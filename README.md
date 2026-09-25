@@ -28,6 +28,13 @@ Visual Studio Build Tools with the C++ workload (MSVC + Windows SDK), a current 
 and the [Vulkan SDK](https://vulkan.lunarg.com) (latest 1.4.x). Start the runner with
 `run.cmd` in a logged-in session, not as a service.
 
+## Workflow
+
+Every task is a pull request into `main`. CI runs on a GitHub-hosted Windows runner;
+GPU jobs run on the self-hosted runner and post their reports as commit comments.
+A pull request is merged once all its checks are green. Findings that need the team go
+to the pull request description under "Questions for the team".
+
 ## Layout
 
 | Path | Contents |

@@ -15,6 +15,9 @@ jobs:
     # Default labels of a Windows self-hosted runner. Add a `gpu` label here once there
     # is more than one self-hosted runner.
     runs-on: [self-hosted, windows, x64]
+    # contents: write is needed to post the report as a commit comment.
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v5
 
@@ -91,3 +94,35 @@ jobs:
           path: |
             runner-info.md
             vulkaninfo*.txt
+
+      # Job logs and artifacts live in Azure blob storage, which automation outside GitHub
+      # may not be able to reach. A commit comment is readable through the GitHub REST API
+      # and shows up on the commit and in its pull request.
+      - name: Post report as commit comment
+        if: ${{ !cancelled() }}
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $md = @("### Runner info", "", "Run: $env:RUN_URL", "")
+          if (Test-Path runner-info.md) { $md += Get-Content runner-info.md }
+          $md += "", "## Vulkan (``vulkaninfo --summary``)", "", '```'
+          if (Test-Path vulkaninfo.txt) { $md += Get-Content vulkaninfo.txt }
+          $md += '```'
+          if ((Test-Path vulkaninfo-stderr.txt) -and (Get-Item vulkaninfo-stderr.txt).Length -gt 0) {
+            $md += "", "stderr:", '```'
+            $md += Get-Content vulkaninfo-stderr.txt
+            $md += '```'
+          }
+          $body = ($md -join "`n")
+          if ($body.Length -gt 60000) { $body = $body.Substring(0, 60000) + "`n... (truncated)" }
+          $json = @{ body = $body } | ConvertTo-Json -Compress
+          $uri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/commits/$env:REPORT_SHA/comments"
+          Invoke-RestMethod -Method Post -Uri $uri -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) `
+            -ContentType 'application/json; charset=utf-8' `
+            -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' } | Out-Null
+          if (-not $?) { exit 1 }
+          $global:LASTEXITCODE = 0
