@@ -1,0 +1,42 @@
+[package]
+name = "engine_profiler"
+description = "Profiling instrumentation: Tracy zones, frames, plots, messages. Compiles to nothing without the `tracy` feature."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Tracy client, started before `main`, capturing from process start, accepting profiler
+# connections from localhost only (ADR 0003). `cargo profiling` builds with it.
+tracy = ["tracy-base", "tracy-client/only-localhost"]
+# Like `tracy`, but also accepts connections from other machines. Do not combine with
+# `tracy` (features are additive; `only-localhost` would win).
+tracy-remote = ["tracy-base"]
+# Only collect while a profiler is connected: for long editor sessions without Tracy.
+tracy-ondemand = ["tracy", "tracy-client/ondemand"]
+# Implementation detail shared by the features above.
+tracy-base = ["dep:tracy-client"]
+
+[dependencies]
+# Bundles the Tracy 0.14.1 client (BSD-3-Clause); use the Tracy 0.14.1 profiler GUI.
+# Default features are off: no crash handler (the engine will install its own).
+tracy-client = { version = "0.19", optional = true, default-features = false, features = [
+    "enable",
+    "system-tracing",
+    "context-switch-tracing",
+    "sampling",
+    "code-transfer",
+    "broadcast",
+    "callstack-inlines",
+    "wait-stacks",
+] }
+
+[[bench]]
+name = "zones"
+harness = false
+required-features = ["tracy-base"]
