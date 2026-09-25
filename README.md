@@ -42,6 +42,7 @@ to the pull request description under "Questions for the team".
 | `crates/engine_core` | Foundation: job system (`jobs`), SPSC ring (`spsc`), sync primitives |
 | `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings |
 | `crates/engine_profiler` | Profiling instrumentation (Tracy zones, plots, frames) |
+| `crates/engine_rhi` | Vulkan 1.3 layer: instance, adapter selection, device, queues |
 | `docs/adr` | Architecture decision records |
 | `docs/research` | Research notes behind the decisions |
 | `docs/perf` | Performance budgets, reference hardware, measurement history |

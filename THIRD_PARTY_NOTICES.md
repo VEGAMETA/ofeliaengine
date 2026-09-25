@@ -9,6 +9,8 @@ the dependency.
 | Crate | License | Used for |
 |---|---|---|
 | windows-sys 0.61 (+ windows-link 0.2) | MIT OR Apache-2.0 | Win32 bindings in `engine_platform` (ADR 0004) |
+| ash 0.38 | MIT OR Apache-2.0 | Vulkan bindings in `engine_rhi` (ADR 0006) |
+| libloading 0.8 (+ cfg-if 1) | ISC (cfg-if: MIT OR Apache-2.0) | loads the Vulkan loader at run time (dependency of ash) |
 
 Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profiling`):
 
