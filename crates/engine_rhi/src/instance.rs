@@ -22,6 +22,8 @@ pub struct InstanceDesc {
     pub debug_utils: bool,
     /// Enable the surface extensions needed to present to windows.
     pub surface: bool,
+    /// Enable `VK_EXT_headless_surface` (tests and servers: swapchains without a window).
+    pub headless_surface: bool,
 }
 
 impl Default for InstanceDesc {
@@ -31,6 +33,7 @@ impl Default for InstanceDesc {
             validation: cfg!(debug_assertions),
             debug_utils: true,
             surface: true,
+            headless_surface: false,
         }
     }
 }
@@ -62,6 +65,9 @@ pub(crate) struct InstanceShared {
     debug_utils: Option<(ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
     debug_state: Option<Box<DebugState>>,
     pub(crate) surface_enabled: bool,
+    #[cfg_attr(not(windows), allow(dead_code))]
+    pub(crate) win32_surface_enabled: bool,
+    pub(crate) headless_surface_enabled: bool,
     pub(crate) debug_utils_enabled: bool,
 }
 
@@ -168,17 +174,22 @@ impl Instance {
         if debug_utils {
             enabled_extensions.push(ext::debug_utils::NAME.as_ptr());
         }
-        let mut surface = false;
-        if desc.surface && has_extension(ash::khr::surface::NAME) {
-            #[cfg(windows)]
-            let platform = ash::khr::win32_surface::NAME;
-            #[cfg(not(windows))]
-            let platform = ash::khr::xlib_surface::NAME;
-            if has_extension(platform) {
-                enabled_extensions.push(ash::khr::surface::NAME.as_ptr());
-                enabled_extensions.push(platform.as_ptr());
-                surface = true;
-            }
+        let wants_surface = desc.surface || desc.headless_surface;
+        let surface = wants_surface && has_extension(ash::khr::surface::NAME);
+        let win32_surface = surface
+            && cfg!(windows)
+            && desc.surface
+            && has_extension(ash::khr::win32_surface::NAME);
+        let headless_surface =
+            surface && desc.headless_surface && has_extension(ext::headless_surface::NAME);
+        if surface {
+            enabled_extensions.push(ash::khr::surface::NAME.as_ptr());
+        }
+        if win32_surface {
+            enabled_extensions.push(ash::khr::win32_surface::NAME.as_ptr());
+        }
+        if headless_surface {
+            enabled_extensions.push(ext::headless_surface::NAME.as_ptr());
         }
         let enabled_layers: Vec<*const i8> = if validation {
             vec![VALIDATION_LAYER.as_ptr()]
@@ -246,6 +257,8 @@ impl Instance {
                 debug_utils: messenger,
                 debug_state,
                 surface_enabled: surface,
+                win32_surface_enabled: win32_surface,
+                headless_surface_enabled: headless_surface,
                 debug_utils_enabled: debug_utils,
             }),
         })

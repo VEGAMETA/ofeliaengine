@@ -14,3 +14,6 @@ workspace = true
 # missing driver is an error value, not a start-up failure (ADR 0006).
 ash = "0.38"
 engine_profiler.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+engine_platform.workspace = true
