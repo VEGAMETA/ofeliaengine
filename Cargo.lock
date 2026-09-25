@@ -71,6 +71,7 @@ dependencies = [
 name = "engine_platform"
 version = "0.0.0"
 dependencies = [
+ "engine_core",
  "windows-sys",
 ]
 
