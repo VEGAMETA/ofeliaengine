@@ -1,0 +1,67 @@
+name: Runner info
+
+# Manual only. Collects the hardware and software configuration of the self-hosted GPU
+# runner for docs/perf/reference-hw.md and checks that the toolchain can link on it.
+on:
+  workflow_dispatch:
+
+jobs:
+  info:
+    name: runner info
+    # Default labels of a Windows self-hosted runner. Add a `gpu` label here once there
+    # is more than one self-hosted runner.
+    runs-on: [self-hosted, windows, x64]
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Hardware and OS
+        run: |
+          $os  = Get-CimInstance Win32_OperatingSystem
+          $cpu = Get-CimInstance Win32_Processor
+          $ram = (Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1GB
+          $gpu = Get-CimInstance Win32_VideoController
+          $out = @()
+          $out += "## Runner hardware"
+          $out += ""
+          $out += "- OS: $($os.Caption) $($os.Version) (build $($os.BuildNumber))"
+          foreach ($c in $cpu) {
+            $out += "- CPU: $($c.Name.Trim()), $($c.NumberOfCores) cores / $($c.NumberOfLogicalProcessors) threads"
+          }
+          $out += "- RAM: $ram GB"
+          foreach ($g in $gpu) {
+            $out += "- GPU: $($g.Name), driver $($g.DriverVersion) ($($g.DriverDate))"
+          }
+          $out | Tee-Object -FilePath runner-info.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+
+      - name: Vulkan
+        run: |
+          $vi = Get-Command vulkaninfo -ErrorAction SilentlyContinue
+          if (-not $vi -and $env:VULKAN_SDK) { $vi = Get-Command "$env:VULKAN_SDK\Bin\vulkaninfo.exe" -ErrorAction SilentlyContinue }
+          if ($vi) {
+            & $vi.Source --summary 2>&1 | Tee-Object -FilePath vulkaninfo.txt
+            "" , "## Vulkan", "", '```', (Get-Content vulkaninfo.txt -Raw), '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          } else {
+            "vulkaninfo not found: install the Vulkan SDK (https://vulkan.lunarg.com)" | Tee-Object -FilePath vulkaninfo.txt
+            "", "## Vulkan", "", "vulkaninfo not found. Install the Vulkan SDK." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          }
+
+      - name: Toolchain
+        run: |
+          rustc -Vv
+          cargo -V
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          if (Test-Path $vswhere) { & $vswhere -latest -products * -property displayName } else { "vswhere not found: install Visual Studio Build Tools with the C++ workload" }
+
+      # Links real test executables with rust-lld (ADR 0001) on the real machine.
+      - name: Build and test
+        run: cargo test --workspace --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: runner-info
+          path: |
+            runner-info.md
+            vulkaninfo.txt
