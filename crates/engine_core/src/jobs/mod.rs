@@ -34,7 +34,6 @@
 //! ```
 
 mod arena;
-mod atomic;
 mod deque;
 mod injector;
 mod job;

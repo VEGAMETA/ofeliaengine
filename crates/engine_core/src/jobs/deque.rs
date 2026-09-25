@@ -16,7 +16,7 @@
 //!   its CAS on `top` then fails and the value is discarded. With atomic slots that read
 //!   is a plain atomic load, not a data race.
 
-use super::atomic::{AtomicIsize, AtomicPtr, Ordering, fence};
+use crate::atomic::{AtomicIsize, AtomicPtr, Ordering, fence};
 use crate::sync::CachePadded;
 use core::ptr::{self, NonNull};
 

@@ -6,7 +6,7 @@
 //! push or pop is one CAS on a position counter plus one store. Values are `AtomicPtr` so
 //! that no access is a data race even under contention.
 
-use super::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use crate::atomic::{AtomicPtr, AtomicUsize, Ordering};
 use crate::sync::CachePadded;
 use core::ptr::{self, NonNull};
 
