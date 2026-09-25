@@ -2,7 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
   workflow_dispatch:
 
@@ -17,61 +16,42 @@ env:
 
 # Everything runs on Windows x64 (CLAUDE.md §15). The toolchain comes from
 # rust-toolchain.toml; rustup installs it on first use.
+#
+# One job instead of one per check: hosted Windows minutes on a private repository are
+# limited, and every extra job pays for checkout + toolchain install again. Steps use
+# `if: !cancelled()` so one failing check does not hide the others.
 jobs:
-  fmt:
-    name: rustfmt
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
-      - run: cargo fmt --all --check
-
-  clippy:
-    name: clippy
+  check:
+    name: check
     runs-on: windows-2025
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-
-  test:
-    name: test
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
-
-  build:
-    name: build (${{ matrix.profile }})
-    runs-on: windows-2025
-    strategy:
-      fail-fast: false
-      matrix:
-        profile: [dev, release, profiling, shipping]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-        with:
-          key: ${{ matrix.profile }}
-      - run: cargo build --workspace --all-targets --locked --profile ${{ matrix.profile }}
-
-  deny:
-    name: cargo-deny
-    runs-on: windows-2025
-    steps:
-      - uses: actions/checkout@v4
       # cargo-deny-action is a Docker action (Linux only), so install the binary instead.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: cargo deny --locked check
 
-  docs:
-    name: docs
-    runs-on: windows-2025
-    env:
-      RUSTDOCFLAGS: -D warnings
-    steps:
-      - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo doc --workspace --no-deps --locked
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: test
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --locked
+      - name: docs
+        if: ${{ !cancelled() }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+      - name: cargo-deny
+        if: ${{ !cancelled() }}
+        run: cargo deny --locked check
+      - name: build (all profiles)
+        if: ${{ !cancelled() }}
+        run: |
+          foreach ($p in 'dev', 'release', 'profiling', 'shipping') {
+            cargo build --workspace --all-targets --locked --profile $p
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }

@@ -20,6 +20,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                  # needs `cargo install cargo-deny`
 ```
 
+## GPU runner
+
+GitHub-hosted runners have no GPU, so Vulkan tests and benchmarks run on a self-hosted
+Windows runner (Settings → Actions → Runners). Prerequisites on that machine: Git, rustup,
+Visual Studio Build Tools with the C++ workload (MSVC + Windows SDK), a current GPU driver
+and the [Vulkan SDK](https://vulkan.lunarg.com) (latest 1.4.x). Start the runner with
+`run.cmd` in a logged-in session, not as a service.
+
 ## Layout
 
 | Path | Contents |

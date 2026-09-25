@@ -1,9 +1,13 @@
 name: Runner info
 
-# Manual only. Collects the hardware and software configuration of the self-hosted GPU
-# runner for docs/perf/reference-hw.md and checks that the toolchain can link on it.
+# Collects the hardware and software configuration of the self-hosted GPU runner for
+# docs/perf/reference-hw.md and checks that the toolchain can link on it.
+# Runs by hand, or automatically when this file changes.
 on:
   workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/runner-info.yml
 
 jobs:
   info:
