@@ -14,6 +14,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0004](0004-platform-bindings-and-timing.md) | Platform bindings, timers and thread placement | Accepted |
 | [0005](0005-window-and-input-threads.md) | Window thread and raw input thread | Accepted |
 | [0006](0006-vulkan-baseline-and-device.md) | Vulkan baseline, bindings and device selection | Accepted |
+| [0007](0007-presentation-and-frames.md) | Presentation and frames in flight | Accepted |
 
 ## Template
 

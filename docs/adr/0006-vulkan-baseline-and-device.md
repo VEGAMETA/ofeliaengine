@@ -67,9 +67,22 @@ the floor and 1.4 used opportunistically.
 ## Measurements
 
 - `tests/gpu.rs::offscreen_triangle`: a Slang triangle rendered with dynamic rendering,
-  synchronization2 barriers and a timeline semaphore, then read back and pixel-checked. It
-  passes on lavapipe with the validation layer on (0 errors, 0 warnings). ref-1 results for
-  both vendors come from the GPU workflow.
+  synchronization2 barriers and a timeline semaphore, then read back and pixel-checked.
+  The centre pixel is `[150, 119, 100, 255]` on all three implementations, with **0 validation
+  errors and 0 warnings**:
+
+  | Implementation | Validation layer | Queues (graphics / async compute / transfer) |
+  |---|---|---|
+  | Mesa lavapipe 25.2.8 (container) | 1.3.275 | family 0 / – / – |
+  | ref-1 NVIDIA RTX 4060 Ti, driver 616.92, Vulkan 1.4.351 | SDK 1.4.350 | 0 / 2 / 1 |
+  | ref-1 AMD Radeon iGPU, driver 25.10.36, Vulkan 1.4.315 (`ENGINE_ADAPTER=radeon`) | SDK 1.4.350 | 0 / 1 / 2 |
+
+  ref-1 numbers are from the GPU workflow on commit `c0d77f0`.
+- **Scoring by kind first is necessary.** The AMD iGPU reports 22.6 GiB of device-local
+  memory (shared system RAM), more than the RTX 4060 Ti's 15.7 GiB. Ranking by memory alone
+  would have picked the iGPU.
+- The AMD iGPU does not expose `VK_EXT_mesh_shader`; the RTX does. Mesh shading therefore
+  needs a fallback path (already planned, §6).
 - The minimum-tier consequence (which GPU generations pass the required set) must still be
   checked against gpuinfo.org, which is not reachable from the development container. This is
   noted as a follow-up.
