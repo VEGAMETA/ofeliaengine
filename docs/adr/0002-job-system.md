@@ -1,7 +1,6 @@
 # 0002. Job system
 
-- Status: Proposed. Becomes Accepted when the ref-1 benchmark run confirms the container
-  numbers below (Bench workflow on the PR that introduces it).
+- Status: Accepted (ref-1 numbers below, Bench workflow run 36195882582).
 - Date: 2026-09-25
 - Research: [docs/research/job-system.md](../research/job-system.md)
 
@@ -90,9 +89,23 @@ Ratio = rayon median / engine median (> 1: engine faster).
 Absolute times in the container vary by up to 2× between runs; the interleaved ratios
 are stable to a few percent.
 
-### ref-1
+### ref-1 (reference machine)
 
-Filled in from the Bench workflow comment on the PR (see `docs/perf/history.md`).
+Ryzen 7 7700, 16 threads, Windows 11 24H2 (`docs/perf/reference-hw.md`), `bench` profile,
+commit `ff35272`, Bench workflow run 36195882582. Engine: 15 workers + registered caller;
+rayon: 16 threads.
+
+| Case | Engine median / p90 | rayon median / p90 | rayon / engine | Allocations per op, engine / rayon | Sequential |
+|---|---|---|---|---|---|
+| `join`: fib(30), sequential below 12 | 179.6 / 228.3 µs | 184.0 / 213.5 µs | 1.02x | 0 / 0 | 1543 µs |
+| `parallel_for`: 1M items, 256 even chunks | 147.5 / 162.5 µs | 171.3 / 212.8 µs | 1.16x | 0 / 0 | 1251 µs |
+| `parallel_for`: 256 chunks, triangular cost | 91.6 / 112.7 µs | 100.7 / 120.7 µs | 1.10x | 0 / 0 | 1264 µs |
+| `scope`: 256 spawns of ~50 ns | 41.6 / 44.1 µs | 54.5 / 61.4 µs | 1.31x | **0 / 256** | – |
+| Cold burst after 3 ms idle | 19.3 / 35.4 µs | 41.1 / 71.1 µs | **2.13x** | 0 / 0 | – |
+
+The engine matches rayon on fine-grained `join` and is faster everywhere else, most
+visibly when waking an idle pool (the frame-start case) and when spawning many small
+jobs, while allocating nothing. ref-1 is not a dedicated benchmark machine; one run.
 
 ### Zero allocations
 

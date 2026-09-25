@@ -17,7 +17,8 @@ $Files = $Files | ForEach-Object { $_ -split ',' } | Where-Object { $_ }
 $md = @("### $Title", "", "Run: $env:RUN_URL", "")
 foreach ($file in $Files) {
     if (Test-Path $file) {
-        $md += Get-Content $file
+        # cargo writes UTF-8 without a BOM; Windows PowerShell 5.1 would read it as ANSI.
+        $md += Get-Content -Encoding UTF8 $file
     } else {
         $md += "_Missing: ${file}_"
     }
