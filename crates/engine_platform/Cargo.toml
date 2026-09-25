@@ -1,0 +1,24 @@
+[package]
+name = "engine_platform"
+description = "Thin Windows 11 layer: high-resolution timers, threads, CPU topology, process settings."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The engine targets Windows 11 only (CLAUDE.md §0.4). On other hosts the crate is empty so
+# that the workspace still builds and tests in Linux containers.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+] }
+
+[[bench]]
+name = "timers"
+harness = false
