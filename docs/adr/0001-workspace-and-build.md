@@ -88,7 +88,7 @@ not fixed and need a recorded decision:
   - `std::thread::sleep` is disallowed via `clippy.toml` (§5: waitable timers);
   - `cargo-deny`: license allow-list from §15, crates.io only, bans `tokio`, `async-std`,
     `smol` and `wgpu`.
-- CI runs on a GitHub-hosted `windows-2025` runner, on every push and pull request, as a
+- CI runs on a GitHub-hosted `windows-2025` runner, on pull requests and pushes to `main`, as a
   single job (fmt, clippy `-D warnings`, tests, docs with `-D warnings`, cargo-deny, build of
   all four profiles). One job instead of six saves the checkout + toolchain install on
   every check; hosted Windows minutes are limited for a private repository.
