@@ -1,11 +1,11 @@
 //! Thin Windows 11 platform layer (CLAUDE.md §0.4, §5).
 //!
-//! - [`time`]: high-resolution waitable timers and a precise sleeper for frame pacing;
-//! - [`cpu`]: CPU set topology (P/E cores, caches) from `GetSystemCpuSetInformation`;
-//! - [`thread`]: CPU set placement, priorities, MMCSS, thread descriptions;
-//! - [`process`]: process-wide settings such as disabling power throttling;
-//! - [`window`]: windows on a dedicated thread, events through a lock-free ring;
-//! - [`raw_input`]: raw mouse/keyboard on a time-critical thread, with timestamps.
+//! - `time`: high-resolution waitable timers and a precise sleeper for frame pacing;
+//! - `cpu`: CPU set topology (P/E cores, caches) from `GetSystemCpuSetInformation`;
+//! - `thread`: CPU set placement, priorities, MMCSS, thread descriptions;
+//! - `process`: process-wide settings such as disabling power throttling;
+//! - `window`: windows on a dedicated thread, events through a lock-free ring;
+//! - `raw_input`: raw mouse/keyboard on a time-critical thread, with timestamps.
 //!
 //! Everything here is Windows-only. On other hosts the crate compiles to nothing, which
 //! keeps the workspace buildable in Linux containers. Bindings come from `windows-sys`
