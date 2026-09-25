@@ -15,18 +15,22 @@ jobs:
     # Default labels of a Windows self-hosted runner. Add a `gpu` label here once there
     # is more than one self-hosted runner.
     runs-on: [self-hosted, windows, x64]
-    defaults:
-      run:
-        shell: powershell
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
+      # Informational steps use Windows PowerShell 5.1 (always installed). The runner
+      # prepends `$ErrorActionPreference = 'stop'`, under which any stderr line of a native
+      # tool becomes a terminating error, so these steps reset it and never fail the job.
       - name: Hardware and OS
+        shell: powershell
         run: |
+          $ErrorActionPreference = 'Continue'
           $os  = Get-CimInstance Win32_OperatingSystem
           $cpu = Get-CimInstance Win32_Processor
           $ram = (Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1GB
+          $mem = Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1
           $gpu = Get-CimInstance Win32_VideoController
+          $disk = Get-PhysicalDisk
           $out = @()
           $out += "## Runner hardware"
           $out += ""
@@ -34,38 +38,56 @@ jobs:
           foreach ($c in $cpu) {
             $out += "- CPU: $($c.Name.Trim()), $($c.NumberOfCores) cores / $($c.NumberOfLogicalProcessors) threads"
           }
-          $out += "- RAM: $ram GB"
+          $out += "- RAM: $ram GB, $($mem.ConfiguredClockSpeed) MT/s"
           foreach ($g in $gpu) {
-            $out += "- GPU: $($g.Name), driver $($g.DriverVersion) ($($g.DriverDate))"
+            $out += "- GPU: $($g.Name), driver $($g.DriverVersion) ($($g.DriverDate)), mode $($g.CurrentHorizontalResolution)x$($g.CurrentVerticalResolution) @ $($g.CurrentRefreshRate) Hz"
+          }
+          foreach ($d in $disk) {
+            $out += "- Disk: $($d.FriendlyName), $($d.MediaType), $($d.BusType), $([math]::Round($d.Size / 1GB)) GB"
           }
           $out | Tee-Object -FilePath runner-info.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $global:LASTEXITCODE = 0
 
       - name: Vulkan
+        shell: powershell
         run: |
+          $ErrorActionPreference = 'Continue'
           $vi = Get-Command vulkaninfo -ErrorAction SilentlyContinue
           if (-not $vi -and $env:VULKAN_SDK) { $vi = Get-Command "$env:VULKAN_SDK\Bin\vulkaninfo.exe" -ErrorAction SilentlyContinue }
+          $summary = @("", "## Vulkan", "", "- VULKAN_SDK: $env:VULKAN_SDK")
           if ($vi) {
-            & $vi.Source --summary 2>&1 | Tee-Object -FilePath vulkaninfo.txt
-            "" , "## Vulkan", "", '```', (Get-Content vulkaninfo.txt -Raw), '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            $summary += "- vulkaninfo: $($vi.Source)"
+            $p = Start-Process -FilePath $vi.Source -ArgumentList '--summary' -NoNewWindow -Wait -PassThru `
+                   -RedirectStandardOutput vulkaninfo.txt -RedirectStandardError vulkaninfo-stderr.txt
+            $summary += "- exit code: $($p.ExitCode)"
+            $summary += "", '```', (Get-Content vulkaninfo.txt -Raw), '```'
+            $err = Get-Content vulkaninfo-stderr.txt -Raw
+            if ($err) { $summary += "", "stderr:", "", '```', $err, '```' }
           } else {
-            "vulkaninfo not found: install the Vulkan SDK (https://vulkan.lunarg.com)" | Tee-Object -FilePath vulkaninfo.txt
-            "", "## Vulkan", "", "vulkaninfo not found. Install the Vulkan SDK." | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            $summary += "", "vulkaninfo not found. Install the Vulkan SDK."
+            "vulkaninfo not found" | Out-File vulkaninfo.txt
           }
+          $summary | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Get-Content vulkaninfo.txt
+          $global:LASTEXITCODE = 0
 
       - name: Toolchain
+        shell: cmd
         run: |
           rustc -Vv
           cargo -V
-          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
-          if (Test-Path $vswhere) { & $vswhere -latest -products * -property displayName } else { "vswhere not found: install Visual Studio Build Tools with the C++ workload" }
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property displayName
+          exit /b 0
 
       # Links real test executables with rust-lld (ADR 0001) on the real machine.
       - name: Build and test
+        shell: cmd
         run: cargo test --workspace --locked
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
         with:
           name: runner-info
           path: |
             runner-info.md
-            vulkaninfo.txt
+            vulkaninfo*.txt
