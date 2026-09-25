@@ -1,0 +1,13 @@
+# Clippy configuration. The lint levels live in `[workspace.lints.clippy]` in Cargo.toml.
+# This is an initial proposal; the final rule set is agreed with the team (CLAUDE.md §15).
+
+disallowed-methods = [
+    # CLAUDE.md §5: waiting uses high-resolution waitable timers, not `Sleep`.
+    { path = "std::thread::sleep", reason = "use the engine_platform high-resolution waitable timer (CLAUDE.md §5)" },
+]
+
+# Tests may unwrap freely.
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-print-in-tests = true
+allow-dbg-in-tests = true

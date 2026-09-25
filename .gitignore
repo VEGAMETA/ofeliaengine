@@ -1,0 +1,8 @@
+/target/
+*.tracy
+*.rdc
+*.dmp
+
+# User-supplied vendor binaries are never committed (CLAUDE.md §3, §6).
+/plugins/
+*.dll

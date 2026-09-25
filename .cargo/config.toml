@@ -1,0 +1,7 @@
+[target.x86_64-pc-windows-msvc]
+# `rust-lld` ships with rustup; for the MSVC target rustc drives it in `lld-link` flavor.
+# No separate LLVM install is needed (ADR 0001).
+linker = "rust-lld.exe"
+# Baseline ISA = Windows 11 24H2 minimum (CLAUDE.md §5). AVX2/AVX-512 only via runtime
+# dispatch. Raising this requires an ADR.
+rustflags = ["-C", "target-cpu=x86-64-v2"]

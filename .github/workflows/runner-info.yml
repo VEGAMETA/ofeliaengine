@@ -1,0 +1,128 @@
+name: Runner info
+
+# Collects the hardware and software configuration of the self-hosted GPU runner for
+# docs/perf/reference-hw.md and checks that the toolchain can link on it.
+# Runs by hand, or automatically when this file changes.
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - .github/workflows/runner-info.yml
+
+jobs:
+  info:
+    name: runner info
+    # Default labels of a Windows self-hosted runner. Add a `gpu` label here once there
+    # is more than one self-hosted runner.
+    runs-on: [self-hosted, windows, x64]
+    # contents: write is needed to post the report as a commit comment.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      # Informational steps use Windows PowerShell 5.1 (always installed). The runner
+      # prepends `$ErrorActionPreference = 'stop'`, under which any stderr line of a native
+      # tool becomes a terminating error, so these steps reset it and never fail the job.
+      - name: Hardware and OS
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $os  = Get-CimInstance Win32_OperatingSystem
+          $cpu = Get-CimInstance Win32_Processor
+          $ram = (Get-CimInstance Win32_PhysicalMemory | Measure-Object Capacity -Sum).Sum / 1GB
+          $mem = Get-CimInstance Win32_PhysicalMemory | Select-Object -First 1
+          $gpu = Get-CimInstance Win32_VideoController
+          $disk = Get-PhysicalDisk
+          $out = @()
+          $out += "## Runner hardware"
+          $out += ""
+          $out += "- OS: $($os.Caption) $($os.Version) (build $($os.BuildNumber))"
+          foreach ($c in $cpu) {
+            $out += "- CPU: $($c.Name.Trim()), $($c.NumberOfCores) cores / $($c.NumberOfLogicalProcessors) threads"
+          }
+          $out += "- RAM: $ram GB, $($mem.ConfiguredClockSpeed) MT/s"
+          foreach ($g in $gpu) {
+            $out += "- GPU: $($g.Name), driver $($g.DriverVersion) ($($g.DriverDate)), mode $($g.CurrentHorizontalResolution)x$($g.CurrentVerticalResolution) @ $($g.CurrentRefreshRate) Hz"
+          }
+          foreach ($d in $disk) {
+            $out += "- Disk: $($d.FriendlyName), $($d.MediaType), $($d.BusType), $([math]::Round($d.Size / 1GB)) GB"
+          }
+          $out | Tee-Object -FilePath runner-info.md | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          $global:LASTEXITCODE = 0
+
+      - name: Vulkan
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $vi = Get-Command vulkaninfo -ErrorAction SilentlyContinue
+          if (-not $vi -and $env:VULKAN_SDK) { $vi = Get-Command "$env:VULKAN_SDK\Bin\vulkaninfo.exe" -ErrorAction SilentlyContinue }
+          $summary = @("", "## Vulkan", "", "- VULKAN_SDK: $env:VULKAN_SDK")
+          if ($vi) {
+            $summary += "- vulkaninfo: $($vi.Source)"
+            $p = Start-Process -FilePath $vi.Source -ArgumentList '--summary' -NoNewWindow -Wait -PassThru `
+                   -RedirectStandardOutput vulkaninfo.txt -RedirectStandardError vulkaninfo-stderr.txt
+            $summary += "- exit code: $($p.ExitCode)"
+            $summary += "", '```', (Get-Content vulkaninfo.txt -Raw), '```'
+            $err = Get-Content vulkaninfo-stderr.txt -Raw
+            if ($err) { $summary += "", "stderr:", "", '```', $err, '```' }
+          } else {
+            $summary += "", "vulkaninfo not found. Install the Vulkan SDK."
+            "vulkaninfo not found" | Out-File vulkaninfo.txt
+          }
+          $summary | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Get-Content vulkaninfo.txt
+          $global:LASTEXITCODE = 0
+
+      - name: Toolchain
+        shell: cmd
+        run: |
+          rustc -Vv
+          cargo -V
+          "%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property displayName
+          exit /b 0
+
+      # Links real test executables with rust-lld (ADR 0001) on the real machine.
+      - name: Build and test
+        shell: cmd
+        run: cargo test --workspace --locked
+
+      - uses: actions/upload-artifact@v5
+        if: ${{ !cancelled() }}
+        with:
+          name: runner-info
+          path: |
+            runner-info.md
+            vulkaninfo*.txt
+
+      # Job logs and artifacts live in Azure blob storage, which automation outside GitHub
+      # may not be able to reach. A commit comment is readable through the GitHub REST API
+      # and shows up on the commit and in its pull request.
+      - name: Post report as commit comment
+        if: ${{ !cancelled() }}
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $md = @("### Runner info", "", "Run: $env:RUN_URL", "")
+          if (Test-Path runner-info.md) { $md += Get-Content runner-info.md }
+          $md += "", "## Vulkan (``vulkaninfo --summary``)", "", '```'
+          if (Test-Path vulkaninfo.txt) { $md += Get-Content vulkaninfo.txt }
+          $md += '```'
+          if ((Test-Path vulkaninfo-stderr.txt) -and (Get-Item vulkaninfo-stderr.txt).Length -gt 0) {
+            $md += "", "stderr:", '```'
+            $md += Get-Content vulkaninfo-stderr.txt
+            $md += '```'
+          }
+          $body = ($md -join "`n")
+          if ($body.Length -gt 60000) { $body = $body.Substring(0, 60000) + "`n... (truncated)" }
+          $json = @{ body = $body } | ConvertTo-Json -Compress
+          $uri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/commits/$env:REPORT_SHA/comments"
+          Invoke-RestMethod -Method Post -Uri $uri -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) `
+            -ContentType 'application/json; charset=utf-8' `
+            -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' } | Out-Null
+          if (-not $?) { exit 1 }
+          $global:LASTEXITCODE = 0

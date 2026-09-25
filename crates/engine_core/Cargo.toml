@@ -1,0 +1,10 @@
+[package]
+name = "engine_core"
+description = "Engine foundation: math, memory, containers, job system, time, hashing."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
