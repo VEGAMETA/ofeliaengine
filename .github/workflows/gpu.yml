@@ -1,0 +1,66 @@
+name: GPU
+
+# Vulkan tests on real GPUs: the self-hosted reference machine (ref-1) has an NVIDIA dGPU
+# and an AMD iGPU, so every run covers both priority vendors. The Vulkan SDK there provides
+# the validation layer; tests fail on any validation error. Output is posted as a commit
+# comment (job logs are not readable by the automation working on this repository).
+on:
+  pull_request:
+    paths:
+      - crates/engine_rhi/**
+      - crates/engine_platform/**
+      - Cargo.lock
+      - .github/workflows/gpu.yml
+  workflow_dispatch:
+
+concurrency:
+  group: gpu-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gpu:
+    name: gpu (NVIDIA + AMD)
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: never
+      ENGINE_REQUIRE_GPU: "1"
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: engine_rhi tests, default adapter (discrete)
+        shell: cmd
+        run: |
+          echo ## Default adapter> gpu-default.md
+          echo.>> gpu-default.md
+          echo ```>> gpu-default.md
+          cargo test -p engine_rhi --locked -- --nocapture --test-threads=1 >> gpu-default.md 2>&1
+          set rc=%ERRORLEVEL%
+          echo ```>> gpu-default.md
+          exit /b %rc%
+
+      - name: engine_rhi tests, AMD iGPU (ENGINE_ADAPTER=radeon)
+        if: ${{ !cancelled() }}
+        shell: cmd
+        env:
+          ENGINE_ADAPTER: radeon
+        run: |
+          echo ## ENGINE_ADAPTER=radeon> gpu-radeon.md
+          echo.>> gpu-radeon.md
+          echo ```>> gpu-radeon.md
+          cargo test -p engine_rhi --locked -- --nocapture --test-threads=1 >> gpu-radeon.md 2>&1
+          set rc=%ERRORLEVEL%
+          echo ```>> gpu-radeon.md
+          exit /b %rc%
+
+      - name: Post report as commit comment
+        if: ${{ !cancelled() }}
+        shell: cmd
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md
