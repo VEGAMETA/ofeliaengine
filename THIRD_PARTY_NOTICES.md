@@ -6,7 +6,13 @@ the dependency.
 
 ## Rust crates (runtime dependencies)
 
-_None yet._
+Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profiling`):
+
+| Crate | License | Used for |
+|---|---|---|
+| tracy-client 0.19 | MIT OR Apache-2.0 | Rust API of the Tracy client (ADR 0003) |
+| tracy-client-sys 0.30 | (MIT OR Apache-2.0) AND BSD-3-Clause | builds the bundled Tracy 0.14.1 client (C++, BSD-3-Clause, © Bartosz Taudul) |
+| windows-targets 0.53 and `windows_*` 0.53 | MIT OR Apache-2.0 | Windows import libraries used by tracy-client-sys |
 
 ## Rust crates (dev-dependencies only, not shipped)
 

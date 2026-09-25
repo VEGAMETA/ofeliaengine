@@ -13,7 +13,7 @@ components and linker (`rust-lld`) are installed automatically from `rust-toolch
 
 ```sh
 cargo build                       # dev profile
-cargo build --profile profiling   # release + debug info, for Tracy
+cargo profiling                   # release + debug info + Tracy (docs/dev-guide/profiling.md)
 cargo build --profile shipping    # fat LTO, panic = abort
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
@@ -40,8 +40,10 @@ to the pull request description under "Questions for the team".
 | Path | Contents |
 |---|---|
 | `crates/engine_core` | Foundation: sync primitives, job system (`jobs`) |
+| `crates/engine_profiler` | Profiling instrumentation (Tracy zones, plots, frames) |
 | `docs/adr` | Architecture decision records |
 | `docs/research` | Research notes behind the decisions |
 | `docs/perf` | Performance budgets, reference hardware, measurement history |
+| `docs/dev-guide` | Documentation for game developers |
 
 Other crates from the target layout (CLAUDE.md §2) are added when work on them starts.
