@@ -7,6 +7,8 @@
 //!   ([`Adapter::missing_features`]) and optional capabilities.
 //! - [`Device`]: the logical device with the engine's required feature set and its
 //!   queues (graphics, async compute, transfer).
+//! - [`Surface`], [`Swapchain`]: presentation (Win32 windows, or headless for tests).
+//! - [`Frames`]: frames in flight on one timeline semaphore.
 //!
 //! The minimum GPU tier is Vulkan 1.3 with dynamic rendering, synchronization2, timeline
 //! semaphores, buffer device address and bindless descriptor indexing (ADR 0006).
@@ -14,10 +16,14 @@
 mod adapter;
 mod device;
 mod error;
+mod frames;
 mod instance;
+mod swapchain;
 
 pub use adapter::{Adapter, AdapterKind, AdapterPreference, OptionalCaps};
 pub use ash;
 pub use device::{Device, Queue};
 pub use error::RhiError;
+pub use frames::{Frame, Frames};
 pub use instance::{Instance, InstanceDesc, ValidationReport};
+pub use swapchain::{AcquiredImage, PresentMode, Surface, Swapchain, SwapchainDesc, color_range};
