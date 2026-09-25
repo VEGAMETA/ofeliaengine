@@ -95,9 +95,6 @@ jobs:
             runner-info.md
             vulkaninfo*.txt
 
-      # Job logs and artifacts live in Azure blob storage, which automation outside GitHub
-      # may not be able to reach. A commit comment is readable through the GitHub REST API
-      # and shows up on the commit and in its pull request.
       - name: Post report as commit comment
         if: ${{ !cancelled() }}
         shell: powershell
@@ -107,22 +104,14 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           $ErrorActionPreference = 'Continue'
-          $md = @("### Runner info", "", "Run: $env:RUN_URL", "")
-          if (Test-Path runner-info.md) { $md += Get-Content runner-info.md }
-          $md += "", "## Vulkan (``vulkaninfo --summary``)", "", '```'
-          if (Test-Path vulkaninfo.txt) { $md += Get-Content vulkaninfo.txt }
-          $md += '```'
+          $vk = @("## Vulkan (``vulkaninfo --summary``)", "", '```')
+          if (Test-Path vulkaninfo.txt) { $vk += Get-Content vulkaninfo.txt }
+          $vk += '```'
           if ((Test-Path vulkaninfo-stderr.txt) -and (Get-Item vulkaninfo-stderr.txt).Length -gt 0) {
-            $md += "", "stderr:", '```'
-            $md += Get-Content vulkaninfo-stderr.txt
-            $md += '```'
+            $vk += "", "stderr:", '```'
+            $vk += Get-Content vulkaninfo-stderr.txt
+            $vk += '```'
           }
-          $body = ($md -join "`n")
-          if ($body.Length -gt 60000) { $body = $body.Substring(0, 60000) + "`n... (truncated)" }
-          $json = @{ body = $body } | ConvertTo-Json -Compress
-          $uri = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/commits/$env:REPORT_SHA/comments"
-          Invoke-RestMethod -Method Post -Uri $uri -Body ([System.Text.Encoding]::UTF8.GetBytes($json)) `
-            -ContentType 'application/json; charset=utf-8' `
-            -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' } | Out-Null
-          if (-not $?) { exit 1 }
-          $global:LASTEXITCODE = 0
+          $vk | Out-File -Encoding utf8 vulkan.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Runner info" -Files runner-info.md,vulkan.md
+          exit $LASTEXITCODE

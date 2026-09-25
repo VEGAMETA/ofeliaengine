@@ -1,0 +1,44 @@
+name: Bench
+
+# Benchmarks on the self-hosted reference machine (docs/perf/reference-hw.md, ref-1).
+# The report is posted as a commit comment. ref-1 is not a dedicated machine, so the
+# numbers are advisory: no regression gate yet (ADR 0001, ADR 0002).
+on:
+  pull_request:
+    paths:
+      - crates/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/bench.yml
+      - .github/scripts/**
+  workflow_dispatch:
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  jobs:
+    name: bench (jobs)
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: cargo bench -p engine_core --bench jobs
+        shell: cmd
+        run: cargo bench -p engine_core --bench jobs --locked > bench-jobs.md
+
+      - name: Post report as commit comment
+        if: ${{ !cancelled() }}
+        shell: cmd
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench: jobs (ref-1)" -Files bench-jobs.md

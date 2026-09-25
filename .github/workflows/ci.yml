@@ -51,6 +51,14 @@ jobs:
       - name: cargo-deny
         if: ${{ !cancelled() }}
         run: cargo deny --locked check
+      # Model checks of the lock-free queues. Separate target dir: `--cfg loom` would
+      # otherwise invalidate the cached normal build.
+      - name: loom
+        if: ${{ !cancelled() }}
+        env:
+          RUSTFLAGS: --cfg loom
+          CARGO_TARGET_DIR: target/loom
+        run: cargo test -p engine_core --release --lib --locked loom
       - name: build (all profiles)
         if: ${{ !cancelled() }}
         run: |
