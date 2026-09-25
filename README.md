@@ -39,8 +39,8 @@ to the pull request description under "Questions for the team".
 
 | Path | Contents |
 |---|---|
-| `crates/engine_core` | Foundation: sync primitives, job system (`jobs`) |
-| `crates/engine_platform` | Windows layer: timers, CPU topology, thread placement, power settings |
+| `crates/engine_core` | Foundation: job system (`jobs`), SPSC ring (`spsc`), sync primitives |
+| `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings |
 | `crates/engine_profiler` | Profiling instrumentation (Tracy zones, plots, frames) |
 | `docs/adr` | Architecture decision records |
 | `docs/research` | Research notes behind the decisions |

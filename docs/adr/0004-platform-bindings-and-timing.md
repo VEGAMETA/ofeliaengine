@@ -45,9 +45,28 @@ It needs Win32 bindings, and the choice affects every OS-facing crate.
 
 ## Measurements
 
-`cargo bench -p engine_platform --bench timers` on ref-1 (Bench workflow). The results are
-recorded in `docs/perf/history.md`, and a summary is added here when the run is available on
-the PR.
+`cargo bench -p engine_platform --bench timers` on ref-1 (Bench workflow, commit `0f9a973`).
+The table shows error (actual wait minus requested wait), median / p99 in µs, over 200
+samples per cell:
+
+| Requested | `std::thread::sleep` | `HighResTimer` | `PreciseSleeper` | `PreciseSleeper` margin |
+|---|---|---|---|---|
+| 0.5 ms | 513 / 531 | 514 / 537 | 0 / 3.0 | 1000 µs (initial) |
+| 1 ms | 518 / 575 | 518 / 732 | 0 / 1.2 | 1000 µs (initial) |
+| 2 ms | 500 / 893 | 499 / 1203 | 0 / 14.5 | 535 µs |
+| 4.167 ms (240 Hz) | 331 / 507 | 335 / 1069 | 0 / 3.2 | 624 µs |
+| 16.667 ms (60 Hz) | 330 / 514 | 349 / 525 | 0 / 3.0 | 531 µs |
+
+Findings:
+- On ref-1 the high-resolution timer fires on the first 0.5 ms boundary strictly after the
+  due time, so it overshoots by 0–500 µs.
+- `HighResTimer` is **no more accurate** than `std::thread::sleep` (both use the same kind of
+  timer since Rust 1.75). Its only advantage is that it does not create and close a timer on
+  every call. The differences in p99 are within noise.
+- `PreciseSleeper` hits deadlines within microseconds (p99 1–15 µs; the worst sample was
+  570 µs, when a preemption landed during the spin). It spins for about 0.5 ms per wait,
+  roughly 12 % of one core at 240 Hz. That is acceptable for a frame limiter, and the ADR
+  for §7 frame pacing may prefer `present_wait` / Reflex where the hardware offers them.
 
 ## Consequences
 
