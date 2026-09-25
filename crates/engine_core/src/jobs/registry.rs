@@ -387,6 +387,7 @@ impl Registry {
         // is visible here; one pushed after it will find our bit.
         let cancel = done() || self.has_work() || self.terminate.load(Ordering::SeqCst);
         if !cancel {
+            engine_profiler::zone!("jobs::park");
             while slot.state.load(Ordering::SeqCst) == SLEEPING {
                 thread::park();
             }

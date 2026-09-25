@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 engine_core = { path = "crates/engine_core" }
+engine_profiler = { path = "crates/engine_profiler" }
 
 [workspace.lints.rust]
 # CLAUDE.md §15: every unsafe operation inside an unsafe fn needs its own unsafe block.

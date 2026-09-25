@@ -103,6 +103,10 @@ rayon: 16 threads.
 | `scope`: 256 spawns of ~50 ns | 41.6 / 44.1 µs | 54.5 / 61.4 µs | 1.31x | **0 / 256** | – |
 | Cold burst after 3 ms idle | 19.3 / 35.4 µs | 41.1 / 71.1 µs | **2.13x** | 0 / 0 | – |
 
+A second ref-1 run (commit `27f736d`, run 36196015262) gave ratios 1.01 / 1.14 / 1.04 /
+1.50 / 1.94 in the same order. In both runs our `join` p90 was worse than rayon's
+(228 vs 214 µs, 231 vs 188 µs) while the medians matched; see Consequences.
+
 The engine matches rayon on fine-grained `join` and is faster everywhere else, most
 visibly when waking an idle pool (the frame-start case) and when spawning many small
 jobs, while allocating nothing. ref-1 is not a dedicated benchmark machine; one run.
@@ -130,6 +134,9 @@ dev-dependency as the benchmark baseline only.
 - Not implemented yet, to add when a subsystem needs them: task-graph dependencies (the
   render graph and ECS scheduler will drive this), pinned tasks, Tracy zones per job
   (with the Tracy integration), CPU-set placement (with `engine_platform`).
+- Investigate the `join` p90 tail on ref-1 (worse than rayon in two runs while the medians
+  match): likely candidates are wake-up throttling during deep recursion and victim
+  selection; measure with Tracy zones before changing anything.
 - To revisit with numbers: spin duration before parking (`spin_rounds`, default 64),
   deque capacity, heartbeat-style lazy splitting for fine-grained `join`, fibers if
   waiting latency becomes a measured problem.

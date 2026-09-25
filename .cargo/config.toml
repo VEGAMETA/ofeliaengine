@@ -5,3 +5,8 @@ linker = "rust-lld.exe"
 # Baseline ISA = Windows 11 24H2 minimum (CLAUDE.md §5). AVX2/AVX-512 only via runtime
 # dispatch. Raising this requires an ADR.
 rustflags = ["-C", "target-cpu=x86-64-v2"]
+
+[alias]
+# One button for a Tracy build (CLAUDE.md §15: `profiling` = release + debug info + Tracy).
+# Cargo profiles cannot enable features, hence the alias. See docs/dev-guide/profiling.md.
+profiling = "build --workspace --profile profiling --features engine_profiler/tracy"

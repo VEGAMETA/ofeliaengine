@@ -68,6 +68,14 @@ jobs:
           if not %rc%==0 echo.> logs\test.failed
           type logs\test.txt
           exit /b %rc%
+      - name: test (Tracy enabled)
+        if: ${{ !cancelled() }}
+        run: |
+          cargo test --workspace --locked --features engine_profiler/tracy > logs\test-tracy.txt 2>&1
+          set rc=%ERRORLEVEL%
+          if not %rc%==0 echo.> logs\test-tracy.failed
+          type logs\test-tracy.txt
+          exit /b %rc%
       - name: docs
         if: ${{ !cancelled() }}
         env:
@@ -102,9 +110,11 @@ jobs:
       - name: build (all profiles)
         if: ${{ !cancelled() }}
         run: |
-          for %%p in (dev release profiling shipping) do (
+          for %%p in (dev release shipping) do (
             cargo build --workspace --all-targets --locked --profile %%p >> logs\build.txt 2>&1 || (type logs\build.txt & echo.> logs\build.failed & exit /b 1)
           )
+          rem The profiling profile is built the way `cargo profiling` builds it: with Tracy.
+          cargo build --workspace --all-targets --locked --profile profiling --features engine_profiler/tracy >> logs\build.txt 2>&1 || (type logs\build.txt & echo.> logs\build.failed & exit /b 1)
           type logs\build.txt
 
       - name: Post failure logs as commit comment
