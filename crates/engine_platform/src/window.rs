@@ -867,10 +867,16 @@ mod tests {
         let mut system = WindowSystem::start(256).unwrap();
         let window = system.create_window(&hidden()).unwrap();
         let hwnd = window.hwnd as HWND;
-        // SAFETY: posting to a live window. 'A' key down with scancode 0x1E, then text:
-        // 'A' and U+1F600 as a surrogate pair.
+        // SAFETY: posting to a live window. 'A' key up with scancode 0x1E (a key *down*
+        // would make `TranslateMessage` post its own `WM_CHAR`), then text: 'A' and
+        // U+1F600 as a surrogate pair.
         unsafe {
-            PostMessageW(hwnd, WM_KEYDOWN, 0x41, (0x1E << 16) | 1);
+            PostMessageW(
+                hwnd,
+                WM_KEYUP,
+                0x41,
+                (0x1E << 16) | (1 << 30) | (1 << 31) | 1,
+            );
             PostMessageW(hwnd, WM_CHAR, 'A' as usize, 1);
             PostMessageW(hwnd, WM_CHAR, 0xD83D, 1);
             PostMessageW(hwnd, WM_CHAR, 0xDE00, 1);
@@ -886,7 +892,7 @@ mod tests {
             WindowEventKind::Key {
                 virtual_key: 0x41,
                 scancode: 0x1E,
-                pressed: true,
+                pressed: false,
                 repeat: false,
                 ..
             }
