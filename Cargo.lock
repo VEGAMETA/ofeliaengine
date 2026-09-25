@@ -101,6 +101,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_shader"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_profiler",
+ "libloading",
+]
+
+[[package]]
 name = "find-msvc-tools"
 version = "0.1.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"

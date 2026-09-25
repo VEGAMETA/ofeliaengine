@@ -9,6 +9,7 @@ on:
     paths:
       - crates/engine_rhi/**
       - crates/engine_platform/**
+      - crates/engine_shader/**
       - Cargo.lock
       - .github/workflows/gpu.yml
   workflow_dispatch:
@@ -19,7 +20,7 @@ concurrency:
 
 jobs:
   gpu:
-    name: gpu (NVIDIA + AMD)
+    name: gpu (NVIDIA + AMD + Slang)
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 30
     permissions:
@@ -55,6 +56,21 @@ jobs:
           echo ```>> gpu-radeon.md
           exit /b %rc%
 
+      - name: engine_shader tests (Slang from the Vulkan SDK)
+        if: ${{ !cancelled() }}
+        shell: cmd
+        env:
+          ENGINE_REQUIRE_SLANG: "1"
+        run: |
+          echo ## Shader compiler (Slang from VULKAN_SDK)> shader.md
+          echo.>> shader.md
+          echo ```>> shader.md
+          dir /b "%VULKAN_SDK%\Bin\slang*" >> shader.md 2>&1
+          cargo test -p engine_shader --locked -- --nocapture --test-threads=1 >> shader.md 2>&1
+          set rc=%ERRORLEVEL%
+          echo ```>> shader.md
+          exit /b %rc%
+
       - name: Post report as commit comment
         if: ${{ !cancelled() }}
         shell: cmd
@@ -63,4 +79,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,shader.md

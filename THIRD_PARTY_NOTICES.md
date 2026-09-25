@@ -27,6 +27,12 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 | rayon 1.12 (+ rayon-core, crossbeam-deque, crossbeam-epoch, crossbeam-utils, either) | MIT OR Apache-2.0 | baseline in `engine_core` job-system benchmarks (ADR 0002) |
 | loom 0.7 (only with `--cfg loom`) | MIT | model checking of the lock-free queues in `engine_core::jobs` |
 
+## Loaded at run time, not distributed
+
+| Component | License | Used for |
+|---|---|---|
+| Slang compiler library (from the user's Vulkan SDK or `ENGINE_SLANG_LIBRARY`) | Apache-2.0 WITH LLVM-exception | shader compilation in the editor and tools (ADR 0008) |
+
 ## Vendored sources (`/third_party`)
 
 _None yet._

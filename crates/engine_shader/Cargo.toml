@@ -1,0 +1,16 @@
+[package]
+name = "engine_shader"
+description = "Slang → SPIR-V compilation with an in-process compiler and a content-addressed cache."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_profiler.workspace = true
+# Loads the Slang compiler library at run time (ISC). Already in the tree through ash.
+libloading = "0.8"

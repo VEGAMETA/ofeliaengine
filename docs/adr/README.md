@@ -15,6 +15,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0005](0005-window-and-input-threads.md) | Window thread and raw input thread | Accepted |
 | [0006](0006-vulkan-baseline-and-device.md) | Vulkan baseline, bindings and device selection | Accepted |
 | [0007](0007-presentation-and-frames.md) | Presentation and frames in flight | Accepted |
+| [0008](0008-shader-compilation.md) | Shader compilation: in-process Slang with a content-addressed cache | Accepted |
 
 ## Template
 

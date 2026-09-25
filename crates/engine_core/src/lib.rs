@@ -6,6 +6,7 @@
 //! the render and audio threads.
 
 mod atomic;
+pub mod hash;
 pub mod jobs;
 pub mod spsc;
 pub mod sync;
