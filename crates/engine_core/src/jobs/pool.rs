@@ -144,8 +144,10 @@ impl ThreadPoolBuilder {
             if let Some(size) = self.stack_size {
                 builder = builder.stack_size(size);
             }
+            let thread_name = format!("{}-{index}", self.name);
             let handle = builder
                 .spawn(move || {
+                    engine_profiler::set_thread_name(&thread_name);
                     registry.bind_worker(index);
                     if let Some(hook) = hook {
                         hook(index);
@@ -452,6 +454,7 @@ fn scope_in<'env, F, R>(registry: &Registry, index: usize, f: F) -> R
 where
     F: for<'scope> FnOnce(&'scope Scope<'scope, 'env>) -> R,
 {
+    engine_profiler::zone!("jobs::scope");
     let arena = &registry.slots[index].owner.arena;
     let mark = arena.mark();
     let scope = Scope::new(registry, index);
@@ -536,6 +539,7 @@ fn parallel_for_in<F>(registry: &Registry, index: usize, len: usize, grain: usiz
 where
     F: Fn(usize, Range<usize>) + Sync,
 {
+    engine_profiler::zone!("jobs::parallel_for");
     let grain = grain.max(1);
     let chunks = len.div_ceil(grain);
     if chunks <= 1 {

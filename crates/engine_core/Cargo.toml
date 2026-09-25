@@ -9,6 +9,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+engine_profiler.workspace = true
+
 [dev-dependencies]
 # Baseline for benches/jobs.rs only; not linked into the engine (ADR 0002).
 rayon = "1.12"
