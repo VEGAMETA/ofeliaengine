@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 engine_core = { path = "crates/engine_core" }
+engine_platform = { path = "crates/engine_platform" }
 engine_profiler = { path = "crates/engine_profiler" }
 
 [workspace.lints.rust]

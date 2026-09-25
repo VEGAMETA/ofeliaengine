@@ -40,6 +40,11 @@ jobs:
           cargo bench -p engine_profiler --features tracy --bench zones --locked > bench-zones.md
           cargo bench -p engine_profiler --features tracy-ondemand --bench zones --locked >> bench-zones.md
 
+      - name: cargo bench -p engine_platform --bench timers
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: cargo bench -p engine_platform --bench timers --locked > bench-timers.md
+
       - name: Post report as commit comment
         if: ${{ !cancelled() }}
         shell: cmd
@@ -48,4 +53,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md

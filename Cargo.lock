@@ -68,6 +68,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_platform"
+version = "0.0.0"
+dependencies = [
+ "windows-sys",
+]
+
+[[package]]
 name = "engine_profiler"
 version = "0.0.0"
 dependencies = [
