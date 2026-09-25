@@ -6,6 +6,10 @@ on:
   push:
     branches: [main]
   pull_request:
+    # Documentation-only changes need no build.
+    paths-ignore:
+      - docs/**
+      - "*.md"
   workflow_dispatch:
 
 concurrency:
