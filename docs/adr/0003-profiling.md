@@ -61,10 +61,14 @@ Cost per call, Tracy compiled in, no profiler connected, from
 |---|---|---|---|
 | Container, on-demand | 4.5 ns | 12.0 ns | 2.7 ns |
 | Container, capture from start | 60 ns | 851 ns | 205 ns |
-| ref-1 | from the Bench workflow on the PR, recorded in `docs/perf/history.md` | | |
+| ref-1, on-demand | 6.0 ns | 8.3 ns | 1.5 ns |
+| ref-1, capture from start | 18.5 ns | 37.7 ns | 9.0 ns |
 
-Capture from start buffers every event in memory until a profiler connects, and the cost
-grows as that buffer fills. Connect the profiler early, or use `tracy-ondemand`, when a Tracy
+ref-1 numbers are from Bench run on commit `009d234`.
+
+Capture from start buffers every event in memory until a profiler connects. On ref-1 this
+costs about 3× more per zone than on-demand mode. In the memory-constrained container it
+cost much more, and the cost grew as the buffer filled. Connect the profiler early, or use `tracy-ondemand`, when a Tracy
 build runs for a long time without Tracy attached. Benchmarks that are not about profiling run
 without Tracy.
 

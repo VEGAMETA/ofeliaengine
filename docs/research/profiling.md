@@ -39,8 +39,11 @@ must use the same protocol version.
 With capture from start, cost grows as the in-memory buffer fills: the nested case ran after
 several million buffered events. This is expected Tracy behavior and not a problem during a
 real profiling session, where the profiler drains the buffer. It does mean that a Tracy build
-that nobody connects to is not representative for benchmarks. ref-1 numbers come from the
-Bench workflow.
+nobody connects to is not representative for benchmarks.
+
+On ref-1 (Bench workflow, commit `009d234`), on-demand mode costs 6.0 ns per zone, 8.3 ns for two
+nested zones and 1.5 ns per plot. Capture from start costs 18.5, 37.7 and 9.0 ns respectively.
+The container's 851 ns for nested zones came from memory pressure in the container.
 
 ## Decision input
 
