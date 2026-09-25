@@ -5,4 +5,5 @@
 //! graphics code. Everything here must be usable from any engine thread, including
 //! the render and audio threads.
 
+pub mod jobs;
 pub mod sync;

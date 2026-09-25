@@ -8,6 +8,13 @@ the dependency.
 
 _None yet._
 
+## Rust crates (dev-dependencies only, not shipped)
+
+| Crate | License | Used for |
+|---|---|---|
+| rayon 1.12 (+ rayon-core, crossbeam-deque, crossbeam-epoch, crossbeam-utils, either) | MIT OR Apache-2.0 | baseline in `engine_core` job-system benchmarks (ADR 0002) |
+| loom 0.7 (only with `--cfg loom`) | MIT | model checking of the lock-free queues in `engine_core::jobs` |
+
 ## Vendored sources (`/third_party`)
 
 _None yet._

@@ -8,3 +8,15 @@ publish.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+# Baseline for benches/jobs.rs only; not linked into the engine (ADR 0002).
+rayon = "1.12"
+
+[[bench]]
+name = "jobs"
+harness = false
+
+# Model checking of the lock-free queues: RUSTFLAGS="--cfg loom" cargo test -p engine_core --release loom
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"

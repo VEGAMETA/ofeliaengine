@@ -13,7 +13,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  CARGO_TERM_COLOR: always
+  CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
 
@@ -23,10 +23,19 @@ env:
 # One job instead of one per check: hosted Windows minutes on a private repository are
 # limited, and every extra job pays for checkout + toolchain install again. Steps use
 # `if: !cancelled()` so one failing check does not hide the others.
+#
+# Each check writes its output to logs/<check>.txt. On failure the tails of the failed logs are
+# posted as a commit comment: job logs live in Azure blob storage, which the automation
+# working on this repository cannot read (see .github/scripts/post-commit-comment.ps1).
 jobs:
   check:
     name: check
     runs-on: windows-2025
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: cmd
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
@@ -34,27 +43,85 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
+      - run: mkdir logs
 
       - name: rustfmt
-        run: cargo fmt --all --check
+        run: |
+          cargo fmt --all --check > logs\rustfmt.txt 2>&1
+          set rc=%ERRORLEVEL%
+          if not %rc%==0 echo.> logs\rustfmt.failed
+          type logs\rustfmt.txt
+          exit /b %rc%
       - name: clippy
         if: ${{ !cancelled() }}
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: |
+          cargo clippy --workspace --all-targets --locked -- -D warnings > logs\clippy.txt 2>&1
+          set rc=%ERRORLEVEL%
+          if not %rc%==0 echo.> logs\clippy.failed
+          type logs\clippy.txt
+          exit /b %rc%
       - name: test
         if: ${{ !cancelled() }}
-        run: cargo test --workspace --locked
+        run: |
+          cargo test --workspace --locked > logs\test.txt 2>&1
+          set rc=%ERRORLEVEL%
+          if not %rc%==0 echo.> logs\test.failed
+          type logs\test.txt
+          exit /b %rc%
       - name: docs
         if: ${{ !cancelled() }}
         env:
           RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps --locked
+        run: |
+          cargo doc --workspace --no-deps --locked > logs\docs.txt 2>&1
+          set rc=%ERRORLEVEL%
+          if not %rc%==0 echo.> logs\docs.failed
+          type logs\docs.txt
+          exit /b %rc%
       - name: cargo-deny
         if: ${{ !cancelled() }}
-        run: cargo deny --locked check
+        run: |
+          cargo deny --locked check > logs\deny.txt 2>&1
+          set rc=%ERRORLEVEL%
+          if not %rc%==0 echo.> logs\deny.failed
+          type logs\deny.txt
+          exit /b %rc%
+      # Model checks of the lock-free queues. Separate target dir: `--cfg loom` would
+      # otherwise invalidate the cached normal build.
+      - name: loom
+        if: ${{ !cancelled() }}
+        env:
+          RUSTFLAGS: --cfg loom
+          CARGO_TARGET_DIR: target/loom
+        run: |
+          cargo test -p engine_core --release --lib --locked loom > logs\loom.txt 2>&1
+          set rc=%ERRORLEVEL%
+          if not %rc%==0 echo.> logs\loom.failed
+          type logs\loom.txt
+          exit /b %rc%
       - name: build (all profiles)
         if: ${{ !cancelled() }}
         run: |
-          foreach ($p in 'dev', 'release', 'profiling', 'shipping') {
-            cargo build --workspace --all-targets --locked --profile $p
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          for %%p in (dev release profiling shipping) do (
+            cargo build --workspace --all-targets --locked --profile %%p >> logs\build.txt 2>&1 || (type logs\build.txt & echo.> logs\build.failed & exit /b 1)
+          )
+          type logs\build.txt
+
+      - name: Post failure logs as commit comment
+        if: ${{ failure() }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          $md = @()
+          foreach ($marker in Get-ChildItem logs -Filter *.failed) {
+            $log = Get-Item (Join-Path logs "$($marker.BaseName).txt")
+            $lines = Get-Content -Encoding UTF8 $log.FullName
+            $md += "#### $($log.BaseName)", "", '```'
+            $md += $lines | Select-Object -Last 120
+            $md += '```', ""
           }
+          $md | Out-File -Encoding utf8 failure.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "CI failure logs (last 120 lines per check)" -Files failure.md

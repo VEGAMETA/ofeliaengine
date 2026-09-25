@@ -18,6 +18,7 @@ engine_core = { path = "crates/engine_core" }
 unsafe_op_in_unsafe_fn = "deny"
 missing_docs = "warn"
 unreachable_pub = "warn"
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(loom)"] }
 
 [workspace.lints.clippy]
 # CLAUDE.md §15: every unsafe block carries a `// SAFETY:` comment.

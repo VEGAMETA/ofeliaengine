@@ -39,8 +39,9 @@ to the pull request description under "Questions for the team".
 
 | Path | Contents |
 |---|---|
-| `crates/engine_core` | Foundation: memory, containers, sync primitives, job system (in progress) |
+| `crates/engine_core` | Foundation: sync primitives, job system (`jobs`) |
 | `docs/adr` | Architecture decision records |
+| `docs/research` | Research notes behind the decisions |
 | `docs/perf` | Performance budgets, reference hardware, measurement history |
 
 Other crates from the target layout (CLAUDE.md §2) are added when work on them starts.
