@@ -106,7 +106,8 @@ impl ThreadPoolBuilder {
         self
     }
 
-    /// Spawns the workers.
+    /// Spawns the workers and returns once every worker has started and run its
+    /// [`on_thread_start`](Self::on_thread_start) hook.
     pub fn build(self) -> Result<ThreadPool, BuildError> {
         let workers = self
             .workers
@@ -131,9 +132,14 @@ impl ThreadPoolBuilder {
             registry: registry.clone(),
             workers: Vec::with_capacity(workers),
         };
+        // Workers report when they are bound and their start hook has run; `build`
+        // returns only then, so thread placement is done before the first frame and
+        // one-time thread start-up costs never land in a frame.
+        let started = Arc::new((AtomicUsize::new(0), thread::current()));
         for index in 0..workers {
             let registry = registry.clone();
             let hook = self.on_thread_start.clone();
+            let started = started.clone();
             let mut builder = thread::Builder::new().name(format!("{}-{index}", self.name));
             if let Some(size) = self.stack_size {
                 builder = builder.stack_size(size);
@@ -144,11 +150,18 @@ impl ThreadPoolBuilder {
                     if let Some(hook) = hook {
                         hook(index);
                     }
+                    if started.0.fetch_add(1, Ordering::AcqRel) + 1 == workers {
+                        started.1.unpark();
+                    }
+                    drop(started);
                     registry.wait_until(index, || registry.terminate.load(Ordering::Acquire));
                 })
                 .map_err(BuildError::Spawn)?;
             // On error, dropping `pool` shuts down the workers spawned so far.
             pool.workers.push(handle);
+        }
+        while started.0.load(Ordering::Acquire) < workers {
+            thread::park();
         }
         Ok(pool)
     }
