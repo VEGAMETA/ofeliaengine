@@ -14,6 +14,7 @@ publish = false
 engine_core = { path = "crates/engine_core" }
 engine_platform = { path = "crates/engine_platform" }
 engine_profiler = { path = "crates/engine_profiler" }
+engine_rhi = { path = "crates/engine_rhi" }
 
 [workspace.lints.rust]
 # CLAUDE.md §15: every unsafe operation inside an unsafe fn needs its own unsafe block.
