@@ -1,0 +1,62 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.94"
+# The engine license is decided by the team (CLAUDE.md §1). Until then no crate declares
+# one and nothing is published.
+publish = false
+
+[workspace.dependencies]
+engine_core = { path = "crates/engine_core" }
+
+[workspace.lints.rust]
+# CLAUDE.md §15: every unsafe operation inside an unsafe fn needs its own unsafe block.
+unsafe_op_in_unsafe_fn = "deny"
+missing_docs = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+# CLAUDE.md §15: every unsafe block carries a `// SAFETY:` comment.
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"
+# Hot paths must not panic (CLAUDE.md §5); make panicking shortcuts visible in review.
+unwrap_used = "warn"
+expect_used = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+
+# ---------------------------------------------------------------------------------------
+# Build profiles (CLAUDE.md §15, ADR 0001).
+# ---------------------------------------------------------------------------------------
+
+# Our crates: light optimization so the editor/game stay usable in dev builds.
+[profile.dev]
+opt-level = 1
+
+# Third-party crates: full optimization. They rarely change, so the cost is paid once.
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+debug = false
+incremental = false
+
+# Release + full debug info for Tracy callstacks and symbol resolution.
+[profile.profiling]
+inherits = "release"
+debug = "full"
+
+# What players get.
+[profile.shipping]
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+panic = "abort"

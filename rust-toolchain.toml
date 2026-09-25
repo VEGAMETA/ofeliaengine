@@ -1,0 +1,7 @@
+# Pinned so benchmark numbers and CI results are reproducible (ADR 0001).
+# Bump deliberately, in its own commit, with a benchmark run.
+[toolchain]
+channel = "1.94.1"
+components = ["rustfmt", "clippy"]
+targets = ["x86_64-pc-windows-msvc"]
+profile = "minimal"
