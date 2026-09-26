@@ -1,7 +1,9 @@
 //! Physics benchmark suite (CLAUDE.md §8) on the Jolt backend: the shared scenes of
 //! `engine_physics::scenes`, stepped at 60 Hz. Reports step times (median, p99, max) on
-//! the calling thread and with worker threads, and batched raycasts. Our own solver will
-//! run the same scenes. Prints Markdown.
+//! the calling thread and with 1, 3, 7 and 15 worker threads (2, 4, 8 and 16 threads in
+//! total, as far as the machine has logical cores), and batched raycasts. The sweep shows
+//! where extra threads stop helping, for example on the second hardware thread (SMT) of
+//! each core. Our own solver will run the same scenes. Prints Markdown.
 //!
 //! ```text
 //! cargo bench -p engine_physics_jolt --bench physics
@@ -43,10 +45,12 @@ fn step_times(w: &mut JoltBackend, steps: usize) -> (f64, f64, f64) {
 type Scene = fn(&mut dyn PhysicsBackend) -> usize;
 
 fn main() {
-    let workers = std::thread::available_parallelism()
-        .map_or(4, |n| n.get() as u32)
-        .saturating_sub(1)
-        .max(1);
+    let logical = std::thread::available_parallelism().map_or(4, |n| n.get() as u32);
+    // Worker threads; the calling thread also runs jobs, so the total is one more.
+    let sweep: Vec<u32> = [0u32, 1, 3, 7, 15]
+        .into_iter()
+        .filter(|&w| w < logical)
+        .collect();
     println!("### Physics (Jolt 5.6.0 via JoltC), 60 Hz, 1 collision step\n");
     println!("| scene | bodies | threads | median ms | p99 ms | max ms |");
     println!("|---|---:|---:|---:|---:|---:|");
@@ -78,7 +82,7 @@ fn main() {
         ),
     ];
     for (name, build, steps) in scenes {
-        for threads in [0, workers] {
+        for &threads in &sweep {
             let mut w = world(threads);
             let bodies = build(&mut w);
             let (median, p99, max) = step_times(&mut w, steps);

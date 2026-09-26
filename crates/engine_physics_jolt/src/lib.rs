@@ -67,6 +67,25 @@ static INIT: Once = Once::new();
 /// usual single world; worlds stepping on several threads take turns.
 static STEP_LOCK: Mutex<()> = Mutex::new(());
 
+/// Runs a Jolt job on the calling thread as soon as it is queued (`threads = 0`).
+unsafe extern "C" fn run_inline(_: *mut c_void, job: JPH_JobFunction, arg: *mut c_void) {
+    // SAFETY: Jolt passes a job function with its argument.
+    unsafe { job(arg) };
+}
+
+/// Batch form of [`run_inline`].
+unsafe extern "C" fn run_inline_batch(
+    _: *mut c_void,
+    job: JPH_JobFunction,
+    args: *mut *mut c_void,
+    count: u32,
+) {
+    for i in 0..count as usize {
+        // SAFETY: Jolt passes `count` job arguments.
+        unsafe { job(*args.add(i)) };
+    }
+}
+
 /// Registers Jolt's types and allocator once per process (never shut down: other worlds
 /// may be alive, and the process exit frees it), and installs the callback tables every
 /// world shares (each world passes its own user data).
@@ -343,11 +362,24 @@ impl JoltBackend {
                 JPH_BroadPhaseLayerInterface_Destroy(bp_interface);
                 return Err(PhysicsError::Full("physics system"));
             }
-            let job_system = JPH_JobSystemThreadPool_Create(&JobSystemThreadPoolConfig {
-                maxJobs: 2048,
-                maxBarriers: 8,
-                numThreads: settings.threads as i32,
-            });
+            let job_system = if settings.threads == 0 {
+                // JoltC maps a thread pool of 0 threads to "all cores". Jolt's own
+                // single-threaded job system runs each job as soon as it is queued; the
+                // callback job system does the same through `run_inline`.
+                JPH_JobSystemCallback_Create(&JPH_JobSystemConfig {
+                    context: core::ptr::null_mut(),
+                    queueJob: Some(run_inline),
+                    queueJobs: Some(run_inline_batch),
+                    maxConcurrency: 1,
+                    maxBarriers: 8,
+                })
+            } else {
+                JPH_JobSystemThreadPool_Create(&JobSystemThreadPoolConfig {
+                    maxJobs: 2048,
+                    maxBarriers: 8,
+                    numThreads: settings.threads as i32,
+                })
+            };
             let capacity = (settings.max_contact_constraints as usize).max(1024) * 2;
             let mut shared = Box::new(Shared {
                 events: (0..capacity)

@@ -84,7 +84,12 @@ as-is, and the bindings are written from `joltc.h`.
   - JoltC offers `JPH_JobSystemCallback_Create` (queue callbacks over Jolt's
     `JobSystemWithBarrier`), but our `engine_core::jobs` is fork-join only, with no
     detached spawn.
-  - P1 uses Jolt's thread pool (`threads = 0` runs on the calling thread).
+  - P1 uses Jolt's thread pool for `threads > 0`.
+  - **`JPH_JobSystemThreadPool_Create` turns `numThreads = 0` into -1**, which is "all
+    cores". Found when the benchmark showed identical times for 1 and 16 threads.
+  - For `threads = 0` the backend therefore uses the callback job system with a callback
+    that runs each job immediately. This is Jolt's `JobSystemSingleThreaded` behavior.
+  - This also rehearses the path for running Jolt's jobs on our own pool later.
   - Routing Jolt jobs through our pool needs a detached-spawn primitive in
     `engine_core::jobs`: a follow-up with its own measurements.
 

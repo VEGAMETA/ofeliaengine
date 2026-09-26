@@ -45,9 +45,13 @@ It also asks for:
 
 ### Jolt's worker threads
 
-1. **Jolt's thread pool** (chosen for P1). `threads = 0` runs on the calling thread.
+1. **Jolt's thread pool** (chosen for P1, `threads > 0`).
 2. **JoltC's callback job system over `engine_core::jobs`.** Needs a detached-spawn
    primitive our fork-join pool does not have yet. Follow-up.
+3. **`threads = 0` runs on the calling thread** through JoltC's callback job system with a
+   callback that executes each job as soon as it is queued. This is how Jolt's own
+   `JobSystemSingleThreaded` works. JoltC's thread-pool constructor cannot express it: it
+   turns 0 threads into "all cores".
 
 ## Decision
 
@@ -107,19 +111,34 @@ Struct layouts of every mirrored JoltC struct match the C compiler's (`ffi` layo
 
 ### Performance
 
-`benches/physics.rs`, cloud container (4 vCPUs, not reference), median / p99 step time
-in ms at 60 Hz:
+`benches/physics.rs` steps each scene on the calling thread alone and with 1, 3, 7 and
+15 Jolt workers (2, 4, 8 and 16 threads in total). The sweep shows where extra threads
+stop helping, for example on the second hardware thread (SMT) of each core.
 
-| scene | bodies | 1 thread | 4 threads |
-|---|---:|---:|---:|
-| pyramid, 20 levels | 210 | 0.065 / 1.71 | 0.064 / 1.73 |
-| pile of mixed shapes | 1 000 | 3.91 / 6.92 | 3.83 / 6.24 |
-| pile of mixed shapes | 5 000 | 18.3 / 37.8 | 19.2 / 28.6 |
-| chain, point joints | 200 | 0.58 / 1.43 | 0.41 / 0.78 |
-| orbits in a point field | 200 | 0.16 / 0.28 | 0.17 / 0.28 |
+**A correction.** The first run of this benchmark (ref-1, and the container numbers first
+recorded here) measured `threads = 0` on all cores, not on one thread. JoltC turns a
+thread pool of 0 threads into "all cores", so the "1 thread" and "16 threads" rows were
+the same configuration (for example 4.08 and 4.06 ms for the 5 000-body pile on ref-1).
+The determinism test's one-thread world was affected the same way. Since the fix
+(option 3 above), the calling-thread configuration is really single-threaded, and the
+test compares one thread against four for real.
 
-- 4 096 batched raycasts over the settled 1 000-body pile: 0.28 µs per ray on one thread.
-- ref-1 numbers come from the bench workflow on the PR that adds this ADR.
+Cloud container (4 vCPUs, **not reference**, measured while another job used one core),
+median step time in ms at 60 Hz:
+
+| scene | bodies | 1 thread | 2 threads | 4 threads |
+|---|---:|---:|---:|---:|
+| pile of mixed shapes | 1 000 | 5.09 | 4.26 | 4.62 |
+| pile of mixed shapes | 5 000 | 43.3 | 28.4 | 24.2 |
+| chain, point joints | 200 | 0.34 | 0.41 | 0.47 |
+| orbits in a point field | 200 | 0.08 | 0.12 | 0.16 |
+
+- **Small scenes run slower with more threads:** the job overhead exceeds the work.
+- **The 5 000-body pile scales** to 1.8× on 4 threads.
+- **4 096 batched raycasts** over the settled 1 000-body pile: 0.28 µs per ray on one
+  thread.
+- **ref-1 thread sweep:** from the bench workflow on the PR that adds this ADR; the
+  default thread count follows from it.
 
 ## Consequences
 

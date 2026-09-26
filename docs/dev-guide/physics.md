@@ -93,3 +93,9 @@ slower).
   per body.
 - `PhysicsSettings::threads` sets the worker threads (0 keeps the simulation on the
   calling thread).
+  - Small worlds (a few hundred bodies) are fastest on the calling thread: handing out
+    jobs costs more than the work.
+  - Large piles scale with threads, but usually not past the number of physical cores;
+    the second hardware thread of a core (SMT) rarely helps.
+  - Measure your scene with `cargo bench -p engine_physics_jolt --bench physics`, which
+    sweeps 1 to 16 threads.

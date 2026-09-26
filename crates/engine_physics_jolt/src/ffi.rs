@@ -354,6 +354,25 @@ pub(crate) struct JobSystemThreadPoolConfig {
     pub(crate) numThreads: i32,
 }
 
+pub(crate) type JPH_JobFunction = unsafe extern "C" fn(arg: *mut c_void);
+pub(crate) type JPH_QueueJobCallback =
+    unsafe extern "C" fn(context: *mut c_void, job: JPH_JobFunction, arg: *mut c_void);
+pub(crate) type JPH_QueueJobsCallback = unsafe extern "C" fn(
+    context: *mut c_void,
+    job: JPH_JobFunction,
+    args: *mut *mut c_void,
+    count: u32,
+);
+
+#[repr(C)]
+pub(crate) struct JPH_JobSystemConfig {
+    pub(crate) context: *mut c_void,
+    pub(crate) queueJob: Option<JPH_QueueJobCallback>,
+    pub(crate) queueJobs: Option<JPH_QueueJobsCallback>,
+    pub(crate) maxConcurrency: u32,
+    pub(crate) maxBarriers: u32,
+}
+
 #[repr(C)]
 pub(crate) struct JPH_MassProperties {
     pub(crate) mass: f32,
@@ -366,6 +385,9 @@ unsafe extern "C" {
 
     pub(crate) fn JPH_JobSystemThreadPool_Create(
         config: *const JobSystemThreadPoolConfig,
+    ) -> *mut JPH_JobSystem;
+    pub(crate) fn JPH_JobSystemCallback_Create(
+        config: *const JPH_JobSystemConfig,
     ) -> *mut JPH_JobSystem;
     pub(crate) fn JPH_JobSystem_Destroy(job_system: *mut JPH_JobSystem);
 
@@ -757,6 +779,8 @@ mod layout {
         engine_joltc_offsetof_JPH_SliderConstraintSettings_motorSettings,
         engine_joltc_sizeof_JPH_BodyLockRead,
         engine_joltc_sizeof_JobSystemThreadPoolConfig,
+        engine_joltc_sizeof_JPH_JobSystemConfig,
+        engine_joltc_offsetof_JPH_JobSystemConfig_maxConcurrency,
         engine_joltc_sizeof_JPH_MassProperties,
     );
 
@@ -904,6 +928,16 @@ mod layout {
                     "JobSystemThreadPoolConfig",
                     size_of::<JobSystemThreadPoolConfig>(),
                     engine_joltc_sizeof_JobSystemThreadPoolConfig(),
+                ),
+                (
+                    "JobSystemConfig",
+                    size_of::<JPH_JobSystemConfig>(),
+                    engine_joltc_sizeof_JPH_JobSystemConfig(),
+                ),
+                (
+                    "JobSystemConfig.maxConcurrency",
+                    offset_of!(JPH_JobSystemConfig, maxConcurrency),
+                    engine_joltc_offsetof_JPH_JobSystemConfig_maxConcurrency(),
                 ),
                 (
                     "MassProperties",
