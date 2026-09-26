@@ -1,0 +1,58 @@
+name: Stress
+
+# The stress scene (tools/stress) on the reference machine: rendering at 1920x1080
+# uncapped, ECS, Jolt and Luau together, with a per-stage frame-time breakdown against the
+# 240 FPS target. Also the simulation alone (headless). Posted as a commit comment.
+#
+# A measurement, like Bench: after merges to main that change the scene, on a pull request
+# when it gets the `bench` label, or by hand (workflow_dispatch) after engine changes.
+on:
+  push:
+    branches: [main]
+    paths:
+      - tools/stress/**
+      - .github/workflows/stress.yml
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+concurrency:
+  group: stress-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  stress:
+    name: stress scene (ref-1)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'bench'
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    env:
+      CARGO_TERM_COLOR: never
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: build
+        shell: cmd
+        run: cargo build --release --locked -p engine_stress > stress-build.txt 2>&1 || (type stress-build.txt & exit /b 1)
+
+      - name: windowed, 1080p, uncapped
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: target\release\engine_stress.exe 1500 > stress-windowed.md 2>&1 & type stress-windowed.md
+
+      - name: simulation only
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: target\release\engine_stress.exe 1500 --headless > stress-headless.md 2>&1 & type stress-headless.md
+
+      - name: Post report as commit comment
+        if: ${{ !cancelled() }}
+        shell: cmd
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Stress scene (ref-1)" -Files stress-windowed.md,stress-headless.md
