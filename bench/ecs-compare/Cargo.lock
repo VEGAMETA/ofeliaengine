@@ -157,7 +157,7 @@ dependencies = [
  "downcast-rs",
  "erased-serde",
  "foldhash",
- "glam",
+ "glam 0.30.10",
  "indexmap",
  "serde",
  "smallvec",
@@ -410,6 +410,7 @@ name = "ecs-compare"
 version = "0.0.0"
 dependencies = [
  "bevy_ecs",
+ "engine_ecs",
  "flecs_ecs",
  "hecs",
 ]
@@ -419,6 +420,26 @@ name = "either"
 version = "1.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
+
+[[package]]
+name = "engine_core"
+version = "0.0.0"
+dependencies = [
+ "engine_profiler",
+ "glam 0.33.10",
+]
+
+[[package]]
+name = "engine_ecs"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "engine_core",
+]
+
+[[package]]
+name = "engine_profiler"
+version = "0.0.0"
 
 [[package]]
 name = "equivalent"
@@ -574,6 +595,12 @@ checksum = "19fc433e8437a212d1b6f1e68c7824af3aed907da60afa994e7f542d18d12aa9"
 dependencies = [
  "serde_core",
 ]
+
+[[package]]
+name = "glam"
+version = "0.33.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928452f9c953e142b2f0973e4bd5f34445fcaa8069556ea97a3c9d34d15a4cf8"
 
 [[package]]
 name = "glob"
