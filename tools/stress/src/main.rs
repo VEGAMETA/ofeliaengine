@@ -369,8 +369,7 @@ mod windowed {
     use engine_ecs::QueryState;
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::forward::{
-        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material,
-        ShadowSettings,
+        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
     use engine_render::mesh::{Mesh, cube, perspective};

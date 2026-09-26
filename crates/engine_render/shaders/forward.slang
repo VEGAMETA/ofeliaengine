@@ -88,6 +88,8 @@ struct Push
 static const uint PHASE_ALL = 0;    // frustum culling only
 static const uint PHASE_EARLY = 1;  // visible last frame and in the frustum
 static const uint PHASE_LATE = 2;   // visible now and not drawn by the early phase
+// Depth (NDC) a box's nearest point must lie beyond the pyramid to count as hidden.
+static const float OCCLUSION_MARGIN = 1e-5;
 
 [[vk::push_constant]]
 ConstantBuffer<Push> push;
@@ -161,7 +163,11 @@ bool occluded(float3 center, float3 extents)
     float farthest = max(
         max(push.pyramid[base + a.y * width + a.x], push.pyramid[base + a.y * width + b.x]),
         max(push.pyramid[base + b.y * width + a.x], push.pyramid[base + b.y * width + b.x]));
-    return nearest > farthest;
+    // A surface lying on the box's face (a wall filling the view is its own occluder's
+    // depth) compares equal up to rounding: the rasterizer and this projection round
+    // differently, and the AMD iGPU of ref-1 came out on the hidden side. The margin keeps
+    // such boxes visible; it costs 1 mm of culling at 7 m and ~20 cm at 100 m (near 0.5).
+    return nearest > farthest + OCCLUSION_MARGIN;
 }
 
 // One thread per instance: frustum (and occlusion) test of the instance's world-space

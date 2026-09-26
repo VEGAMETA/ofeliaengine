@@ -65,7 +65,12 @@ work, rasterization and depth tests. CLAUDE.md §6 asks for GPU culling with
    - Pick the level where the rectangle spans at most 2×2 texels (`2^level ≥ span` in
      pixels).
    - The instance is hidden if its nearest depth is farther than the farthest of those 4
-     texels.
+     texels by more than a margin of 1e-5 (NDC depth).
+   - The margin: a surface lying on the box's face compares equal up to rounding (the
+     rasterizer and the cull shader project differently). On ref-1's AMD iGPU a wall
+     filling the view came out hidden behind its own depth, and the test caught it. The
+     margin costs ≈1 mm of culling at 7 m and ≈20 cm at 100 m with the near plane at
+     0.5 m; it grows with distance² / near.
    - A box with a corner behind the camera, or reaching the near plane, is kept.
    - The pass writes each instance's flag for the next frame. It appends visible
      instances that were not drawn early to the second halves of the buffers.
