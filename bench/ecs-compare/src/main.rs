@@ -444,4 +444,65 @@ fn main() {
         );
     }
     println!();
+    layout_study();
+}
+
+/// `p += v` over 1M rows of `[f32; 3]` with the arrays laid out as whole columns or in
+/// chunks of several sizes: how long a column's contiguous run must be for chunked
+/// storage to stream as fast as whole columns (ADR 0017 follow-up).
+fn layout_study() {
+    const N: usize = 1_000_000;
+    #[inline(never)]
+    fn add_all(p: &mut [[f32; 3]], v: &[[f32; 3]]) {
+        for (p, v) in p.iter_mut().zip(v) {
+            p[0] += v[0];
+            p[1] += v[1];
+            p[2] += v[2];
+        }
+    }
+    let runs = 30;
+    println!("### Chunk layout study: p += v over 1M rows (µs, median of {runs})\n");
+    println!(
+        "| layout | 100-byte rows (Transform + Position + Rotation + Velocity) | 24-byte rows (Position + Velocity) |"
+    );
+    println!("|---|---:|---:|");
+    let mut p = vec![[1.0f32; 3]; N];
+    let v = vec![[1.0f32; 3]; N];
+    let whole = measure(
+        runs,
+        || (),
+        |_| {
+            add_all(&mut p, &v);
+            black_box(&p);
+        },
+    );
+    println!("| whole columns | {whole:.0} | {whole:.0} |");
+    for kib in [16usize, 64, 256, 1024, 2048, 4096] {
+        let bytes = kib << 10;
+        let mut cells = Vec::new();
+        for (row, p_off, v_off) in [(100usize, 64usize, 88usize), (24, 0, 12)] {
+            let cap = bytes / row;
+            let chunks = N.div_ceil(cap);
+            let mut mem: Vec<Vec<[f32; 3]>> =
+                (0..chunks).map(|_| vec![[1.0f32; 3]; bytes / 12]).collect();
+            // Column arrays at `offset * cap` bytes, i.e. `offset / 12 * cap` elements.
+            let (pe, ve) = (p_off * cap / 12, v_off * cap / 12);
+            cells.push(measure(
+                runs,
+                || (),
+                |_| {
+                    for c in mem.iter_mut() {
+                        let (a, b) = c.split_at_mut(ve);
+                        add_all(&mut a[pe..pe + cap], &b[..cap]);
+                    }
+                    black_box(&mem);
+                },
+            ));
+        }
+        println!(
+            "| chunks of {kib} KiB | {:.0} | {:.0} |",
+            cells[0], cells[1]
+        );
+    }
+    println!();
 }
