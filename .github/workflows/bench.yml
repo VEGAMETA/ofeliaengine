@@ -62,6 +62,17 @@ jobs:
         shell: cmd
         run: cargo bench -p engine_ecs --bench ecs --locked > bench-ecs-engine.md
 
+      - name: cargo bench -p engine_audio --bench mixer, and output device timing (muted)
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          cargo bench -p engine_audio --bench mixer --locked > bench-audio.md
+          set rc=%ERRORLEVEL%
+          echo.>> bench-audio.md
+          cargo run -p engine_audio --release --example tone --locked -- --seconds 4 --mute >> bench-audio.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          exit /b %rc%
+
       - name: ECS comparison (research harness for ADR 0017, outside the workspace)
         if: ${{ !cancelled() }}
         continue-on-error: true
@@ -76,4 +87,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-ecs.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-audio.md,bench-ecs.md
