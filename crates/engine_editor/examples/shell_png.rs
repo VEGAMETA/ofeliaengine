@@ -8,6 +8,7 @@
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
 use engine_core::math::{Mat4, Quat, Vec2, Vec3, look_at};
+use engine_editor::icons;
 use engine_editor::paint::{UiText, paint};
 use engine_editor::shell::{
     Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, build,
@@ -33,6 +34,7 @@ const FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
 
 fn tree_item<'a>(
     depth: u16,
+    icon: &'a str,
     name: &'a str,
     kind: &'a str,
     expanded: Option<bool>,
@@ -40,6 +42,7 @@ fn tree_item<'a>(
 ) -> TreeItem<'a> {
     TreeItem {
         depth,
+        icon,
         name,
         kind,
         expanded,
@@ -159,19 +162,68 @@ fn main() {
     let mut graph = RenderGraph::new(&device, 1);
 
     let tree = [
-        tree_item(0, "World", "Node3D", Some(true), false),
-        tree_item(1, "Sun", "DirectionalLight", None, false),
-        tree_item(1, "Environment", "WorldEnvironment", None, false),
-        tree_item(1, "Level", "Node3D", Some(true), false),
-        tree_item(2, "Ground", "MeshInstance", None, false),
-        tree_item(2, "Crates", "Node3D", Some(false), false),
-        tree_item(2, "Tower", "MeshInstance", None, false),
-        tree_item(1, "Player", "CharacterBody", Some(true), true),
-        tree_item(2, "Camera", "Camera3D", None, false),
-        tree_item(2, "Model", "MeshInstance", None, false),
-        tree_item(2, "Collider", "CollisionShape", None, false),
-        tree_item(1, "Enemies", "Node3D", Some(false), false),
-        tree_item(1, "Интерфейс", "Control", Some(false), false),
+        tree_item(0, icons::NODE_3D, "World", "Node3D", Some(true), false),
+        tree_item(1, icons::SUN, "Sun", "DirectionalLight", None, false),
+        tree_item(
+            1,
+            icons::ENVIRONMENT,
+            "Environment",
+            "WorldEnvironment",
+            None,
+            false,
+        ),
+        tree_item(1, icons::NODE_3D, "Level", "Node3D", Some(true), false),
+        tree_item(
+            2,
+            icons::MESH_INSTANCE,
+            "Ground",
+            "MeshInstance",
+            None,
+            false,
+        ),
+        tree_item(2, icons::NODE_3D, "Crates", "Node3D", Some(false), false),
+        tree_item(
+            2,
+            icons::MESH_INSTANCE,
+            "Tower",
+            "MeshInstance",
+            None,
+            false,
+        ),
+        tree_item(
+            1,
+            icons::CHARACTER,
+            "Player",
+            "CharacterBody",
+            Some(true),
+            true,
+        ),
+        tree_item(2, icons::CAMERA, "Camera", "Camera3D", None, false),
+        tree_item(
+            2,
+            icons::MESH_INSTANCE,
+            "Model",
+            "MeshInstance",
+            None,
+            false,
+        ),
+        tree_item(
+            2,
+            icons::COLLISION,
+            "Collider",
+            "CollisionShape",
+            None,
+            false,
+        ),
+        tree_item(1, icons::NODE_3D, "Enemies", "Node3D", Some(false), false),
+        tree_item(
+            1,
+            icons::CONTROL,
+            "Интерфейс",
+            "Control",
+            Some(false),
+            false,
+        ),
     ];
     let transform = [
         Field {
@@ -244,12 +296,12 @@ fn main() {
         },
     ];
     let folders = [
-        tree_item(0, "res://", "", Some(true), false),
-        tree_item(1, "levels", "", None, true),
-        tree_item(1, "models", "", Some(false), false),
-        tree_item(1, "scripts", "", None, false),
-        tree_item(1, "textures", "", None, false),
-        tree_item(1, "audio", "", None, false),
+        tree_item(0, icons::FOLDER_OPEN, "res://", "", Some(true), false),
+        tree_item(1, icons::FOLDER_OPEN, "levels", "", None, true),
+        tree_item(1, icons::FOLDER, "models", "", Some(false), false),
+        tree_item(1, icons::FOLDER, "scripts", "", None, false),
+        tree_item(1, icons::FOLDER, "textures", "", None, false),
+        tree_item(1, icons::FOLDER, "audio", "", None, false),
     ];
     let file = |name, kind| FileItem { name, kind };
     let files = [
@@ -264,11 +316,20 @@ fn main() {
         file("stone.ktx2", FileKind::Texture),
         file("wind.ogg", FileKind::Audio),
     ];
+    let tools = [
+        (icons::TOOL_SELECT, "Select"),
+        (icons::TOOL_MOVE, "Move"),
+        (icons::TOOL_ROTATE, "Rotate"),
+        (icons::TOOL_SCALE, "Scale"),
+        (icons::SNAP, "Snap"),
+    ]
+    .map(|(icon, name)| format!("{icon} {name}"));
+    let tools = tools.each_ref().map(String::as_str);
     let status = format!("engine 0.0.0  ·  Vulkan  ·  {adapter_name}");
     let model = ShellModel {
         scenes: &["main.scene", "level_01.scene*", "меню.scene"],
         active_scene: 1,
-        tools: &["Select", "Move", "Rotate", "Scale", "Snap", "Local"],
+        tools: &tools,
         active_tool: 1,
         tree: &tree,
         selection: "Player  ·  CharacterBody",

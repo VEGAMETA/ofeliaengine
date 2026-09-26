@@ -17,6 +17,7 @@
 //! rectangle [`ShellResponse::viewport`] had in the last layout ([`Ui::rect_of`]). While the
 //! game plays, a thin colored edge around it shows the state instead of big buttons.
 
+use crate::icons;
 use engine_ui::{Align, Color, Direction, Size, Style, Ui};
 
 /// A color from sRGB bytes, as the linear value the renderer blends in.
@@ -76,6 +77,8 @@ impl Default for Palette {
 pub struct TreeItem<'a> {
     /// Nesting level (0: root).
     pub depth: u16,
+    /// Icon glyph before the name (see [`crate::icons`]); empty for none.
+    pub icon: &'a str,
     /// Shown name.
     pub name: &'a str,
     /// Type shown in a dim badge (`Node3D`, `MeshInstance`…); empty for none.
@@ -194,6 +197,8 @@ pub struct ShellResponse {
 const TEXT: f32 = 13.0;
 /// Small text: badges, hints.
 const SMALL: f32 = 11.0;
+/// Icon glyph size (Material Design icons fill the em box, so they read larger than text).
+const ICON: f32 = 14.0;
 /// Width of the scene and inspector docks.
 const SCENE_WIDTH: f32 = 270.0;
 const INSPECTOR_WIDTH: f32 = 320.0;
@@ -351,25 +356,15 @@ fn play_controls(ui: &mut Ui, playing: bool, p: &Palette, out: &mut ShellRespons
     };
     let play_color = if playing { p.playing } else { p.text_dim };
     let id = ui.container("play", button, |ui| {
-        text(ui, "icon", "►", SMALL, play_color);
+        text(ui, "icon", icons::PLAY, ICON, play_color);
     });
     out.play = ui.sense(id, false).clicked;
-    let id = ui.container("pause", Style { gap: 3.0, ..button }, |ui| {
-        for key in ["bar a", "bar b"] {
-            ui.container(
-                key,
-                Style {
-                    size: [Size::Fixed(3.0), Size::Fixed(10.0)],
-                    background: Some(p.text_dim),
-                    ..Style::default()
-                },
-                |_| {},
-            );
-        }
+    let id = ui.container("pause", button, |ui| {
+        text(ui, "icon", icons::PAUSE, ICON, p.text_dim);
     });
     out.pause = ui.sense(id, false).clicked;
     let id = ui.container("stop", button, |ui| {
-        text(ui, "icon", "■", SMALL, p.text_dim);
+        text(ui, "icon", icons::STOP, ICON, p.text_dim);
     });
     out.stop = ui.sense(id, false).clicked;
 }
@@ -403,7 +398,8 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
                             ..Style::default()
                         },
                         |ui| {
-                            icon(ui, file_color(file.kind, p));
+                            let (glyph, color) = file_icon(file.kind, p);
+                            text(ui, "icon", glyph, ICON, color);
                             text(ui, "name", file.name, TEXT, p.text);
                         },
                     );
@@ -417,30 +413,17 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
     });
 }
 
-fn file_color(kind: FileKind, p: &Palette) -> Color {
+/// Icon glyph and its color for a file kind.
+fn file_icon(kind: FileKind, p: &Palette) -> (&'static str, Color) {
     match kind {
-        FileKind::Folder => srgb(214, 170, 90),
-        FileKind::Scene => p.accent,
-        FileKind::Script => srgb(222, 196, 96),
-        FileKind::Texture => srgb(110, 190, 130),
-        FileKind::Mesh => srgb(222, 140, 90),
-        FileKind::Audio => srgb(180, 130, 220),
-        FileKind::Other => p.text_dim,
+        FileKind::Folder => (icons::FOLDER, srgb(214, 170, 90)),
+        FileKind::Scene => (icons::SCENE, p.accent),
+        FileKind::Script => (icons::SCRIPT, srgb(222, 196, 96)),
+        FileKind::Texture => (icons::TEXTURE, srgb(110, 190, 130)),
+        FileKind::Mesh => (icons::MESH, srgb(222, 140, 90)),
+        FileKind::Audio => (icons::AUDIO, srgb(180, 130, 220)),
+        FileKind::Other => (icons::FILE, p.text_dim),
     }
-}
-
-/// A 10 × 10 rounded square in `color`.
-fn icon(ui: &mut Ui, color: Color) {
-    ui.container(
-        "icon",
-        Style {
-            size: [Size::Fixed(10.0), Size::Fixed(10.0)],
-            radius: 2.0,
-            background: Some(color),
-            ..Style::default()
-        },
-        |_| {},
-    );
 }
 
 /// A dock: a column with the dock background.
@@ -488,12 +471,14 @@ fn filter(ui: &mut Ui, hint: &str, p: &Palette) {
                 Style {
                     size: [Size::Grow(1.0), Size::Fixed(24.0)],
                     padding: [8.0, 0.0, 8.0, 0.0],
+                    gap: 6.0,
                     radius: 3.0,
                     background: Some(p.field),
                     align_cross: Align::Center,
                     ..Style::default()
                 },
                 |ui| {
+                    text(ui, "icon", icons::SEARCH, ICON, p.text_dim);
                     text(ui, "hint", hint, TEXT, p.text_dim);
                 },
             );
@@ -518,22 +503,25 @@ fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> Option<usize> {
             },
             |ui| {
                 let arrow = match item.expanded {
-                    Some(true) => "▼",
-                    Some(false) => "►",
+                    Some(true) => icons::EXPANDED,
+                    Some(false) => icons::COLLAPSED,
                     None => "",
                 };
                 ui.container(
                     "arrow",
                     Style {
-                        size: [Size::Fixed(9.0), Size::Fit],
+                        size: [Size::Fixed(ICON), Size::Fit],
                         ..Style::default()
                     },
                     |ui| {
                         if !arrow.is_empty() {
-                            text(ui, "glyph", arrow, 8.0, p.text_dim);
+                            text(ui, "glyph", arrow, ICON, p.text_dim);
                         }
                     },
                 );
+                if !item.icon.is_empty() {
+                    text(ui, "icon", item.icon, ICON, p.text_dim);
+                }
                 text(ui, "name", item.name, TEXT, p.text);
                 if !item.kind.is_empty() {
                     text(ui, "kind", item.kind, SMALL, p.text_dim);
@@ -599,7 +587,7 @@ fn inspector_dock(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette) {
                             ..Style::default()
                         },
                         |ui| {
-                            text(ui, "arrow", "▼", 8.0, p.text_dim);
+                            text(ui, "arrow", icons::EXPANDED, ICON, p.text_dim);
                             text(ui, "title", section.title, TEXT, p.text);
                         },
                     );
