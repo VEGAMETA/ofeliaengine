@@ -4,21 +4,28 @@ name: Script compare
 # reference machine (ADR 0032). Godot is downloaded once per version into the runner's
 # tool cache; it is only run as a reference, nothing from it is built into the engine.
 # Output is posted as a commit comment.
+#
+# A measurement, like Bench: after merges to main that touch the scripts, or on a pull
+# request when it gets the `bench` label.
 on:
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - bench/gdscript/**
       - crates/engine_script/**
       - .github/workflows/script-compare.yml
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
 
 concurrency:
   group: script-compare-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   compare:
     name: script compare (ref-1)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'bench'
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 45
     permissions:

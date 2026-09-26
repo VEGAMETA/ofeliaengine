@@ -1,11 +1,14 @@
 name: CI
 
 on:
-  # Work happens in pull requests, so branch pushes are covered by `pull_request`;
-  # running on both would bill every commit twice.
+  # Every merge to main is checked here. Pull requests are checked before merging on ref-1
+  # itself with tools/check.ps1 (the same commands), so here they run only with the `ci`
+  # label: on the push that adds it and on every push while it is on. The runner is the
+  # developer's desktop; a second, identical build of each push only slowed it down.
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     # Documentation-only changes need no build.
     paths-ignore:
       - docs/**
@@ -41,6 +44,10 @@ env:
 jobs:
   check:
     name: check
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action == 'labeled' && github.event.label.name == 'ci') ||
+      (github.event.action != 'labeled' && contains(github.event.pull_request.labels.*.name, 'ci'))
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 90
     permissions:
