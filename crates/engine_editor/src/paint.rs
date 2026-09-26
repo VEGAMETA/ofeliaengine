@@ -38,13 +38,16 @@ impl core::fmt::Debug for UiText {
 }
 
 impl UiText {
-    /// The bundled Go Regular (Latin, Cyrillic, Greek) and an empty atlas.
+    /// The editor's font stack (ADR 0036) and an empty atlas: Noto Sans for text, JetBrains
+    /// Mono for the arrows and symbols Noto Sans lacks, Symbols Nerd Font for icons.
     pub fn new() -> Result<Self, FontError> {
         let mut fonts = Fonts::new();
-        let regular = fonts.load(engine_text::fonts::GO_REGULAR, 0)?;
+        let text = fonts.load(engine_text::fonts::NOTO_SANS, 0)?;
+        let symbols = fonts.load(engine_text::fonts::JETBRAINS_MONO, 0)?;
+        let icons = fonts.load(engine_text::fonts::NERD_SYMBOLS, 0)?;
         Ok(Self {
             fonts,
-            stack: vec![regular],
+            stack: vec![text, symbols, icons],
             layout: TextLayout::new(),
             atlas: GlyphAtlas::new(ATLAS_SIZE, ATLAS_SIZE),
         })

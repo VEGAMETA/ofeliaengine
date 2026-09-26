@@ -2,8 +2,10 @@
 //! over the world (ADR 0031). Panels, tools, the command palette and docking build on
 //! it and on `engine_ui`. [`Commands`] and [`Keymap`] are the command palette's and
 //! shortcuts' core. [`shell`] lays out the editor window (the team's Godot layout) and
-//! [`paint`] draws `engine_ui` frames with `engine_render2d` and `engine_text`.
+//! [`paint`] draws `engine_ui` frames with `engine_render2d` and `engine_text`; [`icons`]
+//! names the icon glyphs it uses.
 
+pub mod icons;
 pub mod paint;
 mod palette;
 pub mod shell;
