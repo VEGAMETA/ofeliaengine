@@ -131,7 +131,12 @@ fn main() {
     inputs.dedup();
     let mut h = Hasher(0xcbf2_9ce4_8422_2325);
     for path in &inputs {
-        h.write(path.strip_prefix(&root).unwrap_or(path).to_string_lossy().as_bytes());
+        h.write(
+            path.strip_prefix(&root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .as_bytes(),
+        );
         h.write(&std::fs::read(path).unwrap_or_default());
     }
     let compiler = build.get_compiler();
@@ -173,7 +178,10 @@ fn main() {
                 let _ = std::fs::remove_file(&temp);
             }
             if let Ok(mut f) = std::fs::File::create(dir.join("SOURCE.txt")) {
-                let _ = writeln!(f, "Jolt Physics + JoltC static library, key {key}, target {target}");
+                let _ = writeln!(
+                    f,
+                    "Jolt Physics + JoltC static library, key {key}, target {target}"
+                );
             }
         }
     }

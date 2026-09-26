@@ -125,7 +125,11 @@ impl World {
 
     /// Makes `parent` the parent of `child` (appended after its other children), or
     /// detaches `child` with `None`.
-    pub fn set_parent(&mut self, child: Entity, parent: Option<Entity>) -> Result<(), HierarchyError> {
+    pub fn set_parent(
+        &mut self,
+        child: Entity,
+        parent: Option<Entity>,
+    ) -> Result<(), HierarchyError> {
         if !self.contains(child) {
             return Err(HierarchyError::NotAlive(child));
         }

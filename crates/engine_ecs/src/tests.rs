@@ -135,7 +135,11 @@ fn queries_visit_every_match_once() {
     assert_eq!(n, 1250);
     let mut changed = QueryState::<&mut Pos, Changed<Pos>>::new(&mut w);
     assert_eq!(changed.iter(&mut w).count(), 3750);
-    assert_eq!(changed.iter(&mut w).count(), 0, "a query's own writes are not news to it");
+    assert_eq!(
+        changed.iter(&mut w).count(),
+        0,
+        "a query's own writes are not news to it"
+    );
 
     // Iterator and read-only paths agree with `for_each`.
     let mut via_iter: Vec<u32> = ids.iter(&mut w).map(|(id, _)| id.0).collect();
@@ -519,7 +523,10 @@ fn hierarchy_links_are_plain_data_and_ordered() {
     assert_eq!(w.parent(kids[2]), Some(root));
     // Detach from the middle, the ends, and re-attach at the end.
     w.set_parent(kids[1], None).unwrap();
-    assert_eq!(w.children(root).collect::<Vec<_>>(), vec![kids[0], kids[2], kids[3]]);
+    assert_eq!(
+        w.children(root).collect::<Vec<_>>(),
+        vec![kids[0], kids[2], kids[3]]
+    );
     w.set_parent(kids[0], None).unwrap();
     w.set_parent(kids[3], None).unwrap();
     assert_eq!(w.children(root).collect::<Vec<_>>(), vec![kids[2]]);
@@ -527,7 +534,10 @@ fn hierarchy_links_are_plain_data_and_ordered() {
     assert_eq!(w.children(root).collect::<Vec<_>>(), vec![kids[2], kids[0]]);
     // Cycles are rejected; grandchildren work.
     w.set_parent(kids[3], Some(kids[0])).unwrap();
-    assert_eq!(w.set_parent(root, Some(kids[3])), Err(HierarchyError::Cycle));
+    assert_eq!(
+        w.set_parent(root, Some(kids[3])),
+        Err(HierarchyError::Cycle)
+    );
     assert_eq!(w.set_parent(root, Some(root)), Err(HierarchyError::Cycle));
     // Snapshots carry the links.
     let mut snap = Snapshot::new();
