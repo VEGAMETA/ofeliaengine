@@ -107,6 +107,7 @@ dependencies = [
  "engine_core",
  "engine_profiler",
  "engine_rhi",
+ "engine_shader",
 ]
 
 [[package]]
