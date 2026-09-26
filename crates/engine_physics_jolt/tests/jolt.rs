@@ -13,9 +13,11 @@ use engine_physics_jolt::JoltBackend;
 
 const DT: f32 = 1.0 / 60.0;
 
+/// A world on the calling thread plus `threads` workers, used for every step.
 fn world(threads: u32) -> JoltBackend {
     JoltBackend::new(&PhysicsSettings {
         threads,
+        single_thread_below: 0,
         ..PhysicsSettings::default()
     })
     .unwrap()
@@ -276,6 +278,35 @@ fn deterministic_for_the_same_binary() {
     assert_eq!(c, d, "two multi-threaded runs differ");
     println!("single-threaded {a:#018x}, four threads {c:#018x}");
     assert_eq!(a, c, "the thread count changes the result");
+}
+
+#[test]
+fn awake_body_count_picks_the_thread_count() {
+    let adaptive = |single_thread_below| {
+        JoltBackend::new(&PhysicsSettings {
+            threads: 3,
+            single_thread_below,
+            ..PhysicsSettings::default()
+        })
+        .unwrap()
+    };
+    // 300 falling bodies: below a threshold of 500 on the calling thread, above 100 on
+    // the pool.
+    let mut small = adaptive(500);
+    scenes::pile(&mut small, 300).unwrap();
+    small.step(DT, 1).unwrap();
+    assert_eq!(small.stats().step_threads, 1);
+    let mut large = adaptive(100);
+    scenes::pile(&mut large, 300).unwrap();
+    large.step(DT, 1).unwrap();
+    assert_eq!(large.stats().step_threads, 4);
+    // Switching between the two job systems does not change the result.
+    for _ in 1..120 {
+        small.step(DT, 1).unwrap();
+        large.step(DT, 1).unwrap();
+    }
+    assert_eq!(small.state_hash(), large.state_hash());
+    assert_eq!(small.state_hash(), pile_hash(0, 120));
 }
 
 #[test]

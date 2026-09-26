@@ -393,9 +393,14 @@ pub struct PhysicsSettings {
     pub layers: u8,
     /// `collides[a]` bit `b`: layers `a` and `b` collide (keep it symmetric).
     pub collides: Vec<u32>,
-    /// Worker threads for the backend (0: on the calling thread only, fully
-    /// deterministic scheduling).
+    /// Worker threads for the backend at most (0: always on the calling thread). The
+    /// calling thread runs jobs too, so a step uses up to `threads + 1` threads. The
+    /// default is every logical core ([`PhysicsSettings::all_cores`]).
     pub threads: u32,
+    /// Below this many awake bodies a step runs on the calling thread even when
+    /// `threads > 0`: handing out jobs costs more than the work (ADR 0018, thread sweep
+    /// on ref-1). 0 always uses the workers. Results are the same either way.
+    pub single_thread_below: u32,
     /// World gravity.
     pub gravity: Vec3,
 }
@@ -410,9 +415,17 @@ impl Default for PhysicsSettings {
             max_contact_constraints: 32_768,
             layers: 2,
             collides: vec![0b10, 0b11],
-            threads: 0,
+            threads: Self::all_cores(),
+            single_thread_below: 500,
             gravity: Vec3::new(0.0, -9.81, 0.0),
         }
+    }
+}
+
+impl PhysicsSettings {
+    /// Worker threads that, with the calling thread, use every logical core.
+    pub fn all_cores() -> u32 {
+        std::thread::available_parallelism().map_or(0, |n| n.get() as u32 - 1)
     }
 }
 
@@ -425,6 +438,8 @@ pub struct PhysicsStats {
     pub active_bodies: u32,
     /// Contact events of the last step.
     pub contact_events: u32,
+    /// Threads the last step ran on (1: the calling thread only).
+    pub step_threads: u32,
 }
 
 /// Errors from a backend.
