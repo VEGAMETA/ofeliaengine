@@ -12,7 +12,8 @@ workspace = true
 [dependencies]
 engine_profiler.workspace = true
 # Vectors, matrices, quaternions with SSE2 SIMD (MIT OR Apache-2.0, no dependencies; ADR 0012).
-glam = "0.33"
+# `bytemuck`: glam types are plain data inside ECS components (ADR 0017).
+glam = { version = "0.33", features = ["bytemuck"] }
 
 
 [dev-dependencies]

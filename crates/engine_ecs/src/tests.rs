@@ -793,3 +793,99 @@ mod schedule {
         s.run(&mut w, None);
     }
 }
+
+mod transforms {
+    use crate::*;
+    use engine_core::math::{Quat, Vec3};
+
+    fn spawn(w: &mut World, t: Transform) -> Entity {
+        w.spawn((t, GlobalTransform::IDENTITY))
+    }
+
+    fn pos(w: &World, e: Entity) -> Vec3 {
+        w.get::<GlobalTransform>(e).unwrap().translation()
+    }
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        (a - b).length() < 1e-5
+    }
+
+    #[test]
+    fn world_transforms_follow_the_hierarchy() {
+        let mut w = World::new();
+        let mut p = TransformPropagation::new(&mut w);
+        let root = spawn(
+            &mut w,
+            Transform::from_xyz(10.0, 0.0, 0.0)
+                .with_rotation(Quat::from_rotation_y(core::f32::consts::FRAC_PI_2)),
+        );
+        let arm = spawn(
+            &mut w,
+            Transform::from_xyz(0.0, 0.0, -2.0).with_scale(Vec3::splat(2.0)),
+        );
+        let hand = spawn(&mut w, Transform::from_xyz(1.0, 0.0, 0.0));
+        let loose = spawn(&mut w, Transform::from_xyz(0.0, 5.0, 0.0));
+        w.set_parent(arm, Some(root)).unwrap();
+        w.set_parent(hand, Some(arm)).unwrap();
+        assert!(p.run(&mut w));
+        // Rotating +90° about Y maps -Z to -X: the arm sits at (8, 0, 0).
+        assert!(
+            close(pos(&w, arm), Vec3::new(8.0, 0.0, 0.0)),
+            "{}",
+            pos(&w, arm)
+        );
+        // The hand: 1 along the arm's X (scaled by 2, rotated to -Z) → (8, 0, -2).
+        assert!(
+            close(pos(&w, hand), Vec3::new(8.0, 0.0, -2.0)),
+            "{}",
+            pos(&w, hand)
+        );
+        assert!(close(pos(&w, loose), Vec3::new(0.0, 5.0, 0.0)));
+
+        // Nothing changed: the pass does no work.
+        assert!(!p.run(&mut w));
+
+        // Moving the root moves the whole subtree.
+        w.get_mut::<Transform>(root).unwrap().translation.x = 0.0;
+        assert!(p.run(&mut w));
+        assert!(close(pos(&w, hand), Vec3::new(-2.0, 0.0, -2.0)));
+
+        // Reparenting the hand to the loose entity.
+        w.set_parent(hand, Some(loose)).unwrap();
+        assert!(p.run(&mut w));
+        assert!(close(pos(&w, hand), Vec3::new(1.0, 5.0, 0.0)));
+
+        // Detached: the hand's local transform is its world transform.
+        w.set_parent(hand, None).unwrap();
+        assert!(p.run(&mut w));
+        assert!(close(pos(&w, hand), Vec3::new(1.0, 0.0, 0.0)));
+    }
+
+    #[test]
+    fn deep_chains_and_many_roots() {
+        let mut w = World::new();
+        let mut p = TransformPropagation::new(&mut w);
+        let mut tips = Vec::new();
+        for r in 0..50 {
+            let mut parent = spawn(&mut w, Transform::from_xyz(r as f32, 0.0, 0.0));
+            for _ in 0..40 {
+                let child = spawn(&mut w, Transform::from_xyz(0.0, 1.0, 0.0));
+                w.set_parent(child, Some(parent)).unwrap();
+                parent = child;
+            }
+            tips.push(parent);
+        }
+        p.run(&mut w);
+        for (r, &tip) in tips.iter().enumerate() {
+            assert!(close(pos(&w, tip), Vec3::new(r as f32, 40.0, 0.0)));
+        }
+    }
+
+    #[test]
+    fn transform_padding_is_hidden_and_not_saved() {
+        let info = <Transform as reflect::Reflect>::TYPE_INFO;
+        assert!(!info.field("translation").unwrap().attrs.hidden);
+        let pad = info.field("_padding").unwrap();
+        assert!(pad.attrs.hidden && pad.attrs.skip);
+    }
+}

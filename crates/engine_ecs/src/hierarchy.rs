@@ -23,7 +23,7 @@ pub struct Parent {
     #[reflect(hidden)]
     prev: Entity,
     #[reflect(hidden)]
-    next: Entity,
+    pub(crate) next: Entity,
 }
 
 impl Parent {
@@ -39,10 +39,10 @@ impl Parent {
 #[reflect(hidden)]
 pub struct Children {
     #[reflect(hidden)]
-    first: Entity,
+    pub(crate) first: Entity,
     #[reflect(hidden)]
     last: Entity,
-    count: u32,
+    pub(crate) count: u32,
     #[reflect(hidden, skip)]
     _padding: u32,
 }
