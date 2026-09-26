@@ -5,7 +5,8 @@
 //! - `thread`: CPU set placement, priorities, MMCSS, thread descriptions;
 //! - `process`: process-wide settings such as disabling power throttling;
 //! - `window`: windows on a dedicated thread, events through a lock-free ring;
-//! - `raw_input`: raw mouse/keyboard on a time-critical thread, with timestamps.
+//! - `raw_input`: raw mouse/keyboard on a time-critical thread, with timestamps;
+//! - `fs_watch`: directory change notifications for hot reload.
 //!
 //! Everything here is Windows-only. On other hosts the crate compiles to nothing, which
 //! keeps the workspace buildable in Linux containers. Bindings come from `windows-sys`
@@ -13,6 +14,8 @@
 
 #[cfg(windows)]
 pub mod cpu;
+#[cfg(any(windows, test))]
+pub mod fs_watch;
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]
