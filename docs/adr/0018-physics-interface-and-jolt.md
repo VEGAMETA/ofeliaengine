@@ -4,6 +4,9 @@
 - Date: 2026-09-26
 - Research: [docs/research/physics-api.md](../research/physics-api.md)
 
+> **Update 2026-09-26 (ADR 0028):** our own 3D solver (P2) is deferred; Jolt stays the
+> physics engine. The consequences below that mention P2 apply only if it is reopened.
+
 ## Context
 
 CLAUDE.md §8 fixes the plan:

@@ -158,6 +158,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_physics2d"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "engine_core",
+ "engine_profiler",
+]
+
+[[package]]
 name = "engine_physics_jolt"
 version = "0.0.0"
 dependencies = [

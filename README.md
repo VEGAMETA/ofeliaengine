@@ -54,6 +54,7 @@ to the pull request description under "Questions for the team".
 | `crates/engine_render2d` | 2D renderer: sprites and SDF shapes batched through bindless textures, deterministic layer / y-sort order, clipping; examples `sprites`, `sprite_bench`, `viewports` |
 | `crates/engine_physics` | Physics interface (`PhysicsBackend`), shared types, gravity fields, benchmark scenes |
 | `crates/engine_physics_jolt` | Jolt Physics 5.6 backend through vendored JoltC (`third_party/`) |
+| `crates/engine_physics2d` | 2D physics on vendored Box2D v3.1.1 behind a small C shim |
 | `crates/engine_shader` | Slang → SPIR-V: in-process compiler, content-addressed cache, Compile All, hot reload |
 | `tools/engine` | The `engine` command line (`engine shaders build`, `engine shaders watch`) |
 | `docs/adr` | Architecture decision records |
