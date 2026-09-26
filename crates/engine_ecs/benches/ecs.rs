@@ -10,7 +10,9 @@
 
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
-use engine_ecs::{Commands, Entity, QueryState, Snapshot, World, bytemuck, pod_component};
+use engine_ecs::{
+    Commands, Entity, QueryState, Schedule, Snapshot, World, bytemuck, pod_component, system,
+};
 use std::hint::black_box;
 use std::time::Instant;
 
@@ -266,6 +268,76 @@ fn main() {
                     black_box(w.state_hash());
                 },
             ),
+        ));
+    }
+
+    {
+        // Three systems over 1M entities with disjoint writes: one level, so the pool
+        // runs them side by side (each system itself is sequential).
+        let (mut w, _) = world(1_000_000);
+        let mut s = Schedule::new();
+        s.add(system(
+            "position",
+            |w, a| a.query::<(&mut Position, &Velocity), ()>(w),
+            |q, ctx| ctx.for_each(q, |(p, v)| add(p, v)),
+        ));
+        s.add(system(
+            "rotation",
+            |w, a| a.query::<(&mut Rotation, &Velocity), ()>(w),
+            |q, ctx| {
+                ctx.for_each(q, |(r, v)| {
+                    for i in 0..3 {
+                        r.0[i] += v.0[i];
+                    }
+                });
+            },
+        ));
+        s.add(system(
+            "transform",
+            |w, a| a.query::<(&mut Transform, &Velocity), ()>(w),
+            |q, ctx| {
+                ctx.for_each(q, |(t, v)| {
+                    for i in 0..3 {
+                        t.0[12 + i] += v.0[i];
+                    }
+                });
+            },
+        ));
+        s.initialize(&mut w);
+        assert_eq!(s.levels().len(), 1);
+        rows.push((
+            "schedule: 3 independent systems × 1M, serial".into(),
+            measure(30, || (), |_| s.run(&mut w, None)),
+        ));
+        rows.push((
+            format!("schedule: 3 independent systems × 1M, pool ({threads} threads)"),
+            measure(30, || (), |_| s.run(&mut w, Some(&pool))),
+        ));
+    }
+    {
+        // Scheduling overhead: 16 systems whose queries match nothing.
+        let mut w = World::new();
+        w.spawn((Tag(0.0),));
+        let mut s = Schedule::new();
+        for _ in 0..16 {
+            s.add(system(
+                "empty",
+                |w, a| a.query::<&Velocity, ()>(w),
+                |q, ctx| {
+                    ctx.for_each(q, |v| {
+                        black_box(v);
+                    })
+                },
+            ));
+        }
+        s.initialize(&mut w);
+        rows.push((
+            "schedule overhead: 16 empty systems, serial".into(),
+            measure(300, || (), |_| s.run(&mut w, None)),
+        ));
+        rows.push((
+            format!("schedule overhead: 16 empty systems, pool ({threads} threads)"),
+            measure(300, || (), |_| s.run(&mut w, Some(&pool))),
         ));
     }
 

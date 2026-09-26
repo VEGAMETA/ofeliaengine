@@ -641,3 +641,155 @@ fn large_chunks_stagger_columns_within_a_page() {
         (0..200_000u32).map(|i| f64::from(i) + 1.0).sum::<f64>()
     );
 }
+
+mod schedule {
+    use crate::*;
+    use engine_core::jobs::ThreadPool;
+
+    #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+    #[repr(C)]
+    struct P(f32);
+    #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+    #[repr(C)]
+    struct V(f32);
+    #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+    #[repr(C)]
+    struct Hp(f32);
+    #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+    #[repr(C)]
+    struct Age(u32);
+    pod_component!(P, V, Hp, Age);
+
+    struct Dt(f32);
+    #[derive(Default)]
+    struct Score(u64);
+
+    fn build() -> Schedule {
+        let mut s = Schedule::new();
+        s.add(system(
+            "move",
+            |w, a| (a.query::<(&mut P, &V), ()>(w), a.read::<Dt>(w)),
+            |(q, dt), ctx| {
+                let dt = ctx.res(dt).unwrap().0;
+                ctx.for_each(q, |(p, v)| p.0 += v.0 * dt);
+            },
+        ));
+        s.add(system(
+            "decay",
+            |w, a| a.query::<&mut Hp, ()>(w),
+            |q, ctx| ctx.for_each(q, |h| h.0 *= 0.99),
+        ));
+        s.add(system(
+            "age and spawn",
+            |w, a| a.query::<(Entity, &mut Age), ()>(w),
+            |q, ctx| {
+                let mut spawn = 0;
+                let mut dead = Vec::new();
+                ctx.for_each(q, |(e, age)| {
+                    age.0 += 1;
+                    if age.0 % 7 == 0 {
+                        spawn += 1;
+                    }
+                    if age.0 > 20 {
+                        dead.push(e);
+                    }
+                });
+                for _ in 0..spawn {
+                    ctx.commands().spawn((P(0.0), V(1.0), Hp(10.0), Age(0)));
+                }
+                for e in dead {
+                    ctx.commands().despawn(e);
+                }
+            },
+        ));
+        s.add(system(
+            "score",
+            |w, a| (a.query::<&P, ()>(w), a.write::<Score>(w)),
+            |(q, score), ctx| {
+                let mut sum = 0.0f64;
+                ctx.for_each(q, |p| sum += f64::from(p.0));
+                ctx.res_mut(score).unwrap().0 = sum.to_bits();
+            },
+        ));
+        s
+    }
+
+    /// Entities in the test world (small under Miri, which interprets every access).
+    const N: u32 = if cfg!(miri) { 100 } else { 2000 };
+
+    fn world() -> World {
+        let mut w = World::new();
+        w.insert_resource(Dt(0.5));
+        w.insert_resource(Score::default());
+        for i in 0..N {
+            w.spawn((P(i as f32), V(1.0 + (i % 3) as f32), Hp(100.0), Age(i % 13)));
+        }
+        w
+    }
+
+    #[test]
+    fn levels_follow_conflicts_in_order() {
+        let mut w = world();
+        let mut s = build();
+        s.initialize(&mut w);
+        // move (writes P) conflicts with score (reads P); decay and aging are independent.
+        assert_eq!(
+            s.levels(),
+            vec![vec!["move", "decay", "age and spawn"], vec!["score"]]
+        );
+        s.add_exclusive("sync", |_| {});
+        s.add(system("after", |w, a| a.query::<&Hp, ()>(w), |_, _| {}));
+        s.initialize(&mut w);
+        let levels = s.levels();
+        assert_eq!(levels[2], vec!["sync"]);
+        assert_eq!(levels[3], vec!["after"]);
+    }
+
+    #[test]
+    fn parallel_runs_equal_serial_runs() {
+        let pool = ThreadPool::builder().workers(4).build().unwrap();
+        let (ticks, repeats) = if cfg!(miri) { (3, 1) } else { (50, 5) };
+        for _ in 0..repeats {
+            let (mut a, mut b) = (world(), world());
+            let (mut sa, mut sb) = (build(), build());
+            for tick in 0..ticks {
+                sa.run(&mut a, None);
+                sb.run(&mut b, Some(&pool));
+                assert_eq!(a.state_hash(), b.state_hash(), "tick {tick}");
+                assert_eq!(
+                    a.resource::<Score>().unwrap().0,
+                    b.resource::<Score>().unwrap().0
+                );
+            }
+            assert!(a.len() != N as usize, "commands spawned and despawned");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "declared by another system")]
+    fn a_query_is_bound_to_its_system() {
+        use std::sync::{Arc, Mutex};
+        let mut w = world();
+        let stolen: Arc<Mutex<Option<SystemQuery<&P>>>> = Arc::default();
+        let put = stolen.clone();
+        let mut s = Schedule::new();
+        s.add(system(
+            "owner",
+            move |w, a| {
+                *put.lock().unwrap() = Some(a.query::<&P, ()>(w));
+            },
+            |_, _| {},
+        ));
+        let take = stolen.clone();
+        s.add(system(
+            "thief",
+            |_, _| (),
+            move |_, ctx| {
+                if let Some(q) = take.lock().unwrap().as_mut() {
+                    ctx.for_each(q, |_| {});
+                }
+            },
+        ));
+        s.run(&mut w, None);
+    }
+}

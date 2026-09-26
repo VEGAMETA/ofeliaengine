@@ -47,7 +47,7 @@ pub unsafe trait Fetch {
     fn state(world: &World, archetype: &Archetype) -> Option<Self::State>;
 
     /// Stamps the chunk columns this fetch writes.
-    fn mark(state: Self::State, archetype: &mut Archetype, chunk: usize, tick: u64);
+    fn mark(state: Self::State, archetype: &Archetype, chunk: usize, tick: u64);
 
     /// Pointers into `chunk`.
     ///
@@ -97,7 +97,7 @@ unsafe impl<T: Component> Fetch for &T {
     }
 
     #[inline]
-    fn mark(_: usize, _: &mut Archetype, _: usize, _: u64) {}
+    fn mark(_: usize, _: &Archetype, _: usize, _: u64) {}
 
     #[inline]
     unsafe fn ptr(state: usize, archetype: &Archetype, chunk: usize) -> *const T {
@@ -138,7 +138,7 @@ unsafe impl<T: Component> Fetch for &mut T {
     }
 
     #[inline]
-    fn mark(state: usize, archetype: &mut Archetype, chunk: usize, tick: u64) {
+    fn mark(state: usize, archetype: &Archetype, chunk: usize, tick: u64) {
         archetype.mark_column(chunk, state, tick);
     }
 
@@ -176,7 +176,7 @@ unsafe impl Fetch for Entity {
     }
 
     #[inline]
-    fn mark(_: (), _: &mut Archetype, _: usize, _: u64) {}
+    fn mark(_: (), _: &Archetype, _: usize, _: u64) {}
 
     #[inline]
     unsafe fn ptr(_: (), archetype: &Archetype, chunk: usize) -> *const Entity {
@@ -217,7 +217,7 @@ unsafe impl<F: Fetch> Fetch for Option<F> {
     }
 
     #[inline]
-    fn mark(state: Self::State, archetype: &mut Archetype, chunk: usize, tick: u64) {
+    fn mark(state: Self::State, archetype: &Archetype, chunk: usize, tick: u64) {
         if let Some(state) = state {
             F::mark(state, archetype, chunk, tick);
         }
@@ -265,7 +265,7 @@ macro_rules! fetch_tuple {
             }
 
             #[inline]
-            fn mark(state: Self::State, archetype: &mut Archetype, chunk: usize, tick: u64) {
+            fn mark(state: Self::State, archetype: &Archetype, chunk: usize, tick: u64) {
                 $($f::mark(state.$i, archetype, chunk, tick);)+
             }
 
@@ -413,7 +413,7 @@ impl<T: Component> Filter for Changed<T> {
 
     #[inline]
     fn chunk(state: usize, archetype: &Archetype, chunk: usize, last_run: u64) -> bool {
-        archetype.versions[chunk * archetype.columns.len() + state] > last_run
+        archetype.column_version(chunk, state) > last_run
     }
 }
 
@@ -637,6 +637,71 @@ impl<Q: Fetch, F: Filter> QueryState<Q, F> {
                 Q::mark(m.state, archetype, chunk, tick);
                 let len = archetype.chunk_len(chunk);
                 // SAFETY: as in `for_each`; each chunk is handed out once.
+                unsafe { f(Q::slice(Q::ptr(m.state, archetype, chunk), len)) };
+            }
+        }
+    }
+
+    /// Like [`QueryState::for_each`] through a shared world, stamping writes with `tick`.
+    ///
+    /// # Safety
+    ///
+    /// For the duration of the call nothing else reads the components this query writes
+    /// or writes the components it reads (the system scheduler guarantees this from the
+    /// declared accesses), and the world is not changed structurally.
+    pub(crate) unsafe fn for_each_shared<'w>(
+        &mut self,
+        world: &'w World,
+        tick: u64,
+        mut f: impl FnMut(Q::Item<'w>),
+    ) {
+        self.update(world);
+        let last_run = self.last_run;
+        self.last_run = tick;
+        for m in &self.matched {
+            let archetype = &world.archetypes[m.archetype as usize];
+            for chunk in 0..archetype.chunks.len() {
+                if F::CHUNK && !F::chunk(m.filter, archetype, chunk, last_run) {
+                    continue;
+                }
+                Q::mark(m.state, archetype, chunk, tick);
+                let len = archetype.chunk_len(chunk);
+                // SAFETY: as in `for_each`; exclusivity of written columns is the
+                // caller's guarantee instead of `&mut World`.
+                unsafe {
+                    let ptr = Q::ptr(m.state, archetype, chunk);
+                    for row in 0..len {
+                        f(Q::item(ptr, row));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Like [`QueryState::for_each_chunk`] through a shared world; see
+    /// [`QueryState::for_each_shared`].
+    ///
+    /// # Safety
+    ///
+    /// As for [`QueryState::for_each_shared`].
+    pub(crate) unsafe fn for_each_chunk_shared<'w>(
+        &mut self,
+        world: &'w World,
+        tick: u64,
+        mut f: impl FnMut(Q::Slice<'w>),
+    ) {
+        self.update(world);
+        let last_run = self.last_run;
+        self.last_run = tick;
+        for m in &self.matched {
+            let archetype = &world.archetypes[m.archetype as usize];
+            for chunk in 0..archetype.chunks.len() {
+                if F::CHUNK && !F::chunk(m.filter, archetype, chunk, last_run) {
+                    continue;
+                }
+                Q::mark(m.state, archetype, chunk, tick);
+                let len = archetype.chunk_len(chunk);
+                // SAFETY: as in `for_each_shared`; each chunk is handed out once.
                 unsafe { f(Q::slice(Q::ptr(m.state, archetype, chunk), len)) };
             }
         }

@@ -160,3 +160,36 @@ let hash = world.state_hash(); // compare with the server's to detect desyncs
 - **`world.save` copies every entity:** about 1 ms for 100 000 entities with 108 bytes of
   components each, on the 4-core cloud test machine. Every tick is affordable for most
   games. Keep big, rarely-changing data (level geometry) out of the simulated world.
+
+## 8. Systems and schedules
+
+A system declares what it touches once, then runs every tick. A `Schedule` runs systems
+in the order you add them; systems that do not conflict run at the same time on the
+job system.
+
+```rust
+let mut schedule = Schedule::new();
+schedule.add(system(
+    "move",
+    |world, access| (access.query::<(&mut Position, &Velocity), ()>(world), access.read::<Dt>(world)),
+    |(query, dt), ctx| {
+        let dt = ctx.res(dt).unwrap().0;
+        ctx.for_each(query, |(p, v)| p.0 += v.0 * dt);
+    },
+));
+world.insert_resource(Dt(1.0 / 60.0));
+schedule.run(&mut world, Some(&pool)); // or None for one thread
+```
+
+- **Order is what you write.** The result is always the same as running the systems one
+  after another in add order, on any number of threads. Rollback and desync checks
+  rely on this.
+- **Conflicts** are per component and per resource: one system writes what another
+  reads or writes. `schedule.levels()` shows which systems run together.
+- **Structural changes** go through `ctx.commands()`. They are applied after the whole
+  schedule, in add order. Need them earlier? Put an `add_exclusive` step between the
+  systems; it gets `&mut World` and runs alone.
+- A system can only use the queries and resources it declared in its own `init`.
+  Using another system's handle panics.
+- Writing the same component in two systems serializes them, even if they touch
+  different entities. Merge them or split the component when it shows in the profiler.
