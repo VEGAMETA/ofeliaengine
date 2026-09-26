@@ -31,6 +31,8 @@ value are not built (CLAUDE.md §12: design from scenarios, remove the excess).
   - The file browser sits under the viewport.
   - Bottom panels are tabs in a thin bar and open on demand.
   - Every dock can be moved, and layouts are saved.
+- **Rendering scale for weak hardware** (Godot's 3D scaling modes): render scale with
+  bilinear or nearest upscaling (viewports), later FSR 1 and the temporal upscalers.
 - **Play, pause and stop are quiet:**
   - small monochrome icons at the right end of the tab row, not a coloured
     centre-stage group;
@@ -49,7 +51,7 @@ value are not built (CLAUDE.md §12: design from scenarios, remove the excess).
 | Godot friction | What we do instead |
 |---|---|
 | Separate 2D / 3D / Script / AssetLib workspaces (a mode switch at the top) | No workspaces: viewports are panels (2D and 3D side by side if wanted); scripts open in VS Code with luau-lsp and the debugger (DAP). No modes (Raskin). |
-| The game runs in a separate process; the remote tree is read-only-ish; changes made while playing are lost | Play inside the editor; everything stays editable while playing. Changes made in Play are highlighted, and **"Keep changes"** applies them to the scene with undo. |
+| The game runs in a separate process; the remote tree is read-only-ish; changes made while playing are lost | **The game runs in its own window by default** (the team tests that way), but in the same process as the editor, so starting is fast and everything stays live: select, inspect and edit objects of the running game from the editor. Changes made in Play are highlighted, and **"Keep changes"** applies them to the scene with undo. Options: embedded in the viewport, or a separate process (crash isolation, closest to a shipped build). |
 | Undo history per scene, sometimes surprising | One global undo with a history panel (ADR 0031); every step named. |
 | Finding a property in a long inspector | The inspector has an always-visible filter. It can show only values that differ from the default or the prefab. Every field has reset-to-default and "overridden by" markers. |
 | Number fields | Drag to scrub (Shift for fine, Ctrl for snapped); expressions (`2*pi`, `+=10`); units shown. |
@@ -86,5 +88,5 @@ Across all of it:
 2. Scene tree and inspector (reflection-driven, multi-edit, filter, overrides).
 3. Viewport with keyboard gizmos, selection, frame, drag-and-drop from the file
    browser.
-4. Play in editor with live editing and "Keep changes".
+4. Play in a separate window (same process) with live editing and "Keep changes"; embedded and separate-process options.
 5. File browser with background import and previews; output and error panels.
