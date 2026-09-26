@@ -57,7 +57,14 @@ jobs:
       - name: install cargo-deny
         run: |
           cargo deny --version 2>nul | findstr /c:"cargo-deny 0.20" >nul || cargo install cargo-deny --locked --version ~0.20
-      - run: if exist logs rmdir /s /q logs & mkdir logs
+      # Two lines: in cmd, `if exist logs rmdir ... & mkdir logs` would make the mkdir part
+      # of the `if` and skip it when the folder is missing (other workflows' checkouts on
+      # this machine clean untracked files). Without the folder every `> logs\...`
+      # redirection fails and cmd skips the command without setting ERRORLEVEL.
+      - name: fresh logs folder
+        run: |
+          if exist logs rmdir /s /q logs
+          mkdir logs
 
       - name: rustfmt
         run: |
