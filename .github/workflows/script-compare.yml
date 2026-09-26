@@ -1,0 +1,78 @@
+name: Script compare
+
+# Luau (interpreted and native), Rust and GDScript running the same boids step on the
+# reference machine (ADR 0032). Godot is downloaded once per version into the runner's
+# tool cache; it is only run as a reference, nothing from it is built into the engine.
+# Output is posted as a commit comment.
+on:
+  pull_request:
+    paths:
+      - bench/gdscript/**
+      - crates/engine_script/**
+      - .github/workflows/script-compare.yml
+  workflow_dispatch:
+
+concurrency:
+  group: script-compare-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: script compare (ref-1)
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+
+      # The Godot already installed on ref-1 if present, else the latest stable release
+      # downloaded once into the runner's tool cache.
+      - name: Godot
+        shell: powershell
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $local = 'D:\Utils\godot\godot.exe'
+          if (Test-Path $local) {
+            [IO.File]::AppendAllText($env:GITHUB_ENV, "GODOT=$local`n")
+            exit 0
+          }
+          $rel = Invoke-RestMethod -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } https://api.github.com/repos/godotengine/godot/releases/latest
+          $asset = $rel.assets | Where-Object { $_.name -like '*_win64.exe.zip' -and $_.name -notlike '*mono*' } | Select-Object -First 1
+          $dir = Join-Path $env:RUNNER_TOOL_CACHE "godot\$($rel.tag_name)"
+          if (-not (Test-Path $dir)) {
+            New-Item -ItemType Directory -Force $dir | Out-Null
+            $zip = Join-Path $dir 'godot.zip'
+            Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip
+            Expand-Archive $zip -DestinationPath $dir
+            Remove-Item $zip
+          }
+          $exe = Get-ChildItem $dir -Filter '*.exe' | Where-Object { $_.Name -notlike '*console*' } | Select-Object -First 1
+          $console = Get-ChildItem $dir -Filter '*console*.exe' | Select-Object -First 1
+          if ($console) { $exe = $console }
+          # No BOM: Windows PowerShell's `Out-File -Encoding utf8` would add one.
+          [IO.File]::AppendAllText($env:GITHUB_ENV, "GODOT=$($exe.FullName)`n")
+
+      - name: GDScript boids
+        shell: cmd
+        run: |
+          rem `start /wait`: godot.exe may be a windowed program; wait for it to finish.
+          start "" /wait "%GODOT%" --headless --script bench/gdscript/boids.gd -- out=%CD%\gdscript.md > gdscript-raw.txt 2>&1
+          type gdscript-raw.txt
+          if not exist gdscript.md echo _GDScript produced no report; see gdscript-raw.txt._> gdscript.md
+
+      - name: Luau and Rust boids
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: cargo bench -p engine_script --bench boids --locked > luau.md 2> luau-build.txt
+
+      - name: Post report as commit comment
+        if: ${{ !cancelled() }}
+        shell: cmd
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Script compare (ref-1)" -Files gdscript.md,luau.md,gdscript-raw.txt
