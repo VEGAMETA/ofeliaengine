@@ -9,6 +9,7 @@ use engine_input::{
     MouseButton, Stick,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
@@ -16,10 +17,23 @@ struct CountingAllocator;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    // Input handling is single-threaded: count the test thread only. Other threads (the
+    // Tracy client's, with `engine_profiler/tracy`) allocate on their own schedule.
+    // Const-initialized and without drop glue, so reading it never allocates.
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn count() {
+    if COUNTING.with(Cell::get) {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 // SAFETY: forwards to the system allocator; only adds a counter.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count();
         // SAFETY: same contract as the caller's.
         unsafe { System.alloc(layout) }
     }
@@ -30,7 +44,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count();
         // SAFETY: same contract as the caller's.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -105,11 +119,13 @@ fn steady_state_frames_do_not_allocate() {
     for n in 0..50 {
         frame(n, &mut input);
     }
+    COUNTING.with(|c| c.set(true));
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     for n in 50..500 {
         frame(n, &mut input);
     }
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
+    COUNTING.with(|c| c.set(false));
     assert_eq!(
         allocations, 0,
         "{allocations} heap allocations in 450 steady-state frames"
