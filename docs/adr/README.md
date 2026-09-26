@@ -25,6 +25,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0015](0015-renderer-2d.md) | 2D renderer: bindless quad batching, SDF shapes, deterministic order | Accepted |
 | [0016](0016-viewports.md) | Viewports: persistent textures, topological order, graph scopes, composition | Accepted |
 | [0017](0017-ecs.md) | ECS / scene model | **Proposed** (team decision) |
+| [0018](0018-physics-interface-and-jolt.md) | Physics interface (P0) and the Jolt reference backend (P1) | Accepted |
 
 ## Template
 

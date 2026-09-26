@@ -56,10 +56,19 @@ fn parallel_for_uses_multiple_threads() {
     let pool = pool(3);
     pool.register_current_thread().unwrap();
     let ids = std::sync::Mutex::new(std::collections::HashSet::new());
-    // ~5000 chunks of ~20 µs: longer than OS scheduling latency even on a loaded CI box.
+    // Whoever runs chunk 0 waits until another thread has run a chunk, so the result does
+    // not depend on how soon the OS schedules a woken worker. Timing alone was not enough:
+    // Windows Server's long quantum on an oversubscribed 4-vCPU runner let the calling
+    // thread finish ~100 ms of chunks before any worker ran.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     pool.parallel_for(256 * 20, 1, |chunk, _| {
         ids.lock().unwrap().insert(std::thread::current().id());
-        std::hint::black_box(busy_work(chunk as u64, 20_000));
+        if chunk == 0 {
+            while ids.lock().unwrap().len() < 2 && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+        }
+        std::hint::black_box(busy_work(chunk as u64, 2_000));
     });
     assert!(ids.lock().unwrap().len() > 1);
 }
