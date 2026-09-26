@@ -138,6 +138,8 @@ jobs:
         shell: cmd
         run: |
           for %%f in (logs\*.failed) do powershell -NoProfile -Command "Get-Content -Encoding UTF8 logs\%%~nf.txt -Tail 25 | ForEach-Object { '::error title=%%~nf::' + $_ }"
+          for %%f in (logs\*.*) do echo ::warning title=log file::%%f
+          if exist logs\build.txt powershell -NoProfile -Command "Get-Content -Encoding UTF8 logs\build.txt -Tail 25 | ForEach-Object { '::error title=build tail::' + $_ }"
           exit /b 0
 
       - name: Post failure logs as commit comment
