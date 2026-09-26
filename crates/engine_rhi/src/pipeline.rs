@@ -28,6 +28,12 @@ pub enum Blend {
     Alpha,
     /// `src + dst`.
     Additive,
+    /// Premultiplied alpha: `src + dst * (1 - src.a)`. A source with `a = 0` adds, so
+    /// alpha-blended and additive draws share one pipeline.
+    Premultiplied,
+    /// Multiply with a premultiplied source: `src * dst + dst * (1 - src.a)` for color
+    /// (`dst * lerp(1, color, a)`); destination alpha is kept.
+    Multiply,
 }
 
 /// Depth bias for shadow maps: `constant` units plus `slope` × the polygon's depth slope,
@@ -212,6 +218,22 @@ impl Pipeline {
                 .dst_color_blend_factor(vk::BlendFactor::ONE)
                 .color_blend_op(vk::BlendOp::ADD)
                 .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE)
+                .alpha_blend_op(vk::BlendOp::ADD),
+            Blend::Premultiplied => vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ONE)
+                .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD),
+            Blend::Multiply => vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::DST_COLOR)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::ZERO)
                 .dst_alpha_blend_factor(vk::BlendFactor::ONE)
                 .alpha_blend_op(vk::BlendOp::ADD),
         }
