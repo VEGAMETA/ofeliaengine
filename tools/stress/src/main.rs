@@ -277,6 +277,9 @@ impl Sim {
     }
 }
 
+/// Reads one stage's time from a sample.
+type Stage = fn(&Stages) -> f64;
+
 fn percentile(v: &mut [f64], p: f64) -> f64 {
     v.sort_by(f64::total_cmp);
     v[((v.len() as f64 - 1.0) * p).round() as usize]
@@ -288,7 +291,7 @@ fn report(samples: &[Stages], title: &str, extra: &str) {
         let mut v: Vec<f64> = samples.iter().map(f).collect();
         (percentile(&mut v, 0.5), percentile(&mut v, 0.99))
     };
-    let rows: [(&str, fn(&Stages) -> f64); 8] = [
+    let rows: [(&str, Stage); 8] = [
         ("Luau NPC update (one call)", |s| s.script),
         ("Jolt step", |s| s.physics),
         ("physics + script → ECS sync", |s| s.sync),
@@ -350,10 +353,10 @@ fn main() {
             }
         }
         report(&samples, "simulation only (headless)", &extra);
-        return;
+    } else {
+        #[cfg(windows)]
+        windowed::run(sim, frames, &extra);
     }
-    #[cfg(windows)]
-    windowed::run(sim, frames, &extra);
 }
 
 #[cfg(windows)]
