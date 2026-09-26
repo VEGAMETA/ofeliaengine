@@ -1,0 +1,29 @@
+[package]
+name = "engine_physics_jolt"
+description = "Jolt Physics backend (through the JoltC C API) for engine_physics."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+links = "joltc"
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_physics.workspace = true
+engine_profiler.workspace = true
+
+[build-dependencies]
+# Compiles the vendored Jolt Physics and JoltC sources (MIT OR Apache-2.0).
+cc = { version = "1", features = ["parallel"] }
+
+[[bench]]
+name = "physics"
+harness = false
+
+[features]
+# Jolt's CROSS_PLATFORM_DETERMINISTIC: identical results across compilers and CPUs
+# (about 8% slower). Without it, results are identical for the same binary.
+cross-platform-deterministic = []
