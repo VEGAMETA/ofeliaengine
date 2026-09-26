@@ -9,5 +9,6 @@ pub mod arena;
 mod atomic;
 pub mod hash;
 pub mod jobs;
+pub mod math;
 pub mod spsc;
 pub mod sync;

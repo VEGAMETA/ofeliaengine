@@ -11,6 +11,9 @@ workspace = true
 
 [dependencies]
 engine_profiler.workspace = true
+# Vectors, matrices, quaternions with SSE2 SIMD (MIT OR Apache-2.0, no dependencies; ADR 0012).
+glam = "0.33"
+
 
 [dev-dependencies]
 # Baseline for benches/jobs.rs only; not linked into the engine (ADR 0002).
@@ -18,6 +21,10 @@ rayon = "1.12"
 
 [[bench]]
 name = "jobs"
+harness = false
+
+[[bench]]
+name = "math"
 harness = false
 
 # Model checking of the lock-free queues: RUSTFLAGS="--cfg loom" cargo test -p engine_core --release loom

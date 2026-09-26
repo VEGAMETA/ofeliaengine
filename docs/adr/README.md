@@ -19,6 +19,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0009](0009-shader-hot-reload.md) | Shader hot reload and "Compile All Shaders" | Accepted |
 | [0010](0010-gpu-memory-allocator.md) | GPU memory allocator | Accepted |
 | [0011](0011-render-graph.md) | Render graph | Accepted |
+| [0012](0012-math-library.md) | Math library | Accepted |
 
 ## Template
 
