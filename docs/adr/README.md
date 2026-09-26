@@ -40,6 +40,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0031](0031-undo.md) | Undo: transactions of entity snapshots, identified by scene ids | Accepted |
 | [0032](0032-scripting.md) | Scripting: Luau for game logic, Rust modules for hot loops, WASM later | Accepted (API provisional) |
 | [0034](0034-gpu-culling-and-indirect-draws.md) | GPU frustum culling and indirect instanced draws | Accepted |
+| [0036](0036-fonts-and-icons.md) | Default fonts and icons; OFL-1.1 and CC BY 4.0 for font and icon assets | Accepted |
 
 ## Template
 
