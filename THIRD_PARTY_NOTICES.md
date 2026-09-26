@@ -21,6 +21,19 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 | tracy-client-sys 0.30 | (MIT OR Apache-2.0) AND BSD-3-Clause | builds the bundled Tracy 0.14.1 client (C++, BSD-3-Clause, © Bartosz Taudul) |
 | windows-targets 0.53 and `windows_*` 0.53 | MIT OR Apache-2.0 | Windows import libraries used by tracy-client-sys |
 
+## Vendored sources (`third_party/`)
+
+| Project | Version | License | Used for |
+|---|---|---|---|
+| Jolt Physics (© 2021 Jorrit Rouwe) | v5.6.0 | MIT | reference physics backend `engine_physics_jolt` (ADR 0018) |
+| JoltC (© Amer Koleci and contributors) | commit 886e088675ba | MIT | C API over Jolt, bound by `engine_physics_jolt` |
+
+## Rust crates (build dependencies)
+
+| Crate | License | Used for |
+|---|---|---|
+| cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt and JoltC sources |
+
 ## Rust crates (dev-dependencies only, not shipped)
 
 | Crate | License | Used for |
