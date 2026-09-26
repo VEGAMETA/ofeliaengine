@@ -35,6 +35,8 @@ pub use commands::{Commands, PendingEntity, Target};
 pub use component::{
     Component, ComponentDesc, ComponentId, Components, MAX_COMPONENT_ALIGN, Pod, RegisterError,
 };
+/// Reflection (`engine_reflect`), re-exported for [`reflect_component!`].
+pub use engine_reflect as reflect;
 pub use entity::Entity;
 pub use hierarchy::{ChildIter, Children, HierarchyError, Parent};
 pub use query::{Changed, Fetch, Filter, QueryIter, QueryState, ReadOnlyFetch, With, Without};

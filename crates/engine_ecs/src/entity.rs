@@ -118,3 +118,26 @@ impl Entities {
         self.metas[index as usize].location = location;
     }
 }
+
+impl engine_reflect::Reflect for Entity {
+    const TYPE_INFO: &'static engine_reflect::TypeInfo = &engine_reflect::TypeInfo {
+        name: "Entity",
+        size: core::mem::size_of::<Entity>(),
+        align: core::mem::align_of::<Entity>(),
+        kind: engine_reflect::TypeKind::Struct(&[
+            engine_reflect::Field {
+                name: "index",
+                offset: core::mem::offset_of!(Entity, index),
+                ty: <u32 as engine_reflect::Reflect>::TYPE_INFO,
+                attrs: engine_reflect::Attrs::NONE,
+            },
+            engine_reflect::Field {
+                name: "generation",
+                offset: core::mem::offset_of!(Entity, generation),
+                ty: <u32 as engine_reflect::Reflect>::TYPE_INFO,
+                attrs: engine_reflect::Attrs::NONE,
+            },
+        ]),
+        attrs: engine_reflect::Attrs::NONE,
+    };
+}

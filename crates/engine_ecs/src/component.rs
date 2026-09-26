@@ -30,6 +30,9 @@ pub const MAX_COMPONENT_ALIGN: usize = 64;
 pub trait Component: Send + Sync + 'static {
     /// Whether the type is plain data ([`Pod::of`] proves it at compile time).
     const POD: Pod = Pod::NO;
+    /// The reflection description, for serialization, the inspector, scripting and
+    /// replication (set by [`reflect_component!`](crate::reflect_component)).
+    const TYPE_INFO: Option<&'static engine_reflect::TypeInfo> = None;
 }
 
 /// Proof that a component is plain data: no padding, no pointers, every bit pattern
@@ -72,6 +75,25 @@ macro_rules! pod_component {
     };
 }
 
+/// Implements [`Component`] with its reflection description (`engine_reflect::Reflect`).
+/// Add `pod` first for plain-data types: `reflect_component!(pod Health, Velocity)`.
+#[macro_export]
+macro_rules! reflect_component {
+    (pod $($t:ty),+ $(,)?) => {
+        $(impl $crate::Component for $t {
+            const POD: $crate::Pod = $crate::Pod::of::<$t>();
+            const TYPE_INFO: ::core::option::Option<&'static $crate::reflect::TypeInfo> =
+                ::core::option::Option::Some(<$t as $crate::reflect::Reflect>::TYPE_INFO);
+        })+
+    };
+    ($($t:ty),+ $(,)?) => {
+        $(impl $crate::Component for $t {
+            const TYPE_INFO: ::core::option::Option<&'static $crate::reflect::TypeInfo> =
+                ::core::option::Option::Some(<$t as $crate::reflect::Reflect>::TYPE_INFO);
+        })+
+    };
+}
+
 /// Index of a registered component type in its world.
 ///
 /// Ids follow registration order and are not stable across worlds or runs; the
@@ -99,6 +121,8 @@ pub struct ComponentDesc {
     pub drop: Option<unsafe fn(*mut u8)>,
     /// Whether values are plain data (see [`Pod`]).
     pub pod: bool,
+    /// Field description (script components build one at run time).
+    pub type_info: Option<&'static engine_reflect::TypeInfo>,
 }
 
 /// Errors from registering components.
@@ -131,6 +155,7 @@ pub(crate) struct ComponentInfo {
     pub(crate) layout: Layout,
     pub(crate) drop: Option<unsafe fn(*mut u8)>,
     pub(crate) pod: bool,
+    pub(crate) type_info: Option<&'static engine_reflect::TypeInfo>,
 }
 
 unsafe fn drop_as<T>(ptr: *mut u8) {
@@ -177,6 +202,11 @@ impl Components {
         self.infos.get(id.0 as usize).is_some_and(|i| i.pod)
     }
 
+    /// The component's reflection description, if it has one.
+    pub fn type_info(&self, id: ComponentId) -> Option<&'static engine_reflect::TypeInfo> {
+        self.infos.get(id.0 as usize).and_then(|i| i.type_info)
+    }
+
     pub(crate) fn register<T: Component>(&mut self) -> ComponentId {
         if let Some(id) = self.id_of::<T>() {
             return id;
@@ -186,6 +216,7 @@ impl Components {
             layout: Layout::new::<T>(),
             drop: core::mem::needs_drop::<T>().then_some(drop_as::<T> as unsafe fn(*mut u8)),
             pod: T::POD.is_pod(),
+            type_info: T::TYPE_INFO,
         };
         let id = match self.add(desc) {
             Ok(id) => id,
@@ -213,6 +244,7 @@ impl Components {
             layout: desc.layout,
             drop: desc.drop,
             pod: desc.pod,
+            type_info: desc.type_info,
         });
         Ok(id)
     }

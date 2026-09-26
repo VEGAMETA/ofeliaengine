@@ -28,6 +28,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0018](0018-physics-interface-and-jolt.md) | Physics interface (P0) and the Jolt reference backend (P1) | Accepted |
 | [0019](0019-networking-model.md) | Networking model: authoritative ticks, prediction, lag compensation | Accepted |
 | [0021](0021-input-actions.md) | Input actions: named actions, contexts, tick-accurate state | Accepted |
+| [0022](0022-reflection.md) | Reflection: static field tables with offsets | Accepted |
 
 ## Template
 

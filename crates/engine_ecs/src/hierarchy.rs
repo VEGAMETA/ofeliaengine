@@ -12,14 +12,17 @@
 
 use crate::entity::Entity;
 use crate::world::World;
-use crate::{bytemuck, pod_component};
+use crate::{bytemuck, reflect_component};
+use engine_reflect::Reflect;
 
 /// The entity's parent and its place among the parent's children.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct Parent {
     parent: Entity,
+    #[reflect(hidden)]
     prev: Entity,
+    #[reflect(hidden)]
     next: Entity,
 }
 
@@ -31,12 +34,16 @@ impl Parent {
 }
 
 /// The entity's children: the ends of the list and how many there are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
+#[reflect(hidden)]
 pub struct Children {
+    #[reflect(hidden)]
     first: Entity,
+    #[reflect(hidden)]
     last: Entity,
     count: u32,
+    #[reflect(hidden, skip)]
     _padding: u32,
 }
 
@@ -52,7 +59,7 @@ impl Children {
     }
 }
 
-pod_component!(Parent, Children);
+reflect_component!(pod Parent, Children);
 
 /// Errors from changing the hierarchy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

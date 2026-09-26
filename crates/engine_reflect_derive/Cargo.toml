@@ -1,0 +1,19 @@
+[package]
+name = "engine_reflect_derive"
+description = "#[derive(Reflect)] for engine_reflect: static field tables with offsets and attributes."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+proc-macro = true
+
+# The same syn/quote the workspace already builds for bytemuck's derive.
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = "3"
