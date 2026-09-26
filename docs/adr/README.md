@@ -37,6 +37,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0028](0028-physics-scope.md) | Physics scope: Jolt stays, own 3D solver deferred; 2D on Box2D v3 | Accepted |
 | [0029](0029-scene-format.md) | Scene text format: line-oriented blocks, one field per line | Accepted |
 | [0030](0030-ui-core.md) | UI core: immediate-mode building, retained state, full-tree layout | Accepted |
+| [0031](0031-undo.md) | Undo: transactions of entity snapshots, identified by scene ids | Accepted |
 | [0032](0032-scripting.md) | Scripting: Luau for game logic, Rust modules for hot loops, WASM later | Accepted (API provisional) |
 | [0034](0034-gpu-culling-and-indirect-draws.md) | GPU frustum culling and indirect instanced draws | Accepted |
 

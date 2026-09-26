@@ -21,7 +21,7 @@ use engine_reflect::Reflect;
 pub struct Parent {
     parent: Entity,
     #[reflect(hidden)]
-    prev: Entity,
+    pub(crate) prev: Entity,
     #[reflect(hidden)]
     pub(crate) next: Entity,
 }
@@ -41,7 +41,7 @@ pub struct Children {
     #[reflect(hidden)]
     pub(crate) first: Entity,
     #[reflect(hidden)]
-    last: Entity,
+    pub(crate) last: Entity,
     pub(crate) count: u32,
     #[reflect(hidden, skip)]
     _padding: u32,
@@ -190,6 +190,66 @@ impl World {
             }
         }
         Ok(())
+    }
+
+    /// Makes `parent` the parent of `child` at position `index` among its children
+    /// (clamped to the end), or detaches `child` with `None`. Undo uses it to put a
+    /// child back where it was.
+    pub fn set_parent_at(
+        &mut self,
+        child: Entity,
+        parent: Option<Entity>,
+        index: usize,
+    ) -> Result<(), HierarchyError> {
+        self.set_parent(child, None)?;
+        self.set_parent(child, parent)?;
+        let Some(p) = parent else {
+            return Ok(());
+        };
+        let count = self.get::<Children>(p).map_or(0, |c| c.count as usize);
+        if index + 1 >= count {
+            return Ok(()); // already last
+        }
+        // `child` was appended; move it before the child now at `index`.
+        let before = self.children(p).nth(index).unwrap_or(Entity::NULL);
+        let link = self.get::<Parent>(child).copied().unwrap_or(Parent {
+            parent: p,
+            prev: Entity::NULL,
+            next: Entity::NULL,
+        });
+        // Unlink from the end.
+        if let Some(prev) = self.get_mut::<Parent>(link.prev) {
+            prev.next = Entity::NULL;
+        }
+        let mut c = self.get::<Children>(p).copied().unwrap_or(Children {
+            first: child,
+            last: child,
+            count: 1,
+            _padding: 0,
+        });
+        c.last = link.prev;
+        // Link before `before`.
+        let before_prev = self.get::<Parent>(before).map_or(Entity::NULL, |b| b.prev);
+        if let Some(bp) = self.get_mut::<Parent>(before_prev) {
+            bp.next = child;
+        } else {
+            c.first = child;
+        }
+        if let Some(b) = self.get_mut::<Parent>(before) {
+            b.prev = child;
+        }
+        if let Some(me) = self.get_mut::<Parent>(child) {
+            me.prev = before_prev;
+            me.next = before;
+        }
+        self.insert(p, c);
+        Ok(())
+    }
+
+    /// Position of `child` among its parent's children.
+    pub fn child_index(&self, child: Entity) -> Option<usize> {
+        let p = self.parent(child)?;
+        self.children(p).position(|c| c == child)
     }
 
     /// Unlinks `child` from its parent's list and removes its `Parent`.

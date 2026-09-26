@@ -889,3 +889,45 @@ mod transforms {
         assert!(pad.attrs.hidden && pad.attrs.skip);
     }
 }
+
+#[test]
+fn set_parent_at_inserts_at_an_index() {
+    let mut w = World::new();
+    let p = w.spawn((Pos(0.0, 0.0),));
+    let kids: Vec<Entity> = (0..4).map(|i| w.spawn((Pos(i as f32, 0.0),))).collect();
+    for &k in &kids {
+        w.set_parent(k, Some(p)).unwrap();
+    }
+    // Move the last child to the front, then the first to position 2.
+    w.set_parent_at(kids[3], Some(p), 0).unwrap();
+    assert_eq!(
+        w.children(p).collect::<Vec<_>>(),
+        [kids[3], kids[0], kids[1], kids[2]]
+    );
+    w.set_parent_at(kids[3], Some(p), 2).unwrap();
+    assert_eq!(
+        w.children(p).collect::<Vec<_>>(),
+        [kids[0], kids[1], kids[3], kids[2]]
+    );
+    w.set_parent_at(kids[0], Some(p), 99).unwrap();
+    assert_eq!(
+        w.children(p).collect::<Vec<_>>(),
+        [kids[1], kids[3], kids[2], kids[0]]
+    );
+    assert_eq!(w.child_index(kids[2]), Some(2));
+    // Walking backwards through the links agrees.
+    let last = w.get::<Children>(p).map(|c| c.last).unwrap();
+    assert_eq!(last, kids[0]);
+    let mut back = vec![last];
+    let mut cur = last;
+    while let Some(prev) = w
+        .get::<Parent>(cur)
+        .map(|l| l.prev)
+        .filter(|e| *e != Entity::NULL)
+    {
+        back.push(prev);
+        cur = prev;
+    }
+    back.reverse();
+    assert_eq!(back, w.children(p).collect::<Vec<_>>());
+}
