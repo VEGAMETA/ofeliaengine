@@ -17,6 +17,8 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+# Under `powershell -File`, `-Only clippy,test` arrives as one string: split it.
+$Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() } | Where-Object { $_ })
 (Get-Process -Id $PID).PriorityClass = 'BelowNormal'
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
@@ -44,6 +46,12 @@ if ($Profiles) {
         'build --workspace --all-targets --locked --profile shipping',
         'build --workspace --all-targets --locked --profile profiling --features engine_profiler/tracy'
     )
+}
+
+$unknown = @($Only | Where-Object { -not $steps.Contains($_) })
+if ($unknown.Count) {
+    Write-Output "unknown step(s): $($unknown -join ', '); steps: $($steps.Keys -join ', ') (gpu and slang need -Gpu, deny -Deny, profiles -Profiles)"
+    exit 2
 }
 
 $failed = @()
