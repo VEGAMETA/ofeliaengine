@@ -69,12 +69,16 @@ foreach ($name in $steps.Keys) {
         }
         if ($name -eq 'gpu') { $env:ENGINE_REQUIRE_GPU = '1' }
         if ($name -eq 'slang') { $env:ENGINE_REQUIRE_SLANG = '1' }
+        # No profiler connects to the tests: skip the Tracy client's symbol loading at start
+        # (DbgHelp over every module, 4-15 s per test process; the step went 279 s -> 57 s).
+        if ($name -eq 'tracy') { $env:TRACY_SYMBOL_OFFLINE_RESOLVE = '1' }
         # cmd /c keeps cargo's stderr out of PowerShell's error stream (Windows PowerShell 5.1).
         cmd /c "cargo $command >> `"$log`" 2>&1"
         $code = $LASTEXITCODE
         $env:ENGINE_ADAPTER = ''
         $env:ENGINE_REQUIRE_GPU = ''
         $env:ENGINE_REQUIRE_SLANG = ''
+        $env:TRACY_SYMBOL_OFFLINE_RESOLVE = ''
         if ($code -ne 0) { $ok = $false; break }
     }
     $time = '{0,6:N1} s' -f $watch.Elapsed.TotalSeconds

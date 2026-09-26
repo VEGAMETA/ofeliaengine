@@ -64,3 +64,9 @@ Example: `cargo build --profile profiling --features engine_profiler/tracy-ondem
   and slow the game down over time. Attach Tracy or use `tracy-ondemand`.
 - **Profiler version mismatch.** Tracy refuses to connect, or shows a protocol error.
   Download the version listed above.
+- **Slow start of short-lived Tracy processes (tests, tools).** At start the Tracy client
+  loads debug symbols for every module (4-15 s per process on the reference machine, most
+  when run as administrator). When no profiler will connect, set
+  `TRACY_SYMBOL_OFFLINE_RESOLVE=1`: start drops to ~0.3 s. `tools\check.ps1` and CI do this
+  for the tests with Tracy. Leave it unset when profiling, or call stacks show addresses
+  instead of function names.
