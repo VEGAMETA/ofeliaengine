@@ -124,12 +124,19 @@ jobs:
       - name: build (all profiles)
         if: ${{ !cancelled() }}
         run: |
-          for %%p in (dev release shipping) do (
-            cargo build --workspace --all-targets --locked --profile %%p >> logs\build.txt 2>&1 || (type logs\build.txt & echo.> logs\build.failed & exit /b 1)
-          )
+          set log=logs\build.txt
+          cargo build --workspace --all-targets --locked --profile dev > %log% 2>&1 || goto fail
+          cargo build --workspace --all-targets --locked --profile release >> %log% 2>&1 || goto fail
+          cargo build --workspace --all-targets --locked --profile shipping >> %log% 2>&1 || goto fail
           rem The profiling profile is built the way `cargo profiling` builds it: with Tracy.
-          cargo build --workspace --all-targets --locked --profile profiling --features engine_profiler/tracy >> logs\build.txt 2>&1 || (type logs\build.txt & echo.> logs\build.failed & exit /b 1)
-          type logs\build.txt
+          cargo build --workspace --all-targets --locked --profile profiling --features engine_profiler/tracy >> %log% 2>&1 || goto fail
+          type %log%
+          exit /b 0
+          :fail
+          echo.> logs\build.failed
+          type %log%
+          powershell -NoProfile -Command "Get-Content -Encoding UTF8 logs\build.txt -Tail 30 | ForEach-Object { '::error title=build::' + $_ }"
+          exit /b 1
 
       # The last lines of each failed log as error annotations: readable through the
       # checks API even when a commit comment cannot be posted.
