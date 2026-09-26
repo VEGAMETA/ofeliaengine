@@ -103,6 +103,18 @@ bindless set and pipelines exist. Three things were missing:
   - lit ground 198 (compressed, not clipped);
   - cube top 214, 45, 45;
   - background exact.
+- ref-1 (GPU workflow on the PR, commit 9b64af0):
+  - `tests/forward.rs` gives the same pixels on the RTX 4060 Ti (NVIDIA 616.92) and on
+    the Radeon iGPU (AMD 25.10.36) as on lavapipe, within one step: HDR shadowed ground is
+    2 on NVIDIA, 3 elsewhere. 0 validation errors with synchronization validation.
+  - The `cubes` example (26 draws, 2048² shadow map, 1280×720, debug build with
+    validation), GPU time per pass:
+
+    | Pass | NVIDIA | AMD iGPU |
+    |---|---|---|
+    | shadow | 11.1 µs | 194.9 µs |
+    | forward | 46.1 µs | 1000.3 µs |
+    | tonemap | 11.3 µs | 198.2 µs |
 - The SPIR-V freshness test now covers every shader in `shaders/`.
 - The `cubes` example renders 25 PBR cubes (alternating metal and dielectric, varying
   roughness) over a ground plane with shadows. The GPU workflow runs it on NVIDIA and AMD
