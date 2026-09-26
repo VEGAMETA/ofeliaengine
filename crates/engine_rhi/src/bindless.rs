@@ -20,6 +20,7 @@
 use crate::device::Device;
 use crate::error::RhiError;
 use ash::vk;
+use core::cell::RefCell;
 
 /// Push constant bytes available to every pipeline (the Vulkan minimum guarantee).
 pub const PUSH_CONSTANT_BYTES: u32 = 128;
@@ -99,6 +100,9 @@ impl Indices {
 
 /// The bindless descriptor set, its layout and the shared pipeline layout. Drop it
 /// before the [`Device`], after the GPU no longer uses it.
+///
+/// Every method takes `&self`, so renderers and the render graph can share it; it is
+/// used from one thread (the render thread) and is `Send` but not `Sync`.
 pub struct Bindless {
     device: ash::Device,
     set_layout: vk::DescriptorSetLayout,
@@ -106,15 +110,15 @@ pub struct Bindless {
     set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
     samplers: Vec<vk::Sampler>,
-    sampled: Indices,
-    storage: Indices,
+    sampled: RefCell<Indices>,
+    storage: RefCell<Indices>,
 }
 
 impl core::fmt::Debug for Bindless {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Bindless")
-            .field("sampled_images", &self.sampled.capacity)
-            .field("storage_images", &self.storage.capacity)
+            .field("sampled_images", &self.sampled.borrow().capacity)
+            .field("storage_images", &self.storage.borrow().capacity)
             .finish()
     }
 }
@@ -183,8 +187,8 @@ impl Bindless {
             set: vk::DescriptorSet::null(),
             pipeline_layout: vk::PipelineLayout::null(),
             samplers: Vec::with_capacity(SAMPLER_KINDS.len()),
-            sampled: Indices::new(sampled_count),
-            storage: Indices::new(storage_count),
+            sampled: RefCell::new(Indices::new(sampled_count)),
+            storage: RefCell::new(Indices::new(storage_count)),
         };
         // SAFETY: valid create infos; every object is owned by `partial`.
         unsafe {
@@ -316,7 +320,10 @@ impl Bindless {
 
     /// Capacity of binding 0 and 1.
     pub fn capacities(&self) -> (u32, u32) {
-        (self.sampled.capacity, self.storage.capacity)
+        (
+            self.sampled.borrow().capacity,
+            self.storage.borrow().capacity,
+        )
     }
 
     /// Index of a built-in sampler in `g_samplers`.
@@ -326,36 +333,36 @@ impl Bindless {
 
     /// Adds a sampled image view (in `READ_ONLY_OPTIMAL` when sampled); returns its
     /// index in `g_textures`, or `None` when the binding is full.
-    pub fn add_sampled_image(&mut self, view: vk::ImageView) -> Option<u32> {
-        let index = self.sampled.alloc()?;
+    pub fn add_sampled_image(&self, view: vk::ImageView) -> Option<u32> {
+        let index = self.sampled.borrow_mut().alloc()?;
         self.write_image(0, index, view, vk::ImageLayout::READ_ONLY_OPTIMAL);
         Some(index)
     }
 
     /// Adds a storage image view (in `GENERAL` when used); returns its index in
     /// `g_images`, or `None` when the binding is full.
-    pub fn add_storage_image(&mut self, view: vk::ImageView) -> Option<u32> {
-        let index = self.storage.alloc()?;
+    pub fn add_storage_image(&self, view: vk::ImageView) -> Option<u32> {
+        let index = self.storage.borrow_mut().alloc()?;
         self.write_image(1, index, view, vk::ImageLayout::GENERAL);
         Some(index)
     }
 
     /// Releases a sampled image index. It is reused once frame `last_frame` has
     /// finished (see [`Self::collect`]).
-    pub fn remove_sampled_image(&mut self, index: u32, last_frame: u64) {
-        self.sampled.retire(index, last_frame);
+    pub fn remove_sampled_image(&self, index: u32, last_frame: u64) {
+        self.sampled.borrow_mut().retire(index, last_frame);
     }
 
     /// Releases a storage image index, as [`Self::remove_sampled_image`].
-    pub fn remove_storage_image(&mut self, index: u32, last_frame: u64) {
-        self.storage.retire(index, last_frame);
+    pub fn remove_storage_image(&self, index: u32, last_frame: u64) {
+        self.storage.borrow_mut().retire(index, last_frame);
     }
 
     /// Makes indices retired up to `completed_frame` available again. Call once per
     /// frame with the last frame the GPU finished.
-    pub fn collect(&mut self, completed_frame: u64) {
-        self.sampled.collect(completed_frame);
-        self.storage.collect(completed_frame);
+    pub fn collect(&self, completed_frame: u64) {
+        self.sampled.borrow_mut().collect(completed_frame);
+        self.storage.borrow_mut().collect(completed_frame);
     }
 
     /// Binds the set for `bind_point` in `cmd`.

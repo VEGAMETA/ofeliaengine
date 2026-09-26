@@ -40,5 +40,7 @@ pub use memory::{
     Allocation, AllocationRequest, Allocator, AllocatorConfig, DedicatedTo, HeapStats,
     MemoryLocation, ResourceKind,
 };
-pub use pipeline::{Blend, GraphicsPipelineDesc, Pipeline, ShaderStageDesc, spirv_words};
+pub use pipeline::{
+    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, ShaderStageDesc, spirv_words,
+};
 pub use swapchain::{AcquiredImage, PresentMode, Surface, Swapchain, SwapchainDesc, color_range};

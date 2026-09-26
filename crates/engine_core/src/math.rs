@@ -21,6 +21,19 @@ pub fn look_at(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {
     glam::camera::rh::view::look_at_mat4(eye, target, up)
 }
 
+/// Right-handed orthographic projection for Vulkan (depth 0..1, clip Y down): shadow maps,
+/// 2D.
+pub fn vulkan_orthographic(
+    left: f32,
+    right: f32,
+    bottom: f32,
+    top: f32,
+    near: f32,
+    far: f32,
+) -> Mat4 {
+    glam::camera::rh::proj::vulkan::orthographic(left, right, bottom, top, near, far)
+}
+
 /// Right-handed perspective projection for Vulkan: view space +Y up and −Z forward, clip
 /// depth 0..1 (near..far), clip Y down (Vulkan's convention), so images come out upright.
 pub fn vulkan_perspective(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
