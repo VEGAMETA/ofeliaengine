@@ -38,6 +38,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0029](0029-scene-format.md) | Scene text format: line-oriented blocks, one field per line | Accepted |
 | [0032](0032-scripting.md) | Scripting: Luau for game logic, Rust modules for hot loops, WASM later | Accepted (API provisional) |
 | [0034](0034-gpu-culling-and-indirect-draws.md) | GPU frustum culling and indirect instanced draws | Accepted |
+| [0035](0035-occlusion-culling.md) | Two-phase occlusion culling (hierarchical depth) | Accepted |
 
 ## Template
 

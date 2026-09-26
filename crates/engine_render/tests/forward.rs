@@ -5,7 +5,7 @@
 
 use engine_core::math::{Mat4, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, Material, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::mesh::{Mesh, cube};
@@ -181,11 +181,14 @@ fn pbr_lighting_and_shadows() {
                     &mut ring,
                     &bindless,
                     &draws,
-                    &camera,
-                    &light,
-                    scene,
-                    depth,
-                    Some([0.0, 0.0, 0.25, 1.0]),
+                    &ForwardView {
+                        camera,
+                        light,
+                        color: scene,
+                        depth,
+                        clear: Some([0.0, 0.0, 0.25, 1.0]),
+                        occlusion: None,
+                    },
                 );
                 tonemap.add_pass(&mut fg, &bindless, scene, color, 1.0);
             } else {
@@ -194,11 +197,14 @@ fn pbr_lighting_and_shadows() {
                     &mut ring,
                     &bindless,
                     &draws,
-                    &camera,
-                    &light,
-                    color,
-                    depth,
-                    Some([0.0, 0.0, 0.25, 1.0]),
+                    &ForwardView {
+                        camera,
+                        light,
+                        color,
+                        depth,
+                        clear: Some([0.0, 0.0, 0.25, 1.0]),
+                        occlusion: None,
+                    },
                 );
             }
             fg.add_pass("read back")

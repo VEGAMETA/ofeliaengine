@@ -128,11 +128,20 @@ read the code for ideas only. No code was copied.
 
 - **One command per visible object (niagara).** With instancing, the front end sees one
   command per mesh, not per object.
-- **Two-phase occlusion culling.**
-  - It needs instances that keep their identity across frames, to know what was visible
-    last frame. Our instances are rebuilt from the draw list every frame.
-  - It comes after a persistent GPU scene (stable instance slots, uploads of changed
-    instances only). That scene also removes the per-frame upload of static objects.
+- **Two-phase occlusion culling** was first planned for after a persistent GPU scene,
+  because it needs instances that keep their identity across frames. It was then built on
+  draw-list indices ([ADR 0035](../adr/0035-occlusion-culling.md)). A wrong identity only
+  moves an instance between the early and late phases, and never hides it, so stable
+  slots are an optimization, not a requirement. What we took:
+  - two phases (niagara, Nanite);
+  - the farthest-depth pyramid, built from the early phase's depth;
+  - the level where the object's screen rectangle spans 2×2 texels.
+
+  What we did differently:
+  - the pyramid lives in a buffer, with four fetches and a max, instead of an image with
+    a min/max reduction sampler: the render graph has one view per texture;
+  - the screen rectangle comes from the eight corners of the same world box that frustum
+    culling uses, instead of a projected sphere.
 - **LOD selection, meshlets, cluster and triangle culling.** These need meshoptimizer
   (planned with asset import) and mesh shaders with a fallback. The AMD iGPU on ref-1
   has no `VK_EXT_mesh_shader`.
@@ -145,10 +154,7 @@ read the code for ideas only. No code was copied.
    - Stable instance slots and dirty-only uploads.
    - Static objects then cost nothing per frame on the CPU. Today every instance costs
      about 13 ns plus 80 bytes of upload per frame (lavapipe container).
-2. **Two-phase HiZ occlusion culling.**
-   - Depth pyramid with a min/max reduction sampler (`samplerFilterMinmax`, supported on
-     ref-1's GPUs and lavapipe).
-   - Screen rectangles from boxes or Mara–McGuire spheres.
+2. **Two-phase HiZ occlusion culling.** Done: [ADR 0035](../adr/0035-occlusion-culling.md).
 3. **Cascaded shadow maps with GPU caster culling per cascade.**
    - The draw bench shows the shadow pass dominating at 100k objects. The whole scene
      goes into one map fitted to the scene.

@@ -96,7 +96,7 @@ jobs:
           cargo test -p engine_render --locked -- --nocapture --test-threads=1 >> render.md 2>&1
           set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=radeon
-          cargo test -p engine_render --locked --test graph --test mesh --test forward --test culling -- --nocapture >> render.md 2>&1
+          cargo test -p engine_render --locked --test graph --test mesh --test forward --test culling --test occlusion -- --nocapture >> render.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=
           echo ```>> render.md

@@ -3,6 +3,8 @@
 - Status: Accepted
 - Date: 2026-09-26
 - Research: [docs/research/gpu-driven-rendering.md](../research/gpu-driven-rendering.md)
+- Extended by [ADR 0035](0035-occlusion-culling.md): two-phase occlusion culling;
+  `add_passes` takes a `ForwardView`.
 
 ## Context
 
@@ -78,8 +80,24 @@ compare CPU costs on one driver. GPU times on lavapipe only show the proportions
 - 0 validation errors.
 - The existing forward test gives the same pixels as before.
 
-**ref-1 (RTX 4060 Ti, Radeon iGPU):** the GPU workflow runs `draw_bench` on both adapters
-for this PR. Numbers go into `docs/perf/history.md` when the run reports.
+**ref-1** (GPU workflow on `9135f7b`, release). The culling test passes on both GPUs
+(GPU counts equal the CPU reference, 0 validation errors).
+
+| RTX 4060 Ti, 100k cubes | overview | in-field, 1,742 visible |
+|---|---:|---:|
+| draw list (caller) | 1.12 ms | 1.12 ms |
+| `add_passes` (10 ns per instance) | 1.00 ms | 1.00 ms |
+| graph recording | 13 µs | 12 µs |
+| GPU cull | 10.9 µs | 9.5 µs |
+| GPU shadow | 244 µs | 244 µs |
+| GPU forward, culling on / off | 310 / 311 µs | **47 / 267 µs** |
+
+- **Radeon iGPU, 10k cubes, in-field view:**
+  - forward 1,634 → 1,081 µs with culling;
+  - cull 20 µs;
+  - shadow about 600 µs.
+- **Cubes example** (26 draws, debug build with validation): 2,401 FPS on NVIDIA, graph
+  CPU 102 µs per frame.
 
 ## Decision
 

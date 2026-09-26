@@ -1,9 +1,9 @@
 //! Forward PBR renderer with a directional light and a shadow map (ADR 0014), drawn
-//! GPU-driven (ADR 0034).
+//! GPU-driven (ADR 0034) with optional two-phase occlusion culling (ADR 0035).
 //!
 //! [`ForwardRenderer::add_passes`] turns the draw list into instances and batches (a batch
 //! is a run of consecutive draws that share a mesh, drawn as one instanced draw) and
-//! declares four passes in the frame's render graph:
+//! declares these passes in the frame's render graph:
 //!
 //! 1. **cull setup**: copies the batches' indirect draw commands, with no instances yet,
 //!    from the upload ring into a graph buffer;
@@ -13,8 +13,17 @@
 //! 3. **shadow**: depth-only rendering of every instance from the light, into a transient
 //!    shadow map (with depth bias);
 //! 4. **forward**: metallic-roughness PBR (GGX, height-correlated Smith, Schlick; after
-//!    Filament's documentation) with 3×3 PCF shadows, into the caller's color and depth
+//!    Filament's documentation) with 3×3 PCF shadows, into the view's color and depth
 //!    targets.
+//!
+//! With an [`Occlusion`] state in the [`ForwardView`], culling and drawing run in two
+//! phases: **cull early** keeps the instances that were visible in the view's previous
+//! frame and **forward early** draws them; **hiz** reduces that depth into a pyramid of
+//! farthest depths; **cull late** tests every instance against the frustum and the
+//! pyramid, records what is visible for the next frame, and **forward late** draws the
+//! visible instances the early phase missed. Objects hidden behind others are not drawn,
+//! and nothing visible is ever missing: a wrong guess from the previous frame only costs
+//! time.
 //!
 //! Each drawing pass records a single `vkCmdDrawIndirect` for all batches, so beyond
 //! writing 80 bytes per instance into the [`UploadRing`] the CPU cost of a frame does not
@@ -23,24 +32,37 @@
 
 use crate::cull::Frustum;
 use crate::graph::{
-    Access, Buffer, BufferDesc, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture, TextureDesc,
+    Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, LoadOp, PassBuilder,
+    ShaderStages, StoreOp, Texture, TextureDesc,
 };
 use crate::mesh::Mesh;
 use crate::upload::UploadRing;
+use core::cell::Cell;
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_orthographic};
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    Bindless, DepthBias, Device, GraphicsPipelineDesc, Pipeline, RhiError, SamplerKind,
-    ShaderStageDesc, spirv_words,
+    Allocation, Allocator, Bindless, DepthBias, Device, GraphicsPipelineDesc, MemoryLocation,
+    Pipeline, RhiError, SamplerKind, ShaderStageDesc, spirv_words,
 };
 
 const VERTEX: &[u8] = include_bytes!("../shaders/forward.vertexMain.spv");
 const SHADOW_VERTEX: &[u8] = include_bytes!("../shaders/forward.shadowVertex.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
+const HIZ_FIRST: &[u8] = include_bytes!("../shaders/forward.hizFirst.spv");
+const HIZ_DOWN: &[u8] = include_bytes!("../shaders/forward.hizDown.spv");
 
 /// Threads per workgroup of `cullMain`.
 const CULL_GROUP: u32 = 64;
+/// Threads per workgroup side of `hizFirst` and `hizDown`.
+const HIZ_GROUP: u32 = 8;
+/// Depth pyramid levels the frame constants have room for (targets up to 65536 pixels).
+const MAX_HIZ_LEVELS: usize = 16;
+
+/// `PHASE_*` in `forward.slang`.
+const PHASE_ALL: u32 = 0;
+const PHASE_EARLY: u32 = 1;
+const PHASE_LATE: u32 = 2;
 
 /// Surface parameters (metallic-roughness).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -66,7 +88,8 @@ impl Default for Material {
 /// One object to draw.
 ///
 /// Consecutive items with the same mesh (the same `&Mesh`) are drawn as one instanced
-/// batch, so keep the draws of a mesh together.
+/// batch, so keep the draws of a mesh together. With occlusion culling, an item is known
+/// by its index in the list, so also keep the order stable from frame to frame.
 #[derive(Debug, Clone, Copy)]
 pub struct DrawItem<'a> {
     /// Its vertices.
@@ -97,7 +120,97 @@ pub struct Camera {
     pub position: Vec3,
 }
 
-/// `Frame` in `forward.slang` (304 bytes).
+/// What one [`ForwardRenderer::add_passes`] call renders, and where.
+#[derive(Debug, Clone, Copy)]
+pub struct ForwardView<'a> {
+    /// The camera.
+    pub camera: Camera,
+    /// The light.
+    pub light: DirectionalLight,
+    /// Color target.
+    pub color: Texture,
+    /// Depth target, the size of `color`.
+    pub depth: Texture,
+    /// Clear color, or `None` to draw over the target's contents.
+    pub clear: Option<[f32; 4]>,
+    /// This view's occlusion-culling state, or `None` for frustum culling only.
+    pub occlusion: Option<&'a Occlusion>,
+}
+
+/// Occlusion-culling state of one view, kept across frames (ADR 0035): whether each
+/// instance was visible in the view's previous frame.
+///
+/// Instances are known by their index in the draw list, so keep its order stable. A
+/// changed order, a camera cut or more instances than [`Self::capacity`] only cost time
+/// (more instances wait for the late phase, or are drawn early for nothing); what is
+/// visible is always drawn. Use one state per view, and call [`Self::reset`] after a cut.
+#[derive(Debug)]
+pub struct Occlusion {
+    buffer: vk::Buffer,
+    allocation: Option<Allocation>,
+    address: vk::DeviceAddress,
+    capacity: u32,
+    /// The flags must be cleared before their next use.
+    stale: Cell<bool>,
+}
+
+impl Occlusion {
+    /// State for up to `capacity` instances (4 bytes each, in device memory).
+    pub fn new(
+        device: &Device,
+        allocator: &mut Allocator,
+        capacity: u32,
+    ) -> Result<Self, RhiError> {
+        let (buffer, allocation) = allocator.create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(u64::from(capacity.max(1)) * 4)
+                .usage(
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                ),
+            MemoryLocation::Device,
+        )?;
+        // SAFETY: created with SHADER_DEVICE_ADDRESS usage and bound.
+        let address = unsafe {
+            device
+                .raw()
+                .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
+        };
+        Ok(Self {
+            buffer,
+            allocation: Some(allocation),
+            address,
+            capacity,
+            stale: Cell::new(true),
+        })
+    }
+
+    /// Instances whose visibility is remembered.
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// Forgets which instances were visible (after a camera cut or a new scene): the next
+    /// frame tests every instance in its late phase.
+    pub fn reset(&self) {
+        self.stale.set(true);
+    }
+
+    /// Frees the buffer.
+    ///
+    /// # Safety
+    ///
+    /// The GPU no longer uses it.
+    pub unsafe fn destroy(&mut self, allocator: &mut Allocator) {
+        if let Some(allocation) = self.allocation.take() {
+            // SAFETY: guaranteed by the caller; the pair comes from `create_buffer`.
+            unsafe { allocator.destroy_buffer(self.buffer, allocation) };
+        }
+    }
+}
+
+/// `Frame` in `forward.slang` (384 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -110,7 +223,11 @@ struct FrameData {
     planes: [[f32; 4]; 6],
     shadow_sampler: u32,
     cull: u32,
+    visibility_capacity: u32,
+    hiz_levels: u32,
+    depth_size: [u32; 2],
     _pad: [u32; 2],
+    hiz_offsets: [u32; MAX_HIZ_LEVELS],
 }
 
 /// `Instance` in `forward.slang` (80 bytes).
@@ -135,7 +252,8 @@ struct BatchData {
     extents: [f32; 4],
 }
 
-/// `Push` in `forward.slang` (48 bytes).
+/// `Push` in `forward.slang` (72 bytes).
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct Push {
     frame: u64,
@@ -143,14 +261,18 @@ struct Push {
     batches: u64,
     visible: u64,
     commands: u64,
+    visibility: u64,
+    pyramid: u64,
     instance_count: u32,
-    shadow_map: u32,
+    texture: u32,
+    phase: u32,
+    level: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<FrameData>() == 304);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 384);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 80);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 48);
-const _: () = assert!(core::mem::size_of::<Push>() == 48);
+const _: () = assert!(core::mem::size_of::<Push>() == 72);
 const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndirectCommand>() as u64;
 const _: () = assert!(COMMAND_BYTES == 16);
 
@@ -179,10 +301,13 @@ pub struct ForwardPasses {
     pub instances: u32,
     /// Batches: runs of consecutive draws that share a mesh, one indirect draw each.
     pub batches: u32,
+    /// Whether culling ran in two phases (occlusion culling).
+    pub occlusion: bool,
     /// The forward pass's indirect draw commands, one `vk::DrawIndirectCommand` per batch
-    /// in draw order. After the culling pass, each `instance_count` is the number of
-    /// visible instances of its batch: read it back to count what was drawn. `None` when
-    /// there was nothing to draw.
+    /// in draw order; with occlusion culling, the early phase's, then the late phase's.
+    /// After culling, each `instance_count` is the number of instances its phase drew of
+    /// its batch: read it back to count what was drawn. `None` when there was nothing to
+    /// draw.
     pub commands: Option<Buffer>,
 }
 
@@ -192,6 +317,8 @@ pub struct ForwardRenderer {
     main: Pipeline,
     shadow: Pipeline,
     cull: Pipeline,
+    hiz_first: Pipeline,
+    hiz_down: Pipeline,
     shadow_settings: ShadowSettings,
     frustum_culling: bool,
 }
@@ -223,7 +350,6 @@ impl ForwardRenderer {
         let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
         let shadow_vertex = spirv_words(SHADOW_VERTEX).ok_or_else(invalid)?;
         let fragment = spirv_words(FRAGMENT).ok_or_else(invalid)?;
-        let cull = spirv_words(CULL).ok_or_else(invalid)?;
         let formats = [color_format];
         let main = Pipeline::graphics(
             device,
@@ -267,57 +393,58 @@ impl ForwardRenderer {
             },
             vk::PipelineCache::null(),
         )?;
-        let cull = Pipeline::compute(
-            device,
-            bindless.pipeline_layout(),
-            ShaderStageDesc {
-                spirv: &cull,
-                entry: c"cullMain",
-            },
-            vk::PipelineCache::null(),
-        )?;
+        let compute = |spirv: &[u8], entry| -> Result<Pipeline, RhiError> {
+            let words = spirv_words(spirv).ok_or_else(invalid)?;
+            Pipeline::compute(
+                device,
+                bindless.pipeline_layout(),
+                ShaderStageDesc {
+                    spirv: &words,
+                    entry,
+                },
+                vk::PipelineCache::null(),
+            )
+        };
         Ok(Self {
             main,
             shadow,
-            cull,
+            cull: compute(CULL, c"cullMain")?,
+            hiz_first: compute(HIZ_FIRST, c"hizFirst")?,
+            hiz_down: compute(HIZ_DOWN, c"hizDown")?,
             shadow_settings,
             frustum_culling: true,
         })
     }
 
-    /// Turns GPU frustum culling on (the default) or off. Off, every instance counts as
-    /// visible: for comparisons and debugging.
+    /// Turns GPU culling on (the default) or off. Off, every instance counts as visible,
+    /// with or without an [`Occlusion`] state: for comparisons and debugging.
     pub fn set_frustum_culling(&mut self, enabled: bool) {
         self.frustum_culling = enabled;
     }
 
-    /// Whether GPU frustum culling is on.
+    /// Whether GPU culling is on.
     pub fn frustum_culling(&self) -> bool {
         self.frustum_culling
     }
 
-    /// Declares the culling, shadow and forward passes for `draws` into `color` and
-    /// `depth`.
+    /// Declares the culling, shadow and forward passes for `draws` into the view's
+    /// targets.
     ///
     /// Instances, batches, draw commands and frame constants are written into `ring` now;
     /// the passes record when the graph executes, which must be with this `bindless` set
-    /// ([`FrameGraph::execute_with_bindless`]) so the shadow map gets an index. Returns
-    /// `None`, declaring nothing, when `ring` is full.
-    #[allow(clippy::too_many_arguments)]
+    /// ([`FrameGraph::execute_with_bindless`]) so the shadow map and the depth target get
+    /// indices. Returns `None`, declaring nothing, when `ring` is full.
     pub fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
         ring: &mut UploadRing,
         bindless: &'g Bindless,
         draws: &'g [DrawItem<'g>],
-        camera: &Camera,
-        light: &DirectionalLight,
-        color: Texture,
-        depth: Texture,
-        clear: Option<[f32; 4]>,
+        view: &ForwardView<'g>,
     ) -> Option<ForwardPasses> {
         engine_profiler::zone!("render::forward::add_passes");
-        let load = clear.map_or(LoadOp::Load, LoadOp::Clear);
+        let (color, depth) = (view.color, view.depth);
+        let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
         let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
         if draws.is_empty() {
             fg.add_pass("forward")
@@ -327,11 +454,17 @@ impl ForwardRenderer {
             return Some(ForwardPasses {
                 instances: 0,
                 batches: 0,
+                occlusion: false,
                 commands: None,
             });
         }
         let instance_count = draws.len() as u32;
         let batch_count = batches(draws).count() as u32;
+        let depth_desc = fg.texture_desc(depth);
+        let occlusion = view
+            .occlusion
+            .filter(|_| self.frustum_culling && depth_desc.width > 0 && depth_desc.height > 0);
+        let phases: u32 = if occlusion.is_some() { 2 } else { 1 };
 
         // Instances in draw order, and the scene's bounding box for the light on the way.
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
@@ -377,100 +510,155 @@ impl ForwardRenderer {
             }
             staged.address
         };
-        // Draw commands: the forward pass's, with no instances until culling counts them,
+        // Draw commands: the forward pass's for each phase, with no instances until
+        // culling counts them (the late phase's visible list follows the early one's),
         // then the shadow pass's, with every instance.
         let commands = {
+            let per_phase = batch_count as usize;
             let (slots, staged) =
-                ring.alloc::<vk::DrawIndirectCommand>(2 * batch_count as usize)?;
-            let (culled, all) = slots.split_at_mut(batch_count as usize);
-            for (((first, len), culled), all) in batches(draws).zip(culled).zip(all) {
+                ring.alloc::<vk::DrawIndirectCommand>((phases as usize + 1) * per_phase)?;
+            for (b, (first, len)) in batches(draws).enumerate() {
                 let command = vk::DrawIndirectCommand {
                     vertex_count: draws[first].mesh.vertex_count(),
                     instance_count: 0,
                     first_vertex: 0,
                     first_instance: first as u32,
                 };
-                culled.write(command);
-                all.write(vk::DrawIndirectCommand {
+                for phase in 0..phases as usize {
+                    slots[phase * per_phase + b].write(vk::DrawIndirectCommand {
+                        first_instance: command.first_instance + phase as u32 * instance_count,
+                        ..command
+                    });
+                }
+                slots[phases as usize * per_phase + b].write(vk::DrawIndirectCommand {
                     instance_count: len as u32,
                     ..command
                 });
             }
             staged
         };
+        let (hiz_levels, hiz_offsets, hiz_floats) = hiz_layout(depth_desc.width, depth_desc.height);
         let frame = FrameData {
-            clip_from_world: camera.clip_from_world.to_cols_array(),
-            light_clip_from_world: fit_light(min, max, light.direction).to_cols_array(),
-            camera_position: camera.position.extend(1.0).to_array(),
-            to_light: (-light.direction.normalize_or(Vec3::NEG_Y))
+            clip_from_world: view.camera.clip_from_world.to_cols_array(),
+            light_clip_from_world: fit_light(min, max, view.light.direction).to_cols_array(),
+            camera_position: view.camera.position.extend(1.0).to_array(),
+            to_light: (-view.light.direction.normalize_or(Vec3::NEG_Y))
                 .extend(0.0)
                 .to_array(),
-            light_color: light.color.extend(0.0).to_array(),
-            ambient: light.ambient.extend(0.0).to_array(),
-            planes: Frustum::from_clip_from_world(camera.clip_from_world)
+            light_color: view.light.color.extend(0.0).to_array(),
+            ambient: view.light.ambient.extend(0.0).to_array(),
+            planes: Frustum::from_clip_from_world(view.camera.clip_from_world)
                 .planes
                 .map(|p| p.to_array()),
             shadow_sampler: Bindless::sampler(SamplerKind::ShadowCompare),
             cull: u32::from(self.frustum_culling),
+            visibility_capacity: occlusion.map_or(0, Occlusion::capacity),
+            hiz_levels,
+            depth_size: [depth_desc.width, depth_desc.height],
             _pad: [0; 2],
+            hiz_offsets,
         };
         let frame = ring.push(&[frame])?;
-        let push = move |visible, commands, shadow_map| Push {
+        let base = Push {
             frame,
             instances,
             batches: batch_table,
-            visible,
-            commands,
+            visible: 0,
+            commands: 0,
+            visibility: occlusion.map_or(0, |o| o.address),
+            pyramid: 0,
             instance_count,
-            shadow_map,
+            texture: 0,
+            phase: PHASE_ALL,
+            level: 0,
         };
 
         let command_bytes = u64::from(batch_count) * COMMAND_BYTES;
         let culled = fg.create_buffer(
             "draw commands",
             BufferDesc {
-                size: command_bytes,
+                size: u64::from(phases) * command_bytes,
             },
         );
+        let visible_bytes = u64::from(instance_count) * 4;
         let visible = fg.create_buffer(
             "visible instances",
             BufferDesc {
-                size: u64::from(instance_count) * 4,
+                size: u64::from(phases) * visible_bytes,
             },
         );
-        fg.add_pass("cull setup")
-            .write(culled, Access::TransferWrite)
-            .execute(move |ctx| {
-                let region = vk::BufferCopy {
-                    src_offset: commands.offset,
-                    dst_offset: 0,
-                    size: command_bytes,
-                };
-                // SAFETY: recording outside a rendering scope; the ranges are in bounds.
-                unsafe {
-                    ctx.device.cmd_copy_buffer(
-                        ctx.cmd,
-                        commands.buffer,
-                        ctx.buffer(culled),
-                        &[region],
-                    );
-                }
-            });
-        let cull_pipeline = &self.cull;
-        fg.add_pass("cull")
-            .read(culled, Access::StorageReadWrite(ShaderStages::COMPUTE))
-            .write(visible, Access::StorageWrite(ShaderStages::COMPUTE))
-            .execute(move |ctx| {
-                let push = push(ctx.address(visible), ctx.address(culled), 0);
-                // SAFETY: recording outside a rendering scope.
-                unsafe {
-                    cull_pipeline.bind(ctx.cmd);
-                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
-                    bindless.push_constants(ctx.cmd, push_bytes(&push));
+        let flags = occlusion.map(|o| {
+            // Flags written by the previous frame's late phase, or to be cleared now.
+            let stale = o.stale.replace(false);
+            let written = BufferState {
+                stages: vk::PipelineStageFlags2::COMPUTE_SHADER,
+                access: vk::AccessFlags2::SHADER_STORAGE_READ
+                    | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+            };
+            let buffer = fg.import_buffer(
+                "visibility flags",
+                ImportedBuffer {
+                    buffer: o.buffer,
+                    size: u64::from(o.capacity.max(1)) * 4,
+                    address: o.address,
+                    initial: if stale { BufferState::idle() } else { written },
+                    final_state: Some(written),
+                },
+            );
+            (buffer, stale)
+        });
+        let mut setup = fg
+            .add_pass("cull setup")
+            .write(culled, Access::TransferWrite);
+        if let Some((flags, true)) = flags {
+            setup = setup.write(flags, Access::TransferWrite);
+        }
+        setup.execute(move |ctx| {
+            let region = vk::BufferCopy {
+                src_offset: commands.offset,
+                dst_offset: 0,
+                size: u64::from(phases) * command_bytes,
+            };
+            // SAFETY: recording outside a rendering scope; the ranges are in bounds.
+            unsafe {
+                ctx.device
+                    .cmd_copy_buffer(ctx.cmd, commands.buffer, ctx.buffer(culled), &[region]);
+                if let Some((flags, true)) = flags {
                     ctx.device
-                        .cmd_dispatch(ctx.cmd, instance_count.div_ceil(CULL_GROUP), 1, 1);
+                        .cmd_fill_buffer(ctx.cmd, ctx.buffer(flags), 0, vk::WHOLE_SIZE, 0);
                 }
-            });
+            }
+        });
+        let flag_buffer = flags.map(|(buffer, _)| buffer);
+        let dispatch_cull = move |ctx: &mut crate::graph::PassContext<'_>, push: Push| {
+            // SAFETY: recording outside a rendering scope.
+            unsafe {
+                self.cull.bind(ctx.cmd);
+                bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
+                bindless.push_constants(ctx.cmd, push_bytes(&push));
+                ctx.device
+                    .cmd_dispatch(ctx.cmd, instance_count.div_ceil(CULL_GROUP), 1, 1);
+            }
+        };
+        let first_phase = if occlusion.is_some() {
+            PHASE_EARLY
+        } else {
+            PHASE_ALL
+        };
+        let name = if occlusion.is_some() {
+            "cull early"
+        } else {
+            "cull"
+        };
+        cull_pass(fg, name, culled, visible, flag_buffer, first_phase).execute(move |ctx| {
+            let push = Push {
+                visible: ctx.address(visible),
+                commands: ctx.address(culled),
+                phase: first_phase,
+                ..base
+            };
+            dispatch_cull(ctx, push);
+        });
 
         let resolution = self.shadow_settings.resolution;
         let shadow_map = fg.create_texture(
@@ -482,55 +670,211 @@ impl ForwardRenderer {
             .depth(shadow_map, depth_clear, StoreOp::Store)
             .execute(move |ctx| {
                 let area = ctx.render_area();
-                let push = push(0, 0, 0);
                 // SAFETY: recording inside the pass's rendering scope; the commands are in
                 // the ring, which has indirect-buffer usage.
                 unsafe {
                     shadow_pipeline.bind(ctx.cmd);
                     bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
                     set_viewport(ctx.device, ctx.cmd, area);
-                    bindless.push_constants(ctx.cmd, push_bytes(&push));
+                    bindless.push_constants(ctx.cmd, push_bytes(&base));
                     ctx.device.cmd_draw_indirect(
                         ctx.cmd,
                         commands.buffer,
-                        commands.offset + command_bytes,
+                        commands.offset + u64::from(phases) * command_bytes,
                         batch_count,
                         COMMAND_BYTES as u32,
                     );
                 }
             });
         let main_pipeline = &self.main;
-        fg.add_pass("forward")
-            .read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
-            .read(culled, Access::Indirect)
-            .read(visible, Access::StorageRead(ShaderStages::VERTEX))
+        let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>, phase: u32| {
+            let area = ctx.render_area();
+            let push = Push {
+                visible: ctx.address(visible),
+                texture: ctx.sampled_index(shadow_map).unwrap_or(0),
+                ..base
+            };
+            let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
+            // SAFETY: recording inside the pass's rendering scope.
+            unsafe {
+                main_pipeline.bind(ctx.cmd);
+                bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                set_viewport(ctx.device, ctx.cmd, area);
+                bindless.push_constants(ctx.cmd, push_bytes(&push));
+                ctx.device.cmd_draw_indirect(
+                    ctx.cmd,
+                    ctx.buffer(culled),
+                    offset,
+                    batch_count,
+                    COMMAND_BYTES as u32,
+                );
+            }
+        };
+        let Some(flags) = flag_buffer else {
+            forward_pass(fg, "forward", shadow_map, culled, visible)
+                .color(color, load, StoreOp::Store)
+                .depth(depth, depth_clear, StoreOp::DontCare)
+                .execute(move |ctx| draw_phase(ctx, PHASE_ALL));
+            return Some(ForwardPasses {
+                instances: instance_count,
+                batches: batch_count,
+                occlusion: false,
+                commands: Some(culled),
+            });
+        };
+
+        // Two phases: draw what was visible, build the pyramid from its depth, then test
+        // everything against it and draw what the first phase missed.
+        forward_pass(fg, "forward early", shadow_map, culled, visible)
             .color(color, load, StoreOp::Store)
-            .depth(depth, depth_clear, StoreOp::DontCare)
+            .depth(depth, depth_clear, StoreOp::Store)
+            .execute(move |ctx| draw_phase(ctx, PHASE_EARLY));
+        let pyramid = fg.create_buffer(
+            "depth pyramid",
+            BufferDesc {
+                size: u64::from(hiz_floats) * 4,
+            },
+        );
+        let (hiz_first, hiz_down) = (&self.hiz_first, &self.hiz_down);
+        let depth_size = (depth_desc.width, depth_desc.height);
+        fg.add_pass("hiz")
+            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .write(pyramid, Access::StorageReadWrite(ShaderStages::COMPUTE))
             .execute(move |ctx| {
-                let area = ctx.render_area();
-                let shadow_index = ctx.sampled_index(shadow_map).unwrap_or(0);
-                let push = push(ctx.address(visible), 0, shadow_index);
-                // SAFETY: recording inside the pass's rendering scope.
+                let d = ctx.device;
+                let Some(depth_index) = ctx.sampled_index(depth) else {
+                    // No bindless index for the depth: a far pyramid hides nothing.
+                    // SAFETY: recording outside a rendering scope.
+                    unsafe {
+                        d.cmd_fill_buffer(
+                            ctx.cmd,
+                            ctx.buffer(pyramid),
+                            0,
+                            vk::WHOLE_SIZE,
+                            1.0f32.to_bits(),
+                        );
+                    }
+                    return;
+                };
+                let mut push = Push {
+                    pyramid: ctx.address(pyramid),
+                    texture: depth_index,
+                    level: 1,
+                    ..base
+                };
+                let groups = |level: u32| {
+                    let size = |n: u32| ((n - 1) >> level) + 1;
+                    (
+                        size(depth_size.0).div_ceil(HIZ_GROUP),
+                        size(depth_size.1).div_ceil(HIZ_GROUP),
+                    )
+                };
+                let barrier = vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                    .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
+                let barriers = [barrier];
+                let dependency = vk::DependencyInfo::default().memory_barriers(&barriers);
+                // SAFETY: recording outside a rendering scope; each level reads the one
+                // the previous dispatch wrote, ordered by the barriers.
                 unsafe {
-                    main_pipeline.bind(ctx.cmd);
-                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
-                    set_viewport(ctx.device, ctx.cmd, area);
+                    hiz_first.bind(ctx.cmd);
+                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
                     bindless.push_constants(ctx.cmd, push_bytes(&push));
-                    ctx.device.cmd_draw_indirect(
-                        ctx.cmd,
-                        ctx.buffer(culled),
-                        0,
-                        batch_count,
-                        COMMAND_BYTES as u32,
-                    );
+                    let (x, y) = groups(1);
+                    d.cmd_dispatch(ctx.cmd, x, y, 1);
+                    hiz_down.bind(ctx.cmd);
+                    for level in 2..=hiz_levels {
+                        d.cmd_pipeline_barrier2(ctx.cmd, &dependency);
+                        push.level = level;
+                        bindless.push_constants(ctx.cmd, push_bytes(&push));
+                        let (x, y) = groups(level);
+                        d.cmd_dispatch(ctx.cmd, x, y, 1);
+                    }
                 }
             });
+        cull_pass(fg, "cull late", culled, visible, Some(flags), PHASE_LATE)
+            .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
+            .execute(move |ctx| {
+                let push = Push {
+                    visible: ctx.address(visible) + visible_bytes,
+                    commands: ctx.address(culled) + command_bytes,
+                    pyramid: ctx.address(pyramid),
+                    phase: PHASE_LATE,
+                    ..base
+                };
+                dispatch_cull(ctx, push);
+            });
+        forward_pass(fg, "forward late", shadow_map, culled, visible)
+            .color(color, LoadOp::Load, StoreOp::Store)
+            .depth(depth, LoadOp::Load, StoreOp::DontCare)
+            .execute(move |ctx| draw_phase(ctx, PHASE_LATE));
         Some(ForwardPasses {
             instances: instance_count,
             batches: batch_count,
+            occlusion: true,
             commands: Some(culled),
         })
     }
+}
+
+/// A culling pass of `phase` with its buffer accesses (`flags`: occlusion culling's
+/// visibility flags, read early and rewritten late).
+fn cull_pass<'a, 'g>(
+    fg: &'a mut FrameGraph<'g>,
+    name: &'static str,
+    culled: Buffer,
+    visible: Buffer,
+    flags: Option<Buffer>,
+    phase: u32,
+) -> PassBuilder<'a, 'g> {
+    let pass = fg
+        .add_pass(name)
+        .read(culled, Access::StorageReadWrite(ShaderStages::COMPUTE))
+        .write(visible, Access::StorageWrite(ShaderStages::COMPUTE));
+    match flags {
+        Some(flags) if phase == PHASE_LATE => {
+            pass.read(flags, Access::StorageReadWrite(ShaderStages::COMPUTE))
+        }
+        Some(flags) => pass.read(flags, Access::StorageRead(ShaderStages::COMPUTE)),
+        None => pass,
+    }
+}
+
+/// A forward pass that draws the culled commands, without its attachments.
+fn forward_pass<'a, 'g>(
+    fg: &'a mut FrameGraph<'g>,
+    name: &'static str,
+    shadow_map: Texture,
+    culled: Buffer,
+    visible: Buffer,
+) -> PassBuilder<'a, 'g> {
+    fg.add_pass(name)
+        .read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
+        .read(culled, Access::Indirect)
+        .read(visible, Access::StorageRead(ShaderStages::VERTEX))
+}
+
+/// Levels (1 up to the 1×1 level), per-level offsets in floats, and total floats of the
+/// depth pyramid of a `width` × `height` target: level `k` is `⌈width / 2^k⌉ ×
+/// ⌈height / 2^k⌉`, one texel per `2^k × 2^k` pixels.
+fn hiz_layout(width: u32, height: u32) -> (u32, [u32; MAX_HIZ_LEVELS], u32) {
+    let mut offsets = [0; MAX_HIZ_LEVELS];
+    if width == 0 || height == 0 {
+        return (0, offsets, 0);
+    }
+    let (mut levels, mut total) = (0, 0);
+    for level in 1..=MAX_HIZ_LEVELS as u32 {
+        let (w, h) = (((width - 1) >> level) + 1, ((height - 1) >> level) + 1);
+        offsets[level as usize - 1] = total;
+        total += w * h;
+        levels = level;
+        if w == 1 && h == 1 {
+            break;
+        }
+    }
+    (levels, offsets, total)
 }
 
 /// Runs of consecutive draws that share a mesh, as `(first, len)`.
@@ -588,4 +932,31 @@ fn fit_light(min: Vec3, max: Vec3, direction: Vec3) -> Mat4 {
     };
     let view = look_at(center - direction * radius * 2.0, center, up);
     vulkan_orthographic(-radius, radius, -radius, radius, radius * 0.5, radius * 3.5) * view
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pyramid_layout_halves_to_one_texel() {
+        let (levels, offsets, total) = hiz_layout(1920, 1080);
+        assert_eq!(levels, 11, "2^11 = 2048 >= 1920");
+        let sizes: Vec<(u32, u32)> = (1..=levels)
+            .map(|k| (((1920 - 1) >> k) + 1, ((1080 - 1) >> k) + 1))
+            .collect();
+        assert_eq!(sizes[0], (960, 540));
+        assert_eq!(sizes[1], (480, 270));
+        assert_eq!(sizes[4], (60, 34), "1080 / 32 = 33.75 rounds up");
+        assert_eq!(sizes[10], (1, 1));
+        let mut expected = 0;
+        for (k, (w, h)) in sizes.iter().enumerate() {
+            assert_eq!(offsets[k], expected);
+            expected += w * h;
+        }
+        assert_eq!(total, expected);
+        assert_eq!(hiz_layout(1, 1).0, 1);
+        assert_eq!(hiz_layout(0, 1080).0, 0);
+        assert_eq!(hiz_layout(65536, 8).0, 16);
+    }
 }

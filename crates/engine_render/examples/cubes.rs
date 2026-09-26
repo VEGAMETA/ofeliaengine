@@ -24,7 +24,7 @@ fn main() {
     use engine_platform::time::HighResTimer;
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::forward::{
-        Camera, DirectionalLight, DrawItem, ForwardRenderer, Material, ShadowSettings,
+        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
     use engine_render::mesh::{Mesh, cube, perspective};
@@ -227,14 +227,17 @@ fn main() {
                 &mut ring,
                 &bindless,
                 &draws,
-                &Camera {
-                    clip_from_world,
-                    position: eye,
+                &ForwardView {
+                    camera: Camera {
+                        clip_from_world,
+                        position: eye,
+                    },
+                    light,
+                    color: hdr,
+                    depth,
+                    clear: Some([0.02, 0.02, 0.05, 1.0]),
+                    occlusion: None,
                 },
-                &light,
-                hdr,
-                depth,
-                Some([0.02, 0.02, 0.05, 1.0]),
             );
             tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);
             fg.execute_with_bindless(&mut allocator, Some(&bindless))
