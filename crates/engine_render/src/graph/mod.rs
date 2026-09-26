@@ -40,8 +40,10 @@ mod access;
 mod compile;
 mod physical;
 mod placement;
+mod timing;
 
 pub use access::{Access, BufferState, ShaderStages, TextureState};
+pub use timing::PassTime;
 
 use access::AccessInfo;
 use compile::{Boundary, ImageBarrier, Kind, MemoryBarrier, PassRecord, Records, ResourceRecord};
@@ -249,6 +251,7 @@ pub struct RenderGraph {
     physical: PhysicalResources,
     vk_image_barriers: Vec<vk::ImageMemoryBarrier2<'static>>,
     color_attachments: Vec<vk::RenderingAttachmentInfo<'static>>,
+    timing: Option<timing::Timing>,
     stats: GraphStats,
 }
 
@@ -284,6 +287,7 @@ impl RenderGraph {
             physical: PhysicalResources::new(frames_in_flight.max(1)),
             vk_image_barriers: Vec::new(),
             color_attachments: Vec::new(),
+            timing: timing::Timing::new(device, frames_in_flight.max(1)),
             stats: GraphStats::default(),
         }
     }
@@ -326,6 +330,12 @@ impl RenderGraph {
         self.stats
     }
 
+    /// GPU time of every pass of the most recently completed frame (read when its frame
+    /// slot comes around again). Empty until then, or if the queue has no timestamps.
+    pub fn gpu_pass_times(&self) -> &[PassTime] {
+        self.timing.as_ref().map_or(&[], |t| t.times())
+    }
+
     /// Frees the transient heaps and Vulkan objects.
     ///
     /// # Safety
@@ -333,7 +343,12 @@ impl RenderGraph {
     /// The GPU no longer uses any of them (the device is idle).
     pub unsafe fn destroy(&mut self, allocator: &mut Allocator) {
         // SAFETY: guaranteed by the caller.
-        unsafe { self.physical.destroy_all(&self.device, allocator) };
+        unsafe {
+            self.physical.destroy_all(&self.device, allocator);
+            if let Some(timing) = &mut self.timing {
+                timing.destroy(&self.device);
+            }
+        }
     }
 }
 
@@ -459,6 +474,13 @@ impl<'g> FrameGraph<'g> {
 
         let d = &graph.device;
         let cmd = self.cmd;
+        let slot = self.slot;
+        if let Some(timing) = &mut graph.timing {
+            let needed = graph.records.passes.iter().filter(|p| p.needed).count() as u32;
+            // SAFETY: the slot's previous frame is done (`begin`); nothing is recorded yet
+            // inside a render pass.
+            unsafe { timing.begin_frame(d, cmd, slot, needed * 2) };
+        }
         let physical = graph.physical.current();
         let mut stats = GraphStats {
             passes: graph.records.passes.len() as u32,
@@ -497,6 +519,10 @@ impl<'g> FrameGraph<'g> {
                 &graph.textures,
             );
 
+            if let Some(timing) = &mut graph.timing {
+                // SAFETY: recording; queries were prepared by `begin_frame`.
+                unsafe { timing.pass_begin(d, cmd, slot, pass.name) };
+            }
             let attachments =
                 &graph.attachments[pass.attachments.start as usize..pass.attachments.end as usize];
             let mut render_area = vk::Rect2D::default();
@@ -524,6 +550,10 @@ impl<'g> FrameGraph<'g> {
             if !attachments.is_empty() {
                 // SAFETY: matches the `cmd_begin_rendering` above.
                 unsafe { d.cmd_end_rendering(cmd) };
+            }
+            if let Some(timing) = &mut graph.timing {
+                // SAFETY: after `pass_begin` for this pass.
+                unsafe { timing.pass_end(d, cmd, slot) };
             }
             if let Some(utils) = &graph.debug_utils {
                 // SAFETY: matches the label begun above.

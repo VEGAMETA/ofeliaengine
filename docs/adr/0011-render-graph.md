@@ -87,6 +87,13 @@ The engine has Vulkan 1.3 with dynamic rendering, synchronization2 and maintenan
   may be reused or destroyed. `begin_slot` is the `unsafe` variant for tests and tools.
 - **Sync validation:** `InstanceDesc::sync_validation` enables Khronos synchronization
   validation. The graph's GPU test runs with it and must report zero hazards.
+- **GPU time per pass:**
+  - Every needed pass is bracketed by two timestamps in a per-slot query pool.
+  - When the slot comes around again, results are read without waiting.
+  - `RenderGraph::gpu_pass_times` returns them (for the editor profiler's per-viewport
+    view).
+  - In profiling builds they become Tracy GPU zones (`engine_profiler::GpuContext`,
+    calibrated once with a timestamp submission).
 
 ## Measurements
 
@@ -116,8 +123,9 @@ record, steady state, empty callbacks.
 - Next steps, in this order:
   1. **Async compute:** a queue per pass and cross-queue timeline semaphores. Pass
      reordering can come with it.
-  2. **GPU timestamps per pass:** Tracy GPU zones and the editor profiler's per-viewport
-     cost.
+  2. Periodic Tracy clock resync (AMD GPUs reset their timers in low-power states) and
+     calibrated timestamps (`VK_KHR_calibrated_timestamps`) instead of the one-off
+     submission.
   3. Mips and layers per subresource in barriers. Today whole images transition
      together.
   4. Reads of imported resources that other queues or frames write.

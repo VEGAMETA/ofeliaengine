@@ -272,6 +272,24 @@ fn passes_culling_aliasing_and_barriers_are_hazard_free() {
         }
         let stats = graph.stats();
         println!("frame {frame} slot {slot}: {stats:?}");
+        let times = graph.gpu_pass_times();
+        if frame >= 2 {
+            // The previous frame of this slot: every needed pass, in order.
+            let names: Vec<&str> = times.iter().map(|t| t.name).collect();
+            assert_eq!(
+                names,
+                [
+                    "clear a",
+                    "copy a to b",
+                    "copy b to c",
+                    "green corner",
+                    "fill data",
+                    "read back"
+                ]
+            );
+            assert!(times.iter().all(|t| t.gpu_us >= 0.0 && t.gpu_us < 1e6));
+            println!("GPU µs: {times:?}");
+        }
         assert!(!culled_ran.get(), "the culled pass ran");
         assert_eq!(stats.culled_passes, 1);
         // a, b, c and the buffer; `unused` was never created.

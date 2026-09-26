@@ -161,6 +161,79 @@ pub fn is_connected() -> bool {
     return false;
 }
 
+/// A GPU timeline in the profiler (one per queue). GPU zones are declared while
+/// recording (with the timestamp query ids that bracket them) and get their timestamps
+/// later, when the GPU has finished. Does nothing without the `tracy` feature.
+pub struct GpuContext {
+    #[cfg(feature = "tracy-base")]
+    inner: tracy_client::GpuContext,
+}
+
+impl core::fmt::Debug for GpuContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("GpuContext").finish_non_exhaustive()
+    }
+}
+
+impl GpuContext {
+    /// A Vulkan GPU context. `gpu_timestamp` is a timestamp taken at (about) the current
+    /// CPU time and `period_ns` the timestamp period. `None` when profiling is compiled
+    /// out or the client is not running.
+    pub fn new_vulkan(name: &str, gpu_timestamp: i64, period_ns: f32) -> Option<Self> {
+        #[cfg(feature = "tracy-base")]
+        {
+            let client = tracy_client::Client::running()?;
+            let inner = client
+                .new_gpu_context(
+                    Some(name),
+                    tracy_client::GpuContextType::Vulkan,
+                    gpu_timestamp,
+                    period_ns,
+                )
+                .ok()?;
+            Some(Self { inner })
+        }
+        #[cfg(not(feature = "tracy-base"))]
+        {
+            let _ = (name, gpu_timestamp, period_ns);
+            None
+        }
+    }
+
+    /// Opens a GPU zone at record time; `query` identifies its start timestamp.
+    pub fn begin_zone(&self, name: &str, query: u16) {
+        #[cfg(feature = "tracy-base")]
+        self.inner.begin_span_alloc(name, "gpu", "", 0, query);
+        #[cfg(not(feature = "tracy-base"))]
+        let _ = (name, query);
+    }
+
+    /// Closes the innermost GPU zone at record time; `query` identifies its end timestamp.
+    pub fn end_zone(&self, query: u16) {
+        #[cfg(feature = "tracy-base")]
+        self.inner.end_span(query);
+        #[cfg(not(feature = "tracy-base"))]
+        let _ = query;
+    }
+
+    /// Supplies the GPU timestamp of `query` once it is available.
+    pub fn upload(&self, query: u16, gpu_timestamp: i64) {
+        #[cfg(feature = "tracy-base")]
+        self.inner.upload_gpu_timestamp(query, gpu_timestamp);
+        #[cfg(not(feature = "tracy-base"))]
+        let _ = (query, gpu_timestamp);
+    }
+
+    /// Re-synchronizes the GPU and CPU clocks (some GPUs reset their timer in low-power
+    /// states). `gpu_timestamp` must be taken right before the call.
+    pub fn sync(&self, gpu_timestamp: i64) {
+        #[cfg(feature = "tracy-base")]
+        self.inner.sync_gpu_time(gpu_timestamp);
+        #[cfg(not(feature = "tracy-base"))]
+        let _ = gpu_timestamp;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
