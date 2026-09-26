@@ -70,6 +70,30 @@ pub unsafe trait Fetch {
     ///
     /// As for [`Fetch::item`], for all rows below `len`.
     unsafe fn slice<'w>(ptr: Self::Ptr, len: usize) -> Self::Slice<'w>;
+
+    /// Hints the CPU to start loading the first cache lines of `chunk`'s arrays (called
+    /// one chunk ahead, so the hardware prefetcher is already running when the loop
+    /// reaches them).
+    #[inline]
+    fn prefetch(_state: Self::State, _archetype: &Archetype, _chunk: usize) {}
+}
+
+/// Cache lines requested at the start of each array of the next chunk.
+const PREFETCH_LINES: usize = 8;
+
+#[inline(always)]
+fn prefetch_lines(ptr: *const u8) {
+    #[cfg(target_arch = "x86_64")]
+    for i in 0..PREFETCH_LINES {
+        // SAFETY: prefetching is a hint and never faults, whatever the address.
+        unsafe {
+            core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(
+                ptr.wrapping_add(i * 64).cast(),
+            );
+        }
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    let _ = ptr;
 }
 
 /// Fetches that only read, so they can run on a shared `&World`.
@@ -115,6 +139,11 @@ unsafe impl<T: Component> Fetch for &T {
         // SAFETY: guaranteed by the caller.
         unsafe { core::slice::from_raw_parts(ptr, len) }
     }
+
+    #[inline]
+    fn prefetch(state: usize, archetype: &Archetype, chunk: usize) {
+        prefetch_lines(archetype.column_ptr(chunk, state));
+    }
 }
 
 // SAFETY: reads only.
@@ -157,6 +186,11 @@ unsafe impl<T: Component> Fetch for &mut T {
     unsafe fn slice<'w>(ptr: *mut T, len: usize) -> &'w mut [T] {
         // SAFETY: guaranteed by the caller.
         unsafe { core::slice::from_raw_parts_mut(ptr, len) }
+    }
+
+    #[inline]
+    fn prefetch(state: usize, archetype: &Archetype, chunk: usize) {
+        prefetch_lines(archetype.column_ptr(chunk, state));
     }
 }
 
@@ -240,6 +274,13 @@ unsafe impl<F: Fetch> Fetch for Option<F> {
         // SAFETY: guaranteed by the caller.
         ptr.map(|p| unsafe { F::slice(p, len) })
     }
+
+    #[inline]
+    fn prefetch(state: Self::State, archetype: &Archetype, chunk: usize) {
+        if let Some(state) = state {
+            F::prefetch(state, archetype, chunk);
+        }
+    }
 }
 
 // SAFETY: reads only when `F` does.
@@ -285,6 +326,11 @@ macro_rules! fetch_tuple {
             unsafe fn slice<'w>(ptr: Self::Ptr, len: usize) -> Self::Slice<'w> {
                 // SAFETY: guaranteed by the caller.
                 unsafe { ($($f::slice(ptr.$i, len),)+) }
+            }
+
+            #[inline]
+            fn prefetch(state: Self::State, archetype: &Archetype, chunk: usize) {
+                $($f::prefetch(state.$i, archetype, chunk);)+
             }
         }
 
@@ -610,6 +656,9 @@ impl<Q: Fetch, F: Filter> QueryState<Q, F> {
                     continue;
                 }
                 Q::mark(m.state, archetype, chunk, tick);
+                if chunk + 1 < archetype.chunks.len() {
+                    Q::prefetch(m.state, archetype, chunk + 1);
+                }
                 let len = archetype.chunk_len(chunk);
                 // SAFETY: the state belongs to this archetype; rows below `len` are
                 // initialized; `&mut World` makes access exclusive, and the access check
@@ -635,6 +684,9 @@ impl<Q: Fetch, F: Filter> QueryState<Q, F> {
                     continue;
                 }
                 Q::mark(m.state, archetype, chunk, tick);
+                if chunk + 1 < archetype.chunks.len() {
+                    Q::prefetch(m.state, archetype, chunk + 1);
+                }
                 let len = archetype.chunk_len(chunk);
                 // SAFETY: as in `for_each`; each chunk is handed out once.
                 unsafe { f(Q::slice(Q::ptr(m.state, archetype, chunk), len)) };
