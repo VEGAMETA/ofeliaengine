@@ -52,7 +52,7 @@ fn fill<'a>(draws: &mut Vec<DrawItem<'a>>, mesh: &'a Mesh, count: usize, frame: 
             mesh,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::splat(0.8),
-                Quat::from_rotation_y(t + h * 6.28),
+                Quat::from_rotation_y(t + h * core::f32::consts::TAU),
                 p,
             ),
             material: Material {
