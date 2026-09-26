@@ -72,9 +72,11 @@ Findings:
 - **On the Radeon iGPU,** Anti-Lag 2 changes nothing measurable. The driver exposes
   `VK_AMD_anti_lag`, but its effect may be limited to discrete Radeons; this needs a
   discrete RDNA card to verify.
-- **The generic row on the iGPU predates the GPU-timeline fallback:** that GPU has no
-  `present_wait`, so the generic path did not bound the queue at all. It now waits on the
-  frames' timeline semaphore instead, and the next GPU run measures it.
+- **The GPU-timeline fallback works where `present_wait` is missing.** On the iGPU
+  (commit `7759e54`, 12 fills) the generic path now waits on the frames' timeline
+  semaphore: input → present call drops from 6.55 ms to **0.52 ms** at the same 6.55 ms
+  frame time. Before, that GPU had no `present_wait` and the generic path bounded
+  nothing.
 - **No display time without `present_wait` on AMD.** "Input → displayed" needs
   `present_wait`, which the AMD driver does not expose; PresentMon covers that case.
 
