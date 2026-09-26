@@ -78,6 +78,11 @@ bindless set and pipelines exist. Three things were missing:
   graph and renderers can share it during a frame.
 - **Pipeline:** `GraphicsPipelineDesc::depth_bias`.
 - **Math:** `engine_core::math::vulkan_orthographic`.
+- **Tonemapping** (`engine_render::post::Tonemap`):
+  - the scene renders into an `R16G16B16A16_SFLOAT` target (`HDR_FORMAT`);
+  - a fullscreen-triangle pass applies exposure and the Khronos PBR Neutral tone mapper
+    (implemented from its published description) into the display format;
+  - it samples the HDR target through the graph-assigned bindless index.
 
 ## Measurements
 
@@ -93,6 +98,11 @@ bindless set and pipelines exist. Three things were missing:
 
   0 validation errors. The shadow map's depth-write → sampled-read transition and its
   bindless registration are checked by the sync validator.
+- The same scene through HDR and tonemapping gives:
+  - shadowed ground 3, 3, 3 (the tone mapper's toe);
+  - lit ground 198 (compressed, not clipped);
+  - cube top 214, 45, 45;
+  - background exact.
 - The SPIR-V freshness test now covers every shader in `shaders/`.
 - The `cubes` example renders 25 PBR cubes (alternating metal and dielectric, varying
   roughness) over a ground plane with shadows. The GPU workflow runs it on NVIDIA and AMD
@@ -105,7 +115,6 @@ bindless set and pipelines exist. Three things were missing:
 - Next steps:
   - cascaded shadow maps;
   - image-based ambient light;
-  - HDR target and tonemapping (post-processing, §6); the output is currently written
-    straight to the swapchain.
+  - auto-exposure and bloom (post-processing, §6).
 - `DrawItem` lists are CPU-side for now. GPU culling and indirect draws (§6) will build the
   same `Draw` records on the GPU.

@@ -28,6 +28,7 @@ fn main() {
     };
     use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
     use engine_render::mesh::{Mesh, cube, perspective};
+    use engine_render::post::{HDR_FORMAT, Tonemap};
     use engine_render::upload::UploadRing;
     use engine_rhi::ash::vk;
     use engine_rhi::{
@@ -76,14 +77,16 @@ fn main() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let depth_format = vk::Format::D32_SFLOAT;
+    // The scene renders in HDR; tonemapping writes the swapchain.
     let renderer = ForwardRenderer::new(
         &device,
         &bindless,
-        swapchain.format(),
+        HDR_FORMAT,
         depth_format,
         ShadowSettings::default(),
     )
     .unwrap();
+    let tonemap = Tonemap::new(&device, &bindless, swapchain.format()).unwrap();
     let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, in_flight, 1 << 20).unwrap();
     // Reused every frame: steady-state frames allocate nothing.
@@ -112,6 +115,14 @@ fn main() {
         });
         if close {
             break 'main;
+        }
+        if frames_to_run.is_some() && start.elapsed() > Duration::from_secs(120) {
+            // Smoke-test mode must end even if the window never becomes visible (a locked
+            // session keeps it minimized).
+            println!(
+                "timed out after {total_frames} frames (window minimized or presentation blocked)"
+            );
+            std::process::exit(2);
         }
         if minimized {
             idle_timer.sleep(Duration::from_millis(10)).unwrap();
@@ -205,6 +216,10 @@ fn main() {
                 "depth",
                 TextureDesc::new_2d(depth_format, extent.width, extent.height),
             );
+            let hdr = fg.create_texture(
+                "hdr",
+                TextureDesc::new_2d(HDR_FORMAT, extent.width, extent.height),
+            );
             ring.begin(&frame);
             renderer.add_passes(
                 &mut fg,
@@ -216,10 +231,11 @@ fn main() {
                     position: eye,
                 },
                 &light,
-                backbuffer,
+                hdr,
                 depth,
                 Some([0.02, 0.02, 0.05, 1.0]),
             );
+            tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);
             fg.execute_with_bindless(&mut allocator, Some(&bindless))
                 .unwrap();
         }
@@ -286,6 +302,7 @@ fn main() {
     }
     drop(frames);
     drop(renderer);
+    drop(tonemap);
     drop(bindless);
     drop(allocator);
     drop(swapchain);

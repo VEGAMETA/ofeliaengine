@@ -9,6 +9,7 @@ use engine_render::forward::{
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::mesh::{Mesh, cube};
+use engine_render::post::{HDR_FORMAT, Tonemap};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -66,6 +67,18 @@ fn pbr_lighting_and_shadows() {
         },
     )
     .unwrap();
+    let hdr_renderer = ForwardRenderer::new(
+        &device,
+        &bindless,
+        HDR_FORMAT,
+        depth_format,
+        ShadowSettings {
+            resolution: 1024,
+            ..ShadowSettings::default()
+        },
+    )
+    .unwrap();
+    let tonemap = Tonemap::new(&device, &bindless, color_format).unwrap();
     let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
@@ -83,7 +96,9 @@ fn pbr_lighting_and_shadows() {
     let (pool, cmd) = unsafe {
         let pool = d
             .create_command_pool(
-                &vk::CommandPoolCreateInfo::default().queue_family_index(device.graphics.family),
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(device.graphics.family),
                 None,
             )
             .unwrap();
@@ -131,120 +146,144 @@ fn pbr_lighting_and_shadows() {
         ambient: Vec3::splat(0.05),
     };
 
-    // SAFETY: one-shot recording and submission, then wait.
-    unsafe {
-        d.begin_command_buffer(
-            cmd,
-            &vk::CommandBufferBeginInfo::default()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-        )
-        .unwrap();
-    }
-    ring.begin_slot(0);
-    {
-        // SAFETY: nothing is in flight.
-        let mut fg = unsafe { graph.begin_slot(0, cmd) };
-        let color = fg.create_texture("color", TextureDesc::new_2d(color_format, SIZE, SIZE));
-        let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
-        let out = fg.import_buffer(
-            "readback",
-            ImportedBuffer {
-                buffer: readback,
-                size: readback_size,
-                address: 0,
-                initial: BufferState::idle(),
-                final_state: Some(BufferState::host_read()),
-            },
-        );
-        renderer.add_passes(
-            &mut fg,
-            &mut ring,
-            &bindless,
-            &draws,
-            &camera,
-            &light,
-            color,
-            depth,
-            Some([0.0, 0.0, 0.25, 1.0]),
-        );
-        fg.add_pass("read back")
-            .read(color, Access::TransferRead)
-            .write(out, Access::TransferWrite)
-            .execute(move |ctx| {
-                let region = vk::BufferImageCopy {
-                    image_subresource: vk::ImageSubresourceLayers {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    },
-                    image_extent: vk::Extent3D {
-                        width: SIZE,
-                        height: SIZE,
-                        depth: 1,
-                    },
-                    ..Default::default()
-                };
-                // SAFETY: recording; layouts arranged by the graph.
-                unsafe {
-                    ctx.device.cmd_copy_image_to_buffer(
-                        ctx.cmd,
-                        ctx.image(color),
-                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                        ctx.buffer(out),
-                        &[region],
-                    );
-                }
-            });
-        fg.execute_with_bindless(&mut allocator, Some(&bindless))
+    for hdr in [false, true] {
+        // SAFETY: one-shot recording and submission, then wait.
+        unsafe {
+            d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .unwrap();
+            d.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
             .unwrap();
-    }
-    // SAFETY: as above.
-    unsafe {
-        d.end_command_buffer(cmd).unwrap();
-        let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
-        d.queue_submit2(
-            device.graphics.raw,
-            &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
-            vk::Fence::null(),
-        )
-        .unwrap();
-        device.wait_idle().unwrap();
-    }
-    println!(
-        "graph: {:?}; ring used {} bytes",
-        graph.stats(),
-        ring.used()
-    );
+        }
+        ring.begin_slot(0);
+        {
+            // SAFETY: nothing is in flight.
+            let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            let color = fg.create_texture("color", TextureDesc::new_2d(color_format, SIZE, SIZE));
+            let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
+            let out = fg.import_buffer(
+                "readback",
+                ImportedBuffer {
+                    buffer: readback,
+                    size: readback_size,
+                    address: 0,
+                    initial: BufferState::idle(),
+                    final_state: Some(BufferState::host_read()),
+                },
+            );
+            if hdr {
+                let scene = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, SIZE, SIZE));
+                hdr_renderer.add_passes(
+                    &mut fg,
+                    &mut ring,
+                    &bindless,
+                    &draws,
+                    &camera,
+                    &light,
+                    scene,
+                    depth,
+                    Some([0.0, 0.0, 0.25, 1.0]),
+                );
+                tonemap.add_pass(&mut fg, &bindless, scene, color, 1.0);
+            } else {
+                renderer.add_passes(
+                    &mut fg,
+                    &mut ring,
+                    &bindless,
+                    &draws,
+                    &camera,
+                    &light,
+                    color,
+                    depth,
+                    Some([0.0, 0.0, 0.25, 1.0]),
+                );
+            }
+            fg.add_pass("read back")
+                .read(color, Access::TransferRead)
+                .write(out, Access::TransferWrite)
+                .execute(move |ctx| {
+                    let region = vk::BufferImageCopy {
+                        image_subresource: vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        image_extent: vk::Extent3D {
+                            width: SIZE,
+                            height: SIZE,
+                            depth: 1,
+                        },
+                        ..Default::default()
+                    };
+                    // SAFETY: recording; layouts arranged by the graph.
+                    unsafe {
+                        ctx.device.cmd_copy_image_to_buffer(
+                            ctx.cmd,
+                            ctx.image(color),
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            ctx.buffer(out),
+                            &[region],
+                        );
+                    }
+                });
+            fg.execute_with_bindless(&mut allocator, Some(&bindless))
+                .unwrap();
+        }
+        // SAFETY: as above.
+        unsafe {
+            d.end_command_buffer(cmd).unwrap();
+            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            d.queue_submit2(
+                device.graphics.raw,
+                &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
+                vk::Fence::null(),
+            )
+            .unwrap();
+            device.wait_idle().unwrap();
+        }
+        println!(
+            "graph: {:?}; ring used {} bytes",
+            graph.stats(),
+            ring.used()
+        );
 
-    let ptr = readback_mem.mapped_ptr().unwrap();
-    // SAFETY: the GPU is idle; the mapping covers the image.
-    let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), readback_size as usize) };
-    let at = |world: Vec3| {
-        let clip = clip_from_world * Vec4::new(world.x, world.y, world.z, 1.0);
-        let ndc = clip.truncate() / clip.w;
-        let x = ((ndc.x * 0.5 + 0.5) * SIZE as f32) as u32;
-        let y = ((ndc.y * 0.5 + 0.5) * SIZE as f32) as u32;
-        let i = ((y.min(SIZE - 1) * SIZE + x.min(SIZE - 1)) * 4) as usize;
-        [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]
-    };
-    let luma = |p: [u8; 4]| u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2]);
-    let shadowed = at(Vec3::new(0.0, 0.0, 0.0));
-    let lit = at(Vec3::new(2.5, 0.0, 0.0));
-    let top = at(Vec3::new(0.0, 2.0, 0.0));
-    let corner = [bytes[4], bytes[5], bytes[6], bytes[7]];
-    println!(
-        "shadowed ground {shadowed:?}, lit ground {lit:?}, cube top {top:?}, corner {corner:?}"
-    );
-    assert_eq!(corner, [0, 0, 64, 255], "background");
-    assert!(
-        luma(lit) > 3 * luma(shadowed),
-        "lit ground {lit:?} should be much brighter than the shadow {shadowed:?}"
-    );
-    // In shadow only the ambient term remains: 0.05 × 0.8 ≈ 10/255 per channel.
-    assert!(shadowed[0] <= 20, "{shadowed:?}");
-    // The red cube's lit top face is red.
-    assert!(top[0] > 2 * u8::max(top[1], 1) && top[0] > 100, "{top:?}");
+        let ptr = readback_mem.mapped_ptr().unwrap();
+        // SAFETY: the GPU is idle; the mapping covers the image.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), readback_size as usize) };
+        let at = |world: Vec3| {
+            let clip = clip_from_world * Vec4::new(world.x, world.y, world.z, 1.0);
+            let ndc = clip.truncate() / clip.w;
+            let x = ((ndc.x * 0.5 + 0.5) * SIZE as f32) as u32;
+            let y = ((ndc.y * 0.5 + 0.5) * SIZE as f32) as u32;
+            let i = ((y.min(SIZE - 1) * SIZE + x.min(SIZE - 1)) * 4) as usize;
+            [bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]
+        };
+        let luma = |p: [u8; 4]| u32::from(p[0]) + u32::from(p[1]) + u32::from(p[2]);
+        let shadowed = at(Vec3::new(0.0, 0.0, 0.0));
+        let lit = at(Vec3::new(2.5, 0.0, 0.0));
+        let top = at(Vec3::new(0.0, 2.0, 0.0));
+        let corner = [bytes[4], bytes[5], bytes[6], bytes[7]];
+        println!(
+            "hdr+tonemap={hdr}: shadowed ground {shadowed:?}, lit ground {lit:?}, cube top {top:?}, corner {corner:?}"
+        );
+        assert_eq!(corner, [0, 0, 64, 255], "background");
+        assert!(
+            luma(lit) > 3 * luma(shadowed),
+            "lit ground {lit:?} should be much brighter than the shadow {shadowed:?}"
+        );
+        // In shadow only the ambient term remains: 0.05 × 0.8 ≈ 10/255 per channel.
+        assert!(shadowed[0] <= 20, "{shadowed:?}");
+        // The red cube's lit top face is red.
+        assert!(top[0] > 2 * u8::max(top[1], 1) && top[0] > 100, "{top:?}");
+        if hdr {
+            // Tonemapping compresses highlights: nothing reaches full white.
+            assert!(lit[0] < 250 && top[0] < 250, "{lit:?} {top:?}");
+        }
+    }
 
     // SAFETY: the device is idle.
     unsafe {
@@ -255,6 +294,8 @@ fn pbr_lighting_and_shadows() {
         d.destroy_command_pool(pool, None);
     }
     drop(renderer);
+    drop(hdr_renderer);
+    drop(tonemap);
     drop(bindless);
     drop(allocator);
     let report = instance.validation_report();
