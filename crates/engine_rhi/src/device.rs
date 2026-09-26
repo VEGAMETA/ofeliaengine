@@ -154,7 +154,10 @@ impl Device {
             .dynamic_rendering(true)
             .synchronization2(true)
             .maintenance4(true);
-        let features = vk::PhysicalDeviceFeatures::default().sampler_anisotropy(true);
+        let features = vk::PhysicalDeviceFeatures::default()
+            .sampler_anisotropy(true)
+            .multi_draw_indirect(true)
+            .draw_indirect_first_instance(true);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .features(features)
             .push_next(&mut f11)

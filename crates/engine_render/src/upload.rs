@@ -1,8 +1,8 @@
-//! Per-frame GPU data written by the CPU: camera and light constants, draw lists. The GPU
-//! counterpart of the CPU frame arena (CLAUDE.md §5): one buffer per frame slot, in
-//! memory the GPU reads directly (device-local and host-visible where available), reset
-//! when the slot comes around again. Allocations return device addresses that shaders
-//! read through pointers, so no descriptors are involved.
+//! Per-frame GPU data written by the CPU: camera and light constants, draw lists, indirect
+//! draw commands. The GPU counterpart of the CPU frame arena (CLAUDE.md §5): one buffer
+//! per frame slot, in memory the GPU reads directly (device-local and host-visible where
+//! available), reset when the slot comes around again. Allocations return device addresses
+//! that shaders read through pointers, so no descriptors are involved.
 
 use core::mem::MaybeUninit;
 use engine_rhi::ash::vk;
@@ -64,6 +64,7 @@ impl UploadRing {
                     vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_SRC
                         | vk::BufferUsageFlags::UNIFORM_BUFFER
+                        | vk::BufferUsageFlags::INDIRECT_BUFFER
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 ),
                 MemoryLocation::Dynamic,

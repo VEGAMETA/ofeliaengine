@@ -106,7 +106,10 @@ impl Adapter {
     pub(crate) fn query(instance: &Instance, physical: vk::PhysicalDevice) -> Self {
         let raw = instance.raw();
         let mut driver_props = vk::PhysicalDeviceDriverProperties::default();
-        let mut props2 = vk::PhysicalDeviceProperties2::default().push_next(&mut driver_props);
+        let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut props2 = vk::PhysicalDeviceProperties2::default()
+            .push_next(&mut driver_props)
+            .push_next(&mut subgroup);
         // SAFETY: `physical` came from this instance; the output chain is valid.
         unsafe { raw.get_physical_device_properties2(physical, &mut props2) };
         let props = props2.properties;
@@ -197,8 +200,30 @@ impl Adapter {
                 .filter(|(_, v)| *v == vk::FALSE)
                 .map(|(n, _)| *n),
         );
-        if base.sampler_anisotropy == vk::FALSE {
-            missing.push("samplerAnisotropy");
+        for (name, supported) in [
+            ("samplerAnisotropy", base.sampler_anisotropy),
+            // GPU-driven drawing (ADR 0034): many indirect draws per call, each with its
+            // own first instance.
+            ("multiDrawIndirect", base.multi_draw_indirect),
+            (
+                "drawIndirectFirstInstance",
+                base.draw_indirect_first_instance,
+            ),
+        ] {
+            if supported == vk::FALSE {
+                missing.push(name);
+            }
+        }
+        // Wave-level aggregation in compute (GPU culling, ADR 0034).
+        let subgroup_ops = vk::SubgroupFeatureFlags::BASIC
+            | vk::SubgroupFeatureFlags::VOTE
+            | vk::SubgroupFeatureFlags::BALLOT;
+        if !subgroup
+            .supported_stages
+            .contains(vk::ShaderStageFlags::COMPUTE)
+            || !subgroup.supported_operations.contains(subgroup_ops)
+        {
+            missing.push("subgroup basic/vote/ballot operations in compute");
         }
 
         let caps = OptionalCaps {
