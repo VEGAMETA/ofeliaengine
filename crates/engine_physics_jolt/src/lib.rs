@@ -65,10 +65,21 @@ fn from_quat(q: JPH_Quat) -> Quat {
 
 static INIT: Once = Once::new();
 
-/// JoltC steps every world with one process-wide temporary allocator (a stack allocator,
-/// not thread-safe), so steps of different worlds must not overlap. Uncontended with the
-/// usual single world; worlds stepping on several threads take turns.
+/// Serializes JoltC's process-wide state (uncontended with the usual single world):
+/// - every world steps with one temporary allocator (a stack allocator, not thread-safe),
+///   so steps of different worlds must not overlap;
+/// - a map from Jolt systems to JoltC systems is written when a world is created or
+///   destroyed and read by step listeners on Jolt's worker threads during a step, so
+///   creation and destruction must not overlap another world's step (they did in parallel
+///   tests: an access violation when the map rehashed under a reader).
 static STEP_LOCK: Mutex<()> = Mutex::new(());
+
+/// Holds [`STEP_LOCK`], also after a panic elsewhere (the guarded state is JoltC's).
+fn jolt_lock() -> std::sync::MutexGuard<'static, ()> {
+    STEP_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 /// Runs a Jolt job on the calling thread as soon as it is queued (`threads = 0`).
 unsafe extern "C" fn run_inline(_: *mut c_void, job: JPH_JobFunction, arg: *mut c_void) {
@@ -354,16 +365,19 @@ impl JoltBackend {
                 pair_filter,
                 object_layers,
             );
-            let system = JPH_PhysicsSystem_Create(&JPH_PhysicsSystemSettings {
-                maxBodies: settings.max_bodies,
-                numBodyMutexes: 0,
-                maxBodyPairs: settings.max_body_pairs,
-                maxContactConstraints: settings.max_contact_constraints,
-                _padding: 0,
-                broadPhaseLayerInterface: bp_interface,
-                objectLayerPairFilter: pair_filter,
-                objectVsBroadPhaseLayerFilter: object_vs_bp,
-            });
+            let system = {
+                let _serialized = jolt_lock();
+                JPH_PhysicsSystem_Create(&JPH_PhysicsSystemSettings {
+                    maxBodies: settings.max_bodies,
+                    numBodyMutexes: 0,
+                    maxBodyPairs: settings.max_body_pairs,
+                    maxContactConstraints: settings.max_contact_constraints,
+                    _padding: 0,
+                    broadPhaseLayerInterface: bp_interface,
+                    objectLayerPairFilter: pair_filter,
+                    objectVsBroadPhaseLayerFilter: object_vs_bp,
+                })
+            };
             if system.is_null() {
                 JPH_ObjectVsBroadPhaseLayerFilter_Destroy(object_vs_bp);
                 JPH_ObjectLayerPairFilter_Destroy(pair_filter);
@@ -895,9 +909,7 @@ impl PhysicsBackend for JoltBackend {
             (self.inline_jobs, 1)
         };
         let error = {
-            let _serialized = STEP_LOCK
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let _serialized = jolt_lock();
             // SAFETY: the system and job system are valid; callbacks reach `shared`, which
             // outlives the call; `STEP_LOCK` keeps JoltC's shared temporary allocator to one
             // step at a time.
@@ -1134,7 +1146,10 @@ impl Drop for JoltBackend {
             for &id in self.bodies.keys() {
                 JPH_BodyInterface_RemoveAndDestroyBody(self.body_interface, id);
             }
-            JPH_PhysicsSystem_Destroy(self.system);
+            {
+                let _serialized = jolt_lock();
+                JPH_PhysicsSystem_Destroy(self.system);
+            }
             JPH_ContactListener_Destroy(self.contact_listener);
             JPH_PhysicsStepListener_Destroy(self.step_listener);
             JPH_ObjectLayerFilter_Destroy(self.layer_filter);
