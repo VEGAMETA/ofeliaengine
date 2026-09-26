@@ -112,6 +112,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_render2d"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_platform",
+ "engine_profiler",
+ "engine_render",
+ "engine_rhi",
+ "engine_shader",
+]
+
+[[package]]
 name = "engine_rhi"
 version = "0.0.0"
 dependencies = [

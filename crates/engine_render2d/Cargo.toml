@@ -1,0 +1,27 @@
+[package]
+name = "engine_render2d"
+description = "2D renderer: batched sprites and SDF shapes on the render graph."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_profiler.workspace = true
+engine_render.workspace = true
+engine_rhi.workspace = true
+
+[dev-dependencies]
+# Recompiles the committed shaders to check them against their source.
+engine_shader.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+engine_platform.workspace = true
+
+[[bench]]
+name = "canvas"
+harness = false
