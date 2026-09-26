@@ -29,6 +29,7 @@ engine_script = { path = "crates/engine_script" }
 engine_reflect_derive = { path = "crates/engine_reflect_derive" }
 engine_render = { path = "crates/engine_render" }
 engine_render2d = { path = "crates/engine_render2d" }
+engine_ui = { path = "crates/engine_ui" }
 engine_rhi = { path = "crates/engine_rhi" }
 engine_shader = { path = "crates/engine_shader" }
 
