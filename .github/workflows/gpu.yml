@@ -78,6 +78,21 @@ jobs:
           cargo bench -p engine_render --bench graph --locked >> render.md 2>&1
           exit /b %rc%
 
+      - name: Windowed smoke test (cubes example, present through the graph, validation)
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          echo ## Cubes example (window + swapchain + graph, debug build with validation)> cubes.md
+          echo.>> cubes.md
+          echo ```>> cubes.md
+          cargo run -p engine_render --example cubes --locked -- fifo 2 300 >> cubes.md 2>&1
+          set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo run -p engine_render --example cubes --locked -- fifo 2 300 >> cubes.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          echo ```>> cubes.md
+          exit /b %rc%
+
       - name: Memory allocator benchmark, NVIDIA and AMD (release)
         if: ${{ !cancelled() }}
         shell: cmd
@@ -125,4 +140,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,memory-bench.md,shader.md,shader-bench.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,cubes.md,memory-bench.md,shader.md,shader-bench.md
