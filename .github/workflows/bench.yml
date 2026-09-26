@@ -69,6 +69,11 @@ jobs:
         shell: cmd
         run: cargo bench -p engine_ecs --bench ecs --locked > bench-ecs-engine.md
 
+      - name: cargo bench -p engine_scene --bench scene
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: cargo bench -p engine_scene --bench scene --locked > bench-scene.md
+
       - name: cargo bench -p engine_audio --bench mixer, and output device timing (muted)
         if: ${{ !cancelled() }}
         shell: cmd
@@ -102,4 +107,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-audio.md,bench-text.md,bench-ecs.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-scene.md,bench-audio.md,bench-text.md,bench-ecs.md
