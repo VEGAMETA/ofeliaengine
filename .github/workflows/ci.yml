@@ -131,6 +131,15 @@ jobs:
           cargo build --workspace --all-targets --locked --profile profiling --features engine_profiler/tracy >> logs\build.txt 2>&1 || (type logs\build.txt & echo.> logs\build.failed & exit /b 1)
           type logs\build.txt
 
+      # The last lines of each failed log as error annotations: readable through the
+      # checks API even when a commit comment cannot be posted.
+      - name: Failure annotations
+        if: ${{ failure() }}
+        shell: cmd
+        run: |
+          for %%f in (logs\*.failed) do powershell -NoProfile -Command "Get-Content -Encoding UTF8 logs\%%~nf.txt -Tail 25 | ForEach-Object { '::error title=%%~nf::' + $_ }"
+          exit /b 0
+
       - name: Post failure logs as commit comment
         if: ${{ failure() }}
         # Windows PowerShell 5.1: ref-1 has no PowerShell 7 (`pwsh`).
