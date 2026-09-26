@@ -603,3 +603,41 @@ fn reflected_components_expose_their_fields() {
     let pinfo = w.components().type_info(parent).unwrap();
     assert!(pinfo.field("prev").unwrap().attrs.hidden);
 }
+
+#[test]
+fn large_chunks_stagger_columns_within_a_page() {
+    let mut w = World::new();
+    // Enough rows to reach every size class, including 1 MiB chunks.
+    for i in 0..200_000u32 {
+        w.spawn((Pos(i as f32, 0.0), Vel(1.0, 0.0), Id(i)));
+    }
+    let archetype = w
+        .archetypes
+        .iter()
+        .find(|a| a.len() == 200_000)
+        .expect("one archetype");
+    assert!(archetype.chunk_count() > 7, "reaches the 1 MiB class");
+    for chunk in 0..archetype.chunk_count() {
+        let starts: Vec<usize> = (0..archetype.columns.len())
+            .map(|c| archetype.column_ptr(chunk, c) as usize)
+            .collect();
+        for (c, &s) in starts.iter().enumerate() {
+            assert_eq!(s % 16, 0, "column {c} aligned");
+        }
+        if chunk > 0 {
+            // Staggered classes: no two columns share a start offset within a page.
+            let mut in_page: Vec<usize> = starts.iter().map(|s| s % 4096).collect();
+            in_page.sort_unstable();
+            in_page.dedup();
+            assert_eq!(in_page.len(), starts.len(), "chunk {chunk}");
+        }
+    }
+    let mut q = QueryState::<(&mut Pos, &Vel)>::new(&mut w);
+    q.for_each(&mut w, |(p, v)| p.0 += v.0);
+    let mut sum = 0.0f64;
+    q.for_each(&mut w, |(p, _)| sum += f64::from(p.0));
+    assert_eq!(
+        sum,
+        (0..200_000u32).map(|i| f64::from(i) + 1.0).sum::<f64>()
+    );
+}
