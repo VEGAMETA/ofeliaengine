@@ -247,7 +247,7 @@ impl TextLayout {
 
     /// Splits a paragraph (at byte `offset` in the text) into runs of one font, script and
     /// direction. Whitespace and characters of the Common and Inherited scripts join the
-    /// current run.
+    /// current run when its font has them.
     fn itemize(&mut self, fonts: &Fonts, stack: &[FontId], text: &str, offset: usize) {
         let mut start = 0;
         let mut current: Option<(FontId, unicode_script::Script)> = None;
@@ -258,15 +258,22 @@ impl TextLayout {
                     char_script,
                     unicode_script::Script::Common | unicode_script::Script::Inherited
                 );
-            let font = if neutral && current.is_some() {
-                current.map(|(f, _)| f)
-            } else {
-                stack
+            let has = |id: FontId| fonts.get(id).is_some_and(|f| f.glyph(c).is_some());
+            // Neutral characters stay in the current run when its font has them; combining
+            // marks always do (they belong to the cluster before them). Otherwise the first
+            // font in the stack that has the character, and if none does, the current font
+            // (shaping synthesizes missing space variants) or the primary.
+            let font = match current {
+                Some((f, _)) if char_script == unicode_script::Script::Inherited => f,
+                Some((f, _)) if neutral && has(f) => f,
+                _ => stack
                     .iter()
                     .copied()
-                    .find(|&id| fonts.get(id).is_some_and(|f| f.glyph(c).is_some()))
-            }
-            .unwrap_or(stack[0]);
+                    .find(|&id| has(id))
+                    .unwrap_or_else(|| {
+                        current.map_or(stack[0], |(f, _)| if neutral { f } else { stack[0] })
+                    }),
+            };
             let script = if neutral {
                 current.map_or(unicode_script::Script::Latin, |(_, s)| s)
             } else {

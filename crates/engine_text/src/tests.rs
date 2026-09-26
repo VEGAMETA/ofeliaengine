@@ -263,7 +263,14 @@ fn bundled_fonts_cover_their_scripts_and_icons() {
     }
     let icons = Font::from_bytes(crate::fonts::NERD_SYMBOLS, 0).unwrap();
     // Material Design play / pause / stop / folder, Codicons gear, Font Awesome cube.
-    for c in ['\u{F040A}', '\u{F03E4}', '\u{F04DB}', '\u{F024B}', '\u{EB51}', '\u{F1B2}'] {
+    for c in [
+        '\u{F040A}',
+        '\u{F03E4}',
+        '\u{F04DB}',
+        '\u{F024B}',
+        '\u{EB51}',
+        '\u{F1B2}',
+    ] {
         assert!(icons.glyph(c).is_some(), "no icon U+{:X}", c as u32);
     }
     // The UI stack shapes text, symbols and icons from one string.
@@ -277,5 +284,8 @@ fn bundled_fonts_cover_their_scripts_and_icons() {
     let used: Vec<FontId> = layout.glyphs().iter().map(|g| g.font).collect();
     assert_eq!(used.first(), Some(&symbols), "{used:?}");
     assert_eq!(used.last(), Some(&mono), "{used:?}");
-    assert!(used[1..used.len() - 1].iter().all(|&f| f == text), "{used:?}");
+    assert!(
+        used[1..used.len() - 1].iter().all(|&f| f == text),
+        "{used:?}"
+    );
 }

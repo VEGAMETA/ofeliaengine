@@ -53,9 +53,8 @@ pub mod fonts {
     /// Codicons, Font Awesome, Octicons, Devicons…) at their usual code points, for use as
     /// a fallback after a text font. Icon sets under MIT, Apache-2.0, CC BY 4.0, OFL-1.1
     /// and the Unlicense.
-    pub static NERD_SYMBOLS: &[u8] = include_bytes!(
-        "../../../third_party/fonts/nerd-fonts-symbols/SymbolsNerdFont-Regular.ttf"
-    );
+    pub static NERD_SYMBOLS: &[u8] =
+        include_bytes!("../../../third_party/fonts/nerd-fonts-symbols/SymbolsNerdFont-Regular.ttf");
     /// Go Regular (Bigelow & Holmes, BSD-3-Clause): Latin, Cyrillic, Greek. Compact; used
     /// by tests and benchmarks.
     pub static GO_REGULAR: &[u8] = include_bytes!("../../../third_party/fonts/go/Go-Regular.ttf");
