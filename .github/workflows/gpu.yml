@@ -10,6 +10,7 @@ on:
       - crates/engine_rhi/**
       - crates/engine_platform/**
       - crates/engine_shader/**
+      - crates/engine_render/**
       - tools/**
       - Cargo.lock
       - .github/workflows/gpu.yml
@@ -55,6 +56,26 @@ jobs:
           cargo test -p engine_rhi --locked -- --nocapture --test-threads=1 >> gpu-radeon.md 2>&1
           set rc=%ERRORLEVEL%
           echo ```>> gpu-radeon.md
+          exit /b %rc%
+
+      - name: Render graph tests and benchmark, NVIDIA and AMD
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          echo ## Render graph (synchronization validation)> render.md
+          echo.>> render.md
+          echo ```>> render.md
+          cargo test -p engine_render --locked -- --nocapture --test-threads=1 >> render.md 2>&1
+          set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo test -p engine_render --locked --test graph -- --nocapture >> render.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=
+          echo ```>> render.md
+          echo.>> render.md
+          cargo bench -p engine_render --bench graph --locked >> render.md 2>&1
+          set ENGINE_ADAPTER=radeon
+          cargo bench -p engine_render --bench graph --locked >> render.md 2>&1
           exit /b %rc%
 
       - name: Memory allocator benchmark, NVIDIA and AMD (release)
@@ -104,4 +125,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,memory-bench.md,shader.md,shader-bench.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,memory-bench.md,shader.md,shader-bench.md

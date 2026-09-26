@@ -14,6 +14,7 @@ publish = false
 engine_core = { path = "crates/engine_core" }
 engine_platform = { path = "crates/engine_platform" }
 engine_profiler = { path = "crates/engine_profiler" }
+engine_render = { path = "crates/engine_render" }
 engine_rhi = { path = "crates/engine_rhi" }
 engine_shader = { path = "crates/engine_shader" }
 

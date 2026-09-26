@@ -24,6 +24,9 @@ pub struct InstanceDesc {
     pub surface: bool,
     /// Enable `VK_EXT_headless_surface` (tests and servers: swapchains without a window).
     pub headless_surface: bool,
+    /// With validation: also enable synchronization validation, which reports missing or
+    /// wrong barriers (hazards). Slower still; tests of barrier-generating code use it.
+    pub sync_validation: bool,
 }
 
 impl Default for InstanceDesc {
@@ -34,6 +37,7 @@ impl Default for InstanceDesc {
             debug_utils: true,
             surface: true,
             headless_surface: false,
+            sync_validation: false,
         }
     }
 }
@@ -169,6 +173,14 @@ impl Instance {
         };
 
         let validation = desc.validation && has_layer(VALIDATION_LAYER);
+        // VK_EXT_validation_features is provided by the layer itself.
+        let sync_validation = validation
+            && desc.sync_validation
+            // SAFETY: global command; the layer name is NUL-terminated.
+            && unsafe { entry.enumerate_instance_extension_properties(Some(VALIDATION_LAYER)) }
+                .unwrap_or_default()
+                .iter()
+                .any(|e| e.extension_name_as_c_str() == Ok(ext::validation_features::NAME));
         let debug_utils = (validation || desc.debug_utils) && has_extension(ext::debug_utils::NAME);
         let mut enabled_extensions: Vec<*const i8> = Vec::new();
         if debug_utils {
@@ -190,6 +202,9 @@ impl Instance {
         }
         if headless_surface {
             enabled_extensions.push(ext::headless_surface::NAME.as_ptr());
+        }
+        if sync_validation {
+            enabled_extensions.push(ext::validation_features::NAME.as_ptr());
         }
         let enabled_layers: Vec<*const i8> = if validation {
             vec![VALIDATION_LAYER.as_ptr()]
@@ -226,6 +241,12 @@ impl Instance {
         if debug_state.is_some() {
             // Also report problems during instance creation and destruction.
             create_info = create_info.push_next(&mut messenger_info);
+        }
+        let enabled_features = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
+        let mut validation_features =
+            vk::ValidationFeaturesEXT::default().enabled_validation_features(&enabled_features);
+        if sync_validation {
+            create_info = create_info.push_next(&mut validation_features);
         }
         // SAFETY: all pointers in `create_info` refer to locals that outlive the call.
         let raw = unsafe { entry.create_instance(&create_info, None) }

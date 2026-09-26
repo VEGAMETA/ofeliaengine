@@ -23,6 +23,7 @@ pub fn gpu(headless_surface: bool) -> Option<(Instance, Device)> {
             debug_utils: true,
             surface: false,
             headless_surface,
+            sync_validation: false,
         })?;
         let adapter = instance.select_adapter(&AdapterPreference::HighPerformance)?;
         let device = Device::new(&instance, &adapter)?;

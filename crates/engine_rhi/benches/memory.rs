@@ -205,6 +205,7 @@ fn main() {
         debug_utils: false,
         surface: false,
         headless_surface: false,
+        sync_validation: false,
     })
     .expect("Vulkan instance");
     let preference = AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);

@@ -261,6 +261,11 @@ impl Adapter {
         &self.name
     }
 
+    /// Properties of queue family `family` (queue flags, timestamp valid bits, …).
+    pub fn queue_family(&self, family: u32) -> Option<&vk::QueueFamilyProperties> {
+        self.queue_families.get(family as usize)
+    }
+
     /// Required features this adapter lacks. Empty means suitable.
     pub fn missing_features(&self) -> &[&'static str] {
         &self.missing
