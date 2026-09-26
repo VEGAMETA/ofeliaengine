@@ -3,20 +3,27 @@ name: Stress
 # The stress scene (tools/stress) on the reference machine: rendering at 1920x1080
 # uncapped, ECS, Jolt and Luau together, with a per-stage frame-time breakdown against the
 # 240 FPS target. Also the simulation alone (headless). Posted as a commit comment.
+#
+# A measurement, like Bench: after merges to main that change the scene, on a pull request
+# when it gets the `bench` label, or by hand (workflow_dispatch) after engine changes.
 on:
-  pull_request:
+  push:
+    branches: [main]
     paths:
       - tools/stress/**
       - .github/workflows/stress.yml
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
 
 concurrency:
   group: stress-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   stress:
     name: stress scene (ref-1)
+    if: github.event_name != 'pull_request' || github.event.label.name == 'bench'
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 45
     permissions:
