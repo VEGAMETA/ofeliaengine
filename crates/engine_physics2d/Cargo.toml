@@ -1,0 +1,19 @@
+[package]
+name = "engine_physics2d"
+description = "2D physics on Box2D v3 (vendored C sources behind a small C shim)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+links = "box2d"
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_profiler.workspace = true
+
+[build-dependencies]
+# Compiles the vendored Box2D v3 sources and our shim (MIT OR Apache-2.0).
+cc = { version = "1", features = ["parallel"] }

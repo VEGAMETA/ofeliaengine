@@ -4,6 +4,9 @@
 - Date: 2026-09-26
 - Research: [docs/research/physics-api.md](../research/physics-api.md)
 
+> **Update 2026-09-26 (ADR 0028):** our own 3D solver (P2) is deferred; Jolt stays the
+> physics engine. The consequences below that mention P2 apply only if it is reopened.
+
 ## Context
 
 CLAUDE.md §8 fixes the plan:
@@ -165,6 +168,14 @@ Ryzen 7 7700 (8 cores, 16 threads), bench profile, median / p99 step time in ms:
   - Jolt's results do not depend on the thread count. The test
     `awake_body_count_picks_the_thread_count` checks that switching keeps the state
     hash.
+  - ref-1 (Bench run for commit bf17f2e), median ms, best fixed setting → auto:
+    - pyramid (asleep) 0.010 (1 thread) → 0.013 (1);
+    - pile 1 000: 0.860 (16) → 0.853 (16);
+    - pile 5 000: 4.21 (16) → 4.16 (16);
+    - orbits 200: 0.055 (1) → 0.056 (1);
+    - chain 200 (joints): 0.170 (8) → 0.211 (1).
+    The chain is the one scene where 200 bodies still gain from threads (joint solving,
+    24% here). A cost estimate that counts constraints, not only bodies, would catch it.
   - The benchmark's "auto" row shows the choice per scene. In the container it
     matched the fastest fixed setting in every scene (for example the chain: 0.28 ms
     auto against 0.51 ms on 4 threads).

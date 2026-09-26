@@ -33,12 +33,13 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 | Jolt Physics (© 2021 Jorrit Rouwe) | v5.6.0 | MIT | reference physics backend `engine_physics_jolt` (ADR 0018) |
 | JoltC (© Amer Koleci and contributors) | commit 886e088675ba | MIT | C API over Jolt, bound by `engine_physics_jolt` |
 | Go fonts (© 2016 Bigelow & Holmes Inc., for the Go project) | golang/image commit b06f1de3f490 | BSD-3-Clause | Go Regular, Bold and Mono: the engine's bundled fonts and the text test font (`third_party/fonts/go`, embedded by `engine_text::fonts`) |
+| Box2D (© 2022 Erin Catto) | v3.1.1 | MIT | 2D physics, `engine_physics2d` (ADR 0028) |
 
 ## Rust crates (build dependencies)
 
 | Crate | License | Used for |
 |---|---|---|
-| cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt and JoltC sources |
+| cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt, JoltC and Box2D sources |
 
 ## Rust crates (compile-time only: procedural macros)
 

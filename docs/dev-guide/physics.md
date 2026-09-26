@@ -105,3 +105,37 @@ slower).
   hardware thread of each core; a 1 000-body pile stops gaining at 8 threads. Measure
   your scene with `cargo bench -p engine_physics_jolt --bench physics`, which sweeps 1 to
   16 threads and shows the automatic choice.
+- `PhysicsSettings::threads` sets the worker threads (0 keeps the simulation on the
+  calling thread).
+  - Small worlds (a few hundred bodies) are fastest on the calling thread: handing out
+    jobs costs more than the work.
+  - Large piles scale with threads, but usually not past the number of physical cores;
+    the second hardware thread of a core (SMT) rarely helps.
+  - Measure your scene with `cargo bench -p engine_physics_jolt --bench physics`, which
+    sweeps 1 to 16 threads.
+
+## 8. 2D physics
+
+2D games use `engine_physics2d`, a small layer over Box2D v3:
+
+```rust
+use engine_core::math::Vec2;
+use engine_physics2d::{BodyKind, Material, Shape, World2d};
+
+let mut world = World2d::new(Vec2::new(0.0, -10.0));
+let ground = world.create_body(BodyKind::Static, Vec2::ZERO, 0.0);
+world.add_shape(ground, Shape::Box { half_extents: Vec2::new(50.0, 1.0) }, Material::default())?;
+let player = world.create_body(BodyKind::Dynamic, Vec2::new(0.0, 4.0), 0.0);
+world.add_shape(player, Shape::Circle { radius: 0.5 }, Material::default())?;
+
+world.step(1.0 / 60.0, 4); // in your fixed update; 4 substeps is Box2D's default
+let position = world.transform(player)?.position;
+for contact in world.contact_begins() { /* contact.a, contact.b */ }
+```
+
+- Units are metres, kilograms and seconds. Keep moving objects between 0.1 and 10 m;
+  scale pixels to metres, for example 1 m = 32 px.
+- It currently supports boxes and circles; static, kinematic and dynamic bodies;
+  velocities, teleports and begin-contact events.
+- Joints, polygons, raycasts and sensors come when a game needs them. Ask for them.
+- It runs on one thread. The same build with the same calls gives the same result.

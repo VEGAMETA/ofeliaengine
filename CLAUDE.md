@@ -35,8 +35,8 @@ Working name of the engine in code: `engine` (crate prefix `engine_*`). Replace 
 | Graphics API | Vulkan 1.3 (`ash`), no intermediate layers such as wgpu |
 | Shaders | Slang → SPIR-V |
 | Scripting | Luau (via `mlua`, `luau` feature + native codegen) |
-| 3D physics | Own Rust implementation (goal), with Jolt as reference and fallback (§8) |
-| 2D physics | Decide via ADR: own (in the spirit of Box2D v3) or port/bindings of Box2D v3 |
+| 3D physics | Jolt (vendored, via JoltC). Own Rust implementation deferred (ADR 0028, §8) |
+| 2D physics | Box2D v3 (vendored C source behind a C shim; ADR 0028) |
 | Audio | Own mixer + DSP graph, WASAPI directly, VST3 hosting (SDK is MIT) |
 | Profiling | Tracy (mandatory everywhere) + built-in editor profiler |
 | Engine license | Decided by the humans. Until then, do not add copyleft dependencies |
@@ -58,9 +58,9 @@ Decisions change only via an ADR backed by measurements.
   engine_upscale         TAAU (own), FSR 3.1, loaders for user-supplied DLLs (Streamline, XeSS)
   engine_latency         frame pacing, limiter, VK_NV_low_latency2, VK_AMD_anti_lag
   engine_physics         PhysicsBackend trait, shared types, test scenes
-  engine_physics_native  own physics
+  engine_physics_native  own physics (deferred, ADR 0028)
   engine_physics_jolt    Jolt backend (via the JoltC C wrapper)
-  engine_physics2d
+  engine_physics2d       2D physics on Box2D v3
   engine_audio           mixer, buses, DSP, streaming, spatial audio
   engine_audio_vst3      VST3 host (scanning, isolation, PDC, state)
   engine_ecs             ECS / scene model
@@ -290,10 +290,12 @@ how to verify.
    contact events). Design the API so Jolt and our own physics are interchangeable.
 2. **P1: reference.** Jolt backend via JoltC (C wrapper) + our own Rust bindings.
    This is both the comparison baseline and the fallback.
-3. **P2: own physics in Rust.** Developed from the research (§4).
-4. **Decision.** Compare on the benchmark suite using the criteria below. If our physics does not
-   catch up with Jolt within a reasonable time, we stay on Jolt. The decision is recorded in an ADR
-   with numbers.
+3. **P2: own physics in Rust. Deferred** (team decision 2026-09-26, ADR 0028): Jolt stays the
+   3D physics. P2 is reopened only on a trigger listed in ADR 0028 (for example rollback cost
+   that Jolt's state save/restore cannot meet), with measurements.
+4. **Decision.** If P2 is reopened: compare on the benchmark suite using the criteria below. If our
+   physics does not catch up with Jolt within a reasonable time, we stay on Jolt. The decision is
+   recorded in an ADR with numbers.
 
 ### Benchmark suite (`/bench/physics`)
 Pyramids and stacks (stability), thousands of bodies in a pile, ragdolls, fast bodies (CCD),
@@ -305,7 +307,7 @@ multi-core scaling, memory, stability (jitter, tunneling), determinism.
 Initial acceptance criterion: no more than 10% slower than Jolt on the suite with comparable
 stability. Adjusted via ADR.
 
-### Directions for our own physics (to research, not dogma)
+### Directions for our own physics (if P2 is reopened; to research, not dogma)
 - Solver: soft step / TGS with substepping, graph coloring for parallelism,
   wide SIMD solver (AVX2), warm starting. Compare against XPBD.
 - Broadphase: dynamic AABB tree / BVH with incremental rebuilds; compare against SAP.
@@ -538,7 +540,7 @@ Written together with the feature, not after. At minimum:
 3. Slang pipeline with hot reload and cache → "Compile All Shaders".
 4. ECS/scene (ADR!) → serialization → editor skeleton (scene, inspector, undo, command palette).
 5. Luau with bindings, types, hot reload, DAP.
-6. Physics: `PhysicsBackend` → Jolt backend → benchmark suite → own physics (parallel track).
+6. Physics: `PhysicsBackend` → Jolt backend → benchmark suite; 2D on Box2D v3; own physics deferred (ADR 0028).
 7. Audio: WASAPI + mixer → DSP → VST3 host.
 8. Latency (Reflex/Anti-Lag via Vulkan extensions, our own measures) → upscalers (TAAU, FSR 3.1,
    Streamline/XeSS loaders).
