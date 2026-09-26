@@ -81,8 +81,11 @@ pub enum UpdateMode {
 /// How a placed viewport is scaled into its placement rectangle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scaling {
-    /// Fill the rectangle, filtered linearly.
+    /// Fill the rectangle, filtered linearly (bilinear upscaling of a lower render scale).
     Stretch,
+    /// Fill the rectangle with nearest filtering: the cheapest upscale, blocky at
+    /// non-integer ratios (for very weak hardware and retro looks).
+    StretchNearest,
     /// The largest integer scale that fits, centered, nearest filtering; the rest of the
     /// rectangle shows the clear color.
     PixelPerfect,
@@ -648,6 +651,16 @@ pub fn composite_rect(
             },
             SamplerKind::LinearClamp,
         ),
+        Scaling::StretchNearest => (
+            vk::Rect2D {
+                offset: vk::Offset2D { x: x0, y: y0 },
+                extent: vk::Extent2D {
+                    width: w,
+                    height: h,
+                },
+            },
+            SamplerKind::NearestClamp,
+        ),
         Scaling::PixelPerfect => {
             let scale = (w / size.0.max(1)).min(h / size.1.max(1)).max(1);
             let (sw, sh) = (size.0 * scale, size.1 * scale);
@@ -802,6 +815,19 @@ mod tests {
             (200, 100),
         );
         assert_eq!((rect.extent.width, rect.extent.height), (320, 180));
+    }
+
+    #[test]
+    fn stretch_nearest_fills_the_placement_with_nearest_filtering() {
+        // A 1080p window showing a 0.5 render scale: 960 × 540 scaled to 1920 × 1080.
+        let (rect, sampler) = composite_rect(
+            Placement::FULL,
+            Scaling::StretchNearest,
+            (960, 540),
+            (1920, 1080),
+        );
+        assert_eq!((rect.extent.width, rect.extent.height), (1920, 1080));
+        assert_eq!(sampler, SamplerKind::NearestClamp);
     }
 
     #[test]
