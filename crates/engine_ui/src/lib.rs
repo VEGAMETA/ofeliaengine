@@ -399,6 +399,18 @@ fn hash_id(parent: u64, key: &str) -> u64 {
     h ^ (h >> 32)
 }
 
+/// Like [`hash_id`] for [`Ui::push_id`]'s indices (a different seed, so an index and a
+/// key under the same parent are unrelated).
+fn hash_index(parent: u64, index: u64) -> u64 {
+    let mut h = parent ^ 0x8422_2325_cbf2_9ce4;
+    for b in index.to_le_bytes() {
+        h = (h ^ u64::from(b)).wrapping_mul(0x100_0000_01b3);
+    }
+    h ^= h >> 32;
+    h = h.wrapping_mul(0xd6e8_feb8_6659_fd93);
+    h ^ (h >> 32)
+}
+
 /// The UI context: frame buffers and retained state.
 pub struct Ui {
     theme: Theme,
@@ -499,6 +511,28 @@ impl Ui {
     /// The id a key gets under the current parent.
     pub fn id(&self, key: &str) -> u64 {
         hash_id(self.id_stack.last().copied().unwrap_or(0), key)
+    }
+
+    /// Makes the ids of what follows (until [`Ui::pop_id`]) depend on `index`: items of a
+    /// list can reuse the same keys without formatting strings.
+    pub fn push_id(&mut self, index: u64) {
+        let parent = self.id_stack.last().copied().unwrap_or(0);
+        self.id_stack.push(hash_index(parent, index));
+    }
+
+    /// Undoes the last [`Ui::push_id`].
+    pub fn pop_id(&mut self) {
+        self.id_stack.pop();
+    }
+
+    /// Makes the node with `id`, built in this frame (a container or leaf), react to the
+    /// mouse (and to the keyboard if `focusable`), and returns how it was used: rows,
+    /// tabs and other clickable containers.
+    pub fn sense(&mut self, id: u64, focusable: bool) -> Response {
+        if let Some(i) = self.nodes.iter().rposition(|n| n.id == id) {
+            self.last = i as u32;
+        }
+        self.interact(id, focusable)
     }
 
     fn open(&mut self, id: u64, style: Style, text: Option<TextSpan>) -> u32 {
@@ -652,6 +686,15 @@ impl Ui {
             active: active && self.input.mouse_down,
             focused,
             clicked: released_on || key_activate,
+        }
+    }
+
+    /// The draw commands of the frame ended last (valid until the next
+    /// [`Ui::begin_frame`]): for painting after querying the layout ([`Ui::rect_of`]).
+    pub fn last_frame(&self) -> Frame<'_> {
+        Frame {
+            commands: &self.commands,
+            text: &self.text,
         }
     }
 

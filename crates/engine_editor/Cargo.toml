@@ -10,8 +10,17 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+engine_core.workspace = true
 engine_ecs.workspace = true
 engine_input.workspace = true
 engine_profiler.workspace = true
 engine_reflect.workspace = true
+engine_render2d.workspace = true
 engine_scene.workspace = true
+engine_text.workspace = true
+engine_ui.workspace = true
+
+[dev-dependencies]
+# The headless shell screenshot example renders a 3D viewport and reads the image back.
+engine_render.workspace = true
+engine_rhi.workspace = true
