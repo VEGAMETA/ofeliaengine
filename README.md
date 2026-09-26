@@ -18,6 +18,7 @@ cargo build --profile shipping    # fat LTO, panic = abort
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                  # needs `cargo install cargo-deny`
+cargo run --release -p engine_cli -- shaders build <dir>   # Compile All Shaders (docs/dev-guide/shaders.md)
 ```
 
 ## GPU runner
@@ -40,10 +41,11 @@ to the pull request description under "Questions for the team".
 | Path | Contents |
 |---|---|
 | `crates/engine_core` | Foundation: job system (`jobs`), SPSC ring (`spsc`), stable hashing (`hash`), sync primitives |
-| `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings |
+| `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings, directory watching |
 | `crates/engine_profiler` | Profiling instrumentation (Tracy zones, plots, frames) |
 | `crates/engine_rhi` | Vulkan 1.3 layer: instance, adapter selection, device, queues, swapchain, frames in flight |
-| `crates/engine_shader` | Slang → SPIR-V: in-process compiler, content-addressed cache |
+| `crates/engine_shader` | Slang → SPIR-V: in-process compiler, content-addressed cache, Compile All, hot reload |
+| `tools/engine` | The `engine` command line (`engine shaders build`, `engine shaders watch`) |
 | `docs/adr` | Architecture decision records |
 | `docs/research` | Research notes behind the decisions |
 | `docs/perf` | Performance budgets, reference hardware, measurement history |
