@@ -49,6 +49,15 @@ impl core::fmt::Debug for Frames {
 /// How long `begin` waits for the GPU before reporting a hang.
 const GPU_TIMEOUT_NS: u64 = 5_000_000_000;
 
+impl Frame {
+    /// Index of the frame slot (0 .. frames in flight). Per-slot resources, such as
+    /// transient render graph memory, may be reused when a frame with the same slot
+    /// begins: the previous one has finished on the GPU.
+    pub fn slot(&self) -> usize {
+        self.slot
+    }
+}
+
 impl Frames {
     /// Creates `in_flight` (clamped to 1..=3) frame slots whose command buffers are
     /// submitted to queues of `queue_family`.
