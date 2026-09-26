@@ -506,3 +506,43 @@ fn many_chunks_across_size_classes() {
         assert_eq!(w.get::<Pos>(e), Some(&Pos(k as f32, 0.0)));
     }
 }
+
+#[test]
+fn hierarchy_links_are_plain_data_and_ordered() {
+    let mut w = World::new();
+    let root = w.spawn((Id(0),));
+    let kids: Vec<Entity> = (1..=4).map(|i| w.spawn((Id(i),))).collect();
+    for &k in &kids {
+        w.set_parent(k, Some(root)).unwrap();
+    }
+    assert_eq!(w.children(root).collect::<Vec<_>>(), kids);
+    assert_eq!(w.parent(kids[2]), Some(root));
+    // Detach from the middle, the ends, and re-attach at the end.
+    w.set_parent(kids[1], None).unwrap();
+    assert_eq!(w.children(root).collect::<Vec<_>>(), vec![kids[0], kids[2], kids[3]]);
+    w.set_parent(kids[0], None).unwrap();
+    w.set_parent(kids[3], None).unwrap();
+    assert_eq!(w.children(root).collect::<Vec<_>>(), vec![kids[2]]);
+    w.set_parent(kids[0], Some(root)).unwrap();
+    assert_eq!(w.children(root).collect::<Vec<_>>(), vec![kids[2], kids[0]]);
+    // Cycles are rejected; grandchildren work.
+    w.set_parent(kids[3], Some(kids[0])).unwrap();
+    assert_eq!(w.set_parent(root, Some(kids[3])), Err(HierarchyError::Cycle));
+    assert_eq!(w.set_parent(root, Some(root)), Err(HierarchyError::Cycle));
+    // Snapshots carry the links.
+    let mut snap = Snapshot::new();
+    w.save(&mut snap).unwrap();
+    let hash = w.state_hash();
+    w.set_parent(kids[2], None).unwrap();
+    w.restore(&snap).unwrap();
+    assert_eq!(w.state_hash(), hash);
+    assert_eq!(w.children(root).collect::<Vec<_>>(), vec![kids[2], kids[0]]);
+    // Recursive despawn removes the subtree only.
+    assert_eq!(w.despawn_recursive(kids[0]), 2);
+    assert!(!w.contains(kids[3]));
+    assert_eq!(w.children(root).collect::<Vec<_>>(), vec![kids[2]]);
+    assert_eq!(w.get::<Children>(root).map(|c| c.len()), Some(1));
+    w.set_parent(kids[2], None).unwrap();
+    assert!(w.get::<Children>(root).is_none());
+    assert_eq!(w.len(), 3);
+}

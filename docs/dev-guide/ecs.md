@@ -104,7 +104,21 @@ lifetimes.for_each(&mut world, |(entity, life)| {
 world.apply(&mut commands); // in recording order
 ```
 
-## 5. Determinism, rollback and desync checks
+## 5. Parents and children
+
+```rust
+let car = world.spawn((Position::default(),));
+let wheel = world.spawn((Position::default(),));
+world.set_parent(wheel, Some(car))?;     // appended after car's other children
+for child in world.children(car) { /* in the order they were attached */ }
+world.set_parent(wheel, None)?;          // detach
+world.despawn_recursive(car);            // car and everything under it
+```
+
+The links are ordinary plain-data components (`Parent`, `Children`): rollback and
+saving include them automatically.
+
+## 6. Determinism, rollback and desync checks
 
 The same sequence of calls always gives the same entities, the same iteration order and
 the same `world.state_hash()`, on every run and machine with the same build. This is what
@@ -135,7 +149,7 @@ let hash = world.state_hash(); // compare with the server's to detect desyncs
 - **With `par_for_each`,** only write to your own entity. For totals, use
   `par_for_each_chunk` with one output slot per chunk position, then add them up in order.
 
-## 6. Performance
+## 7. Performance
 
 - **Hot loops:** `for_each_chunk` gives you arrays the compiler turns into SIMD loops.
 - **Thousands of entities:** `par_for_each`. Below a few thousand, the sequential version

@@ -11,6 +11,8 @@
 //!   chunk and component for [`Changed`] filters.
 //! - **Commands** ([`Commands`]) defer structural changes and apply them in recording
 //!   order.
+//! - **Hierarchy** ([`Parent`], [`Children`]): intrusive, plain-data sibling lists, so
+//!   parent links are snapshotted and hashed like other components.
 //! - **Determinism** (ADR 0019): the same calls give the same entities, rows, iteration
 //!   order and [`World::state_hash`]. Iteration order is canonical (by component names),
 //!   so it does not depend on the history of which archetypes were created first, and a
@@ -21,6 +23,7 @@ mod commands;
 mod component;
 mod entity;
 mod fxhash;
+mod hierarchy;
 mod query;
 mod snapshot;
 mod storage;
@@ -33,6 +36,7 @@ pub use component::{
     Component, ComponentDesc, ComponentId, Components, MAX_COMPONENT_ALIGN, Pod, RegisterError,
 };
 pub use entity::Entity;
+pub use hierarchy::{ChildIter, Children, HierarchyError, Parent};
 pub use query::{Changed, Fetch, Filter, QueryIter, QueryState, ReadOnlyFetch, With, Without};
 pub use snapshot::{Snapshot, SnapshotError};
 pub use storage::{Archetype, CHUNK_CLASSES};

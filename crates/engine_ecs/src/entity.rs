@@ -12,6 +12,12 @@ pub struct Entity {
 }
 
 impl Entity {
+    /// A handle that never refers to a live entity (for "none" in plain-data components).
+    pub const NULL: Entity = Entity {
+        index: u32::MAX,
+        generation: u32::MAX,
+    };
+
     /// Slot index (dense, reused after despawn).
     pub const fn index(self) -> u32 {
         self.index
