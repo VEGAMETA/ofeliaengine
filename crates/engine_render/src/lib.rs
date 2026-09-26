@@ -8,6 +8,8 @@
 //! - [`upload`]: per-frame GPU data (camera, lights, draw lists) in a ring per frame slot.
 //! - [`post`]: post-processing (tonemapping from the HDR target).
 //! - [`texture`]: textures that live across frames, uploaded through the ring.
+//! - [`viewport`]: viewports: render targets with their own size, update rate and
+//!   placement; nesting, split screen, pixel-perfect scaling (ADR 0016).
 
 pub mod forward;
 pub mod graph;
@@ -15,3 +17,4 @@ pub mod mesh;
 pub mod post;
 pub mod texture;
 pub mod upload;
+pub mod viewport;

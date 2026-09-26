@@ -1,5 +1,6 @@
 //! Post-processing passes. For now: tonemapping from an HDR target to the display format
-//! (Khronos PBR Neutral with exposure), as one fullscreen-triangle pass in the graph.
+//! (Khronos PBR Neutral with exposure), as one fullscreen-triangle pass in the graph, also
+//! used to composite viewports into sub-rectangles of the output.
 
 use crate::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
 use engine_rhi::ash::vk;
@@ -20,7 +21,34 @@ struct Push {
     source: u32,
     sampler: u32,
     exposure: f32,
-    _pad: u32,
+    flags: u32,
+}
+
+/// How [`Tonemap::add_composite_pass`] writes a source into (part of) an output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Composite {
+    /// Target rectangle in output pixels, or `None` for the whole output.
+    pub rect: Option<vk::Rect2D>,
+    /// Sampler: linear for smooth scaling, nearest for pixel-exact integer scaling.
+    pub sampler: SamplerKind,
+    /// Linear multiplier before tone mapping.
+    pub exposure: f32,
+    /// Apply the tone mapper (HDR sources); `false` copies (LDR sources).
+    pub tonemap: bool,
+    /// What happens to the output first. `Load` keeps earlier composites.
+    pub load: LoadOp,
+}
+
+impl Default for Composite {
+    fn default() -> Self {
+        Self {
+            rect: None,
+            sampler: SamplerKind::LinearClamp,
+            exposure: 1.0,
+            tonemap: true,
+            load: LoadOp::DontCare,
+        }
+    }
 }
 
 /// Tonemapping into one output format.
@@ -77,19 +105,55 @@ impl Tonemap {
         output: Texture,
         exposure: f32,
     ) {
+        self.declare(
+            fg,
+            bindless,
+            "tonemap",
+            hdr,
+            output,
+            Composite {
+                exposure,
+                ..Composite::default()
+            },
+        );
+    }
+
+    /// Declares a pass that writes `source` into `composite.rect` of `output`, tonemapped
+    /// or copied, scaled with the chosen sampler. Several composites into one output
+    /// build split screens and picture-in-picture (the first clears, the others load).
+    pub fn add_composite_pass<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        source: Texture,
+        output: Texture,
+        composite: Composite,
+    ) {
+        self.declare(fg, bindless, "composite", source, output, composite);
+    }
+
+    fn declare<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        name: &'static str,
+        source: Texture,
+        output: Texture,
+        composite: Composite,
+    ) {
         let pipeline = &self.pipeline;
-        fg.add_pass("tonemap")
-            .read(hdr, Access::Sampled(ShaderStages::FRAGMENT))
-            .color(output, LoadOp::DontCare, StoreOp::Store)
+        fg.add_pass(name)
+            .read(source, Access::Sampled(ShaderStages::FRAGMENT))
+            .color(output, composite.load, StoreOp::Store)
             .execute(move |ctx| {
-                let Some(source) = ctx.sampled_index(hdr) else {
+                let Some(index) = ctx.sampled_index(source) else {
                     return;
                 };
                 let push = Push {
-                    source,
-                    sampler: Bindless::sampler(SamplerKind::LinearClamp),
-                    exposure,
-                    _pad: 0,
+                    source: index,
+                    sampler: Bindless::sampler(composite.sampler),
+                    exposure: composite.exposure,
+                    flags: u32::from(!composite.tonemap),
                 };
                 // SAFETY: `Push` is plain `repr(C)` data without padding.
                 let bytes = unsafe {
@@ -99,6 +163,7 @@ impl Tonemap {
                     )
                 };
                 let area = ctx.render_area();
+                let rect = composite.rect.unwrap_or(area);
                 // SAFETY: recording inside the pass's rendering scope.
                 unsafe {
                     pipeline.bind(ctx.cmd);
@@ -108,15 +173,15 @@ impl Tonemap {
                         ctx.cmd,
                         0,
                         &[vk::Viewport {
-                            x: 0.0,
-                            y: 0.0,
-                            width: area.extent.width as f32,
-                            height: area.extent.height as f32,
+                            x: rect.offset.x as f32,
+                            y: rect.offset.y as f32,
+                            width: rect.extent.width as f32,
+                            height: rect.extent.height as f32,
                             min_depth: 0.0,
                             max_depth: 1.0,
                         }],
                     );
-                    ctx.device.cmd_set_scissor(ctx.cmd, 0, &[area]);
+                    ctx.device.cmd_set_scissor(ctx.cmd, 0, &[rect]);
                     ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
                 }
             });

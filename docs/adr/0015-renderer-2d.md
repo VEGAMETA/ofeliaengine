@@ -5,6 +5,8 @@
 - Builds on: [ADR 0011](0011-render-graph.md), [ADR 0013](0013-bindless-and-pipelines.md),
   [ADR 0014](0014-pbr-and-shadows.md) (upload ring)
 - Research: [docs/research/renderer-2d.md](../research/renderer-2d.md)
+- Amended by: [ADR 0016](0016-viewports.md) (`Canvas::prepare` is an explicit step;
+  `Renderer2d::add_pass` takes `&Canvas`)
 
 ## Context
 

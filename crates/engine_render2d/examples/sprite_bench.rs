@@ -166,12 +166,13 @@ fn main() {
                         let target =
                             fg.create_texture("target", TextureDesc::new_2d(format, WIDTH, HEIGHT));
                         let t = Instant::now();
+                        canvas.prepare();
                         renderer
                             .add_pass(
                                 &mut fg,
                                 &mut ring,
                                 &bindless,
-                                &mut canvas,
+                                &canvas,
                                 &View2d::pixels(WIDTH, HEIGHT),
                                 target,
                                 Some([0.0, 0.0, 0.0, 1.0]),

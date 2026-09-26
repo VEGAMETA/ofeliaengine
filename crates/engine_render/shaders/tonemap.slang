@@ -1,4 +1,5 @@
-// Tonemapping: HDR scene radiance → display. A fullscreen triangle samples the HDR target
+// Tonemapping: HDR scene radiance → display. A fullscreen triangle (over the viewport the
+// pass sets, so it can fill a sub-rectangle when compositing) samples the source
 // through the bindless arrays and applies exposure and the Khronos PBR Neutral tone
 // mapper (implemented from its published description: linear below the knee, a smooth
 // highlight roll-off, desaturation of very bright colors).
@@ -11,7 +12,7 @@ struct Push
     uint source;    // bindless index of the HDR texture
     uint sampler;   // bindless sampler index
     float exposure; // linear multiplier
-    uint _pad;
+    uint flags;     // bit 0: pass through (exposure only, no tone mapping) for LDR sources
 };
 
 [[vk::push_constant]]
@@ -54,7 +55,7 @@ float3 pbr_neutral(float3 color)
 [shader("fragment")]
 float4 fragmentMain(VertexOut input) : SV_Target
 {
-    float3 hdr = g_textures[NonUniformResourceIndex(push.source)]
-        .SampleLevel(g_samplers[push.sampler], input.uv, 0).rgb;
-    return float4(pbr_neutral(hdr * push.exposure), 1.0);
+    float3 color = g_textures[NonUniformResourceIndex(push.source)]
+        .SampleLevel(g_samplers[push.sampler], input.uv, 0).rgb * push.exposure;
+    return float4((push.flags & 1) != 0 ? color : pbr_neutral(color), 1.0);
 }
