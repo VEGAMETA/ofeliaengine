@@ -38,7 +38,10 @@ the floor and 1.4 used opportunistically.
   - descriptor indexing: `descriptorIndexing`, runtime arrays, partially bound, variable
     count, update-after-bind for sampled images, storage images and storage buffers;
   - non-uniform indexing of sampled images, storage images and storage buffers;
-  - `scalarBlockLayout`, `shaderDrawParameters`, `samplerAnisotropy`.
+  - `scalarBlockLayout`, `shaderDrawParameters`, `samplerAnisotropy`;
+  - `multiDrawIndirect`, `drawIndirectFirstInstance`, and subgroup basic, vote and ballot
+    operations in compute (added by [ADR 0034](0034-gpu-culling-and-indirect-draws.md) for
+    GPU-driven drawing).
 
   An adapter lacking any of them is listed with the missing names, and the error names them all.
 - **Optional, detected and reported** (`OptionalCaps`), enabled when a feature needs it:
