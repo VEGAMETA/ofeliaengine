@@ -20,6 +20,10 @@ env:
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
+  # The vendored Jolt + JoltC static library, built once per content hash and shared by
+  # every profile, clippy and tests (crates/engine_physics_jolt/build.rs); kept between
+  # runs by the cache step below.
+  ENGINE_JOLTC_CACHE: ${{ github.workspace }}\.joltc-cache
 
 # Everything runs on Windows x64 (CLAUDE.md §15). The toolchain comes from
 # rust-toolchain.toml; rustup installs it on first use.
@@ -43,6 +47,10 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/cache@v4
+        with:
+          path: .joltc-cache
+          key: joltc-${{ runner.os }}-${{ hashFiles('third_party/**', 'crates/engine_physics_jolt/build.rs', 'crates/engine_physics_jolt/csrc/**') }}
       # cargo-deny-action is a Docker action (Linux only), so install the binary instead.
       - uses: taiki-e/install-action@v2
         with:
