@@ -29,6 +29,10 @@ use engine_physics_jolt::JoltBackend;
 use engine_script::{ScriptSettings, ScriptVm, mlua};
 use std::time::Instant;
 
+/// Simulated time per frame: one 240 Hz tick, headless and windowed alike, so every frame
+/// does the same work whatever the frame rate.
+const TICK: f32 = 1.0 / 240.0;
+
 /// Surface of a rendered cube.
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -342,11 +346,10 @@ fn main() {
     );
     if headless || !cfg!(windows) {
         let mut samples = Vec::with_capacity(frames);
-        let dt = 1.0 / 240.0;
         for f in 0..frames + 120 {
             let mut s = Stages::default();
             let start = Instant::now();
-            sim.update(dt, f as f32 * dt, &mut s);
+            sim.update(TICK, f as f32 * TICK, &mut s);
             s.frame = start.elapsed().as_secs_f64() * 1e6;
             if f >= 120 {
                 samples.push(s);
@@ -430,7 +433,6 @@ mod windowed {
         let mut draws: Vec<DrawItem<'_>> = Vec::with_capacity(sim.world.len() + 1);
         let mut samples: Vec<Stages> = Vec::with_capacity(frames_to_run);
         let start = Instant::now();
-        let mut last = Instant::now();
         let mut total = 0usize;
         let mut extent_seen = (0, 0);
         'main: loop {
@@ -444,10 +446,12 @@ mod windowed {
                 break 'main;
             }
             let frame_start = Instant::now();
-            let dt = (last.elapsed().as_secs_f32()).clamp(1.0 / 1000.0, 1.0 / 30.0);
-            last = Instant::now();
+            // One 240 Hz tick per frame, in simulated time like the headless run: with wall
+            // time, 1,500 frames at ~1,000 FPS cover 1.5 s, the pile is kicked at most once
+            // and falls asleep, and the Jolt step measures a sleeping world.
+            let dt = TICK;
             let mut s = Stages::default();
-            let t = start.elapsed().as_secs_f32();
+            let t = total as f32 * TICK;
             sim.update(dt, t, &mut s);
 
             let frame = frames.begin().unwrap();
