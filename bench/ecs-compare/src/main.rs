@@ -504,8 +504,8 @@ fn layout_study() {
             ));
         }
         println!(
-            "| chunks of {kib} KiB | {:.0} | {:.0} |",
-            cells[0], cells[1]
+            "| chunks of {kib} KiB | {:.0} | {:.0} | {:.0} |",
+            cells[0], cells[1], cells[2]
         );
     }
     println!();
