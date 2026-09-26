@@ -59,6 +59,7 @@ team".
 | `crates/engine_render` | Render graph (culling, transient memory aliasing, automatic barriers, GPU timings), forward PBR with shadows, per-frame upload ring, textures, viewports (split screen, nesting, pixel-perfect); example `cubes` |
 | `crates/engine_render2d` | 2D renderer: sprites and SDF shapes batched through bindless textures, deterministic layer / y-sort order, clipping; examples `sprites`, `sprite_bench`, `viewports` |
 | `crates/engine_script` | Luau scripting: sandboxed VM with native codegen, module hot reload with state, time and memory limits (ADR 0032) |
+| `crates/engine_editor` | Editor core: undoable transactions over the world (ADR 0031) |
 | `crates/engine_scene` | Text scenes: line-oriented, merge-friendly save and load of entities and reflected components (ADR 0029) |
 | `crates/engine_ui` | UI core for the editor and games: immediate-mode building, retained state, full-tree layout, keyboard focus, draw commands (ADR 0030) |
 | `crates/engine_physics` | Physics interface (`PhysicsBackend`), shared types, gravity fields, benchmark scenes |
