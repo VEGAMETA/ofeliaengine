@@ -114,8 +114,10 @@ configuration, 61 voices, 5 effects):
   - The engine takes exactly one period per event. So the output now keeps one period
     plus a margin queued (`OutputConfig::queue_margin_ms`, default 2 ms): 12 ms on this
     device instead of 22 ms.
-  - The next ref-1 run checks it against the whole-buffer mode for empty and late
-    wake-ups.
+  - Confirmed on ref-1 (commit `f237261`): in every mode with the margin there were 0
+    empty and 0 late wakes, with 2.0 ms still queued at each wake-up (whole-buffer mode:
+    12 ms). Output latency before the Windows engine is 12 ms instead of 22 ms, at the
+    same wake intervals (p99 10.7 ms) and render cost (p50 70 µs with 61 voices).
 - **Shorter latency on this device** needs exclusive mode (optional in §11), or a
   device/driver with small shared-mode buffers (the inbox HDAudio driver goes down to
   128 frames).
