@@ -158,7 +158,7 @@ Ryzen 7 7700 (8 cores, 16 threads), bench profile, median / p99 step time in ms:
     than the work.
 - **Default for games** (team decision, 2026-09-26): the thread count follows the load.
   - Before each step the backend counts awake bodies.
-  - Below `PhysicsSettings::single_thread_below` (default 500) the step runs on the
+  - Below `PhysicsSettings::single_thread_below` (default 300) the step runs on the
     calling thread. Otherwise it runs on every logical core (`threads` default:
     `PhysicsSettings::all_cores()`).
   - Jolt's pool starts on the first large step, so small worlds never start threads.

@@ -416,7 +416,7 @@ impl Default for PhysicsSettings {
             layers: 2,
             collides: vec![0b10, 0b11],
             threads: Self::all_cores(),
-            single_thread_below: 500,
+            single_thread_below: 300,
             gravity: Vec3::new(0.0, -9.81, 0.0),
         }
     }

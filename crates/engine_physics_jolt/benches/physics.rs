@@ -4,7 +4,7 @@
 //! total, as far as the machine has logical cores), and batched raycasts. The sweep shows
 //! where extra threads stop helping, for example on the second hardware thread (SMT) of
 //! each core. The "auto" row is the default settings: all cores, but on the calling
-//! thread below 500 awake bodies. Our own solver will run the same scenes. Prints Markdown.
+//! thread below 300 awake bodies. Our own solver will run the same scenes. Prints Markdown.
 //!
 //! ```text
 //! cargo bench -p engine_physics_jolt --bench physics

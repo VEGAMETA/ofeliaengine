@@ -92,7 +92,7 @@ slower).
 - Use `raycast_batch` and read transforms in bulk with `transforms` instead of one call
   per body.
 - Threads are picked for you before every step:
-  - fewer than `PhysicsSettings::single_thread_below` awake bodies (default 500) run on
+  - fewer than `PhysicsSettings::single_thread_below` awake bodies (default 300) run on
     the calling thread: handing out jobs would cost more than the work;
   - more run on every logical core (`PhysicsSettings::threads`, default
     `PhysicsSettings::all_cores()`). Worker threads start on the first large step.
