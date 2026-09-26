@@ -95,9 +95,9 @@ clear color, and the optional occlusion state. This replaces six positional para
 
 ## Measurements
 
-**Correctness** (`tests/occlusion.rs`, lavapipe, synchronization validation). A wall fills
-the view, with 200 cubes behind it and 20 in front of it. The counts are instances drawn
-early / late:
+**Correctness** (`tests/occlusion.rs`, synchronization validation; lavapipe, and on ref-1
+the RTX 4060 Ti and the Radeon iGPU). A wall fills the view, with 200 cubes behind it and
+20 in front of it. The counts are instances drawn early / late:
 
 | Frame | Early | Late | Why |
 |---|---:|---:|---|
@@ -106,7 +106,9 @@ early / late:
 | 3 | 21 | 0 | The wall and the cubes in front: the 200 behind it are skipped |
 | after `reset` | 0 | 221 | Same as frame 1 |
 
-Every frame is pixel-identical to frustum culling alone. 0 validation errors.
+Every frame is pixel-identical to frustum culling alone. 0 validation errors. On the
+Radeon the first version drew (20, 201) in frame 3: the wall hid behind its own depth
+(see the margin above).
 
 **Cost and gain** (`examples/draw_bench.rs`, 1920×1080, lavapipe: a CPU rasterizer, **not
 reference**, so only the proportions mean something):
@@ -116,8 +118,27 @@ reference**, so only the proportions mean something):
 | City blocks (4 m walls every 10 m, camera in a block) | 10,042 | 1,769 / 29.2 | 73 / 19.5 | +0.17 + 1.27 |
 | Inside the open field (nothing hides anything) | 10,000 | 1,735 / 17.9 | 1,735 / 18.7 | +0.37 + 1.30 |
 
-On the reference GPUs the GPU workflow reports the same table. Those numbers decide the
-default use (below) and go into `docs/perf/history.md`.
+**ref-1** (release, 1920×1080 HDR, shadow map 2048²; µs; "total" is cull + pyramid +
+forward, the shadow pass is the same in both):
+
+| GPU | Scene | Instances | Frustum only: drawn / forward / total | + occlusion: drawn / forward / cull / pyramid / total |
+|---|---|---:|---:|---:|
+| RTX 4060 Ti | City blocks | 10,042 | 1,769 / 68 / 72 | 73 / 66 / 7.6 / 23.6 / 97 |
+| RTX 4060 Ti | City blocks | 100,128 | 1,827 / 83 / 93 | 122 / 69 / 18.5 / 24.6 / 112 |
+| RTX 4060 Ti | Open field | 100,000 | 1,741 / 48 / 58 | 1,741 / 50 / 18.3 / 23.6 / 92 |
+| Radeon iGPU | City blocks | 10,042 | 1,769 / 1,813 / 1,832 | 73 / 1,402 / 47.1 / 220.1 / 1,669 |
+| Radeon iGPU | City blocks | 1,014 | 646 / 1,643 / 1,647 | 49 / 1,339 / 9.8 / 208.8 / 1,558 |
+| Radeon iGPU | Open field | 10,000 | 1,735 / 1,060 / 1,078 | 1,735 / 1,074 / 46.2 / 215.5 / 1,336 |
+
+- With cheap geometry (12-triangle cubes) the RTX draws the 1,700 frustum survivors in
+  under 0.1 ms, so skipping 95% of them saves less than the pyramid (24 µs) and the
+  second cull cost: occlusion is a loss there (+20-35%).
+- On the iGPU the skipped draws are worth 0.3-0.4 ms, and occlusion wins 5-9% in the city
+  despite a pyramid that costs 190-220 µs, 9× the RTX's.
+- In the open field it is pure overhead on both.
+- The pyramid is the cost to cut next: one dispatch per level with a barrier between
+  levels is dominated by fixed costs on the iGPU; a single-pass downsampler (as in
+  FidelityFX SPD, MIT) builds all levels in one dispatch.
 
 ## Consequences
 

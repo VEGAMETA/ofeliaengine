@@ -97,12 +97,15 @@ occlusion.reset();
   - A bad guess from last frame costs time, not pixels.
 - **Keep the draw list in a stable order.** Items are known by their position in it.
   Reordering is allowed, but the frame after it culls less well.
-- **Use it where things hide things.**
+- **Use it where things hide things, and the hidden things are expensive.**
   - In the benchmark's city (4 m walls around 10 m blocks), it drew 73 of 10,042 objects
     instead of 1,769.
-  - In an open field nothing hides anything, and the extra passes (a depth pyramid and a
-    second culling pass) are pure cost.
-  - Turn it on per camera, and compare with `draw_bench`.
+  - It pays when what it skips costs more than its own passes (a depth pyramid and a second
+    culling pass, 25-35 µs on an RTX 4060 Ti, 215-250 µs on a Radeon iGPU at 1080p). On the
+    iGPU the city got 9% faster; on the RTX, with cubes that cost almost nothing to draw,
+    it got slower. Detailed meshes and expensive materials change that.
+  - In an open field nothing hides anything, and the extra passes are pure cost.
+  - Turn it on per camera, and compare with `draw_bench` on the GPUs you target.
 - The capacity is the number of draw items whose visibility is remembered. Items beyond
   it still render correctly, but are always tested in the late phase.
 - Free the state with `unsafe { occlusion.destroy(&mut allocator) }` once the GPU is idle.
@@ -118,8 +121,7 @@ culling off, frustum only, or frustum and occlusion:
 - GPU time of the culling, depth pyramid, shadow and forward passes;
 - how many objects were drawn.
 
-The GPU workflow runs it on the reference machine, and the results are in
-`docs/perf/history.md`.
+Results from the reference machine are in `docs/perf/history.md` and ADR 0035.
 
 Rules of thumb:
 
