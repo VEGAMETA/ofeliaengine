@@ -11,6 +11,8 @@ workspace = true
 
 [dependencies]
 engine_core.workspace = true
+# Directory watchers for hot reload (Windows; the crate is empty elsewhere).
+engine_platform.workspace = true
 engine_profiler.workspace = true
 # Loads the Slang compiler library at run time (ISC). Already in the tree through ash.
 libloading = "0.8"

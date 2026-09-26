@@ -11,6 +11,8 @@ use std::sync::Arc;
 
 pub(crate) type Session = c_void;
 pub(crate) type Request = c_void;
+pub(crate) type Reflection = c_void;
+pub(crate) type ReflectionEntryPoint = c_void;
 
 /// `SlangCompileTarget::SLANG_SPIRV`.
 pub(crate) const TARGET_SPIRV: c_int = 6;
@@ -48,6 +50,13 @@ pub(crate) struct Functions {
     pub(crate) dependency_path: unsafe extern "C" fn(*mut Request, c_int) -> *const c_char,
     pub(crate) entry_point_code:
         unsafe extern "C" fn(*mut Request, c_int, *mut usize) -> *const c_void,
+    pub(crate) reflection: unsafe extern "C" fn(*mut Request) -> *mut Reflection,
+    /// `SlangUInt` is 64-bit on 64-bit targets.
+    pub(crate) reflection_entry_point_count: unsafe extern "C" fn(*mut Reflection) -> usize,
+    pub(crate) reflection_entry_point:
+        unsafe extern "C" fn(*mut Reflection, usize) -> *mut ReflectionEntryPoint,
+    pub(crate) entry_point_name: unsafe extern "C" fn(*mut ReflectionEntryPoint) -> *const c_char,
+    pub(crate) entry_point_stage: unsafe extern "C" fn(*mut ReflectionEntryPoint) -> u32,
 }
 
 /// The loaded Slang compiler library.
@@ -138,6 +147,11 @@ impl SlangLibrary {
             dependency_count: symbol!("spGetDependencyFileCount"),
             dependency_path: symbol!("spGetDependencyFilePath"),
             entry_point_code: symbol!("spGetEntryPointCode"),
+            reflection: symbol!("spGetReflection"),
+            reflection_entry_point_count: symbol!("spReflection_getEntryPointCount"),
+            reflection_entry_point: symbol!("spReflection_getEntryPointByIndex"),
+            entry_point_name: symbol!("spReflectionEntryPoint_getName"),
+            entry_point_stage: symbol!("spReflectionEntryPoint_getStage"),
         };
         let build_tag: unsafe extern "C" fn() -> *const c_char = symbol!("spGetBuildTagString");
         // SAFETY: returns a static NUL-terminated string.

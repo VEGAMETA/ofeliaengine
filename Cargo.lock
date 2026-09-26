@@ -68,6 +68,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 
 [[package]]
+name = "engine_cli"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_shader",
+]
+
+[[package]]
 name = "engine_core"
 version = "0.0.0"
 dependencies = [
@@ -105,6 +113,7 @@ name = "engine_shader"
 version = "0.0.0"
 dependencies = [
  "engine_core",
+ "engine_platform",
  "engine_profiler",
  "libloading",
 ]
