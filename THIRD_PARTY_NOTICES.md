@@ -59,10 +59,6 @@ workspace `deny.toml` license allow-list (checked 2026-09-26).
 |---|---|---|
 | Slang compiler library (from the user's Vulkan SDK or `ENGINE_SLANG_LIBRARY`) | Apache-2.0 WITH LLVM-exception | shader compilation in the editor and tools (ADR 0008) |
 
-## Vendored sources (`/third_party`)
-
-_None yet._
-
 ## Adapted code
 
 _None yet._
