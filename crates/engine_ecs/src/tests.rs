@@ -277,6 +277,7 @@ fn dynamic_components() {
             layout: core::alloc::Layout::new::<[f32; 3]>(),
             drop: None,
             pod: true,
+            type_info: None,
         })
     }
     .unwrap();
@@ -287,6 +288,7 @@ fn dynamic_components() {
             layout: core::alloc::Layout::new::<u8>(),
             drop: None,
             pod: true,
+            type_info: None,
         })
     };
     assert!(matches!(duplicate, Err(RegisterError::DuplicateName(_))));
@@ -555,4 +557,49 @@ fn hierarchy_links_are_plain_data_and_ordered() {
     w.set_parent(kids[2], None).unwrap();
     assert!(w.get::<Children>(root).is_none());
     assert_eq!(w.len(), 3);
+}
+
+#[test]
+fn reflected_components_expose_their_fields() {
+    use crate::reflect::{Reflect, Value, read};
+
+    #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
+    #[repr(C)]
+    struct Stamina {
+        #[reflect(max = 10.0)]
+        current: f32,
+        regen: f32,
+    }
+    reflect_component!(pod Stamina);
+
+    let mut w = World::new();
+    let e = w.spawn((
+        Stamina {
+            current: 4.0,
+            regen: 0.5,
+        },
+        Id(3),
+    ));
+    let id = w.component_id::<Stamina>().unwrap();
+    let info = w.components().type_info(id).unwrap();
+    assert_eq!(info.name, "Stamina");
+    assert!(
+        w.components()
+            .type_info(w.component_id::<Id>().unwrap())
+            .is_none()
+    );
+    // The editor's path: component pointer + field offset.
+    let (offset, ty, attrs) = info.path("regen").unwrap();
+    let base = w.get_raw(e, id).unwrap();
+    // SAFETY: `base` points to a live `Stamina`; the path resolved inside its description.
+    let v = unsafe { read(base.as_ptr().add(offset), ty) };
+    assert_eq!(v, Some(Value::Float(0.5)));
+    assert_eq!(attrs.max, None);
+    assert_eq!(info.field("current").unwrap().attrs.max, Some(10.0));
+    // Hierarchy components are described too (links hidden from the inspector).
+    let parent = w
+        .component_id::<Parent>()
+        .unwrap_or_else(|| w.register::<Parent>());
+    let pinfo = w.components().type_info(parent).unwrap();
+    assert!(pinfo.field("prev").unwrap().attrs.hidden);
 }

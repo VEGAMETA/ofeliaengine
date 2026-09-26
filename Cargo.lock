@@ -113,6 +113,7 @@ version = "0.0.0"
 dependencies = [
  "bytemuck",
  "engine_core",
+ "engine_reflect",
 ]
 
 [[package]]
@@ -153,6 +154,23 @@ name = "engine_profiler"
 version = "0.0.0"
 dependencies = [
  "tracy-client",
+]
+
+[[package]]
+name = "engine_reflect"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_reflect_derive",
+]
+
+[[package]]
+name = "engine_reflect_derive"
+version = "0.0.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]
