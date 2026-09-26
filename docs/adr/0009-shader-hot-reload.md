@@ -111,13 +111,30 @@ PBR-style shaders (vertex + fragment) importing one module. Hot reload rows use
 | Hot reload: edit the shared module → **first** of 48 ready | 131 ms median (streaming) |
 | Hot reload: edit the shared module → all 48 ready | 1370 ms |
 
-On ref-1 the GPU workflow runs the same benchmark with the real watcher and posts it in its
-report. The numbers go into `docs/perf/history.md`.
+ref-1 (Ryzen 7 7700, 16 threads), Slang **2026.8** from the Vulkan SDK 1.4.350, release, real
+`ReadDirectoryChangesW` watcher (GPU workflow run 36203519942):
+
+| Case | Result |
+|---|---|
+| Create a Slang session | 115 ms |
+| Compile one shader, warm session | 154 ms median |
+| Compile All, cold, 1 / 2 / 4 / 8 / 16 in parallel | 7470 / 4693 / 2880 / 1963 / 2102 ms (1.00 / 1.59 / 2.59 / 3.81 / 3.55×) |
+| Compile All, all cache hits | 2.2 ms for 48 files |
+| Hot reload: edit one shader → new SPIR-V | 167 ms median, 181 ms p90 |
+| Hot reload: small test shader, file write → new SPIR-V | 37–41 ms |
+| Hot reload: edit the shared module → first of 48 ready | 325 ms median |
+| Hot reload: edit the shared module → all 48 ready | 1966 ms |
+
+The same shader compiles 2.3× slower on ref-1 with Slang 2026.8 than in the container with
+Slang 2026.12. Parallel scaling stops at about 8 compiles (3.8×). Both point at Slang itself:
+a version difference or contention inside the library. The next step is to measure
+Slang 2026.12 on ref-1 before deciding whether the editor should bundle its own Slang
+(Apache-2.0) rather than use the SDK's.
 
 ## Consequences
 
-- **The budget holds for single-shader edits** (77 ms in the container, before pipeline
-  creation).
+- **The budget holds for single-shader edits**: 77 ms in the container and 167 ms on ref-1
+  with the SDK's Slang, before pipeline creation.
 - **A module imported by many shaders exceeds it for the last shader.** The render thread
   gets shaders as they finish, and the first arrives in ~130 ms. Next step when a renderer
   exists: compile shaders in use first (a priority hint from the pipeline registry). More
