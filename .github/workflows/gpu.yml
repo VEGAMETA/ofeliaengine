@@ -57,6 +57,16 @@ jobs:
           echo ```>> gpu-radeon.md
           exit /b %rc%
 
+      - name: Memory allocator benchmark, NVIDIA and AMD (release)
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          cargo bench -p engine_rhi --bench memory --locked > memory-bench.md 2>&1
+          set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo bench -p engine_rhi --bench memory --locked >> memory-bench.md 2>&1
+          if %rc% neq 0 exit /b %rc%
+
       - name: engine_shader tests (Slang from the Vulkan SDK)
         if: ${{ !cancelled() }}
         shell: cmd
@@ -94,4 +104,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,shader.md,shader-bench.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,memory-bench.md,shader.md,shader-bench.md
