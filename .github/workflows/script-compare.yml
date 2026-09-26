@@ -5,15 +5,9 @@ name: Script compare
 # tool cache; it is only run as a reference, nothing from it is built into the engine.
 # Output is posted as a commit comment.
 #
-# A measurement, like Bench: after merges to main that touch the scripts, or on a pull
-# request when it gets the `bench` label.
+# A measurement, like Bench, on demand only (ADR 0037): by hand (workflow_dispatch) or when
+# a pull request gets the `bench` label.
 on:
-  push:
-    branches: [main]
-    paths:
-      - bench/gdscript/**
-      - crates/engine_script/**
-      - .github/workflows/script-compare.yml
   pull_request:
     types: [labeled]
   workflow_dispatch:

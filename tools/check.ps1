@@ -1,20 +1,32 @@
-# Local version of the CI `check` job (.github/workflows/ci.yml): the same cargo commands,
-# run at below-normal priority so the desktop stays responsive, logs in target\check-logs.
+# The checks every change passes before it is merged (ADR 0037): the cargo commands of the
+# CI workflows, run on the reference machine at below-normal priority so the desktop stays
+# responsive, logs in target\check-logs.
 #
 #   powershell -File tools\check.ps1            # fmt, clippy, tests, tests with Tracy, docs
 #   powershell -File tools\check.ps1 -Gpu       # + GPU tests on the discrete GPU and the Radeon
 #                                               #   iGPU, and Slang tests (what gpu.yml tests)
 #   powershell -File tools\check.ps1 -Deny      # + cargo-deny (dependency or license changes)
+#   powershell -File tools\check.ps1 -Loom      # + loom model checks (lock-free code changes)
 #   powershell -File tools\check.ps1 -Profiles  # + builds of all four profiles (slow: fat LTO)
+#   powershell -File tools\check.ps1 -Full      # all of the above: what CI ran
 #   powershell -File tools\check.ps1 -Only clippy,test
 #
-# Exit code 0 when every step passed.
+# The checks build the working tree: uncommitted changes are reported first, since the
+# merged commit will not have them. Exit code 0 when every step passed.
 param(
     [string[]]$Only = @(),
     [switch]$Gpu,
     [switch]$Deny,
-    [switch]$Profiles
+    [switch]$Loom,
+    [switch]$Profiles,
+    [switch]$Full
 )
+if ($Full) {
+    $Gpu = $true
+    $Deny = $true
+    $Loom = $true
+    $Profiles = $true
+}
 
 $ErrorActionPreference = 'Continue'
 # Under `powershell -File`, `-Only clippy,test` arrives as one string: split it.
@@ -39,6 +51,8 @@ if ($Gpu) {
     $steps['slang'] = @('test --locked -p engine_shader -- --test-threads=1')
 }
 if ($Deny) { $steps['deny'] = @('deny --locked check') }
+# `--cfg loom` in its own target dir, or it would invalidate the normal build.
+if ($Loom) { $steps['loom'] = @('test -p engine_core --release --lib --locked loom') }
 if ($Profiles) {
     $steps['profiles'] = @(
         'build --workspace --all-targets --locked --profile dev',
@@ -50,10 +64,20 @@ if ($Profiles) {
 
 $unknown = @($Only | Where-Object { -not $steps.Contains($_) })
 if ($unknown.Count) {
-    Write-Output "unknown step(s): $($unknown -join ', '); steps: $($steps.Keys -join ', ') (gpu and slang need -Gpu, deny -Deny, profiles -Profiles)"
+    Write-Output "unknown step(s): $($unknown -join ', '); steps: $($steps.Keys -join ', ') (gpu and slang need -Gpu, deny -Deny, loom -Loom, profiles -Profiles)"
     exit 2
 }
 
+$dirty = @(git status --porcelain --untracked-files=all 2>$null)
+if ($dirty.Count) {
+    Write-Output "note: $($dirty.Count) uncommitted change(s) are checked too, but a commit would not have them:"
+    $dirty | Select-Object -First 10 | ForEach-Object { Write-Output "        $_" }
+}
+
+$stepVars = @(
+    'ENGINE_ADAPTER', 'ENGINE_REQUIRE_GPU', 'ENGINE_REQUIRE_SLANG',
+    'TRACY_SYMBOL_OFFLINE_RESOLVE', 'RUSTFLAGS', 'CARGO_TARGET_DIR'
+)
 $failed = @()
 foreach ($name in $steps.Keys) {
     if ($Only.Count -and $Only -notcontains $name) { continue }
@@ -62,6 +86,9 @@ foreach ($name in $steps.Keys) {
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $ok = $true
     foreach ($command in $steps[$name]) {
+        # Steps set these for their commands; the caller's values come back afterwards.
+        $saved = @{}
+        foreach ($var in $stepVars) { $saved[$var] = [Environment]::GetEnvironmentVariable($var) }
         $env:ENGINE_ADAPTER = ''
         if ($command.StartsWith('radeon:')) {
             $env:ENGINE_ADAPTER = 'radeon'
@@ -72,13 +99,14 @@ foreach ($name in $steps.Keys) {
         # No profiler connects to the tests: skip the Tracy client's symbol loading at start
         # (DbgHelp over every module, 4-15 s per test process; the step went 279 s -> 57 s).
         if ($name -eq 'tracy') { $env:TRACY_SYMBOL_OFFLINE_RESOLVE = '1' }
+        if ($name -eq 'loom') {
+            $env:RUSTFLAGS = '--cfg loom'
+            $env:CARGO_TARGET_DIR = 'target\loom'
+        }
         # cmd /c keeps cargo's stderr out of PowerShell's error stream (Windows PowerShell 5.1).
         cmd /c "cargo $command >> `"$log`" 2>&1"
         $code = $LASTEXITCODE
-        $env:ENGINE_ADAPTER = ''
-        $env:ENGINE_REQUIRE_GPU = ''
-        $env:ENGINE_REQUIRE_SLANG = ''
-        $env:TRACY_SYMBOL_OFFLINE_RESOLVE = ''
+        foreach ($var in $stepVars) { [Environment]::SetEnvironmentVariable($var, $saved[$var]) }
         if ($code -ne 0) { $ok = $false; break }
     }
     $time = '{0,6:N1} s' -f $watch.Elapsed.TotalSeconds

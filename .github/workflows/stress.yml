@@ -4,14 +4,10 @@ name: Stress
 # uncapped, ECS, Jolt and Luau together, with a per-stage frame-time breakdown against the
 # 240 FPS target. Also the simulation alone (headless). Posted as a commit comment.
 #
-# A measurement, like Bench: after merges to main that change the scene, on a pull request
-# when it gets the `bench` label, or by hand (workflow_dispatch) after engine changes.
+# A measurement, like Bench, on demand only (ADR 0037): by hand (workflow_dispatch) or when
+# a pull request gets the `bench` label. Usually it is run on ref-1 directly (the same two
+# commands) and recorded in docs/perf/history.md.
 on:
-  push:
-    branches: [main]
-    paths:
-      - tools/stress/**
-      - .github/workflows/stress.yml
   pull_request:
     types: [labeled]
   workflow_dispatch:

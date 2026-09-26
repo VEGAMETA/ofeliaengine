@@ -5,23 +5,11 @@ name: GPU
 # the validation layer; tests fail on any validation error. Output is posted as a commit
 # comment (job logs are not readable by the automation working on this repository).
 on:
-  # Every merge to main that touches the GPU path runs tests and benchmarks. Pull requests
-  # are checked before merging on ref-1 itself (tools/check.ps1 -Gpu), so here they run
-  # only with a label: `ci` for the tests, `bench` for tests and benchmarks.
+  # On demand only (ADR 0037): changes are checked before merging on ref-1 itself
+  # (tools/check.ps1 -Gpu). Run it by hand (tests and benchmarks), or on a pull request with
+  # a label: `ci` for the tests, `bench` for tests and benchmarks.
   pull_request:
     types: [opened, synchronize, reopened, labeled]
-    paths:
-      - crates/engine_rhi/**
-      - crates/engine_platform/**
-      - crates/engine_shader/**
-      - crates/engine_render/**
-      - crates/engine_render2d/**
-      - crates/engine_latency/**
-      - crates/engine_text/**
-      - tools/**
-      - .github/workflows/gpu.yml
-  push:
-    branches: [main]
     paths:
       - crates/engine_rhi/**
       - crates/engine_platform/**

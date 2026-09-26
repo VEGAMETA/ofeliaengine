@@ -39,6 +39,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0032](0032-scripting.md) | Scripting: Luau for game logic, Rust modules for hot loops, WASM later | Accepted (API provisional) |
 | [0034](0034-gpu-culling-and-indirect-draws.md) | GPU frustum culling and indirect instanced draws | Accepted |
 | [0035](0035-occlusion-culling.md) | Two-phase occlusion culling (hierarchical depth) | Accepted |
+| [0037](0037-checks-on-the-reference-machine.md) | Checks on the reference machine before merging; GitHub Actions on demand | Accepted |
 
 ## Template
 
