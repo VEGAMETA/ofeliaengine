@@ -207,7 +207,7 @@ fn lit_cube_through_the_graph() {
 
     // SAFETY: the device is idle.
     unsafe {
-        graph.destroy(&mut allocator);
+        graph.destroy(&mut allocator, None);
         mesh.destroy(&mut allocator);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);

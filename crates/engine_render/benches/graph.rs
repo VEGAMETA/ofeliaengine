@@ -149,7 +149,7 @@ fn main() {
     device.wait_idle().unwrap();
     // SAFETY: nothing is in use.
     unsafe {
-        graph.destroy(&mut allocator);
+        graph.destroy(&mut allocator, None);
         d.destroy_command_pool(pool, None);
     }
 }

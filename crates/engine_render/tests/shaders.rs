@@ -37,17 +37,21 @@ fn committed_spirv_matches_the_source() {
         optimize: true,
         ..CompileOptions::default()
     };
-    let output = compiler
-        .compile_file(&dir.join("mesh.slang"), &[], &options)
-        .unwrap();
-    for entry in &output.entries {
-        let file = dir.join(format!("mesh.{}.spv", entry.name));
-        let committed = std::fs::read(&file).unwrap();
-        let fresh: Vec<u8> = entry.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
-        assert!(
-            committed == fresh,
-            "{} is stale: rebuild the shaders (see this file's header)",
-            file.display()
-        );
+    let sources = engine_shader::find_shader_sources(std::slice::from_ref(&dir)).unwrap();
+    assert!(sources.len() >= 2, "{sources:?}");
+    for source in &sources {
+        let stem = source.file_stem().unwrap().to_string_lossy().into_owned();
+        let output = compiler.compile_file(source, &[], &options).unwrap();
+        for entry in &output.entries {
+            let file = dir.join(format!("{stem}.{}.spv", entry.name));
+            let committed = std::fs::read(&file).unwrap();
+            let fresh: Vec<u8> = entry.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
+            assert!(
+                committed == fresh,
+                "{} is stale: rebuild the shaders (see this file's header)",
+                file.display()
+            );
+            println!("{} is up to date", file.display());
+        }
     }
 }

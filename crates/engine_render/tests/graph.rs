@@ -323,7 +323,7 @@ fn passes_culling_aliasing_and_barriers_are_hazard_free() {
 
     // SAFETY: the device is idle.
     unsafe {
-        graph.destroy(&mut allocator);
+        graph.destroy(&mut allocator, None);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);
     }
