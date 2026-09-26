@@ -18,8 +18,13 @@ impl ShaderStages {
     pub const TASK: Self = Self(8);
     /// Mesh shader.
     pub const MESH: Self = Self(16);
-    /// Every graphics stage.
+    /// Every graphics stage, including task and mesh shaders (only valid on devices with
+    /// mesh shaders enabled).
     pub const ALL_GRAPHICS: Self = Self(1 | 2 | 8 | 16);
+    /// Vertex, fragment and compute: the stages every device has. Resources read by
+    /// "any shader" (bindless textures) use this; task and mesh readers are added
+    /// explicitly where mesh shaders are enabled.
+    pub const ALL: Self = Self(1 | 2 | 4);
 
     pub(crate) fn pipeline_stages(self) -> vk::PipelineStageFlags2 {
         let mut stages = vk::PipelineStageFlags2::empty();
@@ -304,6 +309,15 @@ impl TextureState {
         Self {
             layout: vk::ImageLayout::UNDEFINED,
             stages: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            access: vk::AccessFlags2::NONE,
+        }
+    }
+
+    /// Contents undefined, not in use (a new image before its first write).
+    pub const fn undefined() -> Self {
+        Self {
+            layout: vk::ImageLayout::UNDEFINED,
+            stages: vk::PipelineStageFlags2::NONE,
             access: vk::AccessFlags2::NONE,
         }
     }

@@ -270,6 +270,16 @@ pub struct RenderGraph {
     color_attachments: Vec<vk::RenderingAttachmentInfo<'static>>,
     timing: Option<timing::Timing>,
     stats: GraphStats,
+    /// Scopes of the frame being built, and the one new passes go into.
+    scopes: Vec<ScopeRecord>,
+    current_scope: u32,
+}
+
+/// A named group of passes (a viewport, a subsystem): labelled in captures, attributed in
+/// GPU timings.
+struct ScopeRecord {
+    id: u32,
+    label: [u8; 64],
 }
 
 // SAFETY: the callback pointers are only set and used between `begin` and the end of
@@ -306,6 +316,8 @@ impl RenderGraph {
             color_attachments: Vec::new(),
             timing: timing::Timing::new(device, frames_in_flight.max(1)),
             stats: GraphStats::default(),
+            scopes: Vec::new(),
+            current_scope: compile::NO_SCOPE,
         }
     }
 
@@ -335,6 +347,8 @@ impl RenderGraph {
         self.imports.clear();
         self.callbacks.clear();
         self.arena.reset();
+        self.scopes.clear();
+        self.current_scope = compile::NO_SCOPE;
         FrameGraph {
             slot: slot % self.physical.slots(),
             cmd,
@@ -446,11 +460,29 @@ impl<'g> FrameGraph<'g> {
         Buffer(id)
     }
 
+    /// Puts the passes declared from now on into a scope with a caller-chosen `id` (for
+    /// example a viewport's): GPU captures show them under `label` (up to 63 bytes), and
+    /// their [`PassTime::scope`] is `Some(id)`. Scopes do not nest; a new one ends the
+    /// previous one.
+    pub fn begin_scope(&mut self, id: u32, label: &str) {
+        let mut bytes = [0u8; 64];
+        let len = label.len().min(63);
+        bytes[..len].copy_from_slice(&label.as_bytes()[..len]);
+        self.graph.scopes.push(ScopeRecord { id, label: bytes });
+        self.graph.current_scope = (self.graph.scopes.len() - 1) as u32;
+    }
+
+    /// Ends the current scope: later passes belong to none.
+    pub fn end_scope(&mut self) {
+        self.graph.current_scope = compile::NO_SCOPE;
+    }
+
     /// Declares a pass. Passes run in declaration order.
     pub fn add_pass(&mut self, name: &'static str) -> PassBuilder<'_, 'g> {
         let records = &mut self.graph.records;
         records.passes.push(PassRecord::new(
             name,
+            self.graph.current_scope,
             records.accesses.len() as u32,
             self.graph.attachments.len() as u32,
         ));
@@ -527,11 +559,29 @@ impl<'g> FrameGraph<'g> {
             created_objects: realized.created_objects,
             ..GraphStats::default()
         };
+        let mut open_scope = compile::NO_SCOPE;
         for (index, pass) in graph.records.passes.iter().enumerate() {
             if !pass.needed {
                 stats.culled_passes += 1;
                 continue;
             }
+            if pass.scope != open_scope {
+                if let Some(utils) = &graph.debug_utils {
+                    if open_scope != compile::NO_SCOPE {
+                        // SAFETY: closes the scope label opened below.
+                        unsafe { utils.cmd_end_debug_utils_label(cmd) };
+                    }
+                    if let Some(scope) = graph.scopes.get(pass.scope as usize) {
+                        let label = vk::DebugUtilsLabelEXT::default().label_name(
+                            core::ffi::CStr::from_bytes_until_nul(&scope.label).unwrap_or(c"scope"),
+                        );
+                        // SAFETY: recording command buffer; the label is copied.
+                        unsafe { utils.cmd_begin_debug_utils_label(cmd, &label) };
+                    }
+                }
+                open_scope = pass.scope;
+            }
+            let scope_id = graph.scopes.get(pass.scope as usize).map(|s| s.id);
             if let Some(utils) = &graph.debug_utils {
                 let mut name = [0u8; 64];
                 let len = pass.name.len().min(63);
@@ -557,7 +607,7 @@ impl<'g> FrameGraph<'g> {
 
             if let Some(timing) = &mut graph.timing {
                 // SAFETY: recording; queries were prepared by `begin_frame`.
-                unsafe { timing.pass_begin(d, cmd, slot, pass.name) };
+                unsafe { timing.pass_begin(d, cmd, slot, pass.name, scope_id) };
             }
             let attachments =
                 &graph.attachments[pass.attachments.start as usize..pass.attachments.end as usize];
@@ -595,6 +645,12 @@ impl<'g> FrameGraph<'g> {
                 // SAFETY: matches the label begun above.
                 unsafe { utils.cmd_end_debug_utils_label(cmd) };
             }
+        }
+        if open_scope != compile::NO_SCOPE
+            && let Some(utils) = &graph.debug_utils
+        {
+            // SAFETY: closes the last scope label.
+            unsafe { utils.cmd_end_debug_utils_label(cmd) };
         }
         let finals = &graph.records.image_barriers[graph.records.final_image_barriers.start as usize
             ..graph.records.final_image_barriers.end as usize];

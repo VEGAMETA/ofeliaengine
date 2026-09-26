@@ -140,6 +140,8 @@ impl MemoryBarrier {
 #[derive(Debug)]
 pub(crate) struct PassRecord {
     pub(crate) name: &'static str,
+    /// Index into the frame's scopes, or [`NO_SCOPE`].
+    pub(crate) scope: u32,
     pub(crate) accesses: Range<u32>,
     pub(crate) attachments: Range<u32>,
     pub(crate) side_effects: bool,
@@ -149,9 +151,15 @@ pub(crate) struct PassRecord {
 }
 
 impl PassRecord {
-    pub(crate) fn new(name: &'static str, accesses_start: u32, attachments_start: u32) -> Self {
+    pub(crate) fn new(
+        name: &'static str,
+        scope: u32,
+        accesses_start: u32,
+        attachments_start: u32,
+    ) -> Self {
         Self {
             name,
+            scope,
             accesses: accesses_start..accesses_start,
             attachments: attachments_start..attachments_start,
             side_effects: false,
@@ -161,6 +169,9 @@ impl PassRecord {
         }
     }
 }
+
+/// [`PassRecord::scope`] of passes declared outside any scope.
+pub(crate) const NO_SCOPE: u32 = u32::MAX;
 
 /// Synchronization state of one resource while walking the passes.
 #[derive(Debug, Clone, Copy, Default)]
@@ -476,7 +487,9 @@ mod tests {
 
     fn pass(records: &mut Records, name: &'static str, accesses: &[(u32, AccessInfo)]) -> usize {
         let start = records.accesses.len() as u32;
-        records.passes.push(PassRecord::new(name, start, 0));
+        records
+            .passes
+            .push(PassRecord::new(name, NO_SCOPE, start, 0));
         for &(r, info) in accesses {
             records.add_access(r, info);
         }

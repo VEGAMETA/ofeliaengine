@@ -15,6 +15,8 @@ use engine_rhi::ash::{self, vk};
 pub struct PassTime {
     /// Pass name.
     pub name: &'static str,
+    /// The scope the pass was declared in ([`crate::graph::FrameGraph::begin_scope`]).
+    pub scope: Option<u32>,
     /// Time between the pass's start and end timestamps, in microseconds.
     pub gpu_us: f32,
 }
@@ -23,8 +25,8 @@ pub struct PassTime {
 struct SlotQueries {
     pool: vk::QueryPool,
     capacity: u32,
-    /// Passes recorded in this slot's last frame: name and first query index.
-    pending: Vec<(&'static str, u32)>,
+    /// Passes recorded in this slot's last frame: name, scope and first query index.
+    pending: Vec<(&'static str, Option<u32>, u32)>,
     /// Queries written in that frame.
     written: u32,
 }
@@ -116,12 +118,13 @@ impl Timing {
             };
             if read.is_ok() {
                 self.times.clear();
-                for &(name, first) in &state.pending {
+                for &(name, scope, first) in &state.pending {
                     let start = self.results[first as usize] & self.valid_mask;
                     let end = self.results[first as usize + 1] & self.valid_mask;
                     let ticks = end.wrapping_sub(start) & self.valid_mask;
                     self.times.push(PassTime {
                         name,
+                        scope,
                         gpu_us: ticks as f32 * self.period_ns / 1000.0,
                     });
                 }
@@ -179,6 +182,7 @@ impl Timing {
         cmd: vk::CommandBuffer,
         slot: usize,
         name: &'static str,
+        scope: Option<u32>,
     ) {
         let query = self.slots[slot].written;
         if query + 2 > self.slots[slot].capacity {
@@ -195,7 +199,7 @@ impl Timing {
                 query,
             )
         };
-        state.pending.push((name, query));
+        state.pending.push((name, scope, query));
         state.written += 1;
         if let Some(tracy) = &self.tracy {
             tracy.begin_zone(name, id);
