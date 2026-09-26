@@ -10,16 +10,36 @@ value are not built (CLAUDE.md §12: design from scenarios, remove the excess).
 
 ## What we keep from Godot (familiar on day one)
 
-- **Default layout:**
-  - scene tree top left, file browser bottom left;
-  - viewport in the centre;
-  - inspector on the right;
-  - output and debugger at the bottom.
-  - Docks can be moved, and layouts are saved.
+- **Default layout** (the team's own Godot setup, 2026-09-26):
+
+  ```text
+  ┌ scene tabs ───────────────────────────────┬──────────────┬──────────────┐
+  │ tool bar (select/move/rotate/scale…)      │ Scene        │ Inspector    │
+  ├───────────────────────────────────────────┤ (+ History,  │ (+ Signals)  │
+  │                                           │  Groups…)    │              │
+  │               viewport                    │ filter       │ filter       │
+  │                                           │ node tree    │ properties   │
+  ├───────────────────────────────────────────┤              │              │
+  │ file browser: folder tree │ file grid     │              │              │
+  ├───────────────────────────────────────────┴──────────────┴──────────────┤
+  │ Output · Debugger · Audio · Animation · Shader · Files       status/ver │
+  └──────────────────────────────────────────────────────────────────────────┘
+  ```
+
+  - The scene tree and the inspector sit side by side at full height on the right.
+    Both are tall lists, so neither is squeezed.
+  - The file browser sits under the viewport.
+  - Bottom panels are tabs in a thin bar and open on demand.
+  - Every dock can be moved, and layouts are saved.
+- **Play, pause and stop are quiet:**
+  - small monochrome icons at the right end of the tab row, not a coloured
+    centre-stage group;
+  - F5 / F6 / F8 as in Godot;
+  - while playing, a thin coloured edge around the viewport and a status-bar note show
+    the state, instead of big buttons.
 - **Scene tree → inspector:** select in the tree or the viewport, edit on the right;
   drag to reparent; right-click for add and duplicate.
 - **Quick open** of files and scenes by name.
-- **Play, pause and stop** buttons at the top; F5 and F6 as in Godot.
 - **A Godot keymap preset** (`Keymap::from_text`, ADR — command palette PR): the same
   shortcuts where the actions exist, so muscle memory works. Presets for Blender and
   Unity can follow.
