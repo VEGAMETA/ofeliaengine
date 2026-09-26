@@ -100,6 +100,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_render"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_profiler",
+ "engine_rhi",
+]
+
+[[package]]
 name = "engine_rhi"
 version = "0.0.0"
 dependencies = [
