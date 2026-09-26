@@ -121,6 +121,9 @@ impl Device {
         if adapter.caps.swapchain && instance.surface_enabled() {
             extensions.push(ash::khr::swapchain::NAME.as_ptr());
         }
+        if adapter.caps.memory_budget {
+            extensions.push(ash::ext::memory_budget::NAME.as_ptr());
+        }
 
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)

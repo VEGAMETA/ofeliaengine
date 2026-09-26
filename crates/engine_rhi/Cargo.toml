@@ -15,5 +15,13 @@ workspace = true
 ash = "0.38"
 engine_profiler.workspace = true
 
+[dev-dependencies]
+# Benchmark reference only (ADR 0010): MIT OR Apache-2.0; not linked into the engine.
+gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
+
 [target.'cfg(windows)'.dev-dependencies]
 engine_platform.workspace = true
+
+[[bench]]
+name = "memory"
+harness = false

@@ -9,6 +9,8 @@
 //!   queues (graphics, async compute, transfer).
 //! - [`Surface`], [`Swapchain`]: presentation (Win32 windows, or headless for tests).
 //! - [`Frames`]: frames in flight on one timeline semaphore.
+//! - [`Allocator`]: device memory, sub-allocated from blocks with an O(1) TLSF
+//!   allocator (ADR 0010).
 //!
 //! The minimum GPU tier is Vulkan 1.3 with dynamic rendering, synchronization2, timeline
 //! semaphores, buffer device address and bindless descriptor indexing (ADR 0006).
@@ -18,6 +20,7 @@ mod device;
 mod error;
 mod frames;
 mod instance;
+mod memory;
 mod swapchain;
 
 pub use adapter::{Adapter, AdapterKind, AdapterPreference, OptionalCaps};
@@ -26,4 +29,8 @@ pub use device::{Device, Queue};
 pub use error::RhiError;
 pub use frames::{Frame, Frames};
 pub use instance::{Instance, InstanceDesc, ValidationReport};
+pub use memory::{
+    Allocation, AllocationRequest, Allocator, AllocatorConfig, DedicatedTo, HeapStats,
+    MemoryLocation, ResourceKind,
+};
 pub use swapchain::{AcquiredImage, PresentMode, Surface, Swapchain, SwapchainDesc, color_range};
