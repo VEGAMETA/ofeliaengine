@@ -52,10 +52,11 @@ jobs:
       - uses: actions/checkout@v5
         with:
           clean: false
-      # cargo-deny-action is a Docker action (Linux only), so install the binary instead.
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
+      # cargo-deny-action is a Docker action (Linux only), so install the binary instead:
+      # once per runner (it stays in ~/.cargo/bin), pinned to a minor version.
+      - name: install cargo-deny
+        run: |
+          cargo deny --version 2>nul | findstr /c:"cargo-deny 0.20" >nul || cargo install cargo-deny --locked --version ~0.20
       - run: if exist logs rmdir /s /q logs & mkdir logs
 
       - name: rustfmt
@@ -132,7 +133,8 @@ jobs:
 
       - name: Post failure logs as commit comment
         if: ${{ failure() }}
-        shell: pwsh
+        # Windows PowerShell 5.1: ref-1 has no PowerShell 7 (`pwsh`).
+        shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
