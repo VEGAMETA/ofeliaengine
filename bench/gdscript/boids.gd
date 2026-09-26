@@ -2,8 +2,10 @@
 # every pair, cohesion and separation within radius 5, then integrate), for comparing
 # Godot's scripting with Luau and Rust on the same machine (ADR 0032).
 #
-#   godot --headless --script bench/gdscript/boids.gd
+#   godot --headless --script bench/gdscript/boids.gd -- out=<file.md>
 #
+# The table is printed and, with `out=`, also written to a file (the windowed godot.exe
+# may not deliver stdout when it is redirected).
 # Positions start uniformly in a 100 m cube like the Rust/Luau bench (same density; the
 # random sequence differs). Prints a Markdown table. Written for this engine's
 # benchmarks; not part of Godot.
@@ -92,10 +94,20 @@ func _init() -> void:
 		untyped.append((Time.get_ticks_usec() - t) / 1000.0)
 
 	var info := Engine.get_version_info()
-	print("### GDScript boids (Godot %s, %d agents, all pairs; ms, median of %d)\n" % [info.string, N, STEPS])
-	print("| variant | ms |")
-	print("|---|---:|")
-	print("| GDScript, static types, PackedVector3Array | %.2f |" % median(typed))
-	print("| GDScript, untyped, Array of Vector3 | %.2f |" % median(untyped))
-	print("")
+	var lines := PackedStringArray()
+	lines.append("### GDScript boids (Godot %s, %d agents, all pairs; ms, median of %d)" % [info.string, N, STEPS])
+	lines.append("")
+	lines.append("| variant | ms |")
+	lines.append("|---|---:|")
+	lines.append("| GDScript, static types, PackedVector3Array | %.2f |" % median(typed))
+	lines.append("| GDScript, untyped, Array of Vector3 | %.2f |" % median(untyped))
+	lines.append("")
+	var text := "\n".join(lines)
+	print(text)
+	for arg in OS.get_cmdline_user_args():
+		if arg.begins_with("out="):
+			var f := FileAccess.open(arg.substr(4), FileAccess.WRITE)
+			if f:
+				f.store_string(text + "\n")
+				f.close()
 	quit()
