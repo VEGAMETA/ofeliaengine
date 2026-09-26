@@ -5,6 +5,7 @@ One line per measurement (CLAUDE.md §5). Newest at the top. Hardware refers to 
 
 | Date | Commit | Scene / benchmark | Hardware | Profile | Numbers | Notes |
 |---|---|---|---|---|---|---|
+| 2026-09-26 | feat/transforms | `engine_ecs` benches/ecs.rs, transform propagation | container (4 threads, not reference) | bench | 100k entities (1k roots × 9 × 10), one root moved: 2,863 µs (World::get per child) → 2,126 µs (cached query get); nothing changed: 0.1 µs | ADR 0027 |
 | 2026-09-26 | feat/scheduler | `engine_ecs` benches/ecs.rs, schedule rows | container (4 threads, not reference) | bench | 3 independent systems × 1M: serial 6700.6 µs → pool 2808.3 µs (2.4×); 16 empty systems: serial 0.2 µs, pool 22.5 µs | ADR 0026 |
 | 2026-09-26 | 7759e54 | `engine_latency` examples/latency.rs, generic path without present_wait (GPU-timeline queue bound) | ref-1 (Radeon iGPU) | release | 12 fills, frame 6.55 ms: input → present call 6.55 ms (off, Anti-Lag 2) → 0.52 ms (generic, 1 frame queued) | ADR 0023 |
 | 2026-09-26 | ab7583b | `bench/ecs-compare` layout study + comparison | ref-1 (Ryzen 7 7700) | release | p += v over 1M rows, whole columns 458 µs; 100-byte rows in 256 KiB / 1 MiB chunks 591 / 473 µs; 24-byte rows 604–751 µs (4K aliasing). engine_ecs iterate 1M with 1 MiB chunks + staggered columns: 558 µs vs prototype 507 µs (was 680 vs 465) | ADR 0017 |

@@ -29,6 +29,7 @@ mod resource;
 mod schedule;
 mod snapshot;
 mod storage;
+mod transform;
 mod world;
 
 pub use bundle::{Bundle, MAX_BUNDLE};
@@ -47,6 +48,7 @@ pub use schedule::{
 };
 pub use snapshot::{Snapshot, SnapshotError};
 pub use storage::{Archetype, CHUNK_CLASSES};
+pub use transform::{GlobalTransform, Transform, TransformPropagation};
 pub use world::World;
 
 #[cfg(test)]

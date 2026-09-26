@@ -11,7 +11,8 @@
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
 use engine_ecs::{
-    Commands, Entity, QueryState, Schedule, Snapshot, World, bytemuck, pod_component, system,
+    Commands, Entity, GlobalTransform, QueryState, Schedule, Snapshot, TransformPropagation, World,
+    bytemuck, pod_component, system,
 };
 use std::hint::black_box;
 use std::time::Instant;
@@ -338,6 +339,55 @@ fn main() {
         rows.push((
             format!("schedule overhead: 16 empty systems, pool ({threads} threads)"),
             measure(300, || (), |_| s.run(&mut w, Some(&pool))),
+        ));
+    }
+
+    {
+        // 100k entities with transforms: 1 000 roots, each with 9 children of 10
+        // grandchildren (a typical prop / character shape).
+        let mut w = World::new();
+        let mut p = TransformPropagation::new(&mut w);
+        let mut roots = Vec::new();
+        for r in 0..1_000 {
+            let root = w.spawn((
+                engine_ecs::Transform::from_xyz(r as f32, 0.0, 0.0),
+                GlobalTransform::IDENTITY,
+            ));
+            roots.push(root);
+            for c in 0..9 {
+                let child = w.spawn((
+                    engine_ecs::Transform::from_xyz(0.0, c as f32, 0.0),
+                    GlobalTransform::IDENTITY,
+                ));
+                w.set_parent(child, Some(root)).unwrap();
+                for g in 0..10 {
+                    let leaf = w.spawn((
+                        engine_ecs::Transform::from_xyz(0.0, 0.0, g as f32),
+                        GlobalTransform::IDENTITY,
+                    ));
+                    w.set_parent(leaf, Some(child)).unwrap();
+                }
+            }
+        }
+        assert_eq!(w.len(), 100_000);
+        p.run(&mut w);
+        rows.push((
+            "transforms: propagate 100k (1k roots × 9 × 10), one root moved".into(),
+            measure(
+                50,
+                || (),
+                |_| {
+                    w.get_mut::<engine_ecs::Transform>(roots[0])
+                        .unwrap()
+                        .translation
+                        .y += 1.0;
+                    assert!(p.run(&mut w));
+                },
+            ),
+        ));
+        rows.push((
+            "transforms: 100k, nothing changed (skip)".into(),
+            measure(300, || (), |_| assert!(!p.run(&mut w))),
         ));
     }
 

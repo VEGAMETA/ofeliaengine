@@ -2,7 +2,7 @@
 //!
 //! A frame here spawns and despawns entities (directly and through commands), moves
 //! entities between archetypes, runs sequential, per-chunk, parallel and change-filtered
-//! queries, runs a parallel system schedule with commands, and saves, restores and hashes the world, as a predicting client does every
+//! queries, runs a parallel system schedule with commands, propagates transforms, and saves, restores and hashes the world, as a predicting client does every
 //! tick. After a warm-up that creates every archetype and grows every buffer, a counting
 //! global allocator must see nothing. One test per file, so nothing else allocates
 //! concurrently.
@@ -10,8 +10,8 @@
 #![allow(clippy::unwrap_used)]
 
 use engine_ecs::{
-    Changed, Commands, Entity, QueryState, Schedule, Snapshot, World, bytemuck, pod_component,
-    system,
+    Changed, Commands, Entity, GlobalTransform, QueryState, Schedule, Snapshot, Transform,
+    TransformPropagation, World, bytemuck, pod_component, system,
 };
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -63,6 +63,8 @@ struct Frame {
     moved: QueryState<&'static Position, Changed<Position>>,
     commands: Commands,
     schedule: Schedule,
+    transforms: TransformPropagation,
+    mover: Entity,
     snapshot: Snapshot,
     expired: Vec<Entity>,
     burning: Vec<Entity>,
@@ -119,6 +121,8 @@ fn frame(world: &mut World, f: &mut Frame, pool: &engine_core::jobs::ThreadPool,
 
     // Prediction: save, simulate, roll back, re-simulate.
     f.schedule.run(world, Some(pool));
+    world.get_mut::<Transform>(f.mover).unwrap().translation.x += 1.0;
+    assert!(f.transforms.run(world));
 
     world.save(&mut f.snapshot).unwrap();
     f.movement.for_each(world, |(p, _)| p.0[0] *= 0.5);
@@ -172,12 +176,30 @@ fn steady_state_frames_do_not_allocate() {
             Lifetime(u32::MAX),
         ));
     }
+    // A small hierarchy: 10 roots with 10 children each.
+    let mut mover = Entity::NULL;
+    for r in 0..10 {
+        let root = world.spawn((
+            Transform::from_xyz(r as f32, 0.0, 0.0),
+            GlobalTransform::IDENTITY,
+        ));
+        mover = root;
+        for _ in 0..10 {
+            let child = world.spawn((
+                Transform::from_xyz(0.0, 1.0, 0.0),
+                GlobalTransform::IDENTITY,
+            ));
+            world.set_parent(child, Some(root)).unwrap();
+        }
+    }
     let mut f = Frame {
         movement: QueryState::new(&mut world),
         aging: QueryState::new(&mut world),
         moved: QueryState::new(&mut world),
         commands: Commands::new(),
         schedule: schedule(),
+        transforms: TransformPropagation::new(&mut world),
+        mover,
         snapshot: Snapshot::new(),
         expired: Vec::with_capacity(1024),
         burning: Vec::with_capacity(64),

@@ -193,3 +193,27 @@ schedule.run(&mut world, Some(&pool)); // or None for one thread
   Using another system's handle panics.
 - Writing the same component in two systems serializes them, even if they touch
   different entities. Merge them or split the component when it shows in the profiler.
+
+## 9. Transforms
+
+Give an entity a `Transform` (relative to its parent) and a `GlobalTransform` (world
+space, computed for you):
+
+```rust
+let car = world.spawn((Transform::from_xyz(10.0, 0.0, 0.0), GlobalTransform::IDENTITY));
+let wheel = world.spawn((Transform::from_xyz(1.0, -0.5, 0.0), GlobalTransform::IDENTITY));
+world.set_parent(wheel, Some(car))?;
+
+let mut transforms = TransformPropagation::new(&mut world);
+schedule.add_exclusive("transforms", move |w| {
+    transforms.run(w);
+});
+```
+
+- Write `Transform`; read `GlobalTransform` (rendering, physics sync, audio).
+- `GlobalTransform` is updated when the transforms step runs. Add it after the systems
+  that move things and before the systems that read world positions.
+- If nothing moved and the hierarchy did not change, the step costs almost nothing.
+  If anything moved, every world transform is recomputed: about 2 ms per 100 000
+  entities on the 4-core test machine.
+- A child without both components cuts off its own children: they are not updated.
