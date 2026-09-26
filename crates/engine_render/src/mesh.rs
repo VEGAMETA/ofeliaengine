@@ -73,6 +73,7 @@ pub struct Mesh {
     allocation: Option<Allocation>,
     address: vk::DeviceAddress,
     vertex_count: u32,
+    bounds: (Vec3, Vec3),
 }
 
 impl Mesh {
@@ -105,12 +106,37 @@ impl Mesh {
                 .raw()
                 .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
         };
+        let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for v in vertices {
+            let p = Vec3::new(v.position[0], v.position[1], v.position[2]);
+            min = min.min(p);
+            max = max.max(p);
+        }
+        if vertices.is_empty() {
+            (min, max) = (Vec3::ZERO, Vec3::ZERO);
+        }
         Ok(Self {
             buffer,
             allocation: Some(allocation),
             address,
             vertex_count: vertices.len() as u32,
+            bounds: (min, max),
         })
+    }
+
+    /// Device address of the vertices.
+    pub fn address(&self) -> vk::DeviceAddress {
+        self.address
+    }
+
+    /// Number of vertices (three per triangle).
+    pub fn vertex_count(&self) -> u32 {
+        self.vertex_count
+    }
+
+    /// Object-space bounding box: `(min, max)`.
+    pub fn bounds(&self) -> (Vec3, Vec3) {
+        self.bounds
     }
 
     /// Frees the buffer.

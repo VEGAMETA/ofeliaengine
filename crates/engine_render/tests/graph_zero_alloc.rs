@@ -166,7 +166,7 @@ fn steady_state_frames_do_not_allocate() {
     device.wait_idle().unwrap();
     // SAFETY: nothing is in use.
     unsafe {
-        graph.destroy(&mut allocator);
+        graph.destroy(&mut allocator, None);
         d.destroy_command_pool(pool, None);
     }
 }

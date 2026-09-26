@@ -1,6 +1,8 @@
-//! Lit, rotating cubes in a window, through the whole stack: `engine_platform` window
-//! thread → swapchain and frames in flight → render graph (swapchain imported, depth
-//! transient, present transition derived) → bindless pipeline layout → vertex pulling.
+//! PBR cubes with shadows in a window, through the whole stack: `engine_platform` window
+//! thread → swapchain and frames in flight → render graph (swapchain imported, shadow map
+//! and depth transient, present transition derived) → bindless set (the shadow map's
+//! index assigned by the graph) → upload ring (frame constants and draw list) → vertex
+//! pulling.
 //!
 //! `cargo run -p engine_render --example cubes --release [fifo|mailbox|immediate] [frames-in-flight] [frames-to-run]`
 //!
@@ -21,10 +23,13 @@ fn main() {
     use engine_core::math::{Mat4, Quat, Vec3, look_at};
     use engine_platform::time::HighResTimer;
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
-    use engine_render::graph::{
-        ImportedTexture, LoadOp, RenderGraph, StoreOp, TextureDesc, TextureState,
+    use engine_render::forward::{
+        Camera, DirectionalLight, DrawItem, ForwardRenderer, Material, ShadowSettings,
     };
-    use engine_render::mesh::{Mesh, MeshRenderer, cube, perspective};
+    use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
+    use engine_render::mesh::{Mesh, cube, perspective};
+    use engine_render::post::{HDR_FORMAT, Tonemap};
+    use engine_render::upload::UploadRing;
     use engine_rhi::ash::vk;
     use engine_rhi::{
         AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
@@ -72,8 +77,20 @@ fn main() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let depth_format = vk::Format::D32_SFLOAT;
-    let renderer = MeshRenderer::new(&device, &bindless, swapchain.format(), depth_format).unwrap();
+    // The scene renders in HDR; tonemapping writes the swapchain.
+    let renderer = ForwardRenderer::new(
+        &device,
+        &bindless,
+        HDR_FORMAT,
+        depth_format,
+        ShadowSettings::default(),
+    )
+    .unwrap();
+    let tonemap = Tonemap::new(&device, &bindless, swapchain.format()).unwrap();
     let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
+    let mut ring = UploadRing::new(&device, &mut allocator, in_flight, 1 << 20).unwrap();
+    // Reused every frame: steady-state frames allocate nothing.
+    let mut draws: Vec<DrawItem<'_>> = Vec::with_capacity(26);
     let mut frames = Frames::new(&device, device.graphics.family, in_flight).unwrap();
     let mut graph = RenderGraph::new(&device, in_flight);
     let idle_timer = HighResTimer::new().unwrap();
@@ -98,6 +115,14 @@ fn main() {
         });
         if close {
             break 'main;
+        }
+        if frames_to_run.is_some() && start.elapsed() > Duration::from_secs(120) {
+            // Smoke-test mode must end even if the window never becomes visible (a locked
+            // session keeps it minimized).
+            println!(
+                "timed out after {total_frames} frames (window minimized or presentation blocked)"
+            );
+            std::process::exit(2);
         }
         if minimized {
             idle_timer.sleep(Duration::from_millis(10)).unwrap();
@@ -134,6 +159,42 @@ fn main() {
             0.1,
             200.0,
         ) * look_at(eye, Vec3::ZERO, Vec3::Y);
+        draws.clear();
+        draws.push(DrawItem {
+            mesh: &mesh,
+            world_from_object: Mat4::from_scale_rotation_translation(
+                Vec3::new(14.0, 0.2, 14.0),
+                Quat::IDENTITY,
+                Vec3::new(0.0, -0.6, 0.0),
+            ),
+            material: Material::default(),
+        });
+        for x in -2..=2 {
+            for z in -2..=2 {
+                let angle = time * (1.0 + 0.1 * (x * 5 + z) as f32);
+                draws.push(DrawItem {
+                    mesh: &mesh,
+                    world_from_object: Mat4::from_rotation_translation(
+                        Quat::from_rotation_y(angle) * Quat::from_rotation_x(angle * 0.5),
+                        Vec3::new(x as f32 * 2.0, 0.8, z as f32 * 2.0),
+                    ),
+                    material: Material {
+                        base_color: Vec3::new(
+                            0.3 + 0.15 * (x + 2) as f32,
+                            0.3,
+                            0.3 + 0.15 * (z + 2) as f32,
+                        ),
+                        metallic: if (x + z) % 2 == 0 { 1.0 } else { 0.0 },
+                        roughness: 0.25 + 0.15 * (z + 2) as f32,
+                    },
+                });
+            }
+        }
+        let light = DirectionalLight {
+            direction: Vec3::new(-0.4, -1.0, -0.3),
+            color: Vec3::splat(3.0),
+            ambient: Vec3::splat(0.08),
+        };
 
         let recording = Instant::now();
         {
@@ -147,37 +208,36 @@ fn main() {
                     desc,
                     initial: TextureState::acquired_swapchain_image(),
                     final_state: Some(TextureState::present()),
+                    sampled_index: None,
+                    storage_index: None,
                 },
             );
             let depth = fg.create_texture(
                 "depth",
                 TextureDesc::new_2d(depth_format, extent.width, extent.height),
             );
-            let (renderer, bindless, mesh) = (&renderer, &bindless, &mesh);
-            fg.add_pass("scene")
-                .color(
-                    backbuffer,
-                    LoadOp::Clear([0.02, 0.02, 0.05, 1.0]),
-                    StoreOp::Store,
-                )
-                .depth(
-                    depth,
-                    LoadOp::Clear([1.0, 0.0, 0.0, 0.0]),
-                    StoreOp::DontCare,
-                )
-                .execute(move |ctx| {
-                    for x in -2..=2 {
-                        for z in -2..=2 {
-                            let angle = time * (1.0 + 0.1 * (x * 5 + z) as f32);
-                            let world_from_object = Mat4::from_rotation_translation(
-                                Quat::from_rotation_y(angle) * Quat::from_rotation_x(angle * 0.5),
-                                Vec3::new(x as f32 * 2.0, 0.0, z as f32 * 2.0),
-                            );
-                            renderer.draw(ctx, bindless, mesh, clip_from_world, world_from_object);
-                        }
-                    }
-                });
-            fg.execute(&mut allocator).unwrap();
+            let hdr = fg.create_texture(
+                "hdr",
+                TextureDesc::new_2d(HDR_FORMAT, extent.width, extent.height),
+            );
+            ring.begin(&frame);
+            renderer.add_passes(
+                &mut fg,
+                &mut ring,
+                &bindless,
+                &draws,
+                &Camera {
+                    clip_from_world,
+                    position: eye,
+                },
+                &light,
+                hdr,
+                depth,
+                Some([0.02, 0.02, 0.05, 1.0]),
+            );
+            tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);
+            fg.execute_with_bindless(&mut allocator, Some(&bindless))
+                .unwrap();
         }
         cpu_graph += recording.elapsed();
         total_cpu_graph += recording.elapsed();
@@ -210,13 +270,13 @@ fn main() {
             let gpu_scene = graph
                 .gpu_pass_times()
                 .iter()
-                .find(|t| t.name == "scene")
+                .find(|t| t.name == "forward")
                 .map_or(0.0, |t| t.gpu_us);
             windows
                 .set_title(
                     window.id,
                     &format!(
-                        "engine cubes — {:.0} FPS, graph CPU {:.1} µs, scene GPU {:.1} µs, {:?}, {}x{}",
+                        "engine cubes — {:.0} FPS, graph CPU {:.1} µs, forward GPU {:.1} µs, {:?}, {}x{}",
                         f64::from(frame_count) / seconds,
                         cpu_graph.as_secs_f64() * 1e6 / f64::from(frame_count),
                         gpu_scene,
@@ -236,11 +296,13 @@ fn main() {
     println!("GPU pass times: {:?}", graph.gpu_pass_times());
     // SAFETY: the device is idle.
     unsafe {
-        graph.destroy(&mut allocator);
+        graph.destroy(&mut allocator, Some(&bindless));
+        ring.destroy(&mut allocator);
         mesh.destroy(&mut allocator);
     }
     drop(frames);
     drop(renderer);
+    drop(tonemap);
     drop(bindless);
     drop(allocator);
     drop(swapchain);

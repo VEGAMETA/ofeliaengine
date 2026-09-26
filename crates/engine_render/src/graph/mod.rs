@@ -49,7 +49,7 @@ use access::AccessInfo;
 use compile::{Boundary, ImageBarrier, Kind, MemoryBarrier, PassRecord, Records, ResourceRecord};
 use engine_core::arena::Arena;
 use engine_rhi::ash::{self, vk};
-use engine_rhi::{Allocator, Device, RhiError};
+use engine_rhi::{Allocator, Bindless, Device, RhiError};
 use physical::{Physical, PhysicalResources};
 use std::ptr::NonNull;
 
@@ -120,6 +120,10 @@ pub struct ImportedTexture {
     /// State to leave it in, if the owner needs one (for example
     /// [`TextureState::present`]).
     pub final_state: Option<TextureState>,
+    /// Its index in the bindless sampled-image binding, if its owner registered it.
+    pub sampled_index: Option<u32>,
+    /// Its index in the bindless storage-image binding, if its owner registered it.
+    pub storage_index: Option<u32>,
 }
 
 /// A buffer owned outside the graph.
@@ -229,6 +233,19 @@ impl PassContext<'_> {
         self.physical[texture.0 as usize].extent
     }
 
+    /// Index of a graph texture in the bindless `g_textures` array. Transient textures read
+    /// with [`Access::Sampled`] get one when the frame executes with
+    /// [`FrameGraph::execute_with_bindless`]; imported ones carry their owner's.
+    pub fn sampled_index(&self, texture: Texture) -> Option<u32> {
+        self.physical[texture.0 as usize].sampled_index
+    }
+
+    /// Index of a graph texture in the bindless `g_images` array (storage accesses), as
+    /// [`Self::sampled_index`].
+    pub fn storage_index(&self, texture: Texture) -> Option<u32> {
+        self.physical[texture.0 as usize].storage_index
+    }
+
     /// The area covered by the pass's attachments (zero for passes without any).
     pub fn render_area(&self) -> vk::Rect2D {
         self.render_area
@@ -336,15 +353,16 @@ impl RenderGraph {
         self.timing.as_ref().map_or(&[], |t| t.times())
     }
 
-    /// Frees the transient heaps and Vulkan objects.
+    /// Frees the transient heaps and Vulkan objects, and returns their bindless indices to
+    /// `bindless` (the set used with [`FrameGraph::execute_with_bindless`], if any).
     ///
     /// # Safety
     ///
     /// The GPU no longer uses any of them (the device is idle).
-    pub unsafe fn destroy(&mut self, allocator: &mut Allocator) {
+    pub unsafe fn destroy(&mut self, allocator: &mut Allocator, bindless: Option<&Bindless>) {
         // SAFETY: guaranteed by the caller.
         unsafe {
-            self.physical.destroy_all(&self.device, allocator);
+            self.physical.destroy_all(&self.device, bindless, allocator);
             if let Some(timing) = &mut self.timing {
                 timing.destroy(&self.device);
             }
@@ -406,6 +424,8 @@ impl<'g> FrameGraph<'g> {
             image: texture.image,
             view: texture.view,
             extent: texture.desc.extent(),
+            sampled_index: texture.sampled_index,
+            storage_index: texture.storage_index,
             ..Physical::default()
         };
         Texture(id)
@@ -440,14 +460,29 @@ impl<'g> FrameGraph<'g> {
 
     /// Compiles the frame, creates or reuses transient resources, and records every
     /// needed pass into the frame's command buffer.
-    pub fn execute(mut self, allocator: &mut Allocator) -> Result<(), RhiError> {
+    pub fn execute(self, allocator: &mut Allocator) -> Result<(), RhiError> {
+        self.execute_with_bindless(allocator, None)
+    }
+
+    /// [`Self::execute`], also registering transient textures that are sampled or used as
+    /// storage images in `bindless` (see [`PassContext::sampled_index`]). Use the same
+    /// set for every frame, and pass it to [`RenderGraph::destroy`].
+    pub fn execute_with_bindless(
+        mut self,
+        allocator: &mut Allocator,
+        bindless: Option<&Bindless>,
+    ) -> Result<(), RhiError> {
         engine_profiler::zone!("render::graph::execute");
-        let result = self.execute_inner(allocator);
+        let result = self.execute_inner(allocator, bindless);
         self.drop_callbacks();
         result
     }
 
-    fn execute_inner(&mut self, allocator: &mut Allocator) -> Result<(), RhiError> {
+    fn execute_inner(
+        &mut self,
+        allocator: &mut Allocator,
+        bindless: Option<&Bindless>,
+    ) -> Result<(), RhiError> {
         let graph = &mut *self.graph;
         {
             engine_profiler::zone!("render::graph::compile");
@@ -462,6 +497,7 @@ impl<'g> FrameGraph<'g> {
                     self.slot,
                     &graph.device,
                     graph.debug_utils.as_ref(),
+                    bindless,
                     allocator,
                     &mut graph.records,
                     &graph.textures,

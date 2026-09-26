@@ -30,6 +30,18 @@ pub enum Blend {
     Additive,
 }
 
+/// Depth bias for shadow maps: `constant` units plus `slope` × the polygon's depth slope,
+/// at most `clamp` (0 = no clamp).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DepthBias {
+    /// Constant factor.
+    pub constant: f32,
+    /// Slope factor.
+    pub slope: f32,
+    /// Largest bias (0 disables the clamp).
+    pub clamp: f32,
+}
+
 /// Fixed-function state and formats of a graphics pipeline.
 #[derive(Debug, Clone, Copy)]
 pub struct GraphicsPipelineDesc<'a> {
@@ -55,6 +67,8 @@ pub struct GraphicsPipelineDesc<'a> {
     pub depth_compare: vk::CompareOp,
     /// Color blending.
     pub blend: Blend,
+    /// Depth bias (shadow maps), if any.
+    pub depth_bias: Option<DepthBias>,
     /// Samples per pixel.
     pub samples: vk::SampleCountFlags,
 }
@@ -74,6 +88,7 @@ impl<'a> GraphicsPipelineDesc<'a> {
             depth_write: true,
             depth_compare: vk::CompareOp::LESS,
             blend: Blend::Opaque,
+            depth_bias: None,
             samples: vk::SampleCountFlags::TYPE_1,
         }
     }
@@ -163,11 +178,18 @@ impl Pipeline {
         let viewport = vk::PipelineViewportStateCreateInfo::default()
             .viewport_count(1)
             .scissor_count(1);
-        let raster = vk::PipelineRasterizationStateCreateInfo::default()
+        let mut raster = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(desc.cull_mode)
             .front_face(desc.front_face)
             .line_width(1.0);
+        if let Some(bias) = desc.depth_bias {
+            raster = raster
+                .depth_bias_enable(true)
+                .depth_bias_constant_factor(bias.constant)
+                .depth_bias_slope_factor(bias.slope)
+                .depth_bias_clamp(bias.clamp);
+        }
         let multisample =
             vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(desc.samples);
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
