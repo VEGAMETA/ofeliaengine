@@ -5,6 +5,7 @@ One line per measurement (CLAUDE.md §5). Newest at the top. Hardware refers to 
 
 | Date | Commit | Scene / benchmark | Hardware | Profile | Numbers | Notes |
 |---|---|---|---|---|---|---|
+| 2026-09-26 | bf17f2e | `engine_physics_jolt` benches/physics.rs, auto thread choice (< 300 awake bodies: calling thread) | ref-1 (Ryzen 7 7700) | bench | median ms, best fixed → auto: pyramid 0.010 → 0.013 (1 thread); pile 1k 0.860 → 0.853 (16); pile 5k 4.21 → 4.16 (16); orbits 0.055 → 0.056 (1); chain 0.170 (8 threads) → 0.211 (1) | ADR 0018 |
 | 2026-09-26 | feat/transforms | `engine_ecs` benches/ecs.rs, transform propagation | container (4 threads, not reference) | bench | 100k entities (1k roots × 9 × 10), one root moved: 2,863 µs (World::get per child) → 2,126 µs (cached query get); nothing changed: 0.1 µs | ADR 0027 |
 | 2026-09-26 | feat/scheduler | `engine_ecs` benches/ecs.rs, schedule rows | container (4 threads, not reference) | bench | 3 independent systems × 1M: serial 6700.6 µs → pool 2808.3 µs (2.4×); 16 empty systems: serial 0.2 µs, pool 22.5 µs | ADR 0026 |
 | 2026-09-26 | feat/physics-adaptive-threads | `engine_physics_jolt` benches/physics.rs, auto thread choice (< 300 awake bodies: calling thread) | container (4 threads, not reference) | bench | median ms, fixed 1 / 4 threads → auto: pyramid 0.003 / 0.051 → 0.003 (1); pile 1k 4.46 / 3.54 → 3.71 (4); pile 5k 40.6 / 20.3 → 20.2 (4); chain 0.275 / 0.508 → 0.278 (1); orbits 0.066 / 0.168 → 0.056 (1) | ADR 0018 |
