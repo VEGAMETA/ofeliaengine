@@ -14,6 +14,13 @@ pub enum RhiError {
     /// No adapter supports the required features. One entry per adapter:
     /// `(name, missing features)`.
     NoSuitableAdapter(Vec<(String, Vec<&'static str>)>),
+    /// No memory type allowed for the resource suits the requested location.
+    NoMemoryType {
+        /// `VkMemoryRequirements::memoryTypeBits`.
+        type_bits: u32,
+        /// Requested location.
+        location: crate::memory::MemoryLocation,
+    },
     /// A Vulkan call failed.
     Vulkan {
         /// What was being done.
@@ -47,6 +54,13 @@ impl fmt::Display for RhiError {
                 }
                 Ok(())
             }
+            Self::NoMemoryType {
+                type_bits,
+                location,
+            } => write!(
+                f,
+                "no memory type for {location:?} among the allowed types {type_bits:#b}"
+            ),
             Self::Vulkan { call, result } => write!(f, "{call} failed: {result}"),
         }
     }

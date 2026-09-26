@@ -71,6 +71,8 @@ pub struct OptionalCaps {
     pub device_fault: bool,
     /// `VK_KHR_calibrated_timestamps` or the EXT version (CPU/GPU timeline correlation).
     pub calibrated_timestamps: bool,
+    /// `VK_EXT_memory_budget` (per-heap budget and usage from the OS).
+    pub memory_budget: bool,
 }
 
 /// A physical device and what it can do.
@@ -90,6 +92,10 @@ pub struct Adapter {
     pub driver: String,
     /// Total size of device-local memory heaps in bytes.
     pub device_local_bytes: u64,
+    /// Memory heaps and types.
+    pub memory: vk::PhysicalDeviceMemoryProperties,
+    /// Device limits (alignments, granularities, counts).
+    pub limits: vk::PhysicalDeviceLimits,
     pub(crate) queue_families: Vec<vk::QueueFamilyProperties>,
     missing: Vec<&'static str>,
     /// Optional capabilities.
@@ -206,6 +212,7 @@ impl Adapter {
             device_fault: has(ash::ext::device_fault::NAME),
             calibrated_timestamps: has(ash::khr::calibrated_timestamps::NAME)
                 || has(ash::ext::calibrated_timestamps::NAME),
+            memory_budget: has(ash::ext::memory_budget::NAME),
         };
 
         let kind = match props.device_type {
@@ -237,6 +244,8 @@ impl Adapter {
             api_version: props.api_version,
             driver: format!("{driver_name} {driver_info}").trim().to_owned(),
             device_local_bytes,
+            memory,
+            limits: props.limits,
             queue_families,
             missing,
             caps,
