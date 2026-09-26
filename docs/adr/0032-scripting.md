@@ -47,6 +47,22 @@ bench profile. 1,000 agents, all pairs (1M distance tests), one step:
 | Luau native, f32 in buffers | 5.71 | 4.4 |
 | Luau interpreted, f32 in buffers | 76.41 | 58.4 |
 
+**ref-1** (Ryzen 7 7700; Script compare workflow, commit f413130), same step, with
+Godot 4.7.2-stable's GDScript on the same machine:
+
+| variant | ms | × Rust |
+|---|---:|---:|
+| Rust (f32 arrays) | 0.68 | 1.0 |
+| Luau native (`ScriptVm`) | 3.25 | 4.8 |
+| Luau interpreted | 20.80 | 30.6 |
+| GDScript, static types, `PackedVector3Array` | 39.68 | 58 |
+| GDScript, untyped, `Array` of `Vector3` | 68.20 | 100 |
+
+- Luau native is **12× faster than typed GDScript** and 21× faster than untyped.
+- Even the Luau interpreter is 1.9× faster than typed GDScript. (The GDScript
+  positions come from Godot's RNG with the same distribution: the same density, not
+  the same sequence.)
+
 - **Native codegen matters:** it is 5× faster than the interpreter on vector code.
 - **A per-module environment must be marked safe.**
   - Otherwise Luau assumes builtins may be replaced and turns off fast calls and import
