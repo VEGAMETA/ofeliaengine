@@ -159,5 +159,5 @@ jobs:
           where cargo >> logs\env.txt 2>&1
           cargo --version >> logs\env.txt 2>&1
           dir logs >> logs\env.txt 2>&1
-          powershell -NoProfile -Command "$md = @(); foreach ($f in Get-ChildItem logs -Filter *.txt) { $md += '#### ' + $f.BaseName; $md += ''; $md += '```'; $md += (Get-Content -Encoding UTF8 $f.FullName | Select-Object -Last 40); $md += '```'; $md += '' }; $md | Out-File -Encoding utf8 ci-report.md"
+          powershell -NoProfile -Command "$md = @(); foreach ($f in Get-ChildItem logs -Filter *.txt) { $md += '#### ' + $f.BaseName; $md += ''; $md += '```'; $n = 40; if (Test-Path (Join-Path logs ($f.BaseName + '.failed'))) { $n = 150 }; $md += (Get-Content -Encoding UTF8 $f.FullName | Select-Object -Last $n); $md += '```'; $md += '' }; $md | Out-File -Encoding utf8 ci-report.md"
           powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "CI check (ref-1): log tails" -Files ci-report.md
