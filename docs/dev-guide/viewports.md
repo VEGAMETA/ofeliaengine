@@ -44,6 +44,7 @@ let minimap = viewports.create(ViewportDesc {
 | `parent` | The viewport that shows this one. It renders first, so the parent sees this frame's picture. |
 | `placement` | Where it appears in the window: `rect` is left, top, width, height in 0..1; higher `order` is on top. |
 | `scaling: PixelPerfect` | Integer scaling with sharp pixels and borders (letterboxing). |
+| `scaling: StretchNearest` | Fills the placement with nearest filtering: the cheapest upscale for weak hardware (blocky at non-integer ratios). |
 | `exposure`, `tonemap` | Post-processing when shown in the window (`tonemap: false` for already-final colors). |
 | `clear` | Background color, passed to your content. |
 
@@ -113,3 +114,20 @@ Draw with `Quad::solid` and `Quad::sprite`, not the smooth shapes, for hard pixe
 `viewports.gpu_time_us(&graph, id)` is the GPU time of a viewport's passes in the last
 completed frame. In RenderDoc or Nsight, a viewport's passes appear under a label with
 its name.
+
+## Lower resolution for weak hardware
+
+Render the 3D viewport below the window's resolution and let the compositor scale it:
+
+```rust
+ViewportDesc {
+    size: ViewportSize::Placement { scale: 0.5 }, // 960 × 540 in a 1080p window
+    scaling: Scaling::Stretch,                    // bilinear (smooth)
+    // scaling: Scaling::StretchNearest,          // nearest (sharp, blocky, cheapest)
+    ..ViewportDesc::default()
+}
+```
+
+- UI in its own viewport at scale 1 stays sharp.
+- Better upscalers (own TAAU, FSR, DLSS, XeSS) plug in behind the same render scale
+  later (CLAUDE.md §6).
