@@ -68,6 +68,7 @@ fn main() {
             height: size.1,
             present_mode,
             srgb: true,
+            low_latency: false,
         },
     )
     .unwrap();

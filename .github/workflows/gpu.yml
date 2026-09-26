@@ -12,6 +12,7 @@ on:
       - crates/engine_shader/**
       - crates/engine_render/**
       - crates/engine_render2d/**
+      - crates/engine_latency/**
       - tools/**
       - Cargo.lock
       - .github/workflows/gpu.yml
@@ -126,6 +127,28 @@ jobs:
           if %rc% equ 0 set rc=%ERRORLEVEL%
           exit /b %rc%
 
+      - name: Latency (Reflex / Anti-Lag 2 / generic), NVIDIA and AMD
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          echo ## Latency: validation run (debug, 60 frames per configuration)> latency.md
+          echo.>> latency.md
+          echo ```>> latency.md
+          cargo run -p engine_latency --example latency --locked -- 60 8 >> latency.md 2>&1
+          set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo run -p engine_latency --example latency --locked -- 60 4 >> latency.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          echo ```>> latency.md
+          echo.>> latency.md
+          set ENGINE_ADAPTER=
+          cargo run -p engine_latency --release --example latency --locked -- 300 48 >> latency.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo run -p engine_latency --release --example latency --locked -- 300 12 >> latency.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          exit /b %rc%
+
       - name: Memory allocator benchmark, NVIDIA and AMD (release)
         if: ${{ !cancelled() }}
         shell: cmd
@@ -173,4 +196,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,cubes.md,render2d.md,memory-bench.md,shader.md,shader-bench.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,cubes.md,render2d.md,latency.md,memory-bench.md,shader.md,shader-bench.md

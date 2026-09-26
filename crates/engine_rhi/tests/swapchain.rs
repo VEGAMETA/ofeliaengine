@@ -36,6 +36,7 @@ fn headless_present_loop_with_resize() {
             height: 96,
             present_mode: PresentMode::Mailbox,
             srgb: true,
+            low_latency: false,
         },
     )
     .unwrap();
