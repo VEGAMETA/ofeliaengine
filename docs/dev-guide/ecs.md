@@ -128,6 +128,10 @@ let hash = world.state_hash(); // compare with the server's to detect desyncs
   rendering and editors.
 - **Do not iterate `HashMap`s in simulation code.** Their order is random. Use queries,
   sorted vectors or ordered maps.
+- **Across different machines,** `sin`, `cos`, `exp` and friends from the standard
+  library may round differently (they come from the platform's math library). Same build
+  and CPU class is fine. For lockstep between different PCs, use deterministic
+  replacements (planned in `engine_core`, CLAUDE.md §8).
 - **With `par_for_each`,** only write to your own entity. For totals, use
   `par_for_each_chunk` with one output slot per chunk position, then add them up in order.
 

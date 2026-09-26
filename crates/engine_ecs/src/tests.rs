@@ -423,6 +423,8 @@ fn parallel_iteration_matches_sequential() {
         .unwrap();
     let mut a = World::new();
     churn(&mut a, 5, 30_000);
+    // Enough rows for several chunks even when Miri shortens the churn.
+    a.spawn_batch((0..1_500u32).map(|i| (Id(i), Pos(i as f32, 1.0), Vel(0.5, 0.25))));
     let mut snap = Snapshot::new();
     a.save(&mut snap).unwrap();
     let step = |p: &mut Pos, v: &Vel| {
