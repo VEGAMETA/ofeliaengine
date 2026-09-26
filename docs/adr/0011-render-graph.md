@@ -114,7 +114,19 @@ record, steady state, empty callbacks.
 - `tests/graph.rs`: correct pixels and buffer contents over 6 frames on 2 slots. Culled
   passes never run, aliased memory is shared, objects are reused, and synchronization
   validation reports 0 errors.
-- The GPU workflow runs the tests and the benchmark on NVIDIA and AMD (ref-1).
+- ref-1 (GPU workflow on commit 7c43e1e):
+  - synchronization validation reports 0 errors on the RTX 4060 Ti and the Radeon iGPU;
+  - 0 heap allocations per frame;
+  - GPU times per pass are 1–12 µs.
+
+  | passes | RTX 4060 Ti µs / frame (per pass) | Radeon iGPU µs / frame (per pass) |
+  |---|---|---|
+  | 16 | 13.5 (0.84) | 41.6 (2.60) |
+  | 64 | 54.3 (0.85) | 139.8 (2.18) |
+  | 256 | 216.2 (0.84) | 544.6 (2.13) |
+
+  Real drivers dominate the recording cost (barriers, `vkCmdBeginRendering`). The AMD
+  driver costs about 2.5× the NVIDIA one per pass.
 
 ## Consequences
 
