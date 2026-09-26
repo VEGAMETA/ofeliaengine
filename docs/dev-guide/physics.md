@@ -91,11 +91,17 @@ slower).
 - Let bodies sleep (`allow_sleeping`, on by default): sleeping bodies cost almost nothing.
 - Use `raycast_batch` and read transforms in bulk with `transforms` instead of one call
   per body.
-- `PhysicsSettings::threads` sets the worker threads (0 keeps the simulation on the
-  calling thread).
-  - Small worlds (a few hundred bodies) are fastest on the calling thread: handing out
-    jobs costs more than the work.
-  - Large piles scale with threads, but usually not past the number of physical cores;
-    the second hardware thread of a core (SMT) rarely helps.
-  - Measure your scene with `cargo bench -p engine_physics_jolt --bench physics`, which
-    sweeps 1 to 16 threads.
+- Threads are picked for you before every step:
+  - fewer than `PhysicsSettings::single_thread_below` awake bodies (default 300) run on
+    the calling thread: handing out jobs would cost more than the work;
+  - more run on every logical core (`PhysicsSettings::threads`, default
+    `PhysicsSettings::all_cores()`). Worker threads start on the first large step.
+  - `stats().step_threads` shows what the last step used.
+  - The result does not depend on the choice, so switching is safe for replays and
+    networking.
+  - `threads: 0` keeps the simulation on the calling thread always; `single_thread_below:
+    0` always uses the workers.
+- On ref-1 (8 cores, 16 threads) a 5 000-body pile gains another 27% from the second
+  hardware thread of each core; a 1 000-body pile stops gaining at 8 threads. Measure
+  your scene with `cargo bench -p engine_physics_jolt --bench physics`, which sweeps 1 to
+  16 threads and shows the automatic choice.

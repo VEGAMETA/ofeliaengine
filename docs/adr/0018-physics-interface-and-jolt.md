@@ -156,9 +156,18 @@ Ryzen 7 7700 (8 cores, 16 threads), bench profile, median / p99 step time in ms:
   - The 1 000-body pile gains nothing past the 8 physical cores.
   - Small or sleeping scenes are fastest on one or two threads: job hand-out costs more
     than the work.
-- **Default for games:** as many threads as physical cores (minus the render and audio
-  threads) for large simulations; 0 (the calling thread) for small ones. The dev guide
-  says to measure with this benchmark.
+- **Default for games** (team decision, 2026-09-26): the thread count follows the load.
+  - Before each step the backend counts awake bodies.
+  - Below `PhysicsSettings::single_thread_below` (default 300) the step runs on the
+    calling thread. Otherwise it runs on every logical core (`threads` default:
+    `PhysicsSettings::all_cores()`).
+  - Jolt's pool starts on the first large step, so small worlds never start threads.
+  - Jolt's results do not depend on the thread count. The test
+    `awake_body_count_picks_the_thread_count` checks that switching keeps the state
+    hash.
+  - The benchmark's "auto" row shows the choice per scene. In the container it
+    matched the fastest fixed setting in every scene (for example the chain: 0.28 ms
+    auto against 0.51 ms on 4 threads).
 
 ## Consequences
 

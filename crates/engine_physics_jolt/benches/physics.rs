@@ -3,7 +3,8 @@
 //! the calling thread and with 1, 3, 7 and 15 worker threads (2, 4, 8 and 16 threads in
 //! total, as far as the machine has logical cores), and batched raycasts. The sweep shows
 //! where extra threads stop helping, for example on the second hardware thread (SMT) of
-//! each core. Our own solver will run the same scenes. Prints Markdown.
+//! each core. The "auto" row is the default settings: all cores, but on the calling
+//! thread below 300 awake bodies. Our own solver will run the same scenes. Prints Markdown.
 //!
 //! ```text
 //! cargo bench -p engine_physics_jolt --bench physics
@@ -17,9 +18,11 @@ use std::time::Instant;
 
 const DT: f32 = 1.0 / 60.0;
 
+/// `threads` workers used for every step (no awake-body threshold).
 fn world(threads: u32) -> JoltBackend {
     JoltBackend::new(&PhysicsSettings {
         threads,
+        single_thread_below: 0,
         ..PhysicsSettings::default()
     })
     .unwrap()
@@ -91,6 +94,13 @@ fn main() {
                 if threads == 0 { 1 } else { threads + 1 }
             );
         }
+        let mut w = JoltBackend::new(&PhysicsSettings::default()).unwrap();
+        let bodies = build(&mut w);
+        let (median, p99, max) = step_times(&mut w, steps);
+        println!(
+            "| {name} | {bodies} | auto ({}) | {median:.3} | {p99:.3} | {max:.3} |",
+            w.stats().step_threads
+        );
     }
 
     // Batched raycasts over a settled pile.

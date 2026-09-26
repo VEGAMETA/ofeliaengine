@@ -14,9 +14,12 @@
 //! - Custom gravity vectors and gravity fields are applied by a step listener at every
 //!   collision step, to awake bodies, as a velocity change (Jolt's own gravity factor is
 //!   zero for those bodies).
-//! - Jolt's own job system (a thread pool) runs the simulation; `PhysicsSettings::threads
-//!   = 0` keeps everything on the calling thread. Routing Jolt's jobs through
-//!   `engine_core::jobs` is a follow-up (ADR 0018).
+//! - Jolt's own job system (a thread pool) runs large simulations. Before each step the
+//!   world picks: fewer awake bodies than `PhysicsSettings::single_thread_below` run on
+//!   the calling thread, more on the pool (created on first use, so small worlds never
+//!   start threads). `threads = 0` keeps everything on the calling thread. Jolt's results
+//!   do not depend on the thread count. Routing Jolt's jobs through `engine_core::jobs`
+//!   is a follow-up (ADR 0018).
 
 mod ffi;
 
@@ -288,7 +291,12 @@ pub struct JoltBackend {
     body_interface: *mut JPH_BodyInterface,
     lock_interface: *const JPH_BodyLockInterface,
     query: *const JPH_NarrowPhaseQuery,
-    job_system: *mut JPH_JobSystem,
+    /// Runs every job on the calling thread.
+    inline_jobs: *mut JPH_JobSystem,
+    /// Jolt's thread pool, created by the first step that needs it.
+    pool_jobs: *mut JPH_JobSystem,
+    threads: u32,
+    single_thread_below: u32,
     // The layer tables belong to `system` (JoltC frees them with it).
     contact_listener: *mut JPH_ContactListener,
     step_listener: *mut JPH_PhysicsStepListener,
@@ -362,24 +370,16 @@ impl JoltBackend {
                 JPH_BroadPhaseLayerInterface_Destroy(bp_interface);
                 return Err(PhysicsError::Full("physics system"));
             }
-            let job_system = if settings.threads == 0 {
-                // JoltC maps a thread pool of 0 threads to "all cores". Jolt's own
-                // single-threaded job system runs each job as soon as it is queued; the
-                // callback job system does the same through `run_inline`.
-                JPH_JobSystemCallback_Create(&JPH_JobSystemConfig {
-                    context: core::ptr::null_mut(),
-                    queueJob: Some(run_inline),
-                    queueJobs: Some(run_inline_batch),
-                    maxConcurrency: 1,
-                    maxBarriers: 8,
-                })
-            } else {
-                JPH_JobSystemThreadPool_Create(&JobSystemThreadPoolConfig {
-                    maxJobs: 2048,
-                    maxBarriers: 8,
-                    numThreads: settings.threads as i32,
-                })
-            };
+            // JoltC maps a thread pool of 0 threads to "all cores". Jolt's own
+            // single-threaded job system runs each job as soon as it is queued; the
+            // callback job system does the same through `run_inline`.
+            let inline_jobs = JPH_JobSystemCallback_Create(&JPH_JobSystemConfig {
+                context: core::ptr::null_mut(),
+                queueJob: Some(run_inline),
+                queueJobs: Some(run_inline_batch),
+                maxConcurrency: 1,
+                maxBarriers: 8,
+            });
             let capacity = (settings.max_contact_constraints as usize).max(1024) * 2;
             let mut shared = Box::new(Shared {
                 events: (0..capacity)
@@ -404,7 +404,10 @@ impl JoltBackend {
                 body_interface: JPH_PhysicsSystem_GetBodyInterface(system),
                 lock_interface: JPH_PhysicsSystem_GetBodyLockInterface(system),
                 query: JPH_PhysicsSystem_GetNarrowPhaseQuery(system),
-                job_system,
+                inline_jobs,
+                pool_jobs: core::ptr::null_mut(),
+                threads: settings.threads,
+                single_thread_below: settings.single_thread_below,
                 contact_listener,
                 step_listener,
                 layer_filter: JPH_ObjectLayerFilter_Create(user_data),
@@ -871,6 +874,26 @@ impl PhysicsBackend for JoltBackend {
             self.rebuild_gravity_list();
         }
         self.shared.event_count.store(0, Ordering::Relaxed);
+        // SAFETY: valid system.
+        let awake =
+            unsafe { JPH_PhysicsSystem_GetNumActiveBodies(self.system, JPH_BODY_TYPE_RIGID) };
+        let use_pool = self.threads > 0 && awake >= self.single_thread_below;
+        if use_pool && self.pool_jobs.is_null() {
+            engine_profiler::zone!("physics::jolt::start_workers");
+            // SAFETY: plain creation; destroyed in `drop`.
+            self.pool_jobs = unsafe {
+                JPH_JobSystemThreadPool_Create(&JobSystemThreadPoolConfig {
+                    maxJobs: 2048,
+                    maxBarriers: 8,
+                    numThreads: self.threads as i32,
+                })
+            };
+        }
+        let (jobs, step_threads) = if use_pool && !self.pool_jobs.is_null() {
+            (self.pool_jobs, self.threads + 1)
+        } else {
+            (self.inline_jobs, 1)
+        };
         let error = {
             let _serialized = STEP_LOCK
                 .lock()
@@ -878,9 +901,7 @@ impl PhysicsBackend for JoltBackend {
             // SAFETY: the system and job system are valid; callbacks reach `shared`, which
             // outlives the call; `STEP_LOCK` keeps JoltC's shared temporary allocator to one
             // step at a time.
-            unsafe {
-                JPH_PhysicsSystem_Update(self.system, dt, substeps.max(1) as i32, self.job_system)
-            }
+            unsafe { JPH_PhysicsSystem_Update(self.system, dt, substeps.max(1) as i32, jobs) }
         };
         // Gather the events written by the callbacks (the step has finished: all writes
         // happened before `Update` returned).
@@ -924,6 +945,7 @@ impl PhysicsBackend for JoltBackend {
             bodies,
             active_bodies: active,
             contact_events: self.events.len() as u32,
+            step_threads,
         };
         if error != 0 {
             return Err(PhysicsError::StepFailed(format!(
@@ -1123,7 +1145,10 @@ impl Drop for JoltBackend {
                 }
             }
             JPH_Shape_Destroy(self.unit_sphere);
-            JPH_JobSystem_Destroy(self.job_system);
+            JPH_JobSystem_Destroy(self.inline_jobs);
+            if !self.pool_jobs.is_null() {
+                JPH_JobSystem_Destroy(self.pool_jobs);
+            }
             // The layer tables and filters belong to the physics system from creation on:
             // JoltC's `JPH_PhysicsSystem_Destroy` deleted them.
         }
