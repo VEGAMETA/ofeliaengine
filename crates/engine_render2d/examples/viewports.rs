@@ -26,7 +26,7 @@ fn main() {
     use engine_platform::time::HighResTimer;
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::forward::{
-        Camera, DirectionalLight, DrawItem, ForwardRenderer, Material, ShadowSettings,
+        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
     use engine_render::mesh::{Mesh, cube, perspective};
@@ -345,11 +345,14 @@ fn main() {
                                 ring_ref,
                                 bindless_ref,
                                 draws_ref,
-                                &camera,
-                                &light,
-                                vp.color,
-                                depth,
-                                clear,
+                                &ForwardView {
+                                    camera,
+                                    light,
+                                    color: vp.color,
+                                    depth,
+                                    clear,
+                                    occlusion: None,
+                                },
                             );
                             if vp.id == scene {
                                 renderer_ref

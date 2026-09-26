@@ -1,9 +1,12 @@
-//! Forward renderer benchmark, headless (ADR 0034): many cube instances with PBR and a
-//! shadow map into a 1920×1080 HDR target. For each count, camera and culling setting it
-//! reports the CPU time of building the draw list, of `add_passes` (instances, batches and
-//! commands into the upload ring) and of recording the graph, the GPU time of the cull,
-//! shadow and forward passes (medians of the measured frames, from the graph's
-//! timestamps), and how many instances the GPU found visible. Prints Markdown.
+//! Forward renderer benchmark, headless (ADR 0034, ADR 0035): many cube instances with PBR
+//! and a shadow map into a 1920×1080 HDR target. For each count, camera and culling mode
+//! it reports the CPU time of building the draw list, of `add_passes` (instances, batches
+//! and commands into the upload ring) and of recording the graph, the GPU time of the
+//! culling, depth pyramid, shadow and forward passes (medians of the measured frames, from
+//! the graph's timestamps), and how many instances the GPU drew. Prints Markdown.
+//!
+//! Culling modes: off, frustum, and frustum + two-phase occlusion (in steady state: the
+//! occlusion state carries over the warm-up frames).
 //!
 //! `cargo run -p engine_render --release --example draw_bench [max-instances]`
 
@@ -11,7 +14,8 @@
 
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, Material, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, Occlusion,
+    ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::mesh::{Mesh, cube};
@@ -27,6 +31,9 @@ const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 const WARMUP: usize = 5;
 const FRAMES: usize = 30;
+/// Cubes are 2 m apart; walls in the city stand every `BLOCK` meters.
+const SPACING: f32 = 2.0;
+const BLOCK: f32 = 10.0;
 
 #[derive(Clone, Copy, PartialEq)]
 enum View {
@@ -35,18 +42,32 @@ enum View {
     /// Inside the field near the ground with an 80 m far plane, as in an open world: a
     /// small part is in view, and the same part at every count.
     Inside,
+    /// The same camera in a city: 4 m walls around every 10 m block hide the other
+    /// blocks.
+    City,
 }
 
-/// Instances on a square field (side grows with the count, ~1 cube per 4 m²), spinning.
-fn fill<'a>(draws: &mut Vec<DrawItem<'a>>, mesh: &'a Mesh, count: usize, frame: usize) {
+#[derive(Clone, Copy, PartialEq)]
+enum Culling {
+    Off,
+    Frustum,
+    Occlusion,
+}
+
+fn side(count: usize) -> f32 {
+    (count as f32).sqrt().ceil() * SPACING
+}
+
+/// Instances on a square field (~1 cube per 4 m²), spinning; in the city, walls follow.
+fn fill<'a>(draws: &mut Vec<DrawItem<'a>>, mesh: &'a Mesh, count: usize, frame: usize, city: bool) {
     draws.clear();
-    let side = (count as f32).sqrt().ceil() as usize;
-    let spacing = 2.0;
-    let half = side as f32 * spacing * 0.5;
+    let per_row = (count as f32).sqrt().ceil() as usize;
+    let half = side(count) * 0.5;
     let t = frame as f32 * 0.02;
     for i in 0..count {
-        let (x, z) = ((i % side) as f32, (i / side) as f32);
-        let p = Vec3::new(x * spacing - half, 0.6, z * spacing - half);
+        let (x, z) = ((i % per_row) as f32, (i / per_row) as f32);
+        // Cubes sit between the walls, not in them.
+        let p = Vec3::new(x * SPACING - half + 1.0, 0.6, z * SPACING - half + 1.0);
         let h = (i as f32 * 0.618_034).fract();
         draws.push(DrawItem {
             mesh,
@@ -62,20 +83,50 @@ fn fill<'a>(draws: &mut Vec<DrawItem<'a>>, mesh: &'a Mesh, count: usize, frame: 
             },
         });
     }
+    if city {
+        let length = side(count);
+        let lines = (length / BLOCK) as usize;
+        for k in 0..=lines {
+            let at = k as f32 * BLOCK - half;
+            for world_from_object in [
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.5, 4.0, length),
+                    Quat::IDENTITY,
+                    Vec3::new(at, 2.0, 0.0),
+                ),
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(length, 4.0, 0.5),
+                    Quat::IDENTITY,
+                    Vec3::new(0.0, 2.0, at),
+                ),
+            ] {
+                draws.push(DrawItem {
+                    mesh,
+                    world_from_object,
+                    material: Material::default(),
+                });
+            }
+        }
+    }
 }
 
 fn camera(view: View, count: usize) -> Camera {
-    let side = (count as f32).sqrt().ceil() * 2.0;
-    let (eye, target) = match view {
-        View::Overview => (Vec3::new(0.0, side * 0.9, side * 0.9), Vec3::ZERO),
-        View::Inside => (
-            Vec3::new(-side * 0.25, 3.0, -side * 0.25),
-            Vec3::new(-side * 0.25 + 10.0, 1.0, -side * 0.25 + 3.0),
+    let side = side(count);
+    // 1.5 m inside the block a quarter of the way into the field (walls stand at
+    // `k × BLOCK - side / 2`), 3 m up, looking along the field.
+    let half = side * 0.5;
+    let block = ((side * 0.25) / BLOCK).floor() * BLOCK - half + 1.5;
+    let (eye, target, far) = match view {
+        View::Overview => (
+            Vec3::new(0.0, side * 0.9, side * 0.9),
+            Vec3::ZERO,
+            side * 3.0,
         ),
-    };
-    let far = match view {
-        View::Overview => side * 3.0,
-        View::Inside => 80.0,
+        View::Inside | View::City => (
+            Vec3::new(block, 3.0, block),
+            Vec3::new(block + 10.0, 1.0, block + 3.0),
+            80.0,
+        ),
     };
     Camera {
         clip_from_world: vulkan_perspective(
@@ -123,18 +174,14 @@ fn main() {
     )
     .unwrap();
     let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
-    let mut ring = UploadRing::new(
-        &device,
-        &mut allocator,
-        1,
-        (max_instances as u64 + 1024) * 128,
-    )
-    .unwrap();
+    let capacity = max_instances as u64 + 1024;
+    let mut ring = UploadRing::new(&device, &mut allocator, 1, capacity * 128).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
+    let mut occlusion = Occlusion::new(&device, &mut allocator, capacity as u32).unwrap();
     let (readback, readback_mem) = allocator
         .create_buffer(
             &vk::BufferCreateInfo::default()
-                .size(16)
+                .size(32)
                 .usage(vk::BufferUsageFlags::TRANSFER_DST),
             MemoryLocation::Readback,
         )
@@ -167,148 +214,183 @@ fn main() {
     println!("### Forward renderer, GPU-driven ({WIDTH}×{HEIGHT} HDR, shadow map 2048²)\n");
     println!("Device: {}\n", device.adapter().summary());
     println!(
-        "| cubes | view | culling | visible | draw list µs | add_passes µs | graph µs | GPU cull µs | GPU shadow µs | GPU forward µs |"
+        "| instances | view | culling | drawn | draw list µs | add_passes µs | graph µs | GPU cull µs | GPU pyramid µs | GPU shadow µs | GPU forward µs |"
     );
-    println!("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|");
 
     let mut draws: Vec<DrawItem<'_>> = Vec::new();
+    let configurations = [
+        (View::Overview, Culling::Off),
+        (View::Overview, Culling::Frustum),
+        (View::Overview, Culling::Occlusion),
+        (View::Inside, Culling::Off),
+        (View::Inside, Culling::Frustum),
+        (View::Inside, Culling::Occlusion),
+        (View::City, Culling::Frustum),
+        (View::City, Culling::Occlusion),
+    ];
     for count in [1_000usize, 10_000, 100_000]
         .into_iter()
         .filter(|&c| c <= max_instances)
     {
-        for view in [View::Overview, View::Inside] {
-            for culling in [true, false] {
-                renderer.set_frustum_culling(culling);
-                let camera = camera(view, count);
-                let (mut list, mut prepare, mut record) = (Vec::new(), Vec::new(), Vec::new());
-                let (mut cull, mut shadow, mut forward) = (Vec::new(), Vec::new(), Vec::new());
-                let mut visible = 0;
-                for frame in 0..WARMUP + FRAMES {
-                    let start = Instant::now();
-                    fill(&mut draws, &mesh, count, frame);
-                    let listed = start.elapsed();
-                    // SAFETY: the previous frame finished (waited below).
-                    unsafe {
-                        d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
-                            .unwrap();
-                        d.begin_command_buffer(
-                            cmd,
-                            &vk::CommandBufferBeginInfo::default()
-                                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-                        )
+        for (view, culling) in configurations {
+            renderer.set_frustum_culling(culling != Culling::Off);
+            occlusion.reset();
+            let camera = camera(view, count);
+            let (mut list, mut prepare, mut record) = (Vec::new(), Vec::new(), Vec::new());
+            let (mut cull, mut pyramid, mut shadow, mut forward) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let mut drawn = 0;
+            for frame in 0..WARMUP + FRAMES {
+                let start = Instant::now();
+                fill(&mut draws, &mesh, count, frame, view == View::City);
+                let listed = start.elapsed();
+                // SAFETY: the previous frame finished (waited below).
+                unsafe {
+                    d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
                         .unwrap();
-                    }
-                    ring.begin_slot(0);
-                    let (prepared, executed);
-                    {
-                        // SAFETY: nothing is in flight.
-                        let mut fg = unsafe { graph.begin_slot(0, cmd) };
-                        let hdr = fg
-                            .create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
-                        let depth = fg.create_texture(
-                            "depth",
-                            TextureDesc::new_2d(depth_format, WIDTH, HEIGHT),
-                        );
-                        let out = fg.import_buffer(
-                            "readback",
-                            ImportedBuffer {
-                                buffer: readback,
-                                size: 16,
-                                address: 0,
-                                initial: BufferState::idle(),
-                                final_state: Some(BufferState::host_read()),
-                            },
-                        );
-                        let t = Instant::now();
-                        let passes = renderer
-                            .add_passes(
-                                &mut fg,
-                                &mut ring,
-                                &bindless,
-                                &draws,
-                                &camera,
-                                &light,
-                                hdr,
+                    d.begin_command_buffer(
+                        cmd,
+                        &vk::CommandBufferBeginInfo::default()
+                            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+                    )
+                    .unwrap();
+                }
+                ring.begin_slot(0);
+                let (prepared, executed, phases);
+                {
+                    // SAFETY: nothing is in flight.
+                    let mut fg = unsafe { graph.begin_slot(0, cmd) };
+                    let hdr =
+                        fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
+                    let depth = fg
+                        .create_texture("depth", TextureDesc::new_2d(depth_format, WIDTH, HEIGHT));
+                    let out = fg.import_buffer(
+                        "readback",
+                        ImportedBuffer {
+                            buffer: readback,
+                            size: 32,
+                            address: 0,
+                            initial: BufferState::idle(),
+                            final_state: Some(BufferState::host_read()),
+                        },
+                    );
+                    let t = Instant::now();
+                    let passes = renderer
+                        .add_passes(
+                            &mut fg,
+                            &mut ring,
+                            &bindless,
+                            &draws,
+                            &ForwardView {
+                                camera,
+                                light,
+                                color: hdr,
                                 depth,
-                                Some([0.02, 0.02, 0.05, 1.0]),
-                            )
-                            .unwrap();
-                        prepared = t.elapsed();
-                        let commands = passes.commands.unwrap();
-                        fg.add_pass("consume")
-                            .read(hdr, Access::TransferRead)
-                            .read(commands, Access::TransferRead)
-                            .write(out, Access::TransferWrite)
-                            .execute(move |ctx| {
-                                let region = vk::BufferCopy {
-                                    src_offset: 0,
-                                    dst_offset: 0,
-                                    size: 16,
-                                };
-                                // SAFETY: recording outside a rendering scope.
-                                unsafe {
-                                    ctx.device.cmd_copy_buffer(
-                                        ctx.cmd,
-                                        ctx.buffer(commands),
-                                        ctx.buffer(out),
-                                        &[region],
-                                    );
-                                }
-                            });
-                        let t = Instant::now();
-                        fg.execute_with_bindless(&mut allocator, Some(&bindless))
-                            .unwrap();
-                        executed = t.elapsed();
-                    }
-                    // SAFETY: as above.
-                    unsafe {
-                        d.end_command_buffer(cmd).unwrap();
-                        let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
-                        d.queue_submit2(
-                            device.graphics.raw,
-                            &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
-                            vk::Fence::null(),
+                                clear: Some([0.02, 0.02, 0.05, 1.0]),
+                                occlusion: (culling == Culling::Occlusion).then_some(&occlusion),
+                            },
                         )
                         .unwrap();
-                        device.wait_idle().unwrap();
-                    }
-                    let ptr = readback_mem.mapped_ptr().unwrap();
-                    // SAFETY: the GPU is idle; the mapping holds one draw command.
-                    let command = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 16) };
-                    visible = u32::from_le_bytes([command[4], command[5], command[6], command[7]]);
-                    if frame >= WARMUP {
-                        list.push(listed.as_secs_f64() * 1e6);
-                        prepare.push(prepared.as_secs_f64() * 1e6);
-                        record.push(executed.as_secs_f64() * 1e6);
-                    }
-                    // Times of the frame before this one (read when its slot is reused).
-                    if frame > WARMUP {
-                        for time in graph.gpu_pass_times() {
-                            let target = match time.name {
-                                "cull" => &mut cull,
-                                "shadow" => &mut shadow,
-                                "forward" => &mut forward,
-                                _ => continue,
+                    prepared = t.elapsed();
+                    // One batch (one mesh): a command per phase.
+                    phases = if passes.occlusion { 2 } else { 1 };
+                    let commands = passes.commands.unwrap();
+                    fg.add_pass("consume")
+                        .read(hdr, Access::TransferRead)
+                        .read(commands, Access::TransferRead)
+                        .write(out, Access::TransferWrite)
+                        .execute(move |ctx| {
+                            let region = vk::BufferCopy {
+                                src_offset: 0,
+                                dst_offset: 0,
+                                size: 16 * phases,
                             };
-                            target.push(f64::from(time.gpu_us));
+                            // SAFETY: recording outside a rendering scope.
+                            unsafe {
+                                ctx.device.cmd_copy_buffer(
+                                    ctx.cmd,
+                                    ctx.buffer(commands),
+                                    ctx.buffer(out),
+                                    &[region],
+                                );
+                            }
+                        });
+                    let t = Instant::now();
+                    fg.execute_with_bindless(&mut allocator, Some(&bindless))
+                        .unwrap();
+                    executed = t.elapsed();
+                }
+                // SAFETY: as above.
+                unsafe {
+                    d.end_command_buffer(cmd).unwrap();
+                    let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+                    d.queue_submit2(
+                        device.graphics.raw,
+                        &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
+                        vk::Fence::null(),
+                    )
+                    .unwrap();
+                    device.wait_idle().unwrap();
+                }
+                let ptr = readback_mem.mapped_ptr().unwrap();
+                // SAFETY: the GPU is idle; the mapping holds the phases' draw commands.
+                let commands = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 32) };
+                let count_at = |i: usize| {
+                    let at = 16 * i + 4;
+                    u32::from_le_bytes([
+                        commands[at],
+                        commands[at + 1],
+                        commands[at + 2],
+                        commands[at + 3],
+                    ])
+                };
+                drawn = (0..phases as usize).map(count_at).sum::<u32>();
+                if frame >= WARMUP {
+                    list.push(listed.as_secs_f64() * 1e6);
+                    prepare.push(prepared.as_secs_f64() * 1e6);
+                    record.push(executed.as_secs_f64() * 1e6);
+                }
+                // Times of the frame before this one (read when its slot is reused).
+                if frame > WARMUP {
+                    let (mut c, mut p, mut s, mut f) = (0.0, 0.0, 0.0, 0.0);
+                    for time in graph.gpu_pass_times() {
+                        let us = f64::from(time.gpu_us);
+                        match time.name {
+                            "cull" | "cull early" | "cull late" => c += us,
+                            "hiz" => p += us,
+                            "shadow" => s += us,
+                            "forward" | "forward early" | "forward late" => f += us,
+                            _ => {}
                         }
                     }
+                    cull.push(c);
+                    pyramid.push(p);
+                    shadow.push(s);
+                    forward.push(f);
                 }
-                println!(
-                    "| {count} | {} | {} | {visible} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.0} |",
-                    match view {
-                        View::Overview => "overview",
-                        View::Inside => "inside the field",
-                    },
-                    if culling { "on" } else { "off" },
-                    median(&mut list),
-                    median(&mut prepare),
-                    median(&mut record),
-                    median(&mut cull),
-                    median(&mut shadow),
-                    median(&mut forward),
-                );
             }
+            println!(
+                "| {} | {} | {} | {drawn} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.0} | {:.0} |",
+                draws.len(),
+                match view {
+                    View::Overview => "overview",
+                    View::Inside => "inside the field",
+                    View::City => "city blocks",
+                },
+                match culling {
+                    Culling::Off => "off",
+                    Culling::Frustum => "frustum",
+                    Culling::Occlusion => "frustum + occlusion",
+                },
+                median(&mut list),
+                median(&mut prepare),
+                median(&mut record),
+                median(&mut cull),
+                median(&mut pyramid),
+                median(&mut shadow),
+                median(&mut forward),
+            );
         }
     }
     println!();
@@ -318,6 +400,7 @@ fn main() {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         mesh.destroy(&mut allocator);
+        occlusion.destroy(&mut allocator);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);
     }

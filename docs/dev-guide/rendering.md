@@ -11,7 +11,7 @@ The CPU cost of a frame barely depends on how many objects the list holds.
 ## 1. The draw list
 
 ```rust
-use engine_render::forward::{DrawItem, Material};
+use engine_render::forward::{DrawItem, ForwardView, Material};
 
 draws.clear();
 for (transform, look) in scene_objects {
@@ -26,7 +26,18 @@ for (transform, look) in scene_objects {
     });
 }
 let passes = renderer.add_passes(
-    &mut fg, &mut ring, &bindless, &draws, &camera, &light, hdr, depth, Some(clear),
+    &mut fg,
+    &mut ring,
+    &bindless,
+    &draws,
+    &ForwardView {
+        camera,
+        light,
+        color: hdr,
+        depth,
+        clear: Some(clear),
+        occlusion: None, // or Some(&occlusion): see section 3
+    },
 );
 ```
 
@@ -61,15 +72,51 @@ let passes = renderer.add_passes(
   - `crates/engine_render/tests/culling.rs` and `examples/draw_bench.rs` show how to read
     it back.
 
-## 3. What it costs
+## 3. Occlusion culling: skipping what is hidden
+
+In a city, an interior or a dense forest, most objects in view are hidden behind nearer
+ones. Occlusion culling skips them (ADR 0035). Create one state per camera and pass it
+every frame:
+
+```rust
+use engine_render::forward::Occlusion;
+
+// Once per view: remembers which of up to 100,000 draw items were visible.
+let mut occlusion = Occlusion::new(&device, &mut allocator, 100_000)?;
+
+// Every frame:
+let view = ForwardView { occlusion: Some(&occlusion), ..view };
+
+// After a camera cut (teleport, new level):
+occlusion.reset();
+```
+
+- **It never hides anything visible.**
+  - The frame draws what was visible last frame, builds a depth pyramid from it, tests
+    everything else against it, and draws what was missed.
+  - A bad guess from last frame costs time, not pixels.
+- **Keep the draw list in a stable order.** Items are known by their position in it.
+  Reordering is allowed, but the frame after it culls less well.
+- **Use it where things hide things.**
+  - In the benchmark's city (4 m walls around 10 m blocks), it drew 73 of 10,042 objects
+    instead of 1,769.
+  - In an open field nothing hides anything, and the extra passes (a depth pyramid and a
+    second culling pass) are pure cost.
+  - Turn it on per camera, and compare with `draw_bench`.
+- The capacity is the number of draw items whose visibility is remembered. Items beyond
+  it still render correctly, but are always tested in the late phase.
+- Free the state with `unsafe { occlusion.destroy(&mut allocator) }` once the GPU is idle.
+
+## 4. What it costs
 
 `cargo run -p engine_render --release --example draw_bench` prints the costs for 1k, 10k
-and 100k cubes, with the camera above the field and inside it, culling on and off:
+and 100k cubes, with the camera above the field, inside it and in a city of walls, and
+culling off, frustum only, or frustum and occlusion:
 
 - CPU time of building your list;
 - CPU time of `add_passes` and of recording the frame;
-- GPU time of the culling, shadow and forward passes;
-- how many cubes were visible.
+- GPU time of the culling, depth pyramid, shadow and forward passes;
+- how many objects were drawn.
 
 The GPU workflow runs it on the reference machine, and the results are in
 `docs/perf/history.md`.

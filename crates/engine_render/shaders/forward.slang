@@ -3,6 +3,12 @@
 // visible ones per batch (a run of instances sharing a mesh); the forward pass then draws
 // every batch with one indirect, instanced draw call.
 //
+// With occlusion culling (ADR 0035) the forward pass runs twice. The early phase draws
+// what was visible in the view's previous frame; a depth pyramid (the farthest depth of
+// every 2^k × 2^k pixel block) is built from that depth; the late phase tests every
+// instance against it, draws the visible ones the early phase missed, and records which
+// instances were visible for the next frame.
+//
 // BRDF after Filament's "Physically Based Rendering in Filament" (Apache-2.0 document):
 // GGX distribution, height-correlated Smith-GGX visibility, Schlick Fresnel, Lambertian
 // diffuse; metallic-roughness parameterization. All data is read through buffer device
@@ -28,7 +34,11 @@ struct Frame
     float4 planes[6];        // view frustum: xyz inward unit normal, w offset
     uint shadow_sampler;
     uint cull;               // 0: every instance counts as visible
+    uint visibility_capacity; // instances with visibility flags (occlusion culling)
+    uint hiz_levels;         // depth pyramid levels 1..hiz_levels; the last is 1×1
+    uint2 depth_size;        // size of the depth target in pixels
     uint2 _pad;
+    uint4 hiz_offsets[4];    // offset of level k + 1 in the pyramid, in floats
 };
 
 struct Instance
@@ -67,9 +77,17 @@ struct Push
     Batch* batches;
     uint* visible;           // per batch, from `first`: indices of the visible instances
     DrawCommand* commands;   // one per batch; culling counts the visible instances
+    uint* visibility;        // per instance: visible in the previous frame (occlusion)
+    float* pyramid;          // depth pyramid levels, one after the other
     uint instance_count;
-    uint shadow_map;         // bindless index of the shadow map
+    uint texture;            // bindless index: the shadow map, or the depth to reduce
+    uint phase;              // PHASE_*
+    uint level;              // pyramid level written by hizDown
 };
+
+static const uint PHASE_ALL = 0;    // frustum culling only
+static const uint PHASE_EARLY = 1;  // visible last frame and in the frustum
+static const uint PHASE_LATE = 2;   // visible now and not drawn by the early phase
 
 [[vk::push_constant]]
 ConstantBuffer<Push> push;
@@ -91,8 +109,63 @@ float3 transform_normal(Instance i, float3 n)
     return s * float3(dot(bc, n), dot(ca, n), dot(ab, n));
 }
 
-// One thread per instance: frustum test of the instance's world-space bounding box, then
-// append to the batch's visible list.
+uint hiz_offset(uint level)
+{
+    return push.frame.hiz_offsets[(level - 1) >> 2][(level - 1) & 3];
+}
+
+// Size of pyramid level `level`: every texel covers 2^level × 2^level pixels.
+uint2 hiz_size(uint level)
+{
+    return ((push.frame.depth_size - 1) >> level) + 1;
+}
+
+// Whether a world-space box is hidden: its nearest point is farther than the farthest
+// depth of the pyramid over the screen rectangle it covers (at most 2×2 texels of the
+// level where that rectangle fits).
+bool occluded(float3 center, float3 extents)
+{
+    float4x4 m = push.frame.clip_from_world;
+    float4 c = mul(m, float4(center, 1.0));
+    float4 x = mul(m, float4(extents.x, 0.0, 0.0, 0.0));
+    float4 y = mul(m, float4(0.0, extents.y, 0.0, 0.0));
+    float4 z = mul(m, float4(0.0, 0.0, extents.z, 0.0));
+    float2 lo = float2(1e30, 1e30);
+    float2 hi = float2(-1e30, -1e30);
+    float nearest = 1.0;
+    [unroll]
+    for (uint i = 0; i < 8; i++)
+    {
+        float4 p = c + ((i & 1) != 0 ? x : -x) + ((i & 2) != 0 ? y : -y) + ((i & 4) != 0 ? z : -z);
+        // A corner behind the camera: the rectangle is unbounded.
+        if (p.w <= 1e-5)
+            return false;
+        float3 ndc = p.xyz / p.w;
+        lo = min(lo, ndc.xy);
+        hi = max(hi, ndc.xy);
+        nearest = min(nearest, ndc.z);
+    }
+    if (nearest <= 0.0)
+        return false;
+    float2 size = float2(push.frame.depth_size);
+    uint2 lo_px = uint2(clamp((lo * 0.5 + 0.5) * size, 0.0, size - 1.0));
+    uint2 hi_px = uint2(clamp((hi * 0.5 + 0.5) * size, 0.0, size - 1.0));
+    uint span = max(hi_px.x - lo_px.x, hi_px.y - lo_px.y) + 1;
+    // 2^level >= span: the rectangle touches at most two texels per axis.
+    uint level = span <= 2 ? 1 : firstbithigh(span - 1) + 1;
+    level = min(level, push.frame.hiz_levels);
+    uint base = hiz_offset(level);
+    uint width = hiz_size(level).x;
+    uint2 a = lo_px >> level;
+    uint2 b = hi_px >> level;
+    float farthest = max(
+        max(push.pyramid[base + a.y * width + a.x], push.pyramid[base + a.y * width + b.x]),
+        max(push.pyramid[base + b.y * width + a.x], push.pyramid[base + b.y * width + b.x]));
+    return nearest > farthest;
+}
+
+// One thread per instance: frustum (and occlusion) test of the instance's world-space
+// bounding box, then append to the batch's visible list.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cullMain(uint3 id : SV_DispatchThreadID)
@@ -107,8 +180,9 @@ void cullMain(uint3 id : SV_DispatchThreadID)
     float3 center = transform_point(inst, batch.center.xyz);
     float3 e = batch.extents.xyz;
     float3 extents = float3(dot(abs(inst.row0.xyz), e), dot(abs(inst.row1.xyz), e), dot(abs(inst.row2.xyz), e));
+    bool cull = push.frame.cull != 0;
     bool visible = true;
-    if (push.frame.cull != 0)
+    if (cull)
     {
         [unroll]
         for (int i = 0; i < 6; i++)
@@ -116,6 +190,25 @@ void cullMain(uint3 id : SV_DispatchThreadID)
             float4 plane = push.frame.planes[i];
             // Outside when the box's most inward corner is behind the plane.
             visible = visible && dot(plane.xyz, center) + dot(abs(plane.xyz), extents) + plane.w >= 0.0;
+        }
+    }
+    if (push.phase != PHASE_ALL)
+    {
+        // Instances beyond the flags' capacity count as not visible last frame: the late
+        // phase always tests them.
+        bool tracked = index < push.frame.visibility_capacity;
+        bool was_visible = tracked && push.visibility[index] != 0;
+        if (push.phase == PHASE_EARLY)
+        {
+            visible = visible && was_visible;
+        }
+        else
+        {
+            if (visible && cull)
+                visible = !occluded(center, extents);
+            if (tracked)
+                push.visibility[index] = visible ? 1 : 0;
+            visible = visible && !was_visible;
         }
     }
     uint b = inst.batch;
@@ -137,6 +230,44 @@ void cullMain(uint3 id : SV_DispatchThreadID)
         InterlockedAdd(push.commands[b].instance_count, 1, slot);
         push.visible[batch.first + slot] = index;
     }
+}
+
+// Depth pyramid level 1 from the depth target: the farthest of every 2×2 pixels (the
+// last row and column repeat on odd sizes).
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void hizFirst(uint3 id : SV_DispatchThreadID)
+{
+    uint2 size = push.frame.depth_size;
+    uint2 out_size = hiz_size(1);
+    if (any(id.xy >= out_size))
+        return;
+    Texture2D depth = g_textures[NonUniformResourceIndex(push.texture)];
+    uint2 p = id.xy * 2;
+    uint2 q = min(p + 1, size - 1);
+    float d = max(
+        max(depth.Load(int3(p.x, p.y, 0)).r, depth.Load(int3(q.x, p.y, 0)).r),
+        max(depth.Load(int3(p.x, q.y, 0)).r, depth.Load(int3(q.x, q.y, 0)).r));
+    push.pyramid[hiz_offset(1) + id.y * out_size.x + id.x] = d;
+}
+
+// Depth pyramid level `push.level` (2 or more) from the level below.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void hizDown(uint3 id : SV_DispatchThreadID)
+{
+    uint level = push.level;
+    uint2 in_size = hiz_size(level - 1);
+    uint2 out_size = hiz_size(level);
+    if (any(id.xy >= out_size))
+        return;
+    uint src = hiz_offset(level - 1);
+    uint2 p = id.xy * 2;
+    uint2 q = min(p + 1, in_size - 1);
+    float d = max(
+        max(push.pyramid[src + p.y * in_size.x + p.x], push.pyramid[src + p.y * in_size.x + q.x]),
+        max(push.pyramid[src + q.y * in_size.x + p.x], push.pyramid[src + q.y * in_size.x + q.x]));
+    push.pyramid[hiz_offset(level) + id.y * out_size.x + id.x] = d;
 }
 
 struct VertexOut
@@ -206,7 +337,7 @@ float shadow(float4 light_position, float n_dot_l)
     float2 uv = ndc.xy * 0.5 + 0.5;
     if (any(uv < 0.0) || any(uv > 1.0) || ndc.z > 1.0)
         return 1.0;
-    Texture2D map = g_textures[NonUniformResourceIndex(push.shadow_map)];
+    Texture2D map = g_textures[NonUniformResourceIndex(push.texture)];
     SamplerComparisonState s = g_compare_samplers[push.frame.shadow_sampler];
     uint width, height;
     map.GetDimensions(width, height);

@@ -427,6 +427,11 @@ impl<'g> FrameGraph<'g> {
         Buffer(id)
     }
 
+    /// Size and format of a texture of this frame.
+    pub fn texture_desc(&self, texture: Texture) -> TextureDesc {
+        self.graph.textures[texture.0 as usize]
+    }
+
     /// Uses a texture owned outside the graph. Passes writing it are never culled.
     pub fn import_texture(&mut self, name: &'static str, texture: ImportedTexture) -> Texture {
         let id = self.add_resource(name, Kind::Texture);

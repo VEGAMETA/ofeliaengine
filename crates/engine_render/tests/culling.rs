@@ -12,7 +12,7 @@
 use engine_core::math::{EulerRot, Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::cull::{Frustum, transform_box};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, Material, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::mesh::{Mesh, Vertex, cube};
@@ -259,11 +259,14 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
                     &mut ring,
                     &bindless,
                     &draws,
-                    &camera,
-                    &light,
-                    color,
-                    depth,
-                    Some([0.0, 0.0, 0.25, 1.0]),
+                    &ForwardView {
+                        camera,
+                        light,
+                        color,
+                        depth,
+                        clear: Some([0.0, 0.0, 0.25, 1.0]),
+                        occlusion: None,
+                    },
                 )
                 .unwrap();
             assert_eq!(passes.instances as usize, draws.len());
