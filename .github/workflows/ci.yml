@@ -138,33 +138,19 @@ jobs:
           powershell -NoProfile -Command "Get-Content -Encoding UTF8 logs\build.txt -Tail 30 | ForEach-Object { '::error title=build::' + $_ }"
           exit /b 1
 
-      # The last lines of each failed log as error annotations: readable through the
-      # checks API even when a commit comment cannot be posted.
-      - name: Failure annotations
-        if: ${{ failure() }}
+      # Posted from cmd through `powershell -File`, as the GPU and bench workflows do on
+      # this machine. Every log's tail, so a failing run is diagnosable without job logs.
+      - name: Post logs as commit comment
+        if: ${{ always() }}
         shell: cmd
-        run: |
-          for %%f in (logs\*.failed) do powershell -NoProfile -Command "Get-Content -Encoding UTF8 logs\%%~nf.txt -Tail 25 | ForEach-Object { '::error title=%%~nf::' + $_ }"
-          for %%f in (logs\*.*) do echo ::warning title=log file::%%f
-          if exist logs\build.txt powershell -NoProfile -Command "Get-Content -Encoding UTF8 logs\build.txt -Tail 25 | ForEach-Object { '::error title=build tail::' + $_ }"
-          exit /b 0
-
-      - name: Post failure logs as commit comment
-        if: ${{ failure() }}
-        # Windows PowerShell 5.1: ref-1 has no PowerShell 7 (`pwsh`).
-        shell: powershell
         env:
           GH_TOKEN: ${{ github.token }}
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          $md = @()
-          foreach ($marker in Get-ChildItem logs -Filter *.failed) {
-            $log = Get-Item (Join-Path logs "$($marker.BaseName).txt")
-            $lines = Get-Content -Encoding UTF8 $log.FullName
-            $md += "#### $($log.BaseName)", "", '```'
-            $md += $lines | Select-Object -Last 120
-            $md += '```', ""
-          }
-          $md | Out-File -Encoding utf8 failure.md
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "CI failure logs (last 120 lines per check)" -Files failure.md
+          echo cd: %CD% > logs\env.txt
+          where cargo >> logs\env.txt 2>&1
+          cargo --version >> logs\env.txt 2>&1
+          dir logs >> logs\env.txt 2>&1
+          powershell -NoProfile -Command "$md = @(); foreach ($f in Get-ChildItem logs -Filter *.txt) { $md += '#### ' + $f.BaseName; $md += ''; $md += '```'; $md += (Get-Content -Encoding UTF8 $f.FullName | Select-Object -Last 40); $md += '```'; $md += '' }; $md | Out-File -Encoding utf8 ci-report.md"
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "CI check (ref-1): log tails" -Files ci-report.md
