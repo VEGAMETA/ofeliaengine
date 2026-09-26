@@ -11,6 +11,7 @@ rust-version = "1.94"
 publish = false
 
 [workspace.dependencies]
+engine_audio = { path = "crates/engine_audio" }
 engine_core = { path = "crates/engine_core" }
 engine_ecs = { path = "crates/engine_ecs" }
 engine_input = { path = "crates/engine_input" }
