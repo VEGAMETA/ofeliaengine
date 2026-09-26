@@ -44,6 +44,8 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0035](0035-occlusion-culling.md) | Two-phase occlusion culling (hierarchical depth) | Accepted |
 | [0036](0036-fonts-and-icons.md) | Default fonts and icons; OFL-1.1 and CC BY 4.0 for font and icon assets | Accepted |
 | [0037](0037-checks-on-the-reference-machine.md) | Checks on the reference machine before merging; GitHub Actions on demand | Accepted |
+| [0017](0017-ecs.md) | ECS / scene model | **Proposed** (team decision) |
+| [0020](0020-engine-license.md) | Engine license: source-available with tiered royalties | **Proposed** (team terms, open questions, lawyer) |
 
 ## Template
 
