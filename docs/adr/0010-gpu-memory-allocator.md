@@ -44,8 +44,20 @@ for both. N live allocations of 256 B – 1.5 MiB; 50 000 × (free one + allocat
 
 - The high overhead at 1 000 live allocations is reserved capacity from block growth
   (32 + 64 + 128 + 256 MiB), as in VMA. It is not fragmentation.
-- The GPU workflow runs the benchmark on ref-1 (NVIDIA and AMD) and records the numbers in
-  `docs/perf/history.md`.
+ref-1, release, same benchmark (GPU workflow run on commit 48a0275):
+
+| Device | live | engine ns/pair | gpu-allocator ns/pair | objects (engine / g-a) | overhead (engine / g-a) |
+|---|---|---|---|---|---|
+| RTX 4060 Ti | 1 000 | 105 | 11 520 | 4 / 1 | 2.35 / 1.35 |
+| RTX 4060 Ti | 4 000 | 112 | 33 262 | 6 / 4 | 1.26 / 1.32 |
+| RTX 4060 Ti | 16 000 | 137 | 93 204 | 17 / 16 | 1.25 / 1.33 |
+| Radeon iGPU | 1 000 | 106 | 11 512 | 4 / 1 | 2.46 / 1.36 |
+| Radeon iGPU | 4 000 | 112 | 32 582 | 6 / 4 | 1.30 / 1.32 |
+| Radeon iGPU | 16 000 | 142 | 92 723 | 17 / 16 | 1.21 / 1.33 |
+
+On ref-1 the engine is 110–680× faster, with 0 heap allocations per pair against 4. The
+GPU tests (upload → copy → readback, blocks, dedicated, zero allocations) pass on both GPUs
+with 0 validation errors.
 
 Tests:
 - a TLSF property test (200 000 random operations against a model);
