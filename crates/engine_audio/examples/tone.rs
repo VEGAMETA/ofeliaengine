@@ -76,7 +76,7 @@ fn main() {
             "low latency, driver minimum",
             OutputConfig {
                 period_ms: 0.0,
-                low_latency: true,
+                ..OutputConfig::default()
             },
         ),
         (
@@ -84,6 +84,15 @@ fn main() {
             OutputConfig {
                 period_ms: 10.0,
                 low_latency: false,
+                ..OutputConfig::default()
+            },
+        ),
+        (
+            "standard, whole buffer queued",
+            OutputConfig {
+                period_ms: 10.0,
+                low_latency: false,
+                queue_margin_ms: None,
             },
         ),
     ];
@@ -165,7 +174,7 @@ fn main() {
         let frames_per_ms = f64::from(info.sample_rate) / 1000.0;
         let ms = |frames: u32| f64::from(frames) / frames_per_ms;
         device_rows.push(format!(
-            "| {name} | {} | {:?} | {} Hz, {} ch, {:?} | {} ({:.2} ms) | {} ({:.2} ms) | {} | {} |",
+            "| {name} | {} | {:?} | {} Hz, {} ch, {:?} | {} ({:.2} ms) | {} ({:.2} ms) | {} ({:.2} ms) | {} | {} |",
             if info.device.is_empty() {
                 "—"
             } else {
@@ -179,6 +188,8 @@ fn main() {
             ms(info.period_frames),
             info.buffer_frames,
             ms(info.buffer_frames),
+            info.queue_frames,
+            ms(info.queue_frames),
             info.engine_periods.map_or(String::from("—"), |p| format!(
                 "default {} / fundamental {} / min {} / max {}",
                 p.default, p.fundamental, p.min, p.max
@@ -214,9 +225,9 @@ fn main() {
         if mute { ", muted" } else { "" }
     );
     println!(
-        "| configuration | device | mode | format | period (frames) | buffer (frames) | engine periods (frames) | note |"
+        "| configuration | device | mode | format | period (frames) | buffer (frames) | kept queued (frames) | engine periods (frames) | note |"
     );
-    println!("|---|---|---|---|---:|---:|---|---|");
+    println!("|---|---|---|---|---:|---:|---:|---|---|");
     for row in &device_rows {
         println!("{row}");
     }

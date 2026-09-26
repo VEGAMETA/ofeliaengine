@@ -59,6 +59,12 @@ pub struct OutputConfig {
     pub period_ms: f32,
     /// Try `IAudioClient3` small periods; `false` always uses the standard ~10 ms period.
     pub low_latency: bool,
+    /// Audio kept queued in the device buffer: one period plus this many milliseconds.
+    /// The Windows audio engine takes one period per event, so a small margin suffices
+    /// and every millisecond here is a millisecond of output latency. `None` fills the
+    /// whole device buffer (usually over two periods): the most robust, and the highest
+    /// latency.
+    pub queue_margin_ms: Option<f32>,
 }
 
 impl Default for OutputConfig {
@@ -66,6 +72,7 @@ impl Default for OutputConfig {
         Self {
             period_ms: 5.0,
             low_latency: true,
+            queue_margin_ms: Some(2.0),
         }
     }
 }
@@ -124,6 +131,9 @@ pub struct OutputInfo {
     pub period_frames: u32,
     /// Device buffer size in frames (the most audio that can be queued).
     pub buffer_frames: u32,
+    /// Frames the output keeps queued after each write (one period plus the margin, or
+    /// the whole buffer): the output latency before the Windows engine and the driver.
+    pub queue_frames: u32,
     /// `IAudioClient::GetStreamLatency`, in frames.
     pub stream_latency_frames: u32,
     /// Engine periods when `IAudioClient3` was available.
@@ -142,6 +152,7 @@ impl OutputInfo {
             format: SampleFormat::F32,
             period_frames: sample_rate / 100,
             buffer_frames: 0,
+            queue_frames: 0,
             stream_latency_frames: 0,
             engine_periods: None,
             note: Some(note),
@@ -694,6 +705,11 @@ fn open_client(
             format: format.sample,
             period_frames,
             buffer_frames,
+            queue_frames: match config.queue_margin_ms {
+                Some(ms) => (period_frames + (ms.max(0.0) * rate as f32 / 1000.0) as u32)
+                    .clamp(1, buffer_frames),
+                None => buffer_frames,
+            },
             stream_latency_frames: (latency as f64 / REFTIMES_PER_SEC * f64::from(rate)).round()
                 as u32,
             engine_periods,
@@ -884,7 +900,11 @@ fn stream_loop(
         let mut padding = 0;
         // SAFETY: valid client and out pointer.
         check(unsafe { (c.GetCurrentPadding)(stream.client.raw(), &mut padding) })?;
-        let frames = stream.buffer_frames.saturating_sub(padding);
+        let frames = stream
+            .info
+            .queue_frames
+            .min(stream.buffer_frames)
+            .saturating_sub(padding);
         if frames == 0 {
             return Ok(padding);
         }

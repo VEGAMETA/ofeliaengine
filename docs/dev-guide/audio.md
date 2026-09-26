@@ -150,6 +150,11 @@ audio.play_with(&snare, &PlayParams {
     says which mode is active and why.
 - **Small periods wake the CPU more often and cost battery** on laptops. Consider a
   setting for players.
+- **Queue depth.** The output keeps one period plus 2 ms queued, not the whole device
+  buffer. `OutputConfig::queue_margin_ms` raises the margin, and `None` queues the whole
+  buffer, for machines that drop out.
+- **Many USB audio devices only offer 10 ms periods** in shared mode (the reference
+  machine's does). `output.info().engine_periods` shows what the driver allows.
 - **Mixing is cheap:** 128 resampled voices through a full bus graph with 26 effects take
   a few percent of one core (ADR 0024 has the numbers).
 - **`output.stats()`** shows the audio thread's timing: wake-up intervals, render time,

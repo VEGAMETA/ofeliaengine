@@ -1,6 +1,6 @@
 # 0024. Audio output and mixer: WASAPI low latency, lock-free commands, compiled bus schedule
 
-- Status: Accepted (ref-1 timing numbers to be added from the Bench run of the PR)
+- Status: Accepted
 - Date: 2026-09-26
 - Research: [docs/research/audio.md](../research/audio.md)
 - Related: [ADR 0004](0004-platform-bindings-and-timing.md) (bindings, MMCSS, thread placement)
@@ -77,29 +77,48 @@ In particular, effects need a latency report for delay compensation.
 ## Measurements
 
 **Mixer cost per 256-frame block** (5.33 ms of audio at 48 kHz):
-- `cargo bench -p engine_audio --bench mixer`, release build;
-- dev container (Intel Xeon @ 2.8 GHz, 4 vCPU, shared), not reference hardware;
-- ref-1 numbers come from the Bench workflow on the PR and go into
-  `docs/perf/history.md`.
+- `cargo bench -p engine_audio --bench mixer`, ref-1 (Ryzen 7 7700), commit `be571d3`;
+- the dev container (Xeon @ 2.8 GHz, shared) was 2–3× slower on every row.
 
 | Case | µs per block | Share of real time |
 |---|---:|---:|
-| Master only | 0.3 | 0.01 % |
-| 128 mono voices at the output rate (copy) | 13.4 | 0.25 % |
-| 128 mono voices, pitch 1.37 (linear interpolation) | 51.0 | 0.96 % |
-| 128 stereo 44.1 kHz voices (resampled) | 91.6 | 1.72 % |
-| 512 mono voices, pitch 1.37 | 202.8 | 3.80 % |
-| 1024 voices, 64 mixed + 960 virtual | 34.9 | 0.66 % |
-| Game graph: 128 voices, 9 buses, 26 effects, 8 sends, sidechain, limiter | 192.7 | 3.61 % |
+| Master only | 0.2 | 0.00 % |
+| 128 mono voices at the output rate (copy) | 6.9 | 0.13 % |
+| 128 mono voices, pitch 1.37 (linear interpolation) | 26.8 | 0.50 % |
+| 128 stereo 44.1 kHz voices (resampled) | 47.0 | 0.88 % |
+| 512 mono voices, pitch 1.37 | 106.6 | 2.00 % |
+| 1024 voices, 64 mixed + 960 virtual | 18.2 | 0.34 % |
+| Game graph: 128 voices, 9 buses, 26 effects, 8 sends, sidechain, limiter | 62.7 | 1.18 % |
 
-**Effects per 256-frame stereo block:**
+**Effects per 256-frame stereo block** (ref-1):
 
 | Effect | µs | ns per frame |
 |---|---:|---:|
-| Biquad | 2.42 | 9.4 |
-| Compressor | 6.62 | 25.9 |
-| Limiter | 4.76 | 18.6 |
-| Delay | 3.38 | 13.2 |
+| Biquad | 1.30 | 5.1 |
+| Compressor | 3.10 | 12.1 |
+| Limiter | 1.20 | 4.7 |
+| Delay | 1.10 | 4.3 |
+
+**Output device on ref-1** ("Speakers (2- USB Audio CODEC)"; `tone --mute`, 4 s per
+configuration, 61 voices, 5 effects):
+- **Periods.** The WASAPI layer worked on the first run: `IAudioClient3` accepted the
+  stream. This USB audio device's engine periods are default = fundamental = min = max =
+  480 frames, so no shared-mode period below 10 ms exists on it. The 5 ms request becomes
+  10 ms.
+- **Buffer and wake-ups.** The device buffer is 1,056 frames (22 ms).
+  - Wake intervals p50 / p99 / max: 10.10 / 10.80 / 10.71–16.53 ms.
+  - Render per wake: 45 / 70–75 / 77 µs.
+  - 0 empty wakes, 0 late wakes, 0 reopens in every configuration.
+- **Queue depth.** Filling the whole buffer every wake left 576 frames (12 ms) queued at
+  wake-up, so each written sample waited about 22 ms before the Windows engine.
+  - The engine takes exactly one period per event. So the output now keeps one period
+    plus a margin queued (`OutputConfig::queue_margin_ms`, default 2 ms): 12 ms on this
+    device instead of 22 ms.
+  - The next ref-1 run checks it against the whole-buffer mode for empty and late
+    wake-ups.
+- **Shorter latency on this device** needs exclusive mode (optional in §11), or a
+  device/driver with small shared-mode buffers (the inbox HDAudio driver goes down to
+  128 frames).
 
 **Tests:**
 - **Zero allocations:** 1,000 frames of plays, stops, parameter changes, sidechain,
@@ -160,9 +179,13 @@ In particular, effects need a latency report for delay compensation.
     fundamental period within [min, max]; `0` asks for the minimum;
   - fallback to `IAudioClient::Initialize` (the default ~10 ms) on refusal, with the
     reason in `OutputInfo::note`.
+  - one period plus a margin (default 2 ms) is kept queued, not the whole device buffer:
+    the engine consumes a period per event, and the rest of the buffer would only add
+    latency (22 → 12 ms on ref-1). `queue_margin_ms: None` restores the whole-buffer
+    mode.
 - **Buffer:**
   - primed with real audio before `Start`;
-  - each event renders exactly the free space;
+  - each event renders up to the queue target (one period plus the margin);
   - float buffers are rendered in place, and 16/24/32-bit integer formats are converted
     from a scratch buffer.
 - **Device changes:** an `IMMNotificationClient` signals an event; the thread reopens only
