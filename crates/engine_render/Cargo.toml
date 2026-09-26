@@ -17,3 +17,10 @@ engine_rhi.workspace = true
 [[bench]]
 name = "graph"
 harness = false
+
+[dev-dependencies]
+# Recompiles the committed shaders to check them against their source.
+engine_shader.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
+engine_platform.workspace = true

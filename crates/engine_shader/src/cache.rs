@@ -36,7 +36,8 @@ pub struct ShaderCache {
     dir: PathBuf,
 }
 
-const MANIFEST_VERSION: &str = "engine-shader-cache 1";
+/// Bumped whenever the compiler's settings change the output (2: column-major matrices).
+const MANIFEST_VERSION: &str = "engine-shader-cache 2";
 
 impl ShaderCache {
     /// Opens (creates) a cache in `dir`.

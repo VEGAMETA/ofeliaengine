@@ -2,8 +2,8 @@
 
 use crate::ShaderError;
 use crate::slang::{
-    DEBUG_INFO_NONE, DEBUG_INFO_STANDARD, LANGUAGE_SLANG, OPTIMIZATION_HIGH, OPTIMIZATION_NONE,
-    Request, Session, SlangLibrary, TARGET_SPIRV,
+    DEBUG_INFO_NONE, DEBUG_INFO_STANDARD, LANGUAGE_SLANG, MATRIX_LAYOUT_COLUMN_MAJOR,
+    OPTIMIZATION_HIGH, OPTIMIZATION_NONE, Request, Session, SlangLibrary, TARGET_SPIRV,
 };
 use core::ffi::{CStr, c_char};
 use core::ptr::NonNull;
@@ -253,6 +253,9 @@ impl Compiler {
                 });
             }
             (f.set_codegen_target)(req, TARGET_SPIRV);
+            // The engine's convention (ADR 0012): matrices are stored column by column, as
+            // glam stores them, so they go into buffers and push constants unchanged.
+            (f.set_matrix_layout)(req, MATRIX_LAYOUT_COLUMN_MAJOR);
             (f.set_target_profile)(req, 0, self.spirv_profile);
             (f.set_optimization_level)(
                 req,

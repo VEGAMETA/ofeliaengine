@@ -144,7 +144,7 @@ impl Adapter {
         if props.api_version < vk::API_VERSION_1_3 {
             missing.push("Vulkan 1.3");
         }
-        let required: [(&'static str, vk::Bool32); 17] = [
+        let required: [(&'static str, vk::Bool32); 18] = [
             ("dynamicRendering", f13.dynamic_rendering),
             ("synchronization2", f13.synchronization2),
             ("maintenance4", f13.maintenance4),
@@ -171,6 +171,10 @@ impl Adapter {
             (
                 "descriptorBindingStorageBufferUpdateAfterBind",
                 f12.descriptor_binding_storage_buffer_update_after_bind,
+            ),
+            (
+                "descriptorBindingUpdateUnusedWhilePending",
+                f12.descriptor_binding_update_unused_while_pending,
             ),
             (
                 "shaderSampledImageArrayNonUniformIndexing",

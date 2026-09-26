@@ -80,6 +80,7 @@ name = "engine_core"
 version = "0.0.0"
 dependencies = [
  "engine_profiler",
+ "glam",
  "loom",
  "rayon",
 ]
@@ -104,8 +105,10 @@ name = "engine_render"
 version = "0.0.0"
 dependencies = [
  "engine_core",
+ "engine_platform",
  "engine_profiler",
  "engine_rhi",
+ "engine_shader",
 ]
 
 [[package]]
@@ -148,6 +151,12 @@ dependencies = [
  "windows-link",
  "windows-result",
 ]
+
+[[package]]
+name = "glam"
+version = "0.33.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "928452f9c953e142b2f0973e4bd5f34445fcaa8069556ea97a3c9d34d15a4cf8"
 
 [[package]]
 name = "gpu-allocator"

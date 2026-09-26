@@ -21,6 +21,8 @@ pub(crate) const LANGUAGE_SLANG: c_int = 1;
 /// `SlangOptimizationLevel`: none / high.
 pub(crate) const OPTIMIZATION_NONE: u32 = 0;
 pub(crate) const OPTIMIZATION_HIGH: u32 = 2;
+/// `SlangMatrixLayoutMode::SLANG_MATRIX_LAYOUT_COLUMN_MAJOR` (Slang's default is row-major).
+pub(crate) const MATRIX_LAYOUT_COLUMN_MAJOR: u32 = 2;
 /// `SlangDebugInfoLevel`: none / standard.
 pub(crate) const DEBUG_INFO_NONE: u32 = 0;
 pub(crate) const DEBUG_INFO_STANDARD: u32 = 2;
@@ -36,6 +38,7 @@ pub(crate) struct Functions {
     pub(crate) set_target_profile: unsafe extern "C" fn(*mut Request, c_int, u32),
     pub(crate) set_optimization_level: unsafe extern "C" fn(*mut Request, u32),
     pub(crate) set_debug_info_level: unsafe extern "C" fn(*mut Request, u32),
+    pub(crate) set_matrix_layout: unsafe extern "C" fn(*mut Request, u32),
     pub(crate) add_search_path: unsafe extern "C" fn(*mut Request, *const c_char),
     pub(crate) add_define: unsafe extern "C" fn(*mut Request, *const c_char, *const c_char),
     pub(crate) add_translation_unit:
@@ -137,6 +140,7 @@ impl SlangLibrary {
             set_target_profile: symbol!("spSetTargetProfile"),
             set_optimization_level: symbol!("spSetOptimizationLevel"),
             set_debug_info_level: symbol!("spSetDebugInfoLevel"),
+            set_matrix_layout: symbol!("spSetMatrixLayoutMode"),
             add_search_path: symbol!("spAddSearchPath"),
             add_define: symbol!("spAddPreprocessorDefine"),
             add_translation_unit: symbol!("spAddTranslationUnit"),
