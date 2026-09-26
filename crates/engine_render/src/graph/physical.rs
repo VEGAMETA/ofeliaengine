@@ -13,7 +13,7 @@ use super::placement::{self, Item};
 use super::{BufferDesc, TextureDesc, aspect_of};
 use engine_rhi::ash::{self, vk};
 use engine_rhi::{
-    Allocation, AllocationRequest, Allocator, MemoryLocation, ResourceKind, RhiError,
+    Allocation, AllocationRequest, Allocator, Bindless, MemoryLocation, ResourceKind, RhiError,
 };
 
 /// The Vulkan side of one graph resource in the current frame.
@@ -24,6 +24,10 @@ pub(crate) struct Physical {
     pub(crate) buffer: vk::Buffer,
     pub(crate) address: vk::DeviceAddress,
     pub(crate) extent: vk::Extent2D,
+    /// Index in the bindless sampled-image binding, if registered.
+    pub(crate) sampled_index: Option<u32>,
+    /// Index in the bindless storage-image binding, if registered.
+    pub(crate) storage_index: Option<u32>,
 }
 
 /// Results of [`PhysicalResources::realize`] for the stats.
@@ -56,7 +60,48 @@ struct CachedImage {
     offset: u64,
     image: vk::Image,
     view: vk::ImageView,
+    sampled_index: Option<u32>,
+    storage_index: Option<u32>,
     used: bool,
+}
+
+impl CachedImage {
+    /// Registers the view in the bindless set for the usages that need it (once).
+    fn register(&mut self, bindless: Option<&Bindless>) {
+        let Some(bindless) = bindless else { return };
+        if self.view == vk::ImageView::null() {
+            return;
+        }
+        if self.sampled_index.is_none() && self.usage.contains(vk::ImageUsageFlags::SAMPLED) {
+            self.sampled_index = bindless.add_sampled_image(self.view);
+        }
+        if self.storage_index.is_none() && self.usage.contains(vk::ImageUsageFlags::STORAGE) {
+            self.storage_index = bindless.add_storage_image(self.view);
+        }
+    }
+
+    /// Destroys the image and view and returns its bindless indices.
+    ///
+    /// # Safety
+    ///
+    /// The GPU no longer uses the image (its indices are free to reuse at once).
+    unsafe fn destroy(&self, device: &ash::Device, bindless: Option<&Bindless>) {
+        if let Some(bindless) = bindless {
+            if let Some(index) = self.sampled_index {
+                bindless.remove_sampled_image(index, 0);
+            }
+            if let Some(index) = self.storage_index {
+                bindless.remove_storage_image(index, 0);
+            }
+        }
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            if self.view != vk::ImageView::null() {
+                device.destroy_image_view(self.view, None);
+            }
+            device.destroy_image(self.image, None);
+        }
+    }
 }
 
 struct CachedBuffer {
@@ -235,6 +280,7 @@ impl PhysicalResources {
         slot: usize,
         device: &ash::Device,
         debug_utils: Option<&ash::ext::debug_utils::Device>,
+        bindless: Option<&Bindless>,
         allocator: &mut Allocator,
         records: &mut Records,
         textures: &[TextureDesc],
@@ -373,7 +419,7 @@ impl PhysicalResources {
                     if let Some(i) = existing {
                         let old = slot.heaps.swap_remove(i);
                         // SAFETY: the slot's previous work is done (caller).
-                        unsafe { destroy_heap_objects(device, slot, old.id) };
+                        unsafe { destroy_heap_objects(device, bindless, slot, old.id) };
                         allocator.free(old.allocation);
                     }
                     // Headroom so that a slowly growing frame does not reallocate often.
@@ -423,12 +469,11 @@ impl PhysicalResources {
                                 && c.desc == *desc
                                 && c.usage == usage
                         });
-                        let (image, view) = match cached {
+                        let index = match cached {
                             Some(i) => {
                                 slot.image_cursor = i + 1;
-                                let c = &mut slot.images[i];
-                                c.used = true;
-                                (c.image, c.view)
+                                slot.images[i].used = true;
+                                i
                             }
                             None => {
                                 // SAFETY: memory and offset come from the heap and placement.
@@ -443,19 +488,25 @@ impl PhysicalResources {
                                     offset: item.offset,
                                     image,
                                     view,
+                                    sampled_index: None,
+                                    storage_index: None,
                                     used: true,
                                 });
                                 realized.created_objects += 1;
-                                (image, view)
+                                slot.images.len() - 1
                             }
                         };
+                        let c = &mut slot.images[index];
+                        c.register(bindless);
                         self.current[r] = Physical {
-                            image,
-                            view,
+                            image: c.image,
+                            view: c.view,
                             extent: vk::Extent2D {
                                 width: desc.width,
                                 height: desc.height,
                             },
+                            sampled_index: c.sampled_index,
+                            storage_index: c.storage_index,
                             ..Physical::default()
                         };
                     }
@@ -512,12 +563,7 @@ impl PhysicalResources {
             let keep = c.used;
             if !keep {
                 // SAFETY: not used by any pending GPU work (see above).
-                unsafe {
-                    if c.view != vk::ImageView::null() {
-                        device.destroy_image_view(c.view, None);
-                    }
-                    device.destroy_image(c.image, None);
-                }
+                unsafe { c.destroy(device, bindless) };
             }
             c.used = false;
             keep
@@ -539,16 +585,16 @@ impl PhysicalResources {
     /// # Safety
     ///
     /// The GPU no longer uses any of them.
-    pub(crate) unsafe fn destroy_all(&mut self, device: &ash::Device, allocator: &mut Allocator) {
+    pub(crate) unsafe fn destroy_all(
+        &mut self,
+        device: &ash::Device,
+        bindless: Option<&Bindless>,
+        allocator: &mut Allocator,
+    ) {
         for slot in &mut self.slots {
             for c in slot.images.drain(..) {
                 // SAFETY: guaranteed by the caller.
-                unsafe {
-                    if c.view != vk::ImageView::null() {
-                        device.destroy_image_view(c.view, None);
-                    }
-                    device.destroy_image(c.image, None);
-                }
+                unsafe { c.destroy(device, bindless) };
             }
             for c in slot.buffers.drain(..) {
                 // SAFETY: guaranteed by the caller.
@@ -584,16 +630,16 @@ fn name_object<H: vk::Handle>(
 /// # Safety
 ///
 /// The GPU no longer uses them.
-unsafe fn destroy_heap_objects(device: &ash::Device, slot: &mut Slot, id: u64) {
+unsafe fn destroy_heap_objects(
+    device: &ash::Device,
+    bindless: Option<&Bindless>,
+    slot: &mut Slot,
+    id: u64,
+) {
     slot.images.retain(|c| {
         if c.heap == id {
             // SAFETY: guaranteed by the caller.
-            unsafe {
-                if c.view != vk::ImageView::null() {
-                    device.destroy_image_view(c.view, None);
-                }
-                device.destroy_image(c.image, None);
-            }
+            unsafe { c.destroy(device, bindless) };
         }
         c.heap != id
     });
