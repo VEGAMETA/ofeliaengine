@@ -130,7 +130,7 @@ fn main() {
         let mut pending: VecDeque<(u64, Instant)> = VecDeque::new();
         let mut last_begin: Option<Instant> = None;
         for n in 0..frames_per_run + warmup {
-            let id = latency.begin_frame(&swapchain).unwrap();
+            let id = latency.begin_frame(&swapchain, &frames).unwrap();
             let begin = Instant::now();
             windows.drain_events(|e| {
                 if e.kind == WindowEventKind::CloseRequested {

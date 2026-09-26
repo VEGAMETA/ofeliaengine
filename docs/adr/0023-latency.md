@@ -35,8 +35,11 @@ vendors' extensions, so both paths run in CI.
 - **`engine_latency::Latency`**, one per swapchain:
   - `begin_frame` (sleep before input sampling), `mark` (shared markers),
     `before_present`, `present_id`, `submit_present_id`, `history`, `nv_reports`;
-  - backends: Reflex, Anti-Lag 2, generic (limiter on the precise waitable timer plus
-    `present_wait` queue bound);
+  - backends: Reflex, Anti-Lag 2, generic (limiter on the precise waitable timer plus a
+    queue bound: `present_wait` when the device has it, otherwise waiting for the GPU to
+    finish the frame `max_queued_presents` behind on the frames' timeline semaphore);
+  - present ids continue from the swapchain's last one (`Swapchain::last_present_id`), so
+    several `Latency` objects in turn on one swapchain stay valid;
   - `LatencySettings`: mode (off, on, boost), frame-rate cap, queued presents.
 - **The `latency` example** runs GPU-bound frames for every available configuration. It
   prints frame time, input to present call, input to displayed (`present_wait`) and
@@ -45,10 +48,35 @@ vendors' extensions, so both paths run in CI.
 
 ## Measurements
 
-- **Local:** clippy and builds for Windows and Linux; `engine_rhi` tests on lavapipe
-  with validation (the new optional extensions are not present there and stay off).
-- **ref-1 numbers** come from the GPU workflow on the PR that implements this ADR, and
-  go into `docs/perf/history.md`.
+**Local:** clippy and builds for Windows and Linux; `engine_rhi` tests on lavapipe with
+validation (the new optional extensions are not present there and stay off).
+
+**ref-1, release build.** The `latency` example (GPU workflow on PR #20, commit
+`20c98c8`) runs 300 frames per configuration, presents with `Immediate` at 1280×720 and
+loads the GPU with 32 MiB buffer fills. It reports medians in ms:
+
+| GPU (load) | Configuration | Frame | Input → present call | Input → displayed | Input → GPU end (Reflex) |
+|---|---|---:|---:|---:|---:|
+| RTX 4060 Ti (48 fills) | off | 5.52 | 4.29 | 15.63 | — |
+| | Reflex on | 5.61 | 0.41 | **11.79** | 13.74 |
+| | Reflex boost | 5.61 | 0.42 | 11.80 | 13.61 |
+| | generic (`present_wait`, 1 queued) | 5.51 | 0.91 | 12.26 | — |
+| Radeon iGPU (12 fills) | off | 6.55 | 6.55 | — | — |
+| | Anti-Lag 2 on | 6.55 | 6.55 | — | — |
+| | generic (1 queued) | 6.55 | 6.55 | — | — |
+
+Findings:
+- **On NVIDIA,** Reflex cuts input-to-display by 3.8 ms (−25 %) at the same frame time.
+  The generic `present_wait` path gets most of that (−3.4 ms) on any GPU that has the
+  extension.
+- **On the Radeon iGPU,** Anti-Lag 2 changes nothing measurable. The driver exposes
+  `VK_AMD_anti_lag`, but its effect may be limited to discrete Radeons; this needs a
+  discrete RDNA card to verify.
+- **The generic row on the iGPU predates the GPU-timeline fallback:** that GPU has no
+  `present_wait`, so the generic path did not bound the queue at all. It now waits on the
+  frames' timeline semaphore instead, and the next GPU run measures it.
+- **No display time without `present_wait` on AMD.** "Input → displayed" needs
+  `present_wait`, which the AMD driver does not expose; PresentMon covers that case.
 
 ## Consequences
 

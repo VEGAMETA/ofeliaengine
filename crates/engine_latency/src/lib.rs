@@ -15,7 +15,7 @@
 //! The markers are shared by all backends, Tracy and the latency overlay.
 
 use engine_rhi::ash::vk;
-use engine_rhi::{Device, RhiError, Swapchain};
+use engine_rhi::{Device, Frames, RhiError, Swapchain};
 use std::time::{Duration, Instant};
 
 /// Which implementation runs.
@@ -48,8 +48,9 @@ pub struct LatencySettings {
     /// Frame-rate cap. With variable refresh rate, a few frames below the display's
     /// maximum keeps it in range.
     pub fps_limit: Option<f64>,
-    /// Generic path: how many presents may wait to be displayed beyond the frame being
-    /// built (`VK_KHR_present_wait`); 0 does not wait.
+    /// Generic path: how many frames may be queued beyond the frame being built; 0 does
+    /// not wait. Counted in presents waiting to be displayed with `VK_KHR_present_wait`,
+    /// otherwise in frames the GPU has not finished.
     pub max_queued_presents: u32,
 }
 
@@ -214,6 +215,8 @@ pub struct Latency {
     settings: LatencySettings,
     device: engine_rhi::ash::Device,
     present_id: bool,
+    /// `VK_KHR_present_wait` with present ids (the generic path waits on presents).
+    present_wait: bool,
     nv: Option<Nv>,
     amd: Option<Amd>,
     frame: u64,
@@ -309,6 +312,7 @@ impl Latency {
             settings,
             device: raw.clone(),
             present_id: ext.present_id,
+            present_wait: ext.present_id && ext.present_wait,
             nv,
             amd,
             // Present ids continue from whoever presented to this swapchain before.
@@ -401,7 +405,10 @@ impl Latency {
     /// Starts the next frame and returns its present id (one more than the swapchain's
     /// last): sleeps as the backend decides, so input sampled right after is as fresh as
     /// possible.
-    pub fn begin_frame(&mut self, swapchain: &Swapchain) -> Result<u64, RhiError> {
+    ///
+    /// `frames` bounds the GPU queue on the generic path when the device has no
+    /// `VK_KHR_present_wait`.
+    pub fn begin_frame(&mut self, swapchain: &Swapchain, frames: &Frames) -> Result<u64, RhiError> {
         engine_profiler::zone!("latency::begin_frame");
         self.frame += 1;
         let on = self.settings.mode != LowLatency::Off;
@@ -445,8 +452,20 @@ impl Latency {
         } else if !vendor {
             // Generic: bound the present queue, then cap the frame rate.
             let depth = u64::from(self.settings.max_queued_presents);
-            if on && depth > 0 && self.frame > depth + 1 {
-                swapchain.wait_for_present(self.frame - depth - 1, PRESENT_WAIT_TIMEOUT_NS)?;
+            if on && depth > 0 {
+                if self.present_wait {
+                    if self.frame > depth + 1 {
+                        swapchain
+                            .wait_for_present(self.frame - depth - 1, PRESENT_WAIT_TIMEOUT_NS)?;
+                    }
+                } else {
+                    // No present_wait: bound the GPU queue instead. With `depth` frames
+                    // allowed beyond this one, the frame before those must be finished.
+                    let submitted = frames.submitted();
+                    if submitted > depth {
+                        frames.wait_for_frame(submitted - depth)?;
+                    }
+                }
             }
             if let Some(fps) = self.settings.fps_limit {
                 let interval = Duration::from_secs_f64(1.0 / fps.max(1.0));

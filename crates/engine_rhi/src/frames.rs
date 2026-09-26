@@ -228,6 +228,12 @@ impl Frames {
         self.submitted
     }
 
+    /// Waits until frame `number` (counted like [`Frames::submitted`], from 1) has
+    /// finished on the GPU. Frames not submitted yet count as the last submitted one.
+    pub fn wait_for_frame(&self, number: u64) -> Result<(), RhiError> {
+        self.wait_for(number.min(self.submitted))
+    }
+
     fn wait_for(&self, value: u64) -> Result<(), RhiError> {
         if value == 0 {
             return Ok(());

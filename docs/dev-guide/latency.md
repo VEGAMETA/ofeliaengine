@@ -16,7 +16,7 @@ use engine_latency::{LatencySettings, LowLatency};
 let settings = LatencySettings {
     mode: LowLatency::On,      // Off, On, or Boost (Boost keeps GPU clocks up, NVIDIA)
     fps_limit: Some(141.0),    // with a variable-refresh (G-Sync/FreeSync) 144 Hz monitor
-    max_queued_presents: 1,    // the generic path: how far presentation may lag
+    max_queued_presents: 1,    // the generic path: how many frames may queue ahead
 };
 ```
 
