@@ -6,10 +6,16 @@
 //! is full, and removal moves the archetype's last row into the hole.
 //!
 //! Chunk sizes grow with the archetype: its first chunk is 16 KiB, the next two 64 KiB,
-//! the rest 256 KiB ([`CHUNK_CLASSES`]). Small archetypes stay small, and large ones get
-//! long arrays per component: iterating a million entities streams memory as fast as one
-//! contiguous array would (16 KiB chunks throughout were 3.4× slower on that benchmark,
-//! because each short array restarts the hardware prefetcher).
+//! the next four 256 KiB, the rest 1 MiB ([`CHUNK_CLASSES`]). Small archetypes stay small,
+//! and large ones get long arrays per component: iterating a million entities streams
+//! memory about as fast as whole columns would (on ref-1, 100-byte rows: whole columns
+//! 458 µs, 1 MiB chunks 473 µs, 256 KiB chunks 591 µs, 16 KiB chunks 1656 µs, because each
+//! short array restarts the hardware prefetcher).
+//!
+//! In chunks of 64 KiB and more, column arrays start at staggered offsets within a 4 KiB
+//! page. Otherwise two same-size columns can start a near multiple of 4 KiB apart, and
+//! loads from one falsely depend on stores to the other ("4K aliasing"): on ref-1 that
+//! made `p += v` over 24-byte rows 30–60 % slower in large chunks.
 //!
 //! Chunks come from a per-world pool of 256 KiB slabs, so spawning and despawning in
 //! steady state never reach the global allocator. Each chunk carries one change version
@@ -22,8 +28,12 @@ use core::alloc::Layout;
 use core::ptr::NonNull;
 
 /// Chunk sizes in bytes: an archetype's first chunk uses the first, the next two the
-/// second, the rest the third.
-pub const CHUNK_CLASSES: [usize; 3] = [16 * 1024, 64 * 1024, 256 * 1024];
+/// second, the next four the third, the rest the fourth.
+pub const CHUNK_CLASSES: [usize; CLASSES] = [16 * 1024, 64 * 1024, 256 * 1024, 1024 * 1024];
+const CLASSES: usize = 4;
+/// Classes from this one up stagger their column arrays (see the module docs).
+const STAGGERED_FROM: usize = 1;
+const PAGE: usize = 4096;
 const SLAB_BYTES: usize = 256 * 1024;
 const CHUNK_ALIGN: usize = 64;
 /// Minimum alignment of a column inside a chunk.
@@ -35,15 +45,18 @@ const fn class_of(index: usize) -> usize {
     match index {
         0 => 0,
         1 | 2 => 1,
-        _ => 2,
+        3..=6 => 2,
+        _ => 3,
     }
 }
 
 /// Pool of chunks. Freed chunks are kept for reuse until the world is dropped.
 #[derive(Default)]
 pub(crate) struct ChunkPool {
-    free: [Vec<NonNull<u8>>; 3],
+    free: [Vec<NonNull<u8>>; CLASSES],
     slabs: Vec<NonNull<u8>>,
+    /// Chunks larger than a slab, allocated one by one (all of them, free or in use).
+    large: Vec<(NonNull<u8>, usize)>,
 }
 
 fn layout(bytes: usize) -> Layout {
@@ -69,6 +82,11 @@ impl ChunkPool {
             return raw_alloc(bytes);
         };
         if let Some(chunk) = self.free[class].pop() {
+            return chunk;
+        }
+        if bytes > SLAB_BYTES {
+            let chunk = raw_alloc(bytes);
+            self.large.push((chunk, bytes));
             return chunk;
         }
         let slab = raw_alloc(SLAB_BYTES);
@@ -97,6 +115,10 @@ impl Drop for ChunkPool {
             // SAFETY: allocated in `alloc` with this layout.
             unsafe { std::alloc::dealloc(slab.as_ptr(), layout(SLAB_BYTES)) };
         }
+        for &(chunk, bytes) in &self.large {
+            // SAFETY: allocated in `alloc` with this size.
+            unsafe { std::alloc::dealloc(chunk.as_ptr(), layout(bytes)) };
+        }
     }
 }
 
@@ -120,9 +142,9 @@ pub struct Archetype {
     /// Column indices sorted by component name key (hash order).
     pub(crate) canonical_columns: Box<[u16]>,
     /// Rows per chunk, per size class.
-    capacities: [u32; 3],
+    capacities: [u32; CLASSES],
     /// Bytes per chunk, per size class.
-    chunk_bytes: [u32; 3],
+    chunk_bytes: [u32; CLASSES],
     /// `class * columns.len() + column` → byte offset of the column's array.
     offsets: Box<[u32]>,
     pub(crate) chunks: Vec<NonNull<u8>>,
@@ -150,11 +172,15 @@ impl Archetype {
         let infos: Vec<_> = ids.iter().map(|&id| components.info(id)).collect();
         let entity_bytes = core::mem::size_of::<Entity>();
         let row_bytes: usize = entity_bytes + infos.iter().map(|i| i.layout.size()).sum::<usize>();
-        let slack = (ids.len() + 1) * CHUNK_ALIGN;
-        let mut capacities = [0u32; 3];
-        let mut chunk_bytes = [0u32; 3];
-        let mut offsets = vec![0u32; 3 * ids.len()];
-        for class in 0..3 {
+        let mut capacities = [0u32; CLASSES];
+        let mut chunk_bytes = [0u32; CLASSES];
+        let mut offsets = vec![0u32; CLASSES * ids.len()];
+        // Column c starts at an offset ≡ c · PAGE / n (mod PAGE) in staggered classes.
+        let stagger_step = PAGE / ids.len().max(1).next_power_of_two();
+        for class in 0..CLASSES {
+            let staggered = class >= STAGGERED_FROM;
+            let slack =
+                (ids.len() + 1) * CHUNK_ALIGN + if staggered { ids.len() * PAGE } else { 0 };
             let (capacity, bytes) = if row_bytes + slack <= CHUNK_CLASSES[class] {
                 (
                     (CHUNK_CLASSES[class] - slack) / row_bytes,
@@ -167,6 +193,11 @@ impl Archetype {
             let mut offset = align_up(entity_bytes * capacity, COLUMN_ALIGN);
             for (column, info) in infos.iter().enumerate() {
                 offset = align_up(offset, info.layout.align().max(COLUMN_ALIGN));
+                if staggered {
+                    let want = (column * stagger_step) % PAGE;
+                    offset += (want + PAGE - offset % PAGE) % PAGE;
+                    offset = align_up(offset, info.layout.align().max(COLUMN_ALIGN));
+                }
                 offsets[class * ids.len() + column] = offset as u32;
                 offset += info.layout.size() * capacity;
             }

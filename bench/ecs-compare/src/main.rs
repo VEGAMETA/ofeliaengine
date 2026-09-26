@@ -463,9 +463,9 @@ fn layout_study() {
     let runs = 30;
     println!("### Chunk layout study: p += v over 1M rows (µs, median of {runs})\n");
     println!(
-        "| layout | 100-byte rows (Transform + Position + Rotation + Velocity) | 24-byte rows (Position + Velocity) |"
+        "| layout | 100-byte rows (Transform + Position + Rotation + Velocity) | 24-byte rows (Position + Velocity) | 24-byte rows, Velocity staggered by 2 KiB |"
     );
-    println!("|---|---:|---:|");
+    println!("|---|---:|---:|---:|");
     let mut p = vec![[1.0f32; 3]; N];
     let v = vec![[1.0f32; 3]; N];
     let whole = measure(
@@ -476,17 +476,21 @@ fn layout_study() {
             black_box(&p);
         },
     );
-    println!("| whole columns | {whole:.0} | {whole:.0} |");
+    println!("| whole columns | {whole:.0} | {whole:.0} | {whole:.0} |");
     for kib in [16usize, 64, 256, 1024, 2048, 4096] {
         let bytes = kib << 10;
         let mut cells = Vec::new();
-        for (row, p_off, v_off) in [(100usize, 64usize, 88usize), (24, 0, 12)] {
-            let cap = bytes / row;
+        for (row, p_off, v_off, pad) in [
+            (100usize, 64usize, 88usize, 0usize),
+            (24, 0, 12, 0),
+            (24, 0, 12, 2048),
+        ] {
+            let cap = (bytes - pad) / row;
             let chunks = N.div_ceil(cap);
             let mut mem: Vec<Vec<[f32; 3]>> =
                 (0..chunks).map(|_| vec![[1.0f32; 3]; bytes / 12]).collect();
             // Column arrays at `offset * cap` bytes, i.e. `offset / 12 * cap` elements.
-            let (pe, ve) = (p_off * cap / 12, v_off * cap / 12);
+            let (pe, ve) = (p_off * cap / 12, (v_off * cap + pad) / 12);
             cells.push(measure(
                 runs,
                 || (),
