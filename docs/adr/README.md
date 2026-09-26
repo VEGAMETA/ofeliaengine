@@ -21,6 +21,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0011](0011-render-graph.md) | Render graph | Accepted |
 | [0012](0012-math-library.md) | Math library | Accepted |
 | [0013](0013-bindless-and-pipelines.md) | Bindless resources, pipelines and the first mesh path | Accepted |
+| [0014](0014-pbr-and-shadows.md) | Forward PBR, directional shadows, per-frame GPU data | Accepted |
 
 ## Template
 
