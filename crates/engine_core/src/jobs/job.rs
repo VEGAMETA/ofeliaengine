@@ -86,8 +86,10 @@ impl<L: Latch, F: FnOnce() -> R, R> StackJob<L, F, R> {
     }
 
     pub(crate) fn as_job_ref(&self) -> JobRef {
-        // `header` is the first field of a `repr(C)` struct.
-        NonNull::from(&self.header)
+        // `header` is the first field of a `repr(C)` struct. The pointer is derived from
+        // the whole job, not from `&self.header`: `execute_raw` reaches the other fields
+        // through it, which a pointer to the header alone may not (Stacked Borrows).
+        NonNull::from(self).cast()
     }
 
     unsafe fn execute_raw(job: JobRef) {

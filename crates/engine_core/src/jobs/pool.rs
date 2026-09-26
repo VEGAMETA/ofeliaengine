@@ -558,7 +558,8 @@ where
         refs: CountLatch::new(0, registry, index),
         panic: AtomicPtr::new(ptr::null_mut()),
     };
-    let job_ref = NonNull::from(&job.header);
+    // From the whole job (see `StackJob::as_job_ref`); `header` is its first field.
+    let job_ref = NonNull::from(&job).cast::<JobHeader>();
     let deque = &registry.slots[index].deque;
 
     // One helper reference per other thread that could usefully join in.
