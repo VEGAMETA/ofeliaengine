@@ -3,6 +3,9 @@
 - Status: Accepted
 - Date: 2026-09-26
 - Builds on: [ADR 0011](0011-render-graph.md), [ADR 0013](0013-bindless-and-pipelines.md)
+- Drawing (per-object commands, draw list layout) superseded by
+  [ADR 0034](0034-gpu-culling-and-indirect-draws.md): GPU culling and indirect instanced
+  draws. Shading and shadows are unchanged.
 
 ## Context
 
