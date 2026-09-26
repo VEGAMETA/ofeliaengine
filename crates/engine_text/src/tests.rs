@@ -248,3 +248,34 @@ fn subpixel_keys_round_to_quarters() {
     assert_eq!((k.subpixel, x), (0, 4));
     assert_eq!(GlyphKey::at(f, 1, 10.0, -0.25).1, -1);
 }
+
+#[test]
+fn bundled_fonts_cover_their_scripts_and_icons() {
+    let noto = Font::from_bytes(crate::fonts::NOTO_SANS, 0).unwrap();
+    for c in ['A', 'z', 'Ж', 'я', 'Ω', 'ő', 'ệ', '€', '…'] {
+        assert!(noto.glyph(c).is_some(), "Noto Sans lacks {c}");
+    }
+    // Noto Sans has no arrows or math: JetBrains Mono fills in for them in the UI stack.
+    assert!(noto.glyph('→').is_none());
+    let mono = Font::from_bytes(crate::fonts::JETBRAINS_MONO, 0).unwrap();
+    for c in ['{', '0', 'Ж', '≠', '→', '✓', '⌘', '⇧', '⏎'] {
+        assert!(mono.glyph(c).is_some(), "JetBrains Mono lacks {c}");
+    }
+    let icons = Font::from_bytes(crate::fonts::NERD_SYMBOLS, 0).unwrap();
+    // Material Design play / pause / stop / folder, Codicons gear, Font Awesome cube.
+    for c in ['\u{F040A}', '\u{F03E4}', '\u{F04DB}', '\u{F024B}', '\u{EB51}', '\u{F1B2}'] {
+        assert!(icons.glyph(c).is_some(), "no icon U+{:X}", c as u32);
+    }
+    // The UI stack shapes text, symbols and icons from one string.
+    let mut fonts = Fonts::new();
+    let text = fonts.load(crate::fonts::NOTO_SANS, 0).unwrap();
+    let mono = fonts.load(crate::fonts::JETBRAINS_MONO, 0).unwrap();
+    let symbols = fonts.load(crate::fonts::NERD_SYMBOLS, 0).unwrap();
+    let mut layout = TextLayout::new();
+    let stack = [text, mono, symbols];
+    layout.layout(&mut fonts, &stack, "\u{F040A} Играть →", &style(None));
+    let used: Vec<FontId> = layout.glyphs().iter().map(|g| g.font).collect();
+    assert_eq!(used.first(), Some(&symbols), "{used:?}");
+    assert_eq!(used.last(), Some(&mono), "{used:?}");
+    assert!(used[1..used.len() - 1].iter().all(|&f| f == text), "{used:?}");
+}
