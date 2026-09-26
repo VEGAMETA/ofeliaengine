@@ -5,16 +5,30 @@
 
 use engine_ui::*;
 use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct CountingAllocator;
 
 static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
 
+thread_local! {
+    // The UI runs on one thread: count the test thread only. Other threads (the Tracy
+    // client's, with `engine_profiler/tracy`) allocate on their own schedule.
+    // Const-initialized and without drop glue, so reading it never allocates.
+    static COUNTING: Cell<bool> = const { Cell::new(false) };
+}
+
+fn count() {
+    if COUNTING.with(Cell::get) {
+        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 // SAFETY: forwards to the system allocator; only adds a counter.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count();
         // SAFETY: same contract as the caller's.
         unsafe { System.alloc(layout) }
     }
@@ -25,7 +39,7 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
+        count();
         // SAFETY: same contract as the caller's.
         unsafe { System.realloc(ptr, layout, new_size) }
     }
@@ -86,6 +100,7 @@ fn steady_state_frames_do_not_allocate() {
         ui.end_frame(&mut measure);
     }
     let before = ALLOCATIONS.load(Ordering::Relaxed);
+    COUNTING.with(|c| c.set(true));
     for i in 0..200 {
         input.wheel = if i % 2 == 0 { -5.0 } else { 5.0 };
         input.mouse_pressed = i % 7 == 0;
@@ -96,6 +111,7 @@ fn steady_state_frames_do_not_allocate() {
         let f = ui.end_frame(&mut measure);
         std::hint::black_box(f.commands.len());
     }
+    COUNTING.with(|c| c.set(false));
     let n = ALLOCATIONS.load(Ordering::Relaxed) - before;
     assert_eq!(n, 0, "{n} allocations in 200 frames");
 }
