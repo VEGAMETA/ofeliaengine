@@ -1,0 +1,16 @@
+[package]
+name = "engine_input"
+description = "Input actions: named actions, bindings, contexts, tick-accurate state, network user commands."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+# The action logic is platform-independent (and tested in Linux containers); the device
+# layer (raw input conversion, XInput) is Windows-only.
+[target.'cfg(windows)'.dependencies]
+engine_platform.workspace = true
+windows-sys = { version = "0.61", features = ["Win32_UI_Input_XboxController"] }

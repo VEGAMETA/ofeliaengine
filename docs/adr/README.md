@@ -27,6 +27,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0017](0017-ecs.md) | ECS: own archetype ECS with growing chunks, canonical order, snapshots | Accepted |
 | [0018](0018-physics-interface-and-jolt.md) | Physics interface (P0) and the Jolt reference backend (P1) | Accepted |
 | [0019](0019-networking-model.md) | Networking model: authoritative ticks, prediction, lag compensation | Accepted |
+| [0021](0021-input-actions.md) | Input actions: named actions, contexts, tick-accurate state | Accepted |
 
 ## Template
 
