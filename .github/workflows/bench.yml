@@ -78,7 +78,7 @@ jobs:
           cargo bench -p engine_text --bench text --locked > bench-text.md
           set rc=%ERRORLEVEL%
           echo.>> bench-text.md
-          cargo run --release --locked --manifest-path bench/text-compare/Cargo.toml >> bench-text.md 2>&1
+          cargo run -q --release --locked --manifest-path bench/text-compare/Cargo.toml >> bench-text.md
           exit /b %rc%
 
       - name: ECS comparison (research harness for ADR 0017, outside the workspace)
