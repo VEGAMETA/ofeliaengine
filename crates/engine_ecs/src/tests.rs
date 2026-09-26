@@ -714,11 +714,14 @@ mod schedule {
         s
     }
 
+    /// Entities in the test world (small under Miri, which interprets every access).
+    const N: u32 = if cfg!(miri) { 100 } else { 2000 };
+
     fn world() -> World {
         let mut w = World::new();
         w.insert_resource(Dt(0.5));
         w.insert_resource(Score::default());
-        for i in 0..2000u32 {
+        for i in 0..N {
             w.spawn((P(i as f32), V(1.0 + (i % 3) as f32), Hp(100.0), Age(i % 13)));
         }
         w
@@ -745,18 +748,21 @@ mod schedule {
     #[test]
     fn parallel_runs_equal_serial_runs() {
         let pool = ThreadPool::builder().workers(4).build().unwrap();
-        let (mut a, mut b) = (world(), world());
-        let (mut sa, mut sb) = (build(), build());
-        for _ in 0..50 {
-            sa.run(&mut a, None);
-            sb.run(&mut b, Some(&pool));
+        let (ticks, repeats) = if cfg!(miri) { (3, 1) } else { (50, 5) };
+        for _ in 0..repeats {
+            let (mut a, mut b) = (world(), world());
+            let (mut sa, mut sb) = (build(), build());
+            for tick in 0..ticks {
+                sa.run(&mut a, None);
+                sb.run(&mut b, Some(&pool));
+                assert_eq!(a.state_hash(), b.state_hash(), "tick {tick}");
+                assert_eq!(
+                    a.resource::<Score>().unwrap().0,
+                    b.resource::<Score>().unwrap().0
+                );
+            }
+            assert!(a.len() != N as usize, "commands spawned and despawned");
         }
-        assert_eq!(a.state_hash(), b.state_hash());
-        assert_eq!(
-            a.resource::<Score>().unwrap().0,
-            b.resource::<Score>().unwrap().0
-        );
-        assert!(a.len() != 2000, "commands spawned and despawned");
     }
 
     #[test]
