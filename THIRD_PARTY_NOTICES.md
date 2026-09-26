@@ -41,8 +41,7 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 
 | Crate | License | Used for |
 |---|---|---|
-| cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt, JoltC and Box2D sources |
-| cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt and JoltC sources, and Luau (through luau0-src) |
+| cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt, JoltC and Box2D sources, and Luau (through luau0-src) |
 
 ## Rust crates (compile-time only: procedural macros)
 
