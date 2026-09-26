@@ -21,16 +21,19 @@ env:
   CARGO_INCREMENTAL: 0
   RUST_BACKTRACE: 1
   # The vendored Jolt + JoltC static library, built once per content hash and shared by
-  # every profile, clippy and tests (crates/engine_physics_jolt/build.rs); kept between
-  # runs by the cache step below.
+  # every profile, clippy and tests (crates/engine_physics_jolt/build.rs). It lives in the
+  # runner's work folder, which persists between runs.
   ENGINE_JOLTC_CACHE: ${{ github.workspace }}\.joltc-cache
 
-# Everything runs on Windows x64 (CLAUDE.md §15). The toolchain comes from
-# rust-toolchain.toml; rustup installs it on first use.
+# Everything runs on Windows x64 (CLAUDE.md §15), on the self-hosted reference machine
+# (ref-1), like the GPU and bench workflows: hosted Windows minutes on a private repository
+# are billed, and runs stopped when the account's spending limit was reached. The
+# toolchain comes from rust-toolchain.toml; rustup installs it on first use.
 #
-# One job instead of one per check: hosted Windows minutes on a private repository are
-# limited, and every extra job pays for checkout + toolchain install again. Steps use
-# `if: !cancelled()` so one failing check does not hide the others.
+# The checkout keeps untracked files (`clean: false`), so `target/` and the Jolt cache
+# persist between runs and builds are incremental; `--locked` and fresh checkouts of
+# tracked files keep them honest. Steps use `if: !cancelled()` so one failing check does
+# not hide the others.
 #
 # Each check writes its output to logs/<check>.txt. On failure the tails of the failed logs are
 # posted as a commit comment: job logs live in Azure blob storage, which the automation
@@ -38,7 +41,8 @@ env:
 jobs:
   check:
     name: check
-    runs-on: windows-2025
+    runs-on: [self-hosted, windows, x64]
+    timeout-minutes: 90
     permissions:
       contents: write
     defaults:
@@ -46,16 +50,13 @@ jobs:
         shell: cmd
     steps:
       - uses: actions/checkout@v5
-      - uses: Swatinem/rust-cache@v2
-      - uses: actions/cache@v4
         with:
-          path: .joltc-cache
-          key: joltc-${{ runner.os }}-${{ hashFiles('third_party/**', 'crates/engine_physics_jolt/build.rs', 'crates/engine_physics_jolt/csrc/**') }}
+          clean: false
       # cargo-deny-action is a Docker action (Linux only), so install the binary instead.
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-deny
-      - run: mkdir logs
+      - run: if exist logs rmdir /s /q logs & mkdir logs
 
       - name: rustfmt
         run: |
