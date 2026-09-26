@@ -259,6 +259,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_scene"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_ecs",
+ "engine_profiler",
+ "engine_reflect",
+]
+
+[[package]]
 name = "engine_script"
 version = "0.0.0"
 dependencies = [
