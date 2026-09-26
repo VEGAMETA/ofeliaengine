@@ -560,7 +560,11 @@ mod windowed {
             let _ = swapchain.present(device.graphics, acquired.index);
             s.record = rec.elapsed().as_secs_f64() * 1e6;
             // GPU times of this graph's latest completed frame.
-            s.gpu = graph.gpu_pass_times().iter().map(|p| p.gpu_us).sum();
+            s.gpu = graph
+                .gpu_pass_times()
+                .iter()
+                .map(|p| f64::from(p.gpu_us))
+                .sum();
             s.frame = frame_start.elapsed().as_secs_f64() * 1e6;
             engine_profiler::frame_mark();
             total += 1;
