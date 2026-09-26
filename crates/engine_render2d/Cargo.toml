@@ -1,6 +1,6 @@
 [package]
 name = "engine_render2d"
-description = "2D renderer: batched sprites and SDF shapes on the render graph."
+description = "2D renderer: batched sprites, SDF shapes and text on the render graph."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,6 +14,7 @@ engine_core.workspace = true
 engine_profiler.workspace = true
 engine_render.workspace = true
 engine_rhi.workspace = true
+engine_text.workspace = true
 
 [dev-dependencies]
 # Recompiles the committed shaders to check them against their source.

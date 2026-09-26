@@ -13,6 +13,7 @@ on:
       - crates/engine_render/**
       - crates/engine_render2d/**
       - crates/engine_latency/**
+      - crates/engine_text/**
       - tools/**
       - Cargo.lock
       - .github/workflows/gpu.yml
