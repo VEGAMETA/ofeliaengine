@@ -33,6 +33,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0024](0024-audio-output-and-mixer.md) | Audio output and mixer: WASAPI low latency, lock-free commands, compiled bus schedule | Accepted |
 | [0026](0026-system-scheduler.md) | ECS system scheduler: insertion order, access-derived levels, job system | Accepted |
 | [0027](0027-transforms.md) | Transforms: local and world components, propagation from roots | Accepted |
+| [0025](0025-text.md) | Text: own layout on HarfRust and skrifa, bitmap glyph atlas | Accepted |
 
 ## Template
 

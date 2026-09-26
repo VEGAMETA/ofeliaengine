@@ -13,6 +13,10 @@ the dependency.
 | libloading 0.8 (+ cfg-if 1) | ISC (cfg-if: MIT OR Apache-2.0) | loads the Vulkan loader at run time (dependency of ash) |
 | glam 0.33 | MIT OR Apache-2.0 | vectors, matrices, quaternions in `engine_core::math` (ADR 0012) |
 | bytemuck 1.25 | Zlib OR Apache-2.0 OR MIT | plain-data proofs for ECS components that are snapshotted and hashed byte-wise (ADR 0017) |
+| harfrust 0.13.3 (+ bitflags 2, once_cell 1, smallvec 1) | MIT (the others MIT OR Apache-2.0) | text shaping in `engine_text` (ADR 0025) |
+| skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
+| unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
+| unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
 
 Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profiling`):
 
@@ -28,6 +32,7 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 |---|---|---|---|
 | Jolt Physics (© 2021 Jorrit Rouwe) | v5.6.0 | MIT | reference physics backend `engine_physics_jolt` (ADR 0018) |
 | JoltC (© Amer Koleci and contributors) | commit 886e088675ba | MIT | C API over Jolt, bound by `engine_physics_jolt` |
+| Go fonts (© 2016 Bigelow & Holmes Inc., for the Go project) | golang/image commit b06f1de3f490 | BSD-3-Clause | Go Regular, Bold and Mono: the engine's bundled fonts and the text test font (`third_party/fonts/go`, embedded by `engine_text::fonts`) |
 
 ## Rust crates (build dependencies)
 
@@ -59,6 +64,13 @@ workspace `deny.toml` license allow-list (checked 2026-09-26).
 | hecs 0.11.1 | MIT OR Apache-2.0 | ECS comparison |
 | bevy_ecs 0.18.1 (and its bevy_* dependencies) | MIT OR Apache-2.0 | ECS comparison |
 | flecs_ecs 0.2.2 (+ flecs_ecs_sys, bundled flecs C sources) | MIT | ECS comparison |
+
+`bench/text-compare` (ADR 0025) builds these with its own `Cargo.lock`:
+
+| Crate | License | Used for |
+|---|---|---|
+| parley 0.11.1 (+ fontique, parlance, ICU4X crates and data) | Apache-2.0 OR MIT (ICU4X: Unicode-3.0) | text layout comparison |
+| cosmic-text 0.19.0 (+ fontdb, swash, older harfrust and skrifa) | MIT OR Apache-2.0 | text layout comparison |
 
 ## Loaded at run time, not distributed
 

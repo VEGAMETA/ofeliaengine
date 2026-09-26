@@ -71,6 +71,14 @@ jobs:
           echo.>> bench-audio.md
           cargo run -p engine_audio --release --example tone --locked -- --seconds 4 --mute >> bench-audio.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
+      - name: cargo bench -p engine_text --bench text, and the text layout comparison
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          cargo bench -p engine_text --bench text --locked > bench-text.md
+          set rc=%ERRORLEVEL%
+          echo.>> bench-text.md
+          cargo run --release --locked --manifest-path bench/text-compare/Cargo.toml >> bench-text.md 2>&1
           exit /b %rc%
 
       - name: ECS comparison (research harness for ADR 0017, outside the workspace)
@@ -88,3 +96,4 @@ jobs:
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-audio.md,bench-ecs.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-text.md,bench-ecs.md
