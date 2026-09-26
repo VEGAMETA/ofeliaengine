@@ -29,6 +29,17 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 | loom 0.7 (only with `--cfg loom`) | MIT | model checking of the lock-free queues in `engine_core::jobs` |
 | gpu-allocator 0.28 (+ log, presser, thiserror, thiserror-impl, proc-macro2, quote, syn, unicode-ident) | MIT OR Apache-2.0 (unicode-ident also Unicode-3.0) | baseline in the `engine_rhi` memory allocator benchmark (ADR 0010) |
 
+## Research harnesses (outside the workspace, never linked into the engine)
+
+`bench/ecs-compare` (ADR 0017) builds these with its own `Cargo.lock`. All pass the
+workspace `deny.toml` license allow-list (checked 2026-09-26).
+
+| Crate | License | Used for |
+|---|---|---|
+| hecs 0.11.1 | MIT OR Apache-2.0 | ECS comparison |
+| bevy_ecs 0.18.1 (and its bevy_* dependencies) | MIT OR Apache-2.0 | ECS comparison |
+| flecs_ecs 0.2.2 (+ flecs_ecs_sys, bundled flecs C sources) | MIT | ECS comparison |
+
 ## Loaded at run time, not distributed
 
 | Component | License | Used for |
