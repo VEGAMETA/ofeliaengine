@@ -71,6 +71,22 @@ workspace's `deny.toml`.
   structural operation crosses FFI, and `set` of four components is four archetype moves
   unless the bulk API is used.
 
+## Measurements on ref-1
+
+Ryzen 7 7700, Windows 11, release, one thread, median, µs, lower is better (bench workflow
+report on the PR that added this note):
+
+| scenario | own prototype | hecs 0.11.1 | bevy_ecs 0.18.1 | flecs_ecs 0.2.2 |
+|---|---:|---:|---:|---:|
+| spawn 10k × 4 components | 534 | 836 | 958 | 5 582 |
+| iterate 10k: position += velocity | 4.3 | 8.9 | 7.6 | 5.8 |
+| iterate 1M: position += velocity | 462 | 855 | 829 | 482 |
+| fragmented: 26 archetypes × 20, data *= 2 | 0.1 | 0.3 | 0.2 | 0.4 |
+| add + remove a component, 10k entities | 398 | 435 | 791 | 1 125 |
+| random get of 10k (of 100k) | 93 | 201 | 88 | 237 |
+
+The container shows the same pattern:
+
 ## Measurements (container, not reference)
 
 Cloud container (Intel Xeon 2.8 GHz, 4 vCPUs, shared, noisy), release, one thread, median.
