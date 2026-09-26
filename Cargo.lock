@@ -229,6 +229,7 @@ dependencies = [
  "engine_render",
  "engine_rhi",
  "engine_shader",
+ "engine_text",
 ]
 
 [[package]]

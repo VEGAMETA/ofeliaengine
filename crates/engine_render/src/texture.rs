@@ -44,6 +44,10 @@ pub enum UploadError {
     },
     /// The upload ring's current slot has no room; retry next frame or grow the ring.
     RingFull,
+    /// A region upload before the first whole-texture upload (the rest would be undefined).
+    NotInitialized,
+    /// The region is not inside the texture.
+    OutOfBounds,
 }
 
 impl core::fmt::Display for UploadError {
@@ -54,6 +58,8 @@ impl core::fmt::Display for UploadError {
                 write!(f, "texture data is {actual} bytes, expected {expected}")
             }
             Self::RingFull => write!(f, "upload ring is full"),
+            Self::NotInitialized => write!(f, "region upload before the first full upload"),
+            Self::OutOfBounds => write!(f, "upload region outside the texture"),
         }
     }
 }
@@ -67,6 +73,8 @@ pub struct GpuTexture {
     allocation: Option<Allocation>,
     desc: TextureDesc,
     sampled_index: u32,
+    /// Set by the first whole upload: region uploads keep the rest of the contents.
+    initialized: core::sync::atomic::AtomicBool,
 }
 
 impl core::fmt::Debug for GpuTexture {
@@ -90,6 +98,29 @@ impl GpuTexture {
         format: vk::Format,
         width: u32,
         height: u32,
+    ) -> Result<Self, RhiError> {
+        Self::with_swizzle(
+            device,
+            allocator,
+            bindless,
+            format,
+            width,
+            height,
+            vk::ComponentMapping::default(),
+        )
+    }
+
+    /// Like [`Self::new`] with a component swizzle on the sampled view. For example an
+    /// `R8_UNORM` coverage atlas viewed as `(1, 1, 1, R)` samples as white with coverage in
+    /// alpha, so ordinary sprite shaders draw it tinted by the quad color.
+    pub fn with_swizzle(
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        format: vk::Format,
+        width: u32,
+        height: u32,
+        components: vk::ComponentMapping,
     ) -> Result<Self, RhiError> {
         let desc = TextureDesc::new_2d(format, width, height);
         let (image, allocation) = allocator.create_image(
@@ -117,6 +148,7 @@ impl GpuTexture {
                     .image(image)
                     .view_type(vk::ImageViewType::TYPE_2D)
                     .format(format)
+                    .components(components)
                     .subresource_range(COLOR_RANGE),
                 None,
             )
@@ -145,6 +177,7 @@ impl GpuTexture {
             allocation: Some(allocation),
             desc,
             sampled_index,
+            initialized: core::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -181,6 +214,8 @@ impl GpuTexture {
             });
         }
         let staged = ring.stage(pixels).ok_or(UploadError::RingFull)?;
+        self.initialized
+            .store(true, core::sync::atomic::Ordering::Relaxed);
         let (image, desc) = (self.image, self.desc);
         fg.add_pass("texture upload")
             .side_effects()
@@ -226,6 +261,114 @@ impl GpuTexture {
                 // texture, which outlives the frame ('g), and not in use by earlier passes
                 // (textures are only sampled, and samplers of the previous contents
                 // finished before the ALL_COMMANDS source scope of the first barrier).
+                unsafe {
+                    ctx.device.cmd_pipeline_barrier2(
+                        ctx.cmd,
+                        &vk::DependencyInfo::default()
+                            .image_memory_barriers(core::slice::from_ref(&to_transfer)),
+                    );
+                    ctx.device.cmd_copy_buffer_to_image(
+                        ctx.cmd,
+                        staged.buffer,
+                        image,
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[region],
+                    );
+                    ctx.device.cmd_pipeline_barrier2(
+                        ctx.cmd,
+                        &vk::DependencyInfo::default()
+                            .image_memory_barriers(core::slice::from_ref(&to_read)),
+                    );
+                }
+            });
+        Ok(())
+    }
+
+    /// Declares a pass that replaces the `width × height` region at (`x`, `y`) with
+    /// `pixels` (rows tightly packed) and keeps the rest of the texture. Requires one
+    /// whole [`Self::upload`] first.
+    pub fn upload_region<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        (x, y, width, height): (u32, u32, u32, u32),
+        pixels: &[u8],
+    ) -> Result<(), UploadError> {
+        if !self.initialized.load(core::sync::atomic::Ordering::Relaxed) {
+            return Err(UploadError::NotInitialized);
+        }
+        if width == 0
+            || height == 0
+            || x.checked_add(width).is_none_or(|r| r > self.desc.width)
+            || y.checked_add(height).is_none_or(|b| b > self.desc.height)
+        {
+            return Err(UploadError::OutOfBounds);
+        }
+        let texel = bytes_per_texel(self.desc.format).ok_or(UploadError::UnsupportedFormat)?;
+        let expected = (width * height * texel) as usize;
+        if pixels.len() != expected {
+            return Err(UploadError::WrongSize {
+                expected,
+                actual: pixels.len(),
+            });
+        }
+        let staged = ring.stage(pixels).ok_or(UploadError::RingFull)?;
+        let image = self.image;
+        fg.add_pass("texture region upload")
+            .side_effects()
+            .execute(move |ctx| {
+                let barrier = |old, new, src_stage, src_access, dst_stage, dst_access| {
+                    vk::ImageMemoryBarrier2::default()
+                        .src_stage_mask(src_stage)
+                        .src_access_mask(src_access)
+                        .dst_stage_mask(dst_stage)
+                        .dst_access_mask(dst_access)
+                        .old_layout(old)
+                        .new_layout(new)
+                        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                        .image(image)
+                        .subresource_range(COLOR_RANGE)
+                };
+                let to_transfer = barrier(
+                    vk::ImageLayout::READ_ONLY_OPTIMAL,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::PipelineStageFlags2::ALL_COMMANDS,
+                    vk::AccessFlags2::NONE,
+                    vk::PipelineStageFlags2::COPY,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                );
+                let to_read = barrier(
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::READ_ONLY_OPTIMAL,
+                    vk::PipelineStageFlags2::COPY,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::ALL_COMMANDS,
+                    vk::AccessFlags2::SHADER_SAMPLED_READ,
+                );
+                let region = vk::BufferImageCopy {
+                    buffer_offset: staged.offset,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_offset: vk::Offset3D {
+                        x: x as i32,
+                        y: y as i32,
+                        z: 0,
+                    },
+                    image_extent: vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: as in `upload`; the image is in READ_ONLY_OPTIMAL since the
+                // first whole upload (every upload pass ends there), so its contents
+                // outside the region are kept.
                 unsafe {
                     ctx.device.cmd_pipeline_barrier2(
                         ctx.cmd,

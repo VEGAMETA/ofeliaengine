@@ -13,6 +13,8 @@
 //!   are generated from the vertex index (no vertex buffers), indexed or as a plain list
 //!   depending on the GPU vendor ([`QuadMode::for_vendor`]).
 //! - [`Camera2d`] and [`View2d`]: a y-up world camera and y-down pixel space.
+//! - Text: [`GlyphTexture`] keeps an `engine_text` glyph atlas on the GPU, and
+//!   [`draw_text`] turns a laid-out text into glyph quads (pixel space).
 //!
 //! ```no_run
 //! # use engine_render2d::*;
@@ -30,8 +32,10 @@
 mod canvas;
 mod renderer;
 mod sort;
+mod text;
 mod view;
 
 pub use canvas::{Blend2d, Canvas, CanvasStats, ClipRect, MAX_CLIPS, Order, Quad, Shape};
 pub use renderer::{QuadMode, Render2dError, Renderer2d};
+pub use text::{GlyphTexture, TextColor, draw_text};
 pub use view::{Camera2d, View2d};
