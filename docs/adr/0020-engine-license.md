@@ -1,7 +1,7 @@
 # 0020. Engine license: source-available with tiered royalties
 
-- Status: **Proposed**: terms from the team; open questions below; the legal text must be
-  written by a lawyer
+- Status: **Proposed**: terms from the team (answers of 2026-09-26 recorded below); the
+  legal text must be written by a lawyer
 - Date: 2026-09-26
 
 ## Context
@@ -16,8 +16,11 @@ needs a lawyer.
 
 ## The terms (from the team, 2026-09-26)
 
-Free to download and redistribute. Source code open to read. Closed to modification
-(see question 1). Open to commercial offers.
+Free to download and redistribute. Source code open to read. Anyone may modify their own
+copy; only the original is closed to outside changes (see answer 1). Open to commercial
+offers.
+
+**The prices below are preliminary.** Every tier can be negotiated separately.
 
 | Game | Individual, no publisher | With a publisher |
 |---|---|---|
@@ -37,6 +40,23 @@ Free to download and redistribute. Source code open to read. Closed to modificat
   example: "All engine code is public and readable; the license is source-available
   (ADR 0020)."
 
+## Team answers (2026-09-26)
+
+- **Modification (question 1).**
+  - Anyone may change their own copy of the engine.
+  - The original repository is closed to outside changes: only the authors change it.
+  - A modified engine does not change the price. A game on a modified engine pays the
+    same tier as a game on the original.
+  - Still open: may a modified engine or editor itself be redistributed (published as a
+    fork, or given to another studio)? Recommendation: no, except as part of a shipped
+    game. Otherwise the tiers could be bypassed through a renamed fork.
+- **Prices (questions 2, 4, 5, 6).** The prices are preliminary and can be discussed
+  individually. The license text should state the base tiers and "other terms by
+  agreement". The lawyer still needs answers to 2 and 4–6 for the base tiers.
+- **Licensor (question 7).** There is no company yet: the licensor is the author, a
+  natural person. Jurisdiction and languages are still open. Revisit when a company is
+  founded; the license should allow assignment to it.
+
 ## Consequences for the code base
 
 - **Dependencies.**
@@ -48,8 +68,10 @@ Free to download and redistribute. Source code open to read. Closed to modificat
   - GPL, LGPL and AGPL stay forbidden.
   - Everything vendored or linked today (Jolt, JoltC, ash, glam, bytemuck, Tracy,
     windows-sys, …) is compatible.
-- **Outside contributions need a contributor agreement** (CLA). Without one, code from
-  contributors cannot be relicensed or sold under commercial terms.
+- **The original is changed only by the authors.** Outside patches are not accepted
+  without a separate agreement. If that changes, contributions need a contributor
+  agreement (CLA): without one, contributed code cannot be relicensed or sold under
+  commercial terms.
 - **No telemetry or DRM for royalty enforcement.** Reporting is self-declared, as with
   Unreal. The engine stays free of phone-home code (performance and trust).
 - **Distribution.**
@@ -61,7 +83,10 @@ Free to download and redistribute. Source code open to read. Closed to modificat
 
 ## Open questions for the team
 
-1. **"Closed to modification":**
+Answered or partly answered on 2026-09-26: 1, 7 (see "Team answers"). Prices are
+preliminary and negotiable.
+
+1. **"Closed to modification"** (answered; redistribution of a modified engine is still open):
    - Does this mean no one may change the engine at all?
    - Or that modified versions may not be redistributed as an engine or tool?
 
@@ -86,7 +111,8 @@ Free to download and redistribute. Source code open to read. Closed to modificat
 
 ## Next steps
 
-1. The team answers the questions above.
+1. The team answers the remaining questions: redistribution of a modified engine,
+   2–6, jurisdiction and languages.
 2. A lawyer drafts the license (and the CLA) from this ADR.
 3. CLAUDE.md §0.2 and README are updated. A `LICENSE` file and a contributor guide are
    added.
