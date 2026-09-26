@@ -123,7 +123,14 @@ validation:
 - a picture-in-picture 3D view updated every third frame;
 - per-viewport GPU times in the title and output.
 
-Its ref-1 numbers go into `docs/perf/history.md` from the PR's report.
+ref-1 (GPU workflow on the PR, dev build with validation), per-viewport GPU time in µs:
+
+| viewport | NVIDIA RTX 4060 Ti | AMD Radeon iGPU |
+|---|---:|---:|
+| 3D scene | 50.2 | 822 |
+| minimap (2D child) | 5.7 | 13.6 |
+| pixel art (upscaled) | 2.0 | 5.9 |
+| top view (every third frame) | 25.6 | 345.8 |
 
 ## Consequences
 
