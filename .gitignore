@@ -6,3 +6,6 @@
 # User-supplied vendor binaries are never committed (CLAUDE.md §3, §6).
 /plugins/
 *.dll
+
+# Standalone research harnesses have their own target directories.
+/bench/*/target/

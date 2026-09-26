@@ -1,0 +1,18 @@
+[package]
+name = "ecs-compare"
+description = "Research harness for ADR 0017: an archetype ECS prototype against hecs, bevy_ecs and flecs. Not part of the engine build."
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: its dependencies are for measurement only and never reach the engine.
+[workspace]
+
+[dependencies]
+hecs = "=0.11.1"
+bevy_ecs = { version = "=0.18.1", default-features = false, features = ["std"] }
+flecs_ecs = "=0.2.2"
+
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 1
