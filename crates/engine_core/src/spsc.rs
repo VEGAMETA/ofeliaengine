@@ -1,9 +1,10 @@
 //! Bounded single-producer single-consumer ring buffer.
 //!
-//! Hands `Copy` values from one thread to another without locks or allocation after
+//! Hands values from one thread to another without locks or allocation after
 //! construction: platform threads (window, raw input) to the main thread, the main
 //! thread to the audio thread. Each side owns one index and only reads the other's, so a
-//! push or a pop is one load, one copy and one store.
+//! push or a pop is one load, one move and one store. Values still in the ring when both
+//! halves are gone are dropped by whichever half goes last.
 //!
 //! ```
 //! use engine_core::spsc;
@@ -48,6 +49,23 @@ struct Ring<T> {
 // only by the consumer after acquiring `head`; `T: Send` moves between the two threads.
 unsafe impl<T: Send> Sync for Ring<T> {}
 
+impl<T> Drop for Ring<T> {
+    fn drop(&mut self) {
+        if !core::mem::needs_drop::<T>() {
+            return;
+        }
+        // Both halves are gone, so nothing else touches the indices or the slots.
+        let head = self.head.load(Ordering::Relaxed);
+        let mut tail = self.tail.load(Ordering::Relaxed);
+        while tail != head {
+            // SAFETY: slots in `tail..head` were written by the producer and not yet taken
+            // by the consumer; each is dropped once.
+            self.slots[tail & self.mask].with_mut(|slot| unsafe { (*slot).assume_init_drop() });
+            tail = tail.wrapping_add(1);
+        }
+    }
+}
+
 /// Sending half. Not `Clone`: exactly one producer.
 pub struct Producer<T> {
     ring: Arc<Ring<T>>,
@@ -63,7 +81,7 @@ pub struct Consumer<T> {
 }
 
 /// Creates a channel holding up to `capacity` values (rounded up to a power of two).
-pub fn channel<T: Copy + Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
+pub fn channel<T: Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     let capacity = capacity.max(2).next_power_of_two();
     let slots = (0..capacity)
         .map(|_| UnsafeCell::new(MaybeUninit::uninit()))
@@ -86,7 +104,7 @@ pub fn channel<T: Copy + Send>(capacity: usize) -> (Producer<T>, Consumer<T>) {
     )
 }
 
-impl<T: Copy + Send> Producer<T> {
+impl<T: Send> Producer<T> {
     /// Appends `value`, or returns it if the ring is full.
     #[inline]
     pub fn push(&mut self, value: T) -> Result<(), T> {
@@ -111,7 +129,7 @@ impl<T: Copy + Send> Producer<T> {
     }
 }
 
-impl<T: Copy + Send> Consumer<T> {
+impl<T: Send> Consumer<T> {
     /// Takes the oldest value, if any.
     #[inline]
     pub fn pop(&mut self) -> Option<T> {
@@ -185,6 +203,22 @@ mod tests {
             }
         }
         producer.join().unwrap();
+    }
+
+    #[test]
+    fn owned_values_are_dropped_once() {
+        let counter = std::sync::Arc::new(());
+        let (mut tx, mut rx) = channel::<std::sync::Arc<()>>(8);
+        for _ in 0..5 {
+            tx.push(counter.clone()).unwrap();
+        }
+        drop(rx.pop());
+        drop(rx.pop());
+        assert_eq!(std::sync::Arc::strong_count(&counter), 4);
+        drop(tx);
+        assert_eq!(std::sync::Arc::strong_count(&counter), 4);
+        drop(rx);
+        assert_eq!(std::sync::Arc::strong_count(&counter), 1);
     }
 }
 
