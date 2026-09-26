@@ -5,6 +5,7 @@ One line per measurement (CLAUDE.md §5). Newest at the top. Hardware refers to 
 
 | Date | Commit | Scene / benchmark | Hardware | Profile | Numbers | Notes |
 |---|---|---|---|---|---|---|
+| 2026-09-26 | gpu-allocator PR | `engine_rhi` benches/memory.rs (free+allocate churn, 1k/4k/16k live) | cloud container, lavapipe (**not reference**) | bench | engine TLSF 160/168/242 ns per pair, 0 heap allocs; gpu-allocator 0.28 10 484/29 071/80 435 ns, 4 heap allocs; overhead 2.55/1.28/1.25 vs 1.36/1.24/1.26 | ADR 0010 |
 | 2026-09-26 | c1958b5 | `engine_shader` examples/shader_bench.rs, 48 generated shaders | ref-1 | release | Slang 2026.8 (SDK): session 115 ms; compile one 154 ms; Compile All cold j1/2/4/8/16 7470/4693/2880/1963/2102 ms; all hits 2.2 ms; hot reload (OS watcher) one shader 167 ms median / 181 p90; shared module → first 325 ms, all 1966 ms | ADR 0009, run 36203519942 |
 | 2026-09-26 | shader hot reload PR | `engine_shader` examples/shader_bench.rs, 48 generated shaders | cloud container, 4 vCPU (**not reference**) | release | compile one 66 ms; Compile All cold j1/j2/j4 3563/1989/1548 ms; all hits 1.1 ms; hot reload one shader 77 ms median / 90 p90; shared module → first 131 ms, all 1370 ms | ADR 0009, Slang 2026.12, notify path (no OS watcher) |
 | 2026-09-25 | 0f9a973 | `engine_platform` benches/timers.rs | ref-1 | bench | sleep error median/p99 µs @4.167 ms: std 331/507, HighResTimer 335/1069, PreciseSleeper 0/3.2 (spin margin ~0.6 ms); timer quantized to 0.5 ms | ADR 0004 |
