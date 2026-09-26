@@ -379,7 +379,7 @@ mod windowed {
     };
     use std::time::Duration;
 
-    pub fn run(mut sim: Sim, frames_to_run: usize, extra: &str) {
+    pub(crate) fn run(mut sim: Sim, frames_to_run: usize, extra: &str) {
         let mut windows = WindowSystem::start(4096).unwrap();
         let window = windows
             .create_window(&WindowDesc {
@@ -582,6 +582,9 @@ mod windowed {
             .map(|p| format!("{} {:.0} µs", p.name, p.gpu_us))
             .collect();
         let validation = instance.validation_report();
+        // The draw list borrows the mesh: release it before the mesh goes.
+        let draw_count = draws.capacity();
+        drop(draws);
         // SAFETY: the device is idle.
         unsafe {
             graph.destroy(&mut allocator, Some(&bindless));
@@ -602,7 +605,7 @@ mod windowed {
         }
         let extra = format!(
             "{extra}; {} draws; {}×{} immediate; adapter: {adapter_name}; last GPU passes: {}; validation errors: {}",
-            draws.capacity(),
+            draw_count,
             extent_seen.0,
             extent_seen.1,
             passes.join(", "),
