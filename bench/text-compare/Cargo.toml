@@ -1,0 +1,20 @@
+[package]
+name = "text-compare"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Research harness for the text ADR: Parley vs cosmic-text vs shaping only (harfrust + skrifa). Outside the workspace, like bench/ecs-compare."
+
+[workspace]
+
+[dependencies]
+parley = { version = "=0.11.1", default-features = false, features = ["std"] }
+cosmic-text = { version = "=0.19.0", default-features = false, features = ["std", "swash"] }
+harfrust = "=0.13.3"
+skrifa = "=0.46.0"
+unicode-linebreak = "=0.1.5"
+engine_text = { path = "../../crates/engine_text" }
+
+[profile.release]
+opt-level = 3
+debug = false

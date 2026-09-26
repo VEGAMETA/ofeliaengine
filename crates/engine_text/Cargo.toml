@@ -1,0 +1,20 @@
+[package]
+name = "engine_text"
+description = "Text: fonts, shaping (HarfRust), line breaking, layout, glyph rasterization and atlas."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+harfrust = "=0.13.3"
+skrifa = "=0.46.0"
+unicode-linebreak = "=0.1.5"
+unicode-script = "=0.5.8"
+
+[[bench]]
+name = "text"
+harness = false
