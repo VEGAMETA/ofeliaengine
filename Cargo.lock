@@ -278,6 +278,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_stress"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "engine_core",
+ "engine_ecs",
+ "engine_physics",
+ "engine_physics_jolt",
+ "engine_platform",
+ "engine_profiler",
+ "engine_render",
+ "engine_rhi",
+ "engine_script",
+]
+
+[[package]]
 name = "engine_text"
 version = "0.0.0"
 dependencies = [

@@ -1,0 +1,29 @@
+[package]
+name = "engine_stress"
+description = "Stress scene: rendering, ECS, physics and Luau together, with a frame-time breakdown against the 240 FPS budget."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "engine_stress"
+path = "src/main.rs"
+
+[dependencies]
+engine_core.workspace = true
+engine_ecs.workspace = true
+engine_physics.workspace = true
+engine_physics_jolt.workspace = true
+engine_profiler.workspace = true
+engine_script.workspace = true
+# Already in the tree through engine_ecs; derives plain-data proofs for components.
+bytemuck = { version = "1.25", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+engine_platform.workspace = true
+engine_render.workspace = true
+engine_rhi.workspace = true
