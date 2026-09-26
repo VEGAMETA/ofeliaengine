@@ -122,6 +122,8 @@ fn main() {
             max_queued_presents: 1,
         };
         let mut latency = Latency::with_backend(&device, &swapchain, settings, backend).unwrap();
+        // Reflex keeps reports of earlier configurations; only this run's ids count.
+        let first_id = swapchain.last_present_id() + 1;
         let mut interval = Vec::new();
         let mut input_to_present_call = Vec::new();
         let mut input_to_display = Vec::new();
@@ -252,16 +254,24 @@ fn main() {
             gpu.extend(
                 reports
                     .iter()
+                    .filter(|r| r.present_id >= first_id)
                     .filter_map(NvFrameReport::input_to_gpu_end_us)
                     .map(|us| us as f64 / 1e3),
             );
         }
+        let ms = |v: f64| {
+            if v.is_nan() {
+                String::from("—")
+            } else {
+                format!("{v:.2}")
+            }
+        };
         let row = format!(
-            "| {name} | {:?} | {:.2} | {:.2} | {:.2} | {} |",
+            "| {name} | {:?} | {} | {} | {} | {} |",
             latency.backend(),
-            median(&mut interval),
-            median(&mut input_to_present_call),
-            median(&mut input_to_display),
+            ms(median(&mut interval)),
+            ms(median(&mut input_to_present_call)),
+            ms(median(&mut input_to_display)),
             if gpu.is_empty() {
                 String::from("—")
             } else {

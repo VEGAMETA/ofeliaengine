@@ -311,7 +311,8 @@ impl Latency {
             present_id: ext.present_id,
             nv,
             amd,
-            frame: 0,
+            // Present ids continue from whoever presented to this swapchain before.
+            frame: swapchain.last_present_id(),
             next_frame_at: None,
             sleeper: Sleeper::new(),
             history: Box::new([FrameTimes::default(); HISTORY]),
@@ -397,8 +398,9 @@ impl Latency {
         }
     }
 
-    /// Starts frame `N` (returned, 1-based: the present id): sleeps as the backend
-    /// decides, so input sampled right after is as fresh as possible.
+    /// Starts the next frame and returns its present id (one more than the swapchain's
+    /// last): sleeps as the backend decides, so input sampled right after is as fresh as
+    /// possible.
     pub fn begin_frame(&mut self, swapchain: &Swapchain) -> Result<u64, RhiError> {
         engine_profiler::zone!("latency::begin_frame");
         self.frame += 1;
@@ -563,8 +565,8 @@ pub struct NvFrameReport {
 impl NvFrameReport {
     /// Input sample to GPU completion, the part of input-to-photon the PC controls.
     pub fn input_to_gpu_end_us(&self) -> Option<u64> {
-        (self.input_sample_us > 0)
-            .then(|| self.gpu_render_end_us.saturating_sub(self.input_sample_us))
+        (self.input_sample_us > 0 && self.gpu_render_end_us > self.input_sample_us)
+            .then(|| self.gpu_render_end_us - self.input_sample_us)
     }
 }
 

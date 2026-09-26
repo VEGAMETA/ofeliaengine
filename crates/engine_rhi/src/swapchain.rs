@@ -5,6 +5,7 @@ use crate::error::RhiError;
 use crate::instance::{Instance, InstanceShared};
 use ash::{ext, khr, vk};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// A presentation surface: a window, or headless for tests.
 pub struct Surface {
@@ -167,6 +168,9 @@ pub struct Swapchain {
     desc: SwapchainDesc,
     latency: crate::device::LatencyExtensions,
     present_wait: Option<ash::khr::present_wait::Device>,
+    /// Largest present id sent so far: ids must keep increasing for the swapchain's whole
+    /// life, across every user of it (`VUID-VkPresentIdKHR-presentIds-04999`).
+    last_present_id: AtomicU64,
     device: ash::Device,
 }
 
@@ -200,6 +204,7 @@ impl Swapchain {
                 .latency_extensions()
                 .present_wait
                 .then(|| ash::khr::present_wait::Device::new(device.instance_raw(), device.raw())),
+            last_present_id: AtomicU64::new(0),
             device: device.raw().clone(),
         };
         swapchain.build(device, surface, desc.width, desc.height)?;
@@ -403,8 +408,11 @@ impl Swapchain {
             .wait_semaphores(&semaphores)
             .swapchains(&swapchains)
             .image_indices(&indices);
-        if id.is_some() && self.latency.present_id {
+        if let Some(id) = id
+            && self.latency.present_id
+        {
             info = info.push_next(&mut present_id);
+            self.last_present_id.fetch_max(id, Ordering::Relaxed);
         }
         // SAFETY: `index` was acquired and rendered; the semaphore is signaled by the
         // caller's submission.
@@ -428,6 +436,12 @@ impl Swapchain {
                 result: e,
             }),
         }
+    }
+
+    /// The largest id passed to [`Swapchain::present_with_id`] so far (0 before the first).
+    /// The next id must be larger.
+    pub fn last_present_id(&self) -> u64 {
+        self.last_present_id.load(Ordering::Relaxed)
     }
 
     /// The raw swapchain handle (for extensions such as `VK_NV_low_latency2`).
