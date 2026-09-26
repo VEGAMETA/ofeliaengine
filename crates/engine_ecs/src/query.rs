@@ -389,7 +389,8 @@ impl<T: Component> Filter for Without<T> {
     }
 }
 
-/// Only chunks whose `T` was written (or added) since the query's previous run.
+/// Only chunks whose `T` was written (or added) since the query's previous run. A query's
+/// own writes are not reported to itself on its next run.
 ///
 /// Granularity is the chunk: unchanged entities that share a chunk with a changed one
 /// are visited too. Use it for caching, replication, rendering sync and editors; game
@@ -918,17 +919,21 @@ impl<'w, Q: Fetch, F: Filter> Iterator for QueryIter<'w, '_, Q, F> {
             };
             let chunk = self.chunk;
             self.chunk += 1;
-            // SAFETY: as above.
-            let archetype = unsafe { &*self.archetypes.as_ptr().add(m.archetype as usize) };
-            if F::CHUNK && !F::chunk(m.filter, archetype, chunk, self.last_run) {
-                continue;
+            let ptr = self.archetypes.as_ptr().wrapping_add(m.archetype as usize);
+            if F::CHUNK {
+                // SAFETY: as above; the reference ends before any mutable one is made.
+                let archetype = unsafe { &*ptr };
+                if !F::chunk(m.filter, archetype, chunk, self.last_run) {
+                    continue;
+                }
             }
             if Q::WRITES {
                 // SAFETY: writing fetches only come from `iter`, which borrows the world
                 // mutably for 'w; no other reference to the archetype is alive here.
-                let archetype = unsafe { &mut *self.archetypes.as_ptr().add(m.archetype as usize) };
-                Q::mark(m.state, archetype, chunk, self.tick);
+                Q::mark(m.state, unsafe { &mut *ptr }, chunk, self.tick);
             }
+            // SAFETY: as above; derived after the mutable reference ended.
+            let archetype = unsafe { &*ptr };
             self.len = archetype.chunk_len(chunk);
             self.row = 0;
             // SAFETY: the state belongs to this archetype and the chunk is in use.

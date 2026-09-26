@@ -125,6 +125,18 @@ fn queries_visit_every_match_once() {
     });
     assert_eq!(rows, 3750);
 
+    // A writing iterator (marks chunks while items are alive), then a filtered one.
+    let mut moving = QueryState::<(&mut Pos, &Vel)>::new(&mut w);
+    let mut n = 0;
+    for (p, v) in moving.iter(&mut w) {
+        p.1 += v.1;
+        n += 1;
+    }
+    assert_eq!(n, 1250);
+    let mut changed = QueryState::<&mut Pos, Changed<Pos>>::new(&mut w);
+    assert_eq!(changed.iter(&mut w).count(), 3750);
+    assert_eq!(changed.iter(&mut w).count(), 0, "a query's own writes are not news to it");
+
     // Iterator and read-only paths agree with `for_each`.
     let mut via_iter: Vec<u32> = ids.iter(&mut w).map(|(id, _)| id.0).collect();
     let mut via_readonly = Vec::new();
