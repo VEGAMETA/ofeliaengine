@@ -7,6 +7,7 @@
 
 pub mod arena;
 mod atomic;
+pub mod half;
 pub mod hash;
 pub mod jobs;
 pub mod math;

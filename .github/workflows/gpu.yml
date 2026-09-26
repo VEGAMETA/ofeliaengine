@@ -11,6 +11,7 @@ on:
       - crates/engine_platform/**
       - crates/engine_shader/**
       - crates/engine_render/**
+      - crates/engine_render2d/**
       - tools/**
       - Cargo.lock
       - .github/workflows/gpu.yml
@@ -93,6 +94,34 @@ jobs:
           echo ```>> cubes.md
           exit /b %rc%
 
+      - name: 2D renderer tests, windowed demo and benchmark, NVIDIA and AMD
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          echo ## 2D renderer (synchronization validation)> render2d.md
+          echo.>> render2d.md
+          echo ```>> render2d.md
+          cargo test -p engine_render2d --locked -- --nocapture --test-threads=1 >> render2d.md 2>&1
+          set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo test -p engine_render2d --locked --test render2d -- --nocapture >> render2d.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=
+          cargo run -p engine_render2d --example sprites --locked -- fifo 20000 300 >> render2d.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo run -p engine_render2d --example sprites --locked -- fifo 20000 300 >> render2d.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=
+          echo ```>> render2d.md
+          echo.>> render2d.md
+          cargo run -p engine_render2d --release --example sprite_bench --locked >> render2d.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo run -p engine_render2d --release --example sprite_bench --locked >> render2d.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          exit /b %rc%
+
       - name: Memory allocator benchmark, NVIDIA and AMD (release)
         if: ${{ !cancelled() }}
         shell: cmd
@@ -140,4 +169,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,cubes.md,memory-bench.md,shader.md,shader-bench.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,cubes.md,render2d.md,memory-bench.md,shader.md,shader-bench.md

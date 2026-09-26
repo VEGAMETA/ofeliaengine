@@ -31,7 +31,8 @@ pub enum RhiError {
 }
 
 impl RhiError {
-    pub(crate) fn vk(call: &'static str) -> impl FnOnce(vk::Result) -> Self {
+    /// Maps a failed Vulkan call's result: `.map_err(RhiError::vk("vkCreateImage"))`.
+    pub fn vk(call: &'static str) -> impl FnOnce(vk::Result) -> Self {
         move |result| Self::Vulkan { call, result }
     }
 }

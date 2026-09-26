@@ -45,6 +45,11 @@ jobs:
         shell: cmd
         run: cargo bench -p engine_platform --bench timers --locked > bench-timers.md
 
+      - name: cargo bench -p engine_render2d --bench canvas
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: cargo bench -p engine_render2d --bench canvas --locked > bench-canvas.md
+
       - name: Post report as commit comment
         if: ${{ !cancelled() }}
         shell: cmd
@@ -53,4 +58,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md

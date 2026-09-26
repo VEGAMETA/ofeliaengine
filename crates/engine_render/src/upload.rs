@@ -4,6 +4,7 @@
 //! when the slot comes around again. Allocations return device addresses that shaders
 //! read through pointers, so no descriptors are involved.
 
+use core::mem::MaybeUninit;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Device, MemoryLocation, RhiError};
 
@@ -30,6 +31,17 @@ impl core::fmt::Debug for UploadRing {
     }
 }
 
+/// Where [`UploadRing::stage`] and [`UploadRing::alloc`] put data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Staged {
+    /// The ring buffer of the current slot.
+    pub buffer: vk::Buffer,
+    /// Byte offset in it.
+    pub offset: u64,
+    /// Device address of the data.
+    pub address: vk::DeviceAddress,
+}
+
 /// Alignment of every allocation (covers every scalar, vector and matrix type).
 const ALIGN: u64 = 16;
 
@@ -50,6 +62,7 @@ impl UploadRing {
             let (buffer, allocation) = allocator.create_buffer(
                 &vk::BufferCreateInfo::default().size(capacity).usage(
                     vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_SRC
                         | vk::BufferUsageFlags::UNIFORM_BUFFER
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 ),
@@ -89,20 +102,50 @@ impl UploadRing {
     /// `T` must be plain data laid out as the shader expects (`#[repr(C)]`, no
     /// references).
     pub fn push<T: Copy>(&mut self, values: &[T]) -> Option<vk::DeviceAddress> {
-        let bytes = core::mem::size_of_val(values) as u64;
+        self.stage(values).map(|staged| staged.address)
+    }
+
+    /// Like [`Self::push`], also returning the buffer and offset (a copy source for
+    /// uploads).
+    pub fn stage<T: Copy>(&mut self, values: &[T]) -> Option<Staged> {
+        let (target, staged) = self.alloc::<T>(values.len())?;
+        // SAFETY: `MaybeUninit<T>` has `T`'s layout; the lengths match.
+        let source = unsafe {
+            core::slice::from_raw_parts(values.as_ptr().cast::<MaybeUninit<T>>(), values.len())
+        };
+        target.copy_from_slice(source);
+        Some(staged)
+    }
+
+    /// Reserves room for `count` values of `T` in the current slot and returns it for the
+    /// caller to fill (write only: the memory may be uncached), or `None` when the slot
+    /// is full. Lets callers write gathered data without an intermediate copy.
+    pub fn alloc<T: Copy>(&mut self, count: usize) -> Option<(&mut [MaybeUninit<T>], Staged)> {
+        let bytes = (core::mem::size_of::<T>() * count) as u64;
         let slot = &mut self.slots[self.current];
-        let offset = slot.offset.next_multiple_of(ALIGN);
+        let align = ALIGN.max(core::mem::align_of::<T>() as u64);
+        let offset = slot.offset.next_multiple_of(align);
         if offset + bytes > self.capacity {
             return None;
         }
         let target = slot.allocation.as_mut()?.mapped_slice_mut()?;
-        // SAFETY: `T: Copy` values viewed as bytes, copied into mapped memory that the
-        // GPU does not read until this frame is submitted.
-        let source =
-            unsafe { core::slice::from_raw_parts(values.as_ptr().cast::<u8>(), bytes as usize) };
-        target[offset as usize..(offset + bytes) as usize].copy_from_slice(source);
+        let target = &mut target[offset as usize..(offset + bytes) as usize];
+        if !target.as_ptr().cast::<MaybeUninit<T>>().is_aligned() {
+            return None;
+        }
         slot.offset = offset + bytes;
-        Some(slot.address + offset)
+        let staged = Staged {
+            buffer: slot.buffer,
+            offset,
+            address: slot.address + offset,
+        };
+        // SAFETY: the range is in bounds, belongs to this allocation until the slot is
+        // reset, and is aligned for `T` (checked above). `MaybeUninit` makes any contents
+        // valid.
+        let values = unsafe {
+            core::slice::from_raw_parts_mut(target.as_mut_ptr().cast::<MaybeUninit<T>>(), count)
+        };
+        Some((values, staged))
     }
 
     /// Bytes used in the current slot.
