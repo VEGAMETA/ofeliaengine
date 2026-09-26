@@ -104,7 +104,7 @@ jobs:
           cargo test -p engine_render2d --locked -- --nocapture --test-threads=1 >> render2d.md 2>&1
           set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=radeon
-          cargo test -p engine_render2d --locked --test render2d -- --nocapture >> render2d.md 2>&1
+          cargo test -p engine_render2d --locked --test render2d --test viewports -- --nocapture >> render2d.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=
           cargo run -p engine_render2d --example sprites --locked -- fifo 20000 300 >> render2d.md 2>&1
@@ -112,7 +112,11 @@ jobs:
           set ENGINE_ADAPTER=radeon
           cargo run -p engine_render2d --example sprites --locked -- fifo 20000 300 >> render2d.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
+          cargo run -p engine_render2d --example viewports --locked -- 300 >> render2d.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=
+          cargo run -p engine_render2d --example viewports --locked -- 300 >> render2d.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
           echo ```>> render2d.md
           echo.>> render2d.md
           cargo run -p engine_render2d --release --example sprite_bench --locked >> render2d.md 2>&1
