@@ -7,3 +7,8 @@
 *.jpg binary
 *.ktx2 binary
 *.spv binary
+# Tables that most pull requests append a row to: merging keeps the rows of both sides
+# instead of stopping on a conflict (which cost a rebase and a CI run per merge). Only
+# for append-only files; edits of existing rows would keep both versions.
+docs/adr/README.md merge=union
+docs/perf/history.md merge=union
