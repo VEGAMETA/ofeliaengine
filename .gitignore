@@ -9,3 +9,6 @@
 
 # Standalone research harnesses have their own target directories.
 /bench/*/target/
+
+# Shared Jolt build (ENGINE_JOLTC_CACHE in CI).
+/.joltc-cache/

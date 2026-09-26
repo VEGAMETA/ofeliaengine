@@ -12,6 +12,7 @@ publish = false
 
 [workspace.dependencies]
 engine_core = { path = "crates/engine_core" }
+engine_ecs = { path = "crates/engine_ecs" }
 engine_physics = { path = "crates/engine_physics" }
 engine_physics_jolt = { path = "crates/engine_physics_jolt" }
 engine_platform = { path = "crates/engine_platform" }

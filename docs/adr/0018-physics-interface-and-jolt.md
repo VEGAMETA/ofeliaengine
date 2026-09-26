@@ -137,8 +137,28 @@ median step time in ms at 60 Hz:
 - **The 5 000-body pile scales** to 1.8× on 4 threads.
 - **4 096 batched raycasts** over the settled 1 000-body pile: 0.28 µs per ray on one
   thread.
-- **ref-1 thread sweep:** from the bench workflow on the PR that adds this ADR; the
-  default thread count follows from it.
+### Thread sweep on ref-1
+
+Ryzen 7 7700 (8 cores, 16 threads), bench profile, median / p99 step time in ms:
+
+| scene | bodies | 1 | 2 | 4 | 8 | 16 threads |
+|---|---:|---:|---:|---:|---:|---:|
+| pyramid, 20 levels (asleep) | 210 | 0.009 | 0.013 | 0.021 | 0.031 | 0.045 |
+| pile of mixed shapes | 1 000 | 2.48 / 3.28 | 1.63 / 2.14 | 1.10 / 1.31 | **0.84** / 1.09 | 0.85 / 1.06 |
+| pile of mixed shapes | 5 000 | 19.1 / 25.6 | 12.5 / 14.6 | 7.58 / 9.00 | 5.08 / 6.11 | **3.99** / 4.62 |
+| chain, point joints | 200 | 0.23 | 0.18 | **0.16** | 0.16 | 0.18 |
+| orbits in a point field | 200 | **0.050** | 0.054 | 0.063 | 0.065 | 0.076 |
+
+- 4 096 batched raycasts: 0.14 µs per ray on one thread.
+- **Whether SMT helps depends on the load.**
+  - The 5 000-body pile gains another 27% from the second hardware thread of each core
+    (8 → 16 threads).
+  - The 1 000-body pile gains nothing past the 8 physical cores.
+  - Small or sleeping scenes are fastest on one or two threads: job hand-out costs more
+    than the work.
+- **Default for games:** as many threads as physical cores (minus the render and audio
+  threads) for large simulations; 0 (the calling thread) for small ones. The dev guide
+  says to measure with this benchmark.
 
 ## Consequences
 

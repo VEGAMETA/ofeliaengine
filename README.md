@@ -40,7 +40,8 @@ to the pull request description under "Questions for the team".
 
 | Path | Contents |
 |---|---|
-| `crates/engine_core` | Foundation: job system (`jobs`), frame arena (`arena`), SPSC ring (`spsc`), stable hashing (`hash`), sync primitives |
+| `crates/engine_core` | Foundation: job system (`jobs`), frame arena (`arena`), SPSC ring (`spsc`), stable and state hashing (`hash`), sync primitives |
+| `crates/engine_ecs` | Entity component system: archetypes in growing chunks, cached and parallel queries, commands, change tracking, deterministic snapshots and state hashes |
 | `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings, directory watching |
 | `crates/engine_profiler` | Profiling instrumentation (Tracy zones, plots, frames) |
 | `crates/engine_rhi` | Vulkan 1.3 layer: instance, adapter selection, device, queues, swapchain, frames in flight, memory allocator (TLSF) |

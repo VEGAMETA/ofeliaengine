@@ -1,0 +1,20 @@
+[package]
+name = "engine_ecs"
+description = "Entity component system: archetype chunks, cached queries, command buffers, change versions, snapshots."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_core.workspace = true
+# Plain-data proofs for components that are copied, hashed and rolled back byte-wise
+# (Zlib OR Apache-2.0 OR MIT; the derive checks for padding at compile time). ADR 0017.
+bytemuck = { version = "1.25", features = ["derive", "min_const_generics"] }
+
+[[bench]]
+name = "ecs"
+harness = false

@@ -1,0 +1,233 @@
+//! Parent-child relationships as plain data.
+//!
+//! A child's [`Parent`] holds its parent and its neighbours in the parent's list of
+//! children; the parent's [`Children`] holds the first and last child and the count. The
+//! list is intrusive, so both components are plain data: they are snapshotted, restored
+//! and hashed like any other component, never allocate, and keep children in insertion
+//! order (deterministic). Attaching, detaching and reordering are O(1); a cycle check
+//! walks up from the new parent, O(depth).
+//!
+//! Neither component fragments archetypes by parent: every child with a parent shares
+//! the archetypes its other components select (unlike parent-keyed relationships).
+
+use crate::entity::Entity;
+use crate::world::World;
+use crate::{bytemuck, pod_component};
+
+/// The entity's parent and its place among the parent's children.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct Parent {
+    parent: Entity,
+    prev: Entity,
+    next: Entity,
+}
+
+impl Parent {
+    /// The parent entity.
+    pub fn get(&self) -> Entity {
+        self.parent
+    }
+}
+
+/// The entity's children: the ends of the list and how many there are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct Children {
+    first: Entity,
+    last: Entity,
+    count: u32,
+    _padding: u32,
+}
+
+impl Children {
+    /// Number of children.
+    pub fn len(&self) -> usize {
+        self.count as usize
+    }
+
+    /// Whether there are none (the component is removed when the last child leaves).
+    pub fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
+pod_component!(Parent, Children);
+
+/// Errors from changing the hierarchy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HierarchyError {
+    /// An entity is not alive.
+    NotAlive(Entity),
+    /// The new parent is the child itself or one of its descendants.
+    Cycle,
+}
+
+impl core::fmt::Display for HierarchyError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::NotAlive(e) => write!(f, "entity {e:?} is not alive"),
+            Self::Cycle => write!(f, "the new parent is the child or one of its descendants"),
+        }
+    }
+}
+
+impl std::error::Error for HierarchyError {}
+
+/// Iterator over an entity's children in order.
+#[derive(Debug, Clone)]
+pub struct ChildIter<'w> {
+    world: &'w World,
+    next: Entity,
+    remaining: u32,
+}
+
+impl Iterator for ChildIter<'_> {
+    type Item = Entity;
+
+    fn next(&mut self) -> Option<Entity> {
+        if self.remaining == 0 {
+            return None;
+        }
+        let current = self.next;
+        self.remaining -= 1;
+        self.next = self
+            .world
+            .get::<Parent>(current)
+            .map_or(Entity::NULL, |p| p.next);
+        Some(current)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining as usize, Some(self.remaining as usize))
+    }
+}
+
+impl ExactSizeIterator for ChildIter<'_> {}
+
+impl World {
+    /// The parent of `entity`, if it has one.
+    pub fn parent(&self, entity: Entity) -> Option<Entity> {
+        self.get::<Parent>(entity).map(|p| p.parent)
+    }
+
+    /// The children of `entity`, in the order they were attached.
+    pub fn children(&self, entity: Entity) -> ChildIter<'_> {
+        let (next, remaining) = self
+            .get::<Children>(entity)
+            .map_or((Entity::NULL, 0), |c| (c.first, c.count));
+        ChildIter {
+            world: self,
+            next,
+            remaining,
+        }
+    }
+
+    /// Makes `parent` the parent of `child` (appended after its other children), or
+    /// detaches `child` with `None`.
+    pub fn set_parent(
+        &mut self,
+        child: Entity,
+        parent: Option<Entity>,
+    ) -> Result<(), HierarchyError> {
+        if !self.contains(child) {
+            return Err(HierarchyError::NotAlive(child));
+        }
+        if let Some(p) = parent {
+            if !self.contains(p) {
+                return Err(HierarchyError::NotAlive(p));
+            }
+            let mut up = Some(p);
+            while let Some(a) = up {
+                if a == child {
+                    return Err(HierarchyError::Cycle);
+                }
+                up = self.parent(a);
+            }
+        }
+        if self.parent(child) == parent {
+            return Ok(());
+        }
+        self.detach(child);
+        if let Some(p) = parent {
+            let children = self.get::<Children>(p).copied();
+            let prev = children.map_or(Entity::NULL, |c| c.last);
+            self.insert(
+                child,
+                Parent {
+                    parent: p,
+                    prev,
+                    next: Entity::NULL,
+                },
+            );
+            match children {
+                Some(mut c) => {
+                    if let Some(last) = self.get_mut::<Parent>(prev) {
+                        last.next = child;
+                    }
+                    c.last = child;
+                    c.count += 1;
+                    self.insert(p, c);
+                }
+                None => {
+                    self.insert(
+                        p,
+                        Children {
+                            first: child,
+                            last: child,
+                            count: 1,
+                            _padding: 0,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Unlinks `child` from its parent's list and removes its `Parent`.
+    fn detach(&mut self, child: Entity) {
+        let Some(link) = self.remove::<Parent>(child) else {
+            return;
+        };
+        if let Some(prev) = self.get_mut::<Parent>(link.prev) {
+            prev.next = link.next;
+        }
+        if let Some(next) = self.get_mut::<Parent>(link.next) {
+            next.prev = link.prev;
+        }
+        if let Some(mut c) = self.get::<Children>(link.parent).copied() {
+            c.count -= 1;
+            if c.count == 0 {
+                self.remove::<Children>(link.parent);
+            } else {
+                if c.first == child {
+                    c.first = link.next;
+                }
+                if c.last == child {
+                    c.last = link.prev;
+                }
+                self.insert(link.parent, c);
+            }
+        }
+    }
+
+    /// Despawns `entity` and all its descendants (children before parents are detached,
+    /// deepest first). Returns how many entities were despawned.
+    pub fn despawn_recursive(&mut self, entity: Entity) -> usize {
+        if !self.contains(entity) {
+            return 0;
+        }
+        self.detach(entity);
+        let mut count = 0;
+        // Depth-first, without recursion on the call stack.
+        let mut stack = vec![entity];
+        while let Some(e) = stack.pop() {
+            stack.extend(self.children(e));
+            if self.despawn(e) {
+                count += 1;
+            }
+        }
+        count
+    }
+}

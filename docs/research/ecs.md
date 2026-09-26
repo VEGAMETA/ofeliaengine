@@ -133,3 +133,34 @@ aspect of an ECS, and a rather small one once a baseline is established". For th
 | Scripting: run-time components for Luau (§10) | designed in (component descriptors) | `ComponentDescriptor` | no | yes |
 | Toolchain and API stability | ours | minimum Rust 1.95 for 0.19; breaking releases | stable, small | C ABI stable; bindings 0.x |
 | Cost to us | the core, change tracking, observers, relationships, queries, parallel iteration | integration and following upstream | building most features on top | FFI, debugging across C |
+
+## Decision and what the implementation taught
+
+The team chose our own ECS and determinism from day one ([ADR 0017](../adr/0017-ecs.md),
+networking in [ADR 0019](../adr/0019-networking-model.md)). `engine_ecs` departs from the
+prototype in three ways, each driven by those requirements.
+
+1. **Chunks instead of one growable array per component,** as in Unity's DOTS. Chunks
+   give:
+   - a natural unit for change versions (one per chunk and component instead of per
+     entity), for parallel jobs, and for snapshots;
+   - no large reallocation copies when an archetype grows, which would be frame spikes;
+   - memory reuse between archetypes through a pool.
+
+   The first version used 16 KiB chunks like DOTS. It iterated a million entities
+   3× slower than the prototype:
+   - each component array in a chunk was about 1.7 KiB, 28 cache lines;
+   - that is too short for the hardware prefetcher to ramp up before the next chunk
+     starts;
+   - 64 KiB chunks were 2.6× faster, 256 KiB 3.4×.
+
+   **The fix:** chunks grow with the archetype, 16 → 64 → 256 KiB. The million-entity
+   loop now matches one contiguous array, and a one-entity archetype still costs one
+   16 KiB chunk.
+2. **Canonical iteration order.**
+   - Archetypes are visited in the order of their component *names*, not creation order.
+   - A peer that rolled back and re-simulated may have created archetypes in a
+     different order; without this, its queries would iterate differently from a peer
+     that never rolled back.
+3. **Plain-data components carry a compile-time proof** (`bytemuck::Pod`). Snapshots and
+   state hashes then copy and hash bytes without undefined behavior from padding.

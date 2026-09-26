@@ -1,6 +1,7 @@
-//! ECS comparison for ADR 0017. Scenarios after rust-gamedev's ecs_bench_suite (archived;
-//! MIT/Apache), re-implemented here, plus a large iteration and random access. Single
-//! thread, release build, median of repeated runs. Prints Markdown.
+//! ECS comparison for ADR 0017: the prototype, the candidates, and `engine_ecs`.
+//! Scenarios after rust-gamedev's ecs_bench_suite (archived; MIT/Apache), re-implemented
+//! here, plus a large iteration and random access. Single thread, release build, median
+//! of repeated runs. Prints Markdown.
 //!
 //! `cargo run --release --manifest-path bench/ecs-compare/Cargo.toml`
 
@@ -23,6 +24,8 @@ struct Velocity([f32; 3]);
 struct Tag(f32);
 #[derive(Clone, Copy, bevy_ecs::component::Component, flecs_ecs::prelude::Component)]
 struct Data(f32);
+
+engine_ecs::component!(Transform, Position, Rotation, Velocity, Tag, Data);
 
 const IDENTITY: Transform = Transform([
     1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0,
@@ -75,7 +78,7 @@ fn shuffled(n: usize) -> Vec<usize> {
 
 struct Row {
     name: &'static str,
-    values: [f64; 4],
+    values: [f64; 5],
 }
 
 // ---------------------------------------------------------------------------------------
@@ -84,6 +87,16 @@ struct Row {
 
 fn proto_world(n: usize) -> (proto::World, Vec<proto::Entity>) {
     let mut w = proto::World::new();
+    let es = (0..n).map(|_| w.spawn(bundle())).collect();
+    (w, es)
+}
+
+// ---------------------------------------------------------------------------------------
+// engine_ecs (the engine's ECS, ADR 0017)
+// ---------------------------------------------------------------------------------------
+
+fn engine_world(n: usize) -> (engine_ecs::World, Vec<engine_ecs::Entity>) {
+    let mut w = engine_ecs::World::new();
     let es = (0..n).map(|_| w.spawn(bundle())).collect();
     (w, es)
 }
@@ -136,6 +149,7 @@ fn main() {
             measure(50, || (), |_| drop(black_box(hecs_world(n)))),
             measure(50, || (), |_| drop(black_box(bevy_world(n)))),
             measure(20, || (), |_| drop(black_box(flecs_world(n)))),
+            measure(50, || (), |_| drop(black_box(engine_world(n)))),
         ],
     });
 
@@ -148,6 +162,8 @@ fn main() {
         let mut bq = bw.query::<(&mut Position, &Velocity)>();
         let (fw, _) = flecs_world(n);
         let fq = fw.new_query::<(&mut Position, &Velocity)>();
+        let (mut ew, _) = engine_world(n);
+        let mut eq = engine_ecs::QueryState::<(&mut Position, &Velocity)>::new(&mut ew);
         rows.push(Row {
             name: if n == 10_000 {
                 "iterate 10k: position += velocity"
@@ -175,6 +191,7 @@ fn main() {
                     },
                 ),
                 measure(runs, || (), |_| fq.each(|(p, v)| add(p, v))),
+                measure(runs, || (), |_| eq.for_each(&mut ew, |(p, v)| add(p, v))),
             ],
         });
     }
@@ -186,7 +203,13 @@ fn main() {
                 $(
                     #[derive(Clone, Copy, bevy_ecs::component::Component, flecs_ecs::prelude::Component)]
                     struct $t(f32);
+                    impl engine_ecs::Component for $t {}
                 )*
+                fn frag_engine() -> engine_ecs::World {
+                    let mut w = engine_ecs::World::new();
+                    $( for _ in 0..20 { w.spawn(($t(0.0), Data(1.0))); } )*
+                    w
+                }
                 fn frag_proto() -> proto::World {
                     let mut w = proto::World::new();
                     $( for _ in 0..20 { w.spawn(($t(0.0), Data(1.0))); } )*
@@ -218,6 +241,8 @@ fn main() {
         let mut bq = bw.query::<&mut Data>();
         let fw = frag_flecs();
         let fq = fw.new_query::<&mut Data>();
+        let mut ew = frag_engine();
+        let mut eq = engine_ecs::QueryState::<&mut Data>::new(&mut ew);
         rows.push(Row {
             name: "fragmented: 26 archetypes × 20, data *= 2",
             values: [
@@ -241,6 +266,7 @@ fn main() {
                     },
                 ),
                 measure(1000, || (), |_| fq.each(|d| d.0 *= 2.0)),
+                measure(1000, || (), |_| eq.for_each(&mut ew, |d| d.0 *= 2.0)),
             ],
         });
     }
@@ -315,6 +341,22 @@ fn main() {
                         }
                     },
                 ),
+                measure(
+                    30,
+                    || {
+                        let mut w = engine_ecs::World::new();
+                        let es: Vec<_> = (0..n).map(|_| w.spawn((Data(0.0),))).collect();
+                        (w, es)
+                    },
+                    |(w, es)| {
+                        for &e in es.iter() {
+                            w.insert(e, Tag(0.0));
+                        }
+                        for &e in es.iter() {
+                            w.remove::<Tag>(e);
+                        }
+                    },
+                ),
             ],
         });
     }
@@ -327,6 +369,7 @@ fn main() {
         let (hw, he) = hecs_world(n);
         let (bw, be) = bevy_world(n);
         let (fw, fe) = flecs_world(n);
+        let (ew, ee) = engine_world(n);
         rows.push(Row {
             name: "random get of 10k (of 100k)",
             values: [
@@ -374,17 +417,30 @@ fn main() {
                         black_box(s);
                     },
                 ),
+                measure(
+                    100,
+                    || (),
+                    |_| {
+                        let mut s = 0.0;
+                        for &i in &order[..10_000] {
+                            s += ew.get::<Position>(ee[i]).unwrap().0[0];
+                        }
+                        black_box(s);
+                    },
+                ),
             ],
         });
     }
 
     println!("### ECS comparison (µs, median; lower is better)\n");
-    println!("| scenario | own prototype | hecs 0.11.1 | bevy_ecs 0.18.1 | flecs_ecs 0.2.2 |");
-    println!("|---|---:|---:|---:|---:|");
+    println!(
+        "| scenario | own prototype | hecs 0.11.1 | bevy_ecs 0.18.1 | flecs_ecs 0.2.2 | engine_ecs |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|");
     for row in &rows {
         println!(
-            "| {} | {:.1} | {:.1} | {:.1} | {:.1} |",
-            row.name, row.values[0], row.values[1], row.values[2], row.values[3]
+            "| {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} |",
+            row.name, row.values[0], row.values[1], row.values[2], row.values[3], row.values[4]
         );
     }
     println!();
