@@ -32,11 +32,12 @@ and the [Vulkan SDK](https://vulkan.lunarg.com) (latest 1.4.x). Start the runner
 ## Workflow
 
 Every task is a pull request into `main`. Before merging, it is checked on the reference
-machine (ref-1) with `powershell -File tools\check.ps1`: the CI commands (rustfmt, clippy,
-tests, tests with Tracy, docs); `-Gpu` adds the Vulkan tests on both GPUs and the Slang
-tests, `-Deny` cargo-deny, `-Profiles` the builds of all profiles. GitHub Actions run on
-the self-hosted runner after every merge to `main`, and on a pull request only with the
-`ci` label (`bench` adds the benchmarks); reports are posted as commit comments.
+machine (ref-1) with `powershell -File tools\check.ps1`: rustfmt, clippy, tests, tests with
+Tracy, docs; `-Gpu` adds the Vulkan tests on both GPUs and the Slang tests, `-Deny`
+cargo-deny, `-Loom` the loom model checks, `-Profiles` the builds of all profiles, `-Full`
+all of them (ADR 0037). Benchmarks run on ref-1 by hand and go to `docs/perf/history.md`.
+GitHub Actions run on demand only, on the self-hosted runner: by hand, or on a pull request
+with the `ci` label (`bench` for the benchmarks); reports are posted as commit comments.
 Findings that need the team go to the pull request description under "Questions for the
 team".
 

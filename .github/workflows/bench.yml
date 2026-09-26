@@ -4,19 +4,9 @@ name: Bench
 # The report is posted as a commit comment. ref-1 is not a dedicated machine, so the
 # numbers are advisory: no regression gate yet (ADR 0001, ADR 0002).
 on:
-  # Benchmarks measure what landed: after merges to main (a burst of merges waits for the
-  # running benchmark and then runs once, for the newest commit), or on a pull request
-  # when it gets the `bench` label (numbers needed before merging).
-  push:
-    branches: [main]
-    paths:
-      - crates/**
-      - bench/**
-      - third_party/**
-      - Cargo.toml
-      - Cargo.lock
-      - .github/workflows/bench.yml
-      - .github/scripts/**
+  # On demand only (ADR 0037): benchmarks are run on ref-1 by hand when a change can move
+  # them, and the numbers go to docs/perf/history.md. Here: by hand (workflow_dispatch), or
+  # when a pull request gets the `bench` label, for a report posted on the commit.
   pull_request:
     types: [labeled]
   workflow_dispatch:

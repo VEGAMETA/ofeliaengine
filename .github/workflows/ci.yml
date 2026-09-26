@@ -1,12 +1,11 @@
 name: CI
 
 on:
-  # Every merge to main is checked here. Pull requests are checked before merging on ref-1
-  # itself with tools/check.ps1 (the same commands), so here they run only with the `ci`
-  # label: on the push that adds it and on every push while it is on. The runner is the
-  # developer's desktop; a second, identical build of each push only slowed it down.
-  push:
-    branches: [main]
+  # On demand only (ADR 0037): every change is checked before merging on ref-1 itself with
+  # tools/check.ps1 (the same commands), and ref-1 is also this runner, so an automatic run
+  # would build the same commit a second time on the same cores. Run it by hand
+  # (workflow_dispatch), or on a pull request with the `ci` label: on the event that adds
+  # it and on every push while it is on.
   pull_request:
     types: [opened, synchronize, reopened, labeled]
     # Documentation-only changes need no build.

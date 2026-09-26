@@ -92,6 +92,9 @@ not fixed and need a recorded decision:
   single job (fmt, clippy `-D warnings`, tests, docs with `-D warnings`, cargo-deny, build of
   all four profiles). One job instead of six saves the checkout + toolchain install on
   every check; hosted Windows minutes are limited for a private repository.
+  - *Later:* the job moved to the self-hosted runner (#34), and since ADR 0037 changes are
+    checked on the reference machine before merging (`tools/check.ps1`), with Actions on
+    demand only.
 - GPU work (Vulkan tests, golden images, benchmarks) runs on the self-hosted Windows runner
   on the developer's machine (labels `self-hosted, windows, x64`). It runs interactively
   (`run.cmd`), not as a service, because services live in session 0 without a desktop
