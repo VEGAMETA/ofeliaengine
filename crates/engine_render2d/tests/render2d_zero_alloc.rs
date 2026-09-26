@@ -137,6 +137,7 @@ fn steady_state_frames_do_not_allocate() {
             );
         }
         canvas.set_clip(None);
+        canvas.prepare();
 
         // SAFETY: nothing recorded by this test is ever submitted.
         unsafe {
@@ -161,7 +162,7 @@ fn steady_state_frames_do_not_allocate() {
                     &mut fg,
                     &mut ring,
                     &bindless,
-                    &mut canvas,
+                    &canvas,
                     &view,
                     target,
                     Some([0.0; 4]),

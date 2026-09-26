@@ -260,6 +260,8 @@ fn main() {
         let recorded = recording.elapsed();
 
         let preparing = Instant::now();
+        world.prepare();
+        overlay.prepare();
         {
             let mut fg = graph.begin(&frame);
             let desc = TextureDesc::new_2d(swapchain.format(), extent.width, extent.height);
@@ -292,7 +294,7 @@ fn main() {
                     &mut fg,
                     &mut ring,
                     &bindless,
-                    &mut world,
+                    &world,
                     &camera.view(extent.width, extent.height),
                     backbuffer,
                     Some([0.01, 0.01, 0.02, 1.0]),
@@ -303,7 +305,7 @@ fn main() {
                     &mut fg,
                     &mut ring,
                     &bindless,
-                    &mut overlay,
+                    &overlay,
                     &View2d::pixels(extent.width, extent.height),
                     backbuffer,
                     None,

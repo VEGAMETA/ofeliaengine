@@ -183,6 +183,7 @@ fn sprites_and_shapes() {
         } else {
             scene(&mut canvas, texture.sampled_index());
         }
+        canvas.prepare();
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -217,7 +218,7 @@ fn sprites_and_shapes() {
                     &mut fg,
                     &mut ring,
                     &bindless,
-                    &mut canvas,
+                    &canvas,
                     &View2d::pixels(SIZE, SIZE),
                     color,
                     Some([0.0, 0.0, 0.25, 1.0]),

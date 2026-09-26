@@ -122,6 +122,15 @@ impl Quad {
         }
     }
 
+    /// A solid, axis-aligned rectangle with hard, pixel-exact edges (a sprite without a
+    /// texture: pixel art, UI blocks).
+    pub fn solid(center: Vec2, size: Vec2) -> Self {
+        Self {
+            transform: axis_aligned(center, size),
+            ..Self::default()
+        }
+    }
+
     /// A solid rectangle with antialiased edges.
     pub fn rect(center: Vec2, size: Vec2) -> Self {
         Self {
@@ -312,6 +321,7 @@ pub struct Canvas {
     scratch: Vec<Entry>,
     batches: Vec<Batch>,
     stats: CanvasStats,
+    prepared: bool,
 }
 
 /// Largest number of distinct clip rectangles per canvas.
@@ -330,6 +340,7 @@ impl Canvas {
         self.clips.clear();
         self.current_state = 0;
         self.batches.clear();
+        self.prepared = false;
     }
 
     /// Clips later draws to `clip` (target pixels), or stops clipping with `None`.
@@ -347,11 +358,13 @@ impl Canvas {
             },
         };
         self.current_state = (index as u16) << 1;
+        self.prepared = false;
     }
 
     /// Adds a quad.
     pub fn draw(&mut self, quad: &Quad) {
         let index = self.instances.len() as u32;
+        self.prepared = false;
         self.instances.push(Instance::new(quad));
         let pipeline = u16::from(quad.blend == Blend2d::Multiply) * PIPELINE_MULTIPLY;
         self.entries.push(Entry {
@@ -371,13 +384,19 @@ impl Canvas {
         self.instances.is_empty()
     }
 
+    /// Whether [`Self::prepare`] ran after the last change.
+    pub fn is_prepared(&self) -> bool {
+        self.prepared
+    }
+
     /// Statistics of the last [`Self::prepare`].
     pub fn stats(&self) -> CanvasStats {
         self.stats
     }
 
-    /// Sorts the quads into draw order and forms batches. Renderers call this; it is
-    /// public for measuring it.
+    /// Sorts the quads into draw order and forms batches. Call it after recording and
+    /// before [`crate::Renderer2d::add_pass`]; it can run on any thread (a job preparing
+    /// its own canvas).
     pub fn prepare(&mut self) {
         engine_profiler::zone!("render2d::Canvas::prepare");
         let presorted = sort::sort(&mut self.entries, &mut self.scratch);
@@ -393,6 +412,7 @@ impl Canvas {
                 }),
             }
         }
+        self.prepared = true;
         self.stats = CanvasStats {
             quads: self.instances.len() as u32,
             batches: self.batches.len() as u32,
@@ -501,6 +521,12 @@ mod tests {
         assert_eq!(canvas.clip_rect(1), Some(clip));
         assert_eq!(canvas.clip_rect(0), None);
         assert!(canvas.stats().presorted);
+        assert!(canvas.is_prepared());
+        canvas.draw(&Quad::circle(Vec2::ZERO, 1.0));
+        assert!(
+            !canvas.is_prepared(),
+            "a change invalidates the preparation"
+        );
     }
 
     #[test]

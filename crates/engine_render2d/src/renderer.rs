@@ -64,24 +64,30 @@ const _: () = assert!(core::mem::size_of::<Push>() == 88);
 const VIEW_Y_DOWN: u32 = 1;
 const VIEW_INDIRECT: u32 = 2;
 
-/// The upload ring has no room for this frame's quads; nothing was drawn.
+/// Why [`Renderer2d::add_pass`] declared nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct RingFull {
-    /// Bytes the quads needed.
-    pub needed: u64,
+pub enum Render2dError {
+    /// The upload ring has no room for this frame's quads.
+    RingFull {
+        /// Bytes the quads needed.
+        needed: u64,
+    },
+    /// The canvas changed after its last [`Canvas::prepare`].
+    NotPrepared,
 }
 
-impl core::fmt::Display for RingFull {
+impl core::fmt::Display for Render2dError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(
-            f,
-            "upload ring has no room for {} bytes of quads",
-            self.needed
-        )
+        match self {
+            Self::RingFull { needed } => {
+                write!(f, "upload ring has no room for {needed} bytes of quads")
+            }
+            Self::NotPrepared => write!(f, "canvas changed after Canvas::prepare"),
+        }
     }
 }
 
-impl std::error::Error for RingFull {}
+impl std::error::Error for Render2dError {}
 
 /// Draws canvases into one color format.
 pub struct Renderer2d {
@@ -183,35 +189,40 @@ impl Renderer2d {
     }
 
     /// Declares a pass named "2d" that draws `canvas` into `target`, cleared first when
-    /// `clear` is set. Sorts and batches the canvas, then copies its instances into `ring`
-    /// in submission order, plus the draw order (4 bytes per quad) when sorting moved
-    /// anything. The frame must execute with `bindless`.
+    /// `clear` is set. The canvas must be prepared ([`Canvas::prepare`]); its instances are
+    /// copied into `ring` in submission order, plus the draw order (4 bytes per quad) when
+    /// sorting moved anything. The frame must execute with `bindless`.
     #[allow(clippy::too_many_arguments)]
     pub fn add_pass<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
         ring: &mut UploadRing,
         bindless: &'g Bindless,
-        canvas: &'g mut Canvas,
+        canvas: &'g Canvas,
         view: &View2d,
         target: Texture,
         clear: Option<[f32; 4]>,
-    ) -> Result<(), RingFull> {
+    ) -> Result<(), Render2dError> {
         engine_profiler::zone!("render2d::add_pass");
-        canvas.prepare();
+        if !canvas.is_prepared() {
+            return Err(Render2dError::NotPrepared);
+        }
         let count = canvas.len();
         let needed = (count * (core::mem::size_of::<Instance>() + 4)) as u64;
-        let instances = ring.stage(canvas.instances()).ok_or(RingFull { needed })?;
+        let instances = ring
+            .stage(canvas.instances())
+            .ok_or(Render2dError::RingFull { needed })?;
         // Quads already in draw order are read directly; otherwise through the order.
         let mut view_flags = if view.y_down { VIEW_Y_DOWN } else { 0 };
         let mut order_address = 0;
         if !canvas.stats().presorted {
-            let (order, staged) = ring.alloc::<u32>(count).ok_or(RingFull { needed })?;
+            let (order, staged) = ring
+                .alloc::<u32>(count)
+                .ok_or(Render2dError::RingFull { needed })?;
             canvas.write_order(order);
             order_address = staged.address;
             view_flags |= VIEW_INDIRECT;
         }
-        let canvas: &'g Canvas = canvas;
         let push = Push {
             clip_from_world: view.clip_from_world.to_cols_array(),
             instances: instances.address,
