@@ -196,11 +196,35 @@ mod watcher {
             // Raw handles are not `Send`; the thread only waits on the event, which `self`
             // owns and outlives it.
             let stop_raw = stop as isize;
+            // Changes are recorded only once the first read is pending: wait for it, so
+            // that nothing written after the constructor returns can be missed.
+            let (ready_tx, ready_rx) = mpsc::sync_channel(1);
             let thread = std::thread::Builder::new()
                 .name(String::from("engine-fs-watch"))
                 .spawn(move || {
-                    watch_thread(directory, io_owned, stop_raw, thread_root, recursive, sink)
+                    watch_thread(
+                        directory,
+                        io_owned,
+                        stop_raw,
+                        thread_root,
+                        recursive,
+                        ready_tx,
+                        sink,
+                    )
                 })?;
+            match ready_rx.recv() {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let _ = thread.join();
+                    return Err(e);
+                }
+                Err(_) => {
+                    let _ = thread.join();
+                    return Err(io::Error::other(
+                        "the watcher thread exited during start-up",
+                    ));
+                }
+            }
             Ok(Self {
                 thread: Some(thread),
                 stop: stop_owned,
@@ -253,8 +277,10 @@ mod watcher {
         stop: isize,
         root: PathBuf,
         recursive: bool,
+        ready: mpsc::SyncSender<io::Result<()>>,
         mut sink: impl FnMut(FileEvent) -> bool,
     ) {
+        let mut ready = Some(ready);
         // u32 elements: records must be DWORD-aligned.
         let mut buffer = vec![0u32; BUFFER_BYTES / 4];
         let filter = FILE_NOTIFY_CHANGE_FILE_NAME
@@ -280,6 +306,14 @@ mod watcher {
                     None,
                 )
             };
+            if let Some(ready) = ready.take() {
+                let result = if started == 0 {
+                    Err(io::Error::last_os_error())
+                } else {
+                    Ok(())
+                };
+                let _ = ready.send(result);
+            }
             if started == 0 {
                 return;
             }
