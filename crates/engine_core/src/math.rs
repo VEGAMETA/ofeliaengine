@@ -15,3 +15,14 @@ pub use glam::{
     Affine3A, EulerRot, IVec2, IVec3, IVec4, Mat3, Mat3A, Mat4, Quat, UVec2, UVec3, UVec4, Vec2,
     Vec3, Vec3A, Vec4,
 };
+
+/// Right-handed view matrix: the camera at `eye` looking at `target`, `up` roughly up.
+pub fn look_at(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {
+    glam::camera::rh::view::look_at_mat4(eye, target, up)
+}
+
+/// Right-handed perspective projection for Vulkan: view space +Y up and −Z forward, clip
+/// depth 0..1 (near..far), clip Y down (Vulkan's convention), so images come out upright.
+pub fn vulkan_perspective(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
+    glam::camera::rh::proj::vulkan::perspective(fov_y_radians, aspect, near, far)
+}

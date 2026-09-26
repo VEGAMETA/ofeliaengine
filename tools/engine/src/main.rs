@@ -36,6 +36,7 @@ options:
   -I <DIR>             import/include directory (repeatable)
   -j <N>               most files compiled at once; each needs a ~150 MB Slang session
                        (default: logical CPUs, at most 8)
+  --out <DIR>          build: also write <file>.<entry>.spv per entry point to DIR
 
 exit status: 0 success, 1 shader errors, 2 usage or setup error";
 
@@ -45,6 +46,7 @@ struct Args {
     cache: PathBuf,
     options: CompileOptions,
     parallel: usize,
+    out: Option<PathBuf>,
 }
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
@@ -67,6 +69,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
         cache: PathBuf::from("target/shader-cache"),
         options: CompileOptions::default(),
         parallel: default_parallel,
+        out: None,
     };
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
@@ -83,6 +86,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
                     .push((name.to_owned(), val.to_owned()));
             }
             "-I" => parsed.options.include_dirs.push(value("-I")?.into()),
+            "--out" => parsed.out = Some(value("--out")?.into()),
             "-j" => {
                 parsed.parallel = value("-j")?
                     .parse::<usize>()
@@ -162,6 +166,25 @@ fn build(args: &Args, library: Arc<SlangLibrary>, jobs: &ThreadPool) -> Result<E
             unit.path.display()
         );
     }
+    if let Some(out) = &args.out {
+        std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+        for unit in &report.units {
+            let Ok((output, _)) = &unit.result else {
+                continue;
+            };
+            let stem = unit
+                .path
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            for entry in &output.entries {
+                let bytes: Vec<u8> = entry.spirv.iter().flat_map(|w| w.to_le_bytes()).collect();
+                let file = out.join(format!("{stem}.{}.spv", entry.name));
+                std::fs::write(&file, bytes).map_err(|e| format!("{}: {e}", file.display()))?;
+                println!("  wrote {}", file.display());
+            }
+        }
+    }
     println!("{report}");
     println!("total {:.2} s", start.elapsed().as_secs_f64());
     Ok(if report.is_success() {
@@ -212,7 +235,7 @@ mod tests {
 
     #[test]
     fn parses_build_options() {
-        let parsed = args("shaders build -O -g -D FANCY -D N=3 -I inc -j 2 --cache c a b")
+        let parsed = args("shaders build -O -g -D FANCY -D N=3 -I inc -j 2 --cache c --out o a b")
             .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(parsed.command, "build");
         assert_eq!(parsed.roots, [PathBuf::from("a"), PathBuf::from("b")]);
@@ -227,6 +250,7 @@ mod tests {
         );
         assert_eq!(parsed.options.include_dirs, [PathBuf::from("inc")]);
         assert_eq!(parsed.parallel, 2);
+        assert_eq!(parsed.out, Some(PathBuf::from("o")));
     }
 
     #[test]
