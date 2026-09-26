@@ -4,7 +4,11 @@ name: Bench
 # The report is posted as a commit comment. ref-1 is not a dedicated machine, so the
 # numbers are advisory: no regression gate yet (ADR 0001, ADR 0002).
 on:
-  pull_request:
+  # Benchmarks measure what landed: after merges to main (a burst of merges waits for the
+  # running benchmark and then runs once, for the newest commit), or on a pull request
+  # when it gets the `bench` label (numbers needed before merging).
+  push:
+    branches: [main]
     paths:
       - crates/**
       - bench/**
@@ -13,15 +17,18 @@ on:
       - Cargo.lock
       - .github/workflows/bench.yml
       - .github/scripts/**
+  pull_request:
+    types: [labeled]
   workflow_dispatch:
 
 concurrency:
   group: bench-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   bench:
     name: bench
+    if: github.event_name != 'pull_request' || github.event.label.name == 'bench'
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 30
     permissions:
@@ -95,5 +102,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-audio.md,bench-ecs.md
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-text.md,bench-ecs.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "Bench (ref-1)" -Files bench-jobs.md,bench-zones.md,bench-timers.md,bench-canvas.md,bench-physics.md,bench-ecs-engine.md,bench-audio.md,bench-text.md,bench-ecs.md

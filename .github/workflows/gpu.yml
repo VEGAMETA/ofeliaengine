@@ -5,7 +5,11 @@ name: GPU
 # the validation layer; tests fail on any validation error. Output is posted as a commit
 # comment (job logs are not readable by the automation working on this repository).
 on:
+  # Correctness (tests under validation, windowed smoke runs) on every pull request that
+  # touches the GPU path; benchmarks only after merges to main or on a pull request with
+  # the `bench` label, so a pull request's pushes do not pay for them.
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - crates/engine_rhi/**
       - crates/engine_platform/**
@@ -15,17 +19,32 @@ on:
       - crates/engine_latency/**
       - crates/engine_text/**
       - tools/**
-      - Cargo.lock
+      - .github/workflows/gpu.yml
+  push:
+    branches: [main]
+    paths:
+      - crates/engine_rhi/**
+      - crates/engine_platform/**
+      - crates/engine_shader/**
+      - crates/engine_render/**
+      - crates/engine_render2d/**
+      - crates/engine_latency/**
+      - crates/engine_text/**
+      - tools/**
       - .github/workflows/gpu.yml
   workflow_dispatch:
 
 concurrency:
   group: gpu-${{ github.ref }}
-  cancel-in-progress: true
+  # A new push to a pull request replaces its running tests; runs on main finish their
+  # measurements, and merges that arrive meanwhile run once afterwards.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   gpu:
     name: gpu (NVIDIA + AMD + Slang)
+    # Other labels do not rerun the tests.
+    if: github.event.action != 'labeled' || github.event.label.name == 'bench'
     runs-on: [self-hosted, windows, x64]
     timeout-minutes: 30
     permissions:
@@ -33,6 +52,8 @@ jobs:
     env:
       CARGO_TERM_COLOR: never
       ENGINE_REQUIRE_GPU: "1"
+      # "true" when this run also measures (see `on:`).
+      BENCH: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'bench') }}
     steps:
       - uses: actions/checkout@v5
 
@@ -75,14 +96,18 @@ jobs:
           if %rc% equ 0 set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=
           echo ```>> render.md
-          echo.>> render.md
-          cargo bench -p engine_render --bench graph --locked >> render.md 2>&1
-          set ENGINE_ADAPTER=radeon
-          cargo bench -p engine_render --bench graph --locked >> render.md 2>&1
           exit /b %rc%
 
+      - name: Render graph benchmark, NVIDIA and AMD
+        if: ${{ !cancelled() && env.BENCH == 'true' }}
+        shell: cmd
+        run: |
+          cargo bench -p engine_render --bench graph --locked > render-bench.md 2>&1
+          set ENGINE_ADAPTER=radeon
+          cargo bench -p engine_render --bench graph --locked >> render-bench.md 2>&1
+
       - name: GPU-driven forward renderer benchmark, NVIDIA and AMD (release)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.BENCH == 'true' }}
         shell: cmd
         run: |
           cargo run -p engine_render --release --example draw_bench --locked > draw-bench.md 2>&1
@@ -107,7 +132,7 @@ jobs:
           echo ```>> cubes.md
           exit /b %rc%
 
-      - name: 2D renderer tests, windowed demo and benchmark, NVIDIA and AMD
+      - name: 2D renderer tests and windowed demos, NVIDIA and AMD
         if: ${{ !cancelled() }}
         shell: cmd
         run: |
@@ -131,11 +156,16 @@ jobs:
           cargo run -p engine_render2d --example viewports --locked -- 300 >> render2d.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           echo ```>> render2d.md
-          echo.>> render2d.md
-          cargo run -p engine_render2d --release --example sprite_bench --locked >> render2d.md 2>&1
-          if %rc% equ 0 set rc=%ERRORLEVEL%
+          exit /b %rc%
+
+      - name: 2D renderer benchmark, NVIDIA and AMD (release)
+        if: ${{ !cancelled() && env.BENCH == 'true' }}
+        shell: cmd
+        run: |
+          cargo run -p engine_render2d --release --example sprite_bench --locked > render2d-bench.md 2>&1
+          set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=radeon
-          cargo run -p engine_render2d --release --example sprite_bench --locked >> render2d.md 2>&1
+          cargo run -p engine_render2d --release --example sprite_bench --locked >> render2d-bench.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           exit /b %rc%
 
@@ -152,17 +182,21 @@ jobs:
           cargo run -p engine_latency --example latency --locked -- 60 4 >> latency.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           echo ```>> latency.md
-          echo.>> latency.md
-          set ENGINE_ADAPTER=
-          cargo run -p engine_latency --release --example latency --locked -- 300 48 >> latency.md 2>&1
-          if %rc% equ 0 set rc=%ERRORLEVEL%
+          exit /b %rc%
+
+      - name: Latency measurement, NVIDIA and AMD (release)
+        if: ${{ !cancelled() && env.BENCH == 'true' }}
+        shell: cmd
+        run: |
+          cargo run -p engine_latency --release --example latency --locked -- 300 48 > latency-bench.md 2>&1
+          set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=radeon
-          cargo run -p engine_latency --release --example latency --locked -- 300 12 >> latency.md 2>&1
+          cargo run -p engine_latency --release --example latency --locked -- 300 12 >> latency-bench.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           exit /b %rc%
 
       - name: Memory allocator benchmark, NVIDIA and AMD (release)
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && env.BENCH == 'true' }}
         shell: cmd
         run: |
           cargo bench -p engine_rhi --bench memory --locked > memory-bench.md 2>&1
@@ -186,19 +220,22 @@ jobs:
           echo ```>> shader.md
           exit /b %rc%
 
-      - name: Shader build and hot reload benchmark (release)
+      - name: engine shaders build (CLI smoke test, release)
         if: ${{ !cancelled() }}
         shell: cmd
         run: |
-          echo ## engine shaders build (CLI smoke test)> shader-bench.md
-          echo.>> shader-bench.md
-          echo ```>> shader-bench.md
-          cargo run -p engine_cli --release --locked -- shaders build --cache target\shader-cache-smoke crates >> shader-bench.md 2>&1
+          echo ## engine shaders build (CLI smoke test)> shader-cli.md
+          echo.>> shader-cli.md
+          echo ```>> shader-cli.md
+          cargo run -p engine_cli --release --locked -- shaders build --cache target\shader-cache-smoke crates >> shader-cli.md 2>&1
           set rc=%ERRORLEVEL%
-          echo ```>> shader-bench.md
-          echo.>> shader-bench.md
-          cargo run -p engine_shader --release --locked --example shader_bench >> shader-bench.md 2>&1
-          if %rc% neq 0 exit /b %rc%
+          echo ```>> shader-cli.md
+          exit /b %rc%
+
+      - name: Shader build and hot reload benchmark (release)
+        if: ${{ !cancelled() && env.BENCH == 'true' }}
+        shell: cmd
+        run: cargo run -p engine_shader --release --locked --example shader_bench > shader-bench.md 2>&1
 
       - name: Post report as commit comment
         if: ${{ !cancelled() }}
@@ -208,4 +245,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,draw-bench.md,cubes.md,render2d.md,latency.md,memory-bench.md,shader.md,shader-bench.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,render-bench.md,draw-bench.md,cubes.md,render2d.md,render2d-bench.md,latency.md,latency-bench.md,memory-bench.md,shader.md,shader-cli.md,shader-bench.md
