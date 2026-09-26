@@ -2,14 +2,17 @@
 //!
 //! A frame here spawns and despawns entities (directly and through commands), moves
 //! entities between archetypes, runs sequential, per-chunk, parallel and change-filtered
-//! queries, and saves, restores and hashes the world, as a predicting client does every
+//! queries, runs a parallel system schedule with commands, and saves, restores and hashes the world, as a predicting client does every
 //! tick. After a warm-up that creates every archetype and grows every buffer, a counting
 //! global allocator must see nothing. One test per file, so nothing else allocates
 //! concurrently.
 
 #![allow(clippy::unwrap_used)]
 
-use engine_ecs::{Changed, Commands, Entity, QueryState, Snapshot, World, bytemuck, pod_component};
+use engine_ecs::{
+    Changed, Commands, Entity, QueryState, Schedule, Snapshot, World, bytemuck, pod_component,
+    system,
+};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -59,6 +62,7 @@ struct Frame {
     aging: QueryState<(Entity, &'static mut Lifetime)>,
     moved: QueryState<&'static Position, Changed<Position>>,
     commands: Commands,
+    schedule: Schedule,
     snapshot: Snapshot,
     expired: Vec<Entity>,
     burning: Vec<Entity>,
@@ -114,12 +118,44 @@ fn frame(world: &mut World, f: &mut Frame, pool: &engine_core::jobs::ThreadPool,
     }
 
     // Prediction: save, simulate, roll back, re-simulate.
+    f.schedule.run(world, Some(pool));
+
     world.save(&mut f.snapshot).unwrap();
     f.movement.for_each(world, |(p, _)| p.0[0] *= 0.5);
     world.restore(&f.snapshot).unwrap();
     f.movement.for_each(world, |(p, _)| p.0[0] *= 0.5);
     world.advance_sim_tick();
     world.state_hash() ^ u64::from(n)
+}
+
+/// Two systems in one level (run in parallel); the second spawns an entity through its
+/// commands every frame (the frame's aging despawns it again).
+fn schedule() -> Schedule {
+    let mut s = Schedule::new();
+    s.add(system(
+        "drift",
+        |w, a| a.query::<(&mut Position, &Velocity), ()>(w),
+        |q, ctx| ctx.for_each(q, |(p, v)| p.0[1] -= v.0[1]),
+    ));
+    s.add(system(
+        "age",
+        |w, a| a.query::<(Entity, &mut Lifetime), ()>(w),
+        |q, ctx| {
+            let mut spawn = None;
+            ctx.for_each(q, |(e, life)| {
+                if life.0 == u32::MAX && spawn.is_none() {
+                    spawn = Some(e);
+                }
+            });
+            if spawn.is_some() {
+                let e = ctx
+                    .commands()
+                    .spawn((Position([0.0; 3]), Velocity([0.0; 3])));
+                ctx.commands().insert(e, Lifetime(1));
+            }
+        },
+    ));
+    s
 }
 
 #[test]
@@ -141,6 +177,7 @@ fn steady_state_frames_do_not_allocate() {
         aging: QueryState::new(&mut world),
         moved: QueryState::new(&mut world),
         commands: Commands::new(),
+        schedule: schedule(),
         snapshot: Snapshot::new(),
         expired: Vec::with_capacity(1024),
         burning: Vec::with_capacity(64),

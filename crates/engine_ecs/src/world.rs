@@ -56,6 +56,7 @@ pub struct World {
     pub(crate) change_tick: u64,
     pub(crate) sim_tick: u64,
     scratch: Vec<ComponentId>,
+    pub(crate) resources: crate::resource::Resources,
 }
 
 impl Default for World {
@@ -141,6 +142,7 @@ impl World {
             change_tick: 1,
             sim_tick: 0,
             scratch: Vec::new(),
+            resources: crate::resource::Resources::default(),
         };
         world.archetype_for_sorted(&[]);
         world
@@ -330,6 +332,34 @@ impl World {
         }
         self.entities.free(entity);
         true
+    }
+
+    /// Inserts (or replaces) the resource of type `T`.
+    pub fn insert_resource<T: Send + Sync + 'static>(&mut self, value: T) {
+        let id = self.resources.register::<T>();
+        *self.resources.slots[id].value.get_mut() = Some(Box::new(value));
+    }
+
+    /// The resource of type `T`.
+    pub fn resource<T: 'static>(&self) -> Option<&T> {
+        let id = self.resources.id_of::<T>()?;
+        // SAFETY: `&self` excludes `resource_mut`; the scheduler, the only other writer,
+        // holds the world exclusively while systems run.
+        unsafe { self.resources.get(id) }
+    }
+
+    /// The resource of type `T`, mutably.
+    pub fn resource_mut<T: 'static>(&mut self) -> Option<&mut T> {
+        let id = self.resources.id_of::<T>()?;
+        // SAFETY: `&mut self` is exclusive.
+        unsafe { self.resources.get_mut(id) }
+    }
+
+    /// Removes and returns the resource of type `T`.
+    pub fn remove_resource<T: 'static>(&mut self) -> Option<T> {
+        let id = self.resources.id_of::<T>()?;
+        let value = self.resources.slots[id].value.get_mut().take()?;
+        value.downcast::<T>().ok().map(|b| *b)
     }
 
     /// Despawns every entity, in index order.

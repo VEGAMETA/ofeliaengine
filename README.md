@@ -42,7 +42,7 @@ to the pull request description under "Questions for the team".
 |---|---|
 | `crates/engine_audio` | Audio: lock-free mixer (buses, sends, sidechains, virtual voices, sample-accurate starts), effects (biquad, compressor, limiter, delay), WAV decoding, WASAPI output with `IAudioClient3` low latency; example `tone` |
 | `crates/engine_core` | Foundation: job system (`jobs`), frame arena (`arena`), SPSC ring (`spsc`), stable and state hashing (`hash`), sync primitives |
-| `crates/engine_ecs` | Entity component system: archetypes in growing chunks, cached and parallel queries, commands, change tracking, deterministic snapshots and state hashes |
+| `crates/engine_ecs` | Entity component system: archetypes in growing chunks, cached and parallel queries, commands, change tracking, resources, a deterministic parallel system schedule, snapshots and state hashes |
 | `crates/engine_input` | Input actions in the spirit of Godot: named actions, bindings (keys by position, mouse, gamepads, composites, chords), contexts with priorities, tick-accurate state, network user commands; raw input and XInput on Windows |
 | `crates/engine_reflect` (+ `_derive`) | Reflection: `#[derive(Reflect)]` static field tables with offsets and attributes, for serialization, the inspector, scripting and replication |
 | `crates/engine_latency` | Input latency and frame pacing: NVIDIA Reflex (`VK_NV_low_latency2`), AMD Anti-Lag 2 (`VK_AMD_anti_lag`), a generic limiter with `present_wait`, shared markers; example `latency` |

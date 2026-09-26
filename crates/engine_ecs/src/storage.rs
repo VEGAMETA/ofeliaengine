@@ -26,6 +26,7 @@ use crate::entity::Entity;
 use crate::fxhash::FastMap;
 use core::alloc::Layout;
 use core::ptr::NonNull;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Chunk sizes in bytes: an archetype's first chunk uses the first, the next two the
 /// second, the next four the third, the rest the fourth.
@@ -152,7 +153,9 @@ pub struct Archetype {
     /// Rows in all chunks but the last (which are full).
     full_rows: u32,
     /// `chunk * columns.len() + column` → change tick of the last write.
-    pub(crate) versions: Vec<u64>,
+    /// Atomic so systems running in parallel can stamp different columns of one
+    /// archetype through a shared reference (relaxed stores: plain moves on x86).
+    pub(crate) versions: Vec<AtomicU64>,
     pub(crate) add_edges: FastMap<u32, u32>,
     pub(crate) remove_edges: FastMap<u32, u32>,
 }
@@ -266,7 +269,7 @@ impl Archetype {
         let column = self.column_index(component)?;
         self.versions
             .get(chunk * self.columns.len() + column)
-            .copied()
+            .map(|v| v.load(Ordering::Relaxed))
     }
 
     #[inline]
@@ -314,15 +317,22 @@ impl Archetype {
     }
 
     #[inline]
-    pub(crate) fn mark_chunk(&mut self, chunk: usize, tick: u64) {
+    pub(crate) fn mark_chunk(&self, chunk: usize, tick: u64) {
         let n = self.columns.len();
-        self.versions[chunk * n..(chunk + 1) * n].fill(tick);
+        for v in &self.versions[chunk * n..(chunk + 1) * n] {
+            v.store(tick, Ordering::Relaxed);
+        }
     }
 
     #[inline]
-    pub(crate) fn mark_column(&mut self, chunk: usize, column: usize, tick: u64) {
+    pub(crate) fn mark_column(&self, chunk: usize, column: usize, tick: u64) {
         let n = self.columns.len();
-        self.versions[chunk * n + column] = tick;
+        self.versions[chunk * n + column].store(tick, Ordering::Relaxed);
+    }
+
+    #[inline]
+    pub(crate) fn column_version(&self, chunk: usize, column: usize) -> u64 {
+        self.versions[chunk * self.columns.len() + column].load(Ordering::Relaxed)
     }
 
     /// Appends a chunk of the class its position calls for.
@@ -333,7 +343,7 @@ impl Archetype {
         let bytes = self.chunk_bytes[class_of(self.chunks.len())] as usize;
         self.chunks.push(pool.alloc(bytes));
         self.versions
-            .extend(core::iter::repeat_n(tick, self.columns.len()));
+            .extend((0..self.columns.len()).map(|_| AtomicU64::new(tick)));
     }
 
     /// Removes the last chunk, which must be empty.
@@ -430,7 +440,9 @@ impl Archetype {
         while self.chunks.len() > chunks {
             self.shrink(pool);
         }
-        self.versions.fill(tick);
+        for v in &self.versions {
+            v.store(tick, Ordering::Relaxed);
+        }
         self.len = len;
     }
 
