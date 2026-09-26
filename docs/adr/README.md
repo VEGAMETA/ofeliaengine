@@ -29,6 +29,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0019](0019-networking-model.md) | Networking model: authoritative ticks, prediction, lag compensation | Accepted |
 | [0021](0021-input-actions.md) | Input actions: named actions, contexts, tick-accurate state | Accepted |
 | [0022](0022-reflection.md) | Reflection: static field tables with offsets | Accepted |
+| [0023](0023-latency.md) | Latency: Reflex, Anti-Lag 2 and a generic path behind one interface | Accepted |
 
 ## Template
 

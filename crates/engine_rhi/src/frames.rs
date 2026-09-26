@@ -158,6 +158,20 @@ impl Frames {
         waits_for_image: bool,
         signal: Option<vk::Semaphore>,
     ) -> Result<(), RhiError> {
+        self.submit_tagged(queue, frame, waits_for_image, signal, None)
+    }
+
+    /// Like [`Frames::submit`], telling `VK_NV_low_latency2` which present the work
+    /// belongs to. Pass `present_id` only when that extension is enabled
+    /// (`engine_latency` does).
+    pub fn submit_tagged(
+        &mut self,
+        queue: Queue,
+        frame: Frame,
+        waits_for_image: bool,
+        signal: Option<vk::Semaphore>,
+        present_id: Option<u64>,
+    ) -> Result<(), RhiError> {
         engine_profiler::zone!("rhi::Frames::submit");
         let value = self.submitted + 1;
         let waits = [vk::SemaphoreSubmitInfo::default()
@@ -178,10 +192,15 @@ impl Frames {
             None => 1,
         };
         let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(frame.cmd)];
-        let submit = vk::SubmitInfo2::default()
+        let mut latency =
+            vk::LatencySubmissionPresentIdNV::default().present_id(present_id.unwrap_or(0));
+        let mut submit = vk::SubmitInfo2::default()
             .wait_semaphore_infos(if waits_for_image { &waits } else { &[] })
             .command_buffer_infos(&commands)
             .signal_semaphore_infos(&signals[..signal_count]);
+        if present_id.is_some() {
+            submit = submit.push_next(&mut latency);
+        }
         // SAFETY: the command buffer was recorded by `begin`/the caller and is ended here;
         // the semaphores are valid; external synchronization of `queue` is the caller's
         // (single submitting thread).

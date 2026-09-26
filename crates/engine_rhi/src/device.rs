@@ -15,10 +15,53 @@ pub struct Queue {
     pub family: u32,
 }
 
+/// Optional extensions for latency control and frame pacing (CLAUDE.md §7), enabled
+/// when the adapter supports them and the device presents.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LatencyExtensions {
+    /// `VK_KHR_present_id`: presents carry ids (needed by the others).
+    pub present_id: bool,
+    /// `VK_KHR_present_wait`: wait until a present id is on screen.
+    pub present_wait: bool,
+    /// `VK_NV_low_latency2`: NVIDIA Reflex through the driver, no DLL.
+    pub nv_low_latency2: bool,
+    /// `VK_AMD_anti_lag`: AMD Anti-Lag 2 through the driver, no DLL.
+    pub amd_anti_lag: bool,
+}
+
+/// `VkPhysicalDeviceAntiLagFeaturesAMD` (Vulkan 1.3.290; newer than the bindings).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct AntiLagFeaturesAmd {
+    s_type: vk::StructureType,
+    p_next: *mut core::ffi::c_void,
+    anti_lag: vk::Bool32,
+}
+
+/// `VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ANTI_LAG_FEATURES_AMD`.
+const ANTI_LAG_FEATURES_AMD: vk::StructureType = vk::StructureType::from_raw(1_000_476_000);
+
+impl Default for AntiLagFeaturesAmd {
+    fn default() -> Self {
+        Self {
+            s_type: ANTI_LAG_FEATURES_AMD,
+            p_next: core::ptr::null_mut(),
+            anti_lag: vk::FALSE,
+        }
+    }
+}
+
+// SAFETY: a `repr(C)` structure that starts with `sType` and `pNext`, as the feature
+// chains require.
+unsafe impl vk::ExtendsPhysicalDeviceFeatures2 for AntiLagFeaturesAmd {}
+// SAFETY: as above.
+unsafe impl vk::ExtendsDeviceCreateInfo for AntiLagFeaturesAmd {}
+
 /// The logical device with the engine's required features enabled.
 pub struct Device {
     raw: ash::Device,
     adapter: Adapter,
+    latency: LatencyExtensions,
     /// Graphics + compute + transfer (+ present on a desktop GPU).
     pub graphics: Queue,
     /// A compute queue on a family without graphics (async compute), if the GPU has one.
@@ -119,11 +162,62 @@ impl Device {
             .push_next(&mut f13);
 
         let mut extensions: Vec<*const i8> = Vec::new();
-        if adapter.caps.swapchain && instance.surface_enabled() {
+        let presenting = adapter.caps.swapchain && instance.surface_enabled();
+        if presenting {
             extensions.push(ash::khr::swapchain::NAME.as_ptr());
         }
         if adapter.caps.memory_budget {
             extensions.push(ash::ext::memory_budget::NAME.as_ptr());
+        }
+
+        // Latency extensions: query their features first (only for extensions the
+        // adapter lists), then enable what is supported.
+        let mut q_present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
+        let mut q_present_wait = vk::PhysicalDevicePresentWaitFeaturesKHR::default();
+        let mut q_anti_lag = AntiLagFeaturesAmd::default();
+        {
+            let mut query = vk::PhysicalDeviceFeatures2::default();
+            if presenting && adapter.caps.present_wait {
+                query = query
+                    .push_next(&mut q_present_id)
+                    .push_next(&mut q_present_wait);
+            }
+            if presenting && adapter.caps.amd_anti_lag {
+                query = query.push_next(&mut q_anti_lag);
+            }
+            // SAFETY: the chain only holds structures of extensions the device lists.
+            unsafe {
+                instance
+                    .raw()
+                    .get_physical_device_features2(adapter.physical, &mut query);
+            }
+        }
+        let mut latency = LatencyExtensions::default();
+        latency.present_id = presenting && q_present_id.present_id == vk::TRUE;
+        latency.present_wait = latency.present_id && q_present_wait.present_wait == vk::TRUE;
+        latency.nv_low_latency2 = latency.present_id && adapter.caps.nv_low_latency2;
+        latency.amd_anti_lag = presenting && q_anti_lag.anti_lag == vk::TRUE;
+        let mut e_present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default().present_id(true);
+        let mut e_present_wait =
+            vk::PhysicalDevicePresentWaitFeaturesKHR::default().present_wait(true);
+        let mut e_anti_lag = AntiLagFeaturesAmd {
+            anti_lag: vk::TRUE,
+            ..AntiLagFeaturesAmd::default()
+        };
+        if latency.present_id {
+            extensions.push(ash::khr::present_id::NAME.as_ptr());
+            features2 = features2.push_next(&mut e_present_id);
+        }
+        if latency.present_wait {
+            extensions.push(ash::khr::present_wait::NAME.as_ptr());
+            features2 = features2.push_next(&mut e_present_wait);
+        }
+        if latency.nv_low_latency2 {
+            extensions.push(ash::nv::low_latency2::NAME.as_ptr());
+        }
+        if latency.amd_anti_lag {
+            extensions.push(c"VK_AMD_anti_lag".as_ptr());
+            features2 = features2.push_next(&mut e_anti_lag);
         }
 
         let create_info = vk::DeviceCreateInfo::default()
@@ -150,8 +244,14 @@ impl Device {
             transfer: transfer_family.map(queue),
             raw,
             adapter: adapter.clone(),
+            latency,
             instance: instance.shared.clone(),
         })
+    }
+
+    /// Which latency extensions are enabled.
+    pub fn latency_extensions(&self) -> LatencyExtensions {
+        self.latency
     }
 
     /// The ash device, for calls this layer does not wrap yet.

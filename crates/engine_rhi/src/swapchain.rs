@@ -138,6 +138,9 @@ pub struct SwapchainDesc {
     pub present_mode: PresentMode,
     /// Prefer an sRGB format (the GPU encodes on write).
     pub srgb: bool,
+    /// Create the swapchain for NVIDIA's low-latency mode (`VK_NV_low_latency2`, Reflex)
+    /// when the device has it; `engine_latency` drives it.
+    pub low_latency: bool,
 }
 
 /// Result of [`Swapchain::acquire`].
@@ -162,6 +165,8 @@ pub struct Swapchain {
     extent: vk::Extent2D,
     present_mode: PresentMode,
     desc: SwapchainDesc,
+    latency: crate::device::LatencyExtensions,
+    present_wait: Option<ash::khr::present_wait::Device>,
     device: ash::Device,
 }
 
@@ -190,6 +195,11 @@ impl Swapchain {
             extent: vk::Extent2D::default(),
             present_mode: desc.present_mode,
             desc: *desc,
+            latency: device.latency_extensions(),
+            present_wait: device
+                .latency_extensions()
+                .present_wait
+                .then(|| ash::khr::present_wait::Device::new(device.instance_raw(), device.raw())),
             device: device.raw().clone(),
         };
         swapchain.build(device, surface, desc.width, desc.height)?;
@@ -283,7 +293,9 @@ impl Swapchain {
         }
 
         let old = self.raw;
-        let info = vk::SwapchainCreateInfoKHR::default()
+        let mut latency_info =
+            vk::SwapchainLatencyCreateInfoNV::default().latency_mode_enable(true);
+        let mut info = vk::SwapchainCreateInfoKHR::default()
             .surface(surface.raw)
             .min_image_count(image_count)
             .image_format(format.format)
@@ -297,6 +309,9 @@ impl Swapchain {
             .present_mode(present_mode.raw())
             .clipped(true)
             .old_swapchain(old);
+        if self.desc.low_latency && self.latency.nv_low_latency2 {
+            info = info.push_next(&mut latency_info);
+        }
         // SAFETY: valid create info for a surface of this device's instance; `old` is
         // retired by this call and destroyed below after its views.
         let raw = unsafe { self.loader.create_swapchain(&info, None) }
@@ -367,17 +382,62 @@ impl Swapchain {
     /// [`render_finished`](Self::render_finished)`(index)`. Returns whether the swapchain
     /// is suboptimal; out-of-date is an error.
     pub fn present(&self, queue: Queue, index: u32) -> Result<bool, RhiError> {
+        self.present_with_id(queue, index, None)
+    }
+
+    /// Like [`Swapchain::present`], tagging the present with `id` (increasing, non-zero)
+    /// when `VK_KHR_present_id` is enabled: [`Swapchain::wait_for_present`] and the
+    /// latency extensions refer to presents by it.
+    pub fn present_with_id(
+        &self,
+        queue: Queue,
+        index: u32,
+        id: Option<u64>,
+    ) -> Result<bool, RhiError> {
         let semaphores = [self.render_finished[index as usize]];
         let swapchains = [self.raw];
         let indices = [index];
-        let info = vk::PresentInfoKHR::default()
+        let ids = [id.unwrap_or(0)];
+        let mut present_id = vk::PresentIdKHR::default().present_ids(&ids);
+        let mut info = vk::PresentInfoKHR::default()
             .wait_semaphores(&semaphores)
             .swapchains(&swapchains)
             .image_indices(&indices);
+        if id.is_some() && self.latency.present_id {
+            info = info.push_next(&mut present_id);
+        }
         // SAFETY: `index` was acquired and rendered; the semaphore is signaled by the
         // caller's submission.
         unsafe { self.loader.queue_present(queue.raw, &info) }
             .map_err(RhiError::vk("vkQueuePresentKHR"))
+    }
+
+    /// Waits until the present tagged `id` has reached the screen, up to `timeout_ns`.
+    /// `Ok(true)` when it has, `Ok(false)` on timeout or without `VK_KHR_present_wait`.
+    pub fn wait_for_present(&self, id: u64, timeout_ns: u64) -> Result<bool, RhiError> {
+        let Some(loader) = &self.present_wait else {
+            return Ok(false);
+        };
+        // SAFETY: the swapchain is alive; ids come from `present_with_id`. Host access to
+        // the swapchain is synchronized by `&self` on the presenting thread.
+        match unsafe { loader.wait_for_present(self.raw, id, timeout_ns) } {
+            Ok(()) => Ok(true),
+            Err(vk::Result::TIMEOUT) => Ok(false),
+            Err(e) => Err(RhiError::Vulkan {
+                call: "vkWaitForPresentKHR",
+                result: e,
+            }),
+        }
+    }
+
+    /// The raw swapchain handle (for extensions such as `VK_NV_low_latency2`).
+    pub fn raw(&self) -> vk::SwapchainKHR {
+        self.raw
+    }
+
+    /// Whether the swapchain was created for NVIDIA's low-latency mode.
+    pub fn low_latency(&self) -> bool {
+        self.desc.low_latency && self.latency.nv_low_latency2
     }
 
     /// Swapchain images.

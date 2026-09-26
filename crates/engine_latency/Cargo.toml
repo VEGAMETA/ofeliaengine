@@ -1,0 +1,20 @@
+[package]
+name = "engine_latency"
+description = "Input latency and frame pacing: NVIDIA Reflex (VK_NV_low_latency2), AMD Anti-Lag 2 (VK_AMD_anti_lag), and a generic limiter with present_wait, behind one interface."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_profiler.workspace = true
+engine_rhi.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+engine_platform.workspace = true
+
+[[example]]
+name = "latency"
