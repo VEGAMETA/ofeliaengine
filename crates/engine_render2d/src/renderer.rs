@@ -15,8 +15,8 @@ const VERTEX_LIST: &[u8] = include_bytes!("../shaders/sprite.vertexList.spv");
 const VERTEX_INSTANCED: &[u8] = include_bytes!("../shaders/sprite.vertexInstanced.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/sprite.fragmentMain.spv");
 
-/// How quads become vertices. The renderer uses [`QuadMode::Indexed`]; the others exist
-/// for measuring the choice (ADR 0015).
+/// How quads become vertices. [`QuadMode::for_vendor`] picks the fastest measured one for
+/// a GPU vendor (ADR 0015).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum QuadMode {
     /// A shared index buffer (`0 1 2 2 1 3` + 4k): four vertex shader invocations per
@@ -27,6 +27,23 @@ pub enum QuadMode {
     List,
     /// One six-vertex instance per quad.
     Instanced,
+}
+
+impl QuadMode {
+    /// The fastest mode measured for a PCI vendor id (ref-1, ADR 0015): indexed on NVIDIA
+    /// (about 11% faster than the others), a plain vertex list on AMD (indexed is 13–37%
+    /// slower there) and, until measured, on everything else.
+    pub fn for_vendor(vendor_id: u32) -> Self {
+        match vendor_id {
+            0x10DE => Self::Indexed,
+            _ => Self::List,
+        }
+    }
+
+    /// [`Self::for_vendor`] for `device`'s adapter.
+    pub fn for_device(device: &Device) -> Self {
+        Self::for_vendor(device.adapter().vendor_id)
+    }
 }
 
 /// Quads per indexed draw: the index buffer covers this many with 16-bit indices, and

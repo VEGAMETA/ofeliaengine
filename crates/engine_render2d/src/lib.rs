@@ -8,9 +8,10 @@
 //!   y-sorting), then submission order.
 //! - Batches split only on blend pipeline ([`Blend2d::Multiply`] vs the rest) and clip
 //!   rectangle. Texture changes do not split them: every quad carries its bindless index.
-//! - [`Renderer2d`] writes the sorted quads into the upload ring (64 bytes each) and draws
-//!   each batch with one indexed draw per 16384 quads; vertices are generated from the
-//!   vertex index (no vertex buffers).
+//! - [`Renderer2d`] copies the quads into the upload ring (64 bytes each, plus a 4-byte
+//!   draw order when sorting moved anything) and draws each batch with one draw; vertices
+//!   are generated from the vertex index (no vertex buffers), indexed or as a plain list
+//!   depending on the GPU vendor ([`QuadMode::for_vendor`]).
 //! - [`Camera2d`] and [`View2d`]: a y-up world camera and y-down pixel space.
 //!
 //! ```no_run

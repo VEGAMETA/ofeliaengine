@@ -43,13 +43,15 @@ It has to meet §5:
 
 ### Vertex generation
 
-All three are implemented, selected by `QuadMode`, and measured:
-1. **Indexed** (chosen): a shared 16-bit index buffer `0 1 2 2 1 3 + 4k` (16384 quads,
-   192 KiB). The draw's vertex offset selects the first quad. 4 vertex invocations per
-   quad.
-2. **List**: no index buffer, 6 invocations per quad.
+All three are implemented, selected by `QuadMode`, and measured on ref-1:
+1. **Indexed**: a shared 16-bit index buffer `0 1 2 2 1 3 + 4k` (16384 quads, 192 KiB).
+   The draw's vertex offset selects the first quad. 4 vertex invocations per quad.
+   Fastest on NVIDIA.
+2. **List**: no index buffer, 6 invocations per quad. Fastest on AMD.
 3. **Instanced**: one 6-vertex instance per quad. AMD's guidance is that tiny instances
-   pack poorly into vertex waves.
+   pack poorly into vertex waves. Ties with list on both vendors.
+
+Chosen: **per vendor** (`QuadMode::for_vendor`): indexed on NVIDIA, list elsewhere.
 
 ### Sorting and upload
 
@@ -148,11 +150,45 @@ Lavapipe on the same container, 1920×1080:
 `tests/render2d_zero_alloc.rs`: 100 frames of 6 500 quads (y-sorted, layers, clip, all
 blend modes) through ring and graph make 0 heap allocations.
 
-### Still to measure
+### ref-1, `sprite_bench`
 
-- ref-1 GPU times for the three modes (NVIDIA and AMD) come from the GPU workflow's
-  `sprite_bench` run on this PR. The mode choice is revisited if indexed loses on either
-  vendor.
+Ryzen 7 7700, release, 1920×1080 R8G8B8A8, 8-pixel textured y-sorted sprites from four
+textures (one batch), median of 30 frames. GPU time of the 2D pass in µs:
+
+| quads | NVIDIA indexed | NVIDIA list | NVIDIA instanced | AMD indexed | AMD list | AMD instanced |
+|---:|---:|---:|---:|---:|---:|---:|
+| 10 000 | 24 | 26 | 26 | 392 | 365 | 364 |
+| 100 000 | 164 | 185 | 185 | 3 428 | 2 507 | 2 496 |
+| 1 000 000 | 1 640 | 1 730 | 1 730 | 26 371 | 23 040 | 23 005 |
+
+NVIDIA is an RTX 4060 Ti (driver 616.92); AMD is the Radeon iGPU (driver 25.10.36).
+
+- **Indexed on NVIDIA:** 5–11% faster than the other two modes.
+- **Indexed on AMD:** 8–37% slower than the other two; list and instanced tie.
+- **Why AMD differs:** not investigated yet. Candidates are how the hardware reuses
+  vertices within a primitive group, and its index fetch path. It needs a Radeon GPU
+  Profiler capture, which is not possible on CI.
+- **SDF discs** (radius 6 px, antialiased edges, indexed): 0.42 ms per 100 000 on NVIDIA,
+  8.25 ms on AMD. That is 4.2 and 82 ns per disc, against 1.6 and 34 ns per sprite.
+- **CPU per frame** (the same on both GPUs, Ryzen 7 7700):
+  - recording 100 000 quads: 0.69 ms;
+  - preparing and uploading them: 1.14 ms into NVIDIA's BAR memory over PCIe 4.0 x8,
+    0.76 ms into the iGPU's system memory;
+  - at 1 000 000 quads, the upload is PCIe bound (12.4 ms vs 9.3 ms).
+
+CPU cost, `benches/canvas.rs` on ref-1, ns per quad:
+
+| quads | record | prepare, in order | prepare, y-sorted (radix) | std `sort_unstable` | std `sort` (allocates) | gather 64 B | copy + order |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 10 000 | 7.0 | 0.8 | 5.3 | 10.5 | 12.0 | 1.1 | 1.0 |
+| 100 000 | 7.1 | 0.8 | 5.5 | 18.3 | 11.4 | 1.6 | 2.1 |
+| 1 000 000 | 7.1 | 0.7 | 6.3 | 19.8 | 10.2 | 8.1 | 2.3 |
+
+- The radix sort is 2.0–3.3× faster than `sort_unstable` and 1.6–2.3× faster than the
+  allocating stable sort.
+- Copy + order is slightly slower than the gather while the instances fit in the 32 MiB
+  L3 (100 000 quads, 6.4 MB). It is 3.5× faster beyond that (1 000 000 quads). We keep it
+  for the bounded worst case.
 
 ## Consequences
 
@@ -164,8 +200,13 @@ blend modes) through ring and graph make 0 heap allocations.
 - **SDF quads assume orthogonal axes** (no skew). Skewed shapes would need a general
   distance.
 - **Recording cost scales with the number of quads on one thread.** At 1 000 000 quads,
-  recording plus preparing costs about 40 ns per quad on this CPU. Next:
+  recording plus preparing costs about 40 ns per quad on the container CPU and 13 ns on
+  ref-1. Next:
   - record canvases on several jobs and merge before sorting;
   - avoid re-recording static content (retained chunks for tilemaps).
+- **Upload bandwidth** is the limit for very large dynamic canvases on discrete GPUs:
+  64 bytes per quad per frame over PCIe. Next:
+  - smaller instances (a 32-byte sprite-only form);
+  - retained GPU-side instances for content that does not change.
 - **Next 2D steps:** 9-slice, tilemaps (chunked, GPU culling), particles, 2D lights and
   normal maps, MSDF text (`engine_text`), and viewports (the next step of §17).

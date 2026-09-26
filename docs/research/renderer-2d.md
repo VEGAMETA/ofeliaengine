@@ -98,8 +98,11 @@ copied: the implementations in `engine_render2d` are our own.
      a 4-vertex mesh, because tiny instances pack poorly into vertex waves on AMD
      hardware.
    - We implemented three modes (indexed with a shared `0 1 2 2 1 3` index buffer, a
-     6-vertex list, and instancing) and measure them. See ADR 0015 and the `sprite_bench`
-     example.
+     6-vertex list, and instancing) and measured them on ref-1 (ADR 0015):
+     - indexed is fastest on NVIDIA;
+     - list and instancing are fastest on AMD, where indexed is up to 37% slower.
+
+     The renderer picks the mode per vendor.
 7. **Radix sort with trivial-pass skipping (Terdiman) over 11-bit digits, stable.**
    - Y-sorting one layer costs three scatter passes over 16-byte entries.
    - In-order input is detected with one comparison per key and not sorted.

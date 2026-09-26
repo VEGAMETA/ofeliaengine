@@ -78,7 +78,7 @@ fn main() {
         &mut allocator,
         &bindless,
         swapchain.format(),
-        QuadMode::Indexed,
+        QuadMode::for_device(&device),
     )
     .unwrap();
     let ring_bytes = (sprite_count as u64 * 2 + 4096) * 72;
