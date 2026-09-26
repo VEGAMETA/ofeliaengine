@@ -423,9 +423,10 @@ Goal: the developer never thinks about shader compilation, and players never see
   (Blender, Unreal, Unity, Godot, Houdini, Figma, VS Code). Output:
   `docs/research/ux/<panel>.md`: what works, what annoys, what we take.
 - Design from scenarios: "the developer wants X" → number of clicks/keystrokes → remove the excess.
-- Editor UI framework: our own retained-mode system on top of `engine_render` (the same viewport
-  system); layout: evaluate Taffy; text: Parley/swash/rustybuzz. Immediate mode (egui) is acceptable
-  for internal debug overlays. Decide via ADR.
+- Editor UI framework: our own system on top of `engine_render` (the same viewport system):
+  immediate-mode building with retained per-widget state and full-tree layout, own Clay-like
+  layout (Taffy evaluated, not used for the editor); text: `engine_text` (ADR 0030, ADR 0025).
+  egui is acceptable for internal debug overlays.
 - Once there are users, keep extending `docs/research/ux/findings.md`.
 
 ### Required editor tools

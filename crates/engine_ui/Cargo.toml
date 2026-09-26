@@ -1,0 +1,18 @@
+[package]
+name = "engine_ui"
+description = "UI core for the editor and games: immediate-mode building, retained state, full-tree layout."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_profiler.workspace = true
+
+[[bench]]
+name = "ui"
+harness = false
