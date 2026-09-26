@@ -1,0 +1,22 @@
+[package]
+name = "engine_scene"
+description = "Text scenes: a line-oriented, merge-friendly format for entities and reflected components."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_ecs.workspace = true
+engine_profiler.workspace = true
+engine_reflect.workspace = true
+
+[dev-dependencies]
+engine_core.workspace = true
+
+[[bench]]
+name = "scene"
+harness = false

@@ -94,3 +94,5 @@ maps) is one of CLAUDE.md's irreversible decisions. Options:
 
 The recommendation is option 1. Reflection works the same under all three, so the
 reflection work can start before the choice.
+
+**Decided 2026-09-26: option 1** (team). See ADR 0029 and `crates/engine_scene`.
