@@ -48,6 +48,17 @@ impl Stage {
         }
     }
 
+    fn from_raw(raw: u32) -> Option<Self> {
+        Some(match raw {
+            1 => Self::Vertex,
+            5 => Self::Fragment,
+            6 => Self::Compute,
+            13 => Self::Mesh,
+            14 => Self::Task,
+            _ => return None,
+        })
+    }
+
     pub(crate) fn from_name(name: &str) -> Option<Self> {
         Some(match name {
             "vertex" => Self::Vertex,
@@ -176,6 +187,9 @@ impl Compiler {
     }
 
     /// Compiles `path` to SPIR-V 1.6 for each entry point.
+    ///
+    /// With no `entries`, every function marked `[shader("<stage>")]` is compiled, in
+    /// source order (Slang discovers them).
     pub fn compile_file(
         &mut self,
         path: &Path,
@@ -186,7 +200,8 @@ impl Compiler {
         self.compile_source(path, &source, entries, options)
     }
 
-    /// Compiles `source` (reported as `path` in diagnostics and dependencies).
+    /// Compiles `source` (reported as `path` in diagnostics and dependencies). See
+    /// [`Self::compile_file`] for what an empty `entries` means.
     pub fn compile_source(
         &mut self,
         path: &Path,
@@ -288,8 +303,20 @@ impl Compiler {
             });
         }
 
-        let mut compiled = Vec::with_capacity(entries.len());
-        for (entry, &index) in entries.iter().zip(&entry_indices) {
+        let targets: Vec<(EntryPoint, i32)> = if entries.is_empty() {
+            // SAFETY: the request compiled successfully.
+            unsafe { discovered_entry_points(f, req) }.map_err(|diagnostics| {
+                ShaderError::Compile {
+                    path: path.to_owned(),
+                    diagnostics,
+                }
+            })?
+        } else {
+            entries.iter().cloned().zip(entry_indices).collect()
+        };
+
+        let mut compiled = Vec::with_capacity(targets.len());
+        for (entry, index) in targets {
             let mut size = 0usize;
             // SAFETY: `index` was returned by `add_entry_point` for this request.
             let code = unsafe { (f.entry_point_code)(req, index, &mut size) };
@@ -313,7 +340,7 @@ impl Compiler {
                 )
             };
             compiled.push(CompiledEntry {
-                name: entry.name.clone(),
+                name: entry.name,
                 stage: entry.stage,
                 spirv,
             });
@@ -337,6 +364,46 @@ impl Compiler {
             dependencies,
             diagnostics,
         })
+    }
+}
+
+/// Entry points Slang found through `[shader("...")]` attributes, with their code indices.
+///
+/// # Safety
+///
+/// `req` must be a live request that compiled successfully.
+unsafe fn discovered_entry_points(
+    f: &crate::slang::Functions,
+    req: *mut Request,
+) -> Result<Vec<(EntryPoint, i32)>, String> {
+    // SAFETY: guaranteed by the caller; the strings are copied before the request dies.
+    unsafe {
+        let reflection = (f.reflection)(req);
+        if reflection.is_null() {
+            return Err(String::from("Slang produced no reflection data"));
+        }
+        let count = (f.reflection_entry_point_count)(reflection);
+        let mut found = Vec::with_capacity(count);
+        for i in 0..count {
+            let entry = (f.reflection_entry_point)(reflection, i);
+            if entry.is_null() {
+                continue;
+            }
+            let name_ptr = (f.entry_point_name)(entry);
+            let name = if name_ptr.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(name_ptr).to_string_lossy().into_owned()
+            };
+            let raw_stage = (f.entry_point_stage)(entry);
+            let stage = Stage::from_raw(raw_stage).ok_or_else(|| {
+                format!(
+                    "entry point `{name}` has a stage the engine does not support yet ({raw_stage})"
+                )
+            })?;
+            found.push((EntryPoint { name, stage }, i as i32));
+        }
+        Ok(found)
     }
 }
 

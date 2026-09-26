@@ -10,6 +10,7 @@ on:
       - crates/engine_rhi/**
       - crates/engine_platform/**
       - crates/engine_shader/**
+      - tools/**
       - Cargo.lock
       - .github/workflows/gpu.yml
   workflow_dispatch:
@@ -71,6 +72,20 @@ jobs:
           echo ```>> shader.md
           exit /b %rc%
 
+      - name: Shader build and hot reload benchmark (release)
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          echo ## engine shaders build (CLI smoke test)> shader-bench.md
+          echo.>> shader-bench.md
+          echo ```>> shader-bench.md
+          cargo run -p engine_cli --release --locked -- shaders build --cache target\shader-cache-smoke crates >> shader-bench.md 2>&1
+          set rc=%ERRORLEVEL%
+          echo ```>> shader-bench.md
+          echo.>> shader-bench.md
+          cargo run -p engine_shader --release --locked --example shader_bench >> shader-bench.md 2>&1
+          if %rc% neq 0 exit /b %rc%
+
       - name: Post report as commit comment
         if: ${{ !cancelled() }}
         shell: cmd
@@ -79,4 +94,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,shader.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,shader.md,shader-bench.md

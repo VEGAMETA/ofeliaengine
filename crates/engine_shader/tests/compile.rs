@@ -1,41 +1,17 @@
-//! Slang compilation tests. They need the Slang library (Vulkan SDK, or
-//! `ENGINE_SLANG_LIBRARY`); without it they print why and pass, unless
-//! `ENGINE_REQUIRE_SLANG=1` (set on the GPU workflow and in development containers).
+//! Slang compilation tests (see `common` for when they run).
 
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
+mod common;
+
+use common::{slang, temp_dir};
+
 use engine_shader::{
-    CacheOutcome, CompileOptions, Compiler, EntryPoint, ShaderCache, ShaderError, SlangLibrary,
+    CacheOutcome, CompileOptions, Compiler, CompilerPool, EntryPoint, ShaderCache, ShaderError,
     Stage,
 };
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Instant;
-
-fn slang() -> Option<Arc<SlangLibrary>> {
-    match SlangLibrary::load() {
-        Ok(library) => {
-            println!(
-                "slang {} from {}",
-                library.version(),
-                library.path().display()
-            );
-            Some(library)
-        }
-        Err(e) if std::env::var("ENGINE_REQUIRE_SLANG").is_ok_and(|v| v == "1") => panic!("{e}"),
-        Err(e) => {
-            println!("skipping (set ENGINE_REQUIRE_SLANG=1 to make this an error): {e}");
-            None
-        }
-    }
-}
-
-fn temp_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("engine_shader_{name}_{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
-}
 
 fn triangle_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine_rhi/shaders/triangle.slang")
@@ -192,12 +168,12 @@ fn cache_tracks_imported_modules() {
         "import common;\nRWStructuredBuffer<uint> output;\n[shader(\"compute\")]\n[numthreads(1,1,1)]\nvoid main() { output[0] = value(); }\n",
     )
     .unwrap();
-    let mut compiler = Compiler::new(library).unwrap();
+    let compilers = CompilerPool::new(library);
     let entries = [EntryPoint::new("main", Stage::Compute)];
     let options = CompileOptions::default();
 
     let (first, outcome) = cache
-        .compile(&mut compiler, &main, &entries, &options)
+        .compile(&compilers, &main, &entries, &options)
         .unwrap();
     assert_eq!(outcome, CacheOutcome::Miss);
     println!("dependencies: {:?}", first.dependencies);
@@ -211,7 +187,7 @@ fn cache_tracks_imported_modules() {
     );
 
     let (again, outcome) = cache
-        .compile(&mut compiler, &main, &entries, &options)
+        .compile(&compilers, &main, &entries, &options)
         .unwrap();
     assert_eq!(outcome, CacheOutcome::Hit);
     assert_eq!(again.entries, first.entries);
@@ -223,7 +199,7 @@ fn cache_tracks_imported_modules() {
     )
     .unwrap();
     let (changed, outcome) = cache
-        .compile(&mut compiler, &main, &entries, &options)
+        .compile(&compilers, &main, &entries, &options)
         .unwrap();
     assert_eq!(outcome, CacheOutcome::Miss);
     assert_ne!(changed.entries[0].spirv, first.entries[0].spirv);
@@ -231,7 +207,7 @@ fn cache_tracks_imported_modules() {
     // Different options are a different entry.
     let (_, outcome) = cache
         .compile(
-            &mut compiler,
+            &compilers,
             &main,
             &entries,
             &CompileOptions {
@@ -241,4 +217,30 @@ fn cache_tracks_imported_modules() {
         )
         .unwrap();
     assert_eq!(outcome, CacheOutcome::Miss);
+    // Hits need no session: only the misses above created one.
+    assert_eq!(compilers.idle_count(), 1);
+}
+
+#[test]
+fn discovers_entry_points_when_none_are_requested() {
+    let Some(library) = slang() else { return };
+    let mut compiler = Compiler::new(library).unwrap();
+    let output = compiler
+        .compile_file(&triangle_path(), &[], &CompileOptions::default())
+        .unwrap();
+    let found: Vec<(&str, Stage)> = output
+        .entries
+        .iter()
+        .map(|e| (e.name.as_str(), e.stage))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            ("vertexMain", Stage::Vertex),
+            ("fragmentMain", Stage::Fragment)
+        ]
+    );
+    for entry in &output.entries {
+        assert_eq!(entry_names(&entry.spirv), [entry.name.as_str()]);
+    }
 }

@@ -1,0 +1,18 @@
+[package]
+name = "engine_cli"
+description = "The `engine` command line: shader builds today; cooking, packing and benchmarks later."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "engine"
+path = "src/main.rs"
+
+[dependencies]
+engine_core.workspace = true
+engine_shader.workspace = true

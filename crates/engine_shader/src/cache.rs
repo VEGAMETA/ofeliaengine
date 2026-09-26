@@ -14,7 +14,8 @@
 //! and several processes (the team's DDC) can share one directory.
 
 use crate::ShaderError;
-use crate::compiler::{CompileOptions, CompileOutput, CompiledEntry, Compiler, EntryPoint, Stage};
+use crate::compiler::{CompileOptions, CompileOutput, CompiledEntry, EntryPoint, Stage};
+use crate::pool::CompilerPool;
 use engine_core::hash::{StableHasher, hash128, to_hex};
 use std::fs;
 use std::io;
@@ -127,11 +128,13 @@ impl ShaderCache {
                 _ => return None,
             }
         }
-        let same_entries = compiled.len() == entries.len()
-            && compiled
-                .iter()
-                .zip(entries)
-                .all(|(c, e)| c.name == e.name && c.stage == e.stage);
+        // No requested entries means "all discovered", which the key already encodes.
+        let same_entries = entries.is_empty()
+            || (compiled.len() == entries.len()
+                && compiled
+                    .iter()
+                    .zip(entries)
+                    .all(|(c, e)| c.name == e.name && c.stage == e.stage));
         same_entries.then_some(CompileOutput {
             entries: compiled,
             dependencies,
@@ -158,10 +161,11 @@ impl ShaderCache {
         self.write_atomic(&format!("{}.manifest", to_hex(key)), manifest.as_bytes())
     }
 
-    /// Compiles `path` through the cache.
+    /// Compiles `path` through the cache. A hit needs no Slang session; a miss borrows
+    /// one from `compilers`. Empty `entries` compiles every `[shader(...)]` function.
     pub fn compile(
         &self,
-        compiler: &mut Compiler,
+        compilers: &CompilerPool,
         path: &Path,
         entries: &[EntryPoint],
         options: &CompileOptions,
@@ -169,7 +173,7 @@ impl ShaderCache {
         engine_profiler::zone!("shader::ShaderCache::compile");
         let source = fs::read(path)?;
         let key = Self::request_key(
-            compiler.library().version(),
+            compilers.library().version(),
             path,
             &source,
             entries,
@@ -179,7 +183,8 @@ impl ShaderCache {
             return Ok((output, CacheOutcome::Hit));
         }
         let text = String::from_utf8_lossy(&source);
-        let output = compiler.compile_source(path, &text, entries, options)?;
+        let output =
+            compilers.with(|compiler| compiler.compile_source(path, &text, entries, options))??;
         // A cache write failure costs a recompile next time; it must not fail the build.
         let _ = self.store(key, &output);
         Ok((output, CacheOutcome::Miss))

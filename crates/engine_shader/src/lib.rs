@@ -9,14 +9,30 @@
 //! - [`ShaderCache`] stores SPIR-V by content: the key covers the compiler version, the
 //!   options, the entry points and the content of the source **and every file it
 //!   imported**, as reported by Slang.
+//! - [`CompilerPool`] shares sessions between threads, creating them only when a cache
+//!   miss needs one.
+//! - [`compile_all`] is "Compile All Shaders": every source under the project's shader
+//!   roots ([`find_shader_sources`]), in parallel, with a [`BuildReport`].
+//! - [`ShaderHotReload`] rebuilds affected shaders in the background when files change
+//!   and reports [`ShaderEvent`]s; on errors the previous SPIR-V stays in use (ADR 0009).
 
+mod build;
 mod cache;
 mod compiler;
+mod pool;
+mod reload;
 mod slang;
+mod sources;
 
+pub use build::{BuildReport, UnitResult, compile_all, compile_all_streaming};
 pub use cache::{CacheOutcome, ShaderCache};
 pub use compiler::{CompileOptions, CompileOutput, CompiledEntry, Compiler, EntryPoint, Stage};
+pub use pool::CompilerPool;
+pub use reload::{HotReloadConfig, ShaderEvent, ShaderHotReload, ShaderSet};
 pub use slang::SlangLibrary;
+pub use sources::{
+    SLANG_EXTENSION, declares_entry_points, find_shader_sources, is_slang_file, normalize, path_key,
+};
 
 use std::fmt;
 use std::path::PathBuf;
