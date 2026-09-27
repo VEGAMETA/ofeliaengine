@@ -16,6 +16,7 @@ the dependency.
 | harfrust 0.13.3 (+ bitflags 2, once_cell 1, smallvec 1) | MIT (the others MIT OR Apache-2.0) | text shaping in `engine_text` (ADR 0025) |
 | mlua 0.12.1 + mlua-sys 0.12 (+ bstr, either, num-traits, parking_lot, rustc-hash) | MIT (the others MIT OR Apache-2.0, bstr MIT OR Apache-2.0) | Luau VM bindings in `engine_script` (ADR 0032) |
 | Luau 0.736 (© Roblox Corporation, via luau0-src 0.21, vendored C++ sources built by cc) | MIT | the scripting language and its native code generator (ADR 0032) |
+| gltf 1.4.1 + gltf-json + gltf-derive (+ serde, serde_json, byteorder, lazy_static, inflections, itoa, memchr, zmij) | MIT OR Apache-2.0 (byteorder and memchr Unlicense OR MIT; inflections, zmij MIT) | glTF 2.0 parsing in `engine_assets` (ADR 0033) |
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |

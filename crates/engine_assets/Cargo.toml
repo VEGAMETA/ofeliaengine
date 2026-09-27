@@ -1,0 +1,21 @@
+[package]
+name = "engine_assets"
+description = "Asset import: glTF 2.0 into memory (meshes, PBR materials, node hierarchy) and into the ECS."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_ecs.workspace = true
+engine_profiler.workspace = true
+# Already in the tree through engine_ecs: the plain-data proof for `MeshInstance`.
+bytemuck = { version = "1.25", features = ["derive"] }
+# glTF 2.0 document model and accessor readers (MIT OR Apache-2.0). Without default
+# features: no image decoding, no URL handling — buffers are resolved here, textures are
+# decoded by the texture pipeline later. ADR 0033.
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "KHR_lights_punctual", "KHR_texture_transform", "KHR_materials_emissive_strength"] }

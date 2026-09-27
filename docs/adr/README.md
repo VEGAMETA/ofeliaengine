@@ -40,6 +40,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0034](0034-gpu-culling-and-indirect-draws.md) | GPU frustum culling and indirect instanced draws | Accepted |
 | [0035](0035-occlusion-culling.md) | Two-phase occlusion culling (hierarchical depth) | Accepted |
 | [0037](0037-checks-on-the-reference-machine.md) | Checks on the reference machine before merging; GitHub Actions on demand | Accepted |
+| [0033](0033-gltf-import.md) | glTF 2.0 import into memory with the `gltf` crate | Accepted |
 
 ## Template
 
