@@ -1,0 +1,65 @@
+//! Editor icons: glyphs of the bundled Symbols Nerd Font (`engine_text::fonts::NERD_SYMBOLS`,
+//! ADR 0036), drawn as text with the UI font stack so they size, color and clip like text.
+//!
+//! Each constant names its Nerd Fonts glyph (`glyphnames.json` of Nerd Fonts 3.5.1). Most are
+//! Material Design Icons (Apache-2.0); every set is credited in `THIRD_PARTY_NOTICES.md`.
+
+/// Play (`md-play`).
+pub const PLAY: &str = "\u{F040A}";
+/// Pause (`md-pause`).
+pub const PAUSE: &str = "\u{F03E4}";
+/// Stop (`md-stop`).
+pub const STOP: &str = "\u{F04DB}";
+/// Expanded tree row (`md-chevron_down`).
+pub const EXPANDED: &str = "\u{F0140}";
+/// Collapsed tree row (`md-chevron_right`).
+pub const COLLAPSED: &str = "\u{F0142}";
+
+/// Folder (`md-folder`).
+pub const FOLDER: &str = "\u{F024B}";
+/// Open folder (`md-folder_open`).
+pub const FOLDER_OPEN: &str = "\u{F0770}";
+/// Scene file (`md-movie_open`).
+pub const SCENE: &str = "\u{F0FCE}";
+/// Luau script (`md-language_lua`).
+pub const SCRIPT: &str = "\u{F08B1}";
+/// Texture (`md-image`).
+pub const TEXTURE: &str = "\u{F02E9}";
+/// Mesh or model (`md-cube_outline`).
+pub const MESH: &str = "\u{F01A7}";
+/// Sound (`md-music_note`).
+pub const AUDIO: &str = "\u{F0387}";
+/// Any other file (`md-file_outline`).
+pub const FILE: &str = "\u{F0224}";
+
+/// Spatial node (`md-axis_arrow`).
+pub const NODE_3D: &str = "\u{F0D49}";
+/// Mesh instance (`md-cube`).
+pub const MESH_INSTANCE: &str = "\u{F01A6}";
+/// Light (`md-lightbulb_outline`).
+pub const LIGHT: &str = "\u{F0336}";
+/// Sun / directional light (`md-white_balance_sunny`).
+pub const SUN: &str = "\u{F05A8}";
+/// Environment (`md-earth`).
+pub const ENVIRONMENT: &str = "\u{F01E7}";
+/// Camera (`md-camera`).
+pub const CAMERA: &str = "\u{F0100}";
+/// Character (`md-account`).
+pub const CHARACTER: &str = "\u{F0004}";
+/// Collision shape (`md-shape_outline`).
+pub const COLLISION: &str = "\u{F0832}";
+/// UI control (`md-application_outline`).
+pub const CONTROL: &str = "\u{F0614}";
+
+/// Select tool (`md-cursor_default`).
+pub const TOOL_SELECT: &str = "\u{F01C0}";
+/// Move tool (`md-cursor_move`).
+pub const TOOL_MOVE: &str = "\u{F01BE}";
+/// Rotate tool (`md-rotate_3d_variant`).
+pub const TOOL_ROTATE: &str = "\u{F0464}";
+/// Scale tool (`md-resize`).
+pub const TOOL_SCALE: &str = "\u{F0A68}";
+/// Grid snapping (`md-grid`).
+pub const SNAP: &str = "\u{F02C1}";
+/// Filter / search box (`md-magnify`).
+pub const SEARCH: &str = "\u{F0349}";

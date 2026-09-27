@@ -170,11 +170,17 @@ dependencies = [
 name = "engine_editor"
 version = "0.0.0"
 dependencies = [
+ "engine_core",
  "engine_ecs",
  "engine_input",
  "engine_profiler",
  "engine_reflect",
+ "engine_render",
+ "engine_render2d",
+ "engine_rhi",
  "engine_scene",
+ "engine_text",
+ "engine_ui",
 ]
 
 [[package]]
