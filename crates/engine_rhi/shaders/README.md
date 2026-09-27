@@ -1,7 +1,7 @@
 # Bootstrap shaders
 
 `triangle.slang` is compiled to `triangle.vert.spv` / `triangle.frag.spv` (SPIR-V 1.6) with
-Slang 2026.12:
+Slang 2026.18.3:
 
 ```
 slangc triangle.slang -target spirv -profile spirv_1_6 -entry vertexMain   -stage vertex   -O2 -fvk-use-entrypoint-name -o triangle.vert.spv

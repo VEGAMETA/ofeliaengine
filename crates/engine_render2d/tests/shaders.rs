@@ -12,7 +12,7 @@ use engine_shader::{CompileOptions, Compiler, SlangLibrary};
 use std::path::Path;
 
 /// Slang version that produced the committed files.
-const BUILT_WITH: &str = "2026.12";
+const BUILT_WITH: &str = "2026.18.3";
 
 #[test]
 fn committed_spirv_matches_the_source() {
