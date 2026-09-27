@@ -547,13 +547,44 @@ fn main() {
     let png = encode_png(WIDTH, HEIGHT, PngFormat::Rgb, &rgb).unwrap();
     std::fs::write(&out_path, &png).unwrap();
     println!(
-        "{out_path}: {WIDTH}×{HEIGHT}, {} KiB; {} UI nodes, {commands} draw commands (layout {:.0} µs), {} rect quads, {} glyphs, {} clips; viewport {vw}×{vh}; {adapter_name}",
+        "{out_path}: {WIDTH}×{HEIGHT}, {} KiB; {} UI nodes, {commands} draw commands (first-frame layout {:.0} µs), {} rect quads, {} glyphs, {} clips; viewport {vw}×{vh}; {adapter_name}",
         png.len() / 1024,
         ui.node_count(),
         layout_time.as_secs_f64() * 1e6,
         stats.rects,
         stats.glyphs,
         stats.clips,
+    );
+
+    // Steady state: the editor builds, lays out and paints the UI every frame. The first
+    // frame above also shapes every string for the first time.
+    let input = UiInput {
+        mouse: None,
+        ..UiInput::default()
+    };
+    let mut scratch = Canvas::new();
+    let (mut ui_us, mut paint_us) = (Vec::with_capacity(200), Vec::with_capacity(200));
+    for _ in 0..200 {
+        let t = std::time::Instant::now();
+        ui.begin_frame(&input, [WIDTH as f32, HEIGHT as f32]);
+        build(&mut ui, &model, &palette);
+        ui.end_frame(&mut text);
+        ui_us.push(t.elapsed().as_secs_f64() * 1e6);
+        let t = std::time::Instant::now();
+        scratch.clear();
+        paint(&ui.last_frame(), &mut text, &glyphs, &mut scratch);
+        paint_us.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    let pct = |v: &mut Vec<f64>, p: f64| {
+        v.sort_by(f64::total_cmp);
+        v[((v.len() - 1) as f64 * p).round() as usize]
+    };
+    println!(
+        "steady frame (200 runs, CPU): build + layout {:.0} µs median / {:.0} p99; paint {:.0} / {:.0}",
+        pct(&mut ui_us, 0.5),
+        pct(&mut ui_us, 0.99),
+        pct(&mut paint_us, 0.5),
+        pct(&mut paint_us, 0.99),
     );
 
     // SAFETY: the device is idle.
