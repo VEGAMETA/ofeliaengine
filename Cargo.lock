@@ -171,6 +171,7 @@ name = "engine_editor"
 version = "0.0.0"
 dependencies = [
  "engine_ecs",
+ "engine_input",
  "engine_profiler",
  "engine_reflect",
  "engine_scene",
