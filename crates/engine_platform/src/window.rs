@@ -14,6 +14,7 @@
 //! The process is Per-Monitor-V2 DPI aware; sizes in [`WindowDesc`] are logical (96-DPI)
 //! pixels, sizes in events are physical pixels.
 
+use crate::display::{self, DisplayInfo, DisplayQuery};
 use crate::wide;
 use core::cell::{Cell, RefCell};
 use core::ptr::{self, null, null_mut};
@@ -159,6 +160,11 @@ pub enum WindowEventKind {
     },
     /// Text input (after keyboard layout and dead keys).
     Char(char),
+    /// What the window's monitor shows changed: HDR turned on or off, the SDR white
+    /// level, the refresh rate, or the window moved to another monitor. Sent once after
+    /// [`Created`](Self::Created), then on every change (checked on display changes,
+    /// monitor changes and once a second).
+    Display(DisplayInfo),
 }
 
 /// An event with the window it belongs to and the time the window thread received it.
@@ -181,6 +187,11 @@ enum Command {
 
 /// Wakes the control window to process commands.
 const WM_ENGINE_COMMAND: u32 = WM_APP + 1;
+
+/// Timer of the control window that checks every window's display once a second: moving
+/// the SDR brightness slider sends no message.
+const DISPLAY_TIMER: usize = 1;
+const DISPLAY_TIMER_MS: u32 = 1000;
 
 /// `WM_MOUSELEAVE` (0x02A3). windows-sys places it in `Win32_UI_Controls`, a large module
 /// we otherwise do not need.
@@ -300,6 +311,10 @@ struct ThreadState {
     pending_surrogate: Cell<Option<u16>>,
     /// Windows for which `TrackMouseEvent(TME_LEAVE)` is armed.
     tracking_leave: RefCell<Vec<HWND>>,
+    /// Display queries; taken out while one runs.
+    display: RefCell<Option<DisplayQuery>>,
+    /// The display last reported for each window.
+    displays: RefCell<Vec<(HWND, DisplayInfo)>>,
     quit: Cell<bool>,
 }
 
@@ -349,6 +364,8 @@ fn window_thread(
         next_id: Cell::new(1),
         pending_surrogate: Cell::new(None),
         tracking_leave: RefCell::new(Vec::new()),
+        display: RefCell::new(Some(DisplayQuery::new())),
+        displays: RefCell::new(Vec::new()),
         quit: Cell::new(false),
     });
     let state_ptr: *const ThreadState = &*state;
@@ -362,6 +379,9 @@ fn window_thread(
             }
         };
     let _ = ready.send(Ok(control as isize));
+    // SAFETY: the control window lives until the thread quits; no timer procedure, so
+    // `WM_TIMER` reaches `control_proc`.
+    unsafe { SetTimer(control, DISPLAY_TIMER, DISPLAY_TIMER_MS, None) };
 
     let mut msg = MSG::default();
     loop {
@@ -470,6 +490,15 @@ unsafe extern "system" fn control_proc(
 ) -> LRESULT {
     // SAFETY: called by the OS for the control window, created with a state pointer.
     let state = unsafe { state_for(hwnd, msg, lparam) };
+    if msg == WM_TIMER && wparam == DISPLAY_TIMER && !state.is_null() {
+        // SAFETY: as below.
+        let state = unsafe { &*state };
+        let windows: Vec<(WindowId, HWND)> = state.windows.borrow().clone();
+        for (id, window) in windows {
+            check_display(state, id, window);
+        }
+        return 0;
+    }
     if msg == WM_ENGINE_COMMAND && !state.is_null() {
         // SAFETY: the state lives until the window thread returns, after all windows are
         // destroyed.
@@ -490,7 +519,14 @@ unsafe extern "system" fn control_proc(
 fn handle_command(state: &ThreadState, control: HWND, command: Command) {
     match command {
         Command::Create(desc, reply) => {
-            let _ = reply.send(create_window(state, &desc));
+            let created = create_window(state, &desc);
+            let window = created.as_ref().ok().map(|w| (w.id, w.hwnd as HWND));
+            let _ = reply.send(created);
+            // After the reply: the first query creates a DXGI factory (9 ms on ref-1),
+            // which then overlaps the caller's own start-up.
+            if let Some((id, hwnd)) = window {
+                check_display(state, id, hwnd);
+            }
         }
         Command::SetTitle(id, title) => {
             if let Some(hwnd) = state.hwnd_of(id) {
@@ -516,6 +552,29 @@ fn handle_command(state: &ThreadState, control: HWND, command: Command) {
             state.quit.set(true);
         }
     }
+}
+
+/// Asks for the display of window `hwnd` and reports it if it changed.
+fn check_display(state: &ThreadState, id: WindowId, hwnd: HWND) {
+    // Taken out of the cell so that no borrow is held across calls into the OS; a nested
+    // call (none is expected) finds it gone and skips.
+    let Some(mut query) = state.display.take() else {
+        return;
+    };
+    let info = query.window(hwnd as isize);
+    state.display.replace(Some(query));
+    let Some(info) = info else {
+        return;
+    };
+    {
+        let mut displays = state.displays.borrow_mut();
+        match displays.iter_mut().find(|(h, _)| *h == hwnd) {
+            Some((_, last)) if *last == info => return,
+            Some((_, last)) => *last = info,
+            None => displays.push((hwnd, info)),
+        }
+    }
+    state.push(id, WindowEventKind::Display(info));
 }
 
 fn window_style(resizable: bool) -> WINDOW_STYLE {
@@ -627,6 +686,7 @@ unsafe extern "system" fn window_proc(
         WM_DESTROY => {
             state.windows.borrow_mut().retain(|(_, h)| *h != hwnd);
             state.tracking_leave.borrow_mut().retain(|h| *h != hwnd);
+            state.displays.borrow_mut().retain(|(h, _)| *h != hwnd);
             state.push(id, WindowEventKind::Destroyed);
             return 0;
         }
@@ -666,6 +726,24 @@ unsafe extern "system" fn window_proc(
                     dpi: u32::from(hiword(wparam)),
                 },
             );
+            return 0;
+        }
+        WM_MOVE => {
+            // Only a move to another monitor can change the display.
+            let monitor = display::monitor_of(hwnd as isize);
+            let moved = state
+                .displays
+                .borrow()
+                .iter()
+                .any(|(h, info)| *h == hwnd && info.monitor != monitor);
+            if moved {
+                check_display(state, id, hwnd);
+            }
+            return 0;
+        }
+        WM_DISPLAYCHANGE => {
+            // Resolution, refresh rate, HDR on or off.
+            check_display(state, id, hwnd);
             return 0;
         }
         WM_SETFOCUS => {
@@ -793,29 +871,7 @@ unsafe extern "system" fn window_proc(
 /// the monitor reports its hardware default. Cheap enough to ask every second or so: the
 /// window may move to another monitor.
 pub fn refresh_rate(hwnd: isize) -> Option<u32> {
-    use windows_sys::Win32::Graphics::Gdi::{
-        DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
-        MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
-    };
-    // SAFETY: plain queries; the structures carry their sizes, as the API requires.
-    unsafe {
-        let monitor = MonitorFromWindow(hwnd as HWND, MONITOR_DEFAULTTONEAREST);
-        if monitor.is_null() {
-            return None;
-        }
-        let mut info: MONITORINFOEXW = core::mem::zeroed();
-        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
-        if GetMonitorInfoW(monitor, (&raw mut info).cast::<MONITORINFO>()) == 0 {
-            return None;
-        }
-        let mut mode: DEVMODEW = core::mem::zeroed();
-        mode.dmSize = size_of::<DEVMODEW>() as u16;
-        if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) == 0 {
-            return None;
-        }
-        // 0 and 1 stand for "the hardware's default rate".
-        (mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
-    }
+    display::device_refresh_hz(&display::device_name(display::monitor_of(hwnd))?)
 }
 
 #[cfg(test)]
@@ -860,6 +916,37 @@ mod tests {
         if let Some(hz) = refresh_rate(window.hwnd) {
             assert!((20..=1000).contains(&hz), "{hz} Hz");
         }
+        system.destroy_window(window.id).unwrap();
+    }
+
+    #[test]
+    fn display_is_reported_once_until_it_changes() {
+        let mut system = WindowSystem::start(256).unwrap();
+        let window = system.create_window(&hidden()).unwrap();
+        let displays = |events: &[WindowEvent]| {
+            events
+                .iter()
+                .filter_map(|e| match e.kind {
+                    WindowEventKind::Display(info) => Some(info),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+        let events = wait_for(&mut system, Duration::from_secs(5), |e| {
+            !displays(e).is_empty()
+        });
+        let expected = DisplayQuery::new().window(window.hwnd);
+        let Some(first) = displays(&events).first().copied() else {
+            // A session without a desktop knows no display.
+            assert_eq!(expected, None);
+            return;
+        };
+        assert_eq!(Some(first), expected);
+        // A display change that changed nothing is not reported again.
+        // SAFETY: posting to a live window.
+        unsafe { PostMessageW(window.hwnd as HWND, WM_DISPLAYCHANGE, 32, 0) };
+        let events = wait_for(&mut system, Duration::from_millis(300), |_| false);
+        assert!(displays(&events).is_empty(), "{:?}", displays(&events));
         system.destroy_window(window.id).unwrap();
     }
 

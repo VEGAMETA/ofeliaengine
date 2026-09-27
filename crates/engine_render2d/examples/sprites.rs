@@ -30,7 +30,7 @@ fn main() {
     use engine_rhi::ash::vk;
     use engine_rhi::{
         AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
-        PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
+        OutputColor, PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
     };
     use std::time::{Duration, Instant};
 
@@ -68,6 +68,7 @@ fn main() {
             height: size.1,
             present_mode,
             srgb: true,
+            color: OutputColor::Sdr,
             low_latency: false,
         },
     )

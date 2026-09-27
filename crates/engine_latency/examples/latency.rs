@@ -24,7 +24,7 @@ fn main() {
     use engine_rhi::ash::vk;
     use engine_rhi::{
         AdapterPreference, Allocator, Device, Frames, Instance, InstanceDesc, MemoryLocation,
-        PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
+        OutputColor, PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
     };
     use std::collections::VecDeque;
     use std::time::{Duration, Instant};
@@ -62,6 +62,7 @@ fn main() {
             height: 720,
             present_mode,
             srgb: true,
+            color: OutputColor::Sdr,
             low_latency: true,
         },
     )

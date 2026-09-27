@@ -43,4 +43,7 @@ pub use memory::{
 pub use pipeline::{
     Blend, DepthBias, GraphicsPipelineDesc, Pipeline, ShaderStageDesc, spirv_words,
 };
-pub use swapchain::{AcquiredImage, PresentMode, Surface, Swapchain, SwapchainDesc, color_range};
+pub use swapchain::{
+    AcquiredImage, HdrMetadata, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc,
+    color_range,
+};

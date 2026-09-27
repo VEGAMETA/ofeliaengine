@@ -23,8 +23,8 @@ fn main() {
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_rhi::ash::vk;
     use engine_rhi::{
-        AdapterPreference, Device, Frames, Instance, InstanceDesc, PresentMode, RhiError, Surface,
-        Swapchain, SwapchainDesc,
+        AdapterPreference, Device, Frames, Instance, InstanceDesc, OutputColor, PresentMode,
+        RhiError, Surface, Swapchain, SwapchainDesc,
     };
     use std::time::{Duration, Instant};
 
@@ -47,7 +47,9 @@ fn main() {
 
     let instance = Instance::new(&InstanceDesc::default()).unwrap();
     let adapter = instance
-        .select_adapter(&AdapterPreference::HighPerformance)
+        .select_adapter(
+            &AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance),
+        )
         .unwrap();
     println!("adapter: {}", adapter.summary());
     let device = Device::new(&instance, &adapter).unwrap();
@@ -60,6 +62,18 @@ fn main() {
         "present modes: {:?}",
         Swapchain::supported_present_modes(&device, &surface).unwrap()
     );
+    println!(
+        "outputs: {:?} (HDR color spaces {}); surface formats:",
+        Swapchain::supported_colors(&device, &surface).unwrap(),
+        if instance.hdr_color_spaces_enabled() {
+            "enabled"
+        } else {
+            "unavailable"
+        },
+    );
+    for format in Swapchain::surface_formats(&device, &surface).unwrap() {
+        println!("  {:?} {:?}", format.format, format.color_space);
+    }
 
     let mut size = (1280u32, 720u32);
     let mut swapchain = Swapchain::new(
@@ -70,6 +84,7 @@ fn main() {
             height: size.1,
             present_mode,
             srgb: true,
+            color: OutputColor::Sdr,
             low_latency: false,
         },
     )

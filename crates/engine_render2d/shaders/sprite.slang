@@ -36,6 +36,9 @@ struct Push
     uint* order;          // draw position → instance index (when VIEW_INDIRECT is set)
     float aa_expand;      // world units per pixel: SDF quads grow by this for the edge ramp
     uint view_flags;
+    float white;          // output value of white: 1, or SDR white in scRGB units for HDR
+                          // output (ADR 0038); 1 for multiplied quads (factors, not light)
+    uint _pad;
 };
 
 static const uint VIEW_Y_DOWN = 1;   // world +y points down on screen (pixel/UI views)
@@ -166,5 +169,5 @@ float4 fragmentMain(VertexOut input) : SV_Target0
         color.a *= saturate(0.5 - d / max(pixel, 1e-20));
     }
     float alpha = (input.flags & FLAG_ADDITIVE) != 0 ? 0.0 : color.a;
-    return float4(color.rgb * color.a, alpha);
+    return float4(color.rgb * (color.a * push.white), alpha);
 }

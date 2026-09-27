@@ -72,6 +72,8 @@ pub(crate) struct InstanceShared {
     #[cfg_attr(not(windows), allow(dead_code))]
     pub(crate) win32_surface_enabled: bool,
     pub(crate) headless_surface_enabled: bool,
+    /// `VK_EXT_swapchain_colorspace`: surfaces may offer HDR color spaces.
+    pub(crate) swapchain_colorspace_enabled: bool,
     pub(crate) debug_utils_enabled: bool,
 }
 
@@ -194,6 +196,8 @@ impl Instance {
             && has_extension(ash::khr::win32_surface::NAME);
         let headless_surface =
             surface && desc.headless_surface && has_extension(ext::headless_surface::NAME);
+        // HDR output: without it, surfaces only list sRGB color spaces.
+        let swapchain_colorspace = surface && has_extension(ext::swapchain_colorspace::NAME);
         if surface {
             enabled_extensions.push(ash::khr::surface::NAME.as_ptr());
         }
@@ -202,6 +206,9 @@ impl Instance {
         }
         if headless_surface {
             enabled_extensions.push(ext::headless_surface::NAME.as_ptr());
+        }
+        if swapchain_colorspace {
+            enabled_extensions.push(ext::swapchain_colorspace::NAME.as_ptr());
         }
         if sync_validation {
             enabled_extensions.push(ext::validation_features::NAME.as_ptr());
@@ -280,6 +287,7 @@ impl Instance {
                 surface_enabled: surface,
                 win32_surface_enabled: win32_surface,
                 headless_surface_enabled: headless_surface,
+                swapchain_colorspace_enabled: swapchain_colorspace,
                 debug_utils_enabled: debug_utils,
             }),
         })
@@ -298,6 +306,12 @@ impl Instance {
     /// Whether the surface extensions are enabled.
     pub fn surface_enabled(&self) -> bool {
         self.shared.surface_enabled
+    }
+
+    /// Whether `VK_EXT_swapchain_colorspace` is enabled: surfaces may offer HDR color
+    /// spaces ([`OutputColor`](crate::OutputColor)).
+    pub fn hdr_color_spaces_enabled(&self) -> bool {
+        self.shared.swapchain_colorspace_enabled
     }
 
     /// Validation messages since creation.
