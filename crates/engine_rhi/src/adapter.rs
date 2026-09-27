@@ -73,6 +73,62 @@ pub struct OptionalCaps {
     pub calibrated_timestamps: bool,
     /// `VK_EXT_memory_budget` (per-heap budget and usage from the OS).
     pub memory_budget: bool,
+    /// The driver implements Vulkan 1.4. The engine's floor stays 1.3 (ADR 0006); the
+    /// capabilities below were promoted to core in 1.4 and are used as extensions.
+    pub vulkan_1_4: bool,
+    /// `VK_KHR_maintenance5` (pipelines from SPIR-V without shader modules, sized index
+    /// buffer binds).
+    pub maintenance5: bool,
+    /// `VK_KHR_maintenance6`.
+    pub maintenance6: bool,
+    /// `VK_KHR_push_descriptor`.
+    pub push_descriptor: bool,
+    /// `VK_EXT_host_image_copy` (image uploads from the CPU without staging buffers).
+    pub host_image_copy: bool,
+    /// `VK_KHR_dynamic_rendering_local_read` (reading attachments inside a render pass).
+    pub dynamic_rendering_local_read: bool,
+    /// `VK_KHR_load_store_op_none` or the EXT version.
+    pub load_store_op_none: bool,
+    /// `VK_KHR_shader_maximal_reconvergence` (defined wave behavior after divergence).
+    pub maximal_reconvergence: bool,
+    /// `VK_KHR_line_rasterization` or the EXT version (wide, smooth and stippled lines).
+    pub line_rasterization: bool,
+    /// `VK_KHR_index_type_uint8` or the EXT version.
+    pub index_type_uint8: bool,
+    /// `VK_EXT_hdr_metadata` (mastering metadata for HDR swapchains).
+    pub hdr_metadata: bool,
+}
+
+impl OptionalCaps {
+    /// Names of the capabilities present, for logs and reports.
+    pub fn names(&self) -> Vec<&'static str> {
+        [
+            (self.mesh_shader, "mesh shaders"),
+            (self.ray_tracing, "ray tracing"),
+            (self.descriptor_buffer, "descriptor buffer"),
+            (self.graphics_pipeline_library, "pipeline library"),
+            (self.pipeline_binary, "pipeline binary"),
+            (self.present_wait, "present wait"),
+            (self.nv_low_latency2, "Reflex"),
+            (self.amd_anti_lag, "Anti-Lag 2"),
+            (self.device_fault, "device fault"),
+            (self.calibrated_timestamps, "calibrated timestamps"),
+            (self.memory_budget, "memory budget"),
+            (self.maintenance5, "maintenance5"),
+            (self.maintenance6, "maintenance6"),
+            (self.push_descriptor, "push descriptors"),
+            (self.host_image_copy, "host image copy"),
+            (self.dynamic_rendering_local_read, "local read"),
+            (self.load_store_op_none, "load/store op none"),
+            (self.maximal_reconvergence, "maximal reconvergence"),
+            (self.line_rasterization, "line rasterization"),
+            (self.index_type_uint8, "uint8 indices"),
+            (self.hdr_metadata, "HDR metadata"),
+        ]
+        .into_iter()
+        .filter_map(|(present, name)| present.then_some(name))
+        .collect()
+    }
 }
 
 /// A physical device and what it can do.
@@ -242,6 +298,21 @@ impl Adapter {
             calibrated_timestamps: has(ash::khr::calibrated_timestamps::NAME)
                 || has(ash::ext::calibrated_timestamps::NAME),
             memory_budget: has(ash::ext::memory_budget::NAME),
+            // Promoted to core in Vulkan 1.4; ash 0.38 predates some of them, so all are
+            // compared by name. 1.4 drivers still list them as extensions.
+            vulkan_1_4: props.api_version >= vk::make_api_version(0, 1, 4, 0),
+            maintenance5: has(c"VK_KHR_maintenance5"),
+            maintenance6: has(c"VK_KHR_maintenance6"),
+            push_descriptor: has(c"VK_KHR_push_descriptor"),
+            host_image_copy: has(c"VK_EXT_host_image_copy"),
+            dynamic_rendering_local_read: has(c"VK_KHR_dynamic_rendering_local_read"),
+            load_store_op_none: has(c"VK_KHR_load_store_op_none")
+                || has(c"VK_EXT_load_store_op_none"),
+            maximal_reconvergence: has(c"VK_KHR_shader_maximal_reconvergence"),
+            line_rasterization: has(c"VK_KHR_line_rasterization")
+                || has(c"VK_EXT_line_rasterization"),
+            index_type_uint8: has(c"VK_KHR_index_type_uint8") || has(c"VK_EXT_index_type_uint8"),
+            hdr_metadata: has(c"VK_EXT_hdr_metadata"),
         };
 
         let kind = match props.device_type {

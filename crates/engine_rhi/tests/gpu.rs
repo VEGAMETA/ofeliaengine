@@ -20,11 +20,20 @@ fn adapters_are_listed_and_one_is_selected() {
     };
     for adapter in instance.adapters().unwrap() {
         println!(
-            "adapter: {} missing={:?} caps={:?}",
+            "adapter: {} missing={:?} optional: {}",
             adapter.summary(),
             adapter.missing_features(),
-            adapter.caps
+            adapter.caps.names().join(", ")
         );
+        // A 1.4 driver has what 1.4 made core, extension by extension.
+        if adapter.caps.vulkan_1_4 {
+            let caps = adapter.caps;
+            assert!(
+                caps.maintenance5 && caps.maintenance6 && caps.push_descriptor,
+                "{}",
+                adapter.summary()
+            );
+        }
     }
     println!("selected: {}", device.adapter().summary());
     println!(

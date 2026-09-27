@@ -89,6 +89,11 @@ the floor and 1.4 used opportunistically.
 - The minimum-tier consequence (which GPU generations pass the required set) must still be
   checked against gpuinfo.org, which is not reachable from the development container. This is
   noted as a follow-up.
+- *2026-09-27, the 1.4 question* ([research](../research/vulkan-1.4.md)): a 1.4 floor would
+  drop AMD Polaris/Vega (every Vega APU) and Intel's 11th–14th generation graphics, whose
+  Windows drivers stay at 1.3. The floor stays 1.3. The capabilities 1.4 made core are
+  detected as extensions and reported in `OptionalCaps`; none speeds up the current code,
+  so none is required. ash 0.38 has no 1.4 types.
 
 ## Consequences
 
