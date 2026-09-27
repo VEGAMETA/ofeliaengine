@@ -43,6 +43,35 @@ pub enum SamplerKind {
     ShadowCompare = 5,
 }
 
+/// How a material texture repeats along one axis (glTF's sampler wrap modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[repr(u32)]
+pub enum Wrap {
+    /// Tiles.
+    #[default]
+    Repeat = 0,
+    /// Tiles, every other copy mirrored.
+    MirroredRepeat = 1,
+    /// Stretches the edge texels.
+    ClampToEdge = 2,
+}
+
+impl Wrap {
+    const ALL: [Self; 3] = [Self::Repeat, Self::MirroredRepeat, Self::ClampToEdge];
+
+    fn address_mode(self) -> vk::SamplerAddressMode {
+        match self {
+            Self::Repeat => vk::SamplerAddressMode::REPEAT,
+            Self::MirroredRepeat => vk::SamplerAddressMode::MIRRORED_REPEAT,
+            Self::ClampToEdge => vk::SamplerAddressMode::CLAMP_TO_EDGE,
+        }
+    }
+}
+
+/// Material samplers after the built-in ones: 16× anisotropic trilinear, one per pair of
+/// wrap modes.
+const MATERIAL_SAMPLERS: u32 = 9;
+
 const SAMPLER_KINDS: [SamplerKind; 6] = [
     SamplerKind::LinearRepeat,
     SamplerKind::LinearClamp,
@@ -138,7 +167,7 @@ impl Bindless {
                 .instance_raw()
                 .get_physical_device_properties2(device.physical(), &mut props2)
         };
-        let samplers_count = SAMPLER_KINDS.len() as u32;
+        let samplers_count = SAMPLER_KINDS.len() as u32 + MATERIAL_SAMPLERS;
         let per_stage_total = props12
             .max_per_stage_update_after_bind_resources
             .saturating_sub(samplers_count);
@@ -285,6 +314,24 @@ impl Bindless {
                         .map_err(RhiError::vk("vkCreateSampler"))?,
                 );
             }
+            for s in Wrap::ALL {
+                for t in Wrap::ALL {
+                    let info = vk::SamplerCreateInfo::default()
+                        .mag_filter(vk::Filter::LINEAR)
+                        .min_filter(vk::Filter::LINEAR)
+                        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                        .address_mode_u(s.address_mode())
+                        .address_mode_v(t.address_mode())
+                        .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                        .max_lod(vk::LOD_CLAMP_NONE)
+                        .anisotropy_enable(true)
+                        .max_anisotropy(16.0f32.min(limits.max_sampler_anisotropy));
+                    partial.samplers.push(
+                        d.create_sampler(&info, None)
+                            .map_err(RhiError::vk("vkCreateSampler"))?,
+                    );
+                }
+            }
             let image_infos: Vec<vk::DescriptorImageInfo> = partial
                 .samplers
                 .iter()
@@ -329,6 +376,12 @@ impl Bindless {
     /// Index of a built-in sampler in `g_samplers`.
     pub fn sampler(kind: SamplerKind) -> u32 {
         kind as u32
+    }
+
+    /// Index in `g_samplers` of the 16× anisotropic trilinear sampler that wraps `s`
+    /// horizontally and `t` vertically (material textures).
+    pub fn material_sampler(s: Wrap, t: Wrap) -> u32 {
+        SAMPLER_KINDS.len() as u32 + s as u32 * 3 + t as u32
     }
 
     /// Adds a sampled image view (in `READ_ONLY_OPTIMAL` when sampled); returns its
