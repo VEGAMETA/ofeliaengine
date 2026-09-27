@@ -74,11 +74,40 @@ if ($dirty.Count) {
     $dirty | Select-Object -First 10 | ForEach-Object { Write-Output "        $_" }
 }
 
+# The ADR index: one row per record, in number order. Parallel pull requests append rows
+# through union merges (.gitattributes), which keeps both sides but not the order.
+function Test-AdrIndex {
+    $problems = @()
+    $rows = @(Select-String -Path 'docs\adr\README.md' -Pattern '^\| \[(\d{4})\]\(([^)]+)\)' |
+        ForEach-Object { [pscustomobject]@{ Number = $_.Matches[0].Groups[1].Value; File = $_.Matches[0].Groups[2].Value } })
+    $files = @(Get-ChildItem 'docs\adr' -Filter '*.md' | Where-Object { $_.Name -match '^\d{4}-' } | ForEach-Object { $_.Name })
+    for ($i = 1; $i -lt $rows.Count; $i++) {
+        if ($rows[$i].Number -le $rows[$i - 1].Number) {
+            $problems += "row $($rows[$i].Number) comes after $($rows[$i - 1].Number)"
+        }
+    }
+    foreach ($row in $rows) {
+        if ($files -notcontains $row.File) { $problems += "row $($row.Number) links $($row.File), which does not exist" }
+    }
+    foreach ($file in $files) {
+        if (@($rows | Where-Object { $_.File -eq $file }).Count -eq 0) { $problems += "$file has no row" }
+    }
+    $problems
+}
+$adr = @(Test-AdrIndex)
+if ($adr.Count) {
+    Write-Output "FAILED     0.0 s  adr index (docs\adr\README.md)"
+    $adr | ForEach-Object { Write-Output "        $_" }
+    $failed = @('adr index')
+} else {
+    Write-Output "ok         0.0 s  adr index"
+}
+
 $stepVars = @(
     'ENGINE_ADAPTER', 'ENGINE_REQUIRE_GPU', 'ENGINE_REQUIRE_SLANG',
     'TRACY_SYMBOL_OFFLINE_RESOLVE', 'RUSTFLAGS', 'CARGO_TARGET_DIR'
 )
-$failed = @()
+if (-not $failed) { $failed = @() }
 foreach ($name in $steps.Keys) {
     if ($Only.Count -and $Only -notcontains $name) { continue }
     $log = Join-Path $logs "$name.txt"
