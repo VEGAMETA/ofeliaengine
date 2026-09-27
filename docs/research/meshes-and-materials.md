@@ -148,6 +148,15 @@ Measured afterwards (ADR 0040):
 - **Texture import:** decoding at 157–184 Mtexels/s per thread; Kaiser mip levels at
   45–86 Mtexels/s. Sponza's 69 textures take 0.2 s on 16 threads.
 
+Compression (ADR 0041), measured with `bench/texture-compress`:
+
+- **BC7 very fast** (block_compression, a Rust port of the ISPC kernels): 46.2 dB on
+  Sponza's color, 0.2 dB below "basic" at three times the speed (1 Mtexel/s per thread).
+- **BC5 for normal maps:** 5 dB better than BC7 and 100 times faster.
+- **Sponza's textures:** 363 → 91 MB; forward RTX 390 → 283 µs, Radeon 8.1 → 6.9 ms.
+- **Import:** compressing takes 5.8 s on 16 threads; the derived data cache brings it to
+  13 ms. A GPU encoder is the next step.
+
 ## Sources
 
 - [Bevy: mesh allocator](https://github.com/bevyengine/bevy/blob/main/crates/bevy_render/src/mesh/allocator.rs)
@@ -162,5 +171,7 @@ Measured afterwards (ADR 0040):
 - [zune-jpeg](https://docs.rs/crate/zune-jpeg/latest)
 - [Aras Pranckevičius: Texture Compression in 2020](https://aras-p.info/blog/2020/12/08/Texture-Compression-in-2020/)
 - [bc7enc_rdo (bc7e.ispc)](https://github.com/richgel999/bc7enc_rdo)
+- [block_compression 0.10 (docs.rs, checked 2026-09-27)](https://docs.rs/block_compression)
+- [bc7enc (C++ BC1-5 and BC7)](https://github.com/richgel999/bc7enc)
 - [Khronos glTF-Sample-Assets: model list and licenses](https://github.com/KhronosGroup/glTF-Sample-Assets/blob/main/Models/Models.md); [Sponza README](https://github.com/KhronosGroup/glTF-Sample-Assets/blob/main/Models/Sponza/README.md)
 - [Intel Graphics Research samples (Intel Sponza)](https://www.intel.com/content/www/us/en/developer/topic-technology/graphics-research/samples.html)

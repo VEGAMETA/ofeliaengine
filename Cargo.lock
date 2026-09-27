@@ -39,6 +39,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3ded4057c258ba199e2d26386d3af3780957ecaee6c4ef4041c6b4b8b97c0b06"
 
 [[package]]
+name = "block_compression"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1de43762f28cd97f3c60766636ac814838fd48390ff2a9162d9c9953b4c20182"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
 name = "bstr"
 version = "1.13.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -136,6 +145,7 @@ checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
 name = "engine_assets"
 version = "0.0.0"
 dependencies = [
+ "block_compression",
  "bytemuck",
  "engine_core",
  "engine_ecs",
