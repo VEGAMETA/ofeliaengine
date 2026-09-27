@@ -467,7 +467,7 @@ fn main() {
         let center = Vec2::new(view_rect.pos[0], view_rect.pos[1]) + size * 0.5;
         canvas.draw(&Quad::sprite(index, center, size).order(Order::layer(-1)));
         let frame = ui.last_frame();
-        stats = paint(&frame, &mut text, &glyphs, &mut canvas);
+        stats = paint(&frame, &mut text, &glyphs, &mut canvas, 1.0);
         glyphs.sync(&mut fg, &mut ring, &mut text.atlas).unwrap();
         canvas.prepare();
         let target = fg.create_texture("window", TextureDesc::new_2d(FORMAT, WIDTH, HEIGHT));
@@ -572,7 +572,7 @@ fn main() {
         ui_us.push(t.elapsed().as_secs_f64() * 1e6);
         let t = std::time::Instant::now();
         scratch.clear();
-        paint(&ui.last_frame(), &mut text, &glyphs, &mut scratch);
+        paint(&ui.last_frame(), &mut text, &glyphs, &mut scratch, 1.0);
         paint_us.push(t.elapsed().as_secs_f64() * 1e6);
     }
     let pct = |v: &mut Vec<f64>, p: f64| {

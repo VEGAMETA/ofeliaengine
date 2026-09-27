@@ -181,14 +181,18 @@ pub struct PaintStats {
     pub clips: u32,
 }
 
-/// Appends `frame`'s commands to `canvas` (layer 0, in order). Glyphs missing from the
-/// atlas are rendered into it: call [`GlyphTexture::sync`] afterwards, before the pass that
-/// draws the canvas. Leaves the canvas without a clip.
+/// Appends `frame`'s commands to `canvas` (layer 0, in order), in physical pixels: the UI
+/// is laid out in logical pixels and `scale` is the number of physical pixels per logical
+/// one (the window's DPI / 96). Text is laid out and rasterized at its physical size, so
+/// it stays sharp at any scale. Glyphs missing from the atlas are rendered into it: call
+/// [`GlyphTexture::sync`] afterwards, before the pass that draws the canvas. Leaves the
+/// canvas without a clip.
 pub fn paint(
     frame: &Frame<'_>,
     text: &mut UiText,
     glyphs: &GlyphTexture,
     canvas: &mut Canvas,
+    scale: f32,
 ) -> PaintStats {
     engine_profiler::zone!("editor::paint");
     let mut stats = PaintStats::default();
@@ -201,14 +205,15 @@ pub fn paint(
                 border,
                 radius,
             } => {
-                let size = Vec2::new(rect.size[0], rect.size[1]);
+                let size = Vec2::new(rect.size[0], rect.size[1]) * scale;
                 if size.x <= 0.0 || size.y <= 0.0 {
                     continue;
                 }
-                let center = Vec2::new(rect.pos[0], rect.pos[1]) + size * 0.5;
+                let center = Vec2::new(rect.pos[0], rect.pos[1]) * scale + size * 0.5;
+                let radius = radius * scale;
                 if let Some(fill) = fill {
-                    let quad = if *radius > 0.0 {
-                        Quad::rounded_rect(center, size, *radius)
+                    let quad = if radius > 0.0 {
+                        Quad::rounded_rect(center, size, radius)
                     } else {
                         Quad::solid(center, size)
                     };
@@ -217,8 +222,8 @@ pub fn paint(
                 }
                 if let Some((color, width)) = border {
                     canvas.draw(
-                        &Quad::rounded_rect(center, size, *radius)
-                            .outline(*width)
+                        &Quad::rounded_rect(center, size, radius)
+                            .outline(width * scale)
                             .color(Vec4::from_array(*color))
                             .order(order),
                     );
@@ -235,13 +240,14 @@ pub fn paint(
                 let Some(string) = frame.text.get(range.clone()) else {
                     continue;
                 };
+                let size = size * scale;
                 let laid_out = text.cache.get(
                     (&mut text.fonts, &text.stack, &mut text.layout),
                     string,
-                    *size,
-                    wrap.then_some(rect.size[0]),
+                    size,
+                    wrap.then_some(rect.size[0] * scale),
                 );
-                let origin = Vec2::new(rect.pos[0], rect.pos[1]);
+                let origin = Vec2::new(rect.pos[0], rect.pos[1]) * scale;
                 stats.glyphs += draw_glyphs(
                     canvas,
                     &laid_out.glyphs,
@@ -249,15 +255,18 @@ pub fn paint(
                     &mut text.atlas,
                     glyphs,
                     origin,
-                    *size,
+                    size,
                     Vec4::from_array(*color),
                     order,
                 ) as u32;
             }
             DrawCmd::Clip(clip) => {
                 canvas.set_clip(clip.map(|r| {
-                    let (x0, y0) = (r.pos[0].floor(), r.pos[1].floor());
-                    let (x1, y1) = ((r.pos[0] + r.size[0]).ceil(), (r.pos[1] + r.size[1]).ceil());
+                    let (x0, y0) = ((r.pos[0] * scale).floor(), (r.pos[1] * scale).floor());
+                    let (x1, y1) = (
+                        ((r.pos[0] + r.size[0]) * scale).ceil(),
+                        ((r.pos[1] + r.size[1]) * scale).ceil(),
+                    );
                     ClipRect {
                         x: x0 as i32,
                         y: y0 as i32,

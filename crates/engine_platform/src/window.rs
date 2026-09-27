@@ -788,6 +788,36 @@ unsafe extern "system" fn window_proc(
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
 }
 
+/// Refresh rate of the monitor showing most of `hwnd` (a [`WindowHandle::hwnd`]), in
+/// whole hertz as Windows reports the current mode (239 for a 239.76 Hz panel); `None` if
+/// the monitor reports its hardware default. Cheap enough to ask every second or so: the
+/// window may move to another monitor.
+pub fn refresh_rate(hwnd: isize) -> Option<u32> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW,
+        MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
+    };
+    // SAFETY: plain queries; the structures carry their sizes, as the API requires.
+    unsafe {
+        let monitor = MonitorFromWindow(hwnd as HWND, MONITOR_DEFAULTTONEAREST);
+        if monitor.is_null() {
+            return None;
+        }
+        let mut info: MONITORINFOEXW = core::mem::zeroed();
+        info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+        if GetMonitorInfoW(monitor, (&raw mut info).cast::<MONITORINFO>()) == 0 {
+            return None;
+        }
+        let mut mode: DEVMODEW = core::mem::zeroed();
+        mode.dmSize = size_of::<DEVMODEW>() as u16;
+        if EnumDisplaySettingsW(info.szDevice.as_ptr(), ENUM_CURRENT_SETTINGS, &mut mode) == 0 {
+            return None;
+        }
+        // 0 and 1 stand for "the hardware's default rate".
+        (mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -820,6 +850,17 @@ mod tests {
             resizable: true,
             visible: false,
         }
+    }
+
+    #[test]
+    fn refresh_rate_of_a_window() {
+        let system = WindowSystem::start(256).unwrap();
+        let window = system.create_window(&hidden()).unwrap();
+        // A session without a monitor may not know; a real one reports a sane rate.
+        if let Some(hz) = refresh_rate(window.hwnd) {
+            assert!((20..=1000).contains(&hz), "{hz} Hz");
+        }
+        system.destroy_window(window.id).unwrap();
     }
 
     #[test]
