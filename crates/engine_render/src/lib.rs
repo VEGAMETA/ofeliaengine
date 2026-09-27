@@ -17,6 +17,7 @@
 pub mod cull;
 pub mod forward;
 pub mod graph;
+pub mod hiz;
 pub mod mesh;
 pub mod png;
 pub mod post;

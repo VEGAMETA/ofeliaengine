@@ -55,15 +55,23 @@ work, rasterization and depth tests. CLAUDE.md §6 asks for GPU culling with
    - Levels are built up to 1×1.
    - Level 1 reads the depth target through the bindless sampled index; each further
      level reduces the one below.
-   - One graph pass records one 8×8-thread dispatch per level, with a memory barrier
-     between levels.
+   - *Revised 2026-09-27* (`engine_render::hiz`): every workgroup reduces a 64 × 64 tile
+     of the level below through group shared memory, up to six levels per dispatch.
+     The first dispatch reads the depth and writes levels 1-2, the next ones six levels
+     each: three dispatches at 1080p instead of eleven. Level 1 is computed but not
+     stored (level 2 is the finest), unless it is the whole pyramid. The per-dispatch
+     level offsets are indexed with constants (a run-time index into the push constants
+     made the Radeon's compiler copy the array per thread). `tests/hiz.rs` compares the
+     pyramid bit for bit with a CPU reference on seven sizes, 1 × 1 to 8192 × 3.
+   - *First version:* one 8×8-thread dispatch per level, with a memory barrier between
+     levels.
    - The last row and column repeat on odd sizes, so every texel covers its whole block
      (conservative).
 4. **cull late:** in the frustum and not hidden.
    - The test: project the instance's world box (8 corners, from the same Arvo box as
      frustum culling) to a screen rectangle and its nearest depth.
    - Pick the level where the rectangle spans at most 2×2 texels (`2^level ≥ span` in
-     pixels).
+     pixels), never finer than the finest stored level (2).
    - The instance is hidden if its nearest depth is farther than the farthest of those 4
      texels by more than a margin of 1e-5 (NDC depth).
    - The margin: a surface lying on the box's face compares equal up to rounding (the
@@ -87,8 +95,8 @@ Without an `Occlusion` state the frame is ADR 0034's single phase.
   in one fetch;
 - `samplerFilterMinmax` stays optional.
 
-This can move to an image with a single-pass downsampler when profiling says the pyramid
-matters.
+Profiling did say it mattered (2026-09-27, below); the buffer stayed, with a fused
+reduction instead of an image.
 
 **API.** `ForwardRenderer::add_passes` now takes a `ForwardView`: camera, light, targets,
 clear color, and the optional occlusion state. This replaces six positional parameters.
@@ -123,22 +131,28 @@ forward, the shadow pass is the same in both):
 
 | GPU | Scene | Instances | Frustum only: drawn / forward / total | + occlusion: drawn / forward / cull / pyramid / total |
 |---|---|---:|---:|---:|
-| RTX 4060 Ti | City blocks | 10,042 | 1,769 / 68 / 72 | 73 / 66 / 7.6 / 23.6 / 97 |
-| RTX 4060 Ti | City blocks | 100,128 | 1,827 / 83 / 93 | 122 / 69 / 18.5 / 24.6 / 112 |
-| RTX 4060 Ti | Open field | 100,000 | 1,741 / 48 / 58 | 1,741 / 50 / 18.3 / 23.6 / 92 |
-| Radeon iGPU | City blocks | 10,042 | 1,769 / 1,813 / 1,832 | 73 / 1,402 / 47.1 / 220.1 / 1,669 |
-| Radeon iGPU | City blocks | 1,014 | 646 / 1,643 / 1,647 | 49 / 1,339 / 9.8 / 208.8 / 1,558 |
-| Radeon iGPU | Open field | 10,000 | 1,735 / 1,060 / 1,078 | 1,735 / 1,074 / 46.2 / 215.5 / 1,336 |
+| RTX 4060 Ti | City blocks | 10,042 | 1,769 / 67 / 71 | 73 / 65 / 7.6 / 13.3 / 86 |
+| RTX 4060 Ti | City blocks | 100,128 | 1,827 / 83 / 93 | 122 / 69 / 18.4 / 13.3 / 101 |
+| RTX 4060 Ti | Open field | 100,000 | 1,741 / 48 / 58 | 1,741 / 49 / 18.0 / 13.3 / 80 |
+| Radeon iGPU | City blocks | 10,042 | 1,769 / 1,809 / 1,830 | 73 / 1,401 / 47.1 / 171.4 / 1,620 |
+| Radeon iGPU | City blocks | 1,014 | 646 / 1,647 / 1,651 | 49 / 1,339 / 9.7 / 170.8 / 1,520 |
+| Radeon iGPU | Open field | 10,000 | 1,735 / 1,056 / 1,074 | 1,735 / 1,072 / 45.8 / 160.8 / 1,279 |
+
+With the revised pyramid (the first version's pyramid: RTX 23.6-24.6 µs, Radeon
+208.8-220.1 µs).
 
 - With cheap geometry (12-triangle cubes) the RTX draws the 1,700 frustum survivors in
-  under 0.1 ms, so skipping 95% of them saves less than the pyramid (24 µs) and the
-  second cull cost: occlusion is a loss there (+20-35%).
-- On the iGPU the skipped draws are worth 0.3-0.4 ms, and occlusion wins 5-9% in the city
-  despite a pyramid that costs 190-220 µs, 9× the RTX's.
+  under 0.1 ms, so skipping 95% of them saves less than the pyramid and the second cull
+  cost: occlusion is a loss there (+9-38%).
+- On the iGPU the skipped draws are worth 0.3-0.4 ms, and occlusion wins 8-11% in the
+  city.
 - In the open field it is pure overhead on both.
-- The pyramid is the cost to cut next: one dispatch per level with a barrier between
-  levels is dominated by fixed costs on the iGPU; a single-pass downsampler (as in
-  FidelityFX SPD, MIT) builds all levels in one dispatch.
+- **The pyramid** (Radeon, 10k instances, µs): one dispatch per level 189-222 → fused
+  levels with run-time push constant indexing 281-322 → constant indexing 187-224 →
+  levels 1-2 first, then six per dispatch 173-211 → level 1 not stored 146-171. The
+  first dispatch alone is 104-142 µs: it reads the 8.3 MB depth target at about the
+  memory's 83 GB/s (DDR5-5200, two channels), a floor short of reading less depth. The
+  RTX: 23.6 → 13.3 µs.
 
 ## Consequences
 
@@ -157,6 +171,6 @@ forward, the shadow pass is the same in both):
 - **Shadow casters are not occlusion-culled.** The shadow map needs every caster in the
   light's view. Culling them against a pyramid of the shadow map is part of the cascaded
   shadow map work.
-- **Small, far objects** with a 1–2 pixel rectangle use level 1 (2×2 pixels), which is
-  exact enough. The pyramid never goes below level 1, so there is no full-resolution
-  copy.
+- **Small, far objects** with a rectangle of up to 4 pixels use level 2 (4 × 4 pixels),
+  slightly more conservative than level 1 was; the draw counts of the benchmark did not
+  change. There is no full-resolution copy.

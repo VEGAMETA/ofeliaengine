@@ -35,6 +35,7 @@ use crate::graph::{
     Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, LoadOp, PassBuilder,
     ShaderStages, StoreOp, Texture, TextureDesc,
 };
+use crate::hiz::{self, DepthPyramid, PyramidLayout};
 use crate::mesh::Mesh;
 use crate::upload::UploadRing;
 use core::cell::Cell;
@@ -49,15 +50,9 @@ const VERTEX: &[u8] = include_bytes!("../shaders/forward.vertexMain.spv");
 const SHADOW_VERTEX: &[u8] = include_bytes!("../shaders/forward.shadowVertex.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
-const HIZ_FIRST: &[u8] = include_bytes!("../shaders/forward.hizFirst.spv");
-const HIZ_DOWN: &[u8] = include_bytes!("../shaders/forward.hizDown.spv");
 
 /// Threads per workgroup of `cullMain`.
 const CULL_GROUP: u32 = 64;
-/// Threads per workgroup side of `hizFirst` and `hizDown`.
-const HIZ_GROUP: u32 = 8;
-/// Depth pyramid levels the frame constants have room for (targets up to 65536 pixels).
-const MAX_HIZ_LEVELS: usize = 16;
 
 /// `PHASE_*` in `forward.slang`.
 const PHASE_ALL: u32 = 0;
@@ -227,7 +222,7 @@ struct FrameData {
     hiz_levels: u32,
     depth_size: [u32; 2],
     _pad: [u32; 2],
-    hiz_offsets: [u32; MAX_HIZ_LEVELS],
+    hiz_offsets: [u32; hiz::MAX_LEVELS],
 }
 
 /// `Instance` in `forward.slang` (80 bytes).
@@ -266,7 +261,7 @@ struct Push {
     instance_count: u32,
     texture: u32,
     phase: u32,
-    level: u32,
+    _pad: u32,
 }
 
 const _: () = assert!(core::mem::size_of::<FrameData>() == 384);
@@ -317,8 +312,7 @@ pub struct ForwardRenderer {
     main: Pipeline,
     shadow: Pipeline,
     cull: Pipeline,
-    hiz_first: Pipeline,
-    hiz_down: Pipeline,
+    pyramid: DepthPyramid,
     shadow_settings: ShadowSettings,
     frustum_culling: bool,
 }
@@ -409,8 +403,7 @@ impl ForwardRenderer {
             main,
             shadow,
             cull: compute(CULL, c"cullMain")?,
-            hiz_first: compute(HIZ_FIRST, c"hizFirst")?,
-            hiz_down: compute(HIZ_DOWN, c"hizDown")?,
+            pyramid: DepthPyramid::new(device, bindless)?,
             shadow_settings,
             frustum_culling: true,
         })
@@ -537,7 +530,7 @@ impl ForwardRenderer {
             }
             staged
         };
-        let (hiz_levels, hiz_offsets, hiz_floats) = hiz_layout(depth_desc.width, depth_desc.height);
+        let pyramid_layout = PyramidLayout::new(depth_desc.width, depth_desc.height);
         let frame = FrameData {
             clip_from_world: view.camera.clip_from_world.to_cols_array(),
             light_clip_from_world: fit_light(min, max, view.light.direction).to_cols_array(),
@@ -553,10 +546,10 @@ impl ForwardRenderer {
             shadow_sampler: Bindless::sampler(SamplerKind::ShadowCompare),
             cull: u32::from(self.frustum_culling),
             visibility_capacity: occlusion.map_or(0, Occlusion::capacity),
-            hiz_levels,
+            hiz_levels: pyramid_layout.levels,
             depth_size: [depth_desc.width, depth_desc.height],
             _pad: [0; 2],
-            hiz_offsets,
+            hiz_offsets: pyramid_layout.offsets,
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -570,7 +563,7 @@ impl ForwardRenderer {
             instance_count,
             texture: 0,
             phase: PHASE_ALL,
-            level: 0,
+            _pad: 0,
         };
 
         let command_bytes = u64::from(batch_count) * COMMAND_BYTES;
@@ -732,68 +725,10 @@ impl ForwardRenderer {
         let pyramid = fg.create_buffer(
             "depth pyramid",
             BufferDesc {
-                size: u64::from(hiz_floats) * 4,
+                size: pyramid_layout.bytes(),
             },
         );
-        let (hiz_first, hiz_down) = (&self.hiz_first, &self.hiz_down);
-        let depth_size = (depth_desc.width, depth_desc.height);
-        fg.add_pass("hiz")
-            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
-            .write(pyramid, Access::StorageReadWrite(ShaderStages::COMPUTE))
-            .execute(move |ctx| {
-                let d = ctx.device;
-                let Some(depth_index) = ctx.sampled_index(depth) else {
-                    // No bindless index for the depth: a far pyramid hides nothing.
-                    // SAFETY: recording outside a rendering scope.
-                    unsafe {
-                        d.cmd_fill_buffer(
-                            ctx.cmd,
-                            ctx.buffer(pyramid),
-                            0,
-                            vk::WHOLE_SIZE,
-                            1.0f32.to_bits(),
-                        );
-                    }
-                    return;
-                };
-                let mut push = Push {
-                    pyramid: ctx.address(pyramid),
-                    texture: depth_index,
-                    level: 1,
-                    ..base
-                };
-                let groups = |level: u32| {
-                    let size = |n: u32| ((n - 1) >> level) + 1;
-                    (
-                        size(depth_size.0).div_ceil(HIZ_GROUP),
-                        size(depth_size.1).div_ceil(HIZ_GROUP),
-                    )
-                };
-                let barrier = vk::MemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
-                let barriers = [barrier];
-                let dependency = vk::DependencyInfo::default().memory_barriers(&barriers);
-                // SAFETY: recording outside a rendering scope; each level reads the one
-                // the previous dispatch wrote, ordered by the barriers.
-                unsafe {
-                    hiz_first.bind(ctx.cmd);
-                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
-                    bindless.push_constants(ctx.cmd, push_bytes(&push));
-                    let (x, y) = groups(1);
-                    d.cmd_dispatch(ctx.cmd, x, y, 1);
-                    hiz_down.bind(ctx.cmd);
-                    for level in 2..=hiz_levels {
-                        d.cmd_pipeline_barrier2(ctx.cmd, &dependency);
-                        push.level = level;
-                        bindless.push_constants(ctx.cmd, push_bytes(&push));
-                        let (x, y) = groups(level);
-                        d.cmd_dispatch(ctx.cmd, x, y, 1);
-                    }
-                }
-            });
+        self.pyramid.add_pass(fg, bindless, depth, pyramid);
         cull_pass(fg, "cull late", culled, visible, Some(flags), PHASE_LATE)
             .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
             .execute(move |ctx| {
@@ -856,27 +791,6 @@ fn forward_pass<'a, 'g>(
         .read(visible, Access::StorageRead(ShaderStages::VERTEX))
 }
 
-/// Levels (1 up to the 1×1 level), per-level offsets in floats, and total floats of the
-/// depth pyramid of a `width` × `height` target: level `k` is `⌈width / 2^k⌉ ×
-/// ⌈height / 2^k⌉`, one texel per `2^k × 2^k` pixels.
-fn hiz_layout(width: u32, height: u32) -> (u32, [u32; MAX_HIZ_LEVELS], u32) {
-    let mut offsets = [0; MAX_HIZ_LEVELS];
-    if width == 0 || height == 0 {
-        return (0, offsets, 0);
-    }
-    let (mut levels, mut total) = (0, 0);
-    for level in 1..=MAX_HIZ_LEVELS as u32 {
-        let (w, h) = (((width - 1) >> level) + 1, ((height - 1) >> level) + 1);
-        offsets[level as usize - 1] = total;
-        total += w * h;
-        levels = level;
-        if w == 1 && h == 1 {
-            break;
-        }
-    }
-    (levels, offsets, total)
-}
-
 /// Runs of consecutive draws that share a mesh, as `(first, len)`.
 fn batches<'a>(draws: &'a [DrawItem<'a>]) -> impl Iterator<Item = (usize, usize)> + 'a {
     let mut start = 0;
@@ -932,31 +846,4 @@ fn fit_light(min: Vec3, max: Vec3, direction: Vec3) -> Mat4 {
     };
     let view = look_at(center - direction * radius * 2.0, center, up);
     vulkan_orthographic(-radius, radius, -radius, radius, radius * 0.5, radius * 3.5) * view
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pyramid_layout_halves_to_one_texel() {
-        let (levels, offsets, total) = hiz_layout(1920, 1080);
-        assert_eq!(levels, 11, "2^11 = 2048 >= 1920");
-        let sizes: Vec<(u32, u32)> = (1..=levels)
-            .map(|k| (((1920 - 1) >> k) + 1, ((1080 - 1) >> k) + 1))
-            .collect();
-        assert_eq!(sizes[0], (960, 540));
-        assert_eq!(sizes[1], (480, 270));
-        assert_eq!(sizes[4], (60, 34), "1080 / 32 = 33.75 rounds up");
-        assert_eq!(sizes[10], (1, 1));
-        let mut expected = 0;
-        for (k, (w, h)) in sizes.iter().enumerate() {
-            assert_eq!(offsets[k], expected);
-            expected += w * h;
-        }
-        assert_eq!(total, expected);
-        assert_eq!(hiz_layout(1, 1).0, 1);
-        assert_eq!(hiz_layout(0, 1080).0, 0);
-        assert_eq!(hiz_layout(65536, 8).0, 16);
-    }
 }

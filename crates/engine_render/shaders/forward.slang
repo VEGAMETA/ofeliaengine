@@ -82,7 +82,7 @@ struct Push
     uint instance_count;
     uint texture;            // bindless index: the shadow map, or the depth to reduce
     uint phase;              // PHASE_*
-    uint level;              // pyramid level written by hizDown
+    uint _pad;
 };
 
 static const uint PHASE_ALL = 0;    // frustum culling only
@@ -155,7 +155,9 @@ bool occluded(float3 center, float3 extents)
     uint span = max(hi_px.x - lo_px.x, hi_px.y - lo_px.y) + 1;
     // 2^level >= span: the rectangle touches at most two texels per axis.
     uint level = span <= 2 ? 1 : firstbithigh(span - 1) + 1;
-    level = min(level, push.frame.hiz_levels);
+    // Level 1 is not stored when there are more levels (hiz.slang): start at 2.
+    uint levels = push.frame.hiz_levels;
+    level = clamp(level, min(2u, levels), levels);
     uint base = hiz_offset(level);
     uint width = hiz_size(level).x;
     uint2 a = lo_px >> level;
@@ -236,44 +238,6 @@ void cullMain(uint3 id : SV_DispatchThreadID)
         InterlockedAdd(push.commands[b].instance_count, 1, slot);
         push.visible[batch.first + slot] = index;
     }
-}
-
-// Depth pyramid level 1 from the depth target: the farthest of every 2×2 pixels (the
-// last row and column repeat on odd sizes).
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void hizFirst(uint3 id : SV_DispatchThreadID)
-{
-    uint2 size = push.frame.depth_size;
-    uint2 out_size = hiz_size(1);
-    if (any(id.xy >= out_size))
-        return;
-    Texture2D depth = g_textures[NonUniformResourceIndex(push.texture)];
-    uint2 p = id.xy * 2;
-    uint2 q = min(p + 1, size - 1);
-    float d = max(
-        max(depth.Load(int3(p.x, p.y, 0)).r, depth.Load(int3(q.x, p.y, 0)).r),
-        max(depth.Load(int3(p.x, q.y, 0)).r, depth.Load(int3(q.x, q.y, 0)).r));
-    push.pyramid[hiz_offset(1) + id.y * out_size.x + id.x] = d;
-}
-
-// Depth pyramid level `push.level` (2 or more) from the level below.
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void hizDown(uint3 id : SV_DispatchThreadID)
-{
-    uint level = push.level;
-    uint2 in_size = hiz_size(level - 1);
-    uint2 out_size = hiz_size(level);
-    if (any(id.xy >= out_size))
-        return;
-    uint src = hiz_offset(level - 1);
-    uint2 p = id.xy * 2;
-    uint2 q = min(p + 1, in_size - 1);
-    float d = max(
-        max(push.pyramid[src + p.y * in_size.x + p.x], push.pyramid[src + p.y * in_size.x + q.x]),
-        max(push.pyramid[src + q.y * in_size.x + p.x], push.pyramid[src + q.y * in_size.x + q.x]));
-    push.pyramid[hiz_offset(level) + id.y * out_size.x + id.x] = d;
 }
 
 struct VertexOut
