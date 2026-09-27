@@ -4,15 +4,15 @@
 //! texture index carries its sampler (the wrap modes) in its top 8 bits.
 //!
 //! Textures come from a [`TexturePool`]. A missing texture is the same as white, so its
-//! factor applies unchanged; until a texture is uploaded, materials sample the pool's
-//! white texture of its kind instead (without a normal map, shading uses the
-//! interpolated normal). [`MaterialTable::begin_frame`] resolves materials again when
-//! textures become ready or are removed.
+//! factor applies unchanged (a missing normal map leaves the interpolated normal), and
+//! the shaders skip its sample; a texture not uploaded yet counts as missing.
+//! [`MaterialTable::begin_frame`] resolves materials again when textures become ready or
+//! are removed.
 //!
 //! Slot 0 is the default material (grey, dielectric): stale ids draw with it.
 
 use crate::graph::{Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages};
-use crate::texture_pool::{DefaultTexture, TextureId, TexturePool};
+use crate::texture_pool::{TextureId, TexturePool};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError, Wrap};
 
@@ -127,8 +127,8 @@ pub struct MaterialId {
 }
 
 /// `Material` in `forward.slang` (80 bytes). Texture fields: bindless index in the low
-/// 24 bits, sampler index in the top 8; [`NO_TEXTURE`] for a normal map that is missing
-/// or not uploaded yet.
+/// 24 bits, sampler index in the top 8; [`NO_TEXTURE`] for a texture that is missing or
+/// not uploaded yet.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 #[repr(C)]
 struct GpuMaterial {
@@ -300,8 +300,9 @@ impl MaterialTable {
     /// Frees what finished frames no longer use, resolves textures that became ready or
     /// were removed, uploads changed materials, and imports the table into `fg` for the
     /// passes that shade with it. Call once per frame after the texture pool's
-    /// [`TexturePool::begin_frame`] and before the passes that draw. Allocates only on
-    /// frames that change materials.
+    /// [`TexturePool::begin_frame`] (so textures uploaded this frame are used at once)
+    /// and before the passes that draw. Allocates only on frames that change
+    /// materials.
     pub fn begin_frame<'g>(
         &'g mut self,
         fg: &mut FrameGraph<'g>,
@@ -514,14 +515,15 @@ impl MaterialTable {
     }
 }
 
-/// A material's GPU form: its textures' bindless indices (the defaults until they are
-/// uploaded) with their samplers.
+/// A material's GPU form: its textures' bindless indices with their samplers
+/// ([`NO_TEXTURE`] until they are uploaded).
 fn resolve(desc: &MaterialDesc, textures: &TexturePool) -> GpuMaterial {
-    let texture = |r: Option<TextureRef>, fallback: DefaultTexture| {
-        let (index, wrap) = r
-            .and_then(|r| textures.index(r.texture).map(|index| (index, r.wrap)))
-            .unwrap_or((textures.default_index(fallback), [Wrap::Repeat; 2]));
-        index | (Bindless::material_sampler(wrap[0], wrap[1]) << 24)
+    let texture = |r: Option<TextureRef>| {
+        r.and_then(|r| {
+            let index = textures.index(r.texture)?;
+            Some(index | (Bindless::material_sampler(r.wrap[0], r.wrap[1]) << 24))
+        })
+        .unwrap_or(NO_TEXTURE)
     };
     GpuMaterial {
         base_color: desc.base_color,
@@ -534,20 +536,11 @@ fn resolve(desc: &MaterialDesc, textures: &TexturePool) -> GpuMaterial {
             AlphaMode::Opaque => 0.0,
             AlphaMode::Mask { cutoff } => cutoff,
         },
-        base_color_texture: texture(desc.base_color_texture, DefaultTexture::White),
-        metallic_roughness_texture: texture(
-            desc.metallic_roughness_texture,
-            DefaultTexture::LinearWhite,
-        ),
-        normal_texture: desc
-            .normal_texture
-            .and_then(|r| {
-                let index = textures.index(r.texture)?;
-                Some(index | (Bindless::material_sampler(r.wrap[0], r.wrap[1]) << 24))
-            })
-            .unwrap_or(NO_TEXTURE),
-        occlusion_texture: texture(desc.occlusion_texture, DefaultTexture::LinearWhite),
-        emissive_texture: texture(desc.emissive_texture, DefaultTexture::White),
+        base_color_texture: texture(desc.base_color_texture),
+        metallic_roughness_texture: texture(desc.metallic_roughness_texture),
+        normal_texture: texture(desc.normal_texture),
+        occlusion_texture: texture(desc.occlusion_texture),
+        emissive_texture: texture(desc.emissive_texture),
         _pad: [0; 3],
     }
 }

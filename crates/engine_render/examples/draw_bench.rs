@@ -182,7 +182,7 @@ fn main() {
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
-    let mut textures = TexturePool::new(&device, &mut allocator, 64 << 20, 1).unwrap();
+    let mut textures = TexturePool::new(&device, 64 << 20, 1);
     let mut materials = MaterialTable::new(1);
     // 64 hues from blue to red, then the walls' grey.
     let mut palette: Vec<MaterialId> = (0..64)

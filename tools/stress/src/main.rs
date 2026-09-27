@@ -446,7 +446,7 @@ mod windowed {
         )
         .unwrap();
         let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
-        let mut textures = TexturePool::new(&device, &mut allocator, 64 << 20, in_flight).unwrap();
+        let mut textures = TexturePool::new(&device, 64 << 20, in_flight);
         let mut materials = MaterialTable::new(in_flight);
         let paints: Vec<MaterialId> = sim
             .paints

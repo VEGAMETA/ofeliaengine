@@ -316,7 +316,7 @@ fn main() {
     let (vertices, _, indices, _) = geometry.usage();
 
     // Textures and materials.
-    let mut textures = TexturePool::new(&device, &mut allocator, UPLOAD_BUDGET, 1).unwrap();
+    let mut textures = TexturePool::new(&device, UPLOAD_BUDGET, 1);
     let texture_ids: Vec<Option<TextureId>> = images
         .into_iter()
         .map(|image| {

@@ -586,7 +586,7 @@ mod windowed {
             IN_FLIGHT,
         )?;
         let mesh = geometry.add_mesh(&cube().as_data())?;
-        let mut textures = TexturePool::new(&device, &mut allocator, 64 << 20, IN_FLIGHT)?;
+        let mut textures = TexturePool::new(&device, 64 << 20, IN_FLIGHT);
         let mut materials = MaterialTable::new(IN_FLIGHT);
         let mut ring = UploadRing::new(&device, &mut allocator, IN_FLIGHT, 16 << 20)?;
         let mut frames = Frames::new(&device, device.graphics.family, IN_FLIGHT)?;

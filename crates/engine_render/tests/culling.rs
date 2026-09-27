@@ -109,7 +109,7 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
         scaled(Vec3::new(2.0, 0.2, 2.0), Vec3::ZERO),
     ]
     .map(|mesh| geometry.add_mesh(&mesh.as_data()).unwrap());
-    let mut textures = TexturePool::new(&device, &mut allocator, 1 << 20, 1).unwrap();
+    let mut textures = TexturePool::new(&device, 1 << 20, 1);
     // A material per instance: hundreds, beyond the table's first buffer.
     let mut materials = MaterialTable::new(1);
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
@@ -350,15 +350,18 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
             let at = image_bytes as usize + 4 * i;
             u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
         };
+        // Commands are ordered front to back; each batch's is found by its first instance.
         let mut first = 0;
         let mut counted = Vec::new();
-        for (batch, (mesh_index, count)) in RUNS.into_iter().enumerate() {
+        for (mesh_index, count) in RUNS {
             // index_count, instance_count, first_index, vertex_offset, first_instance
+            let batch = (0..RUNS.len())
+                .find(|&b| word(b * 5 + 4) == first as u32)
+                .unwrap();
             let info = geometry.mesh(meshes[mesh_index]).unwrap();
             assert_eq!(word(batch * 5), info.index_count);
             assert_eq!(word(batch * 5 + 2), info.first_index);
             assert_eq!(word(batch * 5 + 3), info.first_vertex);
-            assert_eq!(word(batch * 5 + 4), first as u32);
             counted.push(word(batch * 5 + 1));
             first += count;
         }

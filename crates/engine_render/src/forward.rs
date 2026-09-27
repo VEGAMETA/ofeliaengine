@@ -327,6 +327,8 @@ struct Scratch {
     /// Material slot of every draw.
     slots: Vec<u32>,
     runs: Vec<Run>,
+    /// Sort keys of the runs: state, then distance from the camera, then run index.
+    keys: Vec<(u64, u32)>,
 }
 
 /// The forward PBR pipelines.
@@ -509,9 +511,10 @@ impl ForwardRenderer {
         }
         let instance_count = draws.len() as u32;
         let mut scratch = self.scratch.borrow_mut();
-        let Scratch { slots, runs } = &mut *scratch;
-        // Batches in draw order, counted per pipeline state, then ordered by state (a
-        // stable counting sort: within a state, draw order is kept).
+        let Scratch { slots, runs, keys } = &mut *scratch;
+        // Batches in draw order, counted per pipeline state, then ordered by state and,
+        // within a state, front to back (by the first instance's box), so the depth test
+        // rejects hidden fragments before shading.
         let mut counts = [0u32; STATES];
         batches(draws, materials, slots, runs, &mut counts);
         let mut starts = [0u32; STATES];
@@ -520,10 +523,20 @@ impl ForwardRenderer {
             *start = next;
             next += count;
         }
-        let mut cursor = starts;
-        for run in runs.iter_mut() {
-            run.order = cursor[run.state];
-            cursor[run.state] += 1;
+        keys.clear();
+        keys.extend(runs.iter().enumerate().map(|(k, run)| {
+            let draw = &draws[run.first as usize];
+            let (center, extents) = local_box(geometry, draw.mesh);
+            let (center, _) = crate::cull::transform_box(&draw.world_from_object, center, extents);
+            let distance = center.distance(view.camera.position);
+            (
+                ((run.state as u64) << 32) | u64::from(distance.to_bits()),
+                k as u32,
+            )
+        }));
+        keys.sort_unstable();
+        for (order, &(_, k)) in keys.iter().enumerate() {
+            runs[k as usize].order = order as u32;
         }
         let batch_count = runs.len() as u32;
         let depth_desc = fg.texture_desc(depth);

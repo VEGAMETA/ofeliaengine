@@ -91,7 +91,7 @@ fn main() {
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
     let mut frame_number = 0u64;
-    let mut textures = TexturePool::new(&device, &mut allocator, 64 << 20, 1).unwrap();
+    let mut textures = TexturePool::new(&device, 64 << 20, 1);
     let mut materials = MaterialTable::new(1);
     let ground = materials.add(MaterialDesc::solid([0.42, 0.44, 0.40], 0.0, 0.9));
     let crate_material = materials.add(MaterialDesc::solid([0.62, 0.44, 0.26], 0.0, 0.7));

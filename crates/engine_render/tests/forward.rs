@@ -84,7 +84,7 @@ fn pbr_lighting_and_shadows() {
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
-    let mut textures = TexturePool::new(&device, &mut allocator, 1 << 20, 1).unwrap();
+    let mut textures = TexturePool::new(&device, 1 << 20, 1);
     let mut materials = MaterialTable::new(1);
     let red = materials.add(MaterialDesc::solid([0.9, 0.2, 0.2], 0.0, 0.6));
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();

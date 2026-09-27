@@ -88,7 +88,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
-    let mut textures = TexturePool::new(&device, &mut allocator, 1 << 20, 1).unwrap();
+    let mut textures = TexturePool::new(&device, 1 << 20, 1);
     let mut materials = MaterialTable::new(1);
     let mut frame_number = 0u64;
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();

@@ -1,8 +1,7 @@
 //! Textures of materials (ADR 0040): images with full mip chains, uploaded through a
 //! staging buffer within a budget of bytes per frame, and registered in the bindless set
-//! once uploaded. Until then materials sample one of the pool's default textures (or
-//! skip their normal map), so a scene appears at once and its textures fill in over the
-//! next frames.
+//! once uploaded. Until then materials shade without them (their factors alone), so a
+//! scene appears at once and its textures fill in over the next frames.
 //!
 //! Uploads record their own layout transitions: materials sample textures through
 //! bindless indices without declaring them to the graph, so a texture is either being
@@ -32,16 +31,6 @@ pub struct TextureLevels {
     pub srgb: bool,
     /// The levels, at least one.
     pub levels: Vec<Vec<u8>>,
-}
-
-/// Built-in textures, always available: what materials sample instead of a missing
-/// texture, so their factors apply unchanged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DefaultTexture {
-    /// sRGB white: base color and emissive.
-    White,
-    /// Linear white: metallic-roughness and occlusion.
-    LinearWhite,
 }
 
 /// Why a texture was not added.
@@ -105,7 +94,6 @@ pub struct TexturePool {
     budget: u64,
     retired: Vec<(u64, Retired)>,
     frames_in_flight: u64,
-    defaults: [TextureId; 2],
     /// Changes whenever textures become ready or are removed: materials resolve their
     /// textures again when it does.
     generation: u64,
@@ -129,15 +117,10 @@ fn level_size(size: u32, level: usize) -> u32 {
 }
 
 impl TexturePool {
-    /// A pool uploading at most `budget` bytes per frame (at least one texture, however
-    /// large). The default textures upload in the first frame, whatever the budget.
-    pub fn new(
-        device: &Device,
-        allocator: &mut Allocator,
-        budget: u64,
-        frames_in_flight: usize,
-    ) -> Result<Self, TextureError> {
-        let mut pool = Self {
+    /// An empty pool uploading at most `budget` bytes per frame (at least one texture,
+    /// however large); frames in flight bound how long removed textures are kept.
+    pub fn new(device: &Device, budget: u64, frames_in_flight: usize) -> Self {
+        Self {
             device: device.raw().clone(),
             slots: Vec::new(),
             free_slots: Vec::new(),
@@ -145,24 +128,9 @@ impl TexturePool {
             budget,
             retired: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
-            defaults: [TextureId {
-                index: 0,
-                generation: 0,
-            }; 2],
             generation: 0,
             uploaded_bytes: 0,
-        };
-        let one = |srgb, texel: [u8; 4]| TextureLevels {
-            width: 1,
-            height: 1,
-            srgb,
-            levels: vec![texel.to_vec()],
-        };
-        pool.defaults = [
-            pool.add(device, allocator, one(true, [255; 4]))?,
-            pool.add(device, allocator, one(false, [255; 4]))?,
-        ];
-        Ok(pool)
+        }
     }
 
     /// Creates a texture's image now and queues its levels for upload.
@@ -260,12 +228,10 @@ impl TexturePool {
         Ok(id)
     }
 
-    /// Removes a texture: materials that use it fall back to the defaults; its memory is
-    /// freed once the frames up to `frame_number` (the current one) have finished.
+    /// Removes a texture: materials that use it shade without it from the next
+    /// [`crate::material::MaterialTable::begin_frame`] on; its memory is freed once the
+    /// frames up to `frame_number` (the current one) have finished.
     pub fn remove(&mut self, id: TextureId, frame_number: u64, bindless: &Bindless) {
-        if self.defaults.contains(&id) {
-            return;
-        }
         let Some(slot) = self.slots.get_mut(id.index as usize) else {
             return;
         };
@@ -290,12 +256,6 @@ impl TexturePool {
             return None;
         }
         slot.texture.as_ref()?.bindless
-    }
-
-    /// The bindless index of a default texture (available from the first frame on).
-    pub fn default_index(&self, kind: DefaultTexture) -> u32 {
-        let id = self.defaults[kind as usize];
-        self.index(id).unwrap_or(0)
     }
 
     /// A counter that changes whenever textures become ready or are removed.
@@ -346,7 +306,7 @@ impl TexturePool {
                     continue;
                 }
             };
-            if !batch.is_empty() && total + bytes > self.budget && !self.defaults.contains(&id) {
+            if !batch.is_empty() && total + bytes > self.budget {
                 break;
             }
             self.queue.pop_front();

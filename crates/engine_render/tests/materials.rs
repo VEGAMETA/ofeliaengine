@@ -162,7 +162,7 @@ impl Scene {
         .unwrap();
         let geometry =
             GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
-        let textures = TexturePool::new(&device, &mut allocator, upload_budget, 1).unwrap();
+        let textures = TexturePool::new(&device, upload_budget, 1);
         let ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
         let graph = RenderGraph::new(&device, 1);
         let (readback, readback_memory) = allocator
@@ -639,7 +639,7 @@ fn materials_and_textures() {
     assert!(py < uy, "red does not tilt along +Y");
 
     // 7. Streaming: with a budget below one texture, textures upload one per frame. Until
-    // its texture is uploaded a material shows its factor on white.
+    // its texture is uploaded a material shows its factor alone.
     scene.finish();
     let Some((instance, device)) = gpu() else {
         return;
@@ -665,13 +665,23 @@ fn materials_and_textures() {
     assert_eq!(
         seen,
         [
-            ([255, 255, 0, 255], false, false),
             ([255, 255, 0, 255], true, false),
             ([0, 0, 0, 255], true, true),
+            ([0, 0, 0, 255], true, true),
         ],
-        "yellow factor on white, then blue × yellow = black"
+        "the yellow factor alone, then blue × yellow = black"
     );
     assert!(scene.textures.generation() > generation);
+    // A removed texture: its materials shade without it from the next frame on.
+    let frame = scene.frame_number;
+    scene.textures.remove(second, frame, &scene.bindless);
+    assert!(scene.textures.index(second).is_none());
+    let image = scene.render(&[draw(quad_mesh, late, Mat4::IDENTITY)], camera, DARK);
+    assert_eq!(
+        block_pixel(&image, 1, 1),
+        [255, 255, 0, 255],
+        "texture removed"
+    );
 
     // 8. Edits apply next frame; removed materials draw as the default material.
     let reference = scene.render(

@@ -84,9 +84,9 @@ struct Material
     float roughness;         // perceptual
     float occlusion_strength;
     float alpha_cutoff;      // masked materials
-    uint base_color_texture; // sRGB
+    uint base_color_texture; // sRGB; NO_TEXTURE (every texture): white
     uint metallic_roughness_texture; // G roughness, B metallic
-    uint normal_texture;     // NO_TEXTURE: shade with the interpolated normal
+    uint normal_texture;     // NO_TEXTURE: the interpolated normal
     uint occlusion_texture;  // R
     uint emissive_texture;   // sRGB
     uint _pad0;
@@ -368,10 +368,13 @@ ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint index : SV_Vu
     return o;
 }
 
-// A material texture: bindless index and sampler from the packed field. Indices differ
-// between instances of one draw, hence non-uniform.
+// A material texture: bindless index and sampler from the packed field; white without
+// one. Indices differ between instances of one draw, hence non-uniform; the branch is
+// uniform across a quad (a quad belongs to one primitive), so derivatives stay defined.
 float4 sample_material(uint packed, float2 uv)
 {
+    if (packed == NO_TEXTURE)
+        return float4(1.0, 1.0, 1.0, 1.0);
     Texture2D t = g_textures[NonUniformResourceIndex(packed & 0xFFFFFFu)];
     SamplerState s = g_samplers[NonUniformResourceIndex(packed >> 24)];
     return t.Sample(s, uv);

@@ -99,7 +99,7 @@ fn main() {
     )
     .unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
-    let mut textures = TexturePool::new(&device, &mut allocator, 64 << 20, in_flight).unwrap();
+    let mut textures = TexturePool::new(&device, 64 << 20, in_flight);
     let mut materials = MaterialTable::new(in_flight);
     // One material per cube of the 5 × 5 grid: color by position, alternating metals.
     let mut palette = Vec::with_capacity(25);
