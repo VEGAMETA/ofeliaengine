@@ -15,7 +15,7 @@ use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
-use engine_render::mesh::{Mesh, Vertex, cube};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, OwnedMeshData, cube};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -92,30 +92,21 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
     .unwrap();
 
     // Three meshes: a cube, a tall box off its origin, a flat slab.
-    let scaled = |scale: Vec3, offset: Vec3| -> Vec<Vertex> {
-        cube()
-            .into_iter()
-            .map(|v| {
-                let p = Vec3::from_slice(&v.position[..3]) * scale + offset;
-                Vertex::new(p, Vec3::from_slice(&v.normal[..3]))
-            })
-            .collect()
+    let scaled = |scale: Vec3, offset: Vec3| -> OwnedMeshData {
+        let mut mesh = cube();
+        for p in &mut mesh.positions {
+            *p = (Vec3::from(*p) * scale + offset).to_array();
+        }
+        mesh
     };
-    let mut meshes = [
-        Mesh::new(&device, &mut allocator, &cube()).unwrap(),
-        Mesh::new(
-            &device,
-            &mut allocator,
-            &scaled(Vec3::new(0.5, 2.0, 0.5), Vec3::new(0.0, 1.0, 0.0)),
-        )
-        .unwrap(),
-        Mesh::new(
-            &device,
-            &mut allocator,
-            &scaled(Vec3::new(2.0, 0.2, 2.0), Vec3::ZERO),
-        )
-        .unwrap(),
-    ];
+    let mut geometry =
+        GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
+    let meshes = [
+        cube(),
+        scaled(Vec3::new(0.5, 2.0, 0.5), Vec3::new(0.0, 1.0, 0.0)),
+        scaled(Vec3::new(2.0, 0.2, 2.0), Vec3::ZERO),
+    ]
+    .map(|mesh| geometry.add_mesh(&mesh.as_data()).unwrap());
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
 
@@ -136,11 +127,12 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
     // Scatter instances in a box around the frustum, away from its planes (so the CPU
     // and GPU agree despite rounding), and count the visible ones per batch.
     let mut rng = Rng(0x9e37_79b9);
-    let mut draws: Vec<DrawItem<'_>> = Vec::new();
+    let mut draws: Vec<DrawItem> = Vec::new();
     let mut expected = Vec::new();
     for (mesh_index, count) in RUNS {
-        let mesh = &meshes[mesh_index];
-        let (lo, hi) = mesh.bounds();
+        let mesh = meshes[mesh_index];
+        let info = *geometry.mesh(mesh).unwrap();
+        let (lo, hi) = (info.min, info.max);
         let (center, extents) = ((lo + hi) * 0.5, (hi - lo) * 0.5);
         let mut visible = 0;
         for _ in 0..count {
@@ -193,7 +185,8 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
     );
 
     let image_bytes = u64::from(SIZE * SIZE * 4);
-    let command_bytes = 16 * RUNS.len() as u64;
+    // VkDrawIndexedIndirectCommand: 5 words.
+    let command_bytes = 20 * RUNS.len() as u64;
     let readback_size = image_bytes + command_bytes;
     let (readback, readback_mem) = allocator
         .create_buffer(
@@ -224,7 +217,7 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
     };
 
     let mut images = Vec::new();
-    for culling in [true, false] {
+    for (frame, culling) in [true, false].into_iter().enumerate() {
         renderer.set_frustum_culling(culling);
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
@@ -241,6 +234,9 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            let geo = geometry
+                .begin_frame(&mut fg, &device, &mut allocator, frame as u64 + 1)
+                .unwrap();
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, SIZE, SIZE));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
             let out = fg.import_buffer(
@@ -258,6 +254,7 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
                     &mut fg,
                     &mut ring,
                     &bindless,
+                    &geo,
                     &draws,
                     &ForwardView {
                         camera,
@@ -344,11 +341,13 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
         let mut first = 0;
         let mut counted = Vec::new();
         for (batch, (mesh_index, count)) in RUNS.into_iter().enumerate() {
-            // vertex_count, instance_count, first_vertex, first_instance
-            assert_eq!(word(batch * 4), meshes[mesh_index].vertex_count());
-            assert_eq!(word(batch * 4 + 2), 0);
-            assert_eq!(word(batch * 4 + 3), first as u32);
-            counted.push(word(batch * 4 + 1));
+            // index_count, instance_count, first_index, vertex_offset, first_instance
+            let info = geometry.mesh(meshes[mesh_index]).unwrap();
+            assert_eq!(word(batch * 5), info.index_count);
+            assert_eq!(word(batch * 5 + 2), info.first_index);
+            assert_eq!(word(batch * 5 + 3), info.first_vertex);
+            assert_eq!(word(batch * 5 + 4), first as u32);
+            counted.push(word(batch * 5 + 1));
             first += count;
         }
         println!("culling={culling}: GPU counted {counted:?}");
@@ -381,9 +380,7 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
     unsafe {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
-        for mesh in &mut meshes {
-            mesh.destroy(&mut allocator);
-        }
+        geometry.destroy(&mut allocator);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);
     }

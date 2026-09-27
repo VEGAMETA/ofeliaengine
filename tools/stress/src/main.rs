@@ -372,7 +372,7 @@ mod windowed {
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
-    use engine_render::mesh::{Mesh, cube, perspective};
+    use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
     use engine_render::post::{HDR_FORMAT, Tonemap};
     use engine_render::upload::UploadRing;
     use engine_rhi::ash::vk;
@@ -426,12 +426,19 @@ mod windowed {
         )
         .unwrap();
         let tonemap = Tonemap::new(&device, &bindless, swapchain.format()).unwrap();
-        let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
+        let mut geometry = GeometryPool::new(
+            &device,
+            &mut allocator,
+            GeometryCapacity::default(),
+            in_flight,
+        )
+        .unwrap();
+        let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
         let mut ring = UploadRing::new(&device, &mut allocator, in_flight, 32 << 20).unwrap();
         let mut frames = Frames::new(&device, device.graphics.family, in_flight).unwrap();
         let mut graph = RenderGraph::new(&device, in_flight);
         let mut query = QueryState::<(&GlobalTransform, &Look)>::new(&mut sim.world);
-        let mut draws: Vec<DrawItem<'_>> = Vec::with_capacity(sim.world.len() + 1);
+        let mut draws: Vec<DrawItem> = Vec::with_capacity(sim.world.len() + 1);
         let mut samples: Vec<Stages> = Vec::with_capacity(frames_to_run);
         let start = Instant::now();
         let mut total = 0usize;
@@ -478,7 +485,7 @@ mod windowed {
             let dl = Instant::now();
             draws.clear();
             draws.push(DrawItem {
-                mesh: &mesh,
+                mesh,
                 world_from_object: Mat4::from_scale_rotation_translation(
                     Vec3::new(120.0, 0.2, 120.0),
                     Quat::IDENTITY,
@@ -488,7 +495,7 @@ mod windowed {
             });
             query.for_each(&mut sim.world, |(g, look)| {
                 draws.push(DrawItem {
-                    mesh: &mesh,
+                    mesh,
                     world_from_object: Mat4::from(g.0) * Mat4::from_scale(Vec3::splat(look.scale)),
                     material: Material {
                         base_color: Vec3::from(look.color),
@@ -514,6 +521,9 @@ mod windowed {
             let rec = Instant::now();
             {
                 let mut fg = graph.begin(&frame);
+                let geo = geometry
+                    .begin_frame(&mut fg, &device, &mut allocator, frame.number)
+                    .unwrap();
                 let desc = TextureDesc::new_2d(swapchain.format(), extent.width, extent.height);
                 let backbuffer = fg.import_texture(
                     "backbuffer",
@@ -540,6 +550,7 @@ mod windowed {
                     &mut fg,
                     &mut ring,
                     &bindless,
+                    &geo,
                     &draws,
                     &ForwardView {
                         camera: Camera {
@@ -597,7 +608,7 @@ mod windowed {
         unsafe {
             graph.destroy(&mut allocator, Some(&bindless));
             ring.destroy(&mut allocator);
-            mesh.destroy(&mut allocator);
+            geometry.destroy(&mut allocator);
         }
         drop(frames);
         drop(renderer);

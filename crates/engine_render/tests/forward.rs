@@ -8,7 +8,7 @@ use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
-use engine_render::mesh::{Mesh, cube};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
 use engine_render::post::{HDR_FORMAT, Tonemap};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -79,7 +79,9 @@ fn pbr_lighting_and_shadows() {
     )
     .unwrap();
     let tonemap = Tonemap::new(&device, &bindless, color_format).unwrap();
-    let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
+    let mut geometry =
+        GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
+    let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
 
@@ -115,7 +117,7 @@ fn pbr_lighting_and_shadows() {
     // A ground slab with its top at y = 0 and a cube floating above the origin.
     let draws = [
         DrawItem {
-            mesh: &mesh,
+            mesh,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::new(8.0, 0.2, 8.0),
                 Default::default(),
@@ -124,7 +126,7 @@ fn pbr_lighting_and_shadows() {
             material: Material::default(),
         },
         DrawItem {
-            mesh: &mesh,
+            mesh,
             world_from_object: Mat4::from_translation(Vec3::new(0.0, 1.5, 0.0)),
             material: Material {
                 base_color: Vec3::new(0.9, 0.2, 0.2),
@@ -146,7 +148,7 @@ fn pbr_lighting_and_shadows() {
         ambient: Vec3::splat(0.05),
     };
 
-    for hdr in [false, true] {
+    for (frame, hdr) in [false, true].into_iter().enumerate() {
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -162,6 +164,9 @@ fn pbr_lighting_and_shadows() {
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            let geo = geometry
+                .begin_frame(&mut fg, &device, &mut allocator, frame as u64 + 1)
+                .unwrap();
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, SIZE, SIZE));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
             let out = fg.import_buffer(
@@ -180,6 +185,7 @@ fn pbr_lighting_and_shadows() {
                     &mut fg,
                     &mut ring,
                     &bindless,
+                    &geo,
                     &draws,
                     &ForwardView {
                         camera,
@@ -196,6 +202,7 @@ fn pbr_lighting_and_shadows() {
                     &mut fg,
                     &mut ring,
                     &bindless,
+                    &geo,
                     &draws,
                     &ForwardView {
                         camera,
@@ -295,7 +302,7 @@ fn pbr_lighting_and_shadows() {
     unsafe {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
-        mesh.destroy(&mut allocator);
+        geometry.destroy(&mut allocator);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);
     }

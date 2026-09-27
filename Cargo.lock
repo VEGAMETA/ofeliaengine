@@ -264,6 +264,7 @@ dependencies = [
 name = "engine_render"
 version = "0.0.0"
 dependencies = [
+ "engine_assets",
  "engine_core",
  "engine_platform",
  "engine_profiler",

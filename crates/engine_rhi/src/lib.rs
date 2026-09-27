@@ -38,7 +38,7 @@ pub use frames::{Frame, Frames};
 pub use instance::{Instance, InstanceDesc, ValidationReport};
 pub use memory::{
     Allocation, AllocationRequest, Allocator, AllocatorConfig, DedicatedTo, HeapStats,
-    MemoryLocation, ResourceKind,
+    MemoryLocation, Range, RangeAllocator, ResourceKind,
 };
 pub use pipeline::{
     Blend, DepthBias, GraphicsPipelineDesc, Pipeline, ShaderStageDesc, spirv_words,

@@ -12,3 +12,6 @@
 
 # Shared Jolt build (ENGINE_JOLTC_CACHE in CI).
 /.joltc-cache/
+
+# Test scenes downloaded by tools/fetch-test-assets.ps1 (never committed).
+/test-assets/
