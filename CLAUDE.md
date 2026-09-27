@@ -176,7 +176,9 @@ version must include the date it was checked.
   Naughty Dog's fiber approach; record the result in an ADR.
 - Hybrid CPUs (P/E cores): place threads via `GetSystemCpuSetInformation` / `EfficiencyClass`.
   Critical threads (main, render, audio) go on P-cores.
-- Disable power throttling for the process (`SetProcessInformation`, `ProcessPowerThrottling`).
+- Disable power throttling for the game process (`SetProcessInformation`, `ProcessPowerThrottling`).
+  The editor keeps it, so it saves power while its window is in the background (team
+  decision, 2026-09-27); measurements pass `--no-throttle`.
 - Waiting uses high-resolution waitable timers (`CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`), not `Sleep`.
 - MMCSS: audio thread uses the "Pro Audio" task, render thread uses "Games".
 

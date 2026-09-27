@@ -173,6 +173,8 @@ dependencies = [
  "engine_core",
  "engine_ecs",
  "engine_input",
+ "engine_latency",
+ "engine_platform",
  "engine_profiler",
  "engine_reflect",
  "engine_render",

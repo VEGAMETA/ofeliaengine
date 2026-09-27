@@ -3,9 +3,12 @@
 //! it and on `engine_ui`. [`Commands`] and [`Keymap`] are the command palette's and
 //! shortcuts' core. [`shell`] lays out the editor window (the team's Godot layout) and
 //! [`paint`] draws `engine_ui` frames with `engine_render2d` and `engine_text`; [`icons`]
-//! names the icon glyphs it uses.
+//! names the icon glyphs it uses. [`input`] turns window events into UI input and
+//! [`camera`] is the viewport's orbit camera.
 
+pub mod camera;
 pub mod icons;
+pub mod input;
 pub mod paint;
 mod palette;
 pub mod shell;

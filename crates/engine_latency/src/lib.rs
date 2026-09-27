@@ -447,8 +447,12 @@ impl Latency {
             _ => false,
         };
         if !vendor && self.amd.is_some() && on {
-            // Anti-Lag 2 sleeps inside the input-stage call (and caps the frame rate).
+            // Anti-Lag 2 sleeps inside the input-stage call and may cap the frame rate,
+            // but its cap is not applied everywhere (ref-1's Radeon iGPU ran 640 FPS with
+            // a cap of 233): cap on the CPU as well. When the driver did cap, the frame is
+            // already due and this does not sleep.
             self.anti_lag(ANTI_LAG_STAGE_INPUT);
+            self.limit_rate();
         } else if !vendor {
             // Generic: bound the present queue, then cap the frame rate.
             let depth = u64::from(self.settings.max_queued_presents);
@@ -467,16 +471,7 @@ impl Latency {
                     }
                 }
             }
-            if let Some(fps) = self.settings.fps_limit {
-                let interval = Duration::from_secs_f64(1.0 / fps.max(1.0));
-                let now = Instant::now();
-                let at = self.next_frame_at.unwrap_or(now);
-                if at > now {
-                    self.sleeper.sleep_until(at);
-                }
-                // Catch up at most one frame after a stall instead of bursting.
-                self.next_frame_at = Some(at.max(now) + interval);
-            }
+            self.limit_rate();
         }
         let frame = self.frame;
         let times = self.times();
@@ -486,6 +481,21 @@ impl Latency {
             marks: [None; MARKERS],
         };
         Ok(frame)
+    }
+
+    /// The CPU frame-rate limiter: sleeps until the frame is due on a high-resolution
+    /// waitable timer.
+    fn limit_rate(&mut self) {
+        if let Some(fps) = self.settings.fps_limit {
+            let interval = Duration::from_secs_f64(1.0 / fps.max(1.0));
+            let now = Instant::now();
+            let at = self.next_frame_at.unwrap_or(now);
+            if at > now {
+                self.sleeper.sleep_until(at);
+            }
+            // Catch up at most one frame after a stall instead of bursting.
+            self.next_frame_at = Some(at.max(now) + interval);
+        }
     }
 
     /// Records a marker for the current frame.
