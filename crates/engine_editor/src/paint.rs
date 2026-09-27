@@ -5,26 +5,35 @@
 //! - Text becomes glyph quads from one shared [`GlyphAtlas`], laid out with the same fonts
 //!   and widths the UI measured with ([`UiText`] is the UI's [`TextMeasure`]), so what is
 //!   measured is what is drawn.
+//! - Laid-out strings are kept while they stay on screen: a label is shaped once, not in
+//!   every frame's layout and again in every paint.
 //! - Clip commands become canvas clip rectangles.
 //!
 //! Quads keep the UI's paint order (one canvas layer, submission order). Things drawn
 //! below the UI, such as a 3D viewport's image, go on a lower layer.
 
+use engine_core::hash::StateHasher;
 use engine_core::math::{Vec2, Vec4};
-use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, draw_text};
-use engine_text::{FontError, FontId, Fonts, GlyphAtlas, TextLayout, TextStyle};
+use engine_render2d::{Canvas, ClipRect, GlyphTexture, Order, Quad, draw_glyphs};
+use engine_text::{FontError, FontId, Fonts, GlyphAtlas, PositionedGlyph, TextLayout, TextStyle};
 use engine_ui::{DrawCmd, Frame, TextMeasure};
+use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 
 /// Side of the glyph atlas in pixels: room for the editor's sizes of Latin and Cyrillic.
 pub const ATLAS_SIZE: u32 = 1024;
 
-/// Fonts, a layout buffer and the glyph atlas of the UI.
+/// Above this many cached layouts, those unused this frame and the last are dropped.
+const CACHE_SOFT_LIMIT: usize = 4096;
+
+/// Fonts, laid-out strings and the glyph atlas of the UI.
 pub struct UiText {
     /// Loaded fonts.
     pub fonts: Fonts,
     /// The fonts text uses, in fallback order.
     stack: Vec<FontId>,
     layout: TextLayout,
+    cache: LayoutCache,
     /// Rendered glyphs; mirror it on the GPU with [`GlyphTexture::sync`] after painting.
     pub atlas: GlyphAtlas,
 }
@@ -33,7 +42,91 @@ impl core::fmt::Debug for UiText {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("UiText")
             .field("fonts", &self.stack.len())
+            .field("cached_layouts", &self.cache.map.len())
             .finish_non_exhaustive()
+    }
+}
+
+/// A string laid out once, reused while it stays on screen.
+struct CachedLayout {
+    text: String,
+    size: u32,
+    /// Wrap width bits, `u32::MAX` for none.
+    max_width: u32,
+    glyphs: Vec<PositionedGlyph>,
+    extent: [f32; 2],
+    /// Frame of last use.
+    frame: u64,
+}
+
+/// Layouts by a hash of (text, size, wrap width); an entry is only used if all three
+/// match, so a hash collision costs a layout, never the wrong text.
+#[derive(Default)]
+struct LayoutCache {
+    map: HashMap<u64, CachedLayout>,
+    frame: u64,
+    layouts: u64,
+}
+
+impl LayoutCache {
+    /// The layout of `text`, laid out with `shaper` if it is not cached.
+    fn get(
+        &mut self,
+        (fonts, stack, layout): (&mut Fonts, &[FontId], &mut TextLayout),
+        text: &str,
+        size: f32,
+        max_width: Option<f32>,
+    ) -> &CachedLayout {
+        let (size_bits, width_bits) = (size.to_bits(), max_width.map_or(u32::MAX, f32::to_bits));
+        let mut h = StateHasher::new();
+        h.write(text.as_bytes());
+        h.write_u64(u64::from(size_bits) | (u64::from(width_bits) << 32));
+        let frame = self.frame;
+        let lay_out = |fonts: &mut Fonts, layout: &mut TextLayout| {
+            let style = TextStyle {
+                size,
+                max_width,
+                ..TextStyle::default()
+            };
+            layout.layout(fonts, stack, text, &style);
+            CachedLayout {
+                text: text.to_owned(),
+                size: size_bits,
+                max_width: width_bits,
+                glyphs: layout.glyphs().to_vec(),
+                extent: [layout.width(), layout.height()],
+                frame,
+            }
+        };
+        let entry = match self.map.entry(h.finish()) {
+            Entry::Occupied(o)
+                if o.get().text == text
+                    && o.get().size == size_bits
+                    && o.get().max_width == width_bits =>
+            {
+                o.into_mut()
+            }
+            Entry::Occupied(mut o) => {
+                self.layouts += 1;
+                o.insert(lay_out(fonts, layout));
+                o.into_mut()
+            }
+            Entry::Vacant(v) => {
+                self.layouts += 1;
+                v.insert(lay_out(fonts, layout))
+            }
+        };
+        entry.frame = frame;
+        entry
+    }
+
+    /// Ends a frame: drops what went unused this frame and the last, once the cache is big.
+    fn end_frame(&mut self) {
+        if self.map.len() > CACHE_SOFT_LIMIT {
+            let keep_from = self.frame.saturating_sub(1);
+            self.map.retain(|_, e| e.frame >= keep_from);
+        }
+        self.frame += 1;
     }
 }
 
@@ -49,25 +142,31 @@ impl UiText {
             fonts,
             stack: vec![text, symbols, icons],
             layout: TextLayout::new(),
+            cache: LayoutCache::default(),
             atlas: GlyphAtlas::new(ATLAS_SIZE, ATLAS_SIZE),
         })
     }
 
-    fn lay_out(&mut self, text: &str, size: f32, max_width: Option<f32>) {
-        let style = TextStyle {
-            size,
-            max_width,
-            ..TextStyle::default()
-        };
-        self.layout
-            .layout(&mut self.fonts, &self.stack, text, &style);
+    /// How many strings were laid out (cache misses) since creation.
+    pub fn layouts_made(&self) -> u64 {
+        self.cache.layouts
+    }
+
+    /// How many laid-out strings are kept.
+    pub fn cached_layouts(&self) -> usize {
+        self.cache.map.len()
     }
 }
 
 impl TextMeasure for UiText {
     fn measure(&mut self, text: &str, size: f32, max_width: Option<f32>) -> [f32; 2] {
-        self.lay_out(text, size, max_width);
-        [self.layout.width().ceil(), self.layout.height().ceil()]
+        let e = self.cache.get(
+            (&mut self.fonts, &self.stack, &mut self.layout),
+            text,
+            size,
+            max_width,
+        );
+        [e.extent[0].ceil(), e.extent[1].ceil()]
     }
 }
 
@@ -136,11 +235,16 @@ pub fn paint(
                 let Some(string) = frame.text.get(range.clone()) else {
                     continue;
                 };
-                text.lay_out(string, *size, wrap.then_some(rect.size[0]));
+                let laid_out = text.cache.get(
+                    (&mut text.fonts, &text.stack, &mut text.layout),
+                    string,
+                    *size,
+                    wrap.then_some(rect.size[0]),
+                );
                 let origin = Vec2::new(rect.pos[0], rect.pos[1]);
-                stats.glyphs += draw_text(
+                stats.glyphs += draw_glyphs(
                     canvas,
-                    &text.layout,
+                    &laid_out.glyphs,
                     &text.fonts,
                     &mut text.atlas,
                     glyphs,
@@ -166,5 +270,6 @@ pub fn paint(
         }
     }
     canvas.set_clip(None);
+    text.cache.end_frame();
     stats
 }

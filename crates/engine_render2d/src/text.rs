@@ -13,7 +13,7 @@ use engine_render::texture::{GpuTexture, UploadError};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocator, Bindless, Device, RhiError, SamplerKind};
-use engine_text::{Fonts, GlyphAtlas, GlyphKey, TextLayout};
+use engine_text::{Fonts, GlyphAtlas, GlyphKey, PositionedGlyph, TextLayout};
 
 /// The GPU side of a [`GlyphAtlas`].
 #[derive(Debug)]
@@ -110,10 +110,37 @@ pub fn draw_text(
     color: TextColor,
     order: Order,
 ) -> usize {
+    draw_glyphs(
+        canvas,
+        layout.glyphs(),
+        fonts,
+        atlas,
+        texture,
+        origin,
+        size,
+        color,
+        order,
+    )
+}
+
+/// [`draw_text`] for glyphs laid out earlier and kept, for example in a cache of layouts
+/// that stay on screen from frame to frame.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_glyphs(
+    canvas: &mut Canvas,
+    glyphs: &[PositionedGlyph],
+    fonts: &Fonts,
+    atlas: &mut GlyphAtlas,
+    texture: &GlyphTexture,
+    origin: Vec2,
+    size: f32,
+    color: TextColor,
+    order: Order,
+) -> usize {
     let (aw, ah) = atlas.size();
     let (inv_w, inv_h) = (1.0 / aw as f32, 1.0 / ah as f32);
     let mut drawn = 0;
-    for g in layout.glyphs() {
+    for g in glyphs {
         let (key, x) = GlyphKey::at(g.font, g.glyph, size, origin.x + g.x);
         let Some(a) = atlas.get(fonts, key) else {
             continue;
