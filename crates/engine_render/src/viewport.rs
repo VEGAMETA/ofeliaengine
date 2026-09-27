@@ -23,7 +23,7 @@ use crate::graph::{
     Access, FrameGraph, ImportedTexture, LoadOp, RenderGraph, ShaderStages, StoreOp, Texture,
     TextureDesc, TextureState,
 };
-use crate::post::{Composite, HDR_FORMAT, Tonemap};
+use crate::post::{Composite, HDR_FORMAT, OutputLevels, Tonemap};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError, SamplerKind};
 
@@ -116,7 +116,8 @@ pub struct ViewportDesc {
     pub name: String,
     /// Texture size.
     pub size: ViewportSize,
-    /// Texture format ([`HDR_FORMAT`] by default).
+    /// Texture format ([`HDR_FORMAT`] by default). Changing it recreates the texture on
+    /// the next render (for example an SDR editor view becoming HDR).
     pub format: vk::Format,
     /// When it renders.
     pub update: UpdateMode,
@@ -172,6 +173,7 @@ struct ViewportTexture {
     view: vk::ImageView,
     allocation: Allocation,
     sampled_index: u32,
+    format: vk::Format,
     width: u32,
     height: u32,
 }
@@ -203,6 +205,7 @@ pub struct Viewports {
     retired: Vec<(u64, ViewportTexture)>,
     order: Vec<(u32, u16)>,
     composite: Vec<(i32, u16)>,
+    output: OutputLevels,
 }
 
 impl core::fmt::Debug for Viewports {
@@ -227,7 +230,14 @@ impl Viewports {
             retired: Vec::new(),
             order: Vec::new(),
             composite: Vec::new(),
+            output: OutputLevels::SDR,
         }
+    }
+
+    /// How [`Self::composite`]'s output reaches the display (SDR until set): tone mapped
+    /// viewports roll off towards its peak, and are written in its encoding (ADR 0038).
+    pub fn set_output_levels(&mut self, levels: OutputLevels) {
+        self.output = levels;
     }
 
     /// Adds a viewport. Its texture is created on its first [`Self::render`].
@@ -432,10 +442,9 @@ impl Viewports {
                 continue;
             };
             let (width, height) = Self::target_extent(&state.desc, window);
-            let resize = state
-                .texture
-                .as_ref()
-                .is_none_or(|t| t.width != width || t.height != height);
+            let resize = state.texture.as_ref().is_none_or(|t| {
+                t.width != width || t.height != height || t.format != state.desc.format
+            });
             if resize {
                 let texture = create_texture(
                     device,
@@ -496,8 +505,9 @@ impl Viewports {
 
     /// Composites every placed viewport into `output` (the window's image, `extent` pixels)
     /// in placement order, through `tonemap`: tone mapped or copied, stretched or
-    /// pixel-perfect. The first composite clears `output` to `clear` (letterbox color);
-    /// with no placed viewports it is only cleared.
+    /// pixel-perfect, in the encoding of [`Self::set_output_levels`]. The first composite
+    /// clears `output` to `clear` (letterbox color, linear); with no placed viewports it is
+    /// only cleared.
     #[allow(clippy::too_many_arguments)]
     pub fn composite<'g>(
         &mut self,
@@ -519,6 +529,8 @@ impl Viewports {
             }
         }
         self.composite.sort_by_key(|&(order, index)| (order, index));
+        let encoding = self.output.swapchain_encoding();
+        let clear = encoding.encode(clear);
         if self.composite.is_empty() {
             fg.add_pass("clear")
                 .color(output, LoadOp::Clear(clear), StoreOp::Store)
@@ -574,6 +586,8 @@ impl Viewports {
                     sampler,
                     exposure: state.desc.exposure,
                     tonemap: state.desc.tonemap,
+                    peak: self.output.peak(),
+                    encoding,
                     load: if i == 0 {
                         LoadOp::Clear(clear)
                     } else {
@@ -752,6 +766,7 @@ fn create_texture(
         view,
         allocation,
         sampled_index,
+        format,
         width,
         height,
     })

@@ -16,6 +16,11 @@
 //!   (always on in debug builds); the report counts its errors.
 //! - --no-throttle keeps Windows from slowing the editor while its window is not in
 //!   front (for measurements; by default the editor saves power in the background).
+//! - HDR (ADR 0038): while Windows runs the display in HDR, the editor presents in scRGB
+//!   (`--hdr hdr10` for HDR10, `--hdr off` to stay in SDR), with the UI at Windows' SDR
+//!   white level and the 3D view rolled off towards the display's peak. It follows HDR
+//!   being turned on or off, the SDR brightness slider and moves to other monitors while
+//!   running.
 
 #[cfg(not(windows))]
 fn main() {
@@ -41,23 +46,25 @@ mod windowed {
         Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, build,
     };
     use engine_latency::{Latency, LatencySettings, LowLatency, Marker};
+    use engine_platform::display::DisplayInfo;
     use engine_platform::time::HighResTimer;
     use engine_platform::window::{
-        MouseButton, WindowDesc, WindowEventKind, WindowSystem, refresh_rate,
+        MouseButton, WindowDesc, WindowEvent, WindowEventKind, WindowSystem,
     };
     use engine_render::forward::{
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
     use engine_render::mesh::{Mesh, cube};
-    use engine_render::post::{HDR_FORMAT, Tonemap};
+    use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, OutputLevels, Tonemap};
     use engine_render::upload::UploadRing;
     use engine_render::viewport::{UpdateMode, ViewportDesc, ViewportSize, Viewports};
     use engine_render2d::{Canvas, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
     use engine_rhi::ash::vk;
     use engine_rhi::{
-        AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
-        PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
+        AdapterPreference, Allocator, Bindless, Device, Frames, HdrMetadata, Instance,
+        InstanceDesc, OutputColor, PresentMode, RhiError, SamplerKind, Surface, Swapchain,
+        SwapchainDesc,
     };
     use engine_ui::{Theme, Ui};
     use std::fmt::Write as _;
@@ -67,8 +74,12 @@ mod windowed {
 
     /// Frames the CPU may record ahead of the GPU.
     const IN_FLIGHT: usize = 2;
-    /// The viewport's texture format: sRGB, written by the tone map.
+    /// The viewport's texture format in SDR: sRGB, written by the tone map. HDR output
+    /// keeps the tone-mapped view in `HDR_FORMAT`.
     const VIEW_FORMAT: vk::Format = vk::Format::R8G8B8A8_SRGB;
+    /// Peak luminance assumed for an HDR display that reports none: DisplayHDR 400, the
+    /// lowest certified tier (a low guess compresses highlights more; a high one clips).
+    const FALLBACK_PEAK_NITS: f32 = 400.0;
     const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
     /// Frame-rate cap.
@@ -99,6 +110,8 @@ mod windowed {
         fps: FpsCap,
         validate: bool,
         no_throttle: bool,
+        /// Output while the display runs in HDR; `Sdr` stays in SDR.
+        hdr: OutputColor,
     }
 
     impl Options {
@@ -109,6 +122,7 @@ mod windowed {
                 fps: FpsCap::Monitor,
                 validate: cfg!(debug_assertions),
                 no_throttle: false,
+                hdr: OutputColor::ScRgb,
             };
             let mut args = std::env::args().skip(1);
             while let Some(arg) = args.next() {
@@ -130,6 +144,13 @@ mod windowed {
                     }
                     "--validate" => options.validate = true,
                     "--no-throttle" => options.no_throttle = true,
+                    "--hdr" => {
+                        options.hdr = match args.next().as_deref() {
+                            Some("off") => OutputColor::Sdr,
+                            Some("hdr10") => OutputColor::Hdr10,
+                            _ => OutputColor::ScRgb,
+                        }
+                    }
                     other => println!("ignoring unknown argument {other}"),
                 }
             }
@@ -264,7 +285,229 @@ mod windowed {
         ui: Duration,
         paint: Duration,
         record: Duration,
+        /// GPU time of whole frames (every pass), in microseconds, and how many frames
+        /// had timings.
+        gpu_us: f64,
+        gpu_frames: u32,
         since: Option<Instant>,
+    }
+
+    /// What the main loop keeps from window events.
+    struct WindowState {
+        /// Client size in pixels.
+        size: (u32, u32),
+        /// UI scale (DPI / 96).
+        scale: f32,
+        minimized: bool,
+        close: bool,
+        /// The size changed since the swapchain was made.
+        resized: bool,
+        /// The monitor showing the window, once the window thread reported it.
+        display: Option<DisplayInfo>,
+        display_changed: bool,
+    }
+
+    impl WindowState {
+        fn new(size: (u32, u32)) -> Self {
+            Self {
+                size,
+                scale: 1.0,
+                minimized: false,
+                close: false,
+                resized: false,
+                display: None,
+                display_changed: false,
+            }
+        }
+
+        fn handle(&mut self, event: WindowEvent, input: &mut InputCollector) {
+            match event.kind {
+                WindowEventKind::CloseRequested => self.close = true,
+                WindowEventKind::Resized { width, height } => {
+                    if width > 0 && height > 0 {
+                        self.size = (width, height);
+                        self.resized = true;
+                    }
+                }
+                WindowEventKind::ScaleChanged { dpi } => self.scale = dpi as f32 / 96.0,
+                WindowEventKind::Minimized => self.minimized = true,
+                WindowEventKind::Restored => self.minimized = false,
+                WindowEventKind::Display(info) => {
+                    self.display = Some(info);
+                    self.display_changed = true;
+                }
+                WindowEventKind::Focused(false) => input.focus_lost(),
+                WindowEventKind::CursorMoved { x, y } => input.cursor_moved(x as f32, y as f32),
+                WindowEventKind::CursorLeft => input.cursor_left(),
+                WindowEventKind::MouseButton { button, pressed } => {
+                    let button = match button {
+                        MouseButton::Left => Some(Button::Left),
+                        MouseButton::Right => Some(Button::Right),
+                        MouseButton::Middle => Some(Button::Middle),
+                        _ => None,
+                    };
+                    if let Some(button) = button {
+                        input.button(button, pressed);
+                    }
+                }
+                WindowEventKind::Wheel { y, .. } => input.wheel(y),
+                WindowEventKind::Key {
+                    virtual_key,
+                    pressed,
+                    ..
+                } => input.key(virtual_key, pressed),
+                _ => {}
+            }
+        }
+    }
+
+    /// The output for `display`: `choice` (an HDR encoding, or SDR to stay in SDR) while
+    /// the display runs in HDR, at its SDR white level and peak; SDR otherwise.
+    fn wanted_levels(choice: OutputColor, display: Option<&DisplayInfo>) -> OutputLevels {
+        match display {
+            Some(d) if d.hdr_enabled && choice.is_hdr() => OutputLevels {
+                color: choice,
+                white_nits: d.sdr_white_nits,
+                peak_nits: if d.max_nits > 0.0 {
+                    d.max_nits
+                } else {
+                    FALLBACK_PEAK_NITS
+                },
+            },
+            _ => OutputLevels::SDR,
+        }
+    }
+
+    /// What `swapchain` delivers of `wanted`: SDR when it fell back to SDR.
+    fn actual_levels(swapchain: &Swapchain, wanted: OutputLevels) -> OutputLevels {
+        if swapchain.color().is_hdr() {
+            OutputLevels {
+                color: swapchain.color(),
+                ..wanted
+            }
+        } else {
+            OutputLevels::SDR
+        }
+    }
+
+    /// The display's range as HDR metadata: the output is tone mapped for it already.
+    fn hdr_metadata(levels: &OutputLevels, display: Option<&DisplayInfo>) -> HdrMetadata {
+        let full_frame = display.map_or(0.0, |d| d.max_full_frame_nits);
+        HdrMetadata {
+            max_nits: levels.peak_nits,
+            min_nits: display.map_or(0.0, |d| d.min_nits),
+            max_content_nits: levels.peak_nits,
+            max_frame_average_nits: if full_frame > 0.0 {
+                full_frame.min(levels.peak_nits)
+            } else {
+                levels.peak_nits
+            },
+        }
+    }
+
+    /// Appends a short description of `levels` ("SDR", "HDR scRGB, white 80 nits, peak
+    /// 344 nits").
+    fn describe(levels: &OutputLevels, out: &mut String) {
+        let name = match levels.color {
+            OutputColor::Sdr => {
+                out.push_str("SDR");
+                return;
+            }
+            OutputColor::ScRgb => "HDR scRGB",
+            OutputColor::Hdr10 => "HDR10",
+        };
+        let _ = write!(
+            out,
+            "{name}, white {:.0} nits, peak {:.0} nits",
+            levels.white_nits, levels.peak_nits
+        );
+    }
+
+    /// Everything that depends on how the swapchain reaches the display (ADR 0038):
+    /// rebuilt when its format changes (HDR on or off), adjusted when only the levels
+    /// change (the SDR brightness slider).
+    struct OutputPipelines {
+        levels: OutputLevels,
+        /// The swapchain format the pipelines were made for.
+        swapchain_format: vk::Format,
+        /// The 3D view's texture format: sRGB in SDR, `HDR_FORMAT` in HDR.
+        view_format: vk::Format,
+        /// Draws the UI into the swapchain, or into an `HDR_FORMAT` image for HDR10.
+        renderer2d: Renderer2d,
+        /// Tone maps the 3D view into its texture.
+        view_tonemap: Tonemap,
+        /// HDR10: encodes the composed image into the swapchain.
+        encode: Option<Tonemap>,
+    }
+
+    impl OutputPipelines {
+        fn new(
+            device: &Device,
+            allocator: &mut Allocator,
+            bindless: &Bindless,
+            swapchain: &Swapchain,
+            levels: OutputLevels,
+        ) -> Result<Self, Error> {
+            let hdr10 = swapchain.color() == OutputColor::Hdr10;
+            let view_format = if swapchain.color().is_hdr() {
+                HDR_FORMAT
+            } else {
+                VIEW_FORMAT
+            };
+            let ui_format = if hdr10 {
+                HDR_FORMAT
+            } else {
+                swapchain.format()
+            };
+            let renderer2d = Renderer2d::new(
+                device,
+                allocator,
+                bindless,
+                ui_format,
+                QuadMode::for_device(device),
+            )?;
+            let view_tonemap = Tonemap::new(device, bindless, view_format)?;
+            let encode = if hdr10 {
+                Some(Tonemap::new(device, bindless, swapchain.format())?)
+            } else {
+                None
+            };
+            let mut output = Self {
+                levels,
+                swapchain_format: swapchain.format(),
+                view_format,
+                renderer2d,
+                view_tonemap,
+                encode,
+            };
+            output.set_levels(levels);
+            Ok(output)
+        }
+
+        /// Whether the pipelines were made for `swapchain`'s format.
+        fn fits(&self, swapchain: &Swapchain) -> bool {
+            self.swapchain_format == swapchain.format()
+        }
+
+        fn set_levels(&mut self, levels: OutputLevels) {
+            self.levels = levels;
+            // scRGB: the UI writes the swapchain, SDR white at Windows' SDR white level.
+            // HDR10: the UI is composed in units of reference white; the encode pass
+            // converts.
+            self.renderer2d
+                .set_white(match levels.swapchain_encoding() {
+                    OutputEncoding::Linear { white } => white,
+                    OutputEncoding::Pq { .. } => 1.0,
+                });
+        }
+
+        /// # Safety
+        ///
+        /// The GPU no longer uses the pipelines.
+        unsafe fn destroy(mut self, allocator: &mut Allocator) {
+            // SAFETY: guaranteed by the caller.
+            unsafe { self.renderer2d.destroy(allocator) };
+        }
     }
 
     pub(crate) fn run() -> Result<(), Error> {
@@ -300,15 +543,23 @@ mod windowed {
         if !surface.supports_queue(&device, device.graphics)? {
             return Err("the graphics queue cannot present to the window".into());
         }
-        let mut size = (1600u32, 900u32);
+        // The window thread reports the display (HDR on or off, SDR white level, refresh
+        // rate) right after creating the window. Creating the device took longer, so the
+        // first swapchain usually starts in the right mode.
+        let mut input = InputCollector::new();
+        let mut win = WindowState::new((1600, 900));
+        windows.drain_events(|event| win.handle(event, &mut input));
+        (win.resized, win.display_changed) = (false, false);
+        let mut wanted = wanted_levels(options.hdr, win.display.as_ref());
         let mut swapchain = Swapchain::new(
             &device,
             &surface,
             &SwapchainDesc {
-                width: size.0,
-                height: size.1,
+                width: win.size.0,
+                height: win.size.1,
                 present_mode: options.present,
                 srgb: true,
+                color: wanted.color,
                 // Lets `engine_latency` use Reflex on NVIDIA.
                 low_latency: true,
             },
@@ -324,18 +575,20 @@ mod windowed {
             DEPTH_FORMAT,
             ShadowSettings::default(),
         )?;
-        let tonemap = Tonemap::new(&device, &bindless, VIEW_FORMAT)?;
-        let mut renderer2d = Renderer2d::new(
+        let mut output = OutputPipelines::new(
             &device,
             &mut allocator,
             &bindless,
-            swapchain.format(),
-            QuadMode::for_device(&device),
+            &swapchain,
+            actual_levels(&swapchain, wanted),
         )?;
+        if output.levels.color.is_hdr() {
+            swapchain.set_hdr_metadata(&hdr_metadata(&output.levels, win.display.as_ref()));
+        }
         let mut mesh = Mesh::new(&device, &mut allocator, &cube())?;
         let mut ring = UploadRing::new(&device, &mut allocator, IN_FLIGHT, 16 << 20)?;
         let mut frames = Frames::new(&device, device.graphics.family, IN_FLIGHT)?;
-        let mut monitor_hz = refresh_rate(window.hwnd);
+        let mut monitor_hz = win.display.and_then(|d| d.refresh_hz);
         let latency_settings = |monitor_hz: Option<u32>| LatencySettings {
             mode: LowLatency::On,
             fps_limit: options.fps.limit(monitor_hz),
@@ -382,7 +635,7 @@ mod windowed {
                 width: 1,
                 height: 1,
             },
-            format: VIEW_FORMAT,
+            format: output.view_format,
             update: UpdateMode::Always,
             placement: None,
             tonemap: false,
@@ -483,75 +736,92 @@ mod windowed {
         ];
         let tools = tools.each_ref().map(String::as_str);
         let (mut active_scene, mut active_tool, mut playing) = (0usize, 1usize, false);
-        let mut status = String::with_capacity(160);
+        let mut status = String::with_capacity(256);
         let _ = write!(status, "engine 0.0.0  ·  Vulkan  ·  {adapter_name}");
 
-        let mut input = InputCollector::new();
         let idle = HighResTimer::new()?;
-        let (mut scale, mut minimized, mut recreate) = (1.0f32, false, false);
+        let mut recreate = false;
         let mut camera_drag = false;
         let mut view_size = (0u32, 0u32);
         let mut stats = Stats::default();
         let mut first_frame: Option<Duration> = None;
         let mut total_frames = 0u64;
+        // `--frames` runs report the average GPU time of every pass (after a warm-up).
+        let mut pass_totals: Vec<(&'static str, f64, u32)> = Vec::with_capacity(32);
 
         'main: loop {
             engine_profiler::zone!("editor::frame");
             // The limiter and latency control sleep here, before input is read. While
             // minimized nothing is presented: only events are watched.
-            if !minimized {
+            if !win.minimized {
                 latency.begin_frame(&swapchain, &frames)?;
             }
-            let mut close = false;
-            windows.drain_events(|event| match event.kind {
-                WindowEventKind::CloseRequested => close = true,
-                WindowEventKind::Resized { width, height } => {
-                    if width > 0 && height > 0 {
-                        size = (width, height);
-                        recreate = true;
-                    }
-                }
-                WindowEventKind::ScaleChanged { dpi } => scale = dpi as f32 / 96.0,
-                WindowEventKind::Minimized => minimized = true,
-                WindowEventKind::Restored => minimized = false,
-                WindowEventKind::Focused(false) => input.focus_lost(),
-                WindowEventKind::CursorMoved { x, y } => input.cursor_moved(x as f32, y as f32),
-                WindowEventKind::CursorLeft => input.cursor_left(),
-                WindowEventKind::MouseButton { button, pressed } => {
-                    let button = match button {
-                        MouseButton::Left => Some(Button::Left),
-                        MouseButton::Right => Some(Button::Right),
-                        MouseButton::Middle => Some(Button::Middle),
-                        _ => None,
-                    };
-                    if let Some(button) = button {
-                        input.button(button, pressed);
-                    }
-                }
-                WindowEventKind::Wheel { y, .. } => input.wheel(y),
-                WindowEventKind::Key {
-                    virtual_key,
-                    pressed,
-                    ..
-                } => input.key(virtual_key, pressed),
-                _ => {}
-            });
-            if close {
+            windows.drain_events(|event| win.handle(event, &mut input));
+            if win.close {
                 break 'main;
             }
-            if minimized {
+            if win.minimized {
                 idle.sleep(Duration::from_millis(10))?;
                 continue;
             }
             latency.mark(&swapchain, Marker::InputSample);
+            recreate |= core::mem::take(&mut win.resized);
+            // The display changed: the refresh rate for the frame cap; HDR on or off, the
+            // SDR white level or the peak for the output.
+            if core::mem::take(&mut win.display_changed) {
+                let hz = win.display.and_then(|d| d.refresh_hz);
+                if hz != monitor_hz {
+                    monitor_hz = hz;
+                    latency.set_settings(&swapchain, latency_settings(monitor_hz))?;
+                }
+                let next = wanted_levels(options.hdr, win.display.as_ref());
+                // Also retried while the surface does not offer the HDR output yet (it may
+                // only list HDR formats once the display has switched).
+                if next.color != wanted.color || next.color != swapchain.color() {
+                    recreate = true;
+                }
+                wanted = next;
+            }
             if recreate {
                 frames.wait_idle()?;
-                swapchain.recreate(&device, &surface, size.0, size.1)?;
+                swapchain.recreate_with_color(
+                    &device,
+                    &surface,
+                    win.size.0,
+                    win.size.1,
+                    wanted.color,
+                )?;
                 // Reflex settings belong to the swapchain.
                 latency.apply(&swapchain)?;
                 recreate = false;
             }
+            // Pipelines follow the swapchain's format, levels the display.
+            let levels = actual_levels(&swapchain, wanted);
+            let mut changed = first_frame.is_none() || levels != output.levels;
+            if !output.fits(&swapchain) {
+                frames.wait_idle()?;
+                let old = core::mem::replace(
+                    &mut output,
+                    OutputPipelines::new(&device, &mut allocator, &bindless, &swapchain, levels)?,
+                );
+                // SAFETY: the device is idle.
+                unsafe { old.destroy(&mut allocator) };
+                if let Some(desc) = viewports.desc_mut(view) {
+                    desc.format = output.view_format;
+                }
+                changed = true;
+            }
+            if changed {
+                output.set_levels(levels);
+                if levels.color.is_hdr() {
+                    swapchain.set_hdr_metadata(&hdr_metadata(&levels, win.display.as_ref()));
+                }
+                let mut line = String::from("output: ");
+                describe(&levels, &mut line);
+                println!("{line} ({:?})", swapchain.format());
+            }
             let extent = swapchain.extent();
+            let scale = win.scale;
 
             // The UI, in logical pixels.
             latency.mark(&swapchain, Marker::SimulationStart);
@@ -699,7 +969,9 @@ mod windowed {
                 ring.begin(&frame);
                 {
                     let (forward, tonemap, bindless, draws) =
-                        (&forward, &tonemap, &bindless, &draws);
+                        (&forward, &output.view_tonemap, &bindless, &draws);
+                    // HDR: the view keeps highlights up to the display's peak.
+                    let peak = output.levels.peak();
                     let ring = &mut ring;
                     viewports.render(
                         &mut fg,
@@ -735,7 +1007,16 @@ mod windowed {
                                     occlusion: None,
                                 },
                             );
-                            tonemap.add_pass(fg, bindless, hdr, vf.color, 1.0);
+                            tonemap.add_composite_pass(
+                                fg,
+                                bindless,
+                                hdr,
+                                vf.color,
+                                Composite {
+                                    peak,
+                                    ..Composite::default()
+                                },
+                            );
                         },
                     )?;
                 }
@@ -765,18 +1046,61 @@ mod windowed {
                         storage_index: None,
                     },
                 );
-                renderer2d.add_pass(
+                // HDR10 composes in linear light first: blending PQ values is not.
+                let ui_target = if output.encode.is_some() {
+                    fg.create_texture(
+                        "ui hdr",
+                        TextureDesc::new_2d(HDR_FORMAT, extent.width, extent.height),
+                    )
+                } else {
+                    backbuffer
+                };
+                output.renderer2d.add_pass(
                     &mut fg,
                     &mut ring,
                     &bindless,
                     &canvas,
                     &View2d::pixels(extent.width, extent.height),
-                    backbuffer,
+                    ui_target,
                     Some(palette.window),
                 )?;
+                if let Some(encode) = &output.encode {
+                    encode.add_composite_pass(
+                        &mut fg,
+                        &bindless,
+                        ui_target,
+                        backbuffer,
+                        Composite {
+                            sampler: SamplerKind::NearestClamp,
+                            tonemap: false,
+                            encoding: output.levels.swapchain_encoding(),
+                            ..Composite::default()
+                        },
+                    );
+                }
                 fg.execute_with_bindless(&mut allocator, Some(&bindless))?;
             }
             stats.record += record_start.elapsed();
+            let passes = graph.gpu_pass_times();
+            if !passes.is_empty() {
+                stats.gpu_us += passes.iter().map(|p| f64::from(p.gpu_us)).sum::<f64>();
+                stats.gpu_frames += 1;
+                if options.frames.is_some() && total_frames >= 200 {
+                    for (i, pass) in passes.iter().enumerate() {
+                        match pass_totals.get_mut(i) {
+                            Some(total) if total.0 == pass.name => {
+                                total.1 += f64::from(pass.gpu_us);
+                                total.2 += 1;
+                            }
+                            // The passes changed (HDR on or off): start over.
+                            _ => {
+                                pass_totals.truncate(i);
+                                pass_totals.push((pass.name, f64::from(pass.gpu_us), 1));
+                            }
+                        }
+                    }
+                }
+            }
 
             frames.submit_tagged(
                 device.graphics,
@@ -833,14 +1157,16 @@ mod windowed {
                 status.clear();
                 let _ = write!(
                     status,
-                    "{:.0} FPS  ·  UI {:.0} µs  ·  paint {:.0} µs  ·  record {:.0} µs  ·  {}×{}  ·  {adapter_name}",
+                    "{:.0} FPS  ·  UI {:.0} µs  ·  paint {:.0} µs  ·  record {:.0} µs  ·  GPU {:.0} µs  ·  {}×{}  ·  {adapter_name}  ·  ",
                     n / elapsed.as_secs_f64(),
                     per(stats.ui),
                     per(stats.paint),
                     per(stats.record),
+                    stats.gpu_us / f64::from(stats.gpu_frames.max(1)),
                     extent.width,
                     extent.height,
                 );
+                describe(&output.levels, &mut status);
                 if options.frames.is_some() {
                     println!(
                         "{status}  ·  monitor {:?} Hz, cap {:?}",
@@ -849,12 +1175,6 @@ mod windowed {
                     );
                 }
                 stats = Stats::default();
-                // The window may have moved to a monitor with another refresh rate.
-                let hz = refresh_rate(window.hwnd);
-                if hz != monitor_hz {
-                    monitor_hz = hz;
-                    latency.set_settings(&swapchain, latency_settings(monitor_hz))?;
-                }
             }
             if options.frames.is_some_and(|n| total_frames >= n) {
                 break 'main;
@@ -862,6 +1182,13 @@ mod windowed {
         }
 
         frames.wait_idle()?;
+        if options.frames.is_some() {
+            let mut line = String::from("GPU passes, average:");
+            for (name, total, count) in &pass_totals {
+                let _ = write!(line, " {name} {:.1} µs,", total / f64::from(*count));
+            }
+            println!("{}", line.trim_end_matches(','));
+        }
         let present_mode = swapchain.present_mode();
         draws.clear();
         // SAFETY: the device is idle.
@@ -870,14 +1197,13 @@ mod windowed {
             graph.destroy(&mut allocator, Some(&bindless));
             ring.destroy(&mut allocator);
             mesh.destroy(&mut allocator);
-            renderer2d.destroy(&mut allocator);
+            output.destroy(&mut allocator);
             glyphs
                 .texture_mut()
                 .destroy(&device, &mut allocator, &bindless, 0);
         }
         drop(frames);
         drop(forward);
-        drop(tonemap);
         drop(swapchain);
         drop(surface);
         windows.destroy_window(window.id)?;

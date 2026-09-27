@@ -5,6 +5,7 @@
 //! - `thread`: CPU set placement, priorities, MMCSS, thread descriptions;
 //! - `process`: process-wide settings such as disabling power throttling;
 //! - `window`: windows on a dedicated thread, events through a lock-free ring;
+//! - `display`: HDR state, SDR white level, luminance range and refresh rate of a monitor;
 //! - `raw_input`: raw mouse/keyboard on a time-critical thread, with timestamps;
 //! - `fs_watch`: directory change notifications for hot reload.
 //!
@@ -14,6 +15,8 @@
 
 #[cfg(windows)]
 pub mod cpu;
+#[cfg(windows)]
+pub mod display;
 #[cfg(any(windows, test))]
 pub mod fs_watch;
 #[cfg(windows)]

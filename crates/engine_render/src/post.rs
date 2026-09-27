@@ -1,12 +1,16 @@
 //! Post-processing passes. For now: tonemapping from an HDR target to the display format
 //! (Khronos PBR Neutral with exposure), as one fullscreen-triangle pass in the graph, also
 //! used to composite viewports into sub-rectangles of the output.
+//!
+//! HDR output (ADR 0038): [`OutputLevels`] describes how the swapchain reaches the display
+//! (SDR, scRGB or HDR10, the luminance of reference white and of the peak); the tone mapper
+//! rolls highlights off towards the display's peak and writes the swapchain's encoding.
 
 use crate::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    Bindless, Device, GraphicsPipelineDesc, Pipeline, RhiError, SamplerKind, ShaderStageDesc,
-    spirv_words,
+    Bindless, Device, GraphicsPipelineDesc, OutputColor, Pipeline, RhiError, SamplerKind,
+    ShaderStageDesc, spirv_words,
 };
 
 const VERTEX: &[u8] = include_bytes!("../shaders/tonemap.vertexMain.spv");
@@ -15,13 +19,141 @@ const FRAGMENT: &[u8] = include_bytes!("../shaders/tonemap.fragmentMain.spv");
 /// The HDR format scenes render into before tonemapping.
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
-/// `Push` in `tonemap.slang` (16 bytes).
+/// `Push` in `tonemap.slang` (24 bytes).
 #[repr(C)]
 struct Push {
     source: u32,
     sampler: u32,
     exposure: f32,
     flags: u32,
+    peak: f32,
+    white: f32,
+}
+
+const FLAG_PASS_THROUGH: u32 = 1;
+const FLAG_ENCODE_PQ: u32 = 2;
+
+/// Luminance of 1.0 in scRGB, in nits.
+const SCRGB_WHITE_NITS: f32 = 80.0;
+/// Luminance of the PQ signal's maximum, in nits.
+const PQ_MAX_NITS: f32 = 10_000.0;
+
+/// How output values relate to light (ADR 0038).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OutputEncoding {
+    /// Linear, reference white written as `white`: 1 for SDR targets and intermediate
+    /// textures, SDR white in scRGB units (nits / 80) for an scRGB swapchain.
+    Linear {
+        /// The value of reference white.
+        white: f32,
+    },
+    /// HDR10: BT.2020 primaries, PQ-encoded, reference white at `white_nits`.
+    Pq {
+        /// Luminance of reference white in nits.
+        white_nits: f32,
+    },
+}
+
+impl OutputEncoding {
+    /// SDR targets and intermediate textures: reference white is 1.
+    pub const LINEAR: Self = Self::Linear { white: 1.0 };
+
+    /// Encodes a linear BT.709 color given in units of reference white, as the tone map
+    /// pass would write it (for clear colors). Alpha is kept.
+    pub fn encode(self, [r, g, b, a]: [f32; 4]) -> [f32; 4] {
+        match self {
+            Self::Linear { white } => [r * white, g * white, b * white, a],
+            Self::Pq { white_nits } => {
+                let scale = white_nits / PQ_MAX_NITS;
+                let [r, g, b] = bt2020_from_bt709([r, g, b]);
+                [
+                    pq_encode(r * scale),
+                    pq_encode(g * scale),
+                    pq_encode(b * scale),
+                    a,
+                ]
+            }
+        }
+    }
+
+    fn push(self) -> (f32, u32) {
+        match self {
+            Self::Linear { white } => (white, 0),
+            Self::Pq { white_nits } => (white_nits / PQ_MAX_NITS, FLAG_ENCODE_PQ),
+        }
+    }
+}
+
+/// How rendering reaches the display (ADR 0038): the swapchain's output, and the
+/// luminance of reference white (SDR white: UI white, a diffuse white surface at exposure
+/// 1) and of the brightest output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct OutputLevels {
+    /// What the swapchain holds.
+    pub color: OutputColor,
+    /// Luminance of reference white in nits (in HDR: Windows' SDR white level, or a
+    /// game's brightness setting).
+    pub white_nits: f32,
+    /// Luminance of the brightest output in nits (the display's peak).
+    pub peak_nits: f32,
+}
+
+impl OutputLevels {
+    /// SDR output: reference white is the display's white, nothing is brighter.
+    pub const SDR: Self = Self {
+        color: OutputColor::Sdr,
+        white_nits: SCRGB_WHITE_NITS,
+        peak_nits: SCRGB_WHITE_NITS,
+    };
+
+    /// Where the tone mapper's roll-off ends, in units of reference white: 1 for SDR,
+    /// the display's peak over reference white (at least 1) for HDR.
+    pub fn peak(&self) -> f32 {
+        if self.color.is_hdr() && self.white_nits > 0.0 {
+            (self.peak_nits / self.white_nits).max(1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// The encoding of passes that write the swapchain itself.
+    pub fn swapchain_encoding(&self) -> OutputEncoding {
+        match self.color {
+            OutputColor::Sdr => OutputEncoding::LINEAR,
+            OutputColor::ScRgb => OutputEncoding::Linear {
+                white: self.white_nits / SCRGB_WHITE_NITS,
+            },
+            OutputColor::Hdr10 => OutputEncoding::Pq {
+                white_nits: self.white_nits,
+            },
+        }
+    }
+}
+
+impl Default for OutputLevels {
+    fn default() -> Self {
+        Self::SDR
+    }
+}
+
+/// BT.709 → BT.2020 primaries, both linear (ITU-R BT.2087).
+fn bt2020_from_bt709([r, g, b]: [f32; 3]) -> [f32; 3] {
+    [
+        0.627_404 * r + 0.329_282 * g + 0.043_313_6 * b,
+        0.069_097 * r + 0.919_54 * g + 0.011_361_2 * b,
+        0.016_391_6 * r + 0.088_013_2 * g + 0.895_595 * b,
+    ]
+}
+
+/// SMPTE ST 2084 (PQ) inverse EOTF: luminance / 10000 nits → signal (as `tonemap.slang`).
+fn pq_encode(y: f32) -> f32 {
+    const M1: f32 = 2610.0 / 16384.0;
+    const M2: f32 = 2523.0 / 4096.0 * 128.0;
+    const C1: f32 = 3424.0 / 4096.0;
+    const C2: f32 = 2413.0 / 4096.0 * 32.0;
+    const C3: f32 = 2392.0 / 4096.0 * 32.0;
+    let p = y.clamp(0.0, 1.0).powf(M1);
+    ((C1 + C2 * p) / (1.0 + C3 * p)).powf(M2)
 }
 
 /// How [`Tonemap::add_composite_pass`] writes a source into (part of) an output.
@@ -35,7 +167,13 @@ pub struct Composite {
     pub exposure: f32,
     /// Apply the tone mapper (HDR sources); `false` copies (LDR sources).
     pub tonemap: bool,
-    /// What happens to the output first. `Load` keeps earlier composites.
+    /// Where the tone mapper's roll-off ends, in units of reference white
+    /// ([`OutputLevels::peak`]; 1 for SDR).
+    pub peak: f32,
+    /// How the output stores values.
+    pub encoding: OutputEncoding,
+    /// What happens to the output first. `Load` keeps earlier composites. A clear color
+    /// is written as it is: encode it first ([`OutputEncoding::encode`]).
     pub load: LoadOp,
 }
 
@@ -46,6 +184,8 @@ impl Default for Composite {
             sampler: SamplerKind::LinearClamp,
             exposure: 1.0,
             tonemap: true,
+            peak: 1.0,
+            encoding: OutputEncoding::LINEAR,
             load: LoadOp::DontCare,
         }
     }
@@ -95,8 +235,9 @@ impl Tonemap {
         Ok(Self { pipeline })
     }
 
-    /// Declares a pass that tonemaps `hdr` (scaled by `exposure`) into `output`. The frame
-    /// must execute with `bindless` so that `hdr` gets an index.
+    /// Declares a pass that tonemaps `hdr` (scaled by `exposure`) into `output`, an SDR
+    /// target ([`Tonemap::add_composite_pass`] writes HDR). The frame must execute with
+    /// `bindless` so that `hdr` gets an index.
     pub fn add_pass<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -121,6 +262,8 @@ impl Tonemap {
     /// Declares a pass that writes `source` into `composite.rect` of `output`, tonemapped
     /// or copied, scaled with the chosen sampler. Several composites into one output
     /// build split screens and picture-in-picture (the first clears, the others load).
+    /// Without a rectangle it is a whole-target pass, named by what it does ("tonemap",
+    /// "encode hdr10" or "copy") in captures and GPU timings.
     pub fn add_composite_pass<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -129,7 +272,13 @@ impl Tonemap {
         output: Texture,
         composite: Composite,
     ) {
-        self.declare(fg, bindless, "composite", source, output, composite);
+        let name = match (composite.rect, composite.tonemap, composite.encoding) {
+            (Some(_), ..) => "composite",
+            (None, true, _) => "tonemap",
+            (None, false, OutputEncoding::Pq { .. }) => "encode hdr10",
+            (None, false, OutputEncoding::Linear { .. }) => "copy",
+        };
+        self.declare(fg, bindless, name, source, output, composite);
     }
 
     fn declare<'g>(
@@ -149,11 +298,18 @@ impl Tonemap {
                 let Some(index) = ctx.sampled_index(source) else {
                     return;
                 };
+                let (white, encode) = composite.encoding.push();
                 let push = Push {
                     source: index,
                     sampler: Bindless::sampler(composite.sampler),
                     exposure: composite.exposure,
-                    flags: u32::from(!composite.tonemap),
+                    flags: if composite.tonemap {
+                        0
+                    } else {
+                        FLAG_PASS_THROUGH
+                    } | encode,
+                    peak: composite.peak,
+                    white,
                 };
                 // SAFETY: `Push` is plain `repr(C)` data without padding.
                 let bytes = unsafe {
@@ -185,5 +341,66 @@ impl Tonemap {
                     ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
                 }
             });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pq_matches_known_levels() {
+        // ST 2084 code values (10-bit full range) of common luminances.
+        for (nits, code) in [
+            (0.0, 0),
+            (100.0, 520),
+            (203.0, 594),
+            (1000.0, 769),
+            (10_000.0, 1023),
+        ] {
+            let signal = pq_encode(nits / PQ_MAX_NITS);
+            assert_eq!((signal * 1023.0).round() as u32, code, "{nits} nits");
+        }
+    }
+
+    #[test]
+    fn levels_scale_reference_white() {
+        let sdr = OutputLevels::SDR;
+        assert_eq!(sdr.peak(), 1.0);
+        assert_eq!(sdr.swapchain_encoding(), OutputEncoding::LINEAR);
+
+        let scrgb = OutputLevels {
+            color: OutputColor::ScRgb,
+            white_nits: 200.0,
+            peak_nits: 1000.0,
+        };
+        assert_eq!(scrgb.peak(), 5.0);
+        assert_eq!(
+            scrgb.swapchain_encoding(),
+            OutputEncoding::Linear { white: 2.5 },
+            "200 nits in scRGB (80 nits = 1)"
+        );
+        assert_eq!(
+            scrgb.swapchain_encoding().encode([1.0, 0.5, 0.0, 1.0]),
+            [2.5, 1.25, 0.0, 1.0]
+        );
+        // A display dimmer than the white level: no roll-off below reference white.
+        let dim = OutputLevels {
+            peak_nits: 150.0,
+            ..scrgb
+        };
+        assert_eq!(dim.peak(), 1.0);
+
+        let hdr10 = OutputLevels {
+            color: OutputColor::Hdr10,
+            ..scrgb
+        };
+        let [r, g, b, a] = hdr10.swapchain_encoding().encode([1.0, 1.0, 1.0, 0.5]);
+        // White keeps equal channels through the primaries' conversion.
+        let white = pq_encode(200.0 / PQ_MAX_NITS);
+        for c in [r, g, b] {
+            assert!((c - white).abs() < 1e-4, "{c} vs {white}");
+        }
+        assert_eq!(a, 0.5);
     }
 }

@@ -50,7 +50,8 @@ impl QuadMode {
 /// longer batches are split (a draw call per 16384 quads).
 const QUADS_PER_DRAW: u32 = 16_384;
 
-/// `Push` in `shaders/sprite.slang` (88 bytes).
+/// `Push` in `shaders/sprite.slang` (96 bytes).
+#[derive(Clone, Copy)]
 #[repr(C)]
 struct Push {
     clip_from_world: [f32; 16],
@@ -58,9 +59,23 @@ struct Push {
     order: vk::DeviceAddress,
     aa_expand: f32,
     view_flags: u32,
+    white: f32,
+    _pad: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<Push>() == 88);
+const _: () = assert!(core::mem::size_of::<Push>() == 96);
+
+impl Push {
+    fn bytes(&self) -> &[u8] {
+        // SAFETY: `Push` is plain `repr(C)` data without padding (asserted size).
+        unsafe {
+            core::slice::from_raw_parts(
+                (self as *const Self).cast::<u8>(),
+                core::mem::size_of::<Self>(),
+            )
+        }
+    }
+}
 const VIEW_Y_DOWN: u32 = 1;
 const VIEW_INDIRECT: u32 = 2;
 
@@ -96,12 +111,14 @@ pub struct Renderer2d {
     mode: QuadMode,
     index_buffer: vk::Buffer,
     index_allocation: Option<Allocation>,
+    white: f32,
 }
 
 impl core::fmt::Debug for Renderer2d {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("Renderer2d")
             .field("mode", &self.mode)
+            .field("white", &self.white)
             .finish_non_exhaustive()
     }
 }
@@ -180,12 +197,26 @@ impl Renderer2d {
             mode,
             index_buffer,
             index_allocation,
+            white: 1.0,
         })
     }
 
     /// The vertex generation mode.
     pub fn mode(&self) -> QuadMode {
         self.mode
+    }
+
+    /// The value white (1.0) is written as in later passes: 1 for SDR targets and HDR
+    /// intermediates (the default), SDR white in scRGB units (nits / 80) for an scRGB
+    /// swapchain (ADR 0038). Scales colors, textures and the clear color; multiplied quads
+    /// are factors and stay as they are.
+    pub fn set_white(&mut self, white: f32) {
+        self.white = white;
+    }
+
+    /// See [`Self::set_white`].
+    pub fn white(&self) -> f32 {
+        self.white
     }
 
     /// Declares a pass named "2d" that draws `canvas` into `target`, cleared first when
@@ -223,14 +254,21 @@ impl Renderer2d {
             order_address = staged.address;
             view_flags |= VIEW_INDIRECT;
         }
+        let white = self.white;
         let push = Push {
             clip_from_world: view.clip_from_world.to_cols_array(),
             instances: instances.address,
             order: order_address,
             aa_expand: view.units_per_pixel,
             view_flags,
+            white,
+            _pad: 0,
         };
-        let load = clear.map_or(LoadOp::Load, LoadOp::Clear);
+        // Multiplied quads scale what is below them: factors, not light.
+        let multiply_push = Push { white: 1.0, ..push };
+        let load = clear.map_or(LoadOp::Load, |[r, g, b, a]| {
+            LoadOp::Clear([r * white, g * white, b * white, a])
+        });
         let (pipelines, mode, index_buffer) = (&self.pipelines, self.mode, self.index_buffer);
         fg.add_pass("2d")
             .color(target, load, StoreOp::Store)
@@ -241,19 +279,11 @@ impl Renderer2d {
                 let area = ctx.render_area();
                 let device = ctx.device;
                 let cmd = ctx.cmd;
-                // SAFETY: `Push` is plain `repr(C)` data without padding.
-                let push_bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        (&raw const push).cast::<u8>(),
-                        core::mem::size_of::<Push>(),
-                    )
-                };
                 // SAFETY: recording inside the pass's rendering scope; the instances are
                 // in the ring slot of this frame; the index buffer lives as long as the
                 // renderer ('g).
                 unsafe {
                     bindless.bind(cmd, vk::PipelineBindPoint::GRAPHICS);
-                    bindless.push_constants(cmd, push_bytes);
                     device.cmd_set_viewport(
                         cmd,
                         0,
@@ -274,6 +304,12 @@ impl Renderer2d {
                         if batch.pipeline() != bound_pipeline {
                             bound_pipeline = batch.pipeline();
                             pipelines[usize::from(bound_pipeline)].bind(cmd);
+                            let constants = if bound_pipeline == PIPELINE_MULTIPLY {
+                                &multiply_push
+                            } else {
+                                &push
+                            };
+                            bindless.push_constants(cmd, constants.bytes());
                         }
                         if batch.clip() != bound_clip {
                             bound_clip = batch.clip();

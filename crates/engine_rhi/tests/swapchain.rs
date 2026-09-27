@@ -8,7 +8,7 @@ mod common;
 
 use common::{TrianglePipeline, assert_no_validation_errors, gpu};
 use engine_rhi::ash::vk;
-use engine_rhi::{Frames, PresentMode, Surface, Swapchain, SwapchainDesc};
+use engine_rhi::{Frames, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc};
 
 #[test]
 fn headless_present_loop_with_resize() {
@@ -36,6 +36,7 @@ fn headless_present_loop_with_resize() {
             height: 96,
             present_mode: PresentMode::Mailbox,
             srgb: true,
+            color: OutputColor::Sdr,
             low_latency: false,
         },
     )

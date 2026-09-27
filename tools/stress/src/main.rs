@@ -378,7 +378,7 @@ mod windowed {
     use engine_rhi::ash::vk;
     use engine_rhi::{
         AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
-        PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
+        OutputColor, PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
     };
     use std::time::Duration;
 
@@ -409,6 +409,7 @@ mod windowed {
                 height: 1080,
                 present_mode: PresentMode::Immediate,
                 srgb: true,
+                color: OutputColor::Sdr,
                 low_latency: false,
             },
         )

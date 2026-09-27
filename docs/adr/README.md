@@ -45,6 +45,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0035](0035-occlusion-culling.md) | Two-phase occlusion culling (hierarchical depth) | Accepted |
 | [0036](0036-fonts-and-icons.md) | Default fonts and icons; OFL-1.1 and CC BY 4.0 for font and icon assets | Accepted |
 | [0037](0037-checks-on-the-reference-machine.md) | Checks on the reference machine before merging; GitHub Actions on demand | Accepted |
+| [0038](0038-hdr-output.md) | HDR output: scRGB by default, following Windows at run time | Accepted |
 
 ## Template
 

@@ -128,6 +128,91 @@ impl PresentMode {
     }
 }
 
+/// What a swapchain's images hold and how the display reads them (ADR 0038).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OutputColor {
+    /// SDR: 8-bit sRGB (`B8G8R8A8_SRGB`, or `_UNORM` without
+    /// [`SwapchainDesc::srgb`]). Shaders write linear values in 0..1.
+    Sdr,
+    /// HDR as scRGB: linear FP16 with BT.709 primaries, 1.0 = 80 nits; values above SDR
+    /// white are brighter, negative ones reach colors outside BT.709
+    /// (`R16G16B16A16_SFLOAT`, `EXTENDED_SRGB_LINEAR`). Windows composes in it, and
+    /// blending stays linear.
+    ScRgb,
+    /// HDR10: PQ-encoded BT.2020 in 10 bits (`A2B10G10R10_UNORM_PACK32`,
+    /// `HDR10_ST2084`). Half the bytes of scRGB, but shaders encode it themselves and
+    /// blending in it is not linear.
+    Hdr10,
+}
+
+impl OutputColor {
+    /// Whether this is an HDR output.
+    pub fn is_hdr(self) -> bool {
+        self != Self::Sdr
+    }
+
+    /// Formats (best first) and the color space of this output.
+    fn candidates(self, srgb: bool) -> (&'static [vk::Format], vk::ColorSpaceKHR) {
+        match self {
+            Self::Sdr if srgb => (
+                &[vk::Format::B8G8R8A8_SRGB, vk::Format::R8G8B8A8_SRGB],
+                vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            ),
+            Self::Sdr => (
+                &[vk::Format::B8G8R8A8_UNORM, vk::Format::R8G8B8A8_UNORM],
+                vk::ColorSpaceKHR::SRGB_NONLINEAR,
+            ),
+            Self::ScRgb => (
+                &[vk::Format::R16G16B16A16_SFLOAT],
+                vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT,
+            ),
+            Self::Hdr10 => (
+                &[
+                    vk::Format::A2B10G10R10_UNORM_PACK32,
+                    vk::Format::A2R10G10B10_UNORM_PACK32,
+                ],
+                vk::ColorSpaceKHR::HDR10_ST2084_EXT,
+            ),
+        }
+    }
+
+    /// What to try when `self` is asked for: itself, the other HDR encoding, then SDR.
+    fn fallbacks(self) -> &'static [Self] {
+        match self {
+            Self::Sdr => &[Self::Sdr],
+            Self::ScRgb => &[Self::ScRgb, Self::Hdr10, Self::Sdr],
+            Self::Hdr10 => &[Self::Hdr10, Self::ScRgb, Self::Sdr],
+        }
+    }
+
+    /// The first of `formats` this output can use.
+    fn pick(self, srgb: bool, formats: &[vk::SurfaceFormatKHR]) -> Option<vk::SurfaceFormatKHR> {
+        let (wanted, space) = self.candidates(srgb);
+        wanted.iter().find_map(|want| {
+            formats
+                .iter()
+                .find(|f| f.format == *want && f.color_space == space)
+                .copied()
+        })
+    }
+}
+
+/// What an HDR swapchain's content spans (`VK_EXT_hdr_metadata`: the SMPTE ST 2086
+/// mastering display and CTA-861.3 content light levels). A display that tone maps by
+/// itself decides from it how much to compress; content already tone mapped for the
+/// display states the display's own range, so that it is left alone.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct HdrMetadata {
+    /// Peak luminance of the mastering display, nits.
+    pub max_nits: f32,
+    /// Black level of the mastering display, nits.
+    pub min_nits: f32,
+    /// Brightest pixel of the content (MaxCLL), nits.
+    pub max_content_nits: f32,
+    /// Brightest frame average of the content (MaxFALL), nits.
+    pub max_frame_average_nits: f32,
+}
+
 /// Parameters for [`Swapchain::new`].
 #[derive(Debug, Clone, Copy)]
 pub struct SwapchainDesc {
@@ -137,8 +222,13 @@ pub struct SwapchainDesc {
     pub height: u32,
     /// Requested present mode; falls back to [`PresentMode::Fifo`] if unsupported.
     pub present_mode: PresentMode,
-    /// Prefer an sRGB format (the GPU encodes on write).
+    /// Prefer an sRGB format (the GPU encodes on write) for SDR output.
     pub srgb: bool,
+    /// Requested output; falls back to the other HDR encoding, then to SDR, when the
+    /// surface does not offer it ([`Swapchain::color`] tells what was used). Ask for HDR
+    /// only while the display runs in HDR: Windows clips an HDR swapchain on an SDR
+    /// display to SDR white.
+    pub color: OutputColor,
     /// Create the swapchain for NVIDIA's low-latency mode (`VK_NV_low_latency2`, Reflex)
     /// when the device has it; `engine_latency` drives it.
     pub low_latency: bool,
@@ -163,9 +253,13 @@ pub struct Swapchain {
     /// only be reused once that image is acquired again (the classic reuse hazard).
     render_finished: Vec<vk::Semaphore>,
     format: vk::SurfaceFormatKHR,
+    color: OutputColor,
     extent: vk::Extent2D,
     present_mode: PresentMode,
     desc: SwapchainDesc,
+    /// `VK_EXT_hdr_metadata`, and the metadata last set (stated again for every new
+    /// swapchain object).
+    hdr_metadata: Option<(ash::ext::hdr_metadata::Device, Option<HdrMetadata>)>,
     latency: crate::device::LatencyExtensions,
     present_wait: Option<ash::khr::present_wait::Device>,
     /// Largest present id sent so far: ids must keep increasing for the swapchain's whole
@@ -179,6 +273,7 @@ impl core::fmt::Debug for Swapchain {
         f.debug_struct("Swapchain")
             .field("images", &self.images.len())
             .field("format", &self.format.format)
+            .field("color", &self.color)
             .field("extent", &self.extent)
             .field("present_mode", &self.present_mode)
             .finish()
@@ -196,9 +291,16 @@ impl Swapchain {
             views: Vec::new(),
             render_finished: Vec::new(),
             format: vk::SurfaceFormatKHR::default(),
+            color: OutputColor::Sdr,
             extent: vk::Extent2D::default(),
             present_mode: desc.present_mode,
             desc: *desc,
+            hdr_metadata: device.hdr_metadata_enabled().then(|| {
+                (
+                    ash::ext::hdr_metadata::Device::new(device.instance_raw(), device.raw()),
+                    None,
+                )
+            }),
             latency: device.latency_extensions(),
             present_wait: device
                 .latency_extensions()
@@ -212,8 +314,8 @@ impl Swapchain {
     }
 
     /// Recreates the swapchain for a new size (after `Resized`, out-of-date or
-    /// suboptimal). The caller must make sure no submitted work still uses the old images
-    /// (for example `Frames::wait_idle`).
+    /// suboptimal). Waits for the device to go idle: the old images may still be in
+    /// submitted work or being presented.
     pub fn recreate(
         &mut self,
         device: &Device,
@@ -221,6 +323,21 @@ impl Swapchain {
         width: u32,
         height: u32,
     ) -> Result<(), RhiError> {
+        self.build(device, surface, width, height)
+    }
+
+    /// Recreates the swapchain for another output (HDR turned on or off); the format may
+    /// change with it ([`Swapchain::format`]). Same conditions as
+    /// [`Swapchain::recreate`].
+    pub fn recreate_with_color(
+        &mut self,
+        device: &Device,
+        surface: &Surface,
+        width: u32,
+        height: u32,
+        color: OutputColor,
+    ) -> Result<(), RhiError> {
+        self.desc.color = color;
         self.build(device, surface, width, height)
     }
 
@@ -255,21 +372,8 @@ impl Swapchain {
         }
         .map_err(RhiError::vk("vkGetPhysicalDeviceSurfacePresentModesKHR"))?;
 
-        let preferred = if self.desc.srgb {
-            [vk::Format::B8G8R8A8_SRGB, vk::Format::R8G8B8A8_SRGB]
-        } else {
-            [vk::Format::B8G8R8A8_UNORM, vk::Format::R8G8B8A8_UNORM]
-        };
-        let format = preferred
-            .iter()
-            .find_map(|want| {
-                formats.iter().find(|f| {
-                    f.format == *want && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-                })
-            })
-            .or_else(|| formats.first())
-            .copied()
-            .ok_or(RhiError::Vulkan {
+        let (color, format) =
+            choose_format(self.desc.color, self.desc.srgb, &formats).ok_or(RhiError::Vulkan {
                 call: "surface has no formats",
                 result: vk::Result::ERROR_FORMAT_NOT_SUPPORTED,
             })?;
@@ -321,9 +425,18 @@ impl Swapchain {
         // retired by this call and destroyed below after its views.
         let raw = unsafe { self.loader.create_swapchain(&info, None) }
             .map_err(RhiError::vk("vkCreateSwapchainKHR"))?;
+        if old != vk::SwapchainKHR::null() {
+            // The last presents of the old images may still wait on their semaphores:
+            // finished frames do not prove finished presents, and without the present
+            // fences of VK_EXT_swapchain_maintenance1 only an idle device does.
+            // Recreation is rare. (An error here is device loss, which the next call
+            // reports.)
+            // SAFETY: plain wait.
+            let _ = unsafe { self.device.device_wait_idle() };
+        }
         self.destroy_views();
         if old != vk::SwapchainKHR::null() {
-            // SAFETY: the caller guaranteed no work uses the old images.
+            // SAFETY: the device is idle; nothing uses the old images.
             unsafe { self.loader.destroy_swapchain(old, None) };
         }
         self.raw = raw;
@@ -349,9 +462,41 @@ impl Swapchain {
             self.render_finished.push(semaphore);
         }
         self.format = format;
+        self.color = color;
         self.extent = extent;
         self.present_mode = present_mode;
+        if let Some((_, Some(metadata))) = self.hdr_metadata {
+            self.set_hdr_metadata(&metadata);
+        }
         Ok(())
+    }
+
+    /// States the luminance range of the content (`VK_EXT_hdr_metadata`); kept across
+    /// recreation. Ignored for SDR output and without the extension
+    /// ([`Device::hdr_metadata_enabled`]).
+    pub fn set_hdr_metadata(&mut self, metadata: &HdrMetadata) {
+        let Some((loader, stored)) = &mut self.hdr_metadata else {
+            return;
+        };
+        *stored = Some(*metadata);
+        let primaries = match self.color {
+            OutputColor::Sdr => return,
+            OutputColor::ScRgb => BT709_PRIMARIES,
+            OutputColor::Hdr10 => BT2020_PRIMARIES,
+        };
+        let xy = |[x, y]: [f32; 2]| vk::XYColorEXT { x, y };
+        let info = vk::HdrMetadataEXT::default()
+            .display_primary_red(xy(primaries[0]))
+            .display_primary_green(xy(primaries[1]))
+            .display_primary_blue(xy(primaries[2]))
+            .white_point(xy(D65_WHITE))
+            .max_luminance(metadata.max_nits)
+            .min_luminance(metadata.min_nits)
+            .max_content_light_level(metadata.max_content_nits)
+            .max_frame_average_light_level(metadata.max_frame_average_nits);
+        // SAFETY: the swapchain belongs to the device the loader was made for; host access
+        // to it is synchronized by `&mut self`.
+        unsafe { loader.set_hdr_metadata(&[self.raw], &[info]) };
     }
 
     fn destroy_views(&mut self) {
@@ -474,6 +619,11 @@ impl Swapchain {
         self.format.format
     }
 
+    /// What the images hold: SDR, scRGB or HDR10.
+    pub fn color(&self) -> OutputColor {
+        self.color
+    }
+
     /// Image size.
     pub fn extent(&self) -> vk::Extent2D {
         self.extent
@@ -482,6 +632,34 @@ impl Swapchain {
     /// Present mode actually in use.
     pub fn present_mode(&self) -> PresentMode {
         self.present_mode
+    }
+
+    /// Outputs this surface offers, for the settings menu. HDR ones need
+    /// `VK_EXT_swapchain_colorspace` ([`Instance::hdr_color_spaces_enabled`]); a surface
+    /// may offer them while the display runs in SDR.
+    pub fn supported_colors(
+        device: &Device,
+        surface: &Surface,
+    ) -> Result<Vec<OutputColor>, RhiError> {
+        let formats = Self::surface_formats(device, surface)?;
+        Ok([OutputColor::Sdr, OutputColor::ScRgb, OutputColor::Hdr10]
+            .into_iter()
+            .filter(|c| c.pick(true, &formats).is_some() || c.pick(false, &formats).is_some())
+            .collect())
+    }
+
+    /// Every format and color space the surface offers, for diagnostics.
+    pub fn surface_formats(
+        device: &Device,
+        surface: &Surface,
+    ) -> Result<Vec<vk::SurfaceFormatKHR>, RhiError> {
+        // SAFETY: the physical device and surface belong to the same instance.
+        unsafe {
+            surface
+                .loader
+                .get_physical_device_surface_formats(device.physical(), surface.raw)
+        }
+        .map_err(RhiError::vk("vkGetPhysicalDeviceSurfaceFormatsKHR"))
     }
 
     /// Supported present modes on this surface, for the settings menu.
@@ -512,6 +690,27 @@ impl Drop for Swapchain {
     }
 }
 
+/// The output and surface format for a request of `color`: its format when offered, else
+/// the other HDR encoding, else SDR, else whatever the surface lists first.
+fn choose_format(
+    color: OutputColor,
+    srgb: bool,
+    formats: &[vk::SurfaceFormatKHR],
+) -> Option<(OutputColor, vk::SurfaceFormatKHR)> {
+    color
+        .fallbacks()
+        .iter()
+        .find_map(|&color| Some((color, color.pick(srgb, formats)?)))
+        .or_else(|| formats.first().map(|&f| (OutputColor::Sdr, f)))
+}
+
+/// CIE xy of the BT.709 / sRGB primaries (red, green, blue).
+const BT709_PRIMARIES: [[f32; 2]; 3] = [[0.640, 0.330], [0.300, 0.600], [0.150, 0.060]];
+/// CIE xy of the BT.2020 primaries.
+const BT2020_PRIMARIES: [[f32; 2]; 3] = [[0.708, 0.292], [0.170, 0.797], [0.131, 0.046]];
+/// CIE xy of the D65 white point.
+const D65_WHITE: [f32; 2] = [0.3127, 0.3290];
+
 /// Subresource range of a single-mip, single-layer color image.
 pub fn color_range() -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange {
@@ -520,5 +719,65 @@ pub fn color_range() -> vk::ImageSubresourceRange {
         level_count: 1,
         base_array_layer: 0,
         layer_count: 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn formats(list: &[(vk::Format, vk::ColorSpaceKHR)]) -> Vec<vk::SurfaceFormatKHR> {
+        list.iter()
+            .map(|&(format, color_space)| vk::SurfaceFormatKHR {
+                format,
+                color_space,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn output_falls_back_to_what_the_surface_offers() {
+        use vk::ColorSpaceKHR as C;
+        use vk::Format as F;
+        // What NVIDIA lists on ref-1 (whether Windows runs the display in HDR or not).
+        let nvidia = formats(&[
+            (F::B8G8R8A8_UNORM, C::SRGB_NONLINEAR),
+            (F::B8G8R8A8_SRGB, C::SRGB_NONLINEAR),
+            (F::R16G16B16A16_SFLOAT, C::EXTENDED_SRGB_LINEAR_EXT),
+            (F::A2B10G10R10_UNORM_PACK32, C::HDR10_ST2084_EXT),
+            (F::A2B10G10R10_UNORM_PACK32, C::SRGB_NONLINEAR),
+        ]);
+        // What the Radeon lists for a display attached to the other GPU.
+        let sdr_only = formats(&[
+            (F::R8G8B8A8_UNORM, C::SRGB_NONLINEAR),
+            (F::B8G8R8A8_SRGB, C::SRGB_NONLINEAR),
+        ]);
+        let hdr10_only = formats(&[
+            (F::B8G8R8A8_SRGB, C::SRGB_NONLINEAR),
+            (F::A2R10G10B10_UNORM_PACK32, C::HDR10_ST2084_EXT),
+        ]);
+        let pick = |color, list: &[vk::SurfaceFormatKHR]| {
+            choose_format(color, true, list).map(|(c, f)| (c, f.format))
+        };
+        use OutputColor::{Hdr10, ScRgb, Sdr};
+        assert_eq!(pick(Sdr, &nvidia), Some((Sdr, F::B8G8R8A8_SRGB)));
+        assert_eq!(pick(ScRgb, &nvidia), Some((ScRgb, F::R16G16B16A16_SFLOAT)));
+        assert_eq!(
+            pick(Hdr10, &nvidia),
+            Some((Hdr10, F::A2B10G10R10_UNORM_PACK32))
+        );
+        assert_eq!(pick(ScRgb, &sdr_only), Some((Sdr, F::B8G8R8A8_SRGB)));
+        assert_eq!(
+            pick(ScRgb, &hdr10_only),
+            Some((Hdr10, F::A2R10G10B10_UNORM_PACK32))
+        );
+        assert_eq!(
+            choose_format(Sdr, false, &nvidia).map(|(_, f)| f.format),
+            Some(F::B8G8R8A8_UNORM)
+        );
+        // A surface without any of ours: its first format, treated as SDR.
+        let odd = formats(&[(F::R5G6B5_UNORM_PACK16, C::SRGB_NONLINEAR)]);
+        assert_eq!(pick(ScRgb, &odd), Some((Sdr, F::R5G6B5_UNORM_PACK16)));
+        assert_eq!(pick(ScRgb, &[]), None);
     }
 }

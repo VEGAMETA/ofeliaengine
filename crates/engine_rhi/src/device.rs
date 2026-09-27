@@ -62,6 +62,8 @@ pub struct Device {
     raw: ash::Device,
     adapter: Adapter,
     latency: LatencyExtensions,
+    /// `VK_EXT_hdr_metadata` is enabled.
+    hdr_metadata: bool,
     /// Graphics + compute + transfer (+ present on a desktop GPU).
     pub graphics: Queue,
     /// A compute queue on a family without graphics (async compute), if the GPU has one.
@@ -172,6 +174,11 @@ impl Device {
         if adapter.caps.memory_budget {
             extensions.push(ash::ext::memory_budget::NAME.as_ptr());
         }
+        // Mastering metadata for HDR swapchains.
+        let hdr_metadata = presenting && adapter.caps.hdr_metadata;
+        if hdr_metadata {
+            extensions.push(ash::ext::hdr_metadata::NAME.as_ptr());
+        }
 
         // Latency extensions: query their features first (only for extensions the
         // adapter lists), then enable what is supported.
@@ -248,6 +255,7 @@ impl Device {
             raw,
             adapter: adapter.clone(),
             latency,
+            hdr_metadata,
             instance: instance.shared.clone(),
         })
     }
@@ -255,6 +263,13 @@ impl Device {
     /// Which latency extensions are enabled.
     pub fn latency_extensions(&self) -> LatencyExtensions {
         self.latency
+    }
+
+    /// Whether `VK_EXT_hdr_metadata` is enabled ([`Swapchain::set_hdr_metadata`]).
+    ///
+    /// [`Swapchain::set_hdr_metadata`]: crate::Swapchain::set_hdr_metadata
+    pub fn hdr_metadata_enabled(&self) -> bool {
+        self.hdr_metadata
     }
 
     /// The ash device, for calls this layer does not wrap yet.

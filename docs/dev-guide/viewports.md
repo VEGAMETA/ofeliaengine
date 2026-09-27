@@ -70,6 +70,12 @@ viewports.composite(&mut fg, &tonemap, &bindless, backbuffer,
 
 Only viewports that are due this frame call your closure, and children come first.
 
+On an HDR display, call `viewports.set_output_levels(levels)` whenever the output
+changes (`docs/dev-guide/hdr.md`): `composite` then rolls highlights off towards the
+display's peak and writes the swapchain's encoding (scRGB or HDR10), including the clear
+color. Changing a viewport's `format` (for example from sRGB to `HDR_FORMAT` when HDR
+turns on) recreates its texture on the next `render`.
+
 ## 3. Showing a viewport inside another
 
 `viewports.texture_index(minimap)` is the minimap's texture index. Use it like any

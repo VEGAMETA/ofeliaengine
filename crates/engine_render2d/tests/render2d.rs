@@ -370,3 +370,190 @@ fn sprites_and_shapes() {
     );
     assert_eq!(report.errors, 0, "{:#?}", report.first_errors);
 }
+
+/// HDR output (ADR 0038): `Renderer2d::set_white` scales light (colors, blended layers,
+/// the clear color) and leaves multiplied quads, which are factors, alone.
+#[test]
+fn white_scales_light_but_not_factors() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let d = device.raw();
+    let mut allocator = Allocator::new(&device);
+    let bindless = Bindless::new(&device).unwrap();
+    const N: u32 = 32;
+    let format = vk::Format::R32G32B32A32_SFLOAT;
+    let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
+    let mut graph = RenderGraph::new(&device, 1);
+    let mut renderer = Renderer2d::new(
+        &device,
+        &mut allocator,
+        &bindless,
+        format,
+        QuadMode::for_device(&device),
+    )
+    .unwrap();
+    renderer.set_white(2.5);
+    let bytes = u64::from(N * N * 16);
+    let (readback, readback_mem) = allocator
+        .create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(bytes)
+                .usage(vk::BufferUsageFlags::TRANSFER_DST),
+            MemoryLocation::Readback,
+        )
+        .unwrap();
+    // SAFETY: plain object creation.
+    let (pool, cmd) = unsafe {
+        let pool = d
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default().queue_family_index(device.graphics.family),
+                None,
+            )
+            .unwrap();
+        let cmd = d
+            .allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .command_buffer_count(1),
+            )
+            .unwrap()[0];
+        (pool, cmd)
+    };
+    // Left half: an opaque color, its lower quarter multiplied by 0.5. Right half: the
+    // clear color, its lower quarter under 50 % white.
+    let mut canvas = Canvas::new();
+    canvas.draw(
+        &Quad::rect(Vec2::new(8.0, 16.0), Vec2::new(16.0, 32.0))
+            .color(Vec4::new(0.4, 0.2, 1.0, 1.0)),
+    );
+    canvas.draw(
+        &Quad::rect(Vec2::new(8.0, 28.0), Vec2::new(16.0, 8.0))
+            .color(Vec4::new(0.5, 0.5, 0.5, 1.0))
+            .blend(Blend2d::Multiply),
+    );
+    canvas.draw(
+        &Quad::rect(Vec2::new(24.0, 28.0), Vec2::new(16.0, 8.0))
+            .color(Vec4::new(1.0, 1.0, 1.0, 0.5)),
+    );
+    canvas.prepare();
+    // SAFETY: one-shot recording and submission, then wait.
+    unsafe {
+        d.begin_command_buffer(
+            cmd,
+            &vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        )
+        .unwrap();
+    }
+    ring.begin_slot(0);
+    {
+        // SAFETY: nothing is in flight.
+        let mut fg = unsafe { graph.begin_slot(0, cmd) };
+        let color = fg.create_texture("color", TextureDesc::new_2d(format, N, N));
+        let out = fg.import_buffer(
+            "readback",
+            ImportedBuffer {
+                buffer: readback,
+                size: bytes,
+                address: 0,
+                initial: BufferState::idle(),
+                final_state: Some(BufferState::host_read()),
+            },
+        );
+        renderer
+            .add_pass(
+                &mut fg,
+                &mut ring,
+                &bindless,
+                &canvas,
+                &View2d::pixels(N, N),
+                color,
+                Some([0.2, 0.4, 0.1, 1.0]),
+            )
+            .unwrap();
+        fg.add_pass("read back")
+            .read(color, Access::TransferRead)
+            .write(out, Access::TransferWrite)
+            .execute(move |ctx| {
+                let region = vk::BufferImageCopy {
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_extent: vk::Extent3D {
+                        width: N,
+                        height: N,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: recording; layouts arranged by the graph.
+                unsafe {
+                    ctx.device.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        ctx.image(color),
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(out),
+                        &[region],
+                    );
+                }
+            });
+        fg.execute_with_bindless(&mut allocator, Some(&bindless))
+            .unwrap();
+    }
+    // SAFETY: as above.
+    unsafe {
+        d.end_command_buffer(cmd).unwrap();
+        let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+        d.queue_submit2(
+            device.graphics.raw,
+            &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
+            vk::Fence::null(),
+        )
+        .unwrap();
+        device.wait_idle().unwrap();
+    }
+    // SAFETY: the GPU is idle; the mapping covers the image.
+    let pixels: &[[f32; 4]] = unsafe {
+        core::slice::from_raw_parts(
+            readback_mem
+                .mapped_ptr()
+                .unwrap()
+                .as_ptr()
+                .cast::<[f32; 4]>(),
+            (N * N) as usize,
+        )
+    };
+    let at = |x: u32, y: u32| pixels[(y * N + x) as usize];
+    let near = |got: [f32; 4], want: [f32; 4], what: &str| {
+        let close = got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-3);
+        assert!(close, "{what}: {got:?}, {want:?} expected");
+    };
+    near(at(8, 8), [1.0, 0.5, 2.5, 1.0], "color × white");
+    near(
+        at(8, 28),
+        [0.5, 0.25, 1.25, 1.0],
+        "multiplied by 0.5, not by 0.5 × white",
+    );
+    near(at(24, 8), [0.5, 1.0, 0.25, 1.0], "clear color × white");
+    near(
+        at(24, 28),
+        [1.5, 1.75, 1.375, 1.0],
+        "half the clear color plus half of white × white",
+    );
+    // SAFETY: the device is idle.
+    unsafe {
+        renderer.destroy(&mut allocator);
+        graph.destroy(&mut allocator, Some(&bindless));
+        ring.destroy(&mut allocator);
+        allocator.destroy_buffer(readback, readback_mem);
+        d.destroy_command_pool(pool, None);
+    }
+    drop(bindless);
+    drop(allocator);
+    let report = instance.validation_report();
+    assert_eq!(report.errors, 0, "{:#?}", report.first_errors);
+}

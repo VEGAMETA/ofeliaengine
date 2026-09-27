@@ -14,6 +14,7 @@ workspace = true
 # that the workspace still builds and tests in Linux containers.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    "Win32_Devices_Display",
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
     "Win32_Security",

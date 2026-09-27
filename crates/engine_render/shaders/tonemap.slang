@@ -3,16 +3,26 @@
 // through the bindless arrays and applies exposure and the Khronos PBR Neutral tone
 // mapper (implemented from its published description: linear below the knee, a smooth
 // highlight roll-off, desaturation of very bright colors).
+//
+// HDR output (ADR 0038): values are in units of reference white (SDR white), and the
+// tone mapper rolls highlights off towards `peak`, the display's peak luminance over
+// reference white, instead of towards 1. The same pass encodes HDR10 (BT.2020 primaries,
+// PQ) for swapchains that need it.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 
+static const uint FLAG_PASS_THROUGH = 1; // exposure only, no tone mapping (LDR sources)
+static const uint FLAG_ENCODE_PQ = 2;    // HDR10 output: BT.2020 primaries, PQ encoding
+
 struct Push
 {
-    uint source;    // bindless index of the HDR texture
+    uint source;    // bindless index of the source texture
     uint sampler;   // bindless sampler index
-    float exposure; // linear multiplier
-    uint flags;     // bit 0: pass through (exposure only, no tone mapping) for LDR sources
+    float exposure; // linear multiplier before tone mapping
+    uint flags;
+    float peak;     // brightest tone-mapped value, in units of reference white (1: SDR)
+    float white;    // output value of reference white: linear, or nits / 10000 for PQ
 };
 
 [[vk::push_constant]]
@@ -35,21 +45,42 @@ VertexOut vertexMain(uint vertex_id : SV_VertexID)
     return o;
 }
 
-float3 pbr_neutral(float3 color)
+// PBR Neutral with its roll-off scaled to `peak`: the toe is unchanged, compression
+// starts at 0.76 · peak and approaches peak. With peak = 1 it is the published curve.
+float3 pbr_neutral(float3 color, float peak)
 {
     const float start_compression = 0.8 - 0.04;
     const float desaturation = 0.15;
     float x = min(color.r, min(color.g, color.b));
     float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
     color -= offset;
-    float peak = max(color.r, max(color.g, color.b));
-    if (peak < start_compression)
+    float brightest = max(color.r, max(color.g, color.b));
+    float start = start_compression * peak;
+    if (brightest < start)
         return color;
-    float d = 1.0 - start_compression;
-    float new_peak = 1.0 - d * d / (peak + d - start_compression);
-    color *= new_peak / peak;
-    float g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
+    float d = peak - start;
+    float new_peak = peak - d * d / (brightest + d - start);
+    color *= new_peak / brightest;
+    float g = 1.0 - 1.0 / (desaturation * (brightest - new_peak) / peak + 1.0);
     return lerp(color, float3(new_peak, new_peak, new_peak), g);
+}
+
+// BT.709 → BT.2020 primaries, both linear (ITU-R BT.2087).
+static const float3x3 BT2020_FROM_BT709 = float3x3(
+    0.6274040, 0.3292820, 0.0433136,
+    0.0690970, 0.9195400, 0.0113612,
+    0.0163916, 0.0880132, 0.8955950);
+
+// SMPTE ST 2084 (PQ) inverse EOTF: luminance / 10000 nits → signal.
+float3 pq_encode(float3 y)
+{
+    const float m1 = 2610.0 / 16384.0;
+    const float m2 = 2523.0 / 4096.0 * 128.0;
+    const float c1 = 3424.0 / 4096.0;
+    const float c2 = 2413.0 / 4096.0 * 32.0;
+    const float c3 = 2392.0 / 4096.0 * 32.0;
+    float3 p = pow(saturate(y), m1);
+    return pow((c1 + c2 * p) / (1.0 + c3 * p), m2);
 }
 
 [shader("fragment")]
@@ -57,5 +88,10 @@ float4 fragmentMain(VertexOut input) : SV_Target
 {
     float3 color = g_textures[NonUniformResourceIndex(push.source)]
         .SampleLevel(g_samplers[push.sampler], input.uv, 0).rgb * push.exposure;
-    return float4((push.flags & 1) != 0 ? color : pbr_neutral(color), 1.0);
+    if ((push.flags & FLAG_PASS_THROUGH) == 0)
+        color = pbr_neutral(color, push.peak);
+    color *= push.white;
+    if ((push.flags & FLAG_ENCODE_PQ) != 0)
+        color = pq_encode(mul(BT2020_FROM_BT709, color));
+    return float4(color, 1.0);
 }
