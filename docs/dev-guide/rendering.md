@@ -101,9 +101,10 @@ occlusion.reset();
   - In the benchmark's city (4 m walls around 10 m blocks), it drew 73 of 10,042 objects
     instead of 1,769.
   - It pays when what it skips costs more than its own passes (a depth pyramid and a second
-    culling pass, 25-35 µs on an RTX 4060 Ti, 215-250 µs on a Radeon iGPU at 1080p). On the
-    iGPU the city got 9% faster; on the RTX, with cubes that cost almost nothing to draw,
-    it got slower. Detailed meshes and expensive materials change that.
+    culling pass, 15-25 µs on an RTX 4060 Ti, 175-200 µs on a Radeon iGPU at 1080p, where
+    reading the depth buffer alone takes about 100 µs of memory bandwidth). On the iGPU the
+    city got 8-11% faster; on the RTX, with cubes that cost almost nothing to draw, it got
+    slower. Detailed meshes and expensive materials change that.
   - In an open field nothing hides anything, and the extra passes are pure cost.
   - Turn it on per camera, and compare with `draw_bench` on the GPUs you target.
 - The capacity is the number of draw items whose visibility is remembered. Items beyond
