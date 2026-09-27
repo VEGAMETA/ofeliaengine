@@ -1,10 +1,11 @@
-# 3D rendering: drawing many objects
+# 3D rendering: meshes, materials and many objects
 
 The forward renderer draws on the GPU's initiative (ADR 0034). You hand it a list of
-objects each frame. The GPU then:
+objects each frame, each a mesh, a material and a transform. The GPU then:
 
 - throws away what the camera cannot see;
-- draws everything that shares a mesh with one instanced draw call.
+- draws everything that shares a mesh and a kind of material with one instanced draw
+  call.
 
 The CPU cost of a frame barely depends on how many objects the list holds.
 
@@ -42,21 +43,97 @@ let geo = geometry.begin_frame(&mut fg, &device, &mut allocator, frame.number)?;
   Shadow passes read only the 12 bytes of the position.
 - `cube()` gives a unit cube with normals, tangents and texture coordinates for tests.
 
-## 2. The draw list
+## 2. Materials and textures
+
+Materials are glTF 2.0's metallic-roughness model (ADR 0040). Every material lives in one
+`MaterialTable`, every texture in one `TexturePool`:
 
 ```rust
-use engine_render::forward::{DrawItem, ForwardView, Material};
+use engine_assets::{TextureUsage, build_mips, decode_image};
+use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, TextureRef};
+use engine_render::texture_pool::{TextureLevels, TexturePool};
+
+// Uploads at most 64 MB of texture data per frame.
+let mut textures = TexturePool::new(&device, 64 << 20, IN_FLIGHT);
+let mut materials = MaterialTable::new(IN_FLIGHT);
+
+// A texture: decoded (PNG or JPEG) and given its mip levels for its use.
+let image = decode_image(&std::fs::read("bark_albedo.png")?)?;
+let mips = build_mips(&image, TextureUsage::Color);
+let bark = textures.add(&device, &mut allocator, TextureLevels {
+    width: mips.width,
+    height: mips.height,
+    srgb: mips.srgb,
+    levels: mips.levels,
+})?;
+
+let tree = materials.add(MaterialDesc {
+    base_color_texture: Some(TextureRef::new(bark)),
+    roughness: 0.8,
+    ..MaterialDesc::default()
+});
+let red_plastic = materials.add(MaterialDesc::solid([0.8, 0.1, 0.1], 0.0, 0.4));
+
+// Every frame, textures first, then materials, before the passes that draw:
+textures.begin_frame(&mut fg, &mut allocator, &bindless, frame.number)?;
+let mats = materials.begin_frame(&mut fg, &device, &mut allocator, &textures, frame.number)?;
+```
+
+- **Every glTF material parameter:**
+  - base color (factor × sRGB texture, with alpha);
+  - metallic and roughness (texture: blue and green);
+  - normal map with its scale;
+  - ambient occlusion (red) with its strength;
+  - emission (factor × sRGB texture; above 1 for bright emitters, the target is HDR).
+- **A missing texture is white:** the factor applies alone, and the shader skips the
+  sample.
+- **Pick the right `TextureUsage` when building mip levels:**
+  - `Color` for base color and emission: filtered in linear light, without dark fringes
+    around cut-outs;
+  - `ColorMasked { cutoff }` for base colors of alpha-tested materials: every level keeps
+    the share of opaque texels, so foliage does not thin out in the distance;
+  - `Data` for metallic-roughness and occlusion;
+  - `Normal` for normal maps (vectors, renormalized).
+- **Textures stream in.**
+  - `add` creates the image at once; its data uploads within the frame budget, oldest
+    first.
+  - Until then, materials using it shade without it. A scene appears at once and its
+    textures fill in over the next frames.
+- **Alpha:**
+  - `AlphaMode::Mask { cutoff }` discards texels below the cutoff, in the view and in
+    shadows (leaves, fences).
+  - Blended transparency comes with the transparency pass. Until then import glTF's
+    `BLEND` as opaque.
+- **`double_sided: true`** draws both faces. Back faces are lit from their own side, and
+  both faces cast shadows. Use it for leaves and cloth; closed meshes should stay
+  single-sided (half the fragments).
+- **Wrap modes** per texture reference: `TextureRef { texture, wrap: [Wrap::Repeat,
+  Wrap::ClampToEdge] }`. Filtering is always trilinear with 16× anisotropy.
+- **Edit and remove freely:**
+  - `materials.set(id, desc)` applies next frame;
+  - `materials.remove(id)`: draws that still use the id draw with the default material;
+  - `textures.remove(id, frame.number, &bindless)`: materials using it shade without it
+    from the next frame on, and its memory is freed once the GPU is done with it.
+- **Specular antialiasing is built in:** highlights on small and curved geometry widen
+  instead of flickering (Tokuyoshi and Kaplanyan's method, Filament's settings).
+- glTF import: `engine_assets::import_gltf` lists each material's textures and their wrap
+  modes, and `read_texture` loads a texture's encoded image. `examples/scene_bench.rs`
+  turns a whole glTF scene into textures, materials and draws, decoding textures in
+  parallel.
+- Not yet: texture compression (textures are RGBA8 for now: Sponza's take 363 MB),
+  `KHR_texture_transform`, a second set of texture coordinates, vertex colors.
+
+## 3. The draw list
+
+```rust
+use engine_render::forward::{DrawItem, ForwardView};
 
 draws.clear();
 for (transform, look) in scene_objects {
     draws.push(DrawItem {
         mesh: rock_mesh,
+        material: look.material,
         world_from_object: transform,
-        material: Material {
-            base_color: look.color,
-            metallic: 0.0,
-            roughness: 0.8,
-        },
     });
 }
 let passes = renderer.add_passes(
@@ -64,6 +141,7 @@ let passes = renderer.add_passes(
     &mut ring,
     &bindless,
     &geo,
+    &mats,
     &draws,
     &ForwardView {
         camera,
@@ -71,26 +149,31 @@ let passes = renderer.add_passes(
         color: hdr,
         depth,
         clear: Some(clear),
-        occlusion: None, // or Some(&occlusion): see section 4
+        occlusion: None, // or Some(&occlusion): see section 5
     },
 );
 ```
 
 - **Keep objects with the same mesh next to each other in the list.**
-  - Every run of consecutive items with the same mesh is one batch, and one batch is one
-    instanced draw.
+  - Every run of consecutive items with the same mesh and the same kind of material
+    (opaque or masked, single- or double-sided) is one batch, and one batch is one
+    instanced draw. Items of one batch may use different materials of that kind.
   - 10,000 rocks followed by 500 trees make 2 batches. The same objects interleaved make
     up to 10,500.
   - Both render correctly, but the first is the fast one.
+- **Batches are drawn front to back** (within each kind of material), so hidden fragments
+  are rejected before shading: on Sponza that halves the forward pass. You do not need to
+  sort anything yourself.
 - **Reuse the `Vec`** (`clear()` and refill) so a frame makes no heap allocations.
 - **Transforms are affine.** Translation, rotation and scale, including mirroring. The
-  bottom row of the matrix is ignored.
+  bottom row of the matrix is ignored. A mirrored object (negative determinant) keeps its
+  front faces and its normal maps the right way round, as glTF requires.
 - **The upload ring must fit the frame.** Size it with about 100 bytes per object plus a
   little per mesh.
   - `add_passes` returns `None` when the ring is full. It then declares nothing, and the
     frame has no 3D content.
 
-## 3. Culling
+## 4. Culling
 
 - Culling is on by default:
   - every object's bounding box, from the mesh's box and its transform, is tested
@@ -102,12 +185,12 @@ let passes = renderer.add_passes(
   debugging something that "disappears". Everything then counts as visible.
 - To count what was drawn:
   - `add_passes` returns `ForwardPasses`, whose `commands` buffer holds one Vulkan draw
-    command per batch;
+    command per batch (ordered by kind of material, then front to back);
   - after the frame, `instance_count` in each command is the number of visible objects.
   - `crates/engine_render/tests/culling.rs` and `examples/draw_bench.rs` show how to read
     it back.
 
-## 4. Occlusion culling: skipping what is hidden
+## 5. Occlusion culling: skipping what is hidden
 
 In a city, an interior or a dense forest, most objects in view are hidden behind nearer
 ones. Occlusion culling skips them (ADR 0035). Create one state per camera and pass it
@@ -146,7 +229,7 @@ occlusion.reset();
   it still render correctly, but are always tested in the late phase.
 - Free the state with `unsafe { occlusion.destroy(&mut allocator) }` once the GPU is idle.
 
-## 5. What it costs
+## 6. What it costs
 
 `cargo run -p engine_render --release --example draw_bench` prints the costs for 1k, 10k
 and 100k cubes, with the camera above the field, inside it and in a city of walls, and
@@ -158,13 +241,19 @@ culling off, frustum only, or frustum and occlusion:
 - how many objects were drawn.
 
 `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
-measures a real glTF scene (fetch scenes with `tools/fetch-test-assets.ps1`).
+measures a real glTF scene with its materials and textures, textured and with factors
+only (fetch scenes with `tools/fetch-test-assets.ps1`; `--screenshot out.png` saves the
+frame). `cargo run -p engine_assets --release --example texture_bench -- <scene>` measures
+texture decoding and mip generation.
 
-Results from the reference machine are in `docs/perf/history.md`, ADR 0035 and ADR 0039.
+Results from the reference machine are in `docs/perf/history.md` and ADRs 0035, 0039 and
+0040. On Sponza at 1080p the textured forward pass takes 0.39 ms on an RTX 4060 Ti and
+8.1 ms on a Radeon iGPU, whose memory bandwidth uncompressed textures exhaust (texture
+compression is next).
 
 Rules of thumb:
 
-- the CPU pays about 80 bytes of upload and a few dozen nanoseconds per object;
+- the CPU pays 64 bytes of upload and a few dozen nanoseconds per object;
 - the GPU culls millions of objects per millisecond;
 - the forward pass then costs what is on screen;
 - the shadow pass costs every object in the scene: shadows are fitted to the whole

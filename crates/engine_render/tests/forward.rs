@@ -5,11 +5,13 @@
 
 use engine_core::math::{Mat4, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
+use engine_render::material::{MaterialDesc, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
 use engine_render::post::{HDR_FORMAT, Tonemap};
+use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -82,6 +84,9 @@ fn pbr_lighting_and_shadows() {
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    let mut textures = TexturePool::new(&device, 1 << 20, 1);
+    let mut materials = MaterialTable::new(1);
+    let red = materials.add(MaterialDesc::solid([0.9, 0.2, 0.2], 0.0, 0.6));
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
 
@@ -118,21 +123,17 @@ fn pbr_lighting_and_shadows() {
     let draws = [
         DrawItem {
             mesh,
+            material: materials.default_material(),
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::new(8.0, 0.2, 8.0),
                 Default::default(),
                 Vec3::new(0.0, -0.1, 0.0),
             ),
-            material: Material::default(),
         },
         DrawItem {
             mesh,
+            material: red,
             world_from_object: Mat4::from_translation(Vec3::new(0.0, 1.5, 0.0)),
-            material: Material {
-                base_color: Vec3::new(0.9, 0.2, 0.2),
-                metallic: 0.0,
-                roughness: 0.6,
-            },
         },
     ];
     let eye = Vec3::new(0.0, 5.0, 6.0);
@@ -164,8 +165,15 @@ fn pbr_lighting_and_shadows() {
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            let frame_number = frame as u64 + 1;
             let geo = geometry
-                .begin_frame(&mut fg, &device, &mut allocator, frame as u64 + 1)
+                .begin_frame(&mut fg, &device, &mut allocator, frame_number)
+                .unwrap();
+            textures
+                .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
+                .unwrap();
+            let mats = materials
+                .begin_frame(&mut fg, &device, &mut allocator, &textures, frame_number)
                 .unwrap();
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, SIZE, SIZE));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
@@ -186,6 +194,7 @@ fn pbr_lighting_and_shadows() {
                     &mut ring,
                     &bindless,
                     &geo,
+                    &mats,
                     &draws,
                     &ForwardView {
                         camera,
@@ -203,6 +212,7 @@ fn pbr_lighting_and_shadows() {
                     &mut ring,
                     &bindless,
                     &geo,
+                    &mats,
                     &draws,
                     &ForwardView {
                         camera,
@@ -303,6 +313,8 @@ fn pbr_lighting_and_shadows() {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
+        materials.destroy(&mut allocator);
+        textures.destroy(&mut allocator, &bindless);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);
     }

@@ -14,12 +14,13 @@
 
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, Occlusion,
-    ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
+use engine_render::material::{MaterialDesc, MaterialId, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId, cube};
 use engine_render::post::HDR_FORMAT;
+use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -58,8 +59,17 @@ fn side(count: usize) -> f32 {
     (count as f32).sqrt().ceil() * SPACING
 }
 
-/// Instances on a square field (~1 cube per 4 m²), spinning; in the city, walls follow.
-fn fill(draws: &mut Vec<DrawItem>, mesh: MeshId, count: usize, frame: usize, city: bool) {
+/// Instances on a square field (~1 cube per 4 m²), spinning, colored from `palette` (the
+/// walls use its last material); in the city, walls follow.
+fn fill(
+    draws: &mut Vec<DrawItem>,
+    mesh: MeshId,
+    palette: &[MaterialId],
+    count: usize,
+    frame: usize,
+    city: bool,
+) {
+    let hues = palette.len() - 1;
     draws.clear();
     let per_row = (count as f32).sqrt().ceil() as usize;
     let half = side(count) * 0.5;
@@ -71,16 +81,12 @@ fn fill(draws: &mut Vec<DrawItem>, mesh: MeshId, count: usize, frame: usize, cit
         let h = (i as f32 * 0.618_034).fract();
         draws.push(DrawItem {
             mesh,
+            material: palette[(h * hues as f32) as usize % hues],
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::splat(0.8),
                 Quat::from_rotation_y(t + h * core::f32::consts::TAU),
                 p,
             ),
-            material: Material {
-                base_color: Vec3::new(0.3 + 0.6 * h, 0.5, 0.9 - 0.6 * h),
-                metallic: 0.0,
-                roughness: 0.5,
-            },
         });
     }
     if city {
@@ -102,8 +108,8 @@ fn fill(draws: &mut Vec<DrawItem>, mesh: MeshId, count: usize, frame: usize, cit
             ] {
                 draws.push(DrawItem {
                     mesh,
+                    material: palette[hues],
                     world_from_object,
-                    material: Material::default(),
                 });
             }
         }
@@ -176,6 +182,20 @@ fn main() {
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    let mut textures = TexturePool::new(&device, 64 << 20, 1);
+    let mut materials = MaterialTable::new(1);
+    // 64 hues from blue to red, then the walls' grey.
+    let mut palette: Vec<MaterialId> = (0..64)
+        .map(|k| {
+            let h = k as f32 / 64.0;
+            materials.add(MaterialDesc::solid(
+                [0.3 + 0.6 * h, 0.5, 0.9 - 0.6 * h],
+                0.0,
+                0.5,
+            ))
+        })
+        .collect();
+    palette.push(materials.default_material());
     let mut frame_number = 0u64;
     let capacity = max_instances as u64 + 1024;
     let mut ring = UploadRing::new(&device, &mut allocator, 1, capacity * 128).unwrap();
@@ -246,7 +266,7 @@ fn main() {
             let mut drawn = 0;
             for frame in 0..WARMUP + FRAMES {
                 let start = Instant::now();
-                fill(&mut draws, mesh, count, frame, view == View::City);
+                fill(&mut draws, mesh, &palette, count, frame, view == View::City);
                 let listed = start.elapsed();
                 // SAFETY: the previous frame finished (waited below).
                 unsafe {
@@ -264,11 +284,15 @@ fn main() {
                 {
                     // SAFETY: nothing is in flight.
                     let mut fg = unsafe { graph.begin_slot(0, cmd) };
+                    frame_number += 1;
                     let geo = geometry
-                        .begin_frame(&mut fg, &device, &mut allocator, {
-                            frame_number += 1;
-                            frame_number
-                        })
+                        .begin_frame(&mut fg, &device, &mut allocator, frame_number)
+                        .unwrap();
+                    textures
+                        .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
+                        .unwrap();
+                    let mats = materials
+                        .begin_frame(&mut fg, &device, &mut allocator, &textures, frame_number)
                         .unwrap();
                     let hdr =
                         fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
@@ -291,6 +315,7 @@ fn main() {
                             &mut ring,
                             &bindless,
                             &geo,
+                            &mats,
                             &draws,
                             &ForwardView {
                                 camera,
@@ -411,6 +436,8 @@ fn main() {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
+        materials.destroy(&mut allocator);
+        textures.destroy(&mut allocator, &bindless);
         occlusion.destroy(&mut allocator);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);

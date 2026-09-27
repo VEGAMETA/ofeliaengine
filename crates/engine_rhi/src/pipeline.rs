@@ -65,6 +65,10 @@ pub struct GraphicsPipelineDesc<'a> {
     pub cull_mode: vk::CullModeFlags,
     /// Winding of front faces (counter-clockwise with the engine's projection).
     pub front_face: vk::FrontFace,
+    /// Cull mode and front face set while recording (`vkCmdSetCullMode`,
+    /// `vkCmdSetFrontFace`, core in Vulkan 1.3) instead of `cull_mode` and `front_face`:
+    /// one pipeline draws single- and double-sided, mirrored and unmirrored geometry.
+    pub dynamic_culling: bool,
     /// Depth test enabled.
     pub depth_test: bool,
     /// Depth writes enabled.
@@ -90,6 +94,7 @@ impl<'a> GraphicsPipelineDesc<'a> {
             topology: vk::PrimitiveTopology::TRIANGLE_LIST,
             cull_mode: vk::CullModeFlags::BACK,
             front_face: vk::FrontFace::COUNTER_CLOCKWISE,
+            dynamic_culling: false,
             depth_test: true,
             depth_write: true,
             depth_compare: vk::CompareOp::LESS,
@@ -240,8 +245,15 @@ impl Pipeline {
         .color_write_mask(vk::ColorComponentFlags::RGBA);
         let attachments = vec![attachment; desc.color_formats.len()];
         let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+            vk::DynamicState::CULL_MODE,
+            vk::DynamicState::FRONT_FACE,
+        ];
+        let dynamic_count = if desc.dynamic_culling { 4 } else { 2 };
+        let dynamic = vk::PipelineDynamicStateCreateInfo::default()
+            .dynamic_states(&dynamic_states[..dynamic_count]);
         let mut rendering = vk::PipelineRenderingCreateInfo::default()
             .color_attachment_formats(desc.color_formats)
             .depth_attachment_format(desc.depth_format);

@@ -1,9 +1,13 @@
 //! Forward PBR renderer with a directional light and a shadow map (ADR 0014), drawn
-//! GPU-driven (ADR 0034) with optional two-phase occlusion culling (ADR 0035).
+//! GPU-driven (ADR 0034) with optional two-phase occlusion culling (ADR 0035), shading
+//! glTF materials from a [`MaterialTable`] (ADR 0040).
 //!
-//! [`ForwardRenderer::add_passes`] turns the draw list into instances and batches (a batch
-//! is a run of consecutive draws that share a mesh of the [`GeometryPool`], drawn as one
-//! indexed, instanced draw) and declares these passes in the frame's render graph:
+//! [`ForwardRenderer::add_passes`] turns the draw list into instances and batches and
+//! declares these passes in the frame's render graph. A batch is a run of consecutive
+//! draws that share a mesh of the [`GeometryPool`] and a pipeline state, drawn as one
+//! indexed, instanced draw. There are eight states: opaque or masked (alpha-tested)
+//! materials, single- or double-sided, drawn with a mirrored transform or not; batches
+//! are ordered by state, opaque first, so every state is one indirect draw call.
 //!
 //! 1. **cull setup**: copies the batches' indirect draw commands, with no instances yet,
 //!    from the upload ring into a graph buffer;
@@ -11,10 +15,10 @@
 //!    camera frustum, appends the visible ones to their batch's range of a visible list
 //!    and counts them in the batch's command;
 //! 3. **shadow**: depth-only rendering of every instance from the light, into a transient
-//!    shadow map (with depth bias);
+//!    shadow map (with depth bias); masked materials test their alpha;
 //! 4. **forward**: metallic-roughness PBR (GGX, height-correlated Smith, Schlick; after
-//!    Filament's documentation) with 3×3 PCF shadows, into the view's color and depth
-//!    targets.
+//!    Filament's documentation) with normal maps, occlusion, emission, geometric specular
+//!    antialiasing and 3×3 PCF shadows, into the view's color and depth targets.
 //!
 //! With an [`Occlusion`] state in the [`ForwardView`], culling and drawing run in two
 //! phases: **cull early** keeps the instances that were visible in the view's previous
@@ -25,13 +29,13 @@
 //! and nothing visible is ever missing: a wrong guess from the previous frame only costs
 //! time.
 //!
-//! Each drawing pass records a single `vkCmdDrawIndexedIndirect` for all batches, so
-//! beyond writing 80 bytes per instance into the [`UploadRing`] the CPU cost of a frame
+//! Each drawing pass records one `vkCmdDrawIndexedIndirect` per pipeline state in use, so
+//! beyond writing 64 bytes per instance into the [`UploadRing`] the CPU cost of a frame
 //! does not grow with the number of draws. Shaders read everything through device
-//! addresses and find the shadow map through the bindless set (its index is assigned by
-//! the graph).
+//! addresses and find the shadow map and material textures through the bindless set.
 //!
 //! [`GeometryPool`]: crate::mesh::GeometryPool
+//! [`MaterialTable`]: crate::material::MaterialTable
 
 use crate::cull::Frustum;
 use crate::graph::{
@@ -39,9 +43,10 @@ use crate::graph::{
     ShaderStages, StoreOp, Texture, TextureDesc,
 };
 use crate::hiz::{self, DepthPyramid, PyramidLayout};
+use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::upload::UploadRing;
-use core::cell::Cell;
+use core::cell::{Cell, RefCell};
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_orthographic};
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -51,7 +56,10 @@ use engine_rhi::{
 
 const VERTEX: &[u8] = include_bytes!("../shaders/forward.vertexMain.spv");
 const SHADOW_VERTEX: &[u8] = include_bytes!("../shaders/forward.shadowVertex.spv");
+const SHADOW_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.shadowVertexMasked.spv");
+const SHADOW_FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.shadowFragmentMasked.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
+const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
 
 /// Threads per workgroup of `cullMain`.
@@ -62,41 +70,30 @@ const PHASE_ALL: u32 = 0;
 const PHASE_EARLY: u32 = 1;
 const PHASE_LATE: u32 = 2;
 
-/// Surface parameters (metallic-roughness).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Material {
-    /// Linear base color.
-    pub base_color: Vec3,
-    /// 0 dielectric … 1 metal.
-    pub metallic: f32,
-    /// Perceptual roughness, 0 (mirror) … 1.
-    pub roughness: f32,
-}
-
-impl Default for Material {
-    fn default() -> Self {
-        Self {
-            base_color: Vec3::splat(0.8),
-            metallic: 0.0,
-            roughness: 0.5,
-        }
-    }
-}
+/// Pipeline states of batches, drawn in this order: bit 2 masked, bit 1 double-sided,
+/// bit 0 mirrored (negative determinant, so front faces wind clockwise on screen).
+const STATES: usize = 8;
+const MASKED: usize = 4;
+const DOUBLE_SIDED: usize = 2;
+const MIRRORED: usize = 1;
 
 /// One object to draw.
 ///
-/// Consecutive items with the same mesh are drawn as one instanced batch, so keep the
-/// draws of a mesh together. With occlusion culling, an item is known by its index in the
-/// list, so also keep the order stable from frame to frame. Items of removed meshes draw
-/// nothing.
+/// Consecutive items with the same mesh and the same kind of material (opaque or masked,
+/// single- or double-sided) are drawn as one instanced batch, so keep the draws of a mesh
+/// together; a mirrored transform also starts a batch of its own. With occlusion culling,
+/// an item is known by its index in the list, so also keep the order stable from frame to
+/// frame. Items of removed meshes draw nothing; items of removed materials draw with the
+/// default material.
 #[derive(Debug, Clone, Copy)]
 pub struct DrawItem {
     /// Its mesh in the geometry pool.
     pub mesh: MeshId,
-    /// Object to world transform (affine: the bottom row is ignored).
+    /// Its material in the material table.
+    pub material: MaterialId,
+    /// Object to world transform (affine: the bottom row is ignored). A negative
+    /// determinant mirrors the object; its faces keep their orientation (glTF).
     pub world_from_object: Mat4,
-    /// Its surface.
-    pub material: Material,
 }
 
 /// The directional light.
@@ -229,13 +226,12 @@ struct FrameData {
     hiz_offsets: [u32; hiz::MAX_LEVELS],
 }
 
-/// `Instance` in `forward.slang` (80 bytes).
+/// `Instance` in `forward.slang` (64 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct InstanceData {
     rows: [[f32; 4]; 3],
-    base_color_metallic: [f32; 4],
-    roughness: f32,
+    material: u32,
     batch: u32,
     _pad: [u32; 2],
 }
@@ -250,7 +246,7 @@ struct BatchData {
     extents: [f32; 4],
 }
 
-/// `Push` in `forward.slang` (88 bytes).
+/// `Push` in `forward.slang` (96 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct Push {
@@ -263,6 +259,7 @@ struct Push {
     pyramid: u64,
     positions: u64,
     attributes: u64,
+    materials: u64,
     instance_count: u32,
     texture: u32,
     phase: u32,
@@ -270,9 +267,9 @@ struct Push {
 }
 
 const _: () = assert!(core::mem::size_of::<FrameData>() == 384);
-const _: () = assert!(core::mem::size_of::<InstanceData>() == 80);
+const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 48);
-const _: () = assert!(core::mem::size_of::<Push>() == 88);
+const _: () = assert!(core::mem::size_of::<Push>() == 96);
 const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 const _: () = assert!(COMMAND_BYTES == 20);
 
@@ -299,28 +296,53 @@ impl Default for ShadowSettings {
 pub struct ForwardPasses {
     /// Instances (one per draw item), all tested by the culling pass.
     pub instances: u32,
-    /// Batches: runs of consecutive draws that share a mesh, one indirect draw each.
+    /// Batches: runs of consecutive draws that share a mesh and a pipeline state.
     pub batches: u32,
     /// Whether culling ran in two phases (occlusion culling).
     pub occlusion: bool,
     /// The forward pass's indirect draw commands, one `vk::DrawIndexedIndirectCommand` (20
-    /// bytes) per batch in draw order; with occlusion culling, the early phase's, then the
-    /// late phase's.
+    /// bytes) per batch, ordered by pipeline state and within a state in draw order; with
+    /// occlusion culling, the early phase's, then the late phase's.
     /// After culling, each `instance_count` is the number of instances its phase drew of
     /// its batch: read it back to count what was drawn. `None` when there was nothing to
     /// draw.
     pub commands: Option<Buffer>,
 }
 
+/// A batch while the draw list is turned into batches.
+#[derive(Debug, Clone, Copy)]
+struct Run {
+    /// First draw.
+    first: u32,
+    len: u32,
+    /// Pipeline state (`MASKED | DOUBLE_SIDED | MIRRORED` bits).
+    state: usize,
+    /// Position among the batches ordered by state.
+    order: u32,
+}
+
+/// Per-frame working memory, kept to avoid allocating every frame.
+#[derive(Debug, Default)]
+struct Scratch {
+    /// Material slot of every draw.
+    slots: Vec<u32>,
+    runs: Vec<Run>,
+    /// Sort keys of the runs: state, then distance from the camera, then run index.
+    keys: Vec<(u64, u32)>,
+}
+
 /// The forward PBR pipelines.
 #[derive(Debug)]
 pub struct ForwardRenderer {
-    main: Pipeline,
-    shadow: Pipeline,
+    /// Forward shading: opaque, masked.
+    main: [Pipeline; 2],
+    /// Shadow map: opaque (depth only), masked.
+    shadow: [Pipeline; 2],
     cull: Pipeline,
     pyramid: DepthPyramid,
     shadow_settings: ShadowSettings,
     frustum_culling: bool,
+    scratch: RefCell<Scratch>,
 }
 
 fn push_bytes(push: &Push) -> &[u8] {
@@ -349,50 +371,72 @@ impl ForwardRenderer {
         };
         let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
         let shadow_vertex = spirv_words(SHADOW_VERTEX).ok_or_else(invalid)?;
+        let shadow_vertex_masked = spirv_words(SHADOW_VERTEX_MASKED).ok_or_else(invalid)?;
+        let shadow_fragment_masked = spirv_words(SHADOW_FRAGMENT_MASKED).ok_or_else(invalid)?;
         let fragment = spirv_words(FRAGMENT).ok_or_else(invalid)?;
+        let fragment_masked = spirv_words(FRAGMENT_MASKED).ok_or_else(invalid)?;
         let formats = [color_format];
-        let main = Pipeline::graphics(
-            device,
-            bindless.pipeline_layout(),
-            &GraphicsPipelineDesc {
-                color_formats: &formats,
-                depth_format,
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: &vertex,
-                        entry: c"vertexMain",
-                    },
-                    Some(ShaderStageDesc {
-                        spirv: &fragment,
-                        entry: c"fragmentMain",
+        // Cull mode and front face come with each batch's pipeline state.
+        let main = |fragment: &[u32], entry| {
+            Pipeline::graphics(
+                device,
+                bindless.pipeline_layout(),
+                &GraphicsPipelineDesc {
+                    color_formats: &formats,
+                    depth_format,
+                    dynamic_culling: true,
+                    ..GraphicsPipelineDesc::new(
+                        ShaderStageDesc {
+                            spirv: &vertex,
+                            entry: c"vertexMain",
+                        },
+                        Some(ShaderStageDesc {
+                            spirv: fragment,
+                            entry,
+                        }),
+                    )
+                },
+                vk::PipelineCache::null(),
+            )
+        };
+        let shadow = |vertex: &[u32], vertex_entry, fragment: Option<ShaderStageDesc<'_>>| {
+            Pipeline::graphics(
+                device,
+                bindless.pipeline_layout(),
+                &GraphicsPipelineDesc {
+                    depth_format: shadow_settings.format,
+                    dynamic_culling: true,
+                    depth_bias: Some(DepthBias {
+                        constant: 1.0,
+                        slope: 1.5,
+                        clamp: 0.0,
                     }),
-                )
-            },
-            vk::PipelineCache::null(),
-        )?;
-        let shadow = Pipeline::graphics(
-            device,
-            bindless.pipeline_layout(),
-            &GraphicsPipelineDesc {
-                depth_format: shadow_settings.format,
-                // Render back faces into the shadow map: fewer self-shadowing artifacts on
-                // closed meshes.
-                cull_mode: vk::CullModeFlags::FRONT,
-                depth_bias: Some(DepthBias {
-                    constant: 1.0,
-                    slope: 1.5,
-                    clamp: 0.0,
+                    ..GraphicsPipelineDesc::new(
+                        ShaderStageDesc {
+                            spirv: vertex,
+                            entry: vertex_entry,
+                        },
+                        fragment,
+                    )
+                },
+                vk::PipelineCache::null(),
+            )
+        };
+        let main = [
+            main(&fragment, c"fragmentMain")?,
+            main(&fragment_masked, c"fragmentMasked")?,
+        ];
+        let shadow = [
+            shadow(&shadow_vertex, c"shadowVertex", None)?,
+            shadow(
+                &shadow_vertex_masked,
+                c"shadowVertexMasked",
+                Some(ShaderStageDesc {
+                    spirv: &shadow_fragment_masked,
+                    entry: c"shadowFragmentMasked",
                 }),
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: &shadow_vertex,
-                        entry: c"shadowVertex",
-                    },
-                    None,
-                )
-            },
-            vk::PipelineCache::null(),
-        )?;
+            )?,
+        ];
         let compute = |spirv: &[u8], entry| -> Result<Pipeline, RhiError> {
             let words = spirv_words(spirv).ok_or_else(invalid)?;
             Pipeline::compute(
@@ -412,6 +456,7 @@ impl ForwardRenderer {
             pyramid: DepthPyramid::new(device, bindless)?,
             shadow_settings,
             frustum_culling: true,
+            scratch: RefCell::new(Scratch::default()),
         })
     }
 
@@ -427,7 +472,8 @@ impl ForwardRenderer {
     }
 
     /// Declares the culling, shadow and forward passes for `draws` into the view's
-    /// targets, drawing from `geometry` (this frame's [`GeometryPool`] buffers).
+    /// targets, drawing from `geometry` (this frame's [`GeometryPool`] buffers) and
+    /// shading with `materials` (this frame's [`MaterialTable`]).
     ///
     /// Instances, batches, draw commands and frame constants are written into `ring` now;
     /// the passes record when the graph executes, which must be with this `bindless` set
@@ -435,12 +481,15 @@ impl ForwardRenderer {
     /// indices. Returns `None`, declaring nothing, when `ring` is full.
     ///
     /// [`GeometryPool`]: crate::mesh::GeometryPool
+    /// [`MaterialTable`]: crate::material::MaterialTable
+    #[allow(clippy::too_many_arguments)]
     pub fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
         ring: &mut UploadRing,
         bindless: &'g Bindless,
         geometry: &GeometryFrame<'g>,
+        materials: &MaterialFrame<'g>,
         draws: &[DrawItem],
         view: &ForwardView<'g>,
     ) -> Option<ForwardPasses> {
@@ -461,7 +510,35 @@ impl ForwardRenderer {
             });
         }
         let instance_count = draws.len() as u32;
-        let batch_count = batches(draws).count() as u32;
+        let mut scratch = self.scratch.borrow_mut();
+        let Scratch { slots, runs, keys } = &mut *scratch;
+        // Batches in draw order, counted per pipeline state, then ordered by state and,
+        // within a state, front to back (by the first instance's box), so the depth test
+        // rejects hidden fragments before shading.
+        let mut counts = [0u32; STATES];
+        batches(draws, materials, slots, runs, &mut counts);
+        let mut starts = [0u32; STATES];
+        let mut next = 0;
+        for (start, count) in starts.iter_mut().zip(counts) {
+            *start = next;
+            next += count;
+        }
+        keys.clear();
+        keys.extend(runs.iter().enumerate().map(|(k, run)| {
+            let draw = &draws[run.first as usize];
+            let (center, extents) = local_box(geometry, draw.mesh);
+            let (center, _) = crate::cull::transform_box(&draw.world_from_object, center, extents);
+            let distance = center.distance(view.camera.position);
+            (
+                ((run.state as u64) << 32) | u64::from(distance.to_bits()),
+                k as u32,
+            )
+        }));
+        keys.sort_unstable();
+        for (order, &(_, k)) in keys.iter().enumerate() {
+            runs[k as usize].order = order as u32;
+        }
+        let batch_count = runs.len() as u32;
         let depth_desc = fg.texture_desc(depth);
         let occlusion = view
             .occlusion
@@ -471,26 +548,25 @@ impl ForwardRenderer {
         // Instances in draw order, and the scene's bounding box for the light on the way.
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         let instances = {
-            let (slots, staged) = ring.alloc::<InstanceData>(draws.len())?;
-            for (batch, (first, len)) in batches(draws).enumerate() {
-                let (center, extents) = local_box(geometry, draws[first].mesh);
-                let items = &draws[first..first + len];
-                for (item, slot) in items.iter().zip(&mut slots[first..first + len]) {
+            let (out, staged) = ring.alloc::<InstanceData>(draws.len())?;
+            for run in runs.iter() {
+                let (center, extents) = local_box(geometry, draws[run.first as usize].mesh);
+                let range = run.first as usize..(run.first + run.len) as usize;
+                let items = draws[range.clone()].iter().zip(&slots[range.clone()]);
+                for ((item, &material), slot) in items.zip(&mut out[range]) {
                     let (world_center, world_extents) =
                         crate::cull::transform_box(&item.world_from_object, center, extents);
                     min = min.min(world_center - world_extents);
                     max = max.max(world_center + world_extents);
                     let rows = item.world_from_object.transpose();
-                    let m = item.material;
                     slot.write(InstanceData {
                         rows: [
                             rows.x_axis.to_array(),
                             rows.y_axis.to_array(),
                             rows.z_axis.to_array(),
                         ],
-                        base_color_metallic: m.base_color.extend(m.metallic).to_array(),
-                        roughness: m.roughness,
-                        batch: batch as u32,
+                        material,
+                        batch: run.order,
                         _pad: [0; 2],
                     });
                 }
@@ -498,11 +574,11 @@ impl ForwardRenderer {
             staged.address
         };
         let batch_table = {
-            let (slots, staged) = ring.alloc::<BatchData>(batch_count as usize)?;
-            for ((first, _), slot) in batches(draws).zip(slots.iter_mut()) {
-                let (center, extents) = local_box(geometry, draws[first].mesh);
-                slot.write(BatchData {
-                    first: first as u32,
+            let (out, staged) = ring.alloc::<BatchData>(batch_count as usize)?;
+            for run in runs.iter() {
+                let (center, extents) = local_box(geometry, draws[run.first as usize].mesh);
+                out[run.order as usize].write(BatchData {
+                    first: run.first,
                     _pad: [0; 3],
                     center: center.extend(0.0).to_array(),
                     extents: extents.extend(0.0).to_array(),
@@ -510,36 +586,39 @@ impl ForwardRenderer {
             }
             staged.address
         };
-        // Draw commands: the forward pass's for each phase, with no instances until
-        // culling counts them (the late phase's visible list follows the early one's),
-        // then the shadow pass's, with every instance.
+        // Draw commands, in state order: the forward pass's for each phase, with no
+        // instances until culling counts them (the late phase's visible list follows the
+        // early one's), then the shadow pass's, with every instance.
         let commands = {
             let per_phase = batch_count as usize;
-            let (slots, staged) =
+            let (out, staged) =
                 ring.alloc::<vk::DrawIndexedIndirectCommand>((phases as usize + 1) * per_phase)?;
-            for (b, (first, len)) in batches(draws).enumerate() {
+            for run in runs.iter() {
                 // A removed mesh draws nothing.
-                let mesh = geometry.mesh(draws[first].mesh);
+                let mesh = geometry.mesh(draws[run.first as usize].mesh);
                 let command = vk::DrawIndexedIndirectCommand {
                     index_count: mesh.map_or(0, |m| m.index_count),
                     instance_count: 0,
                     first_index: mesh.map_or(0, |m| m.first_index),
                     vertex_offset: mesh.map_or(0, |m| m.first_vertex as i32),
-                    first_instance: first as u32,
+                    first_instance: run.first,
                 };
+                let b = run.order as usize;
                 for phase in 0..phases as usize {
-                    slots[phase * per_phase + b].write(vk::DrawIndexedIndirectCommand {
+                    out[phase * per_phase + b].write(vk::DrawIndexedIndirectCommand {
                         first_instance: command.first_instance + phase as u32 * instance_count,
                         ..command
                     });
                 }
-                slots[phases as usize * per_phase + b].write(vk::DrawIndexedIndirectCommand {
-                    instance_count: len as u32,
+                out[phases as usize * per_phase + b].write(vk::DrawIndexedIndirectCommand {
+                    instance_count: run.len,
                     ..command
                 });
             }
             staged
         };
+        drop(scratch);
+        let states = States { starts, counts };
         let pyramid_layout = PyramidLayout::new(depth_desc.width, depth_desc.height);
         let frame = FrameData {
             clip_from_world: view.camera.clip_from_world.to_cols_array(),
@@ -572,6 +651,7 @@ impl ForwardRenderer {
             pyramid: 0,
             positions: geometry.position_address(),
             attributes: geometry.attribute_address(),
+            materials: materials.address(),
             instance_count,
             texture: 0,
             phase: PHASE_ALL,
@@ -670,60 +750,59 @@ impl ForwardRenderer {
             "shadow map",
             TextureDesc::new_2d(self.shadow_settings.format, resolution, resolution),
         );
-        let shadow_pipeline = &self.shadow;
+        let shadow_pipelines = &self.shadow;
         let geometry = *geometry;
-        geometry
-            .read_positions(fg.add_pass("shadow"))
+        let materials = *materials;
+        materials
+            .read(geometry.read(fg.add_pass("shadow")))
             .depth(shadow_map, depth_clear, StoreOp::Store)
             .execute(move |ctx| {
-                let area = ctx.render_area();
                 // SAFETY: recording inside the pass's rendering scope; the commands are in
-                // the ring, which has indirect-buffer usage; the pass reads the pool.
+                // the ring, which has indirect-buffer usage; the pass reads the pool and
+                // the material table.
                 unsafe {
-                    shadow_pipeline.bind(ctx.cmd);
-                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
-                    set_viewport(ctx.device, ctx.cmd, area);
-                    bindless.push_constants(ctx.cmd, push_bytes(&base));
-                    geometry.bind_indices(ctx);
-                    ctx.device.cmd_draw_indexed_indirect(
-                        ctx.cmd,
+                    states.draw(
+                        ctx,
+                        bindless,
+                        &geometry,
+                        shadow_pipelines,
+                        &base,
+                        true,
                         commands.buffer,
                         commands.offset + u64::from(phases) * command_bytes,
-                        batch_count,
-                        COMMAND_BYTES as u32,
                     );
                 }
             });
-        let main_pipeline = &self.main;
+        let main_pipelines = &self.main;
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>, phase: u32| {
-            let area = ctx.render_area();
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
-            // SAFETY: recording inside the pass's rendering scope; the pass reads the pool.
+            // SAFETY: recording inside the pass's rendering scope; the pass reads the pool
+            // and the material table.
             unsafe {
-                main_pipeline.bind(ctx.cmd);
-                bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
-                set_viewport(ctx.device, ctx.cmd, area);
-                bindless.push_constants(ctx.cmd, push_bytes(&push));
-                geometry.bind_indices(ctx);
-                ctx.device.cmd_draw_indexed_indirect(
-                    ctx.cmd,
+                states.draw(
+                    ctx,
+                    bindless,
+                    &geometry,
+                    main_pipelines,
+                    &push,
+                    false,
                     ctx.buffer(culled),
                     offset,
-                    batch_count,
-                    COMMAND_BYTES as u32,
                 );
             }
         };
         let Some(flags) = flag_buffer else {
-            forward_pass(fg, "forward", &geometry, shadow_map, culled, visible)
-                .color(color, load, StoreOp::Store)
-                .depth(depth, depth_clear, StoreOp::DontCare)
-                .execute(move |ctx| draw_phase(ctx, PHASE_ALL));
+            forward_pass(
+                fg, "forward", &geometry, &materials, shadow_map, culled, visible,
+            )
+            .color(color, load, StoreOp::Store)
+            .depth(depth, depth_clear, StoreOp::DontCare)
+            .execute(move |ctx| draw_phase(ctx, PHASE_ALL));
             return Some(ForwardPasses {
                 instances: instance_count,
                 batches: batch_count,
@@ -734,10 +813,18 @@ impl ForwardRenderer {
 
         // Two phases: draw what was visible, build the pyramid from its depth, then test
         // everything against it and draw what the first phase missed.
-        forward_pass(fg, "forward early", &geometry, shadow_map, culled, visible)
-            .color(color, load, StoreOp::Store)
-            .depth(depth, depth_clear, StoreOp::Store)
-            .execute(move |ctx| draw_phase(ctx, PHASE_EARLY));
+        forward_pass(
+            fg,
+            "forward early",
+            &geometry,
+            &materials,
+            shadow_map,
+            culled,
+            visible,
+        )
+        .color(color, load, StoreOp::Store)
+        .depth(depth, depth_clear, StoreOp::Store)
+        .execute(move |ctx| draw_phase(ctx, PHASE_EARLY));
         let pyramid = fg.create_buffer(
             "depth pyramid",
             BufferDesc {
@@ -757,10 +844,18 @@ impl ForwardRenderer {
                 };
                 dispatch_cull(ctx, push);
             });
-        forward_pass(fg, "forward late", &geometry, shadow_map, culled, visible)
-            .color(color, LoadOp::Load, StoreOp::Store)
-            .depth(depth, LoadOp::Load, StoreOp::DontCare)
-            .execute(move |ctx| draw_phase(ctx, PHASE_LATE));
+        forward_pass(
+            fg,
+            "forward late",
+            &geometry,
+            &materials,
+            shadow_map,
+            culled,
+            visible,
+        )
+        .color(color, LoadOp::Load, StoreOp::Store)
+        .depth(depth, LoadOp::Load, StoreOp::DontCare)
+        .execute(move |ctx| draw_phase(ctx, PHASE_LATE));
         Some(ForwardPasses {
             instances: instance_count,
             batches: batch_count,
@@ -798,27 +893,136 @@ fn forward_pass<'a, 'g>(
     fg: &'a mut FrameGraph<'g>,
     name: &'static str,
     geometry: &GeometryFrame<'_>,
+    materials: &MaterialFrame<'_>,
     shadow_map: Texture,
     culled: Buffer,
     visible: Buffer,
 ) -> PassBuilder<'a, 'g> {
-    geometry
-        .read(fg.add_pass(name))
+    materials
+        .read(geometry.read(fg.add_pass(name)))
         .read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
         .read(culled, Access::Indirect)
         .read(visible, Access::StorageRead(ShaderStages::VERTEX))
 }
 
-/// Runs of consecutive draws that share a mesh, as `(first, len)`.
-fn batches(draws: &[DrawItem]) -> impl Iterator<Item = (usize, usize)> + '_ {
-    let mut start = 0;
-    core::iter::from_fn(move || {
-        let mesh = draws.get(start)?.mesh;
-        let len = draws[start..].iter().take_while(|d| d.mesh == mesh).count();
-        let run = (start, len);
-        start += len;
-        Some(run)
-    })
+/// Whether a transform mirrors (negative determinant of its linear part).
+fn mirrored(m: &Mat4) -> bool {
+    m.x_axis
+        .truncate()
+        .cross(m.y_axis.truncate())
+        .dot(m.z_axis.truncate())
+        < 0.0
+}
+
+/// A batch's pipeline state.
+fn state(kind: MaterialKind, mirrored: bool) -> usize {
+    (usize::from(kind.masked) * MASKED)
+        | (usize::from(kind.double_sided) * DOUBLE_SIDED)
+        | (usize::from(mirrored) * MIRRORED)
+}
+
+/// Fills `slots` with every draw's material slot and `runs` with the runs of consecutive
+/// draws that share a mesh and a pipeline state; counts the runs per state.
+fn batches(
+    draws: &[DrawItem],
+    materials: &MaterialFrame<'_>,
+    slots: &mut Vec<u32>,
+    runs: &mut Vec<Run>,
+    counts: &mut [u32; STATES],
+) {
+    slots.clear();
+    runs.clear();
+    let mut mesh = None;
+    for (i, draw) in draws.iter().enumerate() {
+        let (slot, kind) = materials.resolve(draw.material);
+        let state = state(kind, mirrored(&draw.world_from_object));
+        slots.push(slot);
+        match runs.last_mut() {
+            Some(run) if run.state == state && mesh == Some(draw.mesh) => run.len += 1,
+            _ => {
+                runs.push(Run {
+                    first: i as u32,
+                    len: 1,
+                    state,
+                    order: 0,
+                });
+                counts[state] += 1;
+                mesh = Some(draw.mesh);
+            }
+        }
+    }
+}
+
+/// Where each pipeline state's batches are among the commands.
+#[derive(Debug, Clone, Copy)]
+struct States {
+    starts: [u32; STATES],
+    counts: [u32; STATES],
+}
+
+impl States {
+    /// Records one indirect draw per pipeline state in use, from the commands at `offset`
+    /// in `buffer` (one per batch, in state order): `pipelines` are the opaque and the
+    /// masked one. The shadow pass renders back faces of single-sided geometry (fewer
+    /// self-shadowing artifacts on closed meshes); the forward passes cull them.
+    ///
+    /// # Safety
+    ///
+    /// `ctx` records inside a rendering scope of a pass that reads the geometry pool and
+    /// the material table; `buffer` holds the commands and has indirect-buffer usage.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn draw(
+        &self,
+        ctx: &crate::graph::PassContext<'_>,
+        bindless: &Bindless,
+        geometry: &GeometryFrame<'_>,
+        pipelines: &[Pipeline; 2],
+        push: &Push,
+        shadow: bool,
+        buffer: vk::Buffer,
+        offset: u64,
+    ) {
+        let mut bound = None;
+        for state in 0..STATES {
+            let count = self.counts[state];
+            if count == 0 {
+                continue;
+            }
+            let masked = state & MASKED != 0;
+            let cull = match (state & DOUBLE_SIDED != 0, shadow) {
+                (true, _) => vk::CullModeFlags::NONE,
+                (false, true) => vk::CullModeFlags::FRONT,
+                (false, false) => vk::CullModeFlags::BACK,
+            };
+            let front = if state & MIRRORED != 0 {
+                vk::FrontFace::CLOCKWISE
+            } else {
+                vk::FrontFace::COUNTER_CLOCKWISE
+            };
+            // SAFETY: guaranteed by the caller.
+            unsafe {
+                if bound != Some(masked) {
+                    pipelines[usize::from(masked)].bind(ctx.cmd);
+                    if bound.is_none() {
+                        bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                        set_viewport(ctx.device, ctx.cmd, ctx.render_area());
+                        bindless.push_constants(ctx.cmd, push_bytes(push));
+                        geometry.bind_indices(ctx);
+                    }
+                    bound = Some(masked);
+                }
+                ctx.device.cmd_set_cull_mode(ctx.cmd, cull);
+                ctx.device.cmd_set_front_face(ctx.cmd, front);
+                ctx.device.cmd_draw_indexed_indirect(
+                    ctx.cmd,
+                    buffer,
+                    offset + u64::from(self.starts[state]) * COMMAND_BYTES,
+                    count,
+                    COMMAND_BYTES as u32,
+                );
+            }
+        }
+    }
 }
 
 /// A mesh's object-space bounding box as center and half extents (empty for removed

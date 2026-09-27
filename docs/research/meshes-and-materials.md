@@ -133,6 +133,21 @@ Measured afterwards (ADR 0039):
   and cost up to 7% on the Radeon's bandwidth-bound shadow pass. The 12-byte position
   stream stays.
 
+Measured afterwards (ADR 0040):
+
+- **Bindless material table:**
+  - 80 bytes per material, textures by bindless index with the sampler index packed in;
+  - a missing texture is an index that skips the sample, not a default texture: fewer
+    fetches, and flat normals stay exact (UNORM8 cannot store 0).
+- **Front-to-back batch order within each pipeline state:** Sponza's forward pass
+  halves (RTX 712 → 376 µs, Radeon 17.4 → 8.1 ms).
+- **Texturing Sponza with RGBA8:** 225 µs on the RTX, 4.5 ms on the Radeon iGPU (memory
+  bandwidth). That makes compression the next step, then a depth prepass for the
+  overdraw that remains.
+- **Scalarizing the shading per material within a wave:** slower on the RTX; not taken.
+- **Texture import:** decoding at 157–184 Mtexels/s per thread; Kaiser mip levels at
+  45–86 Mtexels/s. Sponza's 69 textures take 0.2 s on 16 threads.
+
 ## Sources
 
 - [Bevy: mesh allocator](https://github.com/bevyengine/bevy/blob/main/crates/bevy_render/src/mesh/allocator.rs)

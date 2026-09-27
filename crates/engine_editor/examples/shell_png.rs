@@ -14,11 +14,13 @@ use engine_editor::shell::{
     Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, build,
 };
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
+use engine_render::material::{MaterialDesc, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
 use engine_render::png::{PngFormat, encode_png};
+use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_render::viewport::{ViewportDesc, ViewportSize, Viewports};
 use engine_render2d::{Canvas, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
@@ -89,53 +91,50 @@ fn main() {
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
     let mut frame_number = 0u64;
-    let material = |r: f32, g: f32, b: f32, roughness: f32| Material {
-        base_color: Vec3::new(r, g, b),
-        metallic: 0.0,
-        roughness,
-    };
+    let mut textures = TexturePool::new(&device, 64 << 20, 1);
+    let mut materials = MaterialTable::new(1);
+    let ground = materials.add(MaterialDesc::solid([0.42, 0.44, 0.40], 0.0, 0.9));
+    let crate_material = materials.add(MaterialDesc::solid([0.62, 0.44, 0.26], 0.0, 0.7));
+    let pillar = materials.add(MaterialDesc::solid([0.55, 0.57, 0.62], 0.0, 0.5));
+    let figure = materials.add(MaterialDesc::solid([0.2, 0.45, 0.9], 0.3, 0.35));
     let mut draws = vec![DrawItem {
         mesh,
+        material: ground,
         world_from_object: Mat4::from_scale_rotation_translation(
             Vec3::new(24.0, 0.2, 24.0),
             Quat::IDENTITY,
             Vec3::new(0.0, -0.1, 0.0),
         ),
-        material: material(0.42, 0.44, 0.40, 0.9),
     }];
     for i in 0..9 {
         let (x, z) = ((i % 3) as f32 * 1.6 - 5.0, (i / 3) as f32 * 1.6 - 3.0);
         draws.push(DrawItem {
             mesh,
+            material: crate_material,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::splat(1.1),
                 Quat::from_rotation_y(i as f32 * 0.4),
                 Vec3::new(x, 0.55 + (i % 2) as f32 * 1.1, z),
             ),
-            material: material(0.62, 0.44, 0.26, 0.7),
         });
     }
     draws.push(DrawItem {
         mesh,
+        material: pillar,
         world_from_object: Mat4::from_scale_rotation_translation(
             Vec3::new(2.0, 6.0, 2.0),
             Quat::IDENTITY,
             Vec3::new(4.0, 3.0, -4.0),
         ),
-        material: material(0.55, 0.57, 0.62, 0.5),
     });
     draws.push(DrawItem {
         mesh,
+        material: figure,
         world_from_object: Mat4::from_scale_rotation_translation(
             Vec3::new(0.7, 1.8, 0.7),
             Quat::from_rotation_y(0.8),
             Vec3::new(0.5, 0.9, 2.0),
         ),
-        material: Material {
-            base_color: Vec3::new(0.2, 0.45, 0.9),
-            metallic: 0.3,
-            roughness: 0.35,
-        },
     });
     let light = DirectionalLight {
         direction: Vec3::new(-0.5, -1.0, -0.35),
@@ -432,11 +431,15 @@ fn main() {
     {
         // SAFETY: nothing is in flight.
         let mut fg = unsafe { graph.begin_slot(0, cmd) };
+        frame_number += 1;
         let geo = geometry
-            .begin_frame(&mut fg, &device, &mut allocator, {
-                frame_number += 1;
-                frame_number
-            })
+            .begin_frame(&mut fg, &device, &mut allocator, frame_number)
+            .unwrap();
+        textures
+            .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
+            .unwrap();
+        let mats = materials
+            .begin_frame(&mut fg, &device, &mut allocator, &textures, frame_number)
             .unwrap();
         {
             let (forward, bindless, draws, ring) = (&forward, &bindless, &draws, &mut ring);
@@ -465,7 +468,7 @@ fn main() {
                             clear,
                             occlusion: None,
                         };
-                        forward.add_passes(fg, ring, bindless, &geo, draws, &view);
+                        forward.add_passes(fg, ring, bindless, &geo, &mats, draws, &view);
                     },
                 )
                 .unwrap();
@@ -602,6 +605,8 @@ fn main() {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
+        materials.destroy(&mut allocator);
+        textures.destroy(&mut allocator, &bindless);
         renderer2d.destroy(&mut allocator);
         glyphs
             .texture_mut()

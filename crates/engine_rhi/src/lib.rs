@@ -31,7 +31,7 @@ mod swapchain;
 
 pub use adapter::{Adapter, AdapterKind, AdapterPreference, OptionalCaps};
 pub use ash;
-pub use bindless::{Bindless, PUSH_CONSTANT_BYTES, SamplerKind};
+pub use bindless::{Bindless, PUSH_CONSTANT_BYTES, SamplerKind, Wrap};
 pub use device::{Device, LatencyExtensions, Queue};
 pub use error::RhiError;
 pub use frames::{Frame, Frames};

@@ -33,16 +33,22 @@ use std::time::Instant;
 /// does the same work whatever the frame rate.
 const TICK: f32 = 1.0 / 240.0;
 
-/// Surface of a rendered cube.
+/// How a cube is rendered: its paint (an index into `Sim::paints`) and scale.
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct Look {
-    pub color: [f32; 3],
-    pub metallic: f32,
-    pub roughness: f32,
+    pub paint: u32,
     pub scale: f32,
 }
 pod_component!(Look);
+
+/// A cube's surface: one material each.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Paint {
+    pub color: [f32; 3],
+    pub metallic: f32,
+    pub roughness: f32,
+}
 
 const NPC_SCRIPT: &str = r#"
 local state = ...
@@ -129,6 +135,8 @@ struct Sim {
     npc_bytes: Vec<u8>,
     body_poses: Vec<(Vec3, Quat)>,
     propagation: TransformPropagation,
+    /// The distinct surfaces of the cubes.
+    paints: Vec<Paint>,
     frame: u64,
 }
 
@@ -138,6 +146,22 @@ impl Sim {
         let spawn = |world: &mut World, t: Transform, look: Look| {
             world.spawn((t, GlobalTransform::IDENTITY, look))
         };
+        let mut paints: Vec<Paint> = Vec::new();
+        let mut look = |color: [f32; 3], metallic: f32, roughness: f32, scale: f32| {
+            let paint = Paint {
+                color,
+                metallic,
+                roughness,
+            };
+            let index = paints.iter().position(|p| *p == paint).unwrap_or_else(|| {
+                paints.push(paint);
+                paints.len() - 1
+            });
+            Look {
+                paint: index as u32,
+                scale,
+            }
+        };
         // Decor: 100 hierarchies on a ring, each a root with children in a helix.
         let per_root = (decor / 100).max(1);
         let mut roots = Vec::new();
@@ -146,12 +170,7 @@ impl Sim {
             let root = spawn(
                 &mut world,
                 Transform::from_xyz(angle.cos() * 40.0, 1.0, angle.sin() * 40.0),
-                Look {
-                    color: [0.8, 0.8, 0.85],
-                    metallic: 1.0,
-                    roughness: 0.3,
-                    scale: 0.6,
-                },
+                look([0.8, 0.8, 0.85], 1.0, 0.3, 0.6),
             );
             roots.push(root);
             for c in 1..per_root {
@@ -159,12 +178,12 @@ impl Sim {
                 let child = spawn(
                     &mut world,
                     Transform::from_xyz(a.cos() * 1.5, c as f32 * 0.12, a.sin() * 1.5),
-                    Look {
-                        color: [0.2 + (r % 5) as f32 * 0.15, 0.4, 0.9 - (c % 7) as f32 * 0.1],
-                        metallic: 0.0,
-                        roughness: 0.5,
-                        scale: 0.25,
-                    },
+                    look(
+                        [0.2 + (r % 5) as f32 * 0.15, 0.4, 0.9 - (c % 7) as f32 * 0.1],
+                        0.0,
+                        0.5,
+                        0.25,
+                    ),
                 );
                 world.set_parent(child, Some(root)).unwrap();
             }
@@ -176,12 +195,7 @@ impl Sim {
                 spawn(
                     &mut world,
                     Transform::IDENTITY,
-                    Look {
-                        color: [0.9, 0.5 + (i % 3) as f32 * 0.15, 0.2],
-                        metallic: 0.0,
-                        roughness: 0.6,
-                        scale: 0.8,
-                    },
+                    look([0.9, 0.5 + (i % 3) as f32 * 0.15, 0.2], 0.0, 0.6, 0.8),
                 )
             })
             .collect();
@@ -190,12 +204,7 @@ impl Sim {
                 spawn(
                     &mut world,
                     Transform::IDENTITY,
-                    Look {
-                        color: [0.2, 0.9, 0.3],
-                        metallic: 0.0,
-                        roughness: 0.4,
-                        scale: 0.5,
-                    },
+                    look([0.2, 0.9, 0.3], 0.0, 0.4, 0.5),
                 )
             })
             .collect();
@@ -216,6 +225,7 @@ impl Sim {
             npc_out,
             npc_bytes: vec![0; npcs * 12],
             propagation,
+            paints,
             frame: 0,
         }
     }
@@ -369,11 +379,13 @@ mod windowed {
     use engine_ecs::QueryState;
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::forward::{
-        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
+        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
+    use engine_render::material::{MaterialDesc, MaterialId, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
     use engine_render::post::{HDR_FORMAT, Tonemap};
+    use engine_render::texture_pool::TexturePool;
     use engine_render::upload::UploadRing;
     use engine_rhi::ash::vk;
     use engine_rhi::{
@@ -434,6 +446,14 @@ mod windowed {
         )
         .unwrap();
         let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+        let mut textures = TexturePool::new(&device, 64 << 20, in_flight);
+        let mut materials = MaterialTable::new(in_flight);
+        let paints: Vec<MaterialId> = sim
+            .paints
+            .iter()
+            .map(|p| materials.add(MaterialDesc::solid(p.color, p.metallic, p.roughness)))
+            .collect();
+        let ground = materials.default_material();
         let mut ring = UploadRing::new(&device, &mut allocator, in_flight, 32 << 20).unwrap();
         let mut frames = Frames::new(&device, device.graphics.family, in_flight).unwrap();
         let mut graph = RenderGraph::new(&device, in_flight);
@@ -486,22 +506,18 @@ mod windowed {
             draws.clear();
             draws.push(DrawItem {
                 mesh,
+                material: ground,
                 world_from_object: Mat4::from_scale_rotation_translation(
                     Vec3::new(120.0, 0.2, 120.0),
                     Quat::IDENTITY,
                     Vec3::new(0.0, -0.1, 0.0),
                 ),
-                material: Material::default(),
             });
             query.for_each(&mut sim.world, |(g, look)| {
                 draws.push(DrawItem {
                     mesh,
+                    material: paints[look.paint as usize],
                     world_from_object: Mat4::from(g.0) * Mat4::from_scale(Vec3::splat(look.scale)),
-                    material: Material {
-                        base_color: Vec3::from(look.color),
-                        metallic: look.metallic,
-                        roughness: look.roughness,
-                    },
                 });
             });
             s.draw_list = dl.elapsed().as_secs_f64() * 1e6;
@@ -523,6 +539,12 @@ mod windowed {
                 let mut fg = graph.begin(&frame);
                 let geo = geometry
                     .begin_frame(&mut fg, &device, &mut allocator, frame.number)
+                    .unwrap();
+                textures
+                    .begin_frame(&mut fg, &mut allocator, &bindless, frame.number)
+                    .unwrap();
+                let mats = materials
+                    .begin_frame(&mut fg, &device, &mut allocator, &textures, frame.number)
                     .unwrap();
                 let desc = TextureDesc::new_2d(swapchain.format(), extent.width, extent.height);
                 let backbuffer = fg.import_texture(
@@ -551,6 +573,7 @@ mod windowed {
                     &mut ring,
                     &bindless,
                     &geo,
+                    &mats,
                     &draws,
                     &ForwardView {
                         camera: Camera {
@@ -609,6 +632,8 @@ mod windowed {
             graph.destroy(&mut allocator, Some(&bindless));
             ring.destroy(&mut allocator);
             geometry.destroy(&mut allocator);
+            materials.destroy(&mut allocator);
+            textures.destroy(&mut allocator, &bindless);
         }
         drop(frames);
         drop(renderer);

@@ -18,11 +18,12 @@
 
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, Occlusion,
-    ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
+use engine_render::material::{MaterialDesc, MaterialId, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
+use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -87,6 +88,8 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    let mut textures = TexturePool::new(&device, 1 << 20, 1);
+    let mut materials = MaterialTable::new(1);
     let mut frame_number = 0u64;
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
@@ -106,53 +109,59 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
         color: Vec3::splat(3.0),
         ambient: Vec3::splat(0.1),
     };
-    let material = |i: usize| Material {
-        base_color: Vec3::new(
-            (i % 7) as f32 / 7.0,
-            (i % 5) as f32 / 5.0,
-            (i % 3) as f32 / 3.0,
-        ),
-        metallic: 0.0,
-        roughness: 0.6,
-    };
+    // Every combination of the three color steps: 7 × 5 × 3.
+    let palette: Vec<MaterialId> = (0..105)
+        .map(|i| {
+            materials.add(MaterialDesc::solid(
+                [
+                    (i % 7) as f32 / 7.0,
+                    (i % 5) as f32 / 5.0,
+                    (i % 3) as f32 / 3.0,
+                ],
+                0.0,
+                0.6,
+            ))
+        })
+        .collect();
+    let material = |i: usize| palette[i % palette.len()];
     let mut draws = vec![DrawItem {
         mesh,
+        material: materials.default_material(),
         world_from_object: Mat4::from_scale_rotation_translation(
             Vec3::new(12.0, 12.0, 0.5),
             Default::default(),
             Vec3::new(0.0, 0.0, 5.0),
         ),
-        material: Material::default(),
     }];
     for i in 0..BEHIND {
         let (x, y, z) = ((i % 10) as f32, ((i / 10) % 5) as f32, (i / 50) as f32);
         draws.push(DrawItem {
             mesh,
+            material: material(i),
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::splat(0.5),
                 Default::default(),
                 Vec3::new(x * 0.6 - 2.7, y * 0.6 - 1.2, -z * 5.0),
             ),
-            material: material(i),
         });
     }
     for i in 0..IN_FRONT {
         let (x, y) = ((i % 5) as f32, (i / 5) as f32);
         draws.push(DrawItem {
             mesh,
+            material: material(i + 3),
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::splat(0.3),
                 Default::default(),
                 Vec3::new(x * 0.8 - 1.6, y * 0.8 - 1.2, 8.0),
             ),
-            material: material(i + 3),
         });
     }
     for i in 0..OUTSIDE {
         draws.push(DrawItem {
             mesh,
-            world_from_object: Mat4::from_translation(Vec3::new(i as f32, 0.0, 20.0)),
             material: material(i),
+            world_from_object: Mat4::from_translation(Vec3::new(i as f32, 0.0, 20.0)),
         });
     }
     let in_frustum = (1 + BEHIND + IN_FRONT) as u32;
@@ -205,11 +214,15 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            frame_number += 1;
             let geo = geometry
-                .begin_frame(&mut fg, &device, &mut allocator, {
-                    frame_number += 1;
-                    frame_number
-                })
+                .begin_frame(&mut fg, &device, &mut allocator, frame_number)
+                .unwrap();
+            textures
+                .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
+                .unwrap();
+            let mats = materials
+                .begin_frame(&mut fg, &device, &mut allocator, &textures, frame_number)
                 .unwrap();
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, SIZE, SIZE));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
@@ -229,6 +242,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
                     &mut ring,
                     &bindless,
                     &geo,
+                    &mats,
                     &draws,
                     &ForwardView {
                         camera,
@@ -358,6 +372,8 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
+        materials.destroy(&mut allocator);
+        textures.destroy(&mut allocator, &bindless);
         occlusion.destroy(&mut allocator);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);
