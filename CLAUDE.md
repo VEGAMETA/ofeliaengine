@@ -493,6 +493,9 @@ physics and navigation visualizers, 2D editor (tilemaps, sprites), viewport mana
 ### Dependencies
 - `cargo-deny` in CI. Allowed: MIT, Apache-2.0, BSD-2/3, Zlib, ISC, Unicode, MIT-0, public domain.
   MPL-2.0 only via ADR. GPL/LGPL/AGPL forbidden.
+- Fonts and icon sets (assets only, never code): OFL-1.1 and CC BY 4.0 are also allowed,
+  shipped unmodified and credited in the "Fonts and icons" section of `THIRD_PARTY_NOTICES.md`
+  (author, upstream, version, license) in the same commit (team decision, ADR 0036).
 - Every new dependency: why, size, compile time, license, maintenance status. One line in the
   commit description.
 - `THIRD_PARTY_NOTICES.md` is updated with every addition.

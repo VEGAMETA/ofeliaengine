@@ -35,8 +35,34 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 |---|---|---|---|
 | Jolt Physics (© 2021 Jorrit Rouwe) | v5.6.0 | MIT | reference physics backend `engine_physics_jolt` (ADR 0018) |
 | JoltC (© Amer Koleci and contributors) | commit 886e088675ba | MIT | C API over Jolt, bound by `engine_physics_jolt` |
-| Go fonts (© 2016 Bigelow & Holmes Inc., for the Go project) | golang/image commit b06f1de3f490 | BSD-3-Clause | Go Regular, Bold and Mono: the engine's bundled fonts and the text test font (`third_party/fonts/go`, embedded by `engine_text::fonts`) |
 | Box2D (© 2022 Erin Catto) | v3.1.1 | MIT | 2D physics, `engine_physics2d` (ADR 0028) |
+
+## Fonts and icons
+
+Every font and icon set the engine ships, unmodified, under `third_party/fonts/`, embedded
+by `engine_text::fonts`. OFL-1.1 and CC BY 4.0 are allowed for fonts and icons only, on the
+condition of this section (ADR 0036). License texts are next to each font.
+
+| Font or icon set | Author | Version | License | Upstream | Used for |
+|---|---|---|---|---|---|
+| Noto Sans | © 2022 The Noto Project Authors | 2.015 | OFL-1.1 | https://github.com/notofonts/latin-greek-cyrillic | editor UI text (`NOTO_SANS`) |
+| JetBrains Mono | © 2020 The JetBrains Mono Project Authors | 2.305 | OFL-1.1 | https://github.com/JetBrains/JetBrainsMono | code, console; arrows and symbols in the UI stack (`JETBRAINS_MONO`) |
+| Go fonts (Regular, Bold, Mono) | © 2016 Bigelow & Holmes Inc., for the Go project | golang/image commit b06f1de3f490 | BSD-3-Clause | https://go.googlesource.com/image | test font of `engine_text` (`GO_*`) |
+| Symbols Nerd Font (the font and scripts) | © 2014 Ryan L McIntyre | Nerd Fonts 3.5.1 | MIT | https://github.com/ryanoasis/nerd-fonts | icons (`NERD_SYMBOLS`), with the sets below |
+| ↳ Codicons | © Microsoft Corporation | 0.0.45 | CC BY 4.0 | https://github.com/microsoft/vscode-codicons | icons |
+| ↳ Devicons | © the Devicon contributors | 2.17.0 | MIT | https://github.com/devicons/devicon | icons |
+| ↳ extraglyphs (from Hack) | © Source Foundry authors | – | MIT | https://github.com/source-foundry/Hack | icons |
+| ↳ Font Awesome | © Fonticons, Inc. | 6.5.1 | CC BY 4.0 (icons) | https://github.com/FortAwesome/Font-Awesome | icons |
+| ↳ Font Awesome Extension | © Andre Gava | 0.0.3 | MIT | https://github.com/AndreLZGava/font-awesome-extension | icons |
+| ↳ Font Logos | © Lukas W | 1.3.0 | Unlicense | https://github.com/lukas-w/font-logos | icons |
+| ↳ Material Design Icons | © Pictogrammers | 2022-10-06 | Apache-2.0 | https://github.com/Templarian/MaterialDesign-Font | icons (play, pause, stop, folders) |
+| ↳ Octicons | © GitHub Inc. | 18.3.0 | MIT | https://github.com/primer/octicons | icons |
+| ↳ Seti-UI | © Jesse Weed | 0.8.1 | MIT | https://github.com/jesseweed/seti-ui | icons |
+| ↳ Pomicons | © Gabriele Lana | 1.001 | OFL-1.1 | https://github.com/gabrielelana/pomicons | icons |
+| ↳ Powerline Extra Symbols | © Ryan L McIntyre | 1.200 | MIT | https://github.com/ryanoasis/powerline-extra-symbols | icons |
+| ↳ Powerline Symbols | © Kim Silkebækken and powerline contributors | 1.000 | MIT | https://github.com/powerline/powerline | icons |
+| ↳ IEC Power Symbols | © Joe Loughry | 2015-02 | MIT | https://github.com/jloughry/Unicode | icons |
+| ↳ Weather Icons | © Erik Flowers | 2.0.10 | OFL-1.1 | https://github.com/erikflowers/weather-icons | icons |
 
 ## Rust crates (build dependencies)
 
