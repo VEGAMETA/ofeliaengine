@@ -75,9 +75,9 @@ fn compiles_the_bootstrap_triangle_and_matches_the_committed_spirv() {
         output.dependencies
     );
 
-    // The committed bootstrap SPIR-V was produced by Slang 2026.12; with the same compiler it
+    // The committed bootstrap SPIR-V was produced by Slang 2026.18.3; with the same compiler it
     // must match the source exactly (no stale binaries in the repository).
-    if library.version() == "2026.12" {
+    if library.version() == "2026.18.3" {
         let committed = |name: &str| -> Vec<u32> {
             let bytes = std::fs::read(
                 Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -93,7 +93,7 @@ fn compiles_the_bootstrap_triangle_and_matches_the_committed_spirv() {
         assert_eq!(output.entries[0].spirv, committed("triangle.vert.spv"));
         assert_eq!(output.entries[1].spirv, committed("triangle.frag.spv"));
     } else {
-        println!("not comparing with committed SPIR-V (made with Slang 2026.12)");
+        println!("not comparing with committed SPIR-V (made with Slang 2026.18.3)");
     }
 }
 
