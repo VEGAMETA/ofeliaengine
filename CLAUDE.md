@@ -39,7 +39,7 @@ Working name of the engine in code: `engine` (crate prefix `engine_*`). Replace 
 | 2D physics | Box2D v3 (vendored C source behind a C shim; ADR 0028) |
 | Audio | Own mixer + DSP graph, WASAPI directly, VST3 hosting (SDK is MIT) |
 | Profiling | Tracy (mandatory everywhere) + built-in editor profiler |
-| Engine license | Decided by the humans. Until then, do not add copyleft dependencies |
+| Engine license | MIT as a placeholder (ADR 0020); the humans choose the final license before the first release. No copyleft dependencies |
 
 Decisions change only via an ADR backed by measurements.
 

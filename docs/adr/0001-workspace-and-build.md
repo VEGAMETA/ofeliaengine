@@ -68,7 +68,8 @@ not fixed and need a recorded decision:
 ## Decision
 
 - Workspace: **A** (virtual workspace, `crates/*`, `resolver = "3"`, edition 2024,
-  `publish = false`, no `license` field until the team decides, §1).
+  `publish = false`, no `license` field until the team decides, §1; since ADR 0020,
+`license = "MIT"` as a placeholder).
 - Toolchain: **A**, pinned to `1.94.1` with `rustfmt`, `clippy` and the
   `x86_64-pc-windows-msvc` target.
 - Linker: **C** (`rust-lld.exe`), provisionally, until the measurement above is done.

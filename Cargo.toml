@@ -6,8 +6,9 @@ members = ["crates/*", "tools/*"]
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.94"
-# The engine license is decided by the team (CLAUDE.md §1). Until then no crate declares
-# one and nothing is published.
+# MIT as a placeholder until the final license is chosen, before the first release
+# (ADR 0020). Nothing is published.
+license = "MIT"
 publish = false
 
 [workspace.dependencies]

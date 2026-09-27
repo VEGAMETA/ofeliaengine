@@ -73,3 +73,8 @@ team".
 | `docs/dev-guide` | Documentation for game developers |
 
 Other crates from the target layout (CLAUDE.md §2) are added when work on them starts.
+
+## License
+
+MIT (`LICENSE`), as a placeholder: the final license is chosen before the first release
+(ADR 0020). Third-party code, fonts and icons keep their own licenses (`THIRD_PARTY_NOTICES.md`).
