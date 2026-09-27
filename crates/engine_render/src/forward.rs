@@ -61,6 +61,14 @@ const SHADOW_FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.shadowF
 const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked.spv");
 const DEPTH_VERTEX: &[u8] = include_bytes!("../shaders/forward.depthVertex.spv");
+const FRAGMENT_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotion.spv");
+const FRAGMENT_MASKED_MOTION: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
+const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
+const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
+
+/// Format of the motion vector target (ADR 0043).
+pub const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 const DEPTH_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.depthVertexMasked.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
 
@@ -133,6 +141,143 @@ pub struct ForwardView<'a> {
     pub clear: Option<[f32; 4]>,
     /// This view's occlusion-culling state, or `None` for frustum culling only.
     pub occlusion: Option<&'a Occlusion>,
+    /// This view's temporal state, for a jittered projection and motion vectors (TAA,
+    /// upscalers, motion blur), or `None`.
+    pub temporal: Option<&'a Temporal>,
+}
+
+/// Temporal state of one view, kept across frames (ADR 0043): last frame's camera and
+/// instance transforms, from which the forward pass writes motion vectors, and the
+/// sub-pixel jitter sequence of the projection.
+///
+/// Instances are known by their index in the draw list, as for [`Occlusion`]: keep the
+/// order stable. An instance whose index had no transform last frame counts as still for
+/// one frame. Call [`Self::reset`] after a camera cut. Transforms must be the ones drawn
+/// in consecutive frames (interpolate fixed-step physics for rendering): motion vectors
+/// report what was on screen.
+#[derive(Debug)]
+pub struct Temporal {
+    buffer: vk::Buffer,
+    allocation: Option<Allocation>,
+    address: vk::DeviceAddress,
+    capacity: u32,
+    /// Instances copied into `buffer` last frame.
+    previous_count: Cell<u32>,
+    previous_clip_from_world: Cell<Option<Mat4>>,
+    /// Frames drawn, for the jitter phase.
+    frame: Cell<u64>,
+    /// Jitter phases (0: no jitter).
+    phases: Cell<u32>,
+    reset: Cell<bool>,
+    /// The state the graph left the buffer in.
+    state: Cell<BufferState>,
+}
+
+/// What a frame drawn with a [`Temporal`] state adds to [`ForwardPasses`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MotionOutput {
+    /// Motion vectors ([`MOTION_FORMAT`], the size of the color target): for each pixel,
+    /// the texture-coordinate delta current − previous of the surface it shows, without
+    /// jitter, so that surface was at `uv − motion` last frame. Pixels without geometry
+    /// carry the camera's motion.
+    pub velocity: Texture,
+    /// This frame's jitter in pixels, in [-0.5, 0.5]: the projection moved the image by
+    /// this much (x right, y down).
+    pub jitter: [f32; 2],
+    /// Last frame is unrelated to this one (first frame, or after [`Temporal::reset`]):
+    /// accumulated history should be dropped.
+    pub reset: bool,
+}
+
+/// The `index`-th element (from 1) of the van der Corput sequence in `base`.
+fn halton(mut index: u32, base: u32) -> f32 {
+    let (mut result, mut f) = (0.0f32, 1.0f32);
+    while index > 0 {
+        f /= base as f32;
+        result += f * (index % base) as f32;
+        index /= base;
+    }
+    result
+}
+
+impl Temporal {
+    /// State for up to `capacity` instances (64 bytes each, in device memory), without
+    /// jitter.
+    pub fn new(
+        device: &Device,
+        allocator: &mut Allocator,
+        capacity: u32,
+    ) -> Result<Self, RhiError> {
+        let (buffer, allocation) = allocator.create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(u64::from(capacity.max(1)) * size_of::<InstanceData>() as u64)
+                .usage(
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                ),
+            MemoryLocation::Device,
+        )?;
+        // SAFETY: created with SHADER_DEVICE_ADDRESS usage and bound.
+        let address = unsafe {
+            device
+                .raw()
+                .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
+        };
+        Ok(Self {
+            buffer,
+            allocation: Some(allocation),
+            address,
+            capacity,
+            previous_count: Cell::new(0),
+            previous_clip_from_world: Cell::new(None),
+            frame: Cell::new(0),
+            phases: Cell::new(0),
+            reset: Cell::new(true),
+            state: Cell::new(BufferState::idle()),
+        })
+    }
+
+    /// Jitters the projection through `phases` Halton(2, 3) offsets (0: no jitter). TAA
+    /// wants at least 8, upscaling by `s` per axis ⌈8 · s²⌉.
+    pub fn set_jitter_phases(&self, phases: u32) {
+        self.phases.set(phases);
+    }
+
+    /// The jitter of the next frame, in pixels.
+    pub fn next_jitter(&self) -> [f32; 2] {
+        let phases = self.phases.get();
+        if phases == 0 {
+            return [0.0; 2];
+        }
+        let k = (self.frame.get() % u64::from(phases)) as u32 + 1;
+        [halton(k, 2) - 0.5, halton(k, 3) - 0.5]
+    }
+
+    /// Forgets last frame (camera cut, teleport): the next frame has no motion and
+    /// reports [`MotionOutput::reset`].
+    pub fn reset(&self) {
+        self.reset.set(true);
+        self.previous_count.set(0);
+        self.previous_clip_from_world.set(None);
+    }
+
+    /// Instances whose transforms are remembered.
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
+    /// Frees the buffer.
+    ///
+    /// # Safety
+    ///
+    /// The GPU no longer uses it.
+    pub unsafe fn destroy(&mut self, allocator: &mut Allocator) {
+        if let Some(allocation) = self.allocation.take() {
+            // SAFETY: guaranteed by the caller; the pair comes from `create_buffer`.
+            unsafe { allocator.destroy_buffer(self.buffer, allocation) };
+        }
+    }
 }
 
 /// Occlusion-culling state of one view, kept across frames (ADR 0035): whether each
@@ -226,6 +371,11 @@ struct FrameData {
     depth_size: [u32; 2],
     _pad: [u32; 2],
     hiz_offsets: [u32; hiz::MAX_LEVELS],
+    previous_clip_from_world: [f32; 16],
+    previous_clip_from_clip: [f32; 16],
+    jitter: [f32; 4],
+    previous_count: u32,
+    _pad2: [u32; 3],
 }
 
 /// `Instance` in `forward.slang` (64 bytes).
@@ -248,7 +398,7 @@ struct BatchData {
     extents: [f32; 4],
 }
 
-/// `Push` in `forward.slang` (96 bytes).
+/// `Push` in `forward.slang` (104 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct Push {
@@ -262,16 +412,17 @@ struct Push {
     positions: u64,
     attributes: u64,
     materials: u64,
+    previous_instances: u64,
     instance_count: u32,
     texture: u32,
     phase: u32,
     _pad: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<FrameData>() == 384);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 544);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 48);
-const _: () = assert!(core::mem::size_of::<Push>() == 96);
+const _: () = assert!(core::mem::size_of::<Push>() == 104);
 const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 const _: () = assert!(COMMAND_BYTES == 20);
 
@@ -294,7 +445,7 @@ impl Default for ShadowSettings {
 }
 
 /// What [`ForwardRenderer::add_passes`] declared.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ForwardPasses {
     /// Instances (one per draw item), all tested by the culling pass.
     pub instances: u32,
@@ -309,6 +460,8 @@ pub struct ForwardPasses {
     /// its batch: read it back to count what was drawn. `None` when there was nothing to
     /// draw.
     pub commands: Option<Buffer>,
+    /// Motion vectors and jitter, with a [`Temporal`] state.
+    pub motion: Option<MotionOutput>,
 }
 
 /// A batch while the draw list is turned into batches.
@@ -343,6 +496,12 @@ pub struct ForwardRenderer {
     shade: Pipeline,
     /// Depth prepass: opaque (depth only), masked.
     prepass: [Pipeline; 2],
+    /// Forward shading that also writes motion vectors: opaque, masked, and after the
+    /// prepass.
+    main_motion: [Pipeline; 2],
+    shade_motion: Pipeline,
+    /// Camera motion where no geometry was drawn.
+    background: Pipeline,
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
     cull: Pipeline,
@@ -385,16 +544,28 @@ impl ForwardRenderer {
         let fragment_masked = spirv_words(FRAGMENT_MASKED).ok_or_else(invalid)?;
         let depth_vertex = spirv_words(DEPTH_VERTEX).ok_or_else(invalid)?;
         let depth_vertex_masked = spirv_words(DEPTH_VERTEX_MASKED).ok_or_else(invalid)?;
+        let fragment_motion = spirv_words(FRAGMENT_MOTION).ok_or_else(invalid)?;
+        let fragment_masked_motion = spirv_words(FRAGMENT_MASKED_MOTION).ok_or_else(invalid)?;
+        let background_vertex = spirv_words(BACKGROUND_VERTEX).ok_or_else(invalid)?;
+        let background_motion = spirv_words(BACKGROUND_MOTION).ok_or_else(invalid)?;
         let formats = [color_format];
+        let motion_formats = [color_format, MOTION_FORMAT];
         // Cull mode and front face come with each batch's pipeline state.
-        let main = |fragment: &[u32], entry| {
+        let main = |fragment: &[u32], entry, formats: &[vk::Format], equal: bool| {
             Pipeline::graphics(
                 device,
                 bindless.pipeline_layout(),
                 &GraphicsPipelineDesc {
-                    color_formats: &formats,
+                    color_formats: formats,
                     depth_format,
                     dynamic_culling: true,
+                    // After the depth prepass: tested for equality, not written.
+                    depth_write: !equal,
+                    depth_compare: if equal {
+                        vk::CompareOp::EQUAL
+                    } else {
+                        vk::CompareOp::LESS
+                    },
                     ..GraphicsPipelineDesc::new(
                         ShaderStageDesc {
                             spirv: &vertex,
@@ -432,27 +603,39 @@ impl ForwardRenderer {
                 vk::PipelineCache::null(),
             )
         };
-        let main = [
-            main(&fragment, c"fragmentMain")?,
-            main(&fragment_masked, c"fragmentMasked")?,
+        let main_motion = [
+            main(&fragment_motion, c"fragmentMainMotion", &motion_formats, false)?,
+            main(
+                &fragment_masked_motion,
+                c"fragmentMaskedMotion",
+                &motion_formats,
+                false,
+            )?,
         ];
-        let shade = Pipeline::graphics(
+        let shade_motion = main(&fragment_motion, c"fragmentMainMotion", &motion_formats, true)?;
+        let shade = main(&fragment, c"fragmentMain", &formats, true)?;
+        let main = [
+            main(&fragment, c"fragmentMain", &formats, false)?,
+            main(&fragment_masked, c"fragmentMasked", &formats, false)?,
+        ];
+        let background_formats = [MOTION_FORMAT];
+        let background = Pipeline::graphics(
             device,
             bindless.pipeline_layout(),
             &GraphicsPipelineDesc {
-                color_formats: &formats,
+                color_formats: &background_formats,
                 depth_format,
-                dynamic_culling: true,
+                cull_mode: vk::CullModeFlags::NONE,
                 depth_write: false,
                 depth_compare: vk::CompareOp::EQUAL,
                 ..GraphicsPipelineDesc::new(
                     ShaderStageDesc {
-                        spirv: &vertex,
-                        entry: c"vertexMain",
+                        spirv: &background_vertex,
+                        entry: c"backgroundVertex",
                     },
                     Some(ShaderStageDesc {
-                        spirv: &fragment,
-                        entry: c"fragmentMain",
+                        spirv: &background_motion,
+                        entry: c"backgroundMotion",
                     }),
                 )
             },
@@ -514,6 +697,9 @@ impl ForwardRenderer {
             main,
             shade,
             prepass,
+            main_motion,
+            shade_motion,
+            background,
             shadow,
             cull: compute(CULL, c"cullMain")?,
             pyramid: DepthPyramid::new(device, bindless)?,
@@ -588,6 +774,7 @@ impl ForwardRenderer {
                 batches: 0,
                 occlusion: false,
                 commands: None,
+                motion: None,
             });
         }
         let instance_count = draws.len() as u32;
@@ -652,8 +839,10 @@ impl ForwardRenderer {
                     });
                 }
             }
-            staged.address
+            staged
         };
+        let instances_staged = instances;
+        let instances = instances.address;
         let batch_table = {
             let (out, staged) = ring.alloc::<BatchData>(batch_count as usize)?;
             for run in runs.iter() {
@@ -701,8 +890,24 @@ impl ForwardRenderer {
         drop(scratch);
         let states = States { starts, counts };
         let pyramid_layout = PyramidLayout::new(depth_desc.width, depth_desc.height);
+        // Temporal state: this frame's jitter (the projection moved by a sub-pixel
+        // offset), last frame's camera, whether last frame is related at all.
+        let temporal = view.temporal;
+        let jitter = temporal.map_or([0.0; 2], Temporal::next_jitter);
+        let jitter_ndc = [
+            2.0 * jitter[0] / depth_desc.width.max(1) as f32,
+            2.0 * jitter[1] / depth_desc.height.max(1) as f32,
+        ];
+        let unjittered = view.camera.clip_from_world;
+        let clip_from_world =
+            Mat4::from_translation(Vec3::new(jitter_ndc[0], jitter_ndc[1], 0.0)) * unjittered;
+        let reset = temporal.is_some_and(|t| t.reset.replace(false));
+        let previous_clip_from_world = temporal
+            .and_then(|t| t.previous_clip_from_world.get())
+            .unwrap_or(unjittered);
+        let previous_count = temporal.map_or(0, |t| t.previous_count.get());
         let frame = FrameData {
-            clip_from_world: view.camera.clip_from_world.to_cols_array(),
+            clip_from_world: clip_from_world.to_cols_array(),
             light_clip_from_world: fit_light(min, max, view.light.direction).to_cols_array(),
             camera_position: view.camera.position.extend(1.0).to_array(),
             to_light: (-view.light.direction.normalize_or(Vec3::NEG_Y))
@@ -720,6 +925,12 @@ impl ForwardRenderer {
             depth_size: [depth_desc.width, depth_desc.height],
             _pad: [0; 2],
             hiz_offsets: pyramid_layout.offsets,
+            previous_clip_from_world: previous_clip_from_world.to_cols_array(),
+            previous_clip_from_clip: (previous_clip_from_world * unjittered.inverse())
+                .to_cols_array(),
+            jitter: [jitter_ndc[0], jitter_ndc[1], 0.0, 0.0],
+            previous_count,
+            _pad2: [0; 3],
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -733,6 +944,7 @@ impl ForwardRenderer {
             positions: geometry.position_address(),
             attributes: geometry.attribute_address(),
             materials: materials.address(),
+            previous_instances: temporal.map_or(0, |t| t.address),
             instance_count,
             texture: 0,
             phase: PHASE_ALL,
@@ -854,15 +1066,48 @@ impl ForwardRenderer {
                     );
                 }
             });
+        // Motion vectors: a second target, last frame's transforms read by the vertex
+        // shader, and this frame's copied for the next one afterwards.
+        let velocity = temporal.map(|_| {
+            fg.create_texture(
+                "motion vectors",
+                TextureDesc::new_2d(MOTION_FORMAT, depth_desc.width, depth_desc.height),
+            )
+        });
+        const COPIED: BufferState = BufferState {
+            stages: vk::PipelineStageFlags2::COPY,
+            access: vk::AccessFlags2::TRANSFER_WRITE,
+        };
+        let previous = temporal.map(|t| {
+            let buffer = fg.import_buffer(
+                "previous instances",
+                ImportedBuffer {
+                    buffer: t.buffer,
+                    size: u64::from(t.capacity.max(1)) * size_of::<InstanceData>() as u64,
+                    address: t.address,
+                    initial: t.state.get(),
+                    final_state: Some(COPIED),
+                },
+            );
+            t.state.set(COPIED);
+            buffer
+        });
+        let targets = Targets {
+            color,
+            color_load: load,
+            velocity,
+            previous,
+        };
+
         let prepass = self.depth_prepass;
-        let main = &self.main;
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
-        let main_pipelines = if prepass {
-            [&self.shade, &self.shade]
-        } else {
-            [&main[0], &main[1]]
+        let main_pipelines = match (prepass, velocity.is_some()) {
+            (true, false) => [&self.shade, &self.shade],
+            (true, true) => [&self.shade_motion, &self.shade_motion],
+            (false, false) => [&self.main[0], &self.main[1]],
+            (false, true) => [&self.main_motion[0], &self.main_motion[1]],
         };
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
@@ -888,120 +1133,259 @@ impl ForwardRenderer {
                 );
             }
         };
-        let Some(flags) = flag_buffer else {
-            if prepass {
-                prepass_pass(fg, "depth prepass", &geometry, &materials, culled, visible)
-                    .depth(depth, depth_clear, StoreOp::Store)
-                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_ALL));
-                forward_pass(
+        // The depth is needed after the frame's passes for motion vectors and upsampling.
+        let depth_store = if velocity.is_some() {
+            StoreOp::Store
+        } else {
+            StoreOp::DontCare
+        };
+        let passes = match flag_buffer {
+            None => {
+                let depth_use = if prepass {
+                    prepass_pass(fg, "depth prepass", &geometry, &materials, culled, visible)
+                        .depth(depth, depth_clear, StoreOp::Store)
+                        .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_ALL));
+                    DepthUse::ReadOnly
+                } else {
+                    DepthUse::Write(depth_clear, depth_store)
+                };
+                shading_pass(
                     fg, "forward", &geometry, &materials, shadow_map, culled, visible,
+                    targets, true, depth, depth_use,
                 )
-                .color(color, load, StoreOp::Store)
-                .depth_read_only(depth)
                 .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL));
-            } else {
-                forward_pass(
-                    fg, "forward", &geometry, &materials, shadow_map, culled, visible,
-                )
-                .color(color, load, StoreOp::Store)
-                .depth(depth, depth_clear, StoreOp::DontCare)
-                .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL));
+                ForwardPasses {
+                    instances: instance_count,
+                    batches: batch_count,
+                    occlusion: false,
+                    commands: Some(culled),
+                    motion: None,
+                }
             }
-            return Some(ForwardPasses {
-                instances: instance_count,
-                batches: batch_count,
-                occlusion: false,
-                commands: Some(culled),
-            });
+            Some(flags) => {
+                // Two phases: draw what was visible, build the pyramid from its depth, then
+                // test everything against it and draw what the first phase missed. With the
+                // prepass the phases draw depth only, and the forward pass shades both
+                // lists once.
+                if prepass {
+                    prepass_pass(
+                        fg,
+                        "depth prepass early",
+                        &geometry,
+                        &materials,
+                        culled,
+                        visible,
+                    )
+                    .depth(depth, depth_clear, StoreOp::Store)
+                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_EARLY));
+                } else {
+                    shading_pass(
+                        fg,
+                        "forward early",
+                        &geometry,
+                        &materials,
+                        shadow_map,
+                        culled,
+                        visible,
+                        targets,
+                        true,
+                        depth,
+                        DepthUse::Write(depth_clear, StoreOp::Store),
+                    )
+                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_EARLY));
+                }
+                let pyramid = fg.create_buffer(
+                    "depth pyramid",
+                    BufferDesc {
+                        size: pyramid_layout.bytes(),
+                    },
+                );
+                self.pyramid.add_pass(fg, bindless, depth, pyramid);
+                cull_pass(fg, "cull late", culled, visible, Some(flags), PHASE_LATE)
+                    .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
+                    .execute(move |ctx| {
+                        let push = Push {
+                            visible: ctx.address(visible) + visible_bytes,
+                            commands: ctx.address(culled) + command_bytes,
+                            pyramid: ctx.address(pyramid),
+                            phase: PHASE_LATE,
+                            ..base
+                        };
+                        dispatch_cull(ctx, push);
+                    });
+                if prepass {
+                    prepass_pass(
+                        fg,
+                        "depth prepass late",
+                        &geometry,
+                        &materials,
+                        culled,
+                        visible,
+                    )
+                    .depth(depth, LoadOp::Load, StoreOp::Store)
+                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_LATE));
+                    shading_pass(
+                        fg,
+                        "forward",
+                        &geometry,
+                        &materials,
+                        shadow_map,
+                        culled,
+                        visible,
+                        targets,
+                        true,
+                        depth,
+                        DepthUse::ReadOnly,
+                    )
+                    .execute(move |ctx| {
+                        draw_phase(ctx, main_pipelines, PHASE_EARLY);
+                        draw_phase(ctx, main_pipelines, PHASE_LATE);
+                    });
+                } else {
+                    shading_pass(
+                        fg,
+                        "forward late",
+                        &geometry,
+                        &materials,
+                        shadow_map,
+                        culled,
+                        visible,
+                        targets,
+                        false,
+                        depth,
+                        DepthUse::Write(LoadOp::Load, depth_store),
+                    )
+                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_LATE));
+                }
+                ForwardPasses {
+                    instances: instance_count,
+                    batches: batch_count,
+                    occlusion: true,
+                    commands: Some(culled),
+                    motion: None,
+                }
+            }
+        };
+        let (Some(temporal), Some(velocity), Some(previous)) = (temporal, velocity, previous)
+        else {
+            return Some(passes);
         };
 
-        // Two phases: draw what was visible, build the pyramid from its depth, then test
-        // everything against it and draw what the first phase missed. With the prepass the
-        // phases draw depth only, and the forward pass shades both lists once.
-        if prepass {
-            prepass_pass(
-                fg,
-                "depth prepass early",
-                &geometry,
-                &materials,
-                culled,
-                visible,
-            )
-            .depth(depth, depth_clear, StoreOp::Store)
-            .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_EARLY));
-        } else {
-            forward_pass(
-                fg,
-                "forward early",
-                &geometry,
-                &materials,
-                shadow_map,
-                culled,
-                visible,
-            )
-            .color(color, load, StoreOp::Store)
-            .depth(depth, depth_clear, StoreOp::Store)
-            .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_EARLY));
-        }
-        let pyramid = fg.create_buffer(
-            "depth pyramid",
-            BufferDesc {
-                size: pyramid_layout.bytes(),
-            },
-        );
-        self.pyramid.add_pass(fg, bindless, depth, pyramid);
-        cull_pass(fg, "cull late", culled, visible, Some(flags), PHASE_LATE)
-            .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
-            .execute(move |ctx| {
-                let push = Push {
-                    visible: ctx.address(visible) + visible_bytes,
-                    commands: ctx.address(culled) + command_bytes,
-                    pyramid: ctx.address(pyramid),
-                    phase: PHASE_LATE,
-                    ..base
-                };
-                dispatch_cull(ctx, push);
-            });
-        if prepass {
-            prepass_pass(
-                fg,
-                "depth prepass late",
-                &geometry,
-                &materials,
-                culled,
-                visible,
-            )
-            .depth(depth, LoadOp::Load, StoreOp::Store)
-            .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_LATE));
-            forward_pass(
-                fg, "forward", &geometry, &materials, shadow_map, culled, visible,
-            )
-            .color(color, load, StoreOp::Store)
+        // Where no geometry was drawn (depth still 1), the camera's motion.
+        let background = &self.background;
+        fg.add_pass("motion background")
+            .color(velocity, LoadOp::Load, StoreOp::Store)
             .depth_read_only(depth)
             .execute(move |ctx| {
-                draw_phase(ctx, main_pipelines, PHASE_EARLY);
-                draw_phase(ctx, main_pipelines, PHASE_LATE);
+                let area = ctx.render_area();
+                // SAFETY: recording inside the pass's rendering scope; the frame constants
+                // are in the ring.
+                unsafe {
+                    background.bind(ctx.cmd);
+                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                    set_viewport(ctx.device, ctx.cmd, area);
+                    bindless.push_constants(ctx.cmd, push_bytes(&base));
+                    ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+                }
             });
-        } else {
-            forward_pass(
-                fg,
-                "forward late",
-                &geometry,
-                &materials,
-                shadow_map,
-                culled,
-                visible,
-            )
-            .color(color, LoadOp::Load, StoreOp::Store)
-            .depth(depth, LoadOp::Load, StoreOp::DontCare)
-            .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_LATE));
+        // This frame's transforms are next frame's previous ones.
+        let copied = instance_count.min(temporal.capacity);
+        if copied > 0 {
+            let size = u64::from(copied) * size_of::<InstanceData>() as u64;
+            fg.add_pass("remember instances")
+                .write(previous, Access::TransferWrite)
+                .execute(move |ctx| {
+                    // SAFETY: recording outside a rendering scope; both ranges are in
+                    // bounds (the ring holds every instance, the state `capacity`).
+                    unsafe {
+                        ctx.device.cmd_copy_buffer(
+                            ctx.cmd,
+                            instances_staged.buffer,
+                            ctx.buffer(previous),
+                            &[vk::BufferCopy {
+                                src_offset: instances_staged.offset,
+                                dst_offset: 0,
+                                size,
+                            }],
+                        );
+                    }
+                });
         }
+        temporal.previous_count.set(copied);
+        temporal.previous_clip_from_world.set(Some(unjittered));
+        temporal.frame.set(temporal.frame.get() + 1);
         Some(ForwardPasses {
-            instances: instance_count,
-            batches: batch_count,
-            occlusion: true,
-            commands: Some(culled),
+            motion: Some(MotionOutput {
+                velocity,
+                jitter,
+                reset,
+            }),
+            ..passes
         })
+    }
+}
+
+/// The targets of the shading passes.
+#[derive(Debug, Clone, Copy)]
+struct Targets {
+    color: Texture,
+    /// What the first shading pass does with the color target.
+    color_load: LoadOp,
+    /// Motion vectors, with a temporal state.
+    velocity: Option<Texture>,
+    /// Last frame's instances, read by the vertex shader for motion vectors.
+    previous: Option<Buffer>,
+}
+
+/// How a shading pass uses the depth target.
+#[derive(Debug, Clone, Copy)]
+enum DepthUse {
+    /// Tested and written.
+    Write(LoadOp, StoreOp),
+    /// Tested for equality with the prepass's depth.
+    ReadOnly,
+}
+
+/// A shading pass with its targets; `first` starts them (clearing motion vectors), later
+/// ones load them.
+#[allow(clippy::too_many_arguments)]
+fn shading_pass<'a, 'g>(
+    fg: &'a mut FrameGraph<'g>,
+    name: &'static str,
+    geometry: &GeometryFrame<'_>,
+    materials: &MaterialFrame<'_>,
+    shadow_map: Texture,
+    culled: Buffer,
+    visible: Buffer,
+    targets: Targets,
+    first: bool,
+    depth: Texture,
+    depth_use: DepthUse,
+) -> PassBuilder<'a, 'g> {
+    let mut pass = forward_pass(fg, name, geometry, materials, shadow_map, culled, visible)
+        .color(
+            targets.color,
+            if first {
+                targets.color_load
+            } else {
+                LoadOp::Load
+            },
+            StoreOp::Store,
+        );
+    if let Some(velocity) = targets.velocity {
+        let load = if first {
+            LoadOp::Clear([0.0; 4])
+        } else {
+            LoadOp::Load
+        };
+        pass = pass.color(velocity, load, StoreOp::Store);
+    }
+    if let Some(previous) = targets.previous {
+        pass = pass.read(previous, Access::StorageRead(ShaderStages::VERTEX));
+    }
+    match depth_use {
+        DepthUse::Write(load, store) => pass.depth(depth, load, store),
+        DepthUse::ReadOnly => pass.depth_read_only(depth),
     }
 }
 

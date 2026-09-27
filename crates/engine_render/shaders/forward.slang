@@ -24,6 +24,13 @@
 // `clip_position`: `precise`, and matrix products written out as sums, so every
 // operation carries NoContraction and the two passes produce the same bits.
 //
+// Motion vectors (ADR 0043): with a temporal state, the projection is jittered by a
+// sub-pixel offset every frame, and the `*Motion` fragment entry points also write each
+// pixel's motion, the texture-coordinate delta current − previous without jitter, into a
+// second target. The previous position comes from last frame's instance transforms
+// (`previous_instances`, by draw index) and camera. `backgroundMotion` fills the pixels
+// no geometry covered (depth still 1) with the camera's motion.
+//
 // Materials (material.rs, ADR 0040) are glTF 2.0 metallic-roughness: base color, metallic
 // and roughness, normal map, occlusion and emission, each a factor times a texture, read
 // per pixel from the material table by the instance's material slot. Masked materials
@@ -58,6 +65,12 @@ struct Frame
     uint2 depth_size;        // size of the depth target in pixels
     uint2 _pad;
     uint4 hiz_offsets[4];    // offset of level k + 1 in the pyramid, in floats
+    float4x4 previous_clip_from_world;  // last frame's camera, unjittered
+    float4x4 previous_clip_from_clip;   // for the background: this frame's clip space
+                                        // (unjittered) to last frame's
+    float4 jitter;           // xy: this frame's jitter in NDC (clip.xy += jitter × w)
+    uint previous_count;     // instances with a previous transform
+    uint3 _pad2;
 };
 
 struct Instance
@@ -124,6 +137,7 @@ struct Push
     float* positions;        // geometry pool: three floats per vertex
     Attributes* attributes;  // geometry pool: the other attributes
     Material* materials;     // the material table
+    Instance* previous_instances; // last frame's instances, by draw index (motion)
     uint instance_count;
     uint texture;            // bindless index: the shadow map, or the depth to reduce
     uint phase;              // PHASE_*
@@ -343,6 +357,7 @@ struct VertexOut
     float4 tangent : TANGENT;         // xyz unit at the vertices; w bitangent sign
     float2 uv : TEXCOORD0;
     float4 light_position : TEXCOORD1;
+    float4 previous_clip : TEXCOORD2; // last frame's clip position (motion vectors)
     nointerpolation uint material : MATERIAL;
 };
 
@@ -352,9 +367,11 @@ struct VertexOut
 [shader("vertex")]
 VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    Instance inst = push.instances[push.visible[slot]];
+    uint index = push.visible[slot];
+    Instance inst = push.instances[index];
     Attributes a = push.attributes[vertex];
-    Placed placed = clip_position(inst, load_position(vertex));
+    float3 p = load_position(vertex);
+    Placed placed = clip_position(inst, p);
     float4 world = float4(placed.world, 1.0);
     VertexOut o;
     o.position = placed.clip;
@@ -367,6 +384,9 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInsta
     o.tangent = float4(normalize(transform_vector(inst, decode_octahedral(a.tangent))), sign * mirror_sign(inst));
     o.uv = a.uv;
     o.light_position = mul(push.frame.light_clip_from_world, world);
+    // Without a previous transform the instance counts as still.
+    Instance previous = index < push.frame.previous_count ? push.previous_instances[index] : inst;
+    o.previous_clip = mul(push.frame.previous_clip_from_world, float4(transform_point(previous, p), 1.0));
     o.material = inst.material;
     return o;
 }
@@ -573,4 +593,70 @@ float4 fragmentMain(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 float4 fragmentMasked(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     return shade(input, front, true);
+}
+
+// The motion of the surface at this pixel: where it is now (the pixel center, jitter
+// removed) minus where it was last frame, in texture coordinates.
+float2 motion(float4 pixel, float4 previous_clip)
+{
+    Frame frame = push.frame[0];
+    float2 uv = pixel.xy / float2(frame.depth_size) - frame.jitter.xy * 0.5;
+    if (previous_clip.w <= 1e-6)
+        return float2(0.0, 0.0);
+    float2 previous = previous_clip.xy / previous_clip.w * 0.5 + 0.5;
+    return uv - previous;
+}
+
+struct ShadedMotion
+{
+    float4 color : SV_Target0;
+    float2 motion : SV_Target1;
+};
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotion(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = shade(input, front, false);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMaskedMotion(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = shade(input, front, true);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+struct Background
+{
+    float4 position : SV_Position;
+    float2 ndc : TEXCOORD0;
+};
+
+// A triangle covering the target at the far plane (depth exactly 1): with an equal depth
+// test it reaches only the pixels no geometry covered.
+[shader("vertex")]
+Background backgroundVertex(uint vertex : SV_VulkanVertexID)
+{
+    float2 ndc = float2((vertex << 1) & 2, vertex & 2) * 2.0 - 1.0;
+    Background o;
+    o.position = float4(ndc, 1.0, 1.0);
+    o.ndc = ndc;
+    return o;
+}
+
+// The camera's motion at infinity along this pixel's ray.
+[shader("fragment")]
+float2 backgroundMotion(Background input) : SV_Target0
+{
+    Frame frame = push.frame[0];
+    float4 previous = mul(frame.previous_clip_from_clip, float4(input.position.xy / float2(frame.depth_size) * 2.0 - 1.0 - frame.jitter.xy, 1.0, 1.0));
+    float2 uv = input.position.xy / float2(frame.depth_size) - frame.jitter.xy * 0.5;
+    if (abs(previous.w) <= 1e-6)
+        return float2(0.0, 0.0);
+    return uv - (previous.xy / previous.w * 0.5 + 0.5);
 }
