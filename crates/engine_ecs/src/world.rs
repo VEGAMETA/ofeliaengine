@@ -227,6 +227,12 @@ impl World {
         self.components.id_of::<T>()
     }
 
+    /// The components `entity` has (in canonical order), if it is alive.
+    pub fn component_ids_of(&self, entity: Entity) -> Option<&[ComponentId]> {
+        let loc = self.entities.location(entity)?;
+        Some(self.archetypes[loc.archetype as usize].components())
+    }
+
     fn archetype_for_sorted(&mut self, ids: &[ComponentId]) -> u32 {
         if let Some(&index) = self.by_ids.get(ids) {
             return index;

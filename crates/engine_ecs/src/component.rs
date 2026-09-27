@@ -202,6 +202,11 @@ impl Components {
         self.infos.get(id.0 as usize).is_some_and(|i| i.pod)
     }
 
+    /// Size and alignment of one value.
+    pub fn layout(&self, id: ComponentId) -> Option<Layout> {
+        self.infos.get(id.0 as usize).map(|i| i.layout)
+    }
+
     /// The component's reflection description, if it has one.
     pub fn type_info(&self, id: ComponentId) -> Option<&'static engine_reflect::TypeInfo> {
         self.infos.get(id.0 as usize).and_then(|i| i.type_info)
