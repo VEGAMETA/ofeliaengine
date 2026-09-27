@@ -47,6 +47,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0037](0037-checks-on-the-reference-machine.md) | Checks on the reference machine before merging; GitHub Actions on demand | Accepted |
 | [0038](0038-hdr-output.md) | HDR output: scRGB by default, following Windows at run time | Accepted |
 | [0039](0039-geometry-pool.md) | Geometry pool: shared vertex and index buffers, 28-byte vertices | Accepted |
+| [0040](0040-materials-and-textures.md) | Materials and textures: a bindless material table, filtered mip chains | Accepted |
 
 ## Template
 

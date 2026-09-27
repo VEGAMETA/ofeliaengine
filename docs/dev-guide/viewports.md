@@ -58,7 +58,9 @@ viewports.render(&mut fg, &device, &mut allocator, &bindless,
                  |fg, vp| {
     // Draw into vp.color (vp.width × vp.height), starting with vp.load.
     if vp.id == game {
-        forward.add_passes(fg, ring, bindless, &draws, &camera, &light, vp.color, depth, clear);
+        // Geometry and materials: `docs/dev-guide/rendering.md`.
+        forward.add_passes(fg, ring, bindless, &geo, &mats, &draws,
+                           &ForwardView { camera, light, color: vp.color, depth, clear, occlusion: None });
         renderer2d.add_pass(fg, ring, bindless, &hud_canvas, &View2d::pixels(vp.width, vp.height), vp.color, None)?;
     } else if vp.id == minimap {
         renderer2d.add_pass(fg, ring, bindless, &minimap_canvas, &View2d::pixels(vp.width, vp.height), vp.color, clear)?;
