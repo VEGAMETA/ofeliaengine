@@ -11,7 +11,7 @@
 //!
 //! `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
 //! (scenes: `tools/fetch-test-assets.ps1`; options: `--screenshot <png>`,
-//! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--ddc <dir>`
+//! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--prepass` for the depth prepass, `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -186,12 +186,14 @@ fn main() {
     let mut path = String::from("test-assets/Sponza/Sponza.gltf");
     let (mut screenshot, mut requested_view) = (None, None);
     let mut uncompressed = false;
+    let mut prepass = false;
     let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--screenshot" => screenshot = args.next(),
             "--uncompressed" => uncompressed = true,
+            "--prepass" => prepass = true,
             "--ddc" => ddc = args.next().unwrap(),
             "--view" => {
                 let v: Vec<f32> = args
@@ -288,7 +290,7 @@ fn main() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let depth_format = vk::Format::D32_SFLOAT;
-    let renderer = ForwardRenderer::new(
+    let mut renderer = ForwardRenderer::new(
         &device,
         &bindless,
         HDR_FORMAT,
@@ -459,15 +461,18 @@ fn main() {
         if uncompressed { "RGBA8" } else { "BC7 and BC5" },
     );
     println!();
-    println!("| materials | upload frames | GPU shadow µs | GPU forward µs |");
-    println!("|---|---:|---:|---:|");
+    renderer.set_depth_prepass(prepass);
+    println!(
+        "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs |"
+    );
+    println!("|---|---:|---:|---:|---:|");
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
         for (&id, &desc) in material_ids.iter().zip(descs.iter()) {
             materials.set(id, desc);
         }
-        let (mut shadow, mut forward) = (Vec::new(), Vec::new());
+        let (mut shadow, mut depth_prepass, mut forward) = (Vec::new(), Vec::new(), Vec::new());
         let mut upload_frames = 0;
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
@@ -596,6 +601,7 @@ fn main() {
                     match time.name {
                         "shadow" => shadow.push(f64::from(time.gpu_us)),
                         "forward" => forward.push(f64::from(time.gpu_us)),
+                        "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
                         _ => {}
                     }
                 }
@@ -611,8 +617,9 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} |",
             median(&mut shadow),
+            median(&mut depth_prepass),
             median(&mut forward),
         );
     }

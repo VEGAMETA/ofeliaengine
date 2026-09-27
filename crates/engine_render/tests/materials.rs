@@ -771,6 +771,49 @@ fn materials_and_textures() {
     }
     println!("normal map lit from +X, RGBA8 vs BC5: {lit:?}");
     assert!(lit[0].abs_diff(lit[1]) <= 6, "BC5 normals: {lit:?}");
+
+    // 10. The depth prepass (ADR 0042) changes no pixel: masked, double-sided and
+    // mirrored geometry in sunlight, shaded with and without it.
+    let mask = scene.texture(blocks(true, |bx, by| {
+        [200, 60, 30, if (bx + by) % 2 == 0 { 0 } else { 255 }]
+    }));
+    let leaves = scene.materials.add(MaterialDesc {
+        base_color_texture: Some(TextureRef::new(mask)),
+        alpha: AlphaMode::Mask { cutoff: 0.5 },
+        double_sided: true,
+        ..MaterialDesc::solid([1.0; 3], 0.0, 0.7)
+    });
+    let stone = scene
+        .materials
+        .add(MaterialDesc::solid([0.7, 0.7, 0.65], 0.0, 0.8));
+    let standing = Mat4::from_scale_rotation_translation(
+        Vec3::new(-1.2, 1.2, 1.0),
+        Quat::from_rotation_y(0.6),
+        Vec3::new(0.8, 0.6, 0.5),
+    );
+    let draws = [
+        draw(quad_mesh, stone, ground),
+        draw(quad_mesh, leaves, roof),
+        draw(quad_mesh, stone, standing),
+    ];
+    let view = Camera {
+        clip_from_world,
+        position: eye,
+    };
+    let mut images = Vec::new();
+    for prepass in [true, false] {
+        scene.renderer.set_depth_prepass(prepass);
+        images.push(scene.render(&draws, view, sun));
+    }
+    scene.renderer.set_depth_prepass(true);
+    let lit = images[0].chunks_exact(4).filter(|p| p[0] > 40).count();
+    assert!(lit > 1000, "the scene covers the view ({lit} lit pixels)");
+    let differing = images[0]
+        .chunks_exact(4)
+        .zip(images[1].chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(differing, 0, "the depth prepass changed {differing} pixels");
     scene.finish();
 }
 

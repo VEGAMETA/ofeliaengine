@@ -221,8 +221,13 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
     };
 
     let mut images = Vec::new();
-    for (frame, culling) in [true, false].into_iter().enumerate() {
+    // Culling on and off with the depth prepass, then culling on without it.
+    for (frame, (culling, prepass)) in [(true, true), (false, true), (true, false)]
+        .into_iter()
+        .enumerate()
+    {
         renderer.set_frustum_culling(culling);
+        renderer.set_depth_prepass(prepass);
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -390,6 +395,14 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
         .filter(|(a, b)| a != b)
         .count();
     assert_eq!(differing, 0, "culling changed {differing} pixels");
+    // The prepass's depth equals the forward pass's bit for bit (`precise` positions):
+    // shading with an equality test leaves no holes and changes nothing.
+    let differing = images[0]
+        .chunks_exact(4)
+        .zip(images[2].chunks_exact(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    assert_eq!(differing, 0, "the depth prepass changed {differing} pixels");
 
     // SAFETY: the device is idle.
     unsafe {

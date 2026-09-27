@@ -176,6 +176,14 @@ let passes = renderer.add_passes(
 - **Batches are drawn front to back** (within each kind of material), so hidden fragments
   are rejected before shading: on Sponza that halves the forward pass. You do not need to
   sort anything yourself.
+- **`renderer.set_depth_prepass(true)`** adds a depth-only pass first, so the forward pass
+  shades each pixel exactly once (ADR 0042).
+  - Turn it on for interiors and cities with expensive materials, especially on
+    integrated GPUs: Sponza's textured frame gets 11% faster on a Radeon iGPU, a city of
+    1,000 cubes 21%.
+  - Leave it off for dense or open geometry. The prepass costs a second pass over every
+    vertex: 100,000 cubes in the open take twice as long.
+  - Compare both with `draw_bench -- --prepass` and `scene_bench -- --prepass`.
 - **Reuse the `Vec`** (`clear()` and refill) so a frame makes no heap allocations.
 - **Transforms are affine.** Translation, rotation and scale, including mirroring. The
   bottom row of the matrix is ignored. A mirrored object (negative determinant) keeps its
