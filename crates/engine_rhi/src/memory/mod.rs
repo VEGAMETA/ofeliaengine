@@ -26,6 +26,78 @@ use ash::vk;
 use core::ptr::NonNull;
 use tlsf::{Tlsf, TlsfAllocation};
 
+/// An offsets-only range allocator (the O(1) TLSF behind GPU memory blocks) for
+/// sub-allocating inside one resource: the vertices and indices of a geometry pool, the
+/// slots of a large buffer. Units are whatever the caller counts in; sizes round up to the
+/// granule. Allocating and freeing touch no heap once the internal node list has grown to
+/// the working set.
+#[derive(Debug)]
+pub struct RangeAllocator(Tlsf);
+
+/// A range handed out by [`RangeAllocator::allocate`]. Free it with the allocator that
+/// made it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Range(TlsfAllocation);
+
+impl Range {
+    /// First unit.
+    pub fn offset(&self) -> u64 {
+        self.0.offset
+    }
+
+    /// Units reserved (the request rounded up to the granule).
+    pub fn size(&self) -> u64 {
+        self.0.size
+    }
+}
+
+impl RangeAllocator {
+    /// Manages `[0, capacity)` in `granule`s (a power of two; 1 for exact sizes), up to
+    /// 2^32 granules.
+    pub fn new(capacity: u64, granule: u64) -> Self {
+        Self(Tlsf::with_granule(capacity, granule))
+    }
+
+    /// Reserves `size` units at an offset aligned to `align` (a power of two). `None` when
+    /// no free range fits: [`Self::grow`] and try again.
+    pub fn allocate(&mut self, size: u64, align: u64) -> Option<Range> {
+        self.0
+            .allocate_fast(size, align)
+            .or_else(|| self.0.allocate(size, align))
+            .map(Range)
+    }
+
+    /// Returns a range to the allocator.
+    pub fn free(&mut self, range: Range) {
+        self.0.free(range.0);
+    }
+
+    /// Extends the managed range to `[0, capacity)`; existing ranges keep their offsets.
+    pub fn grow(&mut self, capacity: u64) {
+        self.0.grow(capacity);
+    }
+
+    /// Size of the managed range.
+    pub fn capacity(&self) -> u64 {
+        self.0.capacity()
+    }
+
+    /// Units in live ranges.
+    pub fn used(&self) -> u64 {
+        self.0.used()
+    }
+
+    /// Number of live ranges.
+    pub fn len(&self) -> u32 {
+        self.0.allocation_count()
+    }
+
+    /// Whether no range is live.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 /// Where memory lives and how the CPU uses it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MemoryLocation {

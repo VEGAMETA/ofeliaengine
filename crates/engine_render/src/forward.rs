@@ -2,8 +2,8 @@
 //! GPU-driven (ADR 0034) with optional two-phase occlusion culling (ADR 0035).
 //!
 //! [`ForwardRenderer::add_passes`] turns the draw list into instances and batches (a batch
-//! is a run of consecutive draws that share a mesh, drawn as one instanced draw) and
-//! declares these passes in the frame's render graph:
+//! is a run of consecutive draws that share a mesh of the [`GeometryPool`], drawn as one
+//! indexed, instanced draw) and declares these passes in the frame's render graph:
 //!
 //! 1. **cull setup**: copies the batches' indirect draw commands, with no instances yet,
 //!    from the upload ring into a graph buffer;
@@ -25,10 +25,13 @@
 //! and nothing visible is ever missing: a wrong guess from the previous frame only costs
 //! time.
 //!
-//! Each drawing pass records a single `vkCmdDrawIndirect` for all batches, so beyond
-//! writing 80 bytes per instance into the [`UploadRing`] the CPU cost of a frame does not
-//! grow with the number of draws. Shaders read everything through device addresses and
-//! find the shadow map through the bindless set (its index is assigned by the graph).
+//! Each drawing pass records a single `vkCmdDrawIndexedIndirect` for all batches, so
+//! beyond writing 80 bytes per instance into the [`UploadRing`] the CPU cost of a frame
+//! does not grow with the number of draws. Shaders read everything through device
+//! addresses and find the shadow map through the bindless set (its index is assigned by
+//! the graph).
+//!
+//! [`GeometryPool`]: crate::mesh::GeometryPool
 
 use crate::cull::Frustum;
 use crate::graph::{
@@ -36,7 +39,7 @@ use crate::graph::{
     ShaderStages, StoreOp, Texture, TextureDesc,
 };
 use crate::hiz::{self, DepthPyramid, PyramidLayout};
-use crate::mesh::Mesh;
+use crate::mesh::{GeometryFrame, MeshId};
 use crate::upload::UploadRing;
 use core::cell::Cell;
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_orthographic};
@@ -82,13 +85,14 @@ impl Default for Material {
 
 /// One object to draw.
 ///
-/// Consecutive items with the same mesh (the same `&Mesh`) are drawn as one instanced
-/// batch, so keep the draws of a mesh together. With occlusion culling, an item is known
-/// by its index in the list, so also keep the order stable from frame to frame.
+/// Consecutive items with the same mesh are drawn as one instanced batch, so keep the
+/// draws of a mesh together. With occlusion culling, an item is known by its index in the
+/// list, so also keep the order stable from frame to frame. Items of removed meshes draw
+/// nothing.
 #[derive(Debug, Clone, Copy)]
-pub struct DrawItem<'a> {
-    /// Its vertices.
-    pub mesh: &'a Mesh,
+pub struct DrawItem {
+    /// Its mesh in the geometry pool.
+    pub mesh: MeshId,
     /// Object to world transform (affine: the bottom row is ignored).
     pub world_from_object: Mat4,
     /// Its surface.
@@ -240,14 +244,13 @@ struct InstanceData {
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct BatchData {
-    vertices: u64,
-    vertex_count: u32,
     first: u32,
+    _pad: [u32; 3],
     center: [f32; 4],
     extents: [f32; 4],
 }
 
-/// `Push` in `forward.slang` (72 bytes).
+/// `Push` in `forward.slang` (88 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct Push {
@@ -258,6 +261,8 @@ struct Push {
     commands: u64,
     visibility: u64,
     pyramid: u64,
+    positions: u64,
+    attributes: u64,
     instance_count: u32,
     texture: u32,
     phase: u32,
@@ -267,9 +272,9 @@ struct Push {
 const _: () = assert!(core::mem::size_of::<FrameData>() == 384);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 80);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 48);
-const _: () = assert!(core::mem::size_of::<Push>() == 72);
-const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndirectCommand>() as u64;
-const _: () = assert!(COMMAND_BYTES == 16);
+const _: () = assert!(core::mem::size_of::<Push>() == 88);
+const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
+const _: () = assert!(COMMAND_BYTES == 20);
 
 /// Shadow map settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -298,8 +303,9 @@ pub struct ForwardPasses {
     pub batches: u32,
     /// Whether culling ran in two phases (occlusion culling).
     pub occlusion: bool,
-    /// The forward pass's indirect draw commands, one `vk::DrawIndirectCommand` per batch
-    /// in draw order; with occlusion culling, the early phase's, then the late phase's.
+    /// The forward pass's indirect draw commands, one `vk::DrawIndexedIndirectCommand` (20
+    /// bytes) per batch in draw order; with occlusion culling, the early phase's, then the
+    /// late phase's.
     /// After culling, each `instance_count` is the number of instances its phase drew of
     /// its batch: read it back to count what was drawn. `None` when there was nothing to
     /// draw.
@@ -421,18 +427,21 @@ impl ForwardRenderer {
     }
 
     /// Declares the culling, shadow and forward passes for `draws` into the view's
-    /// targets.
+    /// targets, drawing from `geometry` (this frame's [`GeometryPool`] buffers).
     ///
     /// Instances, batches, draw commands and frame constants are written into `ring` now;
     /// the passes record when the graph executes, which must be with this `bindless` set
     /// ([`FrameGraph::execute_with_bindless`]) so the shadow map and the depth target get
     /// indices. Returns `None`, declaring nothing, when `ring` is full.
+    ///
+    /// [`GeometryPool`]: crate::mesh::GeometryPool
     pub fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
         ring: &mut UploadRing,
         bindless: &'g Bindless,
-        draws: &'g [DrawItem<'g>],
+        geometry: &GeometryFrame<'g>,
+        draws: &[DrawItem],
         view: &ForwardView<'g>,
     ) -> Option<ForwardPasses> {
         engine_profiler::zone!("render::forward::add_passes");
@@ -464,7 +473,7 @@ impl ForwardRenderer {
         let instances = {
             let (slots, staged) = ring.alloc::<InstanceData>(draws.len())?;
             for (batch, (first, len)) in batches(draws).enumerate() {
-                let (center, extents) = local_box(draws[first].mesh);
+                let (center, extents) = local_box(geometry, draws[first].mesh);
                 let items = &draws[first..first + len];
                 for (item, slot) in items.iter().zip(&mut slots[first..first + len]) {
                     let (world_center, world_extents) =
@@ -491,12 +500,10 @@ impl ForwardRenderer {
         let batch_table = {
             let (slots, staged) = ring.alloc::<BatchData>(batch_count as usize)?;
             for ((first, _), slot) in batches(draws).zip(slots.iter_mut()) {
-                let mesh = draws[first].mesh;
-                let (center, extents) = local_box(mesh);
+                let (center, extents) = local_box(geometry, draws[first].mesh);
                 slot.write(BatchData {
-                    vertices: mesh.address(),
-                    vertex_count: mesh.vertex_count(),
                     first: first as u32,
+                    _pad: [0; 3],
                     center: center.extend(0.0).to_array(),
                     extents: extents.extend(0.0).to_array(),
                 });
@@ -509,21 +516,24 @@ impl ForwardRenderer {
         let commands = {
             let per_phase = batch_count as usize;
             let (slots, staged) =
-                ring.alloc::<vk::DrawIndirectCommand>((phases as usize + 1) * per_phase)?;
+                ring.alloc::<vk::DrawIndexedIndirectCommand>((phases as usize + 1) * per_phase)?;
             for (b, (first, len)) in batches(draws).enumerate() {
-                let command = vk::DrawIndirectCommand {
-                    vertex_count: draws[first].mesh.vertex_count(),
+                // A removed mesh draws nothing.
+                let mesh = geometry.mesh(draws[first].mesh);
+                let command = vk::DrawIndexedIndirectCommand {
+                    index_count: mesh.map_or(0, |m| m.index_count),
                     instance_count: 0,
-                    first_vertex: 0,
+                    first_index: mesh.map_or(0, |m| m.first_index),
+                    vertex_offset: mesh.map_or(0, |m| m.first_vertex as i32),
                     first_instance: first as u32,
                 };
                 for phase in 0..phases as usize {
-                    slots[phase * per_phase + b].write(vk::DrawIndirectCommand {
+                    slots[phase * per_phase + b].write(vk::DrawIndexedIndirectCommand {
                         first_instance: command.first_instance + phase as u32 * instance_count,
                         ..command
                     });
                 }
-                slots[phases as usize * per_phase + b].write(vk::DrawIndirectCommand {
+                slots[phases as usize * per_phase + b].write(vk::DrawIndexedIndirectCommand {
                     instance_count: len as u32,
                     ..command
                 });
@@ -560,6 +570,8 @@ impl ForwardRenderer {
             commands: 0,
             visibility: occlusion.map_or(0, |o| o.address),
             pyramid: 0,
+            positions: geometry.position_address(),
+            attributes: geometry.attribute_address(),
             instance_count,
             texture: 0,
             phase: PHASE_ALL,
@@ -659,18 +671,21 @@ impl ForwardRenderer {
             TextureDesc::new_2d(self.shadow_settings.format, resolution, resolution),
         );
         let shadow_pipeline = &self.shadow;
-        fg.add_pass("shadow")
+        let geometry = *geometry;
+        geometry
+            .read_positions(fg.add_pass("shadow"))
             .depth(shadow_map, depth_clear, StoreOp::Store)
             .execute(move |ctx| {
                 let area = ctx.render_area();
                 // SAFETY: recording inside the pass's rendering scope; the commands are in
-                // the ring, which has indirect-buffer usage.
+                // the ring, which has indirect-buffer usage; the pass reads the pool.
                 unsafe {
                     shadow_pipeline.bind(ctx.cmd);
                     bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
                     set_viewport(ctx.device, ctx.cmd, area);
                     bindless.push_constants(ctx.cmd, push_bytes(&base));
-                    ctx.device.cmd_draw_indirect(
+                    geometry.bind_indices(ctx);
+                    ctx.device.cmd_draw_indexed_indirect(
                         ctx.cmd,
                         commands.buffer,
                         commands.offset + u64::from(phases) * command_bytes,
@@ -688,13 +703,14 @@ impl ForwardRenderer {
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
-            // SAFETY: recording inside the pass's rendering scope.
+            // SAFETY: recording inside the pass's rendering scope; the pass reads the pool.
             unsafe {
                 main_pipeline.bind(ctx.cmd);
                 bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
                 set_viewport(ctx.device, ctx.cmd, area);
                 bindless.push_constants(ctx.cmd, push_bytes(&push));
-                ctx.device.cmd_draw_indirect(
+                geometry.bind_indices(ctx);
+                ctx.device.cmd_draw_indexed_indirect(
                     ctx.cmd,
                     ctx.buffer(culled),
                     offset,
@@ -704,7 +720,7 @@ impl ForwardRenderer {
             }
         };
         let Some(flags) = flag_buffer else {
-            forward_pass(fg, "forward", shadow_map, culled, visible)
+            forward_pass(fg, "forward", &geometry, shadow_map, culled, visible)
                 .color(color, load, StoreOp::Store)
                 .depth(depth, depth_clear, StoreOp::DontCare)
                 .execute(move |ctx| draw_phase(ctx, PHASE_ALL));
@@ -718,7 +734,7 @@ impl ForwardRenderer {
 
         // Two phases: draw what was visible, build the pyramid from its depth, then test
         // everything against it and draw what the first phase missed.
-        forward_pass(fg, "forward early", shadow_map, culled, visible)
+        forward_pass(fg, "forward early", &geometry, shadow_map, culled, visible)
             .color(color, load, StoreOp::Store)
             .depth(depth, depth_clear, StoreOp::Store)
             .execute(move |ctx| draw_phase(ctx, PHASE_EARLY));
@@ -741,7 +757,7 @@ impl ForwardRenderer {
                 };
                 dispatch_cull(ctx, push);
             });
-        forward_pass(fg, "forward late", shadow_map, culled, visible)
+        forward_pass(fg, "forward late", &geometry, shadow_map, culled, visible)
             .color(color, LoadOp::Load, StoreOp::Store)
             .depth(depth, LoadOp::Load, StoreOp::DontCare)
             .execute(move |ctx| draw_phase(ctx, PHASE_LATE));
@@ -781,35 +797,36 @@ fn cull_pass<'a, 'g>(
 fn forward_pass<'a, 'g>(
     fg: &'a mut FrameGraph<'g>,
     name: &'static str,
+    geometry: &GeometryFrame<'_>,
     shadow_map: Texture,
     culled: Buffer,
     visible: Buffer,
 ) -> PassBuilder<'a, 'g> {
-    fg.add_pass(name)
+    geometry
+        .read(fg.add_pass(name))
         .read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
         .read(culled, Access::Indirect)
         .read(visible, Access::StorageRead(ShaderStages::VERTEX))
 }
 
 /// Runs of consecutive draws that share a mesh, as `(first, len)`.
-fn batches<'a>(draws: &'a [DrawItem<'a>]) -> impl Iterator<Item = (usize, usize)> + 'a {
+fn batches(draws: &[DrawItem]) -> impl Iterator<Item = (usize, usize)> + '_ {
     let mut start = 0;
     core::iter::from_fn(move || {
         let mesh = draws.get(start)?.mesh;
-        let len = draws[start..]
-            .iter()
-            .take_while(|d| core::ptr::eq(d.mesh, mesh))
-            .count();
+        let len = draws[start..].iter().take_while(|d| d.mesh == mesh).count();
         let run = (start, len);
         start += len;
         Some(run)
     })
 }
 
-/// A mesh's object-space bounding box as center and half extents.
-fn local_box(mesh: &Mesh) -> (Vec3, Vec3) {
-    let (lo, hi) = mesh.bounds();
-    ((lo + hi) * 0.5, (hi - lo) * 0.5)
+/// A mesh's object-space bounding box as center and half extents (empty for removed
+/// meshes).
+fn local_box(geometry: &GeometryFrame<'_>, mesh: MeshId) -> (Vec3, Vec3) {
+    geometry.mesh(mesh).map_or((Vec3::ZERO, Vec3::ZERO), |m| {
+        ((m.min + m.max) * 0.5, (m.max - m.min) * 0.5)
+    })
 }
 
 /// # Safety

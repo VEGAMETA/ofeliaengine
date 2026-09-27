@@ -22,7 +22,7 @@ use engine_render::forward::{
     ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
-use engine_render::mesh::{Mesh, cube};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -84,7 +84,10 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
         },
     )
     .unwrap();
-    let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
+    let mut geometry =
+        GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
+    let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    let mut frame_number = 0u64;
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
     let mut occlusion = Occlusion::new(&device, &mut allocator, 1024).unwrap();
@@ -113,7 +116,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
         roughness: 0.6,
     };
     let mut draws = vec![DrawItem {
-        mesh: &mesh,
+        mesh,
         world_from_object: Mat4::from_scale_rotation_translation(
             Vec3::new(12.0, 12.0, 0.5),
             Default::default(),
@@ -124,7 +127,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
     for i in 0..BEHIND {
         let (x, y, z) = ((i % 10) as f32, ((i / 10) % 5) as f32, (i / 50) as f32);
         draws.push(DrawItem {
-            mesh: &mesh,
+            mesh,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::splat(0.5),
                 Default::default(),
@@ -136,7 +139,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
     for i in 0..IN_FRONT {
         let (x, y) = ((i % 5) as f32, (i / 5) as f32);
         draws.push(DrawItem {
-            mesh: &mesh,
+            mesh,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::splat(0.3),
                 Default::default(),
@@ -147,7 +150,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
     }
     for i in 0..OUTSIDE {
         draws.push(DrawItem {
-            mesh: &mesh,
+            mesh,
             world_from_object: Mat4::from_translation(Vec3::new(i as f32, 0.0, 20.0)),
             material: material(i),
         });
@@ -155,7 +158,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
     let in_frustum = (1 + BEHIND + IN_FRONT) as u32;
 
     let image_bytes = u64::from(SIZE * SIZE * 4);
-    let readback_size = image_bytes + 32;
+    let readback_size = image_bytes + 40;
     let (readback, readback_mem) = allocator
         .create_buffer(
             &vk::BufferCreateInfo::default()
@@ -202,6 +205,12 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            let geo = geometry
+                .begin_frame(&mut fg, &device, &mut allocator, {
+                    frame_number += 1;
+                    frame_number
+                })
+                .unwrap();
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, SIZE, SIZE));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
             let out = fg.import_buffer(
@@ -219,6 +228,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
                     &mut fg,
                     &mut ring,
                     &bindless,
+                    &geo,
                     &draws,
                     &ForwardView {
                         camera,
@@ -233,7 +243,8 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
             assert_eq!(passes.batches, 1);
             two_phase = passes.occlusion;
             let commands = passes.commands.unwrap();
-            let command_bytes = if two_phase { 32 } else { 16 };
+            // One VkDrawIndexedIndirectCommand (5 words) per phase.
+            let command_bytes = if two_phase { 40 } else { 20 };
             fg.add_pass("read back")
                 .read(color, Access::TransferRead)
                 .read(commands, Access::TransferRead)
@@ -298,7 +309,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
             u32::from_le_bytes([bytes[at], bytes[at + 1], bytes[at + 2], bytes[at + 3]])
         };
         // (vertex_count, instance_count, first_vertex, first_instance) per phase.
-        let counts = two_phase.then(|| (word(1), word(5)));
+        let counts = two_phase.then(|| (word(1), word(6)));
         if !two_phase {
             assert_eq!(word(1), in_frustum, "frustum culling alone");
         }
@@ -346,7 +357,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
     unsafe {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
-        mesh.destroy(&mut allocator);
+        geometry.destroy(&mut allocator);
         occlusion.destroy(&mut allocator);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);

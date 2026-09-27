@@ -1,4 +1,6 @@
-//! Two-level segregated fit (TLSF) sub-allocator for ranges of GPU memory.
+//! Two-level segregated fit (TLSF) sub-allocator for ranges: of GPU memory blocks (256-byte
+//! granules), and of anything else counted in units, such as the vertices and indices of
+//! a geometry pool ([`RangeAllocator`](crate::RangeAllocator), granule 1).
 //!
 //! Masmano, Ripoll, Crespo, Real: "TLSF: a New Dynamic Memory Allocator for Real-Time
 //! Systems" (ECRTS 2004); the variant AMD's VMA 3 uses by default. Free blocks are kept
@@ -11,17 +13,17 @@
 //! vector has grown to the working set, allocating and freeing touch no heap
 //! (CLAUDE.md §5).
 
-/// Allocation granularity: sizes are rounded up to it and every offset is a multiple of
-/// it. 256 bytes covers every buffer alignment Vulkan drivers report
+/// Allocation granularity of GPU memory: sizes are rounded up to it and every offset is a
+/// multiple of it. 256 bytes covers every buffer alignment Vulkan drivers report
 /// (`minStorageBufferOffsetAlignment` ≤ 256) and `nonCoherentAtomSize`.
 pub(crate) const GRANULE: u64 = 256;
-const GRANULE_LOG2: u32 = GRANULE.trailing_zeros();
 /// Second level: 2^5 = 32 lists per power of two, as recommended by the paper.
 const SL_LOG2: u32 = 5;
 const SL_COUNT: usize = 1 << SL_LOG2;
 const NONE: u32 = u32::MAX;
-/// Largest manageable range: sizes in granules must fit the first-level bitmap.
-pub(crate) const MAX_CAPACITY: u64 = 1 << 40;
+/// Largest manageable range in granules: sizes must fit the first-level bitmap (2^40 bytes
+/// of 256-byte granules).
+const MAX_UNITS: u64 = 1 << 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum State {
@@ -47,7 +49,7 @@ struct Node {
 pub(crate) struct TlsfAllocation {
     /// Offset from the start of the managed range, aligned as requested.
     pub(crate) offset: u64,
-    /// Size reserved (the request rounded up to [`GRANULE`]).
+    /// Size reserved (the request rounded up to the granule).
     pub(crate) size: u64,
     node: u32,
 }
@@ -55,6 +57,10 @@ pub(crate) struct TlsfAllocation {
 /// TLSF over `[0, capacity)`.
 #[derive(Debug)]
 pub(crate) struct Tlsf {
+    granule: u64,
+    granule_log2: u32,
+    /// The last block of the physical chain (where growth appends), or `NONE` when empty.
+    tail: u32,
     capacity: u64,
     used: u64,
     allocations: u32,
@@ -90,13 +96,24 @@ fn mapping_search(units: u64) -> (usize, usize) {
 }
 
 impl Tlsf {
-    /// Manages `[0, capacity)`. `capacity` is rounded down to [`GRANULE`] and must be
-    /// below [`MAX_CAPACITY`].
+    /// Manages `[0, capacity)` in [`GRANULE`]s (GPU memory).
     pub(crate) fn new(capacity: u64) -> Self {
-        let capacity = capacity.min(MAX_CAPACITY - GRANULE) & !(GRANULE - 1);
-        let units = (capacity >> GRANULE_LOG2).max(1);
+        Self::with_granule(capacity, GRANULE)
+    }
+
+    /// Manages `[0, capacity)` in `granule`s (a power of two). `capacity` is rounded down to
+    /// the granule and limited to 2^32 granules.
+    pub(crate) fn with_granule(capacity: u64, granule: u64) -> Self {
+        debug_assert!(granule.is_power_of_two(), "granule {granule}");
+        let granule = granule.max(1).next_power_of_two();
+        let granule_log2 = granule.trailing_zeros();
+        let capacity = capacity.min((MAX_UNITS << granule_log2) - granule) & !(granule - 1);
+        let units = (capacity >> granule_log2).max(1);
         let fl_count = mapping(units).0 + 1;
         let mut tlsf = Self {
+            granule,
+            granule_log2,
+            tail: NONE,
             capacity,
             used: 0,
             allocations: 0,
@@ -117,9 +134,50 @@ impl Tlsf {
                 next_free: NONE,
                 state: State::Free,
             });
+            tlsf.tail = root;
             tlsf.insert_free(root);
         }
         tlsf
+    }
+
+    /// Extends the managed range to `[0, capacity)` (rounded down to the granule; smaller
+    /// values change nothing). Existing allocations keep their offsets.
+    pub(crate) fn grow(&mut self, capacity: u64) {
+        let capacity =
+            capacity.min((MAX_UNITS << self.granule_log2) - self.granule) & !(self.granule - 1);
+        if capacity <= self.capacity {
+            return;
+        }
+        let fl_count = mapping(capacity >> self.granule_log2).0 + 1;
+        if fl_count > self.fl_count {
+            self.sl_bitmap.resize(fl_count, 0);
+            self.heads.resize(fl_count * SL_COUNT, NONE);
+            self.fl_count = fl_count;
+        }
+        let added = capacity - self.capacity;
+        let old_capacity = self.capacity;
+        self.capacity = capacity;
+        let tail = self.tail;
+        if tail != NONE && self.nodes[tail as usize].state == State::Free {
+            self.remove_free(tail);
+            self.nodes[tail as usize].size += added;
+            self.insert_free(tail);
+            return;
+        }
+        let node = self.new_node(Node {
+            offset: old_capacity,
+            size: added,
+            prev_phys: tail,
+            next_phys: NONE,
+            prev_free: NONE,
+            next_free: NONE,
+            state: State::Free,
+        });
+        if tail != NONE {
+            self.nodes[tail as usize].next_phys = node;
+        }
+        self.tail = node;
+        self.insert_free(node);
     }
 
     /// Size of the managed range.
@@ -142,8 +200,8 @@ impl Tlsf {
         self.allocations == 0
     }
 
-    /// Reserves `size` bytes aligned to `align` (a power of two; values below
-    /// [`GRANULE`] are raised to it). `None` when no free block fits.
+    /// Reserves `size` units aligned to `align` (a power of two; values below the
+    /// granule are raised to it). `None` when no free block fits.
     pub(crate) fn allocate(&mut self, size: u64, align: u64) -> Option<TlsfAllocation> {
         self.allocate_with(size, align, true)
     }
@@ -161,14 +219,14 @@ impl Tlsf {
             align.is_power_of_two(),
             "alignment {align} is not a power of two"
         );
-        let align = align.max(GRANULE);
-        let size = size.max(1).checked_next_multiple_of(GRANULE)?;
+        let align = align.max(self.granule);
+        let size = size.max(1).checked_next_multiple_of(self.granule)?;
         if size > self.capacity - self.used || align > self.capacity {
             return None;
         }
-        let units = size >> GRANULE_LOG2;
-        // Enough for any start offset: the worst case needs `align - GRANULE` of padding.
-        let padded = units + ((align >> GRANULE_LOG2) - 1);
+        let units = size >> self.granule_log2;
+        // Enough for any start offset: the worst case needs `align - granule` of padding.
+        let padded = units + ((align >> self.granule_log2) - 1);
         let (fl, sl) = mapping_search(padded);
         let node = match self.first_list_from(fl, sl) {
             Some(list) => self.heads[list],
@@ -289,6 +347,8 @@ impl Tlsf {
         });
         if left.next_phys != NONE {
             self.nodes[left.next_phys as usize].prev_phys = right;
+        } else {
+            self.tail = right;
         }
         let left = &mut self.nodes[index as usize];
         left.size = left_size;
@@ -304,6 +364,8 @@ impl Tlsf {
         l.next_phys = r.next_phys;
         if r.next_phys != NONE {
             self.nodes[r.next_phys as usize].prev_phys = left;
+        } else {
+            self.tail = left;
         }
         self.nodes[right as usize].state = State::Dead;
         self.spare.push(right);
@@ -323,7 +385,7 @@ impl Tlsf {
     }
 
     fn list_of(&self, index: u32) -> usize {
-        let (fl, sl) = mapping(self.nodes[index as usize].size >> GRANULE_LOG2);
+        let (fl, sl) = mapping(self.nodes[index as usize].size >> self.granule_log2);
         fl * SL_COUNT + sl
     }
 
@@ -379,7 +441,7 @@ impl Tlsf {
             let n = self.nodes[index as usize];
             assert_eq!(n.offset, end, "gap or overlap at node {index}");
             assert_eq!(n.prev_phys, prev);
-            assert!(n.size > 0 && n.size.is_multiple_of(GRANULE));
+            assert!(n.size > 0 && n.size.is_multiple_of(self.granule));
             match n.state {
                 State::Free => {
                     assert!(!prev_free, "adjacent free blocks at {}", n.offset);
@@ -402,6 +464,7 @@ impl Tlsf {
             index = n.next_phys;
         }
         assert_eq!(end, self.capacity);
+        assert_eq!(prev, self.tail, "the tail is the last block");
         assert_eq!(used, self.used);
         assert_eq!(count, self.allocations);
         for (list, &head) in self.heads.iter().enumerate() {
@@ -572,11 +635,44 @@ mod tests {
     #[test]
     fn huge_ranges_and_requests_do_not_overflow() {
         let mut tlsf = Tlsf::new(u64::MAX);
-        assert_eq!(tlsf.capacity(), MAX_CAPACITY - GRANULE);
+        assert_eq!(tlsf.capacity(), (1 << 40) - GRANULE);
         assert!(tlsf.allocate(u64::MAX, 256).is_none());
         assert!(tlsf.allocate(1 << 39, 1 << 39).is_some());
         tlsf.validate();
         let mut empty = Tlsf::new(100);
         assert!(empty.allocate(1, 1).is_none());
+    }
+
+    #[test]
+    fn unit_granules_and_growth() {
+        // Vertices of a geometry pool: granule 1, any size.
+        let mut tlsf = Tlsf::with_granule(100, 1);
+        let a = tlsf.allocate(37, 1).unwrap();
+        let b = tlsf.allocate(63, 1).unwrap();
+        assert_eq!((a.offset, a.size, b.offset, b.size), (0, 37, 37, 63));
+        assert!(tlsf.allocate(1, 1).is_none());
+        tlsf.validate();
+        // Growth appends a free block after a used tail...
+        tlsf.grow(250);
+        tlsf.validate();
+        let c = tlsf.allocate(150, 1).unwrap();
+        assert_eq!((c.offset, c.size), (100, 150));
+        tlsf.free(b);
+        tlsf.free(c);
+        tlsf.validate();
+        // ...and extends a free tail (37..250 is one block after the frees).
+        tlsf.grow(1000);
+        tlsf.validate();
+        let d = tlsf.allocate(963, 1).unwrap();
+        assert_eq!(d.offset, 37);
+        tlsf.free(a);
+        tlsf.free(d);
+        tlsf.validate();
+        assert!(tlsf.is_empty());
+        // Growth across first-level classes, from an empty allocator too.
+        let mut empty = Tlsf::with_granule(0, 1);
+        empty.grow(1 << 30);
+        empty.validate();
+        assert_eq!(empty.allocate(1 << 30, 1).map(|r| r.size), Some(1 << 30));
     }
 }

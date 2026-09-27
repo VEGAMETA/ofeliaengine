@@ -18,7 +18,7 @@ use engine_render::forward::{
     ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
-use engine_render::mesh::{Mesh, cube};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId, cube};
 use engine_render::post::HDR_FORMAT;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -59,7 +59,7 @@ fn side(count: usize) -> f32 {
 }
 
 /// Instances on a square field (~1 cube per 4 m²), spinning; in the city, walls follow.
-fn fill<'a>(draws: &mut Vec<DrawItem<'a>>, mesh: &'a Mesh, count: usize, frame: usize, city: bool) {
+fn fill(draws: &mut Vec<DrawItem>, mesh: MeshId, count: usize, frame: usize, city: bool) {
     draws.clear();
     let per_row = (count as f32).sqrt().ceil() as usize;
     let half = side(count) * 0.5;
@@ -173,7 +173,10 @@ fn main() {
         ShadowSettings::default(),
     )
     .unwrap();
-    let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
+    let mut geometry =
+        GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
+    let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    let mut frame_number = 0u64;
     let capacity = max_instances as u64 + 1024;
     let mut ring = UploadRing::new(&device, &mut allocator, 1, capacity * 128).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
@@ -181,7 +184,7 @@ fn main() {
     let (readback, readback_mem) = allocator
         .create_buffer(
             &vk::BufferCreateInfo::default()
-                .size(32)
+                .size(40)
                 .usage(vk::BufferUsageFlags::TRANSFER_DST),
             MemoryLocation::Readback,
         )
@@ -218,7 +221,7 @@ fn main() {
     );
     println!("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|");
 
-    let mut draws: Vec<DrawItem<'_>> = Vec::new();
+    let mut draws: Vec<DrawItem> = Vec::new();
     let configurations = [
         (View::Overview, Culling::Off),
         (View::Overview, Culling::Frustum),
@@ -243,7 +246,7 @@ fn main() {
             let mut drawn = 0;
             for frame in 0..WARMUP + FRAMES {
                 let start = Instant::now();
-                fill(&mut draws, &mesh, count, frame, view == View::City);
+                fill(&mut draws, mesh, count, frame, view == View::City);
                 let listed = start.elapsed();
                 // SAFETY: the previous frame finished (waited below).
                 unsafe {
@@ -261,6 +264,12 @@ fn main() {
                 {
                     // SAFETY: nothing is in flight.
                     let mut fg = unsafe { graph.begin_slot(0, cmd) };
+                    let geo = geometry
+                        .begin_frame(&mut fg, &device, &mut allocator, {
+                            frame_number += 1;
+                            frame_number
+                        })
+                        .unwrap();
                     let hdr =
                         fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
                     let depth = fg
@@ -269,7 +278,7 @@ fn main() {
                         "readback",
                         ImportedBuffer {
                             buffer: readback,
-                            size: 32,
+                            size: 40,
                             address: 0,
                             initial: BufferState::idle(),
                             final_state: Some(BufferState::host_read()),
@@ -281,6 +290,7 @@ fn main() {
                             &mut fg,
                             &mut ring,
                             &bindless,
+                            &geo,
                             &draws,
                             &ForwardView {
                                 camera,
@@ -304,7 +314,8 @@ fn main() {
                             let region = vk::BufferCopy {
                                 src_offset: 0,
                                 dst_offset: 0,
-                                size: 16 * phases,
+                                // One VkDrawIndexedIndirectCommand (20 bytes) per phase.
+                                size: 20 * phases,
                             };
                             // SAFETY: recording outside a rendering scope.
                             unsafe {
@@ -335,9 +346,9 @@ fn main() {
                 }
                 let ptr = readback_mem.mapped_ptr().unwrap();
                 // SAFETY: the GPU is idle; the mapping holds the phases' draw commands.
-                let commands = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 32) };
+                let commands = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 40) };
                 let count_at = |i: usize| {
-                    let at = 16 * i + 4;
+                    let at = 20 * i + 4;
                     u32::from_le_bytes([
                         commands[at],
                         commands[at + 1],
@@ -399,7 +410,7 @@ fn main() {
     unsafe {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
-        mesh.destroy(&mut allocator);
+        geometry.destroy(&mut allocator);
         occlusion.destroy(&mut allocator);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);

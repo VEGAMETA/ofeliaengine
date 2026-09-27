@@ -3,7 +3,8 @@
 //! - [`graph`]: the render graph. Passes declare what they read and write; the graph
 //!   culls unused passes, aliases transient memory, derives barriers and records the
 //!   frame (ADR 0011).
-//! - [`mesh`]: meshes (vertex pulling) and a minimal unlit-ish mesh renderer.
+//! - [`mesh`]: the geometry pool: every mesh's vertices and indices in shared buffers,
+//!   compact vertex attributes (ADR 0039).
 //! - [`forward`]: forward PBR with a directional light and a shadow map (ADR 0014), drawn
 //!   GPU-driven: GPU frustum culling and indirect instanced draws (ADR 0034).
 //! - [`cull`]: frustum and bounding-box tests shared by CPU code and the GPU culling pass.

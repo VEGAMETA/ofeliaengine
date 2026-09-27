@@ -17,7 +17,7 @@ use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
-use engine_render::mesh::{Mesh, cube, perspective};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::upload::UploadRing;
 use engine_render::viewport::{ViewportDesc, ViewportSize, Viewports};
@@ -85,14 +85,17 @@ fn main() {
         ShadowSettings::default(),
     )
     .unwrap();
-    let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
+    let mut geometry =
+        GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
+    let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    let mut frame_number = 0u64;
     let material = |r: f32, g: f32, b: f32, roughness: f32| Material {
         base_color: Vec3::new(r, g, b),
         metallic: 0.0,
         roughness,
     };
     let mut draws = vec![DrawItem {
-        mesh: &mesh,
+        mesh,
         world_from_object: Mat4::from_scale_rotation_translation(
             Vec3::new(24.0, 0.2, 24.0),
             Quat::IDENTITY,
@@ -103,7 +106,7 @@ fn main() {
     for i in 0..9 {
         let (x, z) = ((i % 3) as f32 * 1.6 - 5.0, (i / 3) as f32 * 1.6 - 3.0);
         draws.push(DrawItem {
-            mesh: &mesh,
+            mesh,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::splat(1.1),
                 Quat::from_rotation_y(i as f32 * 0.4),
@@ -113,7 +116,7 @@ fn main() {
         });
     }
     draws.push(DrawItem {
-        mesh: &mesh,
+        mesh,
         world_from_object: Mat4::from_scale_rotation_translation(
             Vec3::new(2.0, 6.0, 2.0),
             Quat::IDENTITY,
@@ -122,7 +125,7 @@ fn main() {
         material: material(0.55, 0.57, 0.62, 0.5),
     });
     draws.push(DrawItem {
-        mesh: &mesh,
+        mesh,
         world_from_object: Mat4::from_scale_rotation_translation(
             Vec3::new(0.7, 1.8, 0.7),
             Quat::from_rotation_y(0.8),
@@ -429,6 +432,12 @@ fn main() {
     {
         // SAFETY: nothing is in flight.
         let mut fg = unsafe { graph.begin_slot(0, cmd) };
+        let geo = geometry
+            .begin_frame(&mut fg, &device, &mut allocator, {
+                frame_number += 1;
+                frame_number
+            })
+            .unwrap();
         {
             let (forward, bindless, draws, ring) = (&forward, &bindless, &draws, &mut ring);
             viewports
@@ -456,7 +465,7 @@ fn main() {
                             clear,
                             occlusion: None,
                         };
-                        forward.add_passes(fg, ring, bindless, draws, &view);
+                        forward.add_passes(fg, ring, bindless, &geo, draws, &view);
                     },
                 )
                 .unwrap();
@@ -592,7 +601,7 @@ fn main() {
         viewports.destroy_all(&mut allocator, &bindless);
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
-        mesh.destroy(&mut allocator);
+        geometry.destroy(&mut allocator);
         renderer2d.destroy(&mut allocator);
         glyphs
             .texture_mut()

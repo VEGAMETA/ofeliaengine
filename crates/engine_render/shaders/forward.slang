@@ -13,14 +13,20 @@
 // GGX distribution, height-correlated Smith-GGX visibility, Schlick Fresnel, Lambertian
 // diffuse; metallic-roughness parameterization. All data is read through buffer device
 // addresses; the shadow map comes from the bindless arrays.
+//
+// Vertices come from the geometry pool (mesh.rs, ADR 0039): positions as three floats in
+// their own buffer, the other attributes packed in 16 bytes, drawn with indexed indirect
+// draws whose vertex offset selects the mesh.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(2, 0)]] SamplerComparisonState g_compare_samplers[];
 
-struct Vertex
+// `VertexAttributes` in mesh.rs.
+struct Attributes
 {
-    float4 position;
-    float4 normal;
+    uint normal;   // octahedral, 2 × snorm16
+    uint tangent;  // octahedral, 2 × snorm16; bit 16: bitangent sign (1: negative)
+    float2 uv;
 };
 
 struct Frame
@@ -54,19 +60,19 @@ struct Instance
 
 struct Batch
 {
-    Vertex* vertices;
-    uint vertex_count;
     uint first;              // first instance of the batch; also its first slot in `visible`
+    uint3 _pad;
     float4 center;           // object-space bounding box: center (xyz)
     float4 extents;          // and half extents (xyz)
 };
 
-// VkDrawIndirectCommand.
+// VkDrawIndexedIndirectCommand.
 struct DrawCommand
 {
-    uint vertex_count;
+    uint index_count;
     uint instance_count;
-    uint first_vertex;
+    uint first_index;
+    int vertex_offset;
     uint first_instance;
 };
 
@@ -79,6 +85,8 @@ struct Push
     DrawCommand* commands;   // one per batch; culling counts the visible instances
     uint* visibility;        // per instance: visible in the previous frame (occlusion)
     float* pyramid;          // depth pyramid levels, one after the other
+    float* positions;        // geometry pool: three floats per vertex
+    Attributes* attributes;  // geometry pool: the other attributes
     uint instance_count;
     uint texture;            // bindless index: the shadow map, or the depth to reduce
     uint phase;              // PHASE_*
@@ -93,6 +101,23 @@ static const float OCCLUSION_MARGIN = 1e-5;
 
 [[vk::push_constant]]
 ConstantBuffer<Push> push;
+
+float3 load_position(uint vertex)
+{
+    uint i = vertex * 3;
+    return float3(push.positions[i], push.positions[i + 1], push.positions[i + 2]);
+}
+
+// A unit vector from two snorm16 in octahedral encoding (Cigolle et al. 2014).
+float3 decode_octahedral(uint bits)
+{
+    float2 e = max(float2(int2(bits << 16, bits) >> 16) / 32767.0, -1.0);
+    float3 v = float3(e, 1.0 - abs(e.x) - abs(e.y));
+    float t = max(-v.z, 0.0);
+    v.x += v.x >= 0.0 ? -t : t;
+    v.y += v.y >= 0.0 ? -t : t;
+    return normalize(v);
+}
 
 float3 transform_point(Instance i, float3 p)
 {
@@ -251,30 +276,30 @@ struct VertexOut
 };
 
 // Drawn with the culled commands: instance `slot` (first_instance + instance) is a slot
-// of the visible list.
+// of the visible list; the vertex index includes the draw's vertex offset (Vulkan
+// semantics), so it indexes the pool directly.
 [shader("vertex")]
-VertexOut vertexMain(uint vertex_id : SV_VertexID, uint slot : SV_VulkanInstanceID)
+VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     Instance inst = push.instances[push.visible[slot]];
-    Vertex v = push.batches[inst.batch].vertices[vertex_id];
-    float4 world = float4(transform_point(inst, v.position.xyz), 1.0);
+    float4 world = float4(transform_point(inst, load_position(vertex)), 1.0);
     VertexOut o;
     o.position = mul(push.frame.clip_from_world, world);
     o.world_position = world.xyz;
-    o.normal = transform_normal(inst, v.normal.xyz);
+    o.normal = transform_normal(inst, decode_octahedral(push.attributes[vertex].normal));
     o.light_position = mul(push.frame.light_clip_from_world, world);
     o.base_color_metallic = inst.base_color_metallic;
     o.roughness = inst.roughness;
     return o;
 }
 
-// Drawn with every instance of every batch: the instance index is the instance.
+// Drawn with every instance of every batch: the instance index is the instance. Only
+// positions are fetched.
 [shader("vertex")]
-float4 shadowVertex(uint vertex_id : SV_VertexID, uint index : SV_VulkanInstanceID) : SV_Position
+float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint index : SV_VulkanInstanceID) : SV_Position
 {
     Instance inst = push.instances[index];
-    Vertex v = push.batches[inst.batch].vertices[vertex_id];
-    return mul(push.frame.light_clip_from_world, float4(transform_point(inst, v.position.xyz), 1.0));
+    return mul(push.frame.light_clip_from_world, float4(transform_point(inst, load_position(vertex)), 1.0));
 }
 
 static const float PI = 3.14159265;

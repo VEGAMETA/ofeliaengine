@@ -8,7 +8,41 @@ objects each frame. The GPU then:
 
 The CPU cost of a frame barely depends on how many objects the list holds.
 
-## 1. The draw list
+## 1. Meshes
+
+Every mesh lives in one `GeometryPool` (ADR 0039): shared buffers of vertices and indices,
+so the whole draw list is drawn with a few indexed indirect draws.
+
+```rust
+use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData};
+
+let mut geometry = GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), IN_FLIGHT)?;
+let rock_mesh = geometry.add_mesh(&MeshData {
+    positions: &positions,
+    normals: &normals,
+    tangents: &tangents, // or &[] without a normal map
+    uvs: &uvs,           // or &[]
+    indices: &indices,   // triangles, counter-clockwise front faces
+})?;
+
+// Every frame, once, before the passes that draw:
+let geo = geometry.begin_frame(&mut fg, &device, &mut allocator, frame.number)?;
+```
+
+- **Add meshes whenever you like.** Their data reaches the GPU in the next `begin_frame`;
+  the pool grows by itself (the buffers are replaced and the old contents copied on the
+  GPU).
+- **Remove with `remove_mesh(id, frame.number)`.** Draws of the id then draw nothing, and
+  its memory is reused once the frames that could still draw it are done.
+- **Indexed meshes, as imported:** a vertex shared by six triangles is stored and shaded
+  once.
+  - On Sponza (262k triangles) that is 4× fewer vertices than a triangle list, 8 MB
+    instead of 24, and a forward pass half as long.
+- **Vertex size:** 28 bytes (position 12; normal, tangent and texture coordinates 16).
+  Shadow passes read only the 12 bytes of the position.
+- `cube()` gives a unit cube with normals, tangents and texture coordinates for tests.
+
+## 2. The draw list
 
 ```rust
 use engine_render::forward::{DrawItem, ForwardView, Material};
@@ -16,7 +50,7 @@ use engine_render::forward::{DrawItem, ForwardView, Material};
 draws.clear();
 for (transform, look) in scene_objects {
     draws.push(DrawItem {
-        mesh: &rock_mesh,
+        mesh: rock_mesh,
         world_from_object: transform,
         material: Material {
             base_color: look.color,
@@ -29,6 +63,7 @@ let passes = renderer.add_passes(
     &mut fg,
     &mut ring,
     &bindless,
+    &geo,
     &draws,
     &ForwardView {
         camera,
@@ -36,14 +71,14 @@ let passes = renderer.add_passes(
         color: hdr,
         depth,
         clear: Some(clear),
-        occlusion: None, // or Some(&occlusion): see section 3
+        occlusion: None, // or Some(&occlusion): see section 4
     },
 );
 ```
 
 - **Keep objects with the same mesh next to each other in the list.**
-  - Every run of consecutive items with the same `&Mesh` is one batch, and one batch is
-    one instanced draw.
+  - Every run of consecutive items with the same mesh is one batch, and one batch is one
+    instanced draw.
   - 10,000 rocks followed by 500 trees make 2 batches. The same objects interleaved make
     up to 10,500.
   - Both render correctly, but the first is the fast one.
@@ -55,7 +90,7 @@ let passes = renderer.add_passes(
   - `add_passes` returns `None` when the ring is full. It then declares nothing, and the
     frame has no 3D content.
 
-## 2. Culling
+## 3. Culling
 
 - Culling is on by default:
   - every object's bounding box, from the mesh's box and its transform, is tested
@@ -72,7 +107,7 @@ let passes = renderer.add_passes(
   - `crates/engine_render/tests/culling.rs` and `examples/draw_bench.rs` show how to read
     it back.
 
-## 3. Occlusion culling: skipping what is hidden
+## 4. Occlusion culling: skipping what is hidden
 
 In a city, an interior or a dense forest, most objects in view are hidden behind nearer
 ones. Occlusion culling skips them (ADR 0035). Create one state per camera and pass it
@@ -111,7 +146,7 @@ occlusion.reset();
   it still render correctly, but are always tested in the late phase.
 - Free the state with `unsafe { occlusion.destroy(&mut allocator) }` once the GPU is idle.
 
-## 4. What it costs
+## 5. What it costs
 
 `cargo run -p engine_render --release --example draw_bench` prints the costs for 1k, 10k
 and 100k cubes, with the camera above the field, inside it and in a city of walls, and
@@ -122,7 +157,10 @@ culling off, frustum only, or frustum and occlusion:
 - GPU time of the culling, depth pyramid, shadow and forward passes;
 - how many objects were drawn.
 
-Results from the reference machine are in `docs/perf/history.md` and ADR 0035.
+`cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
+measures a real glTF scene (fetch scenes with `tools/fetch-test-assets.ps1`).
+
+Results from the reference machine are in `docs/perf/history.md`, ADR 0035 and ADR 0039.
 
 Rules of thumb:
 

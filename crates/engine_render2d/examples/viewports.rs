@@ -29,7 +29,7 @@ fn main() {
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
-    use engine_render::mesh::{Mesh, cube, perspective};
+    use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
     use engine_render::post::{HDR_FORMAT, Tonemap};
     use engine_render::upload::UploadRing;
     use engine_render::viewport::{
@@ -95,7 +95,14 @@ fn main() {
     )
     .unwrap();
     let tonemap = Tonemap::new(&device, &bindless, swapchain.format()).unwrap();
-    let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
+    let mut geometry = GeometryPool::new(
+        &device,
+        &mut allocator,
+        GeometryCapacity::default(),
+        in_flight,
+    )
+    .unwrap();
+    let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, in_flight, 4 << 20).unwrap();
     let mut frames = Frames::new(&device, device.graphics.family, in_flight).unwrap();
     let mut graph = RenderGraph::new(&device, in_flight);
@@ -150,7 +157,7 @@ fn main() {
         ..ViewportDesc::default()
     });
 
-    let mut draws: Vec<DrawItem<'_>> = Vec::with_capacity(26);
+    let mut draws: Vec<DrawItem> = Vec::with_capacity(26);
     let mut positions: Vec<Vec3> = Vec::with_capacity(25);
     let mut minimap_canvas = Canvas::new();
     let mut overlay_canvas = Canvas::new();
@@ -216,7 +223,7 @@ fn main() {
         draws.clear();
         positions.clear();
         draws.push(DrawItem {
-            mesh: &mesh,
+            mesh,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::new(14.0, 0.2, 14.0),
                 Quat::IDENTITY,
@@ -234,7 +241,7 @@ fn main() {
                 );
                 positions.push(p);
                 draws.push(DrawItem {
-                    mesh: &mesh,
+                    mesh,
                     world_from_object: Mat4::from_rotation_translation(
                         Quat::from_rotation_y(angle),
                         p,
@@ -292,6 +299,9 @@ fn main() {
 
         {
             let mut fg = graph.begin(&frame);
+            let geo = geometry
+                .begin_frame(&mut fg, &device, &mut allocator, frame.number)
+                .unwrap();
             ring.begin(&frame);
             // The overlay needs the minimap's index, known once it has rendered.
             overlay_canvas.clear();
@@ -345,6 +355,7 @@ fn main() {
                                 fg,
                                 ring_ref,
                                 bindless_ref,
+                                &geo,
                                 draws_ref,
                                 &ForwardView {
                                     camera,
@@ -479,7 +490,7 @@ fn main() {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         renderer.destroy(&mut allocator);
-        mesh.destroy(&mut allocator);
+        geometry.destroy(&mut allocator);
     }
     drop(frames);
     drop(forward);

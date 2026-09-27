@@ -27,7 +27,7 @@ fn main() {
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
-    use engine_render::mesh::{Mesh, cube, perspective};
+    use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
     use engine_render::post::{HDR_FORMAT, Tonemap};
     use engine_render::upload::UploadRing;
     use engine_rhi::ash::vk;
@@ -89,10 +89,17 @@ fn main() {
     )
     .unwrap();
     let tonemap = Tonemap::new(&device, &bindless, swapchain.format()).unwrap();
-    let mut mesh = Mesh::new(&device, &mut allocator, &cube()).unwrap();
+    let mut geometry = GeometryPool::new(
+        &device,
+        &mut allocator,
+        GeometryCapacity::default(),
+        in_flight,
+    )
+    .unwrap();
+    let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, in_flight, 1 << 20).unwrap();
     // Reused every frame: steady-state frames allocate nothing.
-    let mut draws: Vec<DrawItem<'_>> = Vec::with_capacity(26);
+    let mut draws: Vec<DrawItem> = Vec::with_capacity(26);
     let mut frames = Frames::new(&device, device.graphics.family, in_flight).unwrap();
     let mut graph = RenderGraph::new(&device, in_flight);
     let idle_timer = HighResTimer::new().unwrap();
@@ -163,7 +170,7 @@ fn main() {
         ) * look_at(eye, Vec3::ZERO, Vec3::Y);
         draws.clear();
         draws.push(DrawItem {
-            mesh: &mesh,
+            mesh,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::new(14.0, 0.2, 14.0),
                 Quat::IDENTITY,
@@ -175,7 +182,7 @@ fn main() {
             for z in -2..=2 {
                 let angle = time * (1.0 + 0.1 * (x * 5 + z) as f32);
                 draws.push(DrawItem {
-                    mesh: &mesh,
+                    mesh,
                     world_from_object: Mat4::from_rotation_translation(
                         Quat::from_rotation_y(angle) * Quat::from_rotation_x(angle * 0.5),
                         Vec3::new(x as f32 * 2.0, 0.8, z as f32 * 2.0),
@@ -201,6 +208,9 @@ fn main() {
         let recording = Instant::now();
         {
             let mut fg = graph.begin(&frame);
+            let geo = geometry
+                .begin_frame(&mut fg, &device, &mut allocator, frame.number)
+                .unwrap();
             let desc = TextureDesc::new_2d(swapchain.format(), extent.width, extent.height);
             let backbuffer = fg.import_texture(
                 "backbuffer",
@@ -227,6 +237,7 @@ fn main() {
                 &mut fg,
                 &mut ring,
                 &bindless,
+                &geo,
                 &draws,
                 &ForwardView {
                     camera: Camera {
@@ -303,7 +314,7 @@ fn main() {
     unsafe {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
-        mesh.destroy(&mut allocator);
+        geometry.destroy(&mut allocator);
     }
     drop(frames);
     drop(renderer);

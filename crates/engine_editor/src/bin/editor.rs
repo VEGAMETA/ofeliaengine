@@ -55,7 +55,7 @@ mod windowed {
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
-    use engine_render::mesh::{Mesh, cube};
+    use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
     use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, OutputLevels, Tonemap};
     use engine_render::upload::UploadRing;
     use engine_render::viewport::{UpdateMode, ViewportDesc, ViewportSize, Viewports};
@@ -585,7 +585,13 @@ mod windowed {
         if output.levels.color.is_hdr() {
             swapchain.set_hdr_metadata(&hdr_metadata(&output.levels, win.display.as_ref()));
         }
-        let mut mesh = Mesh::new(&device, &mut allocator, &cube())?;
+        let mut geometry = GeometryPool::new(
+            &device,
+            &mut allocator,
+            GeometryCapacity::default(),
+            IN_FLIGHT,
+        )?;
+        let mesh = geometry.add_mesh(&cube().as_data())?;
         let mut ring = UploadRing::new(&device, &mut allocator, IN_FLIGHT, 16 << 20)?;
         let mut frames = Frames::new(&device, device.graphics.family, IN_FLIGHT)?;
         let mut monitor_hz = win.display.and_then(|d| d.refresh_hz);
@@ -612,10 +618,10 @@ mod windowed {
 
         // Scene and panels (demo data).
         let objects = demo_objects();
-        let mut draws: Vec<DrawItem<'_>> = objects
+        let mut draws: Vec<DrawItem> = objects
             .iter()
             .map(|(world_from_object, material)| DrawItem {
-                mesh: &mesh,
+                mesh,
                 world_from_object: *world_from_object,
                 material: *material,
             })
@@ -967,6 +973,7 @@ mod windowed {
             {
                 let mut fg = graph.begin(&frame);
                 ring.begin(&frame);
+                let geo = geometry.begin_frame(&mut fg, &device, &mut allocator, frame.number)?;
                 {
                     let (forward, tonemap, bindless, draws) =
                         (&forward, &output.view_tonemap, &bindless, &draws);
@@ -997,6 +1004,7 @@ mod windowed {
                                 fg,
                                 ring,
                                 bindless,
+                                &geo,
                                 draws,
                                 &ForwardView {
                                     camera: render_camera,
@@ -1196,7 +1204,7 @@ mod windowed {
             viewports.destroy_all(&mut allocator, &bindless);
             graph.destroy(&mut allocator, Some(&bindless));
             ring.destroy(&mut allocator);
-            mesh.destroy(&mut allocator);
+            geometry.destroy(&mut allocator);
             output.destroy(&mut allocator);
             glyphs
                 .texture_mut()
