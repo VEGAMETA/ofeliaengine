@@ -12,10 +12,12 @@
 use engine_core::math::{EulerRot, Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::cull::{Frustum, transform_box};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
+use engine_render::material::{MaterialDesc, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, OwnedMeshData, cube};
+use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -107,6 +109,9 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
         scaled(Vec3::new(2.0, 0.2, 2.0), Vec3::ZERO),
     ]
     .map(|mesh| geometry.add_mesh(&mesh.as_data()).unwrap());
+    let mut textures = TexturePool::new(&device, &mut allocator, 1 << 20, 1).unwrap();
+    // A material per instance: hundreds, beyond the table's first buffer.
+    let mut materials = MaterialTable::new(1);
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
 
@@ -161,14 +166,13 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
                 }
             };
             visible += u32::from(inside);
+            let color = [rng.next(), rng.next(), rng.next()];
+            let metallic = rng.next();
+            let material = materials.add(MaterialDesc::solid(color, metallic, rng.range(0.2, 1.0)));
             draws.push(DrawItem {
                 mesh,
+                material,
                 world_from_object,
-                material: Material {
-                    base_color: Vec3::new(rng.next(), rng.next(), rng.next()),
-                    metallic: rng.next(),
-                    roughness: rng.range(0.2, 1.0),
-                },
             });
         }
         expected.push(visible);
@@ -234,8 +238,15 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            let frame_number = frame as u64 + 1;
             let geo = geometry
-                .begin_frame(&mut fg, &device, &mut allocator, frame as u64 + 1)
+                .begin_frame(&mut fg, &device, &mut allocator, frame_number)
+                .unwrap();
+            textures
+                .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
+                .unwrap();
+            let mats = materials
+                .begin_frame(&mut fg, &device, &mut allocator, &textures, frame_number)
                 .unwrap();
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, SIZE, SIZE));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
@@ -255,6 +266,7 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
                     &mut ring,
                     &bindless,
                     &geo,
+                    &mats,
                     &draws,
                     &ForwardView {
                         camera,
@@ -381,6 +393,8 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
+        materials.destroy(&mut allocator);
+        textures.destroy(&mut allocator, &bindless);
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(pool, None);
     }

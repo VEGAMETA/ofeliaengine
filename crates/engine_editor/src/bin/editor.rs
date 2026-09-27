@@ -52,11 +52,13 @@ mod windowed {
         MouseButton, WindowDesc, WindowEvent, WindowEventKind, WindowSystem,
     };
     use engine_render::forward::{
-        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
+        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
+    use engine_render::material::{MaterialDesc, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
     use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, OutputLevels, Tonemap};
+    use engine_render::texture_pool::TexturePool;
     use engine_render::upload::UploadRing;
     use engine_render::viewport::{UpdateMode, ViewportDesc, ViewportSize, Viewports};
     use engine_render2d::{Canvas, GlyphTexture, Order, Quad, QuadMode, Renderer2d, View2d};
@@ -226,16 +228,12 @@ mod windowed {
         }
     }
 
-    fn material(r: f32, g: f32, b: f32, roughness: f32) -> Material {
-        Material {
-            base_color: Vec3::new(r, g, b),
-            metallic: 0.0,
-            roughness,
-        }
+    fn material(r: f32, g: f32, b: f32, roughness: f32) -> MaterialDesc {
+        MaterialDesc::solid([r, g, b], 0.0, roughness)
     }
 
     /// The demo scene's objects: transform and material.
-    fn demo_objects() -> Vec<(Mat4, Material)> {
+    fn demo_objects() -> Vec<(Mat4, MaterialDesc)> {
         let mut objects = vec![(
             Mat4::from_scale_rotation_translation(
                 Vec3::new(24.0, 0.2, 24.0),
@@ -269,11 +267,7 @@ mod windowed {
                 Quat::from_rotation_y(0.8),
                 Vec3::new(0.5, 0.9, 2.0),
             ),
-            Material {
-                base_color: Vec3::new(0.2, 0.45, 0.9),
-                metallic: 0.3,
-                roughness: 0.35,
-            },
+            MaterialDesc::solid([0.2, 0.45, 0.9], 0.3, 0.35),
         ));
         objects
     }
@@ -592,6 +586,8 @@ mod windowed {
             IN_FLIGHT,
         )?;
         let mesh = geometry.add_mesh(&cube().as_data())?;
+        let mut textures = TexturePool::new(&device, &mut allocator, 64 << 20, IN_FLIGHT)?;
+        let mut materials = MaterialTable::new(IN_FLIGHT);
         let mut ring = UploadRing::new(&device, &mut allocator, IN_FLIGHT, 16 << 20)?;
         let mut frames = Frames::new(&device, device.graphics.family, IN_FLIGHT)?;
         let mut monitor_hz = win.display.and_then(|d| d.refresh_hz);
@@ -622,8 +618,8 @@ mod windowed {
             .iter()
             .map(|(world_from_object, material)| DrawItem {
                 mesh,
+                material: materials.add(*material),
                 world_from_object: *world_from_object,
-                material: *material,
             })
             .collect();
         let light = DirectionalLight {
@@ -974,6 +970,14 @@ mod windowed {
                 let mut fg = graph.begin(&frame);
                 ring.begin(&frame);
                 let geo = geometry.begin_frame(&mut fg, &device, &mut allocator, frame.number)?;
+                textures.begin_frame(&mut fg, &mut allocator, &bindless, frame.number)?;
+                let mats = materials.begin_frame(
+                    &mut fg,
+                    &device,
+                    &mut allocator,
+                    &textures,
+                    frame.number,
+                )?;
                 {
                     let (forward, tonemap, bindless, draws) =
                         (&forward, &output.view_tonemap, &bindless, &draws);
@@ -1005,6 +1009,7 @@ mod windowed {
                                 ring,
                                 bindless,
                                 &geo,
+                                &mats,
                                 draws,
                                 &ForwardView {
                                     camera: render_camera,
@@ -1205,6 +1210,8 @@ mod windowed {
             graph.destroy(&mut allocator, Some(&bindless));
             ring.destroy(&mut allocator);
             geometry.destroy(&mut allocator);
+            materials.destroy(&mut allocator);
+            textures.destroy(&mut allocator, &bindless);
             output.destroy(&mut allocator);
             glyphs
                 .texture_mut()

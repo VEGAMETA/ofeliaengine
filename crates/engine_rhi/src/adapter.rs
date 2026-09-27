@@ -203,10 +203,16 @@ impl Adapter {
         if props.api_version < vk::API_VERSION_1_3 {
             missing.push("Vulkan 1.3");
         }
-        let required: [(&'static str, vk::Bool32); 18] = [
+        let required: [(&'static str, vk::Bool32); 19] = [
             ("dynamicRendering", f13.dynamic_rendering),
             ("synchronization2", f13.synchronization2),
             ("maintenance4", f13.maintenance4),
+            // `discard` in alpha-tested materials: the lane becomes a helper, so the
+            // quad's derivatives stay defined (required by Vulkan 1.3).
+            (
+                "shaderDemoteToHelperInvocation",
+                f13.shader_demote_to_helper_invocation,
+            ),
             ("timelineSemaphore", f12.timeline_semaphore),
             ("bufferDeviceAddress", f12.buffer_device_address),
             ("descriptorIndexing", f12.descriptor_indexing),

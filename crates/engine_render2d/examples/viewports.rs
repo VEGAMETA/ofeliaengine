@@ -26,11 +26,13 @@ fn main() {
     use engine_platform::time::HighResTimer;
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::forward::{
-        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
+        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
     };
     use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
+    use engine_render::material::{MaterialDesc, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
     use engine_render::post::{HDR_FORMAT, Tonemap};
+    use engine_render::texture_pool::TexturePool;
     use engine_render::upload::UploadRing;
     use engine_render::viewport::{
         Placement, Scaling, UpdateMode, ViewportDesc, ViewportSize, Viewports,
@@ -103,6 +105,20 @@ fn main() {
     )
     .unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    let mut textures = TexturePool::new(&device, &mut allocator, 64 << 20, in_flight).unwrap();
+    let mut materials = MaterialTable::new(in_flight);
+    // One material per cube of the 5 × 5 grid.
+    let mut palette = Vec::with_capacity(25);
+    for x in -2..=2i32 {
+        for z in -2..=2i32 {
+            palette.push(materials.add(MaterialDesc::solid(
+                [0.3 + 0.15 * (x + 2) as f32, 0.3, 0.8],
+                if (x + z) % 2 == 0 { 1.0 } else { 0.0 },
+                0.3 + 0.1 * (z + 2) as f32,
+            )));
+        }
+    }
+    let ground = materials.default_material();
     let mut ring = UploadRing::new(&device, &mut allocator, in_flight, 4 << 20).unwrap();
     let mut frames = Frames::new(&device, device.graphics.family, in_flight).unwrap();
     let mut graph = RenderGraph::new(&device, in_flight);
@@ -224,12 +240,12 @@ fn main() {
         positions.clear();
         draws.push(DrawItem {
             mesh,
+            material: ground,
             world_from_object: Mat4::from_scale_rotation_translation(
                 Vec3::new(14.0, 0.2, 14.0),
                 Quat::IDENTITY,
                 Vec3::new(0.0, -0.6, 0.0),
             ),
-            material: Material::default(),
         });
         for x in -2..=2 {
             for z in -2..=2 {
@@ -242,15 +258,11 @@ fn main() {
                 positions.push(p);
                 draws.push(DrawItem {
                     mesh,
+                    material: palette[((x + 2) * 5 + z + 2) as usize],
                     world_from_object: Mat4::from_rotation_translation(
                         Quat::from_rotation_y(angle),
                         p,
                     ),
-                    material: Material {
-                        base_color: Vec3::new(0.3 + 0.15 * (x + 2) as f32, 0.3, 0.8),
-                        metallic: if (x + z) % 2 == 0 { 1.0 } else { 0.0 },
-                        roughness: 0.3 + 0.1 * (z + 2) as f32,
-                    },
                 });
             }
         }
@@ -301,6 +313,12 @@ fn main() {
             let mut fg = graph.begin(&frame);
             let geo = geometry
                 .begin_frame(&mut fg, &device, &mut allocator, frame.number)
+                .unwrap();
+            textures
+                .begin_frame(&mut fg, &mut allocator, &bindless, frame.number)
+                .unwrap();
+            let mats = materials
+                .begin_frame(&mut fg, &device, &mut allocator, &textures, frame.number)
                 .unwrap();
             ring.begin(&frame);
             // The overlay needs the minimap's index, known once it has rendered.
@@ -356,6 +374,7 @@ fn main() {
                                 ring_ref,
                                 bindless_ref,
                                 &geo,
+                                &mats,
                                 draws_ref,
                                 &ForwardView {
                                     camera,
@@ -491,6 +510,8 @@ fn main() {
         ring.destroy(&mut allocator);
         renderer.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
+        materials.destroy(&mut allocator);
+        textures.destroy(&mut allocator, &bindless);
     }
     drop(frames);
     drop(forward);

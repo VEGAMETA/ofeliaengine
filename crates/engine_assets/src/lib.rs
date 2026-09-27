@@ -8,6 +8,6 @@ mod texture_import;
 
 pub use gltf_import::{
     AlphaMode, ImportError, ImportedScene, MaterialData, MeshData, MeshInstance, NodeData,
-    Primitive, TextureSource, import_gltf, spawn_scene,
+    Primitive, TextureData, TextureSource, TextureWrap, import_gltf, read_texture, spawn_scene,
 };
 pub use texture_import::{Image, ImageError, TextureImage, TextureUsage, build_mips, decode_image};

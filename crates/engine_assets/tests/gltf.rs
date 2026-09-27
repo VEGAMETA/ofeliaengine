@@ -247,3 +247,103 @@ fn hierarchy_spawns_into_the_ecs() {
     let mut q = QueryState::<&MeshInstance>::new(&mut world);
     assert_eq!(q.iter(&mut world).count(), 1);
 }
+
+#[test]
+fn textures_samplers_and_material_maps() {
+    use engine_assets::{TextureSource, TextureWrap, read_texture};
+    // The "images" are opaque bytes here: import does not decode them.
+    let embedded = b"embedded image".to_vec();
+    let inline = b"inline image".to_vec();
+    let json = format!(
+        r#"{{
+  "asset": {{"version": "2.0"}},
+  "images": [
+    {{"uri": "my%20image.png"}},
+    {{"bufferView": 0, "mimeType": "image/png"}},
+    {{"uri": "data:image/jpeg;base64,{}"}}
+  ],
+  "samplers": [{{"wrapS": 33071, "wrapT": 33648}}],
+  "textures": [
+    {{"source": 0}},
+    {{"source": 1, "sampler": 0}},
+    {{"source": 2}}
+  ],
+  "materials": [{{
+    "pbrMetallicRoughness": {{"baseColorTexture": {{"index": 0}}, "metallicRoughnessTexture": {{"index": 1}}}},
+    "normalTexture": {{"index": 2, "scale": 0.5}},
+    "occlusionTexture": {{"index": 1, "strength": 0.7}},
+    "emissiveTexture": {{"index": 0}}
+  }}, {{}}],
+  "buffers": [{{"uri": "data:application/octet-stream;base64,{}", "byteLength": {}}}],
+  "bufferViews": [{{"buffer": 0, "byteLength": {}}}]
+}}"#,
+        b64(&inline),
+        b64(&embedded),
+        embedded.len(),
+        embedded.len()
+    );
+    let dir = std::env::temp_dir().join(format!("engine_assets_tex_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("my image.png"), b"file image").unwrap();
+    let scene = import_gltf(json.as_bytes(), Some(&dir)).unwrap();
+
+    assert_eq!(scene.textures.len(), 3);
+    assert_eq!(
+        scene.textures[0].source,
+        TextureSource::Uri(String::from("my image.png")),
+        "URIs are percent-decoded"
+    );
+    assert_eq!(
+        scene.textures[0].wrap,
+        [TextureWrap::Repeat; 2],
+        "default sampler"
+    );
+    assert_eq!(
+        scene.textures[1].wrap,
+        [TextureWrap::ClampToEdge, TextureWrap::MirroredRepeat]
+    );
+    assert_eq!(
+        scene.textures[1].source,
+        TextureSource::Embedded {
+            bytes: embedded.clone(),
+            mime: String::from("image/png")
+        }
+    );
+    assert_eq!(
+        scene.textures[2].source,
+        TextureSource::Embedded {
+            bytes: inline.clone(),
+            mime: String::from("image/jpeg")
+        }
+    );
+    let read = |i: usize| read_texture(&scene.textures[i].source, Some(&dir)).unwrap();
+    assert_eq!(read(0), b"file image");
+    assert_eq!(read(1), embedded);
+    assert_eq!(read(2), inline);
+    assert!(matches!(
+        read_texture(&TextureSource::Uri(String::from("../x.png")), Some(&dir)),
+        Err(ImportError::Buffer(_))
+    ));
+
+    let m = &scene.materials[0];
+    assert_eq!(
+        (
+            m.base_color_texture,
+            m.metallic_roughness_texture,
+            m.normal_texture
+        ),
+        (Some(0), Some(1), Some(2))
+    );
+    assert_eq!((m.normal_scale, m.occlusion_strength), (0.5, 0.7));
+    assert_eq!(
+        (m.occlusion_texture, m.emissive_texture),
+        (Some(1), Some(0))
+    );
+    // glTF defaults.
+    let d = &scene.materials[1];
+    assert_eq!(d.base_color, [1.0; 4]);
+    assert_eq!((d.metallic, d.roughness), (1.0, 1.0));
+    assert_eq!((d.normal_scale, d.occlusion_strength), (1.0, 1.0));
+    assert_eq!((d.alpha, d.double_sided), (AlphaMode::Opaque, false));
+    std::fs::remove_dir_all(&dir).unwrap();
+}

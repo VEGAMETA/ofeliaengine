@@ -155,7 +155,8 @@ impl Device {
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
-            .maintenance4(true);
+            .maintenance4(true)
+            .shader_demote_to_helper_invocation(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
             .multi_draw_indirect(true)

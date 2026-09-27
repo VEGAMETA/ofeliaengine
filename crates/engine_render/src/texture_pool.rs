@@ -1,7 +1,8 @@
 //! Textures of materials (ADR 0040): images with full mip chains, uploaded through a
 //! staging buffer within a budget of bytes per frame, and registered in the bindless set
-//! once uploaded. Until then materials sample one of the pool's default textures, so a
-//! scene appears at once and its textures fill in over the next frames.
+//! once uploaded. Until then materials sample one of the pool's default textures (or
+//! skip their normal map), so a scene appears at once and its textures fill in over the
+//! next frames.
 //!
 //! Uploads record their own layout transitions: materials sample textures through
 //! bindless indices without declaring them to the graph, so a texture is either being
@@ -33,20 +34,18 @@ pub struct TextureLevels {
     pub levels: Vec<Vec<u8>>,
 }
 
-/// Built-in textures, always available.
+/// Built-in textures, always available: what materials sample instead of a missing
+/// texture, so their factors apply unchanged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DefaultTexture {
-    /// sRGB white: base color and emissive without a texture.
+    /// sRGB white: base color and emissive.
     White,
-    /// Linear white: metallic-roughness and occlusion without a texture (the factors
-    /// apply unchanged).
+    /// Linear white: metallic-roughness and occlusion.
     LinearWhite,
-    /// A flat tangent-space normal (0, 0, 1).
-    FlatNormal,
 }
 
 /// Why a texture was not added.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum TextureError {
     /// No levels, or a level whose size does not match its dimensions.
     BadLevels,
@@ -98,7 +97,6 @@ enum Retired {
 }
 
 /// Material textures (see the module documentation).
-#[derive(Debug)]
 pub struct TexturePool {
     device: engine_rhi::ash::Device,
     slots: Vec<Slot>,
@@ -107,10 +105,22 @@ pub struct TexturePool {
     budget: u64,
     retired: Vec<(u64, Retired)>,
     frames_in_flight: u64,
-    defaults: [TextureId; 3],
-    /// Counts textures that became ready; materials resolve again when it changes.
-    ready: u64,
+    defaults: [TextureId; 2],
+    /// Changes whenever textures become ready or are removed: materials resolve their
+    /// textures again when it does.
+    generation: u64,
     uploaded_bytes: u64,
+}
+
+impl core::fmt::Debug for TexturePool {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TexturePool")
+            .field("textures", &(self.slots.len() - self.free_slots.len()))
+            .field("queued", &self.queue.len())
+            .field("budget", &self.budget)
+            .field("uploaded_bytes", &self.uploaded_bytes)
+            .finish()
+    }
 }
 
 /// Size of level `level` of a `size`-texel side.
@@ -120,7 +130,7 @@ fn level_size(size: u32, level: usize) -> u32 {
 
 impl TexturePool {
     /// A pool uploading at most `budget` bytes per frame (at least one texture, however
-    /// large). The default textures upload in the first frame.
+    /// large). The default textures upload in the first frame, whatever the budget.
     pub fn new(
         device: &Device,
         allocator: &mut Allocator,
@@ -138,8 +148,8 @@ impl TexturePool {
             defaults: [TextureId {
                 index: 0,
                 generation: 0,
-            }; 3],
-            ready: 0,
+            }; 2],
+            generation: 0,
             uploaded_bytes: 0,
         };
         let one = |srgb, texel: [u8; 4]| TextureLevels {
@@ -151,7 +161,6 @@ impl TexturePool {
         pool.defaults = [
             pool.add(device, allocator, one(true, [255; 4]))?,
             pool.add(device, allocator, one(false, [255; 4]))?,
-            pool.add(device, allocator, one(false, [128, 128, 255, 255]))?,
         ];
         Ok(pool)
     }
@@ -266,6 +275,7 @@ impl TexturePool {
         if let Some(texture) = slot.texture.take() {
             if let Some(index) = texture.bindless {
                 bindless.remove_sampled_image(index, frame_number);
+                self.generation += 1;
             }
             self.retired.push((frame_number, Retired::Texture(texture)));
         }
@@ -288,9 +298,9 @@ impl TexturePool {
         self.index(id).unwrap_or(0)
     }
 
-    /// A counter that changes whenever textures become ready.
-    pub fn ready_generation(&self) -> u64 {
-        self.ready
+    /// A counter that changes whenever textures become ready or are removed.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// Textures waiting for upload, and their bytes.
@@ -336,7 +346,7 @@ impl TexturePool {
                     continue;
                 }
             };
-            if !batch.is_empty() && total + bytes > self.budget {
+            if !batch.is_empty() && total + bytes > self.budget && !self.defaults.contains(&id) {
                 break;
             }
             self.queue.pop_front();
@@ -475,7 +485,7 @@ impl TexturePool {
                 self.uploaded_bytes += texture.bytes;
             }
         }
-        self.ready += 1;
+        self.generation += 1;
         self.retired
             .push((frame_number, Retired::Staging(staging, staging_memory)));
         Ok(())
@@ -508,7 +518,9 @@ impl TexturePool {
                         allocator.destroy_image(texture.image, allocation);
                     }
                 }
-                Retired::Staging(buffer, allocation) => allocator.destroy_buffer(buffer, allocation),
+                Retired::Staging(buffer, allocation) => {
+                    allocator.destroy_buffer(buffer, allocation)
+                }
             }
         }
     }

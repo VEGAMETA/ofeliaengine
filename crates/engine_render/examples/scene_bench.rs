@@ -1,33 +1,48 @@
-//! Real content through the forward renderer, headless (ADR 0039): a glTF scene imported
-//! into the geometry pool, drawn into a 1920×1080 HDR target with a shadow map from a fixed
-//! camera. Reports the scene's size, the pool's memory, and the median GPU time of the
-//! shadow and forward passes, for the meshes as imported (indexed, vertices shared between
-//! triangles) and as a triangle soup (three vertices per triangle, what the renderer drew
-//! before the pool). Materials are the glTF factors only; textures come with the texture
-//! pipeline.
+//! Real content through the forward renderer, headless (ADR 0039, ADR 0040): a glTF scene
+//! with its materials and textures, drawn into a 1920×1080 HDR target with a shadow map
+//! from a fixed camera.
+//!
+//! Reports the import (glTF, then every texture decoded and given its mip chain in
+//! parallel, then the meshes into the geometry pool), the memory of geometry and
+//! textures, and the median GPU time of the shadow and forward passes, with the materials
+//! as imported and with their factors only (no textures). `--screenshot out.png` also
+//! writes the textured frame, tonemapped.
 //!
 //! `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
-//! (scenes: `tools/fetch-test-assets.ps1`)
+//! (scenes: `tools/fetch-test-assets.ps1`; options: `--screenshot <png>`,
+//! `--view <eye x,y,z,target x,y,z>`)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
-use engine_assets::{ImportedScene, import_gltf};
+use engine_assets::{
+    AlphaMode as GltfAlpha, ImportedScene, TextureImage, TextureUsage, TextureWrap, build_mips,
+    decode_image, import_gltf, read_texture,
+};
+use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Material, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
 };
-use engine_render::graph::{Access, RenderGraph, TextureDesc};
+use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
+use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId};
-use engine_render::post::HDR_FORMAT;
+use engine_render::png::{PngFormat, encode_png};
+use engine_render::post::{HDR_FORMAT, Tonemap};
+use engine_render::texture_pool::{TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
-use engine_rhi::{AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc};
+use engine_rhi::{
+    AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, MemoryLocation, Wrap,
+};
+use std::sync::OnceLock;
 use std::time::Instant;
 
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 const WARMUP: usize = 30;
 const FRAMES: usize = 200;
+/// Texture bytes uploaded per frame: the whole scene within a few frames.
+const UPLOAD_BUDGET: u64 = 256 << 20;
 
 fn median(values: &mut [f64]) -> f64 {
     if values.is_empty() {
@@ -57,67 +72,164 @@ fn instances(scene: &ImportedScene) -> Vec<(usize, Mat4)> {
     out
 }
 
-/// `values` in the order of `indices` (empty stays empty).
-fn gather<T: Copy>(values: &[T], indices: &[u32]) -> Vec<T> {
-    if values.is_empty() {
-        return Vec::new();
+/// Every distinct use of a texture by the materials: `(texture, usage)`. The usage decides
+/// how its mip levels are filtered.
+fn texture_uses(scene: &ImportedScene) -> Vec<(usize, TextureUsage)> {
+    let mut uses = Vec::new();
+    let mut add = |texture: Option<usize>, usage| {
+        if let Some(texture) = texture
+            && !uses.contains(&(texture, usage))
+        {
+            uses.push((texture, usage));
+        }
+    };
+    for m in &scene.materials {
+        add(m.base_color_texture, color_usage(m.alpha));
+        add(m.emissive_texture, TextureUsage::Color);
+        add(m.metallic_roughness_texture, TextureUsage::Data);
+        add(m.occlusion_texture, TextureUsage::Data);
+        add(m.normal_texture, TextureUsage::Normal);
     }
-    indices.iter().map(|&i| values[i as usize]).collect()
+    uses
 }
 
-/// Adds every primitive to the pool, indexed or as a triangle soup; ids per mesh, per
-/// primitive.
-fn add_meshes(scene: &ImportedScene, pool: &mut GeometryPool, soup: bool) -> Vec<Vec<MeshId>> {
+fn color_usage(alpha: GltfAlpha) -> TextureUsage {
+    match alpha {
+        GltfAlpha::Mask(bits) => TextureUsage::ColorMasked {
+            cutoff: f32::from_bits(bits),
+        },
+        GltfAlpha::Opaque | GltfAlpha::Blend => TextureUsage::Color,
+    }
+}
+
+fn wrap(w: TextureWrap) -> Wrap {
+    match w {
+        TextureWrap::Repeat => Wrap::Repeat,
+        TextureWrap::MirroredRepeat => Wrap::MirroredRepeat,
+        TextureWrap::ClampToEdge => Wrap::ClampToEdge,
+    }
+}
+
+/// The scene's materials; `textured: false` keeps the factors only.
+fn material_descs(
+    scene: &ImportedScene,
+    uses: &[(usize, TextureUsage)],
+    ids: &[Option<TextureId>],
+    textured: bool,
+) -> Vec<MaterialDesc> {
+    let find = |texture: Option<usize>, usage: TextureUsage| -> Option<TextureRef> {
+        let texture = texture.filter(|_| textured)?;
+        let k = uses.iter().position(|&u| u == (texture, usage))?;
+        Some(TextureRef {
+            texture: ids[k]?,
+            wrap: scene.textures[texture].wrap.map(wrap),
+        })
+    };
     scene
-        .meshes
+        .materials
         .iter()
-        .map(|mesh| {
-            mesh.primitives
-                .iter()
-                .map(|p| {
-                    if !soup {
-                        return pool
-                            .add_mesh(&MeshData {
-                                positions: &p.positions,
-                                normals: &p.normals,
-                                tangents: &p.tangents,
-                                uvs: &p.uvs,
-                                indices: &p.indices,
-                            })
-                            .unwrap();
-                    }
-                    let (positions, normals) = (
-                        gather(&p.positions, &p.indices),
-                        gather(&p.normals, &p.indices),
-                    );
-                    let (tangents, uvs) =
-                        (gather(&p.tangents, &p.indices), gather(&p.uvs, &p.indices));
-                    let indices: Vec<u32> = (0..p.indices.len() as u32).collect();
-                    pool.add_mesh(&MeshData {
-                        positions: &positions,
-                        normals: &normals,
-                        tangents: &tangents,
-                        uvs: &uvs,
-                        indices: &indices,
-                    })
-                    .unwrap()
-                })
-                .collect()
+        .map(|m| MaterialDesc {
+            base_color: m.base_color,
+            base_color_texture: find(m.base_color_texture, color_usage(m.alpha)),
+            metallic: m.metallic,
+            roughness: m.roughness,
+            metallic_roughness_texture: find(m.metallic_roughness_texture, TextureUsage::Data),
+            normal_texture: find(m.normal_texture, TextureUsage::Normal),
+            normal_scale: m.normal_scale,
+            occlusion_texture: find(m.occlusion_texture, TextureUsage::Data),
+            occlusion_strength: m.occlusion_strength,
+            emissive: m.emissive,
+            emissive_texture: find(m.emissive_texture, TextureUsage::Color),
+            // Blending comes with the transparency pass; until then blended materials
+            // draw opaque.
+            alpha: match m.alpha {
+                GltfAlpha::Mask(bits) => AlphaMode::Mask {
+                    cutoff: f32::from_bits(bits),
+                },
+                GltfAlpha::Opaque | GltfAlpha::Blend => AlphaMode::Opaque,
+            },
+            double_sided: m.double_sided,
         })
         .collect()
 }
 
+/// A camera from `--view ex,ey,ez,tx,ty,tz`, or an interior view down the longest
+/// horizontal axis from a quarter of its length, a little above the floor, or an object
+/// view from the front.
+fn view(min: Vec3, max: Vec3, requested: Option<[f32; 6]>) -> (Vec3, Vec3) {
+    if let Some(v) = requested {
+        return (Vec3::new(v[0], v[1], v[2]), Vec3::new(v[3], v[4], v[5]));
+    }
+    let size = max - min;
+    let center = (min + max) * 0.5;
+    if size.x.max(size.z) > 1.5 * size.y {
+        let (eye_y, target_y) = (min.y + size.y * 0.15, min.y + size.y * 0.25);
+        if size.x >= size.z {
+            (
+                Vec3::new(min.x + size.x * 0.25, eye_y, center.z),
+                Vec3::new(max.x, target_y, center.z),
+            )
+        } else {
+            (
+                Vec3::new(center.x, eye_y, min.z + size.z * 0.25),
+                Vec3::new(center.x, target_y, max.z),
+            )
+        }
+    } else {
+        (center + Vec3::new(0.0, 0.0, size.length() * 0.9), center)
+    }
+}
+
 fn main() {
-    let path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| String::from("test-assets/Sponza/Sponza.gltf"));
+    let mut path = String::from("test-assets/Sponza/Sponza.gltf");
+    let (mut screenshot, mut requested_view) = (None, None);
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--screenshot" => screenshot = args.next(),
+            "--view" => {
+                let v: Vec<f32> = args
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|x| x.trim().parse().unwrap())
+                    .collect();
+                requested_view = Some(<[f32; 6]>::try_from(v).unwrap());
+            }
+            _ => path = arg,
+        }
+    }
     let bytes = std::fs::read(&path).unwrap_or_else(|e| {
         panic!("{path}: {e} (download test scenes with tools/fetch-test-assets.ps1)")
     });
+    let dir = std::path::Path::new(&path).parent();
     let start = Instant::now();
-    let scene = import_gltf(&bytes, std::path::Path::new(&path).parent()).unwrap();
+    let scene = import_gltf(&bytes, dir).unwrap();
     let imported = start.elapsed();
     let placed = instances(&scene);
+
+    // Textures: read, decode and filter every use in parallel.
+    let jobs = ThreadPool::builder().build().unwrap();
+    let uses = texture_uses(&scene);
+    let start = Instant::now();
+    let images: Vec<OnceLock<TextureImage>> = uses.iter().map(|_| OnceLock::new()).collect();
+    jobs.parallel_for(uses.len(), 1, |_, range| {
+        for k in range {
+            let (texture, usage) = uses[k];
+            let encoded = read_texture(&scene.textures[texture].source, dir).unwrap();
+            let image = decode_image(&encoded).unwrap();
+            let _ = images[k].set(build_mips(&image, usage));
+        }
+    });
+    let images: Vec<TextureImage> = images
+        .into_iter()
+        .map(|i| i.into_inner().unwrap())
+        .collect();
+    let decoded = start.elapsed();
+    let texels: u64 = images
+        .iter()
+        .map(|i| u64::from(i.width) * u64::from(i.height))
+        .sum();
 
     let instance = Instance::new(&InstanceDesc {
         app_name: String::from("scene_bench"),
@@ -143,8 +255,19 @@ fn main() {
         ShadowSettings::default(),
     )
     .unwrap();
+    let screenshot_format = vk::Format::R8G8B8A8_SRGB;
+    let tonemap = Tonemap::new(&device, &bindless, screenshot_format).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 64 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
+    let readback_size = u64::from(WIDTH * HEIGHT * 4);
+    let (readback, readback_mem) = allocator
+        .create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(readback_size)
+                .usage(vk::BufferUsageFlags::TRANSFER_DST),
+            MemoryLocation::Readback,
+        )
+        .unwrap();
     // SAFETY: plain object creation.
     let (command_pool, cmd) = unsafe {
         let command_pool = d
@@ -165,104 +288,159 @@ fn main() {
         (command_pool, cmd)
     };
 
+    // Meshes, one per primitive.
+    let mut geometry =
+        GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
+    let start = Instant::now();
+    let meshes: Vec<Vec<MeshId>> = scene
+        .meshes
+        .iter()
+        .map(|mesh| {
+            mesh.primitives
+                .iter()
+                .map(|p| {
+                    geometry
+                        .add_mesh(&MeshData {
+                            positions: &p.positions,
+                            normals: &p.normals,
+                            tangents: &p.tangents,
+                            uvs: &p.uvs,
+                            indices: &p.indices,
+                        })
+                        .unwrap()
+                })
+                .collect()
+        })
+        .collect();
+    let meshes_added = start.elapsed();
+    let (vertices, _, indices, _) = geometry.usage();
+
+    // Textures and materials.
+    let mut textures = TexturePool::new(&device, &mut allocator, UPLOAD_BUDGET, 1).unwrap();
+    let texture_ids: Vec<Option<TextureId>> = images
+        .into_iter()
+        .map(|image| {
+            textures
+                .add(
+                    &device,
+                    &mut allocator,
+                    TextureLevels {
+                        width: image.width,
+                        height: image.height,
+                        srgb: image.srgb,
+                        levels: image.levels,
+                    },
+                )
+                .ok()
+        })
+        .collect();
+    let (_, texture_bytes) = textures.pending();
+    let mut materials = MaterialTable::new(1);
+    let textured = material_descs(&scene, &uses, &texture_ids, true);
+    let untextured = material_descs(&scene, &uses, &texture_ids, false);
+    let material_ids: Vec<MaterialId> = textured.iter().map(|&m| materials.add(m)).collect();
+    let fallback = materials.default_material();
+
+    // Draws sorted by mesh, so instances of a primitive share a batch.
+    let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    let mut draws: Vec<DrawItem> = Vec::new();
+    for &(mesh, world) in &placed {
+        for (p, primitive) in scene.meshes[mesh].primitives.iter().enumerate() {
+            draws.push(DrawItem {
+                mesh: meshes[mesh][p],
+                material: primitive.material.map_or(fallback, |i| material_ids[i]),
+                world_from_object: world,
+            });
+            for corner in 0..8 {
+                let pick = |bit: usize, axis: usize| {
+                    if corner & bit != 0 {
+                        primitive.max[axis]
+                    } else {
+                        primitive.min[axis]
+                    }
+                };
+                let c = world.transform_point3(Vec3::new(pick(1, 0), pick(2, 1), pick(4, 2)));
+                min = min.min(c);
+                max = max.max(c);
+            }
+        }
+    }
+    draws.sort_by_key(|d| format!("{:?}", d.mesh));
+    let (eye, target) = view(min, max, requested_view);
+    let size = max - min;
+    let camera = Camera {
+        clip_from_world: vulkan_perspective(
+            60f32.to_radians(),
+            WIDTH as f32 / HEIGHT as f32,
+            size.length() * 0.001,
+            size.length() * 2.0,
+        ) * look_at(eye, target, Vec3::Y),
+        position: eye,
+    };
+    let light = DirectionalLight {
+        direction: Vec3::new(-0.3, -1.0, -0.2),
+        color: Vec3::splat(3.0),
+        ambient: Vec3::splat(0.08),
+    };
+
+    let masked = scene
+        .materials
+        .iter()
+        .filter(|m| matches!(m.alpha, GltfAlpha::Mask(_)))
+        .count();
+    let blended = scene
+        .materials
+        .iter()
+        .filter(|m| m.alpha == GltfAlpha::Blend)
+        .count();
+    let double_sided = scene.materials.iter().filter(|m| m.double_sided).count();
     println!("### Scene through the forward renderer ({WIDTH}×{HEIGHT} HDR, shadow map 2048²)");
     println!();
     println!("Device: {}", device.adapter().summary());
     println!(
-        "Scene: {path}: {} triangles in {} primitives, {} draws; imported in {:.0} ms",
+        "Scene: {path}: {} triangles in {} primitives, {} draws; {} materials ({masked} masked, \
+         {blended} blended drawn opaque, {double_sided} double-sided)",
         scene.triangle_count(),
         scene
             .meshes
             .iter()
             .map(|m| m.primitives.len())
             .sum::<usize>(),
-        placed
-            .iter()
-            .map(|&(m, _)| scene.meshes[m].primitives.len())
-            .sum::<usize>(),
-        imported.as_secs_f64() * 1e3
+        draws.len(),
+        scene.materials.len(),
+    );
+    println!(
+        "Import: glTF {:.0} ms; {} textures ({:.1} Mtexels) read, decoded and mipmapped in \
+         {:.0} ms on {} threads; meshes into the pool {:.0} ms",
+        imported.as_secs_f64() * 1e3,
+        uses.len(),
+        texels as f64 / 1e6,
+        decoded.as_secs_f64() * 1e3,
+        jobs.num_workers() + 1,
+        meshes_added.as_secs_f64() * 1e3,
+    );
+    println!(
+        "Memory: geometry {:.1} MB ({vertices} vertices), textures {:.1} MB (RGBA8 with mips)",
+        (vertices * 28 + indices * 4) as f64 / (1 << 20) as f64,
+        texture_bytes as f64 / (1 << 20) as f64,
     );
     println!();
-    println!("| meshes | vertices | pool MB | added ms | GPU shadow µs | GPU forward µs |");
-    println!("|---|---:|---:|---:|---:|---:|");
+    println!("| materials | upload frames | GPU shadow µs | GPU forward µs |");
+    println!("|---|---:|---:|---:|");
 
     let mut frame_number = 0u64;
-    for soup in [false, true] {
-        let mut pool =
-            GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
-        let start = Instant::now();
-        let ids = add_meshes(&scene, &mut pool, soup);
-        let added = start.elapsed();
-        let (vertices, _, indices, _) = pool.usage();
-
-        // Draws sorted by mesh, so instances of a primitive share a batch.
-        let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        let mut draws: Vec<DrawItem> = Vec::new();
-        for &(mesh, world) in &placed {
-            for (p, primitive) in scene.meshes[mesh].primitives.iter().enumerate() {
-                let m = primitive.material.map(|i| &scene.materials[i]);
-                let base = m.map_or([0.8, 0.8, 0.8, 1.0], |m| m.base_color);
-                draws.push(DrawItem {
-                    mesh: ids[mesh][p],
-                    world_from_object: world,
-                    material: Material {
-                        base_color: Vec3::new(base[0], base[1], base[2]),
-                        metallic: m.map_or(0.0, |m| m.metallic),
-                        roughness: m.map_or(0.5, |m| m.roughness),
-                    },
-                });
-                for corner in 0..8 {
-                    let pick = |bit: usize, axis: usize| {
-                        if corner & bit != 0 {
-                            primitive.max[axis]
-                        } else {
-                            primitive.min[axis]
-                        }
-                    };
-                    let c = world.transform_point3(Vec3::new(pick(1, 0), pick(2, 1), pick(4, 2)));
-                    min = min.min(c);
-                    max = max.max(c);
-                }
-            }
+    for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
+        for (&id, &desc) in material_ids.iter().zip(descs.iter()) {
+            materials.set(id, desc);
         }
-        draws.sort_by_key(|d| format!("{:?}", d.mesh));
-        // An interior view down the longest horizontal axis at a fifth of the height, or
-        // an object view from the front.
-        let size = max - min;
-        let center = (min + max) * 0.5;
-        let (eye, target) = if size.x.max(size.z) > 2.5 * size.y {
-            let y = min.y + size.y * 0.2;
-            if size.x >= size.z {
-                (
-                    Vec3::new(min.x + size.x * 0.08, y, center.z),
-                    Vec3::new(max.x, y, center.z),
-                )
-            } else {
-                (
-                    Vec3::new(center.x, y, min.z + size.z * 0.08),
-                    Vec3::new(center.x, y, max.z),
-                )
-            }
-        } else {
-            (center + Vec3::new(0.0, 0.0, size.length() * 0.9), center)
-        };
-        let camera = Camera {
-            clip_from_world: vulkan_perspective(
-                60f32.to_radians(),
-                WIDTH as f32 / HEIGHT as f32,
-                size.length() * 0.001,
-                size.length() * 2.0,
-            ) * look_at(eye, target, Vec3::Y),
-            position: eye,
-        };
-        let light = DirectionalLight {
-            direction: Vec3::new(-0.3, -1.0, -0.2),
-            color: Vec3::splat(3.0),
-            ambient: Vec3::splat(0.08),
-        };
-
         let (mut shadow, mut forward) = (Vec::new(), Vec::new());
-        for frame in 0..WARMUP + FRAMES {
+        let mut upload_frames = 0;
+        let last = mode == "textured" && screenshot.is_some();
+        let mut frame = 0;
+        while frame < WARMUP + FRAMES + usize::from(last) {
+            let uploading = textures.pending().0 > 0;
+            upload_frames += usize::from(uploading);
+            let capture = last && frame == WARMUP + FRAMES;
             // SAFETY: the previous frame finished (waited below).
             unsafe {
                 d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -279,7 +457,13 @@ fn main() {
                 // SAFETY: nothing is in flight.
                 let mut fg = unsafe { graph.begin_slot(0, cmd) };
                 frame_number += 1;
-                let geo = pool
+                textures
+                    .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
+                    .unwrap();
+                let mats = materials
+                    .begin_frame(&mut fg, &device, &mut allocator, &textures, frame_number)
+                    .unwrap();
+                let geo = geometry
                     .begin_frame(&mut fg, &device, &mut allocator, frame_number)
                     .unwrap();
                 let hdr = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
@@ -291,6 +475,7 @@ fn main() {
                         &mut ring,
                         &bindless,
                         &geo,
+                        &mats,
                         &draws,
                         &ForwardView {
                             camera,
@@ -302,10 +487,57 @@ fn main() {
                         },
                     )
                     .unwrap();
-                fg.add_pass("consume")
-                    .read(hdr, Access::TransferRead)
-                    .side_effects()
-                    .execute(|_| {});
+                if capture {
+                    let ldr = fg.create_texture(
+                        "screenshot",
+                        TextureDesc::new_2d(screenshot_format, WIDTH, HEIGHT),
+                    );
+                    tonemap.add_pass(&mut fg, &bindless, hdr, ldr, 1.0);
+                    let out = fg.import_buffer(
+                        "readback",
+                        ImportedBuffer {
+                            buffer: readback,
+                            size: readback_size,
+                            address: 0,
+                            initial: BufferState::idle(),
+                            final_state: Some(BufferState::host_read()),
+                        },
+                    );
+                    fg.add_pass("read back")
+                        .read(ldr, Access::TransferRead)
+                        .write(out, Access::TransferWrite)
+                        .execute(move |ctx| {
+                            let region = vk::BufferImageCopy {
+                                image_subresource: vk::ImageSubresourceLayers {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    mip_level: 0,
+                                    base_array_layer: 0,
+                                    layer_count: 1,
+                                },
+                                image_extent: vk::Extent3D {
+                                    width: WIDTH,
+                                    height: HEIGHT,
+                                    depth: 1,
+                                },
+                                ..Default::default()
+                            };
+                            // SAFETY: recording; layouts arranged by the graph.
+                            unsafe {
+                                ctx.device.cmd_copy_image_to_buffer(
+                                    ctx.cmd,
+                                    ctx.image(ldr),
+                                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                    ctx.buffer(out),
+                                    &[region],
+                                );
+                            }
+                        });
+                } else {
+                    fg.add_pass("consume")
+                        .read(hdr, Access::TransferRead)
+                        .side_effects()
+                        .execute(|_| {});
+                }
                 fg.execute_with_bindless(&mut allocator, Some(&bindless))
                     .unwrap();
             }
@@ -321,7 +553,11 @@ fn main() {
                 .unwrap();
                 device.wait_idle().unwrap();
             }
-            if frame > WARMUP {
+            // Measure once every texture is resident.
+            if uploading {
+                continue;
+            }
+            if frame > WARMUP && !capture {
                 for time in graph.gpu_pass_times() {
                     match time.name {
                         "shadow" => shadow.push(f64::from(time.gpu_us)),
@@ -330,28 +566,35 @@ fn main() {
                     }
                 }
             }
+            if capture && let Some(file) = &screenshot {
+                let ptr = readback_mem.mapped_ptr().unwrap();
+                // SAFETY: the GPU is idle; the mapping covers the image.
+                let pixels =
+                    unsafe { core::slice::from_raw_parts(ptr.as_ptr(), readback_size as usize) };
+                let png = encode_png(WIDTH, HEIGHT, PngFormat::Rgba, pixels).unwrap();
+                std::fs::write(file, png).unwrap();
+            }
+            frame += 1;
         }
         println!(
-            "| {} | {vertices} | {:.1} | {:.0} | {:.0} | {:.0} |",
-            if soup {
-                "triangle soup"
-            } else {
-                "indexed (pool)"
-            },
-            (vertices * 28 + indices * 4) as f64 / (1 << 20) as f64,
-            added.as_secs_f64() * 1e3,
+            "| {mode} | {upload_frames} | {:.0} | {:.0} |",
             median(&mut shadow),
             median(&mut forward),
         );
-        // SAFETY: the device is idle.
-        unsafe { pool.destroy(&mut allocator) };
     }
     println!();
+    if let Some(file) = &screenshot {
+        println!("Screenshot: {file} (eye {eye}, target {target})");
+    }
 
     // SAFETY: the device is idle.
     unsafe {
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
+        geometry.destroy(&mut allocator);
+        materials.destroy(&mut allocator);
+        textures.destroy(&mut allocator, &bindless);
+        allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);
     }
 }

@@ -5,9 +5,10 @@
 //!   - meshes as indexed triangle lists with positions, normals (computed when
 //!     missing), UVs and tangents;
 //!   - metallic-roughness PBR materials;
-//!   - the node hierarchy with local transforms.
-//!   - Textures are listed (source URI or buffer view) but not decoded: the texture
-//!     pipeline (KTX2) owns that.
+//!   - the node hierarchy with local transforms;
+//!   - textures with their wrap modes: file names, or the bytes of images embedded in
+//!     the file. [`read_texture`] loads a texture's encoded image; decoding and mip
+//!     levels are [`crate::decode_image`] and [`crate::build_mips`].
 //! - [`spawn_scene`] turns the hierarchy into ECS entities with `Transform`,
 //!   `GlobalTransform`, parent links and a [`MeshInstance`] per mesh-bearing node.
 
@@ -66,7 +67,8 @@ pub enum AlphaMode {
     Blend,
 }
 
-/// A metallic-roughness PBR material.
+/// A metallic-roughness PBR material. Textures are indices into
+/// [`ImportedScene::textures`]; all of them use the first set of texture coordinates.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MaterialData {
     /// Name from the file.
@@ -79,34 +81,60 @@ pub struct MaterialData {
     pub roughness: f32,
     /// Linear emissive color (with `KHR_materials_emissive_strength` applied).
     pub emissive: [f32; 3],
-    /// Base color texture (index into [`ImportedScene::textures`]).
+    /// Base color texture (sRGB color, alpha).
     pub base_color_texture: Option<usize>,
-    /// Metallic-roughness texture.
+    /// Metallic (blue) and roughness (green) texture.
     pub metallic_roughness_texture: Option<usize>,
-    /// Normal map.
+    /// Tangent-space normal map.
     pub normal_texture: Option<usize>,
+    /// Scale of the normal map's X and Y.
+    pub normal_scale: f32,
+    /// Ambient occlusion texture (red).
+    pub occlusion_texture: Option<usize>,
+    /// How much of the occlusion applies, 0 … 1.
+    pub occlusion_strength: f32,
+    /// Emissive texture (sRGB color), multiplied by `emissive`.
+    pub emissive_texture: Option<usize>,
     /// Alpha usage (the mask cutoff is stored as `f32::to_bits`).
     pub alpha: AlphaMode,
     /// Render both faces.
     pub double_sided: bool,
 }
 
-/// Where a texture's image comes from (decoded later by the texture pipeline).
+/// Where a texture's encoded image is (decoded later by the texture pipeline).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TextureSource {
-    /// A file next to the glTF, or a data URI.
+    /// A file next to the glTF: its relative path, percent-decoded.
     Uri(String),
-    /// Bytes inside a buffer: (buffer index, byte offset, length) and MIME type.
+    /// An image inside the file (a buffer view or a data URI).
     Embedded {
-        /// Buffer index.
-        buffer: usize,
-        /// Byte offset in the buffer.
-        offset: usize,
-        /// Byte length.
-        length: usize,
-        /// MIME type (`image/png`, `image/jpeg`, `image/ktx2`...).
+        /// The encoded image.
+        bytes: Vec<u8>,
+        /// MIME type (`image/png`, `image/jpeg`, `image/ktx2`...), empty if the file
+        /// does not say.
         mime: String,
     },
+}
+
+/// How a texture repeats along one axis (glTF's sampler wrap modes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TextureWrap {
+    /// Tiles.
+    #[default]
+    Repeat,
+    /// Tiles, every other copy mirrored.
+    MirroredRepeat,
+    /// Stretches the edge texels.
+    ClampToEdge,
+}
+
+/// A texture: an image and how it repeats.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextureData {
+    /// The encoded image.
+    pub source: TextureSource,
+    /// Wrap along u and v.
+    pub wrap: [TextureWrap; 2],
 }
 
 /// A node: a local transform, an optional mesh and children.
@@ -133,8 +161,8 @@ pub struct ImportedScene {
     pub meshes: Vec<MeshData>,
     /// Materials.
     pub materials: Vec<MaterialData>,
-    /// Texture sources.
-    pub textures: Vec<TextureSource>,
+    /// Textures.
+    pub textures: Vec<TextureData>,
     /// All nodes.
     pub nodes: Vec<NodeData>,
     /// Root nodes of the default scene (or of the first scene).
@@ -210,6 +238,66 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// Decodes `%XX` escapes of a URI (glTF URIs are RFC 3986: a space is `%20`). Invalid
+/// escapes stay as they are.
+fn percent_decode(uri: &str) -> String {
+    let bytes = uri.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        let hex = |c: u8| (c as char).to_digit(16);
+        if bytes[i] == b'%'
+            && let (Some(hi), Some(lo)) = (
+                bytes.get(i + 1).copied().and_then(hex),
+                bytes.get(i + 2).copied().and_then(hex),
+            )
+        {
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+            continue;
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| uri.to_owned())
+}
+
+/// The bytes of a base64 data URI (`data:<mime>;base64,<data>`) and its MIME type.
+fn data_uri(uri: &str) -> Option<Result<(Vec<u8>, String), ImportError>> {
+    let rest = uri.strip_prefix("data:")?;
+    Some(match rest.split_once(";base64,") {
+        Some((mime, b64)) => base64_decode(b64)
+            .map(|bytes| (bytes, mime.to_owned()))
+            .ok_or_else(|| ImportError::Buffer("bad base64 in data URI".into())),
+        None => Err(ImportError::Buffer("only base64 data URIs".into())),
+    })
+}
+
+/// A file next to the asset: `uri` must stay inside `dir`.
+fn read_relative(dir: Option<&Path>, uri: &str) -> Result<Vec<u8>, ImportError> {
+    let dir = dir.ok_or_else(|| {
+        ImportError::Buffer(format!("`{uri}` is external but no folder was given"))
+    })?;
+    if uri.contains("..") || Path::new(uri).is_absolute() {
+        return Err(ImportError::Buffer(format!(
+            "`{uri}` points outside the asset's folder"
+        )));
+    }
+    std::fs::read(dir.join(uri)).map_err(|e| ImportError::Buffer(format!("`{uri}`: {e}")))
+}
+
+/// The encoded image of a texture: embedded bytes, or the file next to the glTF
+/// (`base_dir` is the glTF's folder; paths leaving it are refused).
+pub fn read_texture(
+    source: &TextureSource,
+    base_dir: Option<&Path>,
+) -> Result<Vec<u8>, ImportError> {
+    match source {
+        TextureSource::Embedded { bytes, .. } => Ok(bytes.clone()),
+        TextureSource::Uri(uri) => read_relative(base_dir, uri),
+    }
+}
+
 fn load_buffers(
     doc: &gltf::Document,
     blob: Option<Vec<u8>>,
@@ -222,26 +310,10 @@ fn load_buffers(
             gltf::buffer::Source::Bin => blob
                 .take()
                 .ok_or_else(|| ImportError::Buffer("GLB binary chunk missing".into()))?,
-            gltf::buffer::Source::Uri(uri) => {
-                if let Some(rest) = uri.strip_prefix("data:") {
-                    let (_, b64) = rest
-                        .split_once(";base64,")
-                        .ok_or_else(|| ImportError::Buffer("only base64 data URIs".into()))?;
-                    base64_decode(b64)
-                        .ok_or_else(|| ImportError::Buffer("bad base64 in data URI".into()))?
-                } else {
-                    let dir = base_dir.ok_or_else(|| {
-                        ImportError::Buffer(format!("`{uri}` is external but no folder was given"))
-                    })?;
-                    if uri.contains("..") || Path::new(uri).is_absolute() {
-                        return Err(ImportError::Buffer(format!(
-                            "`{uri}` points outside the asset's folder"
-                        )));
-                    }
-                    std::fs::read(dir.join(uri))
-                        .map_err(|e| ImportError::Buffer(format!("`{uri}`: {e}")))?
-                }
-            }
+            gltf::buffer::Source::Uri(uri) => match data_uri(uri) {
+                Some(data) => data?.0,
+                None => read_relative(base_dir, &percent_decode(uri))?,
+            },
         };
         if data.len() < buffer.length() {
             return Err(ImportError::Buffer(format!(
@@ -286,15 +358,42 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
 
     for texture in document.textures() {
         let source = match texture.source().source() {
-            gltf::image::Source::Uri { uri, .. } => TextureSource::Uri(uri.to_owned()),
-            gltf::image::Source::View { view, mime_type } => TextureSource::Embedded {
-                buffer: view.buffer().index(),
-                offset: view.offset(),
-                length: view.length(),
-                mime: mime_type.to_owned(),
+            gltf::image::Source::Uri { uri, mime_type } => match data_uri(uri) {
+                Some(data) => {
+                    let (bytes, mime) = data?;
+                    TextureSource::Embedded {
+                        bytes,
+                        mime: mime_type.map_or(mime, str::to_owned),
+                    }
+                }
+                None => TextureSource::Uri(percent_decode(uri)),
             },
+            gltf::image::Source::View { view, mime_type } => {
+                let buffer = &buffers[view.buffer().index()];
+                let bytes = buffer
+                    .get(view.offset()..view.offset() + view.length())
+                    .ok_or_else(|| {
+                        ImportError::Invalid(format!(
+                            "image view {} lies outside its buffer",
+                            view.index()
+                        ))
+                    })?;
+                TextureSource::Embedded {
+                    bytes: bytes.to_vec(),
+                    mime: mime_type.to_owned(),
+                }
+            }
         };
-        scene.textures.push(source);
+        let wrap = |mode| match mode {
+            gltf::texture::WrappingMode::Repeat => TextureWrap::Repeat,
+            gltf::texture::WrappingMode::MirroredRepeat => TextureWrap::MirroredRepeat,
+            gltf::texture::WrappingMode::ClampToEdge => TextureWrap::ClampToEdge,
+        };
+        let sampler = texture.sampler();
+        scene.textures.push(TextureData {
+            source,
+            wrap: [wrap(sampler.wrap_s()), wrap(sampler.wrap_t())],
+        });
     }
 
     for m in document.materials() {
@@ -312,6 +411,10 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
                 .metallic_roughness_texture()
                 .map(|t| t.texture().index()),
             normal_texture: m.normal_texture().map(|t| t.texture().index()),
+            normal_scale: m.normal_texture().map_or(1.0, |t| t.scale()),
+            occlusion_texture: m.occlusion_texture().map(|t| t.texture().index()),
+            occlusion_strength: m.occlusion_texture().map_or(1.0, |t| t.strength()),
+            emissive_texture: m.emissive_texture().map(|t| t.texture().index()),
             alpha: match m.alpha_mode() {
                 gltf::material::AlphaMode::Opaque => AlphaMode::Opaque,
                 gltf::material::AlphaMode::Mask => {
