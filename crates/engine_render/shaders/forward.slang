@@ -18,6 +18,12 @@
 // their own buffer, the other attributes packed in 16 bytes, drawn with indexed indirect
 // draws whose vertex offset selects the mesh.
 //
+// With a depth prepass (ADR 0042), `depthVertex` (and `depthVertexMasked`, which tests
+// alpha) first writes the depth of everything visible; the forward pass then shades each
+// pixel once, testing depth for equality. Both compute clip positions with
+// `clip_position`: `precise`, and matrix products written out as sums, so every
+// operation carries NoContraction and the two passes produce the same bits.
+//
 // Materials (material.rs, ADR 0040) are glTF 2.0 metallic-roughness: base color, metallic
 // and roughness, normal map, occlusion and emission, each a factor times a texture, read
 // per pixel from the material table by the instance's material slot. Masked materials
@@ -153,6 +159,30 @@ float3 decode_octahedral(uint bits)
 float3 transform_point(Instance i, float3 p)
 {
     return float3(dot(i.row0.xyz, p) + i.row0.w, dot(i.row1.xyz, p) + i.row1.w, dot(i.row2.xyz, p) + i.row2.w);
+}
+
+// World and clip position of an object-space point, bit-identical in every pass that
+// tests depth for equality (see the file comment).
+struct Placed
+{
+    float3 world;
+    float4 clip;
+};
+
+Placed clip_position(Instance i, float3 p)
+{
+    precise float3 world = float3(
+        i.row0.x * p.x + i.row0.y * p.y + i.row0.z * p.z + i.row0.w,
+        i.row1.x * p.x + i.row1.y * p.y + i.row1.z * p.z + i.row1.w,
+        i.row2.x * p.x + i.row2.y * p.y + i.row2.z * p.z + i.row2.w);
+    // Columns of clip_from_world, weighted: mul() stays one instruction that cannot be
+    // marked NoContraction.
+    float4x4 m = transpose(push.frame.clip_from_world);
+    precise float4 clip = m[0] * world.x + m[1] * world.y + m[2] * world.z + m[3];
+    Placed placed;
+    placed.world = world;
+    placed.clip = clip;
+    return placed;
 }
 
 float3 transform_vector(Instance i, float3 v)
@@ -324,9 +354,10 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInsta
 {
     Instance inst = push.instances[push.visible[slot]];
     Attributes a = push.attributes[vertex];
-    float4 world = float4(transform_point(inst, load_position(vertex)), 1.0);
+    Placed placed = clip_position(inst, load_position(vertex));
+    float4 world = float4(placed.world, 1.0);
     VertexOut o;
-    o.position = mul(push.frame.clip_from_world, world);
+    o.position = placed.clip;
     o.world_position = world.xyz;
     // Unit vectors at the vertices, interpolated without renormalizing: the tangent
     // frame MikkTSpace bakes normal maps against.
@@ -349,6 +380,14 @@ float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint index : SV_VulkanInsta
     return mul(push.frame.light_clip_from_world, float4(transform_point(inst, load_position(vertex)), 1.0));
 }
 
+// The depth prepass: the visible instances' depth, positions only.
+[shader("vertex")]
+float4 depthVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
+{
+    Instance inst = push.instances[push.visible[slot]];
+    return clip_position(inst, load_position(vertex)).clip;
+}
+
 struct ShadowOut
 {
     float4 position : SV_Position;
@@ -363,6 +402,19 @@ ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint index : SV_Vu
     Instance inst = push.instances[index];
     ShadowOut o;
     o.position = mul(push.frame.light_clip_from_world, float4(transform_point(inst, load_position(vertex)), 1.0));
+    o.uv = push.attributes[vertex].uv;
+    o.material = inst.material;
+    return o;
+}
+
+// The depth prepass of masked materials: texture coordinates for the alpha test
+// (`shadowFragmentMasked`).
+[shader("vertex")]
+ShadowOut depthVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    Instance inst = push.instances[push.visible[slot]];
+    ShadowOut o;
+    o.position = clip_position(inst, load_position(vertex)).clip;
     o.uv = push.attributes[vertex].uv;
     o.material = inst.material;
     return o;

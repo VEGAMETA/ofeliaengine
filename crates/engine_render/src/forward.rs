@@ -60,6 +60,8 @@ const SHADOW_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.shadowVer
 const SHADOW_FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.shadowFragmentMasked.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked.spv");
+const DEPTH_VERTEX: &[u8] = include_bytes!("../shaders/forward.depthVertex.spv");
+const DEPTH_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.depthVertexMasked.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
 
 /// Threads per workgroup of `cullMain`.
@@ -336,12 +338,18 @@ struct Scratch {
 pub struct ForwardRenderer {
     /// Forward shading: opaque, masked.
     main: [Pipeline; 2],
+    /// Forward shading after the depth prepass: depth tested for equality, not written;
+    /// no alpha test (the prepass did it).
+    shade: Pipeline,
+    /// Depth prepass: opaque (depth only), masked.
+    prepass: [Pipeline; 2],
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
     cull: Pipeline,
     pyramid: DepthPyramid,
     shadow_settings: ShadowSettings,
     frustum_culling: bool,
+    depth_prepass: bool,
     scratch: RefCell<Scratch>,
 }
 
@@ -375,6 +383,8 @@ impl ForwardRenderer {
         let shadow_fragment_masked = spirv_words(SHADOW_FRAGMENT_MASKED).ok_or_else(invalid)?;
         let fragment = spirv_words(FRAGMENT).ok_or_else(invalid)?;
         let fragment_masked = spirv_words(FRAGMENT_MASKED).ok_or_else(invalid)?;
+        let depth_vertex = spirv_words(DEPTH_VERTEX).ok_or_else(invalid)?;
+        let depth_vertex_masked = spirv_words(DEPTH_VERTEX_MASKED).ok_or_else(invalid)?;
         let formats = [color_format];
         // Cull mode and front face come with each batch's pipeline state.
         let main = |fragment: &[u32], entry| {
@@ -426,6 +436,57 @@ impl ForwardRenderer {
             main(&fragment, c"fragmentMain")?,
             main(&fragment_masked, c"fragmentMasked")?,
         ];
+        let shade = Pipeline::graphics(
+            device,
+            bindless.pipeline_layout(),
+            &GraphicsPipelineDesc {
+                color_formats: &formats,
+                depth_format,
+                dynamic_culling: true,
+                depth_write: false,
+                depth_compare: vk::CompareOp::EQUAL,
+                ..GraphicsPipelineDesc::new(
+                    ShaderStageDesc {
+                        spirv: &vertex,
+                        entry: c"vertexMain",
+                    },
+                    Some(ShaderStageDesc {
+                        spirv: &fragment,
+                        entry: c"fragmentMain",
+                    }),
+                )
+            },
+            vk::PipelineCache::null(),
+        )?;
+        let prepass = |vertex: &[u32], vertex_entry, fragment: Option<ShaderStageDesc<'_>>| {
+            Pipeline::graphics(
+                device,
+                bindless.pipeline_layout(),
+                &GraphicsPipelineDesc {
+                    depth_format,
+                    dynamic_culling: true,
+                    ..GraphicsPipelineDesc::new(
+                        ShaderStageDesc {
+                            spirv: vertex,
+                            entry: vertex_entry,
+                        },
+                        fragment,
+                    )
+                },
+                vk::PipelineCache::null(),
+            )
+        };
+        let prepass = [
+            prepass(&depth_vertex, c"depthVertex", None)?,
+            prepass(
+                &depth_vertex_masked,
+                c"depthVertexMasked",
+                Some(ShaderStageDesc {
+                    spirv: &shadow_fragment_masked,
+                    entry: c"shadowFragmentMasked",
+                }),
+            )?,
+        ];
         let shadow = [
             shadow(&shadow_vertex, c"shadowVertex", None)?,
             shadow(
@@ -451,11 +512,14 @@ impl ForwardRenderer {
         };
         Ok(Self {
             main,
+            shade,
+            prepass,
             shadow,
             cull: compute(CULL, c"cullMain")?,
             pyramid: DepthPyramid::new(device, bindless)?,
             shadow_settings,
             frustum_culling: true,
+            depth_prepass: false,
             scratch: RefCell::new(Scratch::default()),
         })
     }
@@ -469,6 +533,23 @@ impl ForwardRenderer {
     /// Whether GPU culling is on.
     pub fn frustum_culling(&self) -> bool {
         self.frustum_culling
+    }
+
+    /// Turns the depth prepass on or off (the default; ADR 0042). On, a depth-only pass
+    /// draws the visible instances first and the forward pass shades each pixel once;
+    /// off, the forward pass writes depth itself and shades whatever is nearest so far
+    /// (batches are drawn front to back, which avoids most of that).
+    ///
+    /// It pays where expensive shading hides behind other geometry and vertices are few
+    /// (a textured interior on an integrated GPU: Sponza −11%); it costs a second pass
+    /// over the vertices, which dense geometry cannot afford (100k cubes: +97%).
+    pub fn set_depth_prepass(&mut self, enabled: bool) {
+        self.depth_prepass = enabled;
+    }
+
+    /// Whether the depth prepass is on.
+    pub fn depth_prepass(&self) -> bool {
+        self.depth_prepass
     }
 
     /// Declares the culling, shadow and forward passes for `draws` into the view's
@@ -765,7 +846,7 @@ impl ForwardRenderer {
                         ctx,
                         bindless,
                         &geometry,
-                        shadow_pipelines,
+                        [&shadow_pipelines[0], &shadow_pipelines[1]],
                         &base,
                         true,
                         commands.buffer,
@@ -773,8 +854,19 @@ impl ForwardRenderer {
                     );
                 }
             });
-        let main_pipelines = &self.main;
-        let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>, phase: u32| {
+        let prepass = self.depth_prepass;
+        let main = &self.main;
+        let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
+        // After the prepass every state shades with the equal-depth pipeline: masked
+        // materials were alpha-tested there, and nothing is left to discard.
+        let main_pipelines = if prepass {
+            [&self.shade, &self.shade]
+        } else {
+            [&main[0], &main[1]]
+        };
+        let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
+                               pipelines: [&Pipeline; 2],
+                               phase: u32| {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
@@ -788,7 +880,7 @@ impl ForwardRenderer {
                     ctx,
                     bindless,
                     &geometry,
-                    main_pipelines,
+                    pipelines,
                     &push,
                     false,
                     ctx.buffer(culled),
@@ -797,12 +889,24 @@ impl ForwardRenderer {
             }
         };
         let Some(flags) = flag_buffer else {
-            forward_pass(
-                fg, "forward", &geometry, &materials, shadow_map, culled, visible,
-            )
-            .color(color, load, StoreOp::Store)
-            .depth(depth, depth_clear, StoreOp::DontCare)
-            .execute(move |ctx| draw_phase(ctx, PHASE_ALL));
+            if prepass {
+                prepass_pass(fg, "depth prepass", &geometry, &materials, culled, visible)
+                    .depth(depth, depth_clear, StoreOp::Store)
+                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_ALL));
+                forward_pass(
+                    fg, "forward", &geometry, &materials, shadow_map, culled, visible,
+                )
+                .color(color, load, StoreOp::Store)
+                .depth_read_only(depth)
+                .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL));
+            } else {
+                forward_pass(
+                    fg, "forward", &geometry, &materials, shadow_map, culled, visible,
+                )
+                .color(color, load, StoreOp::Store)
+                .depth(depth, depth_clear, StoreOp::DontCare)
+                .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL));
+            }
             return Some(ForwardPasses {
                 instances: instance_count,
                 batches: batch_count,
@@ -812,19 +916,33 @@ impl ForwardRenderer {
         };
 
         // Two phases: draw what was visible, build the pyramid from its depth, then test
-        // everything against it and draw what the first phase missed.
-        forward_pass(
-            fg,
-            "forward early",
-            &geometry,
-            &materials,
-            shadow_map,
-            culled,
-            visible,
-        )
-        .color(color, load, StoreOp::Store)
-        .depth(depth, depth_clear, StoreOp::Store)
-        .execute(move |ctx| draw_phase(ctx, PHASE_EARLY));
+        // everything against it and draw what the first phase missed. With the prepass the
+        // phases draw depth only, and the forward pass shades both lists once.
+        if prepass {
+            prepass_pass(
+                fg,
+                "depth prepass early",
+                &geometry,
+                &materials,
+                culled,
+                visible,
+            )
+            .depth(depth, depth_clear, StoreOp::Store)
+            .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_EARLY));
+        } else {
+            forward_pass(
+                fg,
+                "forward early",
+                &geometry,
+                &materials,
+                shadow_map,
+                culled,
+                visible,
+            )
+            .color(color, load, StoreOp::Store)
+            .depth(depth, depth_clear, StoreOp::Store)
+            .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_EARLY));
+        }
         let pyramid = fg.create_buffer(
             "depth pyramid",
             BufferDesc {
@@ -844,18 +962,40 @@ impl ForwardRenderer {
                 };
                 dispatch_cull(ctx, push);
             });
-        forward_pass(
-            fg,
-            "forward late",
-            &geometry,
-            &materials,
-            shadow_map,
-            culled,
-            visible,
-        )
-        .color(color, LoadOp::Load, StoreOp::Store)
-        .depth(depth, LoadOp::Load, StoreOp::DontCare)
-        .execute(move |ctx| draw_phase(ctx, PHASE_LATE));
+        if prepass {
+            prepass_pass(
+                fg,
+                "depth prepass late",
+                &geometry,
+                &materials,
+                culled,
+                visible,
+            )
+            .depth(depth, LoadOp::Load, StoreOp::Store)
+            .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_LATE));
+            forward_pass(
+                fg, "forward", &geometry, &materials, shadow_map, culled, visible,
+            )
+            .color(color, load, StoreOp::Store)
+            .depth_read_only(depth)
+            .execute(move |ctx| {
+                draw_phase(ctx, main_pipelines, PHASE_EARLY);
+                draw_phase(ctx, main_pipelines, PHASE_LATE);
+            });
+        } else {
+            forward_pass(
+                fg,
+                "forward late",
+                &geometry,
+                &materials,
+                shadow_map,
+                culled,
+                visible,
+            )
+            .color(color, LoadOp::Load, StoreOp::Store)
+            .depth(depth, LoadOp::Load, StoreOp::DontCare)
+            .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_LATE));
+        }
         Some(ForwardPasses {
             instances: instance_count,
             batches: batch_count,
@@ -886,6 +1026,21 @@ fn cull_pass<'a, 'g>(
         Some(flags) => pass.read(flags, Access::StorageRead(ShaderStages::COMPUTE)),
         None => pass,
     }
+}
+
+/// A depth prepass phase that draws the culled commands, without its attachment.
+fn prepass_pass<'a, 'g>(
+    fg: &'a mut FrameGraph<'g>,
+    name: &'static str,
+    geometry: &GeometryFrame<'_>,
+    materials: &MaterialFrame<'_>,
+    culled: Buffer,
+    visible: Buffer,
+) -> PassBuilder<'a, 'g> {
+    materials
+        .read(geometry.read(fg.add_pass(name)))
+        .read(culled, Access::Indirect)
+        .read(visible, Access::StorageRead(ShaderStages::VERTEX))
 }
 
 /// A forward pass that draws the culled commands, without its attachments.
@@ -976,7 +1131,7 @@ impl States {
         ctx: &crate::graph::PassContext<'_>,
         bindless: &Bindless,
         geometry: &GeometryFrame<'_>,
-        pipelines: &[Pipeline; 2],
+        pipelines: [&Pipeline; 2],
         push: &Push,
         shadow: bool,
         buffer: vk::Buffer,

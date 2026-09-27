@@ -8,7 +8,7 @@
 //! Culling modes: off, frustum, and frustum + two-phase occlusion (in steady state: the
 //! occlusion state carries over the warm-up frames).
 //!
-//! `cargo run -p engine_render --release --example draw_bench [max-instances]`
+//! `cargo run -p engine_render --release --example draw_bench [max-instances] [--prepass]`
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -151,10 +151,9 @@ fn median(values: &mut [f64]) -> f64 {
 }
 
 fn main() {
-    let max_instances: usize = std::env::args()
-        .nth(1)
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(100_000);
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let max_instances: usize = args.iter().find_map(|s| s.parse().ok()).unwrap_or(100_000);
+    let prepass = args.iter().any(|a| a == "--prepass");
     let instance = Instance::new(&InstanceDesc {
         app_name: String::from("draw_bench"),
         validation: false,
@@ -237,9 +236,10 @@ fn main() {
     println!("### Forward renderer, GPU-driven ({WIDTH}×{HEIGHT} HDR, shadow map 2048²)\n");
     println!("Device: {}\n", device.adapter().summary());
     println!(
-        "| instances | view | culling | drawn | draw list µs | add_passes µs | graph µs | GPU cull µs | GPU pyramid µs | GPU shadow µs | GPU forward µs |"
+        "| instances | view | culling | drawn | draw list µs | add_passes µs | graph µs | GPU cull µs | GPU pyramid µs | GPU shadow µs | GPU prepass µs | GPU forward µs |"
     );
-    println!("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    renderer.set_depth_prepass(prepass);
 
     let mut draws: Vec<DrawItem> = Vec::new();
     let configurations = [
@@ -261,8 +261,8 @@ fn main() {
             occlusion.reset();
             let camera = camera(view, count);
             let (mut list, mut prepare, mut record) = (Vec::new(), Vec::new(), Vec::new());
-            let (mut cull, mut pyramid, mut shadow, mut forward) =
-                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            let (mut cull, mut pyramid, mut shadow, mut depth, mut forward) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new());
             let mut drawn = 0;
             for frame in 0..WARMUP + FRAMES {
                 let start = Instant::now();
@@ -389,13 +389,16 @@ fn main() {
                 }
                 // Times of the frame before this one (read when its slot is reused).
                 if frame > WARMUP {
-                    let (mut c, mut p, mut s, mut f) = (0.0, 0.0, 0.0, 0.0);
+                    let (mut c, mut p, mut s, mut d, mut f) = (0.0, 0.0, 0.0, 0.0, 0.0);
                     for time in graph.gpu_pass_times() {
                         let us = f64::from(time.gpu_us);
                         match time.name {
                             "cull" | "cull early" | "cull late" => c += us,
                             "hiz" => p += us,
                             "shadow" => s += us,
+                            "depth prepass" | "depth prepass early" | "depth prepass late" => {
+                                d += us
+                            }
                             "forward" | "forward early" | "forward late" => f += us,
                             _ => {}
                         }
@@ -403,11 +406,12 @@ fn main() {
                     cull.push(c);
                     pyramid.push(p);
                     shadow.push(s);
+                    depth.push(d);
                     forward.push(f);
                 }
             }
             println!(
-                "| {} | {} | {} | {drawn} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.0} | {:.0} |",
+                "| {} | {} | {} | {drawn} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} |",
                 draws.len(),
                 match view {
                     View::Overview => "overview",
@@ -425,6 +429,7 @@ fn main() {
                 median(&mut cull),
                 median(&mut pyramid),
                 median(&mut shadow),
+                median(&mut depth),
                 median(&mut forward),
             );
         }

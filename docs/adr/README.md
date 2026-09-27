@@ -49,6 +49,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0039](0039-geometry-pool.md) | Geometry pool: shared vertex and index buffers, 28-byte vertices | Accepted |
 | [0040](0040-materials-and-textures.md) | Materials and textures: a bindless material table, filtered mip chains | Accepted |
 | [0041](0041-texture-compression.md) | Texture compression: BC7 and BC5 on the CPU, a derived data cache | Accepted |
+| [0042](0042-depth-prepass.md) | Depth prepass: optional, off by default | Accepted |
 
 ## Template
 
