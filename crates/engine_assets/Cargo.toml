@@ -24,3 +24,6 @@ gltf = { version = "1.4", default-features = false, features = ["utils", "names"
 png = "0.18"
 # JPEG decoding (MIT OR Apache-2.0 OR Zlib): as fast as libjpeg-turbo, pure Rust.
 zune-jpeg = { version = "0.5", default-features = false, features = ["std", "x86"] }
+# BC1-5 and BC7 block compression (MIT): a Rust port of Intel's ISPC Texture Compressor
+# kernels, CPU only (no wgpu). ADR 0041.
+block_compression = { version = "0.10", default-features = false, features = ["bc15", "bc7"] }

@@ -17,7 +17,7 @@ use engine_render::forward::{
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId, OwnedMeshData};
-use engine_render::texture_pool::{TextureId, TextureLevels, TexturePool};
+use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -85,8 +85,34 @@ fn blocks(srgb: bool, color: impl Fn(u32, u32) -> [u8; 4]) -> TextureLevels {
     TextureLevels {
         width: 8,
         height: 8,
-        srgb,
+        format: if srgb {
+            TextureFormat::Rgba8Srgb
+        } else {
+            TextureFormat::Rgba8Unorm
+        },
         levels: vec![texels],
+    }
+}
+
+/// `levels` block-compressed for `usage` by the asset pipeline (BC7 or BC5).
+fn compressed(levels: &TextureLevels, usage: engine_assets::TextureUsage) -> TextureLevels {
+    let image = engine_assets::TextureImage {
+        width: levels.width,
+        height: levels.height,
+        srgb: levels.format == TextureFormat::Rgba8Srgb,
+        levels: levels.levels.clone(),
+    };
+    let encoded = engine_assets::compress(&image, usage, None);
+    TextureLevels {
+        width: encoded.width,
+        height: encoded.height,
+        format: match encoded.format {
+            engine_assets::TextureFormat::Bc7Srgb => TextureFormat::Bc7Srgb,
+            engine_assets::TextureFormat::Bc7Unorm => TextureFormat::Bc7Unorm,
+            engine_assets::TextureFormat::Bc5Unorm => TextureFormat::Bc5Unorm,
+            other => panic!("not compressed: {other:?}"),
+        },
+        levels: encoded.levels,
     }
 }
 
@@ -706,6 +732,45 @@ fn materials_and_textures() {
         block_pixel(&reference, 1, 1),
         "stale id: default material"
     );
+
+    // 9. Block-compressed textures (ADR 0041): BC7 color within a few steps of its
+    // texels, and a BC5 normal map shading like its uncompressed original.
+    let bc7 = scene.texture(compressed(
+        &blocks(true, block_color),
+        engine_assets::TextureUsage::Color,
+    ));
+    let shown_bc7 = scene
+        .materials
+        .add(emissive(Some(TextureRef::new(bc7)), [1.0; 3]));
+    let image = scene.render(&[draw(quad_mesh, shown_bc7, Mat4::IDENTITY)], camera, DARK);
+    for by in 0..4 {
+        for bx in 0..4 {
+            let got = block_pixel(&image, bx, by);
+            assert!(
+                near(got, block_color(bx, by), 4),
+                "BC7 block ({bx}, {by}): {got:?}, texel {:?}",
+                block_color(bx, by)
+            );
+        }
+    }
+    let s = core::f32::consts::FRAC_1_SQRT_2;
+    let tilted = |z: f32| {
+        let byte = |v: f32| ((v * 0.5 + 0.5) * 255.0).round() as u8;
+        scene_texture_color([byte(s), byte(0.0), byte(z)])
+    };
+    let plain = scene.texture(tilted(s));
+    let bc5 = scene.texture(compressed(&tilted(s), engine_assets::TextureUsage::Normal));
+    let mut lit = Vec::new();
+    for texture in [plain, bc5] {
+        let material = scene.materials.add(MaterialDesc {
+            normal_texture: Some(TextureRef::new(texture)),
+            ..MaterialDesc::solid([1.0; 3], 0.0, 1.0)
+        });
+        let image = scene.render(&[draw(quad_mesh, material, Mat4::IDENTITY)], camera, from_x);
+        lit.push(luma(pixel(&image, SIZE / 2, SIZE / 2)));
+    }
+    println!("normal map lit from +X, RGBA8 vs BC5: {lit:?}");
+    assert!(lit[0].abs_diff(lit[1]) <= 6, "BC5 normals: {lit:?}");
     scene.finish();
 }
 

@@ -19,19 +19,59 @@ pub struct TextureId {
     generation: u32,
 }
 
-/// A texture to add: RGBA8 levels from the full size down, each `max(1, size >> level)`
-/// on a side, rows tightly packed.
+/// How a texture's texels are stored (ADR 0041).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TextureFormat {
+    /// 4 bytes per texel, sRGB color (the view decodes it).
+    Rgba8Srgb,
+    /// 4 bytes per texel, linear data.
+    Rgba8Unorm,
+    /// BC7 blocks (16 bytes per 4 × 4 texels), sRGB color.
+    Bc7Srgb,
+    /// BC7 blocks, linear data.
+    Bc7Unorm,
+    /// BC5 blocks: red and green only (normal maps; blue reads 0, alpha 1).
+    Bc5Unorm,
+}
+
+impl TextureFormat {
+    /// Bytes of a `width × height` level.
+    pub fn level_bytes(self, width: u32, height: u32) -> u64 {
+        match self {
+            Self::Rgba8Srgb | Self::Rgba8Unorm => u64::from(width) * u64::from(height) * 4,
+            Self::Bc7Srgb | Self::Bc7Unorm | Self::Bc5Unorm => {
+                u64::from(width.div_ceil(4)) * u64::from(height.div_ceil(4)) * 16
+            }
+        }
+    }
+
+    fn vk(self) -> vk::Format {
+        match self {
+            Self::Rgba8Srgb => vk::Format::R8G8B8A8_SRGB,
+            Self::Rgba8Unorm => vk::Format::R8G8B8A8_UNORM,
+            Self::Bc7Srgb => vk::Format::BC7_SRGB_BLOCK,
+            Self::Bc7Unorm => vk::Format::BC7_UNORM_BLOCK,
+            Self::Bc5Unorm => vk::Format::BC5_UNORM_BLOCK,
+        }
+    }
+}
+
+/// A texture to add: levels from the full size down, each `max(1, size >> level)` on a
+/// side, rows (of texels or of blocks) tightly packed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TextureLevels {
     /// Width of level 0.
     pub width: u32,
     /// Height of level 0.
     pub height: u32,
-    /// sRGB-encoded color (the view decodes it); linear data otherwise.
-    pub srgb: bool,
+    /// How texels are stored.
+    pub format: TextureFormat,
     /// The levels, at least one.
     pub levels: Vec<Vec<u8>>,
 }
+
+/// Staging offsets of levels are multiples of this: the largest texel block (16 bytes).
+const LEVEL_ALIGN: u64 = 16;
 
 /// Why a texture was not added.
 #[derive(Debug)]
@@ -144,16 +184,15 @@ impl TexturePool {
         if texture.levels.is_empty()
             || texture.levels.len() > 32
             || texture.levels.iter().enumerate().any(|(k, level)| {
-                level.len() != (level_size(width, k) * level_size(height, k) * 4) as usize
+                level.len() as u64
+                    != texture
+                        .format
+                        .level_bytes(level_size(width, k), level_size(height, k))
             })
         {
             return Err(TextureError::BadLevels);
         }
-        let format = if texture.srgb {
-            vk::Format::R8G8B8A8_SRGB
-        } else {
-            vk::Format::R8G8B8A8_UNORM
-        };
+        let format = texture.format.vk();
         let level_count = texture.levels.len() as u32;
         let (image, allocation) = allocator.create_image(
             &vk::ImageCreateInfo::default()
@@ -197,7 +236,12 @@ impl TexturePool {
                 return Err(RhiError::vk("vkCreateImageView")(e).into());
             }
         };
-        let bytes = texture.levels.iter().map(|l| l.len() as u64).sum();
+        // Staging bytes, every level aligned.
+        let bytes = texture
+            .levels
+            .iter()
+            .map(|l| (l.len() as u64).next_multiple_of(LEVEL_ALIGN))
+            .sum();
         let entry = PoolTexture {
             image,
             view,
@@ -356,7 +400,7 @@ impl TexturePool {
                         },
                         ..Default::default()
                     });
-                    offset += level.len() as u64;
+                    offset += (level.len() as u64).next_multiple_of(LEVEL_ALIGN);
                 }
                 images.push((texture.image, levels.len() as u32));
                 regions.push((texture.image, copies));

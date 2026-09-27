@@ -19,6 +19,7 @@ the dependency.
 | gltf 1.4.1 + gltf-json + gltf-derive (+ serde, serde_json, byteorder, lazy_static, inflections, itoa, memchr, zmij) | MIT OR Apache-2.0 (byteorder and memchr Unlicense OR MIT; inflections, zmij MIT) | glTF 2.0 parsing in `engine_assets` (ADR 0033) |
 | png 0.18.1 (+ fdeflate 0.3, flate2 1.1, miniz_oxide 0.8 and 0.9, crc32fast 1.5, simd-adler32 0.3, adler2 2) | MIT OR Apache-2.0 (miniz_oxide MIT OR Zlib OR Apache-2.0; simd-adler32 MIT; adler2 0BSD OR MIT OR Apache-2.0) | PNG decoding of textures in `engine_assets` (ADR 0040) |
 | zune-jpeg 0.5.15 (+ zune-core 0.5) | MIT OR Apache-2.0 OR Zlib | JPEG decoding of textures in `engine_assets` (ADR 0040) |
+| block_compression 0.10.0 (© Nils Hasenbanck; a port of Intel's ISPC Texture Compressor, © Intel Corporation) | MIT | BC7 and BC5 texture compression in `engine_assets` (ADR 0041) |
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
@@ -96,6 +97,9 @@ workspace `deny.toml` license allow-list (checked 2026-09-26).
 | hecs 0.11.1 | MIT OR Apache-2.0 | ECS comparison |
 | bevy_ecs 0.18.1 (and its bevy_* dependencies) | MIT OR Apache-2.0 | ECS comparison |
 | flecs_ecs 0.2.2 (+ flecs_ecs_sys, bundled flecs C sources) | MIT | ECS comparison |
+
+`bench/texture-compress` (ADR 0041) builds these with its own `Cargo.lock`: block_compression
+0.10.0 (MIT, above) and the engine's own crates.
 
 `bench/text-compare` (ADR 0025) builds these with its own `Cargo.lock`:
 

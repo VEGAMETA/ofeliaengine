@@ -1,0 +1,17 @@
+[package]
+name = "texture-compress"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Research harness for texture compression (ADR 0041): BC7, BC5, BC4 and BC1 encoders compared on quality and speed. Outside the workspace, like bench/ecs-compare."
+
+[workspace]
+
+[dependencies]
+block_compression = { version = "0.10", default-features = false, features = ["bc15", "bc7"] }
+engine_assets = { path = "../../crates/engine_assets" }
+engine_core = { path = "../../crates/engine_core" }
+
+[profile.release]
+opt-level = 3
+debug = false

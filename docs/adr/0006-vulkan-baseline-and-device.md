@@ -44,7 +44,9 @@ the floor and 1.4 used opportunistically.
     GPU-driven drawing);
   - `shaderDemoteToHelperInvocation`, which Vulkan 1.3 requires every device to support
     (added by [ADR 0040](0040-materials-and-textures.md): alpha-tested materials discard
-    without leaving the quad's derivatives undefined).
+    without leaving the quad's derivatives undefined);
+  - `textureCompressionBC`, which every desktop GPU supports (added by
+    [ADR 0041](0041-texture-compression.md): BC7 and BC5 textures).
 
   An adapter lacking any of them is listed with the missing names, and the error names them all.
 - **Optional, detected and reported** (`OptionalCaps`), enabled when a feature needs it:

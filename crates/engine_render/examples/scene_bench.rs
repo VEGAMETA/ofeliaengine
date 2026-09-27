@@ -2,21 +2,23 @@
 //! with its materials and textures, drawn into a 1920×1080 HDR target with a shadow map
 //! from a fixed camera.
 //!
-//! Reports the import (glTF, then every texture decoded and given its mip chain in
-//! parallel, then the meshes into the geometry pool), the memory of geometry and
+//! Reports the import (glTF, then every texture decoded, given its mip chain and
+//! block-compressed in parallel, or loaded from the derived data cache, then the meshes
+//! into the geometry pool), the memory of geometry and
 //! textures, and the median GPU time of the shadow and forward passes, with the materials
 //! as imported and with their factors only (no textures). `--screenshot out.png` also
 //! writes the textured frame, tonemapped.
 //!
 //! `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
 //! (scenes: `tools/fetch-test-assets.ps1`; options: `--screenshot <png>`,
-//! `--view <eye x,y,z,target x,y,z>`)
+//! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--ddc <dir>`
+//! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
 use engine_assets::{
-    AlphaMode as GltfAlpha, ImportedScene, TextureImage, TextureUsage, TextureWrap, build_mips,
-    decode_image, import_gltf, read_texture,
+    AlphaMode as GltfAlpha, CacheOutcome, DerivedDataCache, ImportedScene, TextureFormat as Stored,
+    TextureUsage, TextureWrap, build_mips, decode_image, import_gltf, import_texture, read_texture,
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
@@ -28,7 +30,7 @@ use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId};
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::post::{HDR_FORMAT, Tonemap};
-use engine_render::texture_pool::{TextureId, TextureLevels, TexturePool};
+use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -183,10 +185,14 @@ fn view(min: Vec3, max: Vec3, requested: Option<[f32; 6]>) -> (Vec3, Vec3) {
 fn main() {
     let mut path = String::from("test-assets/Sponza/Sponza.gltf");
     let (mut screenshot, mut requested_view) = (None, None);
+    let mut uncompressed = false;
+    let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--screenshot" => screenshot = args.next(),
+            "--uncompressed" => uncompressed = true,
+            "--ddc" => ddc = args.next().unwrap(),
             "--view" => {
                 let v: Vec<f32> = args
                     .next()
@@ -208,27 +214,62 @@ fn main() {
     let imported = start.elapsed();
     let placed = instances(&scene);
 
-    // Textures: read, decode and filter every use in parallel.
+    // Textures: read, decode, filter and compress every use in parallel (or load them
+    // from the derived data cache).
     let jobs = ThreadPool::builder().build().unwrap();
+    let cache = DerivedDataCache::new(&ddc).unwrap();
     let uses = texture_uses(&scene);
     let start = Instant::now();
-    let images: Vec<OnceLock<TextureImage>> = uses.iter().map(|_| OnceLock::new()).collect();
+    let images: Vec<OnceLock<(TextureLevels, bool)>> =
+        uses.iter().map(|_| OnceLock::new()).collect();
     jobs.parallel_for(uses.len(), 1, |_, range| {
         for k in range {
             let (texture, usage) = uses[k];
             let encoded = read_texture(&scene.textures[texture].source, dir).unwrap();
-            let image = decode_image(&encoded).unwrap();
-            let _ = images[k].set(build_mips(&image, usage));
+            let levels = if uncompressed {
+                let mips = build_mips(&decode_image(&encoded).unwrap(), usage);
+                let format = if mips.srgb {
+                    TextureFormat::Rgba8Srgb
+                } else {
+                    TextureFormat::Rgba8Unorm
+                };
+                let levels = TextureLevels {
+                    width: mips.width,
+                    height: mips.height,
+                    format,
+                    levels: mips.levels,
+                };
+                (levels, false)
+            } else {
+                let (t, outcome) =
+                    import_texture(&encoded, usage, Some(&cache), Some(&jobs)).unwrap();
+                let format = match t.format {
+                    Stored::Rgba8Srgb => TextureFormat::Rgba8Srgb,
+                    Stored::Rgba8Unorm => TextureFormat::Rgba8Unorm,
+                    Stored::Bc7Srgb => TextureFormat::Bc7Srgb,
+                    Stored::Bc7Unorm => TextureFormat::Bc7Unorm,
+                    Stored::Bc5Unorm => TextureFormat::Bc5Unorm,
+                };
+                let levels = TextureLevels {
+                    width: t.width,
+                    height: t.height,
+                    format,
+                    levels: t.levels,
+                };
+                (levels, outcome == CacheOutcome::Hit)
+            };
+            let _ = images[k].set(levels);
         }
     });
-    let images: Vec<TextureImage> = images
+    let images: Vec<(TextureLevels, bool)> = images
         .into_iter()
         .map(|i| i.into_inner().unwrap())
         .collect();
     let decoded = start.elapsed();
+    let hits = images.iter().filter(|(_, hit)| *hit).count();
     let texels: u64 = images
         .iter()
-        .map(|i| u64::from(i.width) * u64::from(i.height))
+        .map(|(i, _)| u64::from(i.width) * u64::from(i.height))
         .sum();
 
     let instance = Instance::new(&InstanceDesc {
@@ -319,20 +360,7 @@ fn main() {
     let mut textures = TexturePool::new(&device, UPLOAD_BUDGET, 1);
     let texture_ids: Vec<Option<TextureId>> = images
         .into_iter()
-        .map(|image| {
-            textures
-                .add(
-                    &device,
-                    &mut allocator,
-                    TextureLevels {
-                        width: image.width,
-                        height: image.height,
-                        srgb: image.srgb,
-                        levels: image.levels,
-                    },
-                )
-                .ok()
-        })
+        .map(|(levels, _)| textures.add(&device, &mut allocator, levels).ok())
         .collect();
     let (_, texture_bytes) = textures.pending();
     let mut materials = MaterialTable::new(1);
@@ -410,19 +438,25 @@ fn main() {
         scene.materials.len(),
     );
     println!(
-        "Import: glTF {:.0} ms; {} textures ({:.1} Mtexels) read, decoded and mipmapped in \
-         {:.0} ms on {} threads; meshes into the pool {:.0} ms",
+        "Import: glTF {:.0} ms; {} textures ({:.1} Mtexels) {} in {:.0} ms on {} threads \
+         ({hits} from the cache); meshes into the pool {:.0} ms",
         imported.as_secs_f64() * 1e3,
         uses.len(),
         texels as f64 / 1e6,
+        if uncompressed {
+            "read, decoded and mipmapped"
+        } else {
+            "read, decoded, mipmapped and compressed"
+        },
         decoded.as_secs_f64() * 1e3,
         jobs.num_workers() + 1,
         meshes_added.as_secs_f64() * 1e3,
     );
     println!(
-        "Memory: geometry {:.1} MB ({vertices} vertices), textures {:.1} MB (RGBA8 with mips)",
+        "Memory: geometry {:.1} MB ({vertices} vertices), textures {:.1} MB ({} with mips)",
         (vertices * 28 + indices * 4) as f64 / (1 << 20) as f64,
         texture_bytes as f64 / (1 << 20) as f64,
+        if uncompressed { "RGBA8" } else { "BC7 and BC5" },
     );
     println!();
     println!("| materials | upload frames | GPU shadow µs | GPU forward µs |");

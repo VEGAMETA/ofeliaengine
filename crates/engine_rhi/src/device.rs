@@ -159,6 +159,7 @@ impl Device {
             .shader_demote_to_helper_invocation(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
+            .texture_compression_bc(true)
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()

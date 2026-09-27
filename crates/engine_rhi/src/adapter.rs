@@ -264,6 +264,8 @@ impl Adapter {
         );
         for (name, supported) in [
             ("samplerAnisotropy", base.sampler_anisotropy),
+            // Block-compressed textures (BC1-7, ADR 0041): every desktop GPU.
+            ("textureCompressionBC", base.texture_compression_bc),
             // GPU-driven drawing (ADR 0034): many indirect draws per call, each with its
             // own first instance.
             ("multiDrawIndirect", base.multi_draw_indirect),

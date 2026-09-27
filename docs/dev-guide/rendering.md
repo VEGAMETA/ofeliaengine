@@ -49,22 +49,24 @@ Materials are glTF 2.0's metallic-roughness model (ADR 0040). Every material liv
 `MaterialTable`, every texture in one `TexturePool`:
 
 ```rust
-use engine_assets::{TextureUsage, build_mips, decode_image};
+use engine_assets::{DerivedDataCache, TextureUsage, import_texture};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, TextureRef};
-use engine_render::texture_pool::{TextureLevels, TexturePool};
+use engine_render::texture_pool::{TextureFormat, TextureLevels, TexturePool};
 
 // Uploads at most 64 MB of texture data per frame.
 let mut textures = TexturePool::new(&device, 64 << 20, IN_FLIGHT);
 let mut materials = MaterialTable::new(IN_FLIGHT);
 
-// A texture: decoded (PNG or JPEG) and given its mip levels for its use.
-let image = decode_image(&std::fs::read("bark_albedo.png")?)?;
-let mips = build_mips(&image, TextureUsage::Color);
+// A texture: decoded (PNG or JPEG), given its mip levels and block-compressed for its
+// use, or loaded from the derived data cache when it was imported before.
+let cache = DerivedDataCache::new("project/.ddc")?;
+let (bark_bc7, _) = import_texture(&std::fs::read("bark_albedo.png")?, TextureUsage::Color,
+                                   Some(&cache), Some(&jobs))?;
 let bark = textures.add(&device, &mut allocator, TextureLevels {
-    width: mips.width,
-    height: mips.height,
-    srgb: mips.srgb,
-    levels: mips.levels,
+    width: bark_bc7.width,
+    height: bark_bc7.height,
+    format: TextureFormat::Bc7Srgb, // bark_bc7.format
+    levels: bark_bc7.levels,
 })?;
 
 let tree = materials.add(MaterialDesc {
@@ -87,7 +89,18 @@ let mats = materials.begin_frame(&mut fg, &device, &mut allocator, &textures, fr
   - emission (factor × sRGB texture; above 1 for bright emitters, the target is HDR).
 - **A missing texture is white:** the factor applies alone, and the shader skips the
   sample.
-- **Pick the right `TextureUsage` when building mip levels:**
+- **Textures are block-compressed** (ADR 0041): BC7 for color and data, BC5 for normal
+  maps, a quarter of the memory of RGBA8.
+  - Sponza's textures take 91 MB instead of 363, and its forward pass is 27% faster on an
+    RTX 4060 Ti and 15% on a Radeon iGPU.
+  - Compressing is slow: about 6 s for Sponza on 16 threads. The derived data cache keeps
+    every result, keyed by the image's bytes, its use and the encoder's settings, so the
+    next import of the same image takes milliseconds (13 ms for all of Sponza).
+  - Keep one cache directory per project (or share it with the team). Deleting it only
+    costs time.
+  - `build_mips` and `TextureFormat::Rgba8Srgb`/`Rgba8Unorm` still work for uncompressed
+    textures (procedural or editor-generated ones).
+- **Pick the right `TextureUsage` when importing:**
   - `Color` for base color and emission: filtered in linear light, without dark fringes
     around cut-outs;
   - `ColorMasked { cutoff }` for base colors of alpha-tested materials: every level keeps
@@ -120,8 +133,7 @@ let mats = materials.begin_frame(&mut fg, &device, &mut allocator, &textures, fr
   modes, and `read_texture` loads a texture's encoded image. `examples/scene_bench.rs`
   turns a whole glTF scene into textures, materials and draws, decoding textures in
   parallel.
-- Not yet: texture compression (textures are RGBA8 for now: Sponza's take 363 MB),
-  `KHR_texture_transform`, a second set of texture coordinates, vertex colors.
+- Not yet: `KHR_texture_transform`, a second set of texture coordinates, vertex colors.
 
 ## 3. The draw list
 
@@ -247,9 +259,9 @@ frame). `cargo run -p engine_assets --release --example texture_bench -- <scene>
 texture decoding and mip generation.
 
 Results from the reference machine are in `docs/perf/history.md` and ADRs 0035, 0039 and
-0040. On Sponza at 1080p the textured forward pass takes 0.39 ms on an RTX 4060 Ti and
-8.1 ms on a Radeon iGPU, whose memory bandwidth uncompressed textures exhaust (texture
-compression is next).
+0040 and 0041. On Sponza at 1080p the textured forward pass takes 0.28 ms on an RTX 4060 Ti
+and 6.9 ms on a Radeon iGPU. `scene_bench -- --uncompressed` compares with RGBA8
+textures.
 
 Rules of thumb:
 
