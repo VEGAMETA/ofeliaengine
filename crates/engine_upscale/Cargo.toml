@@ -1,0 +1,22 @@
+[package]
+name = "engine_upscale"
+description = "Temporal antialiasing and upsampling (the engine's own TAAU); later FSR and the loaders of user-supplied upscalers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_profiler.workspace = true
+engine_render.workspace = true
+engine_rhi.workspace = true
+
+[dev-dependencies]
+# Math and half floats for the tests and the benchmark.
+engine_core.workspace = true
+# Recompiles the committed shaders to check them against their source.
+engine_shader.workspace = true

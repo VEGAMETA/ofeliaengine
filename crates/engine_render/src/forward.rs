@@ -62,8 +62,7 @@ const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked.spv");
 const DEPTH_VERTEX: &[u8] = include_bytes!("../shaders/forward.depthVertex.spv");
 const FRAGMENT_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotion.spv");
-const FRAGMENT_MASKED_MOTION: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
+const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
 
@@ -604,7 +603,12 @@ impl ForwardRenderer {
             )
         };
         let main_motion = [
-            main(&fragment_motion, c"fragmentMainMotion", &motion_formats, false)?,
+            main(
+                &fragment_motion,
+                c"fragmentMainMotion",
+                &motion_formats,
+                false,
+            )?,
             main(
                 &fragment_masked_motion,
                 c"fragmentMaskedMotion",
@@ -612,7 +616,12 @@ impl ForwardRenderer {
                 false,
             )?,
         ];
-        let shade_motion = main(&fragment_motion, c"fragmentMainMotion", &motion_formats, true)?;
+        let shade_motion = main(
+            &fragment_motion,
+            c"fragmentMainMotion",
+            &motion_formats,
+            true,
+        )?;
         let shade = main(&fragment, c"fragmentMain", &formats, true)?;
         let main = [
             main(&fragment, c"fragmentMain", &formats, false)?,
@@ -765,16 +774,46 @@ impl ForwardRenderer {
         let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
         let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
         if draws.is_empty() {
-            fg.add_pass("forward")
-                .color(color, load, StoreOp::Store)
-                .depth(depth, depth_clear, StoreOp::DontCare)
-                .execute(|_| {});
+            // Nothing drawn: the target is the clear color everywhere, so no motion shows.
+            // A temporal view still gets its (zero) motion vectors and a stored depth, and
+            // its state moves on, so a resolve after it needs no special case.
+            let temporal = view.temporal;
+            let velocity = temporal.map(|_| {
+                let desc = fg.texture_desc(depth);
+                fg.create_texture(
+                    "motion vectors",
+                    TextureDesc::new_2d(MOTION_FORMAT, desc.width, desc.height),
+                )
+            });
+            let mut pass = fg.add_pass("forward").color(color, load, StoreOp::Store);
+            if let Some(velocity) = velocity {
+                pass = pass.color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store);
+            }
+            let depth_store = if velocity.is_some() {
+                StoreOp::Store
+            } else {
+                StoreOp::DontCare
+            };
+            pass.depth(depth, depth_clear, depth_store).execute(|_| {});
+            let motion = temporal.zip(velocity).map(|(t, velocity)| {
+                let jitter = t.next_jitter();
+                let reset = t.reset.replace(false);
+                t.previous_count.set(0);
+                t.previous_clip_from_world
+                    .set(Some(view.camera.clip_from_world));
+                t.frame.set(t.frame.get() + 1);
+                MotionOutput {
+                    velocity,
+                    jitter,
+                    reset,
+                }
+            });
             return Some(ForwardPasses {
                 instances: 0,
                 batches: 0,
                 occlusion: false,
                 commands: None,
-                motion: None,
+                motion,
             });
         }
         let instance_count = draws.len() as u32;
@@ -1150,8 +1189,8 @@ impl ForwardRenderer {
                     DepthUse::Write(depth_clear, depth_store)
                 };
                 shading_pass(
-                    fg, "forward", &geometry, &materials, shadow_map, culled, visible,
-                    targets, true, depth, depth_use,
+                    fg, "forward", &geometry, &materials, shadow_map, culled, visible, targets,
+                    true, depth, depth_use,
                 )
                 .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL));
                 ForwardPasses {
@@ -1362,16 +1401,15 @@ fn shading_pass<'a, 'g>(
     depth: Texture,
     depth_use: DepthUse,
 ) -> PassBuilder<'a, 'g> {
-    let mut pass = forward_pass(fg, name, geometry, materials, shadow_map, culled, visible)
-        .color(
-            targets.color,
-            if first {
-                targets.color_load
-            } else {
-                LoadOp::Load
-            },
-            StoreOp::Store,
-        );
+    let mut pass = forward_pass(fg, name, geometry, materials, shadow_map, culled, visible).color(
+        targets.color,
+        if first {
+            targets.color_load
+        } else {
+            LoadOp::Load
+        },
+        StoreOp::Store,
+    );
     if let Some(velocity) = targets.velocity {
         let load = if first {
             LoadOp::Clear([0.0; 4])

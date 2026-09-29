@@ -1,8 +1,8 @@
 //! Motion vectors and jitter (ADR 0043), under the validation layer with synchronization
 //! validation: a moving object moves by exactly its displacement, a moving camera moves
 //! everything including the background, jitter never shows in the vectors, a reset stops
-//! motion for a frame, and objects without a previous transform are still. With and
-//! without the depth prepass and occlusion culling.
+//! motion for a frame, objects without a previous transform are still, and an empty frame
+//! reports zero motion. With and without the depth prepass and occlusion culling.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -133,14 +133,14 @@ fn motion_vectors() {
     };
     let mut frame_number = 0u64;
 
-    // Renders one frame: a unit cube (scaled 2) at `x`, the camera at `camera_x`; returns
-    // the motion vectors in pixels and the frame's jitter.
-    let mut render = |x: f32,
+    // Renders one frame: a unit cube (scaled 2) at `x` (nothing for `None`), the camera at
+    // `camera_x`; returns the motion vectors in pixels and the frame's jitter.
+    let mut render = |x: Option<f32>,
                       camera_x: f32,
                       use_occlusion: bool,
                       renderer: &ForwardRenderer|
      -> (Vec<[f32; 2]>, [f32; 2], bool) {
-        let draws = [DrawItem {
+        let cube = x.map(|x| DrawItem {
             mesh,
             material: materials.default_material(),
             world_from_object: Mat4::from_scale_rotation_translation(
@@ -148,7 +148,8 @@ fn motion_vectors() {
                 Default::default(),
                 Vec3::new(x, 0.0, 0.0),
             ),
-        }];
+        });
+        let draws = cube.as_slice();
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -190,7 +191,7 @@ fn motion_vectors() {
                     &bindless,
                     &geo,
                     &mats,
-                    &draws,
+                    draws,
                     &ForwardView {
                         camera: camera(camera_x),
                         light,
@@ -276,47 +277,90 @@ fn motion_vectors() {
     // the left edge.
     let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 0.02 && (a[1] - b[1]).abs() < 0.02;
 
-    for (prepass, use_occlusion) in [(false, false), (true, false), (false, true), (true, true)]
-    {
+    for (prepass, use_occlusion) in [(false, false), (true, false), (false, true), (true, true)] {
         renderer.set_depth_prepass(prepass);
         temporal.reset();
         temporal.set_jitter_phases(8);
         let label = format!("prepass {prepass}, occlusion {use_occlusion}");
-        let (v, _, reset) = render(0.0, 0.0, use_occlusion, &renderer);
+        let (v, _, reset) = render(Some(0.0), 0.0, use_occlusion, &renderer);
         assert!(reset, "{label}: the first frame after a reset");
-        assert!(near(at(&v, 32, 32), [0.0; 2]), "{label}: no history, no motion");
+        assert!(
+            near(at(&v, 32, 32), [0.0; 2]),
+            "{label}: no history, no motion"
+        );
         // The cube moves right by 0.5 units: 4 pixels.
-        let (v, jitter, reset) = render(0.5, 0.0, use_occlusion, &renderer);
+        let (v, jitter, reset) = render(Some(0.5), 0.0, use_occlusion, &renderer);
         assert!(!reset);
         assert!(jitter != [0.0; 2], "jittered");
-        println!("{label}: cube moved 4 px: {:?}, background {:?}", at(&v, 36, 32), at(&v, 2, 2));
-        assert!(near(at(&v, 36, 32), [4.0, 0.0]), "{label}: {:?}", at(&v, 36, 32));
+        println!(
+            "{label}: cube moved 4 px: {:?}, background {:?}",
+            at(&v, 36, 32),
+            at(&v, 2, 2)
+        );
+        assert!(
+            near(at(&v, 36, 32), [4.0, 0.0]),
+            "{label}: {:?}",
+            at(&v, 36, 32)
+        );
         assert!(near(at(&v, 2, 2), [0.0, 0.0]), "{label}: still background");
         // The camera moves right by 0.25 units: everything moves 2 pixels left, the
         // background included.
-        let (v, _, _) = render(0.5, 0.25, use_occlusion, &renderer);
-        println!("{label}: camera moved: {:?}, background {:?}", at(&v, 34, 32), at(&v, 2, 2));
-        assert!(near(at(&v, 34, 32), [-2.0, 0.0]), "{label}: {:?}", at(&v, 34, 32));
-        assert!(near(at(&v, 2, 2), [-2.0, 0.0]), "{label}: {:?}", at(&v, 2, 2));
+        let (v, _, _) = render(Some(0.5), 0.25, use_occlusion, &renderer);
+        println!(
+            "{label}: camera moved: {:?}, background {:?}",
+            at(&v, 34, 32),
+            at(&v, 2, 2)
+        );
+        assert!(
+            near(at(&v, 34, 32), [-2.0, 0.0]),
+            "{label}: {:?}",
+            at(&v, 34, 32)
+        );
+        assert!(
+            near(at(&v, 2, 2), [-2.0, 0.0]),
+            "{label}: {:?}",
+            at(&v, 2, 2)
+        );
         // Still: no motion, whatever the jitter.
         for _ in 0..3 {
-            let (v, jitter, _) = render(0.5, 0.25, use_occlusion, &renderer);
-            assert!(near(at(&v, 34, 32), [0.0; 2]), "{label}: jitter {jitter:?} leaked");
+            let (v, jitter, _) = render(Some(0.5), 0.25, use_occlusion, &renderer);
+            assert!(
+                near(at(&v, 34, 32), [0.0; 2]),
+                "{label}: jitter {jitter:?} leaked"
+            );
             assert!(near(at(&v, 2, 2), [0.0; 2]));
         }
         // A reset: the next frame has no motion even though the cube jumped.
         temporal.reset();
-        let (v, _, reset) = render(-1.0, 0.25, use_occlusion, &renderer);
+        let (v, _, reset) = render(Some(-1.0), 0.25, use_occlusion, &renderer);
         assert!(reset && near(at(&v, 26, 32), [0.0; 2]), "{label}: reset");
     }
 
     // Jitter follows Halton(2, 3), centred.
     temporal.set_jitter_phases(8);
     temporal.reset();
-    let jitters: Vec<[f32; 2]> = (0..3).map(|_| render(0.0, 0.0, false, &renderer).1).collect();
+    let jitters: Vec<[f32; 2]> = (0..3)
+        .map(|_| render(Some(0.0), 0.0, false, &renderer).1)
+        .collect();
     println!("jitter: {jitters:?}");
-    assert!(jitters.iter().all(|j| j[0].abs() <= 0.5 && j[1].abs() <= 0.5));
+    assert!(
+        jitters
+            .iter()
+            .all(|j| j[0].abs() <= 0.5 && j[1].abs() <= 0.5)
+    );
     assert_ne!(jitters[0], jitters[1]);
+
+    // An empty frame still reports (zero) motion and moves the state on; the cube drawn
+    // after it has no previous transform, so it counts as still.
+    let (v, _, reset) = render(None, 0.0, false, &renderer);
+    assert!(!reset);
+    assert!(v.iter().all(|&m| near(m, [0.0; 2])), "empty frame");
+    let (v, _, reset) = render(Some(0.5), 0.0, false, &renderer);
+    assert!(
+        !reset && near(at(&v, 36, 32), [0.0; 2]),
+        "{:?}",
+        at(&v, 36, 32)
+    );
 
     // SAFETY: the device is idle.
     unsafe {

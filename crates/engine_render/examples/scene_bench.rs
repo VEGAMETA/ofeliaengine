@@ -11,7 +11,8 @@
 //!
 //! `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
 //! (scenes: `tools/fetch-test-assets.ps1`; options: `--screenshot <png>`,
-//! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--prepass` for the depth prepass, `--ddc <dir>`
+//! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--prepass` for the depth prepass,
+//! `--motion` for a jittered projection and motion vectors (ADR 0043), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -23,7 +24,7 @@ use engine_assets::{
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
@@ -187,6 +188,7 @@ fn main() {
     let (mut screenshot, mut requested_view) = (None, None);
     let mut uncompressed = false;
     let mut prepass = false;
+    let mut motion = false;
     let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -194,6 +196,7 @@ fn main() {
             "--screenshot" => screenshot = args.next(),
             "--uncompressed" => uncompressed = true,
             "--prepass" => prepass = true,
+            "--motion" => motion = true,
             "--ddc" => ddc = args.next().unwrap(),
             "--view" => {
                 let v: Vec<f32> = args
@@ -462,10 +465,17 @@ fn main() {
     );
     println!();
     renderer.set_depth_prepass(prepass);
+    // Motion vectors: the forward pass writes them, a pass fills the background with the
+    // camera's motion, and the instances are copied for the next frame.
+    let temporal = motion.then(|| {
+        let temporal = Temporal::new(&device, &mut allocator, draws.len() as u32).unwrap();
+        temporal.set_jitter_phases(8);
+        temporal
+    });
     println!(
-        "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs |"
+        "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs |          GPU motion background + remember instances µs |"
     );
-    println!("|---|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|");
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -473,6 +483,7 @@ fn main() {
             materials.set(id, desc);
         }
         let (mut shadow, mut depth_prepass, mut forward) = (Vec::new(), Vec::new(), Vec::new());
+        let mut motion_extra = Vec::new();
         let mut upload_frames = 0;
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
@@ -523,7 +534,7 @@ fn main() {
                             depth,
                             clear: Some([0.02, 0.02, 0.05, 1.0]),
                             occlusion: None,
-                            temporal: None,
+                            temporal: temporal.as_ref(),
                         },
                     )
                     .unwrap();
@@ -598,14 +609,19 @@ fn main() {
                 continue;
             }
             if frame > WARMUP && !capture {
+                let mut extra = 0.0;
                 for time in graph.gpu_pass_times() {
                     match time.name {
                         "shadow" => shadow.push(f64::from(time.gpu_us)),
                         "forward" => forward.push(f64::from(time.gpu_us)),
                         "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
+                        "motion background" | "remember instances" => {
+                            extra += f64::from(time.gpu_us);
+                        }
                         _ => {}
                     }
                 }
+                motion_extra.push(extra);
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
@@ -618,10 +634,11 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
+            median(&mut motion_extra),
         );
     }
     println!();
@@ -636,6 +653,9 @@ fn main() {
         geometry.destroy(&mut allocator);
         materials.destroy(&mut allocator);
         textures.destroy(&mut allocator, &bindless);
+        if let Some(mut temporal) = temporal {
+            temporal.destroy(&mut allocator);
+        }
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);
     }
