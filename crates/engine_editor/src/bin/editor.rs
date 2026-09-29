@@ -1020,6 +1020,7 @@ mod windowed {
                                     occlusion: None,
                                     temporal: None,
                                     lights: &[],
+                                    environment: None,
                                 },
                             );
                             tonemap.add_composite_pass(

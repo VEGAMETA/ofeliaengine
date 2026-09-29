@@ -47,6 +47,12 @@
 // tile's bits and its bin's index range; the wave walks the union of its lanes' bits, one
 // light at a time, so light data loads are shared.
 //
+// Ambient light (environment.rs, ADR 0046): with an environment, diffuse light comes from
+// its 9 irradiance harmonics and specular light from its prefiltered cube at the pixel's
+// roughness times the DFG table (split sum), with Filament's multiple-scattering
+// compensation and specular occlusion from the material's occlusion (Lagarde and de
+// Rousiers 2014); `skyFragment` draws the sky and the sun's disk where no geometry was.
+//
 // Materials (material.rs, ADR 0040) are glTF 2.0 metallic-roughness: base color, metallic
 // and roughness, normal map, occlusion and emission, each a factor times a texture, read
 // per pixel from the material table by the instance's material slot. Masked materials
@@ -54,6 +60,7 @@
 // their shadows); opaque ones never discard, so their depth test stays early.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
+[[vk::binding(0, 0)]] TextureCube g_cubes[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 [[vk::binding(2, 0)]] SamplerComparisonState g_compare_samplers[];
 
@@ -120,6 +127,17 @@ struct Frame
     float bin_scale;         // z-bins per unit of depth along the view
     uint light_culling;      // 0: every light for every pixel (the reference)
     uint3 _pad4;
+    float4x4 world_from_clip; // inverse of clip_from_world (jittered): the sky's rays
+    uint environment;        // 1: ambient light and background from the environment
+    uint sky_cube;           // bindless: the environment's radiance cube
+    uint prefiltered;        // bindless: its prefiltered cube
+    uint dfg_lut;            // bindless: the DFG table
+    uint env_levels;         // mips of the prefiltered cube
+    float env_intensity;     // the environment's radiance multiplier
+    uint linear_sampler;     // trilinear, clamp
+    uint _pad5;
+    float4* sh;              // 9 irradiance harmonics
+    uint2 _pad6;
 };
 
 struct Instance
@@ -203,6 +221,8 @@ static const uint LIGHT_TILE = 16;
 static const uint Z_BINS = 1024;
 // 0 in the pipelines drawn without local lights: the light loop compiles away.
 [vk::constant_id(0)] const uint LOCAL_LIGHTS = 1;
+// 0 in the pipelines drawn without an environment: image-based light compiles away.
+[vk::constant_id(1)] const uint ENVIRONMENT = 1;
 // Depth (NDC) a box's nearest point must lie beyond the pyramid to count as hidden.
 static const float OCCLUSION_MARGIN = 1e-5;
 
@@ -773,6 +793,33 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
     return sum;
 }
 
+// Light from the whole sky: the environment's harmonics (diffuse) and prefiltered cube
+// (specular), or the flat ambient color without an environment.
+float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo)
+{
+    if (ENVIRONMENT == 0 || push.frame.environment == 0)
+        return push.frame.ambient.rgb * albedo * occlusion;
+    float n_dot_v = max(dot(n, v), 1e-4);
+    float4* sh = push.frame.sh;
+    float3 irradiance = sh[0].rgb * 0.282095
+        + sh[1].rgb * (0.488603 * n.y) + sh[2].rgb * (0.488603 * n.z) + sh[3].rgb * (0.488603 * n.x)
+        + sh[4].rgb * (1.092548 * n.x * n.y) + sh[5].rgb * (1.092548 * n.y * n.z)
+        + sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + sh[7].rgb * (1.092548 * n.x * n.z)
+        + sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    irradiance = max(irradiance, 0.0);
+    SamplerState s = g_samplers[push.frame.linear_sampler];
+    float3 r = reflect(-v, n);
+    float lod = roughness * float(push.frame.env_levels - 1);
+    float3 prefiltered = g_cubes[push.frame.prefiltered].SampleLevel(s, r, lod).rgb;
+    float2 dfg = g_textures[push.frame.dfg_lut].SampleLevel(s, float2(n_dot_v, roughness), 0.0).xy;
+    float3 specular = prefiltered * lerp(dfg.xxx, dfg.yyy, f0) * (1.0 + f0 * (1.0 / max(dfg.y, 1e-4) - 1.0));
+    float a = roughness * roughness;
+    // Lagarde and de Rousiers' specular occlusion; 1 without occlusion (most materials),
+    // where skipping it frees registers (72 → 64 VGPRs on the Radeon).
+    float specular_occlusion = occlusion < 1.0 ? saturate(pow(n_dot_v + occlusion, exp2(-16.0 * a - 1.0)) - 1.0 + occlusion) : 1.0;
+    return (diffuse * irradiance * occlusion + specular * specular_occlusion) * push.frame.env_intensity;
+}
+
 // The shading of both forward entry points; `masked` discards below the alpha cutoff.
 float4 shade(VertexOut input, bool front, bool masked)
 {
@@ -825,7 +872,7 @@ float4 shade(VertexOut input, bool front, bool masked)
     // says.
     float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     float3 color = (diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
-        + frame.ambient.rgb * base.rgb * occlusion
+        + ambient_light(n, v, diffuse, f0, roughness, occlusion, base.rgb)
         + emissive
         + local_lights(input.world_position, input.position.xy, n, v, diffuse, f0, a);
     return float4(color, 1.0);
@@ -907,4 +954,23 @@ float2 backgroundMotion(Background input) : SV_Target0
     if (abs(previous.w) <= 1e-6)
         return float2(0.0, 0.0);
     return uv - (previous.xy / previous.w * 0.5 + 0.5);
+}
+
+// The environment's sky along this pixel's ray, and the sun's disk (0.27° in radius: the
+// light's illuminance spread over its solid angle).
+[shader("fragment")]
+float4 skyFragment(Background input) : SV_Target0
+{
+    float2 ndc = input.position.xy / float2(push.frame.depth_size) * 2.0 - 1.0;
+    // Two points of the ray: the near plane and halfway in depth (finite with an infinite
+    // far plane too).
+    float4 near = mul(push.frame.world_from_clip, float4(ndc, 0.0, 1.0));
+    float4 mid = mul(push.frame.world_from_clip, float4(ndc, 0.5, 1.0));
+    float3 d = normalize(mid.xyz / mid.w - near.xyz / near.w);
+    SamplerState s = g_samplers[push.frame.linear_sampler];
+    float3 color = g_cubes[push.frame.sky_cube].SampleLevel(s, d, 0.0).rgb * push.frame.env_intensity;
+    const float cos_sun = 0.99998889;
+    if (dot(d, push.frame.to_light.xyz) > cos_sun)
+        color += push.frame.light_color.rgb / (2.0 * PI * (1.0 - cos_sun));
+    return float4(color, 1.0);
 }

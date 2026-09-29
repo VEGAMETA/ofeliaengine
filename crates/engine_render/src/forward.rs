@@ -42,6 +42,7 @@
 //! [`MaterialTable`]: crate::material::MaterialTable
 
 use crate::cull::Frustum;
+use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
 use crate::graph::{
     Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, LoadOp, PassBuilder,
     ShaderStages, StoreOp, Texture, TextureDesc,
@@ -73,6 +74,7 @@ const FRAGMENT_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMainMo
 const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
+const SKY_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.skyFragment.spv");
 
 pub use crate::lights::{LocalLight, Spot};
 pub use crate::shadow::ShadowSettings;
@@ -159,6 +161,9 @@ pub struct ForwardView<'a> {
     /// Point and spot lights (ADR 0045). Only those reaching the view are shaded, each by
     /// the pixels it can reach.
     pub lights: &'a [LocalLight],
+    /// Light from the whole sky, and the sky as background (ADR 0046); `None` for the flat
+    /// ambient color of [`DirectionalLight::ambient`] over the clear color.
+    pub environment: Option<&'a Environment>,
 }
 
 /// Temporal state of one view, kept across frames (ADR 0043): last frame's camera and
@@ -378,7 +383,7 @@ struct CascadeData {
     bounds: [f32; 4],
 }
 
-/// `Frame` in `forward.slang` (896 bytes).
+/// `Frame` in `forward.slang` (1008 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -417,6 +422,17 @@ struct FrameData {
     bin_scale: f32,
     light_culling: u32,
     _pad4: [u32; 3],
+    world_from_clip: [f32; 16],
+    environment: u32,
+    sky_cube: u32,
+    prefiltered: u32,
+    dfg_lut: u32,
+    env_levels: u32,
+    env_intensity: f32,
+    linear_sampler: u32,
+    _pad5: u32,
+    sh: u64,
+    _pad6: [u32; 2],
 }
 
 /// `Instance` in `forward.slang` (64 bytes).
@@ -462,7 +478,7 @@ struct Push {
 }
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 896);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1008);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 48);
 const _: () = assert!(core::mem::size_of::<Push>() == 112);
@@ -529,13 +545,16 @@ struct Shading {
 /// The forward PBR pipelines.
 #[derive(Debug)]
 pub struct ForwardRenderer {
-    /// Shading without local lights, and with them (`LOCAL_LIGHTS` in `forward.slang`, a
-    /// specialization constant: the light loop takes no registers where there are none).
-    shading: [Shading; 2],
+    /// Shading by variant: bit 0 local lights (`LOCAL_LIGHTS` in `forward.slang`), bit 1
+    /// an environment (`ENVIRONMENT`). Specialization constants: code a frame does not
+    /// need takes no registers there.
+    shading: [Shading; 4],
     /// Depth prepass: opaque (depth only), masked.
     prepass: [Pipeline; 2],
     /// Camera motion where no geometry was drawn.
     background: Pipeline,
+    /// The environment's sky where no geometry was drawn.
+    sky: Pipeline,
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
     cull: Pipeline,
@@ -585,39 +604,43 @@ impl ForwardRenderer {
         let fragment_masked_motion = spirv_words(FRAGMENT_MASKED_MOTION).ok_or_else(invalid)?;
         let background_vertex = spirv_words(BACKGROUND_VERTEX).ok_or_else(invalid)?;
         let background_motion = spirv_words(BACKGROUND_MOTION).ok_or_else(invalid)?;
+        let sky_fragment = spirv_words(SKY_FRAGMENT).ok_or_else(invalid)?;
         let formats = [color_format];
         let motion_formats = [color_format, MOTION_FORMAT];
         // Cull mode and front face come with each batch's pipeline state.
-        let main = |fragment: &[u32], entry, formats: &[vk::Format], equal: bool, lit: bool| {
-            Pipeline::graphics(
-                device,
-                bindless.pipeline_layout(),
-                &GraphicsPipelineDesc {
-                    specialization: if lit { &[1] } else { &[0] },
-                    color_formats: formats,
-                    depth_format,
-                    dynamic_culling: true,
-                    // After the depth prepass: tested for equality, not written.
-                    depth_write: !equal,
-                    depth_compare: if equal {
-                        vk::CompareOp::EQUAL
-                    } else {
-                        vk::CompareOp::LESS
-                    },
-                    ..GraphicsPipelineDesc::new(
-                        ShaderStageDesc {
-                            spirv: &vertex,
-                            entry: c"vertexMain",
+        // The specialization constants of each shading variant.
+        const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
+        let main =
+            |fragment: &[u32], entry, formats: &[vk::Format], equal: bool, variant: usize| {
+                Pipeline::graphics(
+                    device,
+                    bindless.pipeline_layout(),
+                    &GraphicsPipelineDesc {
+                        specialization: &VARIANTS[variant],
+                        color_formats: formats,
+                        depth_format,
+                        dynamic_culling: true,
+                        // After the depth prepass: tested for equality, not written.
+                        depth_write: !equal,
+                        depth_compare: if equal {
+                            vk::CompareOp::EQUAL
+                        } else {
+                            vk::CompareOp::LESS
                         },
-                        Some(ShaderStageDesc {
-                            spirv: fragment,
-                            entry,
-                        }),
-                    )
-                },
-                vk::PipelineCache::null(),
-            )
-        };
+                        ..GraphicsPipelineDesc::new(
+                            ShaderStageDesc {
+                                spirv: &vertex,
+                                entry: c"vertexMain",
+                            },
+                            Some(ShaderStageDesc {
+                                spirv: fragment,
+                                entry,
+                            }),
+                        )
+                    },
+                    vk::PipelineCache::null(),
+                )
+            };
         let shadow = |vertex: &[u32], vertex_entry, fragment: Option<ShaderStageDesc<'_>>| {
             Pipeline::graphics(
                 device,
@@ -641,7 +664,7 @@ impl ForwardRenderer {
                 vk::PipelineCache::null(),
             )
         };
-        let shading = |lit: bool| -> Result<Shading, RhiError> {
+        let shading = |lit: usize| -> Result<Shading, RhiError> {
             Ok(Shading {
                 main: [
                     main(&fragment, c"fragmentMain", &formats, false, lit)?,
@@ -673,7 +696,7 @@ impl ForwardRenderer {
                 )?,
             })
         };
-        let shading = [shading(false)?, shading(true)?];
+        let shading = [shading(0)?, shading(1)?, shading(2)?, shading(3)?];
         let background_formats = [MOTION_FORMAT];
         let background = Pipeline::graphics(
             device,
@@ -692,6 +715,28 @@ impl ForwardRenderer {
                     Some(ShaderStageDesc {
                         spirv: &background_motion,
                         entry: c"backgroundMotion",
+                    }),
+                )
+            },
+            vk::PipelineCache::null(),
+        )?;
+        let sky = Pipeline::graphics(
+            device,
+            bindless.pipeline_layout(),
+            &GraphicsPipelineDesc {
+                color_formats: &formats,
+                depth_format,
+                cull_mode: vk::CullModeFlags::NONE,
+                depth_write: false,
+                depth_compare: vk::CompareOp::EQUAL,
+                ..GraphicsPipelineDesc::new(
+                    ShaderStageDesc {
+                        spirv: &background_vertex,
+                        entry: c"backgroundVertex",
+                    },
+                    Some(ShaderStageDesc {
+                        spirv: &sky_fragment,
+                        entry: c"skyFragment",
                     }),
                 )
             },
@@ -753,6 +798,7 @@ impl ForwardRenderer {
             shading,
             prepass,
             background,
+            sky,
             shadow,
             cull: compute(CULL, c"cullMain")?,
             light_tiles: compute(LIGHT_TILES, c"lightTiles")?,
@@ -791,6 +837,14 @@ impl ForwardRenderer {
     /// Whether the depth prepass is on.
     pub fn depth_prepass(&self) -> bool {
         self.depth_prepass
+    }
+
+    /// The driver's statistics of the opaque forward pipeline of each shading variant (see
+    /// `ForwardRenderer::shading`): without and with local lights, then the same with an
+    /// environment. Empty unless the device captures statistics
+    /// ([`Device::pipeline_statistics_enabled`]).
+    pub fn shading_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
+        core::array::from_fn(|k| self.shading[k].main[0].statistics(device))
     }
 
     /// Turns light culling on (the default) or off. Off, every pixel evaluates every light
@@ -1005,6 +1059,8 @@ impl ForwardRenderer {
             .and_then(|t| t.previous_clip_from_world.get())
             .unwrap_or(unjittered);
         let previous_count = temporal.map_or(0, |t| t.previous_count.get());
+        // The environment: rebuilt first if its sky changed (ADR 0046).
+        let environment = view.environment.map(|e| e.add_passes(fg, bindless));
         // Local lights: culled, sorted and binned on the CPU (ADR 0045).
         let axis = ViewAxis::new(unjittered);
         let (light_layout, uploaded) = {
@@ -1086,6 +1142,17 @@ impl ForwardRenderer {
             bin_scale: light_layout.bin_scale,
             light_culling: u32::from(self.light_culling),
             _pad4: [0; 3],
+            world_from_clip: clip_from_world.inverse().to_cols_array(),
+            environment: u32::from(environment.is_some()),
+            sky_cube: environment.map_or(0, |e| e.source_index),
+            prefiltered: environment.map_or(0, |e| e.prefiltered_index),
+            dfg_lut: environment.map_or(0, |e| e.dfg_index),
+            env_levels: PREFILTERED_LEVELS,
+            env_intensity: environment.map_or(1.0, |e| e.intensity),
+            linear_sampler: Bindless::sampler(SamplerKind::LinearClamp),
+            _pad5: 0,
+            sh: environment.map_or(0, |e| e.sh_address),
+            _pad6: [0; 2],
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -1359,13 +1426,15 @@ impl ForwardRenderer {
             velocity,
             previous,
             light_tiles,
+            environment,
         };
 
         let prepass = self.depth_prepass;
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
-        let shading = &self.shading[usize::from(light_layout.count > 0)];
+        let shading = &self.shading
+            [usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1];
         let main_pipelines = match (prepass, velocity.is_some()) {
             (true, false) => [&shading.shade, &shading.shade],
             (true, true) => [&shading.shade_motion, &shading.shade_motion],
@@ -1399,7 +1468,7 @@ impl ForwardRenderer {
             }
         };
         // The depth is needed after the frame's passes for motion vectors and upsampling.
-        let depth_store = if velocity.is_some() {
+        let depth_store = if velocity.is_some() || environment.is_some() {
             StoreOp::Store
         } else {
             StoreOp::DontCare
@@ -1531,6 +1600,26 @@ impl ForwardRenderer {
                 }
             }
         };
+        // The sky where no geometry was drawn (depth still 1).
+        if let Some(env) = environment {
+            let sky = &self.sky;
+            fg.add_pass("sky")
+                .color(color, LoadOp::Load, StoreOp::Store)
+                .depth_read_only(depth)
+                .read(env.source, Access::Sampled(ShaderStages::FRAGMENT))
+                .execute(move |ctx| {
+                    let area = ctx.render_area();
+                    // SAFETY: recording inside the pass's rendering scope; the frame
+                    // constants are in the ring.
+                    unsafe {
+                        sky.bind(ctx.cmd);
+                        bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                        set_viewport(ctx.device, ctx.cmd, area);
+                        bindless.push_constants(ctx.cmd, push_bytes(&base));
+                        ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+                    }
+                });
+        }
         let (Some(temporal), Some(velocity), Some(previous)) = (temporal, velocity, previous)
         else {
             return Some(passes);
@@ -1602,6 +1691,8 @@ struct Targets {
     previous: Option<Buffer>,
     /// The tiles' light bitmasks, with light culling.
     light_tiles: Option<Buffer>,
+    /// The environment's lighting.
+    environment: Option<EnvironmentFrame>,
 }
 
 /// How a shading pass uses the depth target.
@@ -1651,6 +1742,12 @@ fn shading_pass<'a, 'g>(
     }
     if let Some(tiles) = targets.light_tiles {
         pass = pass.read(tiles, Access::StorageRead(ShaderStages::FRAGMENT));
+    }
+    if let Some(env) = targets.environment {
+        pass = pass
+            .read(env.prefiltered, Access::Sampled(ShaderStages::FRAGMENT))
+            .read(env.dfg, Access::Sampled(ShaderStages::FRAGMENT))
+            .read(env.sh, Access::StorageRead(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),

@@ -334,6 +334,7 @@ fn main() {
                                 occlusion: (culling == Culling::Occlusion).then_some(&occlusion),
                                 temporal: None,
                                 lights: &[],
+                                environment: None,
                             },
                         )
                         .unwrap();

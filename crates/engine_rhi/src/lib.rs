@@ -41,7 +41,8 @@ pub use memory::{
     MemoryLocation, Range, RangeAllocator, ResourceKind,
 };
 pub use pipeline::{
-    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, ShaderStageDesc, spirv_words,
+    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineStatistic, ShaderStageDesc,
+    spirv_words,
 };
 pub use swapchain::{
     AcquiredImage, HdrMetadata, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc,

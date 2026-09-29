@@ -15,7 +15,9 @@
 //! `--motion` for a jittered projection and motion vectors (ADR 0043), `--cascades <1-4>`
 //! `--shadow-res <texels per cascade>` and `--shadow-blend <band>` for the shadows
 //! (ADR 0044), `--lights <count>` for point and spot lights spread over the scene and
-//! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--ddc <dir>`
+//! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--sky` for
+//! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
+//! every frame (ADR 0046), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -26,6 +28,7 @@ use engine_assets::{
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
+use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
     Spot, Temporal,
@@ -196,6 +199,8 @@ fn main() {
     let mut shadows = ShadowSettings::default();
     let mut light_count = 0usize;
     let mut light_culling = true;
+    let (mut with_sky, mut sky_every_frame) = (false, false);
+    let mut pipeline_stats = false;
     let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -206,6 +211,9 @@ fn main() {
             "--motion" => motion = true,
             "--lights" => light_count = args.next().unwrap().parse().unwrap(),
             "--no-light-culling" => light_culling = false,
+            "--sky" => with_sky = true,
+            "--pipeline-stats" => pipeline_stats = true,
+            "--sky-every-frame" => (with_sky, sky_every_frame) = (true, true),
             "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
             "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
             "--shadow-blend" => shadows.blend = args.next().unwrap().parse().unwrap(),
@@ -502,6 +510,25 @@ fn main() {
     println!();
     renderer.set_depth_prepass(prepass);
     renderer.set_light_culling(light_culling);
+    if pipeline_stats {
+        // Needs ENGINE_PIPELINE_STATS=1 (the device captures statistics at creation).
+        let names = [
+            "plain",
+            "local lights",
+            "environment",
+            "lights + environment",
+        ];
+        for (name, stats) in names.iter().zip(renderer.shading_statistics(&device)) {
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
+        println!();
+    }
+    let environment = with_sky
+        .then(|| Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap());
     // Motion vectors: the forward pass writes them, a pass fills the background with the
     // camera's motion, and the instances are copied for the next frame.
     let temporal = motion.then(|| {
@@ -518,9 +545,10 @@ fn main() {
     }
     println!(
         "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs | \
-         GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs |"
+         GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs | \
+         GPU sky µs | GPU environment rebuild µs |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -530,6 +558,7 @@ fn main() {
         let (mut shadow, mut depth_prepass, mut forward) = (Vec::new(), Vec::new(), Vec::new());
         let mut motion_extra = Vec::new();
         let (mut light_tiles, mut cpu_add) = (Vec::new(), Vec::new());
+        let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
         let mut upload_frames = 0;
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
@@ -566,6 +595,14 @@ fn main() {
                 let hdr = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
                 let depth =
                     fg.create_texture("depth", TextureDesc::new_2d(depth_format, WIDTH, HEIGHT));
+                if let Some(environment) = &environment
+                    && sky_every_frame
+                {
+                    // A barely different sky every frame: rebuilt every frame.
+                    let mut sky = Sky::default();
+                    sky.zenith.x += (frame_number % 2) as f32 * 1e-3;
+                    environment.set_sky(sky);
+                }
                 let started = Instant::now();
                 renderer
                     .add_passes(
@@ -584,6 +621,7 @@ fn main() {
                             occlusion: None,
                             temporal: temporal.as_ref(),
                             lights: &lights,
+                            environment: environment.as_ref(),
                         },
                     )
                     .unwrap();
@@ -662,6 +700,7 @@ fn main() {
                 let mut extra = 0.0;
                 let mut shadow_frame = 0.0;
                 let mut tiles_frame = 0.0;
+                let (mut sky_frame, mut rebuild_frame) = (0.0, 0.0);
                 for time in graph.gpu_pass_times() {
                     match time.name {
                         "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
@@ -673,6 +712,10 @@ fn main() {
                         "light tiles clear" | "light tiles" => {
                             tiles_frame += f64::from(time.gpu_us);
                         }
+                        "sky" => sky_frame += f64::from(time.gpu_us),
+                        "environment sky" | "environment prefilter" | "environment irradiance" => {
+                            rebuild_frame += f64::from(time.gpu_us);
+                        }
                         _ => {}
                     }
                 }
@@ -680,6 +723,8 @@ fn main() {
                 shadow.push(shadow_frame);
                 light_tiles.push(tiles_frame);
                 cpu_add.push(added.as_secs_f64() * 1e6);
+                sky_pass.push(sky_frame);
+                rebuild.push(rebuild_frame);
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
@@ -692,13 +737,15 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
             median(&mut motion_extra),
             median(&mut light_tiles),
             median(&mut cpu_add),
+            median(&mut sky_pass),
+            median(&mut rebuild),
         );
     }
     println!();
@@ -713,6 +760,9 @@ fn main() {
         geometry.destroy(&mut allocator);
         materials.destroy(&mut allocator);
         textures.destroy(&mut allocator, &bindless);
+        if let Some(mut environment) = environment {
+            environment.destroy(&mut allocator, &bindless);
+        }
         if let Some(mut temporal) = temporal {
             temporal.destroy(&mut allocator);
         }

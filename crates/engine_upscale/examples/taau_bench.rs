@@ -215,6 +215,7 @@ fn main() {
                             occlusion: None,
                             temporal: Some(&temporal),
                             lights: &[],
+                            environment: None,
                         },
                     )
                     .unwrap();

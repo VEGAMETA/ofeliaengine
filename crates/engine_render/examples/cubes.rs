@@ -269,6 +269,7 @@ fn main() {
                     occlusion: None,
                     temporal: None,
                     lights: &[],
+                    environment: None,
                 },
             );
             tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);
