@@ -18,7 +18,7 @@
 //! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--post` for bloom, automatic exposure and tone mapping every
-//! frame (ADR 0047), `--ddc <dir>`
+//! frame (ADR 0047), `--curve gt|pbr-neutral` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -38,7 +38,7 @@ use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, Tex
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId};
 use engine_render::png::{PngFormat, encode_png};
-use engine_render::post::{Composite, HDR_FORMAT, Tonemap};
+use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
@@ -204,6 +204,7 @@ fn main() {
     let (mut with_sky, mut sky_every_frame) = (false, false);
     let mut pipeline_stats = false;
     let mut post = false;
+    let mut curve = ToneCurve::Gt;
     let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -217,6 +218,12 @@ fn main() {
             "--sky" => with_sky = true,
             "--pipeline-stats" => pipeline_stats = true,
             "--post" => post = true,
+            "--curve" => {
+                curve = match args.next().as_deref() {
+                    Some("pbr-neutral") => ToneCurve::PbrNeutral,
+                    _ => ToneCurve::Gt,
+                }
+            }
             "--sky-every-frame" => (with_sky, sky_every_frame) = (true, true),
             "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
             "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
@@ -649,7 +656,25 @@ fn main() {
                         "screenshot",
                         TextureDesc::new_2d(screenshot_format, WIDTH, HEIGHT),
                     );
-                    tonemap.add_pass(&mut fg, &bindless, hdr, ldr, 1.0);
+                    let (bloomed, measured) = match &post_effects {
+                        Some((bloom, exposure)) => (
+                            Some(bloom.add_passes(&mut fg, &bindless, hdr)),
+                            Some(exposure.add_passes(&mut fg, &bindless, hdr, 1.0 / 60.0)),
+                        ),
+                        None => (None, None),
+                    };
+                    tonemap.add_composite_pass(
+                        &mut fg,
+                        &bindless,
+                        hdr,
+                        ldr,
+                        Composite {
+                            curve,
+                            bloom: bloomed,
+                            auto_exposure: measured,
+                            ..Composite::default()
+                        },
+                    );
                     let out = fg.import_buffer(
                         "readback",
                         ImportedBuffer {
@@ -704,6 +729,7 @@ fn main() {
                         Composite {
                             bloom: Some(bloomed),
                             auto_exposure: Some(measured),
+                            curve,
                             ..Composite::default()
                         },
                     );

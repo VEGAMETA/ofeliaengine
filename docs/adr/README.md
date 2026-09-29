@@ -55,6 +55,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0045](0045-local-lights.md) | Local lights: z-bins and tile bitmasks | Accepted |
 | [0046](0046-image-based-lighting.md) | Image-based lighting from an environment | Accepted |
 | [0047](0047-bloom-and-automatic-exposure.md) | Bloom and automatic exposure | Accepted |
+| [0048](0048-tone-curve.md) | The tone curve: Uchimura's by default, PBR Neutral as an option | Accepted |
 
 ## Template
 

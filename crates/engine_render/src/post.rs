@@ -1,6 +1,6 @@
 //! Post-processing passes. For now: tonemapping from an HDR target to the display format
-//! (Khronos PBR Neutral with exposure), as one fullscreen-triangle pass in the graph, also
-//! used to composite viewports into sub-rectangles of the output.
+//! (a [`ToneCurve`] with exposure), as one fullscreen-triangle pass in the graph, also used
+//! to composite viewports into sub-rectangles of the output.
 //!
 //! HDR output (ADR 0038): [`OutputLevels`] describes how the swapchain reaches the display
 //! (SDR, scRGB or HDR10, the luminance of reference white and of the peak); the tone mapper
@@ -40,6 +40,78 @@ const FLAG_PASS_THROUGH: u32 = 1;
 const FLAG_ENCODE_PQ: u32 = 2;
 const FLAG_BLOOM: u32 = 4;
 const FLAG_AUTO_EXPOSURE: u32 = 8;
+const FLAG_PBR_NEUTRAL: u32 = 16;
+
+/// The tone curve: how scene values map to what the display shows (ADR 0048).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToneCurve {
+    /// Uchimura's curve (Gran Turismo Sport, CEDEC 2017), per channel: a toe in the darks,
+    /// a linear section that keeps mid-tones as they are (0.18 stays 0.18), and a shoulder
+    /// that approaches the display's peak smoothly. Bright colors whiten as their channels
+    /// reach the peak, as on film. The same mid-tones in SDR and HDR, with the peak where
+    /// the display's is.
+    #[default]
+    Gt,
+    /// Khronos PBR Neutral: hue-preserving, made for product visualization (the colors of
+    /// materials under neutral light, not a filmic look).
+    PbrNeutral,
+}
+
+/// Uchimura's curve with the published defaults (contrast 1, linear section from 0.22 over
+/// 0.4 of the range, toe power 1.33, no pedestal) and a peak of `peak`.
+fn gt(x: f32, peak: f32) -> f32 {
+    let (a, m, l, c, b) = (1.0f32, 0.22f32, 0.4f32, 1.33f32, 0.0f32);
+    let p = peak.max(m + 1e-3);
+    let l0 = (p - m) * l / a;
+    let s0 = m + l0;
+    let s1 = m + a * l0;
+    let c2 = a * p / (p - s1);
+    let cp = -c2 / p;
+    let w0 = if x < m {
+        let t = x / m;
+        1.0 - t * t * (3.0 - 2.0 * t)
+    } else {
+        0.0
+    };
+    let w2 = if x < s0 { 0.0 } else { 1.0 };
+    let w1 = 1.0 - w0 - w2;
+    let toe = m * (x / m).max(0.0).powf(c) + b;
+    let shoulder = p - (p - s1) * (cp * (x - s0)).exp();
+    let linear = m + a * (x - m);
+    toe * w0 + linear * w1 + shoulder * w2
+}
+
+/// PBR Neutral rolled off towards `peak` (as `tonemap.slang`).
+fn pbr_neutral([mut r, mut g, mut b]: [f32; 3], peak: f32) -> [f32; 3] {
+    let start_compression = 0.8 - 0.04;
+    let desaturation = 0.15;
+    let x = r.min(g).min(b);
+    let offset = if x < 0.08 { x - 6.25 * x * x } else { 0.04 };
+    (r, g, b) = (r - offset, g - offset, b - offset);
+    let brightest = r.max(g).max(b);
+    let start = start_compression * peak;
+    if brightest < start {
+        return [r, g, b];
+    }
+    let d = peak - start;
+    let new_peak = peak - d * d / (brightest + d - start);
+    let k = new_peak / brightest;
+    (r, g, b) = (r * k, g * k, b * k);
+    let t = 1.0 - 1.0 / (desaturation * (brightest - new_peak) / peak + 1.0);
+    let mix = |c: f32| c + (new_peak - c) * t;
+    [mix(r), mix(g), mix(b)]
+}
+
+impl ToneCurve {
+    /// The curve on a linear BT.709 color in units of reference white, rolling off
+    /// towards `peak` (1 for SDR): what the tone map pass computes, for tools and tests.
+    pub fn apply(self, rgb: [f32; 3], peak: f32) -> [f32; 3] {
+        match self {
+            Self::Gt => rgb.map(|c| gt(c.max(0.0), peak)),
+            Self::PbrNeutral => pbr_neutral(rgb, peak),
+        }
+    }
+}
 
 /// Luminance of 1.0 in scRGB, in nits.
 const SCRGB_WHITE_NITS: f32 = 80.0;
@@ -175,6 +247,8 @@ pub struct Composite {
     pub exposure: f32,
     /// Apply the tone mapper (HDR sources); `false` copies (LDR sources).
     pub tonemap: bool,
+    /// Which tone curve.
+    pub curve: ToneCurve,
     /// Where the tone mapper's roll-off ends, in units of reference white
     /// ([`OutputLevels::peak`]; 1 for SDR).
     pub peak: f32,
@@ -197,6 +271,7 @@ impl Default for Composite {
             sampler: SamplerKind::LinearClamp,
             exposure: 1.0,
             tonemap: true,
+            curve: ToneCurve::Gt,
             peak: 1.0,
             encoding: OutputEncoding::LINEAR,
             load: LoadOp::DontCare,
@@ -335,6 +410,11 @@ impl Tonemap {
                         FLAG_PASS_THROUGH
                     } | encode
                         | if bloom.is_some() { FLAG_BLOOM } else { 0 }
+                        | if composite.curve == ToneCurve::PbrNeutral {
+                            FLAG_PBR_NEUTRAL
+                        } else {
+                            0
+                        }
                         | if auto_exposure.is_some() {
                             FLAG_AUTO_EXPOSURE
                         } else {
@@ -382,6 +462,36 @@ impl Tonemap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gt_keeps_mid_tones_and_rolls_off_smoothly_to_the_peak() {
+        for peak in [1.0f32, 2.5, 5.0, 12.5] {
+            // Mid-tones are kept, the same for every peak.
+            assert!((gt(0.5, peak) - 0.5).abs() < 1e-6, "{peak}");
+            // Monotonic, below the peak, reaching it far above.
+            let mut last = 0.0;
+            for k in 0..20_000 {
+                let x = k as f32 * 0.005;
+                let y = gt(x, peak);
+                assert!(y >= last - 1e-6 && y <= peak + 1e-6, "{peak} {x} {y}");
+                last = y;
+            }
+            assert!(gt(1000.0, peak) > peak * 0.999);
+            // Continuous in value and slope where the shoulder starts.
+            let s0 = 0.22 + (peak - 0.22) * 0.4;
+            let e = 1e-3;
+            assert!((gt(s0 - e, peak) - gt(s0 + e, peak)).abs() < 3e-3);
+            let slope = (gt(s0 + 2.0 * e, peak) - gt(s0 + e, peak)) / e;
+            assert!((slope - 1.0).abs() < 0.01, "{peak}: {slope}");
+        }
+        // The toe darkens the darks a little, black stays black.
+        assert_eq!(gt(0.0, 1.0), 0.0);
+        assert!(gt(0.05, 1.0) < 0.05);
+        // Bright colors whiten: the ratio of channels shrinks towards the peak.
+        let dim = ToneCurve::Gt.apply([0.4, 0.2, 0.1], 1.0);
+        let bright = ToneCurve::Gt.apply([40.0, 20.0, 10.0], 1.0);
+        assert!(bright[2] / bright[0] > dim[2] / dim[0]);
+    }
 
     #[test]
     fn pq_matches_known_levels() {
