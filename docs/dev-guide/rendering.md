@@ -393,3 +393,47 @@ What it costs (ref-1, 1080p; `scene_bench -- --cascades N --shadow-res R`, `draw
   sits in every cascade.
 - **On integrated GPUs, start with 2 cascades.** Most of the sharpness is in the first
   ones.
+
+## 9. Point and spot lights
+
+Any number of local lights (ADR 0045), up to 65,535 per view:
+
+```rust
+use engine_render::forward::{LocalLight, Spot};
+
+let lights = [
+    // A lamp: color × intensity, and the distance where its light ends.
+    LocalLight { position: Vec3::new(2.0, 3.0, -4.0), range: 8.0,
+                 color: Vec3::new(1.0, 0.8, 0.6) * 20.0, spot: None },
+    // A spot pointing down, full between 0.3 rad of its axis, fading out by 0.5.
+    LocalLight { position: Vec3::new(0.0, 5.0, 0.0), range: 12.0, color: Vec3::splat(40.0),
+                 spot: Some(Spot { direction: Vec3::NEG_Y, inner: 0.3, outer: 0.5 }) },
+];
+let view = ForwardView { lights: &lights, ..view };
+```
+
+- **`range` is the knob that matters for speed.** A light costs only the pixels within
+  its range. Its falloff is inverse-square, windowed to reach zero exactly there. Set it
+  to where the light stops mattering, not larger.
+- **Nothing to do per frame.** The renderer culls lights outside the view, sorts the
+  rest by depth, and has each pixel shade only the lights in both its screen tile and its
+  depth slice.
+- **A frame without lights costs nothing extra:** the shaders are compiled without the
+  light loop then.
+- **Debugging:** `renderer.set_light_culling(false)` makes every pixel evaluate every
+  light that reaches the view (the reference; slow).
+- **Not yet:** shadows of local lights, and physical light units.
+
+What it costs (ref-1, Sponza at 1080p, lights spread over the scene with ranges of 3–8%
+of its size; `scene_bench -- --lights N`):
+
+| lights | RTX 4060 Ti forward | Radeon iGPU forward |
+|---:|---:|---:|
+| 0 | 0.32 ms | 7.7 ms |
+| 256 | 0.47 ms | 14.1 ms |
+| 1,024 | 0.85 ms | 25.9 ms |
+| 4,096 | 2.45 ms | 72.6 ms |
+
+- **The CPU pays about 55 ns per light** (culling, sorting, binning).
+- **The GPU pays most for the lights that actually overlap each pixel.** Many small
+  lights are cheaper than a few huge ones.

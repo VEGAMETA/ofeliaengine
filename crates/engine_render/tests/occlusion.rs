@@ -252,6 +252,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
                         clear: Some([0.0, 0.0, 0.25, 1.0]),
                         occlusion,
                         temporal: None,
+                        lights: &[],
                     },
                 )
                 .unwrap();

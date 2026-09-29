@@ -47,6 +47,9 @@ use crate::graph::{
     ShaderStages, StoreOp, Texture, TextureDesc,
 };
 use crate::hiz::{self, DepthPyramid, PyramidLayout};
+use crate::lights::{
+    LightData, LightLayout, ViewAxis, Z_BINS, cull_lights, write_bins, write_lights, write_rects,
+};
 use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::shadow::{self, CascadeFit, MAX_CASCADES};
@@ -71,12 +74,14 @@ const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmen
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
 
+pub use crate::lights::{LocalLight, Spot};
 pub use crate::shadow::ShadowSettings;
 
 /// Format of the motion vector target (ADR 0043).
 pub const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 const DEPTH_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.depthVertexMasked.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
+const LIGHT_TILES: &[u8] = include_bytes!("../shaders/forward.lightTiles.spv");
 
 /// Threads per workgroup of `cullMain`.
 const CULL_GROUP: u32 = 64;
@@ -151,6 +156,9 @@ pub struct ForwardView<'a> {
     /// This view's temporal state, for a jittered projection and motion vectors (TAA,
     /// upscalers, motion blur), or `None`.
     pub temporal: Option<&'a Temporal>,
+    /// Point and spot lights (ADR 0045). Only those reaching the view are shaded, each by
+    /// the pixels it can reach.
+    pub lights: &'a [LocalLight],
 }
 
 /// Temporal state of one view, kept across frames (ADR 0043): last frame's camera and
@@ -370,7 +378,7 @@ struct CascadeData {
     bounds: [f32; 4],
 }
 
-/// `Frame` in `forward.slang` (832 bytes).
+/// `Frame` in `forward.slang` (896 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -400,6 +408,15 @@ struct FrameData {
     normal_bias: f32,
     fade_last: u32,
     _pad3: [u32; 3],
+    view_axis: [f32; 4],
+    lights: u64,
+    zbins: u64,
+    light_count: u32,
+    light_words: u32,
+    tiles_x: u32,
+    bin_scale: f32,
+    light_culling: u32,
+    _pad4: [u32; 3],
 }
 
 /// `Instance` in `forward.slang` (64 bytes).
@@ -422,7 +439,7 @@ struct BatchData {
     extents: [f32; 4],
 }
 
-/// `Push` in `forward.slang` (104 bytes).
+/// `Push` in `forward.slang` (112 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct Push {
@@ -437,6 +454,7 @@ struct Push {
     attributes: u64,
     materials: u64,
     previous_instances: u64,
+    light_tiles: u64,
     instance_count: u32,
     texture: u32,
     phase: u32,
@@ -444,10 +462,10 @@ struct Push {
 }
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 832);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 896);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 48);
-const _: () = assert!(core::mem::size_of::<Push>() == 104);
+const _: () = assert!(core::mem::size_of::<Push>() == 112);
 const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 const _: () = assert!(COMMAND_BYTES == 20);
 
@@ -491,30 +509,42 @@ struct Scratch {
     runs: Vec<Run>,
     /// Sort keys of the runs: state, then distance from the camera, then run index.
     keys: Vec<(u64, u32)>,
+    lights: crate::lights::LightScratch,
 }
 
-/// The forward PBR pipelines.
+/// The shading pipelines, compiled with or without local lights.
 #[derive(Debug)]
-pub struct ForwardRenderer {
+struct Shading {
     /// Forward shading: opaque, masked.
     main: [Pipeline; 2],
     /// Forward shading after the depth prepass: depth tested for equality, not written;
     /// no alpha test (the prepass did it).
     shade: Pipeline,
-    /// Depth prepass: opaque (depth only), masked.
-    prepass: [Pipeline; 2],
     /// Forward shading that also writes motion vectors: opaque, masked, and after the
     /// prepass.
     main_motion: [Pipeline; 2],
     shade_motion: Pipeline,
+}
+
+/// The forward PBR pipelines.
+#[derive(Debug)]
+pub struct ForwardRenderer {
+    /// Shading without local lights, and with them (`LOCAL_LIGHTS` in `forward.slang`, a
+    /// specialization constant: the light loop takes no registers where there are none).
+    shading: [Shading; 2],
+    /// Depth prepass: opaque (depth only), masked.
+    prepass: [Pipeline; 2],
     /// Camera motion where no geometry was drawn.
     background: Pipeline,
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
     cull: Pipeline,
+    /// The tiles' light bitmasks.
+    light_tiles: Pipeline,
     pyramid: DepthPyramid,
     shadow_settings: ShadowSettings,
     frustum_culling: bool,
+    light_culling: bool,
     depth_prepass: bool,
     scratch: RefCell<Scratch>,
 }
@@ -558,11 +588,12 @@ impl ForwardRenderer {
         let formats = [color_format];
         let motion_formats = [color_format, MOTION_FORMAT];
         // Cull mode and front face come with each batch's pipeline state.
-        let main = |fragment: &[u32], entry, formats: &[vk::Format], equal: bool| {
+        let main = |fragment: &[u32], entry, formats: &[vk::Format], equal: bool, lit: bool| {
             Pipeline::graphics(
                 device,
                 bindless.pipeline_layout(),
                 &GraphicsPipelineDesc {
+                    specialization: if lit { &[1] } else { &[0] },
                     color_formats: formats,
                     depth_format,
                     dynamic_culling: true,
@@ -610,31 +641,39 @@ impl ForwardRenderer {
                 vk::PipelineCache::null(),
             )
         };
-        let main_motion = [
-            main(
-                &fragment_motion,
-                c"fragmentMainMotion",
-                &motion_formats,
-                false,
-            )?,
-            main(
-                &fragment_masked_motion,
-                c"fragmentMaskedMotion",
-                &motion_formats,
-                false,
-            )?,
-        ];
-        let shade_motion = main(
-            &fragment_motion,
-            c"fragmentMainMotion",
-            &motion_formats,
-            true,
-        )?;
-        let shade = main(&fragment, c"fragmentMain", &formats, true)?;
-        let main = [
-            main(&fragment, c"fragmentMain", &formats, false)?,
-            main(&fragment_masked, c"fragmentMasked", &formats, false)?,
-        ];
+        let shading = |lit: bool| -> Result<Shading, RhiError> {
+            Ok(Shading {
+                main: [
+                    main(&fragment, c"fragmentMain", &formats, false, lit)?,
+                    main(&fragment_masked, c"fragmentMasked", &formats, false, lit)?,
+                ],
+                shade: main(&fragment, c"fragmentMain", &formats, true, lit)?,
+                main_motion: [
+                    main(
+                        &fragment_motion,
+                        c"fragmentMainMotion",
+                        &motion_formats,
+                        false,
+                        lit,
+                    )?,
+                    main(
+                        &fragment_masked_motion,
+                        c"fragmentMaskedMotion",
+                        &motion_formats,
+                        false,
+                        lit,
+                    )?,
+                ],
+                shade_motion: main(
+                    &fragment_motion,
+                    c"fragmentMainMotion",
+                    &motion_formats,
+                    true,
+                    lit,
+                )?,
+            })
+        };
+        let shading = [shading(false)?, shading(true)?];
         let background_formats = [MOTION_FORMAT];
         let background = Pipeline::graphics(
             device,
@@ -711,17 +750,16 @@ impl ForwardRenderer {
             )
         };
         Ok(Self {
-            main,
-            shade,
+            shading,
             prepass,
-            main_motion,
-            shade_motion,
             background,
             shadow,
             cull: compute(CULL, c"cullMain")?,
+            light_tiles: compute(LIGHT_TILES, c"lightTiles")?,
             pyramid: DepthPyramid::new(device, bindless)?,
             shadow_settings,
             frustum_culling: true,
+            light_culling: true,
             depth_prepass: false,
             scratch: RefCell::new(Scratch::default()),
         })
@@ -753,6 +791,12 @@ impl ForwardRenderer {
     /// Whether the depth prepass is on.
     pub fn depth_prepass(&self) -> bool {
         self.depth_prepass
+    }
+
+    /// Turns light culling on (the default) or off. Off, every pixel evaluates every light
+    /// that reaches the view: the reference for tests and comparisons (ADR 0045).
+    pub fn set_light_culling(&mut self, enabled: bool) {
+        self.light_culling = enabled;
     }
 
     /// Declares the culling, shadow and forward passes for `draws` into the view's
@@ -826,7 +870,9 @@ impl ForwardRenderer {
         }
         let instance_count = draws.len() as u32;
         let mut scratch = self.scratch.borrow_mut();
-        let Scratch { slots, runs, keys } = &mut *scratch;
+        let Scratch {
+            slots, runs, keys, ..
+        } = &mut *scratch;
         // Batches in draw order, counted per pipeline state, then ordered by state and,
         // within a state, front to back (by the first instance's box), so the depth test
         // rejects hidden fragments before shading.
@@ -959,6 +1005,35 @@ impl ForwardRenderer {
             .and_then(|t| t.previous_clip_from_world.get())
             .unwrap_or(unjittered);
         let previous_count = temporal.map_or(0, |t| t.previous_count.get());
+        // Local lights: culled, sorted and binned on the CPU (ADR 0045).
+        let axis = ViewAxis::new(unjittered);
+        let (light_layout, uploaded) = {
+            let mut scratch = self.scratch.borrow_mut();
+            let scratch = &mut scratch.lights;
+            let layout = match axis {
+                Some(axis) if !view.lights.is_empty() => cull_lights(
+                    view.lights,
+                    unjittered,
+                    axis,
+                    [depth_desc.width, depth_desc.height],
+                    scratch,
+                ),
+                _ => LightLayout::EMPTY,
+            };
+            let uploaded = if layout.count > 0 {
+                let n = layout.count as usize;
+                let (out, lights) = ring.alloc::<LightData>(n)?;
+                write_lights(view.lights, scratch, out);
+                let (out, rects) = ring.alloc::<[u32; 2]>(n)?;
+                write_rects(scratch, out);
+                let (out, bins) = ring.alloc::<u32>(Z_BINS)?;
+                write_bins(view.lights, &layout, scratch, out);
+                Some((lights.address, rects.address, bins.address))
+            } else {
+                None
+            };
+            (layout, uploaded)
+        };
         let settings = &self.shadow_settings;
         let fit = shadow::fit_cascades(
             unjittered,
@@ -1000,6 +1075,17 @@ impl ForwardRenderer {
             normal_bias: settings.normal_bias,
             fade_last: u32::from(fit.fade),
             _pad3: [0; 3],
+            view_axis: axis.map_or([0.0; 4], |a| {
+                a.forward.extend(-a.forward.dot(a.near_center)).to_array()
+            }),
+            lights: uploaded.map_or(0, |u| u.0),
+            zbins: uploaded.map_or(0, |u| u.2),
+            light_count: light_layout.count,
+            light_words: light_layout.words,
+            tiles_x: light_layout.tiles[0],
+            bin_scale: light_layout.bin_scale,
+            light_culling: u32::from(self.light_culling),
+            _pad4: [0; 3],
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -1014,6 +1100,7 @@ impl ForwardRenderer {
             attributes: geometry.attribute_address(),
             materials: materials.address(),
             previous_instances: temporal.map_or(0, |t| t.address),
+            light_tiles: 0,
             instance_count,
             texture: 0,
             phase: PHASE_ALL,
@@ -1224,22 +1311,66 @@ impl ForwardRenderer {
             t.state.set(COPIED);
             buffer
         });
+        // The tiles' light bitmasks, from the lights' rectangles.
+        let light_tiles = match uploaded {
+            Some((_, rects, _)) if self.light_culling => {
+                let words = light_layout.mask_words();
+                let lights = light_layout.count;
+                let buffer = fg.create_buffer("light tiles", BufferDesc { size: words * 4 });
+                fg.add_pass("light tiles clear")
+                    .write(buffer, Access::TransferWrite)
+                    .execute(move |ctx| {
+                        // SAFETY: recording outside a rendering scope.
+                        unsafe {
+                            ctx.device.cmd_fill_buffer(
+                                ctx.cmd,
+                                ctx.buffer(buffer),
+                                0,
+                                vk::WHOLE_SIZE,
+                                0,
+                            );
+                        }
+                    });
+                let pipeline = &self.light_tiles;
+                fg.add_pass("light tiles")
+                    .read(buffer, Access::StorageReadWrite(ShaderStages::COMPUTE))
+                    .execute(move |ctx| {
+                        let push = Push {
+                            visible: rects,
+                            light_tiles: ctx.address(buffer),
+                            ..base
+                        };
+                        // SAFETY: recording outside a rendering scope; the rectangles are in
+                        // the ring; one group per light.
+                        unsafe {
+                            pipeline.bind(ctx.cmd);
+                            bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
+                            bindless.push_constants(ctx.cmd, push_bytes(&push));
+                            ctx.device.cmd_dispatch(ctx.cmd, lights, 1, 1);
+                        }
+                    });
+                Some(buffer)
+            }
+            _ => None,
+        };
         let targets = Targets {
             color,
             color_load: load,
             velocity,
             previous,
+            light_tiles,
         };
 
         let prepass = self.depth_prepass;
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
+        let shading = &self.shading[usize::from(light_layout.count > 0)];
         let main_pipelines = match (prepass, velocity.is_some()) {
-            (true, false) => [&self.shade, &self.shade],
-            (true, true) => [&self.shade_motion, &self.shade_motion],
-            (false, false) => [&self.main[0], &self.main[1]],
-            (false, true) => [&self.main_motion[0], &self.main_motion[1]],
+            (true, false) => [&shading.shade, &shading.shade],
+            (true, true) => [&shading.shade_motion, &shading.shade_motion],
+            (false, false) => [&shading.main[0], &shading.main[1]],
+            (false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
         };
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
@@ -1247,6 +1378,7 @@ impl ForwardRenderer {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
+                light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
@@ -1468,6 +1600,8 @@ struct Targets {
     velocity: Option<Texture>,
     /// Last frame's instances, read by the vertex shader for motion vectors.
     previous: Option<Buffer>,
+    /// The tiles' light bitmasks, with light culling.
+    light_tiles: Option<Buffer>,
 }
 
 /// How a shading pass uses the depth target.
@@ -1514,6 +1648,9 @@ fn shading_pass<'a, 'g>(
     }
     if let Some(previous) = targets.previous {
         pass = pass.read(previous, Access::StorageRead(ShaderStages::VERTEX));
+    }
+    if let Some(tiles) = targets.light_tiles {
+        pass = pass.read(tiles, Access::StorageRead(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),

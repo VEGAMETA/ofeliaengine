@@ -586,6 +586,7 @@ mod windowed {
                         clear: Some([0.02, 0.02, 0.05, 1.0]),
                         occlusion: None,
                         temporal: None,
+                        lights: &[],
                     },
                 );
                 tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);

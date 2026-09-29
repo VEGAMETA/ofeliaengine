@@ -56,7 +56,7 @@ team".
 | `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings, directory watching |
 | `crates/engine_profiler` | Profiling instrumentation (Tracy zones, plots, frames) |
 | `crates/engine_rhi` | Vulkan 1.3 layer: instance, adapter selection, device, queues, swapchain, frames in flight, memory allocator (TLSF) |
-| `crates/engine_render` | Render graph (culling, transient memory aliasing, automatic barriers, GPU timings), forward PBR with cascaded shadow maps, motion vectors and projection jitter, per-frame upload ring, textures, viewports (split screen, nesting, pixel-perfect); example `cubes` |
+| `crates/engine_render` | Render graph (culling, transient memory aliasing, automatic barriers, GPU timings), forward PBR with cascaded shadow maps and z-binned point and spot lights, motion vectors and projection jitter, per-frame upload ring, textures, viewports (split screen, nesting, pixel-perfect); example `cubes` |
 | `crates/engine_upscale` | Temporal antialiasing and upsampling (TAAU, ADR 0043): resolves the forward renderer's jittered frames along their motion vectors; example `taau_bench` |
 | `crates/engine_render2d` | 2D renderer: sprites and SDF shapes batched through bindless textures, deterministic layer / y-sort order, clipping; examples `sprites`, `sprite_bench`, `viewports` |
 | `crates/engine_script` | Luau scripting: sandboxed VM with native codegen, module hot reload with state, time and memory limits (ADR 0032) |

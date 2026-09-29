@@ -14,7 +14,8 @@
 //! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--prepass` for the depth prepass,
 //! `--motion` for a jittered projection and motion vectors (ADR 0043), `--cascades <1-4>`
 //! `--shadow-res <texels per cascade>` and `--shadow-blend <band>` for the shadows
-//! (ADR 0044), `--ddc <dir>`
+//! (ADR 0044), `--lights <count>` for point and spot lights spread over the scene and
+//! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -26,7 +27,8 @@ use engine_assets::{
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
+    Spot, Temporal,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
@@ -192,6 +194,8 @@ fn main() {
     let mut prepass = false;
     let mut motion = false;
     let mut shadows = ShadowSettings::default();
+    let mut light_count = 0usize;
+    let mut light_culling = true;
     let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -200,6 +204,8 @@ fn main() {
             "--uncompressed" => uncompressed = true,
             "--prepass" => prepass = true,
             "--motion" => motion = true,
+            "--lights" => light_count = args.next().unwrap().parse().unwrap(),
+            "--no-light-culling" => light_culling = false,
             "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
             "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
             "--shadow-blend" => shadows.blend = args.next().unwrap().parse().unwrap(),
@@ -400,6 +406,32 @@ fn main() {
     }
     draws.sort_by_key(|d| format!("{:?}", d.mesh));
     let (eye, target) = view(min, max, requested_view);
+    // Lights spread over the scene's box (a fixed sequence): every fourth a spot pointing
+    // down, ranges a few percent of the scene's size.
+    let size_of_scene = (max - min).length();
+    let mut seed = 0x9E37_79B9u32;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed >> 8) as f32 / (1 << 24) as f32
+    };
+    let lights: Vec<LocalLight> = (0..light_count)
+        .map(|k| {
+            let t = Vec3::new(next(), next(), next());
+            let range = size_of_scene * (0.03 + 0.05 * next());
+            LocalLight {
+                position: min + (max - min) * t,
+                range,
+                color: Vec3::new(0.3 + next(), 0.3 + next(), 0.3 + next()) * range * range * 0.5,
+                spot: (k % 4 == 0).then_some(Spot {
+                    direction: Vec3::NEG_Y,
+                    inner: 0.4,
+                    outer: 0.7,
+                }),
+            }
+        })
+        .collect();
     let size = max - min;
     let camera = Camera {
         clip_from_world: vulkan_perspective(
@@ -469,6 +501,7 @@ fn main() {
     );
     println!();
     renderer.set_depth_prepass(prepass);
+    renderer.set_light_culling(light_culling);
     // Motion vectors: the forward pass writes them, a pass fills the background with the
     // camera's motion, and the instances are copied for the next frame.
     let temporal = motion.then(|| {
@@ -476,10 +509,18 @@ fn main() {
         temporal.set_jitter_phases(8);
         temporal
     });
+    if light_count > 0 {
+        println!(
+            "Lights: {light_count} ({} culling)",
+            if light_culling { "with" } else { "without" }
+        );
+        println!();
+    }
     println!(
-        "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs |          GPU motion background + remember instances µs |"
+        "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs | \
+         GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs |"
     );
-    println!("|---|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -488,6 +529,7 @@ fn main() {
         }
         let (mut shadow, mut depth_prepass, mut forward) = (Vec::new(), Vec::new(), Vec::new());
         let mut motion_extra = Vec::new();
+        let (mut light_tiles, mut cpu_add) = (Vec::new(), Vec::new());
         let mut upload_frames = 0;
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
@@ -507,6 +549,7 @@ fn main() {
                 .unwrap();
             }
             ring.begin_slot(0);
+            let added;
             {
                 // SAFETY: nothing is in flight.
                 let mut fg = unsafe { graph.begin_slot(0, cmd) };
@@ -523,6 +566,7 @@ fn main() {
                 let hdr = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
                 let depth =
                     fg.create_texture("depth", TextureDesc::new_2d(depth_format, WIDTH, HEIGHT));
+                let started = Instant::now();
                 renderer
                     .add_passes(
                         &mut fg,
@@ -539,9 +583,11 @@ fn main() {
                             clear: Some([0.02, 0.02, 0.05, 1.0]),
                             occlusion: None,
                             temporal: temporal.as_ref(),
+                            lights: &lights,
                         },
                     )
                     .unwrap();
+                added = started.elapsed();
                 if capture {
                     let ldr = fg.create_texture(
                         "screenshot",
@@ -615,6 +661,7 @@ fn main() {
             if frame > WARMUP && !capture {
                 let mut extra = 0.0;
                 let mut shadow_frame = 0.0;
+                let mut tiles_frame = 0.0;
                 for time in graph.gpu_pass_times() {
                     match time.name {
                         "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
@@ -623,11 +670,16 @@ fn main() {
                         "motion background" | "remember instances" => {
                             extra += f64::from(time.gpu_us);
                         }
+                        "light tiles clear" | "light tiles" => {
+                            tiles_frame += f64::from(time.gpu_us);
+                        }
                         _ => {}
                     }
                 }
                 motion_extra.push(extra);
                 shadow.push(shadow_frame);
+                light_tiles.push(tiles_frame);
+                cpu_add.push(added.as_secs_f64() * 1e6);
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
@@ -640,11 +692,13 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
             median(&mut motion_extra),
+            median(&mut light_tiles),
+            median(&mut cpu_add),
         );
     }
     println!();
