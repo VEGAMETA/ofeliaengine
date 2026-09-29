@@ -14,6 +14,8 @@
 
 static const uint FLAG_PASS_THROUGH = 1; // exposure only, no tone mapping (LDR sources)
 static const uint FLAG_ENCODE_PQ = 2;    // HDR10 output: BT.2020 primaries, PQ encoding
+static const uint FLAG_BLOOM = 4;        // mix in `bloom` (postfx.slang) by its intensity
+static const uint FLAG_AUTO_EXPOSURE = 8; // multiply by the measured exposure
 
 struct Push
 {
@@ -23,6 +25,9 @@ struct Push
     uint flags;
     float peak;     // brightest tone-mapped value, in units of reference white (1: SDR)
     float white;    // output value of reference white: linear, or nits / 10000 for PQ
+    uint bloom;     // bindless index of the bloom (half size), with FLAG_BLOOM
+    float bloom_intensity; // how much of the image the bloom replaces
+    float4* auto_exposure; // x: the measured exposure, with FLAG_AUTO_EXPOSURE
 };
 
 [[vk::push_constant]]
@@ -86,8 +91,18 @@ float3 pq_encode(float3 y)
 [shader("fragment")]
 float4 fragmentMain(VertexOut input) : SV_Target
 {
-    float3 color = g_textures[NonUniformResourceIndex(push.source)]
-        .SampleLevel(g_samplers[push.sampler], input.uv, 0).rgb * push.exposure;
+    SamplerState s = g_samplers[push.sampler];
+    float3 color = g_textures[NonUniformResourceIndex(push.source)].SampleLevel(s, input.uv, 0).rgb;
+    // Bloom replaces its share of the image: energy is kept.
+    if ((push.flags & FLAG_BLOOM) != 0)
+    {
+        float3 bloom = g_textures[NonUniformResourceIndex(push.bloom)].SampleLevel(s, input.uv, 0).rgb;
+        color = lerp(color, bloom, push.bloom_intensity);
+    }
+    float exposure = push.exposure;
+    if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
+        exposure *= push.auto_exposure[0].x;
+    color *= exposure;
     if ((push.flags & FLAG_PASS_THROUGH) == 0)
         color = pbr_neutral(color, push.peak);
     color *= push.white;
