@@ -8,7 +8,8 @@
 //! Culling modes: off, frustum, and frustum + two-phase occlusion (in steady state: the
 //! occlusion state carries over the warm-up frames).
 //!
-//! `cargo run -p engine_render --release --example draw_bench [max-instances] [--prepass]`
+//! `cargo run -p engine_render --release --example draw_bench [max-instances] [--prepass]
+//! [--cascades <1-4>] [--shadow-res <texels per cascade>]`
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -151,9 +152,18 @@ fn median(values: &mut [f64]) -> f64 {
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let max_instances: usize = args.iter().find_map(|s| s.parse().ok()).unwrap_or(100_000);
-    let prepass = args.iter().any(|a| a == "--prepass");
+    let mut max_instances: usize = 100_000;
+    let mut prepass = false;
+    let mut shadows = ShadowSettings::default();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--prepass" => prepass = true,
+            "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
+            "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
+            n => max_instances = n.parse().unwrap(),
+        }
+    }
     let instance = Instance::new(&InstanceDesc {
         app_name: String::from("draw_bench"),
         validation: false,
@@ -170,14 +180,8 @@ fn main() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let depth_format = vk::Format::D32_SFLOAT;
-    let mut renderer = ForwardRenderer::new(
-        &device,
-        &bindless,
-        HDR_FORMAT,
-        depth_format,
-        ShadowSettings::default(),
-    )
-    .unwrap();
+    let mut renderer =
+        ForwardRenderer::new(&device, &bindless, HDR_FORMAT, depth_format, shadows).unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
@@ -233,7 +237,11 @@ fn main() {
         ambient: Vec3::splat(0.08),
     };
 
-    println!("### Forward renderer, GPU-driven ({WIDTH}×{HEIGHT} HDR, shadow map 2048²)\n");
+    println!(
+        "### Forward renderer, GPU-driven ({WIDTH}×{HEIGHT} HDR, {} shadow cascades of {}²)\n",
+        shadows.cascade_count(),
+        shadows.resolution
+    );
     println!("Device: {}\n", device.adapter().summary());
     println!(
         "| instances | view | culling | drawn | draw list µs | add_passes µs | graph µs | GPU cull µs | GPU pyramid µs | GPU shadow µs | GPU prepass µs | GPU forward µs |"
@@ -396,7 +404,7 @@ fn main() {
                         match time.name {
                             "cull" | "cull early" | "cull late" => c += us,
                             "hiz" => p += us,
-                            "shadow" => s += us,
+                            "shadow cull" | "shadow" => s += us,
                             "depth prepass" | "depth prepass early" | "depth prepass late" => {
                                 d += us
                             }
