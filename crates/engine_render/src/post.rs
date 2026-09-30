@@ -41,6 +41,8 @@ const FLAG_ENCODE_PQ: u32 = 2;
 const FLAG_BLOOM: u32 = 4;
 const FLAG_AUTO_EXPOSURE: u32 = 8;
 const FLAG_PBR_NEUTRAL: u32 = 16;
+const FLAG_AGX: u32 = 32;
+const FLAG_ACES: u32 = 64;
 
 /// The tone curve: how scene values map to what the display shows (ADR 0048).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -55,6 +57,91 @@ pub enum ToneCurve {
     /// Khronos PBR Neutral: hue-preserving, made for product visualization (the colors of
     /// materials under neutral light, not a filmic look).
     PbrNeutral,
+    /// AgX (Troy Sobotka; Blender 4's default): a log encoding and a sigmoid in a gently
+    /// inset gamut, so very bright saturated colors go to white along their hue instead of
+    /// turning yellow or cyan per channel. Soft, low contrast. SDR only: on HDR outputs
+    /// it maps to reference white and leaves the extra range unused.
+    Agx,
+    /// Stephen Hill's fit of ACES 1.0 (RRT + sRGB ODT), as in MJP's Baking Lab: the
+    /// familiar film look of many games, contrasty, with saturated highlights that shift
+    /// hue. Mid-grey comes out darker (0.18 → 0.11: about +0.7 EV of exposure matches the
+    /// other curves). SDR only, like [`Self::Agx`].
+    Aces,
+}
+
+/// `m · v` for a row-major 3 × 3 matrix.
+fn mat3(m: &[[f32; 3]; 3], [r, g, b]: [f32; 3]) -> [f32; 3] {
+    m.map(|row| row[0] * r + row[1] * g + row[2] * b)
+}
+
+/// AgX's inset matrix (Blender's, for Rec.2020 primaries) applied after BT.709 → BT.2020,
+/// folded into one matrix; row-major, as `tonemap.slang`.
+const AGX_IN: [[f32; 3]; 3] = [
+    [0.544_814_8, 0.373_786_5, 0.081_398_2],
+    [0.140_416_76, 0.754_137_1, 0.105_444_7],
+    [0.088_810_54, 0.178_871_52, 0.732_317_6],
+];
+/// AgX's outset matrix (the inverse of Blender's `AgXOutsetMatrixInv`), in Rec.2020.
+const AGX_OUT: [[f32; 3]; 3] = [
+    [1.127_100_6, -0.110_606_64, -0.016_493_939],
+    [-0.141_329_76, 1.157_823_7, -0.016_493_939],
+    [-0.141_329_76, -0.110_606_64, 1.251_936_4],
+];
+/// BT.2020 → BT.709 primaries, both linear (the inverse of ITU-R BT.2087's matrix).
+const BT709_FROM_BT2020: [[f32; 3]; 3] = [
+    [1.660_490_3, -0.587_639_1, -0.072_851_6],
+    [-0.124_549_97, 1.132_899_9, -0.008_347_964],
+    [-0.018_151_12, -0.100_578_72, 1.118_73],
+];
+/// AgX's log range: log2(0.18 · 2^−10) .. log2(0.18 · 2^6.5).
+const AGX_MIN_EV: f32 = -12.473_93;
+const AGX_MAX_EV: f32 = 4.026_069;
+
+/// AgX's default contrast sigmoid, a polynomial fit on the log-encoded value 0..1
+/// (Wrensch's minimal AgX, Rec.2020 coefficients as in Filament).
+fn agx_sigmoid(x: f32) -> f32 {
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    let x6 = x4 * x2;
+    -17.86 * x6 * x + 78.01 * x6 - 126.7 * x4 * x + 92.06 * x4 - 28.72 * x2 * x + 4.361 * x2
+        - 0.1718 * x
+        + 0.002_857
+}
+
+/// AgX on a linear BT.709 color (as `tonemap.slang`).
+fn agx(rgb: [f32; 3]) -> [f32; 3] {
+    let v = mat3(&AGX_IN, rgb.map(|c| c.max(0.0)));
+    let v = v.map(|c| {
+        let t = (c.max(1e-10).log2() - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+        agx_sigmoid(t.clamp(0.0, 1.0))
+    });
+    let v = mat3(&AGX_OUT, v).map(|c| c.max(0.0).powf(2.2));
+    // Colors AgX leaves outside BT.709 (it works in Rec.2020) are clipped to the display.
+    mat3(&BT709_FROM_BT2020, v).map(|c| c.clamp(0.0, 1.0))
+}
+
+/// Linear sRGB → XYZ → D65 to D60 → AP1 → RRT saturation (Hill's fit of ACES 1.0).
+const ACES_IN: [[f32; 3]; 3] = [
+    [0.597_19, 0.354_58, 0.048_23],
+    [0.076_00, 0.908_34, 0.015_66],
+    [0.028_40, 0.133_83, 0.837_77],
+];
+/// ODT saturation → XYZ → D60 to D65 → linear sRGB.
+const ACES_OUT: [[f32; 3]; 3] = [
+    [1.604_75, -0.531_08, -0.073_67],
+    [-0.102_08, 1.108_13, -0.006_05],
+    [-0.003_27, -0.072_76, 1.076_02],
+];
+
+/// Hill's ACES fit on a linear BT.709 color (as `tonemap.slang`).
+fn aces(rgb: [f32; 3]) -> [f32; 3] {
+    let v = mat3(&ACES_IN, rgb.map(|c| c.max(0.0)));
+    let v = v.map(|c| {
+        let a = c * (c + 0.024_578_6) - 0.000_090_537;
+        let b = c * (0.983_729 * c + 0.432_951) + 0.238_081;
+        a / b
+    });
+    mat3(&ACES_OUT, v).map(|c| c.clamp(0.0, 1.0))
 }
 
 /// Uchimura's curve with the published defaults (contrast 1, linear section from 0.22 over
@@ -109,6 +196,8 @@ impl ToneCurve {
         match self {
             Self::Gt => rgb.map(|c| gt(c.max(0.0), peak)),
             Self::PbrNeutral => pbr_neutral(rgb, peak),
+            Self::Agx => agx(rgb),
+            Self::Aces => aces(rgb),
         }
     }
 }
@@ -410,10 +499,11 @@ impl Tonemap {
                         FLAG_PASS_THROUGH
                     } | encode
                         | if bloom.is_some() { FLAG_BLOOM } else { 0 }
-                        | if composite.curve == ToneCurve::PbrNeutral {
-                            FLAG_PBR_NEUTRAL
-                        } else {
-                            0
+                        | match composite.curve {
+                            ToneCurve::Gt => 0,
+                            ToneCurve::PbrNeutral => FLAG_PBR_NEUTRAL,
+                            ToneCurve::Agx => FLAG_AGX,
+                            ToneCurve::Aces => FLAG_ACES,
                         }
                         | if auto_exposure.is_some() {
                             FLAG_AUTO_EXPOSURE
@@ -491,6 +581,38 @@ mod tests {
         let dim = ToneCurve::Gt.apply([0.4, 0.2, 0.1], 1.0);
         let bright = ToneCurve::Gt.apply([40.0, 20.0, 10.0], 1.0);
         assert!(bright[2] / bright[0] > dim[2] / dim[0]);
+    }
+
+    #[test]
+    fn agx_and_aces_are_neutral_monotonic_and_bounded() {
+        for curve in [ToneCurve::Agx, ToneCurve::Aces] {
+            let mut last = -1.0;
+            for k in 0..4_000 {
+                let x = (k as f32 * 0.005 - 12.0).exp2();
+                let [r, g, b] = curve.apply([x, x, x], 1.0);
+                // Grey stays grey, rises with the input, stays within the display.
+                assert!(
+                    (r - g).abs() < 2e-4 && (g - b).abs() < 2e-4,
+                    "{curve:?} {x}"
+                );
+                // AgX's sigmoid sums terms of about ±127 in f32: near white, where it is
+                // almost flat, rounding (~3e-5) exceeds a step's rise.
+                assert!(g >= last - 1e-4 && g <= 1.0 + 1e-6, "{curve:?} {x}: {g}");
+                last = g;
+            }
+            assert!(last > 0.95, "{curve:?} reaches white: {last}");
+            assert!(curve.apply([0.0; 3], 1.0)[1] < 1e-3, "{curve:?}: black");
+        }
+        // Mid-grey: AgX close to the others, ACES darker (documented on the variants).
+        let agx_grey = ToneCurve::Agx.apply([0.18; 3], 1.0)[1];
+        let aces_grey = ToneCurve::Aces.apply([0.18; 3], 1.0)[1];
+        assert!((0.12..0.25).contains(&agx_grey), "{agx_grey}");
+        assert!((0.09..0.13).contains(&aces_grey), "{aces_grey}");
+        // AgX takes a very bright saturated color towards white along its hue: the
+        // weakest channel catches up.
+        let dim = ToneCurve::Agx.apply([0.3, 0.05, 0.02], 1.0);
+        let bright = ToneCurve::Agx.apply([300.0, 50.0, 20.0], 1.0);
+        assert!(bright[2] / bright[0] > dim[2] / dim[0] * 2.0);
     }
 
     #[test]

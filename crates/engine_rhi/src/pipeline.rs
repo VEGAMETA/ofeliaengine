@@ -177,6 +177,19 @@ impl Drop for Modules<'_> {
     }
 }
 
+/// Map entries and data for specialization constants: `values[i]` is constant id `i`.
+fn specialization_parts(values: &[u32]) -> (Vec<vk::SpecializationMapEntry>, Vec<u8>) {
+    let entries = (0..values.len() as u32)
+        .map(|i| vk::SpecializationMapEntry {
+            constant_id: i,
+            offset: i * 4,
+            size: 4,
+        })
+        .collect();
+    let data = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    (entries, data)
+}
+
 impl Pipeline {
     /// Creates a graphics pipeline with `layout` (normally
     /// [`crate::Bindless::pipeline_layout`]).
@@ -192,18 +205,7 @@ impl Pipeline {
             device: d,
             list: [vk::ShaderModule::null(); 2],
         };
-        let entries: Vec<vk::SpecializationMapEntry> = (0..desc.specialization.len() as u32)
-            .map(|i| vk::SpecializationMapEntry {
-                constant_id: i,
-                offset: i * 4,
-                size: 4,
-            })
-            .collect();
-        let data: Vec<u8> = desc
-            .specialization
-            .iter()
-            .flat_map(|v| v.to_ne_bytes())
-            .collect();
+        let (entries, data) = specialization_parts(desc.specialization);
         let specialization = vk::SpecializationInfo::default()
             .map_entries(&entries)
             .data(&data);
@@ -399,6 +401,18 @@ impl Pipeline {
         stage: ShaderStageDesc<'_>,
         cache: vk::PipelineCache,
     ) -> Result<Self, RhiError> {
+        Self::compute_specialized(device, layout, stage, &[], cache)
+    }
+
+    /// Like [`Self::compute`], with specialization constants: `specialization[i]` is
+    /// constant id `i` (32-bit values), as in [`GraphicsPipelineDesc::specialization`].
+    pub fn compute_specialized(
+        device: &Device,
+        layout: vk::PipelineLayout,
+        stage: ShaderStageDesc<'_>,
+        specialization: &[u32],
+        cache: vk::PipelineCache,
+    ) -> Result<Self, RhiError> {
         engine_profiler::zone!("rhi::Pipeline::compute");
         let d = device.raw();
         let mut modules = Modules {
@@ -406,13 +420,19 @@ impl Pipeline {
             list: [vk::ShaderModule::null(); 2],
         };
         let module = modules.create(0, stage.spirv)?;
+        let (entries, data) = specialization_parts(specialization);
+        let specialization = vk::SpecializationInfo::default()
+            .map_entries(&entries)
+            .data(&data);
+        let mut stage_info = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(module)
+            .name(stage.entry);
+        if !entries.is_empty() {
+            stage_info = stage_info.specialization_info(&specialization);
+        }
         let info = vk::ComputePipelineCreateInfo::default()
-            .stage(
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::COMPUTE)
-                    .module(module)
-                    .name(stage.entry),
-            )
+            .stage(stage_info)
             .layout(layout)
             .flags(statistics_flags(device));
         // SAFETY: as above.

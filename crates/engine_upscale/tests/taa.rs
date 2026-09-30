@@ -29,7 +29,7 @@ use engine_rhi::{
     AdapterPreference, Allocation, Allocator, Bindless, Device, Instance, InstanceDesc,
     MemoryLocation,
 };
-use engine_upscale::{Taau, TaauInput};
+use engine_upscale::{HistoryFilter, Taau, TaauInput};
 
 const HDR: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const DEPTH: vk::Format = vk::Format::D32_SFLOAT;
@@ -484,6 +484,25 @@ fn taa_converges_to_the_supersampled_image() {
     let panned_truth = reference(&mut gpu, x);
     let panned_plain = gpu.render(&draws, x, Mode::Plain(SIZE));
 
+    // The same pan with the Catmull-Rom history.
+    gpu.taau.set_history_filter(HistoryFilter::CatmullRom);
+    temporal.reset();
+    let mut sharp = Vec::new();
+    let mut x = 0.0;
+    for _ in 0..24 {
+        x += 0.02;
+        sharp = gpu.render(
+            &draws,
+            x,
+            Mode::Temporal {
+                render: SIZE,
+                output: SIZE,
+                temporal: &temporal,
+            },
+        );
+    }
+    gpu.taau.set_history_filter(HistoryFilter::default());
+
     let scores = [
         ("one sample per pixel", psnr(&plain, &truth)),
         ("TAA", psnr(&taa, &truth)),
@@ -491,6 +510,10 @@ fn taa_converges_to_the_supersampled_image() {
         ("TAAU from half resolution", psnr(&taau, &truth)),
         ("panning, one sample", psnr(&panned_plain, &panned_truth)),
         ("panning, TAA", psnr(&panned, &panned_truth)),
+        (
+            "panning, TAA, Catmull-Rom history",
+            psnr(&sharp, &panned_truth),
+        ),
     ];
     for (name, db) in scores {
         println!("{name}: {db:.2} dB against 4×4 supersampling");
@@ -507,6 +530,10 @@ fn taa_converges_to_the_supersampled_image() {
     assert!(
         scores[5].1 > scores[4].1 + 1.0,
         "TAA follows motion: {scores:?}"
+    );
+    assert!(
+        scores[6].1 > scores[5].1,
+        "the Catmull-Rom history is sharper in motion: {scores:?}"
     );
 
     let Gpu {
