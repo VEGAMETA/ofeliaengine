@@ -310,6 +310,7 @@ impl Scene {
                         depth,
                         clear: Some([0.0, 0.0, 0.0, 1.0]),
                         occlusion: None,
+                        temporal: None,
                     },
                 )
                 .unwrap();

@@ -278,3 +278,68 @@ Rules of thumb:
 - the forward pass then costs what is on screen;
 - the shadow pass costs every object in the scene: shadows are fitted to the whole
   scene until cascaded shadow maps arrive.
+
+## 7. Temporal antialiasing and upsampling (TAA / TAAU)
+
+Temporal antialiasing removes the aliasing of edges, alpha-tested foliage, highlights
+and shadow edges (ADR 0043):
+
+- every frame the camera is moved by a sub-pixel offset (jitter);
+- each pixel blends with where its surface was last frame, found through its motion
+  vector.
+
+Upsampling (TAAU) is the same resolve into a larger image: render at 720p, output
+1080p. It works per view:
+
+```rust
+use engine_render::forward::Temporal;
+use engine_upscale::{Taau, TaauInput};
+
+// Once per view: remembers the transforms of up to 100,000 draw items.
+let temporal = Temporal::new(&device, &mut allocator, 100_000)?;
+let mut taau = Taau::new(&device, &bindless, frames_in_flight)?;
+temporal.set_jitter_phases(Taau::jitter_phases(render_size, output_size));
+
+// Every frame: `color` and `depth` at the render size.
+let view = ForwardView { temporal: Some(&temporal), ..view };
+let passes = renderer.add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view)?;
+let motion = passes.motion.expect("a temporal view reports motion");
+let resolved = taau.add_pass(&mut fg, &device, &mut allocator, &bindless,
+    TaauInput { color, depth, motion }, output_size, frame_number)?;
+tonemap.add_pass(&mut fg, &bindless, resolved, backbuffer, exposure);
+
+// After a camera cut (teleport, new level, switching cameras):
+temporal.reset();
+```
+
+- **Keep the draw list in a stable order.**
+  - Items are known by their position in it, as for occlusion culling.
+  - An item whose position had nothing last frame (new, reordered, beyond the capacity)
+    counts as still for one frame. It may smear briefly if it moved.
+- **Give the transforms you draw.** With fixed-step physics, interpolate for rendering.
+  Motion vectors report what was on screen, and a jump between two ticks looks like
+  motion.
+- **Call `reset()` on cuts.** Otherwise the first frame blends with a picture of
+  somewhere else.
+- **Changing the output size** recreates the history (and restarts accumulation).
+  Changing the render size only needs new jitter phases.
+- **Motion vectors are yours too.** `MotionOutput::velocity` (RG16F, the render size) is
+  the texture-coordinate delta current − previous, without jitter. The surface at `uv`
+  was at `uv − motion` last frame. Pixels without geometry carry the camera's motion. Use
+  it for motion blur or your own temporal effects.
+- **Known limits for now:**
+  - no texture LOD bias while upsampling (textures are slightly softer than native);
+  - no masks for transparent or animated-texture surfaces;
+  - no sharpening.
+
+What it costs (ref-1, 1080p):
+
+- **Motion vectors:** +8-23% on the forward pass (Sponza, FlightHelmet). Measure with
+  `scene_bench -- --motion`.
+- **The resolve:**
+  - RTX 4060 Ti: 0.17 ms for TAA, 0.13 ms from 720p;
+  - Radeon iGPU: 4.5 ms either way.
+  - Measure with `cargo run -p engine_upscale --release --example taau_bench`.
+- **Upsampling from 720p** is cheaper than native 1080p with TAA on both GPUs:
+  - RTX: 0.19 ms against 0.30 ms for forward + resolve in that benchmark;
+  - Radeon: 5.8 ms against 7.7 ms.

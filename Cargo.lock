@@ -386,6 +386,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_upscale"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_profiler",
+ "engine_render",
+ "engine_rhi",
+ "engine_shader",
+]
+
+[[package]]
 name = "fdeflate"
 version = "0.3.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
