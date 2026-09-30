@@ -82,7 +82,11 @@ audio.set_bus_voice_limit(footsteps, Some(8));
 ## 4. Sends and effects
 
 ```rust
-use engine_audio::{SendTap, dsp::{Biquad, Compressor, Delay, Limiter}};
+use engine_audio::{SendTap, dsp::{Biquad, Compressor, Delay, Limiter, Reverb}};
+
+let hall = audio.add_bus("hall", BusId::MASTER)?;
+audio.add_effect(hall, Reverb::new(2.2, 0.8))?;                     // 2.2 s to fade 60 dB
+audio.add_send(world, hall, 0.25, SendTap::PostFader)?;
 
 let echo = audio.add_bus("echo", BusId::MASTER)?;
 audio.add_effect(echo, Delay::new(0.25, 0.4, 1.0))?;                // fully wet echo bus
@@ -98,13 +102,37 @@ audio.add_effect(BusId::MASTER, Limiter::new(-1.0))?;              // no clippin
   - `Biquad`: low / high / band pass, notch, peak, shelves, all-pass;
   - `Compressor`: with sidechain;
   - `Limiter`: lookahead, never exceeds its ceiling;
-  - `Delay`.
+  - `Delay`;
+  - `Reverb`: an algorithmic room (see below).
 - **Your own effect:** implement `dsp::Effect`. `process` must not allocate or lock; it
   runs on the audio thread.
 - **Parameters are set by index;** each effect lists its indices as constants
   (`Biquad::FREQUENCY`, `Compressor::THRESHOLD_DB`, ...).
 - **Pre- and post-fader sends:** a `PreFader` send ignores the bus's own volume. A
   `PostFader` send follows it (the usual choice for reverb and echo).
+
+### Reverb
+
+`Reverb::new(decay, size)` makes a fully wet reverb for a send bus: put one bus per
+acoustic space (cave, hall, small room) and send to it from the buses that are in that
+space.
+
+| Parameter | Meaning | Default |
+|---|---|---|
+| `Reverb::DECAY` | Seconds for the tail to fade by 60 dB (RT60), 0.1..30. Measured within 2% | from `new` |
+| `Reverb::SIZE` | 0..1: how far apart the echoes are (a closet ~0.1, a hall ~0.8) | from `new` |
+| `Reverb::DAMPING` | Hz where the tail starts losing highs; lower sounds softer and further away, 20 kHz and above is bright | 8,000 |
+| `Reverb::PRE_DELAY` | Seconds before the reverb starts (big spaces: 20–60 ms), up to 0.5 | 0.02 |
+| `Reverb::EARLY` | Level of the early reflections, 0..1 | 0.5 |
+| `Reverb::MIX` | 0 dry .. 1 wet; on an insert (not a send) use 0.2–0.4 | 1 |
+
+- **Set `SIZE` per room, not continuously:** changing it while the tail rings may click.
+  `DECAY`, `DAMPING`, `EARLY` and `MIX` can move freely (for example, damping down when
+  the player goes underwater).
+- **Cost:** about 10 µs per 256-frame block (0.2% of a core); a handful of reverb buses is
+  fine. ADR 0049 has the design and the numbers.
+- **The same size sounds the same every run:** the echo pattern is fixed, not random per
+  instance.
 
 ### Ducking music under dialogue
 
