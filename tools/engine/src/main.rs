@@ -1,11 +1,11 @@
-//! The `engine` command line (CLAUDE.md §9 "one button", §2 `/tools`).
+//! The `ofeliaengine` command line (CLAUDE.md §9 "one button", §2 `/tools`).
 //!
 //! ```text
-//! engine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
-//! engine shaders watch [OPTIONS] <ROOT>...   rebuild on every change (Windows)
+//! ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
+//! ofeliaengine shaders watch [OPTIONS] <ROOT>...   rebuild on every change (Windows)
 //! ```
 //!
-//! Run `engine help` for the options.
+//! Run `ofeliaengine help` for the options.
 
 // A command-line tool reports on stdout/stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
@@ -22,8 +22,8 @@ use std::time::Instant;
 
 const USAGE: &str = "\
 usage:
-  engine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
-  engine shaders watch [OPTIONS] <ROOT>...   compile, then rebuild on every change (Windows)
+  ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
+  ofeliaengine shaders watch [OPTIONS] <ROOT>...   compile, then rebuild on every change (Windows)
 
 A shader is a .slang file with at least one [shader(\"<stage>\")] entry point; other
 .slang files are modules, compiled through the shaders that import them.

@@ -4,7 +4,7 @@ Instructions for Claude working autonomously on this engine.
 Read this file in full at the start of every session. If anything here is outdated
 or contradicts the actual state of the repository, propose a change via an ADR (see §3).
 
-Working name of the engine in code: `engine` (crate prefix `engine_*`). Replace once the team picks a name.
+The engine is called **ofeliaengine** (team decision, 2026-09-30). In code the prefix stays `engine` (crates `engine_*`, `ENGINE_*` variables); the binary is `ofeliaengine.exe` (package `engine_cli`).
 
 ---
 
@@ -335,7 +335,7 @@ Goal: the developer never thinks about shader compilation, and players never see
   support: custom shaders, compute, post-processing, 2D, particles.
 - **Permutations:** minimize via bindless, specialization constants and uber-shaders.
   Every new permutation axis must be justified with its variant count.
-- **"Compile All Shaders" button** in the editor and `engine shaders build` in the CLI:
+- **"Compile All Shaders" button** in the editor and `ofeliaengine shaders build` in the CLI:
   - finds all materials and shaders in the project and every combination actually used;
   - parallel compilation on all cores, cache keyed by hash (source + includes + flags + compiler version);
   - DDC (derived data cache), shared across the team;

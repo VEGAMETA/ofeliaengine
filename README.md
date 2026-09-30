@@ -1,7 +1,9 @@
-# engine
+# ofeliaengine
 
 A game engine for Windows 11 x64 written in Rust, with Vulkan 1.3, Slang, Luau and Tracy.
-The working name is `engine`; the team will pick the final name.
+The engine is called **ofeliaengine** (team decision, 2026-09-30). In code it is still
+`engine` (crate prefix `engine_*`, `ENGINE_*` variables); the command line is
+`ofeliaengine.exe`.
 
 Principles, stack and working rules are in [`CLAUDE.md`](CLAUDE.md). Architectural decisions
 are in [`docs/adr`](docs/adr).
@@ -68,7 +70,7 @@ team".
 | `crates/engine_physics_jolt` | Jolt Physics 5.6 backend through vendored JoltC (`third_party/`) |
 | `crates/engine_physics2d` | 2D physics on vendored Box2D v3.1.1 behind a small C shim |
 | `crates/engine_shader` | Slang → SPIR-V: in-process compiler, content-addressed cache, Compile All, hot reload |
-| `tools/engine` | The `engine` command line (`engine shaders build`, `engine shaders watch`) |
+| `tools/engine` | The `ofeliaengine` command line, package `engine_cli` (`ofeliaengine shaders build`, `ofeliaengine shaders watch`) |
 | `docs/adr` | Architecture decision records |
 | `docs/research` | Research notes behind the decisions |
 | `docs/perf` | Performance budgets, reference hardware, measurement history |
