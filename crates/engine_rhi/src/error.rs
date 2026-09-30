@@ -42,8 +42,16 @@ pub enum RhiError {
 
 impl RhiError {
     /// Maps a failed Vulkan call's result: `.map_err(RhiError::vk("vkCreateImage"))`.
+    ///
+    /// `VK_ERROR_DEVICE_LOST` also produces the GPU fault report (once per device loss;
+    /// see [`crate::last_gpu_fault`]).
     pub fn vk(call: &'static str) -> impl FnOnce(vk::Result) -> Self {
-        move |result| Self::Vulkan { call, result }
+        move |result| {
+            if result == vk::Result::ERROR_DEVICE_LOST {
+                crate::fault::device_lost(call);
+            }
+            Self::Vulkan { call, result }
+        }
     }
 }
 

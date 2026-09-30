@@ -1,0 +1,26 @@
+[package]
+name = "engine_log"
+description = "Logging: the `log` facade over a lock-free ring, with stderr, debugger, file and Tracy sinks."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# The logging facade most Rust crates log through (MIT OR Apache-2.0, no dependencies;
+# already in the tree through other crates). ADR 0061.
+log = "0.4"
+# Tracy messages.
+engine_profiler.workspace = true
+
+# Model checking of the ring: RUSTFLAGS="--cfg loom" cargo test -p engine_log --release --lib loom
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"
+
+[[bench]]
+name = "log"
+harness = false

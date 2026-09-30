@@ -80,6 +80,8 @@ pub struct Device {
     /// Every pipeline is created through it (ADR 0055); internally synchronized, so
     /// pipelines are created from many threads at once.
     pipeline_cache: vk::PipelineCache,
+    /// GPU fault reports and breadcrumbs (ADR 0061); taken when the device is dropped.
+    diagnostics: Option<Arc<crate::fault::Diagnostics>>,
     /// Hash of the cache data as loaded or last saved: unchanged data is not rewritten.
     saved_cache: AtomicU64,
     /// Creates pipelines in parallel ([`Self::create_parallel`]); without it, threads of
@@ -259,6 +261,18 @@ impl Device {
             features2 = features2.push_next(&mut e_anti_lag);
         }
 
+        // GPU crash diagnostics (ADR 0061): VK_EXT_device_fault, and the buffer markers of
+        // the breadcrumbs (in AMD's uncached memory where available).
+        let mut diagnostics_features =
+            crate::fault::Features::query(instance.raw(), adapter.physical);
+        extensions.extend(diagnostics_features.extensions().map(|e| e.as_ptr()));
+        if diagnostics_features.fault.device_fault == vk::TRUE {
+            features2 = features2.push_next(&mut diagnostics_features.fault);
+        }
+        if diagnostics_features.coherent.device_coherent_memory == vk::TRUE {
+            features2 = features2.push_next(&mut diagnostics_features.coherent);
+        }
+
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
@@ -291,8 +305,11 @@ impl Device {
             raw: unsafe { raw.get_device_queue(family, 0) },
             family,
         };
+        let diagnostics =
+            crate::fault::Diagnostics::new(instance.raw(), &raw, adapter, &diagnostics_features);
         Ok(Self {
             pipeline_cache,
+            diagnostics: Some(diagnostics),
             saved_cache: AtomicU64::new(state_hash64(&[])),
             jobs: None,
             graphics: queue(graphics_family),
@@ -312,6 +329,21 @@ impl Device {
     /// `VK_KHR_pipeline_executable_properties`.
     pub fn pipeline_statistics_enabled(&self) -> bool {
         self.pipeline_statistics
+    }
+
+    /// The GPU breadcrumbs (ADR 0061): present when the GPU has `VK_AMD_buffer_marker`
+    /// (AMD and NVIDIA drivers do) and `ENGINE_GPU_BREADCRUMBS` is not `0`. The render
+    /// graph marks every pass with them.
+    pub fn breadcrumbs(&self) -> Option<&Arc<crate::Breadcrumbs>> {
+        self.diagnostics.as_ref()?.breadcrumbs.as_ref()
+    }
+
+    /// Whether `VK_EXT_device_fault` is enabled: device losses report the driver's fault
+    /// description, faulting addresses and vendor dump ([`crate::last_gpu_fault`]).
+    pub fn device_fault_enabled(&self) -> bool {
+        self.diagnostics
+            .as_ref()
+            .is_some_and(|d| d.device_fault_enabled())
     }
 
     /// Which latency extensions are enabled.
@@ -527,6 +559,9 @@ impl Drop for Device {
         // in-flight work.
         unsafe {
             let _ = self.raw.device_wait_idle();
+            if let Some(diagnostics) = self.diagnostics.take() {
+                diagnostics.destroy();
+            }
             self.raw.destroy_pipeline_cache(self.pipeline_cache, None);
             self.raw.destroy_device(None);
         }

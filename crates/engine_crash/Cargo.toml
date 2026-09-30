@@ -1,0 +1,20 @@
+[package]
+name = "engine_crash"
+description = "Crash reports: out-of-process minidumps for crashes and panics, with the last log lines and GPU breadcrumbs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Embark's crash handling (MIT OR Apache-2.0, ADR 0061): `crash-handler` hooks the
+# process's crash paths, `minidumper` runs the monitor process that writes minidumps
+# (through `minidump-writer`, MIT) over a local socket.
+crash-handler = "0.8"
+minidumper = "0.11"
+engine_log.workspace = true
+log = "0.4"

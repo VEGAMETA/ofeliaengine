@@ -12,7 +12,11 @@ workspace = true
 
 [dependencies]
 engine_core.workspace = true
+# Logging and crash reports of the editor application (ADR 0061).
+engine_crash.workspace = true
 engine_ecs.workspace = true
+engine_log.workspace = true
+log = "0.4"
 engine_input.workspace = true
 # The window, the 3D viewport, the device and frame pacing: the editor application
 # (`src/bin/editor.rs`).

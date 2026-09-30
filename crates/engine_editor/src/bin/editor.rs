@@ -30,7 +30,23 @@ fn main() {
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    windowed::run()
+    // The crash monitor is this executable started by `engine_crash::install`.
+    if engine_crash::run_monitor_if_requested() {
+        return Ok(());
+    }
+    // Log to stderr and to %LOCALAPPDATA%/ofeliaengine/logs/editor.log; crashes, panics
+    // and GPU faults leave reports in ../reports (ADR 0061).
+    let _log = engine_log::init(&engine_log::LogConfig {
+        file: Some(engine_log::report::log_file("editor")),
+        ..engine_log::LogConfig::default()
+    });
+    let _crash = engine_crash::install(&engine_crash::CrashConfig::new("editor"))
+        .inspect_err(|e| log::warn!("no crash reports: {e}"));
+    let result = windowed::run();
+    if let Err(e) = &result {
+        log::error!("{e}");
+    }
+    result
 }
 
 #[cfg(windows)]
