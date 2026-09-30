@@ -13,7 +13,7 @@
 //! compute passes of that frame's graph. The forward renderer reads them when a view has an
 //! environment ([`crate::forward::ForwardView::environment`]).
 
-use crate::compute::{ComputeShader, Dispatch};
+use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::graph::{
     Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, ShaderStages,
     Texture, TextureDesc, TextureState,
@@ -324,14 +324,18 @@ impl Environment {
         bindless: &Bindless,
         sky: Sky,
     ) -> Result<Self, RhiError> {
-        let shader = |spirv: &[u8], entry| ComputeShader::new(device, bindless, spirv, entry);
-        let shaders = [
-            shader(SKY_CUBE, c"skyCube")?,
-            shader(DOWNSAMPLE, c"downsample")?,
-            shader(PREFILTER, c"prefilter")?,
-            shader(IRRADIANCE, c"irradiance")?,
-            shader(DFG, c"dfg")?,
-        ];
+        let source = |spirv: &[u8], entry| ComputeSource::new(spirv, entry, &[]);
+        let shaders = ComputeSource::create_all(
+            device,
+            bindless,
+            [
+                source(SKY_CUBE, c"skyCube")?,
+                source(DOWNSAMPLE, c"downsample")?,
+                source(PREFILTER, c"prefilter")?,
+                source(IRRADIANCE, c"irradiance")?,
+                source(DFG, c"dfg")?,
+            ],
+        )?;
         let source = Image::new(
             device,
             allocator,
