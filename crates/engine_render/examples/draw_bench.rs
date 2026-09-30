@@ -13,7 +13,8 @@
 //!
 //! `--sphere <rings>` draws UV spheres of `rings` × 2·`rings` quads (radius 0.5) instead of
 //! cubes; `--lods` gives the mesh detail levels from `engine_assets::generate_lods`
-//! (ADR 0053).
+//! (ADR 0053). `--blended` makes every instance half transparent (ADR 0054): the forward
+//! column then includes the transparent pass.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -192,6 +193,7 @@ fn main() {
     let mut prepass = false;
     let mut sphere_rings = None;
     let mut lods = false;
+    let mut blended = false;
     let mut shadows = ShadowSettings::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -201,6 +203,7 @@ fn main() {
             "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
             "--sphere" => sphere_rings = Some(args.next().unwrap().parse().unwrap()),
             "--lods" => lods = true,
+            "--blended" => blended = true,
             n => max_instances = n.parse().unwrap(),
         }
     }
@@ -259,24 +262,37 @@ fn main() {
     let mut palette: Vec<MaterialId> = (0..64)
         .map(|k| {
             let h = k as f32 / 64.0;
-            materials.add(MaterialDesc::solid(
-                [0.3 + 0.6 * h, 0.5, 0.9 - 0.6 * h],
-                0.0,
-                0.5,
-            ))
+            let solid = MaterialDesc::solid([0.3 + 0.6 * h, 0.5, 0.9 - 0.6 * h], 0.0, 0.5);
+            materials.add(if blended {
+                MaterialDesc {
+                    base_color: [
+                        solid.base_color[0],
+                        solid.base_color[1],
+                        solid.base_color[2],
+                        0.5,
+                    ],
+                    alpha: engine_render::material::AlphaMode::Blend,
+                    ..solid
+                }
+            } else {
+                solid
+            })
         })
         .collect();
     palette.push(materials.default_material());
     let mut frame_number = 0u64;
     let capacity = max_instances as u64 + 1024;
-    let mut ring = UploadRing::new(&device, &mut allocator, 1, capacity * 128).unwrap();
+    // Per instance: its record, and with `--blended` a batch and a command per list.
+    let mut ring = UploadRing::new(&device, &mut allocator, 1, capacity * 256).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
     let mut occlusion = Occlusion::new(&device, &mut allocator, capacity as u32).unwrap();
+    let readback_bytes = 2 * 20 * 4 * (max_instances as u64 + 1024);
     let (readback, readback_mem) = allocator
         .create_buffer(
             &vk::BufferCreateInfo::default()
-                // Up to two phases of four detail levels' commands (20 bytes each).
-                .size(160)
+                // Up to two phases of commands (20 bytes each): four detail levels of one
+                // batch, or one per instance when every instance is blended.
+                .size(readback_bytes)
                 .usage(vk::BufferUsageFlags::TRANSFER_DST),
             MemoryLocation::Readback,
         )
@@ -452,7 +468,8 @@ fn main() {
                 }
                 let ptr = readback_mem.mapped_ptr().unwrap();
                 // SAFETY: the GPU is idle; the mapping holds the phases' draw commands.
-                let commands = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 160) };
+                let commands =
+                    unsafe { core::slice::from_raw_parts(ptr.as_ptr(), readback_bytes as usize) };
                 let count_at = |i: usize| {
                     let at = 20 * i + 4;
                     u32::from_le_bytes([
@@ -480,7 +497,7 @@ fn main() {
                             "depth prepass" | "depth prepass early" | "depth prepass late" => {
                                 d += us
                             }
-                            "forward" | "forward early" | "forward late" => f += us,
+                            "forward" | "forward early" | "forward late" | "transparent" => f += us,
                             _ => {}
                         }
                     }

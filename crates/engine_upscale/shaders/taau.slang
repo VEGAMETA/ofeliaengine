@@ -34,7 +34,7 @@ struct Push
     uint2 output_size;
     float2 jitter;       // render pixels
     uint reset;          // 1: ignore the history
-    uint _pad;
+    uint reactive;       // render resolution: transparent coverage (sampled), or NO_REACTIVE
 };
 
 [[vk::push_constant]]
@@ -48,6 +48,8 @@ ConstantBuffer<Push> push;
 // Accumulated weight of a still pixel (1/16 of each new frame), and of a pixel that moves
 // by 2 output pixels or more.
 static const float MAX_WEIGHT = 16.0;
+// No reactive mask this frame.
+static const uint NO_REACTIVE = 0xFFFFFFFFu;
 static const float MOVING_WEIGHT = 4.0;
 
 float max3(float3 c)
@@ -181,6 +183,14 @@ void resolve(uint3 id : SV_DispatchThreadID)
         history = from_ycocg(history);
         float moved = length(motion * output_size);
         float cap = lerp(MAX_WEIGHT, MOVING_WEIGHT, saturate(moved * 0.5));
+        // Transparent surfaces do not move with the motion vectors (those are the opaque
+        // surface's behind them): where they cover the pixel, the history counts at most
+        // as much as one new frame (ADR 0054).
+        if (push.reactive != NO_REACTIVE)
+        {
+            float coverage = g_textures[push.reactive].Load(int3(closest_pixel, 0)).r;
+            cap = lerp(cap, 1.0, coverage);
+        }
         history_weight = min(history_weight, cap);
         blended = (history * history_weight + current * best_weight) / (history_weight + best_weight);
         new_weight = min(history_weight + best_weight, cap);

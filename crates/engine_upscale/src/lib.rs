@@ -56,8 +56,12 @@ struct Push {
     output_size: [u32; 2],
     jitter: [f32; 2],
     reset: u32,
-    _pad: u32,
+    /// The reactive mask's bindless index, or [`NO_REACTIVE`].
+    reactive: u32,
 }
+
+/// `NO_REACTIVE` in `taau.slang`.
+const NO_REACTIVE: u32 = u32::MAX;
 
 #[derive(Debug)]
 struct HistoryImage {
@@ -226,8 +230,12 @@ impl Taau {
         }];
         let jitter = input.motion.jitter;
         let velocity = input.motion.velocity;
-        fg.add_compute("taau", bindless)
-            .read(input.color, Access::Sampled(ShaderStages::COMPUTE))
+        let reactive = input.motion.reactive;
+        let mut pass = fg.add_compute("taau", bindless);
+        if let Some(mask) = reactive {
+            pass = pass.read(mask, Access::Sampled(ShaderStages::COMPUTE));
+        }
+        pass.read(input.color, Access::Sampled(ShaderStages::COMPUTE))
             .read(input.depth, Access::Sampled(ShaderStages::COMPUTE))
             .read(velocity, Access::Sampled(ShaderStages::COMPUTE))
             .read(history_texture, Access::Sampled(ShaderStages::COMPUTE))
@@ -244,7 +252,10 @@ impl Taau {
                     output_size: [width, height],
                     jitter,
                     reset: u32::from(reset),
-                    _pad: 0,
+                    reactive: match reactive {
+                        Some(mask) => ctx.sampled_index(mask)?,
+                        None => NO_REACTIVE,
+                    },
                 })
             });
         Ok(output)

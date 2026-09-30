@@ -115,8 +115,8 @@ let mats = materials.begin_frame(&mut fg, &device, &mut allocator, &textures, fr
 - **Alpha:**
   - `AlphaMode::Mask { cutoff }` discards texels below the cutoff, in the view and in
     shadows (leaves, fences).
-  - Blended transparency comes with the transparency pass. Until then import glTF's
-    `BLEND` as opaque.
+  - `AlphaMode::Blend`: transparent, alpha is coverage (glass, water, visors). Drawn
+    after the opaque surfaces, back to front; see section 12.
 - **`double_sided: true`** draws both faces. Back faces are lit from their own side, and
   both faces cast shadows. Use it for leaves and cloth; closed meshes should stay
   single-sided (half the fragments).
@@ -360,7 +360,8 @@ temporal.reset();
   1 dB better on a panning camera).
 - **Known limits for now:**
   - no texture LOD bias while upsampling (textures are slightly softer than native);
-  - no masks for transparent or animated-texture surfaces;
+  - transparent surfaces lower the history's weight where they cover (section 12), but
+    there is no mask for animated textures yet;
   - no sharpening.
 
 What it costs (ref-1, 1080p):
@@ -566,3 +567,46 @@ exposure.reset();
 - **What it costs** at 1080p: bloom 0.11 ms, exposure 0.02 ms, tone map 0.03 ms on an RTX
   4060 Ti. On a Radeon iGPU they are 1.1 ms, 0.28 ms and 0.99 ms: consider fewer bloom
   levels there.
+
+## 12. Transparent surfaces
+
+Materials with `AlphaMode::Blend` are drawn by a transparent pass after the opaque
+surfaces and the sky (ADR 0054):
+
+```rust
+let glass = materials.add(MaterialDesc {
+    base_color: [0.9, 0.95, 1.0, 0.25], // alpha 0.25: a quarter of the light is the glass's
+    roughness: 0.05,
+    alpha: AlphaMode::Blend,
+    ..MaterialDesc::default()
+});
+draws.push(DrawItem { mesh: window_pane, material: glass, world_from_object });
+```
+
+- **Nothing else to do:** put them in the same draw list, in any order.
+- **Alpha is coverage**, as glTF's `BLEND` says:
+  - the whole shading, highlights included, scales with it;
+  - alpha 1 looks like an opaque surface, still drawn in the transparent pass.
+- **Order:** objects are sorted back to front by the distance to their box's center.
+  - Separate objects blend correctly.
+  - Objects that intersect, or one inside another, can blend in the wrong order in
+    places: split them, or make the inner one opaque or masked.
+  - Inside one mesh, triangles blend in index order. For a closed glass, draw the back
+    faces and front faces as two meshes, or accept the error.
+- **They are lit like the rest:** sun and its shadows, point and spot lights, sky light.
+  - They cast no shadows.
+  - They do not hide what is behind them from occlusion culling.
+- **Under TAA/TAAU** the pass also writes a reactive mask (`MotionOutput::reactive`, R8,
+  the layers' combined alpha). The resolve uses it by itself: history counts less where
+  transparent surfaces cover, so they do not ghost over moving backgrounds.
+  - The price is a little more shimmer on their edges.
+  - Use the mask in your own temporal effects too.
+- **What it costs:** each transparent object is its own draw command, about 37 ns of CPU
+  per object per frame.
+  - 10,000 transparent cubes: `add_passes` 0.45 ms instead of 0.08 ms.
+  - GPU culling on a Radeon iGPU: 0.09 ms instead of 0.02 ms.
+  - Hundreds are cheap. Thousands of small ones (smoke, sparks) belong to the particle
+    system, which sorts on the GPU.
+  - Measure with `draw_bench -- --blended`.
+- **Not yet:** refraction and distortion, colored shadows through glass,
+  order-independent transparency.
