@@ -20,6 +20,7 @@
 //!   placement; nesting, split screen, pixel-perfect scaling (ADR 0016).
 
 pub mod cull;
+pub mod environment;
 pub mod forward;
 pub mod graph;
 pub mod hiz;

@@ -437,3 +437,44 @@ of its size; `scene_bench -- --lights N`):
 - **The CPU pays about 55 ns per light** (culling, sorting, binning).
 - **The GPU pays most for the lights that actually overlap each pixel.** Many small
   lights are cheaper than a few huge ones.
+
+## 10. Sky light and the sky (image-based lighting)
+
+An environment lights everything from the whole sky (ADR 0046):
+
+- rough surfaces take its average color from their side;
+- metals reflect it, blurred by their roughness;
+- where nothing is drawn, the sky and the sun's disk appear.
+
+```rust
+use engine_render::environment::{Environment, Sky};
+
+// Once: a sky of three colors (linear radiance) around the sun.
+let environment = Environment::new(&device, &mut allocator, &bindless, Sky {
+    zenith: Vec3::new(0.12, 0.25, 0.6),
+    horizon: Vec3::new(0.55, 0.62, 0.72),
+    ground: Vec3::new(0.12, 0.11, 0.1),
+})?;
+
+// Every frame:
+let view = ForwardView { environment: Some(&environment), ..view };
+
+// Evening: the next frame rebuilds the lighting.
+environment.set_sky(evening);
+environment.set_intensity(0.5);
+```
+
+- **Changing the sky costs one frame** a few compute passes: 0.05 ms on an RTX 4060 Ti,
+  1.3 ms on a Radeon iGPU. Change it when time of day moves noticeably, not every frame.
+- **With an environment, `DirectionalLight::ambient` is not used.** The sky replaces the
+  flat ambient color.
+- **The sun's disk is drawn in the sky** from the light's direction and color. Its light
+  still comes from the directional light (with its shadows), not from the environment.
+- **Occlusion textures** darken the sky light, diffuse and specular.
+- **One environment per view per frame for now.** Give split-screen views their own.
+- **Debugging:** `environment.set_debug_directions(true)` colors the sky by direction
+  (x red, y green, z blue).
+
+What it costs (ref-1, Sponza at 1080p): the forward pass goes from 0.32 to 0.40 ms on the
+RTX 4060 Ti, and from 7.7 to 12.2 ms on the Radeon iGPU. That is the price of real
+reflections on every surface. The sky pass itself costs 3 µs and 33 µs.

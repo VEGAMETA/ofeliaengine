@@ -73,6 +73,9 @@ pub struct OptionalCaps {
     pub calibrated_timestamps: bool,
     /// `VK_EXT_memory_budget` (per-heap budget and usage from the OS).
     pub memory_budget: bool,
+    /// `VK_KHR_pipeline_executable_properties` (the driver's statistics of a compiled
+    /// pipeline: registers, occupancy, instructions).
+    pub pipeline_executable_info: bool,
     /// The driver implements Vulkan 1.4. The engine's floor stays 1.3 (ADR 0006); the
     /// capabilities below were promoted to core in 1.4 and are used as extensions.
     pub vulkan_1_4: bool,
@@ -306,6 +309,7 @@ impl Adapter {
             calibrated_timestamps: has(ash::khr::calibrated_timestamps::NAME)
                 || has(ash::ext::calibrated_timestamps::NAME),
             memory_budget: has(ash::ext::memory_budget::NAME),
+            pipeline_executable_info: has(ash::khr::pipeline_executable_properties::NAME),
             // Promoted to core in Vulkan 1.4; ash 0.38 predates some of them, so all are
             // compared by name. 1.4 drivers still list them as extensions.
             vulkan_1_4: props.api_version >= vk::make_api_version(0, 1, 4, 0),

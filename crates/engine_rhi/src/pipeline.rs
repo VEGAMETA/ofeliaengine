@@ -110,6 +110,27 @@ impl<'a> GraphicsPipelineDesc<'a> {
     }
 }
 
+/// One statistic the driver reports for a stage of a compiled pipeline
+/// ([`Pipeline::statistics`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipelineStatistic {
+    /// The executable (stage) it describes, as the driver names it.
+    pub stage: String,
+    /// The statistic's name, as the driver names it ("VGPRs", "Register count", ...).
+    pub name: String,
+    /// Its value.
+    pub value: f64,
+}
+
+/// Pipelines capture statistics when the device asks for them.
+fn statistics_flags(device: &Device) -> vk::PipelineCreateFlags {
+    if device.pipeline_statistics_enabled() {
+        vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR
+    } else {
+        vk::PipelineCreateFlags::empty()
+    }
+}
+
 /// A pipeline and the device that owns it. Destroyed on drop (the GPU must be done
 /// with it).
 pub struct Pipeline {
@@ -297,6 +318,7 @@ impl Pipeline {
             .color_blend_state(&blend)
             .dynamic_state(&dynamic)
             .layout(layout)
+            .flags(statistics_flags(device))
             .push_next(&mut rendering);
         // SAFETY: every pointer in `info` refers to locals alive for the call.
         let raw = unsafe { d.create_graphics_pipelines(cache, &[info], None) }.map_err(
@@ -310,6 +332,64 @@ impl Pipeline {
             raw,
             bind_point: vk::PipelineBindPoint::GRAPHICS,
         })
+    }
+
+    /// The driver's statistics of each stage (registers, occupancy, instruction counts;
+    /// names and meanings are the driver's), or nothing unless the device captures them
+    /// ([`Device::pipeline_statistics_enabled`]).
+    pub fn statistics(&self, device: &Device) -> Vec<PipelineStatistic> {
+        let mut out = Vec::new();
+        if !device.pipeline_statistics_enabled() {
+            return out;
+        }
+        let loader = ash::khr::pipeline_executable_properties::Device::new(
+            device.instance_raw(),
+            device.raw(),
+        );
+        let info = vk::PipelineInfoKHR::default().pipeline(self.raw);
+        // SAFETY: the pipeline was created with CAPTURE_STATISTICS by this device, and the
+        // extension is enabled.
+        let Ok(executables) = (unsafe { loader.get_pipeline_executable_properties(&info) }) else {
+            return out;
+        };
+        for (index, executable) in executables.iter().enumerate() {
+            let stage = executable
+                .name_as_c_str()
+                .map_or_else(|_| format!("{index}"), |n| n.to_string_lossy().into_owned());
+            let info = vk::PipelineExecutableInfoKHR::default()
+                .pipeline(self.raw)
+                .executable_index(index as u32);
+            // SAFETY: as above; the index comes from the driver.
+            let Ok(statistics) = (unsafe { loader.get_pipeline_executable_statistics(&info) })
+            else {
+                continue;
+            };
+            for statistic in statistics {
+                // SAFETY: the union member matches the format the driver reports.
+                let value = unsafe {
+                    match statistic.format {
+                        vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
+                            f64::from(statistic.value.b32)
+                        }
+                        vk::PipelineExecutableStatisticFormatKHR::INT64 => {
+                            statistic.value.i64 as f64
+                        }
+                        vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
+                            statistic.value.u64 as f64
+                        }
+                        _ => statistic.value.f64,
+                    }
+                };
+                out.push(PipelineStatistic {
+                    stage: stage.clone(),
+                    name: statistic
+                        .name_as_c_str()
+                        .map_or_else(|_| String::new(), |n| n.to_string_lossy().into_owned()),
+                    value,
+                });
+            }
+        }
+        out
     }
 
     /// Creates a compute pipeline with `layout`.
@@ -333,7 +413,8 @@ impl Pipeline {
                     .module(module)
                     .name(stage.entry),
             )
-            .layout(layout);
+            .layout(layout)
+            .flags(statistics_flags(device));
         // SAFETY: as above.
         let raw = unsafe { d.create_compute_pipelines(cache, &[info], None) }.map_err(
             |(_, result)| RhiError::Vulkan {

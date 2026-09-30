@@ -469,6 +469,7 @@ fn main() {
                             occlusion: None,
                             temporal: None,
                             lights: &[],
+                            environment: None,
                         };
                         forward.add_passes(fg, ring, bindless, &geo, &mats, draws, &view);
                     },

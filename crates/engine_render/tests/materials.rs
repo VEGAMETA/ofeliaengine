@@ -312,6 +312,7 @@ impl Scene {
                         occlusion: None,
                         temporal: None,
                         lights: &[],
+                        environment: None,
                     },
                 )
                 .unwrap();

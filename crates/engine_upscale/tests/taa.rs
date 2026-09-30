@@ -184,6 +184,7 @@ impl Gpu {
                         occlusion: None,
                         temporal,
                         lights: &[],
+                        environment: None,
                     },
                 )
                 .unwrap();
