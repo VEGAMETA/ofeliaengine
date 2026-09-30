@@ -281,6 +281,7 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
                         clear: Some([0.0, 0.0, 0.25, 1.0]),
                         occlusion: None,
                         temporal: None,
+                        lights: &[],
                     },
                 )
                 .unwrap();

@@ -81,6 +81,10 @@ pub struct GraphicsPipelineDesc<'a> {
     pub depth_bias: Option<DepthBias>,
     /// Samples per pixel.
     pub samples: vk::SampleCountFlags,
+    /// Specialization constants of every stage: value `i` is `constant_id` `i`. The driver
+    /// compiles the pipeline with them, so branches on them cost nothing (and code behind
+    /// a false one takes no registers).
+    pub specialization: &'a [u32],
 }
 
 impl<'a> GraphicsPipelineDesc<'a> {
@@ -101,6 +105,7 @@ impl<'a> GraphicsPipelineDesc<'a> {
             blend: Blend::Opaque,
             depth_bias: None,
             samples: vk::SampleCountFlags::TYPE_1,
+            specialization: &[],
         }
     }
 }
@@ -166,22 +171,46 @@ impl Pipeline {
             device: d,
             list: [vk::ShaderModule::null(); 2],
         };
+        let entries: Vec<vk::SpecializationMapEntry> = (0..desc.specialization.len() as u32)
+            .map(|i| vk::SpecializationMapEntry {
+                constant_id: i,
+                offset: i * 4,
+                size: 4,
+            })
+            .collect();
+        let data: Vec<u8> = desc
+            .specialization
+            .iter()
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        let specialization = vk::SpecializationInfo::default()
+            .map_entries(&entries)
+            .data(&data);
+        let stage = |flags, module, entry| {
+            let info = vk::PipelineShaderStageCreateInfo::default()
+                .stage(flags)
+                .module(module)
+                .name(entry);
+            if entries.is_empty() {
+                info
+            } else {
+                info.specialization_info(&specialization)
+            }
+        };
         let mut stages = Vec::with_capacity(2);
         let vertex = modules.create(0, desc.vertex.spirv)?;
-        stages.push(
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vertex)
-                .name(desc.vertex.entry),
-        );
+        stages.push(stage(
+            vk::ShaderStageFlags::VERTEX,
+            vertex,
+            desc.vertex.entry,
+        ));
         if let Some(fragment) = desc.fragment {
             let module = modules.create(1, fragment.spirv)?;
-            stages.push(
-                vk::PipelineShaderStageCreateInfo::default()
-                    .stage(vk::ShaderStageFlags::FRAGMENT)
-                    .module(module)
-                    .name(fragment.entry),
-            );
+            stages.push(stage(
+                vk::ShaderStageFlags::FRAGMENT,
+                module,
+                fragment.entry,
+            ));
         }
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
         let input_assembly =

@@ -40,6 +40,13 @@
 // multiple of its texel size, filter 3 × 3 comparisons, and blend into the next cascade
 // over a band at the edge (the last one fades out).
 //
+// Local lights (lights.rs, ADR 0045): point and spot lights sorted by depth along the view.
+// The CPU fills z-bins (each slice of view depth: the lowest and highest index of the
+// lights overlapping it) and each light's rectangle of screen tiles; `lightTiles` sets one
+// bit per light in every tile its rectangle covers. A pixel shades the lights in both its
+// tile's bits and its bin's index range; the wave walks the union of its lanes' bits, one
+// light at a time, so light data loads are shared.
+//
 // Materials (material.rs, ADR 0040) are glTF 2.0 metallic-roughness: base color, metallic
 // and roughness, normal map, occlusion and emission, each a factor times a texture, read
 // per pixel from the material table by the instance's material slot. Masked materials
@@ -65,6 +72,14 @@ struct Cascade
     float4 offset;           // xyz: offset; w: NDC edge within which the filter stays inside
     float4 atlas;            // cascade NDC → atlas uv: xy scale, zw offset
     float4 bounds;           // light view: xy center, z half size, w far depth (−z)
+};
+
+// `LightData` in lights.rs.
+struct Light
+{
+    float4 position_range;   // xyz position, w range (the falloff ends there)
+    float4 color_scale;      // rgb color × intensity; w spot cone scale (0: point light)
+    float4 direction_offset; // xyz direction of the cone, w cone offset (1: point light)
 };
 
 struct Frame
@@ -96,6 +111,15 @@ struct Frame
     float normal_bias;       // receiver offset along its normal, in texels of its cascade
     uint fade_last;          // 1: shadows fade out at the last cascade's edge
     uint3 _pad3;
+    float4 view_axis;        // xyz view direction; w: −dot(direction, near plane center)
+    Light* lights;           // local lights, sorted by depth along the view
+    uint* zbins;             // Z_BINS entries: lowest light index | highest << 16
+    uint light_count;
+    uint light_words;        // 32-bit words of a tile's light bitmask
+    uint tiles_x;            // light tiles per row
+    float bin_scale;         // z-bins per unit of depth along the view
+    uint light_culling;      // 0: every light for every pixel (the reference)
+    uint3 _pad4;
 };
 
 struct Instance
@@ -163,6 +187,7 @@ struct Push
     Attributes* attributes;  // geometry pool: the other attributes
     Material* materials;     // the material table
     Instance* previous_instances; // last frame's instances, by draw index (motion)
+    uint* light_tiles;       // per tile, `light_words` bitmask words of its lights
     uint instance_count;
     uint texture;            // bindless index: the shadow map, or the depth to reduce
     uint phase;              // PHASE_*; the cascade in the shadow pass
@@ -173,6 +198,11 @@ static const uint PHASE_ALL = 0;    // frustum culling only
 static const uint PHASE_EARLY = 1;  // visible last frame and in the frustum
 static const uint PHASE_LATE = 2;   // visible now and not drawn by the early phase
 static const uint PHASE_SHADOW = 3; // casters of each cascade
+// `LIGHT_TILE` and `Z_BINS` in lights.rs.
+static const uint LIGHT_TILE = 16;
+static const uint Z_BINS = 1024;
+// 0 in the pipelines drawn without local lights: the light loop compiles away.
+[vk::constant_id(0)] const uint LOCAL_LIGHTS = 1;
 // Depth (NDC) a box's nearest point must lie beyond the pyramid to count as hidden.
 static const float OCCLUSION_MARGIN = 1e-5;
 
@@ -397,6 +427,29 @@ void cullMain(uint3 id : SV_DispatchThreadID)
         }
     }
     append(push.commands, push.visible, inst.batch, batch.first, index, visible);
+}
+
+// One group per light: its bit is set in the (cleared) bitmasks of every tile of its
+// rectangle. `visible` holds the rectangles (min x | min y << 16, max x | max y << 16).
+// The work follows what the lights cover, not tiles × lights.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lightTiles(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
+{
+    uint light = group.x;
+    uint lo = push.visible[light * 2];
+    uint hi = push.visible[light * 2 + 1];
+    uint2 first = uint2(lo & 0xFFFFu, lo >> 16);
+    uint2 size = uint2(hi & 0xFFFFu, hi >> 16) - first + 1;
+    uint words = push.frame.light_words;
+    uint tiles_x = push.frame.tiles_x;
+    uint word = light >> 5;
+    uint bit = 1u << (light & 31u);
+    for (uint i = local; i < size.x * size.y; i += 64)
+    {
+        uint2 t = first + uint2(i % size.x, i / size.x);
+        InterlockedOr(push.light_tiles[(t.y * tiles_x + t.x) * words + word], bit);
+    }
 }
 
 struct VertexOut
@@ -639,6 +692,87 @@ float shadow(float3 light, float3 n, float2 pixel)
     return 1.0;
 }
 
+// Light reflected towards `v` by a surface with normal `n`, for unit irradiance from `l`
+// (the BRDF times n·l).
+float3 surface_light(float3 n, float3 v, float3 l, float3 diffuse, float3 f0, float a)
+{
+    float3 h = normalize(v + l);
+    float n_dot_v = max(dot(n, v), 1e-4);
+    float n_dot_l = saturate(dot(n, l));
+    float n_dot_h = saturate(dot(n, h));
+    float v_dot_h = saturate(dot(v, h));
+    float3 f = fresnel_schlick(v_dot_h, f0);
+    float3 specular = distribution_ggx(n_dot_h, a) * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, a) * f;
+    return (diffuse + specular) * n_dot_l;
+}
+
+// One local light at `p`: inverse-square falloff windowed to zero at its range (Karis 2013),
+// times the spot cone.
+float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, float3 f0, float a)
+{
+    float3 to = light.position_range.xyz - p;
+    float d2 = dot(to, to);
+    float r = light.position_range.w;
+    float x = d2 / (r * r);
+    float window = saturate(1.0 - x * x);
+    if (window <= 0.0)
+        return 0.0;
+    float3 l = to * rsqrt(max(d2, 1e-8));
+    float cone = saturate(dot(-l, light.direction_offset.xyz) * light.color_scale.w + light.direction_offset.w);
+    float attenuation = window * window / max(d2, 1e-4) * cone * cone;
+    return surface_light(n, v, l, diffuse, f0, a) * light.color_scale.rgb * attenuation;
+}
+
+// Bits `lo`..`hi` (light indices) of word `w`.
+uint range_bits(uint w, uint lo, uint hi)
+{
+    int first = clamp(int(lo) - int(w * 32), 0, 32);
+    int end = clamp(int(hi) - int(w * 32) + 1, 0, 32);
+    uint below_end = end >= 32 ? 0xFFFFFFFFu : (1u << uint(end)) - 1u;
+    uint from_first = first >= 32 ? 0u : 0xFFFFFFFFu << uint(first);
+    return below_end & from_first;
+}
+
+// The local lights reaching `p` (at `pixel`): those in both its tile's bits and its
+// z-bin's index range, or every light without culling.
+float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, float3 f0, float a)
+{
+    uint count = push.frame.light_count;
+    float3 sum = 0.0;
+    if (LOCAL_LIGHTS == 0 || count == 0)
+        return sum;
+    if (push.frame.light_culling == 0)
+    {
+        for (uint i = 0; i < count; i++)
+            sum += local_light(push.frame.lights[i], p, n, v, diffuse, f0, a);
+        return sum;
+    }
+    float depth = dot(p, push.frame.view_axis.xyz) + push.frame.view_axis.w;
+    uint bin = uint(clamp(depth * push.frame.bin_scale, 0.0, float(Z_BINS - 1)));
+    uint range = push.frame.zbins[bin];
+    uint lo = range & 0xFFFFu;
+    uint hi = range >> 16;
+    bool any = lo <= hi;
+    // The wave walks the union of its lanes' words.
+    uint first_word = WaveActiveMin(any ? lo >> 5 : 0xFFFFFFFFu);
+    uint last_word = WaveActiveMax(any ? hi >> 5 : 0u);
+    uint2 tile = uint2(pixel) / LIGHT_TILE;
+    uint base = (tile.y * push.frame.tiles_x + tile.x) * push.frame.light_words;
+    for (uint w = first_word; w <= last_word && first_word != 0xFFFFFFFFu; w++)
+    {
+        uint mask = any ? push.light_tiles[base + w] & range_bits(w, lo, hi) : 0u;
+        uint merged = WaveActiveBitOr(mask);
+        while (merged != 0)
+        {
+            uint bit = firstbitlow(merged);
+            merged &= merged - 1u;
+            if ((mask >> bit) & 1u)
+                sum += local_light(push.frame.lights[w * 32 + bit], p, n, v, diffuse, f0, a);
+        }
+    }
+    return sum;
+}
+
 // The shading of both forward entry points; `masked` discards below the alpha cutoff.
 float4 shade(VertexOut input, bool front, bool masked)
 {
@@ -692,7 +826,8 @@ float4 shade(VertexOut input, bool front, bool masked)
     float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     float3 color = (diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
         + frame.ambient.rgb * base.rgb * occlusion
-        + emissive;
+        + emissive
+        + local_lights(input.world_position, input.position.xy, n, v, diffuse, f0, a);
     return float4(color, 1.0);
 }
 

@@ -52,6 +52,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0042](0042-depth-prepass.md) | Depth prepass: optional, off by default | Accepted |
 | [0043](0043-motion-vectors-and-taau.md) | Motion vectors, projection jitter and the engine's own TAAU | Accepted |
 | [0044](0044-cascaded-shadow-maps.md) | Cascaded shadow maps: stable cascades in an atlas, casters culled per cascade on the GPU | Accepted |
+| [0045](0045-local-lights.md) | Local lights: z-bins and tile bitmasks | Accepted |
 
 ## Template
 

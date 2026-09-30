@@ -384,6 +384,7 @@ fn main() {
                                     clear,
                                     occlusion: None,
                                     temporal: None,
+                                    lights: &[],
                                 },
                             );
                             if vp.id == scene {

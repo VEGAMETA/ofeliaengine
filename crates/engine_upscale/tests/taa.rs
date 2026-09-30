@@ -183,6 +183,7 @@ impl Gpu {
                         clear: Some([0.02, 0.02, 0.03, 1.0]),
                         occlusion: None,
                         temporal,
+                        lights: &[],
                     },
                 )
                 .unwrap();
