@@ -53,8 +53,25 @@ Sponza, 1920×1080, `scene_bench --ao <preset>` (release, `VK_LOADER_LAYERS_DISA
 | **High (3 × 3), default** | **460** | **12,104** |
 | Ultra (9 × 3) | 1,055 | — |
 
-- Of High on the RTX: depths 28, main 386, denoise 42. The forward pass costs 10–12 µs
-  more (one load and the multi-bounce fit).
+- Of High on the RTX: depths 28, main 386, denoise 42. The forward pass, Sponza with the
+  sky light: RTX 321 → 318 µs with AO; Radeon 8,664 → 9,854 µs (+14 %: the shading
+  variant that reads AO takes more registers; only views with AO use it).
+- **Shading without AO must not pay for it.** The first version read AO in every forward
+  shading pipeline (a load and a multi-bounce fit, skipped when no AO was bound). On the
+  Radeon the environment variant went from 64 to 77 VGPRs, fewer waves in flight, and
+  the forward pass got 9 % (procedural scene) to 13 % (Sponza) slower with AO off; the
+  RTX did not change. The golden-image gate (ADR 0062) caught it when the pull requests
+  were merged together, and a bisection named this change. Measured fixes, environment
+  variant VGPRs (main: 64):
+  - the load moved next to its use: 76;
+  - a scalar multi-bounce fit (the albedo's luminance) instead of per channel: 72;
+  - AO folded into the material's occlusion where that is read: 72;
+  - all of it under a specialization constant set to 0: still 72 (70 with only the fit,
+    72 with only the load): the AMD driver does not remove code under a specialization
+    constant before allocating registers;
+  - **separate entry points** (`fragmentMainAo`, `fragmentMainMotionAo`) with `ao` a
+    literal argument of `shade`, which the SPIR-V optimizer removes from the others: 64,
+    and the Radeon's forward pass back to 12,206 µs (main 12,196).
 - Optimizations kept (High main pass 462 → 386 µs, Low 179 → 164): the slice directions
   rotated rather than recomputed (no `sin`/`cos` per slice), `rsqrt` instead of `length`
   and a division per sample, the depth level from `firstbithigh` instead of `log2`, the
@@ -104,13 +121,18 @@ the GPU to about 0.005.
      survive) and the edges (four 2-bit weights in an R8);
   3. `ao denoise` (0–3 passes, 1 by default): an edge-aware 3 × 3 blur; the last pass
      restores the scale.
-- **Use in shading:** the forward pass multiplies the ambient and environment diffuse
-  light by the visibility through Jimenez's multi-bounce fit (brighter albedos lose less),
-  and the specular by Lagarde's specular occlusion from the combined occlusion (material
-  × screen). Sun and local lights are untouched: their shadows are their occlusion.
-- **API:** `ForwardRenderer::set_ambient_occlusion(Option<AoSettings>)`, off by default;
-  `AoQuality::{Low, Medium, High, Ultra, Custom { slices, steps }}`, High by default.
-  Perspective views only: orthographic ones draw without it.
+- **Use in shading:** the view's AO multiplies the material's occlusion where that is
+  read; the ambient and environment diffuse light take the combined occlusion through
+  Jimenez's multi-bounce fit for the albedo's luminance (brighter surfaces lose less), the
+  specular Lagarde's specular occlusion from it. Sun and local lights are untouched: their
+  shadows are their occlusion.
+- **Only views with AO pay for it:** the shading that reads it has its own entry points,
+  with 8 pipelines (4 lighting variants, with and without motion vectors) made when AO is
+  first turned on, like its 3 compute pipelines; shading without AO has no code for it.
+- **API:** `ForwardRenderer::set_ambient_occlusion(&Device, &Bindless,
+  Option<AoSettings>)`, off by default; `AoQuality::{Low, Medium, High, Ultra, Custom {
+  slices, steps }}`, High by default. Perspective views only: orthographic ones draw
+  without it.
 - **Tests:** the floor-and-wall reference for the Custom 9 × 32 (±0.04), every preset
   against the requested-radius reference (±0.05 for three samples per side, ±0.08 for
   two), with two-phase occlusion culling and with a temporal state; on both GPUs, under
@@ -122,6 +144,9 @@ the GPU to about 0.005.
   (High), or 0.23 ms (Low). Under TAAU AO runs at the render resolution, so upscaling
   lowers its cost with the rest.
 - AO forces the depth prepass: 58 µs on Sponza that a renderer without it would not pay.
+- A rule for every shading feature from here on: code a view does not use must not be in
+  its shaders. On the Radeon a specialization constant is not enough; a literal argument
+  of separate entry points is.
 - Screen-space limits remain: nothing off screen or behind the first depth layer
   occludes, and thin objects occlude everything behind them within the radius (visibility
   bitmasks would fix the latter).

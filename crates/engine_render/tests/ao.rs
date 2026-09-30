@@ -206,7 +206,9 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
         (AoQuality::High, false, false),
         (AoQuality::Ultra, false, true),
     ] {
-        renderer.set_ambient_occlusion(Some(settings(quality)));
+        renderer
+            .set_ambient_occlusion(&device, &bindless, Some(settings(quality)))
+            .unwrap();
         // Two frames: occlusion culling's second frame has the first's visibility.
         for _ in 0..2 {
             frame_number += 1;

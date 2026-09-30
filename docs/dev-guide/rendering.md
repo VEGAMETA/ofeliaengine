@@ -623,11 +623,11 @@ renderer:
 ```rust
 use engine_render::ao::{AoQuality, AoSettings};
 
-renderer.set_ambient_occlusion(Some(AoSettings {
+renderer.set_ambient_occlusion(&device, &bindless, Some(AoSettings {
     quality: AoQuality::High, // 3 directions × 3 samples per side
     radius: 0.5,              // how far occluders count, in world units
     ..AoSettings::default()
-}));
+}))?;
 ```
 
 - **What it darkens:** the ambient light and the sky's diffuse and reflected light, never

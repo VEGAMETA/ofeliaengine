@@ -839,21 +839,25 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
 
 // Jimenez et al.'s fit of the light bouncing between occluders (GTAO, 2016): ambient
 // occlusion darkens light-colored surfaces less.
-float3 multibounce(float visibility, float3 albedo)
+float multibounce(float visibility, float albedo)
 {
-    float3 a = 2.0404 * albedo - 0.3324;
-    float3 b = -4.7951 * albedo + 0.6417;
-    float3 c = 2.7552 * albedo + 0.6903;
+    float a = 2.0404 * albedo - 0.3324;
+    float b = -4.7951 * albedo + 0.6417;
+    float c = 2.7552 * albedo + 0.6903;
     return max(visibility, ((visibility * a + b) * visibility + c) * visibility);
 }
 
 // Light from the whole sky: the environment's harmonics (diffuse) and prefiltered cube
 // (specular), or the flat ambient color without an environment. `occlusion` is the
-// material's, `screen` the view's ambient occlusion (ADR 0058; 1 without).
-float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float screen, float3 albedo)
+// material's, times the view's ambient occlusion when `ao` (ADR 0058).
+float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao)
 {
-    float3 diffuse_occlusion = occlusion * (screen < 1.0 ? multibounce(screen, albedo) : 1.0);
-    occlusion *= screen;
+    // With the view's ambient occlusion, the fit of its bounces (for the albedo's
+    // luminance: one value instead of three, fewer registers); without it, the material's
+    // occlusion as it was.
+    float diffuse_occlusion = ao && occlusion < 1.0
+        ? multibounce(occlusion, dot(albedo, float3(0.2126, 0.7152, 0.0722)))
+        : occlusion;
     if (ENVIRONMENT == 0 || push.frame.environment == 0)
         return push.frame.ambient.rgb * albedo * diffuse_occlusion;
     float n_dot_v = max(dot(n, v), 1e-4);
@@ -878,8 +882,11 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
 }
 
 // The shading of the forward entry points, with the material's alpha; `masked` discards
-// below the alpha cutoff.
-float4 shade(VertexOut input, bool front, bool masked)
+// below the alpha cutoff; `ao` reads the view's ambient occlusion (ADR 0058). Both are
+// literals at every call: the compiler removes the code of the other case, so shading
+// without ambient occlusion spends no registers on it (on RDNA2 even dead code under a
+// specialization constant took the shading from 64 to 72 VGPRs, 9 to 13 % slower).
+float4 shade(VertexOut input, bool front, bool masked, bool ao)
 {
     Frame frame = push.frame[0];
     Material m = push.materials[input.material];
@@ -910,7 +917,9 @@ float4 shade(VertexOut input, bool front, bool masked)
     float metallic = saturate(mr.b * m.metallic);
     float perceptual = widen_roughness(saturate(mr.g * m.roughness), kernel);
     float occlusion = 1.0 + m.occlusion_strength * (sample_material(m.occlusion_texture, input.uv).r - 1.0);
-    float screen_occlusion = push.ao != NO_TEXTURE ? g_textures[push.ao].Load(int3(int2(input.position.xy), 0)).r : 1.0;
+    // The view's ambient occlusion (ADR 0058) joins the material's.
+    if (ao && push.ao != NO_TEXTURE)
+        occlusion *= g_textures[push.ao].Load(int3(int2(input.position.xy), 0)).r;
     float3 emissive = sample_material(m.emissive_texture, input.uv).rgb * m.emissive;
 
     float3 v = normalize(frame.camera_position.xyz - input.world_position);
@@ -931,7 +940,7 @@ float4 shade(VertexOut input, bool front, bool masked)
     // says.
     float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     float3 color = (diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
-        + ambient_light(n, v, diffuse, f0, roughness, occlusion, screen_occlusion, base.rgb)
+        + ambient_light(n, v, diffuse, f0, roughness, occlusion, base.rgb, ao)
         + emissive
         + local_lights(input.world_position, input.position.xy, n, v, diffuse, f0, a);
     return float4(color, base.a);
@@ -940,13 +949,20 @@ float4 shade(VertexOut input, bool front, bool masked)
 [shader("fragment")]
 float4 fragmentMain(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
-    return float4(shade(input, front, false).rgb, 1.0);
+    return float4(shade(input, front, false, false).rgb, 1.0);
+}
+
+// After the depth prepass of a view with ambient occlusion (ADR 0058).
+[shader("fragment")]
+float4 fragmentMainAo(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true).rgb, 1.0);
 }
 
 [shader("fragment")]
 float4 fragmentMasked(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
-    return float4(shade(input, front, true).rgb, 1.0);
+    return float4(shade(input, front, true, false).rgb, 1.0);
 }
 
 // Transparent surfaces (ADR 0054): premultiplied color over what is behind. Alpha is
@@ -954,7 +970,7 @@ float4 fragmentMasked(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 [shader("fragment")]
 float4 fragmentBlended(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
-    float4 c = shade(input, front, false);
+    float4 c = shade(input, front, false, false);
     float alpha = saturate(c.a);
     return float4(c.rgb * alpha, alpha);
 }
@@ -970,7 +986,7 @@ struct BlendedReactive
 [shader("fragment")]
 BlendedReactive fragmentBlendedReactive(VertexOut input, bool front : SV_IsFrontFace)
 {
-    float4 c = shade(input, front, false);
+    float4 c = shade(input, front, false, false);
     float alpha = saturate(c.a);
     BlendedReactive o;
     o.color = float4(c.rgb * alpha, alpha);
@@ -1000,7 +1016,17 @@ struct ShadedMotion
 ShadedMotion fragmentMainMotion(VertexOut input, bool front : SV_IsFrontFace)
 {
     ShadedMotion o;
-    o.color = float4(shade(input, front, false).rgb, 1.0);
+    o.color = float4(shade(input, front, false, false).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+// With motion vectors, after the depth prepass of a view with ambient occlusion.
+[shader("fragment")]
+ShadedMotion fragmentMainMotionAo(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, true).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
     return o;
 }
@@ -1009,7 +1035,7 @@ ShadedMotion fragmentMainMotion(VertexOut input, bool front : SV_IsFrontFace)
 ShadedMotion fragmentMaskedMotion(VertexOut input, bool front : SV_IsFrontFace)
 {
     ShadedMotion o;
-    o.color = float4(shade(input, front, true).rgb, 1.0);
+    o.color = float4(shade(input, front, true, false).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
     return o;
 }

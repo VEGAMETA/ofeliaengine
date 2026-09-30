@@ -674,7 +674,9 @@ fn main() {
     );
     println!();
     renderer.set_depth_prepass(prepass);
-    renderer.set_ambient_occlusion(ao);
+    renderer
+        .set_ambient_occlusion(&device, &bindless, ao)
+        .unwrap();
     renderer.set_light_culling(light_culling);
     if pipeline_stats {
         // Needs ENGINE_PIPELINE_STATS=1 (the device captures statistics at creation).

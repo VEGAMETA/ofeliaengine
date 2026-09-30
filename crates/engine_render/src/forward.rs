@@ -73,6 +73,8 @@ const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked.spv");
 const DEPTH_VERTEX: &[u8] = include_bytes!("../shaders/forward.depthVertex.spv");
 const FRAGMENT_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotion.spv");
+const FRAGMENT_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainAo.spv");
+const FRAGMENT_MOTION_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotionAo.spv");
 const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
@@ -679,6 +681,108 @@ struct Shading {
     blended: [Pipeline; 2],
 }
 
+/// Ambient occlusion (ADR 0058): its passes, and the shading that reads it after the depth
+/// prepass (`fragmentMainAo`, `fragmentMainMotionAo`), per shading variant: without and
+/// with motion vectors. The other entry points have no code for it (see `shade` in
+/// `forward.slang`).
+#[derive(Debug)]
+struct AoPasses {
+    passes: AmbientOcclusion,
+    shading: [[Pipeline; 2]; 4],
+}
+
+/// The specialization constants of each shading variant: `LOCAL_LIGHTS`, `ENVIRONMENT`
+/// (`forward.slang`).
+const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
+
+/// A shading pipeline of the forward pass.
+fn shading_desc<'a>(
+    vertex: &'a [u32],
+    fragment: &'a [u32],
+    entry: &'a core::ffi::CStr,
+    color_formats: &'a [vk::Format],
+    depth_format: vk::Format,
+    specialization: &'a [u32],
+) -> GraphicsPipelineDesc<'a> {
+    GraphicsPipelineDesc {
+        specialization,
+        color_formats,
+        depth_format,
+        // Cull mode and front face come with each batch's pipeline state.
+        dynamic_culling: true,
+        ..GraphicsPipelineDesc::new(
+            ShaderStageDesc {
+                spirv: vertex,
+                entry: c"vertexMain",
+            },
+            Some(ShaderStageDesc {
+                spirv: fragment,
+                entry,
+            }),
+        )
+    }
+}
+
+impl AoPasses {
+    fn new(
+        device: &Device,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+    ) -> Result<Self, RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+        let fragment = spirv_words(FRAGMENT_AO).ok_or_else(invalid)?;
+        let fragment_motion = spirv_words(FRAGMENT_MOTION_AO).ok_or_else(invalid)?;
+        let formats = [color_format];
+        let motion_formats = [color_format, MOTION_FORMAT];
+        // After the depth prepass: tested for equality, not written.
+        let shade = |fragment, entry, formats, variant: usize| GraphicsPipelineDesc {
+            depth_write: false,
+            depth_compare: vk::CompareOp::EQUAL,
+            ..shading_desc(
+                &vertex,
+                fragment,
+                entry,
+                formats,
+                depth_format,
+                &VARIANTS[variant],
+            )
+        };
+        let descs: Vec<PipelineDesc<'_>> = (0..VARIANTS.len())
+            .flat_map(|v| {
+                [
+                    shade(&fragment, c"fragmentMainAo", &formats[..], v),
+                    shade(
+                        &fragment_motion,
+                        c"fragmentMainMotionAo",
+                        &motion_formats[..],
+                        v,
+                    ),
+                ]
+            })
+            .map(PipelineDesc::Graphics)
+            .collect();
+        let mut pipelines =
+            Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
+                call: "ambient occlusion pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        let mut pair = || -> Result<[Pipeline; 2], RhiError> { Ok([next()?, next()?]) };
+        let shading = [pair()?, pair()?, pair()?, pair()?];
+        Ok(Self {
+            passes: AmbientOcclusion::new(device, bindless)?,
+            shading,
+        })
+    }
+}
+
 /// The forward PBR pipelines.
 #[derive(Debug)]
 pub struct ForwardRenderer {
@@ -704,7 +808,10 @@ pub struct ForwardRenderer {
     /// Screen-space error (pixels) a coarser detail level may have; 0 draws full meshes.
     lod_threshold: f32,
     depth_prepass: bool,
-    ao: AmbientOcclusion,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+    /// Ambient occlusion's passes and shading pipelines, made when it is first turned on.
+    ao: Option<AoPasses>,
     ao_settings: Option<AoSettings>,
     /// Frames drawn with ambient occlusion: its noise index under TAA.
     ao_frame: Cell<u32>,
@@ -748,36 +855,6 @@ impl ForwardRenderer {
         let reactive_formats = [color_format, REACTIVE_FORMAT];
         let formats = [color_format];
         let motion_formats = [color_format, MOTION_FORMAT];
-        // The specialization constants of each shading variant.
-        const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
-        // Every graphics pipeline is described first and created in parallel below
-        // (ADR 0055); they are taken back in the order they were described.
-        fn shading_desc<'a>(
-            vertex: &'a [u32],
-            fragment: &'a [u32],
-            entry: &'a core::ffi::CStr,
-            color_formats: &'a [vk::Format],
-            depth_format: vk::Format,
-            specialization: &'a [u32],
-        ) -> GraphicsPipelineDesc<'a> {
-            GraphicsPipelineDesc {
-                specialization,
-                color_formats,
-                depth_format,
-                // Cull mode and front face come with each batch's pipeline state.
-                dynamic_culling: true,
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: vertex,
-                        entry: c"vertexMain",
-                    },
-                    Some(ShaderStageDesc {
-                        spirv: fragment,
-                        entry,
-                    }),
-                )
-            }
-        }
         let main = |fragment, entry, formats, equal: bool, variant: usize| GraphicsPipelineDesc {
             // After the depth prepass: tested for equality, not written.
             depth_write: !equal,
@@ -947,7 +1024,9 @@ impl ForwardRenderer {
             light_culling: true,
             lod_threshold: 1.0,
             depth_prepass: false,
-            ao: AmbientOcclusion::new(device, bindless)?,
+            color_format,
+            depth_format,
+            ao: None,
             ao_settings: None,
             ao_frame: Cell::new(0),
             scratch: RefCell::new(Scratch::default()),
@@ -986,9 +1065,25 @@ impl ForwardRenderer {
     /// default). It darkens the ambient and environment light where the surroundings hide
     /// the sky, not the sun or local lights. It needs the depth before shading, so the
     /// depth prepass runs whenever it is on. Perspective views only: orthographic ones
-    /// draw without it.
-    pub fn set_ambient_occlusion(&mut self, settings: Option<AoSettings>) {
+    /// draw without it. The first time it is turned on its passes and 8 shading pipelines
+    /// are made (in parallel, through the pipeline cache: ADR 0055), so a renderer that
+    /// never uses it pays nothing, not even registers in its shading.
+    pub fn set_ambient_occlusion(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        settings: Option<AoSettings>,
+    ) -> Result<(), RhiError> {
+        if settings.is_some() && self.ao.is_none() {
+            self.ao = Some(AoPasses::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+            )?);
+        }
         self.ao_settings = settings;
+        Ok(())
     }
 
     /// The ambient occlusion settings, when it is on.
@@ -1649,7 +1744,10 @@ impl ForwardRenderer {
         };
 
         // Ambient occlusion needs the whole depth before shading: the prepass draws it.
-        let ao = self.ao_settings.zip(view.camera.view_space());
+        let ao = self
+            .ao_settings
+            .zip(view.camera.view_space())
+            .zip(self.ao.as_ref());
         let ao_frame = if temporal.is_some() {
             let frame = self.ao_frame.get().wrapping_add(1);
             self.ao_frame.set(frame);
@@ -1662,11 +1760,19 @@ impl ForwardRenderer {
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
-        let shading = &self.shading
-            [usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1];
+        let variant = usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1;
+        let shading = &self.shading[variant];
+        // With ambient occlusion, the shading that reads it (the prepass is on then).
+        let ao_shading = ao.map(|(_, passes)| &passes.shading[variant]);
         let main_pipelines = match (prepass, velocity.is_some()) {
-            (true, false) => [&shading.shade, &shading.shade],
-            (true, true) => [&shading.shade_motion, &shading.shade_motion],
+            (true, false) => match ao_shading {
+                Some(p) => [&p[0], &p[0]],
+                None => [&shading.shade, &shading.shade],
+            },
+            (true, true) => match ao_shading {
+                Some(p) => [&p[1], &p[1]],
+                None => [&shading.shade_motion, &shading.shade_motion],
+            },
             (false, false) => [&shading.main[0], &shading.main[1]],
             (false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
         };
@@ -1715,9 +1821,10 @@ impl ForwardRenderer {
                 } else {
                     DepthUse::Write(depth_clear, depth_store)
                 };
-                if let Some((settings, view_space)) = &ao {
+                if let Some(((settings, view_space), passes)) = &ao {
                     targets.ao = Some(
-                        self.ao
+                        passes
+                            .passes
                             .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
                     );
                 }
@@ -1806,9 +1913,10 @@ impl ForwardRenderer {
                     )
                     .depth(depth, LoadOp::Load, StoreOp::Store)
                     .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_LATE, None));
-                    if let Some((settings, view_space)) = &ao {
+                    if let Some(((settings, view_space), passes)) = &ao {
                         targets.ao = Some(
-                            self.ao
+                            passes
+                                .passes
                                 .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
                         );
                     }
