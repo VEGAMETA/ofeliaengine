@@ -23,6 +23,8 @@ the dependency.
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
+| meshopt 0.6.2 (+ bitflags 2, float-cmp 0.10, num-traits 0.2, thiserror 2 + thiserror-impl) | MIT OR Apache-2.0 (float-cmp MIT) | mesh simplification for detail levels in `engine_assets` (ADR 0053) |
+| meshoptimizer 0.25 (© Arseny Kapoulkine; vendored inside meshopt, built by cc) | MIT | the simplifier and vertex cache optimizer behind meshopt |
 
 Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profiling`):
 

@@ -103,7 +103,8 @@ struct Frame
     uint visibility_capacity; // instances with visibility flags (occlusion culling)
     uint hiz_levels;         // depth pyramid levels 1..hiz_levels; the last is 1×1
     uint2 depth_size;        // size of the depth target in pixels
-    uint2 _pad;
+    float lod_scale;         // pixels per object unit at distance 1 over the LOD threshold (0: full meshes)
+    uint slot_count;         // instance slots per command list
     uint4 hiz_offsets[4];    // offset of level k + 1 in the pyramid, in floats
     float4x4 previous_clip_from_world;  // last frame's camera, unjittered
     float4x4 previous_clip_from_clip;   // for the background: this frame's clip space
@@ -113,7 +114,7 @@ struct Frame
     uint3 _pad2;
     Cascade cascades[4];
     uint cascade_count;      // 0: everything is lit
-    uint batch_count;        // batches per command list (the shadow phase's lists)
+    uint command_count;      // draw commands per list (one per detail level of each batch)
     float cascade_blend;     // NDC band at a cascade's edge that blends into the next
     float normal_bias;       // receiver offset along its normal, in texels of its cascade
     uint fade_last;          // 1: shadows fade out at the last cascade's edge
@@ -153,11 +154,36 @@ struct Instance
 
 struct Batch
 {
-    uint first;              // first instance of the batch; also its first slot in `visible`
-    uint3 _pad;
+    uint command;            // the finest level's draw command; the coarser ones follow
+    uint slot;               // its first slot in `visible`; each level has `count` more
+    uint count;              // instances
+    uint lods;               // detail levels of the mesh (ADR 0053)
     float4 center;           // object-space bounding box: center (xyz)
     float4 extents;          // and half extents (xyz)
+    float4 errors;           // each level's error, object-space units
 };
+
+// The coarsest detail level whose error, projected at the box's nearest possible
+// distance, stays within the threshold (ADR 0053): error × scale × lod_scale ≤ distance.
+uint choose_lod(Instance inst, Batch batch, float3 center, float3 extents)
+{
+    if (batch.lods <= 1 || push.frame.lod_scale <= 0.0)
+        return 0;
+    // The largest scale of the instance's linear part (its columns' lengths).
+    float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+    float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+    float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+    float scale = sqrt(max(dot(c0, c0), max(dot(c1, c1), dot(c2, c2))));
+    float distance = max(length(center - push.frame.camera_position.xyz) - length(extents), 1e-3);
+    float allowed = distance / (scale * push.frame.lod_scale);
+    uint lod = 0;
+    for (uint k = 1; k < batch.lods; k++)
+    {
+        if (batch.errors[k] <= allowed)
+            lod = k;
+    }
+    return lod;
+}
 
 // `GpuMaterial` in material.rs. Textures: bindless index in the low 24 bits, sampler
 // index in the top 8.
@@ -399,6 +425,9 @@ void cullMain(uint3 id : SV_DispatchThreadID)
     float3 e = batch.extents.xyz;
     float3 extents = float3(dot(abs(inst.row0.xyz), e), dot(abs(inst.row1.xyz), e), dot(abs(inst.row2.xyz), e));
     bool cull = push.frame.cull != 0;
+    uint lod = choose_lod(inst, batch, center, extents);
+    uint command = batch.command + lod;
+    uint first = batch.slot + lod * batch.count;
     if (push.phase == PHASE_SHADOW)
     {
         // The box in light view space (Arvo again: the light view is a rotation).
@@ -412,7 +441,7 @@ void cullMain(uint3 id : SV_DispatchThreadID)
             // Inside the cascade's square, and not wholly beyond its far depth: anything
             // between the light and the slice casts into it.
             bool caster = !cull || (all(abs(c.xy - b.xy) <= b.z + e.xy) && -(c.z + e.z) <= b.w);
-            append(push.commands + k * push.frame.batch_count, push.visible + k * push.instance_count, inst.batch, batch.first, index, caster);
+            append(push.commands + k * push.frame.command_count, push.visible + k * push.frame.slot_count, command, first, index, caster);
         }
         return;
     }
@@ -446,7 +475,7 @@ void cullMain(uint3 id : SV_DispatchThreadID)
             visible = visible && !was_visible;
         }
     }
-    append(push.commands, push.visible, inst.batch, batch.first, index, visible);
+    append(push.commands, push.visible, command, first, index, visible);
 }
 
 // One group per light: its bit is set in the (cleared) bitmasks of every tile of its

@@ -9,7 +9,11 @@
 //! occlusion state carries over the warm-up frames).
 //!
 //! `cargo run -p engine_render --release --example draw_bench [max-instances] [--prepass]
-//! [--cascades <1-4>] [--shadow-res <texels per cascade>]`
+//! [--cascades <1-4>] [--shadow-res <texels per cascade>] [--sphere <rings>] [--lods]`
+//!
+//! `--sphere <rings>` draws UV spheres of `rings` × 2·`rings` quads (radius 0.5) instead of
+//! cubes; `--lods` gives the mesh detail levels from `engine_assets::generate_lods`
+//! (ADR 0053).
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -19,7 +23,9 @@ use engine_render::forward::{
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialId, MaterialTable};
-use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId, cube};
+use engine_render::mesh::{
+    GeometryCapacity, GeometryPool, LodIndices, MeshId, OwnedMeshData, cube,
+};
 use engine_render::post::HDR_FORMAT;
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
@@ -151,9 +157,41 @@ fn median(values: &mut [f64]) -> f64 {
     values.get(values.len() / 2).copied().unwrap_or(0.0)
 }
 
+/// A UV sphere of radius 0.5: `rings` × 2·`rings` quads, counter-clockwise from outside.
+fn sphere(rings: u32) -> OwnedMeshData {
+    let segments = rings * 2;
+    let mut mesh = OwnedMeshData::default();
+    for r in 0..=rings {
+        let theta = core::f32::consts::PI * r as f32 / rings as f32;
+        for s in 0..=segments {
+            let phi = core::f32::consts::TAU * s as f32 / segments as f32;
+            let n = [
+                theta.sin() * phi.cos(),
+                theta.cos(),
+                theta.sin() * phi.sin(),
+            ];
+            mesh.positions.push(n.map(|c| c * 0.5));
+            mesh.normals.push(n);
+            mesh.uvs
+                .push([s as f32 / segments as f32, r as f32 / rings as f32]);
+        }
+    }
+    let row = segments + 1;
+    for r in 0..rings {
+        for s in 0..segments {
+            let (a, b) = (r * row + s, (r + 1) * row + s);
+            mesh.indices
+                .extend_from_slice(&[a, a + 1, b, a + 1, b + 1, b]);
+        }
+    }
+    mesh
+}
+
 fn main() {
     let mut max_instances: usize = 100_000;
     let mut prepass = false;
+    let mut sphere_rings = None;
+    let mut lods = false;
     let mut shadows = ShadowSettings::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -161,6 +199,8 @@ fn main() {
             "--prepass" => prepass = true,
             "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
             "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
+            "--sphere" => sphere_rings = Some(args.next().unwrap().parse().unwrap()),
+            "--lods" => lods = true,
             n => max_instances = n.parse().unwrap(),
         }
     }
@@ -184,7 +224,35 @@ fn main() {
         ForwardRenderer::new(&device, &bindless, HDR_FORMAT, depth_format, shadows).unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
-    let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    let mesh_data = sphere_rings.map_or_else(cube, sphere);
+    let levels = if lods {
+        engine_assets::generate_lods(
+            &mesh_data.positions,
+            &mesh_data.indices,
+            &engine_assets::LodSettings::default(),
+        )
+    } else {
+        Vec::new()
+    };
+    print!("Mesh: {} triangles", mesh_data.indices.len() / 3);
+    for level in &levels {
+        print!(
+            ", LOD {} triangles (error {:.4})",
+            level.indices.len() / 3,
+            level.error
+        );
+    }
+    println!();
+    let lod_indices: Vec<LodIndices<'_>> = levels
+        .iter()
+        .map(|l| LodIndices {
+            indices: &l.indices,
+            error: l.error,
+        })
+        .collect();
+    let mesh = geometry
+        .add_mesh_with_lods(&mesh_data.as_data(), &lod_indices)
+        .unwrap();
     let mut textures = TexturePool::new(&device, 64 << 20, 1);
     let mut materials = MaterialTable::new(1);
     // 64 hues from blue to red, then the walls' grey.
@@ -207,7 +275,8 @@ fn main() {
     let (readback, readback_mem) = allocator
         .create_buffer(
             &vk::BufferCreateInfo::default()
-                .size(40)
+                // Up to two phases of four detail levels' commands (20 bytes each).
+                .size(160)
                 .usage(vk::BufferUsageFlags::TRANSFER_DST),
             MemoryLocation::Readback,
         )
@@ -288,7 +357,7 @@ fn main() {
                     .unwrap();
                 }
                 ring.begin_slot(0);
-                let (prepared, executed, phases);
+                let (prepared, executed, phases, per_list);
                 {
                     // SAFETY: nothing is in flight.
                     let mut fg = unsafe { graph.begin_slot(0, cmd) };
@@ -339,8 +408,9 @@ fn main() {
                         )
                         .unwrap();
                     prepared = t.elapsed();
-                    // One batch (one mesh): a command per phase.
+                    // One batch (one mesh): a command per detail level and phase.
                     phases = if passes.occlusion { 2 } else { 1 };
+                    per_list = u64::from(passes.draw_commands);
                     let commands = passes.commands.unwrap();
                     fg.add_pass("consume")
                         .read(hdr, Access::TransferRead)
@@ -350,8 +420,8 @@ fn main() {
                             let region = vk::BufferCopy {
                                 src_offset: 0,
                                 dst_offset: 0,
-                                // One VkDrawIndexedIndirectCommand (20 bytes) per phase.
-                                size: 20 * phases,
+                                // VkDrawIndexedIndirectCommand: 20 bytes.
+                                size: 20 * phases * per_list,
                             };
                             // SAFETY: recording outside a rendering scope.
                             unsafe {
@@ -382,7 +452,7 @@ fn main() {
                 }
                 let ptr = readback_mem.mapped_ptr().unwrap();
                 // SAFETY: the GPU is idle; the mapping holds the phases' draw commands.
-                let commands = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 40) };
+                let commands = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 160) };
                 let count_at = |i: usize| {
                     let at = 20 * i + 4;
                     u32::from_le_bytes([
@@ -392,7 +462,7 @@ fn main() {
                         commands[at + 3],
                     ])
                 };
-                drawn = (0..phases as usize).map(count_at).sum::<u32>();
+                drawn = (0..(phases * per_list) as usize).map(count_at).sum::<u32>();
                 if frame >= WARMUP {
                     list.push(listed.as_secs_f64() * 1e6);
                     prepare.push(prepared.as_secs_f64() * 1e6);

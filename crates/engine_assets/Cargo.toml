@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Mesh simplification for LOD chains (MIT OR Apache-2.0; builds meshoptimizer, MIT); ADR 0053.
+meshopt = "0.6"
 engine_core.workspace = true
 engine_ecs.workspace = true
 engine_profiler.workspace = true
