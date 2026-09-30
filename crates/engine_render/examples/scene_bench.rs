@@ -12,7 +12,9 @@
 //! `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
 //! (scenes: `tools/fetch-test-assets.ps1`; options: `--screenshot <png>`,
 //! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--prepass` for the depth prepass,
-//! `--motion` for a jittered projection and motion vectors (ADR 0043), `--ddc <dir>`
+//! `--motion` for a jittered projection and motion vectors (ADR 0043), `--cascades <1-4>`
+//! `--shadow-res <texels per cascade>` and `--shadow-blend <band>` for the shadows
+//! (ADR 0044), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -189,6 +191,7 @@ fn main() {
     let mut uncompressed = false;
     let mut prepass = false;
     let mut motion = false;
+    let mut shadows = ShadowSettings::default();
     let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -197,6 +200,9 @@ fn main() {
             "--uncompressed" => uncompressed = true,
             "--prepass" => prepass = true,
             "--motion" => motion = true,
+            "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
+            "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
+            "--shadow-blend" => shadows.blend = args.next().unwrap().parse().unwrap(),
             "--ddc" => ddc = args.next().unwrap(),
             "--view" => {
                 let v: Vec<f32> = args
@@ -293,14 +299,8 @@ fn main() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let depth_format = vk::Format::D32_SFLOAT;
-    let mut renderer = ForwardRenderer::new(
-        &device,
-        &bindless,
-        HDR_FORMAT,
-        depth_format,
-        ShadowSettings::default(),
-    )
-    .unwrap();
+    let mut renderer =
+        ForwardRenderer::new(&device, &bindless, HDR_FORMAT, depth_format, shadows).unwrap();
     let screenshot_format = vk::Format::R8G8B8A8_SRGB;
     let tonemap = Tonemap::new(&device, &bindless, screenshot_format).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 64 << 20).unwrap();
@@ -427,7 +427,11 @@ fn main() {
         .filter(|m| m.alpha == GltfAlpha::Blend)
         .count();
     let double_sided = scene.materials.iter().filter(|m| m.double_sided).count();
-    println!("### Scene through the forward renderer ({WIDTH}×{HEIGHT} HDR, shadow map 2048²)");
+    println!(
+        "### Scene through the forward renderer ({WIDTH}×{HEIGHT} HDR, {} shadow cascades of {}²)",
+        shadows.cascade_count(),
+        shadows.resolution
+    );
     println!();
     println!("Device: {}", device.adapter().summary());
     println!(
@@ -610,9 +614,10 @@ fn main() {
             }
             if frame > WARMUP && !capture {
                 let mut extra = 0.0;
+                let mut shadow_frame = 0.0;
                 for time in graph.gpu_pass_times() {
                     match time.name {
-                        "shadow" => shadow.push(f64::from(time.gpu_us)),
+                        "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
                         "forward" => forward.push(f64::from(time.gpu_us)),
                         "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
                         "motion background" | "remember instances" => {
@@ -622,6 +627,7 @@ fn main() {
                     }
                 }
                 motion_extra.push(extra);
+                shadow.push(shadow_frame);
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();

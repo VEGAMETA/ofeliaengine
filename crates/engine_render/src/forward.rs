@@ -1,4 +1,5 @@
-//! Forward PBR renderer with a directional light and a shadow map (ADR 0014), drawn
+//! Forward PBR renderer with a directional light and cascaded shadow maps (ADR 0014,
+//! ADR 0044), drawn
 //! GPU-driven (ADR 0034) with optional two-phase occlusion culling (ADR 0035), shading
 //! glTF materials from a [`MaterialTable`] (ADR 0040).
 //!
@@ -14,11 +15,14 @@
 //! 2. **cull**: a compute pass tests every instance's world-space bounding box against the
 //!    camera frustum, appends the visible ones to their batch's range of a visible list
 //!    and counts them in the batch's command;
-//! 3. **shadow**: depth-only rendering of every instance from the light, into a transient
-//!    shadow map (with depth bias); masked materials test their alpha;
+//! 3. **shadow cull** and **shadow**: the culling shader tests every instance against each
+//!    shadow cascade ([`crate::shadow`]) and appends the casters to that cascade's
+//!    commands; a depth-only pass draws each cascade into its tile of a transient atlas
+//!    (with depth bias); masked materials test their alpha;
 //! 4. **forward**: metallic-roughness PBR (GGX, height-correlated Smith, Schlick; after
 //!    Filament's documentation) with normal maps, occlusion, emission, geometric specular
-//!    antialiasing and 3×3 PCF shadows, into the view's color and depth targets.
+//!    antialiasing and 3×3 PCF shadows from the finest cascade holding each pixel, into the
+//!    view's color and depth targets.
 //!
 //! With an [`Occlusion`] state in the [`ForwardView`], culling and drawing run in two
 //! phases: **cull early** keeps the instances that were visible in the view's previous
@@ -45,9 +49,10 @@ use crate::graph::{
 use crate::hiz::{self, DepthPyramid, PyramidLayout};
 use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
+use crate::shadow::{self, CascadeFit, MAX_CASCADES};
 use crate::upload::UploadRing;
 use core::cell::{Cell, RefCell};
-use engine_core::math::{Mat4, Vec3, look_at, vulkan_orthographic};
+use engine_core::math::{Mat4, Vec3};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     Allocation, Allocator, Bindless, DepthBias, Device, GraphicsPipelineDesc, MemoryLocation,
@@ -66,6 +71,8 @@ const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmen
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
 
+pub use crate::shadow::ShadowSettings;
+
 /// Format of the motion vector target (ADR 0043).
 pub const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 const DEPTH_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.depthVertexMasked.spv");
@@ -78,6 +85,7 @@ const CULL_GROUP: u32 = 64;
 const PHASE_ALL: u32 = 0;
 const PHASE_EARLY: u32 = 1;
 const PHASE_LATE: u32 = 2;
+const PHASE_SHADOW: u32 = 3;
 
 /// Pipeline states of batches, drawn in this order: bit 2 masked, bit 1 double-sided,
 /// bit 0 mirrored (negative determinant, so front faces wind clockwise on screen).
@@ -352,12 +360,22 @@ impl Occlusion {
     }
 }
 
-/// `Frame` in `forward.slang` (384 bytes).
+/// `Cascade` in `forward.slang` (64 bytes).
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct CascadeData {
+    scale: [f32; 4],
+    offset: [f32; 4],
+    atlas: [f32; 4],
+    bounds: [f32; 4],
+}
+
+/// `Frame` in `forward.slang` (832 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
     clip_from_world: [f32; 16],
-    light_clip_from_world: [f32; 16],
+    light_from_world: [f32; 16],
     camera_position: [f32; 4],
     to_light: [f32; 4],
     light_color: [f32; 4],
@@ -375,6 +393,13 @@ struct FrameData {
     jitter: [f32; 4],
     previous_count: u32,
     _pad2: [u32; 3],
+    cascades: [CascadeData; MAX_CASCADES],
+    cascade_count: u32,
+    batch_count: u32,
+    cascade_blend: f32,
+    normal_bias: f32,
+    fade_last: u32,
+    _pad3: [u32; 3],
 }
 
 /// `Instance` in `forward.slang` (64 bytes).
@@ -418,30 +443,13 @@ struct Push {
     _pad: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<FrameData>() == 544);
+const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 832);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 48);
 const _: () = assert!(core::mem::size_of::<Push>() == 104);
 const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 const _: () = assert!(COMMAND_BYTES == 20);
-
-/// Shadow map settings.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ShadowSettings {
-    /// Width and height in texels.
-    pub resolution: u32,
-    /// Depth format.
-    pub format: vk::Format,
-}
-
-impl Default for ShadowSettings {
-    fn default() -> Self {
-        Self {
-            resolution: 2048,
-            format: vk::Format::D32_SFLOAT,
-        }
-    }
-}
 
 /// What [`ForwardRenderer::add_passes`] declared.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -895,13 +903,15 @@ impl ForwardRenderer {
             }
             staged.address
         };
-        // Draw commands, in state order: the forward pass's for each phase, with no
-        // instances until culling counts them (the late phase's visible list follows the
-        // early one's), then the shadow pass's, with every instance.
+        // Draw commands, in state order: the forward pass's for each phase, then the shadow
+        // pass's for each cascade, with no instances until culling counts them (each list's
+        // slots follow the previous list's).
+        let cascade_count = self.shadow_settings.cascade_count() as u32;
         let commands = {
             let per_phase = batch_count as usize;
-            let (out, staged) =
-                ring.alloc::<vk::DrawIndexedIndirectCommand>((phases as usize + 1) * per_phase)?;
+            let (out, staged) = ring.alloc::<vk::DrawIndexedIndirectCommand>(
+                (phases + cascade_count) as usize * per_phase,
+            )?;
             for run in runs.iter() {
                 // A removed mesh draws nothing.
                 let mesh = geometry.mesh(draws[run.first as usize].mesh);
@@ -919,10 +929,14 @@ impl ForwardRenderer {
                         ..command
                     });
                 }
-                out[phases as usize * per_phase + b].write(vk::DrawIndexedIndirectCommand {
-                    instance_count: run.len,
-                    ..command
-                });
+                for cascade in 0..cascade_count {
+                    out[(phases + cascade) as usize * per_phase + b].write(
+                        vk::DrawIndexedIndirectCommand {
+                            first_instance: command.first_instance + cascade * instance_count,
+                            ..command
+                        },
+                    );
+                }
             }
             staged
         };
@@ -945,9 +959,18 @@ impl ForwardRenderer {
             .and_then(|t| t.previous_clip_from_world.get())
             .unwrap_or(unjittered);
         let previous_count = temporal.map_or(0, |t| t.previous_count.get());
+        let settings = &self.shadow_settings;
+        let fit = shadow::fit_cascades(
+            unjittered,
+            view.camera.position,
+            view.light.direction,
+            min,
+            max,
+            settings,
+        );
         let frame = FrameData {
             clip_from_world: clip_from_world.to_cols_array(),
-            light_clip_from_world: fit_light(min, max, view.light.direction).to_cols_array(),
+            light_from_world: fit.light_from_world.to_cols_array(),
             camera_position: view.camera.position.extend(1.0).to_array(),
             to_light: (-view.light.direction.normalize_or(Vec3::NEG_Y))
                 .extend(0.0)
@@ -970,6 +993,13 @@ impl ForwardRenderer {
             jitter: [jitter_ndc[0], jitter_ndc[1], 0.0, 0.0],
             previous_count,
             _pad2: [0; 3],
+            cascades: cascade_data(&fit, settings),
+            cascade_count: fit.count as u32,
+            batch_count,
+            cascade_blend: settings.blend.clamp(0.0, 1.0),
+            normal_bias: settings.normal_bias,
+            fade_last: u32::from(fit.fade),
+            _pad3: [0; 3],
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -1004,6 +1034,18 @@ impl ForwardRenderer {
                 size: u64::from(phases) * visible_bytes,
             },
         );
+        let shadow_commands = fg.create_buffer(
+            "shadow commands",
+            BufferDesc {
+                size: u64::from(cascade_count) * command_bytes,
+            },
+        );
+        let casters = fg.create_buffer(
+            "shadow casters",
+            BufferDesc {
+                size: u64::from(cascade_count) * visible_bytes,
+            },
+        );
         let flags = occlusion.map(|o| {
             // Flags written by the previous frame's late phase, or to be cleared now.
             let stale = o.stale.replace(false);
@@ -1026,7 +1068,8 @@ impl ForwardRenderer {
         });
         let mut setup = fg
             .add_pass("cull setup")
-            .write(culled, Access::TransferWrite);
+            .write(culled, Access::TransferWrite)
+            .write(shadow_commands, Access::TransferWrite);
         if let Some((flags, true)) = flags {
             setup = setup.write(flags, Access::TransferWrite);
         }
@@ -1036,10 +1079,21 @@ impl ForwardRenderer {
                 dst_offset: 0,
                 size: u64::from(phases) * command_bytes,
             };
+            let shadow_region = vk::BufferCopy {
+                src_offset: commands.offset + u64::from(phases) * command_bytes,
+                dst_offset: 0,
+                size: u64::from(cascade_count) * command_bytes,
+            };
             // SAFETY: recording outside a rendering scope; the ranges are in bounds.
             unsafe {
                 ctx.device
                     .cmd_copy_buffer(ctx.cmd, commands.buffer, ctx.buffer(culled), &[region]);
+                ctx.device.cmd_copy_buffer(
+                    ctx.cmd,
+                    commands.buffer,
+                    ctx.buffer(shadow_commands),
+                    &[shadow_region],
+                );
                 if let Some((flags, true)) = flags {
                     ctx.device
                         .cmd_fill_buffer(ctx.cmd, ctx.buffer(flags), 0, vk::WHOLE_SIZE, 0);
@@ -1077,32 +1131,71 @@ impl ForwardRenderer {
             dispatch_cull(ctx, push);
         });
 
-        let resolution = self.shadow_settings.resolution;
+        // Shadow casters of each cascade, then each cascade drawn into its atlas tile.
+        fg.add_pass("shadow cull")
+            .read(
+                shadow_commands,
+                Access::StorageReadWrite(ShaderStages::COMPUTE),
+            )
+            .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
+            .execute(move |ctx| {
+                let push = Push {
+                    visible: ctx.address(casters),
+                    commands: ctx.address(shadow_commands),
+                    phase: PHASE_SHADOW,
+                    ..base
+                };
+                dispatch_cull(ctx, push);
+            });
+        let resolution = settings.resolution;
+        let (atlas_width, atlas_height) = settings.atlas_size();
+        let columns = settings.atlas_grid().0;
         let shadow_map = fg.create_texture(
             "shadow map",
-            TextureDesc::new_2d(self.shadow_settings.format, resolution, resolution),
+            TextureDesc::new_2d(settings.format, atlas_width, atlas_height),
         );
         let shadow_pipelines = &self.shadow;
         let geometry = *geometry;
         let materials = *materials;
+        let drawn_cascades = fit.count as u32;
         materials
             .read(geometry.read(fg.add_pass("shadow")))
+            .read(shadow_commands, Access::Indirect)
+            .read(casters, Access::StorageRead(ShaderStages::VERTEX))
             .depth(shadow_map, depth_clear, StoreOp::Store)
             .execute(move |ctx| {
-                // SAFETY: recording inside the pass's rendering scope; the commands are in
-                // the ring, which has indirect-buffer usage; the pass reads the pool and
-                // the material table.
-                unsafe {
-                    states.draw(
-                        ctx,
-                        bindless,
-                        &geometry,
-                        [&shadow_pipelines[0], &shadow_pipelines[1]],
-                        &base,
-                        true,
-                        commands.buffer,
-                        commands.offset + u64::from(phases) * command_bytes,
-                    );
+                for cascade in 0..drawn_cascades {
+                    let tile = vk::Rect2D {
+                        offset: vk::Offset2D {
+                            x: ((cascade % columns) * resolution) as i32,
+                            y: ((cascade / columns) * resolution) as i32,
+                        },
+                        extent: vk::Extent2D {
+                            width: resolution,
+                            height: resolution,
+                        },
+                    };
+                    let push = Push {
+                        visible: ctx.address(casters),
+                        phase: cascade,
+                        ..base
+                    };
+                    // SAFETY: recording inside the pass's rendering scope; the pass reads
+                    // the commands (indirect), the caster lists, the pool and the material
+                    // table.
+                    unsafe {
+                        states.draw(
+                            ctx,
+                            bindless,
+                            &geometry,
+                            [&shadow_pipelines[0], &shadow_pipelines[1]],
+                            &push,
+                            true,
+                            ctx.buffer(shadow_commands),
+                            u64::from(cascade) * command_bytes,
+                            tile,
+                        );
+                    }
                 }
             });
         // Motion vectors: a second target, last frame's transforms read by the vertex
@@ -1169,6 +1262,7 @@ impl ForwardRenderer {
                     false,
                     ctx.buffer(culled),
                     offset,
+                    ctx.render_area(),
                 );
             }
         };
@@ -1539,9 +1633,10 @@ struct States {
 
 impl States {
     /// Records one indirect draw per pipeline state in use, from the commands at `offset`
-    /// in `buffer` (one per batch, in state order): `pipelines` are the opaque and the
-    /// masked one. The shadow pass renders back faces of single-sided geometry (fewer
-    /// self-shadowing artifacts on closed meshes); the forward passes cull them.
+    /// in `buffer` (one per batch, in state order), into `area` of the target: `pipelines`
+    /// are the opaque and the masked one. The shadow pass renders back faces of single-sided
+    /// geometry (fewer self-shadowing artifacts on closed meshes); the forward passes cull
+    /// them.
     ///
     /// # Safety
     ///
@@ -1558,6 +1653,7 @@ impl States {
         shadow: bool,
         buffer: vk::Buffer,
         offset: u64,
+        area: vk::Rect2D,
     ) {
         let mut bound = None;
         for state in 0..STATES {
@@ -1582,7 +1678,7 @@ impl States {
                     pipelines[usize::from(masked)].bind(ctx.cmd);
                     if bound.is_none() {
                         bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
-                        set_viewport(ctx.device, ctx.cmd, ctx.render_area());
+                        set_viewport(ctx.device, ctx.cmd, area);
                         bindless.push_constants(ctx.cmd, push_bytes(push));
                         geometry.bind_indices(ctx);
                     }
@@ -1600,6 +1696,35 @@ impl States {
             }
         }
     }
+}
+
+/// The shader's view of the frame's cascades: projections as scale and offset, atlas
+/// tiles, selection limits and caster bounds.
+fn cascade_data(fit: &CascadeFit, settings: &ShadowSettings) -> [CascadeData; MAX_CASCADES] {
+    let (columns, rows) = settings.atlas_grid();
+    let mut out = [CascadeData::default(); MAX_CASCADES];
+    for (k, (data, cascade)) in out.iter_mut().zip(&fit.cascades[..fit.count]).enumerate() {
+        let m = cascade.clip_from_light();
+        let tile = [(k as u32 % columns) as f32, (k as u32 / columns) as f32];
+        let grid = [columns as f32, rows as f32];
+        *data = CascadeData {
+            scale: [m.x_axis.x, m.y_axis.y, m.z_axis.z, cascade.texel],
+            offset: [m.w_axis.x, m.w_axis.y, m.w_axis.z, cascade.limit],
+            atlas: [
+                0.5 / grid[0],
+                0.5 / grid[1],
+                (0.5 + tile[0]) / grid[0],
+                (0.5 + tile[1]) / grid[1],
+            ],
+            bounds: [
+                cascade.center.x,
+                cascade.center.y,
+                cascade.radius,
+                cascade.far,
+            ],
+        };
+    }
+    out
 }
 
 /// A mesh's object-space bounding box as center and half extents (empty for removed
@@ -1630,18 +1755,4 @@ unsafe fn set_viewport(device: &engine_rhi::ash::Device, cmd: vk::CommandBuffer,
         );
         device.cmd_set_scissor(cmd, 0, &[area]);
     }
-}
-
-/// An orthographic light projection that contains the scene's bounding box.
-fn fit_light(min: Vec3, max: Vec3, direction: Vec3) -> Mat4 {
-    let direction = direction.normalize_or(Vec3::NEG_Y);
-    let center = (min + max) * 0.5;
-    let radius = ((max - min).length() * 0.5).max(1e-3);
-    let up = if direction.y.abs() > 0.99 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    };
-    let view = look_at(center - direction * radius * 2.0, center, up);
-    vulkan_orthographic(-radius, radius, -radius, radius, radius * 0.5, radius * 3.5) * view
 }

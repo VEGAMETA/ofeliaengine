@@ -51,6 +51,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0041](0041-texture-compression.md) | Texture compression: BC7 and BC5 on the CPU, a derived data cache | Accepted |
 | [0042](0042-depth-prepass.md) | Depth prepass: optional, off by default | Accepted |
 | [0043](0043-motion-vectors-and-taau.md) | Motion vectors, projection jitter and the engine's own TAAU | Accepted |
+| [0044](0044-cascaded-shadow-maps.md) | Cascaded shadow maps: stable cascades in an atlas, casters culled per cascade on the GPU | Accepted |
 
 ## Template
 

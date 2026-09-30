@@ -276,8 +276,7 @@ Rules of thumb:
 - the CPU pays 64 bytes of upload and a few dozen nanoseconds per object;
 - the GPU culls millions of objects per millisecond;
 - the forward pass then costs what is on screen;
-- the shadow pass costs every object in the scene: shadows are fitted to the whole
-  scene until cascaded shadow maps arrive.
+- the shadow pass costs every object that casts into a cascade (section 8).
 
 ## 7. Temporal antialiasing and upsampling (TAA / TAAU)
 
@@ -343,3 +342,54 @@ What it costs (ref-1, 1080p):
 - **Upsampling from 720p** is cheaper than native 1080p with TAA on both GPUs:
   - RTX: 0.19 ms against 0.30 ms for forward + resolve in that benchmark;
   - Radeon: 5.8 ms against 7.7 ms.
+
+## 8. Shadows of the sun: cascaded shadow maps
+
+The directional light casts through up to four cascades (ADR 0044):
+
+- the view is cut along its depth into slices, finest near the camera;
+- each slice gets its own square shadow map, a tile of one atlas.
+
+A 15 cm pole 4 m away keeps a crisp shadow, and a building 100 m away still casts one.
+
+```rust
+use engine_render::forward::ShadowSettings;
+
+let renderer = ForwardRenderer::new(&device, &bindless, HDR_FORMAT, depth_format,
+    ShadowSettings {
+        cascades: 4,        // 1–4
+        resolution: 1024,   // texels per cascade; the atlas holds 2 × 2
+        distance: 150.0,    // how far from the camera shadows reach (world units)
+        ..ShadowSettings::default()
+    })?;
+```
+
+- **Nothing to do per frame.** Cascades follow the camera and the light.
+  - Their maps move in whole texels and keep their size when the camera turns, so shadow
+    edges do not crawl.
+  - Shadows never reach beyond your scene's bounds or the camera's far plane. Shorter
+    `distance` means sharper cascades.
+- **Only objects that can cast into a cascade are drawn into it.** The GPU culls casters
+  per cascade, including objects outside the camera's view whose shadows fall into it.
+- **Cascade edges dither** over a band (`blend`, 10% of a cascade by default):
+  - with TAA (section 7) the dither resolves into a smooth transition;
+  - without it, it is a fine, still pattern;
+  - `blend: 0.0` gives hard seams.
+- **Acne and gaps:** receivers are pushed along their normal by `normal_bias` texels of
+  their cascade (1.0). Raise it if lit surfaces at grazing angles to the sun show dark
+  stripes; lower it if shadows detach from contact points.
+
+What it costs (ref-1, 1080p; `scene_bench -- --cascades N --shadow-res R`, `draw_bench`):
+
+| Sponza (an interior), shadow / forward µs | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| 2 cascades of 1024² | 76 / 303 | 1,197 / 7,519 |
+| 4 cascades of 1024² (default) | 159 / 317 | 2,292 / 7,778 |
+| 4 cascades of 2048² | 353 / 333 | 4,103 / 8,057 |
+
+- **Open worlds with many objects** gain: at 100,000 cubes the shadow pass fell from
+  263 µs to 18–83 µs on the RTX.
+- **Small interiors** pay a pass over their geometry per cascade. The whole of Sponza
+  sits in every cascade.
+- **On integrated GPUs, start with 2 cascades.** Most of the sharpness is in the first
+  ones.
