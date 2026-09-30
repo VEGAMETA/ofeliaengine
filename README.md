@@ -46,7 +46,7 @@ team".
 | Path | Contents |
 |---|---|
 | `crates/engine_assets` | Asset import: glTF 2.0 into memory (meshes, PBR materials, node hierarchy) and into the ECS (ADR 0033) |
-| `crates/engine_audio` | Audio: lock-free mixer (buses, sends, sidechains, virtual voices, sample-accurate starts), effects (biquad, compressor, limiter, delay, FDN reverb), WAV decoding, WASAPI output with `IAudioClient3` low latency; example `tone` |
+| `crates/engine_audio` | Audio: lock-free mixer (buses, sends, sidechains, virtual voices, sample-accurate starts), effects (biquad, compressor, limiter, delay, FDN reverb), spatial audio (distance, pan, Doppler, air absorption, occlusion, reverb zones), WAV decoding, WASAPI output with `IAudioClient3` low latency; example `tone` |
 | `crates/engine_core` | Foundation: job system (`jobs`), frame arena (`arena`), SPSC ring (`spsc`), stable and state hashing (`hash`), sync primitives |
 | `crates/engine_ecs` | Entity component system: archetypes in growing chunks, cached and parallel queries, commands, change tracking, resources, a deterministic parallel system schedule, transform propagation, snapshots and state hashes |
 | `crates/engine_input` | Input actions in the spirit of Godot: named actions, bindings (keys by position, mouse, gamepads, composites, chords), contexts with priorities, tick-accurate state, network user commands; raw input and XInput on Windows |

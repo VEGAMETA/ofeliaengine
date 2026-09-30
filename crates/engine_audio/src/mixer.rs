@@ -12,6 +12,7 @@ use crate::command::{BusChange, Command, NO_BUS, Return, VoiceChange, VoiceStart
 use crate::dsp::{Block, Effect};
 use crate::graph::Schedule;
 use crate::shared::Shared;
+use crate::spatial::{Emitter, Heard, Listener, hear};
 use engine_core::spsc::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -34,6 +35,10 @@ const AUDIBLE: f32 = 1e-4;
 /// Output samples are limited to this magnitude (+12 dBFS) and NaN becomes silence, so a
 /// misbehaving effect cannot blast the speakers.
 const OUTPUT_LIMIT: f32 = 4.0;
+/// Spatial low-pass cutoffs at or above this are not filtered (the one-pole's effect there
+/// is under 2 dB at the top of the spectrum; skipping it saves the filter on every nearby
+/// voice).
+const FILTER_BELOW_HZ: f32 = 16_000.0;
 
 /// A linear ramp towards a target, advanced frame by frame.
 #[derive(Debug, Clone, Copy, Default)]
@@ -167,6 +172,14 @@ struct Voice {
     /// without a fade-out).
     mixed: bool,
     ended: bool,
+    /// Placed in the world ([`crate::spatial`]).
+    spatial: Option<Emitter>,
+    occlusion: f32,
+    /// The emitter as heard by the listener at the last render call.
+    heard: Heard,
+    /// Spatial low-pass: one-pole coefficient (1: not filtered) and state per channel.
+    lowpass: f32,
+    filter: [f32; 2],
 }
 
 impl Voice {
@@ -174,12 +187,36 @@ impl Voice {
         self.clip.as_ref().is_some_and(|c| c.0.channels == 2)
     }
 
+    /// Channel gains from the user's gain and pan and the spatial ones.
+    fn levels(&self) -> [f32; 2] {
+        channel_gains(
+            self.gain * self.heard.gain,
+            self.pan + self.heard.pan,
+            self.stereo(),
+        )
+    }
+
     fn targets(&self) -> [f32; 2] {
         if self.stopping {
             [0.0; 2]
         } else {
-            channel_gains(self.gain, self.pan, self.stereo())
+            self.levels()
         }
+    }
+
+    /// Recomputes how the listener hears a spatial voice.
+    fn spatialize(&mut self, listener: &Listener, sample_rate: u32) {
+        let Some(emitter) = &self.spatial else {
+            return;
+        };
+        self.heard = hear(listener, emitter, self.occlusion);
+        self.lowpass = if self.heard.cutoff >= FILTER_BELOW_HZ {
+            1.0
+        } else {
+            let w = core::f32::consts::TAU * self.heard.cutoff / sample_rate.max(1) as f32;
+            1.0 - (-w).exp()
+        };
+        self.update_step(sample_rate);
     }
 
     fn set_gains(&mut self, frames: u32) {
@@ -190,7 +227,8 @@ impl Voice {
 
     fn update_step(&mut self, sample_rate: u32) {
         let clip_rate = self.clip.as_ref().map_or(sample_rate, |c| c.0.sample_rate);
-        let ratio = f64::from(self.pitch.clamp(1.0 / 64.0, 64.0)) * f64::from(clip_rate)
+        let pitch = self.pitch * self.heard.pitch;
+        let ratio = f64::from(pitch.clamp(1.0 / 64.0, 64.0)) * f64::from(clip_rate)
             / f64::from(sample_rate.max(1));
         self.step = ((ratio * ONE as f64).round() as u64).clamp(1, 1 << 40);
     }
@@ -307,6 +345,34 @@ fn resample(
     i
 }
 
+/// One-pole low-pass in place, `y += (x - y) · a`, four samples per step: each output of a
+/// step depends on the previous step's last output through one multiply and add, instead of
+/// every sample waiting for the one before (the plain loop is latency-bound, about 3x
+/// slower without FMA).
+pub(crate) fn one_pole(samples: &mut [f32], state: &mut f32, a: f32) {
+    let b = 1.0 - a;
+    let (b2, b3) = (b * b, b * b * b);
+    let b4 = b2 * b2;
+    let mut y = *state;
+    let mut chunks = samples.chunks_exact_mut(4);
+    for c in &mut chunks {
+        let (u0, u1, u2, u3) = (a * c[0], a * c[1], a * c[2], a * c[3]);
+        let s1 = b * u0 + u1;
+        let s2 = b * s1 + u2;
+        let s3 = b * s2 + u3;
+        c[0] = b * y + u0;
+        c[1] = b2 * y + s1;
+        c[2] = b3 * y + s2;
+        c[3] = b4 * y + s3;
+        y = c[3];
+    }
+    for x in chunks.into_remainder() {
+        y = b * y + a * *x;
+        *x = y;
+    }
+    *state = y;
+}
+
 /// Moves `pos` forward by `n` output frames without reading; `false` if a one-shot ended.
 fn advance(clip: &ClipData, pos: &mut u64, step: u64, looping: bool, n: u64) -> bool {
     let end = (clip.frames as u64) << 32;
@@ -375,6 +441,7 @@ pub struct Renderer {
     schedule: Box<Schedule>,
     buffers: Box<[f32]>,
     scratch: Box<[f32]>,
+    listener: Listener,
     /// Returns dropped without freeing because both the ring and `pending` were full
     /// (should stay 0; the rings are sized for the worst case).
     leaked: u64,
@@ -429,6 +496,7 @@ impl Renderer {
             schedule,
             buffers: vec![0.0; max_buses * REGION].into_boxed_slice(),
             scratch: vec![0.0; REGION].into_boxed_slice(),
+            listener: Listener::default(),
             leaked: 0,
         }
     }
@@ -478,9 +546,10 @@ impl Renderer {
         while let Some(command) = self.commands.pop() {
             self.apply(command);
         }
+        let frames = out.len() / channels;
+        self.update_spatial(frames);
         self.choose_real_voices();
 
-        let frames = out.len() / channels;
         let mut done = 0;
         while done < frames {
             let n = (frames - done).min(MAX_BLOCK);
@@ -556,6 +625,14 @@ impl Renderer {
                         v.stopping = true;
                         v.set_gains(seconds_to_frames(fade, rate));
                     }
+                    // Applied with the next spatial update, at the start of the render.
+                    VoiceChange::Position(position, velocity) => {
+                        if let Some(e) = v.spatial.as_mut() {
+                            e.position = position;
+                            e.velocity = velocity;
+                        }
+                    }
+                    VoiceChange::Occlusion(occlusion) => v.occlusion = occlusion,
                 }
             }
             Command::Bus { bus, change } => {
@@ -619,17 +696,18 @@ impl Renderer {
                 let old = core::mem::replace(&mut self.schedule, schedule);
                 self.give_back(Return::Schedule(old));
             }
+            Command::Listener(listener) => self.listener = listener,
         }
     }
 
     fn start_voice(&mut self, slot: u32, clip: Clip, start: VoiceStart) {
         let rate = self.sample_rate;
         let clock = self.clock;
+        let listener = self.listener;
         let Some(v) = self.voices.get_mut(slot as usize) else {
             self.give_back(Return::VoiceEnded { slot, clip });
             return;
         };
-        let stereo = clip.0.channels == 2;
         *v = Voice {
             active: true,
             clip: Some(clip),
@@ -648,12 +726,18 @@ impl Renderer {
             want_real: true,
             mixed: false,
             ended: false,
+            spatial: start.spatial,
+            occlusion: 0.0,
+            heard: Heard::PLAIN,
+            lowpass: 1.0,
+            filter: [0.0; 2],
         };
         v.update_step(rate);
+        v.spatialize(&listener, rate);
         if start.fade_in > 0.0 {
             v.set_gains(seconds_to_frames(start.fade_in, rate));
         } else {
-            let [l, r] = channel_gains(v.gain, v.pan, stereo);
+            let [l, r] = v.levels();
             v.gains = [Ramp::at(l), Ramp::at(r)];
         }
         // Started late: skip ahead so the voice stays in time with the clock.
@@ -670,6 +754,25 @@ impl Renderer {
             }
         }
         self.active.push(slot);
+    }
+
+    /// Follows the listener and the emitters: each spatial voice's gain, pan, pitch and
+    /// low-pass, ramped over this render call (`frames`) so movement never clicks.
+    fn update_spatial(&mut self, frames: usize) {
+        let rate = self.sample_rate;
+        let ramp = (frames as u32).max(DECLICK);
+        for &slot in &self.active {
+            let v = &mut self.voices[slot as usize];
+            if v.spatial.is_none() || v.ended {
+                continue;
+            }
+            v.spatialize(&self.listener, rate);
+            if !v.is_virtual && !v.stopping {
+                // A fade in progress keeps its length.
+                let frames = ramp.max(v.gains[0].left).max(v.gains[1].left);
+                v.set_gains(frames);
+            }
+        }
     }
 
     /// Decides which voices are mixed this call: audible ones, by priority and loudness,
@@ -699,7 +802,7 @@ impl Renderer {
             } else {
                 0
             };
-            let targets = channel_gains(v.gain, v.pan, v.stereo());
+            let targets = v.levels();
             let audibility = targets[0].max(targets[1]) * self.bus_gains[usize::from(bus)];
             v.want_real = audibility >= AUDIBLE && !(v.stopping && v.is_virtual);
             if v.want_real {
@@ -792,11 +895,7 @@ impl Renderer {
         if v.is_virtual {
             // Back from virtual: fade in from silence.
             v.is_virtual = false;
-            let targets = if v.stopping {
-                [0.0; 2]
-            } else {
-                channel_gains(v.gain, v.pan, clip.0.channels == 2)
-            };
+            let targets = v.targets();
             v.gains = [Ramp::at(0.0); 2];
             v.gains[0].set(targets[0], DECLICK);
             v.gains[1].set(targets[1], DECLICK);
@@ -818,6 +917,19 @@ impl Renderer {
             &mut right[..m],
         );
         let stereo = clip.0.channels == 2;
+        let channels = if stereo { 2 } else { 1 };
+        for (samples, state) in [&mut left[..produced], &mut right[..produced]]
+            .into_iter()
+            .zip(&mut v.filter)
+            .take(channels)
+        {
+            if v.lowpass < 1.0 {
+                one_pole(samples, state, v.lowpass);
+            } else if let Some(&last) = samples.last() {
+                // Unfiltered: track the signal, so filtering can start without a click.
+                *state = last;
+            }
+        }
         let bus = if self.bus_live[usize::from(v.bus)] {
             usize::from(v.bus)
         } else {

@@ -1,4 +1,4 @@
-# Audio: sounds, buses, effects, timing
+# Audio: sounds, buses, effects, timing, sounds in the world
 
 `engine_audio` plays sounds through a mixer that runs on its own thread. Your game code
 talks to it through `Audio`; every call returns immediately and never waits for the audio
@@ -194,3 +194,72 @@ audio.play_with(&snare, &PlayParams {
 - `Clip::from_interleaved`: generated or decoded samples.
 - Clips are decoded into memory and shared: playing a clip 100 times does not copy it.
 - Streaming (Vorbis, Opus, FLAC) for long music comes later.
+
+## 8. Sounds in the world
+
+Give a sound an `Emitter` and it follows a place in the world: quieter with distance,
+panned by direction, higher in pitch as it approaches, muffled when far or behind a wall.
+
+```rust
+use engine_audio::{Emitter, Listener, PlayParams, Rolloff};
+use engine_core::math::Vec3;
+
+let engine = audio.play_with(&engine_loop, &PlayParams {
+    looping: true,
+    spatial: Some(Emitter {
+        min_distance: 3.0,          // full volume within 3 m (also the sound's size)
+        max_distance: 80.0,         // where the rolloff ends
+        rolloff: Rolloff::Inverse,  // physical; Linear goes silent at max_distance
+        doppler: 0.5,               // half the physical effect (cameras move fast)
+        ..Emitter::at(car.position)
+    }),
+    ..PlayParams::default()
+})?;
+
+// Every frame:
+audio.set_listener(&Listener {
+    position: camera.position,
+    forward: camera.forward,
+    up: camera.up,
+    velocity: camera.velocity,
+});
+audio.set_voice_position(engine, car.position, car.velocity);
+```
+
+- **World conventions:** metres, +Y up, right-handed (as the renderer). The default
+  listener stands at the origin facing −Z.
+- **The listener is one command per frame** and moves every sound. Update a voice's
+  position only when it moves.
+- **Smooth by construction:** the mixer recomputes every spatial voice each device period
+  (~5 ms) and ramps between; a sound teleporting from left to right glides over 5 ms.
+- **Distance curves:**
+  - `Inverse`: −6 dB per doubling of the distance after `min_distance`, held from
+    `max_distance` on (a 1 m sound is at −40 dB from 100 m);
+  - `Linear`: silent at `max_distance`. Use it for sounds that must disappear at a range.
+- **Far sounds are free:** audibility includes the distance, so drowned or silent voices
+  become virtual (position advances, nothing is mixed).
+- **Doppler:** from the velocities you pass (m/s); `doppler: 0.0` disables it (music
+  boxes, voices).
+- **Air absorption:** highs fade with distance (20 kHz at the source, 5 kHz at 100 m);
+  `air_absorption: 0.0` disables it, 2.0 doubles it (fog, rain).
+- **Occlusion:** `audio.set_voice_occlusion(voice, 1.0)` behind a wall: 15 dB quieter and
+  muffled to ~600 Hz. Take it from a ray cast between the listener and the sound, a few
+  times a second; values in between for partial cover.
+- **Stereo only for now:** left/right, not front/back or above/below (HRTF for
+  headphones comes later).
+- **Cost:** a spatial voice costs about 0.13 µs more per 256-frame block than a plain
+  one; 128 moving spatial voices take 0.8% of a core (ADR 0050).
+
+### A reverb per space
+
+```rust
+use engine_audio::spatial::ReverbZone;
+
+let cave_reverb = audio.add_bus("cave reverb", BusId::MASTER)?;
+audio.add_effect(cave_reverb, Reverb::new(3.5, 0.9))?;
+let to_cave = audio.add_send(world, cave_reverb, 0.0, SendTap::PostFader)?;
+let cave = ReverbZone { center: cave_center, half_extents: Vec3::new(20.0, 8.0, 30.0), fade: 6.0 };
+
+// Every frame: full reverb inside the cave, fading out over 6 m around it.
+audio.set_send_gain(to_cave, 0.4 * cave.weight(camera.position), 0.1);
+```
