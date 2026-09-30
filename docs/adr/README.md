@@ -52,6 +52,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0042](0042-depth-prepass.md) | Depth prepass: optional, off by default | Accepted |
 | [0049](0049-reverb.md) | Reverb: diffusion into an 8-line feedback delay network | Accepted |
 | [0050](0050-spatial-audio.md) | Spatial audio: emitters and a listener, computed on the audio thread per render call | Accepted |
+| [0051](0051-compressed-audio-and-streaming.md) | Compressed audio and streaming: lewton, vendored libopus, claxon; an SPSC ring per stream | Accepted |
 
 ## Template
 

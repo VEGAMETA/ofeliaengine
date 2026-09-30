@@ -204,3 +204,40 @@ fn unknown_and_damaged_files_are_errors_not_panics() {
         }
     }
 }
+
+#[test]
+fn a_streamed_file_plays_exactly_like_its_decoded_clip() {
+    use engine_audio::{Audio, AudioConfig, PlayParams};
+    for case in &CASES {
+        // A buffer longer than the file: all of it is decoded before playing, so the
+        // comparison does not depend on the stream thread's timing.
+        let (mut audio, mut renderer) = Audio::new(&AudioConfig {
+            stream_buffer_ms: 2_000,
+            ..AudioConfig::default()
+        });
+        let render = |renderer: &mut engine_audio::Renderer| {
+            let mut out = Vec::new();
+            for _ in 0..120 {
+                let mut block = vec![0.0f32; 512];
+                renderer.render(&mut block, 2);
+                out.extend(block);
+            }
+            out
+        };
+        let clip = decode(data(case.file)).unwrap();
+        audio.play_with(&clip, &PlayParams::default()).unwrap();
+        let from_clip = render(&mut renderer);
+        audio.update();
+        let decoder = open_bytes(data(case.file)).unwrap();
+        audio.play_stream(decoder, &PlayParams::default()).unwrap();
+        let streamed = render(&mut renderer);
+        assert_eq!(audio.stream_underruns(), 0, "{}", case.file);
+        let worst = from_clip
+            .iter()
+            .zip(&streamed)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(worst < 1e-6, "{}: {worst}", case.file);
+        assert!(streamed.iter().any(|&s| s != 0.0), "{}", case.file);
+    }
+}

@@ -148,9 +148,13 @@ impl<S: Source> Decoder for VorbisDecoder<S> {
             .ok_or(DecodeError::Io("decoder failed".into()))?;
         let mut source = reader.into_inner();
         source.rewind()?;
-        let mut reader = PacketReader::new(source);
-        read_headers(&mut reader).map_err(corrupt)?;
-        self.reader = Some(reader);
+        self.reader = Some(PacketReader::new(source));
+        // The three header packets are known already: skip them without parsing (the
+        // setup header's codebooks take about a millisecond to build).
+        for _ in 0..3 {
+            self.next_packet()?
+                .ok_or_else(|| DecodeError::Corrupt("missing Vorbis headers".into()))?;
+        }
         self.window = PreviousWindowRight::new();
         self.decoded = 0;
         self.pending.clear();

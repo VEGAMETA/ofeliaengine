@@ -193,7 +193,38 @@ audio.play_with(&snare, &PlayParams {
 - `Clip::from_wav`: PCM 8/16/24/32-bit, float 32/64-bit, mono or stereo.
 - `Clip::from_interleaved`: generated or decoded samples.
 - Clips are decoded into memory and shared: playing a clip 100 times does not copy it.
-- Streaming (Vorbis, Opus, FLAC) for long music comes later.
+- **Compressed files:** `engine_audio_decode` reads Ogg Opus (`.opus`), Ogg Vorbis
+  (`.ogg`) and FLAC (`.flac`), mono or stereo. For short sounds, decode once at load:
+
+```rust
+let door = engine_audio_decode::decode(std::fs::read("sounds/door.opus")?)?; // a Clip
+```
+
+### Streaming music and long sounds
+
+```rust
+let music = engine_audio_decode::open_file("music/theme.opus")?;
+let voice = audio.play_stream(music, &PlayParams { bus: music_bus, looping: true, ..PlayParams::default() })?;
+```
+
+- **Memory:** a stream keeps `AudioConfig::stream_buffer_ms` (500 ms by default) decoded
+  ahead, whatever the file's length. A clip holds all of it: a 5-minute stereo track is
+  about 110 MB as a clip.
+- **Starts at once:** `play_stream` decodes the first quarter second before returning
+  (a few milliseconds on the calling thread). A file shorter than the buffer is decoded
+  whole right there and needs nothing more.
+- **Everything else is the same** as for clips: buses, gain, pan, pitch, fades, `stop`,
+  spatial placement, virtual voices.
+- **Looping** starts the file over without a gap (`looping: true`).
+- **Which format:** Opus for music and dialogue (smallest for the quality; 96–128 kbit/s
+  stereo is plenty), FLAC when it must stay exact, Vorbis for existing assets.
+- **Decoding is cheap:** 800–1,800 times faster than real time on the reference machine;
+  a stream costs its decoder under 0.2% of one core.
+- **If the disk falls behind,** the stream pauses and resumes where it was (no skipped
+  audio). `audio.stream_underruns()` counts it; raise `stream_buffer_ms` if it grows.
+  `audio.stream_errors()` counts damaged files (such a stream ends).
+- **Seeking inside a file** is exact but decodes from the start (about 1 ms per second of
+  position), so prefer separate files over jumping around a long one.
 
 ## 8. Sounds in the world
 

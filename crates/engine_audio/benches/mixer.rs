@@ -9,7 +9,9 @@
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
 use engine_audio::dsp::{Biquad, Block, Compressor, Delay, Effect, Limiter, Reverb};
-use engine_audio::{Audio, AudioConfig, BusId, Clip, Emitter, PlayParams, Renderer, SendTap};
+use engine_audio::{
+    Audio, AudioConfig, BusId, Clip, DecodeError, Decoder, Emitter, PlayParams, Renderer, SendTap,
+};
 use engine_core::math::Vec3;
 use std::time::Instant;
 
@@ -96,8 +98,73 @@ fn spatial_voices(count: u32, clip: &Clip, max_real: u32) -> Renderer {
     renderer
 }
 
+/// A stereo decoder of noise, `frames` long: the stream path without codec cost.
+struct NoiseDecoder {
+    frames: u64,
+    pos: u64,
+}
+
+impl Decoder for NoiseDecoder {
+    fn sample_rate(&self) -> u32 {
+        48_000
+    }
+
+    fn channels(&self) -> u16 {
+        2
+    }
+
+    fn frames(&self) -> Option<u64> {
+        Some(self.frames)
+    }
+
+    fn read(&mut self, out: &mut [f32]) -> Result<usize, DecodeError> {
+        let n = ((out.len() / 2) as u64).min(self.frames - self.pos) as usize;
+        let noise = noise(n, 2);
+        out[..n * 2].copy_from_slice(&noise);
+        self.pos += n as u64;
+        Ok(n)
+    }
+
+    fn seek(&mut self, frame: u64) -> Result<(), DecodeError> {
+        self.pos = frame.min(self.frames);
+        Ok(())
+    }
+}
+
+/// `count` stereo streams, decoded ahead in full (a 5 s buffer, 2 s streams), so the
+/// timing is the ring reading of the audio thread alone.
+fn streams(count: u32) -> Renderer {
+    let (mut audio, renderer) = Audio::new(&AudioConfig {
+        max_voices: count.max(1),
+        max_real_voices: count,
+        stream_buffer_ms: 5_000,
+        ..AudioConfig::default()
+    });
+    for i in 0..count {
+        audio
+            .play_stream(
+                Box::new(NoiseDecoder {
+                    frames: 96_000,
+                    pos: 0,
+                }),
+                &PlayParams {
+                    gain: 0.01,
+                    pan: (i % 17) as f32 / 8.0 - 1.0,
+                    ..PlayParams::default()
+                },
+            )
+            .unwrap();
+    }
+    std::mem::forget(audio);
+    renderer
+}
+
 fn row(name: &str, us: f64) {
     println!("| {name} | {us:.1} | {:.2} % |", us / BUDGET_US * 100.0);
+}
+
+fn stereo48() -> Clip {
+    Clip::from_interleaved(48_000, 2, &noise(96_000, 2)).unwrap()
 }
 
 fn main() {
@@ -125,6 +192,14 @@ fn main() {
             time_render(&mut voices(count, &stereo, 1.0, count), 500),
         );
     }
+    row(
+        "32 stereo streams, output rate (ring reads)",
+        time_render(&mut streams(32), 300),
+    );
+    row(
+        "32 stereo clips, output rate (copy), for comparison",
+        time_render(&mut voices(32, &stereo48(), 1.0, 32), 300),
+    );
     row(
         "128 spatial mono voices (distance, pan, Doppler, low-pass)",
         time_render(&mut spatial_voices(128, &mono, 128), 500),
