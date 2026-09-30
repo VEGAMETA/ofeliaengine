@@ -113,6 +113,12 @@ pub enum MemoryLocation {
     /// Written by the GPU and read by the CPU (screenshots, queries). Host-cached when
     /// available, for fast CPU reads.
     Readback,
+    /// Staging for streamed uploads: written by drive reads and by decompression, which
+    /// reads back what it wrote, then copied by the GPU. Host-cached host memory:
+    /// decompressing into write-combined memory (`Upload`) runs 25-40× slower (0.03
+    /// against 1.27 GB/s per thread, ADR 0057), while the GPU copies from either at the
+    /// same speed.
+    Streaming,
 }
 
 impl MemoryLocation {
@@ -132,6 +138,7 @@ impl MemoryLocation {
             Self::Upload => (host, F::empty(), F::DEVICE_LOCAL | F::HOST_CACHED),
             Self::Dynamic => (host, F::DEVICE_LOCAL, F::HOST_CACHED),
             Self::Readback => (host, F::HOST_CACHED, F::empty()),
+            Self::Streaming => (host, F::HOST_CACHED, F::DEVICE_LOCAL),
         }
     }
 }

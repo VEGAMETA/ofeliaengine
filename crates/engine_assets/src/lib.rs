@@ -14,7 +14,7 @@ mod texture_import;
 
 pub use cook::{
     CookError, CookSettings, CookStats, CookedInstance, CookedMaterial, CookedMesh, CookedScene,
-    TextureSlot, cook_scene, load_pack, write_pack,
+    SceneLayout, TextureEntry, TextureSlot, cook_scene, load_pack, open_scene, write_pack,
 };
 pub use ddc::{
     CacheOutcome, DerivedDataCache, import_texture, texture_from_bytes, texture_key,

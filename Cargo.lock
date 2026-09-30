@@ -320,6 +320,7 @@ dependencies = [
  "engine_profiler",
  "engine_rhi",
  "engine_shader",
+ "zstd",
 ]
 
 [[package]]

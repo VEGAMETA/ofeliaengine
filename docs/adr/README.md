@@ -64,6 +64,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0054](0054-transparency.md) | Transparency: sorted blended instances in a forward pass, a reactive mask for TAAU | Accepted |
 | [0055](0055-pipeline-cache-and-warm-up.md) | Pipeline cache and warm-up: a validated VkPipelineCache on disk, cache lookups first, compiles in parallel | Accepted |
 | [0056](0056-cooked-packs-and-streaming-reads.md) | Cooked packs and streaming reads: our own container, an I/O ring, zstd per entry | Accepted |
+| [0057](0057-texture-streaming.md) | Texture streaming: reads straight into a host-cached staging ring, levels arriving smallest first, a streaming thread | Accepted |
 
 ## Template
 
