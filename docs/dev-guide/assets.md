@@ -59,6 +59,66 @@ materials and draws; copy that part. Its `--pack <file>` option loads a pack.
 - **Packs have a version.** An engine that changes the format refuses older packs with
   a message; cook them again.
 
+## Streaming textures while the game runs
+
+Load the scene and its meshes, create the textures empty, and let their levels arrive
+while frames are drawn (ADR 0057):
+
+```rust
+use engine_assets::open_scene;
+use engine_assets::pack::{PackStreamer, StreamThread};
+
+let (pack, layout, _) = open_scene("packs/level1.pack".as_ref(), &jobs, 32)?;
+// layout.scene: meshes, materials and instances, as from load_pack.
+// layout.textures: format, size and levels of each texture, no data yet.
+let ids: Vec<TextureId> = layout.textures.iter().map(|t| {
+    textures.add_empty(&mut allocator, t.width, t.height, format_of(t.format), t.levels)
+}).collect::<Result<_, _>>()?;
+// Reads and decompression on a thread of their own.
+let mut stream = StreamThread::spawn(pack, 32, 64, 4)?;
+let mut queue: VecDeque<TextureEntry> = layout.texture_entries.into(); // tails first
+
+// Every frame, before textures.begin_frame:
+while stream.has_room() && let Some(&te) = queue.front() {
+    let bytes = PackStreamer::target_bytes(&stream.entries()[te.entry as usize]) as u64;
+    let Some(mut span) = textures.staging(&mut allocator, bytes)? else { break }; // ring full
+    // SAFETY: the span is this request's until it comes back from poll.
+    unsafe { stream.request(te.entry, span.as_mut_ptr(), span.len() as usize, tag)? };
+    in_flight.insert(tag, (span, te));
+    queue.pop_front();
+}
+stream.poll(&mut finished);
+for done in finished.drain(..) {
+    let (span, te) = in_flight.remove(&done.tag).unwrap();
+    done.result?;
+    textures.upload_levels(ids[te.texture as usize], te.first_level, te.level_count, span)?;
+}
+```
+
+`examples/scene_bench.rs` in `engine_render` does exactly this (`--pack <file> --stream`).
+
+- **The data goes straight to the GPU:**
+  - raw entries are read from the drive into the texture pool's staging ring;
+  - compressed ones are decompressed into it;
+  - the GPU copies from there.
+- **Every texture shows up blurry first:** its levels up to 128 texels (the tail) come
+  first in the file. Then the larger levels arrive, smallest first, and the texture
+  sharpens as each joins.
+- **The frame's thread only queues and collects:** microseconds per frame. Reads,
+  decompression and checks run on the streaming thread and its workers, below normal
+  priority.
+- **The staging ring** (64 MiB by default, `TexturePool::set_staging_size`) bounds how
+  far reading runs ahead: `staging` returns `None` while it is full. It must hold the
+  largest level: a 4K BC7 level is 16 MiB, an 8K one 64 MiB.
+
+Sponza, counted from the first frame:
+
+| | hard disk | NVMe |
+|---|---:|---:|
+| scene and meshes, before the first frame | 13–316 ms | 7 ms |
+| every texture visible (blurry) | 26–61 ms | 14 ms |
+| every level | 394–564 ms | 40–41 ms |
+
 ## What it costs
 
 Sponza (104.5 MB once loaded, 71.5 MB in its pack), on the reference machine:
@@ -85,7 +145,7 @@ Sponza (104.5 MB once loaded, 71.5 MB in its pack), on the reference machine:
 
 ## Not yet
 
-- Uploading straight from the read buffers (today the data passes through `Vec`s: about
-  10 ms for Sponza).
-- Streaming mip levels by screen size, and detail levels of meshes.
+- Loading only the levels the camera needs, and a memory budget that evicts the rest:
+  today every level streams in.
+- Streaming detail levels of meshes.
 - Hot reload of packs: cook on save, swap while running.

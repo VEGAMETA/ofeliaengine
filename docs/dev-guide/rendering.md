@@ -112,6 +112,9 @@ let mats = materials.begin_frame(&mut fg, &device, &mut allocator, &textures, fr
     first.
   - Until then, materials using it shade without it. A scene appears at once and its
     textures fill in over the next frames.
+  - From packs, levels stream in one by one, smallest first: `add_empty`, `staging`,
+    `upload_levels`. The texture is used as soon as its smallest levels are there and
+    sharpens as larger ones arrive (see assets.md, "Streaming textures").
 - **Alpha:**
   - `AlphaMode::Mask { cutoff }` discards texels below the cutoff, in the view and in
     shadows (leaves, fences).

@@ -143,8 +143,9 @@ impl ReadFile {
 pub struct ReadDone {
     /// The tag given to [`ReadQueue::push`].
     pub tag: u64,
-    /// The buffer given to [`ReadQueue::push`], holding the data.
-    pub buffer: AlignedBuffer,
+    /// The buffer given to [`ReadQueue::push`], holding the data (none after
+    /// [`ReadQueue::push_into`]: the data is where the caller asked).
+    pub buffer: Option<AlignedBuffer>,
     /// Bytes read (fewer than asked at the end of the file), or why it failed.
     pub result: io::Result<usize>,
 }
@@ -153,10 +154,34 @@ pub struct ReadDone {
 #[derive(Debug)]
 pub struct PushError {
     /// The buffer given to [`ReadQueue::push`].
-    pub buffer: AlignedBuffer,
+    pub buffer: Option<AlignedBuffer>,
     /// Why: the queue is full ([`io::ErrorKind::WouldBlock`]) or the read is not aligned
     /// ([`io::ErrorKind::InvalidInput`]).
     pub error: io::Error,
+}
+
+/// Where a read goes.
+enum Target {
+    /// A buffer the queue holds while reading.
+    Owned(AlignedBuffer),
+    /// Memory of the caller's ([`ReadQueue::push_into`]).
+    Raw(*mut u8, usize),
+}
+
+impl Target {
+    fn address(&mut self) -> (*mut u8, usize) {
+        match self {
+            Self::Owned(buffer) => (buffer.as_mut_slice().as_mut_ptr(), buffer.len()),
+            Self::Raw(address, len) => (*address, *len),
+        }
+    }
+
+    fn into_buffer(self) -> Option<AlignedBuffer> {
+        match self {
+            Self::Owned(buffer) => Some(buffer),
+            Self::Raw(..) => None,
+        }
+    }
 }
 
 /// Reads in flight (see the module documentation).
@@ -224,23 +249,62 @@ impl ReadQueue {
         buffer: AlignedBuffer,
         tag: u64,
     ) -> Result<(), PushError> {
-        if !offset.is_multiple_of(READ_ALIGN as u64) {
-            return Err(PushError {
-                buffer,
-                error: io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    "read offset not a multiple of READ_ALIGN",
-                ),
-            });
+        let refused = |buffer, error| PushError {
+            buffer: Some(buffer),
+            error,
+        };
+        if let Err(error) = self.check(offset, 0, 0) {
+            return Err(refused(buffer, error));
+        }
+        self.inner
+            .push(file, offset, Target::Owned(buffer), tag)
+            .map_err(|(target, error)| PushError {
+                buffer: target.into_buffer(),
+                error,
+            })?;
+        self.pending += 1;
+        Ok(())
+    }
+
+    /// Queues a read of `len` bytes of `file` at `offset` into memory of the caller's:
+    /// staging memory the GPU copies from, for example, so the data is not copied again.
+    /// `offset`, `len` and the `target` address are multiples of [`READ_ALIGN`]. The
+    /// completion carries no buffer.
+    ///
+    /// # Safety
+    ///
+    /// `target..target + len` is writable memory that nothing reads, writes, frees or
+    /// unmaps until the read's completion has been popped (or the queue dropped).
+    pub unsafe fn push_into(
+        &mut self,
+        file: &Arc<ReadFile>,
+        offset: u64,
+        target: *mut u8,
+        len: usize,
+        tag: u64,
+    ) -> io::Result<()> {
+        self.check(offset, target as usize, len)?;
+        self.inner
+            .push(file, offset, Target::Raw(target, len), tag)
+            .map_err(|(_, error)| error)?;
+        self.pending += 1;
+        Ok(())
+    }
+
+    /// Checks a read's alignment and the queue's room.
+    fn check(&self, offset: u64, address: usize, len: usize) -> io::Result<()> {
+        if !offset.is_multiple_of(READ_ALIGN as u64)
+            || !address.is_multiple_of(READ_ALIGN)
+            || !len.is_multiple_of(READ_ALIGN)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "read offset, address or length not a multiple of READ_ALIGN",
+            ));
         }
         if self.pending >= self.depth {
-            return Err(PushError {
-                buffer,
-                error: io::Error::new(io::ErrorKind::WouldBlock, "read queue full"),
-            });
+            return Err(io::Error::new(io::ErrorKind::WouldBlock, "read queue full"));
         }
-        self.inner.push(file, offset, buffer, tag)?;
-        self.pending += 1;
         Ok(())
     }
 
@@ -283,7 +347,7 @@ fn hresult_error(hr: i32) -> io::Error {
 
 #[cfg(windows)]
 mod imp {
-    use super::{AlignedBuffer, PushError, ReadDone, ReadFile, hresult_error};
+    use super::{ReadDone, ReadFile, Target, hresult_error};
     use std::collections::VecDeque;
     use std::io;
     use std::path::Path;
@@ -342,18 +406,22 @@ mod imp {
 
         /// Reads synchronously (the fallback): the handle is overlapped, so the read is
         /// started and then waited for.
-        fn read_at(&self, offset: u64, buffer: &mut AlignedBuffer) -> io::Result<usize> {
+        ///
+        /// # Safety
+        ///
+        /// `target..target + len` is aligned writable memory, not otherwise used.
+        unsafe fn read_at(&self, offset: u64, target: *mut u8, len: usize) -> io::Result<usize> {
             // SAFETY: all-zero is a valid OVERLAPPED; no event (the handle is signaled).
             let mut overlapped: OVERLAPPED = unsafe { core::mem::zeroed() };
             overlapped.Anonymous.Anonymous.Offset = offset as u32;
             overlapped.Anonymous.Anonymous.OffsetHigh = (offset >> 32) as u32;
-            let len = u32::try_from(buffer.len()).map_err(io::Error::other)?;
-            // SAFETY: the buffer is aligned, `len` bytes long and outlives the wait below;
-            // `overlapped` lives until the read has finished.
+            let len = u32::try_from(len).map_err(io::Error::other)?;
+            // SAFETY: the target is aligned, `len` bytes long and outlives the wait below
+            // (the caller's contract); `overlapped` lives until the read has finished.
             let started = unsafe {
                 Win32ReadFile(
                     self.handle,
-                    buffer.as_mut_slice().as_mut_ptr(),
+                    target,
                     len,
                     core::ptr::null_mut(),
                     &mut overlapped,
@@ -390,7 +458,7 @@ mod imp {
 
     /// A read in flight on the ring: what comes back with its completion.
     pub(super) struct InFlight {
-        buffer: AlignedBuffer,
+        target: Target,
         tag: u64,
         // Keeps the handle open until the read has finished.
         _file: Arc<ReadFile>,
@@ -457,15 +525,18 @@ mod imp {
             &mut self,
             file: &Arc<ReadFile>,
             offset: u64,
-            mut buffer: AlignedBuffer,
+            mut target: Target,
             tag: u64,
-        ) -> Result<(), PushError> {
+        ) -> Result<(), (Target, io::Error)> {
+            let (address, len) = target.address();
             match self {
                 Self::Sync { done } => {
-                    let result = file.inner.read_at(offset, &mut buffer);
+                    // SAFETY: an owned buffer, or the caller's memory under
+                    // `push_into`'s contract.
+                    let result = unsafe { file.inner.read_at(offset, address, len) };
                     done.push_back(ReadDone {
                         tag,
-                        buffer,
+                        buffer: target.into_buffer(),
                         result,
                     });
                     Ok(())
@@ -473,20 +544,14 @@ mod imp {
                 Self::Ring {
                     ring, slots, free, ..
                 } => {
-                    let Ok(len) = u32::try_from(buffer.len()) else {
-                        return Err(PushError {
-                            buffer,
-                            error: io::Error::new(
-                                io::ErrorKind::InvalidInput,
-                                "a read is at most 4 GiB",
-                            ),
-                        });
+                    let Ok(len) = u32::try_from(len) else {
+                        let error =
+                            io::Error::new(io::ErrorKind::InvalidInput, "a read is at most 4 GiB");
+                        return Err((target, error));
                     };
                     let Some(slot) = free.pop() else {
-                        return Err(PushError {
-                            buffer,
-                            error: io::Error::new(io::ErrorKind::WouldBlock, "read queue full"),
-                        });
+                        let error = io::Error::new(io::ErrorKind::WouldBlock, "read queue full");
+                        return Err((target, error));
                     };
                     let file_ref = IORING_HANDLE_REF {
                         Kind: IORING_REF_RAW,
@@ -497,23 +562,21 @@ mod imp {
                     let data = IORING_BUFFER_REF {
                         Kind: IORING_REF_RAW,
                         Buffer: IORING_BUFFER_REF_0 {
-                            Address: buffer.as_mut_slice().as_mut_ptr().cast(),
+                            Address: address.cast(),
                         },
                     };
-                    // SAFETY: the buffer's heap memory does not move when the buffer is
-                    // stored below, and the slot keeps both it and the file alive until
-                    // the completion is popped (or the queue waits for it on drop).
+                    // SAFETY: an owned buffer's heap memory does not move when it is stored
+                    // below, and the slot keeps it and the file alive until the completion
+                    // is popped (or the queue waits for it on drop); the caller's memory
+                    // stays valid as long under `push_into`'s contract.
                     let hr =
                         unsafe { BuildIoRingReadFile(*ring, file_ref, data, len, offset, slot, 0) };
                     if hr < 0 {
                         free.push(slot);
-                        return Err(PushError {
-                            buffer,
-                            error: hresult_error(hr),
-                        });
+                        return Err((target, hresult_error(hr)));
                     }
                     slots[slot] = Some(InFlight {
-                        buffer,
+                        target,
                         tag,
                         _file: file.clone(),
                     });
@@ -558,7 +621,7 @@ mod imp {
                 };
                 done.push_back(ReadDone {
                     tag: read.tag,
-                    buffer: read.buffer,
+                    buffer: read.target.into_buffer(),
                     result,
                 });
             }
@@ -584,7 +647,7 @@ mod imp {
 
 #[cfg(not(windows))]
 mod imp {
-    use super::{AlignedBuffer, PushError, ReadDone, ReadFile};
+    use super::{ReadDone, ReadFile, Target};
     use std::collections::VecDeque;
     use std::io;
     use std::path::Path;
@@ -602,9 +665,13 @@ mod imp {
             Ok((Self { file }, len))
         }
 
-        fn read_at(&self, offset: u64, buffer: &mut AlignedBuffer) -> io::Result<usize> {
+        /// # Safety
+        ///
+        /// `target..target + len` is writable memory, not otherwise used.
+        unsafe fn read_at(&self, offset: u64, target: *mut u8, len: usize) -> io::Result<usize> {
             use std::os::unix::fs::FileExt;
-            let target = buffer.as_mut_slice();
+            // SAFETY: the caller's contract.
+            let target = unsafe { core::slice::from_raw_parts_mut(target, len) };
             let mut total = 0;
             while total < target.len() {
                 match self
@@ -642,13 +709,15 @@ mod imp {
             &mut self,
             file: &Arc<ReadFile>,
             offset: u64,
-            mut buffer: AlignedBuffer,
+            mut target: Target,
             tag: u64,
-        ) -> Result<(), PushError> {
-            let result = file.inner.read_at(offset, &mut buffer);
+        ) -> Result<(), (Target, io::Error)> {
+            let (address, len) = target.address();
+            // SAFETY: an owned buffer, or the caller's memory under `push_into`'s contract.
+            let result = unsafe { file.inner.read_at(offset, address, len) };
             self.done.push_back(ReadDone {
                 tag,
-                buffer,
+                buffer: target.into_buffer(),
                 result,
             });
             Ok(())
@@ -706,7 +775,8 @@ mod tests {
             while let Some(done) = queue.pop() {
                 let read = done.tag as usize;
                 assert_eq!(done.result.unwrap(), 2 * READ_ALIGN);
-                let data = done.buffer.as_slice();
+                let buffer = done.buffer.unwrap();
+                let data = buffer.as_slice();
                 assert!(data[..READ_ALIGN].iter().all(|&b| b == (read * 2) as u8));
                 assert!(
                     data[READ_ALIGN..]
@@ -770,12 +840,55 @@ mod tests {
             .push(&file, 100, AlignedBuffer::new(1), 0)
             .unwrap_err();
         assert_eq!(refused.error.kind(), io::ErrorKind::InvalidInput);
-        assert_eq!(refused.buffer.len(), READ_ALIGN);
+        assert_eq!(refused.buffer.unwrap().len(), READ_ALIGN);
         queue.push(&file, 0, AlignedBuffer::new(1), 0).unwrap();
         let full = queue.push(&file, 0, AlignedBuffer::new(1), 1).unwrap_err();
         assert_eq!(full.error.kind(), io::ErrorKind::WouldBlock);
         // Dropping the queue with a read in flight waits for it.
         drop(queue);
+        drop(file);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn reads_into_memory_of_the_callers() {
+        let path = pattern_file("into", 8);
+        let file = Arc::new(ReadFile::open(&path).unwrap());
+        for mut queue in [ReadQueue::new(4).unwrap(), ReadQueue::synchronous(4)] {
+            let mut target = AlignedBuffer::new(3 * READ_ALIGN);
+            let base = target.as_mut_slice().as_mut_ptr();
+            // SAFETY: `target` outlives the reads, which are popped below, and is not used
+            // meanwhile.
+            unsafe {
+                queue
+                    .push_into(&file, (5 * READ_ALIGN) as u64, base, 2 * READ_ALIGN, 1)
+                    .unwrap();
+                queue
+                    .push_into(&file, 0, base.add(2 * READ_ALIGN), READ_ALIGN, 2)
+                    .unwrap();
+                // Misaligned address or length.
+                let err = queue
+                    .push_into(&file, 0, base.add(1), READ_ALIGN, 3)
+                    .unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+                let err = queue.push_into(&file, 0, base, 100, 3).unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+            }
+            let mut done = Vec::new();
+            while queue.pending() > 0 {
+                queue.submit(true).unwrap();
+                while let Some(d) = queue.pop() {
+                    assert!(d.buffer.is_none());
+                    done.push((d.tag, d.result.unwrap()));
+                }
+            }
+            done.sort_unstable();
+            assert_eq!(done, [(1, 2 * READ_ALIGN), (2, READ_ALIGN)]);
+            let data = target.as_slice();
+            assert!(data[..READ_ALIGN].iter().all(|&b| b == 5));
+            assert!(data[READ_ALIGN..2 * READ_ALIGN].iter().all(|&b| b == 6));
+            assert!(data[2 * READ_ALIGN..].iter().all(|&b| b == 0));
+        }
         drop(file);
         let _ = std::fs::remove_file(path);
     }

@@ -21,13 +21,18 @@
 //! frame (ADR 0047), `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
 //! levels made at load (ADR 0053), `--pack <file>` to load a cooked pack instead of the glTF
-//! scene (ADR 0056; `ofeliaengine cook` makes one)
+//! scene (ADR 0056; `ofeliaengine cook` makes one), `--stream` with it to stream the
+//! textures while drawing (ADR 0057: tails first, then larger levels, through the texture
+//! pool's staging ring)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
+use engine_assets::cook::TextureRecord;
+use engine_assets::pack::{PackStreamer, StreamThread, Streamed};
 use engine_assets::{
-    AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
-    TextureSlot, TextureWrap, cook_scene, import_gltf, load_pack,
+    AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureEntry,
+    TextureFormat as Stored, TextureSlot, TextureWrap, cook_scene, import_gltf, load_pack,
+    open_scene,
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
@@ -42,12 +47,14 @@ use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, 
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
+use engine_render::texture_pool::StagingSpan;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, MemoryLocation, Wrap,
 };
+use std::collections::VecDeque;
 use std::path::Path;
 use std::time::Instant;
 
@@ -64,6 +71,95 @@ fn median(values: &mut [f64]) -> f64 {
     }
     values.sort_by(f64::total_cmp);
     values[values.len() / 2]
+}
+
+fn stored_format(format: Stored) -> TextureFormat {
+    match format {
+        Stored::Rgba8Srgb => TextureFormat::Rgba8Srgb,
+        Stored::Rgba8Unorm => TextureFormat::Rgba8Unorm,
+        Stored::Bc7Srgb => TextureFormat::Bc7Srgb,
+        Stored::Bc7Unorm => TextureFormat::Bc7Unorm,
+        Stored::Bc5Unorm => TextureFormat::Bc5Unorm,
+    }
+}
+
+/// Textures streamed from a pack into the pool while frames are drawn (ADR 0057).
+struct Streaming {
+    streamer: StreamThread,
+    records: Vec<TextureRecord>,
+    queue: VecDeque<TextureEntry>,
+    /// Requests by tag: the span being filled and what goes into it.
+    requests: Vec<Option<(StagingSpan, TextureEntry)>>,
+    finished: Vec<Streamed>,
+    tails_left: usize,
+    bytes: u64,
+    /// When streaming began (the first frame).
+    began: Option<(Instant, u64)>,
+    /// Time each pump took on the frame's thread (while streaming), ms.
+    pump_ms: Vec<f64>,
+    /// When the scene was whole at low resolution, and at full: (ms and frames since
+    /// streaming began).
+    tails_done: Option<(f64, u64)>,
+    all_done: Option<(f64, u64)>,
+}
+
+impl Streaming {
+    /// Requests what fits (streaming thread, staging ring), then uploads what arrived.
+    fn pump(
+        &mut self,
+        pool: &mut TexturePool,
+        allocator: &mut Allocator,
+        ids: &[Option<TextureId>],
+        frame_number: u64,
+    ) {
+        self.began.get_or_insert((Instant::now(), frame_number));
+        if !self.busy() {
+            return;
+        }
+        let pump_start = Instant::now();
+        while self.streamer.has_room() {
+            let Some(&te) = self.queue.front() else {
+                break;
+            };
+            let entry = self.streamer.entries()[te.entry as usize];
+            let bytes = PackStreamer::target_bytes(&entry) as u64;
+            let Some(mut span) = pool.staging(allocator, bytes).unwrap() else {
+                break;
+            };
+            let tag = self.requests.len() as u64;
+            // SAFETY: the span is lent to this request alone and stays alive until it is
+            // handed to the pool when the entry has arrived.
+            unsafe {
+                self.streamer
+                    .request(te.entry, span.as_mut_ptr(), span.len() as usize, tag)
+                    .unwrap();
+            }
+            self.bytes += bytes;
+            self.requests.push(Some((span, te)));
+            self.queue.pop_front();
+        }
+        self.streamer.poll(&mut self.finished);
+        for done in self.finished.drain(..) {
+            let Some((span, te)) = self.requests[done.tag as usize].take() else {
+                continue;
+            };
+            done.result.unwrap();
+            if te.first_level + te.level_count == self.records[te.texture as usize].levels {
+                self.tails_left -= 1;
+            }
+            let Some(id) = ids[te.texture as usize] else {
+                pool.cancel_staging(span);
+                continue;
+            };
+            pool.upload_levels(id, te.first_level, te.level_count, span)
+                .unwrap();
+        }
+        self.pump_ms.push(pump_start.elapsed().as_secs_f64() * 1e3);
+    }
+
+    fn busy(&self) -> bool {
+        !self.queue.is_empty() || self.streamer.pending() > 0
+    }
 }
 
 fn wrap(w: TextureWrap) -> Wrap {
@@ -157,6 +253,7 @@ fn main() {
     let mut curve = ToneCurve::Gt;
     let mut ddc = String::from("test-assets/.ddc");
     let mut pack: Option<String> = None;
+    let mut stream = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -184,6 +281,7 @@ fn main() {
             "--shadow-blend" => shadows.blend = args.next().unwrap().parse().unwrap(),
             "--ddc" => ddc = args.next().unwrap(),
             "--pack" => pack = args.next(),
+            "--stream" => stream = true,
             "--view" => {
                 let v: Vec<f32> = args
                     .next()
@@ -200,7 +298,20 @@ fn main() {
     // data cache, meshes given detail levels here).
     let jobs = ThreadPool::builder().build().unwrap();
     let start = Instant::now();
+    let mut streaming_setup = None;
     let (mut cooked, source) = match &pack {
+        Some(file) if stream => {
+            let (pack, layout, load) = open_scene(Path::new(file), &jobs, 32).unwrap();
+            let source = format!(
+                "pack: scene and meshes {:.1} MB read through {} in {:.0} ms; {} texture entries streamed while drawing",
+                load.read_bytes as f64 / 1e6,
+                load.backend,
+                load.seconds * 1e3,
+                layout.texture_entries.len(),
+            );
+            streaming_setup = Some((pack, layout.textures, layout.texture_entries));
+            (layout.scene, source)
+        }
         Some(file) => {
             let (scene, load) = load_pack(Path::new(file), &jobs, 32).unwrap();
             let source = format!(
@@ -248,11 +359,17 @@ fn main() {
         }
     };
     let loaded = start.elapsed();
-    let texels: u64 = cooked
-        .textures
-        .iter()
-        .map(|t| u64::from(t.width) * u64::from(t.height))
-        .sum();
+    let texels: u64 = match &streaming_setup {
+        Some((_, records, _)) => records
+            .iter()
+            .map(|t| u64::from(t.width) * u64::from(t.height))
+            .sum(),
+        None => cooked
+            .textures
+            .iter()
+            .map(|t| u64::from(t.width) * u64::from(t.height))
+            .sum(),
+    };
 
     let instance = Instance::new(&InstanceDesc {
         app_name: String::from("scene_bench"),
@@ -349,26 +466,71 @@ fn main() {
 
     // Textures and materials.
     let mut textures = TexturePool::new(&device, UPLOAD_BUDGET, 1);
-    let texture_ids: Vec<Option<TextureId>> = std::mem::take(&mut cooked.textures)
-        .into_iter()
-        .map(|t| {
-            let format = match t.format {
-                Stored::Rgba8Srgb => TextureFormat::Rgba8Srgb,
-                Stored::Rgba8Unorm => TextureFormat::Rgba8Unorm,
-                Stored::Bc7Srgb => TextureFormat::Bc7Srgb,
-                Stored::Bc7Unorm => TextureFormat::Bc7Unorm,
-                Stored::Bc5Unorm => TextureFormat::Bc5Unorm,
-            };
-            let levels = TextureLevels {
-                width: t.width,
-                height: t.height,
-                format,
-                levels: t.levels,
-            };
-            textures.add(&device, &mut allocator, levels).ok()
-        })
-        .collect();
-    let (_, texture_bytes) = textures.pending();
+    let mut streaming = None;
+    let (texture_ids, texture_bytes): (Vec<Option<TextureId>>, u64) = match streaming_setup {
+        Some((pack, records, entries)) => {
+            let ids = records
+                .iter()
+                .map(|r| {
+                    let format = Stored::from_code(r.format).map(stored_format)?;
+                    textures
+                        .add_empty(&mut allocator, r.width, r.height, format, r.levels)
+                        .ok()
+                })
+                .collect();
+            let bytes = records
+                .iter()
+                .filter_map(|r| {
+                    let format = stored_format(Stored::from_code(r.format)?);
+                    Some(
+                        (0..r.levels)
+                            .map(|k| {
+                                format.level_bytes((r.width >> k).max(1), (r.height >> k).max(1))
+                            })
+                            .sum::<u64>(),
+                    )
+                })
+                .sum();
+            let tails_left = records.len();
+            streaming = Some(Streaming {
+                // Reads, decompression and checks on a thread of their own (below-normal
+                // priority), with half the cores for decompression.
+                streamer: StreamThread::spawn(
+                    pack,
+                    32,
+                    64,
+                    std::thread::available_parallelism().map_or(4, |n| n.get() / 2),
+                )
+                .unwrap(),
+                records,
+                queue: entries.into(),
+                requests: Vec::new(),
+                finished: Vec::new(),
+                tails_left,
+                bytes: 0,
+                began: None,
+                pump_ms: Vec::new(),
+                tails_done: None,
+                all_done: None,
+            });
+            (ids, bytes)
+        }
+        None => {
+            let ids = std::mem::take(&mut cooked.textures)
+                .into_iter()
+                .map(|t| {
+                    let levels = TextureLevels {
+                        width: t.width,
+                        height: t.height,
+                        format: stored_format(t.format),
+                        levels: t.levels,
+                    };
+                    textures.add(&device, &mut allocator, levels).ok()
+                })
+                .collect();
+            (ids, textures.pending().1)
+        }
+    };
     let mut materials = MaterialTable::new(1);
     let textured = material_descs(&cooked, &texture_ids, true);
     let untextured = material_descs(&cooked, &texture_ids, false);
@@ -558,7 +720,16 @@ fn main() {
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
         while frame < WARMUP + FRAMES + usize::from(last) {
-            let uploading = textures.pending().0 > 0;
+            if let Some(s) = streaming.as_mut() {
+                s.pump(
+                    &mut textures,
+                    &mut allocator,
+                    &texture_ids,
+                    frame_number + 1,
+                );
+            }
+            let uploading =
+                textures.pending().0 > 0 || streaming.as_ref().is_some_and(Streaming::busy);
             upload_frames += usize::from(uploading);
             let capture = last && frame == WARMUP + FRAMES;
             // SAFETY: the previous frame finished (waited below).
@@ -728,6 +899,18 @@ fn main() {
                 .unwrap();
                 device.wait_idle().unwrap();
             }
+            if let Some(s) = streaming.as_mut() {
+                let at = s.began.map_or((0.0, 0), |(t, f)| {
+                    (t.elapsed().as_secs_f64() * 1e3, frame_number + 1 - f)
+                });
+                let uploaded = textures.pending().0 == 0;
+                if s.tails_left == 0 && uploaded && s.tails_done.is_none() {
+                    s.tails_done = Some(at);
+                }
+                if !s.busy() && uploaded && s.all_done.is_none() {
+                    s.all_done = Some(at);
+                }
+            }
             // Measure once every texture is resident.
             if uploading {
                 continue;
@@ -799,6 +982,26 @@ fn main() {
         );
     }
     println!();
+    if let Some(s) = &streaming {
+        let show = |at: Option<(f64, u64)>| {
+            at.map_or(String::from("never"), |(ms, frame)| {
+                format!("{ms:.0} ms ({frame} frames)")
+            })
+        };
+        let (sum, max) = s
+            .pump_ms
+            .iter()
+            .fold((0.0, 0.0f64), |(sum, max), &ms| (sum + ms, max.max(ms)));
+        println!(
+            "Streaming, from the first frame: every texture at low resolution after {}, every level after {}; {:.1} MB through the staging ring; on the frame's thread {:.2} ms per frame on average, {:.2} at most ({} frames)",
+            show(s.tails_done),
+            show(s.all_done),
+            s.bytes as f64 / 1e6,
+            sum / s.pump_ms.len().max(1) as f64,
+            max,
+            s.pump_ms.len(),
+        );
+    }
     if let Some(file) = &screenshot {
         println!("Screenshot: {file} (eye {eye}, target {target})");
     }

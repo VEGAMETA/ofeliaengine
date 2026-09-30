@@ -25,10 +25,11 @@
 
 use engine_core::hash::state_hash64;
 use engine_core::jobs::{Scope, ThreadPool};
+use engine_core::spsc;
 use engine_platform::io::{AlignedBuffer, READ_ALIGN, ReadFile, ReadQueue};
 use std::io::{self, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 const _: () = assert!(
@@ -634,12 +635,12 @@ impl Pack {
                 while let Some(done) = queue.pop() {
                     let index = done.tag as u32;
                     let e = &self.entries[index as usize];
-                    match done.result {
-                        Ok(read) if read as u64 >= e.stored_bytes => {
-                            decode(scope, &shared, index, e, self.chunks(e), done.buffer);
+                    match (done.result, done.buffer) {
+                        (Ok(read), Some(buffer)) if read as u64 >= e.stored_bytes => {
+                            decode(scope, &shared, index, e, self.chunks(e), buffer);
                         }
-                        Ok(_) => shared.fail(invalid(format!("entry {index}: truncated"))),
-                        Err(error) => shared.fail(error.into()),
+                        (Ok(_), _) => shared.fail(invalid(format!("entry {index}: truncated"))),
+                        (Err(error), _) => shared.fail(error.into()),
                     }
                 }
             }
@@ -735,36 +736,15 @@ fn decode<'scope, 'env, F>(
                     chunk.stored_bytes() as usize,
                 )
             };
-            let result = if raw {
-                // Raw entries stay in the read buffer: only the check.
-                Ok(stored)
-            } else {
+            let target = (!raw).then(|| {
                 // SAFETY: the output holds `e.bytes` bytes and lives as above; this job
                 // alone writes `raw_start..raw_start + raw_len`, and nobody reads it before
                 // every chunk is done.
-                let target = unsafe {
+                unsafe {
                     core::slice::from_raw_parts_mut(assembly.output.0.add(raw_start), raw_len)
-                };
-                if chunk.is_raw() {
-                    target.copy_from_slice(stored);
-                    Ok(&*target)
-                } else {
-                    match zstd::bulk::decompress_to_buffer(stored, target) {
-                        Ok(n) if n == raw_len => Ok(&*target),
-                        Ok(_) => Err(invalid(format!("entry {index}: chunk {k} too short"))),
-                        Err(why) => Err(invalid(format!("entry {index}: chunk {k}: {why}"))),
-                    }
-                }
-            };
-            let checked = result.and_then(|bytes| {
-                if state_hash64(bytes) == chunk.hash {
-                    Ok(())
-                } else {
-                    Err(invalid(format!(
-                        "entry {index}: chunk {k} damaged (hash mismatch)"
-                    )))
                 }
             });
+            let checked = chunk_checked(index, k, chunk, stored, target);
             shared
                 .decode_nanos
                 .fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -794,6 +774,529 @@ fn decode<'scope, 'env, F>(
     }
 }
 
+/// Chunk `k` of entry `index` from its `stored` bytes: decompressed (or copied) into
+/// `target` when given, then its raw bytes checked against its hash; without a target the
+/// entry is raw and `stored` is checked where it is.
+fn chunk_checked(
+    index: u32,
+    k: usize,
+    chunk: &Chunk,
+    stored: &[u8],
+    target: Option<&mut [u8]>,
+) -> Result<(), PackError> {
+    let bytes: &[u8] = match target {
+        None => stored,
+        Some(target) if chunk.is_raw() => {
+            if target.len() != stored.len() {
+                return Err(invalid(format!(
+                    "entry {index}: chunk {k} has the wrong size"
+                )));
+            }
+            target.copy_from_slice(stored);
+            target
+        }
+        Some(target) => {
+            let len = target.len();
+            match zstd::bulk::decompress_to_buffer(stored, &mut *target) {
+                Ok(n) if n == len => target,
+                Ok(_) => return Err(invalid(format!("entry {index}: chunk {k} too short"))),
+                Err(why) => return Err(invalid(format!("entry {index}: chunk {k}: {why}"))),
+            }
+        }
+    };
+    if state_hash64(bytes) == chunk.hash {
+        Ok(())
+    } else {
+        Err(invalid(format!(
+            "entry {index}: chunk {k} damaged (hash mismatch)"
+        )))
+    }
+}
+
+/// Streams entries of a pack into memory of the caller's (staging memory the GPU copies
+/// from), without blocking a frame on the drive (ADR 0057). Each [`Self::update`] starts
+/// the reads requested since the last, and checks and decompresses the entries whose reads
+/// have finished, their chunks in parallel on the job pool.
+///
+/// - Raw entries are read straight into their target and checked there.
+/// - Compressed entries are read into a buffer of the streamer's, then decompressed into
+///   their target.
+pub struct PackStreamer {
+    pack: Pack,
+    queue: ReadQueue,
+    reads: Vec<Option<StreamRead>>,
+    free: Vec<usize>,
+    /// Read buffers of compressed entries, kept for the next reads.
+    buffers: Vec<AlignedBuffer>,
+    /// Scratch of `update`, kept to avoid allocating per frame.
+    arrived: Vec<(usize, io::Result<usize>, Option<AlignedBuffer>)>,
+    work: Vec<(usize, usize)>,
+}
+
+impl core::fmt::Debug for PackStreamer {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PackStreamer")
+            .field("entries", &self.pack.entries.len())
+            .field("reading", &self.pending())
+            .finish_non_exhaustive()
+    }
+}
+
+/// An entry being streamed.
+struct StreamRead {
+    index: u32,
+    tag: u64,
+    target: Address,
+}
+
+/// A finished streamed entry: its tag and whether it is in its target, checked.
+#[derive(Debug)]
+pub struct Streamed {
+    /// The tag given to [`PackStreamer::request`].
+    pub tag: u64,
+    /// The entry's index.
+    pub index: u32,
+    /// Ok when the target holds the entry's raw bytes, checked.
+    pub result: Result<(), PackError>,
+}
+
+impl PackStreamer {
+    /// Streams from `pack`, up to `depth` entries at a time.
+    pub fn new(pack: Pack, depth: usize) -> Result<Self, PackError> {
+        let depth = depth.clamp(1, 1024);
+        Ok(Self {
+            pack,
+            queue: ReadQueue::new(depth)?,
+            reads: (0..depth).map(|_| None).collect(),
+            free: (0..depth).rev().collect(),
+            buffers: Vec::new(),
+            arrived: Vec::with_capacity(depth),
+            work: Vec::new(),
+        })
+    }
+
+    /// The pack.
+    pub fn pack(&self) -> &Pack {
+        &self.pack
+    }
+
+    /// Entries requested and not yet finished.
+    pub fn pending(&self) -> usize {
+        self.reads.len() - self.free.len()
+    }
+
+    /// Whether another entry can be requested now.
+    pub fn has_room(&self) -> bool {
+        !self.free.is_empty()
+    }
+
+    /// Bytes an entry's target needs: its raw bytes, and for raw entries (read straight
+    /// into it) their stored bytes rounded up to a block.
+    pub fn target_bytes(entry: &Entry) -> usize {
+        if entry.is_raw() {
+            entry.stored_bytes.next_multiple_of(BLOCK) as usize
+        } else {
+            entry.bytes as usize
+        }
+    }
+
+    /// Requests entry `index` into `target..target + len`, tagged `tag`; it arrives in a
+    /// later [`Self::update`]. `target` is a multiple of [`BLOCK`] and `len` at least
+    /// [`Self::target_bytes`].
+    ///
+    /// # Safety
+    ///
+    /// The target memory is writable, and nothing else reads, writes or frees it until the
+    /// entry has come out of [`Self::update`] (or the streamer is dropped).
+    pub unsafe fn request(
+        &mut self,
+        index: u32,
+        target: *mut u8,
+        len: usize,
+        tag: u64,
+    ) -> Result<(), PackError> {
+        let e = *self
+            .pack
+            .entries
+            .get(index as usize)
+            .ok_or_else(|| invalid(format!("no entry {index}")))?;
+        if !(target as usize).is_multiple_of(BLOCK as usize) || len < Self::target_bytes(&e) {
+            return Err(invalid("stream target misaligned or too small"));
+        }
+        let Some(slot) = self.free.pop() else {
+            return Err(PackError::Io(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "streamer full",
+            )));
+        };
+        let pushed = if e.is_raw() {
+            let padded = e.stored_bytes.next_multiple_of(BLOCK) as usize;
+            if padded == 0 {
+                // An empty entry: nothing to read.
+                Ok(())
+            } else {
+                // SAFETY: the caller's contract covers `target..target + len`, and
+                // `padded <= len`.
+                unsafe {
+                    self.queue
+                        .push_into(&self.pack.file, e.offset, target, padded, slot as u64)
+                }
+                .map_err(PackError::from)
+            }
+        } else {
+            let buffer = match self
+                .buffers
+                .iter()
+                .position(|b| b.len() as u64 >= e.stored_bytes)
+            {
+                Some(k) => self.buffers.swap_remove(k),
+                None => AlignedBuffer::new(e.stored_bytes as usize),
+            };
+            self.queue
+                .push(&self.pack.file, e.offset, buffer, slot as u64)
+                .map_err(|refused| {
+                    if let Some(buffer) = refused.buffer {
+                        self.buffers.push(buffer);
+                    }
+                    PackError::from(refused.error)
+                })
+        };
+        if let Err(error) = pushed {
+            self.free.push(slot);
+            return Err(error);
+        }
+        self.reads[slot] = Some(StreamRead {
+            index,
+            tag,
+            target: Address(target),
+        });
+        if e.is_raw() && e.stored_bytes == 0 {
+            // Nothing to read: finished at the next update.
+            self.arrived.push((slot, Ok(0), None));
+        }
+        Ok(())
+    }
+
+    /// Starts requested reads, then checks and decompresses every entry whose read has
+    /// finished (on `jobs`, blocking until that work is done) and appends them to
+    /// `finished`. With `wait`, first waits for at least one read if none has finished.
+    pub fn update(
+        &mut self,
+        jobs: &ThreadPool,
+        wait: bool,
+        finished: &mut Vec<Streamed>,
+    ) -> Result<(), PackError> {
+        engine_profiler::zone!("assets::PackStreamer::update");
+        self.queue.submit(wait && self.arrived.is_empty())?;
+        while let Some(done) = self.queue.pop() {
+            self.arrived
+                .push((done.tag as usize, done.result, done.buffer));
+        }
+        if self.arrived.is_empty() {
+            return Ok(());
+        }
+        // One job per chunk of every arrived entry.
+        let chunk_bytes = 1usize << self.pack.chunk_shift;
+        self.work.clear();
+        let mut failures: Vec<Option<PackError>> = Vec::with_capacity(self.arrived.len());
+        for (a, (slot, result, _)) in self.arrived.iter_mut().enumerate() {
+            let read = self.reads[*slot].as_ref();
+            let failure = match (read, result) {
+                (None, _) => Some(invalid("a read finished that was not requested")),
+                (Some(_), Err(error)) => Some(PackError::Io(core::mem::replace(
+                    error,
+                    io::Error::other("taken"),
+                ))),
+                (Some(r), Ok(n)) => {
+                    let e = &self.pack.entries[r.index as usize];
+                    if (*n as u64) < e.stored_bytes {
+                        Some(invalid(format!("entry {}: truncated", r.index)))
+                    } else {
+                        self.work
+                            .extend((0..e.chunk_count as usize).map(|k| (a, k)));
+                        None
+                    }
+                }
+            };
+            failures.push(failure);
+        }
+        let errors: Vec<OnceLock<PackError>> =
+            (0..self.arrived.len()).map(|_| OnceLock::new()).collect();
+        {
+            let (pack, reads, arrived, work) = (&self.pack, &self.reads, &self.arrived, &self.work);
+            jobs.parallel_for(work.len(), 1, |_, range| {
+                for w in range {
+                    let (a, k) = work[w];
+                    let (slot, _, buffer) = &arrived[a];
+                    let Some(r) = reads[*slot].as_ref() else {
+                        continue;
+                    };
+                    let e = &pack.entries[r.index as usize];
+                    let chunk = &pack.chunks(e)[k];
+                    let raw_start = k * chunk_bytes;
+                    let raw_len = (e.bytes as usize - raw_start).min(chunk_bytes);
+                    let result = if e.is_raw() {
+                        // SAFETY: the target holds the read (the request's contract, and
+                        // the read has finished); this job only reads it.
+                        let stored = unsafe {
+                            core::slice::from_raw_parts(
+                                r.target.0.add(chunk.offset as usize),
+                                chunk.stored_bytes() as usize,
+                            )
+                        };
+                        chunk_checked(r.index, k, chunk, stored, None)
+                    } else {
+                        let stored = buffer.as_ref().map(|b| {
+                            &b.as_slice()[chunk.offset as usize..][..chunk.stored_bytes() as usize]
+                        });
+                        // SAFETY: `raw_start + raw_len <= e.bytes <= target_len` (checked
+                        // at the request); this job alone writes that range of the target.
+                        let target = unsafe {
+                            core::slice::from_raw_parts_mut(r.target.0.add(raw_start), raw_len)
+                        };
+                        match stored {
+                            Some(stored) => chunk_checked(r.index, k, chunk, stored, Some(target)),
+                            None => Err(invalid("compressed entry without its read buffer")),
+                        }
+                    };
+                    if let Err(error) = result {
+                        let _ = errors[a].set(error);
+                    }
+                }
+            });
+        }
+        for ((slot, _, buffer), (failure, error)) in
+            self.arrived.drain(..).zip(failures.into_iter().zip(errors))
+        {
+            if let Some(buffer) = buffer {
+                self.buffers.push(buffer);
+            }
+            let Some(read) = self.reads[slot].take() else {
+                continue;
+            };
+            self.free.push(slot);
+            finished.push(Streamed {
+                tag: read.tag,
+                index: read.index,
+                result: match failure.or(error.into_inner()) {
+                    Some(error) => Err(error),
+                    None => Ok(()),
+                },
+            });
+        }
+        Ok(())
+    }
+}
+
+/// A request to [`StreamThread`].
+struct ThreadRequest {
+    index: u32,
+    target: Address,
+    len: usize,
+    tag: u64,
+}
+
+/// A [`PackStreamer`] on a thread of its own (ADR 0057): the frame's thread only queues
+/// requests and collects finished entries, through lock-free queues and without
+/// allocating. The streaming thread waits for the drive and decompresses on a job pool of
+/// its own, at below-normal priority, so a frame never waits for either (measured on
+/// NVMe: decompressing inside the frame's update took up to 6 ms of a frame).
+pub struct StreamThread {
+    entries: Vec<Entry>,
+    requests: spsc::Producer<ThreadRequest>,
+    finished: spsc::Consumer<Streamed>,
+    /// Requested and not yet collected.
+    in_flight: usize,
+    capacity: usize,
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl core::fmt::Debug for StreamThread {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("StreamThread")
+            .field("entries", &self.entries.len())
+            .field("in_flight", &self.in_flight)
+            .finish_non_exhaustive()
+    }
+}
+
+impl StreamThread {
+    /// Starts streaming from `pack`: up to `depth` reads in flight, up to `capacity`
+    /// entries requested at a time, decompression on `workers` threads (below-normal
+    /// priority).
+    pub fn spawn(
+        pack: Pack,
+        depth: usize,
+        capacity: usize,
+        workers: usize,
+    ) -> Result<Self, PackError> {
+        let capacity = capacity.max(1);
+        let entries = pack.entries().to_vec();
+        let mut streamer = PackStreamer::new(pack, depth)?;
+        let jobs = ThreadPool::builder()
+            .workers(workers.max(1))
+            .thread_name("engine-stream")
+            .on_thread_start(|_| lower_priority())
+            .build()
+            .map_err(|e| PackError::Io(io::Error::other(format!("{e:?}"))))?;
+        let (requests, mut incoming) = spsc::channel::<ThreadRequest>(capacity);
+        let (mut outgoing, finished) = spsc::channel::<Streamed>(capacity);
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let thread = std::thread::Builder::new()
+            .name(String::from("engine-stream"))
+            .spawn(move || {
+                lower_priority();
+                let mut done = Vec::with_capacity(capacity);
+                let mut waiting: Option<ThreadRequest> = None;
+                loop {
+                    // New requests, as many as the streamer takes.
+                    while streamer.has_room() {
+                        let Some(r) = waiting.take().or_else(|| incoming.pop()) else {
+                            break;
+                        };
+                        // SAFETY: the frame's thread promised the target under
+                        // `StreamThread::request`'s contract, which is the streamer's.
+                        let requested =
+                            unsafe { streamer.request(r.index, r.target.0, r.len, r.tag) };
+                        if let Err(error) = requested {
+                            done.push(Streamed {
+                                tag: r.tag,
+                                index: r.index,
+                                result: Err(error),
+                            });
+                        }
+                    }
+                    if streamer.pending() == 0 && done.is_empty() {
+                        if stopping.load(Ordering::Acquire) {
+                            break;
+                        }
+                        // Nothing to do until a request arrives (`request` unparks).
+                        match incoming.pop() {
+                            Some(r) => waiting = Some(r),
+                            None => std::thread::park(),
+                        }
+                        continue;
+                    }
+                    if streamer.pending() > 0
+                        && let Err(error) = streamer.update(&jobs, true, &mut done)
+                    {
+                        // The queue itself failed: every entry in flight fails with it.
+                        done.push(Streamed {
+                            tag: u64::MAX,
+                            index: u32::MAX,
+                            result: Err(error),
+                        });
+                        break;
+                    }
+                    for streamed in done.drain(..) {
+                        let mut streamed = streamed;
+                        // Never full: at most `capacity` entries are in flight.
+                        while let Err(back) = outgoing.push(streamed) {
+                            streamed = back;
+                            std::thread::yield_now();
+                        }
+                    }
+                }
+            })
+            .map_err(PackError::Io)?;
+        Ok(Self {
+            entries,
+            requests,
+            finished,
+            in_flight: 0,
+            capacity,
+            stop,
+            thread: Some(thread),
+        })
+    }
+
+    /// The pack's table of contents.
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// Entries requested and not yet collected.
+    pub fn pending(&self) -> usize {
+        self.in_flight
+    }
+
+    /// Whether another entry can be requested now.
+    pub fn has_room(&self) -> bool {
+        self.in_flight < self.capacity
+    }
+
+    /// Requests entry `index` into `target..target + len`, tagged `tag`, as
+    /// [`PackStreamer::request`] (a failure comes back as a finished entry).
+    ///
+    /// # Safety
+    ///
+    /// The target memory is writable, and nothing else reads, writes or frees it until the
+    /// entry has come out of [`Self::poll`] (or this is dropped).
+    pub unsafe fn request(
+        &mut self,
+        index: u32,
+        target: *mut u8,
+        len: usize,
+        tag: u64,
+    ) -> Result<(), PackError> {
+        if !self.has_room() {
+            return Err(PackError::Io(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "streaming thread full",
+            )));
+        }
+        let request = ThreadRequest {
+            index,
+            target: Address(target),
+            len,
+            tag,
+        };
+        if self.requests.push(request).is_err() {
+            return Err(PackError::Io(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "streaming thread full",
+            )));
+        }
+        self.in_flight += 1;
+        if let Some(thread) = &self.thread {
+            thread.thread().unpark();
+        }
+        Ok(())
+    }
+
+    /// Appends the entries finished since the last call to `finished`. An entry tagged
+    /// `u64::MAX` (index `u32::MAX`) means the streaming thread's read queue failed:
+    /// nothing more will finish.
+    pub fn poll(&mut self, finished: &mut Vec<Streamed>) {
+        while let Some(streamed) = self.finished.pop() {
+            self.in_flight = self.in_flight.saturating_sub(1);
+            finished.push(streamed);
+        }
+    }
+}
+
+impl Drop for StreamThread {
+    fn drop(&mut self) {
+        // The thread finishes what is in flight (targets stay valid until then, by
+        // `request`'s contract) and leaves.
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            thread.thread().unpark();
+            let _ = thread.join();
+        }
+    }
+}
+
+/// Streaming works below normal priority: frames come first.
+fn lower_priority() {
+    #[cfg(windows)]
+    let _ = engine_platform::thread::set_current_thread_priority(
+        engine_platform::thread::ThreadPriority::BelowNormal,
+    );
+}
+
 /// Reads `len` bytes at `offset` (block-aligned) and waits.
 fn read_blocking(
     queue: &mut ReadQueue,
@@ -808,10 +1311,10 @@ fn read_blocking(
         queue.submit(true)?;
         if let Some(done) = queue.pop() {
             let read = done.result?;
-            if read < len {
-                return Err(invalid("truncated"));
-            }
-            return Ok(done.buffer);
+            return match done.buffer {
+                Some(buffer) if read >= len => Ok(buffer),
+                _ => Err(invalid("truncated")),
+            };
         }
     }
 }
@@ -910,6 +1413,148 @@ mod tests {
             drop(pack);
             let _ = std::fs::remove_file(path);
         }
+    }
+
+    #[test]
+    fn entries_stream_into_memory_of_the_callers() {
+        for level in [0, 3] {
+            let path = temp(&format!("stream_{level}"));
+            write(&path, level);
+            let jobs = ThreadPool::builder().workers(3).build().unwrap();
+            let mut streamer = PackStreamer::new(Pack::open(&path).unwrap(), 2).unwrap();
+            let entries = streamer.pack().entries().to_vec();
+            let mut targets: Vec<AlignedBuffer> = entries
+                .iter()
+                .map(|e| AlignedBuffer::new(PackStreamer::target_bytes(e)))
+                .collect();
+            let mut next = 0;
+            let mut finished = Vec::new();
+            while next < entries.len() || streamer.pending() > 0 {
+                while next < entries.len() && streamer.has_room() {
+                    let target = &mut targets[next];
+                    // SAFETY: each target is used by its own entry only and outlives the
+                    // streamer's use of it (finished below before the targets are read).
+                    unsafe {
+                        streamer
+                            .request(
+                                next as u32,
+                                target.as_mut_slice().as_mut_ptr(),
+                                target.len(),
+                                100 + next as u64,
+                            )
+                            .unwrap();
+                    }
+                    next += 1;
+                }
+                streamer.update(&jobs, true, &mut finished).unwrap();
+            }
+            assert_eq!(finished.len(), entries.len());
+            for f in &finished {
+                assert!(f.result.is_ok(), "{:?}", f.result);
+                assert_eq!(f.tag, 100 + u64::from(f.index));
+            }
+            for (i, sample) in samples().iter().enumerate() {
+                assert_eq!(
+                    targets[i].as_slice()[..sample.len()],
+                    sample[..],
+                    "entry {i}"
+                );
+            }
+            drop(streamer);
+            // A damaged chunk fails its entry only.
+            let e = Pack::open(&path).unwrap().entries()[1];
+            let mut bytes = std::fs::read(&path).unwrap();
+            bytes[(e.offset + 5) as usize] ^= 1;
+            std::fs::write(&path, bytes).unwrap();
+            let mut streamer = PackStreamer::new(Pack::open(&path).unwrap(), 4).unwrap();
+            let mut finished = Vec::new();
+            for i in [0u32, 1] {
+                let target = &mut targets[i as usize];
+                // SAFETY: as above.
+                unsafe {
+                    streamer
+                        .request(i, target.as_mut_slice().as_mut_ptr(), target.len(), 0)
+                        .unwrap();
+                }
+            }
+            while streamer.pending() > 0 {
+                streamer.update(&jobs, true, &mut finished).unwrap();
+            }
+            finished.sort_by_key(|f| f.index);
+            assert!(finished[0].result.is_ok());
+            assert!(finished[1].result.is_err());
+            drop(streamer);
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn a_streaming_thread_delivers_every_entry() {
+        let path = temp("thread");
+        write(&path, 3);
+        let pack = Pack::open(&path).unwrap();
+        let entries = pack.entries().to_vec();
+        let mut targets: Vec<AlignedBuffer> = entries
+            .iter()
+            .map(|e| AlignedBuffer::new(PackStreamer::target_bytes(e)))
+            .collect();
+        let mut thread = StreamThread::spawn(pack, 2, 3, 2).unwrap();
+        let (mut next, mut finished) = (0, Vec::new());
+        while next < entries.len() || thread.pending() > 0 {
+            while next < entries.len() && thread.has_room() {
+                let target = &mut targets[next];
+                // SAFETY: each target is used by its own entry only and outlives the
+                // thread's use of it.
+                unsafe {
+                    thread
+                        .request(
+                            next as u32,
+                            target.as_mut_slice().as_mut_ptr(),
+                            target.len(),
+                            next as u64,
+                        )
+                        .unwrap();
+                }
+                next += 1;
+            }
+            thread.poll(&mut finished);
+            std::thread::yield_now();
+        }
+        assert_eq!(finished.len(), entries.len());
+        assert!(
+            finished
+                .iter()
+                .all(|f| f.result.is_ok() && f.tag == u64::from(f.index))
+        );
+        for (i, sample) in samples().iter().enumerate() {
+            assert_eq!(
+                targets[i].as_slice()[..sample.len()],
+                sample[..],
+                "entry {i}"
+            );
+        }
+        // A misaligned target fails that entry; dropping waits for what is in flight.
+        let mut odd = AlignedBuffer::new(8192);
+        // SAFETY: as above.
+        unsafe {
+            let address = odd.as_mut_slice().as_mut_ptr().add(1);
+            thread.request(1, address, 4096, 7).unwrap();
+        }
+        let mut failed = Vec::new();
+        while failed.is_empty() {
+            thread.poll(&mut failed);
+            std::thread::yield_now();
+        }
+        assert!(failed[0].result.is_err());
+        let first = &mut targets[0];
+        // SAFETY: as above.
+        unsafe {
+            thread
+                .request(0, first.as_mut_slice().as_mut_ptr(), first.len(), 0)
+                .unwrap();
+        }
+        drop(thread);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

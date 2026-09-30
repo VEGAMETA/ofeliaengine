@@ -1,10 +1,23 @@
-//! Textures of materials (ADR 0040): images with full mip chains, uploaded through a
-//! staging buffer within a budget of bytes per frame, and registered in the bindless set
-//! once uploaded. Until then materials shade without them (their factors alone), so a
-//! scene appears at once and its textures fill in over the next frames.
+//! Textures of materials (ADR 0040, ADR 0057): images with full mip chains, uploaded
+//! within a budget of bytes per frame, and registered in the bindless set as their levels
+//! arrive. Until then materials shade without them (their factors alone), so a scene
+//! appears at once and its textures fill in over the next frames.
+//!
+//! Two ways in:
+//!
+//! - [`TexturePool::add`] takes every level in memory and uploads them together (through a
+//!   staging buffer made for the frame).
+//! - **Streaming:** [`TexturePool::add_empty`] makes the image,
+//!   [`TexturePool::staging`] lends memory of the pool's staging ring (host-cached, so
+//!   drive reads land in it and decompression writes into it directly), and
+//!   [`TexturePool::upload_levels`] copies any range of levels from there. A texture is
+//!   resident from its smallest level up: each time a larger level joins that range it
+//!   gets a view over the resident levels and a new bindless index (materials pick it up
+//!   through [`TexturePool::generation`]); the old view is freed once the frames that used
+//!   it have finished.
 //!
 //! Uploads record their own layout transitions: materials sample textures through
-//! bindless indices without declaring them to the graph, so a texture is either being
+//! bindless indices without declaring them to the graph, so a level is either being
 //! uploaded (inside the upload pass) or read-only.
 
 use crate::graph::{Access, BufferState, FrameGraph, ImportedBuffer};
@@ -71,13 +84,24 @@ pub struct TextureLevels {
 }
 
 /// Staging offsets of levels are multiples of this: the largest texel block (16 bytes).
-const LEVEL_ALIGN: u64 = 16;
+/// In a [`StagingSpan`], levels follow one another, each padded to it.
+pub const LEVEL_ALIGN: u64 = 16;
+/// Staging spans start at multiples of this, so unbuffered drive reads land in them.
+pub const STAGING_ALIGN: u64 = 4096;
+/// The staging ring's size unless [`TexturePool::set_staging_size`] says otherwise: room
+/// for a 4K texture's top level (16 MiB of BC7) four times over.
+pub const DEFAULT_STAGING_BYTES: u64 = 64 << 20;
+/// Most levels a texture may have (a 2^31-texel side).
+const MAX_LEVELS: u32 = 32;
 
-/// Why a texture was not added.
+/// Why a texture or an upload was not accepted.
 #[derive(Debug)]
 pub enum TextureError {
-    /// No levels, or a level whose size does not match its dimensions.
+    /// No levels, a level whose size does not match its dimensions, or levels outside the
+    /// texture.
     BadLevels,
+    /// Asked for more staging memory than the ring holds.
+    StagingTooSmall,
     /// A Vulkan call failed.
     Rhi(RhiError),
 }
@@ -92,6 +116,7 @@ impl core::fmt::Display for TextureError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::BadLevels => write!(f, "texture levels do not match its size"),
+            Self::StagingTooSmall => write!(f, "larger than the staging ring"),
             Self::Rhi(e) => write!(f, "{e}"),
         }
     }
@@ -99,18 +124,154 @@ impl core::fmt::Display for TextureError {
 
 impl std::error::Error for TextureError {}
 
+/// Staging memory lent by [`TexturePool::staging`]: fill it (drive reads, decompression,
+/// from any thread), then hand it back with [`TexturePool::upload_levels`] or
+/// [`TexturePool::cancel_staging`].
+#[derive(Debug)]
+pub struct StagingSpan {
+    /// Position in the ring (monotonic; the ring offset is modulo its size).
+    start: u64,
+    offset: u64,
+    len: u64,
+    address: *mut u8,
+}
+
+// SAFETY: the span is the only handle to its range of the ring; filling it from another
+// thread is its purpose.
+unsafe impl Send for StagingSpan {}
+
+impl StagingSpan {
+    /// Its first byte (a multiple of [`STAGING_ALIGN`]). Valid for writes of
+    /// [`Self::len`] bytes until the span is handed back, while the pool lives.
+    pub fn as_mut_ptr(&mut self) -> *mut u8 {
+        self.address
+    }
+
+    /// Its length (a multiple of [`STAGING_ALIGN`]).
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Never empty (kept for the `len` convention).
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// Its bytes.
+    pub fn bytes_mut(&mut self) -> &mut [u8] {
+        // SAFETY: the ring's mapped memory holds `len` bytes at `address`, lent to this
+        // span alone until it is handed back.
+        unsafe { core::slice::from_raw_parts_mut(self.address, self.len as usize) }
+    }
+}
+
+/// Where spans of the staging ring are: lent in order, given back in any order; memory is
+/// reused once every older span has come back (and the frames copying from it have
+/// finished).
+#[derive(Debug, Default)]
+struct RingSpans {
+    size: u64,
+    /// Next free position (monotonic; ring offsets are modulo `size`).
+    head: u64,
+    /// Lent spans in order: start, length, back.
+    spans: VecDeque<(u64, u64, bool)>,
+}
+
+impl RingSpans {
+    fn tail(&self) -> u64 {
+        self.spans.front().map_or(self.head, |s| s.0)
+    }
+
+    /// A span of at least `bytes`: its start (monotonic), offset and length.
+    fn lend(&mut self, bytes: u64) -> Option<(u64, u64, u64)> {
+        let len = bytes.max(1).next_multiple_of(STAGING_ALIGN);
+        if self.spans.is_empty() {
+            // Nothing lent: start again at the beginning of the ring.
+            self.head = self.head.next_multiple_of(self.size);
+        }
+        let mut start = self.head;
+        if start % self.size + len > self.size {
+            // Skip the end of the ring: spans are contiguous.
+            start = start.next_multiple_of(self.size);
+        }
+        if start + len - self.tail() > self.size {
+            return None;
+        }
+        self.spans.push_back((start, len, false));
+        self.head = start + len;
+        Some((start, start % self.size, len))
+    }
+
+    fn give_back(&mut self, start: u64) {
+        if let Some(span) = self.spans.iter_mut().find(|s| s.0 == start) {
+            span.2 = true;
+        }
+        while self.spans.front().is_some_and(|s| s.2) {
+            self.spans.pop_front();
+        }
+    }
+}
+
+/// The streaming staging ring: one host-cached buffer, lent out in spans.
+struct StagingRing {
+    buffer: vk::Buffer,
+    allocation: Allocation,
+    /// The ring's first byte: the buffer's first page-aligned address.
+    base: *mut u8,
+    /// Where the ring starts in the buffer.
+    skip: u64,
+    spans: RingSpans,
+}
+
+impl StagingRing {
+    fn lend(&mut self, bytes: u64) -> Option<StagingSpan> {
+        let (start, offset, len) = self.spans.lend(bytes)?;
+        Some(StagingSpan {
+            start,
+            offset: self.skip + offset,
+            len,
+            // SAFETY: `offset + len <= size`, within the mapped buffer.
+            address: unsafe { self.base.add(offset as usize) },
+        })
+    }
+
+    fn give_back(&mut self, start: u64) {
+        self.spans.give_back(start);
+    }
+}
+
 #[derive(Debug)]
 struct PoolTexture {
     image: vk::Image,
-    view: vk::ImageView,
     allocation: Option<Allocation>,
+    format: TextureFormat,
     width: u32,
     height: u32,
-    /// Bindless index once uploaded.
+    levels: u32,
+    /// Levels uploaded, one bit each.
+    uploaded: u32,
+    /// First level of the view: the resident levels are `resident..levels`.
+    resident: u32,
+    /// View over the resident levels.
+    view: Option<vk::ImageView>,
+    /// Its bindless index.
     bindless: Option<u32>,
-    /// Level data waiting for upload.
-    pending: Option<Vec<Vec<u8>>>,
-    bytes: u64,
+}
+
+impl PoolTexture {
+    fn level_size(&self, level: u32) -> (u32, u32) {
+        ((self.width >> level).max(1), (self.height >> level).max(1))
+    }
+
+    /// Staging bytes of `count` levels from `first`, each padded to [`LEVEL_ALIGN`].
+    fn staging_bytes(&self, first: u32, count: u32) -> u64 {
+        (first..first + count)
+            .map(|k| {
+                let (w, h) = self.level_size(k);
+                self.format.level_bytes(w, h).next_multiple_of(LEVEL_ALIGN)
+            })
+            .sum()
+    }
 }
 
 #[derive(Debug)]
@@ -119,10 +280,31 @@ struct Slot {
     texture: Option<PoolTexture>,
 }
 
+/// Where an upload's data is.
+#[derive(Debug)]
+enum Source {
+    /// In memory: copied into a staging buffer made for the frame.
+    Owned(Vec<Vec<u8>>),
+    /// In the staging ring.
+    Span(StagingSpan),
+}
+
+#[derive(Debug)]
+struct Upload {
+    id: TextureId,
+    first: u32,
+    count: u32,
+    bytes: u64,
+    source: Source,
+}
+
 #[derive(Debug)]
 enum Retired {
     Texture(PoolTexture),
+    View(vk::ImageView),
     Staging(vk::Buffer, Allocation),
+    /// A ring span (its start).
+    Span(u64),
 }
 
 /// Material textures (see the module documentation).
@@ -130,7 +312,7 @@ pub struct TexturePool {
     device: engine_rhi::ash::Device,
     slots: Vec<Slot>,
     free_slots: Vec<u32>,
-    queue: VecDeque<TextureId>,
+    queue: VecDeque<Upload>,
     budget: u64,
     retired: Vec<(u64, Retired)>,
     frames_in_flight: u64,
@@ -138,6 +320,8 @@ pub struct TexturePool {
     /// textures again when it does.
     generation: u64,
     uploaded_bytes: u64,
+    ring: Option<StagingRing>,
+    ring_bytes: u64,
 }
 
 impl core::fmt::Debug for TexturePool {
@@ -147,17 +331,13 @@ impl core::fmt::Debug for TexturePool {
             .field("queued", &self.queue.len())
             .field("budget", &self.budget)
             .field("uploaded_bytes", &self.uploaded_bytes)
+            .field("staging_ring", &self.ring.as_ref().map(|r| r.spans.size))
             .finish()
     }
 }
 
-/// Size of level `level` of a `size`-texel side.
-fn level_size(size: u32, level: usize) -> u32 {
-    (size >> level).max(1)
-}
-
 impl TexturePool {
-    /// An empty pool uploading at most `budget` bytes per frame (at least one texture,
+    /// An empty pool uploading at most `budget` bytes per frame (at least one upload,
     /// however large); frames in flight bound how long removed textures are kept.
     pub fn new(device: &Device, budget: u64, frames_in_flight: usize) -> Self {
         Self {
@@ -170,6 +350,17 @@ impl TexturePool {
             frames_in_flight: frames_in_flight.max(1) as u64,
             generation: 0,
             uploaded_bytes: 0,
+            ring: None,
+            ring_bytes: DEFAULT_STAGING_BYTES,
+        }
+    }
+
+    /// The staging ring's size, for streaming ([`DEFAULT_STAGING_BYTES`] by default):
+    /// set before the first [`Self::staging`]. It bounds the largest single upload and how
+    /// much can be read ahead.
+    pub fn set_staging_size(&mut self, bytes: u64) {
+        if self.ring.is_none() {
+            self.ring_bytes = bytes.max(STAGING_ALIGN).next_multiple_of(STAGING_ALIGN);
         }
     }
 
@@ -180,77 +371,78 @@ impl TexturePool {
         allocator: &mut Allocator,
         texture: TextureLevels,
     ) -> Result<TextureId, TextureError> {
+        let _ = device;
+        let levels = texture.levels.len() as u32;
         let (width, height) = (texture.width.max(1), texture.height.max(1));
-        if texture.levels.is_empty()
-            || texture.levels.len() > 32
-            || texture.levels.iter().enumerate().any(|(k, level)| {
-                level.len() as u64
-                    != texture
-                        .format
-                        .level_bytes(level_size(width, k), level_size(height, k))
-            })
-        {
+        let mut bytes = 0;
+        for (k, level) in texture.levels.iter().enumerate() {
+            let size = |s: u32| (s >> k).max(1);
+            let expected = texture.format.level_bytes(size(width), size(height));
+            if level.len() as u64 != expected {
+                return Err(TextureError::BadLevels);
+            }
+            bytes += expected.next_multiple_of(LEVEL_ALIGN);
+        }
+        let id = self.add_empty(allocator, width, height, texture.format, levels)?;
+        self.queue.push_back(Upload {
+            id,
+            first: 0,
+            count: levels,
+            bytes,
+            source: Source::Owned(texture.levels),
+        });
+        Ok(id)
+    }
+
+    /// Creates a texture's image of `levels` levels with no data: upload them with
+    /// [`Self::upload_levels`]. Materials see it once its smallest level has arrived.
+    pub fn add_empty(
+        &mut self,
+        allocator: &mut Allocator,
+        width: u32,
+        height: u32,
+        format: TextureFormat,
+        levels: u32,
+    ) -> Result<TextureId, TextureError> {
+        let (width, height) = (width.max(1), height.max(1));
+        let full = 32 - width.max(height).leading_zeros();
+        if levels == 0 || levels > full.min(MAX_LEVELS) {
             return Err(TextureError::BadLevels);
         }
-        let format = texture.format.vk();
-        let level_count = texture.levels.len() as u32;
         let (image, allocation) = allocator.create_image(
             &vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
-                .format(format)
+                .format(format.vk())
                 .extent(vk::Extent3D {
                     width,
                     height,
                     depth: 1,
                 })
-                .mip_levels(level_count)
+                .mip_levels(levels)
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+                // Copied from too: into an image of more or fewer levels when streaming
+                // changes what is resident, and by tools reading textures back.
+                .usage(
+                    vk::ImageUsageFlags::SAMPLED
+                        | vk::ImageUsageFlags::TRANSFER_DST
+                        | vk::ImageUsageFlags::TRANSFER_SRC,
+                )
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             MemoryLocation::Device,
         )?;
-        // SAFETY: a view of the image just created, over all its levels.
-        let view = unsafe {
-            device.raw().create_image_view(
-                &vk::ImageViewCreateInfo::default()
-                    .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(format)
-                    .subresource_range(vk::ImageSubresourceRange {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        base_mip_level: 0,
-                        level_count,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    }),
-                None,
-            )
-        };
-        let view = match view {
-            Ok(view) => view,
-            Err(e) => {
-                // SAFETY: never used.
-                unsafe { allocator.destroy_image(image, allocation) };
-                return Err(RhiError::vk("vkCreateImageView")(e).into());
-            }
-        };
-        // Staging bytes, every level aligned.
-        let bytes = texture
-            .levels
-            .iter()
-            .map(|l| (l.len() as u64).next_multiple_of(LEVEL_ALIGN))
-            .sum();
         let entry = PoolTexture {
             image,
-            view,
             allocation: Some(allocation),
+            format,
             width,
             height,
+            levels,
+            uploaded: 0,
+            resident: levels,
+            view: None,
             bindless: None,
-            pending: Some(texture.levels),
-            bytes,
         };
         let index = match self.free_slots.pop() {
             Some(index) => index,
@@ -264,12 +456,98 @@ impl TexturePool {
         };
         let slot = &mut self.slots[index as usize];
         slot.texture = Some(entry);
-        let id = TextureId {
+        Ok(TextureId {
             index,
             generation: slot.generation,
-        };
-        self.queue.push_back(id);
-        Ok(id)
+        })
+    }
+
+    /// Lends `bytes` of the staging ring (made at the first call, in host-cached memory),
+    /// or `None` while it is full: hand spans back and try again next frame.
+    pub fn staging(
+        &mut self,
+        allocator: &mut Allocator,
+        bytes: u64,
+    ) -> Result<Option<StagingSpan>, TextureError> {
+        if bytes > self.ring_bytes {
+            return Err(TextureError::StagingTooSmall);
+        }
+        if self.ring.is_none() {
+            let size = self.ring_bytes;
+            // One block more: the ring starts at the first page-aligned address, wherever
+            // the allocator placed the buffer.
+            let (buffer, mut allocation) = allocator.create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(size + STAGING_ALIGN)
+                    .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+                MemoryLocation::Streaming,
+            )?;
+            let mapped = allocation
+                .mapped_slice_mut()
+                .map(|m| (m.as_mut_ptr(), m.len() as u64));
+            let Some((address, _)) = mapped.filter(|m| m.1 >= size + STAGING_ALIGN) else {
+                // SAFETY: never used.
+                unsafe { allocator.destroy_buffer(buffer, allocation) };
+                return Err(RhiError::Vulkan {
+                    call: "staging ring not mapped",
+                    result: vk::Result::ERROR_MEMORY_MAP_FAILED,
+                }
+                .into());
+            };
+            let skip = (address as u64).next_multiple_of(STAGING_ALIGN) - address as u64;
+            self.ring = Some(StagingRing {
+                buffer,
+                allocation,
+                // SAFETY: `skip < STAGING_ALIGN`, within the mapping.
+                base: unsafe { address.add(skip as usize) },
+                skip,
+                spans: RingSpans {
+                    size,
+                    ..RingSpans::default()
+                },
+            });
+        }
+        Ok(self.ring.as_mut().and_then(|ring| ring.lend(bytes)))
+    }
+
+    /// Hands back a span without uploading from it.
+    pub fn cancel_staging(&mut self, span: StagingSpan) {
+        if let Some(ring) = self.ring.as_mut() {
+            ring.give_back(span.start);
+        }
+    }
+
+    /// Queues the upload of `count` levels from `first` out of `span`, where they follow
+    /// one another, each padded to [`LEVEL_ALIGN`] (the layout of a cooked pack's texture
+    /// entry). The span comes back to the ring once the frame that copies it has finished.
+    /// A stale id or levels outside the texture give the span back and fail.
+    pub fn upload_levels(
+        &mut self,
+        id: TextureId,
+        first: u32,
+        count: u32,
+        span: StagingSpan,
+    ) -> Result<(), TextureError> {
+        let bytes = self.texture(id).and_then(|t| {
+            let fits = count > 0 && first.checked_add(count).is_some_and(|end| end <= t.levels);
+            fits.then(|| t.staging_bytes(first, count))
+        });
+        match bytes {
+            Some(bytes) if bytes <= span.len => {
+                self.queue.push_back(Upload {
+                    id,
+                    first,
+                    count,
+                    bytes,
+                    source: Source::Span(span),
+                });
+                Ok(())
+            }
+            _ => {
+                self.cancel_staging(span);
+                Err(TextureError::BadLevels)
+            }
+        }
     }
 
     /// Removes a texture: materials that use it shade without it from the next
@@ -293,13 +571,29 @@ impl TexturePool {
         self.free_slots.push(id.index);
     }
 
-    /// The bindless index of a texture once uploaded; `None` before, and for stale ids.
-    pub fn index(&self, id: TextureId) -> Option<u32> {
+    fn texture(&self, id: TextureId) -> Option<&PoolTexture> {
         let slot = self.slots.get(id.index as usize)?;
-        if slot.generation != id.generation {
-            return None;
-        }
-        slot.texture.as_ref()?.bindless
+        (slot.generation == id.generation)
+            .then_some(slot.texture.as_ref())
+            .flatten()
+    }
+
+    /// The bindless index of a texture once some of it is resident; `None` before, and
+    /// for stale ids.
+    pub fn index(&self, id: TextureId) -> Option<u32> {
+        self.texture(id)?.bindless
+    }
+
+    /// A texture's image, for recording by hand (its uploaded levels are in
+    /// `READ_ONLY_OPTIMAL` layout between frames).
+    pub fn image(&self, id: TextureId) -> Option<vk::Image> {
+        Some(self.texture(id)?.image)
+    }
+
+    /// The largest resident level of a texture (0: all of it), once some of it is.
+    pub fn resident_level(&self, id: TextureId) -> Option<u32> {
+        let t = self.texture(id)?;
+        (t.resident < t.levels).then_some(t.resident)
     }
 
     /// A counter that changes whenever textures become ready or are removed.
@@ -307,15 +601,9 @@ impl TexturePool {
         self.generation
     }
 
-    /// Textures waiting for upload, and their bytes.
+    /// Uploads waiting, and their bytes.
     pub fn pending(&self) -> (usize, u64) {
-        let bytes = self
-            .queue
-            .iter()
-            .filter_map(|id| self.slots[id.index as usize].texture.as_ref())
-            .map(|t| t.bytes)
-            .sum();
-        (self.queue.len(), bytes)
+        (self.queue.len(), self.queue.iter().map(|u| u.bytes).sum())
     }
 
     /// Bytes uploaded so far.
@@ -323,8 +611,8 @@ impl TexturePool {
         self.uploaded_bytes
     }
 
-    /// Frees what finished frames no longer use and uploads queued textures, oldest
-    /// first, up to the budget. Uploaded textures are readable (and have bindless indices)
+    /// Frees what finished frames no longer use and records queued uploads, oldest first,
+    /// up to the budget. Uploaded levels are readable (and textures have bindless indices)
     /// in every pass declared after this call. Allocates only on frames that upload.
     pub fn begin_frame(
         &mut self,
@@ -335,163 +623,257 @@ impl TexturePool {
     ) -> Result<(), RhiError> {
         engine_profiler::zone!("render::TexturePool::begin_frame");
         self.collect_retired(allocator, frame_number);
-        if self.queue.is_empty() {
-            return Ok(());
-        }
-        // This frame's batch: the oldest textures within the budget.
+        // This frame's batch: the oldest uploads within the budget.
         let mut batch = Vec::new();
         let mut total = 0u64;
-        while let Some(&id) = self.queue.front() {
-            let bytes = match self.slots[id.index as usize].texture.as_ref() {
-                Some(t) if self.slots[id.index as usize].generation == id.generation => t.bytes,
-                _ => {
-                    // Removed before its upload.
-                    self.queue.pop_front();
-                    continue;
+        let mut owned_bytes = 0u64;
+        while let Some(upload) = self.queue.front() {
+            if self.texture(upload.id).is_none() {
+                // Removed before its upload.
+                if let Some(Upload {
+                    source: Source::Span(span),
+                    ..
+                }) = self.queue.pop_front()
+                {
+                    self.cancel_staging(span);
                 }
-            };
-            if !batch.is_empty() && total + bytes > self.budget {
+                continue;
+            }
+            if !batch.is_empty() && total + upload.bytes > self.budget {
                 break;
             }
-            self.queue.pop_front();
-            batch.push(id);
-            total += bytes;
+            total += upload.bytes;
+            if matches!(upload.source, Source::Owned(_)) {
+                owned_bytes += upload.bytes;
+            }
+            if let Some(upload) = self.queue.pop_front() {
+                batch.push(upload);
+            }
         }
         if batch.is_empty() {
             return Ok(());
         }
-        let (staging, mut staging_memory) = allocator.create_buffer(
-            &vk::BufferCreateInfo::default()
-                .size(total.max(16))
-                .usage(vk::BufferUsageFlags::TRANSFER_SRC),
-            MemoryLocation::Upload,
-        )?;
-        let mut images = Vec::with_capacity(batch.len());
-        let mut regions: Vec<(vk::Image, Vec<vk::BufferImageCopy>)> =
-            Vec::with_capacity(batch.len());
-        let mut offset = 0u64;
-        {
-            let Some(target) = staging_memory.mapped_slice_mut() else {
+        // In-memory levels go through a staging buffer of this frame's.
+        let owned_staging = if owned_bytes > 0 {
+            let (buffer, mut memory) = allocator.create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(owned_bytes)
+                    .usage(vk::BufferUsageFlags::TRANSFER_SRC),
+                MemoryLocation::Upload,
+            )?;
+            let Some(target) = memory.mapped_slice_mut() else {
+                // SAFETY: never used.
+                unsafe { allocator.destroy_buffer(buffer, memory) };
                 return Err(RhiError::Vulkan {
                     call: "staging buffer not mapped",
                     result: vk::Result::ERROR_MEMORY_MAP_FAILED,
                 });
             };
-            for id in &batch {
-                let Some(texture) = self.slots[id.index as usize].texture.as_mut() else {
-                    continue;
-                };
-                let levels = texture.pending.take().unwrap_or_default();
-                let mut copies = Vec::with_capacity(levels.len());
-                for (k, level) in levels.iter().enumerate() {
-                    target[offset as usize..offset as usize + level.len()].copy_from_slice(level);
-                    copies.push(vk::BufferImageCopy {
-                        buffer_offset: offset,
-                        image_subresource: vk::ImageSubresourceLayers {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            mip_level: k as u32,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        },
-                        image_extent: vk::Extent3D {
-                            width: level_size(texture.width, k),
-                            height: level_size(texture.height, k),
-                            depth: 1,
-                        },
-                        ..Default::default()
-                    });
-                    offset += (level.len() as u64).next_multiple_of(LEVEL_ALIGN);
+            let mut offset = 0usize;
+            for upload in &batch {
+                if let Source::Owned(levels) = &upload.source {
+                    for level in levels {
+                        target[offset..offset + level.len()].copy_from_slice(level);
+                        offset += (level.len() as u64).next_multiple_of(LEVEL_ALIGN) as usize;
+                    }
                 }
-                images.push((texture.image, levels.len() as u32));
-                regions.push((texture.image, copies));
             }
+            Some((buffer, memory))
+        } else {
+            None
+        };
+        let owned_handle = owned_staging.as_ref().map(|(buffer, _)| {
+            fg.import_buffer(
+                "texture staging",
+                ImportedBuffer {
+                    buffer: *buffer,
+                    size: owned_bytes,
+                    address: 0,
+                    initial: BufferState::idle(),
+                    final_state: None,
+                },
+            )
+        });
+        let ring_handle = self.ring.as_ref().and_then(|ring| {
+            batch
+                .iter()
+                .any(|u| matches!(u.source, Source::Span(_)))
+                .then(|| {
+                    fg.import_buffer(
+                        "texture streaming ring",
+                        ImportedBuffer {
+                            buffer: ring.buffer,
+                            size: ring.spans.size + STAGING_ALIGN,
+                            address: 0,
+                            initial: BufferState::idle(),
+                            final_state: None,
+                        },
+                    )
+                })
+        });
+        // Copies per upload: (image, first level, count, from the ring?, regions).
+        let mut copies: Vec<(vk::Image, u32, u32, bool, Vec<vk::BufferImageCopy>)> =
+            Vec::with_capacity(batch.len());
+        let mut owned_offset = 0u64;
+        for upload in &batch {
+            let Some(t) = self.texture(upload.id) else {
+                continue;
+            };
+            let (mut offset, ring) = match &upload.source {
+                Source::Owned(_) => (owned_offset, false),
+                Source::Span(span) => (span.offset, true),
+            };
+            let mut regions = Vec::with_capacity(upload.count as usize);
+            for k in upload.first..upload.first + upload.count {
+                let (w, h) = t.level_size(k);
+                regions.push(vk::BufferImageCopy {
+                    buffer_offset: offset,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: k,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_extent: vk::Extent3D {
+                        width: w,
+                        height: h,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                });
+                offset += t.format.level_bytes(w, h).next_multiple_of(LEVEL_ALIGN);
+            }
+            if !ring {
+                owned_offset = offset;
+            }
+            copies.push((t.image, upload.first, upload.count, ring, regions));
         }
-        let staging_handle = fg.import_buffer(
-            "texture staging",
-            ImportedBuffer {
-                buffer: staging,
-                size: total.max(16),
-                address: 0,
-                initial: BufferState::idle(),
-                final_state: None,
-            },
-        );
-        fg.add_pass("texture pool upload")
-            .read(staging_handle, Access::TransferRead)
-            .side_effects()
-            .execute(move |ctx| {
-                let range = |levels| vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_mip_level: 0,
-                    level_count: levels,
-                    base_array_layer: 0,
-                    layer_count: 1,
-                };
-                let to_transfer: Vec<_> = images
-                    .iter()
-                    .map(|&(image, levels)| {
-                        vk::ImageMemoryBarrier2::default()
-                            .src_stage_mask(vk::PipelineStageFlags2::NONE)
-                            .src_access_mask(vk::AccessFlags2::NONE)
-                            .dst_stage_mask(vk::PipelineStageFlags2::COPY)
-                            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                            .old_layout(vk::ImageLayout::UNDEFINED)
-                            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                            .image(image)
-                            .subresource_range(range(levels))
-                    })
-                    .collect();
-                let to_read: Vec<_> = images
-                    .iter()
-                    .map(|&(image, levels)| {
-                        vk::ImageMemoryBarrier2::default()
-                            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-                            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
-                            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                            .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
-                            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                            .new_layout(vk::ImageLayout::READ_ONLY_OPTIMAL)
-                            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-                            .image(image)
-                            .subresource_range(range(levels))
-                    })
-                    .collect();
-                let source = ctx.buffer(staging_handle);
-                // SAFETY: recording outside a rendering scope; the images are new (never
-                // used before these barriers) and owned by the pool, which frees them only
-                // after the frames that used them.
-                unsafe {
-                    ctx.device.cmd_pipeline_barrier2(
-                        ctx.cmd,
-                        &vk::DependencyInfo::default().image_memory_barriers(&to_transfer),
-                    );
-                    for (image, copies) in &regions {
+        let mut pass = fg.add_pass("texture pool upload");
+        if let Some(handle) = owned_handle {
+            pass = pass.read(handle, Access::TransferRead);
+        }
+        if let Some(handle) = ring_handle {
+            pass = pass.read(handle, Access::TransferRead);
+        }
+        pass.side_effects().execute(move |ctx| {
+            let range = |first, count| vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: first,
+                level_count: count,
+                base_array_layer: 0,
+                layer_count: 1,
+            };
+            let barrier = |image, first, count, to_transfer: bool| {
+                let b = vk::ImageMemoryBarrier2::default()
+                    .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                    .image(image)
+                    .subresource_range(range(first, count));
+                if to_transfer {
+                    b.src_stage_mask(vk::PipelineStageFlags2::NONE)
+                        .src_access_mask(vk::AccessFlags2::NONE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                } else {
+                    b.src_stage_mask(vk::PipelineStageFlags2::COPY)
+                        .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                        .dst_access_mask(vk::AccessFlags2::SHADER_SAMPLED_READ)
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::READ_ONLY_OPTIMAL)
+                }
+            };
+            let to_transfer: Vec<_> = copies
+                .iter()
+                .map(|(image, first, count, _, _)| barrier(*image, *first, *count, true))
+                .collect();
+            let to_read: Vec<_> = copies
+                .iter()
+                .map(|(image, first, count, _, _)| barrier(*image, *first, *count, false))
+                .collect();
+            let owned = owned_handle.map(|h| ctx.buffer(h));
+            let ring = ring_handle.map(|h| ctx.buffer(h));
+            // SAFETY: recording outside a rendering scope; the levels are new (never used
+            // before these barriers: a level is uploaded once) and owned by the pool,
+            // which frees images only after the frames that used them.
+            unsafe {
+                ctx.device.cmd_pipeline_barrier2(
+                    ctx.cmd,
+                    &vk::DependencyInfo::default().image_memory_barriers(&to_transfer),
+                );
+                for (image, _, _, from_ring, regions) in &copies {
+                    let source = if *from_ring { ring } else { owned };
+                    if let Some(source) = source {
                         ctx.device.cmd_copy_buffer_to_image(
                             ctx.cmd,
                             source,
                             *image,
                             vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            copies,
+                            regions,
                         );
                     }
-                    ctx.device.cmd_pipeline_barrier2(
-                        ctx.cmd,
-                        &vk::DependencyInfo::default().image_memory_barriers(&to_read),
-                    );
                 }
-            });
-        for id in batch {
-            if let Some(texture) = self.slots[id.index as usize].texture.as_mut() {
-                texture.bindless = bindless.add_sampled_image(texture.view);
-                self.uploaded_bytes += texture.bytes;
+                ctx.device.cmd_pipeline_barrier2(
+                    ctx.cmd,
+                    &vk::DependencyInfo::default().image_memory_barriers(&to_read),
+                );
             }
+        });
+        // Residency: views over the resident levels, a new bindless index when it grows.
+        for upload in batch {
+            let mask = ((1u64 << (upload.first + upload.count)) - (1u64 << upload.first)) as u32;
+            if let Source::Span(span) = upload.source {
+                self.retired.push((frame_number, Retired::Span(span.start)));
+            }
+            self.uploaded_bytes += upload.bytes;
+            let Some(slot) = self.slots.get_mut(upload.id.index as usize) else {
+                continue;
+            };
+            let Some(t) = slot.texture.as_mut() else {
+                continue;
+            };
+            t.uploaded |= mask;
+            let mut resident = t.levels;
+            while resident > 0 && t.uploaded & (1 << (resident - 1)) != 0 {
+                resident -= 1;
+            }
+            if resident == t.resident {
+                continue;
+            }
+            // SAFETY: a view of the pool's image over levels uploaded above.
+            let view = unsafe {
+                self.device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(t.image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(t.format.vk())
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: resident,
+                            level_count: t.levels - resident,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        }),
+                    None,
+                )
+            };
+            let view = view.map_err(RhiError::vk("vkCreateImageView"))?;
+            if let Some(old) = t.bindless.take() {
+                bindless.remove_sampled_image(old, frame_number);
+            }
+            if let Some(old) = t.view.replace(view) {
+                self.retired.push((frame_number, Retired::View(old)));
+            }
+            t.bindless = bindless.add_sampled_image(view);
+            t.resident = resident;
         }
         self.generation += 1;
-        self.retired
-            .push((frame_number, Retired::Staging(staging, staging_memory)));
+        if let Some(staging) = owned_staging {
+            self.retired
+                .push((frame_number, Retired::Staging(staging.0, staging.1)));
+        }
         Ok(())
     }
 
@@ -512,28 +894,37 @@ impl TexturePool {
     /// # Safety
     ///
     /// The GPU no longer uses it.
-    unsafe fn destroy_retired(&self, allocator: &mut Allocator, retired: Retired) {
+    unsafe fn destroy_retired(&mut self, allocator: &mut Allocator, retired: Retired) {
         // SAFETY: guaranteed by the caller.
         unsafe {
             match retired {
                 Retired::Texture(mut texture) => {
-                    self.device.destroy_image_view(texture.view, None);
+                    if let Some(view) = texture.view.take() {
+                        self.device.destroy_image_view(view, None);
+                    }
                     if let Some(allocation) = texture.allocation.take() {
                         allocator.destroy_image(texture.image, allocation);
                     }
                 }
+                Retired::View(view) => self.device.destroy_image_view(view, None),
                 Retired::Staging(buffer, allocation) => {
-                    allocator.destroy_buffer(buffer, allocation)
+                    allocator.destroy_buffer(buffer, allocation);
+                }
+                Retired::Span(start) => {
+                    if let Some(ring) = self.ring.as_mut() {
+                        ring.give_back(start);
+                    }
                 }
             }
         }
     }
 
-    /// Frees every texture.
+    /// Frees every texture and the staging ring.
     ///
     /// # Safety
     ///
-    /// The GPU no longer uses the pool (the device is idle).
+    /// The GPU no longer uses the pool (the device is idle), and no staging span is being
+    /// filled.
     pub unsafe fn destroy(&mut self, allocator: &mut Allocator, bindless: &Bindless) {
         let slots = core::mem::take(&mut self.slots);
         for slot in slots {
@@ -549,5 +940,45 @@ impl TexturePool {
             // SAFETY: guaranteed by the caller.
             unsafe { self.destroy_retired(allocator, retired) };
         }
+        self.queue.clear();
+        if let Some(ring) = self.ring.take() {
+            // SAFETY: guaranteed by the caller.
+            unsafe { allocator.destroy_buffer(ring.buffer, ring.allocation) };
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_ring_lends_in_order_and_takes_back_in_any() {
+        const B: u64 = STAGING_ALIGN;
+        let mut r = RingSpans {
+            size: 16 * B,
+            ..RingSpans::default()
+        };
+        let a = r.lend(5 * B).unwrap();
+        let b = r.lend(1).unwrap();
+        assert_eq!((a.1, a.2), (0, 5 * B));
+        assert_eq!((b.1, b.2), (5 * B, B));
+        let c = r.lend(8 * B).unwrap();
+        // 14 blocks out, 2 left at the end: 3 do not fit.
+        assert!(r.lend(3 * B).is_none());
+        // `b` back first: `a` still holds the front.
+        r.give_back(b.0);
+        assert!(r.lend(3 * B).is_none());
+        r.give_back(a.0);
+        // 6 blocks free at the front: 3 skip the 2 at the end and start at 0.
+        let d = r.lend(3 * B).unwrap();
+        assert_eq!(d.1, 0);
+        r.give_back(c.0);
+        r.give_back(d.0);
+        assert!(r.spans.is_empty());
+        // Empty again: the whole ring at once, from wherever the head is.
+        let e = r.lend(16 * B).unwrap();
+        assert_eq!((e.1, e.2), (0, 16 * B));
+        assert!(r.lend(1).is_none());
     }
 }
