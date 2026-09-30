@@ -9,16 +9,14 @@
 //! - [`AutoExposure`] builds a histogram of log2 luminance, averages it between two
 //!   percentiles, and adapts an exposure towards middle grey over time, all on the GPU.
 
+use crate::compute::{ComputeShader, Dispatch};
 use crate::graph::{
     Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, ShaderStages, Texture,
     TextureDesc,
 };
 use core::cell::Cell;
 use engine_rhi::ash::vk;
-use engine_rhi::{
-    Allocation, Allocator, Bindless, Device, MemoryLocation, Pipeline, RhiError, SamplerKind,
-    ShaderStageDesc, spirv_words,
-};
+use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError, SamplerKind};
 
 const DOWNSAMPLE: &[u8] = include_bytes!("../shaders/postfx.bloomDownsample.spv");
 const UPSAMPLE: &[u8] = include_bytes!("../shaders/postfx.bloomUpsample.spv");
@@ -31,7 +29,7 @@ const BLOOM_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 pub const MAX_BLOOM_LEVELS: u32 = 8;
 
 /// `Push` in `postfx.slang` (96 bytes).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
     histogram: u64,
@@ -55,59 +53,6 @@ struct Push {
     reset: u32,
     step: u32,
     _pad: u32,
-}
-
-const _: () = assert!(core::mem::size_of::<Push>() == 96);
-
-fn push_bytes(push: &Push) -> &[u8] {
-    // SAFETY: `Push` is plain `repr(C)` data without padding (asserted size).
-    unsafe {
-        core::slice::from_raw_parts(
-            (push as *const Push).cast::<u8>(),
-            core::mem::size_of::<Push>(),
-        )
-    }
-}
-
-fn compute(
-    device: &Device,
-    bindless: &Bindless,
-    spirv: &[u8],
-    entry: &core::ffi::CStr,
-) -> Result<Pipeline, RhiError> {
-    let words = spirv_words(spirv).ok_or(RhiError::Vulkan {
-        call: "embedded SPIR-V",
-        result: vk::Result::ERROR_INVALID_SHADER_NV,
-    })?;
-    Pipeline::compute(
-        device,
-        bindless.pipeline_layout(),
-        ShaderStageDesc {
-            spirv: &words,
-            entry,
-        },
-        vk::PipelineCache::null(),
-    )
-}
-
-/// # Safety
-///
-/// Recording outside a rendering scope; the pass declares what the dispatch reads and
-/// writes.
-unsafe fn dispatch(
-    ctx: &crate::graph::PassContext<'_>,
-    bindless: &Bindless,
-    pipeline: &Pipeline,
-    push: &Push,
-    groups: [u32; 2],
-) {
-    // SAFETY: guaranteed by the caller.
-    unsafe {
-        pipeline.bind(ctx.cmd);
-        bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
-        bindless.push_constants(ctx.cmd, push_bytes(push));
-        ctx.device.cmd_dispatch(ctx.cmd, groups[0], groups[1], 1);
-    }
 }
 
 /// Bloom settings.
@@ -149,8 +94,8 @@ pub struct BloomOutput {
 /// Bloom (see the module documentation).
 #[derive(Debug)]
 pub struct Bloom {
-    downsample: Pipeline,
-    upsample: Pipeline,
+    downsample: ComputeShader<Push>,
+    upsample: ComputeShader<Push>,
     settings: Cell<BloomSettings>,
 }
 
@@ -162,8 +107,8 @@ impl Bloom {
         settings: BloomSettings,
     ) -> Result<Self, RhiError> {
         Ok(Self {
-            downsample: compute(device, bindless, DOWNSAMPLE, c"bloomDownsample")?,
-            upsample: compute(device, bindless, UPSAMPLE, c"bloomUpsample")?,
+            downsample: ComputeShader::new(device, bindless, DOWNSAMPLE, c"bloomDownsample")?,
+            upsample: ComputeShader::new(device, bindless, UPSAMPLE, c"bloomUpsample")?,
             settings: Cell::new(settings),
         })
     }
@@ -214,35 +159,19 @@ impl Bloom {
                 sizes[level]
             };
             let target = fg.create_texture(NAMES[level], TextureDesc::new_2d(BLOOM_FORMAT, w, h));
-            let pipeline = &self.downsample;
             let source = previous;
-            fg.add_pass("bloom downsample")
+            fg.add_compute("bloom downsample", bindless)
                 .read(source, Access::Sampled(ShaderStages::COMPUTE))
                 .write(target, Access::StorageWrite(ShaderStages::COMPUTE))
-                .execute(move |ctx| {
-                    let (Some(source), Some(out)) =
-                        (ctx.sampled_index(source), ctx.storage_index(target))
-                    else {
-                        return;
-                    };
-                    let push = Push {
-                        source,
-                        target: out,
+                .dispatch(&self.downsample, Dispatch::Threads([w, h, 1]), move |ctx| {
+                    Some(Push {
+                        source: ctx.sampled_index(source)?,
+                        target: ctx.storage_index(target)?,
                         sampler,
                         karis: u32::from(level == 0 && settings.karis_average),
                         size: [w, h],
                         ..Push::default()
-                    };
-                    // SAFETY: the pass reads `source` and writes `target`.
-                    unsafe {
-                        dispatch(
-                            ctx,
-                            bindless,
-                            pipeline,
-                            &push,
-                            [w.div_ceil(8), h.div_ceil(8)],
-                        )
-                    };
+                    })
                 });
             down[level] = target;
             previous = target;
@@ -252,39 +181,21 @@ impl Bloom {
         for level in (0..levels.saturating_sub(1)).rev() {
             let [w, h] = sizes[level];
             let target = fg.create_texture("bloom up", TextureDesc::new_2d(BLOOM_FORMAT, w, h));
-            let pipeline = &self.upsample;
             let (own, lower) = (down[level], up);
-            fg.add_pass("bloom upsample")
+            fg.add_compute("bloom upsample", bindless)
                 .read(own, Access::Sampled(ShaderStages::COMPUTE))
                 .read(lower, Access::Sampled(ShaderStages::COMPUTE))
                 .write(target, Access::StorageWrite(ShaderStages::COMPUTE))
-                .execute(move |ctx| {
-                    let (Some(own), Some(lower), Some(out)) = (
-                        ctx.sampled_index(own),
-                        ctx.sampled_index(lower),
-                        ctx.storage_index(target),
-                    ) else {
-                        return;
-                    };
-                    let push = Push {
-                        source: own,
-                        lower,
-                        target: out,
+                .dispatch(&self.upsample, Dispatch::Threads([w, h, 1]), move |ctx| {
+                    Some(Push {
+                        source: ctx.sampled_index(own)?,
+                        lower: ctx.sampled_index(lower)?,
+                        target: ctx.storage_index(target)?,
                         sampler,
                         size: [w, h],
                         scatter,
                         ..Push::default()
-                    };
-                    // SAFETY: the pass reads both levels and writes `target`.
-                    unsafe {
-                        dispatch(
-                            ctx,
-                            bindless,
-                            pipeline,
-                            &push,
-                            [w.div_ceil(8), h.div_ceil(8)],
-                        )
-                    };
+                    })
                 });
             up = target;
         }
@@ -344,8 +255,8 @@ const HISTOGRAM_STEP: u32 = 2;
 /// Automatic exposure (see the module documentation). One per view: it keeps the view's
 /// adapted exposure.
 pub struct AutoExposure {
-    histogram: Pipeline,
-    average: Pipeline,
+    histogram: ComputeShader<Push>,
+    average: ComputeShader<Push>,
     buffer: vk::Buffer,
     allocation: Option<Allocation>,
     address: vk::DeviceAddress,
@@ -370,8 +281,8 @@ impl AutoExposure {
         bindless: &Bindless,
         settings: ExposureSettings,
     ) -> Result<Self, RhiError> {
-        let histogram = compute(device, bindless, HISTOGRAM, c"exposureHistogram")?;
-        let average = compute(device, bindless, AVERAGE, c"exposureAverage")?;
+        let histogram = ComputeShader::new(device, bindless, HISTOGRAM, c"exposureHistogram")?;
+        let average = ComputeShader::new(device, bindless, AVERAGE, c"exposureAverage")?;
         let (buffer, allocation) = allocator.create_buffer(
             &vk::BufferCreateInfo::default().size(16).usage(
                 vk::BufferUsageFlags::STORAGE_BUFFER
@@ -472,38 +383,31 @@ impl AutoExposure {
             step: HISTOGRAM_STEP,
             ..Push::default()
         };
-        let pipeline = &self.histogram;
-        fg.add_pass("exposure histogram")
+        // One thread per `HISTOGRAM_STEP` pixels along each axis.
+        let threads = [
+            desc.width.div_ceil(HISTOGRAM_STEP),
+            desc.height.div_ceil(HISTOGRAM_STEP),
+            1,
+        ];
+        fg.add_compute("exposure histogram", bindless)
             .read(hdr, Access::Sampled(ShaderStages::COMPUTE))
             .read(histogram, Access::StorageReadWrite(ShaderStages::COMPUTE))
-            .execute(move |ctx| {
-                let Some(source) = ctx.sampled_index(hdr) else {
-                    return;
-                };
-                let push = Push {
+            .dispatch(&self.histogram, Dispatch::Threads(threads), move |ctx| {
+                Some(Push {
                     histogram: ctx.address(histogram),
-                    source,
+                    source: ctx.sampled_index(hdr)?,
                     ..base
-                };
-                let groups = [
-                    desc.width.div_ceil(16 * HISTOGRAM_STEP),
-                    desc.height.div_ceil(16 * HISTOGRAM_STEP),
-                ];
-                // SAFETY: the pass reads `hdr` and updates the histogram.
-                unsafe { dispatch(ctx, bindless, pipeline, &push, groups) };
+                })
             });
-        let pipeline = &self.average;
-        fg.add_pass("exposure average")
+        fg.add_compute("exposure average", bindless)
             .read(histogram, Access::StorageRead(ShaderStages::COMPUTE))
             .read(exposure, Access::StorageReadWrite(ShaderStages::COMPUTE))
-            .execute(move |ctx| {
-                let push = Push {
+            .dispatch(&self.average, Dispatch::Groups([1, 1, 1]), move |ctx| {
+                Some(Push {
                     histogram: ctx.address(histogram),
                     exposure: ctx.address(exposure),
                     ..base
-                };
-                // SAFETY: the pass reads the histogram and updates the exposure.
-                unsafe { dispatch(ctx, bindless, pipeline, &push, [1, 1]) };
+                })
             });
         exposure
     }
