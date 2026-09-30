@@ -18,6 +18,7 @@ use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{ForwardRenderer, ShadowSettings};
 use engine_render::post::{HDR_FORMAT, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
+use engine_render::subsurface::SubsurfaceProfile;
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, creation_stats,
@@ -93,6 +94,14 @@ fn main() {
             )
             .unwrap(),
         );
+    });
+    // Subsurface materials' pipelines come with the first profiles (ADR 0059).
+    row("subsurface (first profiles)", &mut || {
+        if let Some(forward) = keep_forward.as_mut() {
+            forward
+                .set_subsurface_profiles(&device, &bindless, &[SubsurfaceProfile::skin()])
+                .unwrap();
+        }
     });
     let mut keep_tonemap = None;
     row("tone map", &mut || {

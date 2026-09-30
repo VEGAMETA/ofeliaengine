@@ -10,7 +10,9 @@
 //! the diffuse light of the pixels around it weighted by the profile: a disk of samples
 //! whose radii are importance-sampled from the profile, rotated per pixel, weighted by
 //! the profile at their 3D distance (so light does not cross depth discontinuities) and
-//! renormalized per channel. Pixels of other materials are never sampled.
+//! renormalized per channel. Pixels of other materials are never sampled. The scatter pass
+//! draws the subsurface materials' geometry again, depth tested for equality, so it runs
+//! for their pixels only.
 //!
 //! Transmission, light passing through thin parts (ears, leaves, fingers), is computed in
 //! the forward pass from the same profile: `T(d) = ∫ R(√(ρ² + d²)) dA` over a plane at
@@ -23,9 +25,8 @@
 //! half-plane and the radii to sample) comes from [`SubsurfaceProfile`]'s methods and the
 //! shaders' `profile_*` functions, so the shape can be swapped in one place (ADR 0059).
 
-use crate::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
+use engine_core::half;
 use engine_rhi::ash::vk;
-use engine_rhi::{Bindless, Blend, GraphicsPipelineDesc, Pipeline, ShaderStageDesc};
 
 /// Format of the diffuse light the forward subsurface pass writes for the scatter pass:
 /// rgb the diffuse light per unit albedo (times the mask and the entry albedo), a the
@@ -49,6 +50,8 @@ const _: () = assert!(KERNEL_OFFSETS[3] + BUDGETS[3] == KERNEL_LEN);
 /// Smallest variance (world units²): a zero radius is a Gaussian of 1 µm in a metre-scaled
 /// scene, far below a pixel, and keeps the shader's divisions finite.
 const MIN_VARIANCE: f64 = 1e-12;
+/// The golden angle, π(3 − √5): consecutive samples of the spiral turn by it.
+const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 
 /// One Gaussian of a profile: `weight / (2π v) · exp(−r² / 2v)` per channel.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -295,11 +298,11 @@ impl SubsurfaceProfile {
                 (-core::f64::consts::LOG2_E / (2.0 * v)) as f32,
             ];
         }
-        let mut kernel = [[0.0f32; 2]; KERNEL_LEN];
+        let mut kernel = [[0u32; 4]; KERNEL_LEN];
         let mut radii = [0.0f32; 4];
         for (b, (&n, &offset)) in BUDGETS.iter().zip(&KERNEL_OFFSETS).enumerate() {
             // Stratified in the CDF: sample k holds the share k/n … (k + 1)/n of the
-            // light, at its middle.
+            // light, at its middle, on a golden-angle spiral (Vogel 1979).
             for k in 0..n {
                 let r = self.sample_radius((k as f32 + 0.5) / n as f32);
                 let density = f64::from(self.sample_density(r));
@@ -308,14 +311,31 @@ impl SubsurfaceProfile {
                 } else {
                     0.0
                 };
-                kernel[offset + k] = [r, weight as f32];
+                let angle = k as f64 * GOLDEN_ANGLE;
+                let w = self
+                    .evaluate(r)
+                    .map(|e| half::from_f32((f64::from(e) * weight) as f32));
+                kernel[offset + k] = [
+                    ((f64::from(r) * angle.cos()) as f32).to_bits(),
+                    ((f64::from(r) * angle.sin()) as f32).to_bits(),
+                    u32::from(w[0]) | u32::from(w[1]) << 16,
+                    u32::from(w[2]),
+                ];
                 radii[b] = radii[b].max(r);
+            }
+        }
+        // Each channel's mean variance, for the scatter pass's depth falloff.
+        let mut mean = [0.0f64; 3];
+        for (v, w) in self.world() {
+            for (m, w) in mean.iter_mut().zip(w) {
+                *m += w * v;
             }
         }
         GpuProfile {
             gaussians,
+            falloff: mean
+                .map(|m| (-core::f64::consts::LOG2_E / (2.0 * m.max(MIN_VARIANCE))) as f32),
             count: self.count as u32,
-            _pad: [0; 3],
             radii,
             kernel,
         }
@@ -341,21 +361,24 @@ fn erfc(x: f64) -> f64 {
     if x >= 0.0 { r } else { 2.0 - r }
 }
 
-/// `SubsurfaceProfile` in `forward.slang` and `subsurface.slang` (1312 bytes).
+/// `SubsurfaceProfile` in `forward.slang` (2496 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 pub(crate) struct GpuProfile {
     /// rgb: weight / (2π v); w: −log2(e) / 2v (world units).
     gaussians: [[f32; 4]; MAX_GAUSSIANS],
+    /// Per channel −log2(e) / 2v̄, v̄ the channel's mean variance: how the scatter pass's
+    /// weights fall off with the depth between two pixels.
+    falloff: [f32; 3],
     count: u32,
-    _pad: [u32; 3],
     /// The largest sample radius of each budget.
     radii: [f32; 4],
-    /// Per budget, its samples: radius and 1 / (n · density).
-    kernel: [[f32; 2]; KERNEL_LEN],
+    /// Per budget, its samples: offset on the golden-angle spiral (x, y as `f32` bits) and
+    /// the profile there over n · density (three halves).
+    kernel: [[u32; 4]; KERNEL_LEN],
 }
 
-const _: () = assert!(size_of::<GpuProfile>() == 1312);
+const _: () = assert!(size_of::<GpuProfile>() == 2496);
 
 impl core::fmt::Debug for GpuProfile {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -403,26 +426,12 @@ pub struct SubsurfaceSettings {
     pub quality: SubsurfaceQuality,
 }
 
-/// `ScatterPush` in `subsurface.slang` (64 bytes).
-#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-struct ScatterPush {
-    profiles: u64,
-    irradiance: u32,
-    albedo: u32,
-    profile_count: u32,
-    kernel: u32,
-    samples: u32,
-    budget: u32,
-    size: [u32; 2],
-    pixels_per_unit: f32,
-    w_scale: f32,
-    w_offset: f32,
-    frame: u32,
-    _pad: [u32; 2],
+impl SubsurfaceSettings {
+    /// The budget's index (`BUDGET_*` in `forward.slang`).
+    pub(crate) fn budget(&self) -> u32 {
+        self.quality.index() as u32
+    }
 }
-
-const _: () = assert!(size_of::<ScatterPush>() == 64);
 
 /// How many pixels a world unit covers at a depth: `pixels_per_unit / (w_scale · depth +
 /// w_offset)`, with depth measured from the near plane along the view.
@@ -452,111 +461,6 @@ impl Footprint {
             w_scale: row3.truncate().dot(forward),
             w_offset: row3.truncate().dot(near_center) + row3.w,
         }
-    }
-}
-
-/// What the scatter pass needs from the frame.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ScatterInput {
-    pub irradiance: Texture,
-    pub albedo: Texture,
-    /// The frame's profiles (in the upload ring).
-    pub profiles: u64,
-    pub profile_count: u32,
-    pub footprint: Footprint,
-    /// The noise's frame index (0 without a temporal resolve).
-    pub frame: u32,
-}
-
-/// Declares the scatter pass: adds the scattered diffuse light of every subsurface pixel
-/// to `color`.
-pub(crate) fn add_scatter_pass<'g>(
-    fg: &mut FrameGraph<'g>,
-    bindless: &'g Bindless,
-    pipeline: &'g Pipeline,
-    color: Texture,
-    input: ScatterInput,
-    settings: SubsurfaceSettings,
-) {
-    let desc = fg.texture_desc(input.irradiance);
-    let budget = settings.quality.index();
-    let base = ScatterPush {
-        profiles: input.profiles,
-        profile_count: input.profile_count,
-        kernel: KERNEL_OFFSETS[budget] as u32,
-        samples: BUDGETS[budget] as u32,
-        budget: budget as u32,
-        size: [desc.width, desc.height],
-        pixels_per_unit: input.footprint.pixels_per_unit,
-        w_scale: input.footprint.w_scale,
-        w_offset: input.footprint.w_offset,
-        frame: input.frame,
-        ..ScatterPush::default()
-    };
-    let (irradiance, albedo) = (input.irradiance, input.albedo);
-    fg.add_pass("subsurface scatter")
-        .color(color, LoadOp::Load, StoreOp::Store)
-        .read(irradiance, Access::Sampled(ShaderStages::FRAGMENT))
-        .read(albedo, Access::Sampled(ShaderStages::FRAGMENT))
-        .execute(move |ctx| {
-            let (Some(irradiance), Some(albedo)) =
-                (ctx.sampled_index(irradiance), ctx.sampled_index(albedo))
-            else {
-                return;
-            };
-            let push = ScatterPush {
-                irradiance,
-                albedo,
-                ..base
-            };
-            let area = ctx.render_area();
-            // SAFETY: recording inside the pass's rendering scope; the profiles are in the
-            // ring, the targets are sampled by the pass.
-            unsafe {
-                pipeline.bind(ctx.cmd);
-                bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
-                ctx.device.cmd_set_viewport(
-                    ctx.cmd,
-                    0,
-                    &[vk::Viewport {
-                        x: area.offset.x as f32,
-                        y: area.offset.y as f32,
-                        width: area.extent.width as f32,
-                        height: area.extent.height as f32,
-                        min_depth: 0.0,
-                        max_depth: 1.0,
-                    }],
-                );
-                ctx.device.cmd_set_scissor(ctx.cmd, 0, &[area]);
-                bindless.push_constants(ctx.cmd, bytemuck::bytes_of(&push));
-                ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
-            }
-        });
-}
-
-/// The scatter pass's pipeline: a full-screen triangle adding into a `color_format`
-/// target.
-pub(crate) fn scatter_pipeline_desc<'a>(
-    vertex: &'a [u32],
-    fragment: &'a [u32],
-    color_formats: &'a [vk::Format],
-) -> GraphicsPipelineDesc<'a> {
-    GraphicsPipelineDesc {
-        color_formats,
-        cull_mode: vk::CullModeFlags::NONE,
-        depth_test: false,
-        depth_write: false,
-        blend: Blend::Additive,
-        ..GraphicsPipelineDesc::new(
-            ShaderStageDesc {
-                spirv: vertex,
-                entry: c"scatterVertex",
-            },
-            Some(ShaderStageDesc {
-                spirv: fragment,
-                entry: c"scatterFragment",
-            }),
-        )
     }
 }
 
@@ -738,15 +642,16 @@ mod tests {
             for (b, (&n, &offset)) in BUDGETS.iter().zip(&KERNEL_OFFSETS).enumerate() {
                 let mut sums = [0.0f64; 3];
                 let mut last = 0.0;
-                for &[r, w] in &gpu.kernel[offset..offset + n] {
+                for &[x, y, rg, b] in &gpu.kernel[offset..offset + n] {
+                    let r = f32::from_bits(x).hypot(f32::from_bits(y));
                     assert!(r >= last, "radii grow");
                     last = r;
-                    let e = profile.evaluate(r);
-                    for (s, e) in sums.iter_mut().zip(e) {
-                        *s += f64::from(e) * f64::from(w);
+                    let w = [rg as u16, (rg >> 16) as u16, b as u16].map(half::to_f32);
+                    for (s, w) in sums.iter_mut().zip(w) {
+                        *s += f64::from(w);
                     }
                 }
-                assert_eq!(gpu.radii[b], last);
+                assert!((gpu.radii[b] - last).abs() <= 1e-6 * last.max(1e-9));
                 // The estimate of ∫R dA = 1 the samples make without renormalizing: the
                 // shader divides by the weights it used, so this only bounds its noise.
                 let tolerance = [0.25, 0.1, 0.05, 0.03][b];

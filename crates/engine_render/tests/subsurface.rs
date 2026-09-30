@@ -345,6 +345,12 @@ impl Scene {
             .collect()
     }
 
+    fn profiles(&mut self, profiles: &[SubsurfaceProfile]) {
+        self.renderer
+            .set_subsurface_profiles(&self.device, &self.bindless, profiles)
+            .unwrap();
+    }
+
     fn finish(mut self) {
         // SAFETY: the device is idle.
         unsafe {
@@ -425,9 +431,7 @@ fn even_light_is_unchanged_by_scattering() {
     let Some(mut scene) = Scene::new() else {
         return;
     };
-    scene
-        .renderer
-        .set_subsurface_profiles(&[gaussians([0.08, 0.05, 0.03])]);
+    scene.profiles(&[gaussians([0.08, 0.05, 0.03])]);
     let plain = scene.materials.add(material(albedo(), None));
     let scattering = scene
         .materials
@@ -482,9 +486,7 @@ fn zero_radius_matches_ordinary_shading() {
     let Some(mut scene) = Scene::new() else {
         return;
     };
-    scene
-        .renderer
-        .set_subsurface_profiles(&[SubsurfaceProfile::skin().with_scale(0.0)]);
+    scene.profiles(&[SubsurfaceProfile::skin().with_scale(0.0)]);
     // Double-sided, so both cast shadows from every face: the same shadow map for both
     // (single-sided subsurface materials cast from their front faces).
     let two_sided = |subsurface| MaterialDesc {
@@ -580,7 +582,7 @@ fn a_shadow_edge_spreads_like_the_half_plane_response() {
     };
     let sigma = [0.08, 0.05, 0.03];
     let profile = gaussians(sigma);
-    scene.renderer.set_subsurface_profiles(&[profile]);
+    scene.profiles(&[profile]);
     scene.renderer.set_subsurface(Some(SubsurfaceSettings {
         quality: SubsurfaceQuality::Ultra,
     }));
@@ -670,9 +672,7 @@ fn no_light_crosses_depth_or_material_edges() {
     let Some(mut scene) = Scene::new() else {
         return;
     };
-    scene
-        .renderer
-        .set_subsurface_profiles(&[gaussians([0.08, 0.05, 0.03])]);
+    scene.profiles(&[gaussians([0.08, 0.05, 0.03])]);
     scene.renderer.set_subsurface(Some(SubsurfaceSettings {
         quality: SubsurfaceQuality::Ultra,
     }));
@@ -740,7 +740,7 @@ fn transmission_follows_the_slab_integral() {
     };
     let sigma = [0.4, 0.3, 0.2];
     let profile = gaussians(sigma);
-    scene.renderer.set_subsurface_profiles(&[profile]);
+    scene.profiles(&[profile]);
     // The sun straight from behind the planes: nothing reaches their front but what passes
     // through.
     let light = DirectionalLight {

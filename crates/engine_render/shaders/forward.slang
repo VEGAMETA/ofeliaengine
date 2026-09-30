@@ -63,8 +63,9 @@
 // `fragmentSubsurface` after the others, depth tested for equality with the prepass. It
 // writes the specular light and emission as usual, and keeps the diffuse light apart, per
 // unit albedo, with the light passing through from behind (transmission, from the
-// profile's slab integral): the scatter pass (`subsurface.slang`) spreads it with the
-// profile and multiplies it by the exit albedo.
+// profile's slab integral). `scatterFragment`, drawn with the same geometry and depth
+// test, spreads that light with the profile and multiplies it by the exit albedo (see
+// there).
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(0, 0)]] TextureCube g_cubes[];
@@ -100,11 +101,18 @@ struct Light
 struct SubsurfaceProfile
 {
     float4 gaussians[6];     // rgb: weight / (2π v); w: −log2(e) / 2v
+    float3 falloff;          // per channel −log2(e) / 2v̄ (v̄ its mean variance): the scatter weights' depth falloff
     uint count;
-    uint3 _pad;
     float4 radii;            // the scatter pass's largest sample radius per budget
-    float2 kernel[148];      // the scatter pass's samples
+    uint4 kernel[148];       // per budget: offset on the golden-angle spiral (xy, float bits), the profile there over n · density (zw, three halves)
 };
+
+// The scatter pass's budgets: samples and first kernel entry (`BUDGETS` and
+// `KERNEL_OFFSETS` in subsurface.rs).
+static const uint BUDGET_SAMPLES[4] = { 8, 20, 40, 80 };
+static const uint BUDGET_FIRST[4] = { 0, 8, 28, 68 };
+// The scatter pass takes at most one sample per this many pixels of its disk.
+static const float PIXELS_PER_SAMPLE = 4.0;
 
 struct Frame
 {
@@ -128,14 +136,17 @@ struct Frame
                                         // (unjittered) to last frame's
     float4 jitter;           // xy: this frame's jitter in NDC (clip.xy += jitter × w)
     uint previous_count;     // instances with a previous transform
-    uint3 _pad2;
+    uint scatter_budget;     // the subsurface budget, BUDGET_* (ADR 0059)
+    uint2 _pad2;
     Cascade cascades[4];
     uint cascade_count;      // 0: everything is lit
     uint command_count;      // draw commands per list (one per detail level of each batch)
     float cascade_blend;     // NDC band at a cascade's edge that blends into the next
     float normal_bias;       // receiver offset along its normal, in texels of its cascade
     uint fade_last;          // 1: shadows fade out at the last cascade's edge
-    uint3 _pad3;
+    float scatter_pixels_per_unit; // pixels per world unit at clip w = 1
+    float scatter_w_scale;   // clip w = w_scale · depth from the near plane + w_offset
+    float scatter_w_offset;
     float4 view_axis;        // xyz view direction; w: −dot(direction, near plane center)
     Light* lights;           // local lights, sorted by depth along the view
     uint* zbins;             // Z_BINS entries: lowest light index | highest << 16
@@ -144,7 +155,8 @@ struct Frame
     uint tiles_x;            // light tiles per row
     float bin_scale;         // z-bins per unit of depth along the view
     uint light_culling;      // 0: every light for every pixel (the reference)
-    uint3 _pad4;
+    uint scatter_frame;      // noise index of the scatter pass
+    uint2 _pad4;
     float4x4 world_from_clip; // inverse of clip_from_world (jittered): the sky's rays
     uint environment;        // 1: ambient light and background from the environment
     uint sky_cube;           // bindless: the environment's radiance cube
@@ -1140,6 +1152,112 @@ ShadedMotion fragmentMaskedMotion(VertexOut input, bool front : SV_IsFrontFace)
     o.color = float4(shade(input, front, true).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
     return o;
+}
+
+// The scatter pass (ADR 0059). The forward subsurface pass left, at every pixel of a
+// subsurface material, its diffuse light per unit albedo (rgb) with its depth from the
+// near plane (a; 0 elsewhere), and its exit albedo with its profile's index. Drawn with
+// the subsurface batches again (`depthVertex`, depth tested for equality), it adds at each
+// of their pixels the albedo times the profile-weighted average of that light around it:
+//
+// - the share of the profile that falls inside the pixel's own footprint (its CDF at half
+//   a pixel) weights the pixel itself;
+// - the samples beyond it lie on a disk in the screen plane: radii importance-sampled
+//   from the profile, stratified in its CDF, on a golden-angle spiral (precomputed per
+//   profile and budget on the CPU), turned per pixel by interleaved gradient noise (new
+//   every frame only under a temporal resolve);
+// - each sample is weighted by the profile at its distance over the density it was drawn
+//   with (precomputed), times a falloff with the depth between the pixels (each channel's
+//   Gaussian of its mean variance: the profile at the 3D distance for one Gaussian per
+//   channel), so light does not cross depth discontinuities; pixels of other materials
+//   are skipped;
+// - where the kernel covers few pixels a smaller budget is used, at most one sample per
+//   PIXELS_PER_SAMPLE pixels of its disk;
+// - each channel is renormalized by the weights it used (Golubev 2018; Jimenez et al.
+//   2015), which keeps a surface lit evenly exactly as it was.
+//
+// A pixel whose whole kernel lies within half a pixel skips the samples: its albedo times
+// its own light, as without scattering. `push.texture` and `push.phase` hold the bindless
+// indices of the light and the albedo.
+
+// Two halves (low, high bits) as floats, without 16-bit types: the exponent rebiased by a
+// multiplication with 2^112, right for normal and subnormal values (Giesen, "half to float
+// done quic").
+float2 unpack_halves(uint bits)
+{
+    uint2 h = uint2(bits & 0xFFFFu, bits >> 16);
+    return asfloat(((h & 0x8000u) << 16) | ((h & 0x7FFFu) << 13)) * 5.192297e33;
+}
+
+// The share of each channel's light within radius `r`: `SubsurfaceProfile::cdf` in
+// subsurface.rs.
+float3 profile_cdf(SubsurfaceProfile* p, float r)
+{
+    float3 c = 0.0;
+    uint count = p.count;
+    for (uint i = 0; i < count; i++)
+    {
+        float4 g = p.gaussians[i];
+        c += g.rgb * (PI_LOG2E / -g.w) * (1.0 - exp2(g.w * r * r));
+    }
+    return c;
+}
+
+[shader("fragment")]
+float4 scatterFragment(float4 position : SV_Position) : SV_Target0
+{
+    Frame* frame = push.frame;
+    int2 pixel = int2(position.xy);
+    Texture2D irradiance = g_textures[push.texture];
+    float4 center = irradiance.Load(int3(pixel, 0));
+    float4 albedo = g_textures[push.phase].Load(int3(pixel, 0));
+    uint index = min(uint(albedo.a * 255.0 + 0.5), max(frame.subsurface_count, 1u) - 1u);
+    SubsurfaceProfile* stored = frame.subsurface + index;
+    float depth = center.a;
+    // World units per pixel here, and half of it: the pixel's own footprint.
+    float pixels_per_unit = frame.scatter_pixels_per_unit / max(frame.scatter_w_scale * depth + frame.scatter_w_offset, 1e-6);
+    float inside = 0.5 / pixels_per_unit;
+    uint budget = frame.scatter_budget;
+    if (stored.radii[budget] <= inside)
+        return float4(albedo.rgb * center.rgb, 0.0);
+    // Fewer samples where a smaller budget already has one per PIXELS_PER_SAMPLE pixels.
+    while (budget > 0)
+    {
+        float reach = stored.radii[budget - 1] * pixels_per_unit;
+        if (float(BUDGET_SAMPLES[budget - 1]) * PIXELS_PER_SAMPLE < 3.14159265 * reach * reach)
+            break;
+        budget--;
+    }
+
+    float3 weights = profile_cdf(stored, inside);
+    float3 sum = weights * center.rgb;
+    float3 falloff = stored.falloff;
+    // The spiral turned by the pixel's angle, scaled to pixels.
+    float angle = 6.28318531 * gradient_noise(position.xy + 5.588238 * float(frame.scatter_frame & 63u));
+    float2 turn = float2(cos(angle), sin(angle)) * pixels_per_unit;
+    float inside2 = inside * inside;
+    int2 last = int2(frame.depth_size) - 1;
+    uint first = BUDGET_FIRST[budget];
+    uint samples = BUDGET_SAMPLES[budget];
+    for (uint k = 0; k < samples; k++)
+    {
+        uint4 entry = stored.kernel[first + k];
+        float2 xy = asfloat(entry.xy);
+        if (dot(xy, xy) <= inside2)
+            continue;
+        float2 offset = float2(xy.x * turn.x - xy.y * turn.y, xy.x * turn.y + xy.y * turn.x);
+        int2 at = pixel + int2(round(offset));
+        if (any(at < int2(0, 0)) || any(at > last))
+            continue;
+        float4 s = irradiance.Load(int3(at, 0));
+        if (s.a <= 0.0)
+            continue;
+        float dz = s.a - depth;
+        float3 w = float3(unpack_halves(entry.z), unpack_halves(entry.w).x) * exp2(falloff * (dz * dz));
+        sum += w * s.rgb;
+        weights += w;
+    }
+    return float4(albedo.rgb * sum / max(weights, 1e-30), 0.0);
 }
 
 struct SubsurfaceShaded
