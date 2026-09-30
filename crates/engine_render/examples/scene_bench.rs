@@ -153,13 +153,12 @@ fn material_descs(
             occlusion_strength: m.occlusion_strength,
             emissive: m.emissive,
             emissive_texture: find(m.emissive_texture, TextureUsage::Color),
-            // Blending comes with the transparency pass; until then blended materials
-            // draw opaque.
             alpha: match m.alpha {
                 GltfAlpha::Mask(bits) => AlphaMode::Mask {
                     cutoff: f32::from_bits(bits),
                 },
-                GltfAlpha::Opaque | GltfAlpha::Blend => AlphaMode::Opaque,
+                GltfAlpha::Opaque => AlphaMode::Opaque,
+                GltfAlpha::Blend => AlphaMode::Blend,
             },
             double_sided: m.double_sided,
         })
@@ -519,7 +518,7 @@ fn main() {
     println!("Device: {}", device.adapter().summary());
     println!(
         "Scene: {path}: {} triangles in {} primitives, {} draws; {} materials ({masked} masked, \
-         {blended} blended drawn opaque, {double_sided} double-sided)",
+         {blended} blended, {double_sided} double-sided)",
         scene.triangle_count(),
         scene
             .meshes

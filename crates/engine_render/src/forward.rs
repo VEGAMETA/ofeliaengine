@@ -60,8 +60,8 @@ use core::cell::{Cell, RefCell};
 use engine_core::math::{Mat4, Vec3};
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    Allocation, Allocator, Bindless, DepthBias, Device, GraphicsPipelineDesc, MemoryLocation,
-    Pipeline, RhiError, SamplerKind, ShaderStageDesc, spirv_words,
+    Allocation, Allocator, Bindless, Blend, DepthBias, Device, GraphicsPipelineDesc,
+    MemoryLocation, Pipeline, RhiError, SamplerKind, ShaderStageDesc, spirv_words,
 };
 
 const VERTEX: &[u8] = include_bytes!("../shaders/forward.vertexMain.spv");
@@ -84,6 +84,13 @@ pub use crate::shadow::ShadowSettings;
 pub const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 const DEPTH_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.depthVertexMasked.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
+const FRAGMENT_BLENDED: &[u8] = include_bytes!("../shaders/forward.fragmentBlended.spv");
+const FRAGMENT_BLENDED_REACTIVE: &[u8] =
+    include_bytes!("../shaders/forward.fragmentBlendedReactive.spv");
+
+/// Format of the reactive mask the transparent pass writes for temporal upsampling: how much
+/// of each pixel transparent surfaces cover (their combined alpha).
+pub const REACTIVE_FORMAT: vk::Format = vk::Format::R8_UNORM;
 const LIGHT_TILES: &[u8] = include_bytes!("../shaders/forward.lightTiles.spv");
 
 /// `PHASE_*` in `forward.slang`.
@@ -94,7 +101,10 @@ const PHASE_SHADOW: u32 = 3;
 
 /// Pipeline states of batches, drawn in this order: bit 2 masked, bit 1 double-sided,
 /// bit 0 mirrored (negative determinant, so front faces wind clockwise on screen).
-const STATES: usize = 8;
+const STATES: usize = 16;
+/// Blended surfaces: drawn by the transparent pass only, one batch per instance, back to
+/// front (ADR 0054).
+const BLENDED: usize = 8;
 const MASKED: usize = 4;
 const DOUBLE_SIDED: usize = 2;
 const MIRRORED: usize = 1;
@@ -205,6 +215,10 @@ pub struct MotionOutput {
     /// Last frame is unrelated to this one (first frame, or after [`Temporal::reset`]):
     /// accumulated history should be dropped.
     pub reset: bool,
+    /// How much of each pixel transparent surfaces cover ([`REACTIVE_FORMAT`]), when there
+    /// were any: their pixels do not move with the motion vectors, so a temporal resolve
+    /// should trust its history less there.
+    pub reactive: Option<Texture>,
 }
 
 /// The `index`-th element (from 1) of the van der Corput sequence in `base`.
@@ -458,7 +472,7 @@ struct BatchData {
     slot: u32,
     /// Instances.
     count: u32,
-    /// Detail levels.
+    /// Detail levels (bits 0-7); bit 8: blended (the transparent pass's).
     lods: u32,
     center: [f32; 4],
     extents: [f32; 4],
@@ -552,6 +566,8 @@ struct Scratch {
     runs: Vec<Run>,
     /// Sort keys of the runs: state, then distance from the camera, then run index.
     keys: Vec<(u64, u32)>,
+    /// The draw commands of one list, before they are copied into each list.
+    commands: Vec<vk::DrawIndexedIndirectCommand>,
     lights: crate::lights::LightScratch,
 }
 
@@ -567,6 +583,9 @@ struct Shading {
     /// prepass.
     main_motion: [Pipeline; 2],
     shade_motion: Pipeline,
+    /// Transparent surfaces: premultiplied blending, depth tested but not written; without
+    /// and with the reactive mask.
+    blended: [Pipeline; 2],
 }
 
 /// The forward PBR pipelines.
@@ -628,6 +647,10 @@ impl ForwardRenderer {
         let background_vertex = spirv_words(BACKGROUND_VERTEX).ok_or_else(invalid)?;
         let background_motion = spirv_words(BACKGROUND_MOTION).ok_or_else(invalid)?;
         let sky_fragment = spirv_words(SKY_FRAGMENT).ok_or_else(invalid)?;
+        let fragment_blended = spirv_words(FRAGMENT_BLENDED).ok_or_else(invalid)?;
+        let fragment_blended_reactive =
+            spirv_words(FRAGMENT_BLENDED_REACTIVE).ok_or_else(invalid)?;
+        let reactive_formats = [color_format, REACTIVE_FORMAT];
         let formats = [color_format];
         let motion_formats = [color_format, MOTION_FORMAT];
         // Cull mode and front face come with each batch's pipeline state.
@@ -687,8 +710,43 @@ impl ForwardRenderer {
                 vk::PipelineCache::null(),
             )
         };
+        let blended = |fragment: &[u32], entry, formats: &[vk::Format], variant: usize| {
+            Pipeline::graphics(
+                device,
+                bindless.pipeline_layout(),
+                &GraphicsPipelineDesc {
+                    specialization: &VARIANTS[variant],
+                    color_formats: formats,
+                    depth_format,
+                    dynamic_culling: true,
+                    depth_write: false,
+                    depth_compare: vk::CompareOp::LESS,
+                    blend: Blend::Premultiplied,
+                    ..GraphicsPipelineDesc::new(
+                        ShaderStageDesc {
+                            spirv: &vertex,
+                            entry: c"vertexMain",
+                        },
+                        Some(ShaderStageDesc {
+                            spirv: fragment,
+                            entry,
+                        }),
+                    )
+                },
+                vk::PipelineCache::null(),
+            )
+        };
         let shading = |lit: usize| -> Result<Shading, RhiError> {
             Ok(Shading {
+                blended: [
+                    blended(&fragment_blended, c"fragmentBlended", &formats, lit)?,
+                    blended(
+                        &fragment_blended_reactive,
+                        c"fragmentBlendedReactive",
+                        &reactive_formats,
+                        lit,
+                    )?,
+                ],
                 main: [
                     main(&fragment, c"fragmentMain", &formats, false, lit)?,
                     main(&fragment_masked, c"fragmentMasked", &formats, false, lit)?,
@@ -931,6 +989,7 @@ impl ForwardRenderer {
                     velocity,
                     jitter,
                     reset,
+                    reactive: None,
                 }
             });
             return Some(ForwardPasses {
@@ -945,7 +1004,11 @@ impl ForwardRenderer {
         let instance_count = draws.len() as u32;
         let mut scratch = self.scratch.borrow_mut();
         let Scratch {
-            slots, runs, keys, ..
+            slots,
+            runs,
+            keys,
+            commands: command_scratch,
+            ..
         } = &mut *scratch;
         // Batches in draw order, counted per pipeline state, then ordered by state and,
         // within a state, front to back (by the first instance's box), so the depth test
@@ -963,11 +1026,15 @@ impl ForwardRenderer {
             let draw = &draws[run.first as usize];
             let (center, extents) = local_box(geometry, draw.mesh);
             let (center, _) = crate::cull::transform_box(&draw.world_from_object, center, extents);
-            let distance = center.distance(view.camera.position);
-            (
-                ((run.state as u64) << 32) | u64::from(distance.to_bits()),
-                k as u32,
-            )
+            let distance = center.distance(view.camera.position).max(0.0).to_bits();
+            // Opaque batches front to back (the depth test rejects hidden fragments early),
+            // blended ones back to front (each blends over what is behind it).
+            let distance = if run.state & BLENDED != 0 {
+                !distance
+            } else {
+                distance
+            };
+            (((run.state as u64) << 32) | u64::from(distance), k as u32)
         }));
         keys.sort_unstable();
         for (order, &(_, k)) in keys.iter().enumerate() {
@@ -1035,9 +1102,12 @@ impl ForwardRenderer {
         };
         let instances_staged = instances;
         let instances = instances.address;
+        // The ring's memory takes writes best in order (it may be write-combined device
+        // memory): the batch table and the command lists are written front to back.
         let batch_table = {
             let (out, staged) = ring.alloc::<BatchData>(batch_count as usize)?;
-            for run in runs.iter() {
+            for &(_, k) in keys.iter() {
+                let run = &runs[k as usize];
                 let mesh = draws[run.first as usize].mesh;
                 let (center, extents) = local_box(geometry, mesh);
                 let lods = geometry.mesh(mesh).map(|m| m.lods).unwrap_or_default();
@@ -1045,7 +1115,7 @@ impl ForwardRenderer {
                     command: run.command,
                     slot: run.slot,
                     count: run.len,
-                    lods: run.lods,
+                    lods: run.lods | u32::from(run.state & BLENDED != 0) << 8,
                     center: center.extend(0.0).to_array(),
                     extents: extents.extend(0.0).to_array(),
                     errors: lods.map(|l| l.error),
@@ -1062,26 +1132,32 @@ impl ForwardRenderer {
             let (out, staged) = ring.alloc::<vk::DrawIndexedIndirectCommand>(
                 (phases + cascade_count) as usize * per_list,
             )?;
-            for run in runs.iter() {
+            // One list's commands, in command order (the sorted batches' levels)...
+            command_scratch.clear();
+            for &(_, k) in keys.iter() {
+                let run = &runs[k as usize];
                 // A removed mesh draws nothing.
                 let mesh = geometry.mesh(draws[run.first as usize].mesh);
                 for lod in 0..run.lods {
                     let level = mesh.map(|m| m.lods[lod as usize]).unwrap_or_default();
-                    let command = vk::DrawIndexedIndirectCommand {
+                    command_scratch.push(vk::DrawIndexedIndirectCommand {
                         index_count: level.index_count,
                         instance_count: 0,
                         first_index: level.first_index,
                         vertex_offset: mesh.map_or(0, |m| m.first_vertex as i32),
                         first_instance: run.slot + lod * run.len,
-                    };
-                    let c = (run.command + lod) as usize;
-                    for list in 0..phases + cascade_count {
-                        out[list as usize * per_list + c].write(vk::DrawIndexedIndirectCommand {
-                            first_instance: command.first_instance
-                                + list_offset(list, phases) * slot_count,
-                            ..command
-                        });
-                    }
+                    });
+                }
+            }
+            // ... then copied into each list, which has its own slot region.
+            for list in 0..phases + cascade_count {
+                let slots = list_offset(list, phases) * slot_count;
+                let out = &mut out[list as usize * per_list..(list as usize + 1) * per_list];
+                for (out, command) in out.iter_mut().zip(command_scratch.iter()) {
+                    out.write(vk::DrawIndexedIndirectCommand {
+                        first_instance: command.first_instance + slots,
+                        ..*command
+                    });
                 }
             }
             staged
@@ -1402,6 +1478,7 @@ impl ForwardRenderer {
                             [&shadow_pipelines[0], &shadow_pipelines[1]],
                             &push,
                             true,
+                            false,
                             ctx.buffer(shadow_commands),
                             u64::from(cascade) * command_bytes,
                             tile,
@@ -1513,6 +1590,7 @@ impl ForwardRenderer {
                     &geometry,
                     pipelines,
                     &push,
+                    false,
                     false,
                     ctx.buffer(culled),
                     offset,
@@ -1682,6 +1760,72 @@ impl ForwardRenderer {
                     }
                 });
         }
+        // Transparent surfaces, back to front over the opaque image: depth tested, not
+        // written, lit like the rest (ADR 0054). They were culled in the last phase only.
+        let blended_commands: u32 = (0..STATES)
+            .filter(|s| s & BLENDED != 0)
+            .map(|s| states.counts[s])
+            .sum();
+        let reactive = (blended_commands > 0 && velocity.is_some()).then(|| {
+            fg.create_texture(
+                "reactive mask",
+                TextureDesc::new_2d(REACTIVE_FORMAT, depth_desc.width, depth_desc.height),
+            )
+        });
+        if blended_commands > 0 {
+            let pipelines = if reactive.is_some() {
+                &shading.blended[1]
+            } else {
+                &shading.blended[0]
+            };
+            let mut pass = forward_pass(
+                fg,
+                "transparent",
+                &geometry,
+                &materials,
+                shadow_map,
+                culled,
+                visible,
+            )
+            .color(color, LoadOp::Load, StoreOp::Store);
+            if let Some(reactive) = reactive {
+                pass = pass.color(reactive, LoadOp::Clear([0.0; 4]), StoreOp::Store);
+            }
+            if let Some(tiles) = light_tiles {
+                pass = pass.read(tiles, Access::StorageRead(ShaderStages::FRAGMENT));
+            }
+            if let Some(env) = environment {
+                pass = pass
+                    .read(env.prefiltered, Access::Sampled(ShaderStages::FRAGMENT))
+                    .read(env.dfg, Access::Sampled(ShaderStages::FRAGMENT))
+                    .read(env.sh, Access::StorageRead(ShaderStages::FRAGMENT));
+            }
+            let offset = u64::from(phases - 1) * command_bytes;
+            pass.depth_read_only(depth).execute(move |ctx| {
+                let push = Push {
+                    visible: ctx.address(visible),
+                    texture: ctx.sampled_index(shadow_map).unwrap_or(0),
+                    light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
+                    ..base
+                };
+                // SAFETY: recording inside the pass's rendering scope; the pass reads the
+                // pool, the material table and the commands.
+                unsafe {
+                    states.draw(
+                        ctx,
+                        bindless,
+                        &geometry,
+                        [pipelines, pipelines],
+                        &push,
+                        false,
+                        true,
+                        ctx.buffer(culled),
+                        offset,
+                        ctx.render_area(),
+                    );
+                }
+            });
+        }
         let (Some(temporal), Some(velocity), Some(previous)) = (temporal, velocity, previous)
         else {
             return Some(passes);
@@ -1735,6 +1879,7 @@ impl ForwardRenderer {
                 velocity,
                 jitter,
                 reset,
+                reactive,
             }),
             ..passes
         })
@@ -1884,7 +2029,9 @@ fn mirrored(m: &Mat4) -> bool {
 
 /// A batch's pipeline state.
 fn state(kind: MaterialKind, mirrored: bool) -> usize {
-    (usize::from(kind.masked) * MASKED)
+    // Masked and blended exclude each other (both come from the alpha mode).
+    (usize::from(kind.blended) * BLENDED)
+        | (usize::from(kind.masked) * MASKED)
         | (usize::from(kind.double_sided) * DOUBLE_SIDED)
         | (usize::from(mirrored) * MIRRORED)
 }
@@ -1918,7 +2065,9 @@ fn batches(
                     lods: 1,
                 });
                 counts[state] += 1;
-                mesh = Some(draw.mesh);
+                // A blended draw is a batch of its own (no mesh to continue): one command
+                // per instance keeps them in back-to-front order through culling.
+                mesh = (state & BLENDED == 0).then_some(draw.mesh);
             }
         }
     }
@@ -1934,7 +2083,8 @@ struct States {
 impl States {
     /// Records one indirect draw per pipeline state in use, from the commands at `offset`
     /// in `buffer` (one per batch, in state order), into `area` of the target: `pipelines`
-    /// are the opaque and the masked one. The shadow pass renders back faces of single-sided
+    /// are the opaque and the masked one. `blended` draws the blended states only (the
+    /// transparent pass), otherwise only the others. The shadow pass renders back faces of single-sided
     /// geometry (fewer self-shadowing artifacts on closed meshes); the forward passes cull
     /// them.
     ///
@@ -1951,6 +2101,7 @@ impl States {
         pipelines: [&Pipeline; 2],
         push: &Push,
         shadow: bool,
+        blended: bool,
         buffer: vk::Buffer,
         offset: u64,
         area: vk::Rect2D,
@@ -1958,7 +2109,7 @@ impl States {
         let mut bound = None;
         for state in 0..STATES {
             let count = self.counts[state];
-            if count == 0 {
+            if count == 0 || (state & BLENDED != 0) != blended {
                 continue;
             }
             let masked = state & MASKED != 0;

@@ -163,11 +163,16 @@ struct Batch
     float4 errors;           // each level's error, object-space units
 };
 
+// Bits of `Batch.lods`: the level count, and whether the batch is blended (ADR 0054).
+static const uint LOD_COUNT_MASK = 0xFFu;
+static const uint BATCH_BLENDED = 1u << 8;
+
 // The coarsest detail level whose error, projected at the box's nearest possible
 // distance, stays within the threshold (ADR 0053): error × scale × lod_scale ≤ distance.
 uint choose_lod(Instance inst, Batch batch, float3 center, float3 extents)
 {
-    if (batch.lods <= 1 || push.frame.lod_scale <= 0.0)
+    uint lods = batch.lods & LOD_COUNT_MASK;
+    if (lods <= 1 || push.frame.lod_scale <= 0.0)
         return 0;
     // The largest scale of the instance's linear part (its columns' lengths).
     float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
@@ -177,7 +182,7 @@ uint choose_lod(Instance inst, Batch batch, float3 center, float3 extents)
     float distance = max(length(center - push.frame.camera_position.xyz) - length(extents), 1e-3);
     float allowed = distance / (scale * push.frame.lod_scale);
     uint lod = 0;
-    for (uint k = 1; k < batch.lods; k++)
+    for (uint k = 1; k < lods; k++)
     {
         if (batch.errors[k] <= allowed)
             lod = k;
@@ -425,6 +430,9 @@ void cullMain(uint3 id : SV_DispatchThreadID)
     float3 e = batch.extents.xyz;
     float3 extents = float3(dot(abs(inst.row0.xyz), e), dot(abs(inst.row1.xyz), e), dot(abs(inst.row2.xyz), e));
     bool cull = push.frame.cull != 0;
+    // Blended batches cast no shadows and are drawn once, after the opaque surfaces: in the
+    // last phase, tested against the pyramid of what the first phase drew.
+    bool blended = (batch.lods & BATCH_BLENDED) != 0;
     uint lod = choose_lod(inst, batch, center, extents);
     uint command = batch.command + lod;
     uint first = batch.slot + lod * batch.count;
@@ -440,7 +448,7 @@ void cullMain(uint3 id : SV_DispatchThreadID)
             float4 b = push.frame.cascades[k].bounds;
             // Inside the cascade's square, and not wholly beyond its far depth: anything
             // between the light and the slice casts into it.
-            bool caster = !cull || (all(abs(c.xy - b.xy) <= b.z + e.xy) && -(c.z + e.z) <= b.w);
+            bool caster = !blended && (!cull || (all(abs(c.xy - b.xy) <= b.z + e.xy) && -(c.z + e.z) <= b.w));
             append(push.commands + k * push.frame.command_count, push.visible + k * push.frame.slot_count, command, first, index, caster);
         }
         return;
@@ -456,7 +464,14 @@ void cullMain(uint3 id : SV_DispatchThreadID)
             visible = visible && dot(plane.xyz, center) + dot(abs(plane.xyz), extents) + plane.w >= 0.0;
         }
     }
-    if (push.phase != PHASE_ALL)
+    if (push.phase != PHASE_ALL && blended)
+    {
+        if (push.phase == PHASE_EARLY)
+            visible = false;
+        else if (visible && cull)
+            visible = !occluded(center, extents);
+    }
+    else if (push.phase != PHASE_ALL)
     {
         // Instances beyond the flags' capacity count as not visible last frame: the late
         // phase always tests them.
@@ -849,7 +864,8 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
     return (diffuse * irradiance * occlusion + specular * specular_occlusion) * push.frame.env_intensity;
 }
 
-// The shading of both forward entry points; `masked` discards below the alpha cutoff.
+// The shading of the forward entry points, with the material's alpha; `masked` discards
+// below the alpha cutoff.
 float4 shade(VertexOut input, bool front, bool masked)
 {
     Frame frame = push.frame[0];
@@ -904,19 +920,48 @@ float4 shade(VertexOut input, bool front, bool masked)
         + ambient_light(n, v, diffuse, f0, roughness, occlusion, base.rgb)
         + emissive
         + local_lights(input.world_position, input.position.xy, n, v, diffuse, f0, a);
-    return float4(color, 1.0);
+    return float4(color, base.a);
 }
 
 [shader("fragment")]
 float4 fragmentMain(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
-    return shade(input, front, false);
+    return float4(shade(input, front, false).rgb, 1.0);
 }
 
 [shader("fragment")]
 float4 fragmentMasked(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
-    return shade(input, front, true);
+    return float4(shade(input, front, true).rgb, 1.0);
+}
+
+// Transparent surfaces (ADR 0054): premultiplied color over what is behind. Alpha is
+// coverage: the whole shading scales with it, as glTF's BLEND mode says.
+[shader("fragment")]
+float4 fragmentBlended(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    float4 c = shade(input, front, false);
+    float alpha = saturate(c.a);
+    return float4(c.rgb * alpha, alpha);
+}
+
+struct BlendedReactive
+{
+    float4 color : SV_Target0;
+    // The reactive mask for temporal upsampling: blended the same way (premultiplied), so
+    // it accumulates the layers' combined coverage 1 − Π(1 − alpha).
+    float4 reactive : SV_Target1;
+};
+
+[shader("fragment")]
+BlendedReactive fragmentBlendedReactive(VertexOut input, bool front : SV_IsFrontFace)
+{
+    float4 c = shade(input, front, false);
+    float alpha = saturate(c.a);
+    BlendedReactive o;
+    o.color = float4(c.rgb * alpha, alpha);
+    o.reactive = float4(alpha, 0.0, 0.0, alpha);
+    return o;
 }
 
 // The motion of the surface at this pixel: where it is now (the pixel center, jitter
@@ -941,7 +986,7 @@ struct ShadedMotion
 ShadedMotion fragmentMainMotion(VertexOut input, bool front : SV_IsFrontFace)
 {
     ShadedMotion o;
-    o.color = shade(input, front, false);
+    o.color = float4(shade(input, front, false).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
     return o;
 }
@@ -950,7 +995,7 @@ ShadedMotion fragmentMainMotion(VertexOut input, bool front : SV_IsFrontFace)
 ShadedMotion fragmentMaskedMotion(VertexOut input, bool front : SV_IsFrontFace)
 {
     ShadedMotion o;
-    o.color = shade(input, front, true);
+    o.color = float4(shade(input, front, true).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
     return o;
 }

@@ -16,8 +16,7 @@ use crate::texture_pool::{TextureId, TexturePool};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError, Wrap};
 
-/// How a material's alpha is used. Blending (glTF's `BLEND`) comes with the transparency
-/// pass.
+/// How a material's alpha is used.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub enum AlphaMode {
     /// Alpha is ignored.
@@ -30,6 +29,11 @@ pub enum AlphaMode {
         /// Alpha cutoff, 0 … 1.
         cutoff: f32,
     },
+    /// Blended over what is behind (glTF's `BLEND`): alpha is the surface's coverage,
+    /// scaling its whole shading (light, reflections, emission). Drawn after the opaque
+    /// surfaces, back to front, without writing depth and without casting shadows
+    /// (ADR 0054).
+    Blend,
 }
 
 /// A texture of a material and how it repeats.
@@ -154,12 +158,17 @@ const MATERIAL_BYTES: u64 = size_of::<GpuMaterial>() as u64;
 const _: () = assert!(MATERIAL_BYTES == 80);
 
 /// What the forward renderer needs to know of a material to pick its pipeline state.
+// Four bytes: with the slot, `MaterialFrame::resolve` returns it in one register (it runs
+// once per draw).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(C, align(4))]
 pub struct MaterialKind {
     /// Alpha tested.
     pub masked: bool,
     /// Drawn without face culling.
     pub double_sided: bool,
+    /// Blended over what is behind, in the transparent pass.
+    pub blended: bool,
 }
 
 #[derive(Debug)]
@@ -251,6 +260,7 @@ impl MaterialTable {
         slot.kind = MaterialKind {
             masked: matches!(desc.alpha, AlphaMode::Mask { .. }),
             double_sided: desc.double_sided,
+            blended: desc.alpha == AlphaMode::Blend,
         };
         if !slot.dirty {
             slot.dirty = true;
@@ -533,7 +543,7 @@ fn resolve(desc: &MaterialDesc, textures: &TexturePool) -> GpuMaterial {
         roughness: desc.roughness.clamp(0.0, 1.0),
         occlusion_strength: desc.occlusion_strength.clamp(0.0, 1.0),
         alpha_cutoff: match desc.alpha {
-            AlphaMode::Opaque => 0.0,
+            AlphaMode::Opaque | AlphaMode::Blend => 0.0,
             AlphaMode::Mask { cutoff } => cutoff,
         },
         base_color_texture: texture(desc.base_color_texture),
