@@ -613,3 +613,66 @@ draws.push(DrawItem { mesh: window_pane, material: glass, world_from_object });
   - Measure with `draw_bench -- --blended`.
 - **Not yet:** refraction and distortion, colored shadows through glass,
   order-independent transparency.
+
+## 13. Skin, wax and leaves: subsurface scattering
+
+Light that enters skin, wax, marble, jade, fruit or leaves spreads under the surface and
+comes out around where it entered (ADR 0059). Give the renderer the diffusion profiles,
+and the materials a `Subsurface`:
+
+```rust
+use engine_render::material::{Subsurface, Transmission};
+use engine_render::subsurface::SubsurfaceProfile;
+
+// Profile 0: human skin at its real size (millimetres, a metre-scaled scene).
+// Profile 1: wax, light spreading 8 mm in red, 5 in green, 3 in blue.
+renderer.set_subsurface_profiles(&device, &bindless, &[
+    SubsurfaceProfile::skin(),
+    SubsurfaceProfile::from_radius([8.0, 5.0, 3.0]),
+])?;
+let face = materials.add(MaterialDesc {
+    subsurface: Some(Subsurface {
+        profile: 0,
+        transmission: Transmission::Thick, // ears and nostrils light up from behind
+        ..Subsurface::default()
+    }),
+    ..MaterialDesc::solid([0.85, 0.62, 0.52], 0.0, 0.45)
+});
+```
+
+- **Profiles** belong to the renderer; materials name them by index. Call
+  `set_subsurface_profiles` when they change (a level load), not every frame: the first
+  call also creates the 9 pipelines subsurface materials need (about 0.1 s cold, a few
+  ms from the pipeline cache). A game that never calls it never pays for them.
+  - `skin()` is d'Eon and Luebke's measured six-Gaussian fit. `with_scale(k)` makes a
+    profile `k` world units per millimetre: larger values look softer (stylized or
+    miniature scenes); 0 turns scattering off.
+  - `from_radius([r, g, b])`: one Gaussian per channel, 99% of the light within those
+    millimetres. `SubsurfaceProfile::new` takes your own Gaussians.
+- **`Subsurface` on a material** (opaque or masked; blended materials ignore it):
+  - `mask`: how much of the diffuse light scatters (1: all).
+  - `transmission`: `Thin` (leaves, paper: the material's `thickness`), `Thick` (solid
+    objects: the thicker of `thickness` and the object itself as the sun's shadow map
+    sees it), or `None`. Only the sun transmits.
+  - `texturing`: `PostScatter` keeps the base color's detail sharp (pores, freckles);
+    `PreAndPostScatter` blurs half of it with the light (scans whose texture already
+    holds the scattering).
+  - `thickness` and `thickness_texture` (green) in world units; glTF's
+    `KHR_materials_volume` thickness is imported into `MaterialData`.
+- **Settings:** `renderer.set_subsurface(Some(SubsurfaceSettings { quality }))`,
+  `SubsurfaceQuality::Low | Medium | High | Ultra` = 8 / 20 / 40 / 80 samples per pixel
+  (Medium by default); `None` shades subsurface materials as ordinary ones. Under TAA the
+  noise changes every frame and averages out; without it the pattern is fixed.
+- **What happens:** a view that draws subsurface materials runs the depth prepass, draws
+  them in a "forward subsurface" pass after the others, then a "subsurface scatter" pass
+  adds their spread light. Other materials are shaded exactly as before.
+- **What it costs** at 1080p (`subsurface_bench`), scatter pass for skin a metre away /
+  four times larger:
+  - RTX 4060 Ti: 17–27 µs / 18–33 µs when it covers 10% of the screen (Low–Medium),
+    108 / 137–256 µs at 100%;
+  - Radeon iGPU: 0.4 / 0.5–1.0 ms at 10%, 3.9 / 5.3–9.6 ms at 100%: use `Low` there,
+    and keep close-ups of skin moderate.
+  - The forward subsurface pass costs 6–12% more than ordinary shading of the same
+    pixels.
+- **Limits:** only what is on screen scatters; two scattering objects at the same depth
+  exchange a little light; the exit albedo is stored in 8 bits.

@@ -33,6 +33,11 @@
 //! and nothing visible is ever missing: a wrong guess from the previous frame only costs
 //! time.
 //!
+//! Materials with subsurface scattering (ADR 0059, [`crate::subsurface`]) are shaded by a
+//! **forward subsurface** pass after the forward pass (the depth prepass then always
+//! runs), which keeps their diffuse light apart; a **subsurface scatter** pass draws them
+//! again and adds that light spread by their profile.
+//!
 //! Each drawing pass records one `vkCmdDrawIndexedIndirect` per pipeline state in use, so
 //! beyond writing 64 bytes per instance into the [`UploadRing`] the CPU cost of a frame
 //! does not grow with the number of draws. Shaders read everything through device
