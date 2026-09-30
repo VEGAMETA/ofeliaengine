@@ -4,7 +4,7 @@ Instructions for Claude working autonomously on this engine.
 Read this file in full at the start of every session. If anything here is outdated
 or contradicts the actual state of the repository, propose a change via an ADR (see §3).
 
-Working name of the engine in code: `engine` (crate prefix `engine_*`). Replace once the team picks a name.
+The engine is called **ofeliaengine** (team decision, 2026-09-30). In code it is still `engine` (crate prefix `engine_*`) until a separate rename PR.
 
 ---
 

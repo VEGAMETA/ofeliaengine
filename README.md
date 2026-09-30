@@ -1,7 +1,8 @@
-# engine
+# ofeliaengine
 
 A game engine for Windows 11 x64 written in Rust, with Vulkan 1.3, Slang, Luau and Tracy.
-The working name is `engine`; the team will pick the final name.
+The engine is called **ofeliaengine** (team decision, 2026-09-30). In code it is still
+`engine` (crate prefix `engine_*`, the `engine` tool, `ENGINE_*` variables) until the rename.
 
 Principles, stack and working rules are in [`CLAUDE.md`](CLAUDE.md). Architectural decisions
 are in [`docs/adr`](docs/adr).
