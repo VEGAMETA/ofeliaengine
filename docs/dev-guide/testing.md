@@ -30,7 +30,8 @@ set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden
 
 - **Add a shot** for a new feature: a `Shot` in `golden.rs` that turns it on (see
   `tests/golden/src/scene.rs`: procedural scenes need no files; glTF scenes come from
-  `test-assets/`, fetched by `tools/fetch-test-assets.ps1`).
+  `test-assets/`, fetched by `tools/fetch-test-assets.ps1`, or from the folder in
+  `ENGINE_TEST_ASSETS`: set it in a git worktree, which has no `test-assets/` of its own).
 - **Compare any two images:** `cargo run -p engine_golden --release --bin flip -- a.png b.png map.png`.
 - Missing golden images or scenes are skipped with a note, except in `tools/check.ps1 -Gpu`,
   which requires them.

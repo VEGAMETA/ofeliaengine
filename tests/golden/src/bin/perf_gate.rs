@@ -49,10 +49,7 @@ fn shots() -> Vec<Shot> {
         },
         Shot {
             size: [1920, 1080],
-            ..Shot::new(
-                "sponza",
-                Source::Gltf(PathBuf::from("test-assets/Sponza/Sponza.gltf")),
-            )
+            ..Shot::new("sponza", Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
         },
     ]
 }

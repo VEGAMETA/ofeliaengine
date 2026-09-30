@@ -34,8 +34,8 @@ pub enum Source {
     /// Built here: spheres of graded roughness and metalness, a glass cube, a glowing
     /// cube, a floor and a wall. Needs no files.
     Procedural,
-    /// A glTF file (`test-assets/`, fetched by `tools/fetch-test-assets.ps1`), cooked
-    /// through the derived data cache in `test-assets/.ddc`.
+    /// A glTF file, relative to [`test_assets`] (fetched by
+    /// `tools/fetch-test-assets.ps1`), cooked through the derived data cache in its `.ddc`.
     Gltf(PathBuf),
 }
 
@@ -131,9 +131,13 @@ pub enum Skip {
     NoScene(PathBuf),
 }
 
-/// The repository's root (for `test-assets/`).
-pub fn repo_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+/// The test scenes: `ENGINE_TEST_ASSETS`, or `test-assets/` in the repository (a git
+/// worktree has none of its own: point the variable at the main checkout's).
+pub fn test_assets() -> PathBuf {
+    std::env::var_os("ENGINE_TEST_ASSETS").map_or_else(
+        || Path::new(env!("CARGO_MANIFEST_DIR")).join("../../test-assets"),
+        PathBuf::from,
+    )
 }
 
 /// Vendor directory name for golden images: `nvidia`, `amd`, `intel` or the id in hex.
@@ -357,7 +361,7 @@ fn load(source: &Source) -> Result<Loaded, Skip> {
             procedural: procedural(),
         }),
         Source::Gltf(path) => {
-            let path = repo_root().join(path);
+            let path = test_assets().join(path);
             let Ok(bytes) = std::fs::read(&path) else {
                 return Err(Skip::NoScene(path));
             };
@@ -366,7 +370,7 @@ fn load(source: &Source) -> Result<Loaded, Skip> {
             let jobs = ThreadPool::builder()
                 .build()
                 .map_err(|_| Skip::NoScene(path.clone()))?;
-            let cache = DerivedDataCache::new(repo_root().join("test-assets/.ddc"))
+            let cache = DerivedDataCache::new(test_assets().join(".ddc"))
                 .map_err(|_| Skip::NoScene(path.clone()))?;
             let settings = CookSettings {
                 lods: false,

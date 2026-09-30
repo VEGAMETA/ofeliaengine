@@ -31,7 +31,7 @@ fn check(shot: &Shot) {
         Err(Skip::NoScene(path)) => {
             assert!(
                 !require_golden(),
-                "{}: {} missing (tools/fetch-test-assets.ps1)",
+                "{}: {} missing (tools/fetch-test-assets.ps1, or ENGINE_TEST_ASSETS)",
                 shot.name,
                 path.display()
             );
@@ -105,7 +105,7 @@ fn procedural_scene_without_sky() {
 fn sponza() {
     check(&Shot::new(
         "sponza",
-        Source::Gltf(PathBuf::from("test-assets/Sponza/Sponza.gltf")),
+        Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
     ));
 }
 
@@ -114,6 +114,6 @@ fn sponza() {
 fn flight_helmet() {
     check(&Shot::new(
         "flight_helmet",
-        Source::Gltf(PathBuf::from("test-assets/FlightHelmet/FlightHelmet.gltf")),
+        Source::Gltf(PathBuf::from("FlightHelmet/FlightHelmet.gltf")),
     ));
 }
