@@ -206,6 +206,7 @@ fn material_descs(
                 GltfAlpha::Blend => AlphaMode::Blend,
             },
             double_sided: m.double_sided,
+            subsurface: None,
         })
         .collect()
 }

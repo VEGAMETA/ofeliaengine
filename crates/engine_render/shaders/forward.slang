@@ -58,6 +58,13 @@
 // per pixel from the material table by the instance's material slot. Masked materials
 // discard below their alpha cutoff (`fragmentMasked`, and `shadowFragmentMasked` for
 // their shadows); opaque ones never discard, so their depth test stays early.
+//
+// Subsurface scattering (subsurface.rs, ADR 0059): materials with a profile are drawn by
+// `fragmentSubsurface` after the others, depth tested for equality with the prepass. It
+// writes the specular light and emission as usual, and keeps the diffuse light apart, per
+// unit albedo, with the light passing through from behind (transmission, from the
+// profile's slab integral): the scatter pass (`subsurface.slang`) spreads it with the
+// profile and multiplies it by the exit albedo.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(0, 0)]] TextureCube g_cubes[];
@@ -87,6 +94,16 @@ struct Light
     float4 position_range;   // xyz position, w range (the falloff ends there)
     float4 color_scale;      // rgb color × intensity; w spot cone scale (0: point light)
     float4 direction_offset; // xyz direction of the cone, w cone offset (1: point light)
+};
+
+// `GpuProfile` in subsurface.rs: a sum of Gaussians in world units (ADR 0059).
+struct SubsurfaceProfile
+{
+    float4 gaussians[6];     // rgb: weight / (2π v); w: −log2(e) / 2v
+    uint count;
+    uint3 _pad;
+    float4 radii;            // the scatter pass's largest sample radius per budget
+    float2 kernel[148];      // the scatter pass's samples
 };
 
 struct Frame
@@ -136,9 +153,9 @@ struct Frame
     uint env_levels;         // mips of the prefiltered cube
     float env_intensity;     // the environment's radiance multiplier
     uint linear_sampler;     // trilinear, clamp
-    uint _pad5;
+    uint subsurface_count;   // profiles at `subsurface` (0: no subsurface draws)
     float4* sh;              // 9 irradiance harmonics
-    uint2 _pad6;
+    SubsurfaceProfile* subsurface;
 };
 
 struct Instance
@@ -206,10 +223,14 @@ struct Material
     uint normal_texture;     // NO_TEXTURE: the interpolated normal
     uint occlusion_texture;  // R
     uint emissive_texture;   // sRGB
-    uint _pad0;
-    uint _pad1;
-    uint _pad2;
+    uint subsurface;         // bits 0-7 profile + 1 (0: none); 8-15 mask; 16-17 transmission; 18 pre- and post-scatter texturing
+    uint thickness_texture;  // G, times `thickness`
+    float thickness;         // world units
 };
+
+// Bits of `Material.subsurface` (`GpuMaterial` in material.rs).
+static const uint TRANSMISSION_THIN = 1;
+static const uint SUBSURFACE_SPLIT_TEXTURING = 1u << 18;
 
 static const uint NO_TEXTURE = 0xFFFFFFFFu;
 
@@ -771,8 +792,9 @@ float3 surface_light(float3 n, float3 v, float3 l, float3 diffuse, float3 f0, fl
 }
 
 // One local light at `p`: inverse-square falloff windowed to zero at its range (Karis 2013),
-// times the spot cone.
-float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, float3 f0, float a)
+// times the spot cone. Adds the irradiance it brings to `irradiance` (subsurface
+// materials; unused and compiled away elsewhere).
+float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance)
 {
     float3 to = light.position_range.xyz - p;
     float d2 = dot(to, to);
@@ -784,6 +806,7 @@ float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, fl
     float3 l = to * rsqrt(max(d2, 1e-8));
     float cone = saturate(dot(-l, light.direction_offset.xyz) * light.color_scale.w + light.direction_offset.w);
     float attenuation = window * window / max(d2, 1e-4) * cone * cone;
+    irradiance += light.color_scale.rgb * attenuation * saturate(dot(n, l));
     return surface_light(n, v, l, diffuse, f0, a) * light.color_scale.rgb * attenuation;
 }
 
@@ -798,8 +821,9 @@ uint range_bits(uint w, uint lo, uint hi)
 }
 
 // The local lights reaching `p` (at `pixel`): those in both its tile's bits and its
-// z-bin's index range, or every light without culling.
-float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, float3 f0, float a)
+// z-bin's index range, or every light without culling. Their irradiance adds to
+// `irradiance`.
+float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance)
 {
     uint count = push.frame.light_count;
     float3 sum = 0.0;
@@ -808,7 +832,7 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
     if (push.frame.light_culling == 0)
     {
         for (uint i = 0; i < count; i++)
-            sum += local_light(push.frame.lights[i], p, n, v, diffuse, f0, a);
+            sum += local_light(push.frame.lights[i], p, n, v, diffuse, f0, a, irradiance);
         return sum;
     }
     float depth = dot(p, push.frame.view_axis.xyz) + push.frame.view_axis.w;
@@ -831,7 +855,7 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
             uint bit = firstbitlow(merged);
             merged &= merged - 1u;
             if ((mask >> bit) & 1u)
-                sum += local_light(push.frame.lights[w * 32 + bit], p, n, v, diffuse, f0, a);
+                sum += local_light(push.frame.lights[w * 32 + bit], p, n, v, diffuse, f0, a, irradiance);
         }
     }
     return sum;
@@ -864,9 +888,86 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
     return (diffuse * irradiance * occlusion + specular * specular_occlusion) * push.frame.env_intensity;
 }
 
+// The irradiance of the environment's harmonics at normal `n` (as in `ambient_light`).
+float3 sky_irradiance(float3 n)
+{
+    float4* sh = push.frame.sh;
+    float3 irradiance = sh[0].rgb * 0.282095
+        + sh[1].rgb * (0.488603 * n.y) + sh[2].rgb * (0.488603 * n.z) + sh[3].rgb * (0.488603 * n.x)
+        + sh[4].rgb * (1.092548 * n.x * n.y) + sh[5].rgb * (1.092548 * n.y * n.z)
+        + sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + sh[7].rgb * (1.092548 * n.x * n.z)
+        + sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    return max(irradiance, 0.0);
+}
+
+// The diffuse part of `ambient_light` per unit base color, for subsurface materials;
+// `kd` is (1 − metallic) / π.
+float3 ambient_diffuse(float3 n, float occlusion, float kd)
+{
+    if (ENVIRONMENT == 0 || push.frame.environment == 0)
+        return push.frame.ambient.rgb * occlusion;
+    return kd * sky_irradiance(n) * occlusion * push.frame.env_intensity;
+}
+
+// π log2(e): a profile Gaussian's weight from its stored amplitude and exponent.
+static const float PI_LOG2E = 4.53236014;
+
+// Transmission through a slab `d` world units thick: the profile integrated over a plane
+// at distance `d` (`SubsurfaceProfile::transmission` in subsurface.rs).
+float3 profile_transmission(SubsurfaceProfile* p, float d)
+{
+    float3 t = 0.0;
+    uint count = p.count;
+    for (uint i = 0; i < count; i++)
+    {
+        float4 g = p.gaussians[i];
+        t += g.rgb * (PI_LOG2E / -g.w) * exp2(g.w * d * d);
+    }
+    return t;
+}
+
+// How far the sun's light travelled from the nearest surface towards it to reach light
+// view position `light` of a receiver with light-view normal `normal`, in world units:
+// the shadow map's depth there (in the finest cascade holding it) against the receiver's,
+// pushed into the surface along its normal first. 0 outside the cascades.
+float shadow_distance(float3 light, float3 normal)
+{
+    uint count = push.frame.cascade_count;
+    for (uint c = 0; c < count; c++)
+    {
+        if (cascade_edge(c, light) >= push.frame.cascades[c].offset.w)
+            continue;
+        Cascade k = push.frame.cascades[c];
+        float3 ndc = (light - normal * (push.frame.normal_bias * k.scale.w)) * k.scale.xyz + k.offset.xyz;
+        float2 uv = ndc.xy * k.atlas.xy + k.atlas.zw;
+        Texture2D map = g_textures[NonUniformResourceIndex(push.texture)];
+        uint width, height;
+        map.GetDimensions(width, height);
+        int2 texel = clamp(int2(uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
+        float occluder = map.Load(int3(texel, 0)).r;
+        return max(ndc.z - occluder, 0.0) / abs(k.scale.z);
+    }
+    return 0.0;
+}
+
+// What the forward subsurface pass writes besides the color (ADR 0059).
+struct SubsurfaceOut
+{
+    float4 irradiance;       // rgb: mask × diffuse light per unit albedo × entry albedo; a: depth from the near plane
+    float4 albedo;           // rgb: exit albedo; a: profile index / 255
+};
+
 // The shading of the forward entry points, with the material's alpha; `masked` discards
 // below the alpha cutoff.
 float4 shade(VertexOut input, bool front, bool masked)
+{
+    SubsurfaceOut unused;
+    return shade_surface(input, front, masked, false, unused);
+}
+
+// `shade`; with `subsurface`, the scattered part of the diffuse light goes to `sss`
+// instead of the color.
+float4 shade_surface(VertexOut input, bool front, bool masked, bool subsurface, out SubsurfaceOut sss)
 {
     Frame frame = push.frame[0];
     Material m = push.materials[input.material];
@@ -913,13 +1014,54 @@ float4 shade(VertexOut input, bool front, bool masked)
     float3 f = fresnel_schlick(v_dot_h, f0);
     float3 specular = distribution_ggx(n_dot_h, a) * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, a) * f;
     float3 diffuse = (1.0 - metallic) * base.rgb / PI;
+    // Subsurface materials keep their diffuse light apart: the lighting below then returns
+    // the specular light only.
+    float3 surface_diffuse = subsurface ? float3(0.0, 0.0, 0.0) : diffuse;
+    float3 ambient_albedo = subsurface ? float3(0.0, 0.0, 0.0) : base.rgb;
     // A surface facing away from the light is in its own shadow, whatever its normal map
     // says.
     float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
-    float3 color = (diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
-        + ambient_light(n, v, diffuse, f0, roughness, occlusion, base.rgb)
+    float3 local_irradiance = 0.0;
+    float3 color = (surface_diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
+        + ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo)
         + emissive
-        + local_lights(input.world_position, input.position.xy, n, v, diffuse, f0, a);
+        + local_lights(input.world_position, input.position.xy, n, v, surface_diffuse, f0, a, local_irradiance);
+    sss = (SubsurfaceOut)0;
+    if (subsurface)
+    {
+        uint bits = m.subsurface;
+        uint index = min(max(bits & 0xFFu, 1u) - 1u, max(frame.subsurface_count, 1u) - 1u);
+        SubsurfaceProfile* profile = frame.subsurface + index;
+        // Diffuse light per unit base color: sun, local lights, sky.
+        float kd = (1.0 - metallic) / PI;
+        float3 lit = kd * (frame.light_color.rgb * n_dot_l * visible + local_irradiance) + ambient_diffuse(n, occlusion, kd);
+        // Light from behind, through the material (Jimenez et al. 2010): the profile's slab
+        // integral over its thickness, or over the object's in the shadow map.
+        uint transmission = (bits >> 16) & 3u;
+        float back = saturate(-dot(n, l));
+        if (transmission != 0 && back > 0.0)
+        {
+            float thickness = m.thickness * sample_material(m.thickness_texture, input.uv).g;
+            float3 light_normal = normalize(input.light_normal) * side;
+            float d = thickness;
+            float lit_back = 1.0;
+            if (transmission == TRANSMISSION_THIN)
+                // Shadowed by other objects: the receiver pushed through its thickness to
+                // the lit side.
+                lit_back = shadow(input.light_position - light_normal * thickness, -light_normal, input.position.xy);
+            else
+                d = max(thickness, shadow_distance(input.light_position, light_normal));
+            lit += kd * frame.light_color.rgb * back * lit_back * profile_transmission(profile, d);
+        }
+        float mask = float((bits >> 8) & 0xFFu) / 255.0;
+        bool split = (bits & SUBSURFACE_SPLIT_TEXTURING) != 0;
+        float3 entry = split ? sqrt(base.rgb) : float3(1.0, 1.0, 1.0);
+        float3 exit = split ? sqrt(base.rgb) : base.rgb;
+        color += (1.0 - mask) * base.rgb * lit;
+        float depth = max(dot(input.world_position, frame.view_axis.xyz) + frame.view_axis.w, 1e-6);
+        sss.irradiance = float4(mask * lit * entry, depth);
+        sss.albedo = float4(exit, float(index) / 255.0);
+    }
     return float4(color, base.a);
 }
 
@@ -997,6 +1139,46 @@ ShadedMotion fragmentMaskedMotion(VertexOut input, bool front : SV_IsFrontFace)
     ShadedMotion o;
     o.color = float4(shade(input, front, true).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+struct SubsurfaceShaded
+{
+    float4 color : SV_Target0;
+    float4 irradiance : SV_Target1;
+    float4 albedo : SV_Target2;
+};
+
+// Subsurface materials (ADR 0059), after the prepass: the color without the scattered
+// diffuse light, which goes to the other targets.
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurface(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    o.color = float4(shade_surface(input, front, false, true, sss).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+struct SubsurfaceShadedMotion
+{
+    float4 color : SV_Target0;
+    float2 motion : SV_Target1;
+    float4 irradiance : SV_Target2;
+    float4 albedo : SV_Target3;
+};
+
+[shader("fragment")]
+SubsurfaceShadedMotion fragmentSubsurfaceMotion(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShadedMotion o;
+    o.color = float4(shade_surface(input, front, false, true, sss).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
     return o;
 }
 

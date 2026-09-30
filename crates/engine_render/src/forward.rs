@@ -55,6 +55,10 @@ use crate::lights::{
 use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::shadow::{self, CascadeFit, MAX_CASCADES};
+use crate::subsurface::{
+    self, ALBEDO_FORMAT, Footprint, GpuProfile, IRRADIANCE_FORMAT, ScatterInput, SubsurfaceProfile,
+    SubsurfaceSettings,
+};
 use crate::upload::UploadRing;
 use core::cell::{Cell, RefCell};
 use engine_core::math::{Mat4, Vec3};
@@ -76,6 +80,11 @@ const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmen
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
 const SKY_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.skyFragment.spv");
+const FRAGMENT_SUBSURFACE: &[u8] = include_bytes!("../shaders/forward.fragmentSubsurface.spv");
+const FRAGMENT_SUBSURFACE_MOTION: &[u8] =
+    include_bytes!("../shaders/forward.fragmentSubsurfaceMotion.spv");
+const SCATTER_VERTEX: &[u8] = include_bytes!("../shaders/subsurface.scatterVertex.spv");
+const SCATTER_FRAGMENT: &[u8] = include_bytes!("../shaders/subsurface.scatterFragment.spv");
 
 pub use crate::lights::{LocalLight, Spot};
 pub use crate::shadow::ShadowSettings;
@@ -99,15 +108,26 @@ const PHASE_EARLY: u32 = 1;
 const PHASE_LATE: u32 = 2;
 const PHASE_SHADOW: u32 = 3;
 
-/// Pipeline states of batches, drawn in this order: bit 2 masked, bit 1 double-sided,
-/// bit 0 mirrored (negative determinant, so front faces wind clockwise on screen).
-const STATES: usize = 16;
+/// Pipeline states of batches, drawn in this order: bit 4 subsurface scattering, bit 3
+/// blended, bit 2 masked, bit 1 double-sided, bit 0 mirrored (negative determinant, so
+/// front faces wind clockwise on screen).
+const STATES: usize = 32;
+/// Subsurface scattering (ADR 0059): shaded by the forward subsurface pass, after the
+/// depth prepass. Never blended.
+const SUBSURFACE: usize = 16;
 /// Blended surfaces: drawn by the transparent pass only, one batch per instance, back to
 /// front (ADR 0054).
 const BLENDED: usize = 8;
 const MASKED: usize = 4;
 const DOUBLE_SIDED: usize = 2;
 const MIRRORED: usize = 1;
+/// Bitmasks of states for [`States::draw`]: opaque and masked without subsurface
+/// scattering (0-7), blended (8-15), with subsurface scattering (16-23).
+const PLAIN_STATES: u32 = 0x0000_00FF;
+const BLENDED_STATES: u32 = 0x0000_FF00;
+const SUBSURFACE_STATES: u32 = 0x00FF_0000;
+/// Everything that writes depth and casts shadows.
+const DEPTH_STATES: u32 = PLAIN_STATES | SUBSURFACE_STATES;
 
 /// One object to draw.
 ///
@@ -447,9 +467,10 @@ struct FrameData {
     env_levels: u32,
     env_intensity: f32,
     linear_sampler: u32,
-    _pad5: u32,
+    /// Subsurface profiles (ADR 0059) at `subsurface`.
+    subsurface_count: u32,
     sh: u64,
-    _pad6: [u32; 2],
+    subsurface: u64,
 }
 
 /// `Instance` in `forward.slang` (64 bytes).
@@ -586,6 +607,9 @@ struct Shading {
     /// Transparent surfaces: premultiplied blending, depth tested but not written; without
     /// and with the reactive mask.
     blended: [Pipeline; 2],
+    /// Subsurface-scattering materials after the prepass (ADR 0059), also writing their
+    /// diffuse light and albedo: without and with motion vectors.
+    subsurface: [Pipeline; 2],
 }
 
 /// The forward PBR pipelines.
@@ -613,6 +637,11 @@ pub struct ForwardRenderer {
     /// Screen-space error (pixels) a coarser detail level may have; 0 draws full meshes.
     lod_threshold: f32,
     depth_prepass: bool,
+    /// Adds the scattered light of subsurface materials (ADR 0059).
+    scatter: Pipeline,
+    subsurface_settings: Option<SubsurfaceSettings>,
+    /// The profiles as the shaders read them.
+    subsurface_profiles: Vec<GpuProfile>,
     scratch: RefCell<Scratch>,
 }
 
@@ -650,9 +679,21 @@ impl ForwardRenderer {
         let fragment_blended = spirv_words(FRAGMENT_BLENDED).ok_or_else(invalid)?;
         let fragment_blended_reactive =
             spirv_words(FRAGMENT_BLENDED_REACTIVE).ok_or_else(invalid)?;
+        let fragment_subsurface = spirv_words(FRAGMENT_SUBSURFACE).ok_or_else(invalid)?;
+        let fragment_subsurface_motion =
+            spirv_words(FRAGMENT_SUBSURFACE_MOTION).ok_or_else(invalid)?;
+        let scatter_vertex = spirv_words(SCATTER_VERTEX).ok_or_else(invalid)?;
+        let scatter_fragment = spirv_words(SCATTER_FRAGMENT).ok_or_else(invalid)?;
         let reactive_formats = [color_format, REACTIVE_FORMAT];
         let formats = [color_format];
         let motion_formats = [color_format, MOTION_FORMAT];
+        let subsurface_formats = [color_format, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
+        let subsurface_motion_formats = [
+            color_format,
+            MOTION_FORMAT,
+            IRRADIANCE_FORMAT,
+            ALBEDO_FORMAT,
+        ];
         // The specialization constants of each shading variant.
         const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
         // Every graphics pipeline is described first and created in parallel below
@@ -713,7 +754,7 @@ impl ForwardRenderer {
                 &VARIANTS[variant],
             )
         };
-        let mut descs = Vec::with_capacity(8 * VARIANTS.len() + 6);
+        let mut descs = Vec::with_capacity(10 * VARIANTS.len() + 7);
         for lit in 0..VARIANTS.len() {
             descs.extend([
                 main(&fragment, c"fragmentMain", &formats, false, lit),
@@ -747,6 +788,20 @@ impl ForwardRenderer {
                     &reactive_formats,
                     lit,
                 ),
+                main(
+                    &fragment_subsurface,
+                    c"fragmentSubsurface",
+                    &subsurface_formats,
+                    true,
+                    lit,
+                ),
+                main(
+                    &fragment_subsurface_motion,
+                    c"fragmentSubsurfaceMotion",
+                    &subsurface_motion_formats,
+                    true,
+                    lit,
+                ),
             ]);
         }
         let background_formats = [MOTION_FORMAT];
@@ -777,6 +832,11 @@ impl ForwardRenderer {
                 spirv: &sky_fragment,
                 entry: c"skyFragment",
             },
+        ));
+        descs.push(subsurface::scatter_pipeline_desc(
+            &scatter_vertex,
+            &scatter_fragment,
+            &formats,
         ));
         let masked_depth = ShaderStageDesc {
             spirv: &shadow_fragment_masked,
@@ -831,11 +891,13 @@ impl ForwardRenderer {
                 main_motion: [next()?, next()?],
                 shade_motion: next()?,
                 blended: [next()?, next()?],
+                subsurface: [next()?, next()?],
             })
         };
         let shading = [shading()?, shading()?, shading()?, shading()?];
         let background = next()?;
         let sky = next()?;
+        let scatter = next()?;
         let prepass = [next()?, next()?];
         let shadow = [next()?, next()?];
         Ok(Self {
@@ -852,6 +914,9 @@ impl ForwardRenderer {
             light_culling: true,
             lod_threshold: 1.0,
             depth_prepass: false,
+            scatter,
+            subsurface_settings: Some(SubsurfaceSettings::default()),
+            subsurface_profiles: Vec::new(),
             scratch: RefCell::new(Scratch::default()),
         })
     }
@@ -882,6 +947,33 @@ impl ForwardRenderer {
     /// Whether the depth prepass is on.
     pub fn depth_prepass(&self) -> bool {
         self.depth_prepass
+    }
+
+    /// Turns subsurface scattering (ADR 0059) on with `settings` (the default) or off
+    /// (`None`: subsurface materials shade as ordinary ones). It needs the depth before
+    /// shading, so the depth prepass runs whenever a subsurface material is drawn.
+    pub fn set_subsurface(&mut self, settings: Option<SubsurfaceSettings>) {
+        self.subsurface_settings = settings;
+    }
+
+    /// The subsurface scattering settings, when it is on.
+    pub fn subsurface(&self) -> Option<SubsurfaceSettings> {
+        self.subsurface_settings
+    }
+
+    /// Sets the diffusion profiles that subsurface materials name by index
+    /// ([`crate::material::Subsurface::profile`]; at most [`subsurface::MAX_PROFILES`],
+    /// the rest are ignored). Without profiles, subsurface materials shade as ordinary
+    /// ones. Prepares each profile's sample kernels (well under a millisecond each):
+    /// call it when profiles change, not every frame.
+    pub fn set_subsurface_profiles(&mut self, profiles: &[SubsurfaceProfile]) {
+        self.subsurface_profiles.clear();
+        self.subsurface_profiles.extend(
+            profiles
+                .iter()
+                .take(subsurface::MAX_PROFILES)
+                .map(SubsurfaceProfile::gpu),
+        );
     }
 
     /// The driver's statistics of the opaque forward pipeline of each shading variant (see
@@ -989,7 +1081,12 @@ impl ForwardRenderer {
         // within a state, front to back (by the first instance's box), so the depth test
         // rejects hidden fragments before shading.
         let mut counts = [0u32; STATES];
-        batches(draws, materials, slots, runs, &mut counts);
+        // Subsurface materials get a pipeline state of their own while scattering is on
+        // and there are profiles; otherwise they shade as ordinary ones.
+        let subsurface_on =
+            self.subsurface_settings.is_some() && !self.subsurface_profiles.is_empty();
+        batches(draws, materials, slots, runs, &mut counts, subsurface_on);
+        let subsurface_draws = counts[SUBSURFACE..SUBSURFACE + 8].iter().any(|&c| c > 0);
         let mut starts = [0u32; STATES];
         let mut next = 0;
         for (start, count) in starts.iter_mut().zip(counts) {
@@ -1187,6 +1284,12 @@ impl ForwardRenderer {
             };
             (layout, uploaded)
         };
+        // Subsurface profiles, for transmission and the scatter pass (ADR 0059).
+        let profiles = if subsurface_draws {
+            ring.push(&self.subsurface_profiles)?
+        } else {
+            0
+        };
         let settings = &self.shadow_settings;
         let fit = shadow::fit_cascades(
             unjittered,
@@ -1258,9 +1361,13 @@ impl ForwardRenderer {
             env_levels: PREFILTERED_LEVELS,
             env_intensity: environment.map_or(1.0, |e| e.intensity),
             linear_sampler: Bindless::sampler(SamplerKind::LinearClamp),
-            _pad5: 0,
+            subsurface_count: if subsurface_draws {
+                self.subsurface_profiles.len() as u32
+            } else {
+                0
+            },
             sh: environment.map_or(0, |e| e.sh_address),
-            _pad6: [0; 2],
+            subsurface: profiles,
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -1453,7 +1560,7 @@ impl ForwardRenderer {
                             [&shadow_pipelines[0], &shadow_pipelines[1]],
                             &push,
                             true,
-                            false,
+                            DEPTH_STATES,
                             ctx.buffer(shadow_commands),
                             u64::from(cascade) * command_bytes,
                             tile,
@@ -1534,7 +1641,9 @@ impl ForwardRenderer {
             environment,
         };
 
-        let prepass = self.depth_prepass;
+        // Subsurface materials need the depth before shading (the prepass draws it): their
+        // pass follows the forward pass with the depth tested for equality.
+        let prepass = self.depth_prepass || subsurface_draws;
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
@@ -1548,7 +1657,8 @@ impl ForwardRenderer {
         };
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
-                               phase: u32| {
+                               phase: u32,
+                               mask: u32| {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
@@ -1566,7 +1676,7 @@ impl ForwardRenderer {
                     pipelines,
                     &push,
                     false,
-                    false,
+                    mask,
                     ctx.buffer(culled),
                     offset,
                     ctx.render_area(),
@@ -1584,7 +1694,9 @@ impl ForwardRenderer {
                 let depth_use = if prepass {
                     prepass_pass(fg, "depth prepass", &geometry, &materials, culled, visible)
                         .depth(depth, depth_clear, StoreOp::Store)
-                        .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_ALL));
+                        .execute(move |ctx| {
+                            draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES)
+                        });
                     DepthUse::ReadOnly
                 } else {
                     DepthUse::Write(depth_clear, depth_store)
@@ -1593,7 +1705,7 @@ impl ForwardRenderer {
                     fg, "forward", &geometry, &materials, shadow_map, culled, visible, targets,
                     true, depth, depth_use,
                 )
-                .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL));
+                .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL, PLAIN_STATES));
                 ForwardPasses {
                     instances: instance_count,
                     batches: batch_count,
@@ -1618,7 +1730,9 @@ impl ForwardRenderer {
                         visible,
                     )
                     .depth(depth, depth_clear, StoreOp::Store)
-                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_EARLY));
+                    .execute(move |ctx| {
+                        draw_phase(ctx, prepass_pipelines, PHASE_EARLY, DEPTH_STATES)
+                    });
                 } else {
                     shading_pass(
                         fg,
@@ -1633,7 +1747,7 @@ impl ForwardRenderer {
                         depth,
                         DepthUse::Write(depth_clear, StoreOp::Store),
                     )
-                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_EARLY));
+                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES));
                 }
                 let pyramid = fg.create_buffer(
                     "depth pyramid",
@@ -1671,7 +1785,9 @@ impl ForwardRenderer {
                         visible,
                     )
                     .depth(depth, LoadOp::Load, StoreOp::Store)
-                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_LATE));
+                    .execute(move |ctx| {
+                        draw_phase(ctx, prepass_pipelines, PHASE_LATE, DEPTH_STATES)
+                    });
                     shading_pass(
                         fg,
                         "forward",
@@ -1686,8 +1802,8 @@ impl ForwardRenderer {
                         DepthUse::ReadOnly,
                     )
                     .execute(move |ctx| {
-                        draw_phase(ctx, main_pipelines, PHASE_EARLY);
-                        draw_phase(ctx, main_pipelines, PHASE_LATE);
+                        draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES);
+                        draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES);
                     });
                 } else {
                     shading_pass(
@@ -1703,7 +1819,7 @@ impl ForwardRenderer {
                         depth,
                         DepthUse::Write(LoadOp::Load, depth_store),
                     )
-                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_LATE));
+                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES));
                 }
                 ForwardPasses {
                     instances: instance_count,
@@ -1715,6 +1831,62 @@ impl ForwardRenderer {
                 }
             }
         };
+        // Subsurface materials (ADR 0059): shaded after the others, also writing their
+        // diffuse light and albedo, then scattered into the color target.
+        if subsurface_draws && let Some(settings) = self.subsurface_settings {
+            let irradiance = fg.create_texture(
+                "subsurface irradiance",
+                TextureDesc::new_2d(IRRADIANCE_FORMAT, depth_desc.width, depth_desc.height),
+            );
+            let albedo = fg.create_texture(
+                "subsurface albedo",
+                TextureDesc::new_2d(ALBEDO_FORMAT, depth_desc.width, depth_desc.height),
+            );
+            let pipeline = &shading.subsurface[usize::from(velocity.is_some())];
+            let two_phases = flag_buffer.is_some();
+            shading_pass(
+                fg,
+                "forward subsurface",
+                &geometry,
+                &materials,
+                shadow_map,
+                culled,
+                visible,
+                targets,
+                false,
+                depth,
+                DepthUse::ReadOnly,
+            )
+            .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+            .color(albedo, LoadOp::DontCare, StoreOp::Store)
+            .execute(move |ctx| {
+                let pipelines = [pipeline, pipeline];
+                if two_phases {
+                    draw_phase(ctx, pipelines, PHASE_EARLY, SUBSURFACE_STATES);
+                    draw_phase(ctx, pipelines, PHASE_LATE, SUBSURFACE_STATES);
+                } else {
+                    draw_phase(ctx, pipelines, PHASE_ALL, SUBSURFACE_STATES);
+                }
+            });
+            let (forward, near_center) =
+                axis.map_or((Vec3::NEG_Z, Vec3::ZERO), |a| (a.forward, a.near_center));
+            subsurface::add_scatter_pass(
+                fg,
+                bindless,
+                &self.scatter,
+                color,
+                ScatterInput {
+                    irradiance,
+                    albedo,
+                    profiles,
+                    profile_count: self.subsurface_profiles.len() as u32,
+                    footprint: Footprint::new(unjittered, forward, near_center, depth_desc.height),
+                    // New noise every frame only when a temporal resolve averages it.
+                    frame: temporal.map_or(0, |t| t.frame.get() as u32),
+                },
+                settings,
+            );
+        }
         // The sky where no geometry was drawn (depth still 1).
         if let Some(env) = environment {
             let sky = &self.sky;
@@ -1793,7 +1965,7 @@ impl ForwardRenderer {
                         [pipelines, pipelines],
                         &push,
                         false,
-                        true,
+                        BLENDED_STATES,
                         ctx.buffer(culled),
                         offset,
                         ctx.render_area(),
@@ -2002,30 +2174,34 @@ fn mirrored(m: &Mat4) -> bool {
         < 0.0
 }
 
-/// A batch's pipeline state.
-fn state(kind: MaterialKind, mirrored: bool) -> usize {
-    // Masked and blended exclude each other (both come from the alpha mode).
-    (usize::from(kind.blended) * BLENDED)
+/// A batch's pipeline state; `subsurface`: whether subsurface materials get theirs.
+fn state(kind: MaterialKind, mirrored: bool, subsurface: bool) -> usize {
+    // Masked and blended exclude each other (both come from the alpha mode), blended and
+    // subsurface too (the material table never sets both).
+    (usize::from(kind.subsurface && subsurface) * SUBSURFACE)
+        | (usize::from(kind.blended) * BLENDED)
         | (usize::from(kind.masked) * MASKED)
         | (usize::from(kind.double_sided) * DOUBLE_SIDED)
         | (usize::from(mirrored) * MIRRORED)
 }
 
 /// Fills `slots` with every draw's material slot and `runs` with the runs of consecutive
-/// draws that share a mesh and a pipeline state; counts the runs per state.
+/// draws that share a mesh and a pipeline state; counts the runs per state. `subsurface`:
+/// whether subsurface materials get their own states.
 fn batches(
     draws: &[DrawItem],
     materials: &MaterialFrame<'_>,
     slots: &mut Vec<u32>,
     runs: &mut Vec<Run>,
     counts: &mut [u32; STATES],
+    subsurface: bool,
 ) {
     slots.clear();
     runs.clear();
     let mut mesh = None;
     for (i, draw) in draws.iter().enumerate() {
         let (slot, kind) = materials.resolve(draw.material);
-        let state = state(kind, mirrored(&draw.world_from_object));
+        let state = state(kind, mirrored(&draw.world_from_object), subsurface);
         slots.push(slot);
         match runs.last_mut() {
             Some(run) if run.state == state && mesh == Some(draw.mesh) => run.len += 1,
@@ -2058,10 +2234,11 @@ struct States {
 impl States {
     /// Records one indirect draw per pipeline state in use, from the commands at `offset`
     /// in `buffer` (one per batch, in state order), into `area` of the target: `pipelines`
-    /// are the opaque and the masked one. `blended` draws the blended states only (the
-    /// transparent pass), otherwise only the others. The shadow pass renders back faces of single-sided
-    /// geometry (fewer self-shadowing artifacts on closed meshes); the forward passes cull
-    /// them.
+    /// are the opaque and the masked one. Only the states whose bits `mask` sets are drawn
+    /// (`*_STATES`). The shadow pass renders back faces of single-sided
+    /// geometry (fewer self-shadowing artifacts on closed meshes), except for subsurface
+    /// materials (their front faces, where light enters, for thick transmission); the
+    /// forward passes cull them.
     ///
     /// # Safety
     ///
@@ -2076,7 +2253,7 @@ impl States {
         pipelines: [&Pipeline; 2],
         push: &Push,
         shadow: bool,
-        blended: bool,
+        mask: u32,
         buffer: vk::Buffer,
         offset: u64,
         area: vk::Rect2D,
@@ -2084,12 +2261,15 @@ impl States {
         let mut bound = None;
         for state in 0..STATES {
             let count = self.counts[state];
-            if count == 0 || (state & BLENDED != 0) != blended {
+            if count == 0 || mask & (1 << state) == 0 {
                 continue;
             }
             let masked = state & MASKED != 0;
             let cull = match (state & DOUBLE_SIDED != 0, shadow) {
                 (true, _) => vk::CullModeFlags::NONE,
+                // Subsurface materials cast from the faces towards the light: the shadow
+                // map then holds where light enters them, for thick transmission.
+                (false, true) if state & SUBSURFACE != 0 => vk::CullModeFlags::BACK,
                 (false, true) => vk::CullModeFlags::FRONT,
                 (false, false) => vk::CullModeFlags::BACK,
             };
