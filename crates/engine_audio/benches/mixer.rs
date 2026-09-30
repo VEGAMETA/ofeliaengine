@@ -8,7 +8,7 @@
 
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
-use engine_audio::dsp::{Biquad, Block, Compressor, Delay, Effect, Limiter};
+use engine_audio::dsp::{Biquad, Block, Compressor, Delay, Effect, Limiter, Reverb};
 use engine_audio::{Audio, AudioConfig, BusId, Clip, PlayParams, Renderer, SendTap};
 use std::time::Instant;
 
@@ -97,13 +97,11 @@ fn main() {
         time_render(&mut voices(1024, &mono, 1.0, 64), 500),
     );
 
-    // A game-like graph: 8 category buses with EQ and compression, a reverb-ish delay send,
+    // A game-like graph: 8 category buses with EQ and compression, a reverb send,
     // a ducking sidechain, a master limiter; 128 voices spread over the categories.
     let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
     let reverb = audio.add_bus("reverb", BusId::MASTER).unwrap();
-    audio
-        .add_effect(reverb, Delay::new(0.09, 0.5, 1.0))
-        .unwrap();
+    audio.add_effect(reverb, Reverb::new(1.8, 0.6)).unwrap();
     let mut categories = Vec::new();
     for i in 0..8 {
         let bus = audio
@@ -157,6 +155,7 @@ fn main() {
             "Delay (fractional, feedback)",
             Box::new(Delay::new(0.25, 0.4, 0.3)),
         ),
+        ("Reverb (FDN, 8 lines)", Box::new(Reverb::new(2.0, 0.6))),
     ];
     let input = noise(BLOCK, 2);
     for (name, mut effect) in effects {

@@ -9,10 +9,12 @@
 mod biquad;
 mod delay;
 mod dynamics;
+mod reverb;
 
 pub use biquad::{Biquad, FilterKind};
 pub use delay::Delay;
 pub use dynamics::{Compressor, Limiter};
+pub use reverb::Reverb;
 
 /// One sub-block of a bus's stereo signal, processed in place.
 pub struct Block<'a> {

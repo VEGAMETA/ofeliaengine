@@ -56,6 +56,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0046](0046-image-based-lighting.md) | Image-based lighting from an environment | Accepted |
 | [0047](0047-bloom-and-automatic-exposure.md) | Bloom and automatic exposure | Accepted |
 | [0048](0048-tone-curve.md) | The tone curve: Uchimura's by default, PBR Neutral as an option | Accepted |
+| [0049](0049-reverb.md) | Reverb: diffusion into an 8-line feedback delay network | Accepted |
 | [0052](0052-compute-passes.md) | Compute passes: shaders typed by their push constants, checked against SPIR-V | Accepted |
 | [0053](0053-mesh-lods.md) | Mesh detail levels: meshoptimizer at import, chosen per instance by the culling pass | Accepted |
 
