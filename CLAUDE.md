@@ -547,6 +547,20 @@ Written together with the feature, not after. At minimum:
 
 ## 17. Work order (initial, adjusted by the team)
 
+**Current priorities (team decision 2026-09-30).** The engine's technical core comes first:
+internals that are thought through and fast, measured on both reference GPUs, before what
+makes a game developer's day easier. In this order:
+
+1. Transparency (sorted and order-independent paths, lighting, TAA interplay).
+2. Shader and pipeline cache and warm-up (PSO collection, persistent caches, no hitches).
+3. Assets and streaming (cooked runtime format, IoRing, GPU decompression research).
+4. Ambient occlusion and subsurface scattering.
+5. FSR 3.1 and DLSS (Streamline), then XeSS.
+6. Review what else the core lacks.
+7. Only then: editor tools, Luau bindings and debugger, other tooling.
+
+The initial order below is kept for reference; its remaining items follow these.
+
 1. `engine_core`, `engine_platform` (window, input, timers), Tracy, CI, cargo-deny.
 2. `engine_rhi` + triangle → render graph → basic 3D (meshes, PBR, shadows) → 2D batcher → viewports.
 3. Slang pipeline with hot reload and cache → "Compile All Shaders".
