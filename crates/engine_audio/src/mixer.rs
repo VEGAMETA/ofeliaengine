@@ -7,12 +7,13 @@
 //! into the output. It never allocates, frees, locks or blocks: objects it no longer needs
 //! go back to the game thread.
 
-use crate::clip::{Clip, ClipData};
-use crate::command::{BusChange, Command, NO_BUS, Return, VoiceChange, VoiceStart};
+use crate::clip::ClipData;
+use crate::command::{BusChange, Command, NO_BUS, Return, Source, VoiceChange, VoiceStart};
 use crate::dsp::{Block, Effect};
 use crate::graph::Schedule;
 use crate::shared::Shared;
 use crate::spatial::{Emitter, Heard, Listener, hear};
+use crate::stream::{StreamRead, advance_stream, resample_stream};
 use engine_core::spsc::{Consumer, Producer};
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -151,7 +152,7 @@ fn seconds_to_frames(seconds: f32, sample_rate: u32) -> u32 {
 #[derive(Default)]
 struct Voice {
     active: bool,
-    clip: Option<Clip>,
+    source: Option<Source>,
     bus: u16,
     /// Position in the clip, 32.32 frames.
     pos: u64,
@@ -184,7 +185,7 @@ struct Voice {
 
 impl Voice {
     fn stereo(&self) -> bool {
-        self.clip.as_ref().is_some_and(|c| c.0.channels == 2)
+        self.source.as_ref().is_some_and(|s| s.channels() == 2)
     }
 
     /// Channel gains from the user's gain and pan and the spatial ones.
@@ -226,7 +227,10 @@ impl Voice {
     }
 
     fn update_step(&mut self, sample_rate: u32) {
-        let clip_rate = self.clip.as_ref().map_or(sample_rate, |c| c.0.sample_rate);
+        let clip_rate = self
+            .source
+            .as_ref()
+            .map_or(sample_rate, Source::sample_rate);
         let pitch = self.pitch * self.heard.pitch;
         let ratio = f64::from(pitch.clamp(1.0 / 64.0, 64.0)) * f64::from(clip_rate)
             / f64::from(sample_rate.max(1));
@@ -595,7 +599,11 @@ impl Renderer {
 
     fn apply(&mut self, command: Command) {
         match command {
-            Command::Play { slot, clip, start } => self.start_voice(slot, clip, start),
+            Command::Play {
+                slot,
+                source,
+                start,
+            } => self.start_voice(slot, source, start),
             Command::Voice { slot, change } => {
                 let rate = self.sample_rate;
                 let Some(v) = self.voices.get_mut(slot as usize) else {
@@ -700,17 +708,20 @@ impl Renderer {
         }
     }
 
-    fn start_voice(&mut self, slot: u32, clip: Clip, start: VoiceStart) {
+    fn start_voice(&mut self, slot: u32, source: Source, start: VoiceStart) {
         let rate = self.sample_rate;
         let clock = self.clock;
         let listener = self.listener;
         let Some(v) = self.voices.get_mut(slot as usize) else {
-            self.give_back(Return::VoiceEnded { slot, clip });
+            if let Source::Stream(ring) = &source {
+                ring.close();
+            }
+            self.give_back(Return::VoiceEnded { slot, source });
             return;
         };
         *v = Voice {
             active: true,
-            clip: Some(clip),
+            source: Some(source),
             bus: start.bus,
             pos: 0,
             step: 0,
@@ -745,8 +756,9 @@ impl Renderer {
             && at < clock
         {
             v.start_at = None;
-            let alive = match &v.clip {
-                Some(c) => advance(&c.0, &mut v.pos, v.step, v.looping, clock - at),
+            let alive = match &v.source {
+                Some(Source::Clip(c)) => advance(&c.0, &mut v.pos, v.step, v.looping, clock - at),
+                Some(Source::Stream(s)) => !advance_stream(s, &mut v.pos, v.step, clock - at),
                 None => false,
             };
             if !alive {
@@ -876,7 +888,7 @@ impl Renderer {
             None => 0,
         };
         let m = n - offset;
-        let Some(clip) = v.clip.as_ref() else {
+        let Some(source) = v.source.as_ref() else {
             v.ended = true;
             return;
         };
@@ -885,7 +897,11 @@ impl Renderer {
             v.is_virtual = true;
         }
         if v.is_virtual && !v.want_real {
-            if v.stopping || !advance(&clip.0, &mut v.pos, v.step, v.looping, m as u64) {
+            let alive = match source {
+                Source::Clip(clip) => advance(&clip.0, &mut v.pos, v.step, v.looping, m as u64),
+                Source::Stream(ring) => !advance_stream(ring, &mut v.pos, v.step, m as u64),
+            };
+            if v.stopping || !alive {
                 v.ended = true;
             }
             v.gains[0].skip(m as u32);
@@ -908,15 +924,33 @@ impl Renderer {
 
         v.mixed = true;
         let (left, right) = self.scratch.split_at_mut(MAX_BLOCK);
-        let produced = resample(
-            &clip.0,
-            &mut v.pos,
-            v.step,
-            v.looping,
-            &mut left[..m],
-            &mut right[..m],
-        );
-        let stereo = clip.0.channels == 2;
+        let (produced, ended) = match source {
+            Source::Clip(clip) => {
+                let produced = resample(
+                    &clip.0,
+                    &mut v.pos,
+                    v.step,
+                    v.looping,
+                    &mut left[..m],
+                    &mut right[..m],
+                );
+                (produced, produced < m)
+            }
+            Source::Stream(ring) => {
+                match resample_stream(ring, &mut v.pos, v.step, &mut left[..m], &mut right[..m]) {
+                    StreamRead::Full => (m, false),
+                    StreamRead::Ended(produced) => (produced, true),
+                    StreamRead::Starved(produced) => {
+                        // The decoder is behind: silence until it catches up, in place.
+                        left[produced..m].fill(0.0);
+                        right[produced..m].fill(0.0);
+                        self.shared.stream_underruns.fetch_add(1, Ordering::Relaxed);
+                        (m, false)
+                    }
+                }
+            }
+        };
+        let stereo = source.channels() == 2;
         let channels = if stereo { 2 } else { 1 };
         for (samples, state) in [&mut left[..produced], &mut right[..produced]]
             .into_iter()
@@ -945,7 +979,7 @@ impl Renderer {
         v.gains[0].add_scaled(&mut out_l[offset..offset + produced], &left[..produced]);
         v.gains[1].add_scaled(&mut out_r[offset..offset + produced], src_r);
 
-        if produced < m || (v.stopping && v.gains[0].left == 0 && v.gains[1].left == 0) {
+        if ended || (v.stopping && v.gains[0].left == 0 && v.gains[1].left == 0) {
             v.ended = true;
         }
     }
@@ -1068,11 +1102,14 @@ impl Renderer {
             let v = &mut self.voices[slot as usize];
             if v.ended {
                 v.active = false;
-                let clip = v.clip.take();
+                let source = v.source.take();
                 // Order-preserving removal (see `active`).
                 self.active.remove(i);
-                if let Some(clip) = clip {
-                    self.give_back(Return::VoiceEnded { slot, clip });
+                if let Some(source) = source {
+                    if let Source::Stream(ring) = &source {
+                        ring.close();
+                    }
+                    self.give_back(Return::VoiceEnded { slot, source });
                 }
             } else {
                 i += 1;

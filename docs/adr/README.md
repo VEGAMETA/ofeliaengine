@@ -58,6 +58,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0048](0048-tone-curve.md) | The tone curve: Uchimura's by default, PBR Neutral as an option | Accepted |
 | [0049](0049-reverb.md) | Reverb: diffusion into an 8-line feedback delay network | Accepted |
 | [0050](0050-spatial-audio.md) | Spatial audio: emitters and a listener, computed on the audio thread per render call | Accepted |
+| [0051](0051-compressed-audio-and-streaming.md) | Compressed audio and streaming: lewton, vendored libopus, claxon; an SPSC ring per stream | Accepted |
 | [0052](0052-compute-passes.md) | Compute passes: shaders typed by their push constants, checked against SPIR-V | Accepted |
 | [0053](0053-mesh-lods.md) | Mesh detail levels: meshoptimizer at import, chosen per instance by the culling pass | Accepted |
 

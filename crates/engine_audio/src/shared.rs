@@ -10,6 +10,8 @@ pub(crate) struct Shared {
     pub(crate) sample_rate: AtomicU32,
     pub(crate) real_voices: AtomicU32,
     pub(crate) virtual_voices: AtomicU32,
+    /// Blocks in which a stream voice ran out of decoded frames.
+    pub(crate) stream_underruns: AtomicU64,
     /// Peak per bus and channel since the game last read it, as `f32` bits (non-negative
     /// floats order like their bits, so `fetch_max` works).
     pub(crate) peaks: Box<[AtomicU32]>,
@@ -22,6 +24,7 @@ impl Shared {
             sample_rate: AtomicU32::new(48_000),
             real_voices: AtomicU32::new(0),
             virtual_voices: AtomicU32::new(0),
+            stream_underruns: AtomicU64::new(0),
             peaks: (0..max_buses * 2).map(|_| AtomicU32::new(0)).collect(),
         }
     }

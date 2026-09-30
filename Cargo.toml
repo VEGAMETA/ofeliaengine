@@ -14,6 +14,7 @@ publish = false
 [workspace.dependencies]
 engine_assets = { path = "crates/engine_assets" }
 engine_audio = { path = "crates/engine_audio" }
+engine_audio_decode = { path = "crates/engine_audio_decode" }
 engine_core = { path = "crates/engine_core" }
 engine_text = { path = "crates/engine_text" }
 engine_ecs = { path = "crates/engine_ecs" }

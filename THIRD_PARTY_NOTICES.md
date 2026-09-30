@@ -25,6 +25,9 @@ the dependency.
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
 | meshopt 0.6.2 (+ bitflags 2, float-cmp 0.10, num-traits 0.2, thiserror 2 + thiserror-impl) | MIT OR Apache-2.0 (float-cmp MIT) | mesh simplification for detail levels in `engine_assets` (ADR 0053) |
 | meshoptimizer 0.25 (© Arseny Kapoulkine; vendored inside meshopt, built by cc) | MIT | the simplifier and vertex cache optimizer behind meshopt |
+| lewton 0.10.2 (+ tinyvec 1.13, byteorder 1.5) | MIT OR Apache-2.0 (tinyvec Zlib OR Apache-2.0 OR MIT; byteorder Unlicense OR MIT) | Ogg Vorbis decoding in `engine_audio_decode` (ADR 0051) |
+| ogg 0.8.0 | BSD-3-Clause | Ogg pages of Opus files in `engine_audio_decode` (ADR 0051) |
+| claxon 0.4.3 | Apache-2.0 | FLAC decoding in `engine_audio_decode` (ADR 0051) |
 
 Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profiling`):
 
@@ -41,6 +44,7 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 | Jolt Physics (© 2021 Jorrit Rouwe) | v5.6.0 | MIT | reference physics backend `engine_physics_jolt` (ADR 0018) |
 | JoltC (© Amer Koleci and contributors) | commit 886e088675ba | MIT | C API over Jolt, bound by `engine_physics_jolt` |
 | Box2D (© 2022 Erin Catto) | v3.1.1 | MIT | 2D physics, `engine_physics2d` (ADR 0028) |
+| libopus (© 2001-2023 Xiph.Org, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon) | 1.5.2 | BSD-3-Clause (`third_party/opus/COPYING`) | Opus decoding in `engine_audio_decode` (ADR 0051) |
 
 ## Fonts and icons
 

@@ -1,18 +1,19 @@
 //! The game-thread side: [`Audio`].
 
 use crate::clip::Clip;
-use crate::command::{BusChange, Command, NO_BUS, Return, VoiceChange, VoiceStart};
+use crate::command::{BusChange, Command, NO_BUS, Return, Source, VoiceChange, VoiceStart};
 use crate::dsp::Effect;
 use crate::graph::{BusNode, EffectNode, Graph, SendNode};
 use crate::mixer::{Renderer, RendererParts};
 use crate::shared::Shared;
 use crate::spatial::{Emitter, Listener};
+use crate::stream::{DecodeError, Decoder, StreamJob, StreamRing, Streamer};
 use core::fmt;
 use engine_core::math::Vec3;
 use engine_core::spsc::{self, Consumer, Producer};
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// Capacities, fixed at creation so the audio thread never grows anything.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,9 @@ pub struct AudioConfig {
     /// Commands queued between two render calls before they spill into a game-side
     /// overflow queue. Default 2048.
     pub command_capacity: u32,
+    /// Decoded audio kept ahead of each stream, in milliseconds (rounded up to a power of
+    /// two of frames). Default 500: room for a slow disk read without a gap.
+    pub stream_buffer_ms: u32,
 }
 
 impl Default for AudioConfig {
@@ -42,6 +46,7 @@ impl Default for AudioConfig {
             max_sends: 128,
             max_effects: 128,
             command_capacity: 2048,
+            stream_buffer_ms: 500,
         }
     }
 }
@@ -171,6 +176,8 @@ pub enum AudioError {
     /// The change would make the graph cyclic (a bus feeding itself through parents,
     /// sends or sidechains). The graph is left as it was.
     Cycle,
+    /// A stream could not start: its decoder failed or has an unsupported format.
+    Decode(DecodeError),
 }
 
 impl fmt::Display for AudioError {
@@ -181,6 +188,7 @@ impl fmt::Display for AudioError {
             Self::Unknown(what) => write!(f, "unknown {what}"),
             Self::Master => f.write_str("the master bus cannot be removed or re-parented"),
             Self::Cycle => f.write_str("the change would make the bus graph cyclic"),
+            Self::Decode(e) => write!(f, "stream: {e}"),
         }
     }
 }
@@ -210,6 +218,10 @@ pub struct Audio {
     send_limit: usize,
     effect_limit: usize,
     shared: Arc<Shared>,
+    stream_frames_ms: u32,
+    /// The stream thread, started with the first stream.
+    streamer: Option<Streamer>,
+    stream_errors: Arc<AtomicU64>,
 }
 
 impl Audio {
@@ -251,6 +263,9 @@ impl Audio {
             send_limit: max_sends,
             effect_limit: max_effects,
             shared,
+            stream_frames_ms: config.stream_buffer_ms.max(20),
+            streamer: None,
+            stream_errors: Arc::new(AtomicU64::new(0)),
         };
         (audio, renderer)
     }
@@ -297,6 +312,72 @@ impl Audio {
         clip: &Clip,
         params: &PlayParams,
     ) -> Result<VoiceHandle, AudioError> {
+        self.start(Source::Clip(clip.clone()), params)
+    }
+
+    /// Plays a long sound (music, ambience, dialogue) while it decodes: the stream thread
+    /// keeps [`AudioConfig::stream_buffer_ms`] of it decoded ahead, and only that much is
+    /// in memory. `params.looping` starts it over at the end. The first part is decoded
+    /// here, before this returns (a few milliseconds), so it starts at once.
+    ///
+    /// Short sounds played often are cheaper as clips: `Clip::from_decoder`.
+    pub fn play_stream(
+        &mut self,
+        decoder: Box<dyn Decoder>,
+        params: &PlayParams,
+    ) -> Result<VoiceHandle, AudioError> {
+        engine_profiler::zone!("audio::play_stream");
+        if self.graph.bus(params.bus.0).is_none() {
+            return Err(AudioError::Unknown("bus"));
+        }
+        if self.free_voices.is_empty() {
+            return Err(AudioError::VoicesExhausted);
+        }
+        let (rate, channels) = (decoder.sample_rate(), usize::from(decoder.channels()));
+        if rate == 0 || !(1..=2).contains(&channels) {
+            return Err(AudioError::Decode(DecodeError::Unsupported(format!(
+                "{channels} channels at {rate} Hz"
+            ))));
+        }
+        let frames = (u64::from(self.stream_frames_ms) * u64::from(rate)).div_ceil(1000);
+        let ring = Arc::new(StreamRing::new(frames as usize, channels, rate));
+        let mut job = StreamJob {
+            ring: ring.clone(),
+            decoder,
+            looping: params.looping,
+            errors: self.stream_errors.clone(),
+        };
+        // Decode the first half now so the voice starts with data; a stream that fails
+        // right away is an error here rather than silence.
+        let mut scratch = vec![0.0f32; 1024 * channels];
+        let mut ended = false;
+        while ring.space() > ring.capacity() / 2 {
+            let n = job.decoder.read(&mut scratch).map_err(AudioError::Decode)?;
+            if n == 0 {
+                // A looping stream with something in it starts over; otherwise this is
+                // all there is.
+                if params.looping && ring.space() != ring.capacity() && job.decoder.seek(0).is_ok()
+                {
+                    continue;
+                }
+                ended = true;
+                break;
+            }
+            ring.push(&scratch[..n * channels]);
+        }
+        if ended {
+            // Short enough to fit: the stream thread is not needed (and the voice must not
+            // wait for it to say so).
+            ring.finish();
+        }
+        let handle = self.start(Source::Stream(ring), params)?;
+        if !ended {
+            self.streamer.get_or_insert_with(Streamer::start).add(job);
+        }
+        Ok(handle)
+    }
+
+    fn start(&mut self, source: Source, params: &PlayParams) -> Result<VoiceHandle, AudioError> {
         let bus = if self.graph.bus(params.bus.0).is_some() {
             params.bus.0
         } else {
@@ -311,7 +392,7 @@ impl Audio {
         };
         self.send(Command::Play {
             slot: index,
-            clip: clip.clone(),
+            source,
             start: VoiceStart {
                 bus,
                 gain: params.gain,
@@ -735,6 +816,18 @@ impl Audio {
             self.shared.take_peak(bus.index(), 0),
             self.shared.take_peak(bus.index(), 1),
         ]
+    }
+
+    /// Render blocks in which a stream voice ran out of decoded audio (and paused until
+    /// the decoder caught up), since the start. Stays 0 unless the disk or the stream
+    /// thread falls behind; raise [`AudioConfig::stream_buffer_ms`] if it grows.
+    pub fn stream_underruns(&self) -> u64 {
+        self.shared.stream_underruns.load(Ordering::Relaxed)
+    }
+
+    /// Decode errors in playing streams since the start (a stream ends at its first).
+    pub fn stream_errors(&self) -> u64 {
+        self.stream_errors.load(Ordering::Relaxed)
     }
 
     /// `(mixed, virtual)` voices at the audio thread's last render call.

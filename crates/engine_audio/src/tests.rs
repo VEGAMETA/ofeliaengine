@@ -756,3 +756,248 @@ fn the_four_step_low_pass_matches_the_plain_recursion() {
         }
     }
 }
+
+/// Waits for the stream thread in tests (real time on purpose: the thread polls on its
+/// own clock).
+#[allow(clippy::disallowed_methods)]
+fn wait_ms(ms: u64) {
+    std::thread::sleep(std::time::Duration::from_millis(ms));
+}
+
+/// A decoder of a known signal: frame `i` of channel 0 is `value(i % period)`, channel 1
+/// its negative. Reports when it is dropped.
+struct Synthetic {
+    rate: u32,
+    channels: u16,
+    frames: u64,
+    period: u64,
+    pos: u64,
+    dropped: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn value(i: u64) -> f32 {
+    (i as f32 + 1.0) / 16_384.0
+}
+
+impl Synthetic {
+    fn new(rate: u32, channels: u16, frames: u64) -> Self {
+        Self {
+            rate,
+            channels,
+            frames,
+            period: frames,
+            pos: 0,
+            dropped: std::sync::Arc::default(),
+        }
+    }
+}
+
+impl Drop for Synthetic {
+    fn drop(&mut self) {
+        self.dropped
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl crate::Decoder for Synthetic {
+    fn sample_rate(&self) -> u32 {
+        self.rate
+    }
+
+    fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    fn frames(&self) -> Option<u64> {
+        Some(self.frames)
+    }
+
+    fn read(&mut self, out: &mut [f32]) -> Result<usize, crate::DecodeError> {
+        let channels = usize::from(self.channels);
+        let n = ((out.len() / channels) as u64).min(self.frames - self.pos) as usize;
+        for (f, frame) in out.chunks_exact_mut(channels).take(n).enumerate() {
+            let v = value((self.pos + f as u64) % self.period);
+            frame[0] = v;
+            if channels == 2 {
+                frame[1] = -v;
+            }
+        }
+        self.pos += n as u64;
+        Ok(n)
+    }
+
+    fn seek(&mut self, frame: u64) -> Result<(), crate::DecodeError> {
+        self.pos = frame.min(self.frames);
+        Ok(())
+    }
+}
+
+#[test]
+fn a_stream_plays_exactly_like_the_clip_it_decodes_to() {
+    // 44.1 kHz stereo into 48 kHz: resampled with interpolation on both paths. The buffer
+    // holds the whole stream, so it is decoded before `play_stream` returns.
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig {
+        stream_buffer_ms: 2_000,
+        ..AudioConfig::default()
+    });
+    let clip = Clip::from_decoder(&mut Synthetic::new(44_100, 2, 10_000)).unwrap();
+    let params = PlayParams {
+        pan: -1.0,
+        ..PlayParams::default()
+    };
+    let from_clip = audio.play_with(&clip, &params).unwrap();
+    let mut clip_out = Vec::new();
+    for _ in 0..50 {
+        clip_out.extend(render(&mut renderer, 256));
+    }
+    audio.update();
+    assert!(!audio.is_playing(from_clip));
+
+    let stream = audio
+        .play_stream(Box::new(Synthetic::new(44_100, 2, 10_000)), &params)
+        .unwrap();
+    let mut stream_out = Vec::new();
+    for _ in 0..50 {
+        stream_out.extend(render(&mut renderer, 256));
+    }
+    audio.update();
+    assert!(!audio.is_playing(stream));
+    assert_eq!(audio.stream_underruns(), 0);
+    let expected_frames = (10_000.0f64 * 48_000.0 / 44_100.0).ceil() as usize;
+    for (i, (s, c)) in stream_out.iter().zip(&clip_out).enumerate() {
+        assert!((s - c).abs() < 1e-6, "{i}: {s} vs {c}");
+    }
+    assert!(left(&stream_out)[expected_frames - 2] != 0.0);
+    assert!(
+        left(&stream_out)[expected_frames + 1..]
+            .iter()
+            .all(|&x| x == 0.0)
+    );
+}
+
+#[test]
+fn a_looping_stream_is_kept_filled_by_the_stream_thread() {
+    // A 50 ms ring (4096 frames) and a 3000-frame loop: most of it is decoded while it
+    // plays, across the loop point, by the stream thread.
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig {
+        stream_buffer_ms: 50,
+        ..AudioConfig::default()
+    });
+    let voice = audio
+        .play_stream(
+            Box::new(Synthetic::new(48_000, 1, 3_000)),
+            &PlayParams {
+                pan: -1.0,
+                looping: true,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    let mut out = Vec::new();
+    for _ in 0..24 {
+        // 21 ms of audio every 40 ms: the thread (polling every 10 ms) keeps ahead.
+        out.extend(left(&render(&mut renderer, 1_024)));
+        wait_ms(40);
+    }
+    assert_eq!(audio.stream_underruns(), 0);
+    for (i, &s) in out.iter().enumerate() {
+        assert_eq!(s, value(i as u64 % 3_000), "frame {i}");
+    }
+    assert!(audio.is_playing(voice));
+    assert_eq!(audio.stream_errors(), 0);
+}
+
+#[test]
+fn a_starved_stream_waits_instead_of_skipping() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig {
+        stream_buffer_ms: 50,
+        ..AudioConfig::default()
+    });
+    audio
+        .play_stream(
+            Box::new(Synthetic::new(48_000, 1, 200_000)),
+            &PlayParams {
+                pan: -1.0,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    // A whole second at once: far more than the 4096-frame ring holds, so it starves.
+    let mut out = left(&render(&mut renderer, 48_000));
+    assert!(audio.stream_underruns() > 0);
+    for _ in 0..8 {
+        wait_ms(30);
+        out.extend(left(&render(&mut renderer, 1_024)));
+    }
+    // Every sample of the signal is non-zero; starving adds silence. Without the
+    // silence, the signal must come out whole: paused, never skipped.
+    let heard: Vec<f32> = out.into_iter().filter(|&s| s != 0.0).collect();
+    assert!(heard.len() > 8_000, "{}", heard.len());
+    for (i, &s) in heard.iter().enumerate() {
+        assert_eq!(s, value(i as u64), "sample {i}");
+    }
+}
+
+#[test]
+fn a_virtual_stream_keeps_time_and_ends() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig {
+        stream_buffer_ms: 2_000,
+        ..AudioConfig::default()
+    });
+    let muted = audio.add_bus("muted", BusId::MASTER).unwrap();
+    audio.set_bus_mute(muted, true);
+    let voice = audio
+        .play_stream(
+            Box::new(Synthetic::new(48_000, 2, 5_000)),
+            &PlayParams {
+                bus: muted,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    render(&mut renderer, 256);
+    assert_eq!(audio.voice_counts(), (0, 1));
+    for _ in 0..20 {
+        render(&mut renderer, 256);
+    }
+    audio.update();
+    assert!(!audio.is_playing(voice));
+}
+
+#[test]
+fn stopping_a_stream_frees_its_decoder_on_the_stream_thread() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig {
+        stream_buffer_ms: 50,
+        ..AudioConfig::default()
+    });
+    let decoder = Synthetic::new(48_000, 1, 1_000_000);
+    let dropped = decoder.dropped.clone();
+    let voice = audio
+        .play_stream(Box::new(decoder), &PlayParams::default())
+        .unwrap();
+    render(&mut renderer, 1_024);
+    audio.stop(voice, 0.0);
+    render(&mut renderer, 1_024);
+    audio.update();
+    assert!(!audio.is_playing(voice));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    while !dropped.load(std::sync::atomic::Ordering::Acquire) {
+        assert!(std::time::Instant::now() < deadline, "decoder not dropped");
+        wait_ms(5);
+    }
+}
+
+#[test]
+fn streams_with_unsupported_formats_are_refused() {
+    let (mut audio, _renderer) = Audio::new(&AudioConfig::default());
+    let result = audio.play_stream(
+        Box::new(Synthetic::new(48_000, 6, 1_000)),
+        &PlayParams::default(),
+    );
+    assert!(matches!(result, Err(AudioError::Decode(_))));
+    let result = audio.play_stream(
+        Box::new(Synthetic::new(0, 2, 1_000)),
+        &PlayParams::default(),
+    );
+    assert!(matches!(result, Err(AudioError::Decode(_))));
+}

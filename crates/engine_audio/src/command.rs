@@ -5,10 +5,35 @@ use crate::clip::Clip;
 use crate::dsp::Effect;
 use crate::graph::Schedule;
 use crate::spatial::{Emitter, Listener};
+use crate::stream::StreamRing;
 use engine_core::math::Vec3;
+use std::sync::Arc;
 
 /// Sentinel for "no bus".
 pub(crate) const NO_BUS: u16 = u16::MAX;
+
+/// What a voice plays: a clip in memory or a stream being decoded. Either is dropped on
+/// the game thread (it goes back through [`Return::VoiceEnded`]).
+pub(crate) enum Source {
+    Clip(Clip),
+    Stream(Arc<StreamRing>),
+}
+
+impl Source {
+    pub(crate) fn channels(&self) -> usize {
+        match self {
+            Self::Clip(c) => usize::from(c.0.channels),
+            Self::Stream(s) => s.channels,
+        }
+    }
+
+    pub(crate) fn sample_rate(&self) -> u32 {
+        match self {
+            Self::Clip(c) => c.0.sample_rate,
+            Self::Stream(s) => s.sample_rate,
+        }
+    }
+}
 
 /// How a voice starts.
 #[derive(Clone, Copy)]
@@ -58,7 +83,7 @@ pub(crate) enum BusChange {
 pub(crate) enum Command {
     Play {
         slot: u32,
-        clip: Clip,
+        source: Source,
         start: VoiceStart,
     },
     Voice {
@@ -99,9 +124,9 @@ pub(crate) enum Command {
 pub(crate) enum Return {
     VoiceEnded {
         slot: u32,
-        // Dropped on the game thread, which may free the clip's memory.
+        // Dropped on the game thread, which may free the clip's or the stream's memory.
         #[allow(dead_code)]
-        clip: Clip,
+        source: Source,
     },
     #[allow(dead_code)]
     Schedule(Box<Schedule>),

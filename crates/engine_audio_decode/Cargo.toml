@@ -1,0 +1,25 @@
+[package]
+name = "engine_audio_decode"
+description = "Compressed audio for engine_audio: Ogg Vorbis, Ogg Opus (vendored libopus) and FLAC decoders."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+links = "opus"
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_audio.workspace = true
+engine_profiler.workspace = true
+# Vorbis (MIT OR Apache-2.0), the Ogg container for Opus (BSD-3-Clause, the version
+# lewton uses) and FLAC (Apache-2.0); ADR 0051.
+lewton = "0.10"
+ogg = "0.8"
+claxon = "0.4"
+
+[build-dependencies]
+# Compiles the vendored libopus (MIT OR Apache-2.0).
+cc = { version = "1", features = ["parallel"] }

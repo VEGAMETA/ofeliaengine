@@ -35,6 +35,7 @@ mod mixer;
 pub mod output;
 mod shared;
 pub mod spatial;
+pub mod stream;
 mod wav;
 
 pub use clip::{Clip, ClipError};
@@ -44,6 +45,7 @@ pub use engine::{
 };
 pub use mixer::{MAX_BLOCK, Renderer};
 pub use spatial::{Emitter, Listener, Rolloff};
+pub use stream::{DecodeError, Decoder};
 
 #[cfg(test)]
 mod tests;
