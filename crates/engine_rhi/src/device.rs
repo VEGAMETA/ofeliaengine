@@ -69,6 +69,8 @@ pub struct Device {
     latency: LatencyExtensions,
     /// `VK_EXT_hdr_metadata` is enabled.
     hdr_metadata: bool,
+    /// `shaderFloat16` and `shaderInt16` are enabled.
+    shader_float16: bool,
     /// Pipelines capture the driver's statistics (`ENGINE_PIPELINE_STATS=1`).
     pipeline_statistics: bool,
     /// Graphics + compute + transfer (+ present on a desktop GPU).
@@ -166,7 +168,9 @@ impl Device {
             .shader_sampled_image_array_non_uniform_indexing(true)
             .shader_storage_image_array_non_uniform_indexing(true)
             .shader_storage_buffer_array_non_uniform_indexing(true)
-            .scalar_block_layout(true);
+            .scalar_block_layout(true)
+            // 16-bit math where supported: optional (FSR 3.1's faster variants, ADR 0060).
+            .shader_float16(adapter.caps.shader_float16);
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
@@ -178,7 +182,8 @@ impl Device {
             .sampler_anisotropy(true)
             .texture_compression_bc(true)
             .multi_draw_indirect(true)
-            .draw_indirect_first_instance(true);
+            .draw_indirect_first_instance(true)
+            .shader_int16(adapter.caps.shader_float16);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .features(features)
             .push_next(&mut f11)
@@ -302,6 +307,7 @@ impl Device {
             adapter: adapter.clone(),
             latency,
             hdr_metadata,
+            shader_float16: adapter.caps.shader_float16,
             pipeline_statistics,
             instance: instance.shared.clone(),
         })
@@ -344,6 +350,18 @@ impl Device {
     /// The ash instance (for physical-device queries).
     pub fn instance_raw(&self) -> &ash::Instance {
         &self.instance.raw
+    }
+
+    /// The ash entry of the instance (global commands, `vkGetInstanceProcAddr`), for
+    /// libraries that load Vulkan functions themselves.
+    pub fn entry(&self) -> &ash::Entry {
+        &self.instance.entry
+    }
+
+    /// Whether 16-bit float and integer math in shaders (`shaderFloat16`, `shaderInt16`) is
+    /// enabled: [`crate::OptionalCaps::shader_float16`] of the adapter.
+    pub fn shader_float16_enabled(&self) -> bool {
+        self.shader_float16
     }
 
     /// Whether `VK_EXT_debug_utils` is available for object names and markers.

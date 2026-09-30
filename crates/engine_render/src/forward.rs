@@ -196,6 +196,8 @@ pub struct Temporal {
     frame: Cell<u64>,
     /// Jitter phases (0: no jitter).
     phases: Cell<u32>,
+    /// Added to the level of detail of material texture samples.
+    lod_bias: Cell<f32>,
     reset: Cell<bool>,
     /// The state the graph left the buffer in.
     state: Cell<BufferState>,
@@ -265,6 +267,7 @@ impl Temporal {
             previous_clip_from_world: Cell::new(None),
             frame: Cell::new(0),
             phases: Cell::new(0),
+            lod_bias: Cell::new(0.0),
             reset: Cell::new(true),
             state: Cell::new(BufferState::idle()),
         })
@@ -274,6 +277,21 @@ impl Temporal {
     /// wants at least 8, upscaling by `s` per axis ⌈8 · s²⌉.
     pub fn set_jitter_phases(&self, phases: u32) {
         self.phases.set(phases);
+    }
+
+    /// Biases the level of detail of every material texture sample by `bias` (negative:
+    /// sharper). A temporal upscaler reconstructs detail finer than a render pixel, so
+    /// textures should be sampled as if at the output resolution:
+    /// log2(render width / output width), and upscalers may ask for more
+    /// (`engine_upscale::texture_lod_bias`, `engine_fsr::Fsr::texture_lod_bias`).
+    /// 0 by default.
+    pub fn set_texture_lod_bias(&self, bias: f32) {
+        self.lod_bias.set(bias);
+    }
+
+    /// The bias set by [`Self::set_texture_lod_bias`].
+    pub fn texture_lod_bias(&self) -> f32 {
+        self.lod_bias.get()
     }
 
     /// The jitter of the next frame, in pixels.
@@ -1229,7 +1247,12 @@ impl ForwardRenderer {
             previous_clip_from_world: previous_clip_from_world.to_cols_array(),
             previous_clip_from_clip: (previous_clip_from_world * unjittered.inverse())
                 .to_cols_array(),
-            jitter: [jitter_ndc[0], jitter_ndc[1], 0.0, 0.0],
+            jitter: [
+                jitter_ndc[0],
+                jitter_ndc[1],
+                temporal.map_or(0.0, Temporal::texture_lod_bias),
+                0.0,
+            ],
             previous_count,
             _pad2: [0; 3],
             cascades: cascade_data(&fit, settings),

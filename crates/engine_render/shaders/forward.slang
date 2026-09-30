@@ -109,7 +109,8 @@ struct Frame
     float4x4 previous_clip_from_world;  // last frame's camera, unjittered
     float4x4 previous_clip_from_clip;   // for the background: this frame's clip space
                                         // (unjittered) to last frame's
-    float4 jitter;           // xy: this frame's jitter in NDC (clip.xy += jitter × w)
+    float4 jitter;           // xy: this frame's jitter in NDC (clip.xy += jitter × w);
+                             // z: LOD bias of material textures (temporal upscaling)
     uint previous_count;     // instances with a previous transform
     uint3 _pad2;
     Cascade cascades[4];
@@ -622,13 +623,15 @@ ShadowOut depthVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_Vulk
 // A material texture: bindless index and sampler from the packed field; white without
 // one. Indices differ between instances of one draw, hence non-uniform; the branch is
 // uniform across a quad (a quad belongs to one primitive), so derivatives stay defined.
+// The view's LOD bias applies to every material sample, the alpha tests of the depth and
+// shadow passes included, so the depth prepass and the shading pass keep the same pixels.
 float4 sample_material(uint packed, float2 uv)
 {
     if (packed == NO_TEXTURE)
         return float4(1.0, 1.0, 1.0, 1.0);
     Texture2D t = g_textures[NonUniformResourceIndex(packed & 0xFFFFFFu)];
     SamplerState s = g_samplers[NonUniformResourceIndex(packed >> 24)];
-    return t.Sample(s, uv);
+    return t.SampleBias(s, uv, push.frame.jitter.z);
 }
 
 [shader("fragment")]

@@ -47,6 +47,8 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 | JoltC (© Amer Koleci and contributors) | commit 886e088675ba | MIT | C API over Jolt, bound by `engine_physics_jolt` |
 | Box2D (© 2022 Erin Catto) | v3.1.1 | MIT | 2D physics, `engine_physics2d` (ADR 0028) |
 | libopus (© 2001-2023 Xiph.Org, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon) | 1.5.2 | BSD-3-Clause (`third_party/opus/COPYING`) | Opus decoding in `engine_audio_decode` (ADR 0051) |
+| AMD FidelityFX SDK (© 2024 Advanced Micro Devices, Inc.; only the FSR 3.1 upscaler, the Vulkan backend and their shared code and GLSL) | v1.1.4, commit c6efa6bf7f20 (FSR 3.1.4) | MIT (`third_party/FidelityFX-SDK/LICENSE.txt`) | FSR 3.1 upscaling in `engine_fsr` (ADR 0060); the SPIR-V in `crates/engine_fsr/shaders` is compiled from its GLSL |
+| Vulkan-Headers (© 2015-2023 The Khronos Group Inc.; `vulkan.h`, `vulkan_core.h`, `vk_platform.h`, `vk_video/`) | v1.4.350, commit 8864cdc896bb | Apache-2.0 OR MIT (`third_party/Vulkan-Headers/LICENSE.md`) | the C headers the FidelityFX SDK's Vulkan backend compiles against in `engine_fsr` |
 
 ## Fonts and icons
 
@@ -79,7 +81,7 @@ condition of this section (ADR 0036). License texts are next to each font.
 
 | Crate | License | Used for |
 |---|---|---|
-| cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt, JoltC and Box2D sources, and Luau (through luau0-src) |
+| cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt, JoltC, Box2D and FidelityFX SDK sources, and Luau (through luau0-src) |
 
 ## Rust crates (compile-time only: procedural macros)
 

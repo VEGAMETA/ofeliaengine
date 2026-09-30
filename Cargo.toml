@@ -25,6 +25,7 @@ engine_physics_jolt = { path = "crates/engine_physics_jolt" }
 engine_physics2d = { path = "crates/engine_physics2d" }
 engine_scene = { path = "crates/engine_scene" }
 engine_editor = { path = "crates/engine_editor" }
+engine_fsr = { path = "crates/engine_fsr" }
 engine_platform = { path = "crates/engine_platform" }
 engine_profiler = { path = "crates/engine_profiler" }
 engine_reflect = { path = "crates/engine_reflect" }
