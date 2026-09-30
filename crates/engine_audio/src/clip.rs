@@ -40,6 +40,8 @@ pub enum ClipError {
         /// Bits per sample.
         bits: u16,
     },
+    /// A compressed file could not be decoded.
+    Decode(crate::stream::DecodeError),
 }
 
 impl fmt::Display for ClipError {
@@ -55,6 +57,7 @@ impl fmt::Display for ClipError {
             Self::Length => f.write_str("no samples, or a partial frame at the end"),
             Self::NotWav => f.write_str("not a RIFF/WAVE file"),
             Self::Truncated => f.write_str("WAVE file without complete fmt and data chunks"),
+            Self::Decode(e) => e.fmt(f),
             Self::UnsupportedEncoding { tag, bits } => write!(
                 f,
                 "unsupported WAVE encoding: format tag {tag:#06x}, {bits} bits (PCM 8/16/24/32 or float 32/64)"
