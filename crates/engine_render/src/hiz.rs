@@ -9,9 +9,10 @@
 //! workgroups costs more than it saves. The next dispatches work on small data and write
 //! six levels each. A 1080p pyramid takes three dispatches instead of eleven.
 
+use crate::compute::{ComputeShader, Dispatch};
 use crate::graph::{Access, Buffer, FrameGraph, ShaderStages, Texture};
 use engine_rhi::ash::vk;
-use engine_rhi::{Bindless, Device, Pipeline, RhiError, ShaderStageDesc, spirv_words};
+use engine_rhi::{Bindless, Device, RhiError};
 
 const REDUCE: &[u8] = include_bytes!("../shaders/hiz.hizReduce.spv");
 
@@ -91,7 +92,7 @@ impl PyramidLayout {
 }
 
 /// `HizPush` in `hiz.slang` (64 bytes).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
     pyramid: u64,
@@ -105,8 +106,6 @@ struct Push {
     count: u32,
     _pad: u32,
 }
-
-const _: () = assert!(core::mem::size_of::<Push>() == 64);
 
 impl Push {
     /// Points the push constants at `count` levels from `first`, and the level below.
@@ -128,16 +127,6 @@ impl Push {
             layout.offset(first + 3),
         ];
         self.out_b = [layout.offset(first + 4), layout.offset(first + 5)];
-    }
-
-    fn bytes(&self) -> &[u8] {
-        // SAFETY: `Push` is plain `repr(C)` data without padding (asserted size).
-        unsafe {
-            core::slice::from_raw_parts(
-                (self as *const Self).cast::<u8>(),
-                core::mem::size_of::<Self>(),
-            )
-        }
     }
 }
 
@@ -162,26 +151,15 @@ fn dispatches(levels: u32) -> impl Iterator<Item = (u32, u32)> {
 /// Builds depth pyramids.
 #[derive(Debug)]
 pub struct DepthPyramid {
-    reduce: Pipeline,
+    reduce: ComputeShader<Push>,
 }
 
 impl DepthPyramid {
     /// Creates the pipeline.
     pub fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
-        let words = spirv_words(REDUCE).ok_or(RhiError::Vulkan {
-            call: "embedded SPIR-V",
-            result: vk::Result::ERROR_INVALID_SHADER_NV,
-        })?;
-        let reduce = Pipeline::compute(
-            device,
-            bindless.pipeline_layout(),
-            ShaderStageDesc {
-                spirv: &words,
-                entry: c"hizReduce",
-            },
-            vk::PipelineCache::null(),
-        )?;
-        Ok(Self { reduce })
+        Ok(Self {
+            reduce: ComputeShader::new(device, bindless, REDUCE, c"hizReduce")?,
+        })
     }
 
     /// Adds the pass that reduces `depth` (sampled) into `pyramid`, a buffer of at least
@@ -198,15 +176,15 @@ impl DepthPyramid {
         let (width, height) = (desc.width, desc.height);
         let layout = PyramidLayout::new(width, height);
         let reduce = &self.reduce;
-        fg.add_pass("hiz")
+        fg.add_compute("hiz", bindless)
             .read(depth, Access::Sampled(ShaderStages::COMPUTE))
             .write(pyramid, Access::StorageReadWrite(ShaderStages::COMPUTE))
-            .execute(move |ctx| {
-                let d = ctx.device;
+            .record(move |rec| {
+                let ctx = rec.context();
                 let Some(texture) = ctx.sampled_index(depth) else {
                     // SAFETY: recording outside a rendering scope.
                     unsafe {
-                        d.cmd_fill_buffer(
+                        ctx.device.cmd_fill_buffer(
                             ctx.cmd,
                             ctx.buffer(pyramid),
                             0,
@@ -228,27 +206,16 @@ impl DepthPyramid {
                     count: 0,
                     _pad: 0,
                 };
-                let barrier = vk::MemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                    .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
-                let barriers = [barrier];
-                let dependency = vk::DependencyInfo::default().memory_barriers(&barriers);
-                // SAFETY: recording outside a rendering scope; each dispatch reads the
-                // level the previous one wrote last, ordered by the barrier.
-                unsafe {
-                    reduce.bind(ctx.cmd);
-                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
-                    for (first, count) in dispatches(layout.levels) {
-                        if first > 1 {
-                            d.cmd_pipeline_barrier2(ctx.cmd, &dependency);
-                        }
-                        push.levels_from(&layout, first, count);
-                        bindless.push_constants(ctx.cmd, push.bytes());
-                        let (w, h) = level_size(width, height, first - 1);
-                        d.cmd_dispatch(ctx.cmd, w.div_ceil(TILE), h.div_ceil(TILE), 1);
+                for (first, count) in dispatches(layout.levels) {
+                    // Each dispatch reads the level the previous one wrote last.
+                    if first > 1 {
+                        rec.barrier();
                     }
+                    push.levels_from(&layout, first, count);
+                    // One workgroup per TILE × TILE of its input level.
+                    let (w, h) = level_size(width, height, first - 1);
+                    let groups = [w.div_ceil(TILE), h.div_ceil(TILE), 1];
+                    rec.dispatch(reduce, Dispatch::Groups(groups), &push);
                 }
             });
     }

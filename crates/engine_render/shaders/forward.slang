@@ -1,4 +1,4 @@
-// Forward PBR shading with one directional light and a shadow map, drawn GPU-driven
+// Forward PBR shading with one directional light and cascaded shadow maps, drawn GPU-driven
 // (ADR 0034): a compute pass culls instances against the view frustum and compacts the
 // visible ones per batch (a run of instances sharing a mesh and a pipeline state); the
 // forward pass then draws the batches with one indirect draw call per pipeline state.
@@ -24,6 +24,35 @@
 // `clip_position`: `precise`, and matrix products written out as sums, so every
 // operation carries NoContraction and the two passes produce the same bits.
 //
+// Motion vectors (ADR 0043): with a temporal state, the projection is jittered by a
+// sub-pixel offset every frame, and the `*Motion` fragment entry points also write each
+// pixel's motion, the texture-coordinate delta current − previous without jitter, into a
+// second target. The previous position comes from last frame's instance transforms
+// (`previous_instances`, by draw index) and camera. `backgroundMotion` fills the pixels
+// no geometry covered (depth still 1) with the camera's motion.
+//
+// Cascaded shadows (shadow.rs, ADR 0044): up to four cascades share one light view (a
+// rotation) and differ by a scale and an offset; they are tiles of one atlas. The culling
+// shader's shadow phase tests every instance's box, in light view space, against each
+// cascade's square and far depth and appends the casters to that cascade's commands; the
+// shadow pass draws each cascade into its tile. Receivers pick the finest cascade whose
+// square holds them with room for the filter, push themselves along their normal by a
+// multiple of its texel size, filter 3 × 3 comparisons, and blend into the next cascade
+// over a band at the edge (the last one fades out).
+//
+// Local lights (lights.rs, ADR 0045): point and spot lights sorted by depth along the view.
+// The CPU fills z-bins (each slice of view depth: the lowest and highest index of the
+// lights overlapping it) and each light's rectangle of screen tiles; `lightTiles` sets one
+// bit per light in every tile its rectangle covers. A pixel shades the lights in both its
+// tile's bits and its bin's index range; the wave walks the union of its lanes' bits, one
+// light at a time, so light data loads are shared.
+//
+// Ambient light (environment.rs, ADR 0046): with an environment, diffuse light comes from
+// its 9 irradiance harmonics and specular light from its prefiltered cube at the pixel's
+// roughness times the DFG table (split sum), with Filament's multiple-scattering
+// compensation and specular occlusion from the material's occlusion (Lagarde and de
+// Rousiers 2014); `skyFragment` draws the sky and the sun's disk where no geometry was.
+//
 // Materials (material.rs, ADR 0040) are glTF 2.0 metallic-roughness: base color, metallic
 // and roughness, normal map, occlusion and emission, each a factor times a texture, read
 // per pixel from the material table by the instance's material slot. Masked materials
@@ -31,6 +60,7 @@
 // their shadows); opaque ones never discard, so their depth test stays early.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
+[[vk::binding(0, 0)]] TextureCube g_cubes[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 [[vk::binding(2, 0)]] SamplerComparisonState g_compare_samplers[];
 
@@ -42,10 +72,27 @@ struct Attributes
     float2 uv;
 };
 
+// `CascadeData` in forward.rs.
+struct Cascade
+{
+    float4 scale;            // xyz: light view → cascade NDC scale; w: world size of a texel
+    float4 offset;           // xyz: offset; w: NDC edge within which the filter stays inside
+    float4 atlas;            // cascade NDC → atlas uv: xy scale, zw offset
+    float4 bounds;           // light view: xy center, z half size, w far depth (−z)
+};
+
+// `LightData` in lights.rs.
+struct Light
+{
+    float4 position_range;   // xyz position, w range (the falloff ends there)
+    float4 color_scale;      // rgb color × intensity; w spot cone scale (0: point light)
+    float4 direction_offset; // xyz direction of the cone, w cone offset (1: point light)
+};
+
 struct Frame
 {
     float4x4 clip_from_world;
-    float4x4 light_clip_from_world;
+    float4x4 light_from_world; // the light's view: a rotation shared by the cascades
     float4 camera_position;  // xyz
     float4 to_light;         // xyz: unit vector towards the light
     float4 light_color;      // rgb: color × intensity
@@ -56,8 +103,42 @@ struct Frame
     uint visibility_capacity; // instances with visibility flags (occlusion culling)
     uint hiz_levels;         // depth pyramid levels 1..hiz_levels; the last is 1×1
     uint2 depth_size;        // size of the depth target in pixels
-    uint2 _pad;
+    float lod_scale;         // pixels per object unit at distance 1 over the LOD threshold (0: full meshes)
+    uint slot_count;         // instance slots per command list
     uint4 hiz_offsets[4];    // offset of level k + 1 in the pyramid, in floats
+    float4x4 previous_clip_from_world;  // last frame's camera, unjittered
+    float4x4 previous_clip_from_clip;   // for the background: this frame's clip space
+                                        // (unjittered) to last frame's
+    float4 jitter;           // xy: this frame's jitter in NDC (clip.xy += jitter × w)
+    uint previous_count;     // instances with a previous transform
+    uint3 _pad2;
+    Cascade cascades[4];
+    uint cascade_count;      // 0: everything is lit
+    uint command_count;      // draw commands per list (one per detail level of each batch)
+    float cascade_blend;     // NDC band at a cascade's edge that blends into the next
+    float normal_bias;       // receiver offset along its normal, in texels of its cascade
+    uint fade_last;          // 1: shadows fade out at the last cascade's edge
+    uint3 _pad3;
+    float4 view_axis;        // xyz view direction; w: −dot(direction, near plane center)
+    Light* lights;           // local lights, sorted by depth along the view
+    uint* zbins;             // Z_BINS entries: lowest light index | highest << 16
+    uint light_count;
+    uint light_words;        // 32-bit words of a tile's light bitmask
+    uint tiles_x;            // light tiles per row
+    float bin_scale;         // z-bins per unit of depth along the view
+    uint light_culling;      // 0: every light for every pixel (the reference)
+    uint3 _pad4;
+    float4x4 world_from_clip; // inverse of clip_from_world (jittered): the sky's rays
+    uint environment;        // 1: ambient light and background from the environment
+    uint sky_cube;           // bindless: the environment's radiance cube
+    uint prefiltered;        // bindless: its prefiltered cube
+    uint dfg_lut;            // bindless: the DFG table
+    uint env_levels;         // mips of the prefiltered cube
+    float env_intensity;     // the environment's radiance multiplier
+    uint linear_sampler;     // trilinear, clamp
+    uint _pad5;
+    float4* sh;              // 9 irradiance harmonics
+    uint2 _pad6;
 };
 
 struct Instance
@@ -73,11 +154,36 @@ struct Instance
 
 struct Batch
 {
-    uint first;              // first instance of the batch; also its first slot in `visible`
-    uint3 _pad;
+    uint command;            // the finest level's draw command; the coarser ones follow
+    uint slot;               // its first slot in `visible`; each level has `count` more
+    uint count;              // instances
+    uint lods;               // detail levels of the mesh (ADR 0053)
     float4 center;           // object-space bounding box: center (xyz)
     float4 extents;          // and half extents (xyz)
+    float4 errors;           // each level's error, object-space units
 };
+
+// The coarsest detail level whose error, projected at the box's nearest possible
+// distance, stays within the threshold (ADR 0053): error × scale × lod_scale ≤ distance.
+uint choose_lod(Instance inst, Batch batch, float3 center, float3 extents)
+{
+    if (batch.lods <= 1 || push.frame.lod_scale <= 0.0)
+        return 0;
+    // The largest scale of the instance's linear part (its columns' lengths).
+    float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+    float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+    float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+    float scale = sqrt(max(dot(c0, c0), max(dot(c1, c1), dot(c2, c2))));
+    float distance = max(length(center - push.frame.camera_position.xyz) - length(extents), 1e-3);
+    float allowed = distance / (scale * push.frame.lod_scale);
+    uint lod = 0;
+    for (uint k = 1; k < batch.lods; k++)
+    {
+        if (batch.errors[k] <= allowed)
+            lod = k;
+    }
+    return lod;
+}
 
 // `GpuMaterial` in material.rs. Textures: bindless index in the low 24 bits, sampler
 // index in the top 8.
@@ -124,15 +230,25 @@ struct Push
     float* positions;        // geometry pool: three floats per vertex
     Attributes* attributes;  // geometry pool: the other attributes
     Material* materials;     // the material table
+    Instance* previous_instances; // last frame's instances, by draw index (motion)
+    uint* light_tiles;       // per tile, `light_words` bitmask words of its lights
     uint instance_count;
     uint texture;            // bindless index: the shadow map, or the depth to reduce
-    uint phase;              // PHASE_*
+    uint phase;              // PHASE_*; the cascade in the shadow pass
     uint _pad;
 };
 
 static const uint PHASE_ALL = 0;    // frustum culling only
 static const uint PHASE_EARLY = 1;  // visible last frame and in the frustum
 static const uint PHASE_LATE = 2;   // visible now and not drawn by the early phase
+static const uint PHASE_SHADOW = 3; // casters of each cascade
+// `LIGHT_TILE` and `Z_BINS` in lights.rs.
+static const uint LIGHT_TILE = 16;
+static const uint Z_BINS = 1024;
+// 0 in the pipelines drawn without local lights: the light loop compiles away.
+[vk::constant_id(0)] const uint LOCAL_LIGHTS = 1;
+// 0 in the pipelines drawn without an environment: image-based light compiles away.
+[vk::constant_id(1)] const uint ENVIRONMENT = 1;
 // Depth (NDC) a box's nearest point must lie beyond the pyramid to count as hidden.
 static const float OCCLUSION_MARGIN = 1e-5;
 
@@ -267,8 +383,33 @@ bool occluded(float3 center, float3 extents)
     return nearest > farthest + OCCLUSION_MARGIN;
 }
 
+// Appends instance `index` (of batch `b`, whose slots start at `first`) to `visible` and
+// counts it in `commands[b]` when `keep`. Called with the whole wave.
+void append(DrawCommand* commands, uint* visible, uint b, uint first, uint index, bool keep)
+{
+    if (WaveActiveAllEqual(b))
+    {
+        // A batch's instances are contiguous, so a wave almost always belongs to one
+        // batch: one atomic per wave instead of one per visible instance.
+        uint count = WaveActiveCountBits(keep);
+        uint base = 0;
+        if (WaveIsFirstLane() && count > 0)
+            InterlockedAdd(commands[b].instance_count, count, base);
+        base = WaveReadLaneFirst(base);
+        if (keep)
+            visible[first + base + WavePrefixCountBits(keep)] = index;
+    }
+    else if (keep)
+    {
+        uint slot;
+        InterlockedAdd(commands[b].instance_count, 1, slot);
+        visible[first + slot] = index;
+    }
+}
+
 // One thread per instance: frustum (and occlusion) test of the instance's world-space
-// bounding box, then append to the batch's visible list.
+// bounding box, then append to the batch's visible list. The shadow phase instead tests
+// the box against every cascade and appends to each cascade's lists.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cullMain(uint3 id : SV_DispatchThreadID)
@@ -284,6 +425,26 @@ void cullMain(uint3 id : SV_DispatchThreadID)
     float3 e = batch.extents.xyz;
     float3 extents = float3(dot(abs(inst.row0.xyz), e), dot(abs(inst.row1.xyz), e), dot(abs(inst.row2.xyz), e));
     bool cull = push.frame.cull != 0;
+    uint lod = choose_lod(inst, batch, center, extents);
+    uint command = batch.command + lod;
+    uint first = batch.slot + lod * batch.count;
+    if (push.phase == PHASE_SHADOW)
+    {
+        // The box in light view space (Arvo again: the light view is a rotation).
+        float4x4 light = push.frame.light_from_world;
+        float3 c = mul(light, float4(center, 1.0)).xyz;
+        float3 e = float3(dot(abs(light[0].xyz), extents), dot(abs(light[1].xyz), extents), dot(abs(light[2].xyz), extents));
+        uint cascades = push.frame.cascade_count;
+        for (uint k = 0; k < cascades; k++)
+        {
+            float4 b = push.frame.cascades[k].bounds;
+            // Inside the cascade's square, and not wholly beyond its far depth: anything
+            // between the light and the slice casts into it.
+            bool caster = !cull || (all(abs(c.xy - b.xy) <= b.z + e.xy) && -(c.z + e.z) <= b.w);
+            append(push.commands + k * push.frame.command_count, push.visible + k * push.frame.slot_count, command, first, index, caster);
+        }
+        return;
+    }
     bool visible = true;
     if (cull)
     {
@@ -314,24 +475,29 @@ void cullMain(uint3 id : SV_DispatchThreadID)
             visible = visible && !was_visible;
         }
     }
-    uint b = inst.batch;
-    if (WaveActiveAllEqual(b))
+    append(push.commands, push.visible, command, first, index, visible);
+}
+
+// One group per light: its bit is set in the (cleared) bitmasks of every tile of its
+// rectangle. `visible` holds the rectangles (min x | min y << 16, max x | max y << 16).
+// The work follows what the lights cover, not tiles × lights.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void lightTiles(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
+{
+    uint light = group.x;
+    uint lo = push.visible[light * 2];
+    uint hi = push.visible[light * 2 + 1];
+    uint2 first = uint2(lo & 0xFFFFu, lo >> 16);
+    uint2 size = uint2(hi & 0xFFFFu, hi >> 16) - first + 1;
+    uint words = push.frame.light_words;
+    uint tiles_x = push.frame.tiles_x;
+    uint word = light >> 5;
+    uint bit = 1u << (light & 31u);
+    for (uint i = local; i < size.x * size.y; i += 64)
     {
-        // A batch's instances are contiguous, so a wave almost always belongs to one
-        // batch: one atomic per wave instead of one per visible instance.
-        uint count = WaveActiveCountBits(visible);
-        uint base = 0;
-        if (WaveIsFirstLane() && count > 0)
-            InterlockedAdd(push.commands[b].instance_count, count, base);
-        base = WaveReadLaneFirst(base);
-        if (visible)
-            push.visible[batch.first + base + WavePrefixCountBits(visible)] = index;
-    }
-    else if (visible)
-    {
-        uint slot;
-        InterlockedAdd(push.commands[b].instance_count, 1, slot);
-        push.visible[batch.first + slot] = index;
+        uint2 t = first + uint2(i % size.x, i / size.x);
+        InterlockedOr(push.light_tiles[(t.y * tiles_x + t.x) * words + word], bit);
     }
 }
 
@@ -342,7 +508,9 @@ struct VertexOut
     float3 normal : NORMAL;           // unit at the vertices
     float4 tangent : TANGENT;         // xyz unit at the vertices; w bitangent sign
     float2 uv : TEXCOORD0;
-    float4 light_position : TEXCOORD1;
+    float3 light_position : TEXCOORD1; // light view position (shadows)
+    float4 previous_clip : TEXCOORD2; // last frame's clip position (motion vectors)
+    float3 light_normal : TEXCOORD3;  // the normal in light view space (unit at the vertices)
     nointerpolation uint material : MATERIAL;
 };
 
@@ -352,9 +520,11 @@ struct VertexOut
 [shader("vertex")]
 VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    Instance inst = push.instances[push.visible[slot]];
+    uint index = push.visible[slot];
+    Instance inst = push.instances[index];
     Attributes a = push.attributes[vertex];
-    Placed placed = clip_position(inst, load_position(vertex));
+    float3 p = load_position(vertex);
+    Placed placed = clip_position(inst, p);
     float4 world = float4(placed.world, 1.0);
     VertexOut o;
     o.position = placed.clip;
@@ -366,18 +536,32 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInsta
     float sign = (a.tangent & 0x10000u) != 0 ? -1.0 : 1.0;
     o.tangent = float4(normalize(transform_vector(inst, decode_octahedral(a.tangent))), sign * mirror_sign(inst));
     o.uv = a.uv;
-    o.light_position = mul(push.frame.light_clip_from_world, world);
+    // Shadows look up in light view space; transforming here keeps it off every pixel.
+    float4x4 light = push.frame.light_from_world;
+    o.light_position = mul(light, world).xyz;
+    o.light_normal = mul((float3x3)light, o.normal);
+    // Without a previous transform the instance counts as still.
+    Instance previous = index < push.frame.previous_count ? push.previous_instances[index] : inst;
+    o.previous_clip = mul(push.frame.previous_clip_from_world, float4(transform_point(previous, p), 1.0));
     o.material = inst.material;
     return o;
 }
 
-// Drawn with every instance of every batch: the instance index is the instance. Only
-// positions are fetched.
-[shader("vertex")]
-float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint index : SV_VulkanInstanceID) : SV_Position
+// A world position in the clip space of cascade `push.phase`.
+float4 shadow_clip(float3 world)
 {
-    Instance inst = push.instances[index];
-    return mul(push.frame.light_clip_from_world, float4(transform_point(inst, load_position(vertex)), 1.0));
+    Cascade k = push.frame.cascades[push.phase];
+    float3 light = mul(push.frame.light_from_world, float4(world, 1.0)).xyz;
+    return float4(light * k.scale.xyz + k.offset.xyz, 1.0);
+}
+
+// Drawn with a cascade's culled commands: instance `slot` is a slot of its caster list.
+// Only positions are fetched.
+[shader("vertex")]
+float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
+{
+    Instance inst = push.instances[push.visible[slot]];
+    return shadow_clip(transform_point(inst, load_position(vertex)));
 }
 
 // The depth prepass: the visible instances' depth, positions only.
@@ -397,11 +581,11 @@ struct ShadowOut
 
 // Shadows of masked materials: texture coordinates for the alpha test.
 [shader("vertex")]
-ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint index : SV_VulkanInstanceID)
+ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    Instance inst = push.instances[index];
+    Instance inst = push.instances[push.visible[slot]];
     ShadowOut o;
-    o.position = mul(push.frame.light_clip_from_world, float4(transform_point(inst, load_position(vertex)), 1.0));
+    o.position = shadow_clip(transform_point(inst, load_position(vertex)));
     o.uv = push.attributes[vertex].uv;
     o.material = inst.material;
     return o;
@@ -485,13 +669,15 @@ float widen_roughness(float perceptual, float kernel)
     return sqrt(sqrt(saturate(a * a + kernel)));
 }
 
-// 3×3 percentage-closer filtering with hardware comparison.
-float shadow(float4 light_position)
+// 3×3 percentage-closer filtering with hardware comparison in cascade `c`, at light view
+// position `light` of a receiver with light-view normal `normal` (pushed along it first).
+float cascade_shadow(uint c, float3 light, float3 normal)
 {
-    float3 ndc = light_position.xyz / light_position.w;
-    float2 uv = ndc.xy * 0.5 + 0.5;
-    if (any(uv < 0.0) || any(uv > 1.0) || ndc.z > 1.0)
+    Cascade k = push.frame.cascades[c];
+    float3 ndc = (light + normal * (push.frame.normal_bias * k.scale.w)) * k.scale.xyz + k.offset.xyz;
+    if (ndc.z > 1.0)
         return 1.0;
+    float2 uv = ndc.xy * k.atlas.xy + k.atlas.zw;
     Texture2D map = g_textures[NonUniformResourceIndex(push.texture)];
     SamplerComparisonState s = g_compare_samplers[push.frame.shadow_sampler];
     uint width, height;
@@ -504,6 +690,163 @@ float shadow(float4 light_position)
         for (int x = -1; x <= 1; x++)
             lit += map.SampleCmpLevelZero(s, uv + float2(x, y) * texel, ndc.z);
     return lit / 9.0;
+}
+
+// How far towards the edge of cascade `c` a light view position lies (0 center, 1 edge),
+// or 2 when it is outside the cascade's depth range. A cascade holds the point with room
+// for the filter below its limit (`Cascade::holds` in shadow.rs).
+float cascade_edge(uint c, float3 light)
+{
+    float4 scale = push.frame.cascades[c].scale;
+    float4 offset = push.frame.cascades[c].offset;
+    float3 ndc = light * scale.xyz + offset.xyz;
+    return ndc.z < 0.0 || ndc.z > 1.0 ? 2.0 : max(abs(ndc.x), abs(ndc.y));
+}
+
+// Interleaved gradient noise (Jimenez 2014) in [0, 1) at a pixel.
+float gradient_noise(float2 pixel)
+{
+    return frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
+}
+
+// How lit a receiver at light view position `light`, with light-view geometric normal `n`,
+// at `pixel` is: the finest cascade that holds it. Over the band at a cascade's edge the
+// pixel dithers into the next one that holds it (the last cascade dithers out, when
+// shadows end at the distance setting), with a probability rising across the band: one
+// lookup per pixel, and TAA's jitter moves the noise so the transition resolves smooth.
+// The frame is read through its pointer: a local copy indexed by the cascade would sit in
+// scratch memory on some GPUs.
+float shadow(float3 light, float3 n, float2 pixel)
+{
+    uint count = push.frame.cascade_count;
+    float band = push.frame.cascade_blend;
+    for (uint c = 0; c < count; c++)
+    {
+        float edge = cascade_edge(c, light);
+        float limit = push.frame.cascades[c].offset.w;
+        if (edge >= limit)
+            continue;
+        uint chosen = c;
+        float t = saturate((edge - (limit - band)) / band);
+        // The jitter (in NDC, a few thousandths) shifts the pattern every TAA frame.
+        if (t > 0.0 && gradient_noise(pixel + push.frame.jitter.xy * 4096.0) < t)
+        {
+            if (c + 1 < count && cascade_edge(c + 1, light) < push.frame.cascades[c + 1].offset.w)
+                chosen = c + 1;
+            else if (c + 1 == count && push.frame.fade_last != 0)
+                return 1.0;
+        }
+        return cascade_shadow(chosen, light, n);
+    }
+    return 1.0;
+}
+
+// Light reflected towards `v` by a surface with normal `n`, for unit irradiance from `l`
+// (the BRDF times n·l).
+float3 surface_light(float3 n, float3 v, float3 l, float3 diffuse, float3 f0, float a)
+{
+    float3 h = normalize(v + l);
+    float n_dot_v = max(dot(n, v), 1e-4);
+    float n_dot_l = saturate(dot(n, l));
+    float n_dot_h = saturate(dot(n, h));
+    float v_dot_h = saturate(dot(v, h));
+    float3 f = fresnel_schlick(v_dot_h, f0);
+    float3 specular = distribution_ggx(n_dot_h, a) * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, a) * f;
+    return (diffuse + specular) * n_dot_l;
+}
+
+// One local light at `p`: inverse-square falloff windowed to zero at its range (Karis 2013),
+// times the spot cone.
+float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, float3 f0, float a)
+{
+    float3 to = light.position_range.xyz - p;
+    float d2 = dot(to, to);
+    float r = light.position_range.w;
+    float x = d2 / (r * r);
+    float window = saturate(1.0 - x * x);
+    if (window <= 0.0)
+        return 0.0;
+    float3 l = to * rsqrt(max(d2, 1e-8));
+    float cone = saturate(dot(-l, light.direction_offset.xyz) * light.color_scale.w + light.direction_offset.w);
+    float attenuation = window * window / max(d2, 1e-4) * cone * cone;
+    return surface_light(n, v, l, diffuse, f0, a) * light.color_scale.rgb * attenuation;
+}
+
+// Bits `lo`..`hi` (light indices) of word `w`.
+uint range_bits(uint w, uint lo, uint hi)
+{
+    int first = clamp(int(lo) - int(w * 32), 0, 32);
+    int end = clamp(int(hi) - int(w * 32) + 1, 0, 32);
+    uint below_end = end >= 32 ? 0xFFFFFFFFu : (1u << uint(end)) - 1u;
+    uint from_first = first >= 32 ? 0u : 0xFFFFFFFFu << uint(first);
+    return below_end & from_first;
+}
+
+// The local lights reaching `p` (at `pixel`): those in both its tile's bits and its
+// z-bin's index range, or every light without culling.
+float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, float3 f0, float a)
+{
+    uint count = push.frame.light_count;
+    float3 sum = 0.0;
+    if (LOCAL_LIGHTS == 0 || count == 0)
+        return sum;
+    if (push.frame.light_culling == 0)
+    {
+        for (uint i = 0; i < count; i++)
+            sum += local_light(push.frame.lights[i], p, n, v, diffuse, f0, a);
+        return sum;
+    }
+    float depth = dot(p, push.frame.view_axis.xyz) + push.frame.view_axis.w;
+    uint bin = uint(clamp(depth * push.frame.bin_scale, 0.0, float(Z_BINS - 1)));
+    uint range = push.frame.zbins[bin];
+    uint lo = range & 0xFFFFu;
+    uint hi = range >> 16;
+    bool any = lo <= hi;
+    // The wave walks the union of its lanes' words.
+    uint first_word = WaveActiveMin(any ? lo >> 5 : 0xFFFFFFFFu);
+    uint last_word = WaveActiveMax(any ? hi >> 5 : 0u);
+    uint2 tile = uint2(pixel) / LIGHT_TILE;
+    uint base = (tile.y * push.frame.tiles_x + tile.x) * push.frame.light_words;
+    for (uint w = first_word; w <= last_word && first_word != 0xFFFFFFFFu; w++)
+    {
+        uint mask = any ? push.light_tiles[base + w] & range_bits(w, lo, hi) : 0u;
+        uint merged = WaveActiveBitOr(mask);
+        while (merged != 0)
+        {
+            uint bit = firstbitlow(merged);
+            merged &= merged - 1u;
+            if ((mask >> bit) & 1u)
+                sum += local_light(push.frame.lights[w * 32 + bit], p, n, v, diffuse, f0, a);
+        }
+    }
+    return sum;
+}
+
+// Light from the whole sky: the environment's harmonics (diffuse) and prefiltered cube
+// (specular), or the flat ambient color without an environment.
+float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo)
+{
+    if (ENVIRONMENT == 0 || push.frame.environment == 0)
+        return push.frame.ambient.rgb * albedo * occlusion;
+    float n_dot_v = max(dot(n, v), 1e-4);
+    float4* sh = push.frame.sh;
+    float3 irradiance = sh[0].rgb * 0.282095
+        + sh[1].rgb * (0.488603 * n.y) + sh[2].rgb * (0.488603 * n.z) + sh[3].rgb * (0.488603 * n.x)
+        + sh[4].rgb * (1.092548 * n.x * n.y) + sh[5].rgb * (1.092548 * n.y * n.z)
+        + sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + sh[7].rgb * (1.092548 * n.x * n.z)
+        + sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    irradiance = max(irradiance, 0.0);
+    SamplerState s = g_samplers[push.frame.linear_sampler];
+    float3 r = reflect(-v, n);
+    float lod = roughness * float(push.frame.env_levels - 1);
+    float3 prefiltered = g_cubes[push.frame.prefiltered].SampleLevel(s, r, lod).rgb;
+    float2 dfg = g_textures[push.frame.dfg_lut].SampleLevel(s, float2(n_dot_v, roughness), 0.0).xy;
+    float3 specular = prefiltered * lerp(dfg.xxx, dfg.yyy, f0) * (1.0 + f0 * (1.0 / max(dfg.y, 1e-4) - 1.0));
+    float a = roughness * roughness;
+    // Lagarde and de Rousiers' specular occlusion; 1 without occlusion (most materials),
+    // where skipping it frees registers (72 → 64 VGPRs on the Radeon).
+    float specular_occlusion = occlusion < 1.0 ? saturate(pow(n_dot_v + occlusion, exp2(-16.0 * a - 1.0)) - 1.0 + occlusion) : 1.0;
+    return (diffuse * irradiance * occlusion + specular * specular_occlusion) * push.frame.env_intensity;
 }
 
 // The shading of both forward entry points; `masked` discards below the alpha cutoff.
@@ -556,10 +899,11 @@ float4 shade(VertexOut input, bool front, bool masked)
     float3 diffuse = (1.0 - metallic) * base.rgb / PI;
     // A surface facing away from the light is in its own shadow, whatever its normal map
     // says.
-    float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position) : 0.0;
+    float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     float3 color = (diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
-        + frame.ambient.rgb * base.rgb * occlusion
-        + emissive;
+        + ambient_light(n, v, diffuse, f0, roughness, occlusion, base.rgb)
+        + emissive
+        + local_lights(input.world_position, input.position.xy, n, v, diffuse, f0, a);
     return float4(color, 1.0);
 }
 
@@ -573,4 +917,89 @@ float4 fragmentMain(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 float4 fragmentMasked(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     return shade(input, front, true);
+}
+
+// The motion of the surface at this pixel: where it is now (the pixel center, jitter
+// removed) minus where it was last frame, in texture coordinates.
+float2 motion(float4 pixel, float4 previous_clip)
+{
+    Frame frame = push.frame[0];
+    float2 uv = pixel.xy / float2(frame.depth_size) - frame.jitter.xy * 0.5;
+    if (previous_clip.w <= 1e-6)
+        return float2(0.0, 0.0);
+    float2 previous = previous_clip.xy / previous_clip.w * 0.5 + 0.5;
+    return uv - previous;
+}
+
+struct ShadedMotion
+{
+    float4 color : SV_Target0;
+    float2 motion : SV_Target1;
+};
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotion(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = shade(input, front, false);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMaskedMotion(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = shade(input, front, true);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+struct Background
+{
+    float4 position : SV_Position;
+    float2 ndc : TEXCOORD0;
+};
+
+// A triangle covering the target at the far plane (depth exactly 1): with an equal depth
+// test it reaches only the pixels no geometry covered.
+[shader("vertex")]
+Background backgroundVertex(uint vertex : SV_VulkanVertexID)
+{
+    float2 ndc = float2((vertex << 1) & 2, vertex & 2) * 2.0 - 1.0;
+    Background o;
+    o.position = float4(ndc, 1.0, 1.0);
+    o.ndc = ndc;
+    return o;
+}
+
+// The camera's motion at infinity along this pixel's ray.
+[shader("fragment")]
+float2 backgroundMotion(Background input) : SV_Target0
+{
+    Frame frame = push.frame[0];
+    float4 previous = mul(frame.previous_clip_from_clip, float4(input.position.xy / float2(frame.depth_size) * 2.0 - 1.0 - frame.jitter.xy, 1.0, 1.0));
+    float2 uv = input.position.xy / float2(frame.depth_size) - frame.jitter.xy * 0.5;
+    if (abs(previous.w) <= 1e-6)
+        return float2(0.0, 0.0);
+    return uv - (previous.xy / previous.w * 0.5 + 0.5);
+}
+
+// The environment's sky along this pixel's ray, and the sun's disk (0.27° in radius: the
+// light's illuminance spread over its solid angle).
+[shader("fragment")]
+float4 skyFragment(Background input) : SV_Target0
+{
+    float2 ndc = input.position.xy / float2(push.frame.depth_size) * 2.0 - 1.0;
+    // Two points of the ray: the near plane and halfway in depth (finite with an infinite
+    // far plane too).
+    float4 near = mul(push.frame.world_from_clip, float4(ndc, 0.0, 1.0));
+    float4 mid = mul(push.frame.world_from_clip, float4(ndc, 0.5, 1.0));
+    float3 d = normalize(mid.xyz / mid.w - near.xyz / near.w);
+    SamplerState s = g_samplers[push.frame.linear_sampler];
+    float3 color = g_cubes[push.frame.sky_cube].SampleLevel(s, d, 0.0).rgb * push.frame.env_intensity;
+    const float cos_sun = 0.99998889;
+    if (dot(d, push.frame.to_light.xyz) > cos_sun)
+        color += push.frame.light_color.rgb / (2.0 * PI * (1.0 - cos_sun));
+    return float4(color, 1.0);
 }

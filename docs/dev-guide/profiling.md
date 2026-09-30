@@ -70,3 +70,21 @@ Example: `cargo build --profile profiling --features engine_profiler/tracy-ondem
   `TRACY_SYMBOL_OFFLINE_RESOLVE=1`: start drops to ~0.3 s. `tools\check.ps1` and CI do this
   for the tests with Tracy. Leave it unset when profiling, or call stacks show addresses
   instead of function names.
+
+## Shader registers and occupancy
+
+On integrated GPUs a shader's register count often decides its speed: more registers,
+fewer waves in flight, less latency hidden. To see what the driver compiled:
+
+```sh
+set ENGINE_PIPELINE_STATS=1
+cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf --pipeline-stats
+```
+
+- `ENGINE_PIPELINE_STATS=1` makes the device enable `VK_KHR_pipeline_executable_properties`
+  and every pipeline capture its statistics.
+- `Pipeline::statistics(&device)` returns them; the names and meanings are the driver's.
+  - AMD: `numUsedVgprs` per stage;
+  - NVIDIA: `Register Count`, `Binary Size`.
+- `ForwardRenderer::shading_statistics` gives them for each shading variant (with or
+  without local lights and an environment).

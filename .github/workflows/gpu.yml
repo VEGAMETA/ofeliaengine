@@ -84,10 +84,26 @@ jobs:
           cargo test -p engine_render --locked -- --nocapture --test-threads=1 >> render.md 2>&1
           set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=radeon
-          cargo test -p engine_render --locked --test graph --test geometry --test forward --test materials --test culling --test occlusion --test hiz --test tonemap -- --nocapture >> render.md 2>&1
+          cargo test -p engine_render --locked --test graph --test geometry --test forward --test materials --test culling --test occlusion --test hiz --test tonemap --test motion --test shadows --test lights --test environment --test post -- --nocapture >> render.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=
           echo ```>> render.md
+          exit /b %rc%
+
+      - name: Temporal antialiasing and upsampling tests, NVIDIA and AMD
+        if: ${{ !cancelled() }}
+        shell: cmd
+        run: |
+          echo ## TAA / TAAU against supersampling (synchronization validation)> upscale.md
+          echo.>> upscale.md
+          echo ```>> upscale.md
+          cargo test -p engine_upscale --locked -- --nocapture --test-threads=1 >> upscale.md 2>&1
+          set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=radeon
+          cargo test -p engine_upscale --locked --test taa -- --nocapture >> upscale.md 2>&1
+          if %rc% equ 0 set rc=%ERRORLEVEL%
+          set ENGINE_ADAPTER=
+          echo ```>> upscale.md
           exit /b %rc%
 
       - name: Render graph benchmark, NVIDIA and AMD
@@ -237,4 +253,4 @@ jobs:
           REPORT_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
-          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,render-bench.md,draw-bench.md,cubes.md,render2d.md,render2d-bench.md,latency.md,latency-bench.md,memory-bench.md,shader.md,shader-cli.md,shader-bench.md
+          powershell -NoProfile -ExecutionPolicy Bypass -File .github/scripts/post-commit-comment.ps1 -Title "GPU tests (ref-1)" -Files gpu-default.md,gpu-radeon.md,render.md,upscale.md,render-bench.md,draw-bench.md,cubes.md,render2d.md,render2d-bench.md,latency.md,latency-bench.md,memory-bench.md,shader.md,shader-cli.md,shader-bench.md

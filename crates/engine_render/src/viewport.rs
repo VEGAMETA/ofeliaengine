@@ -593,6 +593,7 @@ impl Viewports {
                     } else {
                         LoadOp::Load
                     },
+                    ..Composite::default()
                 },
             );
         }
