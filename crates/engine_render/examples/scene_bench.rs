@@ -17,7 +17,8 @@
 //! (ADR 0044), `--lights <count>` for point and spot lights spread over the scene and
 //! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
-//! every frame (ADR 0046), `--ddc <dir>`
+//! every frame (ADR 0046), `--post` for bloom, automatic exposure and tone mapping every
+//! frame (ADR 0047), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -37,7 +38,8 @@ use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, Tex
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId};
 use engine_render::png::{PngFormat, encode_png};
-use engine_render::post::{HDR_FORMAT, Tonemap};
+use engine_render::post::{Composite, HDR_FORMAT, Tonemap};
+use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -201,6 +203,7 @@ fn main() {
     let mut light_culling = true;
     let (mut with_sky, mut sky_every_frame) = (false, false);
     let mut pipeline_stats = false;
+    let mut post = false;
     let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -213,6 +216,7 @@ fn main() {
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
             "--pipeline-stats" => pipeline_stats = true,
+            "--post" => post = true,
             "--sky-every-frame" => (with_sky, sky_every_frame) = (true, true),
             "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
             "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
@@ -527,6 +531,18 @@ fn main() {
         }
         println!();
     }
+    let post_effects = post.then(|| {
+        (
+            Bloom::new(&device, &bindless, BloomSettings::default()).unwrap(),
+            AutoExposure::new(
+                &device,
+                &mut allocator,
+                &bindless,
+                ExposureSettings::default(),
+            )
+            .unwrap(),
+        )
+    });
     let environment = with_sky
         .then(|| Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap());
     // Motion vectors: the forward pass writes them, a pass fills the background with the
@@ -546,9 +562,9 @@ fn main() {
     println!(
         "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs | \
          GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs | \
-         GPU sky µs | GPU environment rebuild µs |"
+         GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -559,6 +575,8 @@ fn main() {
         let mut motion_extra = Vec::new();
         let (mut light_tiles, mut cpu_add) = (Vec::new(), Vec::new());
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
+        let (mut bloom_time, mut exposure_time, mut tonemap_time) =
+            (Vec::new(), Vec::new(), Vec::new());
         let mut upload_frames = 0;
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
@@ -671,6 +689,28 @@ fn main() {
                                 );
                             }
                         });
+                } else if let Some((bloom, exposure)) = &post_effects {
+                    let ldr = fg.create_texture(
+                        "tonemapped",
+                        TextureDesc::new_2d(screenshot_format, WIDTH, HEIGHT),
+                    );
+                    let bloomed = bloom.add_passes(&mut fg, &bindless, hdr);
+                    let measured = exposure.add_passes(&mut fg, &bindless, hdr, 1.0 / 60.0);
+                    tonemap.add_composite_pass(
+                        &mut fg,
+                        &bindless,
+                        hdr,
+                        ldr,
+                        Composite {
+                            bloom: Some(bloomed),
+                            auto_exposure: Some(measured),
+                            ..Composite::default()
+                        },
+                    );
+                    fg.add_pass("consume")
+                        .read(ldr, Access::TransferRead)
+                        .side_effects()
+                        .execute(|_| {});
                 } else {
                     fg.add_pass("consume")
                         .read(hdr, Access::TransferRead)
@@ -701,6 +741,7 @@ fn main() {
                 let mut shadow_frame = 0.0;
                 let mut tiles_frame = 0.0;
                 let (mut sky_frame, mut rebuild_frame) = (0.0, 0.0);
+                let (mut bloom_frame, mut exposure_frame, mut tonemap_frame) = (0.0, 0.0, 0.0);
                 for time in graph.gpu_pass_times() {
                     match time.name {
                         "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
@@ -713,6 +754,13 @@ fn main() {
                             tiles_frame += f64::from(time.gpu_us);
                         }
                         "sky" => sky_frame += f64::from(time.gpu_us),
+                        "bloom downsample" | "bloom upsample" => {
+                            bloom_frame += f64::from(time.gpu_us);
+                        }
+                        "exposure histogram clear" | "exposure histogram" | "exposure average" => {
+                            exposure_frame += f64::from(time.gpu_us);
+                        }
+                        "tonemap" => tonemap_frame += f64::from(time.gpu_us),
                         "environment sky" | "environment prefilter" | "environment irradiance" => {
                             rebuild_frame += f64::from(time.gpu_us);
                         }
@@ -725,6 +773,9 @@ fn main() {
                 cpu_add.push(added.as_secs_f64() * 1e6);
                 sky_pass.push(sky_frame);
                 rebuild.push(rebuild_frame);
+                bloom_time.push(bloom_frame);
+                exposure_time.push(exposure_frame);
+                tonemap_time.push(tonemap_frame);
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
@@ -737,7 +788,7 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
@@ -746,6 +797,9 @@ fn main() {
             median(&mut cpu_add),
             median(&mut sky_pass),
             median(&mut rebuild),
+            median(&mut bloom_time),
+            median(&mut exposure_time),
+            median(&mut tonemap_time),
         );
     }
     println!();
@@ -760,6 +814,9 @@ fn main() {
         geometry.destroy(&mut allocator);
         materials.destroy(&mut allocator);
         textures.destroy(&mut allocator, &bindless);
+        if let Some((_, mut exposure)) = post_effects {
+            exposure.destroy(&mut allocator);
+        }
         if let Some(mut environment) = environment {
             environment.destroy(&mut allocator, &bindless);
         }

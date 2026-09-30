@@ -478,3 +478,49 @@ environment.set_intensity(0.5);
 What it costs (ref-1, Sponza at 1080p): the forward pass goes from 0.32 to 0.40 ms on the
 RTX 4060 Ti, and from 7.7 to 12.2 ms on the Radeon iGPU. That is the price of real
 reflections on every surface. The sky pass itself costs 3 µs and 33 µs.
+
+## 11. Bloom and automatic exposure
+
+Before tone mapping, two passes make HDR frames read like photographs (ADR 0047):
+
+- **automatic exposure** brings the scene's typical brightness to middle grey and adapts
+  when it changes;
+- **bloom** makes very bright light glow.
+
+```rust
+use engine_render::post::Composite;
+use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
+
+// Once per view:
+let bloom = Bloom::new(&device, &bindless, BloomSettings::default())?;
+let exposure = AutoExposure::new(&device, &mut allocator, &bindless, ExposureSettings::default())?;
+
+// Every frame, after the scene (and TAA) into `hdr`:
+let bloomed = bloom.add_passes(&mut fg, &bindless, hdr);
+let measured = exposure.add_passes(&mut fg, &bindless, hdr, frame_seconds);
+tonemap.add_composite_pass(&mut fg, &bindless, hdr, backbuffer, Composite {
+    bloom: Some(bloomed),
+    auto_exposure: Some(measured),
+    exposure: 1.0, // now a compensation on top
+    ..Composite::default()
+});
+
+// After a camera cut: no slow adaptation from the old place.
+exposure.reset();
+```
+
+- **Exposure:**
+  - `ExposureSettings::compensation` shifts it in EV (+1 twice as bright);
+  - `speed_up` and `speed_down` set how fast it adapts to darkness and to light, in EV per
+    second;
+  - `low_percent` and `high_percent` choose which pixels count: by default the darkest
+    10% and brightest 10% are ignored, so the sun or a black border does not drive it.
+- **Bloom:**
+  - `intensity` is the share of the image the glow replaces: 0.04 by default, no light is
+    created;
+  - `scatter` widens it;
+  - `karis_average` (on) stops sparkling specular pixels from flickering in the glow, at
+    the cost of small light sources glowing less than their energy.
+- **What it costs** at 1080p: bloom 0.11 ms, exposure 0.02 ms, tone map 0.02 ms on an RTX
+  4060 Ti. On a Radeon iGPU they are 1.1 ms, 0.28 ms and 0.82 ms: consider fewer bloom
+  levels there.

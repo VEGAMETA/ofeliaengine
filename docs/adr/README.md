@@ -54,6 +54,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0044](0044-cascaded-shadow-maps.md) | Cascaded shadow maps: stable cascades in an atlas, casters culled per cascade on the GPU | Accepted |
 | [0045](0045-local-lights.md) | Local lights: z-bins and tile bitmasks | Accepted |
 | [0046](0046-image-based-lighting.md) | Image-based lighting from an environment | Accepted |
+| [0047](0047-bloom-and-automatic-exposure.md) | Bloom and automatic exposure | Accepted |
 
 ## Template
 

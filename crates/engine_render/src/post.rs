@@ -6,7 +6,8 @@
 //! (SDR, scRGB or HDR10, the luminance of reference white and of the peak); the tone mapper
 //! rolls highlights off towards the display's peak and writes the swapchain's encoding.
 
-use crate::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
+use crate::graph::{Access, Buffer, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
+use crate::postfx::BloomOutput;
 use engine_rhi::ash::vk;
 use engine_rhi::{
     Bindless, Device, GraphicsPipelineDesc, OutputColor, Pipeline, RhiError, SamplerKind,
@@ -19,7 +20,7 @@ const FRAGMENT: &[u8] = include_bytes!("../shaders/tonemap.fragmentMain.spv");
 /// The HDR format scenes render into before tonemapping.
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
-/// `Push` in `tonemap.slang` (24 bytes).
+/// `Push` in `tonemap.slang` (40 bytes).
 #[repr(C)]
 struct Push {
     source: u32,
@@ -28,10 +29,17 @@ struct Push {
     flags: u32,
     peak: f32,
     white: f32,
+    bloom: u32,
+    bloom_intensity: f32,
+    auto_exposure: u64,
 }
+
+const _: () = assert!(core::mem::size_of::<Push>() == 40);
 
 const FLAG_PASS_THROUGH: u32 = 1;
 const FLAG_ENCODE_PQ: u32 = 2;
+const FLAG_BLOOM: u32 = 4;
+const FLAG_AUTO_EXPOSURE: u32 = 8;
 
 /// Luminance of 1.0 in scRGB, in nits.
 const SCRGB_WHITE_NITS: f32 = 80.0;
@@ -175,6 +183,11 @@ pub struct Composite {
     /// What happens to the output first. `Load` keeps earlier composites. A clear color
     /// is written as it is: encode it first ([`OutputEncoding::encode`]).
     pub load: LoadOp,
+    /// Bloom of the source ([`crate::postfx::Bloom`]), mixed in before exposure.
+    pub bloom: Option<BloomOutput>,
+    /// An exposure measured on the GPU ([`crate::postfx::AutoExposure`]), multiplied
+    /// with `exposure` (which then acts as compensation).
+    pub auto_exposure: Option<Buffer>,
 }
 
 impl Default for Composite {
@@ -187,6 +200,8 @@ impl Default for Composite {
             peak: 1.0,
             encoding: OutputEncoding::LINEAR,
             load: LoadOp::DontCare,
+            bloom: None,
+            auto_exposure: None,
         }
     }
 }
@@ -291,14 +306,25 @@ impl Tonemap {
         composite: Composite,
     ) {
         let pipeline = &self.pipeline;
-        fg.add_pass(name)
-            .read(source, Access::Sampled(ShaderStages::FRAGMENT))
-            .color(output, composite.load, StoreOp::Store)
+        let mut pass = fg
+            .add_pass(name)
+            .read(source, Access::Sampled(ShaderStages::FRAGMENT));
+        if let Some(bloom) = composite.bloom {
+            pass = pass.read(bloom.texture, Access::Sampled(ShaderStages::FRAGMENT));
+        }
+        if let Some(exposure) = composite.auto_exposure {
+            pass = pass.read(exposure, Access::StorageRead(ShaderStages::FRAGMENT));
+        }
+        pass.color(output, composite.load, StoreOp::Store)
             .execute(move |ctx| {
                 let Some(index) = ctx.sampled_index(source) else {
                     return;
                 };
                 let (white, encode) = composite.encoding.push();
+                let bloom = composite
+                    .bloom
+                    .and_then(|b| ctx.sampled_index(b.texture).map(|i| (i, b.intensity)));
+                let auto_exposure = composite.auto_exposure.map(|b| ctx.address(b));
                 let push = Push {
                     source: index,
                     sampler: Bindless::sampler(composite.sampler),
@@ -307,9 +333,18 @@ impl Tonemap {
                         0
                     } else {
                         FLAG_PASS_THROUGH
-                    } | encode,
+                    } | encode
+                        | if bloom.is_some() { FLAG_BLOOM } else { 0 }
+                        | if auto_exposure.is_some() {
+                            FLAG_AUTO_EXPOSURE
+                        } else {
+                            0
+                        },
                     peak: composite.peak,
                     white,
+                    bloom: bloom.map_or(0, |b| b.0),
+                    bloom_intensity: bloom.map_or(0.0, |b| b.1),
+                    auto_exposure: auto_exposure.unwrap_or(0),
                 };
                 // SAFETY: `Push` is plain `repr(C)` data without padding.
                 let bytes = unsafe {

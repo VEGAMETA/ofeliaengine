@@ -29,6 +29,7 @@ pub mod material;
 pub mod mesh;
 pub mod png;
 pub mod post;
+pub mod postfx;
 pub mod shadow;
 pub mod texture;
 pub mod texture_pool;
