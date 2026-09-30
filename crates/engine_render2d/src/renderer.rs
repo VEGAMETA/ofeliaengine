@@ -165,7 +165,6 @@ impl Renderer2d {
                         }),
                     )
                 },
-                vk::PipelineCache::null(),
             )
         };
         let pipelines = [pipeline(Blend::Premultiplied)?, pipeline(Blend::Multiply)?];

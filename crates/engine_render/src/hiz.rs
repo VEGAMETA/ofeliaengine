@@ -9,10 +9,10 @@
 //! workgroups costs more than it saves. The next dispatches work on small data and write
 //! six levels each. A 1080p pyramid takes three dispatches instead of eleven.
 
-use crate::compute::{ComputeShader, Dispatch};
+use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::graph::{Access, Buffer, FrameGraph, ShaderStages, Texture};
 use engine_rhi::ash::vk;
-use engine_rhi::{Bindless, Device, RhiError};
+use engine_rhi::{Bindless, Device, Pipeline, RhiError};
 
 const REDUCE: &[u8] = include_bytes!("../shaders/hiz.hizReduce.spv");
 
@@ -94,7 +94,7 @@ impl PyramidLayout {
 /// `HizPush` in `hiz.slang` (64 bytes).
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct Push {
+pub(crate) struct Push {
     pyramid: u64,
     depth_size: [u32; 2],
     texture: u32,
@@ -157,9 +157,21 @@ pub struct DepthPyramid {
 impl DepthPyramid {
     /// Creates the pipeline.
     pub fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
-        Ok(Self {
-            reduce: ComputeShader::new(device, bindless, REDUCE, c"hizReduce")?,
-        })
+        let source = Self::source()?;
+        let [reduce] = ComputeSource::create_all(device, bindless, [source])?;
+        Ok(Self { reduce })
+    }
+
+    /// The reduction shader, to create with other pipelines (ADR 0055).
+    pub(crate) fn source() -> Result<ComputeSource<'static, Push>, RhiError> {
+        ComputeSource::new(REDUCE, c"hizReduce", &[])
+    }
+
+    /// The pyramid, given the pipeline created from [`Self::source`].
+    pub(crate) fn from_source(source: &ComputeSource<'_, Push>, pipeline: Pipeline) -> Self {
+        Self {
+            reduce: source.finish(pipeline),
+        }
     }
 
     /// Adds the pass that reduces `depth` (sampled) into `pyramid`, a buffer of at least

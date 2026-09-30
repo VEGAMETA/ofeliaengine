@@ -9,7 +9,7 @@
 //! - [`AutoExposure`] builds a histogram of log2 luminance, averages it between two
 //!   percentiles, and adapts an exposure towards middle grey over time, all on the GPU.
 
-use crate::compute::{ComputeShader, Dispatch};
+use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::graph::{
     Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, ShaderStages, Texture,
     TextureDesc,
@@ -106,9 +106,17 @@ impl Bloom {
         bindless: &Bindless,
         settings: BloomSettings,
     ) -> Result<Self, RhiError> {
+        let [downsample, upsample] = ComputeSource::create_all(
+            device,
+            bindless,
+            [
+                ComputeSource::new(DOWNSAMPLE, c"bloomDownsample", &[])?,
+                ComputeSource::new(UPSAMPLE, c"bloomUpsample", &[])?,
+            ],
+        )?;
         Ok(Self {
-            downsample: ComputeShader::new(device, bindless, DOWNSAMPLE, c"bloomDownsample")?,
-            upsample: ComputeShader::new(device, bindless, UPSAMPLE, c"bloomUpsample")?,
+            downsample,
+            upsample,
             settings: Cell::new(settings),
         })
     }
@@ -281,8 +289,14 @@ impl AutoExposure {
         bindless: &Bindless,
         settings: ExposureSettings,
     ) -> Result<Self, RhiError> {
-        let histogram = ComputeShader::new(device, bindless, HISTOGRAM, c"exposureHistogram")?;
-        let average = ComputeShader::new(device, bindless, AVERAGE, c"exposureAverage")?;
+        let [histogram, average] = ComputeSource::create_all(
+            device,
+            bindless,
+            [
+                ComputeSource::new(HISTOGRAM, c"exposureHistogram", &[])?,
+                ComputeSource::new(AVERAGE, c"exposureAverage", &[])?,
+            ],
+        )?;
         let (buffer, allocation) = allocator.create_buffer(
             &vk::BufferCreateInfo::default().size(16).usage(
                 vk::BufferUsageFlags::STORAGE_BUFFER

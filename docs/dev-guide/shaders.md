@@ -205,3 +205,76 @@ fg.add_compute("blur mips", &bindless)
 - Examples in the engine: `postfx.rs` (bloom and exposure), `environment.rs` (mip chains,
   several shaders in one pass), `hiz.rs` (workgroups per tile), `engine_upscale` (TAAU,
   specialization constants).
+- **Several shaders at once** compile in parallel (section 7):
+
+```rust
+let [down, up] = ComputeSource::create_all(&device, &bindless, [
+    ComputeSource::<Push>::new(DOWN_SPV, c"down", &[])?,
+    ComputeSource::<Push>::new(UP_SPV, c"up", &[])?,
+])?;
+```
+
+## 7. Pipelines at start-up: the cache
+
+The driver turns each shader, with its render state, into a pipeline: machine code for
+your GPU. The engine's renderers make 53 of them. Compiled one after another they take
+1–1.5 s, and the drivers' own caches do not survive a patch, a reinstall or a driver
+update. The engine keeps its own cache (ADR 0055):
+
+```rust
+use engine_rhi::PipelineCacheLoad;
+
+let mut device = Device::new(&instance, &adapter)?;
+// Optional: compile on your job pool instead of threads started for it.
+device.set_job_pool(jobs.clone()); // an Arc<ThreadPool>
+
+// Before creating the renderers:
+let cache = save_dir.join(device.pipeline_cache_file_name());
+if let PipelineCacheLoad::Rejected(why) = device.load_pipeline_cache(&cache) {
+    println!("pipeline cache not used: {why}"); // after a driver update, for example
+}
+let forward = ForwardRenderer::new(&device, &bindless, HDR_FORMAT, DEPTH_FORMAT, shadows)?;
+// ... the other renderers ...
+
+// Once start-up is done, and again at exit or after loading screens:
+device.save_pipeline_cache(&cache)?;
+```
+
+- **What it costs** (all 53 pipelines, RTX 4060 Ti / Radeon iGPU):
+
+  | | ms |
+  |---|---|
+  | with the cache | 7 / 6 |
+  | after a driver update or on a new GPU (compiled in parallel) | 300 / 320 |
+  | before this cache existed, cold | 1,430 / 1,020 |
+
+- **Where to keep it:** in the player's local data, for example
+  `%LOCALAPPDATA%\<game>\`, not in the installation folder (read-only under
+  Program Files) and not in roaming profiles (megabytes, and only valid for this GPU and
+  driver).
+  - `pipeline_cache_file_name()` includes the GPU's ids, so a laptop with two GPUs keeps
+    one file per GPU.
+- **Never a crash or a wrong picture:**
+  - a damaged file, one from another GPU or another driver is refused, with the reason;
+    the game compiles as without a cache and the next save replaces the file;
+  - saving writes a temporary file and renames it, so a crash mid-save keeps the old
+    file;
+  - saving an unchanged cache does nothing.
+- **Your own pipelines** go through the cache by themselves. Create many at once with
+  `Pipeline::create_many(&device, layout, &descs)`, or `ComputeSource::create_all` for
+  compute shaders:
+  - those in the cache come first, one after another (a lookup is a fraction of a
+    millisecond, and drivers serialize them);
+  - the others compile in parallel.
+- **Measure:**
+  - `cargo run -p engine_upscale --release --example pipeline_bench -- --cache <file>`;
+  - `ENGINE_PIPELINE_SALT=<a new number>` makes every pipeline miss every cache: a cold
+    start on demand;
+  - `engine_rhi::creation_stats()` counts pipelines, cache hits and misses: log it, or
+    show warm-up progress.
+- The editor keeps its caches in `%LOCALAPPDATA%\ofeliaengine\editor` and prints the
+  hits in its cold-start report (`editor --frames 60`).
+- **Not yet:**
+  - recording pipelines as they are used, which the material graph will need;
+  - `VK_KHR_pipeline_binary`;
+  - fast linking for pipelines created while drawing.

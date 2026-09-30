@@ -14,6 +14,8 @@ workspace = true
 # Vulkan bindings (MIT OR Apache-2.0). `loaded`: vulkan-1.dll is loaded at run time, so a
 # missing driver is an error value, not a start-up failure (ADR 0006).
 ash = "0.38"
+# The pipeline cache file's checksum and the job pool pipelines are created on (ADR 0055).
+engine_core.workspace = true
 engine_profiler.workspace = true
 
 [dev-dependencies]

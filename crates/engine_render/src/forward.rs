@@ -41,7 +41,7 @@
 //! [`GeometryPool`]: crate::mesh::GeometryPool
 //! [`MaterialTable`]: crate::material::MaterialTable
 
-use crate::compute::{ComputePass, ComputeShader, Dispatch};
+use crate::compute::{ComputePass, ComputeShader, ComputeSource, Dispatch};
 use crate::cull::Frustum;
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
 use crate::graph::{
@@ -61,7 +61,7 @@ use engine_core::math::{Mat4, Vec3};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     Allocation, Allocator, Bindless, Blend, DepthBias, Device, GraphicsPipelineDesc,
-    MemoryLocation, Pipeline, RhiError, SamplerKind, ShaderStageDesc, spirv_words,
+    MemoryLocation, Pipeline, PipelineDesc, RhiError, SamplerKind, ShaderStageDesc, spirv_words,
 };
 
 const VERTEX: &[u8] = include_bytes!("../shaders/forward.vertexMain.spv");
@@ -653,225 +653,200 @@ impl ForwardRenderer {
         let reactive_formats = [color_format, REACTIVE_FORMAT];
         let formats = [color_format];
         let motion_formats = [color_format, MOTION_FORMAT];
-        // Cull mode and front face come with each batch's pipeline state.
         // The specialization constants of each shading variant.
         const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
-        let main =
-            |fragment: &[u32], entry, formats: &[vk::Format], equal: bool, variant: usize| {
-                Pipeline::graphics(
-                    device,
-                    bindless.pipeline_layout(),
-                    &GraphicsPipelineDesc {
-                        specialization: &VARIANTS[variant],
-                        color_formats: formats,
-                        depth_format,
-                        dynamic_culling: true,
-                        // After the depth prepass: tested for equality, not written.
-                        depth_write: !equal,
-                        depth_compare: if equal {
-                            vk::CompareOp::EQUAL
-                        } else {
-                            vk::CompareOp::LESS
-                        },
-                        ..GraphicsPipelineDesc::new(
-                            ShaderStageDesc {
-                                spirv: &vertex,
-                                entry: c"vertexMain",
-                            },
-                            Some(ShaderStageDesc {
-                                spirv: fragment,
-                                entry,
-                            }),
-                        )
+        // Every graphics pipeline is described first and created in parallel below
+        // (ADR 0055); they are taken back in the order they were described.
+        fn shading_desc<'a>(
+            vertex: &'a [u32],
+            fragment: &'a [u32],
+            entry: &'a core::ffi::CStr,
+            color_formats: &'a [vk::Format],
+            depth_format: vk::Format,
+            specialization: &'a [u32],
+        ) -> GraphicsPipelineDesc<'a> {
+            GraphicsPipelineDesc {
+                specialization,
+                color_formats,
+                depth_format,
+                // Cull mode and front face come with each batch's pipeline state.
+                dynamic_culling: true,
+                ..GraphicsPipelineDesc::new(
+                    ShaderStageDesc {
+                        spirv: vertex,
+                        entry: c"vertexMain",
                     },
-                    vk::PipelineCache::null(),
-                )
-            };
-        let shadow = |vertex: &[u32], vertex_entry, fragment: Option<ShaderStageDesc<'_>>| {
-            Pipeline::graphics(
-                device,
-                bindless.pipeline_layout(),
-                &GraphicsPipelineDesc {
-                    depth_format: shadow_settings.format,
-                    dynamic_culling: true,
-                    depth_bias: Some(DepthBias {
-                        constant: 1.0,
-                        slope: 1.5,
-                        clamp: 0.0,
+                    Some(ShaderStageDesc {
+                        spirv: fragment,
+                        entry,
                     }),
-                    ..GraphicsPipelineDesc::new(
-                        ShaderStageDesc {
-                            spirv: vertex,
-                            entry: vertex_entry,
-                        },
-                        fragment,
-                    )
-                },
-                vk::PipelineCache::null(),
+                )
+            }
+        }
+        let main = |fragment, entry, formats, equal: bool, variant: usize| GraphicsPipelineDesc {
+            // After the depth prepass: tested for equality, not written.
+            depth_write: !equal,
+            depth_compare: if equal {
+                vk::CompareOp::EQUAL
+            } else {
+                vk::CompareOp::LESS
+            },
+            ..shading_desc(
+                &vertex,
+                fragment,
+                entry,
+                formats,
+                depth_format,
+                &VARIANTS[variant],
             )
         };
-        let blended = |fragment: &[u32], entry, formats: &[vk::Format], variant: usize| {
-            Pipeline::graphics(
-                device,
-                bindless.pipeline_layout(),
-                &GraphicsPipelineDesc {
-                    specialization: &VARIANTS[variant],
-                    color_formats: formats,
-                    depth_format,
-                    dynamic_culling: true,
-                    depth_write: false,
-                    depth_compare: vk::CompareOp::LESS,
-                    blend: Blend::Premultiplied,
-                    ..GraphicsPipelineDesc::new(
-                        ShaderStageDesc {
-                            spirv: &vertex,
-                            entry: c"vertexMain",
-                        },
-                        Some(ShaderStageDesc {
-                            spirv: fragment,
-                            entry,
-                        }),
-                    )
-                },
-                vk::PipelineCache::null(),
+        let blended = |fragment, entry, formats, variant: usize| GraphicsPipelineDesc {
+            depth_write: false,
+            depth_compare: vk::CompareOp::LESS,
+            blend: Blend::Premultiplied,
+            ..shading_desc(
+                &vertex,
+                fragment,
+                entry,
+                formats,
+                depth_format,
+                &VARIANTS[variant],
             )
         };
-        let shading = |lit: usize| -> Result<Shading, RhiError> {
-            Ok(Shading {
-                blended: [
-                    blended(&fragment_blended, c"fragmentBlended", &formats, lit)?,
-                    blended(
-                        &fragment_blended_reactive,
-                        c"fragmentBlendedReactive",
-                        &reactive_formats,
-                        lit,
-                    )?,
-                ],
-                main: [
-                    main(&fragment, c"fragmentMain", &formats, false, lit)?,
-                    main(&fragment_masked, c"fragmentMasked", &formats, false, lit)?,
-                ],
-                shade: main(&fragment, c"fragmentMain", &formats, true, lit)?,
-                main_motion: [
-                    main(
-                        &fragment_motion,
-                        c"fragmentMainMotion",
-                        &motion_formats,
-                        false,
-                        lit,
-                    )?,
-                    main(
-                        &fragment_masked_motion,
-                        c"fragmentMaskedMotion",
-                        &motion_formats,
-                        false,
-                        lit,
-                    )?,
-                ],
-                shade_motion: main(
+        let mut descs = Vec::with_capacity(8 * VARIANTS.len() + 6);
+        for lit in 0..VARIANTS.len() {
+            descs.extend([
+                main(&fragment, c"fragmentMain", &formats, false, lit),
+                main(&fragment_masked, c"fragmentMasked", &formats, false, lit),
+                main(&fragment, c"fragmentMain", &formats, true, lit),
+                main(
+                    &fragment_motion,
+                    c"fragmentMainMotion",
+                    &motion_formats,
+                    false,
+                    lit,
+                ),
+                main(
+                    &fragment_masked_motion,
+                    c"fragmentMaskedMotion",
+                    &motion_formats,
+                    false,
+                    lit,
+                ),
+                main(
                     &fragment_motion,
                     c"fragmentMainMotion",
                     &motion_formats,
                     true,
                     lit,
-                )?,
-            })
-        };
-        let shading = [shading(0)?, shading(1)?, shading(2)?, shading(3)?];
+                ),
+                blended(&fragment_blended, c"fragmentBlended", &formats, lit),
+                blended(
+                    &fragment_blended_reactive,
+                    c"fragmentBlendedReactive",
+                    &reactive_formats,
+                    lit,
+                ),
+            ]);
+        }
         let background_formats = [MOTION_FORMAT];
-        let background = Pipeline::graphics(
-            device,
-            bindless.pipeline_layout(),
-            &GraphicsPipelineDesc {
-                color_formats: &background_formats,
-                depth_format,
-                cull_mode: vk::CullModeFlags::NONE,
-                depth_write: false,
-                depth_compare: vk::CompareOp::EQUAL,
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: &background_vertex,
-                        entry: c"backgroundVertex",
-                    },
-                    Some(ShaderStageDesc {
-                        spirv: &background_motion,
-                        entry: c"backgroundMotion",
-                    }),
-                )
-            },
-            vk::PipelineCache::null(),
-        )?;
-        let sky = Pipeline::graphics(
-            device,
-            bindless.pipeline_layout(),
-            &GraphicsPipelineDesc {
-                color_formats: &formats,
-                depth_format,
-                cull_mode: vk::CullModeFlags::NONE,
-                depth_write: false,
-                depth_compare: vk::CompareOp::EQUAL,
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: &background_vertex,
-                        entry: c"backgroundVertex",
-                    },
-                    Some(ShaderStageDesc {
-                        spirv: &sky_fragment,
-                        entry: c"skyFragment",
-                    }),
-                )
-            },
-            vk::PipelineCache::null(),
-        )?;
-        let prepass = |vertex: &[u32], vertex_entry, fragment: Option<ShaderStageDesc<'_>>| {
-            Pipeline::graphics(
-                device,
-                bindless.pipeline_layout(),
-                &GraphicsPipelineDesc {
-                    depth_format,
-                    dynamic_culling: true,
-                    ..GraphicsPipelineDesc::new(
-                        ShaderStageDesc {
-                            spirv: vertex,
-                            entry: vertex_entry,
-                        },
-                        fragment,
-                    )
+        let full_screen = |color_formats, fragment| GraphicsPipelineDesc {
+            color_formats,
+            depth_format,
+            cull_mode: vk::CullModeFlags::NONE,
+            depth_write: false,
+            depth_compare: vk::CompareOp::EQUAL,
+            ..GraphicsPipelineDesc::new(
+                ShaderStageDesc {
+                    spirv: &background_vertex,
+                    entry: c"backgroundVertex",
                 },
-                vk::PipelineCache::null(),
+                Some(fragment),
             )
         };
-        let prepass = [
-            prepass(&depth_vertex, c"depthVertex", None)?,
-            prepass(
-                &depth_vertex_masked,
-                c"depthVertexMasked",
-                Some(ShaderStageDesc {
-                    spirv: &shadow_fragment_masked,
-                    entry: c"shadowFragmentMasked",
-                }),
-            )?,
-        ];
-        let shadow = [
-            shadow(&shadow_vertex, c"shadowVertex", None)?,
-            shadow(
-                &shadow_vertex_masked,
-                c"shadowVertexMasked",
-                Some(ShaderStageDesc {
-                    spirv: &shadow_fragment_masked,
-                    entry: c"shadowFragmentMasked",
-                }),
-            )?,
-        ];
+        descs.push(full_screen(
+            &background_formats,
+            ShaderStageDesc {
+                spirv: &background_motion,
+                entry: c"backgroundMotion",
+            },
+        ));
+        descs.push(full_screen(
+            &formats,
+            ShaderStageDesc {
+                spirv: &sky_fragment,
+                entry: c"skyFragment",
+            },
+        ));
+        let masked_depth = ShaderStageDesc {
+            spirv: &shadow_fragment_masked,
+            entry: c"shadowFragmentMasked",
+        };
+        let prepass = |spirv, entry, fragment| GraphicsPipelineDesc {
+            depth_format,
+            dynamic_culling: true,
+            ..GraphicsPipelineDesc::new(ShaderStageDesc { spirv, entry }, fragment)
+        };
+        descs.push(prepass(&depth_vertex, c"depthVertex", None));
+        descs.push(prepass(
+            &depth_vertex_masked,
+            c"depthVertexMasked",
+            Some(masked_depth),
+        ));
+        let shadow = |spirv, entry, fragment| GraphicsPipelineDesc {
+            depth_format: shadow_settings.format,
+            dynamic_culling: true,
+            depth_bias: Some(DepthBias {
+                constant: 1.0,
+                slope: 1.5,
+                clamp: 0.0,
+            }),
+            ..GraphicsPipelineDesc::new(ShaderStageDesc { spirv, entry }, fragment)
+        };
+        descs.push(shadow(&shadow_vertex, c"shadowVertex", None));
+        descs.push(shadow(
+            &shadow_vertex_masked,
+            c"shadowVertexMasked",
+            Some(masked_depth),
+        ));
+        // The compute passes' shaders, created with the rest.
+        let cull = ComputeSource::<Push>::new(CULL, c"cullMain", &[])?;
+        let light_tiles = ComputeSource::<Push>::new(LIGHT_TILES, c"lightTiles", &[])?;
+        let reduce = DepthPyramid::source()?;
+        let mut all: Vec<PipelineDesc<'_>> =
+            descs.iter().copied().map(PipelineDesc::Graphics).collect();
+        all.extend([cull.desc(), light_tiles.desc(), reduce.desc()]);
+        let layout = bindless.pipeline_layout();
+        let mut pipelines = Pipeline::create_many(device, layout, &all)?.into_iter();
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
+                call: "forward pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        let mut shading = || -> Result<Shading, RhiError> {
+            Ok(Shading {
+                main: [next()?, next()?],
+                shade: next()?,
+                main_motion: [next()?, next()?],
+                shade_motion: next()?,
+                blended: [next()?, next()?],
+            })
+        };
+        let shading = [shading()?, shading()?, shading()?, shading()?];
+        let background = next()?;
+        let sky = next()?;
+        let prepass = [next()?, next()?];
+        let shadow = [next()?, next()?];
         Ok(Self {
             shading,
             prepass,
             background,
             sky,
             shadow,
-            cull: ComputeShader::new(device, bindless, CULL, c"cullMain")?,
-            light_tiles: ComputeShader::new(device, bindless, LIGHT_TILES, c"lightTiles")?,
-            pyramid: DepthPyramid::new(device, bindless)?,
+            cull: cull.finish(next()?),
+            light_tiles: light_tiles.finish(next()?),
+            pyramid: DepthPyramid::from_source(&reduce, next()?),
             shadow_settings,
             frustum_culling: true,
             light_culling: true,
