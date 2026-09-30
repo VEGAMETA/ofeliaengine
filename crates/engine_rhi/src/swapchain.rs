@@ -265,6 +265,9 @@ pub struct Swapchain {
     /// Largest present id sent so far: ids must keep increasing for the swapchain's whole
     /// life, across every user of it (`VUID-VkPresentIdKHR-presentIds-04999`).
     last_present_id: AtomicU64,
+    /// Presents through this function instead of the driver's (a library's hook, such as
+    /// Streamline's for DLSS, ADR 0063).
+    present_function: Option<vk::PFN_vkQueuePresentKHR>,
     device: ash::Device,
 }
 
@@ -307,6 +310,7 @@ impl Swapchain {
                 .present_wait
                 .then(|| ash::khr::present_wait::Device::new(device.instance_raw(), device.raw())),
             last_present_id: AtomicU64::new(0),
+            present_function: None,
             device: device.raw().clone(),
         };
         swapchain.build(device, surface, desc.width, desc.height)?;
@@ -559,10 +563,34 @@ impl Swapchain {
             info = info.push_next(&mut present_id);
             self.last_present_id.fetch_max(id, Ordering::Relaxed);
         }
+        if let Some(present) = self.present_function {
+            // SAFETY: as below; the hook forwards to the driver's `vkQueuePresentKHR`
+            // (`set_present_function`).
+            return match unsafe { present(queue.raw, &info) } {
+                vk::Result::SUCCESS => Ok(false),
+                vk::Result::SUBOPTIMAL_KHR => Ok(true),
+                result => Err(RhiError::Vulkan {
+                    call: "vkQueuePresentKHR",
+                    result,
+                }),
+            };
+        }
         // SAFETY: `index` was acquired and rendered; the semaphore is signaled by the
         // caller's submission.
         unsafe { self.loader.queue_present(queue.raw, &info) }
             .map_err(RhiError::vk("vkQueuePresentKHR"))
+    }
+
+    /// Presents through `present` instead of the driver's `vkQueuePresentKHR` (or again
+    /// through the driver's with `None`): a library that must see every present, such as
+    /// Streamline for DLSS (ADR 0063), hooks it this way.
+    ///
+    /// # Safety
+    ///
+    /// `present` behaves as `vkQueuePresentKHR` of this swapchain's device (it forwards to
+    /// it) and stays callable for as long as it is set.
+    pub unsafe fn set_present_function(&mut self, present: Option<vk::PFN_vkQueuePresentKHR>) {
+        self.present_function = present;
     }
 
     /// Waits until the present tagged `id` has reached the screen, up to `timeout_ns`.

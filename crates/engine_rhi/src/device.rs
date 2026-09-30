@@ -5,6 +5,7 @@ use crate::error::RhiError;
 use crate::instance::{Instance, InstanceShared};
 use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheLoad, PipelineCacheSave};
 use ash::vk;
+use core::ffi::CStr;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use engine_core::hash::state_hash64;
 use engine_core::jobs::ThreadPool;
@@ -73,6 +74,8 @@ pub struct Device {
     shader_float16: bool,
     /// Pipelines capture the driver's statistics (`ENGINE_PIPELINE_STATS=1`).
     pipeline_statistics: bool,
+    /// Extensions a library asked for ([`Device::with_extensions`]) that were enabled.
+    extra_extensions: Vec<std::ffi::CString>,
     /// Graphics + compute + transfer (+ present on a desktop GPU).
     pub graphics: Queue,
     /// A compute queue on a family without graphics (async compute), if the GPU has one.
@@ -106,6 +109,18 @@ impl Device {
     /// Creates the device on `adapter`, which must be suitable
     /// ([`Adapter::missing_features`] empty).
     pub fn new(instance: &Instance, adapter: &Adapter) -> Result<Self, RhiError> {
+        Self::with_extensions(instance, adapter, &[])
+    }
+
+    /// Like [`Self::new`], also enabling `extra` device extensions a library needs (the
+    /// ones Streamline asks for DLSS, ADR 0063); they must need no feature structures.
+    /// Those the adapter does not list are skipped: [`Self::extra_extension_enabled`]
+    /// tells which were enabled.
+    pub fn with_extensions(
+        instance: &Instance,
+        adapter: &Adapter,
+        extra: &[&CStr],
+    ) -> Result<Self, RhiError> {
         engine_profiler::zone!("rhi::Device::new");
         if !adapter.missing_features().is_empty() {
             return Err(RhiError::NoSuitableAdapter(vec![(
@@ -177,7 +192,10 @@ impl Device {
             .maintenance4(true)
             // Creating a pipeline only if the cache holds it (`Pipeline::create_many`).
             .pipeline_creation_cache_control(true)
-            .shader_demote_to_helper_invocation(true);
+            .shader_demote_to_helper_invocation(true)
+            // Required of every Vulkan 1.3 device; libraries that tag the engine's objects
+            // use it (Streamline for DLSS, ADR 0063).
+            .private_data(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
             .texture_compression_bc(true)
@@ -264,6 +282,33 @@ impl Device {
             features2 = features2.push_next(&mut e_anti_lag);
         }
 
+        let mut extra_extensions = Vec::new();
+        if !extra.is_empty() {
+            // SAFETY: the adapter belongs to `instance`.
+            let available = unsafe {
+                instance
+                    .raw()
+                    .enumerate_device_extension_properties(adapter.physical)
+            }
+            .map_err(RhiError::vk("vkEnumerateDeviceExtensionProperties"))?;
+            for &name in extra {
+                if !available
+                    .iter()
+                    .any(|e| e.extension_name_as_c_str() == Ok(name))
+                {
+                    continue;
+                }
+                let listed = extensions.iter().any(|&e| {
+                    // SAFETY: the list holds pointers to NUL-terminated static names.
+                    (unsafe { CStr::from_ptr(e) }) == name
+                });
+                if !listed {
+                    extensions.push(name.as_ptr());
+                }
+                extra_extensions.push(name.to_owned());
+            }
+        }
+
         let create_info = vk::DeviceCreateInfo::default()
             .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
@@ -309,6 +354,7 @@ impl Device {
             hdr_metadata,
             shader_float16: adapter.caps.shader_float16,
             pipeline_statistics,
+            extra_extensions,
             instance: instance.shared.clone(),
         })
     }
@@ -318,6 +364,11 @@ impl Device {
     /// `VK_KHR_pipeline_executable_properties`.
     pub fn pipeline_statistics_enabled(&self) -> bool {
         self.pipeline_statistics
+    }
+
+    /// Whether `name`, passed to [`Self::with_extensions`], was enabled.
+    pub fn extra_extension_enabled(&self, name: &CStr) -> bool {
+        self.extra_extensions.iter().any(|e| e.as_c_str() == name)
     }
 
     /// Which latency extensions are enabled.

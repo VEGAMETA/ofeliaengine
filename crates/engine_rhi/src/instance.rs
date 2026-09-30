@@ -75,6 +75,8 @@ pub(crate) struct InstanceShared {
     /// `VK_EXT_swapchain_colorspace`: surfaces may offer HDR color spaces.
     pub(crate) swapchain_colorspace_enabled: bool,
     pub(crate) debug_utils_enabled: bool,
+    /// Extensions a library asked for ([`Instance::with_extensions`]) that were enabled.
+    pub(crate) extra_extensions: Vec<std::ffi::CString>,
 }
 
 impl Drop for InstanceShared {
@@ -149,6 +151,13 @@ unsafe extern "system" fn debug_callback(
 impl Instance {
     /// Loads the Vulkan loader and creates the instance (Vulkan 1.3).
     pub fn new(desc: &InstanceDesc) -> Result<Self, RhiError> {
+        Self::with_extensions(desc, &[])
+    }
+
+    /// Like [`Self::new`], also enabling `extra` instance extensions a library needs (the
+    /// ones Streamline asks for DLSS, ADR 0063). Those the loader does not list are skipped:
+    /// [`Self::extra_extension_enabled`] tells which were enabled.
+    pub fn with_extensions(desc: &InstanceDesc, extra: &[&CStr]) -> Result<Self, RhiError> {
         engine_profiler::zone!("rhi::Instance::new");
         // SAFETY: loads `vulkan-1.dll` / `libvulkan.so.1`; the entry points are only used
         // while `entry` lives (it is stored in the shared state).
@@ -212,6 +221,19 @@ impl Instance {
         }
         if sync_validation {
             enabled_extensions.push(ext::validation_features::NAME.as_ptr());
+        }
+        let mut extra_extensions = Vec::new();
+        for &name in extra {
+            let listed = enabled_extensions.iter().any(|&e| {
+                // SAFETY: the list holds pointers to NUL-terminated static names.
+                (unsafe { CStr::from_ptr(e) }) == name
+            });
+            if has_extension(name) {
+                if !listed {
+                    enabled_extensions.push(name.as_ptr());
+                }
+                extra_extensions.push(name.to_owned());
+            }
         }
         let enabled_layers: Vec<*const i8> = if validation {
             vec![VALIDATION_LAYER.as_ptr()]
@@ -289,6 +311,7 @@ impl Instance {
                 headless_surface_enabled: headless_surface,
                 swapchain_colorspace_enabled: swapchain_colorspace,
                 debug_utils_enabled: debug_utils,
+                extra_extensions,
             }),
         })
     }
@@ -301,6 +324,14 @@ impl Instance {
     /// The ash entry (global commands).
     pub fn entry(&self) -> &ash::Entry {
         &self.shared.entry
+    }
+
+    /// Whether `name`, passed to [`Self::with_extensions`], was enabled.
+    pub fn extra_extension_enabled(&self, name: &CStr) -> bool {
+        self.shared
+            .extra_extensions
+            .iter()
+            .any(|e| e.as_c_str() == name)
     }
 
     /// Whether the surface extensions are enabled.

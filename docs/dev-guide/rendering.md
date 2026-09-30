@@ -443,6 +443,124 @@ When to choose it (ref-1, `cargo run -p engine_fsr --release --example upscale_b
   more than its 0.5 ms. In a light scene it does not; in a heavy one it does.
 - FSR holds about 130 MiB of GPU memory at 1440p (its history and intermediate images).
 
+### NVIDIA DLSS instead of TAAU
+
+`engine_dlss` runs NVIDIA's DLSS Super Resolution (and DLAA, the same network at the
+output size) through NVIDIA Streamline (ADR 0063). It runs only on NVIDIA RTX GPUs, and
+only with NVIDIA's DLLs, which **the engine does not ship**: the player, or you, put them
+next to the game.
+
+**The DLLs:** [upscalers.md](upscalers.md) lists them, where they go, how to check them
+(`cargo run -p engine_dlss --example dlss_probe`), and what NVIDIA's license asks of a
+game that ships them.
+
+**Setup.** Streamline must start before the Vulkan device exists, so DLSS takes part in
+creating it:
+
+```rust
+use engine_dlss::{Dlss, Streamline, StreamlineDesc};
+use engine_rhi::{Device, Instance};
+use engine_upscale::Quality;
+
+// 1. Before the instance: an error means "no DLSS" (missing or unsigned DLLs, no NVIDIA
+//    driver). Hide the option; nothing else changes.
+let streamline = Streamline::load(&StreamlineDesc {
+    project_id: String::from("your game's GUID"),
+    ..StreamlineDesc::default()
+}).ok();
+let instance = Instance::with_extensions(&instance_desc,
+    &streamline.as_ref().map(Streamline::instance_extensions).unwrap_or_default())?;
+let adapter = instance.select_adapter(&preference)?;
+// 2. Does this GPU run DLSS? (An RTX GPU with a recent driver.)
+let streamline = streamline.filter(|s| s.check_adapter(&instance, &adapter).is_ok());
+let device = Device::with_extensions(&instance, &adapter,
+    &streamline.as_ref().map(Streamline::device_extensions).unwrap_or_default())?;
+// 3. Hand over the device, and let Streamline see your presents.
+if let Some(streamline) = &streamline {
+    streamline.attach(&device)?;
+    unsafe { swapchain.set_present_function(streamline.present_function()) };
+}
+
+// Once per view.
+let mut dlss = Dlss::new(streamline.as_ref().unwrap(), frames_in_flight)?;
+let render_size = dlss.render_size(Quality::Quality, output_size)?; // 1080p → 1280×720
+temporal.set_jitter_phases(Dlss::jitter_phases(render_size, output_size));
+temporal.set_texture_lod_bias(Dlss::texture_lod_bias(render_size, output_size));
+
+// Every frame: as for FSR.
+let upscaled = dlss.add_pass(&mut fg, UpscaleInput {
+    color, depth, motion: passes.motion.expect("a temporal view reports motion"),
+    camera: UpscaleCamera { near, far, fov_y }, frame_time_ms,
+}, output_size, frame_number)?;
+tonemap.add_pass(&mut fg, &bindless, upscaled, backbuffer, exposure);
+
+// At shutdown, before the device: free the views' DLSS, then drop Streamline.
+unsafe { dlss.destroy() };
+drop(dlss);
+drop(streamline);
+```
+
+- **Modes** follow from the sizes you render and output: DLAA at the output size, else
+  Quality (1.5× per axis), Balanced (1.72×), Performance (2×) or Ultra Performance (3×).
+  Take render sizes from `dlss.render_size` (NVIDIA's numbers); `dlss.render_sizes`
+  gives the range each mode accepts for dynamic resolution.
+- **Presets** (NVIDIA's networks): `dlss.set_preset(DlssPreset::K)` and so on. The default
+  lets NVIDIA choose: K for DLAA, Quality and Balanced, M for Performance, L for Ultra
+  Performance. On the RTX 4060 Ti, K is the cheapest (0.87 ms at 1080p from 720p); M
+  costs 1.3-3.5× K, L 1.6-4.4×.
+- **Texture LOD bias:** NVIDIA's recommendation, `Dlss::texture_lod_bias` (one level
+  sharper than `engine_upscale::texture_lod_bias`), measured best with DLSS.
+- **Cuts:** `temporal.reset()` (or `dlss.reset()`).
+- **Changing the output size, the mode or the preset** creates a new DLSS feature: 26 ms
+  on the first frame. Do it in menus.
+- **Startup:** loading Streamline takes about 0.7 s and attaching the device 0.4 s. Load
+  it only when the player enabled DLSS, or early, beside other startup work.
+- **Not passed to DLSS:** the reactive mask of transparent surfaces (NVIDIA's current
+  networks take none) and the engine's exposure (DLSS measures its own).
+- **Not available yet:** DLSS frame generation and Ray Reconstruction (ADR 0063).
+
+What it costs and gives (ref-1, RTX 4060 Ti, `cargo run -p engine_dlss --release
+--example upscale_bench`, FSR's scene):
+
+| 1080p from | TAAU | FSR 3.1 | DLSS |
+|---|---:|---:|---:|
+| 1080p (DLAA), GPU time | 0.15 ms | 0.79 ms | 0.89 ms |
+| 720p, GPU time | 0.12 ms | 0.53 ms | 0.87 ms |
+| 540p, GPU time | 0.12 ms | 0.44 ms | 1.12 ms (0.86 with preset K) |
+| 720p, image still / moving (PSNR against 2×2 supersampling) | 42.6 / 36.8 dB | 43.5 / 38.9 dB | 46.0 / 39.8 dB |
+| 540p, image still / moving | 40.4 / 35.1 dB | 41.6 / 37.0 dB | 44.3 / 41.5 dB |
+| GPU memory | 32 MiB at 1080p (two history images) | 134 MiB at 1440p | 85 MiB at 1080p (124 with preset M), 149 MiB at 1440p |
+
+- DLSS gives the best image by a clear margin: from 540p it beats FSR from 720p.
+- It costs the most GPU time: it pays where the rendering it saves costs more than about
+  0.9 ms at 1080p, that is, in heavy scenes, not in this light one.
+
+### Choosing an upscaler: one interface
+
+`Taau`, `Fsr` and `Dlss` all implement `engine_upscale::Upscaler`, so a view can hold
+whichever the player chose:
+
+```rust
+use engine_upscale::{Quality, UpscaleContext, UpscaleInput, Upscaler, UpscalerKind};
+
+let mut upscaler: Box<dyn Upscaler> = match settings.upscaler {
+    UpscalerKind::Taau => Box::new(Taau::new(&device, &bindless, frames_in_flight)?),
+    UpscalerKind::Fsr => Box::new(Fsr::new(&device, frames_in_flight)),
+    UpscalerKind::Dlss => Box::new(Dlss::new(&streamline, frames_in_flight)?),
+};
+let render_size = upscaler.render_size(settings.quality, output_size);
+temporal.set_jitter_phases(upscaler.jitter_phases(render_size, output_size));
+temporal.set_texture_lod_bias(upscaler.texture_lod_bias(render_size, output_size));
+
+// Every frame:
+let upscaled = upscaler.add_pass(&mut fg,
+    UpscaleContext { device: &device, allocator: &mut allocator, bindless: &bindless },
+    input, output_size, frame_number)?;
+```
+
+`UpscalerKind::name()` gives the menu text ("TAAU", "FSR 3.1", "DLSS"). Offer DLSS only
+when `Streamline::load`, `check_adapter` and `attach` succeeded.
+
 ## 8. Shadows of the sun: cascaded shadow maps
 
 The directional light casts through up to four cascades (ADR 0044):
