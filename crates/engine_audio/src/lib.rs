@@ -34,6 +34,7 @@ mod mixer;
 #[cfg(windows)]
 pub mod output;
 mod shared;
+pub mod spatial;
 mod wav;
 
 pub use clip::{Clip, ClipError};
@@ -42,6 +43,7 @@ pub use engine::{
     VoiceHandle,
 };
 pub use mixer::{MAX_BLOCK, Renderer};
+pub use spatial::{Emitter, Listener, Rolloff};
 
 #[cfg(test)]
 mod tests;

@@ -4,6 +4,8 @@
 use crate::clip::Clip;
 use crate::dsp::Effect;
 use crate::graph::Schedule;
+use crate::spatial::{Emitter, Listener};
+use engine_core::math::Vec3;
 
 /// Sentinel for "no bus".
 pub(crate) const NO_BUS: u16 = u16::MAX;
@@ -21,6 +23,8 @@ pub(crate) struct VoiceStart {
     pub(crate) start_at: Option<u64>,
     /// Fade-in in seconds.
     pub(crate) fade_in: f32,
+    /// Placed in the world.
+    pub(crate) spatial: Option<Emitter>,
 }
 
 #[derive(Clone, Copy)]
@@ -33,6 +37,10 @@ pub(crate) enum VoiceChange {
     Pitch(f32),
     /// Fade-out seconds, then the voice ends.
     Stop(f32),
+    /// A spatial voice's position and velocity.
+    Position(Vec3, Vec3),
+    /// A spatial voice's occlusion (0..1).
+    Occlusion(f32),
 }
 
 #[derive(Clone, Copy)]
@@ -83,6 +91,8 @@ pub(crate) enum Command {
     },
     /// The compiled bus graph; replaces the current one.
     Schedule(Box<Schedule>),
+    /// Where spatial voices are heard from.
+    Listener(Listener),
 }
 
 /// Audio thread → game thread: finished voices and objects to free.

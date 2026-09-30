@@ -1,7 +1,11 @@
 #![allow(clippy::unwrap_used, clippy::float_cmp)]
 
 use crate::dsp::{Biquad, Block, Compressor, Delay, Effect, Limiter, db_to_gain};
-use crate::{Audio, AudioConfig, AudioError, BusId, Clip, ClipError, PlayParams, SendTap};
+use crate::{
+    Audio, AudioConfig, AudioError, BusId, Clip, ClipError, Emitter, Listener, PlayParams, Rolloff,
+    SendTap,
+};
+use engine_core::math::Vec3;
 
 fn mono(samples: &[f32]) -> Clip {
     Clip::from_interleaved(48_000, 1, samples).unwrap()
@@ -570,4 +574,185 @@ fn stale_handles_are_ignored() {
     audio.stop(first, 0.0);
     let out = render(&mut renderer, 5);
     assert!(out[0] > 0.5);
+}
+
+fn looping_spatial(emitter: Emitter) -> PlayParams {
+    PlayParams {
+        looping: true,
+        spatial: Some(emitter),
+        ..PlayParams::default()
+    }
+}
+
+fn rms(samples: &[f32]) -> f32 {
+    (samples.iter().map(|x| x * x).sum::<f32>() / samples.len().max(1) as f32).sqrt()
+}
+
+#[test]
+fn spatial_voice_is_panned_and_attenuated_by_distance() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    // 2 m to the right of the default listener (facing -Z): inverse rolloff from 1 m
+    // halves it, and it is fully right.
+    audio
+        .play_with(
+            &mono(&[1.0; 64]),
+            &looping_spatial(Emitter::at(Vec3::new(2.0, 0.0, 0.0))),
+        )
+        .unwrap();
+    let out = render(&mut renderer, 256);
+    assert!(right(&out).iter().all(|&x| (x - 0.5).abs() < 1e-5));
+    assert!(left(&out).iter().all(|&x| x.abs() < 1e-5));
+
+    // Turned around (facing +Z) the same sound is on the left, after one ramp.
+    audio.set_listener(&Listener {
+        forward: Vec3::Z,
+        ..Listener::default()
+    });
+    render(&mut renderer, 256);
+    let out = render(&mut renderer, 256);
+    assert!(left(&out).iter().all(|&x| (x - 0.5).abs() < 1e-5));
+    assert!(right(&out).iter().all(|&x| x.abs() < 1e-5));
+}
+
+#[test]
+fn a_jump_in_position_is_ramped_over_the_render_call() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let v = audio
+        .play_with(
+            &mono(&[1.0; 64]),
+            &looping_spatial(Emitter::at(Vec3::new(-5.0, 0.0, 0.0))),
+        )
+        .unwrap();
+    let mut out = render(&mut renderer, 256);
+    audio.set_voice_position(v, Vec3::new(5.0, 0.0, 0.0), Vec3::ZERO);
+    out.extend(render(&mut renderer, 256));
+    out.extend(render(&mut renderer, 256));
+    for channel in [left(&out), right(&out)] {
+        let steepest = channel
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        // 0.2 (5 m) across 256 frames.
+        assert!(steepest < 0.001, "{steepest}");
+    }
+    assert!(left(&out)[767].abs() < 1e-5);
+    assert!((right(&out)[767] - 0.2).abs() < 1e-5);
+}
+
+#[test]
+fn approaching_sounds_play_higher() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let sine: Vec<f32> = (0..48_000)
+        .map(|i| (core::f32::consts::TAU * 1_000.0 * i as f32 / 48_000.0).sin())
+        .collect();
+    // 50 m ahead, coming closer at a tenth of the speed of sound: 1000 Hz / 0.9.
+    audio
+        .play_with(
+            &mono(&sine),
+            &looping_spatial(Emitter {
+                velocity: Vec3::new(0.0, 0.0, 34.3),
+                ..Emitter::at(Vec3::new(0.0, 0.0, -50.0))
+            }),
+        )
+        .unwrap();
+    let mut l = Vec::new();
+    for _ in 0..(48_000 / 240) {
+        l.extend(left(&render(&mut renderer, 240)));
+    }
+    let rising = l.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+    assert!((rising as f32 - 1_000.0 / 0.9).abs() <= 2.0, "{rising}");
+}
+
+#[test]
+fn sounds_beyond_a_linear_rolloff_become_virtual() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let v = audio
+        .play_with(
+            &mono(&[1.0; 64]),
+            &looping_spatial(Emitter {
+                rolloff: Rolloff::Linear,
+                max_distance: 30.0,
+                ..Emitter::at(Vec3::new(0.0, 0.0, -40.0))
+            }),
+        )
+        .unwrap();
+    assert!(render(&mut renderer, 256).iter().all(|&x| x == 0.0));
+    assert_eq!(audio.voice_counts(), (0, 1));
+    // Walking up to it brings it back.
+    audio.set_listener(&Listener {
+        position: Vec3::new(0.0, 0.0, -30.0),
+        ..Listener::default()
+    });
+    render(&mut renderer, 256);
+    assert_eq!(audio.voice_counts(), (1, 0));
+    assert!(audio.is_playing(v));
+}
+
+#[test]
+fn occlusion_muffles_and_lowers_the_sound() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    // The highest frequency there is (alternating samples), 1 m ahead.
+    let buzz: Vec<f32> = (0..64)
+        .map(|i| if i % 2 == 0 { 1.0 } else { -1.0 })
+        .collect();
+    let v = audio
+        .play_with(
+            &mono(&buzz),
+            &looping_spatial(Emitter::at(Vec3::new(0.0, 0.0, -1.0))),
+        )
+        .unwrap();
+    let clear = rms(&left(&render(&mut renderer, 1024)));
+    assert!((clear - CENTER).abs() < 1e-3, "{clear}");
+    audio.set_voice_occlusion(v, 1.0);
+    render(&mut renderer, 1024);
+    let occluded = rms(&left(&render(&mut renderer, 1024)));
+    // −15 dB of gain and a 600 Hz low-pass at the top of the spectrum: over 40 dB.
+    assert!(occluded < clear * 0.01, "{occluded} vs {clear}");
+}
+
+#[test]
+fn spatial_updates_keep_a_fade_in() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    audio
+        .play_with(
+            &mono(&[1.0; 64]),
+            &PlayParams {
+                fade_in: 0.5,
+                ..looping_spatial(Emitter::at(Vec3::new(0.0, 0.0, -1.0)))
+            },
+        )
+        .unwrap();
+    let mut l = Vec::new();
+    for _ in 0..4 {
+        l.extend(left(&render(&mut renderer, 256)));
+    }
+    // 1024 of the fade's 24,000 frames: about 4% of the way to the centre level.
+    let expected = CENTER * 1_024.0 / 24_000.0;
+    assert!(
+        (l[1023] - expected).abs() < 0.002,
+        "{} vs {expected}",
+        l[1023]
+    );
+}
+
+#[test]
+fn the_four_step_low_pass_matches_the_plain_recursion() {
+    for a in [0.9f32, 0.3, 0.05, 0.001] {
+        for len in [0usize, 1, 3, 4, 5, 7, 64, 255] {
+            let input: Vec<f32> = (0..len)
+                .map(|i| ((i * 37 % 11) as f32 - 5.0) / 5.0)
+                .collect();
+            let (mut plain, mut y) = (input.clone(), 0.25f32);
+            for x in &mut plain {
+                y += (*x - y) * a;
+                *x = y;
+            }
+            let (mut fast, mut state) = (input, 0.25f32);
+            crate::mixer::one_pole(&mut fast, &mut state, a);
+            for (i, (p, f)) in plain.iter().zip(&fast).enumerate() {
+                assert!((p - f).abs() < 1e-5, "a {a}, len {len}, {i}: {p} vs {f}");
+            }
+            assert!((state - y).abs() < 1e-5);
+        }
+    }
 }

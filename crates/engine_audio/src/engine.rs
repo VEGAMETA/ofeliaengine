@@ -6,7 +6,9 @@ use crate::dsp::Effect;
 use crate::graph::{BusNode, EffectNode, Graph, SendNode};
 use crate::mixer::{Renderer, RendererParts};
 use crate::shared::Shared;
+use crate::spatial::{Emitter, Listener};
 use core::fmt;
+use engine_core::math::Vec3;
 use engine_core::spsc::{self, Consumer, Producer};
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -112,6 +114,10 @@ pub struct PlayParams {
     pub start_at: Option<u64>,
     /// Fade-in in seconds.
     pub fade_in: f32,
+    /// Place the sound in the world: gain, pan, pitch and a low-pass then follow the
+    /// emitter as heard by the [`Listener`] ([`crate::spatial`]). `gain`, `pan` and `pitch`
+    /// still apply on top. `None` plays it as is (music, UI).
+    pub spatial: Option<Emitter>,
 }
 
 impl Default for PlayParams {
@@ -125,6 +131,7 @@ impl Default for PlayParams {
             priority: 128,
             start_at: None,
             fade_in: 0.0,
+            spatial: None,
         }
     }
 }
@@ -314,6 +321,7 @@ impl Audio {
                 priority: params.priority,
                 start_at: params.start_at,
                 fade_in: params.fade_in,
+                spatial: params.spatial,
             },
         });
         Ok(handle)
@@ -355,6 +363,24 @@ impl Audio {
     /// Changes the voice's pitch (playback rate ratio).
     pub fn set_voice_pitch(&mut self, voice: VoiceHandle, pitch: f32) {
         self.voice_command(voice, VoiceChange::Pitch(pitch));
+    }
+
+    /// Moves a spatial voice (one played with [`PlayParams::spatial`]); `velocity` in m/s
+    /// drives the Doppler effect. Call each frame for sounds that move.
+    pub fn set_voice_position(&mut self, voice: VoiceHandle, position: Vec3, velocity: Vec3) {
+        self.voice_command(voice, VoiceChange::Position(position, velocity));
+    }
+
+    /// How much is between a spatial voice and the listener, 0 (nothing) .. 1 (a wall):
+    /// full occlusion is 15 dB quieter and muffled to about 600 Hz. Usually from a ray
+    /// cast, a few times per second.
+    pub fn set_voice_occlusion(&mut self, voice: VoiceHandle, occlusion: f32) {
+        self.voice_command(voice, VoiceChange::Occlusion(occlusion));
+    }
+
+    /// Where spatial voices are heard from. Call once per frame (usually from the camera).
+    pub fn set_listener(&mut self, listener: &Listener) {
+        self.send(Command::Listener(*listener));
     }
 
     fn compile_and_send(&mut self) -> bool {

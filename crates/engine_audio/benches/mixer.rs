@@ -9,7 +9,8 @@
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
 use engine_audio::dsp::{Biquad, Block, Compressor, Delay, Effect, Limiter, Reverb};
-use engine_audio::{Audio, AudioConfig, BusId, Clip, PlayParams, Renderer, SendTap};
+use engine_audio::{Audio, AudioConfig, BusId, Clip, Emitter, PlayParams, Renderer, SendTap};
+use engine_core::math::Vec3;
 use std::time::Instant;
 
 const BLOCK: usize = 256;
@@ -63,6 +64,38 @@ fn voices(count: u32, clip: &Clip, pitch: f32, max_real: u32) -> Renderer {
     renderer
 }
 
+/// `count` looping spatial voices on a ring 5..80 m around the listener, each moving (so
+/// every one is resampled for the Doppler effect, and the far ones low-passed).
+fn spatial_voices(count: u32, clip: &Clip, max_real: u32) -> Renderer {
+    let (mut audio, renderer) = Audio::new(&AudioConfig {
+        max_voices: count.max(1),
+        max_real_voices: max_real,
+        ..AudioConfig::default()
+    });
+    for i in 0..count {
+        let angle = i as f32 * 2.399;
+        let distance = 5.0 + 75.0 * (i as f32 / count.max(1) as f32);
+        let position = Vec3::new(angle.cos(), 0.0, angle.sin()) * distance;
+        audio
+            .play_with(
+                clip,
+                &PlayParams {
+                    looping: true,
+                    gain: 0.05,
+                    spatial: Some(Emitter {
+                        velocity: Vec3::new(-angle.sin(), 0.0, angle.cos()) * 10.0
+                            + position.normalize() * 3.0,
+                        ..Emitter::at(position)
+                    }),
+                    ..PlayParams::default()
+                },
+            )
+            .unwrap();
+    }
+    std::mem::forget(audio);
+    renderer
+}
+
 fn row(name: &str, us: f64) {
     println!("| {name} | {us:.1} | {:.2} % |", us / BUDGET_US * 100.0);
 }
@@ -92,6 +125,14 @@ fn main() {
             time_render(&mut voices(count, &stereo, 1.0, count), 500),
         );
     }
+    row(
+        "128 spatial mono voices (distance, pan, Doppler, low-pass)",
+        time_render(&mut spatial_voices(128, &mono, 128), 500),
+    );
+    row(
+        "1024 spatial voices, 64 real + 960 virtual",
+        time_render(&mut spatial_voices(1024, &mono, 64), 500),
+    );
     row(
         "1024 voices, 64 real + 960 virtual",
         time_render(&mut voices(1024, &mono, 1.0, 64), 500),
