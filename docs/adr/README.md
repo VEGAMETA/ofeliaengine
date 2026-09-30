@@ -50,13 +50,13 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0040](0040-materials-and-textures.md) | Materials and textures: a bindless material table, filtered mip chains | Accepted |
 | [0041](0041-texture-compression.md) | Texture compression: BC7 and BC5 on the CPU, a derived data cache | Accepted |
 | [0042](0042-depth-prepass.md) | Depth prepass: optional, off by default | Accepted |
-| [0049](0049-reverb.md) | Reverb: diffusion into an 8-line feedback delay network | Accepted |
 | [0043](0043-motion-vectors-and-taau.md) | Motion vectors, projection jitter and the engine's own TAAU | Accepted |
 | [0044](0044-cascaded-shadow-maps.md) | Cascaded shadow maps: stable cascades in an atlas, casters culled per cascade on the GPU | Accepted |
 | [0045](0045-local-lights.md) | Local lights: z-bins and tile bitmasks | Accepted |
 | [0046](0046-image-based-lighting.md) | Image-based lighting from an environment | Accepted |
 | [0047](0047-bloom-and-automatic-exposure.md) | Bloom and automatic exposure | Accepted |
 | [0048](0048-tone-curve.md) | The tone curve: Uchimura's by default, PBR Neutral as an option | Accepted |
+| [0049](0049-reverb.md) | Reverb: diffusion into an 8-line feedback delay network | Accepted |
 | [0052](0052-compute-passes.md) | Compute passes: shaders typed by their push constants, checked against SPIR-V | Accepted |
 | [0053](0053-mesh-lods.md) | Mesh detail levels: meshoptimizer at import, chosen per instance by the culling pass | Accepted |
 
