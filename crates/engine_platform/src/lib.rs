@@ -7,7 +7,9 @@
 //! - `window`: windows on a dedicated thread, events through a lock-free ring;
 //! - `display`: HDR state, SDR white level, luminance range and refresh rate of a monitor;
 //! - `raw_input`: raw mouse/keyboard on a time-critical thread, with timestamps;
-//! - `fs_watch`: directory change notifications for hot reload.
+//! - `fs_watch`: directory change notifications for hot reload;
+//! - `io`: batched unbuffered file reads through an I/O ring, for streaming (all hosts;
+//!   synchronous reads where there is no I/O ring).
 //!
 //! Everything here is Windows-only. On other hosts the crate compiles to nothing, which
 //! keeps the workspace buildable in Linux containers. Bindings come from `windows-sys`
@@ -19,6 +21,7 @@ pub mod cpu;
 pub mod display;
 #[cfg(any(windows, test))]
 pub mod fs_watch;
+pub mod io;
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]

@@ -1,15 +1,21 @@
 //! Asset import (CLAUDE.md §13, ADR 0033). glTF 2.0 into memory and into the ECS;
 //! PNG and JPEG textures decoded and given mip chains filtered for their use (ADR 0040),
 //! block-compressed (BC7, BC5) and kept in a derived data cache (ADR 0041). Meshes get
-//! detail levels from meshoptimizer (ADR 0053). Cooking to a
-//! runtime format and streaming come later; the on-disk cooked format is a team decision.
+//! detail levels from meshoptimizer (ADR 0053). Scenes are cooked into packs, the runtime
+//! format, and loaded through an I/O ring with zstd per entry (`cook`, `pack`; ADR 0056).
 
+pub mod cook;
 mod ddc;
 mod gltf_import;
 mod lod;
+pub mod pack;
 mod texture_compress;
 mod texture_import;
 
+pub use cook::{
+    CookError, CookSettings, CookStats, CookedInstance, CookedMaterial, CookedMesh, CookedScene,
+    TextureSlot, cook_scene, load_pack, write_pack,
+};
 pub use ddc::{
     CacheOutcome, DerivedDataCache, import_texture, texture_from_bytes, texture_key,
     texture_to_bytes,
