@@ -19,6 +19,7 @@
 //! - [`viewport`]: viewports: render targets with their own size, update rate and
 //!   placement; nesting, split screen, pixel-perfect scaling (ADR 0016).
 
+pub mod ao;
 pub mod compute;
 pub mod cull;
 pub mod environment;

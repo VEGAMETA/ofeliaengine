@@ -131,11 +131,34 @@ Constants and formulas taken into our own code (no files copied).
 | ACES 1.0 RRT + sRGB ODT fit (matrices and rational curve) by Stephen Hill | `engine_render/src/post.rs` (`ACES_IN`, `ACES_OUT`, `aces`), `engine_render/shaders/tonemap.slang` | MJP and David Neubelt, Baking Lab, `BakingLab/ACES.hlsl` | MIT (Copyright (c) 2016 MJP) |
 | The ACES transforms that fit approximates | same | Academy Color Encoding System, A.M.P.A.S. | ACES license (below) |
 | AgX inset/outset matrices for Rec.2020 and the polynomial sigmoid's coefficients | `engine_render/src/post.rs` (`AGX_IN`, `AGX_OUT`, `agx_sigmoid`), `engine_render/shaders/tonemap.slang` | Filament `filament/src/ToneMapper.cpp` (matrices from Blender's AgX via EaryChow/AgX_LUT_Gen, no license, accepted by the team, ADR 0048; sigmoid adapted from B. Wrensch's minimal AgX) | Apache-2.0 (Filament) |
+| GTAO as structured by XeGTAO: the depth MIP filter, the main pass's slice and horizon math, the constants (radius × 1.457, falloff 0.615, MIP offset 3.3, the 0.03 floor, ÷ 1.5 before the blur), R2 + Hilbert noise, the edges and their 2-bit packing, the denoise weights | `engine_render/src/ao.rs`, `engine_render/shaders/ao.slang` | Intel XeGTAO, `XeGTAO.h`, `XeGTAO.hlsli` (after Jimenez et al., SIGGRAPH 2016) | MIT (Copyright (C) 2016-2021, Intel Corporation) |
 
 ### MIT license (Baking Lab)
 
 ```
 Copyright (c) 2016 MJP
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to deal in the Software
+without restriction, including without limitation the rights to use, copy, modify,
+merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### MIT license (XeGTAO)
+
+```
+Copyright (C) 2016-2021, Intel Corporation
 
 Permission is hereby granted, free of charge, to any person obtaining a copy of this
 software and associated documentation files (the "Software"), to deal in the Software
