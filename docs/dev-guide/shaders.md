@@ -1,9 +1,9 @@
 # Shaders: writing, building, hot reload
 
 The engine compiles shaders written in [Slang](https://shader-slang.org) to SPIR-V. You
-never run a shader compiler by hand. The editor and the `engine` command line find your
-shaders, compile them on all cores, cache the results, and recompile the right ones when
-you save a file.
+never run a shader compiler by hand. The editor and the `ofeliaengine` command line find
+your shaders, compile them on all cores, cache the results, and recompile the right ones
+when you save a file.
 
 ## 1. What you need
 
@@ -78,7 +78,7 @@ cargo run --release -p engine_cli -- shaders build shaders
 
 ## 4. Hot reload
 
-While the editor (or `engine shaders watch shaders`) is running, save any `.slang` file:
+While the editor (or `ofeliaengine shaders watch shaders`) is running, save any `.slang` file:
 
 - The engine recompiles exactly the shaders that use it: the file itself if it is a
   shader, or every shader that imports it if it is a module.

@@ -1,6 +1,6 @@
 [package]
 name = "engine_cli"
-description = "The `engine` command line: shader builds today; cooking, packing and benchmarks later."
+description = "The `ofeliaengine` command line: shader builds today; cooking, packing and benchmarks later."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,7 @@ license.workspace = true
 workspace = true
 
 [[bin]]
-name = "engine"
+name = "ofeliaengine"
 path = "src/main.rs"
 
 [dependencies]

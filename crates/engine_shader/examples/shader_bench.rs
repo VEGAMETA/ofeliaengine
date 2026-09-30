@@ -185,7 +185,7 @@ fn main() {
         stats(single)
     );
 
-    // Compile All with a cold cache and new sessions, as a fresh `engine shaders build`.
+    // Compile All with a cold cache and new sessions, as a fresh `ofeliaengine shaders build`.
     println!(
         "\n| Compile All, cold cache (sessions included) | wall | per shader | speed-up |\n|---|---|---|---|"
     );
