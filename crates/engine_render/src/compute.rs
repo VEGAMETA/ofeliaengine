@@ -43,7 +43,8 @@ use core::marker::PhantomData;
 use engine_rhi::ash::vk;
 use engine_rhi::spirv::reflect;
 use engine_rhi::{
-    Bindless, Device, PUSH_CONSTANT_BYTES, Pipeline, RhiError, ShaderStageDesc, spirv_words,
+    Bindless, Device, PUSH_CONSTANT_BYTES, Pipeline, PipelineDesc, RhiError, ShaderStageDesc,
+    spirv_words,
 };
 
 /// A compute pipeline whose push constants are a `P`.
@@ -76,6 +77,7 @@ impl<P: bytemuck::Pod> ComputeShader<P> {
 
     /// Like [`Self::new`], with specialization constants (`specialization[i]` is constant
     /// id `i`). The workgroup size is the module's own; specializing it is not supported.
+    /// Several at once, in parallel: [`ComputeSource::create_all`].
     pub fn specialized(
         device: &Device,
         bindless: &Bindless,
@@ -83,30 +85,9 @@ impl<P: bytemuck::Pod> ComputeShader<P> {
         entry: &CStr,
         specialization: &[u32],
     ) -> Result<Self, RhiError> {
-        const {
-            assert!(
-                core::mem::size_of::<P>() <= PUSH_CONSTANT_BYTES as usize,
-                "push constants are limited to PUSH_CONSTANT_BYTES"
-            );
-        }
-        let local_size = check_interface::<P>(spirv, entry)?;
-        let words = spirv_words(spirv)
-            .ok_or_else(|| RhiError::ShaderInterface(format!("{entry:?}: not SPIR-V")))?;
-        let pipeline = Pipeline::compute_specialized(
-            device,
-            bindless.pipeline_layout(),
-            ShaderStageDesc {
-                spirv: &words,
-                entry,
-            },
-            specialization,
-            vk::PipelineCache::null(),
-        )?;
-        Ok(Self {
-            pipeline,
-            local_size,
-            _push: PhantomData,
-        })
+        let source = ComputeSource::<P>::new(spirv, entry, specialization)?;
+        let [shader] = ComputeSource::create_all(device, bindless, [source])?;
+        Ok(shader)
     }
 
     /// Invocations per workgroup (`numthreads`).
@@ -127,6 +108,92 @@ impl<P: bytemuck::Pod> ComputeShader<P> {
                 [0, 1, 2].map(|i| threads[i].div_ceil(self.local_size[i].max(1)))
             }
         }
+    }
+}
+
+/// A compute shader checked against its push constants `P`, not created yet (ADR 0055):
+/// several are created at once, in parallel where they need compiling, with
+/// [`Self::create_all`], or together with other pipelines through
+/// [`Pipeline::create_many`] and [`Self::finish`].
+pub struct ComputeSource<'a, P> {
+    words: Vec<u32>,
+    entry: &'a CStr,
+    specialization: &'a [u32],
+    local_size: [u32; 3],
+    _push: PhantomData<fn(P)>,
+}
+
+impl<P> core::fmt::Debug for ComputeSource<'_, P> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("ComputeSource")
+            .field("entry", &self.entry)
+            .field("local_size", &self.local_size)
+            .finish_non_exhaustive()
+    }
+}
+
+impl<'a, P: bytemuck::Pod> ComputeSource<'a, P> {
+    /// `entry` in `spirv` (the bytes of a `.spv` file) with `specialization`
+    /// (`specialization[i]` is constant id `i`). Fails if the shader reads more push
+    /// constants than a `P` holds.
+    pub fn new(spirv: &[u8], entry: &'a CStr, specialization: &'a [u32]) -> Result<Self, RhiError> {
+        const {
+            assert!(
+                core::mem::size_of::<P>() <= PUSH_CONSTANT_BYTES as usize,
+                "push constants are limited to PUSH_CONSTANT_BYTES"
+            );
+        }
+        let local_size = check_interface::<P>(spirv, entry)?;
+        let words = spirv_words(spirv)
+            .ok_or_else(|| RhiError::ShaderInterface(format!("{entry:?}: not SPIR-V")))?;
+        Ok(Self {
+            words,
+            entry,
+            specialization,
+            local_size,
+            _push: PhantomData,
+        })
+    }
+
+    /// The pipeline to create, for [`Pipeline::create_many`] (with
+    /// [`Bindless::pipeline_layout`]).
+    pub fn desc(&self) -> PipelineDesc<'_> {
+        PipelineDesc::Compute {
+            stage: ShaderStageDesc {
+                spirv: &self.words,
+                entry: self.entry,
+            },
+            specialization: self.specialization,
+        }
+    }
+
+    /// The shader, given the pipeline [`Pipeline::create_many`] created from
+    /// [`Self::desc`].
+    pub fn finish(&self, pipeline: Pipeline) -> ComputeShader<P> {
+        ComputeShader {
+            pipeline,
+            local_size: self.local_size,
+            _push: PhantomData,
+        }
+    }
+
+    /// Creates the shaders of `sources`, in their order.
+    pub fn create_all<const N: usize>(
+        device: &Device,
+        bindless: &Bindless,
+        sources: [Self; N],
+    ) -> Result<[ComputeShader<P>; N], RhiError> {
+        let descs: Vec<PipelineDesc<'_>> = sources.iter().map(Self::desc).collect();
+        let pipelines = Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?;
+        let shaders: Vec<ComputeShader<P>> = sources
+            .iter()
+            .zip(pipelines)
+            .map(|(source, pipeline)| source.finish(pipeline))
+            .collect();
+        shaders.try_into().map_err(|_| RhiError::Vulkan {
+            call: "compute pipelines (fewer than sources)",
+            result: vk::Result::ERROR_UNKNOWN,
+        })
     }
 }
 

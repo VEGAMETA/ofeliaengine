@@ -9,6 +9,7 @@ use crate::device::Device;
 use crate::error::RhiError;
 use ash::vk;
 use core::ffi::CStr;
+use core::sync::atomic::{AtomicU64, Ordering};
 
 /// A SPIR-V entry point.
 #[derive(Debug, Clone, Copy)]
@@ -110,6 +111,20 @@ impl<'a> GraphicsPipelineDesc<'a> {
     }
 }
 
+/// A pipeline to create with others ([`Pipeline::create_many`]).
+#[derive(Debug, Clone, Copy)]
+pub enum PipelineDesc<'a> {
+    /// A graphics pipeline.
+    Graphics(GraphicsPipelineDesc<'a>),
+    /// A compute pipeline.
+    Compute {
+        /// The compute stage.
+        stage: ShaderStageDesc<'a>,
+        /// Specialization constants: value `i` is `constant_id` `i`.
+        specialization: &'a [u32],
+    },
+}
+
 /// One statistic the driver reports for a stage of a compiled pipeline
 /// ([`Pipeline::statistics`]).
 #[derive(Debug, Clone, PartialEq)]
@@ -120,6 +135,63 @@ pub struct PipelineStatistic {
     pub name: String,
     /// Its value.
     pub value: f64,
+}
+
+/// Pipeline creation in this process, over all devices ([`creation_stats`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PipelineCreationStats {
+    /// Pipelines created.
+    pub created: u64,
+    /// Pipelines [`Pipeline::create_many`] found in the pipeline cache.
+    pub cache_hits: u64,
+    /// Pipelines [`Pipeline::create_many`] did not find there and compiled.
+    pub cache_misses: u64,
+    /// Time spent in the driver's creation calls (lookups included), summed over threads.
+    pub time: core::time::Duration,
+}
+
+static CREATED: AtomicU64 = AtomicU64::new(0);
+static HITS: AtomicU64 = AtomicU64::new(0);
+static MISSES: AtomicU64 = AtomicU64::new(0);
+static NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// How many pipelines this process created, how many came from the pipeline cache, and
+/// how long the driver took.
+pub fn creation_stats() -> PipelineCreationStats {
+    PipelineCreationStats {
+        created: CREATED.load(Ordering::Relaxed),
+        cache_hits: HITS.load(Ordering::Relaxed),
+        cache_misses: MISSES.load(Ordering::Relaxed),
+        time: core::time::Duration::from_nanos(NANOS.load(Ordering::Relaxed)),
+    }
+}
+
+/// Counts a creation call that started at `start`: `created` or not (a lookup that
+/// missed), `lookup` or a full creation.
+fn count_creation(start: std::time::Instant, created: bool, lookup: bool) {
+    NANOS.fetch_add(start.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    match (created, lookup) {
+        (true, true) => {
+            CREATED.fetch_add(1, Ordering::Relaxed);
+            HITS.fetch_add(1, Ordering::Relaxed);
+        }
+        (true, false) => {
+            CREATED.fetch_add(1, Ordering::Relaxed);
+        }
+        (false, _) => {
+            MISSES.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// With `cached_only`, creation fails (`VK_PIPELINE_COMPILE_REQUIRED`) instead of
+/// compiling when the pipeline cache does not hold the pipeline (core in Vulkan 1.3).
+fn cache_flags(cached_only: bool) -> vk::PipelineCreateFlags {
+    if cached_only {
+        vk::PipelineCreateFlags::FAIL_ON_PIPELINE_COMPILE_REQUIRED
+    } else {
+        vk::PipelineCreateFlags::empty()
+    }
 }
 
 /// Pipelines capture statistics when the device asks for them.
@@ -177,28 +249,109 @@ impl Drop for Modules<'_> {
     }
 }
 
+/// `ENGINE_PIPELINE_SALT=<n>` (n > 0): every pipeline carries one more specialization
+/// constant, with an id no shader uses. It changes nothing in the pipeline (the Vulkan
+/// specification ignores map entries the shader does not use) but changes every cache key,
+/// so the driver compiles from scratch: for measuring cold pipeline creation.
+fn salt() -> Option<u32> {
+    static SALT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *SALT.get_or_init(|| {
+        std::env::var("ENGINE_PIPELINE_SALT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|&v| v != 0)
+    })
+}
+
+/// The constant id of the salt: far above any id a shader declares.
+const SALT_CONSTANT_ID: u32 = 0x7FFF_0000;
+
 /// Map entries and data for specialization constants: `values[i]` is constant id `i`.
 fn specialization_parts(values: &[u32]) -> (Vec<vk::SpecializationMapEntry>, Vec<u8>) {
-    let entries = (0..values.len() as u32)
+    let mut entries: Vec<_> = (0..values.len() as u32)
         .map(|i| vk::SpecializationMapEntry {
             constant_id: i,
             offset: i * 4,
             size: 4,
         })
         .collect();
-    let data = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    let mut data: Vec<u8> = values.iter().flat_map(|v| v.to_ne_bytes()).collect();
+    if let Some(salt) = salt() {
+        entries.push(vk::SpecializationMapEntry {
+            constant_id: SALT_CONSTANT_ID,
+            offset: data.len() as u32,
+            size: 4,
+        });
+        data.extend_from_slice(&salt.to_ne_bytes());
+    }
     (entries, data)
 }
 
 impl Pipeline {
     /// Creates a graphics pipeline with `layout` (normally
-    /// [`crate::Bindless::pipeline_layout`]).
+    /// [`crate::Bindless::pipeline_layout`]), through the device's pipeline cache. Many
+    /// at once: [`Self::create_many`].
     pub fn graphics(
         device: &Device,
         layout: vk::PipelineLayout,
         desc: &GraphicsPipelineDesc<'_>,
-        cache: vk::PipelineCache,
     ) -> Result<Self, RhiError> {
+        Self::create_graphics(device, layout, desc, false)?.ok_or(RhiError::Vulkan {
+            call: "vkCreateGraphicsPipelines",
+            result: vk::Result::PIPELINE_COMPILE_REQUIRED,
+        })
+    }
+
+    /// Creates the pipelines of `descs`, in their order, as fast as the driver allows
+    /// (ADR 0055):
+    ///
+    /// 1. those the pipeline cache holds, one after another on the calling thread: a
+    ///    lookup takes a fraction of a millisecond, and drivers serialize lookups (on the
+    ///    RTX 4060 Ti, 41 lookups on 16 threads took 38 ms, one after another 6 ms);
+    /// 2. the others in parallel ([`Device::create_parallel`]): compiling takes tens of
+    ///    milliseconds each, on the calling thread of each.
+    pub fn create_many(
+        device: &Device,
+        layout: vk::PipelineLayout,
+        descs: &[PipelineDesc<'_>],
+    ) -> Result<Vec<Self>, RhiError> {
+        engine_profiler::zone!("rhi::Pipeline::create_many");
+        let create = |desc: &PipelineDesc<'_>, cached_only| match desc {
+            PipelineDesc::Graphics(desc) => {
+                Self::create_graphics(device, layout, desc, cached_only)
+            }
+            PipelineDesc::Compute {
+                stage,
+                specialization,
+            } => Self::create_compute(device, layout, *stage, specialization, cached_only),
+        };
+        let mut pipelines = Vec::with_capacity(descs.len());
+        for desc in descs {
+            pipelines.push(create(desc, true)?);
+        }
+        let missing: Vec<usize> = (0..descs.len())
+            .filter(|&i| pipelines[i].is_none())
+            .collect();
+        let compiled = device.create_parallel(missing.len(), |k| {
+            create(&descs[missing[k]], false)?.ok_or(RhiError::Vulkan {
+                call: "vkCreate*Pipelines",
+                result: vk::Result::PIPELINE_COMPILE_REQUIRED,
+            })
+        })?;
+        for (i, pipeline) in missing.into_iter().zip(compiled) {
+            pipelines[i] = Some(pipeline);
+        }
+        Ok(pipelines.into_iter().flatten().collect())
+    }
+
+    /// Creates a graphics pipeline; with `cached_only`, only if the pipeline cache holds
+    /// it (`None` otherwise).
+    fn create_graphics(
+        device: &Device,
+        layout: vk::PipelineLayout,
+        desc: &GraphicsPipelineDesc<'_>,
+        cached_only: bool,
+    ) -> Result<Option<Self>, RhiError> {
         engine_profiler::zone!("rhi::Pipeline::graphics");
         let d = device.raw();
         let mut modules = Modules {
@@ -320,20 +473,31 @@ impl Pipeline {
             .color_blend_state(&blend)
             .dynamic_state(&dynamic)
             .layout(layout)
-            .flags(statistics_flags(device))
+            .flags(statistics_flags(device) | cache_flags(cached_only))
             .push_next(&mut rendering);
+        let start = std::time::Instant::now();
         // SAFETY: every pointer in `info` refers to locals alive for the call.
-        let raw = unsafe { d.create_graphics_pipelines(cache, &[info], None) }.map_err(
-            |(_, result)| RhiError::Vulkan {
-                call: "vkCreateGraphicsPipelines",
-                result,
-            },
-        )?[0];
-        Ok(Self {
+        let created =
+            unsafe { d.create_graphics_pipelines(device.pipeline_cache(), &[info], None) };
+        let raw = match created {
+            Ok(pipelines) => pipelines[0],
+            Err((_, vk::Result::PIPELINE_COMPILE_REQUIRED)) if cached_only => {
+                count_creation(start, false, true);
+                return Ok(None);
+            }
+            Err((_, result)) => {
+                return Err(RhiError::Vulkan {
+                    call: "vkCreateGraphicsPipelines",
+                    result,
+                });
+            }
+        };
+        count_creation(start, true, cached_only);
+        Ok(Some(Self {
             device: d.clone(),
             raw,
             bind_point: vk::PipelineBindPoint::GRAPHICS,
-        })
+        }))
     }
 
     /// The driver's statistics of each stage (registers, occupancy, instruction counts;
@@ -394,14 +558,13 @@ impl Pipeline {
         out
     }
 
-    /// Creates a compute pipeline with `layout`.
+    /// Creates a compute pipeline with `layout`, through the device's pipeline cache.
     pub fn compute(
         device: &Device,
         layout: vk::PipelineLayout,
         stage: ShaderStageDesc<'_>,
-        cache: vk::PipelineCache,
     ) -> Result<Self, RhiError> {
-        Self::compute_specialized(device, layout, stage, &[], cache)
+        Self::compute_specialized(device, layout, stage, &[])
     }
 
     /// Like [`Self::compute`], with specialization constants: `specialization[i]` is
@@ -411,8 +574,24 @@ impl Pipeline {
         layout: vk::PipelineLayout,
         stage: ShaderStageDesc<'_>,
         specialization: &[u32],
-        cache: vk::PipelineCache,
     ) -> Result<Self, RhiError> {
+        Self::create_compute(device, layout, stage, specialization, false)?.ok_or(
+            RhiError::Vulkan {
+                call: "vkCreateComputePipelines",
+                result: vk::Result::PIPELINE_COMPILE_REQUIRED,
+            },
+        )
+    }
+
+    /// Creates a compute pipeline; with `cached_only`, only if the pipeline cache holds
+    /// it (`None` otherwise).
+    fn create_compute(
+        device: &Device,
+        layout: vk::PipelineLayout,
+        stage: ShaderStageDesc<'_>,
+        specialization: &[u32],
+        cached_only: bool,
+    ) -> Result<Option<Self>, RhiError> {
         engine_profiler::zone!("rhi::Pipeline::compute");
         let d = device.raw();
         let mut modules = Modules {
@@ -434,19 +613,29 @@ impl Pipeline {
         let info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(layout)
-            .flags(statistics_flags(device));
+            .flags(statistics_flags(device) | cache_flags(cached_only));
+        let start = std::time::Instant::now();
         // SAFETY: as above.
-        let raw = unsafe { d.create_compute_pipelines(cache, &[info], None) }.map_err(
-            |(_, result)| RhiError::Vulkan {
-                call: "vkCreateComputePipelines",
-                result,
-            },
-        )?[0];
-        Ok(Self {
+        let created = unsafe { d.create_compute_pipelines(device.pipeline_cache(), &[info], None) };
+        let raw = match created {
+            Ok(pipelines) => pipelines[0],
+            Err((_, vk::Result::PIPELINE_COMPILE_REQUIRED)) if cached_only => {
+                count_creation(start, false, true);
+                return Ok(None);
+            }
+            Err((_, result)) => {
+                return Err(RhiError::Vulkan {
+                    call: "vkCreateComputePipelines",
+                    result,
+                });
+            }
+        };
+        count_creation(start, true, cached_only);
+        Ok(Some(Self {
             device: d.clone(),
             raw,
             bind_point: vk::PipelineBindPoint::COMPUTE,
-        })
+        }))
     }
 
     /// The Vulkan pipeline.

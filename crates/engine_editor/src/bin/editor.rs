@@ -66,10 +66,11 @@ mod windowed {
     use engine_rhi::{
         AdapterPreference, Allocator, Bindless, Device, Frames, HdrMetadata, Instance,
         InstanceDesc, OutputColor, PresentMode, RhiError, SamplerKind, Surface, Swapchain,
-        SwapchainDesc,
+        SwapchainDesc, creation_stats,
     };
     use engine_ui::{Theme, Ui};
     use std::fmt::Write as _;
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
 
     type Error = Box<dyn std::error::Error>;
@@ -531,7 +532,15 @@ mod windowed {
         let preference =
             AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);
         let adapter = instance.select_adapter(&preference)?;
-        let device = Device::new(&instance, &adapter)?;
+        let mut device = Device::new(&instance, &adapter)?;
+        // The pipelines of the last run (ADR 0055): the renderers start in milliseconds
+        // instead of compiling for a second.
+        let cache_path =
+            pipeline_cache_dir().map(|dir| dir.join(device.pipeline_cache_file_name()));
+        let cache_load = cache_path
+            .as_deref()
+            .map(|path| device.load_pipeline_cache(path));
+        let device = device;
         let adapter_name = device.adapter().name().to_owned();
         let surface = Surface::from_win32(&instance, window.hinstance, window.hwnd)?;
         if !surface.supports_queue(&device, device.graphics)? {
@@ -600,6 +609,8 @@ mod windowed {
         let mut graph = RenderGraph::new(&device, IN_FLIGHT);
         let mut viewports = Viewports::new(&device, IN_FLIGHT);
         let pipelines_ready = started.elapsed();
+        // Saved now as well as at exit: a crash does not cost the next start its cache.
+        save_pipeline_cache(&device, cache_path.as_deref());
 
         let palette = Palette::default();
         let mut ui = Ui::new(Theme {
@@ -1151,6 +1162,18 @@ mod windowed {
                     (pipelines_ready - device_ready).as_secs_f64() * 1e3,
                     (ui_ready - pipelines_ready).as_secs_f64() * 1e3,
                 );
+                let stats = creation_stats();
+                println!(
+                    "pipelines: {} created, {} from the cache, {} compiled; cache file: {}",
+                    stats.created,
+                    stats.cache_hits,
+                    stats.cache_misses,
+                    cache_load
+                        .as_ref()
+                        .map_or(String::from("none (no LOCALAPPDATA)"), |load| format!(
+                            "{load:?}"
+                        )),
+                );
                 println!(
                     "frame pacing: {:?}, cap {} (monitor {})",
                     latency.backend(),
@@ -1198,6 +1221,7 @@ mod windowed {
         }
 
         frames.wait_idle()?;
+        save_pipeline_cache(&device, cache_path.as_deref());
         if options.frames.is_some() {
             let mut line = String::from("GPU passes, average:");
             for (name, total, count) in &pass_totals {
@@ -1239,5 +1263,21 @@ mod windowed {
             return Err("validation errors".into());
         }
         Ok(())
+    }
+
+    /// Where the editor keeps its pipeline caches (one per GPU):
+    /// `%LOCALAPPDATA%\ofeliaengine\editor`.
+    fn pipeline_cache_dir() -> Option<PathBuf> {
+        std::env::var_os("LOCALAPPDATA")
+            .map(|dir| PathBuf::from(dir).join("ofeliaengine").join("editor"))
+    }
+
+    /// Saves the pipeline cache, reporting a failure (the next start compiles again).
+    fn save_pipeline_cache(device: &Device, path: Option<&Path>) {
+        if let Some(path) = path
+            && let Err(e) = device.save_pipeline_cache(path)
+        {
+            println!("pipeline cache not saved: {e}");
+        }
     }
 }

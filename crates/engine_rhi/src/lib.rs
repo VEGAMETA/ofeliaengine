@@ -27,6 +27,7 @@ mod frames;
 mod instance;
 mod memory;
 mod pipeline;
+mod pipeline_cache;
 pub mod spirv;
 mod swapchain;
 
@@ -42,9 +43,10 @@ pub use memory::{
     MemoryLocation, Range, RangeAllocator, ResourceKind,
 };
 pub use pipeline::{
-    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineStatistic, ShaderStageDesc,
-    spirv_words,
+    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineCreationStats, PipelineDesc,
+    PipelineStatistic, ShaderStageDesc, creation_stats, spirv_words,
 };
+pub use pipeline_cache::{PipelineCacheLoad, PipelineCacheSave};
 pub use swapchain::{
     AcquiredImage, HdrMetadata, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc,
     color_range,

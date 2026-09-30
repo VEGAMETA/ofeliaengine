@@ -337,6 +337,7 @@ name = "engine_rhi"
 version = "0.0.0"
 dependencies = [
  "ash",
+ "engine_core",
  "engine_platform",
  "engine_profiler",
  "gpu-allocator",

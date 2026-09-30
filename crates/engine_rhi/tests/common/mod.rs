@@ -25,7 +25,7 @@ pub fn gpu(headless_surface: bool) -> Option<(Instance, Device)> {
             headless_surface,
             sync_validation: false,
         })?;
-        let adapter = instance.select_adapter(&AdapterPreference::HighPerformance)?;
+        let adapter = instance.select_adapter(&preference())?;
         let device = Device::new(&instance, &adapter)?;
         Ok((instance, device))
     };
@@ -37,6 +37,11 @@ pub fn gpu(headless_surface: bool) -> Option<(Instance, Device)> {
         }
         Err(e) => panic!("GPU required but unavailable: {e}"),
     }
+}
+
+/// The adapter the tests use: `ENGINE_ADAPTER` if set, otherwise the fastest.
+pub fn preference() -> AdapterPreference {
+    AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance)
 }
 
 pub fn assert_no_validation_errors(instance: &Instance) {

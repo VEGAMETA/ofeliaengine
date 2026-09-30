@@ -31,6 +31,13 @@ pub enum RhiError {
         /// The result code.
         result: vk::Result,
     },
+    /// Reading or writing a file failed (the pipeline cache).
+    Io {
+        /// What was being done.
+        what: &'static str,
+        /// The error.
+        error: std::io::Error,
+    },
 }
 
 impl RhiError {
@@ -67,6 +74,7 @@ impl fmt::Display for RhiError {
             ),
             Self::ShaderInterface(what) => write!(f, "shader interface: {what}"),
             Self::Vulkan { call, result } => write!(f, "{call} failed: {result}"),
+            Self::Io { what, error } => write!(f, "{what}: {error}"),
         }
     }
 }

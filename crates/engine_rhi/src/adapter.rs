@@ -147,6 +147,11 @@ pub struct Adapter {
     pub kind: AdapterKind,
     /// Supported Vulkan version.
     pub api_version: u32,
+    /// Driver version (vendor-specific encoding).
+    pub driver_version: u32,
+    /// Identifies the driver's pipeline cache format: caches from another UUID are
+    /// unusable (another driver build).
+    pub pipeline_cache_uuid: [u8; 16],
     /// Driver name and version string (`driverName driverInfo`).
     pub driver: String,
     /// Total size of device-local memory heaps in bytes.
@@ -206,10 +211,14 @@ impl Adapter {
         if props.api_version < vk::API_VERSION_1_3 {
             missing.push("Vulkan 1.3");
         }
-        let required: [(&'static str, vk::Bool32); 19] = [
+        let required: [(&'static str, vk::Bool32); 20] = [
             ("dynamicRendering", f13.dynamic_rendering),
             ("synchronization2", f13.synchronization2),
             ("maintenance4", f13.maintenance4),
+            (
+                "pipelineCreationCacheControl",
+                f13.pipeline_creation_cache_control,
+            ),
             // `discard` in alpha-tested materials: the lane becomes a helper, so the
             // quad's derivatives stay defined (required by Vulkan 1.3).
             (
@@ -354,6 +363,8 @@ impl Adapter {
             device_id: props.device_id,
             kind,
             api_version: props.api_version,
+            driver_version: props.driver_version,
+            pipeline_cache_uuid: props.pipeline_cache_uuid,
             driver: format!("{driver_name} {driver_info}").trim().to_owned(),
             device_local_bytes,
             memory,
