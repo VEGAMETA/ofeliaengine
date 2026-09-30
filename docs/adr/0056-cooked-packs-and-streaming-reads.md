@@ -77,28 +77,40 @@ Measured on the cooked data (160.8 MB of BC7/BC5 textures, 12.8 MB of glTF geome
 - zstd saves a third of the textures and more than half of the geometry. Decoding costs
   the same at every level, so the cook uses 19; it takes 2.2 s for Sponza on 16
   threads.
-- Each entry is compressed alone: any subset can be loaded, later a single mip level.
-  Entries that do not shrink by 5% are stored raw.
+- **Chunks of 1 MiB**, each compressed alone (stored raw when it does not shrink by 5%):
+  - any entry loads alone, and one large entry decompresses on many threads (a 4K
+    texture's top level is 16 chunks);
+  - chunking costs little ratio:
+
+    | chunk | textures | geometry |
+    |---|---:|---:|
+    | whole entry | 65.1% | 42.4% |
+    | **1 MiB** | **65.7%** | **44.7%** |
+    | 256 KiB | 66.6% | 49.6% |
+    | 64 KiB | 68.1% | 55.8% |
+
+  - the chunk table lives in the table of contents, so an entry whose chunks are all raw
+    is stored as its raw bytes and can be read straight to where it is used.
 - **GPU decompression (GDeflate):** deflate compresses BC7 no better than zstd here
   (68%), and on the iGPU it would take GPU time from rendering. Worth measuring once CPU
-  decoding limits loads on fast drives. Today it does not: Sponza's raw pack loads in 27
-  ms from NVMe, its zstd pack in 32 ms.
+  decoding limits loads on fast drives. Today it does not: Sponza's raw pack loads in 29
+  ms from NVMe, its zstd pack in 34 ms.
 
 ## Numbers
 
-Sponza, cooked with detail levels (70.5 MB compressed, 104.5 MB unpacked; `scene_bench
---pack`):
+Sponza, cooked with detail levels (361 entries: 71.5 MB compressed, 104.5 MB unpacked;
+`scene_bench --pack`):
 
 | | hard disk | NVMe |
 |---|---:|---:|
 | glTF + derived data cache, cold | 3,078 ms | 45 ms |
 | glTF + derived data cache, OS cache warm | 28 ms | 28 ms |
-| **pack, zstd** (always from the drive) | **558–684 ms** | **32–41 ms** |
-| pack, raw (104.5 MB) | 826–859 ms | 27–47 ms |
+| **pack, zstd** (always from the drive) | **520–663 ms** | **34–36 ms** |
+| pack, raw (104.5 MB) | 868–1,073 ms | 29–30 ms |
 
-- zstd plus hash checks: 116–241 ms of CPU across 16 threads. The raw pack's checks take
-  16 ms.
-- The hard disk reads the pack at 103–126 MB/s, its sequential maximum.
+- zstd plus hash checks: 108–177 ms of CPU across 16 threads. The raw pack's checks take
+  7–14 ms.
+- The hard disk reads the pack at 107–136 MB/s, its sequential maximum.
 - The frame is identical to the glTF path's, byte for byte, with and without detail
   levels.
 
@@ -111,23 +123,31 @@ Sponza, cooked with detail levels (70.5 MB compressed, 104.5 MB unpacked; `scene
   - a read owns its buffer until its completion hands it back, so no memory can be
     reused while the drive writes to it.
 - **`engine_assets::pack`**, format version 1:
-  - a 64-byte header (magic `OFPK`, version, entry count, table offset, size and hash,
-    file length);
-  - entries aligned to 4 KiB; each is raw or zstd, with the `state_hash64` of its raw
-    bytes;
-  - a table of 80-byte `Entry` records (content id, offset, sizes, hash, kind,
-    compression, 24 bytes of kind-specific meta);
-  - opening checks every bound, and loading checks every entry's hash;
-  - ids are content hashes, so duplicates are stored once (Sponza: 4 textures);
-  - `Pack::load` keeps up to N reads in flight and decompresses on the job pool as reads
-    finish.
+  - a 64-byte header: magic `OFPK`, version, entry and chunk counts, chunk size, table
+    offset, size and hash, file length;
+  - entries aligned to 4 KiB, each its chunks one after another;
+  - a table of contents of 80-byte `Entry` records (content id, offset, sizes, chunks,
+    kind, 28 bytes of kind-specific meta), then 16-byte `Chunk` records (offset, stored
+    size with a raw flag, `state_hash64` of the raw bytes);
+  - opening checks every entry's and chunk's bounds; loading checks every chunk's hash,
+    so damage is reported to the chunk;
+  - ids are content hashes, so duplicates are stored once;
+  - `Pack::load` keeps up to N reads in flight, decompresses and checks each entry's
+    chunks as parallel jobs, and hands raw entries over in their read buffers (no copy).
 - **`engine_assets::cook`:**
   - `CookedScene`: textures with their levels, meshes with detail levels, materials and
     instances;
   - `cook_scene` builds it from glTF, through the derived data cache, textures and
     detail levels in parallel;
   - `write_pack` and `load_pack` store and read it. Texture, mesh and scene entries are
-    laid out as the module documents.
+    laid out as the module documents;
+  - **each texture is split for streaming:**
+    - its levels of at most 128 texels share one entry, the tail (22 KiB of BC7);
+    - each larger level has an entry of its own;
+    - the scene's `TextureRecord` maps levels to entries;
+  - **the file is in load order:** meshes and every tail first (the whole scene at low
+    resolution, read in one pass on a hard disk), then the large levels from the
+    smallest, the scene record last.
 - **`ofeliaengine cook <scene.gltf> -o <out.pack>`** (`--no-lods`, `--level N`, `--ddc`).
 - `scene_bench --pack <file>`: both paths go through `CookedScene`.
 

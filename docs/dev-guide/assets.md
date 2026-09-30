@@ -14,7 +14,7 @@ ofeliaengine cook assets/level1/level1.gltf -o packs/level1.pack
 
 ```text
 assets/level1/level1.gltf: 69 textures (69 from the derived data cache), 103 meshes, 25 materials, 103 instances; cooked in 0.1 s
-packs/level1.pack: 169 entries, 70.9 MB (104.5 MB raw, 67%), written in 2.2 s
+packs/level1.pack: 361 entries, 71.5 MB (104.5 MB raw, 68%), written in 2.6 s
 ```
 
 - **Textures** are filtered and block-compressed as for the renderer (BC7, BC5 for
@@ -22,9 +22,12 @@ packs/level1.pack: 169 entries, 70.9 MB (104.5 MB raw, 67%), written in 2.2 s
   `.ddc` next to the scene's folder (`--ddc <dir>` for another), so a second cook takes
   seconds.
 - **Meshes** get detail levels (`--no-lods` to skip them).
-- **Every entry** is compressed with zstd when that saves at least 5%. `--level 0` stores
-  everything raw, which loads a little faster from NVMe but makes the file a third
-  larger.
+- **Every entry** is compressed with zstd in chunks of 1 MiB (each decompresses on its
+  own thread) when that saves at least 5%. `--level 0` stores everything raw, which loads
+  a little faster from NVMe but makes the file a third larger.
+- **Textures are split for streaming:** the levels up to 128 texels form one entry, and
+  each larger level is an entry of its own. The file starts with meshes and those small
+  levels (the whole scene, blurry), then the large levels from the smallest.
 - **The same texture** used by several materials is stored once.
 
 ## Loading
@@ -51,21 +54,21 @@ materials and draws; copy that part. Its `--pack <file>` option loads a pack.
   - loading a pack a second time reads the drive again: keep what you need loaded.
 - **Damage is found, never drawn:**
   - opening checks the header, the table and every entry's bounds;
-  - loading checks each entry's hash;
+  - loading checks each chunk's hash;
   - a damaged, truncated or foreign file gives `PackError::Invalid` with the reason.
 - **Packs have a version.** An engine that changes the format refuses older packs with
   a message; cook them again.
 
 ## What it costs
 
-Sponza (104.5 MB once loaded, 70.5 MB in its pack), on the reference machine:
+Sponza (104.5 MB once loaded, 71.5 MB in its pack), on the reference machine:
 
 | | hard disk | NVMe |
 |---|---:|---:|
-| **from its pack** | **0.56–0.68 s** | **32–41 ms** |
+| **from its pack** | **0.52–0.66 s** | **34–36 ms** |
 | from glTF and the derived data cache, first time | 3.1 s | 45 ms |
 
-- zstd costs about 0.2 s of CPU in all, spread over the job pool.
+- zstd costs 0.1–0.2 s of CPU in all, spread over the job pool.
 - On a hard disk the pack loads at the disk's full speed (about 120 MB/s): smaller
   packs load faster there.
 

@@ -43,8 +43,10 @@ compressed alone:
     blocks that compress much better. That is a lever for later, a change to the texture
     cook, not to the pack.
 - zstd decodes as fast at level 19 as at 3, so the cook spends the time once.
-- On the cooked Sponza pack (textures, meshes with detail levels): 104.5 MB to 70.5 MB
-  (67%).
+- On the cooked Sponza pack (textures, meshes with detail levels): 104.5 MB to 71.5 MB
+  (68%) in 1 MiB chunks.
+- Chunks cost little: textures 65.1% whole, 65.7% in 1 MiB chunks, 66.6% in 256 KiB,
+  68.1% in 64 KiB; geometry 42.4%, 44.7%, 49.6%, 55.8%.
 
 ## Reading from the drives
 
@@ -99,6 +101,6 @@ compressed alone:
 
 See ADR 0056:
 
-- Sponza from its pack: 558–684 ms from the hard disk (3,078 ms from sources and cache),
-  32–41 ms from NVMe (45 ms);
+- Sponza from its pack: 520–663 ms from the hard disk (3,078 ms from sources and cache),
+  34–36 ms from NVMe (45 ms);
 - the frame is identical to the source path's.

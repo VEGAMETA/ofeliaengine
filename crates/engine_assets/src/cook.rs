@@ -3,21 +3,26 @@
 //! makes one from an imported glTF scene; [`write_pack`] stores it and [`load_pack`] reads
 //! it back without the sources, the derived data cache or any decoding but zstd's.
 //!
-//! Entries of a scene's pack (`meta` of [`crate::pack::Entry`]):
+//! Entries of a scene's pack (`meta` of [`crate::pack::Entry`]), in the order they are
+//! written:
 //!
-//! - **texture:** `[format code, width, height, levels]`; the levels from the largest,
-//!   each padded to 16 bytes.
 //! - **mesh:** `[vertices, indices, detail levels, attributes (1 normals, 2 uvs, 4
 //!   tangents)]`; positions, the attributes present, the bounds, the indices, then per
 //!   level its index count and error, then the levels' indices. Sections padded to 16.
-//! - **scene:** `[materials, instances]`; [`MaterialRecord`]s then [`InstanceRecord`]s,
-//!   referring to textures and meshes by entry index.
+//! - **texture levels:** `[format code, width, height, levels, first level, level count]`
+//!   (width and height of level 0); the levels, each padded to 16 bytes. A texture's
+//!   levels of at most [`TAIL_SIZE`] texels share one entry (its tail, written with the
+//!   meshes: the whole scene at low resolution); each larger level has its own entry,
+//!   written after every tail, smallest first.
+//! - **scene:** `[textures, materials, instances]`; [`TextureRecord`]s (which entry holds
+//!   each level), [`MaterialRecord`]s, [`InstanceRecord`]s (meshes by entry index).
 
 use crate::ddc::{DerivedDataCache, import_texture};
 use crate::gltf_import::{AlphaMode, ImportError, ImportedScene, TextureWrap, read_texture};
 use crate::lod::{Lod, LodSettings, generate_lods};
 use crate::pack::{
-    EntryData, EntryKind, LoadStats, Pack, PackError, PackStats, PackWriter, PreparedEntry, invalid,
+    DEFAULT_CHUNK_SHIFT, EntryData, EntryKind, LoadStats, Pack, PackError, PackStats, PackWriter,
+    PreparedEntry, invalid,
 };
 use crate::texture_compress::{EncodedTexture, TextureFormat};
 use crate::texture_import::{ImageError, TextureUsage, build_mips, decode_image};
@@ -359,6 +364,25 @@ pub fn cook_scene(
     Ok((cooked, stats))
 }
 
+/// A texture in a scene entry: its size and which entry holds each of its levels.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct TextureRecord {
+    /// [`TextureFormat::code`].
+    pub format: u32,
+    /// Width of level 0.
+    pub width: u32,
+    /// Height of level 0.
+    pub height: u32,
+    /// Number of levels.
+    pub levels: u32,
+    /// The entry holding each level (`u32::MAX` past the last): one per large level, one
+    /// for the small ones at the end (the tail).
+    pub entries: [u32; 16],
+}
+
+const _: () = assert!(size_of::<TextureRecord>() == 80);
+
 /// A material in a scene entry.
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
@@ -381,8 +405,8 @@ pub struct MaterialRecord {
     pub alpha_cutoff: u32,
     /// 1: double-sided.
     pub double_sided: u32,
-    /// Texture entries (base color, metallic-roughness, normal, occlusion, emission), or
-    /// `u32::MAX`.
+    /// Textures (base color, metallic-roughness, normal, occlusion, emission) as indices of
+    /// the scene's [`TextureRecord`]s, or `u32::MAX`.
     pub textures: [u32; 5],
     /// Wrap modes of the textures: u | v << 8 (0 repeat, 1 mirrored, 2 clamp).
     pub wraps: [u32; 5],
@@ -408,6 +432,17 @@ const _: () = assert!(size_of::<InstanceRecord>() == 80);
 
 const NONE: u32 = u32::MAX;
 
+/// Levels of at most this many texels on their longer side share one entry (the tail): the
+/// whole texture at low resolution, loaded first (22 KiB of BC7 at 128²).
+pub const TAIL_SIZE: u32 = 128;
+
+/// The first level of a `width × height` texture that belongs to its tail.
+fn first_tail_level(width: u32, height: u32, levels: u32) -> u32 {
+    (0..levels)
+        .find(|&k| (width >> k).max(height >> k).max(1) <= TAIL_SIZE)
+        .unwrap_or(levels.saturating_sub(1))
+}
+
 fn wrap_code(w: TextureWrap) -> u32 {
     match w {
         TextureWrap::Repeat => 0,
@@ -431,9 +466,15 @@ fn section(out: &mut Vec<u8>, bytes: &[u8]) {
     out.resize(out.len().next_multiple_of(16), 0);
 }
 
-fn texture_entry(t: &EncodedTexture, level: i32) -> PreparedEntry {
+/// An entry of a texture: `level_count` levels from `first_level`.
+fn texture_levels_entry(
+    t: &EncodedTexture,
+    first_level: u32,
+    level_count: u32,
+    level: i32,
+) -> PreparedEntry {
     let mut data = Vec::new();
-    for l in &t.levels {
+    for l in &t.levels[first_level as usize..][..level_count as usize] {
         section(&mut data, l);
     }
     let meta = [
@@ -441,10 +482,17 @@ fn texture_entry(t: &EncodedTexture, level: i32) -> PreparedEntry {
         t.width,
         t.height,
         t.levels.len() as u32,
-        0,
+        first_level,
+        level_count,
         0,
     ];
-    PreparedEntry::new(EntryKind::Texture, meta, &data, level)
+    PreparedEntry::new(
+        EntryKind::TextureLevels,
+        meta,
+        &data,
+        level,
+        DEFAULT_CHUNK_SHIFT,
+    )
 }
 
 fn mesh_entry(m: &CookedMesh, level: i32) -> PreparedEntry {
@@ -481,11 +529,22 @@ fn mesh_entry(m: &CookedMesh, level: i32) -> PreparedEntry {
         attributes,
         0,
         0,
+        0,
     ];
-    PreparedEntry::new(EntryKind::Mesh, meta, &data, level)
+    PreparedEntry::new(EntryKind::Mesh, meta, &data, level, DEFAULT_CHUNK_SHIFT)
 }
 
-/// Writes `scene` to a pack at `path`, compressing entries on `jobs`.
+/// A part of the scene stored as one entry.
+#[derive(Debug, Clone, Copy)]
+enum Piece {
+    Mesh(usize),
+    /// Texture, first level, level count.
+    Levels(usize, u32, u32),
+}
+
+/// Writes `scene` to a pack at `path`, compressing entries on `jobs`. Entries are in the
+/// order a scene loads best from a hard disk: meshes and the textures' tails first (the
+/// whole scene at low resolution), then the textures' large levels from the smallest.
 pub fn write_pack(
     path: &Path,
     scene: &CookedScene,
@@ -493,30 +552,68 @@ pub fn write_pack(
     level: i32,
 ) -> Result<PackStats, PackError> {
     engine_profiler::zone!("assets::write_pack");
+    let mut pieces: Vec<Piece> = (0..scene.meshes.len()).map(Piece::Mesh).collect();
+    let mut large = Vec::new();
+    for (t, texture) in scene.textures.iter().enumerate() {
+        let levels = texture.levels.len() as u32;
+        let tail = first_tail_level(texture.width, texture.height, levels);
+        pieces.push(Piece::Levels(t, tail, levels - tail));
+        large.extend((0..tail).map(|k| Piece::Levels(t, k, 1)));
+    }
+    let bytes = |p: &Piece| match *p {
+        Piece::Levels(t, k, _) => scene.textures[t].levels[k as usize].len(),
+        Piece::Mesh(_) => 0,
+    };
+    large.sort_by_key(bytes);
+    pieces.extend(large);
+
     // Compressing is the slow part: every entry in parallel.
-    let count = scene.textures.len() + scene.meshes.len();
-    let prepared: Vec<OnceLock<PreparedEntry>> = (0..count).map(|_| OnceLock::new()).collect();
-    jobs.parallel_for(count, 1, |_, range| {
+    let prepared: Vec<OnceLock<PreparedEntry>> = pieces.iter().map(|_| OnceLock::new()).collect();
+    jobs.parallel_for(pieces.len(), 1, |_, range| {
         for k in range {
-            let entry = match scene.textures.get(k) {
-                Some(t) => texture_entry(t, level),
-                None => mesh_entry(&scene.meshes[k - scene.textures.len()], level),
+            let entry = match pieces[k] {
+                Piece::Mesh(m) => mesh_entry(&scene.meshes[m], level),
+                Piece::Levels(t, first, count) => {
+                    texture_levels_entry(&scene.textures[t], first, count, level)
+                }
             };
             let _ = prepared[k].set(entry);
         }
     });
-    let mut writer = PackWriter::create(path)?;
-    let mut indices = Vec::with_capacity(count);
-    for entry in prepared.into_iter().filter_map(OnceLock::into_inner) {
-        indices.push(writer.add(&entry)?);
+    let mut writer = PackWriter::create(path, DEFAULT_CHUNK_SHIFT)?;
+    let mut mesh_entries = vec![NONE; scene.meshes.len()];
+    let mut records: Vec<TextureRecord> = scene
+        .textures
+        .iter()
+        .map(|t| TextureRecord {
+            format: t.format.code(),
+            width: t.width,
+            height: t.height,
+            levels: t.levels.len() as u32,
+            entries: [NONE; 16],
+        })
+        .collect();
+    for (piece, entry) in pieces.iter().zip(prepared) {
+        let Some(entry) = entry.into_inner() else {
+            return Err(invalid("an entry was not prepared"));
+        };
+        let index = writer.add(&entry)?;
+        match *piece {
+            Piece::Mesh(m) => mesh_entries[m] = index,
+            Piece::Levels(t, first, count) => {
+                for k in first..first + count {
+                    let slot = records[t]
+                        .entries
+                        .get_mut(k as usize)
+                        .ok_or_else(|| invalid("more than 16 mip levels"))?;
+                    *slot = index;
+                }
+            }
+        }
     }
-    let (texture_entries, mesh_entries) = indices.split_at(scene.textures.len());
     let texture = |slot: Option<TextureSlot>| {
         slot.map_or((NONE, 0), |s| {
-            (
-                texture_entries[s.texture as usize],
-                wrap_code(s.wrap[0]) | wrap_code(s.wrap[1]) << 8,
-            )
+            (s.texture, wrap_code(s.wrap[0]) | wrap_code(s.wrap[1]) << 8)
         })
     };
     let materials: Vec<MaterialRecord> = scene
@@ -561,10 +658,25 @@ pub fn write_pack(
         })
         .collect();
     let mut data = Vec::new();
+    section(&mut data, bytemuck::cast_slice(&records));
     section(&mut data, bytemuck::cast_slice(&materials));
     section(&mut data, bytemuck::cast_slice(&instances));
-    let meta = [materials.len() as u32, instances.len() as u32, 0, 0, 0, 0];
-    writer.add(&PreparedEntry::new(EntryKind::Scene, meta, &data, level))?;
+    let meta = [
+        records.len() as u32,
+        materials.len() as u32,
+        instances.len() as u32,
+        0,
+        0,
+        0,
+        0,
+    ];
+    writer.add(&PreparedEntry::new(
+        EntryKind::Scene,
+        meta,
+        &data,
+        level,
+        DEFAULT_CHUNK_SHIFT,
+    ))?;
     writer.finish()
 }
 
@@ -579,16 +691,11 @@ impl<'a> Sections<'a> {
         let bytes = count
             .checked_mul(size_of::<T>())
             .ok_or_else(|| invalid("section too large"))?;
-        let end = self.at.checked_add(bytes).filter(|&e| e <= self.data.len());
-        let Some(end) = end else {
-            return Err(invalid("section out of bounds"));
-        };
-        let out = self.data[self.at..end]
+        Ok(self
+            .slice(bytes)?
             .chunks_exact(size_of::<T>())
             .map(bytemuck::pod_read_unaligned)
-            .collect();
-        self.at = end.next_multiple_of(16).min(self.data.len());
-        Ok(out)
+            .collect())
     }
 
     fn slice(&mut self, len: usize) -> Result<&'a [u8], PackError> {
@@ -602,29 +709,45 @@ impl<'a> Sections<'a> {
     }
 }
 
-fn read_texture_entry(meta: [u32; 6], data: &[u8]) -> Result<EncodedTexture, PackError> {
+/// The dimensions a texture entry or record describes, checked.
+fn texture_shape(
+    format: u32,
+    width: u32,
+    height: u32,
+    levels: u32,
+) -> Result<TextureFormat, PackError> {
     let format =
-        TextureFormat::from_code(meta[0]).ok_or_else(|| invalid("unknown texture format"))?;
-    let (width, height, count) = (meta[1].max(1), meta[2].max(1), meta[3]);
-    if count == 0 || count > 16 || width > 1 << 15 || height > 1 << 15 {
+        TextureFormat::from_code(format).ok_or_else(|| invalid("unknown texture format"))?;
+    let full = 32 - width.max(height).max(1).leading_zeros();
+    if width == 0
+        || height == 0
+        || width > 1 << 15
+        || height > 1 << 15
+        || levels == 0
+        || levels > full
+    {
         return Err(invalid("bad texture dimensions"));
     }
+    Ok(format)
+}
+
+/// Levels of a texture entry: `(meta, levels)`.
+fn read_levels_entry(meta: [u32; 7], data: &[u8]) -> Result<Vec<Vec<u8>>, PackError> {
+    let [code, width, height, levels, first, count, _] = meta;
+    let format = texture_shape(code, width, height, levels)?;
+    if count == 0 || first.checked_add(count).is_none_or(|end| end > levels) {
+        return Err(invalid("bad texture levels"));
+    }
     let mut sections = Sections { data, at: 0 };
-    let levels = (0..count)
+    (first..first + count)
         .map(|k| {
             let bytes = format.level_bytes((width >> k).max(1), (height >> k).max(1));
             sections.slice(bytes).map(<[u8]>::to_vec)
         })
-        .collect::<Result<_, _>>()?;
-    Ok(EncodedTexture {
-        format,
-        width,
-        height,
-        levels,
-    })
+        .collect()
 }
 
-fn read_mesh_entry(meta: [u32; 6], data: &[u8]) -> Result<CookedMesh, PackError> {
+fn read_mesh_entry(meta: [u32; 7], data: &[u8]) -> Result<CookedMesh, PackError> {
     let [vertices, index_count, lod_count, attributes, ..] = meta.map(|m| m as usize);
     let mut s = Sections { data, at: 0 };
     let positions = s.next::<[f32; 3]>(vertices)?;
@@ -673,13 +796,13 @@ fn read_mesh_entry(meta: [u32; 6], data: &[u8]) -> Result<CookedMesh, PackError>
 
 /// An entry decoded by kind.
 enum Decoded {
-    Texture(EncodedTexture),
+    Levels([u32; 7], Vec<Vec<u8>>),
     Mesh(CookedMesh),
-    Scene(Vec<MaterialRecord>, Vec<InstanceRecord>),
+    Scene(Vec<TextureRecord>, Vec<MaterialRecord>, Vec<InstanceRecord>),
 }
 
-/// Loads the scene of the pack at `path`: every entry read with up to `depth` reads in
-/// flight and decoded on `jobs`.
+/// Loads the whole scene of the pack at `path`: every entry, in file order, with up to
+/// `depth` reads in flight, decoded on `jobs`.
 pub fn load_pack(
     path: &Path,
     jobs: &ThreadPool,
@@ -692,13 +815,14 @@ pub fn load_pack(
     let indices: Vec<u32> = (0..entries.len() as u32).collect();
     let stats = pack.load(&indices, jobs, depth, |index, e, data: EntryData| {
         let value = match e.kind() {
-            EntryKind::Texture => Decoded::Texture(read_texture_entry(e.meta, &data)?),
+            EntryKind::TextureLevels => Decoded::Levels(e.meta, read_levels_entry(e.meta, &data)?),
             EntryKind::Mesh => Decoded::Mesh(read_mesh_entry(e.meta, &data)?),
             EntryKind::Scene => {
                 let mut s = Sections { data: &data, at: 0 };
-                let materials = s.next::<MaterialRecord>(e.meta[0] as usize)?;
-                let instances = s.next::<InstanceRecord>(e.meta[1] as usize)?;
-                Decoded::Scene(materials, instances)
+                let textures = s.next::<TextureRecord>(e.meta[0] as usize)?;
+                let materials = s.next::<MaterialRecord>(e.meta[1] as usize)?;
+                let instances = s.next::<InstanceRecord>(e.meta[2] as usize)?;
+                Decoded::Scene(textures, materials, instances)
             }
         };
         if let Ok(mut slot) = decoded[index as usize].lock() {
@@ -706,48 +830,76 @@ pub fn load_pack(
         }
         Ok(())
     })?;
-    // Entry indices to scene indices.
+    let mut decoded: Vec<Option<Decoded>> = decoded
+        .into_iter()
+        .map(|slot| slot.into_inner().ok().flatten())
+        .collect();
     let mut scene = CookedScene::default();
-    let mut texture_of = vec![NONE; entries.len()];
     let mut mesh_of = vec![NONE; entries.len()];
     let mut records = None;
-    for (i, slot) in decoded.into_iter().enumerate() {
-        match slot.into_inner().ok().flatten() {
-            Some(Decoded::Texture(t)) => {
-                texture_of[i] = scene.textures.len() as u32;
-                scene.textures.push(t);
-            }
+    for (i, slot) in decoded.iter_mut().enumerate() {
+        match slot {
             Some(Decoded::Mesh(m)) => {
                 mesh_of[i] = scene.meshes.len() as u32;
-                scene.meshes.push(m);
+                scene.meshes.push(core::mem::take(m));
             }
-            Some(Decoded::Scene(m, i)) => {
-                if records.replace((m, i)).is_some() {
+            Some(Decoded::Scene(..)) => {
+                let Some(Decoded::Scene(t, m, inst)) = slot.take() else {
+                    continue;
+                };
+                if records.replace((t, m, inst)).is_some() {
                     return Err(invalid("more than one scene"));
                 }
             }
+            Some(Decoded::Levels(..)) => {}
             None => return Err(invalid(format!("entry {i} not loaded"))),
         }
     }
-    let Some((materials, instances)) = records else {
+    let Some((textures, materials, instances)) = records else {
         return Err(invalid("no scene"));
     };
-    let slot = |entry: u32, wrap: u32| -> Result<Option<TextureSlot>, PackError> {
-        if entry == NONE {
+    // Textures from their entries' levels.
+    for record in &textures {
+        let format = texture_shape(record.format, record.width, record.height, record.levels)?;
+        let mut levels = Vec::with_capacity(record.levels as usize);
+        for k in 0..record.levels {
+            let entry = record.entries[k as usize];
+            let Some(Some(Decoded::Levels(meta, held))) = decoded.get(entry as usize) else {
+                return Err(invalid("texture level in a missing entry"));
+            };
+            let [code, width, height, count, first, ..] = *meta;
+            if [code, width, height, count]
+                != [record.format, record.width, record.height, record.levels]
+                || k < first
+                || k - first >= held.len() as u32
+            {
+                return Err(invalid("texture level entry does not match its texture"));
+            }
+            levels.push(held[(k - first) as usize].clone());
+        }
+        scene.textures.push(EncodedTexture {
+            format,
+            width: record.width,
+            height: record.height,
+            levels,
+        });
+    }
+    let slot = |texture: u32, wrap: u32| -> Result<Option<TextureSlot>, PackError> {
+        if texture == NONE {
             return Ok(None);
         }
-        let texture = *texture_of
-            .get(entry as usize)
-            .filter(|&&t| t != NONE)
-            .ok_or_else(|| invalid("material refers to a missing texture"))?;
+        if texture as usize >= scene.textures.len() {
+            return Err(invalid("material refers to a missing texture"));
+        }
         Ok(Some(TextureSlot {
             texture,
             wrap: [wrap_from(wrap & 0xff)?, wrap_from(wrap >> 8)?],
         }))
     };
+    let mut cooked_materials = Vec::with_capacity(materials.len());
     for m in &materials {
         let t = |k: usize| slot(m.textures[k], m.wraps[k]);
-        scene.materials.push(CookedMaterial {
+        cooked_materials.push(CookedMaterial {
             base_color: m.base_color,
             base_color_texture: t(0)?,
             metallic: m.metallic,
@@ -768,6 +920,7 @@ pub fn load_pack(
             double_sided: m.double_sided != 0,
         });
     }
+    scene.materials = cooked_materials;
     for i in &instances {
         let mesh = *mesh_of
             .get(i.mesh as usize)
@@ -790,6 +943,22 @@ pub fn load_pack(
 mod tests {
     use super::*;
 
+    /// Levels of a `size`² BC7 texture, each filled with its level number.
+    fn bc7(size: u32) -> EncodedTexture {
+        let levels = 32 - size.leading_zeros();
+        EncodedTexture {
+            format: TextureFormat::Bc7Srgb,
+            width: size,
+            height: size,
+            levels: (0..levels)
+                .map(|k| {
+                    let s = (size >> k).max(1);
+                    vec![k as u8 + 1; TextureFormat::Bc7Srgb.level_bytes(s, s)]
+                })
+                .collect(),
+        }
+    }
+
     fn sample() -> CookedScene {
         let quad = CookedMesh {
             positions: vec![
@@ -809,12 +978,6 @@ mod tests {
             min: [0.0; 3],
             max: [1.0, 1.0, 0.0],
         };
-        let texture = EncodedTexture {
-            format: TextureFormat::Bc7Srgb,
-            width: 8,
-            height: 4,
-            levels: vec![vec![1; 32], vec![2; 16], vec![3; 16], vec![4; 16]],
-        };
         let data_texture = EncodedTexture {
             format: TextureFormat::Rgba8Unorm,
             width: 2,
@@ -833,7 +996,10 @@ mod tests {
                 texture: 1,
                 wrap: [TextureWrap::MirroredRepeat; 2],
             }),
-            normal_texture: None,
+            normal_texture: Some(TextureSlot {
+                texture: 2,
+                wrap: [TextureWrap::Repeat; 2],
+            }),
             normal_scale: 1.0,
             occlusion_texture: Some(TextureSlot {
                 texture: 1,
@@ -846,7 +1012,20 @@ mod tests {
             double_sided: true,
         };
         CookedScene {
-            textures: vec![texture, data_texture],
+            // A texture with large levels and a tail, one that is all tail, and a
+            // non-square one.
+            textures: vec![bc7(512), data_texture, {
+                let mut t = bc7(256);
+                t.width = 256;
+                t.height = 64;
+                t.levels = (0..9u32)
+                    .map(|k| {
+                        let (w, h) = ((256 >> k).max(1), (64 >> k).max(1));
+                        vec![k as u8 + 7; TextureFormat::Bc7Srgb.level_bytes(w, h)]
+                    })
+                    .collect();
+                t
+            }],
             meshes: vec![
                 quad.clone(),
                 CookedMesh {
@@ -878,10 +1057,23 @@ mod tests {
         for level in [0, 19] {
             let scene = sample();
             let stats = write_pack(&path, &scene, &jobs, level).unwrap();
-            assert_eq!(stats.entries, 5);
+            // Meshes 2; textures: 512² has 2 large levels + a tail, 2×2 a tail, 256×64
+            // 1 large level + a tail; the scene.
+            assert_eq!(stats.entries, 2 + 3 + 1 + 2 + 1);
             let (loaded, load) = load_pack(&path, &jobs, 4).unwrap();
             assert_eq!(loaded, scene);
             assert_eq!(load.read_bytes, stats.stored_bytes);
+            // File order: meshes, tails, then large levels from the smallest.
+            let pack = Pack::open(&path).unwrap();
+            let kinds: Vec<(EntryKind, u32)> = pack
+                .entries()
+                .iter()
+                .map(|e| (e.kind(), e.meta[4]))
+                .collect();
+            assert_eq!(kinds[..2], [(EntryKind::Mesh, 0), (EntryKind::Mesh, 0)]);
+            let large: Vec<u64> = pack.entries()[5..8].iter().map(|e| e.bytes).collect();
+            assert!(large.is_sorted(), "{large:?}");
+            assert_eq!(kinds[8].0, EntryKind::Scene);
         }
         let _ = std::fs::remove_file(path);
     }
@@ -892,13 +1084,18 @@ mod tests {
         let mut mesh = sample().meshes[0].clone();
         mesh.indices[2] = 99;
         let entry = mesh_entry(&mesh, 0);
-        let data = entry.stored_for_tests();
-        assert!(read_mesh_entry(entry.meta_for_tests(), data).is_err());
-        // A texture entry shorter than its levels.
+        assert!(read_mesh_entry(entry.meta_for_tests(), &entry.raw_for_tests()).is_err());
+        // A texture entry shorter than its levels, or claiming more levels than fit.
         let texture = &sample().textures[0];
-        let entry = texture_entry(texture, 0);
-        let data = entry.stored_for_tests();
-        assert!(read_texture_entry(entry.meta_for_tests(), &data[..40]).is_err());
-        assert!(read_texture_entry(entry.meta_for_tests(), data).is_ok());
+        let entry = texture_levels_entry(texture, 2, 8, 0);
+        let data = entry.raw_for_tests();
+        assert!(read_levels_entry(entry.meta_for_tests(), &data[..40]).is_err());
+        assert_eq!(
+            read_levels_entry(entry.meta_for_tests(), &data).unwrap(),
+            texture.levels[2..]
+        );
+        let mut meta = entry.meta_for_tests();
+        meta[3] = 11;
+        assert!(read_levels_entry(meta, &data).is_err());
     }
 }
