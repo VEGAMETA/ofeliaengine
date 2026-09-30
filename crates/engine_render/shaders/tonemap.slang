@@ -1,8 +1,12 @@
 // Tonemapping: HDR scene radiance → display. A fullscreen triangle (over the viewport the
 // pass sets, so it can fill a sub-rectangle when compositing) samples the source
-// through the bindless arrays and applies exposure and the Khronos PBR Neutral tone
-// mapper (implemented from its published description: linear below the knee, a smooth
-// highlight roll-off, desaturation of very bright colors).
+// through the bindless arrays and applies exposure and a tone curve (ADR 0048):
+//
+// - by default Uchimura's (Gran Turismo Sport, CEDEC 2017, from its published formula),
+//   per channel: toe, linear mid-tones, an exponential shoulder towards the peak;
+// - or the Khronos PBR Neutral tone mapper (implemented from its published description:
+//   linear below the knee, a smooth highlight roll-off, desaturation of very bright
+//   colors).
 //
 // HDR output (ADR 0038): values are in units of reference white (SDR white), and the
 // tone mapper rolls highlights off towards `peak`, the display's peak luminance over
@@ -16,6 +20,7 @@ static const uint FLAG_PASS_THROUGH = 1; // exposure only, no tone mapping (LDR 
 static const uint FLAG_ENCODE_PQ = 2;    // HDR10 output: BT.2020 primaries, PQ encoding
 static const uint FLAG_BLOOM = 4;        // mix in `bloom` (postfx.slang) by its intensity
 static const uint FLAG_AUTO_EXPOSURE = 8; // multiply by the measured exposure
+static const uint FLAG_PBR_NEUTRAL = 16; // PBR Neutral instead of Uchimura's curve
 
 struct Push
 {
@@ -70,6 +75,40 @@ float3 pbr_neutral(float3 color, float peak)
     return lerp(color, float3(new_peak, new_peak, new_peak), g);
 }
 
+// Uchimura's curve (`gt` in post.rs), the published defaults, rolling off to `peak`. Only
+// the section a value falls in is evaluated (neighbouring pixels share it): the toe's power
+// and the shoulder's exponential are not both paid for.
+float gt(float x, float peak)
+{
+    const float a = 1.0;
+    const float m = 0.22;
+    const float l = 0.4;
+    const float c = 1.33;
+    const float b = 0.0;
+    float p = max(peak, m + 1e-3);
+    float l0 = (p - m) * l / a;
+    float s0 = m + l0;
+    float linear = m + a * (x - m);
+    if (x < m)
+    {
+        float t = x / m;
+        float w0 = 1.0 - t * t * (3.0 - 2.0 * t);
+        float toe = m * pow(max(t, 0.0), c) + b;
+        return toe * w0 + linear * (1.0 - w0);
+    }
+    if (x < s0)
+        return linear;
+    float s1 = m + a * l0;
+    float cp = -a / (p - s1);
+    return p - (p - s1) * exp(cp * (x - s0));
+}
+
+float3 gt3(float3 color, float peak)
+{
+    color = max(color, 0.0);
+    return float3(gt(color.r, peak), gt(color.g, peak), gt(color.b, peak));
+}
+
 // BT.709 → BT.2020 primaries, both linear (ITU-R BT.2087).
 static const float3x3 BT2020_FROM_BT709 = float3x3(
     0.6274040, 0.3292820, 0.0433136,
@@ -104,7 +143,7 @@ float4 fragmentMain(VertexOut input) : SV_Target
         exposure *= push.auto_exposure[0].x;
     color *= exposure;
     if ((push.flags & FLAG_PASS_THROUGH) == 0)
-        color = pbr_neutral(color, push.peak);
+        color = (push.flags & FLAG_PBR_NEUTRAL) != 0 ? pbr_neutral(color, push.peak) : gt3(color, push.peak);
     color *= push.white;
     if ((push.flags & FLAG_ENCODE_PQ) != 0)
         color = pq_encode(mul(BT2020_FROM_BT709, color));

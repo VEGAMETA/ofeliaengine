@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
-use engine_render::post::{Composite, OutputEncoding, Tonemap};
+use engine_render::post::{Composite, OutputEncoding, ToneCurve, Tonemap};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, MemoryLocation,
@@ -58,27 +58,6 @@ const INPUT: [[f32; 4]; 12] = [
     [0.0, 3.0, 0.0, 1.0],
     [0.3, 0.3, 12.0, 1.0],
 ];
-
-/// PBR Neutral rolled off towards `peak` (as `tonemap.slang`).
-fn pbr_neutral([mut r, mut g, mut b]: [f32; 3], peak: f32) -> [f32; 3] {
-    let start_compression = 0.8 - 0.04;
-    let desaturation = 0.15;
-    let x = r.min(g).min(b);
-    let offset = if x < 0.08 { x - 6.25 * x * x } else { 0.04 };
-    (r, g, b) = (r - offset, g - offset, b - offset);
-    let brightest = r.max(g).max(b);
-    let start = start_compression * peak;
-    if brightest < start {
-        return [r, g, b];
-    }
-    let d = peak - start;
-    let new_peak = peak - d * d / (brightest + d - start);
-    let k = new_peak / brightest;
-    (r, g, b) = (r * k, g * k, b * k);
-    let t = 1.0 - 1.0 / (desaturation * (brightest - new_peak) / peak + 1.0);
-    let mix = |c: f32| c + (new_peak - c) * t;
-    [mix(r), mix(g), mix(b)]
-}
 
 #[test]
 fn tone_map_and_encodings_match_the_reference() {
@@ -137,7 +116,7 @@ fn tone_map_and_encodings_match_the_reference() {
         )
         .unwrap();
 
-    let cases: [(&str, bool, f32, OutputEncoding); 4] = [
+    let outputs: [(&str, bool, f32, OutputEncoding); 4] = [
         ("SDR", true, 1.0, OutputEncoding::LINEAR),
         (
             "scRGB, 200-nit white, 1000-nit peak",
@@ -158,7 +137,11 @@ fn tone_map_and_encodings_match_the_reference() {
             OutputEncoding::Pq { white_nits: 250.0 },
         ),
     ];
-    for (name, tone_map, peak, encoding) in cases {
+    let cases = outputs
+        .iter()
+        .flat_map(|&c| [(c, ToneCurve::Gt), (c, ToneCurve::PbrNeutral)]);
+    for ((name, tone_map, peak, encoding), curve) in cases {
+        let name = format!("{name}, {curve:?}");
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -222,6 +205,7 @@ fn tone_map_and_encodings_match_the_reference() {
                 Composite {
                     sampler: SamplerKind::NearestClamp,
                     tonemap: tone_map,
+                    curve,
                     peak,
                     encoding,
                     load: LoadOp::DontCare,
@@ -296,7 +280,7 @@ fn tone_map_and_encodings_match_the_reference() {
         for (input, got) in INPUT.iter().zip(gpu) {
             let [r, g, b, a] = *input;
             let [r, g, b] = if tone_map {
-                pbr_neutral([r, g, b], peak)
+                curve.apply([r, g, b], peak)
             } else {
                 [r, g, b]
             };

@@ -521,6 +521,9 @@ exposure.reset();
   - `scatter` widens it;
   - `karis_average` (on) stops sparkling specular pixels from flickering in the glow, at
     the cost of small light sources glowing less than their energy.
-- **What it costs** at 1080p: bloom 0.11 ms, exposure 0.02 ms, tone map 0.02 ms on an RTX
-  4060 Ti. On a Radeon iGPU they are 1.1 ms, 0.28 ms and 0.82 ms: consider fewer bloom
+- **The tone curve** (`Composite::curve`, ADR 0048):
+  - Uchimura's by default: mid-tones kept, a filmic shoulder, the display's peak on HDR;
+  - `ToneCurve::PbrNeutral` for material and product views.
+- **What it costs** at 1080p: bloom 0.11 ms, exposure 0.02 ms, tone map 0.03 ms on an RTX
+  4060 Ti. On a Radeon iGPU they are 1.1 ms, 0.28 ms and 0.99 ms: consider fewer bloom
   levels there.

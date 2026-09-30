@@ -76,5 +76,6 @@ the more expensive option (GPU per frame on an RTX 4060 Ti at 240 Hz: SDR 515 µ
   Output stays SDR, correctly scaled by Windows.
 - If the SDR white level is above the display's peak, HDR adds no headroom: the view is
   tone mapped as in SDR.
-- The tone mapper is PBR Neutral with its roll-off moved to the display's peak; an
-  HDR-specific tone mapper comes with the post-processing stack.
+- The tone curve (ADR 0048) keeps mid-tones the same in SDR and HDR and rolls off towards
+  the display's peak: Uchimura's curve by default, PBR Neutral with
+  `Composite::curve = ToneCurve::PbrNeutral` (for material and product views).
