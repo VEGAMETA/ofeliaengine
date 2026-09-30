@@ -205,10 +205,39 @@ let passes = renderer.add_passes(
   debugging something that "disappears". Everything then counts as visible.
 - To count what was drawn:
   - `add_passes` returns `ForwardPasses`, whose `commands` buffer holds one Vulkan draw
-    command per batch (ordered by kind of material, then front to back);
+    command per detail level of each batch (ordered by kind of material, then front to
+    back; `draw_commands` of them per list);
   - after the frame, `instance_count` in each command is the number of visible objects.
   - `crates/engine_render/tests/culling.rs` and `examples/draw_bench.rs` show how to read
     it back.
+
+### Detail levels (LODs)
+
+Far away, a mesh can be drawn with fewer triangles without anyone seeing the difference.
+Give it detail levels and the renderer picks one per object, per frame (ADR 0053):
+
+```rust
+let levels = engine_assets::generate_lods(&mesh.positions, &mesh.indices, &LodSettings::default());
+let lods: Vec<LodIndices> = levels.iter().map(|l| LodIndices { indices: &l.indices, error: l.error }).collect();
+let id = geometry.add_mesh_with_lods(&mesh.as_data(), &lods)?;
+```
+
+- **Made from the mesh itself:** up to 3 levels, each about half the triangles of the
+  previous, sharing the mesh's vertices (little extra memory). Small meshes (under a few
+  hundred triangles) get none: they would not gain.
+- **Chosen by how much it shows:** each level knows how far its surface strays from the
+  full mesh; the renderer draws the coarsest level whose error stays within 1 pixel on
+  screen at the object's distance and size. No per-asset distances to tune; it follows the
+  resolution and field of view.
+- `renderer.set_lod_threshold(2.0)` accepts 2 pixels (faster, softer silhouettes);
+  `0.0` always draws full meshes (for comparisons).
+- **What it saves:** a field of 16k-triangle spheres costs 6–9× less to shade on both
+  reference GPUs (`draw_bench --sphere 64 --lods`). Scenes seen from inside with large
+  meshes gain less (Sponza: about 10–15%).
+- **Your own levels** (artist-made) work the same: pass their indices and their error.
+- **Known limits:** levels switch without a cross-fade (at 1 pixel it rarely shows; TAA
+  hides the rest); orthographic cameras draw full meshes; making levels at load takes
+  time (155 ms for Sponza) until the derived data cache keeps them.
 
 ## 5. Occlusion culling: skipping what is hidden
 
@@ -276,5 +305,264 @@ Rules of thumb:
 - the CPU pays 64 bytes of upload and a few dozen nanoseconds per object;
 - the GPU culls millions of objects per millisecond;
 - the forward pass then costs what is on screen;
-- the shadow pass costs every object in the scene: shadows are fitted to the whole
-  scene until cascaded shadow maps arrive.
+- the shadow pass costs every object that casts into a cascade (section 8).
+
+## 7. Temporal antialiasing and upsampling (TAA / TAAU)
+
+Temporal antialiasing removes the aliasing of edges, alpha-tested foliage, highlights
+and shadow edges (ADR 0043):
+
+- every frame the camera is moved by a sub-pixel offset (jitter);
+- each pixel blends with where its surface was last frame, found through its motion
+  vector.
+
+Upsampling (TAAU) is the same resolve into a larger image: render at 720p, output
+1080p. It works per view:
+
+```rust
+use engine_render::forward::Temporal;
+use engine_upscale::{Taau, TaauInput};
+
+// Once per view: remembers the transforms of up to 100,000 draw items.
+let temporal = Temporal::new(&device, &mut allocator, 100_000)?;
+let mut taau = Taau::new(&device, &bindless, frames_in_flight)?;
+temporal.set_jitter_phases(Taau::jitter_phases(render_size, output_size));
+
+// Every frame: `color` and `depth` at the render size.
+let view = ForwardView { temporal: Some(&temporal), ..view };
+let passes = renderer.add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view)?;
+let motion = passes.motion.expect("a temporal view reports motion");
+let resolved = taau.add_pass(&mut fg, &device, &mut allocator, &bindless,
+    TaauInput { color, depth, motion }, output_size, frame_number)?;
+tonemap.add_pass(&mut fg, &bindless, resolved, backbuffer, exposure);
+
+// After a camera cut (teleport, new level, switching cameras):
+temporal.reset();
+```
+
+- **Keep the draw list in a stable order.**
+  - Items are known by their position in it, as for occlusion culling.
+  - An item whose position had nothing last frame (new, reordered, beyond the capacity)
+    counts as still for one frame. It may smear briefly if it moved.
+- **Give the transforms you draw.** With fixed-step physics, interpolate for rendering.
+  Motion vectors report what was on screen, and a jump between two ticks looks like
+  motion.
+- **Call `reset()` on cuts.** Otherwise the first frame blends with a picture of
+  somewhere else.
+- **Changing the output size** recreates the history (and restarts accumulation).
+  Changing the render size only needs new jitter phases.
+- **Motion vectors are yours too.** `MotionOutput::velocity` (RG16F, the render size) is
+  the texture-coordinate delta current − previous, without jitter. The surface at `uv`
+  was at `uv − motion` last frame. Pixels without geometry carry the camera's motion. Use
+  it for motion blur or your own temporal effects.
+- **History filter:** bilinear by default (the fastest). For sharper images in motion,
+  `taau.set_history_filter(HistoryFilter::CatmullRom)`: 10-15% more resolve time (about
+  1 dB better on a panning camera).
+- **Known limits for now:**
+  - no texture LOD bias while upsampling (textures are slightly softer than native);
+  - no masks for transparent or animated-texture surfaces;
+  - no sharpening.
+
+What it costs (ref-1, 1080p):
+
+- **Motion vectors:** +8-23% on the forward pass (Sponza, FlightHelmet). Measure with
+  `scene_bench -- --motion`.
+- **The resolve:**
+  - RTX 4060 Ti: 0.14 ms for TAA, 0.12 ms from 720p (bilinear history);
+  - Radeon iGPU: 3.9 ms either way (4.5 ms with the Catmull-Rom history).
+  - Pass `-- --catmull-rom` to the benchmark for the other filter.
+  - Measure with `cargo run -p engine_upscale --release --example taau_bench`.
+- **Upsampling from 720p** is cheaper than native 1080p with TAA on both GPUs:
+  - RTX: 0.19 ms against 0.30 ms for forward + resolve in that benchmark;
+  - Radeon: 5.8 ms against 7.7 ms.
+
+## 8. Shadows of the sun: cascaded shadow maps
+
+The directional light casts through up to four cascades (ADR 0044):
+
+- the view is cut along its depth into slices, finest near the camera;
+- each slice gets its own square shadow map, a tile of one atlas.
+
+A 15 cm pole 4 m away keeps a crisp shadow, and a building 100 m away still casts one.
+
+```rust
+use engine_render::forward::ShadowSettings;
+
+let renderer = ForwardRenderer::new(&device, &bindless, HDR_FORMAT, depth_format,
+    ShadowSettings {
+        cascades: 4,        // 1–4
+        resolution: 1024,   // texels per cascade; the atlas holds 2 × 2
+        distance: 150.0,    // how far from the camera shadows reach (world units)
+        ..ShadowSettings::default()
+    })?;
+```
+
+- **Nothing to do per frame.** Cascades follow the camera and the light.
+  - Their maps move in whole texels and keep their size when the camera turns, so shadow
+    edges do not crawl.
+  - Shadows never reach beyond your scene's bounds or the camera's far plane. Shorter
+    `distance` means sharper cascades.
+- **Only objects that can cast into a cascade are drawn into it.** The GPU culls casters
+  per cascade, including objects outside the camera's view whose shadows fall into it.
+- **Cascade edges dither** over a band (`blend`, 10% of a cascade by default):
+  - with TAA (section 7) the dither resolves into a smooth transition;
+  - without it, it is a fine, still pattern;
+  - `blend: 0.0` gives hard seams.
+- **Acne and gaps:** receivers are pushed along their normal by `normal_bias` texels of
+  their cascade (1.0). Raise it if lit surfaces at grazing angles to the sun show dark
+  stripes; lower it if shadows detach from contact points.
+
+What it costs (ref-1, 1080p; `scene_bench -- --cascades N --shadow-res R`, `draw_bench`):
+
+| Sponza (an interior), shadow / forward µs | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| 2 cascades of 1024² | 76 / 303 | 1,197 / 7,519 |
+| 4 cascades of 1024² (default) | 159 / 317 | 2,292 / 7,778 |
+| 4 cascades of 2048² | 353 / 333 | 4,103 / 8,057 |
+
+- **Open worlds with many objects** gain: at 100,000 cubes the shadow pass fell from
+  263 µs to 18–83 µs on the RTX.
+- **Small interiors** pay a pass over their geometry per cascade. The whole of Sponza
+  sits in every cascade.
+- **On integrated GPUs, start with 2 cascades.** Most of the sharpness is in the first
+  ones.
+
+## 9. Point and spot lights
+
+Any number of local lights (ADR 0045), up to 65,535 per view:
+
+```rust
+use engine_render::forward::{LocalLight, Spot};
+
+let lights = [
+    // A lamp: color × intensity, and the distance where its light ends.
+    LocalLight { position: Vec3::new(2.0, 3.0, -4.0), range: 8.0,
+                 color: Vec3::new(1.0, 0.8, 0.6) * 20.0, spot: None },
+    // A spot pointing down, full between 0.3 rad of its axis, fading out by 0.5.
+    LocalLight { position: Vec3::new(0.0, 5.0, 0.0), range: 12.0, color: Vec3::splat(40.0),
+                 spot: Some(Spot { direction: Vec3::NEG_Y, inner: 0.3, outer: 0.5 }) },
+];
+let view = ForwardView { lights: &lights, ..view };
+```
+
+- **`range` is the knob that matters for speed.** A light costs only the pixels within
+  its range. Its falloff is inverse-square, windowed to reach zero exactly there. Set it
+  to where the light stops mattering, not larger.
+- **Nothing to do per frame.** The renderer culls lights outside the view, sorts the
+  rest by depth, and has each pixel shade only the lights in both its screen tile and its
+  depth slice.
+- **A frame without lights costs nothing extra:** the shaders are compiled without the
+  light loop then.
+- **Debugging:** `renderer.set_light_culling(false)` makes every pixel evaluate every
+  light that reaches the view (the reference; slow).
+- **Not yet:** shadows of local lights, and physical light units.
+
+What it costs (ref-1, Sponza at 1080p, lights spread over the scene with ranges of 3–8%
+of its size; `scene_bench -- --lights N`):
+
+| lights | RTX 4060 Ti forward | Radeon iGPU forward |
+|---:|---:|---:|
+| 0 | 0.32 ms | 7.7 ms |
+| 256 | 0.47 ms | 14.1 ms |
+| 1,024 | 0.85 ms | 25.9 ms |
+| 4,096 | 2.45 ms | 72.6 ms |
+
+- **The CPU pays about 55 ns per light** (culling, sorting, binning).
+- **The GPU pays most for the lights that actually overlap each pixel.** Many small
+  lights are cheaper than a few huge ones.
+
+## 10. Sky light and the sky (image-based lighting)
+
+An environment lights everything from the whole sky (ADR 0046):
+
+- rough surfaces take its average color from their side;
+- metals reflect it, blurred by their roughness;
+- where nothing is drawn, the sky and the sun's disk appear.
+
+```rust
+use engine_render::environment::{Environment, Sky};
+
+// Once: a sky of three colors (linear radiance) around the sun.
+let environment = Environment::new(&device, &mut allocator, &bindless, Sky {
+    zenith: Vec3::new(0.12, 0.25, 0.6),
+    horizon: Vec3::new(0.55, 0.62, 0.72),
+    ground: Vec3::new(0.12, 0.11, 0.1),
+})?;
+
+// Every frame:
+let view = ForwardView { environment: Some(&environment), ..view };
+
+// Evening: the next frame rebuilds the lighting.
+environment.set_sky(evening);
+environment.set_intensity(0.5);
+```
+
+- **Changing the sky costs one frame** a few compute passes: 0.05 ms on an RTX 4060 Ti,
+  1.3 ms on a Radeon iGPU. Change it when time of day moves noticeably, not every frame.
+- **With an environment, `DirectionalLight::ambient` is not used.** The sky replaces the
+  flat ambient color.
+- **The sun's disk is drawn in the sky** from the light's direction and color. Its light
+  still comes from the directional light (with its shadows), not from the environment.
+- **Occlusion textures** darken the sky light, diffuse and specular.
+- **One environment per view per frame for now.** Give split-screen views their own.
+- **Debugging:** `environment.set_debug_directions(true)` colors the sky by direction
+  (x red, y green, z blue).
+
+What it costs (ref-1, Sponza at 1080p): the forward pass goes from 0.32 to 0.40 ms on the
+RTX 4060 Ti, and from 7.7 to 12.2 ms on the Radeon iGPU. That is the price of real
+reflections on every surface. The sky pass itself costs 3 µs and 33 µs.
+
+## 11. Bloom and automatic exposure
+
+Before tone mapping, two passes make HDR frames read like photographs (ADR 0047):
+
+- **automatic exposure** brings the scene's typical brightness to middle grey and adapts
+  when it changes;
+- **bloom** makes very bright light glow.
+
+```rust
+use engine_render::post::Composite;
+use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
+
+// Once per view:
+let bloom = Bloom::new(&device, &bindless, BloomSettings::default())?;
+let exposure = AutoExposure::new(&device, &mut allocator, &bindless, ExposureSettings::default())?;
+
+// Every frame, after the scene (and TAA) into `hdr`:
+let bloomed = bloom.add_passes(&mut fg, &bindless, hdr);
+let measured = exposure.add_passes(&mut fg, &bindless, hdr, frame_seconds);
+tonemap.add_composite_pass(&mut fg, &bindless, hdr, backbuffer, Composite {
+    bloom: Some(bloomed),
+    auto_exposure: Some(measured),
+    exposure: 1.0, // now a compensation on top
+    ..Composite::default()
+});
+
+// After a camera cut: no slow adaptation from the old place.
+exposure.reset();
+```
+
+- **Exposure:**
+  - `ExposureSettings::compensation` shifts it in EV (+1 twice as bright);
+  - `speed_up` and `speed_down` set how fast it adapts to darkness and to light, in EV per
+    second;
+  - `low_percent` and `high_percent` choose which pixels count: by default the darkest
+    10% and brightest 10% are ignored, so the sun or a black border does not drive it.
+- **Bloom:**
+  - `intensity` is the share of the image the glow replaces: 0.04 by default, no light is
+    created;
+  - `scatter` widens it;
+  - `karis_average` (on) stops sparkling specular pixels from flickering in the glow, at
+    the cost of small light sources glowing less than their energy.
+- **The tone curve** (`Composite::curve`, ADR 0048):
+  - Uchimura's by default: mid-tones kept, a filmic shoulder, the display's peak on HDR;
+  - `ToneCurve::PbrNeutral` for material and product views;
+  - `ToneCurve::Agx`: soft, low contrast; saturated highlights go to white along their
+    hue (Blender's look);
+  - `ToneCurve::Aces`: the classic contrasty film look of many games; mid-grey darker
+    (add about +0.7 EV of exposure);
+  - AgX and ACES are SDR curves: on HDR screens they do not use the extra range.
+  - Compare them: `scene_bench -- <scene> --post --curve gt|pbr-neutral|agx|aces`.
+- **What it costs** at 1080p: bloom 0.11 ms, exposure 0.02 ms, tone map 0.03 ms on an RTX
+  4060 Ti. On a Radeon iGPU they are 1.1 ms, 0.28 ms and 0.99 ms: consider fewer bloom
+  levels there.

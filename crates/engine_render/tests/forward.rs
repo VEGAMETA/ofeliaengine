@@ -203,6 +203,9 @@ fn pbr_lighting_and_shadows() {
                         depth,
                         clear: Some([0.0, 0.0, 0.25, 1.0]),
                         occlusion: None,
+                        temporal: None,
+                        lights: &[],
+                        environment: None,
                     },
                 );
                 tonemap.add_pass(&mut fg, &bindless, scene, color, 1.0);
@@ -221,6 +224,9 @@ fn pbr_lighting_and_shadows() {
                         depth,
                         clear: Some([0.0, 0.0, 0.25, 1.0]),
                         occlusion: None,
+                        temporal: None,
+                        lights: &[],
+                        environment: None,
                     },
                 );
             }

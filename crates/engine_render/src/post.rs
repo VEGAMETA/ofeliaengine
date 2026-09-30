@@ -1,12 +1,13 @@
 //! Post-processing passes. For now: tonemapping from an HDR target to the display format
-//! (Khronos PBR Neutral with exposure), as one fullscreen-triangle pass in the graph, also
-//! used to composite viewports into sub-rectangles of the output.
+//! (a [`ToneCurve`] with exposure), as one fullscreen-triangle pass in the graph, also used
+//! to composite viewports into sub-rectangles of the output.
 //!
 //! HDR output (ADR 0038): [`OutputLevels`] describes how the swapchain reaches the display
 //! (SDR, scRGB or HDR10, the luminance of reference white and of the peak); the tone mapper
 //! rolls highlights off towards the display's peak and writes the swapchain's encoding.
 
-use crate::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
+use crate::graph::{Access, Buffer, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
+use crate::postfx::BloomOutput;
 use engine_rhi::ash::vk;
 use engine_rhi::{
     Bindless, Device, GraphicsPipelineDesc, OutputColor, Pipeline, RhiError, SamplerKind,
@@ -19,7 +20,7 @@ const FRAGMENT: &[u8] = include_bytes!("../shaders/tonemap.fragmentMain.spv");
 /// The HDR format scenes render into before tonemapping.
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
-/// `Push` in `tonemap.slang` (24 bytes).
+/// `Push` in `tonemap.slang` (40 bytes).
 #[repr(C)]
 struct Push {
     source: u32,
@@ -28,10 +29,178 @@ struct Push {
     flags: u32,
     peak: f32,
     white: f32,
+    bloom: u32,
+    bloom_intensity: f32,
+    auto_exposure: u64,
 }
+
+const _: () = assert!(core::mem::size_of::<Push>() == 40);
 
 const FLAG_PASS_THROUGH: u32 = 1;
 const FLAG_ENCODE_PQ: u32 = 2;
+const FLAG_BLOOM: u32 = 4;
+const FLAG_AUTO_EXPOSURE: u32 = 8;
+const FLAG_PBR_NEUTRAL: u32 = 16;
+const FLAG_AGX: u32 = 32;
+const FLAG_ACES: u32 = 64;
+
+/// The tone curve: how scene values map to what the display shows (ADR 0048).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ToneCurve {
+    /// Uchimura's curve (Gran Turismo Sport, CEDEC 2017), per channel: a toe in the darks,
+    /// a linear section that keeps mid-tones as they are (0.18 stays 0.18), and a shoulder
+    /// that approaches the display's peak smoothly. Bright colors whiten as their channels
+    /// reach the peak, as on film. The same mid-tones in SDR and HDR, with the peak where
+    /// the display's is.
+    #[default]
+    Gt,
+    /// Khronos PBR Neutral: hue-preserving, made for product visualization (the colors of
+    /// materials under neutral light, not a filmic look).
+    PbrNeutral,
+    /// AgX (Troy Sobotka; Blender 4's default): a log encoding and a sigmoid in a gently
+    /// inset gamut, so very bright saturated colors go to white along their hue instead of
+    /// turning yellow or cyan per channel. Soft, low contrast. SDR only: on HDR outputs
+    /// it maps to reference white and leaves the extra range unused.
+    Agx,
+    /// Stephen Hill's fit of ACES 1.0 (RRT + sRGB ODT), as in MJP's Baking Lab: the
+    /// familiar film look of many games, contrasty, with saturated highlights that shift
+    /// hue. Mid-grey comes out darker (0.18 → 0.11: about +0.7 EV of exposure matches the
+    /// other curves). SDR only, like [`Self::Agx`].
+    Aces,
+}
+
+/// `m · v` for a row-major 3 × 3 matrix.
+fn mat3(m: &[[f32; 3]; 3], [r, g, b]: [f32; 3]) -> [f32; 3] {
+    m.map(|row| row[0] * r + row[1] * g + row[2] * b)
+}
+
+/// AgX's inset matrix (Blender's, for Rec.2020 primaries) applied after BT.709 → BT.2020,
+/// folded into one matrix; row-major, as `tonemap.slang`.
+const AGX_IN: [[f32; 3]; 3] = [
+    [0.544_814_8, 0.373_786_5, 0.081_398_2],
+    [0.140_416_76, 0.754_137_1, 0.105_444_7],
+    [0.088_810_54, 0.178_871_52, 0.732_317_6],
+];
+/// AgX's outset matrix (the inverse of Blender's `AgXOutsetMatrixInv`), in Rec.2020.
+const AGX_OUT: [[f32; 3]; 3] = [
+    [1.127_100_6, -0.110_606_64, -0.016_493_939],
+    [-0.141_329_76, 1.157_823_7, -0.016_493_939],
+    [-0.141_329_76, -0.110_606_64, 1.251_936_4],
+];
+/// BT.2020 → BT.709 primaries, both linear (the inverse of ITU-R BT.2087's matrix).
+const BT709_FROM_BT2020: [[f32; 3]; 3] = [
+    [1.660_490_3, -0.587_639_1, -0.072_851_6],
+    [-0.124_549_97, 1.132_899_9, -0.008_347_964],
+    [-0.018_151_12, -0.100_578_72, 1.118_73],
+];
+/// AgX's log range: log2(0.18 · 2^−10) .. log2(0.18 · 2^6.5).
+const AGX_MIN_EV: f32 = -12.473_93;
+const AGX_MAX_EV: f32 = 4.026_069;
+
+/// AgX's default contrast sigmoid, a polynomial fit on the log-encoded value 0..1
+/// (Wrensch's minimal AgX, Rec.2020 coefficients as in Filament).
+fn agx_sigmoid(x: f32) -> f32 {
+    let x2 = x * x;
+    let x4 = x2 * x2;
+    let x6 = x4 * x2;
+    -17.86 * x6 * x + 78.01 * x6 - 126.7 * x4 * x + 92.06 * x4 - 28.72 * x2 * x + 4.361 * x2
+        - 0.1718 * x
+        + 0.002_857
+}
+
+/// AgX on a linear BT.709 color (as `tonemap.slang`).
+fn agx(rgb: [f32; 3]) -> [f32; 3] {
+    let v = mat3(&AGX_IN, rgb.map(|c| c.max(0.0)));
+    let v = v.map(|c| {
+        let t = (c.max(1e-10).log2() - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+        agx_sigmoid(t.clamp(0.0, 1.0))
+    });
+    let v = mat3(&AGX_OUT, v).map(|c| c.max(0.0).powf(2.2));
+    // Colors AgX leaves outside BT.709 (it works in Rec.2020) are clipped to the display.
+    mat3(&BT709_FROM_BT2020, v).map(|c| c.clamp(0.0, 1.0))
+}
+
+/// Linear sRGB → XYZ → D65 to D60 → AP1 → RRT saturation (Hill's fit of ACES 1.0).
+const ACES_IN: [[f32; 3]; 3] = [
+    [0.597_19, 0.354_58, 0.048_23],
+    [0.076_00, 0.908_34, 0.015_66],
+    [0.028_40, 0.133_83, 0.837_77],
+];
+/// ODT saturation → XYZ → D60 to D65 → linear sRGB.
+const ACES_OUT: [[f32; 3]; 3] = [
+    [1.604_75, -0.531_08, -0.073_67],
+    [-0.102_08, 1.108_13, -0.006_05],
+    [-0.003_27, -0.072_76, 1.076_02],
+];
+
+/// Hill's ACES fit on a linear BT.709 color (as `tonemap.slang`).
+fn aces(rgb: [f32; 3]) -> [f32; 3] {
+    let v = mat3(&ACES_IN, rgb.map(|c| c.max(0.0)));
+    let v = v.map(|c| {
+        let a = c * (c + 0.024_578_6) - 0.000_090_537;
+        let b = c * (0.983_729 * c + 0.432_951) + 0.238_081;
+        a / b
+    });
+    mat3(&ACES_OUT, v).map(|c| c.clamp(0.0, 1.0))
+}
+
+/// Uchimura's curve with the published defaults (contrast 1, linear section from 0.22 over
+/// 0.4 of the range, toe power 1.33, no pedestal) and a peak of `peak`.
+fn gt(x: f32, peak: f32) -> f32 {
+    let (a, m, l, c, b) = (1.0f32, 0.22f32, 0.4f32, 1.33f32, 0.0f32);
+    let p = peak.max(m + 1e-3);
+    let l0 = (p - m) * l / a;
+    let s0 = m + l0;
+    let s1 = m + a * l0;
+    let c2 = a * p / (p - s1);
+    let cp = -c2 / p;
+    let w0 = if x < m {
+        let t = x / m;
+        1.0 - t * t * (3.0 - 2.0 * t)
+    } else {
+        0.0
+    };
+    let w2 = if x < s0 { 0.0 } else { 1.0 };
+    let w1 = 1.0 - w0 - w2;
+    let toe = m * (x / m).max(0.0).powf(c) + b;
+    let shoulder = p - (p - s1) * (cp * (x - s0)).exp();
+    let linear = m + a * (x - m);
+    toe * w0 + linear * w1 + shoulder * w2
+}
+
+/// PBR Neutral rolled off towards `peak` (as `tonemap.slang`).
+fn pbr_neutral([mut r, mut g, mut b]: [f32; 3], peak: f32) -> [f32; 3] {
+    let start_compression = 0.8 - 0.04;
+    let desaturation = 0.15;
+    let x = r.min(g).min(b);
+    let offset = if x < 0.08 { x - 6.25 * x * x } else { 0.04 };
+    (r, g, b) = (r - offset, g - offset, b - offset);
+    let brightest = r.max(g).max(b);
+    let start = start_compression * peak;
+    if brightest < start {
+        return [r, g, b];
+    }
+    let d = peak - start;
+    let new_peak = peak - d * d / (brightest + d - start);
+    let k = new_peak / brightest;
+    (r, g, b) = (r * k, g * k, b * k);
+    let t = 1.0 - 1.0 / (desaturation * (brightest - new_peak) / peak + 1.0);
+    let mix = |c: f32| c + (new_peak - c) * t;
+    [mix(r), mix(g), mix(b)]
+}
+
+impl ToneCurve {
+    /// The curve on a linear BT.709 color in units of reference white, rolling off
+    /// towards `peak` (1 for SDR): what the tone map pass computes, for tools and tests.
+    pub fn apply(self, rgb: [f32; 3], peak: f32) -> [f32; 3] {
+        match self {
+            Self::Gt => rgb.map(|c| gt(c.max(0.0), peak)),
+            Self::PbrNeutral => pbr_neutral(rgb, peak),
+            Self::Agx => agx(rgb),
+            Self::Aces => aces(rgb),
+        }
+    }
+}
 
 /// Luminance of 1.0 in scRGB, in nits.
 const SCRGB_WHITE_NITS: f32 = 80.0;
@@ -167,6 +336,8 @@ pub struct Composite {
     pub exposure: f32,
     /// Apply the tone mapper (HDR sources); `false` copies (LDR sources).
     pub tonemap: bool,
+    /// Which tone curve.
+    pub curve: ToneCurve,
     /// Where the tone mapper's roll-off ends, in units of reference white
     /// ([`OutputLevels::peak`]; 1 for SDR).
     pub peak: f32,
@@ -175,6 +346,11 @@ pub struct Composite {
     /// What happens to the output first. `Load` keeps earlier composites. A clear color
     /// is written as it is: encode it first ([`OutputEncoding::encode`]).
     pub load: LoadOp,
+    /// Bloom of the source ([`crate::postfx::Bloom`]), mixed in before exposure.
+    pub bloom: Option<BloomOutput>,
+    /// An exposure measured on the GPU ([`crate::postfx::AutoExposure`]), multiplied
+    /// with `exposure` (which then acts as compensation).
+    pub auto_exposure: Option<Buffer>,
 }
 
 impl Default for Composite {
@@ -184,9 +360,12 @@ impl Default for Composite {
             sampler: SamplerKind::LinearClamp,
             exposure: 1.0,
             tonemap: true,
+            curve: ToneCurve::Gt,
             peak: 1.0,
             encoding: OutputEncoding::LINEAR,
             load: LoadOp::DontCare,
+            bloom: None,
+            auto_exposure: None,
         }
     }
 }
@@ -291,14 +470,25 @@ impl Tonemap {
         composite: Composite,
     ) {
         let pipeline = &self.pipeline;
-        fg.add_pass(name)
-            .read(source, Access::Sampled(ShaderStages::FRAGMENT))
-            .color(output, composite.load, StoreOp::Store)
+        let mut pass = fg
+            .add_pass(name)
+            .read(source, Access::Sampled(ShaderStages::FRAGMENT));
+        if let Some(bloom) = composite.bloom {
+            pass = pass.read(bloom.texture, Access::Sampled(ShaderStages::FRAGMENT));
+        }
+        if let Some(exposure) = composite.auto_exposure {
+            pass = pass.read(exposure, Access::StorageRead(ShaderStages::FRAGMENT));
+        }
+        pass.color(output, composite.load, StoreOp::Store)
             .execute(move |ctx| {
                 let Some(index) = ctx.sampled_index(source) else {
                     return;
                 };
                 let (white, encode) = composite.encoding.push();
+                let bloom = composite
+                    .bloom
+                    .and_then(|b| ctx.sampled_index(b.texture).map(|i| (i, b.intensity)));
+                let auto_exposure = composite.auto_exposure.map(|b| ctx.address(b));
                 let push = Push {
                     source: index,
                     sampler: Bindless::sampler(composite.sampler),
@@ -307,9 +497,24 @@ impl Tonemap {
                         0
                     } else {
                         FLAG_PASS_THROUGH
-                    } | encode,
+                    } | encode
+                        | if bloom.is_some() { FLAG_BLOOM } else { 0 }
+                        | match composite.curve {
+                            ToneCurve::Gt => 0,
+                            ToneCurve::PbrNeutral => FLAG_PBR_NEUTRAL,
+                            ToneCurve::Agx => FLAG_AGX,
+                            ToneCurve::Aces => FLAG_ACES,
+                        }
+                        | if auto_exposure.is_some() {
+                            FLAG_AUTO_EXPOSURE
+                        } else {
+                            0
+                        },
                     peak: composite.peak,
                     white,
+                    bloom: bloom.map_or(0, |b| b.0),
+                    bloom_intensity: bloom.map_or(0.0, |b| b.1),
+                    auto_exposure: auto_exposure.unwrap_or(0),
                 };
                 // SAFETY: `Push` is plain `repr(C)` data without padding.
                 let bytes = unsafe {
@@ -347,6 +552,68 @@ impl Tonemap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gt_keeps_mid_tones_and_rolls_off_smoothly_to_the_peak() {
+        for peak in [1.0f32, 2.5, 5.0, 12.5] {
+            // Mid-tones are kept, the same for every peak.
+            assert!((gt(0.5, peak) - 0.5).abs() < 1e-6, "{peak}");
+            // Monotonic, below the peak, reaching it far above.
+            let mut last = 0.0;
+            for k in 0..20_000 {
+                let x = k as f32 * 0.005;
+                let y = gt(x, peak);
+                assert!(y >= last - 1e-6 && y <= peak + 1e-6, "{peak} {x} {y}");
+                last = y;
+            }
+            assert!(gt(1000.0, peak) > peak * 0.999);
+            // Continuous in value and slope where the shoulder starts.
+            let s0 = 0.22 + (peak - 0.22) * 0.4;
+            let e = 1e-3;
+            assert!((gt(s0 - e, peak) - gt(s0 + e, peak)).abs() < 3e-3);
+            let slope = (gt(s0 + 2.0 * e, peak) - gt(s0 + e, peak)) / e;
+            assert!((slope - 1.0).abs() < 0.01, "{peak}: {slope}");
+        }
+        // The toe darkens the darks a little, black stays black.
+        assert_eq!(gt(0.0, 1.0), 0.0);
+        assert!(gt(0.05, 1.0) < 0.05);
+        // Bright colors whiten: the ratio of channels shrinks towards the peak.
+        let dim = ToneCurve::Gt.apply([0.4, 0.2, 0.1], 1.0);
+        let bright = ToneCurve::Gt.apply([40.0, 20.0, 10.0], 1.0);
+        assert!(bright[2] / bright[0] > dim[2] / dim[0]);
+    }
+
+    #[test]
+    fn agx_and_aces_are_neutral_monotonic_and_bounded() {
+        for curve in [ToneCurve::Agx, ToneCurve::Aces] {
+            let mut last = -1.0;
+            for k in 0..4_000 {
+                let x = (k as f32 * 0.005 - 12.0).exp2();
+                let [r, g, b] = curve.apply([x, x, x], 1.0);
+                // Grey stays grey, rises with the input, stays within the display.
+                assert!(
+                    (r - g).abs() < 2e-4 && (g - b).abs() < 2e-4,
+                    "{curve:?} {x}"
+                );
+                // AgX's sigmoid sums terms of about ±127 in f32: near white, where it is
+                // almost flat, rounding (~3e-5) exceeds a step's rise.
+                assert!(g >= last - 1e-4 && g <= 1.0 + 1e-6, "{curve:?} {x}: {g}");
+                last = g;
+            }
+            assert!(last > 0.95, "{curve:?} reaches white: {last}");
+            assert!(curve.apply([0.0; 3], 1.0)[1] < 1e-3, "{curve:?}: black");
+        }
+        // Mid-grey: AgX close to the others, ACES darker (documented on the variants).
+        let agx_grey = ToneCurve::Agx.apply([0.18; 3], 1.0)[1];
+        let aces_grey = ToneCurve::Aces.apply([0.18; 3], 1.0)[1];
+        assert!((0.12..0.25).contains(&agx_grey), "{agx_grey}");
+        assert!((0.09..0.13).contains(&aces_grey), "{aces_grey}");
+        // AgX takes a very bright saturated color towards white along its hue: the
+        // weakest channel catches up.
+        let dim = ToneCurve::Agx.apply([0.3, 0.05, 0.02], 1.0);
+        let bright = ToneCurve::Agx.apply([300.0, 50.0, 20.0], 1.0);
+        assert!(bright[2] / bright[0] > dim[2] / dim[0] * 2.0);
+    }
 
     #[test]
     fn pq_matches_known_levels() {

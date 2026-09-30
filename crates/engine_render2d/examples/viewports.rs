@@ -383,6 +383,9 @@ fn main() {
                                     depth,
                                     clear,
                                     occlusion: None,
+                                    temporal: None,
+                                    lights: &[],
+                                    environment: None,
                                 },
                             );
                             if vp.id == scene {

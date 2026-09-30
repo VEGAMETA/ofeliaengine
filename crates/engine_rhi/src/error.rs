@@ -21,6 +21,9 @@ pub enum RhiError {
         /// Requested location.
         location: crate::memory::MemoryLocation,
     },
+    /// A shader does not match the code using it (for example its push constant block is
+    /// larger than the data pushed), or its SPIR-V could not be read.
+    ShaderInterface(String),
     /// A Vulkan call failed.
     Vulkan {
         /// What was being done.
@@ -62,6 +65,7 @@ impl fmt::Display for RhiError {
                 f,
                 "no memory type for {location:?} among the allowed types {type_bits:#b}"
             ),
+            Self::ShaderInterface(what) => write!(f, "shader interface: {what}"),
             Self::Vulkan { call, result } => write!(f, "{call} failed: {result}"),
         }
     }

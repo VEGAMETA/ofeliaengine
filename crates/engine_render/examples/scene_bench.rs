@@ -11,8 +11,16 @@
 //!
 //! `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
 //! (scenes: `tools/fetch-test-assets.ps1`; options: `--screenshot <png>`,
-//! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--prepass` for the depth prepass, `--ddc <dir>`
-//! for the derived data cache, `test-assets/.ddc` by default)
+//! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--prepass` for the depth prepass,
+//! `--motion` for a jittered projection and motion vectors (ADR 0043), `--cascades <1-4>`
+//! `--shadow-res <texels per cascade>` and `--shadow-blend <band>` for the shadows
+//! (ADR 0044), `--lights <count>` for point and spot lights spread over the scene and
+//! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--sky` for
+//! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
+//! every frame (ADR 0046), `--post` for bloom, automatic exposure and tone mapping every
+//! frame (ADR 0047), `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
+//! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
+//! levels made at load (ADR 0053)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -22,14 +30,17 @@ use engine_assets::{
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
+use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
+    Spot, Temporal,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
-use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId};
 use engine_render::png::{PngFormat, encode_png};
-use engine_render::post::{HDR_FORMAT, Tonemap};
+use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
+use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -187,6 +198,15 @@ fn main() {
     let (mut screenshot, mut requested_view) = (None, None);
     let mut uncompressed = false;
     let mut prepass = false;
+    let mut motion = false;
+    let mut shadows = ShadowSettings::default();
+    let mut light_count = 0usize;
+    let mut light_culling = true;
+    let (mut with_sky, mut sky_every_frame) = (false, false);
+    let mut lods = false;
+    let mut pipeline_stats = false;
+    let mut post = false;
+    let mut curve = ToneCurve::Gt;
     let mut ddc = String::from("test-assets/.ddc");
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -194,6 +214,25 @@ fn main() {
             "--screenshot" => screenshot = args.next(),
             "--uncompressed" => uncompressed = true,
             "--prepass" => prepass = true,
+            "--motion" => motion = true,
+            "--lights" => light_count = args.next().unwrap().parse().unwrap(),
+            "--no-light-culling" => light_culling = false,
+            "--sky" => with_sky = true,
+            "--lods" => lods = true,
+            "--pipeline-stats" => pipeline_stats = true,
+            "--post" => post = true,
+            "--curve" => {
+                curve = match args.next().as_deref() {
+                    Some("pbr-neutral") => ToneCurve::PbrNeutral,
+                    Some("agx") => ToneCurve::Agx,
+                    Some("aces") => ToneCurve::Aces,
+                    _ => ToneCurve::Gt,
+                }
+            }
+            "--sky-every-frame" => (with_sky, sky_every_frame) = (true, true),
+            "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
+            "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
+            "--shadow-blend" => shadows.blend = args.next().unwrap().parse().unwrap(),
             "--ddc" => ddc = args.next().unwrap(),
             "--view" => {
                 let v: Vec<f32> = args
@@ -290,14 +329,8 @@ fn main() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let depth_format = vk::Format::D32_SFLOAT;
-    let mut renderer = ForwardRenderer::new(
-        &device,
-        &bindless,
-        HDR_FORMAT,
-        depth_format,
-        ShadowSettings::default(),
-    )
-    .unwrap();
+    let mut renderer =
+        ForwardRenderer::new(&device, &bindless, HDR_FORMAT, depth_format, shadows).unwrap();
     let screenshot_format = vk::Format::R8G8B8A8_SRGB;
     let tonemap = Tonemap::new(&device, &bindless, screenshot_format).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 64 << 20).unwrap();
@@ -335,6 +368,7 @@ fn main() {
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let start = Instant::now();
+    let mut lod_triangles = 0usize;
     let meshes: Vec<Vec<MeshId>> = scene
         .meshes
         .iter()
@@ -342,20 +376,46 @@ fn main() {
             mesh.primitives
                 .iter()
                 .map(|p| {
-                    geometry
-                        .add_mesh(&MeshData {
-                            positions: &p.positions,
-                            normals: &p.normals,
-                            tangents: &p.tangents,
-                            uvs: &p.uvs,
-                            indices: &p.indices,
+                    let levels = if lods {
+                        engine_assets::generate_lods(
+                            &p.positions,
+                            &p.indices,
+                            &engine_assets::LodSettings::default(),
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    lod_triangles += levels.iter().map(|l| l.indices.len() / 3).sum::<usize>();
+                    let levels: Vec<LodIndices<'_>> = levels
+                        .iter()
+                        .map(|l| LodIndices {
+                            indices: &l.indices,
+                            error: l.error,
                         })
+                        .collect();
+                    geometry
+                        .add_mesh_with_lods(
+                            &MeshData {
+                                positions: &p.positions,
+                                normals: &p.normals,
+                                tangents: &p.tangents,
+                                uvs: &p.uvs,
+                                indices: &p.indices,
+                            },
+                            &levels,
+                        )
                         .unwrap()
                 })
                 .collect()
         })
         .collect();
     let meshes_added = start.elapsed();
+    if lods {
+        println!(
+            "Detail levels: {lod_triangles} triangles in coarser levels, made in {:.0} ms",
+            meshes_added.as_secs_f64() * 1e3
+        );
+    }
     let (vertices, _, indices, _) = geometry.usage();
 
     // Textures and materials.
@@ -397,6 +457,32 @@ fn main() {
     }
     draws.sort_by_key(|d| format!("{:?}", d.mesh));
     let (eye, target) = view(min, max, requested_view);
+    // Lights spread over the scene's box (a fixed sequence): every fourth a spot pointing
+    // down, ranges a few percent of the scene's size.
+    let size_of_scene = (max - min).length();
+    let mut seed = 0x9E37_79B9u32;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        (seed >> 8) as f32 / (1 << 24) as f32
+    };
+    let lights: Vec<LocalLight> = (0..light_count)
+        .map(|k| {
+            let t = Vec3::new(next(), next(), next());
+            let range = size_of_scene * (0.03 + 0.05 * next());
+            LocalLight {
+                position: min + (max - min) * t,
+                range,
+                color: Vec3::new(0.3 + next(), 0.3 + next(), 0.3 + next()) * range * range * 0.5,
+                spot: (k % 4 == 0).then_some(Spot {
+                    direction: Vec3::NEG_Y,
+                    inner: 0.4,
+                    outer: 0.7,
+                }),
+            }
+        })
+        .collect();
     let size = max - min;
     let camera = Camera {
         clip_from_world: vulkan_perspective(
@@ -424,7 +510,11 @@ fn main() {
         .filter(|m| m.alpha == GltfAlpha::Blend)
         .count();
     let double_sided = scene.materials.iter().filter(|m| m.double_sided).count();
-    println!("### Scene through the forward renderer ({WIDTH}×{HEIGHT} HDR, shadow map 2048²)");
+    println!(
+        "### Scene through the forward renderer ({WIDTH}×{HEIGHT} HDR, {} shadow cascades of {}²)",
+        shadows.cascade_count(),
+        shadows.resolution
+    );
     println!();
     println!("Device: {}", device.adapter().summary());
     println!(
@@ -462,10 +552,58 @@ fn main() {
     );
     println!();
     renderer.set_depth_prepass(prepass);
+    renderer.set_light_culling(light_culling);
+    if pipeline_stats {
+        // Needs ENGINE_PIPELINE_STATS=1 (the device captures statistics at creation).
+        let names = [
+            "plain",
+            "local lights",
+            "environment",
+            "lights + environment",
+        ];
+        for (name, stats) in names.iter().zip(renderer.shading_statistics(&device)) {
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
+        println!();
+    }
+    let post_effects = post.then(|| {
+        (
+            Bloom::new(&device, &bindless, BloomSettings::default()).unwrap(),
+            AutoExposure::new(
+                &device,
+                &mut allocator,
+                &bindless,
+                ExposureSettings::default(),
+            )
+            .unwrap(),
+        )
+    });
+    let environment = with_sky
+        .then(|| Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap());
+    // Motion vectors: the forward pass writes them, a pass fills the background with the
+    // camera's motion, and the instances are copied for the next frame.
+    let temporal = motion.then(|| {
+        let temporal = Temporal::new(&device, &mut allocator, draws.len() as u32).unwrap();
+        temporal.set_jitter_phases(8);
+        temporal
+    });
+    if light_count > 0 {
+        println!(
+            "Lights: {light_count} ({} culling)",
+            if light_culling { "with" } else { "without" }
+        );
+        println!();
+    }
     println!(
-        "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs |"
+        "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs | \
+         GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs | \
+         GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs |"
     );
-    println!("|---|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -473,6 +611,11 @@ fn main() {
             materials.set(id, desc);
         }
         let (mut shadow, mut depth_prepass, mut forward) = (Vec::new(), Vec::new(), Vec::new());
+        let mut motion_extra = Vec::new();
+        let (mut light_tiles, mut cpu_add) = (Vec::new(), Vec::new());
+        let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
+        let (mut bloom_time, mut exposure_time, mut tonemap_time) =
+            (Vec::new(), Vec::new(), Vec::new());
         let mut upload_frames = 0;
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
@@ -492,6 +635,7 @@ fn main() {
                 .unwrap();
             }
             ring.begin_slot(0);
+            let added;
             {
                 // SAFETY: nothing is in flight.
                 let mut fg = unsafe { graph.begin_slot(0, cmd) };
@@ -508,6 +652,15 @@ fn main() {
                 let hdr = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
                 let depth =
                     fg.create_texture("depth", TextureDesc::new_2d(depth_format, WIDTH, HEIGHT));
+                if let Some(environment) = &environment
+                    && sky_every_frame
+                {
+                    // A barely different sky every frame: rebuilt every frame.
+                    let mut sky = Sky::default();
+                    sky.zenith.x += (frame_number % 2) as f32 * 1e-3;
+                    environment.set_sky(sky);
+                }
+                let started = Instant::now();
                 renderer
                     .add_passes(
                         &mut fg,
@@ -523,15 +676,37 @@ fn main() {
                             depth,
                             clear: Some([0.02, 0.02, 0.05, 1.0]),
                             occlusion: None,
+                            temporal: temporal.as_ref(),
+                            lights: &lights,
+                            environment: environment.as_ref(),
                         },
                     )
                     .unwrap();
+                added = started.elapsed();
                 if capture {
                     let ldr = fg.create_texture(
                         "screenshot",
                         TextureDesc::new_2d(screenshot_format, WIDTH, HEIGHT),
                     );
-                    tonemap.add_pass(&mut fg, &bindless, hdr, ldr, 1.0);
+                    let (bloomed, measured) = match &post_effects {
+                        Some((bloom, exposure)) => (
+                            Some(bloom.add_passes(&mut fg, &bindless, hdr)),
+                            Some(exposure.add_passes(&mut fg, &bindless, hdr, 1.0 / 60.0)),
+                        ),
+                        None => (None, None),
+                    };
+                    tonemap.add_composite_pass(
+                        &mut fg,
+                        &bindless,
+                        hdr,
+                        ldr,
+                        Composite {
+                            curve,
+                            bloom: bloomed,
+                            auto_exposure: measured,
+                            ..Composite::default()
+                        },
+                    );
                     let out = fg.import_buffer(
                         "readback",
                         ImportedBuffer {
@@ -571,6 +746,29 @@ fn main() {
                                 );
                             }
                         });
+                } else if let Some((bloom, exposure)) = &post_effects {
+                    let ldr = fg.create_texture(
+                        "tonemapped",
+                        TextureDesc::new_2d(screenshot_format, WIDTH, HEIGHT),
+                    );
+                    let bloomed = bloom.add_passes(&mut fg, &bindless, hdr);
+                    let measured = exposure.add_passes(&mut fg, &bindless, hdr, 1.0 / 60.0);
+                    tonemap.add_composite_pass(
+                        &mut fg,
+                        &bindless,
+                        hdr,
+                        ldr,
+                        Composite {
+                            bloom: Some(bloomed),
+                            auto_exposure: Some(measured),
+                            curve,
+                            ..Composite::default()
+                        },
+                    );
+                    fg.add_pass("consume")
+                        .read(ldr, Access::TransferRead)
+                        .side_effects()
+                        .execute(|_| {});
                 } else {
                     fg.add_pass("consume")
                         .read(hdr, Access::TransferRead)
@@ -597,14 +795,45 @@ fn main() {
                 continue;
             }
             if frame > WARMUP && !capture {
+                let mut extra = 0.0;
+                let mut shadow_frame = 0.0;
+                let mut tiles_frame = 0.0;
+                let (mut sky_frame, mut rebuild_frame) = (0.0, 0.0);
+                let (mut bloom_frame, mut exposure_frame, mut tonemap_frame) = (0.0, 0.0, 0.0);
                 for time in graph.gpu_pass_times() {
                     match time.name {
-                        "shadow" => shadow.push(f64::from(time.gpu_us)),
+                        "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
                         "forward" => forward.push(f64::from(time.gpu_us)),
                         "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
+                        "motion background" | "remember instances" => {
+                            extra += f64::from(time.gpu_us);
+                        }
+                        "light tiles clear" | "light tiles" => {
+                            tiles_frame += f64::from(time.gpu_us);
+                        }
+                        "sky" => sky_frame += f64::from(time.gpu_us),
+                        "bloom downsample" | "bloom upsample" => {
+                            bloom_frame += f64::from(time.gpu_us);
+                        }
+                        "exposure histogram clear" | "exposure histogram" | "exposure average" => {
+                            exposure_frame += f64::from(time.gpu_us);
+                        }
+                        "tonemap" => tonemap_frame += f64::from(time.gpu_us),
+                        "environment sky" | "environment prefilter" | "environment irradiance" => {
+                            rebuild_frame += f64::from(time.gpu_us);
+                        }
                         _ => {}
                     }
                 }
+                motion_extra.push(extra);
+                shadow.push(shadow_frame);
+                light_tiles.push(tiles_frame);
+                cpu_add.push(added.as_secs_f64() * 1e6);
+                sky_pass.push(sky_frame);
+                rebuild.push(rebuild_frame);
+                bloom_time.push(bloom_frame);
+                exposure_time.push(exposure_frame);
+                tonemap_time.push(tonemap_frame);
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
@@ -617,10 +846,18 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
+            median(&mut motion_extra),
+            median(&mut light_tiles),
+            median(&mut cpu_add),
+            median(&mut sky_pass),
+            median(&mut rebuild),
+            median(&mut bloom_time),
+            median(&mut exposure_time),
+            median(&mut tonemap_time),
         );
     }
     println!();
@@ -635,6 +872,15 @@ fn main() {
         geometry.destroy(&mut allocator);
         materials.destroy(&mut allocator);
         textures.destroy(&mut allocator, &bindless);
+        if let Some((_, mut exposure)) = post_effects {
+            exposure.destroy(&mut allocator);
+        }
+        if let Some(mut environment) = environment {
+            environment.destroy(&mut allocator, &bindless);
+        }
+        if let Some(mut temporal) = temporal {
+            temporal.destroy(&mut allocator);
+        }
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);
     }

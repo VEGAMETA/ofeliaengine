@@ -27,6 +27,7 @@ mod frames;
 mod instance;
 mod memory;
 mod pipeline;
+pub mod spirv;
 mod swapchain;
 
 pub use adapter::{Adapter, AdapterKind, AdapterPreference, OptionalCaps};
@@ -41,7 +42,8 @@ pub use memory::{
     MemoryLocation, Range, RangeAllocator, ResourceKind,
 };
 pub use pipeline::{
-    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, ShaderStageDesc, spirv_words,
+    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineStatistic, ShaderStageDesc,
+    spirv_words,
 };
 pub use swapchain::{
     AcquiredImage, HdrMetadata, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc,
