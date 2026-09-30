@@ -1,8 +1,12 @@
 // Tonemapping: HDR scene radiance → display. A fullscreen triangle (over the viewport the
 // pass sets, so it can fill a sub-rectangle when compositing) samples the source
-// through the bindless arrays and applies exposure and the Khronos PBR Neutral tone
-// mapper (implemented from its published description: linear below the knee, a smooth
-// highlight roll-off, desaturation of very bright colors).
+// through the bindless arrays and applies exposure and a tone curve (ADR 0048):
+//
+// - by default Uchimura's (Gran Turismo Sport, CEDEC 2017, from its published formula),
+//   per channel: toe, linear mid-tones, an exponential shoulder towards the peak;
+// - or the Khronos PBR Neutral tone mapper (implemented from its published description:
+//   linear below the knee, a smooth highlight roll-off, desaturation of very bright
+//   colors).
 //
 // HDR output (ADR 0038): values are in units of reference white (SDR white), and the
 // tone mapper rolls highlights off towards `peak`, the display's peak luminance over
@@ -14,6 +18,11 @@
 
 static const uint FLAG_PASS_THROUGH = 1; // exposure only, no tone mapping (LDR sources)
 static const uint FLAG_ENCODE_PQ = 2;    // HDR10 output: BT.2020 primaries, PQ encoding
+static const uint FLAG_BLOOM = 4;        // mix in `bloom` (postfx.slang) by its intensity
+static const uint FLAG_AUTO_EXPOSURE = 8; // multiply by the measured exposure
+static const uint FLAG_PBR_NEUTRAL = 16; // PBR Neutral instead of Uchimura's curve
+static const uint FLAG_AGX = 32;         // AgX instead of Uchimura's curve
+static const uint FLAG_ACES = 64;        // Hill's ACES fit instead of Uchimura's curve
 
 struct Push
 {
@@ -23,6 +32,9 @@ struct Push
     uint flags;
     float peak;     // brightest tone-mapped value, in units of reference white (1: SDR)
     float white;    // output value of reference white: linear, or nits / 10000 for PQ
+    uint bloom;     // bindless index of the bloom (half size), with FLAG_BLOOM
+    float bloom_intensity; // how much of the image the bloom replaces
+    float4* auto_exposure; // x: the measured exposure, with FLAG_AUTO_EXPOSURE
 };
 
 [[vk::push_constant]]
@@ -65,6 +77,92 @@ float3 pbr_neutral(float3 color, float peak)
     return lerp(color, float3(new_peak, new_peak, new_peak), g);
 }
 
+// Uchimura's curve (`gt` in post.rs), the published defaults, rolling off to `peak`. Only
+// the section a value falls in is evaluated (neighbouring pixels share it): the toe's power
+// and the shoulder's exponential are not both paid for.
+float gt(float x, float peak)
+{
+    const float a = 1.0;
+    const float m = 0.22;
+    const float l = 0.4;
+    const float c = 1.33;
+    const float b = 0.0;
+    float p = max(peak, m + 1e-3);
+    float l0 = (p - m) * l / a;
+    float s0 = m + l0;
+    float linear = m + a * (x - m);
+    if (x < m)
+    {
+        float t = x / m;
+        float w0 = 1.0 - t * t * (3.0 - 2.0 * t);
+        float toe = m * pow(max(t, 0.0), c) + b;
+        return toe * w0 + linear * (1.0 - w0);
+    }
+    if (x < s0)
+        return linear;
+    float s1 = m + a * l0;
+    float cp = -a / (p - s1);
+    return p - (p - s1) * exp(cp * (x - s0));
+}
+
+float3 gt3(float3 color, float peak)
+{
+    color = max(color, 0.0);
+    return float3(gt(color.r, peak), gt(color.g, peak), gt(color.b, peak));
+}
+
+// AgX (`agx` in post.rs): Blender's inset matrix for Rec.2020 folded with BT.709 → BT.2020,
+// a log encoding over [MIN_EV, MAX_EV] around mid-grey, a polynomial sigmoid (Wrensch's
+// minimal AgX, Rec.2020 coefficients as in Filament), the outset matrix, a 2.2 power back
+// to linear, and back to BT.709. The constants' provenance is in post.rs and ADR 0048.
+static const float3x3 AGX_IN = float3x3(
+    0.5448148, 0.3737865, 0.0813982,
+    0.14041676, 0.7541371, 0.1054447,
+    0.08881054, 0.17887152, 0.7323176);
+static const float3x3 AGX_OUT = float3x3(
+    1.1271006, -0.11060664, -0.016493939,
+    -0.14132976, 1.1578237, -0.016493939,
+    -0.14132976, -0.11060664, 1.2519364);
+static const float3x3 BT709_FROM_BT2020 = float3x3(
+    1.6604903, -0.5876391, -0.0728516,
+    -0.12454997, 1.1328999, -0.008347964,
+    -0.01815112, -0.10057872, 1.1187299);
+
+float3 agx(float3 color)
+{
+    const float min_ev = -12.47393;
+    const float max_ev = 4.026069;
+    float3 v = mul(AGX_IN, max(color, 0.0));
+    v = saturate((log2(max(v, 1e-10)) - min_ev) / (max_ev - min_ev));
+    float3 x2 = v * v;
+    float3 x4 = x2 * x2;
+    float3 x6 = x4 * x2;
+    v = -17.86 * x6 * v + 78.01 * x6 - 126.7 * x4 * v + 92.06 * x4 - 28.72 * x2 * v + 4.361 * x2
+        - 0.1718 * v + 0.002857;
+    v = pow(max(mul(AGX_OUT, v), 0.0), 2.2);
+    // Colors AgX leaves outside BT.709 (it works in Rec.2020) are clipped to the display.
+    return saturate(mul(BT709_FROM_BT2020, v));
+}
+
+// Stephen Hill's fit of ACES 1.0 RRT + sRGB ODT (`aces` in post.rs; MJP's Baking Lab, MIT;
+// the transforms it fits are the Academy's, see THIRD_PARTY_NOTICES.md).
+static const float3x3 ACES_IN = float3x3(
+    0.59719, 0.35458, 0.04823,
+    0.07600, 0.90834, 0.01566,
+    0.02840, 0.13383, 0.83777);
+static const float3x3 ACES_OUT = float3x3(
+    1.60475, -0.53108, -0.07367,
+    -0.10208, 1.10813, -0.00605,
+    -0.00327, -0.07276, 1.07602);
+
+float3 aces(float3 color)
+{
+    float3 v = mul(ACES_IN, max(color, 0.0));
+    float3 a = v * (v + 0.0245786) - 0.000090537;
+    float3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
+    return saturate(mul(ACES_OUT, a / b));
+}
+
 // BT.709 → BT.2020 primaries, both linear (ITU-R BT.2087).
 static const float3x3 BT2020_FROM_BT709 = float3x3(
     0.6274040, 0.3292820, 0.0433136,
@@ -86,10 +184,29 @@ float3 pq_encode(float3 y)
 [shader("fragment")]
 float4 fragmentMain(VertexOut input) : SV_Target
 {
-    float3 color = g_textures[NonUniformResourceIndex(push.source)]
-        .SampleLevel(g_samplers[push.sampler], input.uv, 0).rgb * push.exposure;
+    SamplerState s = g_samplers[push.sampler];
+    float3 color = g_textures[NonUniformResourceIndex(push.source)].SampleLevel(s, input.uv, 0).rgb;
+    // Bloom replaces its share of the image: energy is kept.
+    if ((push.flags & FLAG_BLOOM) != 0)
+    {
+        float3 bloom = g_textures[NonUniformResourceIndex(push.bloom)].SampleLevel(s, input.uv, 0).rgb;
+        color = lerp(color, bloom, push.bloom_intensity);
+    }
+    float exposure = push.exposure;
+    if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
+        exposure *= push.auto_exposure[0].x;
+    color *= exposure;
     if ((push.flags & FLAG_PASS_THROUGH) == 0)
-        color = pbr_neutral(color, push.peak);
+    {
+        if ((push.flags & FLAG_PBR_NEUTRAL) != 0)
+            color = pbr_neutral(color, push.peak);
+        else if ((push.flags & FLAG_AGX) != 0)
+            color = agx(color);
+        else if ((push.flags & FLAG_ACES) != 0)
+            color = aces(color);
+        else
+            color = gt3(color, push.peak);
+    }
     color *= push.white;
     if ((push.flags & FLAG_ENCODE_PQ) != 0)
         color = pq_encode(mul(BT2020_FROM_BT709, color));

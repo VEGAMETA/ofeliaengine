@@ -19,14 +19,19 @@
 //! - [`viewport`]: viewports: render targets with their own size, update rate and
 //!   placement; nesting, split screen, pixel-perfect scaling (ADR 0016).
 
+pub mod compute;
 pub mod cull;
+pub mod environment;
 pub mod forward;
 pub mod graph;
 pub mod hiz;
+pub mod lights;
 pub mod material;
 pub mod mesh;
 pub mod png;
 pub mod post;
+pub mod postfx;
+pub mod shadow;
 pub mod texture;
 pub mod texture_pool;
 pub mod upload;

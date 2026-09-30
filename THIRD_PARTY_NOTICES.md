@@ -23,6 +23,8 @@ the dependency.
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
+| meshopt 0.6.2 (+ bitflags 2, float-cmp 0.10, num-traits 0.2, thiserror 2 + thiserror-impl) | MIT OR Apache-2.0 (float-cmp MIT) | mesh simplification for detail levels in `engine_assets` (ADR 0053) |
+| meshoptimizer 0.25 (© Arseny Kapoulkine; vendored inside meshopt, built by cc) | MIT | the simplifier and vertex cache optimizer behind meshopt |
 | lewton 0.10.2 (+ tinyvec 1.13, byteorder 1.5) | MIT OR Apache-2.0 (tinyvec Zlib OR Apache-2.0 OR MIT; byteorder Unlicense OR MIT) | Ogg Vorbis decoding in `engine_audio_decode` (ADR 0051) |
 | ogg 0.8.0 | BSD-3-Clause | Ogg pages of Opus files in `engine_audio_decode` (ADR 0051) |
 | claxon 0.4.3 | Apache-2.0 | FLAC decoding in `engine_audio_decode` (ADR 0051) |
@@ -120,4 +122,100 @@ workspace `deny.toml` license allow-list (checked 2026-09-26).
 
 ## Adapted code
 
-_None yet._
+Constants and formulas taken into our own code (no files copied).
+
+| What | Where | Source | License |
+|---|---|---|---|
+| ACES 1.0 RRT + sRGB ODT fit (matrices and rational curve) by Stephen Hill | `engine_render/src/post.rs` (`ACES_IN`, `ACES_OUT`, `aces`), `engine_render/shaders/tonemap.slang` | MJP and David Neubelt, Baking Lab, `BakingLab/ACES.hlsl` | MIT (Copyright (c) 2016 MJP) |
+| The ACES transforms that fit approximates | same | Academy Color Encoding System, A.M.P.A.S. | ACES license (below) |
+| AgX inset/outset matrices for Rec.2020 and the polynomial sigmoid's coefficients | `engine_render/src/post.rs` (`AGX_IN`, `AGX_OUT`, `agx_sigmoid`), `engine_render/shaders/tonemap.slang` | Filament `filament/src/ToneMapper.cpp` (matrices from Blender's AgX via EaryChow/AgX_LUT_Gen, no license, accepted by the team, ADR 0048; sigmoid adapted from B. Wrensch's minimal AgX) | Apache-2.0 (Filament) |
+
+### MIT license (Baking Lab)
+
+```
+Copyright (c) 2016 MJP
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to deal in the Software
+without restriction, including without limitation the rights to use, copy, modify,
+merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### ACES license (A.M.P.A.S.)
+
+```
+Academy Color Encoding System (ACES) software and tools are provided by the Academy under
+the following terms and conditions: A worldwide, royalty-free, non-exclusive right to
+copy, modify, create derivatives, and use, in source and binary forms, is hereby granted,
+subject to acceptance of this license.
+
+Copyright © 2015 Academy of Motion Picture Arts and Sciences (A.M.P.A.S.). Portions
+contributed by others as indicated. All rights reserved.
+
+Performance of any of the aforementioned acts indicates acceptance to be bound by the
+following terms and conditions:
+
+* Copies of source code, in whole or in part, must retain the above copyright notice,
+  this list of conditions and the Disclaimer of Warranty.
+* Use in binary form must retain the above copyright notice, this list of conditions and
+  the Disclaimer of Warranty in the documentation and/or other materials provided with
+  the distribution.
+* Nothing in this license shall be deemed to grant any rights to trademarks, copyrights,
+  patents, trade secrets or any other intellectual property of A.M.P.A.S. or any
+  contributors, except as expressly stated herein.
+* Neither the name "A.M.P.A.S." nor the name of any other contributors to this software
+  may be used to endorse or promote products derivative of or based on this software
+  without express prior written permission of A.M.P.A.S. or the contributors, as
+  appropriate.
+
+This license shall be construed pursuant to the laws of the State of California, and any
+disputes related thereto shall be subject to the jurisdiction of the courts therein.
+
+Disclaimer of Warranty.
+
+* Use in binary form must retain the above copyright notice, this list of
+conditions and the Disclaimer of Warranty in the documentation and/or other
+materials provided with the distribution.
+
+* Nothing in this license shall be deemed to grant any rights to trademarks,
+copyrights, patents, trade secrets or any other intellectual property of
+A.M.P.A.S. or any contributors, except as expressly stated herein.
+
+* Neither the name "A.M.P.A.S." nor the name of any other contributors to this
+software may be used to endorse or promote products derivative of or based on
+this software without express prior written permission of A.M.P.A.S. or the
+contributors, as appropriate.
+
+This license shall be construed pursuant to the laws of the State of
+California, and any disputes related thereto shall be subject to the
+jurisdiction of the courts therein.
+
+Disclaimer of Warranty: THIS SOFTWARE IS PROVIDED BY A.M.P.A.S. AND CONTRIBUTORS
+"AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+THE IMPLIED WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND
+NON-INFRINGEMENT ARE DISCLAIMED. IN NO EVENT SHALL A.M.P.A.S., OR ANY
+CONTRIBUTORS OR DISTRIBUTORS, BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL,
+SPECIAL, EXEMPLARY, RESITUTIONARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE
+OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
+ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+WITHOUT LIMITING THE GENERALITY OF THE FOREGOING, THE ACADEMY SPECIFICALLY
+DISCLAIMS ANY REPRESENTATIONS OR WARRANTIES WHATSOEVER RELATED TO PATENT OR
+OTHER INTELLECTUAL PROPERTY RIGHTS IN THE ACADEMY COLOR ENCODING SYSTEM, OR
+APPLICATIONS THEREOF, HELD BY PARTIES OTHER THAN A.M.P.A.S.,WHETHER DISCLOSED OR
+UNDISCLOSED.
+```

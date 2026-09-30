@@ -457,8 +457,16 @@ fn after_access(s: &mut State, info: &AccessInfo) {
     } else {
         vk::PipelineStageFlags2::empty()
     };
-    s.visible_stages = info.stages;
-    s.visible_access = info.access;
+    // What this access reads is visible to it; what it writes is visible to no one yet,
+    // so a later read (even by the same stages) waits for it. A read-write access used to
+    // count its own writes as visible, and a read after it went without a barrier.
+    if info.writes {
+        s.visible_stages = vk::PipelineStageFlags2::empty();
+        s.visible_access = vk::AccessFlags2::empty();
+    } else {
+        s.visible_stages = info.stages;
+        s.visible_access = info.access;
+    }
 }
 
 #[cfg(test)]
@@ -742,6 +750,52 @@ mod tests {
             rec.final_memory_barrier.src_access,
             vk::AccessFlags2::TRANSFER_WRITE
         );
+    }
+
+    #[test]
+    fn a_read_after_a_read_write_access_waits_for_its_writes() {
+        // Atomics into a histogram, then a pass that reads it, both compute.
+        let mut rec = Records::default();
+        let data = buffer(&mut rec, "histogram");
+        // Imported, so the passes are kept.
+        rec.resources[data as usize].initial = Some(BufferState::idle().into());
+        rec.resources[data as usize].final_state = Some(BufferState::host_read().into());
+        let _count = pass(
+            &mut rec,
+            "count",
+            &[(
+                data,
+                AccessInfo::of(Access::StorageReadWrite(ShaderStages::COMPUTE)),
+            )],
+        );
+        let average = pass(
+            &mut rec,
+            "average",
+            &[(
+                data,
+                AccessInfo::of(Access::StorageRead(ShaderStages::COMPUTE)),
+            )],
+        );
+        let again = pass(
+            &mut rec,
+            "again",
+            &[(
+                data,
+                AccessInfo::of(Access::StorageRead(ShaderStages::COMPUTE)),
+            )],
+        );
+        // The readers write outside the graph (as the exposure pass does).
+        rec.passes[average].side_effects = true;
+        rec.passes[again].side_effects = true;
+        compile(&mut rec);
+        let m = rec.passes[average].memory_barrier;
+        assert!(
+            m.src_access
+                .contains(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+        );
+        assert!(m.dst_access.contains(vk::AccessFlags2::SHADER_STORAGE_READ));
+        // The second reader is covered by the first one's barrier.
+        assert!(rec.passes[again].memory_barrier.is_empty());
     }
 
     #[test]

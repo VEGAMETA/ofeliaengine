@@ -64,6 +64,8 @@ pub struct Device {
     latency: LatencyExtensions,
     /// `VK_EXT_hdr_metadata` is enabled.
     hdr_metadata: bool,
+    /// Pipelines capture the driver's statistics (`ENGINE_PIPELINE_STATS=1`).
+    pipeline_statistics: bool,
     /// Graphics + compute + transfer (+ present on a desktop GPU).
     pub graphics: Queue,
     /// A compute queue on a family without graphics (async compute), if the GPU has one.
@@ -182,6 +184,16 @@ impl Device {
             extensions.push(ash::ext::hdr_metadata::NAME.as_ptr());
         }
 
+        // The driver's statistics of compiled pipelines, on request: measuring shaders.
+        let pipeline_statistics = adapter.caps.pipeline_executable_info
+            && std::env::var("ENGINE_PIPELINE_STATS").is_ok_and(|v| v == "1");
+        let mut e_statistics = vk::PhysicalDevicePipelineExecutablePropertiesFeaturesKHR::default()
+            .pipeline_executable_info(true);
+        if pipeline_statistics {
+            extensions.push(ash::khr::pipeline_executable_properties::NAME.as_ptr());
+            features2 = features2.push_next(&mut e_statistics);
+        }
+
         // Latency extensions: query their features first (only for extensions the
         // adapter lists), then enable what is supported.
         let mut q_present_id = vk::PhysicalDevicePresentIdFeaturesKHR::default();
@@ -258,8 +270,16 @@ impl Device {
             adapter: adapter.clone(),
             latency,
             hdr_metadata,
+            pipeline_statistics,
             instance: instance.shared.clone(),
         })
+    }
+
+    /// Whether pipelines capture the driver's statistics ([`crate::Pipeline::statistics`]):
+    /// set `ENGINE_PIPELINE_STATS=1` before creating the device, on a driver with
+    /// `VK_KHR_pipeline_executable_properties`.
+    pub fn pipeline_statistics_enabled(&self) -> bool {
+        self.pipeline_statistics
     }
 
     /// Which latency extensions are enabled.

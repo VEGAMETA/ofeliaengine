@@ -98,3 +98,110 @@ Typical time from save to new SPIR-V is under 100 ms for a single shader.
 | "Slang compiler library not found" | Install the Vulkan SDK, or set `ENGINE_SLANG_LIBRARY`. The message lists every path tried. |
 | A shader is not built | It needs a `[shader("...")]` entry point, and its directory must not start with `.`. |
 | Edits in an import directory are ignored | Pass that directory with `-I`. Import directories are watched too. |
+
+## 6. Writing a compute pass
+
+A compute pass is three things: the shader, a Rust struct for its push constants, and a
+pass in the frame graph. `engine_render::compute` (ADR 0052) does the rest: creating the
+pipeline, checking that the struct matches the shader, binding, pushing, and counting
+workgroups.
+
+**The shader** reads and writes resources through the bindless arrays and gets their
+indices (and buffer addresses) as push constants:
+
+```slang
+// shaders/blur.slang
+[[vk::binding(0, 0)]] Texture2D g_textures[];
+[[vk::binding(1, 0)]] [vk::image_format("rgba16f")] RWTexture2D<float4> g_images[];
+[[vk::binding(2, 0)]] SamplerState g_samplers[];
+
+struct Push
+{
+    uint source;   // sampled image
+    uint target;   // storage image
+    uint sampler;
+    uint2 size;
+    float radius;
+};
+[[vk::push_constant]] ConstantBuffer<Push> push;
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void blur(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= push.size))
+        return; // the last workgroups reach past the image
+    // ...
+    g_images[push.target][id.xy] = result;
+}
+```
+
+**The push constants in Rust**, field for field, `#[repr(C)]`, with `bytemuck` doing the
+byte conversion (its derive refuses structs with hidden padding, so pad by hand):
+
+```rust
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct Push {
+    source: u32,
+    target: u32,
+    sampler: u32,
+    size: [u32; 2],
+    radius: f32,
+}
+
+const BLUR: &[u8] = include_bytes!("../shaders/blur.blur.spv"); // built by `shaders build`
+let blur = ComputeShader::<Push>::new(&device, &bindless, BLUR, c"blur")?;
+```
+
+- `ComputeShader::new` reads the workgroup size (`numthreads`) and the push constant
+  block from the SPIR-V. If the shader reads more bytes than `Push` has (a field added in
+  Slang and forgotten in Rust), it fails with a message naming both sizes, instead of the
+  shader reading garbage. More than 128 bytes of push constants does not compile.
+- With specialization constants: `ComputeShader::specialized(.., &[value_of_id_0, ..])`.
+
+**Each frame**, declare what the pass reads and writes, then dispatch:
+
+```rust
+fg.add_compute("blur", &bindless)
+    .read(hdr, Access::Sampled(ShaderStages::COMPUTE))
+    .write(blurred, Access::StorageWrite(ShaderStages::COMPUTE))
+    .dispatch(&blur, Dispatch::Threads([width, height, 1]), move |ctx| {
+        Some(Push {
+            source: ctx.sampled_index(hdr)?,
+            target: ctx.storage_index(blurred)?,
+            sampler: Bindless::sampler(SamplerKind::LinearClamp),
+            size: [width, height],
+            radius: 4.0,
+        })
+    });
+```
+
+- `Dispatch::Threads([w, h, d])` dispatches enough workgroups for that many threads (the
+  shader must skip the extra ones, as above). `Dispatch::Groups([x, y, z])` gives the
+  counts directly, when a workgroup covers something else than its threads (a tile, a
+  light).
+- The closure runs when the frame is recorded; `ctx` gives bindless indices of the pass's
+  textures and addresses of its buffers. Returning `None` (`?` on a missing index) skips
+  the dispatch.
+- The graph puts the barriers between passes from what you declared.
+- **Several dispatches in one pass** (for example a mip chain inside one image):
+
+```rust
+fg.add_compute("blur mips", &bindless)
+    .write(chain, Access::StorageReadWrite(ShaderStages::COMPUTE))
+    .record(move |rec| {
+        for level in 1..levels {
+            let size = [w >> level, h >> level, 1];
+            rec.dispatch(&reduce, Dispatch::Threads(size), &Push { level, ..base });
+            rec.barrier(); // the next level reads what this one wrote
+        }
+    });
+```
+
+  `rec.context()` gives the same indices and addresses as `ctx` above.
+- No `unsafe` anywhere in pass code. Rebuild the SPIR-V after editing the shader
+  (`shaders build`, section 3); hot reload of engine passes comes later.
+- Examples in the engine: `postfx.rs` (bloom and exposure), `environment.rs` (mip chains,
+  several shaders in one pass), `hiz.rs` (workgroups per tile), `engine_upscale` (TAAU,
+  specialization constants).
