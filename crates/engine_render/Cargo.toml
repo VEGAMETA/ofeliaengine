@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Push constants as plain bytes without unsafe (ADR 0052); the version engine_ecs uses.
+bytemuck = { version = "1.25", features = ["derive"] }
 engine_core.workspace = true
 engine_profiler.workspace = true
 engine_rhi.workspace = true

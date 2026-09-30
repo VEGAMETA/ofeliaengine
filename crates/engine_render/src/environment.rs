@@ -13,6 +13,7 @@
 //! compute passes of that frame's graph. The forward renderer reads them when a view has an
 //! environment ([`crate::forward::ForwardView::environment`]).
 
+use crate::compute::{ComputeShader, Dispatch};
 use crate::graph::{
     Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, ShaderStages,
     Texture, TextureDesc, TextureState,
@@ -20,10 +21,7 @@ use crate::graph::{
 use core::cell::Cell;
 use engine_core::math::Vec3;
 use engine_rhi::ash::vk;
-use engine_rhi::{
-    Allocation, Allocator, Bindless, Device, MemoryLocation, Pipeline, RhiError, SamplerKind,
-    ShaderStageDesc, spirv_words,
-};
+use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError, SamplerKind};
 
 const SKY_CUBE: &[u8] = include_bytes!("../shaders/environment.skyCube.spv");
 const DOWNSAMPLE: &[u8] = include_bytes!("../shaders/environment.downsample.spv");
@@ -81,7 +79,7 @@ impl Sky {
 }
 
 /// `Push` in `environment.slang` (96 bytes).
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
     zenith: [f32; 4],
@@ -98,18 +96,6 @@ struct Push {
     source_size: u32,
     samples: u32,
     mode: u32,
-}
-
-const _: () = assert!(core::mem::size_of::<Push>() == 96);
-
-fn push_bytes(push: &Push) -> &[u8] {
-    // SAFETY: `Push` is plain `repr(C)` data without padding (asserted size).
-    unsafe {
-        core::slice::from_raw_parts(
-            (push as *const Push).cast::<u8>(),
-            core::mem::size_of::<Push>(),
-        )
-    }
 }
 
 /// An image owned by the environment: sampled through one view, written through one
@@ -304,7 +290,8 @@ pub(crate) struct EnvironmentFrame {
 /// screen with one shared environment is a follow-up).
 pub struct Environment {
     device: engine_rhi::ash::Device,
-    pipelines: [Pipeline; 5],
+    /// Sky into the cube, downsample, prefilter, irradiance, DFG table.
+    shaders: [ComputeShader<Push>; 5],
     source: Image,
     prefiltered: Image,
     dfg: Image,
@@ -337,28 +324,13 @@ impl Environment {
         bindless: &Bindless,
         sky: Sky,
     ) -> Result<Self, RhiError> {
-        let invalid = || RhiError::Vulkan {
-            call: "embedded SPIR-V",
-            result: vk::Result::ERROR_INVALID_SHADER_NV,
-        };
-        let compute = |spirv: &[u8], entry| -> Result<Pipeline, RhiError> {
-            let words = spirv_words(spirv).ok_or_else(invalid)?;
-            Pipeline::compute(
-                device,
-                bindless.pipeline_layout(),
-                ShaderStageDesc {
-                    spirv: &words,
-                    entry,
-                },
-                vk::PipelineCache::null(),
-            )
-        };
-        let pipelines = [
-            compute(SKY_CUBE, c"skyCube")?,
-            compute(DOWNSAMPLE, c"downsample")?,
-            compute(PREFILTER, c"prefilter")?,
-            compute(IRRADIANCE, c"irradiance")?,
-            compute(DFG, c"dfg")?,
+        let shader = |spirv: &[u8], entry| ComputeShader::new(device, bindless, spirv, entry);
+        let shaders = [
+            shader(SKY_CUBE, c"skyCube")?,
+            shader(DOWNSAMPLE, c"downsample")?,
+            shader(PREFILTER, c"prefilter")?,
+            shader(IRRADIANCE, c"irradiance")?,
+            shader(DFG, c"dfg")?,
         ];
         let source = Image::new(
             device,
@@ -403,7 +375,7 @@ impl Environment {
         };
         Ok(Self {
             device: device.raw().clone(),
-            pipelines,
+            shaders,
             source,
             prefiltered,
             dfg,
@@ -479,41 +451,23 @@ impl Environment {
         );
         self.sh_state.set(read);
         let sampler = Bindless::sampler(SamplerKind::LinearClamp);
-        let [
-            sky_pipeline,
-            downsample,
-            prefilter,
-            irradiance,
-            dfg_pipeline,
-        ] = &self.pipelines;
-        let dispatch = |ctx: &crate::graph::PassContext<'_>,
-                        pipeline: &Pipeline,
-                        push: &Push,
-                        groups: [u32; 3]| {
-            // SAFETY: recording outside a rendering scope; the images and the buffer are
-            // the pass's.
-            unsafe {
-                pipeline.bind(ctx.cmd);
-                bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
-                bindless.push_constants(ctx.cmd, push_bytes(push));
-                ctx.device
-                    .cmd_dispatch(ctx.cmd, groups[0], groups[1], groups[2]);
-            }
-        };
+        let [sky_cube, downsample, prefilter, irradiance, dfg_table] = &self.shaders;
         if !self.dfg_ready.replace(true) {
             let target = self.dfg.storage[0];
-            fg.add_pass("environment dfg")
+            fg.add_compute("environment dfg", bindless)
                 .write(dfg, Access::StorageWrite(ShaderStages::COMPUTE))
-                .execute(move |ctx| {
-                    let push = Push {
-                        target,
-                        size: DFG_SIZE,
-                        samples: DFG_SAMPLES,
-                        ..Push::default()
-                    };
-                    let groups = DFG_SIZE.div_ceil(8);
-                    dispatch(ctx, dfg_pipeline, &push, [groups, groups, 1]);
-                });
+                .dispatch(
+                    dfg_table,
+                    Dispatch::Threads([DFG_SIZE, DFG_SIZE, 1]),
+                    move |_| {
+                        Some(Push {
+                            target,
+                            size: DFG_SIZE,
+                            samples: DFG_SAMPLES,
+                            ..Push::default()
+                        })
+                    },
+                );
         }
         if self.dirty.replace(false) {
             let sky = self.sky.get();
@@ -526,30 +480,22 @@ impl Environment {
                 ..Push::default()
             };
             let storage: &'g [u32] = &self.source.storage;
-            fg.add_pass("environment sky")
+            fg.add_compute("environment sky", bindless)
                 .write(source, Access::StorageWrite(ShaderStages::COMPUTE))
-                .execute(move |ctx| {
-                    let groups = SOURCE_SIZE.div_ceil(8);
+                .record(move |rec| {
                     let push = Push {
                         target: storage[0],
                         size: SOURCE_SIZE,
                         ..base
                     };
-                    dispatch(ctx, sky_pipeline, &push, [groups, groups, 6]);
+                    rec.dispatch(
+                        sky_cube,
+                        Dispatch::Threads([SOURCE_SIZE, SOURCE_SIZE, 6]),
+                        &push,
+                    );
                     for level in 1..SOURCE_LEVELS {
-                        // The mip above, written by the previous dispatch.
-                        let barrier = vk::MemoryBarrier2::default()
-                            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
-                            .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
-                            .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ);
-                        // SAFETY: recording outside a rendering scope.
-                        unsafe {
-                            ctx.device.cmd_pipeline_barrier2(
-                                ctx.cmd,
-                                &vk::DependencyInfo::default().memory_barriers(&[barrier]),
-                            );
-                        }
+                        // Each mip reads the one above, written by the previous dispatch.
+                        rec.barrier();
                         let size = SOURCE_SIZE >> level;
                         let push = Push {
                             target: storage[level as usize],
@@ -557,16 +503,15 @@ impl Environment {
                             size,
                             ..base
                         };
-                        let groups = size.div_ceil(8);
-                        dispatch(ctx, downsample, &push, [groups, groups, 6]);
+                        rec.dispatch(downsample, Dispatch::Threads([size, size, 6]), &push);
                     }
                 });
             let targets: &'g [u32] = &self.prefiltered.storage;
             let source_index = self.source.sampled;
-            fg.add_pass("environment prefilter")
+            fg.add_compute("environment prefilter", bindless)
                 .read(source, Access::Sampled(ShaderStages::COMPUTE))
                 .write(prefiltered, Access::StorageWrite(ShaderStages::COMPUTE))
-                .execute(move |ctx| {
+                .record(move |rec| {
                     for level in 0..PREFILTERED_LEVELS {
                         let size = PREFILTERED_SIZE >> level;
                         let push = Push {
@@ -579,22 +524,20 @@ impl Environment {
                             samples: PREFILTER_SAMPLES,
                             ..base
                         };
-                        let groups = size.div_ceil(8);
-                        dispatch(ctx, prefilter, &push, [groups, groups, 6]);
+                        rec.dispatch(prefilter, Dispatch::Threads([size, size, 6]), &push);
                     }
                 });
-            fg.add_pass("environment irradiance")
+            fg.add_compute("environment irradiance", bindless)
                 .read(source, Access::Sampled(ShaderStages::COMPUTE))
                 .write(sh, Access::StorageWrite(ShaderStages::COMPUTE))
-                .execute(move |ctx| {
-                    let push = Push {
+                .dispatch(irradiance, Dispatch::Groups([1, 1, 1]), move |ctx| {
+                    Some(Push {
                         source: source_index,
                         sh: ctx.address(sh),
                         size: SOURCE_SIZE >> IRRADIANCE_LEVEL,
                         level: IRRADIANCE_LEVEL,
                         ..base
-                    };
-                    dispatch(ctx, irradiance, &push, [1, 1, 1]);
+                    })
                 });
         }
         EnvironmentFrame {

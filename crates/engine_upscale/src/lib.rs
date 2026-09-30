@@ -17,15 +17,13 @@
 //! tonemap.add_pass(&mut fg, &bindless, resolved, backbuffer, exposure);
 //! ```
 
+use engine_render::compute::{ComputeShader, Dispatch};
 use engine_render::forward::MotionOutput;
 use engine_render::graph::{
     Access, FrameGraph, ImportedTexture, ShaderStages, Texture, TextureDesc, TextureState,
 };
 use engine_rhi::ash::vk;
-use engine_rhi::{
-    Allocation, Allocator, Bindless, Device, MemoryLocation, Pipeline, RhiError, SamplerKind,
-    ShaderStageDesc, spirv_words,
-};
+use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError, SamplerKind};
 
 const RESOLVE: &[u8] = include_bytes!("../shaders/taau.resolve.spv");
 
@@ -45,7 +43,7 @@ pub struct TaauInput {
 }
 
 /// `Push` in `taau.slang` (56 bytes).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
     color: u32,
@@ -60,8 +58,6 @@ struct Push {
     reset: u32,
     _pad: u32,
 }
-
-const _: () = assert!(core::mem::size_of::<Push>() == 56);
 
 #[derive(Debug)]
 struct HistoryImage {
@@ -100,7 +96,7 @@ pub enum HistoryFilter {
 pub struct Taau {
     device: engine_rhi::ash::Device,
     /// Resolve pipelines by [`HistoryFilter`]: bilinear, Catmull-Rom.
-    pipelines: [Pipeline; 2],
+    shaders: [ComputeShader<Push>; 2],
     filter: HistoryFilter,
     history: Option<History>,
     /// Histories replaced by a resize, freed once their frames are done.
@@ -127,26 +123,12 @@ impl Taau {
         bindless: &Bindless,
         frames_in_flight: usize,
     ) -> Result<Self, RhiError> {
-        let invalid = || RhiError::Vulkan {
-            call: "embedded SPIR-V",
-            result: vk::Result::ERROR_INVALID_SHADER_NV,
-        };
-        let words = spirv_words(RESOLVE).ok_or_else(invalid)?;
-        let pipeline = |catmull_rom: u32| {
-            Pipeline::compute_specialized(
-                device,
-                bindless.pipeline_layout(),
-                ShaderStageDesc {
-                    spirv: &words,
-                    entry: c"resolve",
-                },
-                &[catmull_rom],
-                vk::PipelineCache::null(),
-            )
+        let shader = |catmull_rom: u32| {
+            ComputeShader::specialized(device, bindless, RESOLVE, c"resolve", &[catmull_rom])
         };
         Ok(Self {
             device: device.raw().clone(),
-            pipelines: [pipeline(0)?, pipeline(1)?],
+            shaders: [shader(0)?, shader(1)?],
             filter: HistoryFilter::default(),
             history: None,
             retired: Vec::new(),
@@ -238,56 +220,32 @@ impl Taau {
         history.valid = true;
 
         let input_desc = fg.texture_desc(input.color);
-        let pipeline = &self.pipelines[match self.filter {
+        let shader = &self.shaders[match self.filter {
             HistoryFilter::Bilinear => 0,
             HistoryFilter::CatmullRom => 1,
         }];
         let jitter = input.motion.jitter;
         let velocity = input.motion.velocity;
-        fg.add_pass("taau")
+        fg.add_compute("taau", bindless)
             .read(input.color, Access::Sampled(ShaderStages::COMPUTE))
             .read(input.depth, Access::Sampled(ShaderStages::COMPUTE))
             .read(velocity, Access::Sampled(ShaderStages::COMPUTE))
             .read(history_texture, Access::Sampled(ShaderStages::COMPUTE))
             .write(output, Access::StorageWrite(ShaderStages::COMPUTE))
-            .execute(move |ctx| {
-                let (Some(color), Some(depth), Some(velocity), Some(history), Some(out)) = (
-                    ctx.sampled_index(input.color),
-                    ctx.sampled_index(input.depth),
-                    ctx.sampled_index(velocity),
-                    ctx.sampled_index(history_texture),
-                    ctx.storage_index(output),
-                ) else {
-                    return;
-                };
-                let push = Push {
-                    color,
-                    depth,
-                    velocity,
-                    history,
-                    output: out,
+            .dispatch(shader, Dispatch::Threads([width, height, 1]), move |ctx| {
+                Some(Push {
+                    color: ctx.sampled_index(input.color)?,
+                    depth: ctx.sampled_index(input.depth)?,
+                    velocity: ctx.sampled_index(velocity)?,
+                    history: ctx.sampled_index(history_texture)?,
+                    output: ctx.storage_index(output)?,
                     linear_sampler: Bindless::sampler(SamplerKind::LinearClamp),
                     input_size: [input_desc.width, input_desc.height],
                     output_size: [width, height],
                     jitter,
                     reset: u32::from(reset),
                     _pad: 0,
-                };
-                // SAFETY: `Push` is plain `repr(C)` data without padding (asserted size).
-                let bytes = unsafe {
-                    core::slice::from_raw_parts(
-                        (&push as *const Push).cast::<u8>(),
-                        core::mem::size_of::<Push>(),
-                    )
-                };
-                // SAFETY: recording outside a rendering scope.
-                unsafe {
-                    pipeline.bind(ctx.cmd);
-                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
-                    bindless.push_constants(ctx.cmd, bytes);
-                    ctx.device
-                        .cmd_dispatch(ctx.cmd, width.div_ceil(8), height.div_ceil(8), 1);
-                }
+                })
             });
         Ok(output)
     }

@@ -56,6 +56,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0046](0046-image-based-lighting.md) | Image-based lighting from an environment | Accepted |
 | [0047](0047-bloom-and-automatic-exposure.md) | Bloom and automatic exposure | Accepted |
 | [0048](0048-tone-curve.md) | The tone curve: Uchimura's by default, PBR Neutral as an option | Accepted |
+| [0052](0052-compute-passes.md) | Compute passes: shaders typed by their push constants, checked against SPIR-V | Accepted |
 
 ## Template
 

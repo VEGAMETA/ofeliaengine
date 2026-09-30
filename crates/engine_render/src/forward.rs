@@ -41,6 +41,7 @@
 //! [`GeometryPool`]: crate::mesh::GeometryPool
 //! [`MaterialTable`]: crate::material::MaterialTable
 
+use crate::compute::{ComputePass, ComputeShader, Dispatch};
 use crate::cull::Frustum;
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
 use crate::graph::{
@@ -84,9 +85,6 @@ pub const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 const DEPTH_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.depthVertexMasked.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
 const LIGHT_TILES: &[u8] = include_bytes!("../shaders/forward.lightTiles.spv");
-
-/// Threads per workgroup of `cullMain`.
-const CULL_GROUP: u32 = 64;
 
 /// `PHASE_*` in `forward.slang`.
 const PHASE_ALL: u32 = 0;
@@ -456,7 +454,7 @@ struct BatchData {
 }
 
 /// `Push` in `forward.slang` (112 bytes).
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
     frame: u64,
@@ -557,9 +555,9 @@ pub struct ForwardRenderer {
     sky: Pipeline,
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
-    cull: Pipeline,
+    cull: ComputeShader<Push>,
     /// The tiles' light bitmasks.
-    light_tiles: Pipeline,
+    light_tiles: ComputeShader<Push>,
     pyramid: DepthPyramid,
     shadow_settings: ShadowSettings,
     frustum_culling: bool,
@@ -569,13 +567,7 @@ pub struct ForwardRenderer {
 }
 
 fn push_bytes(push: &Push) -> &[u8] {
-    // SAFETY: `Push` is plain `repr(C)` data without padding (asserted size).
-    unsafe {
-        core::slice::from_raw_parts(
-            (push as *const Push).cast::<u8>(),
-            core::mem::size_of::<Push>(),
-        )
-    }
+    bytemuck::bytes_of(push)
 }
 
 impl ForwardRenderer {
@@ -782,26 +774,14 @@ impl ForwardRenderer {
                 }),
             )?,
         ];
-        let compute = |spirv: &[u8], entry| -> Result<Pipeline, RhiError> {
-            let words = spirv_words(spirv).ok_or_else(invalid)?;
-            Pipeline::compute(
-                device,
-                bindless.pipeline_layout(),
-                ShaderStageDesc {
-                    spirv: &words,
-                    entry,
-                },
-                vk::PipelineCache::null(),
-            )
-        };
         Ok(Self {
             shading,
             prepass,
             background,
             sky,
             shadow,
-            cull: compute(CULL, c"cullMain")?,
-            light_tiles: compute(LIGHT_TILES, c"lightTiles")?,
+            cull: ComputeShader::new(device, bindless, CULL, c"cullMain")?,
+            light_tiles: ComputeShader::new(device, bindless, LIGHT_TILES, c"lightTiles")?,
             pyramid: DepthPyramid::new(device, bindless)?,
             shadow_settings,
             frustum_culling: true,
@@ -1255,16 +1235,9 @@ impl ForwardRenderer {
             }
         });
         let flag_buffer = flags.map(|(buffer, _)| buffer);
-        let dispatch_cull = move |ctx: &mut crate::graph::PassContext<'_>, push: Push| {
-            // SAFETY: recording outside a rendering scope.
-            unsafe {
-                self.cull.bind(ctx.cmd);
-                bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
-                bindless.push_constants(ctx.cmd, push_bytes(&push));
-                ctx.device
-                    .cmd_dispatch(ctx.cmd, instance_count.div_ceil(CULL_GROUP), 1, 1);
-            }
-        };
+        // One thread per instance.
+        let cull_threads = Dispatch::Threads([instance_count, 1, 1]);
+        let cull = &self.cull;
         let first_phase = if occlusion.is_some() {
             PHASE_EARLY
         } else {
@@ -1275,31 +1248,38 @@ impl ForwardRenderer {
         } else {
             "cull"
         };
-        cull_pass(fg, name, culled, visible, flag_buffer, first_phase).execute(move |ctx| {
-            let push = Push {
+        cull_pass(
+            fg,
+            bindless,
+            name,
+            culled,
+            visible,
+            flag_buffer,
+            first_phase,
+        )
+        .dispatch(cull, cull_threads, move |ctx| {
+            Some(Push {
                 visible: ctx.address(visible),
                 commands: ctx.address(culled),
                 phase: first_phase,
                 ..base
-            };
-            dispatch_cull(ctx, push);
+            })
         });
 
         // Shadow casters of each cascade, then each cascade drawn into its atlas tile.
-        fg.add_pass("shadow cull")
+        fg.add_compute("shadow cull", bindless)
             .read(
                 shadow_commands,
                 Access::StorageReadWrite(ShaderStages::COMPUTE),
             )
             .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
-            .execute(move |ctx| {
-                let push = Push {
+            .dispatch(cull, cull_threads, move |ctx| {
+                Some(Push {
                     visible: ctx.address(casters),
                     commands: ctx.address(shadow_commands),
                     phase: PHASE_SHADOW,
                     ..base
-                };
-                dispatch_cull(ctx, push);
+                })
             });
         let resolution = settings.resolution;
         let (atlas_width, atlas_height) = settings.atlas_size();
@@ -1398,24 +1378,20 @@ impl ForwardRenderer {
                             );
                         }
                     });
-                let pipeline = &self.light_tiles;
-                fg.add_pass("light tiles")
+                // One workgroup per light: it sets the light's bit over its rectangle.
+                fg.add_compute("light tiles", bindless)
                     .read(buffer, Access::StorageReadWrite(ShaderStages::COMPUTE))
-                    .execute(move |ctx| {
-                        let push = Push {
-                            visible: rects,
-                            light_tiles: ctx.address(buffer),
-                            ..base
-                        };
-                        // SAFETY: recording outside a rendering scope; the rectangles are in
-                        // the ring; one group per light.
-                        unsafe {
-                            pipeline.bind(ctx.cmd);
-                            bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
-                            bindless.push_constants(ctx.cmd, push_bytes(&push));
-                            ctx.device.cmd_dispatch(ctx.cmd, lights, 1, 1);
-                        }
-                    });
+                    .dispatch(
+                        &self.light_tiles,
+                        Dispatch::Groups([lights, 1, 1]),
+                        move |ctx| {
+                            Some(Push {
+                                visible: rects,
+                                light_tiles: ctx.address(buffer),
+                                ..base
+                            })
+                        },
+                    );
                 Some(buffer)
             }
             _ => None,
@@ -1535,18 +1511,25 @@ impl ForwardRenderer {
                     },
                 );
                 self.pyramid.add_pass(fg, bindless, depth, pyramid);
-                cull_pass(fg, "cull late", culled, visible, Some(flags), PHASE_LATE)
-                    .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
-                    .execute(move |ctx| {
-                        let push = Push {
-                            visible: ctx.address(visible) + visible_bytes,
-                            commands: ctx.address(culled) + command_bytes,
-                            pyramid: ctx.address(pyramid),
-                            phase: PHASE_LATE,
-                            ..base
-                        };
-                        dispatch_cull(ctx, push);
-                    });
+                cull_pass(
+                    fg,
+                    bindless,
+                    "cull late",
+                    culled,
+                    visible,
+                    Some(flags),
+                    PHASE_LATE,
+                )
+                .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
+                .dispatch(cull, cull_threads, move |ctx| {
+                    Some(Push {
+                        visible: ctx.address(visible) + visible_bytes,
+                        commands: ctx.address(culled) + command_bytes,
+                        pyramid: ctx.address(pyramid),
+                        phase: PHASE_LATE,
+                        ..base
+                    })
+                });
                 if prepass {
                     prepass_pass(
                         fg,
@@ -1759,14 +1742,15 @@ fn shading_pass<'a, 'g>(
 /// visibility flags, read early and rewritten late).
 fn cull_pass<'a, 'g>(
     fg: &'a mut FrameGraph<'g>,
+    bindless: &'g Bindless,
     name: &'static str,
     culled: Buffer,
     visible: Buffer,
     flags: Option<Buffer>,
     phase: u32,
-) -> PassBuilder<'a, 'g> {
+) -> ComputePass<'a, 'g> {
     let pass = fg
-        .add_pass(name)
+        .add_compute(name, bindless)
         .read(culled, Access::StorageReadWrite(ShaderStages::COMPUTE))
         .write(visible, Access::StorageWrite(ShaderStages::COMPUTE));
     match flags {

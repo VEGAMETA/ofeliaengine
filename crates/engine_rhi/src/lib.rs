@@ -27,6 +27,7 @@ mod frames;
 mod instance;
 mod memory;
 mod pipeline;
+pub mod spirv;
 mod swapchain;
 
 pub use adapter::{Adapter, AdapterKind, AdapterPreference, OptionalCaps};

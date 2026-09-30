@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Push constants as plain bytes (ADR 0052).
+bytemuck = { version = "1.25", features = ["derive"] }
 engine_profiler.workspace = true
 engine_render.workspace = true
 engine_rhi.workspace = true
