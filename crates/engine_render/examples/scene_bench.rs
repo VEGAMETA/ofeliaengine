@@ -18,7 +18,7 @@
 //! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--post` for bloom, automatic exposure and tone mapping every
-//! frame (ADR 0047), `--curve gt|pbr-neutral` for the tone curve (ADR 0048), `--ddc <dir>`
+//! frame (ADR 0047), `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -221,6 +221,8 @@ fn main() {
             "--curve" => {
                 curve = match args.next().as_deref() {
                     Some("pbr-neutral") => ToneCurve::PbrNeutral,
+                    Some("agx") => ToneCurve::Agx,
+                    Some("aces") => ToneCurve::Aces,
                     _ => ToneCurve::Gt,
                 }
             }

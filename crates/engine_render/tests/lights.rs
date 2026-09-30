@@ -322,25 +322,40 @@ fn culled_lights_match_every_light_for_every_pixel() {
             .collect()
     };
 
-    let culled = render(&lights, true);
-    let reference = render(&lights, false);
     let unlit = render(&[], true);
-    let (mut worst, mut differing, mut lit) = (0.0f32, 0, 0);
-    for ((c, r), u) in culled.iter().zip(&reference).zip(&unlit) {
-        for k in 0..3 {
-            // Relative to the pixel's brightness: half floats round at 1/1024.
-            let error = (c[k] - r[k]).abs() / (1.0 + r[k].abs());
-            worst = worst.max(error);
-            differing += usize::from(error > 2.0 / 1024.0);
+    let compare = |culled: &[[f32; 3]], reference: &[[f32; 3]]| {
+        let (mut worst, mut differing, mut lit) = (0.0f32, 0, 0);
+        for ((c, r), u) in culled.iter().zip(reference).zip(&unlit) {
+            for k in 0..3 {
+                // Relative to the pixel's brightness: half floats round at 1/1024.
+                let error = (c[k] - r[k]).abs() / (1.0 + r[k].abs());
+                worst = worst.max(error);
+                differing += usize::from(error > 2.0 / 1024.0);
+            }
+            lit += usize::from(r[0] + r[1] + r[2] > (u[0] + u[1] + u[2]) * 1.5 + 0.01);
         }
-        lit += usize::from(r[0] + r[1] + r[2] > (u[0] + u[1] + u[2]) * 1.5 + 0.01);
-    }
-    println!(
-        "{} lights: worst relative difference {worst:.5}, {differing} channels beyond 2/1024, \
-         {lit} of {} pixels lit by them",
-        lights.len(),
-        WIDTH * HEIGHT
-    );
+        (worst, differing, lit)
+    };
+    // The AMD iGPU of ref-1 does not render this scene bit-identically every time: in
+    // about one run of seven a few far pixels differ between two renders of the same
+    // frame, with culling or without (#72). A culling bug differs on every attempt; this
+    // passes on the next one.
+    let mut attempt = 1;
+    let (culled, worst, differing, lit) = loop {
+        let culled = render(&lights, true);
+        let reference = render(&lights, false);
+        let (worst, differing, lit) = compare(&culled, &reference);
+        println!(
+            "{} lights, attempt {attempt}: worst relative difference {worst:.5}, {differing} \
+             channels beyond 2/1024, {lit} of {} pixels lit by them",
+            lights.len(),
+            WIDTH * HEIGHT
+        );
+        if differing == 0 || attempt == 3 {
+            break (culled, worst, differing, lit);
+        }
+        attempt += 1;
+    };
     assert!(culled.iter().flatten().all(|v| v.is_finite()));
     assert_eq!(differing, 0, "culling changed the image (worst {worst})");
     assert!(

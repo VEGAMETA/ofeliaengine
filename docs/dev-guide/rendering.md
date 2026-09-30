@@ -326,6 +326,9 @@ temporal.reset();
   the texture-coordinate delta current − previous, without jitter. The surface at `uv`
   was at `uv − motion` last frame. Pixels without geometry carry the camera's motion. Use
   it for motion blur or your own temporal effects.
+- **History filter:** bilinear by default (the fastest). For sharper images in motion,
+  `taau.set_history_filter(HistoryFilter::CatmullRom)`: 10-15% more resolve time (about
+  1 dB better on a panning camera).
 - **Known limits for now:**
   - no texture LOD bias while upsampling (textures are slightly softer than native);
   - no masks for transparent or animated-texture surfaces;
@@ -336,8 +339,9 @@ What it costs (ref-1, 1080p):
 - **Motion vectors:** +8-23% on the forward pass (Sponza, FlightHelmet). Measure with
   `scene_bench -- --motion`.
 - **The resolve:**
-  - RTX 4060 Ti: 0.17 ms for TAA, 0.13 ms from 720p;
-  - Radeon iGPU: 4.5 ms either way.
+  - RTX 4060 Ti: 0.14 ms for TAA, 0.12 ms from 720p (bilinear history);
+  - Radeon iGPU: 3.9 ms either way (4.5 ms with the Catmull-Rom history).
+  - Pass `-- --catmull-rom` to the benchmark for the other filter.
   - Measure with `cargo run -p engine_upscale --release --example taau_bench`.
 - **Upsampling from 720p** is cheaper than native 1080p with TAA on both GPUs:
   - RTX: 0.19 ms against 0.30 ms for forward + resolve in that benchmark;
@@ -523,7 +527,13 @@ exposure.reset();
     the cost of small light sources glowing less than their energy.
 - **The tone curve** (`Composite::curve`, ADR 0048):
   - Uchimura's by default: mid-tones kept, a filmic shoulder, the display's peak on HDR;
-  - `ToneCurve::PbrNeutral` for material and product views.
+  - `ToneCurve::PbrNeutral` for material and product views;
+  - `ToneCurve::Agx`: soft, low contrast; saturated highlights go to white along their
+    hue (Blender's look);
+  - `ToneCurve::Aces`: the classic contrasty film look of many games; mid-grey darker
+    (add about +0.7 EV of exposure);
+  - AgX and ACES are SDR curves: on HDR screens they do not use the extra range.
+  - Compare them: `scene_bench -- <scene> --post --curve gt|pbr-neutral|agx|aces`.
 - **What it costs** at 1080p: bloom 0.11 ms, exposure 0.02 ms, tone map 0.03 ms on an RTX
   4060 Ti. On a Radeon iGPU they are 1.1 ms, 0.28 ms and 0.99 ms: consider fewer bloom
   levels there.

@@ -191,5 +191,24 @@ pass at the render resolution is shown for scale.
 - **Revisit:**
   - motion vectors only for moving objects (option 2) when a scene benchmark shows the
     +8-23% forward cost matters;
-  - the Radeon's resolve after a profiler capture;
-  - the bilinear history if the team takes that trade.
+  - the Radeon's resolve after a profiler capture.
+
+## Amendment (2026-09-30): bilinear history by default
+
+The team took the trade: `Taau` fetches the history with one bilinear fetch by default
+(`HistoryFilter::Bilinear`); the 5-tap Catmull-Rom filter stays as
+`HistoryFilter::CatmullRom` (`Taau::set_history_filter`). Each filter is its own pipeline
+(a specialization constant), so the bilinear one does not carry the Catmull-Rom path's
+registers. `Pipeline::compute_specialized` was added to `engine_rhi` for it.
+
+| resolve, GPU µs (`taau_bench`) | bilinear | Catmull-Rom |
+|---|---:|---:|
+| RTX, 1080p TAA | 144.6 | 160.6 |
+| RTX, 1080p from 720p | 124.1 | 135.8 |
+| RTX, 1440p TAA | 249.1 | 292.4 |
+| Radeon, 1080p TAA | 3,876 | 4,526 |
+| Radeon, 1440p TAA | 6,890 | 8,049 |
+
+Quality (`tests/taa.rs`, PSNR against 4×4 supersampling): still images are the same;
+panning a third of a pixel per frame gives 37.1 dB bilinear against 38.3 dB Catmull-Rom
+on the RTX (37.3 and 38.4 on the Radeon). The test checks both.

@@ -78,4 +78,6 @@ the more expensive option (GPU per frame on an RTX 4060 Ti at 240 Hz: SDR 515 µ
   tone mapped as in SDR.
 - The tone curve (ADR 0048) keeps mid-tones the same in SDR and HDR and rolls off towards
   the display's peak: Uchimura's curve by default, PBR Neutral with
-  `Composite::curve = ToneCurve::PbrNeutral` (for material and product views).
+  `Composite::curve = ToneCurve::PbrNeutral` (for material and product views). AgX and
+  ACES (`ToneCurve::Agx`, `ToneCurve::Aces`) are SDR curves: on an HDR display they stop
+  at reference white.

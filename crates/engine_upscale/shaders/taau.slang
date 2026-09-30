@@ -10,8 +10,8 @@
 //    (variance clipping, Salvi 2016).
 // 3. The history is fetched where the surface was last frame, following the motion of
 //    the nearest surface in the neighbourhood (edges of moving objects keep their motion),
-//    with a 5-tap Catmull-Rom filter (sharper than bilinear; Jimenez et al.), and clipped
-//    towards the box's center.
+//    bilinearly by default, or with a 5-tap Catmull-Rom filter (sharper in motion;
+//    Jimenez et al.) when specialized so, and clipped towards the box's center.
 // 4. Current and history blend by their weights; the accumulated weight lives in history
 //    alpha, capped lower when the pixel moves (resampling blurs).
 //
@@ -39,6 +39,11 @@ struct Push
 
 [[vk::push_constant]]
 ConstantBuffer<Push> push;
+
+// 1: the history is fetched with the 5-tap Catmull-Rom filter; 0: one bilinear fetch
+// (`HistoryFilter` in lib.rs). A specialization constant, so each pipeline only has the
+// registers its filter needs.
+[vk::constant_id(0)] const uint CATMULL_ROM = 0;
 
 // Accumulated weight of a still pixel (1/16 of each new frame), and of a pixel that moves
 // by 2 output pixels or more.
@@ -77,6 +82,8 @@ float4 sample_history(float2 uv)
 {
     Texture2D history = g_textures[push.history];
     SamplerState s = g_samplers[push.linear_sampler];
+    if (CATMULL_ROM == 0)
+        return history.SampleLevel(s, uv, 0);
     float2 size = float2(push.output_size);
     float2 position = uv * size;
     float2 center = floor(position - 0.5) + 0.5;

@@ -84,11 +84,24 @@ struct History {
     valid: bool,
 }
 
+/// How [`Taau`] fetches last frame's result (ADR 0043).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HistoryFilter {
+    /// One bilinear fetch: the fastest (the resolve about 15% cheaper), a little softer in
+    /// motion (about 1.2 dB lower PSNR on a moving camera).
+    #[default]
+    Bilinear,
+    /// A 5-tap Catmull-Rom filter (5 bilinear fetches): keeps moving images sharper.
+    CatmullRom,
+}
+
 /// Temporal antialiasing and upsampling (see the crate documentation). One per view: it
 /// keeps the view's history.
 pub struct Taau {
     device: engine_rhi::ash::Device,
-    pipeline: Pipeline,
+    /// Resolve pipelines by [`HistoryFilter`]: bilinear, Catmull-Rom.
+    pipelines: [Pipeline; 2],
+    filter: HistoryFilter,
     history: Option<History>,
     /// Histories replaced by a resize, freed once their frames are done.
     retired: Vec<(u64, History)>,
@@ -119,18 +132,22 @@ impl Taau {
             result: vk::Result::ERROR_INVALID_SHADER_NV,
         };
         let words = spirv_words(RESOLVE).ok_or_else(invalid)?;
-        let pipeline = Pipeline::compute(
-            device,
-            bindless.pipeline_layout(),
-            ShaderStageDesc {
-                spirv: &words,
-                entry: c"resolve",
-            },
-            vk::PipelineCache::null(),
-        )?;
+        let pipeline = |catmull_rom: u32| {
+            Pipeline::compute_specialized(
+                device,
+                bindless.pipeline_layout(),
+                ShaderStageDesc {
+                    spirv: &words,
+                    entry: c"resolve",
+                },
+                &[catmull_rom],
+                vk::PipelineCache::null(),
+            )
+        };
         Ok(Self {
             device: device.raw().clone(),
-            pipeline,
+            pipelines: [pipeline(0)?, pipeline(1)?],
+            filter: HistoryFilter::default(),
             history: None,
             retired: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
@@ -143,6 +160,17 @@ impl Taau {
     pub fn jitter_phases(input: (u32, u32), output: (u32, u32)) -> u32 {
         let scale = output.0 as f32 / input.0.max(1) as f32;
         ((8.0 * scale * scale).ceil() as u32).max(8)
+    }
+
+    /// Chooses how the history is fetched (default [`HistoryFilter::Bilinear`]); takes
+    /// effect with the next [`Self::add_pass`].
+    pub fn set_history_filter(&mut self, filter: HistoryFilter) {
+        self.filter = filter;
+    }
+
+    /// The current [`HistoryFilter`].
+    pub fn history_filter(&self) -> HistoryFilter {
+        self.filter
     }
 
     /// Forgets the history: the next frame starts accumulating anew (after a camera cut,
@@ -210,7 +238,10 @@ impl Taau {
         history.valid = true;
 
         let input_desc = fg.texture_desc(input.color);
-        let pipeline = &self.pipeline;
+        let pipeline = &self.pipelines[match self.filter {
+            HistoryFilter::Bilinear => 0,
+            HistoryFilter::CatmullRom => 1,
+        }];
         let jitter = input.motion.jitter;
         let velocity = input.motion.velocity;
         fg.add_pass("taau")

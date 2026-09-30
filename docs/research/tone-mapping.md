@@ -57,8 +57,9 @@ Games want the latter, in SDR and on HDR displays alike.
      (pure red maps to 1.66 P);
    - BT.709 keeps every channel within [0, P].
 3. **PBR Neutral stays as `ToneCurve::PbrNeutral`** for product and material views.
-4. **Questions for the team:** AgX (provenance of its constants) or ACES (the Academy's
-   license) as further curves.
+4. **AgX and ACES as options** (decided by the team on 2026-09-30, ADR 0048's
+   amendment): AgX's constants accepted as they are; ACES under the Academy's permissive
+   license (ACES 2: Apache-2.0), through Hill's fit in MJP's Baking Lab (MIT).
 
 ## Sources
 
@@ -66,6 +67,8 @@ Games want the latter, in SDR and on HDR displays alike.
 - Khronos, "PBR Neutral Tone Mapping" specification
 - Filament, `filament/src/ToneMapper.cpp` (AgX section and its attributions), main, checked 2026-09-30 (Apache-2.0)
 - EaryChow, AgX_LUT_Gen (https://github.com/EaryChow/AgX_LUT_Gen), no license file, checked 2026-09-30
+- MJP and David Neubelt, Baking Lab, `BakingLab/ACES.hlsl` (Stephen Hill's fit), master, checked 2026-09-30 (MIT)
+- A.M.P.A.S., aces-dev `LICENSE.md` (dev branch), checked 2026-09-30; aces-aswf/aces-core `LICENSE` (Apache-2.0), checked 2026-09-30
 - Ottosson, "A perceptual color space for image processing" (Oklab; public domain or MIT), checked 2026-09-30
 - Lottes, "Advanced Techniques and Optimization of HDR Color Pipelines", GDC 2016
 - Fry, "High Dynamic Range Color Grading and Display in Frostbite", GDC 2017

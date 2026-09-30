@@ -73,6 +73,34 @@ must serve SDR and HDR displays, keep mid-tones, and be license-clean.
   - a hue-preserving path to white (inset and outset, as AgX does), which removes the
     hue skews of per-channel curves on saturated highlights;
   - color grading (LUTs).
-- **Questions for the team:**
-  - AgX, if its constants' provenance is cleared;
-  - ACES, if the Academy's license is acceptable.
+- **Revisit at polish** (#71): Uchimura's curve is acceptable for now; compare the other
+  curves on real content.
+
+## Amendment (2026-09-30): AgX and ACES as options
+
+The team accepted AgX's constants as they are and ACES under a license compatible with
+MIT. Both are `ToneCurve` variants; Uchimura's curve stays the default.
+
+- **`ToneCurve::Agx`:** Blender's inset and outset matrices for Rec.2020 (from EaryChow's
+  AgX_LUT_Gen, without a license; accepted by the team), taken as Filament
+  (Apache-2.0) states them, and the Rec.2020 coefficients of Wrensch's polynomial sigmoid.
+  BT.709 → BT.2020 is folded into the inset matrix; after the outset and the 2.2 power the
+  color returns to BT.709 and is clipped to the display (AgX leaves some colors outside
+  BT.709).
+- **`ToneCurve::Aces`:** Stephen Hill's fit of ACES 1.0 RRT + sRGB ODT as published in
+  MJP's Baking Lab (MIT). The transforms it fits are the Academy's (a permissive
+  BSD-style license; ACES 2 is Apache-2.0 under the ASWF). Notices are in
+  `THIRD_PARTY_NOTICES.md`. Mid-grey maps to 0.11 (the others keep about 0.18), so ACES
+  needs about +0.7 EV of exposure to match.
+- **Both are SDR curves:** on HDR outputs they map to reference white and do not use the
+  display's extra range. Uchimura's curve remains the HDR choice.
+- **Tests:** `tests/tonemap.rs` covers all four curves on all four outputs against the CPU
+  reference (`ToneCurve::apply`) on both GPUs; CPU tests check grey stays grey, monotonic,
+  within [0, 1], mid-grey levels, and AgX whitening saturated highlights along their hue.
+
+| tone map pass with bloom and exposure, Sponza 1080p, GPU µs | RTX | Radeon |
+|---|---:|---:|
+| Uchimura (default) | 27–31 | 993–999 |
+| PBR Neutral | 22.5 | 835–846 |
+| AgX | 31.7 | 985 |
+| ACES | 24.6 | 905 |

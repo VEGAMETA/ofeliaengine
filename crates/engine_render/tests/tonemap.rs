@@ -137,9 +137,15 @@ fn tone_map_and_encodings_match_the_reference() {
             OutputEncoding::Pq { white_nits: 250.0 },
         ),
     ];
-    let cases = outputs
-        .iter()
-        .flat_map(|&c| [(c, ToneCurve::Gt), (c, ToneCurve::PbrNeutral)]);
+    let cases = outputs.iter().flat_map(|&c| {
+        [
+            ToneCurve::Gt,
+            ToneCurve::PbrNeutral,
+            ToneCurve::Agx,
+            ToneCurve::Aces,
+        ]
+        .map(|curve| (c, curve))
+    });
     for ((name, tone_map, peak, encoding), curve) in cases {
         let name = format!("{name}, {curve:?}");
         // SAFETY: one-shot recording and submission, then wait.

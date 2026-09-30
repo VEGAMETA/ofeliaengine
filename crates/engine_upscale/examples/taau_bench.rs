@@ -3,8 +3,9 @@
 //! at the output resolution. Reports the median GPU time of the forward pass and of the
 //! resolve for plain TAA and for upsampling by 1.5× and 2× per axis, at 1080p and 1440p.
 //!
-//! `cargo run -p engine_upscale --release --example taau_bench`
-//! (`ENGINE_ADAPTER=radeon` for the integrated GPU of ref-1)
+//! `cargo run -p engine_upscale --release --example taau_bench [-- --catmull-rom]`
+//! (`ENGINE_ADAPTER=radeon` for the integrated GPU of ref-1; `--catmull-rom` measures the
+//! sharper history filter instead of the default bilinear one)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -20,7 +21,7 @@ use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc};
-use engine_upscale::{Taau, TaauInput};
+use engine_upscale::{HistoryFilter, Taau, TaauInput};
 
 const WARMUP: usize = 30;
 const FRAMES: usize = 200;
@@ -61,6 +62,9 @@ fn main() {
     )
     .unwrap();
     let mut taau = Taau::new(&device, &bindless, 1).unwrap();
+    if std::env::args().any(|a| a == "--catmull-rom") {
+        taau.set_history_filter(HistoryFilter::CatmullRom);
+    }
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 16 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
     let mut geometry =
