@@ -60,7 +60,7 @@ things at `add_pass`.
 ## Measurements
 
 ref-1, RTX 4060 Ti (driver 616.92), release; NGX 310.9.1, Streamline 2.14.1.
-`cargo run -p engine_dlss --release --example upscale_bench`: FSR's benchmark scene (576
+`cargo run -p engine_dlss --release --example dlss_bench`: FSR's benchmark scene (576
 cubes, camera circling, HDR, shadow map 2048²); GPU µs from the graph's pass timestamps,
 medians of 200 frames.
 

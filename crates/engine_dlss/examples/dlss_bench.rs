@@ -14,7 +14,7 @@
 //! Needs the Streamline DLLs (`ENGINE_STREAMLINE_DIR`) and an NVIDIA RTX GPU for DLSS;
 //! without them it measures TAAU and FSR only.
 //!
-//! `cargo run -p engine_dlss --release --example upscale_bench [-- --timing | --quality]`
+//! `cargo run -p engine_dlss --release --example dlss_bench [-- --timing | --quality]`
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -362,7 +362,7 @@ fn main() {
     }
     let instance = Instance::with_extensions(
         &InstanceDesc {
-            app_name: String::from("upscale_bench"),
+            app_name: String::from("dlss_bench"),
             validation: false,
             debug_utils: true,
             surface: false,

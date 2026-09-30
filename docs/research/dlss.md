@@ -203,7 +203,7 @@ than the standard bias; AMD recommends the same for FSR, which measured worse th
 ## Measurements
 
 ref-1, RTX 4060 Ti, driver 616.92, NGX 310.9.1, Streamline 2.14.1. `cargo run -p
-engine_dlss --release --example upscale_bench` (the FSR benchmark's scene: 576 cubes,
+engine_dlss --release --example dlss_bench` (the FSR benchmark's scene: 576 cubes,
 camera circling, HDR); GPU µs from the graph's pass timestamps, medians of 200 frames.
 
 | output ← render | forward | TAAU | FSR 3.1 | DLSS (default preset) |

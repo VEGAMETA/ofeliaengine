@@ -520,7 +520,7 @@ drop(streamline);
 - **Not available yet:** DLSS frame generation and Ray Reconstruction (ADR 0063).
 
 What it costs and gives (ref-1, RTX 4060 Ti, `cargo run -p engine_dlss --release
---example upscale_bench`, FSR's scene):
+--example dlss_bench`, FSR's scene):
 
 | 1080p from | TAAU | FSR 3.1 | DLSS |
 |---|---:|---:|---:|
