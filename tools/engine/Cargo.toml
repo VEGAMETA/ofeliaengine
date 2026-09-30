@@ -15,5 +15,7 @@ name = "ofeliaengine"
 path = "src/main.rs"
 
 [dependencies]
+# Cooking scenes into packs (ADR 0056).
+engine_assets.workspace = true
 engine_core.workspace = true
 engine_shader.workspace = true

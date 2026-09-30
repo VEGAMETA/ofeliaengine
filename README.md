@@ -21,6 +21,7 @@ cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
 cargo deny check                  # needs `cargo install cargo-deny`
 cargo run --release -p engine_cli -- shaders build <dir>   # Compile All Shaders (docs/dev-guide/shaders.md)
+cargo run --release -p engine_cli -- cook <scene.gltf> -o <out.pack>   # cook a scene (docs/dev-guide/assets.md)
 ```
 
 ## GPU runner
@@ -47,7 +48,7 @@ team".
 
 | Path | Contents |
 |---|---|
-| `crates/engine_assets` | Asset import: glTF 2.0 into memory (meshes, PBR materials, node hierarchy) and into the ECS (ADR 0033) |
+| `crates/engine_assets` | Asset import: glTF 2.0 into memory (meshes, PBR materials, node hierarchy) and into the ECS (ADR 0033); cooked packs of scenes, loaded through an I/O ring with zstd per entry (ADR 0056, `docs/dev-guide/assets.md`) |
 | `crates/engine_audio_decode` | Compressed audio for `engine_audio`: Ogg Opus (vendored libopus), Ogg Vorbis (lewton) and FLAC (claxon) decoders, whole-file decoding into clips and streaming; example `decode_bench` |
 | `crates/engine_audio` | Audio: lock-free mixer (buses, sends, sidechains, virtual voices, sample-accurate starts), effects (biquad, compressor, limiter, delay, FDN reverb), spatial audio (distance, pan, Doppler, air absorption, occlusion, reverb zones), WAV decoding, streaming of compressed files (`Audio::play_stream`), WASAPI output with `IAudioClient3` low latency; example `tone` |
 | `crates/engine_core` | Foundation: job system (`jobs`), frame arena (`arena`), SPSC ring (`spsc`), stable and state hashing (`hash`), sync primitives |
@@ -56,7 +57,7 @@ team".
 | `crates/engine_reflect` (+ `_derive`) | Reflection: `#[derive(Reflect)]` static field tables with offsets and attributes, for serialization, the inspector, scripting and replication |
 | `crates/engine_latency` | Input latency and frame pacing: NVIDIA Reflex (`VK_NV_low_latency2`), AMD Anti-Lag 2 (`VK_AMD_anti_lag`), a generic limiter with `present_wait`, shared markers; example `latency` |
 | `crates/engine_text` | Text: fonts from bytes, HarfRust shaping, UAX #14 wrapping with fallback fonts and alignment, coverage rasterizer, glyph atlas; bundled Go fonts |
-| `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings, directory watching |
+| `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings, directory watching, unbuffered reads through an I/O ring |
 | `crates/engine_profiler` | Profiling instrumentation (Tracy zones, plots, frames) |
 | `crates/engine_rhi` | Vulkan 1.3 layer: instance, adapter selection, device, queues, swapchain, frames in flight, memory allocator (TLSF) |
 | `crates/engine_render` | Render graph (culling, transient memory aliasing, automatic barriers, GPU timings), forward PBR with cascaded shadow maps, z-binned point and spot lights and image-based light from an environment, mesh detail levels chosen per instance on the GPU, sorted transparent surfaces, compute passes typed by their push constants and checked against the SPIR-V, bloom and automatic exposure, motion vectors and projection jitter, per-frame upload ring, textures, viewports (split screen, nesting, pixel-perfect); example `cubes` |
@@ -70,7 +71,7 @@ team".
 | `crates/engine_physics_jolt` | Jolt Physics 5.6 backend through vendored JoltC (`third_party/`) |
 | `crates/engine_physics2d` | 2D physics on vendored Box2D v3.1.1 behind a small C shim |
 | `crates/engine_shader` | Slang → SPIR-V: in-process compiler, content-addressed cache, Compile All, hot reload |
-| `tools/engine` | The `ofeliaengine` command line, package `engine_cli` (`ofeliaengine shaders build`, `ofeliaengine shaders watch`) |
+| `tools/engine` | The `ofeliaengine` command line, package `engine_cli` (`ofeliaengine shaders build`, `ofeliaengine shaders watch`, `ofeliaengine cook`) |
 | `docs/adr` | Architecture decision records |
 | `docs/research` | Research notes behind the decisions |
 | `docs/perf` | Performance budgets, reference hardware, measurement history |

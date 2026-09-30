@@ -3,6 +3,7 @@
 //! ```text
 //! ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
 //! ofeliaengine shaders watch [OPTIONS] <ROOT>...   rebuild on every change (Windows)
+//! ofeliaengine cook <SCENE.gltf> -o <OUT.pack>     cook a scene into a pack (ADR 0056)
 //! ```
 //!
 //! Run `ofeliaengine help` for the options.
@@ -10,6 +11,7 @@
 // A command-line tool reports on stdout/stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf, write_pack};
 use engine_core::jobs::ThreadPool;
 use engine_shader::{
     CompileOptions, CompilerPool, HotReloadConfig, ShaderCache, ShaderEvent, ShaderHotReload,
@@ -24,6 +26,11 @@ const USAGE: &str = "\
 usage:
   ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
   ofeliaengine shaders watch [OPTIONS] <ROOT>...   compile, then rebuild on every change (Windows)
+  ofeliaengine cook <SCENE.gltf> -o <OUT.pack> [--ddc <DIR>] [--no-lods] [--level <N>]
+                                                   cook a scene into a pack: textures compressed
+                                                   with mips (through the derived data cache,
+                                                   default <scene dir>/../.ddc), meshes with
+                                                   detail levels, entries zstd level N (19)
 
 A shader is a .slang file with at least one [shader(\"<stage>\")] entry point; other
 .slang files are modules, compiled through the shaders that import them.
@@ -40,6 +47,100 @@ options:
 
 exit status: 0 success, 1 shader errors, 2 usage or setup error";
 
+enum Command {
+    Shaders(Args),
+    Cook(CookArgs),
+}
+
+struct CookArgs {
+    scene: PathBuf,
+    out: PathBuf,
+    ddc: Option<PathBuf>,
+    settings: CookSettings,
+}
+
+fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
+    match args.next().as_deref() {
+        Some("shaders") => parse(args).map(Command::Shaders),
+        Some("cook") => parse_cook(args).map(Command::Cook),
+        Some("help" | "-h" | "--help") | None => Err(String::new()),
+        Some(other) => Err(format!("unknown command `{other}`")),
+    }
+}
+
+fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String> {
+    let (mut scene, mut out, mut ddc) = (None, None, None);
+    let mut settings = CookSettings::default();
+    while let Some(arg) = args.next() {
+        let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
+        match arg.as_str() {
+            "-o" | "--out" => out = Some(PathBuf::from(value("-o")?)),
+            "--ddc" => ddc = Some(PathBuf::from(value("--ddc")?)),
+            "--no-lods" => settings.lods = false,
+            "--level" => {
+                let level = value("--level")?;
+                settings.compression_level = level
+                    .parse()
+                    .ok()
+                    .filter(|l| (0..=22).contains(l))
+                    .ok_or_else(|| format!("--level {level}: 0 to 22"))?;
+            }
+            other if other.starts_with('-') => return Err(format!("unknown option `{other}`")),
+            path if scene.is_none() => scene = Some(PathBuf::from(path)),
+            extra => return Err(format!("unexpected `{extra}`")),
+        }
+    }
+    Ok(CookArgs {
+        scene: scene.ok_or("no scene given")?,
+        out: out.ok_or("no output given (-o <OUT.pack>)")?,
+        ddc,
+        settings,
+    })
+}
+
+fn cook(args: &CookArgs) -> Result<ExitCode, String> {
+    let start = Instant::now();
+    let bytes = std::fs::read(&args.scene).map_err(|e| format!("{}: {e}", args.scene.display()))?;
+    let dir = args.scene.parent();
+    let scene = import_gltf(&bytes, dir).map_err(|e| format!("{}: {e}", args.scene.display()))?;
+    let ddc_dir = args.ddc.clone().unwrap_or_else(|| {
+        dir.and_then(std::path::Path::parent)
+            .unwrap_or(std::path::Path::new("."))
+            .join(".ddc")
+    });
+    let cache = DerivedDataCache::new(&ddc_dir)
+        .map_err(|e| format!("derived data cache {}: {e}", ddc_dir.display()))?;
+    let jobs = ThreadPool::builder()
+        .thread_name("engine-cook")
+        .build()
+        .map_err(|e| format!("cannot start worker threads: {e:?}"))?;
+    let (cooked, stats) = cook_scene(&scene, dir, Some(&cache), &jobs, &args.settings)
+        .map_err(|e| format!("{}: {e}", args.scene.display()))?;
+    let cooked_at = start.elapsed();
+    let written = write_pack(&args.out, &cooked, &jobs, args.settings.compression_level)
+        .map_err(|e| format!("{}: {e}", args.out.display()))?;
+    println!(
+        "{}: {} textures ({} from the derived data cache), {} meshes, {} materials, {} instances; cooked in {:.1} s",
+        args.scene.display(),
+        cooked.textures.len(),
+        stats.cache_hits,
+        cooked.meshes.len(),
+        cooked.materials.len(),
+        cooked.instances.len(),
+        cooked_at.as_secs_f64(),
+    );
+    println!(
+        "{}: {} entries, {:.1} MB ({:.1} MB raw, {:.0}%), written in {:.1} s",
+        args.out.display(),
+        written.entries,
+        written.file_bytes as f64 / 1e6,
+        written.bytes as f64 / 1e6,
+        100.0 * written.stored_bytes as f64 / written.bytes.max(1) as f64,
+        (start.elapsed() - cooked_at).as_secs_f64(),
+    );
+    Ok(ExitCode::SUCCESS)
+}
+
 struct Args {
     command: String,
     roots: Vec<PathBuf>,
@@ -50,11 +151,6 @@ struct Args {
 }
 
 fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
-    match args.next().as_deref() {
-        Some("shaders") => {}
-        Some("help" | "-h" | "--help") | None => return Err(String::new()),
-        Some(other) => return Err(format!("unknown command `{other}`")),
-    }
     let command = match args.next().as_deref() {
         Some(c @ ("build" | "watch")) => c.to_owned(),
         Some(other) => return Err(format!("unknown shaders command `{other}`")),
@@ -105,7 +201,7 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
 }
 
 fn main() -> ExitCode {
-    let args = match parse(std::env::args().skip(1)) {
+    let command = match parse_command(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(message) => {
             if !message.is_empty() {
@@ -115,7 +211,11 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    match run(&args) {
+    let result = match &command {
+        Command::Shaders(args) => run(args),
+        Command::Cook(args) => cook(args),
+    };
+    match result {
         Ok(code) => code,
         Err(message) => {
             eprintln!("error: {message}");
@@ -230,7 +330,35 @@ mod tests {
     use super::*;
 
     fn args(line: &str) -> Result<Args, String> {
-        parse(line.split_whitespace().map(str::to_owned))
+        match parse_command(line.split_whitespace().map(str::to_owned))? {
+            Command::Shaders(args) => Ok(args),
+            Command::Cook(_) => Err(String::from("not a shaders command")),
+        }
+    }
+
+    fn cook_args(line: &str) -> Result<CookArgs, String> {
+        match parse_command(line.split_whitespace().map(str::to_owned))? {
+            Command::Cook(args) => Ok(args),
+            Command::Shaders(_) => Err(String::from("not a cook command")),
+        }
+    }
+
+    #[test]
+    fn parses_cook_options() {
+        let parsed = cook_args("cook a/scene.gltf -o out.pack --ddc d --no-lods --level 3")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(parsed.scene, PathBuf::from("a/scene.gltf"));
+        assert_eq!(parsed.out, PathBuf::from("out.pack"));
+        assert_eq!(parsed.ddc, Some(PathBuf::from("d")));
+        assert!(!parsed.settings.lods);
+        assert_eq!(parsed.settings.compression_level, 3);
+        let defaults = cook_args("cook s.gltf -o o.pack").unwrap_or_else(|e| panic!("{e}"));
+        assert!(defaults.settings.lods && defaults.settings.block_compression);
+        assert_eq!(defaults.settings.compression_level, 19);
+        assert!(cook_args("cook s.gltf").is_err());
+        assert!(cook_args("cook -o o.pack").is_err());
+        assert!(cook_args("cook s.gltf -o o.pack --level 30").is_err());
+        assert!(cook_args("cook s.gltf -o o.pack extra").is_err());
     }
 
     #[test]

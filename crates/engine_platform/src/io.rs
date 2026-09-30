@@ -51,7 +51,9 @@ unsafe impl Sync for AlignedBuffer {}
 
 impl core::fmt::Debug for AlignedBuffer {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("AlignedBuffer").field("len", &self.len).finish()
+        f.debug_struct("AlignedBuffer")
+            .field("len", &self.len)
+            .finish()
     }
 }
 
@@ -501,9 +503,8 @@ mod imp {
                     // SAFETY: the buffer's heap memory does not move when the buffer is
                     // stored below, and the slot keeps both it and the file alive until
                     // the completion is popped (or the queue waits for it on drop).
-                    let hr = unsafe {
-                        BuildIoRingReadFile(*ring, file_ref, data, len, offset, slot, 0)
-                    };
+                    let hr =
+                        unsafe { BuildIoRingReadFile(*ring, file_ref, data, len, offset, slot, 0) };
                     if hr < 0 {
                         free.push(slot);
                         return Err(PushError {
@@ -606,7 +607,10 @@ mod imp {
             let target = buffer.as_mut_slice();
             let mut total = 0;
             while total < target.len() {
-                match self.file.read_at(&mut target[total..], offset + total as u64)? {
+                match self
+                    .file
+                    .read_at(&mut target[total..], offset + total as u64)?
+                {
                     0 => break,
                     n => total += n,
                 }
@@ -690,7 +694,12 @@ mod tests {
                 let Some(read) = next.next() else { break };
                 let offset = (read * 2 * READ_ALIGN) as u64;
                 queue
-                    .push(&file, offset, AlignedBuffer::new(2 * READ_ALIGN), read as u64)
+                    .push(
+                        &file,
+                        offset,
+                        AlignedBuffer::new(2 * READ_ALIGN),
+                        read as u64,
+                    )
                     .unwrap();
             }
             queue.submit(true).unwrap();
@@ -699,7 +708,11 @@ mod tests {
                 assert_eq!(done.result.unwrap(), 2 * READ_ALIGN);
                 let data = done.buffer.as_slice();
                 assert!(data[..READ_ALIGN].iter().all(|&b| b == (read * 2) as u8));
-                assert!(data[READ_ALIGN..].iter().all(|&b| b == (read * 2 + 1) as u8));
+                assert!(
+                    data[READ_ALIGN..]
+                        .iter()
+                        .all(|&b| b == (read * 2 + 1) as u8)
+                );
                 assert!(!seen[read]);
                 seen[read] = true;
             }
@@ -707,10 +720,20 @@ mod tests {
         assert!(seen.iter().all(|&s| s));
         // Past the end: nothing read. At the end: what is left.
         queue
-            .push(&file, (BLOCKS * READ_ALIGN) as u64, AlignedBuffer::new(1), 1)
+            .push(
+                &file,
+                (BLOCKS * READ_ALIGN) as u64,
+                AlignedBuffer::new(1),
+                1,
+            )
             .unwrap();
         queue
-            .push(&file, ((BLOCKS - 1) * READ_ALIGN) as u64, AlignedBuffer::new(8192), 2)
+            .push(
+                &file,
+                ((BLOCKS - 1) * READ_ALIGN) as u64,
+                AlignedBuffer::new(8192),
+                2,
+            )
             .unwrap();
         let mut results = Vec::new();
         while queue.pending() > 0 {
@@ -743,7 +766,9 @@ mod tests {
         let path = pattern_file("refuse", 4);
         let file = Arc::new(ReadFile::open(&path).unwrap());
         let mut queue = ReadQueue::new(1).unwrap();
-        let refused = queue.push(&file, 100, AlignedBuffer::new(1), 0).unwrap_err();
+        let refused = queue
+            .push(&file, 100, AlignedBuffer::new(1), 0)
+            .unwrap_err();
         assert_eq!(refused.error.kind(), io::ErrorKind::InvalidInput);
         assert_eq!(refused.buffer.len(), READ_ALIGN);
         queue.push(&file, 0, AlignedBuffer::new(1), 0).unwrap();
