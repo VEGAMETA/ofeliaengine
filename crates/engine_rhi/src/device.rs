@@ -3,8 +3,13 @@
 use crate::adapter::Adapter;
 use crate::error::RhiError;
 use crate::instance::{Instance, InstanceShared};
+use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheLoad, PipelineCacheSave};
 use ash::vk;
-use std::sync::Arc;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use engine_core::hash::state_hash64;
+use engine_core::jobs::ThreadPool;
+use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 /// A device queue and its family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,6 +77,14 @@ pub struct Device {
     pub async_compute: Option<Queue>,
     /// A transfer-only queue (copy engine), if the GPU has one.
     pub transfer: Option<Queue>,
+    /// Every pipeline is created through it (ADR 0055); internally synchronized, so
+    /// pipelines are created from many threads at once.
+    pipeline_cache: vk::PipelineCache,
+    /// Hash of the cache data as loaded or last saved: unchanged data is not rewritten.
+    saved_cache: AtomicU64,
+    /// Creates pipelines in parallel ([`Self::create_parallel`]); without it, threads of
+    /// its own.
+    jobs: Option<Arc<ThreadPool>>,
     // Keeps the instance alive until the device is destroyed.
     instance: Arc<InstanceShared>,
 }
@@ -158,6 +171,8 @@ impl Device {
             .dynamic_rendering(true)
             .synchronization2(true)
             .maintenance4(true)
+            // Creating a pipeline only if the cache holds it (`Pipeline::create_many`).
+            .pipeline_creation_cache_control(true)
             .shader_demote_to_helper_invocation(true);
         let features = vk::PhysicalDeviceFeatures::default()
             .sampler_anisotropy(true)
@@ -257,12 +272,29 @@ impl Device {
         }
         .map_err(RhiError::vk("vkCreateDevice"))?;
 
+        // SAFETY: the device was just created; the create info holds no pointers.
+        let pipeline_cache = match unsafe {
+            raw.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None)
+        } {
+            Ok(cache) => cache,
+            Err(result) => {
+                // SAFETY: nothing was created from the device yet.
+                unsafe { raw.destroy_device(None) };
+                return Err(RhiError::Vulkan {
+                    call: "vkCreatePipelineCache",
+                    result,
+                });
+            }
+        };
         let queue = |family: u32| Queue {
             // SAFETY: each family was requested with one queue.
             raw: unsafe { raw.get_device_queue(family, 0) },
             family,
         };
         Ok(Self {
+            pipeline_cache,
+            saved_cache: AtomicU64::new(state_hash64(&[])),
+            jobs: None,
             graphics: queue(graphics_family),
             async_compute: compute_family.map(queue),
             transfer: transfer_family.map(queue),
@@ -325,6 +357,167 @@ impl Device {
         // (callers stop submitting first).
         unsafe { self.raw.device_wait_idle() }.map_err(RhiError::vk("vkDeviceWaitIdle"))
     }
+
+    /// The pipeline cache every pipeline of this device is created through (ADR 0055).
+    pub fn pipeline_cache(&self) -> vk::PipelineCache {
+        self.pipeline_cache
+    }
+
+    /// A file name for this GPU's pipeline cache, `pipelines-<vendor>-<device>.bin`: a
+    /// machine with two GPUs keeps a cache for each instead of replacing one with the
+    /// other.
+    pub fn pipeline_cache_file_name(&self) -> String {
+        format!(
+            "pipelines-{:04x}-{:04x}.bin",
+            self.adapter.vendor_id, self.adapter.device_id
+        )
+    }
+
+    /// Loads the pipeline cache [`Self::save_pipeline_cache`] wrote in an earlier run.
+    /// Call it before creating the renderers: their pipelines then come from the cache
+    /// instead of the driver's compiler (milliseconds instead of a second or more).
+    ///
+    /// Never fails: a missing file (the first run) or one that cannot be used (another GPU,
+    /// a driver update, damage) leaves the cache as it was, and the result says why.
+    pub fn load_pipeline_cache(&mut self, path: &Path) -> PipelineCacheLoad {
+        engine_profiler::zone!("rhi::Device::load_pipeline_cache");
+        let file = match std::fs::read(path) {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return PipelineCacheLoad::Missing;
+            }
+            Err(e) => return PipelineCacheLoad::Rejected(format!("cannot read it: {e}")),
+        };
+        let data = match pipeline_cache::unwrap(&CacheIdentity::of(&self.adapter), &file) {
+            Ok(data) => data,
+            Err(reason) => return PipelineCacheLoad::Rejected(reason),
+        };
+        let info = vk::PipelineCacheCreateInfo::default().initial_data(data);
+        // SAFETY: the data passed the envelope's checks and names this device in the
+        // driver's own header.
+        let loaded = match unsafe { self.raw.create_pipeline_cache(&info, None) } {
+            Ok(cache) => cache,
+            Err(result) => {
+                return PipelineCacheLoad::Rejected(format!("the driver refused it: {result}"));
+            }
+        };
+        // What the cache gathered before the load goes into the loaded one.
+        // SAFETY: `&mut self`: no pipeline is being created through either cache.
+        if let Err(result) = unsafe {
+            self.raw
+                .merge_pipeline_caches(loaded, &[self.pipeline_cache])
+        } {
+            // SAFETY: as above; `loaded` is unused.
+            unsafe { self.raw.destroy_pipeline_cache(loaded, None) };
+            return PipelineCacheLoad::Rejected(format!("cannot merge it: {result}"));
+        }
+        // SAFETY: as above; pipelines created through the old cache do not depend on it.
+        unsafe { self.raw.destroy_pipeline_cache(self.pipeline_cache, None) };
+        self.pipeline_cache = loaded;
+        self.saved_cache
+            .store(state_hash64(data), Ordering::Relaxed);
+        PipelineCacheLoad::Loaded { bytes: data.len() }
+    }
+
+    /// Writes the pipeline cache to `path` for [`Self::load_pipeline_cache`] in the next
+    /// run: after start-up, after a loading screen, at exit. Does nothing when the cache
+    /// has not changed since it was loaded or last saved. The file is written next to
+    /// `path` and renamed over it, so a crash never leaves half a file.
+    pub fn save_pipeline_cache(&self, path: &Path) -> Result<PipelineCacheSave, RhiError> {
+        engine_profiler::zone!("rhi::Device::save_pipeline_cache");
+        // SAFETY: the cache belongs to this device; reading its data needs no exclusive
+        // access.
+        let data = unsafe { self.raw.get_pipeline_cache_data(self.pipeline_cache) }
+            .map_err(RhiError::vk("vkGetPipelineCacheData"))?;
+        let hash = state_hash64(&data);
+        if hash == self.saved_cache.load(Ordering::Relaxed) {
+            return Ok(PipelineCacheSave::Unchanged);
+        }
+        let file = pipeline_cache::wrap(&CacheIdentity::of(&self.adapter), &data);
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(|error| RhiError::Io {
+                what: "creating the pipeline cache's directory",
+                error,
+            })?;
+        }
+        let mut temporary = path.as_os_str().to_owned();
+        temporary.push(".tmp");
+        std::fs::write(&temporary, &file).map_err(|error| RhiError::Io {
+            what: "writing the pipeline cache",
+            error,
+        })?;
+        std::fs::rename(&temporary, path).map_err(|error| RhiError::Io {
+            what: "replacing the pipeline cache",
+            error,
+        })?;
+        self.saved_cache.store(hash, Ordering::Relaxed);
+        Ok(PipelineCacheSave::Written { bytes: file.len() })
+    }
+
+    /// Creates pipelines on `pool`'s threads ([`Self::create_parallel`]) instead of
+    /// threads started for the purpose.
+    pub fn set_job_pool(&mut self, pool: Arc<ThreadPool>) {
+        self.jobs = Some(pool);
+    }
+
+    /// Calls `create(i)` for every `i` in `0..count` in parallel and returns the results
+    /// in index order, or the error of the lowest index that failed. For creating many
+    /// pipelines at once: drivers compile each on the calling thread, so a renderer's
+    /// pipelines take the time of the slowest few instead of their sum.
+    ///
+    /// Runs on the pool given to [`Self::set_job_pool`], or else on up to one thread per
+    /// core started for the call.
+    pub fn create_parallel<T, F>(&self, count: usize, create: F) -> Result<Vec<T>, RhiError>
+    where
+        T: Send + Sync,
+        F: Fn(usize) -> Result<T, RhiError> + Sync,
+    {
+        engine_profiler::zone!("rhi::Device::create_parallel");
+        if count <= 1 {
+            return (0..count).map(create).collect();
+        }
+        let slots: Vec<OnceLock<Result<T, RhiError>>> =
+            (0..count).map(|_| OnceLock::new()).collect();
+        let run = |i: usize| {
+            let _ = slots[i].set(create(i));
+        };
+        match &self.jobs {
+            Some(pool) => pool.parallel_for(count, 1, |_, range| range.for_each(run)),
+            None => {
+                let next = AtomicUsize::new(0);
+                let work = || {
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        if i >= count {
+                            break;
+                        }
+                        run(i);
+                    }
+                };
+                let threads = std::thread::available_parallelism()
+                    .map_or(4, |n| n.get())
+                    .min(count);
+                std::thread::scope(|scope| {
+                    for _ in 1..threads {
+                        // A thread that cannot start leaves its share to the others.
+                        let _ = std::thread::Builder::new()
+                            .name(String::from("engine-pipelines"))
+                            .spawn_scoped(scope, work);
+                    }
+                    work();
+                });
+            }
+        }
+        slots
+            .into_iter()
+            .map(|slot| {
+                slot.into_inner().unwrap_or(Err(RhiError::Vulkan {
+                    call: "parallel creation (a job did not run)",
+                    result: vk::Result::ERROR_UNKNOWN,
+                }))
+            })
+            .collect()
+    }
 }
 
 impl Drop for Device {
@@ -334,6 +527,7 @@ impl Drop for Device {
         // in-flight work.
         unsafe {
             let _ = self.raw.device_wait_idle();
+            self.raw.destroy_pipeline_cache(self.pipeline_cache, None);
             self.raw.destroy_device(None);
         }
     }

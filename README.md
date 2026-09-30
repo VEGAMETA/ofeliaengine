@@ -58,7 +58,7 @@ team".
 | `crates/engine_text` | Text: fonts from bytes, HarfRust shaping, UAX #14 wrapping with fallback fonts and alignment, coverage rasterizer, glyph atlas; bundled Go fonts |
 | `crates/engine_platform` | Windows layer: windows (own thread), raw input (own thread), timers, CPU topology, thread placement, power settings, directory watching |
 | `crates/engine_profiler` | Profiling instrumentation (Tracy zones, plots, frames) |
-| `crates/engine_rhi` | Vulkan 1.3 layer: instance, adapter selection, device, queues, swapchain, frames in flight, memory allocator (TLSF) |
+| `crates/engine_rhi` | Vulkan 1.3 layer: instance, adapter selection, device, queues, swapchain, frames in flight, memory allocator (TLSF), a validated pipeline cache on disk and parallel pipeline creation |
 | `crates/engine_render` | Render graph (culling, transient memory aliasing, automatic barriers, GPU timings), forward PBR with cascaded shadow maps, z-binned point and spot lights and image-based light from an environment, mesh detail levels chosen per instance on the GPU, sorted transparent surfaces, compute passes typed by their push constants and checked against the SPIR-V, bloom and automatic exposure, motion vectors and projection jitter, per-frame upload ring, textures, viewports (split screen, nesting, pixel-perfect); example `cubes` |
 | `crates/engine_upscale` | Temporal antialiasing and upsampling (TAAU, ADR 0043): resolves the forward renderer's jittered frames along their motion vectors, trusting history less under transparent surfaces; example `taau_bench` |
 | `crates/engine_render2d` | 2D renderer: sprites and SDF shapes batched through bindless textures, deterministic layer / y-sort order, clipping; examples `sprites`, `sprite_bench`, `viewports` |

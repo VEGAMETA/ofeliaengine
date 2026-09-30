@@ -17,7 +17,7 @@
 //! tonemap.add_pass(&mut fg, &bindless, resolved, backbuffer, exposure);
 //! ```
 
-use engine_render::compute::{ComputeShader, Dispatch};
+use engine_render::compute::{ComputeShader, ComputeSource, Dispatch};
 use engine_render::forward::MotionOutput;
 use engine_render::graph::{
     Access, FrameGraph, ImportedTexture, ShaderStages, Texture, TextureDesc, TextureState,
@@ -127,12 +127,18 @@ impl Taau {
         bindless: &Bindless,
         frames_in_flight: usize,
     ) -> Result<Self, RhiError> {
-        let shader = |catmull_rom: u32| {
-            ComputeShader::specialized(device, bindless, RESOLVE, c"resolve", &[catmull_rom])
-        };
+        // Bilinear and Catmull-Rom history.
+        let shaders = ComputeSource::create_all(
+            device,
+            bindless,
+            [
+                ComputeSource::new(RESOLVE, c"resolve", &[0])?,
+                ComputeSource::new(RESOLVE, c"resolve", &[1])?,
+            ],
+        )?;
         Ok(Self {
             device: device.raw().clone(),
-            shaders: [shader(0)?, shader(1)?],
+            shaders,
             filter: HistoryFilter::default(),
             history: None,
             retired: Vec::new(),

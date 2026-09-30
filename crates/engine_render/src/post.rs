@@ -409,7 +409,6 @@ impl Tonemap {
                     }),
                 )
             },
-            vk::PipelineCache::null(),
         )?;
         Ok(Self { pipeline })
     }
