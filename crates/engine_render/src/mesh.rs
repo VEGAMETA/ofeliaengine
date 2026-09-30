@@ -271,6 +271,8 @@ pub enum MeshError {
     },
     /// The pool cannot hold more (2^32 vertices or indices).
     PoolFull,
+    /// More detail levels than [`MAX_LODS`] (the full mesh included).
+    TooManyLods,
 }
 
 impl core::fmt::Display for MeshError {
@@ -278,6 +280,7 @@ impl core::fmt::Display for MeshError {
         match self {
             Self::MismatchedLengths => write!(f, "mesh attributes differ in length"),
             Self::NotTriangles => write!(f, "index count is not a multiple of three"),
+            Self::TooManyLods => write!(f, "more than {MAX_LODS} detail levels"),
             Self::IndexOutOfRange {
                 index,
                 vertex_count,
@@ -288,6 +291,32 @@ impl core::fmt::Display for MeshError {
 }
 
 impl std::error::Error for MeshError {}
+
+/// Most detail levels a mesh has, the full mesh included (ADR 0053).
+pub const MAX_LODS: usize = 4;
+
+/// One detail level of a mesh: a range of indices over the mesh's vertices.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MeshLod {
+    /// First index.
+    pub first_index: u32,
+    /// Indices (three per triangle).
+    pub index_count: u32,
+    /// How far this level's surface strays from the full mesh, in object-space units (0 for
+    /// the full mesh). The renderer draws the coarsest level whose error covers at most a
+    /// pixel or so on screen.
+    pub error: f32,
+}
+
+/// A simplified level added with a mesh ([`GeometryPool::add_mesh_with_lods`]): triangles
+/// over the mesh's own vertices, and their error in object-space units.
+#[derive(Debug, Clone, Copy)]
+pub struct LodIndices<'a> {
+    /// Triangles, three indices each, into the mesh's vertices.
+    pub indices: &'a [u32],
+    /// Geometric error against the full mesh (object space).
+    pub error: f32,
+}
 
 /// A mesh in a [`GeometryPool`]. Ids of removed meshes are stale: lookups give `None`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -311,6 +340,11 @@ pub struct MeshInfo {
     pub min: Vec3,
     /// Maximum corner.
     pub max: Vec3,
+    /// Detail levels, finest first; the first is the full mesh (`first_index`,
+    /// `index_count`). Only `lod_count` are used.
+    pub lods: [MeshLod; MAX_LODS],
+    /// Detail levels (at least 1).
+    pub lod_count: u32,
 }
 
 /// Initial sizes of a [`GeometryPool`]; it grows as needed.
@@ -506,6 +540,20 @@ impl GeometryPool {
     /// Adds a mesh; its data reaches the GPU in the next [`Self::begin_frame`], before any
     /// pass of that frame draws it.
     pub fn add_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, MeshError> {
+        self.add_mesh_with_lods(data, &[])
+    }
+
+    /// Adds a mesh with simplified levels (coarser ones last, their errors increasing),
+    /// drawn instead of the full mesh when they differ from it by about a pixel or less on
+    /// screen (ADR 0053). The levels share the mesh's vertices; `engine_assets` makes them.
+    pub fn add_mesh_with_lods(
+        &mut self,
+        data: &MeshData<'_>,
+        lods: &[LodIndices<'_>],
+    ) -> Result<MeshId, MeshError> {
+        if lods.len() >= MAX_LODS {
+            return Err(MeshError::TooManyLods);
+        }
         let vertex_count = data.positions.len();
         if data.normals.len() != vertex_count
             || !(data.tangents.is_empty() || data.tangents.len() == vertex_count)
@@ -513,12 +561,14 @@ impl GeometryPool {
         {
             return Err(MeshError::MismatchedLengths);
         }
-        if !data.indices.len().is_multiple_of(3) {
+        let levels = || core::iter::once(data.indices).chain(lods.iter().map(|l| l.indices));
+        if levels().any(|indices| !indices.len().is_multiple_of(3)) {
             return Err(MeshError::NotTriangles);
         }
         let vertex_count = u32::try_from(vertex_count).map_err(|_| MeshError::PoolFull)?;
-        let index_count = u32::try_from(data.indices.len()).map_err(|_| MeshError::PoolFull)?;
-        if let Some(&index) = data.indices.iter().find(|&&i| i >= vertex_count) {
+        let total_indices: usize = levels().map(<[u32]>::len).sum();
+        let index_count = u32::try_from(total_indices).map_err(|_| MeshError::PoolFull)?;
+        if let Some(&index) = levels().flatten().find(|&&i| i >= vertex_count) {
             return Err(MeshError::IndexOutOfRange {
                 index,
                 vertex_count,
@@ -564,16 +614,31 @@ impl GeometryPool {
                     uv: data.uvs.get(v).copied().unwrap_or([0.0; 2]),
                 }
             }));
-        self.staged_indices.extend_from_slice(data.indices);
+        let mut levels_info = [MeshLod::default(); MAX_LODS];
+        let mut next = upload.first_index;
+        for (k, (indices, error)) in core::iter::once((data.indices, 0.0))
+            .chain(lods.iter().map(|l| (l.indices, l.error.max(0.0))))
+            .enumerate()
+        {
+            self.staged_indices.extend_from_slice(indices);
+            levels_info[k] = MeshLod {
+                first_index: next,
+                index_count: indices.len() as u32,
+                error,
+            };
+            next += indices.len() as u32;
+        }
         self.uploads.push(upload);
 
         let info = MeshInfo {
             first_vertex: upload.first_vertex,
             vertex_count,
             first_index: upload.first_index,
-            index_count,
+            index_count: data.indices.len() as u32,
             min,
             max,
+            lods: levels_info,
+            lod_count: 1 + lods.len() as u32,
         };
         let index = match self.free_slots.pop() {
             Some(index) => index,

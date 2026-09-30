@@ -397,7 +397,11 @@ struct FrameData {
     visibility_capacity: u32,
     hiz_levels: u32,
     depth_size: [u32; 2],
-    _pad: [u32; 2],
+    /// Pixels per object-space unit at distance 1, over the LOD threshold (0: always
+    /// the full meshes).
+    lod_scale: f32,
+    /// Instance slots per command list.
+    slot_count: u32,
     hiz_offsets: [u32; hiz::MAX_LEVELS],
     previous_clip_from_world: [f32; 16],
     previous_clip_from_clip: [f32; 16],
@@ -406,7 +410,8 @@ struct FrameData {
     _pad2: [u32; 3],
     cascades: [CascadeData; MAX_CASCADES],
     cascade_count: u32,
-    batch_count: u32,
+    /// Draw commands per list (one per detail level of each batch).
+    command_count: u32,
     cascade_blend: f32,
     normal_bias: f32,
     fade_last: u32,
@@ -443,14 +448,22 @@ struct InstanceData {
     _pad: [u32; 2],
 }
 
-/// `Batch` in `forward.slang` (48 bytes).
+/// `Batch` in `forward.slang` (64 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct BatchData {
-    first: u32,
-    _pad: [u32; 3],
+    /// The batch's first draw command (its finest level; the others follow).
+    command: u32,
+    /// The first command's first instance slot (each level has `count` more).
+    slot: u32,
+    /// Instances.
+    count: u32,
+    /// Detail levels.
+    lods: u32,
     center: [f32; 4],
     extents: [f32; 4],
+    /// Each level's error in object-space units.
+    errors: [f32; 4],
 }
 
 /// `Push` in `forward.slang` (112 bytes).
@@ -478,7 +491,8 @@ struct Push {
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
 const _: () = assert!(core::mem::size_of::<FrameData>() == 1008);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
-const _: () = assert!(core::mem::size_of::<BatchData>() == 48);
+const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
+const _: () = assert!(crate::mesh::MAX_LODS == 4);
 const _: () = assert!(core::mem::size_of::<Push>() == 112);
 const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 const _: () = assert!(COMMAND_BYTES == 20);
@@ -490,6 +504,9 @@ pub struct ForwardPasses {
     pub instances: u32,
     /// Batches: runs of consecutive draws that share a mesh and a pipeline state.
     pub batches: u32,
+    /// Draw commands per list: one per detail level of each batch's mesh (equal to
+    /// `batches` without LODs), in the order of `commands`.
+    pub draw_commands: u32,
     /// Whether culling ran in two phases (occlusion culling).
     pub occlusion: bool,
     /// The forward pass's indirect draw commands, one `vk::DrawIndexedIndirectCommand` (20
@@ -503,6 +520,13 @@ pub struct ForwardPasses {
     pub motion: Option<MotionOutput>,
 }
 
+/// Which instance-slot region command list `list` uses: the forward phases' lists
+/// (`0..phases`) have their own regions, and each cascade's shadow list (`phases + k`) has
+/// region `k` (the shadow lists are culled apart from the forward ones).
+fn list_offset(list: u32, phases: u32) -> u32 {
+    if list < phases { list } else { list - phases }
+}
+
 /// A batch while the draw list is turned into batches.
 #[derive(Debug, Clone, Copy)]
 struct Run {
@@ -513,6 +537,11 @@ struct Run {
     state: usize,
     /// Position among the batches ordered by state.
     order: u32,
+    /// First draw command (the finest level) and its first instance slot.
+    command: u32,
+    slot: u32,
+    /// Detail levels of the mesh.
+    lods: u32,
 }
 
 /// Per-frame working memory, kept to avoid allocating every frame.
@@ -562,6 +591,8 @@ pub struct ForwardRenderer {
     shadow_settings: ShadowSettings,
     frustum_culling: bool,
     light_culling: bool,
+    /// Screen-space error (pixels) a coarser detail level may have; 0 draws full meshes.
+    lod_threshold: f32,
     depth_prepass: bool,
     scratch: RefCell<Scratch>,
 }
@@ -786,6 +817,7 @@ impl ForwardRenderer {
             shadow_settings,
             frustum_culling: true,
             light_culling: true,
+            lod_threshold: 1.0,
             depth_prepass: false,
             scratch: RefCell::new(Scratch::default()),
         })
@@ -831,6 +863,13 @@ impl ForwardRenderer {
     /// that reaches the view: the reference for tests and comparisons (ADR 0045).
     pub fn set_light_culling(&mut self, enabled: bool) {
         self.light_culling = enabled;
+    }
+
+    /// How far (in pixels on screen) a mesh's coarser detail level may stray from the full
+    /// mesh to be drawn instead (default 1; ADR 0053). 0 always draws the full meshes.
+    /// Orthographic views always draw the full meshes.
+    pub fn set_lod_threshold(&mut self, pixels: f32) {
+        self.lod_threshold = pixels.max(0.0);
     }
 
     /// Declares the culling, shadow and forward passes for `draws` into the view's
@@ -897,6 +936,7 @@ impl ForwardRenderer {
             return Some(ForwardPasses {
                 instances: 0,
                 batches: 0,
+                draw_commands: 0,
                 occlusion: false,
                 commands: None,
                 motion,
@@ -934,6 +974,31 @@ impl ForwardRenderer {
             runs[k as usize].order = order as u32;
         }
         let batch_count = runs.len() as u32;
+        // Draw commands: one per detail level of each batch's mesh, a batch's levels
+        // together and the batches in state order (so each state stays one indirect draw).
+        // Each command has its own range of instance slots, in draw order (without LODs a
+        // draw's slot is its index, as before LODs).
+        counts = [0; STATES];
+        let mut command_count = 0u32;
+        for &(_, k) in keys.iter() {
+            let run = &mut runs[k as usize];
+            run.lods = geometry
+                .mesh(draws[run.first as usize].mesh)
+                .map_or(1, |m| m.lod_count.clamp(1, crate::mesh::MAX_LODS as u32));
+            run.command = command_count;
+            command_count += run.lods;
+            counts[run.state] += run.lods;
+        }
+        let mut slot_count = 0u32;
+        for run in runs.iter_mut() {
+            run.slot = slot_count;
+            slot_count += run.lods * run.len;
+        }
+        let mut next = 0;
+        for (start, count) in starts.iter_mut().zip(counts) {
+            *start = next;
+            next += count;
+        }
         let depth_desc = fg.texture_desc(depth);
         let occlusion = view
             .occlusion
@@ -973,12 +1038,17 @@ impl ForwardRenderer {
         let batch_table = {
             let (out, staged) = ring.alloc::<BatchData>(batch_count as usize)?;
             for run in runs.iter() {
-                let (center, extents) = local_box(geometry, draws[run.first as usize].mesh);
+                let mesh = draws[run.first as usize].mesh;
+                let (center, extents) = local_box(geometry, mesh);
+                let lods = geometry.mesh(mesh).map(|m| m.lods).unwrap_or_default();
                 out[run.order as usize].write(BatchData {
-                    first: run.first,
-                    _pad: [0; 3],
+                    command: run.command,
+                    slot: run.slot,
+                    count: run.len,
+                    lods: run.lods,
                     center: center.extend(0.0).to_array(),
                     extents: extents.extend(0.0).to_array(),
+                    errors: lods.map(|l| l.error),
                 });
             }
             staged.address
@@ -988,34 +1058,30 @@ impl ForwardRenderer {
         // slots follow the previous list's).
         let cascade_count = self.shadow_settings.cascade_count() as u32;
         let commands = {
-            let per_phase = batch_count as usize;
+            let per_list = command_count as usize;
             let (out, staged) = ring.alloc::<vk::DrawIndexedIndirectCommand>(
-                (phases + cascade_count) as usize * per_phase,
+                (phases + cascade_count) as usize * per_list,
             )?;
             for run in runs.iter() {
                 // A removed mesh draws nothing.
                 let mesh = geometry.mesh(draws[run.first as usize].mesh);
-                let command = vk::DrawIndexedIndirectCommand {
-                    index_count: mesh.map_or(0, |m| m.index_count),
-                    instance_count: 0,
-                    first_index: mesh.map_or(0, |m| m.first_index),
-                    vertex_offset: mesh.map_or(0, |m| m.first_vertex as i32),
-                    first_instance: run.first,
-                };
-                let b = run.order as usize;
-                for phase in 0..phases as usize {
-                    out[phase * per_phase + b].write(vk::DrawIndexedIndirectCommand {
-                        first_instance: command.first_instance + phase as u32 * instance_count,
-                        ..command
-                    });
-                }
-                for cascade in 0..cascade_count {
-                    out[(phases + cascade) as usize * per_phase + b].write(
-                        vk::DrawIndexedIndirectCommand {
-                            first_instance: command.first_instance + cascade * instance_count,
+                for lod in 0..run.lods {
+                    let level = mesh.map(|m| m.lods[lod as usize]).unwrap_or_default();
+                    let command = vk::DrawIndexedIndirectCommand {
+                        index_count: level.index_count,
+                        instance_count: 0,
+                        first_index: level.first_index,
+                        vertex_offset: mesh.map_or(0, |m| m.first_vertex as i32),
+                        first_instance: run.slot + lod * run.len,
+                    };
+                    let c = (run.command + lod) as usize;
+                    for list in 0..phases + cascade_count {
+                        out[list as usize * per_list + c].write(vk::DrawIndexedIndirectCommand {
+                            first_instance: command.first_instance
+                                + list_offset(list, phases) * slot_count,
                             ..command
-                        },
-                    );
+                        });
+                    }
                 }
             }
             staged
@@ -1096,7 +1162,18 @@ impl ForwardRenderer {
             visibility_capacity: occlusion.map_or(0, Occlusion::capacity),
             hiz_levels: pyramid_layout.levels,
             depth_size: [depth_desc.width, depth_desc.height],
-            _pad: [0; 2],
+            lod_scale: {
+                // Pixels per unit at distance 1: the projection's vertical scale (the length
+                // of the clip matrix's y row, whatever the camera's rotation) times half
+                // the height. Orthographic views (no perspective divide) draw full meshes.
+                let (y_row, w_row) = (unjittered.row(1).truncate(), unjittered.row(3).truncate());
+                if self.lod_threshold > 0.0 && w_row.length() > 1e-6 {
+                    y_row.length() * depth_desc.height as f32 * 0.5 / self.lod_threshold
+                } else {
+                    0.0
+                }
+            },
+            slot_count,
             hiz_offsets: pyramid_layout.offsets,
             previous_clip_from_world: previous_clip_from_world.to_cols_array(),
             previous_clip_from_clip: (previous_clip_from_world * unjittered.inverse())
@@ -1106,7 +1183,7 @@ impl ForwardRenderer {
             _pad2: [0; 3],
             cascades: cascade_data(&fit, settings),
             cascade_count: fit.count as u32,
-            batch_count,
+            command_count,
             cascade_blend: settings.blend.clamp(0.0, 1.0),
             normal_bias: settings.normal_bias,
             fade_last: u32::from(fit.fade),
@@ -1154,14 +1231,14 @@ impl ForwardRenderer {
             _pad: 0,
         };
 
-        let command_bytes = u64::from(batch_count) * COMMAND_BYTES;
+        let command_bytes = u64::from(command_count) * COMMAND_BYTES;
         let culled = fg.create_buffer(
             "draw commands",
             BufferDesc {
                 size: u64::from(phases) * command_bytes,
             },
         );
-        let visible_bytes = u64::from(instance_count) * 4;
+        let visible_bytes = u64::from(slot_count) * 4;
         let visible = fg.create_buffer(
             "visible instances",
             BufferDesc {
@@ -1467,6 +1544,7 @@ impl ForwardRenderer {
                 ForwardPasses {
                     instances: instance_count,
                     batches: batch_count,
+                    draw_commands: command_count,
                     occlusion: false,
                     commands: Some(culled),
                     motion: None,
@@ -1577,6 +1655,7 @@ impl ForwardRenderer {
                 ForwardPasses {
                     instances: instance_count,
                     batches: batch_count,
+                    draw_commands: command_count,
                     occlusion: true,
                     commands: Some(culled),
                     motion: None,
@@ -1834,6 +1913,9 @@ fn batches(
                     len: 1,
                     state,
                     order: 0,
+                    command: 0,
+                    slot: 0,
+                    lods: 1,
                 });
                 counts[state] += 1;
                 mesh = Some(draw.mesh);

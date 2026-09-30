@@ -19,7 +19,8 @@
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--post` for bloom, automatic exposure and tone mapping every
 //! frame (ADR 0047), `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
-//! for the derived data cache, `test-assets/.ddc` by default)
+//! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
+//! levels made at load (ADR 0053)
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -36,7 +37,7 @@ use engine_render::forward::{
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
-use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId};
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
@@ -202,6 +203,7 @@ fn main() {
     let mut light_count = 0usize;
     let mut light_culling = true;
     let (mut with_sky, mut sky_every_frame) = (false, false);
+    let mut lods = false;
     let mut pipeline_stats = false;
     let mut post = false;
     let mut curve = ToneCurve::Gt;
@@ -216,6 +218,7 @@ fn main() {
             "--lights" => light_count = args.next().unwrap().parse().unwrap(),
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
+            "--lods" => lods = true,
             "--pipeline-stats" => pipeline_stats = true,
             "--post" => post = true,
             "--curve" => {
@@ -365,6 +368,7 @@ fn main() {
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let start = Instant::now();
+    let mut lod_triangles = 0usize;
     let meshes: Vec<Vec<MeshId>> = scene
         .meshes
         .iter()
@@ -372,20 +376,46 @@ fn main() {
             mesh.primitives
                 .iter()
                 .map(|p| {
-                    geometry
-                        .add_mesh(&MeshData {
-                            positions: &p.positions,
-                            normals: &p.normals,
-                            tangents: &p.tangents,
-                            uvs: &p.uvs,
-                            indices: &p.indices,
+                    let levels = if lods {
+                        engine_assets::generate_lods(
+                            &p.positions,
+                            &p.indices,
+                            &engine_assets::LodSettings::default(),
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    lod_triangles += levels.iter().map(|l| l.indices.len() / 3).sum::<usize>();
+                    let levels: Vec<LodIndices<'_>> = levels
+                        .iter()
+                        .map(|l| LodIndices {
+                            indices: &l.indices,
+                            error: l.error,
                         })
+                        .collect();
+                    geometry
+                        .add_mesh_with_lods(
+                            &MeshData {
+                                positions: &p.positions,
+                                normals: &p.normals,
+                                tangents: &p.tangents,
+                                uvs: &p.uvs,
+                                indices: &p.indices,
+                            },
+                            &levels,
+                        )
                         .unwrap()
                 })
                 .collect()
         })
         .collect();
     let meshes_added = start.elapsed();
+    if lods {
+        println!(
+            "Detail levels: {lod_triangles} triangles in coarser levels, made in {:.0} ms",
+            meshes_added.as_secs_f64() * 1e3
+        );
+    }
     let (vertices, _, indices, _) = geometry.usage();
 
     // Textures and materials.

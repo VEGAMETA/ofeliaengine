@@ -205,10 +205,39 @@ let passes = renderer.add_passes(
   debugging something that "disappears". Everything then counts as visible.
 - To count what was drawn:
   - `add_passes` returns `ForwardPasses`, whose `commands` buffer holds one Vulkan draw
-    command per batch (ordered by kind of material, then front to back);
+    command per detail level of each batch (ordered by kind of material, then front to
+    back; `draw_commands` of them per list);
   - after the frame, `instance_count` in each command is the number of visible objects.
   - `crates/engine_render/tests/culling.rs` and `examples/draw_bench.rs` show how to read
     it back.
+
+### Detail levels (LODs)
+
+Far away, a mesh can be drawn with fewer triangles without anyone seeing the difference.
+Give it detail levels and the renderer picks one per object, per frame (ADR 0053):
+
+```rust
+let levels = engine_assets::generate_lods(&mesh.positions, &mesh.indices, &LodSettings::default());
+let lods: Vec<LodIndices> = levels.iter().map(|l| LodIndices { indices: &l.indices, error: l.error }).collect();
+let id = geometry.add_mesh_with_lods(&mesh.as_data(), &lods)?;
+```
+
+- **Made from the mesh itself:** up to 3 levels, each about half the triangles of the
+  previous, sharing the mesh's vertices (little extra memory). Small meshes (under a few
+  hundred triangles) get none: they would not gain.
+- **Chosen by how much it shows:** each level knows how far its surface strays from the
+  full mesh; the renderer draws the coarsest level whose error stays within 1 pixel on
+  screen at the object's distance and size. No per-asset distances to tune; it follows the
+  resolution and field of view.
+- `renderer.set_lod_threshold(2.0)` accepts 2 pixels (faster, softer silhouettes);
+  `0.0` always draws full meshes (for comparisons).
+- **What it saves:** a field of 16k-triangle spheres costs 6–9× less to shade on both
+  reference GPUs (`draw_bench --sphere 64 --lods`). Scenes seen from inside with large
+  meshes gain less (Sponza: about 10–15%).
+- **Your own levels** (artist-made) work the same: pass their indices and their error.
+- **Known limits:** levels switch without a cross-fade (at 1 pixel it rarely shows; TAA
+  hides the rest); orthographic cameras draw full meshes; making levels at load takes
+  time (155 ms for Sponza) until the derived data cache keeps them.
 
 ## 5. Occlusion culling: skipping what is hidden
 
