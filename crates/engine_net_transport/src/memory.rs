@@ -24,6 +24,9 @@ use std::time::{Duration, Instant};
 
 use crate::socket::DatagramSocket;
 
+/// Capacity of a pooled datagram buffer.
+const DATAGRAM_CAPACITY: usize = 2048;
+
 /// What a link does to datagrams.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LinkConditions {
@@ -223,7 +226,11 @@ impl MemoryNetwork {
 
     /// A socket at `addr` with a public address.
     pub fn bind(&self, addr: SocketAddr) -> MemorySocket {
-        self.lock().inboxes.insert(addr, Vec::with_capacity(4096));
+        let mut inner = self.lock();
+        inner.inboxes.insert(addr, Vec::with_capacity(4096));
+        // Datagram buffers for the wire, so steady traffic does not allocate.
+        inner.pool.extend((0..512).map(|_| Vec::with_capacity(DATAGRAM_CAPACITY)));
+        drop(inner);
         MemorySocket {
             net: self.clone(),
             addr,
@@ -277,7 +284,7 @@ impl MemoryNetwork {
             if inner.random() < conditions.reorder {
                 delay += conditions.latency.max(Duration::from_millis(1));
             }
-            let mut buf = inner.pool.pop().unwrap_or_default();
+            let mut buf = inner.pool.pop().unwrap_or_else(|| Vec::with_capacity(DATAGRAM_CAPACITY));
             buf.clear();
             buf.extend_from_slice(data);
             inner.order += 1;
