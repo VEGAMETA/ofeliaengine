@@ -153,6 +153,8 @@ fn steady_state_physics_does_not_allocate() {
         }
     });
     assert_eq!(rust, 0, "saving allocates on the Rust side");
+    // Warm-up (with Tracy compiled in, a zone's first use registers it).
+    w.restore_state(&snapshot).unwrap();
     let (rust, jolt_restore) = allocations(|| {
         for _ in 0..10 {
             w.restore_state(&snapshot).unwrap();
