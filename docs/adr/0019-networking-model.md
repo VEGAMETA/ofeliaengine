@@ -103,6 +103,26 @@ the ECS are built now, so what they must provide is decided now.
     libsodium).
 - **Encryption:** Windows CNG (AES-GCM, X25519) against a library.
 
+### Addendum (team, 2026-10-01): no loopback in singleplayer, the camera per frame
+
+- **Singleplayer has no client/server split.** One ECS world, one simulation, no network
+  layer: no loopback server, no snapshot serialization, no interpolation delay for remote
+  entities (there are none). Source runs a listen server even offline; that costs two
+  copies of entity state, delta encoding inside one process, prediction on top of the
+  simulation, and the interpolation delay (`cl_interp`, 100 ms in early Source), and buys
+  nothing a single process needs. Multiplayer reuses the same systems: the server runs
+  them authoritatively, the client predicts with them.
+- **What the client/server shape is really good for is kept:** the fixed simulation tick
+  separate from presentation (rendering interpolates between ticks at the display's
+  rate), simulation and rendering on different cores (frame N rendered while N+1
+  simulates), snapshots for saves, replays and rollback.
+- **The player's camera is updated every rendered frame from the latest input,** not once
+  per tick: view rotation and aim (and the locally controlled character's presentation)
+  are applied after input sampling, right before extraction. The simulation still
+  consumes the input on its tick, with a sub-tick timestamp (as above, like CS2's
+  sub-tick input). Otherwise interpolating between ticks would add up to one tick of
+  latency: 15.6 ms at 64 Hz.
+
 ## Consequences
 
 - `engine_ecs` is built against the requirements above from its first version.
