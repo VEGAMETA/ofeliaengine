@@ -1,5 +1,8 @@
 //! Upscaling and temporal antialiasing (CLAUDE.md §6, ADR 0043).
 //!
+//! [`Upscaler`] is the interface every upscaler implements (ADR 0063): [`Taau`] here,
+//! FSR 3.1 in `engine_fsr`, DLSS in `engine_dlss`.
+//!
 //! [`Taau`] is the engine's own temporal antialiasing and upsampling: it accumulates the
 //! forward renderer's jittered frames, following their motion vectors, into an image at
 //! output resolution (the same as the render resolution for plain TAA, larger for
@@ -16,6 +19,12 @@
 //!     color: hdr, depth, motion: passes.motion.unwrap() }, output_size, frame.number)?;
 //! tonemap.add_pass(&mut fg, &bindless, resolved, backbuffer, exposure);
 //! ```
+
+mod upscaler;
+
+pub use upscaler::{
+    Quality, UpscaleCamera, UpscaleContext, UpscaleError, UpscaleInput, Upscaler, UpscalerKind,
+};
 
 use engine_render::compute::{ComputeShader, ComputeSource, Dispatch};
 use engine_render::forward::MotionOutput;

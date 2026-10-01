@@ -70,6 +70,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0060](0060-fsr-3-1-upscaling.md) | FSR 3.1 upscaling beside the engine's TAAU, built from source with our own shader generator; a texture LOD bias for both; frame generation later | Accepted |
 | [0061](0061-logging-crash-reports-gpu-faults.md) | Failure visibility: a lock-free log behind the `log` facade, out-of-process crash reports, GPU breadcrumbs and `VK_EXT_device_fault` | Accepted |
 | [0062](0062-golden-images-and-perf-gate.md) | Golden images compared through FLIP, and a per-pass GPU time gate | Accepted |
+| [0063](0063-dlss-through-streamline.md) | DLSS Super Resolution through Streamline with manual hooking, from user-supplied DLLs; one `Upscaler` interface over TAAU, FSR and DLSS | Accepted |
 
 ## Template
 

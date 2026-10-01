@@ -582,6 +582,88 @@ unsafe fn transition(
     }
 }
 
+impl From<engine_upscale::Quality> for QualityMode {
+    fn from(quality: engine_upscale::Quality) -> Self {
+        use engine_upscale::Quality;
+        match quality {
+            Quality::Native => Self::NativeAa,
+            Quality::Quality => Self::Quality,
+            Quality::Balanced => Self::Balanced,
+            Quality::Performance => Self::Performance,
+            Quality::UltraPerformance => Self::UltraPerformance,
+        }
+    }
+}
+
+impl From<FsrError> for engine_upscale::UpscaleError {
+    fn from(e: FsrError) -> Self {
+        match e {
+            FsrError::Ffx { call, code } => Self::Library {
+                upscaler: engine_upscale::UpscalerKind::Fsr,
+                call,
+                code,
+            },
+        }
+    }
+}
+
+/// FSR behind the engine's upscaler interface (ADR 0063). The texture LOD bias is the
+/// standard log2(render / output), which measured better than AMD's extra level (ADR 0060).
+impl engine_upscale::Upscaler for Fsr {
+    fn kind(&self) -> engine_upscale::UpscalerKind {
+        engine_upscale::UpscalerKind::Fsr
+    }
+
+    fn render_size(&self, quality: engine_upscale::Quality, output: (u32, u32)) -> (u32, u32) {
+        QualityMode::from(quality).render_size(output)
+    }
+
+    fn jitter_phases(&self, render: (u32, u32), output: (u32, u32)) -> u32 {
+        Self::jitter_phases(render, output)
+    }
+
+    fn reset(&mut self) {
+        Self::reset(self);
+    }
+
+    fn add_pass<'g>(
+        &'g mut self,
+        fg: &mut FrameGraph<'g>,
+        _ctx: engine_upscale::UpscaleContext<'_, 'g>,
+        input: engine_upscale::UpscaleInput,
+        output_size: (u32, u32),
+        frame_number: u64,
+    ) -> Result<Texture, engine_upscale::UpscaleError> {
+        Ok(Self::add_pass(
+            self,
+            fg,
+            FsrInput {
+                color: input.color,
+                depth: input.depth,
+                motion: input.motion,
+                camera: FsrCamera {
+                    near: input.camera.near,
+                    far: input.camera.far,
+                    fov_y: input.camera.fov_y,
+                    meters_per_unit: 1.0,
+                },
+                frame_time_ms: input.frame_time_ms,
+            },
+            output_size,
+            frame_number,
+        )?)
+    }
+
+    unsafe fn destroy(
+        &mut self,
+        _allocator: &mut engine_rhi::Allocator,
+        _bindless: &engine_rhi::Bindless,
+    ) {
+        // SAFETY: guaranteed by the caller.
+        unsafe { Self::destroy(self) };
+    }
+}
+
 /// The SDK's own numbers, to check this crate's against (tests).
 #[doc(hidden)]
 pub mod sdk {

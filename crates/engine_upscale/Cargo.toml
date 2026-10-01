@@ -1,6 +1,6 @@
 [package]
 name = "engine_upscale"
-description = "Temporal antialiasing and upsampling (the engine's own TAAU); later FSR and the loaders of user-supplied upscalers."
+description = "Temporal antialiasing and upsampling (the engine's own TAAU) and the Upscaler interface over TAAU, FSR and DLSS (ADR 0063)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

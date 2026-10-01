@@ -385,6 +385,11 @@ impl Adapter {
         &self.name
     }
 
+    /// The Vulkan physical device handle, for libraries that query it themselves.
+    pub fn physical(&self) -> vk::PhysicalDevice {
+        self.physical
+    }
+
     pub(crate) fn info_name(&self) -> &str {
         &self.name
     }
