@@ -482,8 +482,10 @@ fn explain(a: &[u8], b: &[u8], width: usize) -> String {
         .take(8)
         .map(|(i, (a, b))| format!("({}, {}) {a:?} vs {b:?}", i % width, i / width))
         .collect();
+    let hint = "on the Radeon iGPU under CPU load, run the gpu_selfcheck test first \
+                (docs/research/radeon-igpu-lds-faults.md)";
     format!(
-        "{} pixels differ, first: {}; on the Radeon iGPU under CPU load, run          `cargo test -p engine_render --test gpu_selfcheck -- --ignored` first          (docs/research/radeon-igpu-lds-faults.md)",
+        "{} pixels differ, first: {}; {hint}",
         differing(a, b),
         pixels.join(", ")
     )
