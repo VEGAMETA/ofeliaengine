@@ -196,6 +196,48 @@ let passes = renderer.add_passes(
   - `add_passes` returns `None` when the ring is full. It then declares nothing, and the
     frame has no 3D content.
 
+### The GPU scene: instances that stay on the GPU (ADR 0064)
+
+A draw list is rebuilt and uploaded every frame: 0.87 ms of CPU and 6 MiB per frame for
+100,000 objects on the RTX 4060 Ti, even when nothing moves. A `GpuScene` keeps the
+instances in GPU buffers across frames and uploads only what changed:
+
+```rust
+use engine_render::gpu_scene::{GpuScene, SceneInstance};
+
+let mut scene = GpuScene::new(&device, &bindless, 4096, frames_in_flight)?;
+let rock = scene.insert(SceneInstance { mesh: rock_mesh, material, world_from_object });
+// Later, whenever something changes:
+scene.set_transform(rock, &new_transform); // a bit-identical transform costs nothing
+scene.teleport(rock, &spawn_point);        // no motion blur / TAA smear this frame
+scene.remove(rock);
+
+// Every frame, once, before the views that draw it:
+let frame = scene
+    .add_passes(&mut fg, &device, &mut allocator, &mut ring, &bindless, &geo, &mats, frame_number)?
+    .expect("upload ring full");
+renderer.add_scene_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &frame, &view);
+```
+
+- **Cost follows changes.** 100,000 static objects: 2 µs of CPU and under 1 KiB uploaded
+  per frame; 1 % moving: 46 µs and 95 KiB (RTX). On the Radeon iGPU it also saves the
+  0.5 ms copy of every instance that motion vectors needed with a draw list.
+- **Order does not matter.** Instances are batched by mesh and pipeline state whatever
+  order you insert them in, and occlusion culling and motion vectors key off each
+  instance's slot, not a position in a list.
+- **Everything moving every frame** (particles, a stress test) is cheaper as a draw list:
+  the scene does bookkeeping per moved instance (100,000 moving: 1.7 ms against 0.9 ms of
+  CPU). A view draws either a list or a scene.
+- **Motion vectors** come from the scene: give the view a `Temporal` for the camera and
+  jitter as usual. New and teleported instances have no motion in their first frame.
+- **Occlusion culling** works as with lists; size the `Occlusion` to at least
+  `scene.slot_count()` so every instance is remembered.
+- Removed slots are reused by the next insert; editing a material's kind (opaque, masked,
+  blended, double-sided) or removing a material re-resolves all instances once.
+- With the ECS, `engine_runtime::RenderExtract` keeps a scene in sync with every entity
+  that has a `MeshRenderer` (see the ECS guide, section 10).
+- Compare both paths: `cargo run -p engine_render --release --example gpu_scene_bench`.
+
 ## 4. Culling
 
 - Culling is on by default:

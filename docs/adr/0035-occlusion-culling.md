@@ -5,6 +5,8 @@
 - Builds on: [ADR 0034](0034-gpu-culling-and-indirect-draws.md) (GPU frustum culling and
   indirect instanced draws)
 - Research: [docs/research/gpu-driven-rendering.md](../research/gpu-driven-rendering.md)
+- Extended by [ADR 0064](0064-gpu-scene-extraction-runtime.md): on the GPU scene path
+  instances are known by stable slots, so the order caveat below does not apply there.
 
 ## Context
 
