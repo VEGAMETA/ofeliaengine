@@ -676,3 +676,41 @@ draws.push(DrawItem { mesh: window_pane, material: glass, world_from_object });
   - Measure with `draw_bench -- --blended`.
 - **Not yet:** refraction and distortion, colored shadows through glass,
   order-independent transparency.
+
+## 13. Ambient occlusion
+
+Ambient occlusion darkens the sky light where the surroundings hide the sky: creases,
+corners, the undersides of arches, folds of cloth (GTAO, ADR 0058). Turn it on per
+renderer:
+
+```rust
+use engine_render::ao::{AoQuality, AoSettings};
+
+renderer.set_ambient_occlusion(&device, &bindless, Some(AoSettings {
+    quality: AoQuality::High, // 3 directions × 3 samples per side
+    radius: 0.5,              // how far occluders count, in world units
+    ..AoSettings::default()
+}))?;
+```
+
+- **What it darkens:** the ambient light and the sky's diffuse and reflected light, never
+  the sun or point and spot lights (their shadows are their occlusion).
+  - Bright surfaces lose less than dark ones (light bounces inside the crease).
+  - It multiplies with the material's own occlusion texture.
+- **Radius is in world units:** 0.5 is half a metre in a metre-scaled scene. Larger radii
+  darken wider areas at the same cost.
+- **Quality and cost** at 1920 × 1080 on an RTX 4060 Ti: `Low` 0.23 ms, `Medium` 0.31,
+  `High` 0.46 (default), `Ultra` 1.06. Under TAAU it runs at the render resolution, so
+  upscaling makes it cheaper too.
+  - `Low` and `Medium` are noisy per frame: use them with TAA/TAAU, which averages the noise
+    (the noise changes per frame only when TAA is on, otherwise it would flicker).
+  - `AoQuality::Custom { slices, steps }` for references and comparisons.
+- **It turns the depth prepass on** (its depth must be ready before shading): about
+  0.06 ms on Sponza.
+- **Perspective cameras only:** orthographic views draw without it.
+- **Look:** `power` (2.2) darkens or lightens the whole effect, `falloff` softens its outer
+  edge, `denoise_passes` (0–3, 1) blurs it along surfaces without crossing depth edges.
+- **Limits of screen space:** nothing off screen or hidden behind the nearest surface
+  occludes, and thin objects (poles, railings) occlude everything behind them within the
+  radius.
+- Measure with `scene_bench -- --ao low|medium|high|ultra|<slices>x<steps>`.

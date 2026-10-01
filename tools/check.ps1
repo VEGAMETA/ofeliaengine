@@ -4,7 +4,10 @@
 #
 #   powershell -File tools\check.ps1            # fmt, clippy, tests, tests with Tracy, docs
 #   powershell -File tools\check.ps1 -Gpu       # + GPU tests on the discrete GPU and the Radeon
-#                                               #   iGPU, and Slang tests (what gpu.yml tests)
+#                                               #   iGPU (golden images included), and Slang
+#                                               #   tests (what gpu.yml tests)
+#   powershell -File tools\check.ps1 -Perf      # + GPU time per pass against the baselines
+#                                               #   (tests/golden/perf; advisory, ADR 0062)
 #   powershell -File tools\check.ps1 -Deny      # + cargo-deny (dependency or license changes)
 #   powershell -File tools\check.ps1 -Loom      # + loom model checks (lock-free code changes)
 #   powershell -File tools\check.ps1 -Profiles  # + builds of all four profiles (slow: fat LTO)
@@ -19,10 +22,12 @@ param(
     [switch]$Deny,
     [switch]$Loom,
     [switch]$Profiles,
+    [switch]$Perf,
     [switch]$Full
 )
 if ($Full) {
     $Gpu = $true
+    $Perf = $true
     $Deny = $true
     $Loom = $true
     $Profiles = $true
@@ -46,9 +51,14 @@ $steps = [ordered]@{
 }
 if ($Gpu) {
     # `radeon:` runs the command with ENGINE_ADAPTER=radeon (the AMD iGPU of ref-1).
-    $gpuTests = 'test --locked -p engine_rhi -p engine_render -p engine_render2d -p engine_text -p engine_upscale -p engine_fsr -- --test-threads=1'
+    $gpuTests = 'test --locked -p engine_rhi -p engine_render -p engine_render2d -p engine_text -p engine_upscale -p engine_fsr -p engine_golden -- --test-threads=1'
     $steps['gpu'] = @($gpuTests, "radeon:$gpuTests")
     $steps['slang'] = @('test --locked -p engine_shader -- --test-threads=1')
+}
+if ($Perf) {
+    # Release, overlays off; regressions are reported (below), not fatal (ADR 0062).
+    $perfGate = 'run --release --locked -p engine_golden --bin perf_gate'
+    $steps['perf'] = @($perfGate, "radeon:$perfGate")
 }
 if ($Deny) { $steps['deny'] = @('deny --locked check') }
 # `--cfg loom` in its own target dir, or it would invalidate the normal build.
@@ -64,7 +74,7 @@ if ($Profiles) {
 
 $unknown = @($Only | Where-Object { -not $steps.Contains($_) })
 if ($unknown.Count) {
-    Write-Output "unknown step(s): $($unknown -join ', '); steps: $($steps.Keys -join ', ') (gpu and slang need -Gpu, deny -Deny, loom -Loom, profiles -Profiles)"
+    Write-Output "unknown step(s): $($unknown -join ', '); steps: $($steps.Keys -join ', ') (gpu and slang need -Gpu, perf -Perf, deny -Deny, loom -Loom, profiles -Profiles)"
     exit 2
 }
 
@@ -104,7 +114,8 @@ if ($adr.Count) {
 }
 
 $stepVars = @(
-    'ENGINE_ADAPTER', 'ENGINE_REQUIRE_GPU', 'ENGINE_REQUIRE_SLANG',
+    'ENGINE_ADAPTER', 'ENGINE_REQUIRE_GPU', 'ENGINE_REQUIRE_SLANG', 'ENGINE_REQUIRE_GOLDEN',
+    'VK_LOADER_LAYERS_DISABLE',
     'TRACY_SYMBOL_OFFLINE_RESOLVE', 'RUSTFLAGS', 'CARGO_TARGET_DIR'
 )
 if (-not $failed) { $failed = @() }
@@ -123,7 +134,15 @@ foreach ($name in $steps.Keys) {
             $env:ENGINE_ADAPTER = 'radeon'
             $command = $command.Substring(7)
         }
-        if ($name -eq 'gpu') { $env:ENGINE_REQUIRE_GPU = '1' }
+        if ($name -eq 'gpu') {
+            $env:ENGINE_REQUIRE_GPU = '1'
+            # ref-1 has the test scenes and a golden image per vendor: none may be missing.
+            $env:ENGINE_REQUIRE_GOLDEN = '1'
+        }
+        if ($name -eq 'perf') {
+            $env:ENGINE_REQUIRE_GPU = '1'
+            $env:VK_LOADER_LAYERS_DISABLE = '~implicit~'
+        }
         if ($name -eq 'slang') { $env:ENGINE_REQUIRE_SLANG = '1' }
         # No profiler connects to the tests: skip the Tracy client's symbol loading at start
         # (DbgHelp over every module, 4-15 s per test process; the step went 279 s -> 57 s).
@@ -141,6 +160,10 @@ foreach ($name in $steps.Keys) {
     $time = '{0,6:N1} s' -f $watch.Elapsed.TotalSeconds
     if ($ok) {
         Write-Output "ok      $time  $name"
+        if ($name -eq 'perf') {
+            Select-String -Path $log -Pattern '\*\*slower\*\*' | Select-Object -First 15 |
+                ForEach-Object { Write-Output "        $($_.Line)" }
+        }
     } else {
         Write-Output "FAILED  $time  $name  ($log)"
         Get-Content $log -Tail 30 | Select-String -Pattern '^(error|warning)|panicked|FAILED|-->' |

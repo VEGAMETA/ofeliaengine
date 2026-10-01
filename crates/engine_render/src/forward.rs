@@ -41,6 +41,7 @@
 //! [`GeometryPool`]: crate::mesh::GeometryPool
 //! [`MaterialTable`]: crate::material::MaterialTable
 
+use crate::ao::{AmbientOcclusion, AoSettings};
 use crate::compute::{ComputePass, ComputeShader, ComputeSource, Dispatch};
 use crate::cull::Frustum;
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
@@ -57,7 +58,7 @@ use crate::mesh::{GeometryFrame, MeshId};
 use crate::shadow::{self, CascadeFit, MAX_CASCADES};
 use crate::upload::UploadRing;
 use core::cell::{Cell, RefCell};
-use engine_core::math::{Mat4, Vec3};
+use engine_core::math::{Mat4, Vec3, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     Allocation, Allocator, Bindless, Blend, DepthBias, Device, GraphicsPipelineDesc,
@@ -72,6 +73,8 @@ const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked.spv");
 const DEPTH_VERTEX: &[u8] = include_bytes!("../shaders/forward.depthVertex.spv");
 const FRAGMENT_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotion.spv");
+const FRAGMENT_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainAo.spv");
+const FRAGMENT_MOTION_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotionAo.spv");
 const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
@@ -146,6 +149,89 @@ pub struct Camera {
     pub clip_from_world: Mat4,
     /// World-space position (for specular).
     pub position: Vec3,
+}
+
+/// A perspective camera's view and projection, recovered from its `clip_from_world`, for
+/// screen-space effects (ADR 0058). View space is right-handed, looking down −z; the
+/// projection maps it as `clip = (p00·x + p20·z, p11·y + p21·z, p22·z + p32, −z)` (`p20`
+/// and `p21` hold an off-center projection or the TAA jitter).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewSpace {
+    /// View from world: the camera's rotation and position.
+    pub view_from_world: Mat4,
+    /// Horizontal scale.
+    pub p00: f32,
+    /// Vertical scale (negative for Vulkan's downward y).
+    pub p11: f32,
+    /// Horizontal offset.
+    pub p20: f32,
+    /// Vertical offset.
+    pub p21: f32,
+    /// Depth terms: `depth = p22 + p32 / z`.
+    pub p22: f32,
+    /// See `p22`.
+    pub p32: f32,
+}
+
+impl ViewSpace {
+    /// Distance along the view direction of a depth-buffer value.
+    pub fn linear_depth(&self, depth: f32) -> f32 {
+        self.p32 / (depth + self.p22)
+    }
+}
+
+impl Camera {
+    /// The view and projection of a perspective camera whose view is rigid (rotation and
+    /// translation), or `None` (orthographic, scaled or skewed).
+    pub fn view_space(&self) -> Option<ViewSpace> {
+        let m = self.clip_from_world;
+        let (r0, r1, r2, r3) = (m.row(0), m.row(1), m.row(2), m.row(3));
+        // clip.w = −z: the fourth row is minus the view's third row, a unit vector for a
+        // rigid view (zero for an orthographic projection).
+        let back = -r3.truncate();
+        let tz = -r3.w;
+        if (back.length() - 1.0).abs() > 1e-3 {
+            return None;
+        }
+        let p22 = r2.truncate().dot(back);
+        let p32 = r2.w - p22 * tz;
+        let p20 = r0.truncate().dot(back);
+        let right = r0.truncate() - p20 * back;
+        let p00 = right.length();
+        let p21 = r1.truncate().dot(back);
+        let up = r1.truncate() - p21 * back;
+        let mut p11 = up.length();
+        if p00 < 1e-6 || p11 < 1e-6 {
+            return None;
+        }
+        let right = right / p00;
+        let mut up = up / p11;
+        // Right-handed: right × up = back; Vulkan's projection flips y.
+        if right.cross(up).dot(back) < 0.0 {
+            up = -up;
+            p11 = -p11;
+        }
+        if right.dot(up).abs() > 1e-3 {
+            return None;
+        }
+        let tx = (r0.w - p20 * tz) / p00;
+        let ty = (r1.w - p21 * tz) / p11;
+        let view_from_world = Mat4::from_cols(
+            Vec4::new(right.x, up.x, back.x, 0.0),
+            Vec4::new(right.y, up.y, back.y, 0.0),
+            Vec4::new(right.z, up.z, back.z, 0.0),
+            Vec4::new(tx, ty, tz, 1.0),
+        );
+        Some(ViewSpace {
+            view_from_world,
+            p00,
+            p11,
+            p20,
+            p21,
+            p22,
+            p32,
+        })
+    }
 }
 
 /// What one [`ForwardRenderer::add_passes`] call renders, and where.
@@ -517,8 +603,12 @@ struct Push {
     instance_count: u32,
     texture: u32,
     phase: u32,
-    _pad: u32,
+    /// Bindless index of the view's ambient occlusion, or [`NO_AO`].
+    ao: u32,
 }
+
+/// `NO_TEXTURE` in `forward.slang`: no ambient occlusion.
+const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
 const _: () = assert!(core::mem::size_of::<FrameData>() == 1008);
@@ -550,6 +640,9 @@ pub struct ForwardPasses {
     pub commands: Option<Buffer>,
     /// Motion vectors and jitter, with a [`Temporal`] state.
     pub motion: Option<MotionOutput>,
+    /// The view's ambient occlusion ([`crate::ao::AO_FORMAT`], sampled by the forward
+    /// pass), when it is on: for debugging views and effects of your own.
+    pub ao: Option<Texture>,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -606,6 +699,108 @@ struct Shading {
     blended: [Pipeline; 2],
 }
 
+/// Ambient occlusion (ADR 0058): its passes, and the shading that reads it after the depth
+/// prepass (`fragmentMainAo`, `fragmentMainMotionAo`), per shading variant: without and
+/// with motion vectors. The other entry points have no code for it (see `shade` in
+/// `forward.slang`).
+#[derive(Debug)]
+struct AoPasses {
+    passes: AmbientOcclusion,
+    shading: [[Pipeline; 2]; 4],
+}
+
+/// The specialization constants of each shading variant: `LOCAL_LIGHTS`, `ENVIRONMENT`
+/// (`forward.slang`).
+const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
+
+/// A shading pipeline of the forward pass.
+fn shading_desc<'a>(
+    vertex: &'a [u32],
+    fragment: &'a [u32],
+    entry: &'a core::ffi::CStr,
+    color_formats: &'a [vk::Format],
+    depth_format: vk::Format,
+    specialization: &'a [u32],
+) -> GraphicsPipelineDesc<'a> {
+    GraphicsPipelineDesc {
+        specialization,
+        color_formats,
+        depth_format,
+        // Cull mode and front face come with each batch's pipeline state.
+        dynamic_culling: true,
+        ..GraphicsPipelineDesc::new(
+            ShaderStageDesc {
+                spirv: vertex,
+                entry: c"vertexMain",
+            },
+            Some(ShaderStageDesc {
+                spirv: fragment,
+                entry,
+            }),
+        )
+    }
+}
+
+impl AoPasses {
+    fn new(
+        device: &Device,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+    ) -> Result<Self, RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+        let fragment = spirv_words(FRAGMENT_AO).ok_or_else(invalid)?;
+        let fragment_motion = spirv_words(FRAGMENT_MOTION_AO).ok_or_else(invalid)?;
+        let formats = [color_format];
+        let motion_formats = [color_format, MOTION_FORMAT];
+        // After the depth prepass: tested for equality, not written.
+        let shade = |fragment, entry, formats, variant: usize| GraphicsPipelineDesc {
+            depth_write: false,
+            depth_compare: vk::CompareOp::EQUAL,
+            ..shading_desc(
+                &vertex,
+                fragment,
+                entry,
+                formats,
+                depth_format,
+                &VARIANTS[variant],
+            )
+        };
+        let descs: Vec<PipelineDesc<'_>> = (0..VARIANTS.len())
+            .flat_map(|v| {
+                [
+                    shade(&fragment, c"fragmentMainAo", &formats[..], v),
+                    shade(
+                        &fragment_motion,
+                        c"fragmentMainMotionAo",
+                        &motion_formats[..],
+                        v,
+                    ),
+                ]
+            })
+            .map(PipelineDesc::Graphics)
+            .collect();
+        let mut pipelines =
+            Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
+                call: "ambient occlusion pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        let mut pair = || -> Result<[Pipeline; 2], RhiError> { Ok([next()?, next()?]) };
+        let shading = [pair()?, pair()?, pair()?, pair()?];
+        Ok(Self {
+            passes: AmbientOcclusion::new(device, bindless)?,
+            shading,
+        })
+    }
+}
+
 /// The forward PBR pipelines.
 #[derive(Debug)]
 pub struct ForwardRenderer {
@@ -631,6 +826,13 @@ pub struct ForwardRenderer {
     /// Screen-space error (pixels) a coarser detail level may have; 0 draws full meshes.
     lod_threshold: f32,
     depth_prepass: bool,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+    /// Ambient occlusion's passes and shading pipelines, made when it is first turned on.
+    ao: Option<AoPasses>,
+    ao_settings: Option<AoSettings>,
+    /// Frames drawn with ambient occlusion: its noise index under TAA.
+    ao_frame: Cell<u32>,
     scratch: RefCell<Scratch>,
 }
 
@@ -671,36 +873,6 @@ impl ForwardRenderer {
         let reactive_formats = [color_format, REACTIVE_FORMAT];
         let formats = [color_format];
         let motion_formats = [color_format, MOTION_FORMAT];
-        // The specialization constants of each shading variant.
-        const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
-        // Every graphics pipeline is described first and created in parallel below
-        // (ADR 0055); they are taken back in the order they were described.
-        fn shading_desc<'a>(
-            vertex: &'a [u32],
-            fragment: &'a [u32],
-            entry: &'a core::ffi::CStr,
-            color_formats: &'a [vk::Format],
-            depth_format: vk::Format,
-            specialization: &'a [u32],
-        ) -> GraphicsPipelineDesc<'a> {
-            GraphicsPipelineDesc {
-                specialization,
-                color_formats,
-                depth_format,
-                // Cull mode and front face come with each batch's pipeline state.
-                dynamic_culling: true,
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: vertex,
-                        entry: c"vertexMain",
-                    },
-                    Some(ShaderStageDesc {
-                        spirv: fragment,
-                        entry,
-                    }),
-                )
-            }
-        }
         let main = |fragment, entry, formats, equal: bool, variant: usize| GraphicsPipelineDesc {
             // After the depth prepass: tested for equality, not written.
             depth_write: !equal,
@@ -870,6 +1042,11 @@ impl ForwardRenderer {
             light_culling: true,
             lod_threshold: 1.0,
             depth_prepass: false,
+            color_format,
+            depth_format,
+            ao: None,
+            ao_settings: None,
+            ao_frame: Cell::new(0),
             scratch: RefCell::new(Scratch::default()),
         })
     }
@@ -900,6 +1077,36 @@ impl ForwardRenderer {
     /// Whether the depth prepass is on.
     pub fn depth_prepass(&self) -> bool {
         self.depth_prepass
+    }
+
+    /// Turns ambient occlusion (GTAO, ADR 0058) on with `settings`, or off (`None`, the
+    /// default). It darkens the ambient and environment light where the surroundings hide
+    /// the sky, not the sun or local lights. It needs the depth before shading, so the
+    /// depth prepass runs whenever it is on. Perspective views only: orthographic ones
+    /// draw without it. The first time it is turned on its passes and 8 shading pipelines
+    /// are made (in parallel, through the pipeline cache: ADR 0055), so a renderer that
+    /// never uses it pays nothing, not even registers in its shading.
+    pub fn set_ambient_occlusion(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        settings: Option<AoSettings>,
+    ) -> Result<(), RhiError> {
+        if settings.is_some() && self.ao.is_none() {
+            self.ao = Some(AoPasses::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+            )?);
+        }
+        self.ao_settings = settings;
+        Ok(())
+    }
+
+    /// The ambient occlusion settings, when it is on.
+    pub fn ambient_occlusion(&self) -> Option<AoSettings> {
+        self.ao_settings
     }
 
     /// The driver's statistics of the opaque forward pipeline of each shading variant (see
@@ -992,6 +1199,7 @@ impl ForwardRenderer {
                 occlusion: false,
                 commands: None,
                 motion,
+                ao: None,
             });
         }
         let instance_count = draws.len() as u32;
@@ -1302,7 +1510,7 @@ impl ForwardRenderer {
             instance_count,
             texture: 0,
             phase: PHASE_ALL,
-            _pad: 0,
+            ao: NO_AO,
         };
 
         let command_bytes = u64::from(command_count) * COMMAND_BYTES;
@@ -1548,34 +1756,58 @@ impl ForwardRenderer {
             }
             _ => None,
         };
-        let targets = Targets {
+        let mut targets = Targets {
             color,
             color_load: load,
             velocity,
             previous,
             light_tiles,
             environment,
+            ao: None,
         };
 
-        let prepass = self.depth_prepass;
+        // Ambient occlusion needs the whole depth before shading: the prepass draws it.
+        let ao = self
+            .ao_settings
+            .zip(view.camera.view_space())
+            .zip(self.ao.as_ref());
+        let ao_frame = if temporal.is_some() {
+            let frame = self.ao_frame.get().wrapping_add(1);
+            self.ao_frame.set(frame);
+            frame
+        } else {
+            // Without a temporal resolve changing noise would flicker.
+            0
+        };
+        let prepass = self.depth_prepass || ao.is_some();
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
-        let shading = &self.shading
-            [usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1];
+        let variant = usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1;
+        let shading = &self.shading[variant];
+        // With ambient occlusion, the shading that reads it (the prepass is on then).
+        let ao_shading = ao.map(|(_, passes)| &passes.shading[variant]);
         let main_pipelines = match (prepass, velocity.is_some()) {
-            (true, false) => [&shading.shade, &shading.shade],
-            (true, true) => [&shading.shade_motion, &shading.shade_motion],
+            (true, false) => match ao_shading {
+                Some(p) => [&p[0], &p[0]],
+                None => [&shading.shade, &shading.shade],
+            },
+            (true, true) => match ao_shading {
+                Some(p) => [&p[1], &p[1]],
+                None => [&shading.shade_motion, &shading.shade_motion],
+            },
             (false, false) => [&shading.main[0], &shading.main[1]],
             (false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
         };
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
-                               phase: u32| {
+                               phase: u32,
+                               ao: Option<Texture>| {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
                 light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
+                ao: ao.and_then(|t| ctx.sampled_index(t)).unwrap_or(NO_AO),
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
@@ -1607,16 +1839,24 @@ impl ForwardRenderer {
                 let depth_use = if prepass {
                     prepass_pass(fg, "depth prepass", &geometry, &materials, culled, visible)
                         .depth(depth, depth_clear, StoreOp::Store)
-                        .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_ALL));
+                        .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_ALL, None));
                     DepthUse::ReadOnly
                 } else {
                     DepthUse::Write(depth_clear, depth_store)
                 };
+                if let Some(((settings, view_space), passes)) = &ao {
+                    targets.ao = Some(
+                        passes
+                            .passes
+                            .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
+                    );
+                }
+                let ao_texture = targets.ao;
                 shading_pass(
                     fg, "forward", &geometry, &materials, shadow_map, culled, visible, targets,
                     true, depth, depth_use,
                 )
-                .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL));
+                .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL, ao_texture));
                 ForwardPasses {
                     instances: instance_count,
                     batches: batch_count,
@@ -1624,6 +1864,7 @@ impl ForwardRenderer {
                     occlusion: false,
                     commands: Some(culled),
                     motion: None,
+                    ao: targets.ao,
                 }
             }
             Some(flags) => {
@@ -1641,7 +1882,7 @@ impl ForwardRenderer {
                         visible,
                     )
                     .depth(depth, depth_clear, StoreOp::Store)
-                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_EARLY));
+                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_EARLY, None));
                 } else {
                     shading_pass(
                         fg,
@@ -1656,7 +1897,7 @@ impl ForwardRenderer {
                         depth,
                         DepthUse::Write(depth_clear, StoreOp::Store),
                     )
-                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_EARLY));
+                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_EARLY, None));
                 }
                 let pyramid = fg.create_buffer(
                     "depth pyramid",
@@ -1694,7 +1935,15 @@ impl ForwardRenderer {
                         visible,
                     )
                     .depth(depth, LoadOp::Load, StoreOp::Store)
-                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_LATE));
+                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_LATE, None));
+                    if let Some(((settings, view_space), passes)) = &ao {
+                        targets.ao = Some(
+                            passes
+                                .passes
+                                .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
+                        );
+                    }
+                    let ao_texture = targets.ao;
                     shading_pass(
                         fg,
                         "forward",
@@ -1709,8 +1958,8 @@ impl ForwardRenderer {
                         DepthUse::ReadOnly,
                     )
                     .execute(move |ctx| {
-                        draw_phase(ctx, main_pipelines, PHASE_EARLY);
-                        draw_phase(ctx, main_pipelines, PHASE_LATE);
+                        draw_phase(ctx, main_pipelines, PHASE_EARLY, ao_texture);
+                        draw_phase(ctx, main_pipelines, PHASE_LATE, ao_texture);
                     });
                 } else {
                     shading_pass(
@@ -1726,7 +1975,7 @@ impl ForwardRenderer {
                         depth,
                         DepthUse::Write(LoadOp::Load, depth_store),
                     )
-                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_LATE));
+                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_LATE, None));
                 }
                 ForwardPasses {
                     instances: instance_count,
@@ -1735,6 +1984,7 @@ impl ForwardRenderer {
                     occlusion: true,
                     commands: Some(culled),
                     motion: None,
+                    ao: targets.ao,
                 }
             }
         };
@@ -1898,6 +2148,8 @@ struct Targets {
     light_tiles: Option<Buffer>,
     /// The environment's lighting.
     environment: Option<EnvironmentFrame>,
+    /// The view's ambient occlusion (ADR 0058), computed after the depth prepass.
+    ao: Option<Texture>,
 }
 
 /// How a shading pass uses the depth target.
@@ -1953,6 +2205,9 @@ fn shading_pass<'a, 'g>(
             .read(env.prefiltered, Access::Sampled(ShaderStages::FRAGMENT))
             .read(env.dfg, Access::Sampled(ShaderStages::FRAGMENT))
             .read(env.sh, Access::StorageRead(ShaderStages::FRAGMENT));
+    }
+    if let Some(ao) = targets.ao {
+        pass = pass.read(ao, Access::Sampled(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),
@@ -2203,5 +2458,67 @@ unsafe fn set_viewport(device: &engine_rhi::ash::Device, cmd: vk::CommandBuffer,
             }],
         );
         device.cmd_set_scissor(cmd, 0, &[area]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_core::math::{look_at, vulkan_orthographic, vulkan_perspective};
+
+    #[test]
+    fn the_view_and_projection_come_back_from_clip_from_world() {
+        let views = [
+            look_at(Vec3::new(3.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y),
+            look_at(
+                Vec3::new(-10.0, 40.0, 1.0),
+                Vec3::new(2.0, 0.0, -3.0),
+                Vec3::Y,
+            ),
+            look_at(
+                Vec3::new(0.5, -2.0, -7.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::X,
+            ),
+        ];
+        for view in views {
+            for jitter in [(0.0, 0.0), (0.0013, -0.0021)] {
+                let projection = Mat4::from_translation(Vec3::new(jitter.0, jitter.1, 0.0))
+                    * vulkan_perspective(1.1, 16.0 / 9.0, 0.1, 300.0);
+                let camera = Camera {
+                    clip_from_world: projection * view,
+                    position: view.inverse().w_axis.truncate(),
+                };
+                let v = camera.view_space().unwrap();
+                assert!(v.view_from_world.abs_diff_eq(view, 1e-4), "{view:?}");
+                // The projection rebuilt from its terms.
+                let rebuilt = Mat4::from_cols(
+                    Vec4::new(v.p00, 0.0, 0.0, 0.0),
+                    Vec4::new(0.0, v.p11, 0.0, 0.0),
+                    Vec4::new(v.p20, v.p21, v.p22, -1.0),
+                    Vec4::new(0.0, 0.0, v.p32, 0.0),
+                );
+                assert!(
+                    rebuilt.abs_diff_eq(projection, 1e-4),
+                    "{rebuilt:?} {projection:?}"
+                );
+                // Linear depth of a point 12 units in front.
+                let p = view.inverse().transform_point3(Vec3::new(0.3, -0.2, -12.0));
+                let clip = camera.clip_from_world * p.extend(1.0);
+                assert!((v.linear_depth(clip.z / clip.w) - 12.0).abs() < 1e-3);
+            }
+        }
+        let ortho = Camera {
+            clip_from_world: vulkan_orthographic(-1.0, 1.0, -1.0, 1.0, 0.1, 10.0) * views[0],
+            position: Vec3::ZERO,
+        };
+        assert!(ortho.view_space().is_none());
+        let scaled = Camera {
+            clip_from_world: vulkan_perspective(1.0, 1.0, 0.1, 10.0)
+                * Mat4::from_scale(Vec3::splat(2.0))
+                * views[0],
+            position: Vec3::ZERO,
+        };
+        assert!(scaled.view_space().is_none());
     }
 }
