@@ -368,10 +368,14 @@ fn temporal_shots_are_deterministic() {
         (Err(e), _) | (_, Err(e)) => panic!("{e:?}"),
     };
     assert_eq!(one.antialiasing, Antialiasing::TAAU);
-    assert!(
-        one.rgba8 == two.rgba8,
-        "two renders of a temporal shot differ"
-    );
+    let differing = one
+        .rgba8
+        .chunks(4)
+        .zip(two.rgba8.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    println!("{}: {differing} pixels differ", one.adapter);
+    assert_eq!(differing, 0, "two renders of a temporal shot differ");
 }
 
 /// The game runtime's path (ECS entities extracted into a GPU scene, a `Camera` entity

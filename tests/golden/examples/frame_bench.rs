@@ -105,7 +105,11 @@ fn antialiasing() {
         ("TAAU 50 %", Antialiasing::TAAU, Quality::Performance),
         ("FSR Native AA", Antialiasing::FSR, Quality::Native),
         ("FSR Quality (67 %)", Antialiasing::FSR, Quality::Quality),
-        ("FSR Performance (50 %)", Antialiasing::FSR, Quality::Performance),
+        (
+            "FSR Performance (50 %)",
+            Antialiasing::FSR,
+            Quality::Performance,
+        ),
         ("DLAA", Antialiasing::DLSS, Quality::Native),
         ("DLSS Quality (67 %)", Antialiasing::DLSS, Quality::Quality),
     ];
@@ -150,7 +154,9 @@ fn ambient_occlusion() {
     .unwrap();
     println!("Adapter: {}\n", reference.adapter);
     let reference = linear(&reference);
-    println!("| ambient occlusion | GPU frame ms | AO passes ms | depth prepass ms | mean FLIP vs 16×16 |");
+    println!(
+        "| ambient occlusion | GPU frame ms | AO passes ms | depth prepass ms | mean FLIP vs 16×16 |"
+    );
     println!("|---|---:|---:|---:|---:|");
     let presets: [(&str, Option<AoQuality>); 5] = [
         ("none", None),
