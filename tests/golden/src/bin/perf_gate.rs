@@ -28,6 +28,7 @@ use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, vendor_name,
 };
 use engine_render::ao::AoSettings;
+use engine_render::atmosphere::{Atmosphere, HeightFog};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -64,6 +65,17 @@ fn shots() -> Vec<Shot> {
             ao: Some(AoSettings::default()),
             ..Shot::new(
                 "sponza_ao",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
+        // The physically based sky and height fog (ADR 0069): the atmosphere's full-screen
+        // pass and aerial perspective every frame (its tables only in the first).
+        Shot {
+            size: [1920, 1080],
+            atmosphere: Some(Atmosphere::earth()),
+            fog: Some(HeightFog::default()),
+            ..Shot::new(
+                "sponza_atmosphere",
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },
