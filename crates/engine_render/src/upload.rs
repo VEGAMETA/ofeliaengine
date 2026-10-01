@@ -67,15 +67,8 @@ impl UploadRing {
                         | vk::BufferUsageFlags::INDIRECT_BUFFER
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 ),
-                match std::env::var("ENGINE_DEBUG_RING").as_deref() {
-                    Ok("upload") => MemoryLocation::Upload,
-                    Ok("readback") => MemoryLocation::Readback,
-                    _ => MemoryLocation::Dynamic,
-                },
+                MemoryLocation::Dynamic,
             )?;
-            if std::env::var("ENGINE_DEBUG_RING").is_ok() {
-                eprintln!("ring memory type {}", allocation.memory_type());
-            }
             // SAFETY: created with SHADER_DEVICE_ADDRESS usage and bound.
             let address = unsafe {
                 device.raw().get_buffer_device_address(
@@ -154,13 +147,6 @@ impl UploadRing {
             core::slice::from_raw_parts_mut(target.as_mut_ptr().cast::<MaybeUninit<T>>(), count)
         };
         Some((values, staged))
-    }
-
-    /// DEBUG: the bytes written in the current slot.
-    pub fn debug_used_bytes(&mut self) -> Vec<u8> {
-        let slot = &mut self.slots[self.current];
-        let used = slot.offset as usize;
-        slot.allocation.as_mut().unwrap().mapped_slice_mut().unwrap()[..used].to_vec()
     }
 
     /// Bytes used in the current slot.

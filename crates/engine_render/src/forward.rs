@@ -672,8 +672,6 @@ pub struct ForwardPasses {
     /// The environment's atmosphere tables this frame, when it has a physical sky (ADR
     /// 0069): for debugging views and tests.
     pub atmosphere: Option<AtmosphereTextures>,
-    /// DEBUG: visible list, shadow commands, shadow casters.
-    pub debug: Option<(Buffer, Buffer, Buffer)>,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -1636,11 +1634,6 @@ impl ForwardRenderer {
                     });
                 }
             }
-            DEBUG_DIRECT.with(|d| {
-                let mut d = d.borrow_mut();
-                d.clear();
-                d.extend_from_slice(command_scratch);
-            });
             // ... then copied into each list, which has its own slot region.
             for list in 0..phases + cascade_count {
                 let slots = list_offset(list, phases) * slot_count;
@@ -1882,12 +1875,7 @@ impl ForwardRenderer {
     ) -> Option<ForwardPasses> {
         let (color, depth) = (view.color, view.depth);
         let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
-        let depth_clear = LoadOp::Clear([
-            std::env::var("ENGINE_DEBUG_DEPTH_CLEAR").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
-            0.0,
-            0.0,
-            0.0,
-        ]);
+        let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
         let Setup {
             depth_desc,
             phases,
@@ -2252,7 +2240,6 @@ impl ForwardRenderer {
         let geometry = *geometry;
         let materials = *materials;
         let drawn_cascades = fit.count as u32;
-        let no_shadow_draws = std::env::var("ENGINE_DEBUG_NO_SHADOW_DRAWS").is_ok();
         materials
             .read(geometry.read(fg.add_pass("shadow")))
             .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
@@ -2260,9 +2247,6 @@ impl ForwardRenderer {
             .read(casters, Access::StorageRead(ShaderStages::VERTEX))
             .depth(shadow_map, depth_clear, StoreOp::Store)
             .execute(move |ctx| {
-                if no_shadow_draws {
-                    return;
-                }
                 for cascade in 0..drawn_cascades {
                     let tile = vk::Rect2D {
                         offset: vk::Offset2D {
@@ -2442,10 +2426,7 @@ impl ForwardRenderer {
             }
         };
         // The depth is needed after the frame's passes for motion vectors and upsampling.
-        let depth_store = if velocity.is_some()
-            || environment.is_some()
-            || std::env::var("ENGINE_DEBUG_DEPTH_STORE").is_ok()
-        {
+        let depth_store = if velocity.is_some() || environment.is_some() {
             StoreOp::Store
         } else {
             StoreOp::DontCare
@@ -2505,7 +2486,6 @@ impl ForwardRenderer {
                     motion: None,
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
-                    debug: Some((visible, shadow_commands, casters)),
                 }
             }
             Some(flags) => {
@@ -2642,7 +2622,6 @@ impl ForwardRenderer {
                     motion: None,
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
-                    debug: Some((visible, shadow_commands, casters)),
                 }
             }
         };
@@ -3005,7 +2984,6 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         motion,
         ao: None,
         atmosphere: None,
-        debug: None,
     }
 }
 
@@ -3159,16 +3137,6 @@ fn forward_pass<'a, 'g>(
         .maybe_read(instances, Access::StorageRead(ShaderStages::VERTEX))
 }
 
-/// DEBUG: a probe pipeline and layout drawn instead of the forward pipelines.
-pub static DEBUG_PROBE: std::sync::Mutex<Option<(vk::Pipeline, vk::PipelineLayout)>> =
-    std::sync::Mutex::new(None);
-
-thread_local! {
-    /// DEBUG: the last laid-out command list, for direct draws.
-    static DEBUG_DIRECT: core::cell::RefCell<Vec<vk::DrawIndexedIndirectCommand>> =
-        const { core::cell::RefCell::new(Vec::new()) };
-}
-
 /// Whether a transform mirrors (negative determinant of its linear part).
 pub(crate) fn mirrored(m: &Mat4) -> bool {
     m.x_axis
@@ -3296,56 +3264,13 @@ impl States {
                 }
                 ctx.device.cmd_set_cull_mode(ctx.cmd, cull);
                 ctx.device.cmd_set_front_face(ctx.cmd, front);
-                let probe = if shadow { None } else { *DEBUG_PROBE.lock().unwrap() };
-                if let Some((pipeline, layout)) = probe {
-                    ctx.device.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
-                    let mut bytes = [0u8; 112];
-                    if std::env::var("STRESS_PROBE_FILE").is_ok() {
-                        bytes.copy_from_slice(push_bytes(push));
-                        if std::env::var("STRESS_PROBE_ENTRY").is_ok_and(|e| e == "E") {
-                            bytes[..8].copy_from_slice(&push.positions.to_le_bytes());
-                        }
-                        if std::env::var("STRESS_ZERO_PUSH").is_ok() {
-                            bytes[8..].fill(0);
-                        }
-                    } else {
-                        bytes[..8].copy_from_slice(&push.positions.to_le_bytes());
-                        bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
-                    }
-                    if layout == bindless.pipeline_layout() {
-                        bindless.push_constants(ctx.cmd, push_bytes(push));
-                    } else {
-                        ctx.device.cmd_push_constants(ctx.cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &bytes);
-                    }
-                    bound = None;
-                }
-                if !shadow && std::env::var("ENGINE_DEBUG_DIRECT").is_ok() {
-                    DEBUG_DIRECT.with(|d| {
-                        let d = d.borrow();
-                        for i in 0..count {
-                            let c = d[(self.starts[state] + i) as usize];
-                            ctx.device.cmd_draw_indexed(ctx.cmd, c.index_count, 1, c.first_index, c.vertex_offset, c.first_instance);
-                        }
-                    });
-                } else if std::env::var("ENGINE_DEBUG_SINGLE_DRAWS").is_ok() {
-                    for i in 0..count {
-                        ctx.device.cmd_draw_indexed_indirect(
-                            ctx.cmd,
-                            buffer,
-                            offset + u64::from(self.starts[state] + i) * COMMAND_BYTES,
-                            1,
-                            COMMAND_BYTES as u32,
-                        );
-                    }
-                } else {
-                    ctx.device.cmd_draw_indexed_indirect(
-                        ctx.cmd,
-                        buffer,
-                        offset + u64::from(self.starts[state]) * COMMAND_BYTES,
-                        count,
-                        COMMAND_BYTES as u32,
-                    );
-                }
+                ctx.device.cmd_draw_indexed_indirect(
+                    ctx.cmd,
+                    buffer,
+                    offset + u64::from(self.starts[state]) * COMMAND_BYTES,
+                    count,
+                    COMMAND_BYTES as u32,
+                );
             }
         }
     }

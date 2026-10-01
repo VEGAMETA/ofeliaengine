@@ -545,8 +545,7 @@ impl RenderGraph {
             vk_buffer_barriers: Vec::new(),
             color_attachments: Vec::new(),
             timing: [
-                timing::Timing::new(device, slots, device.graphics, QueueKind::Graphics)
-                    .filter(|_| std::env::var("ENGINE_DEBUG_NO_TIMING").is_err()),
+                timing::Timing::new(device, slots, device.graphics, QueueKind::Graphics),
                 compute
                     .and_then(|q| timing::Timing::new(device, slots, q, QueueKind::AsyncCompute)),
             ],
@@ -939,7 +938,6 @@ impl<'g> FrameGraph<'g> {
             crumbs,
             slot,
             recorded: 0,
-            debug_queue: queues[0].map_or(vk::Queue::null(), |q| q.raw),
             stats: &mut stats,
         };
         let mut started = [false; 2];
@@ -1255,8 +1253,6 @@ struct Recorder<'a> {
     slot: usize,
     /// Graphics passes recorded (breadcrumb indices).
     recorded: u32,
-    /// DEBUG: the graphics queue, to split the command buffer.
-    debug_queue: vk::Queue,
     stats: &'a mut GraphStats,
 }
 
@@ -1331,24 +1327,6 @@ impl Recorder<'_> {
             [pass.image_barriers.start as usize..pass.image_barriers.end as usize];
         let buffers = &records.buffer_barriers
             [pass.buffer_barriers.start as usize..pass.buffer_barriers.end as usize];
-        if let Ok(mode) = std::env::var("ENGINE_DEBUG_FULL_BARRIERS") {
-            if mode == "all" || mode.split(',').any(|n| n == pass.name) {
-                let full = [vk::MemoryBarrier2::default()
-                    .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                    .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
-                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
-                    .dst_access_mask(
-                        vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
-                    )];
-                // SAFETY: debugging aid, recording outside a rendering scope.
-                unsafe {
-                    d.cmd_pipeline_barrier2(
-                        cmd,
-                        &vk::DependencyInfo::default().memory_barriers(&full),
-                    )
-                };
-            }
-        }
         self.stats.image_barriers += barriers.len() as u32;
         self.stats.memory_barriers += u32::from(!pass.memory_barrier.is_empty());
         self.stats.ownership_transfers +=
@@ -1415,25 +1393,6 @@ impl Recorder<'_> {
         if let Some(utils) = self.utils {
             // SAFETY: matches the label begun above.
             unsafe { utils.cmd_end_debug_utils_label(cmd) };
-        }
-        if let Ok(names) = std::env::var("ENGINE_DEBUG_SPLIT_AFTER") {
-            if names.split(',').any(|n| n == pass.name) {
-                // SAFETY: debugging aid: submits what was recorded so far, waits, and
-                // starts the command buffer again.
-                unsafe {
-                    d.end_command_buffer(cmd).unwrap();
-                    let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
-                    d.queue_submit2(
-                        self.debug_queue,
-                        &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
-                        vk::Fence::null(),
-                    )
-                    .unwrap();
-                    d.device_wait_idle().unwrap();
-                    d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
-                    d.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).unwrap();
-                }
-            }
         }
     }
 
