@@ -860,6 +860,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut timed = 0;
     let mut captured = false;
     let mut resident_frames = 0;
+    let mut previous_faces = 0;
     while timed < options.timed_frames || !captured {
         let uploading = textures.pending().0 > 0;
         // With probes, once every probe was captured with the textures resident.
@@ -1101,8 +1102,12 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             captured = true;
         } else if captured || resident_frames > 2 {
             // Times of the frame before this one's recording (the graph reads them when
-            // its slot comes around): every frame after the scene is resident.
-            if resident_frames > 3 {
+            // its slot comes around): every frame after the scene is resident (and its
+            // reflection probes captured: captures are not steady-state work).
+            let faces = probes.as_ref().map_or(0, |p| p.stats().faces);
+            let capturing = faces > 0 || previous_faces > 0;
+            previous_faces = faces;
+            if resident_frames > 3 && !capturing {
                 let mut frame: BTreeMap<&'static str, f64> = BTreeMap::new();
                 // The test bed's own passes are not the renderer's.
                 for time in graph

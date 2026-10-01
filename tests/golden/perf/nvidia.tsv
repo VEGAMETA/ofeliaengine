@@ -95,3 +95,20 @@ sponza_taau_67	shadow cull	3.1
 sponza_taau_67	sky	3.1
 sponza_taau_67	taau	128.4
 sponza_taau_67	tonemap	27.6
+sponza_reflections	(frame total)	1080.4
+sponza_reflections	(gpu frame)	1100.0
+sponza_reflections	bloom downsample	85.0
+sponza_reflections	bloom upsample	34.8
+sponza_reflections	cull	4.5
+sponza_reflections	cull setup	0.7
+sponza_reflections	depth prepass	57.3
+sponza_reflections	forward	319.5
+sponza_reflections	reflections	141.3
+sponza_reflections	shadow	158.7
+sponza_reflections	shadow cull	3.1
+sponza_reflections	sky	3.1
+sponza_reflections	ssr depth	26.6
+sponza_reflections	ssr spatial	51.2
+sponza_reflections	ssr temporal	55.3
+sponza_reflections	ssr trace	111.6
+sponza_reflections	tonemap	27.6
