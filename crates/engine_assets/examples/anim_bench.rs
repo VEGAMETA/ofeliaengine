@@ -12,7 +12,12 @@
 //! `cargo run -p engine_assets --release --example anim_bench -- [--assets DIR] [--frames N]`
 //! (`DIR`: the test scenes, `ENGINE_TEST_ASSETS` by default).
 
-#![allow(clippy::unwrap_used, clippy::print_stdout, clippy::too_many_lines)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::print_stdout,
+    clippy::too_many_lines,
+    clippy::needless_range_loop
+)]
 
 use engine_anim::*;
 use engine_assets::animation::{SkinSkeleton, raw_clip, shell_distances, skin_skeleton};
