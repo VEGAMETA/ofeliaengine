@@ -49,7 +49,8 @@ impl Antialiasing {
 pub enum Exposure {
     /// A fixed linear multiplier.
     Fixed(f32),
-    /// Measured every frame on the antialiased image and adapted over time (ADR 0047).
+    /// Measured every frame on the scene at render resolution, before antialiasing, and
+    /// adapted over time (ADR 0047); FSR and DLSS get the same exposure.
     Auto(ExposureSettings),
 }
 

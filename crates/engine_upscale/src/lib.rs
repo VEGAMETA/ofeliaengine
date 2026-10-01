@@ -23,7 +23,8 @@
 mod upscaler;
 
 pub use upscaler::{
-    Quality, UpscaleCamera, UpscaleContext, UpscaleError, UpscaleInput, Upscaler, UpscalerKind,
+    EXPOSURE_FORMAT, Quality, UpscaleCamera, UpscaleContext, UpscaleError, UpscaleInput, Upscaler,
+    UpscalerKind,
 };
 
 use engine_render::compute::{ComputeShader, ComputeSource, Dispatch};

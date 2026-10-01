@@ -23,7 +23,8 @@ use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocator, Bindless, Device, RhiError, SamplerKind};
 use engine_upscale::{
-    Taau, UpscaleCamera, UpscaleContext, UpscaleError, UpscaleInput, Upscaler, UpscalerKind,
+    EXPOSURE_FORMAT, Taau, UpscaleCamera, UpscaleContext, UpscaleError, UpscaleInput, Upscaler,
+    UpscalerKind,
 };
 
 /// Why a frame could not be declared.
@@ -266,6 +267,71 @@ impl fmt::Debug for FrameRenderer {
             .field("frames_in_flight", &self.frames_in_flight)
             .finish_non_exhaustive()
     }
+}
+
+/// The exposure the tone mapper applies, as the 1 × 1 texture FSR and DLSS read: a fixed
+/// multiplier cleared into it, or the automatic exposure's multiplier copied from its
+/// buffer (its first float).
+fn exposure_texture(fg: &mut FrameGraph<'_>, fixed: f32, auto: Option<Buffer>) -> Texture {
+    let texture = fg.create_texture("exposure", TextureDesc::new_2d(EXPOSURE_FORMAT, 1, 1));
+    let range = vk::ImageSubresourceRange {
+        aspect_mask: vk::ImageAspectFlags::COLOR,
+        base_mip_level: 0,
+        level_count: 1,
+        base_array_layer: 0,
+        layer_count: 1,
+    };
+    match auto {
+        Some(buffer) => fg
+            .add_pass("exposure value")
+            .read(buffer, Access::TransferRead)
+            .write(texture, Access::TransferWrite)
+            .execute(move |pass| {
+                let region = vk::BufferImageCopy {
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_extent: vk::Extent3D {
+                        width: 1,
+                        height: 1,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: recording outside a rendering scope; the graph arranged the
+                // buffer's read and the image's layout.
+                unsafe {
+                    pass.device.cmd_copy_buffer_to_image(
+                        pass.cmd,
+                        pass.buffer(buffer),
+                        pass.image(texture),
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &[region],
+                    );
+                }
+            }),
+        None => fg
+            .add_pass("exposure value")
+            .write(texture, Access::TransferWrite)
+            .execute(move |pass| {
+                // SAFETY: as above.
+                unsafe {
+                    pass.device.cmd_clear_color_image(
+                        pass.cmd,
+                        pass.image(texture),
+                        vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                        &vk::ClearColorValue {
+                            float32: [fixed, 0.0, 0.0, 0.0],
+                        },
+                        &[range],
+                    );
+                }
+            }),
+    }
+    texture
 }
 
 /// The render size for `output` at `scale` per axis.
@@ -674,10 +740,27 @@ impl FrameRenderer {
             },
         );
 
-        // 3. Antialiasing / upscaling to the output size.
+        // 3. Exposure, measured on the scene at render resolution before antialiasing:
+        // the upscalers that judge colors by it (FSR, DLSS) get this frame's exposure,
+        // and the measurement costs the render size's pixels, not the output's.
+        let (exposure_value, auto_exposure) = match (settings.exposure, exposure) {
+            (Exposure::Auto(_), Some(auto)) => {
+                (1.0, Some(auto.add_passes(fg, ctx.bindless, color, ctx.dt)))
+            }
+            (Exposure::Fixed(value), _) => (value, None),
+            (Exposure::Auto(_), None) => (1.0, None),
+        };
+
+        // 4. Antialiasing / upscaling to the output size.
         let resolved = match (prepared.antialiasing, upscaler, passes.motion) {
             (Antialiasing::Temporal(_), Some(upscaler), Some(motion)) => {
                 let upscaler: &'g mut dyn Upscaler = &mut **upscaler;
+                // FSR and DLSS take the exposure the tone mapper applies (their own
+                // measurement otherwise sees another picture than the player); TAAU
+                // blends exposure-independent colors and needs none.
+                let exposure_input =
+                    matches!(upscaler.kind(), UpscalerKind::Fsr | UpscalerKind::Dlss)
+                        .then(|| exposure_texture(fg, exposure_value, auto_exposure));
                 upscaler.add_pass(
                     fg,
                     UpscaleContext {
@@ -695,6 +778,7 @@ impl FrameRenderer {
                             fov_y: camera.fov_y,
                         },
                         frame_time_ms: ctx.dt * 1000.0,
+                        exposure: exposure_input,
                     },
                     output,
                     ctx.frame_number,
@@ -737,18 +821,10 @@ impl FrameRenderer {
                 });
         }
 
-        // 4. Bloom, exposure and tone mapping, at the output size.
+        // 5. Bloom and tone mapping, at the output size.
         let bloom = settings
             .bloom
             .then(|| self.bloom.add_passes(fg, ctx.bindless, resolved));
-        let (exposure_value, auto_exposure) = match (settings.exposure, exposure) {
-            (Exposure::Auto(_), Some(auto)) => (
-                1.0,
-                Some(auto.add_passes(fg, ctx.bindless, resolved, ctx.dt)),
-            ),
-            (Exposure::Fixed(value), _) => (value, None),
-            (Exposure::Auto(_), None) => (1.0, None),
-        };
         self.tonemap.add_composite_pass(
             fg,
             ctx.bindless,

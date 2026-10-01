@@ -1123,7 +1123,15 @@ impl Dlss {
         options.output_width = output_size.0;
         options.output_height = output_size.1;
         options.color_buffers_hdr = sl::TRUE;
-        options.use_auto_exposure = sl::TRUE;
+        // The engine's exposure when given (the one the tone mapper applies), else DLSS's
+        // own measurement.
+        let exposure = input.exposure;
+        let exposure_desc = exposure.map(|e| fg.texture_desc(e));
+        options.use_auto_exposure = if exposure.is_some() {
+            sl::FALSE
+        } else {
+            sl::TRUE
+        };
         let preset = viewport.preset.raw();
         options.dlaa_preset = preset;
         options.quality_preset = preset;
@@ -1144,8 +1152,11 @@ impl Dlss {
         // The engine's reactive mask is not passed: DLSS's current networks (presets J to
         // M) take no reactive or transparency mask (DLSS Programming Guide §3.15).
         let velocity = input.motion.velocity;
-        fg.add_pass("dlss")
-            .read(input.color, Access::Sampled(ShaderStages::COMPUTE))
+        let mut pass = fg.add_pass("dlss");
+        if let Some(exposure) = exposure {
+            pass = pass.read(exposure, Access::Sampled(ShaderStages::COMPUTE));
+        }
+        pass.read(input.color, Access::Sampled(ShaderStages::COMPUTE))
             .read(input.depth, Access::Sampled(ShaderStages::COMPUTE))
             .read(velocity, Access::Sampled(ShaderStages::COMPUTE))
             .write(output, Access::StorageWrite(ShaderStages::COMPUTE))
@@ -1179,11 +1190,16 @@ impl Dlss {
                                 | vk::ImageUsageFlags::TRANSFER_DST)
                                 .as_raw(),
                     ),
+                    match (exposure, exposure_desc) {
+                        (Some(texture), Some(desc)) => resource(texture, desc, read, sampled),
+                        _ => sl::Resource::empty(),
+                    },
                 ];
                 let inputs = [
                     (resources[0].native, vk::ImageAspectFlags::COLOR),
                     (resources[1].native, vk::ImageAspectFlags::DEPTH),
                     (resources[2].native, vk::ImageAspectFlags::COLOR),
+                    (resources[4].native, vk::ImageAspectFlags::COLOR),
                 ];
                 // The graph leaves sampled inputs in READ_ONLY_OPTIMAL, which Streamline
                 // does not know (it maps unknown layouts to GENERAL); give it
@@ -1207,22 +1223,26 @@ impl Dlss {
                     sl::BUFFER_DEPTH,
                     sl::BUFFER_MOTION_VECTORS,
                     sl::BUFFER_SCALING_OUTPUT_COLOR,
+                    sl::BUFFER_EXPOSURE,
                 ];
                 // Local tags, valid until the evaluation returns: Streamline copies nothing.
-                let mut tags = [sl::ResourceTag::empty(); 4];
+                let mut tags = [sl::ResourceTag::empty(); 5];
                 for ((tag, resource), kind) in tags.iter_mut().zip(&mut resources).zip(kinds) {
                     tag.resource = resource;
                     tag.kind = kind;
                     tag.lifecycle = sl::LIFECYCLE_VALID_UNTIL_EVALUATE;
                 }
                 let handle = sl::ViewportHandle::new(viewport.id);
-                let chain: [*const sl::BaseStructure; 5] = [
+                let chain: [*const sl::BaseStructure; 6] = [
                     (&raw const handle).cast(),
                     (&raw const tags[0]).cast(),
                     (&raw const tags[1]).cast(),
                     (&raw const tags[2]).cast(),
                     (&raw const tags[3]).cast(),
+                    (&raw const tags[4]).cast(),
                 ];
+                // The exposure's tag only when there is one.
+                let links = if exposure.is_some() { 6 } else { 5 };
                 let frame_index = frame_number as u32;
                 let mut token = core::ptr::null_mut();
                 // SAFETY: Streamline is attached; every structure outlives the calls; the
@@ -1241,7 +1261,7 @@ impl Dlss {
                             sl::FEATURE_DLSS,
                             token,
                             chain.as_ptr(),
-                            chain.len() as u32,
+                            links,
                             vk::Handle::as_raw(ctx.cmd) as *mut c_void,
                         );
                     }
@@ -1342,12 +1362,12 @@ impl engine_upscale::Upscaler for Dlss {
 /// Recording outside a rendering scope; the images are in `from`.
 unsafe fn transition(
     ctx: &engine_render::graph::PassContext<'_>,
-    images: &[(*mut c_void, vk::ImageAspectFlags); 3],
+    images: &[(*mut c_void, vk::ImageAspectFlags); 4],
     after: (vk::PipelineStageFlags2, vk::AccessFlags2),
     from: vk::ImageLayout,
     to: vk::ImageLayout,
 ) {
-    let mut barriers = [vk::ImageMemoryBarrier2::default(); 3];
+    let mut barriers = [vk::ImageMemoryBarrier2::default(); 4];
     let mut count = 0;
     for &(image, aspect) in images {
         if image.is_null() {

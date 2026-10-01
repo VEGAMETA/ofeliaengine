@@ -308,6 +308,7 @@ impl Gpu {
                                     fov_y: FOV_Y,
                                 },
                                 frame_time_ms: 1000.0 / 60.0,
+                                exposure: None,
                             },
                             (output_size, output_size),
                             *frame_number,
