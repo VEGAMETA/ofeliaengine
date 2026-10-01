@@ -1537,7 +1537,11 @@ fn begin_rendering(
             LoadOp::Clear(value) => (vk::AttachmentLoadOp::CLEAR, value),
             LoadOp::DontCare => (vk::AttachmentLoadOp::DONT_CARE, [0.0; 4]),
         };
+        // A read-only attachment keeps its contents without a store, which would count as
+        // a write (and race with a layout transition that only waited for reads, such as
+        // a compute pass sampling the depth between the prepass and the shading).
         let store = match a.store {
+            _ if a.read_only => vk::AttachmentStoreOp::NONE,
             StoreOp::Store => vk::AttachmentStoreOp::STORE,
             StoreOp::DontCare => vk::AttachmentStoreOp::DONT_CARE,
         };

@@ -90,6 +90,8 @@ pub struct Shot {
     pub fog: Option<HeightFog>,
     /// Shadows of local lights (ADR 0071): every light casts them.
     pub local_shadows: bool,
+    /// The sun's contact shadows (ADR 0071; they turn the depth prepass on).
+    pub contact_shadows: bool,
 }
 
 impl Shot {
@@ -120,6 +122,7 @@ impl Shot {
             atmosphere: None,
             fog: None,
             local_shadows: false,
+            contact_shadows: false,
         }
     }
 }
@@ -527,6 +530,11 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 Some(LocalShadowSettings::default()),
             )
             .expect("local shadows");
+    }
+    if shot.contact_shadows {
+        renderer
+            .set_contact_shadows(&device, &bindless, Some(Default::default()))
+            .expect("contact shadows");
     }
     renderer
         .set_ambient_occlusion(&device, &bindless, shot.ao)

@@ -171,6 +171,21 @@ fn sponza_with_local_shadows() {
     });
 }
 
+/// The procedural scene with the sun low from the side and the sun's contact shadows (ADR
+/// 0071): the spheres' and cubes' contact with the floor, sharper than the cascades.
+#[test]
+fn procedural_scene_with_contact_shadows() {
+    check(&Shot {
+        contact_shadows: true,
+        sun: DirectionalLight {
+            direction: Vec3::new(-0.8, -0.4, -0.3).normalize(),
+            color: Vec3::splat(3.0),
+            ambient: Vec3::splat(0.08),
+        },
+        ..procedural("procedural_contact_shadows")
+    });
+}
+
 /// The procedural scene with subsurface scattering (ADR 0059): the floor and the
 /// dielectric spheres scatter like wax; the shadows on the floor get soft, reddish edges.
 #[test]
