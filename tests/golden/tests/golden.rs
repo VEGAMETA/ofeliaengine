@@ -373,3 +373,47 @@ fn temporal_shots_are_deterministic() {
         "two renders of a temporal shot differ"
     );
 }
+
+/// The game runtime's path (ECS entities extracted into a GPU scene, a `Camera` entity
+/// resolved every frame by a `CameraView`; ADR 0064, ADR 0072) renders the same bytes as
+/// the test bed's draw list with the same camera, without and with TAA.
+#[test]
+fn the_runtime_renders_what_the_test_bed_renders() {
+    let options = RenderOptions {
+        validation: true,
+        timed_frames: 0,
+    };
+    for antialiasing in [Antialiasing::Off, Antialiasing::TAAU] {
+        let reference = Shot {
+            rigid_camera: true,
+            antialiasing,
+            temporal_frames: 8,
+            camera_motion: Vec3::new(0.02, 0.0, 0.0),
+            ..procedural("procedural_runtime")
+        };
+        let runtime = Shot {
+            runtime: true,
+            ..reference.clone()
+        };
+        let (one, two) = match (render(&reference, options), render(&runtime, options)) {
+            (Ok(one), Ok(two)) => (one, two),
+            (Err(Skip::NoGpu(e)), _) | (_, Err(Skip::NoGpu(e))) => {
+                println!("skipped, no GPU ({e})");
+                return;
+            }
+            (Err(e), _) | (_, Err(e)) => panic!("{e:?}"),
+        };
+        let differing = one
+            .rgba8
+            .chunks(4)
+            .zip(two.rgba8.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        println!(
+            "{}: antialiasing {}: {differing} pixels differ",
+            one.adapter,
+            antialiasing.name()
+        );
+        assert_eq!(differing, 0, "the runtime path drew another picture");
+    }
+}
