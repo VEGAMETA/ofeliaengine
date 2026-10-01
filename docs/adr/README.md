@@ -75,6 +75,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0065](0065-async-compute.md) | Async compute in the render graph: opt-in passes scheduled by the graph across two queues, on by default where measured faster (NVIDIA) | Accepted |
 | [0066](0066-physics-queries-characters-rollback.md) | Physics for games: shape casts and overlaps, Jolt's `CharacterVirtual` behind a backend-agnostic interface, kinematic targets, rollback snapshots into a reusable buffer, ECS sync with interpolation; 2D queries and Box2D's mover | Accepted |
 | [0067](0067-no-camera-motion-blur-in-gameplay.md) | No camera motion blur in gameplay: cinematic views only, by license and by API | Accepted |
+| [0070](0070-network-transport.md) | Network transport: own sans-I/O UDP endpoint with netcode-style connect tokens, AES-256-GCM through CNG, reliable-stream and unreliable channels with delivery notification, no I/O thread; NAT traversal UPnP → PCP/NAT-PMP → STUN hole punching → relay | Accepted |
 
 ## Template
 
