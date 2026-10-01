@@ -131,6 +131,7 @@ Constants and formulas taken into our own code (no files copied).
 | ACES 1.0 RRT + sRGB ODT fit (matrices and rational curve) by Stephen Hill | `engine_render/src/post.rs` (`ACES_IN`, `ACES_OUT`, `aces`), `engine_render/shaders/tonemap.slang` | MJP and David Neubelt, Baking Lab, `BakingLab/ACES.hlsl` | MIT (Copyright (c) 2016 MJP) |
 | The ACES transforms that fit approximates | same | Academy Color Encoding System, A.M.P.A.S. | ACES license (below) |
 | AgX inset/outset matrices for Rec.2020 and the polynomial sigmoid's coefficients | `engine_render/src/post.rs` (`AGX_IN`, `AGX_OUT`, `agx_sigmoid`), `engine_render/shaders/tonemap.slang` | Filament `filament/src/ToneMapper.cpp` (matrices from Blender's AgX via EaryChow/AgX_LUT_Gen, no license, accepted by the team, ADR 0048; sigmoid adapted from B. Wrensch's minimal AgX) | Apache-2.0 (Filament) |
+| LDR-FLIP: its constants, separable spatial and feature filters, colour transforms and error remapping, ported to Rust | `tests/golden/src/flip.rs` (test-only crate `engine_golden`) | NVIDIA `NVlabs/flip`, `src/cpp/FLIP.h` (Andersson et al., HPG 2020) | BSD-3-Clause (Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES) |
 
 ### MIT license (Baking Lab)
 
@@ -152,6 +153,37 @@ PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS 
 FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+### BSD 3-Clause license (FLIP)
+
+```
+Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### ACES license (A.M.P.A.S.)
