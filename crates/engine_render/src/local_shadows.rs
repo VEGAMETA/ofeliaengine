@@ -150,7 +150,10 @@ impl Atlas {
     /// An empty atlas of `size` (a power of two) whose smallest tiles are `min`.
     pub(crate) fn new(size: u32, min: u32) -> Self {
         let levels = (size / min.max(1)).max(1).trailing_zeros() as usize + 1;
-        let mut free = vec![Vec::new(); levels];
+        // Room for every tile a level can hold (up to 4096), so freeing never allocates.
+        let mut free: Vec<Vec<[u32; 2]>> = (0..levels)
+            .map(|k| Vec::with_capacity(1usize << (2 * k).min(12)))
+            .collect();
         free[0].push([0, 0]);
         Self {
             size,
@@ -535,6 +538,8 @@ impl ShadowCache {
     ) {
         let mut changes = core::mem::take(&mut self.changes);
         changes.clear();
+        // Two boxes per draw at most.
+        changes.reserve(2 * draws.len().max(self.previous.len()));
         for (i, draw) in draws.iter().enumerate() {
             let t = draw.world_from_object.transpose();
             let rows = [
@@ -618,6 +623,12 @@ impl ShadowCache {
         plan.drawn.clear();
         plan.first_view.clear();
         plan.first_view.resize(lights.len(), NO_SHADOW);
+        // Room for every light's views, so later frames do not grow them.
+        let most = lights.len() * 6;
+        plan.views.reserve(most);
+        plan.drawn.reserve(most);
+        self.candidates.reserve(lights.len());
+        self.order.reserve(lights.len());
         let mut stats = LocalShadowStats::default();
 
         // Entries of lights that are gone or no longer cast shadows.

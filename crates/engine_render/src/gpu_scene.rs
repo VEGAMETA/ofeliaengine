@@ -521,7 +521,7 @@ impl GpuScene {
             bounds_stale: false,
             material_revision: None,
             updates: Vec::with_capacity(reserve),
-            changes: Vec::with_capacity(reserve),
+            changes: Vec::with_capacity(2 * reserve),
             buffers: None,
             initial_capacity: capacity.max(1),
             retired: Vec::new(),

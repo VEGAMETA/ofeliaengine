@@ -25,7 +25,7 @@
 
 use engine_core::math::Vec3;
 use engine_golden::scene::{
-    RenderOptions, Shot, Skip, Source, procedural_lights, render, vendor_name,
+    RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights, vendor_name,
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
@@ -65,6 +65,17 @@ fn shots() -> Vec<Shot> {
             ao: Some(AoSettings::default()),
             ..Shot::new(
                 "sponza_ao",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
+        // Shadows of local lights (ADR 0071): in steady state every shadow is cached, so
+        // this measures what looking them up costs the shading.
+        Shot {
+            size: [1920, 1080],
+            lights: sponza_lights(),
+            local_shadows: true,
+            ..Shot::new(
+                "sponza_local_shadows",
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },

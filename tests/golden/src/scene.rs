@@ -13,8 +13,8 @@ use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
-    Spot,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
+    LocalShadowSettings, ShadowSettings, Spot,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
@@ -83,6 +83,8 @@ pub struct Shot {
     pub atmosphere: Option<Atmosphere>,
     /// Exponential height fog (ADR 0069; with `sky`).
     pub fog: Option<HeightFog>,
+    /// Shadows of local lights (ADR 0071): every light casts them.
+    pub local_shadows: bool,
 }
 
 impl Shot {
@@ -111,6 +113,7 @@ impl Shot {
             async_compute: None,
             atmosphere: None,
             fog: None,
+            local_shadows: false,
         }
     }
 }
@@ -365,6 +368,38 @@ pub fn procedural_lights() -> Vec<LocalLight> {
     ]
 }
 
+/// Warm point lights along Sponza's hall, alternating sides, and two cold spot lights
+/// from above.
+pub fn sponza_lights() -> Vec<LocalLight> {
+    let mut lights: Vec<LocalLight> = (0..5)
+        .map(|k| LocalLight {
+            position: Vec3::new(
+                -6.0 + 4.0 * k as f32,
+                1.4,
+                if k % 2 == 0 { 2.2 } else { -2.2 },
+            ),
+            range: 8.0,
+            color: Vec3::new(24.0, 15.0, 8.0),
+            spot: None,
+            shadow: true,
+        })
+        .collect();
+    for x in [-2.0, 6.0] {
+        lights.push(LocalLight {
+            position: Vec3::new(x, 7.0, 0.0),
+            range: 12.0,
+            color: Vec3::new(90.0, 100.0, 140.0),
+            spot: Some(Spot {
+                direction: Vec3::new(0.15, -1.0, 0.1).normalize(),
+                inner: 0.4,
+                outer: 0.65,
+            }),
+            shadow: true,
+        });
+    }
+    lights
+}
+
 fn gpu(validation: bool) -> Result<(Instance, Device), Skip> {
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
     let attempt = || -> Result<(Instance, Device), engine_rhi::RhiError> {
@@ -476,6 +511,16 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     )
     .expect("renderer");
     renderer.set_depth_prepass(shot.prepass);
+    if shot.local_shadows {
+        renderer
+            .set_local_shadows(
+                &device,
+                &mut allocator,
+                &bindless,
+                Some(LocalShadowSettings::default()),
+            )
+            .expect("local shadows");
+    }
     renderer
         .set_ambient_occlusion(&device, &bindless, shot.ao)
         .expect("ambient occlusion");
@@ -615,6 +660,10 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let (default_eye, default_target) = default_view(min, max);
     let eye = shot.eye.unwrap_or(default_eye);
     let target = shot.target.unwrap_or(default_target);
+    let mut lights = shot.lights.clone();
+    for light in lights.iter_mut() {
+        light.shadow = shot.local_shadows;
+    }
     let extent = (max - min).length();
     let camera = Camera {
         clip_from_world: vulkan_perspective(
@@ -681,7 +730,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         clear: Some([0.02, 0.02, 0.05, 1.0]),
                         occlusion: None,
                         temporal: None,
-                        lights: &shot.lights,
+                        lights: &lights,
                         environment: environment.as_ref(),
                     },
                 )
@@ -810,6 +859,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // SAFETY: the device is idle; everything below was created above and is not used
     // again.
     unsafe {
+        renderer.destroy(&device, &mut allocator, &bindless);
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);

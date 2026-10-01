@@ -585,7 +585,7 @@ fn local_shadows_match_analytic_shadows_and_cache() {
         },
     );
     let mut lights = [spot, point];
-    let mut views = |bed: &mut Bed, draws: &[DrawItem], lights: &[LocalLight]| {
+    let views = |bed: &mut Bed, draws: &[DrawItem], lights: &[LocalLight]| {
         bed.render(&cached, camera, draws, None, lights);
         cached.local_shadow_stats().views_drawn
     };
@@ -620,7 +620,7 @@ fn local_shadows_match_analytic_shadows_and_cache() {
         })
         .collect();
     let scene_renderer = renderer(&mut bed, LocalShadowSettings::default());
-    let mut scene_views = |bed: &mut Bed, scene: &mut GpuScene| {
+    let scene_views = |bed: &mut Bed, scene: &mut GpuScene| {
         bed.render(&scene_renderer, camera, &[], Some(scene), &lights);
         scene_renderer.local_shadow_stats().views_drawn
     };
