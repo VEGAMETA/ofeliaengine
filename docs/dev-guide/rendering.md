@@ -9,6 +9,118 @@ objects each frame, each a mesh, a material and a transform. The GPU then:
 
 The CPU cost of a frame barely depends on how many objects the list holds.
 
+## How a frame is put together: the frame renderer
+
+`engine_frame::FrameRenderer` composes a whole frame for each view (ADR 0072). Use it
+instead of wiring the passes below by hand: it puts them in the right order, at the
+right resolution, with the right antialiasing.
+
+```text
+ scene passes (render size)              antialiasing               post (output size)
+ cull → shadows → prepass/AO → forward   TAAU / FSR / DLSS          bloom → tone map
+ → SSS → sky/fog → transparent           (Off: nothing)             → your target
+ → skinned motion; exposure measured
+ jitter + motion vectors ──────────────▶ history per view
+```
+
+```rust
+use engine_frame::{
+    Antialiasing, FrameContext, FrameRenderer, PrepareContext, Quality, RenderDefaults,
+    SceneDraws, SceneInput, View, ViewCamera, ViewTarget,
+};
+
+// Once: the passes' pipelines, for the swapchain's format.
+let frame = FrameRenderer::new(&device, &bindless, swapchain.format(), vk::Format::D32_SFLOAT,
+    ShadowSettings::default(), frames_in_flight)?;
+// Measured defaults for this GPU (discrete or small integrated): AO, antialiasing, size.
+let defaults = RenderDefaults::for_device(&device);
+frame.forward_mut().set_ambient_occlusion(&device, &bindless, defaults.ambient_occlusion)?;
+let mut settings = defaults.view_settings();          // or ViewSettings { .. }
+// Once per view (main camera, each split-screen player, each render target):
+let mut view = View::new(&device, 100_000);
+
+// Every frame, before materials.begin_frame (the LOD bias lives in the samplers):
+frame.prepare(&mut view, &settings, (width, height), PrepareContext {
+    device: &device, allocator: &mut allocator, bindless: &bindless,
+    materials: &mut materials, frame_number: frame_number })?;
+// In the frame's graph, after the pools' begin_frame (and GpuScene::add_passes,
+// Skinning::begin_frame):
+frame.add_view(&mut fg, &mut FrameContext { device: &device, allocator: &mut allocator,
+        bindless: &bindless, ring: &mut ring, frame_number, dt },
+    &mut view,
+    &SceneInput { geometry: &geo, materials: &mats, draws: SceneDraws::Scene(&scene_frame),
+        skinning: Some(&skinned), light: sun, lights: &lights, environment: Some(&sky) },
+    &ViewCamera { view_from_world, position, fov_y, near, far, cut: false },
+    ViewTarget { texture: backbuffer, rect: None, load: LoadOp::DontCare })?;
+
+// At shutdown, with the device idle:
+unsafe { view.destroy(&mut allocator, &bindless) };
+```
+
+- **Antialiasing** (`ViewSettings::antialiasing`):
+  - `Antialiasing::Off`: no jitter, no motion vectors, no history: the cheapest, and
+    aliased;
+  - `Antialiasing::TAAU`: the engine's own; at `Quality::Native` this is plain TAA;
+  - `Antialiasing::FSR`: AMD FSR 3.1, on any GPU (built in);
+  - `Antialiasing::DLSS`: NVIDIA DLSS (DLAA at `Native`), once you hand the frame renderer
+    Streamline (`frame.set_streamline(Some(streamline))`, see below). Without it, the view
+    falls back to TAAU; `prepare` returns what is used.
+- **Render size** (`ViewSettings::quality`): `Native` (100 %), `Quality` (67 %), `Balanced`
+  (59 %), `Performance` (50 %), `UltraPerformance` (33 %) per axis. With `Off`, a smaller
+  size is stretched bilinearly.
+- **Dynamic resolution:** set `ViewSettings::render_scale = Some(0.8)` frame by frame
+  (from your GPU-time controller). The texture LOD bias stays the one of `quality`; keep
+  the scale at or below it and change it in coarse steps.
+- **Camera cuts:** set `ViewCamera::cut` on the first frame of a new shot (teleport,
+  another camera, a new level). The history, last frame's motion, the occlusion state and
+  the adapted exposure start over: nothing of the old picture ghosts into the new one.
+  Changing the upscaler or the output size does the same by itself.
+- **Exposure** (`ViewSettings::exposure`): `Exposure::Fixed(1.0)` or
+  `Exposure::Auto(ExposureSettings { .. })`. It is measured on the scene before
+  antialiasing, and FSR and DLSS get the same exposure the tone mapper applies (+0.3 to
+  +0.8 dB of image quality against their own measurement).
+- **Passes of your own on the scene** (screen-space reflections, debug views):
+  `frame.add_view_with(.., |fg, targets| { .. })` calls you between the scene passes and
+  antialiasing with `targets.color`, `depth`, `motion` (motion vectors, jitter, reset,
+  reactive mask) and, with `ViewSettings::previous_color`, last frame's antialiased HDR
+  image (`targets.previous_color`, `None` after a cut). What you write into the color is
+  antialiased and post-processed like the rest.
+- **Several views:** one `View` each, `add_view` for each into the same graph, with
+  `ViewTarget::rect` for split screen (the first clears, the others `LoadOp::Load`).
+  Views drawing with one `MaterialTable` share its texture LOD bias (the last prepared
+  wins): give them the same antialiasing.
+- **With the game runtime:** put an `engine_runtime::Camera` on an entity and let a
+  `CameraView` resolve it every frame (it gives the `ViewCamera` and the settings); move
+  the player's camera in `Runtime::frame`'s presentation step. See
+  [ecs.md](ecs.md#cameras).
+
+What the choices cost and give on Sponza at 1080p (ref-1, `cargo run -p engine_golden
+--release --example frame_bench`; FLIP against the frame rendered at 4K and averaged 2×2,
+lower is better):
+
+| mode | RTX 4060 Ti ms | Radeon iGPU ms | FLIP |
+|---|---:|---:|---:|
+| off, 1080p | 0.78 | 17.1 | 0.024 |
+| TAA (`TAAU`, `Native`) | 0.9–1.3 | 23.2 | 0.032 |
+| TAAU 67 % (`Quality`) | 0.74 | 16.3 | 0.041 |
+| TAAU 50 % (`Performance`) | 0.67 | 13.8 | 0.049 |
+| FSR 3.1 Native AA / Quality | 1.71 / 1.17 | 42.1 / 25.3 | 0.033 / 0.043 |
+| DLAA / DLSS Quality | 3.11 / 1.62 | – | 0.018 / 0.023 |
+
+- On a small integrated GPU, TAAU from 67 % is *cheaper* than no antialiasing at full
+  size; FSR costs more than the whole scene there. The defaults follow this
+  (`RenderDefaults`): TAA and AO High on discrete GPUs, TAAU 67 % and AO Low on integrated
+  ones.
+- A still image rewards sharpness: TAAU and FSR soften textures a little (their FLIP is
+  higher than no antialiasing's), while removing the shimmer of edges and foliage in
+  motion that a still image does not show. DLSS does both.
+- Ambient occlusion runs at the render size: at 67 % it costs 2.3× less (High: 12.1 →
+  5.4 ms on the Radeon) for the same quality. See section 13.
+
+What the composer itself costs on the CPU: `prepare` + `add_view`, declaring every pass
+of the frame, take 4–10 µs per view and frame on ref-1 (20,000 instances in a GPU scene,
+`game_loop`), and allocate nothing.
+
 ## 1. Meshes
 
 Every mesh lives in one `GeometryPool` (ADR 0039): shared buffers of vertices and indices,
@@ -466,8 +578,9 @@ tonemap.add_pass(&mut fg, &bindless, upscaled, backbuffer, exposure);
 - **Changing the output size**, or a render size larger than any before, creates a new
   FSR context: 11-14 ms on the RTX 4060 Ti, 55-70 ms on the Radeon iGPU. Do it in menus,
   not every frame. A smaller render size (dynamic resolution) costs nothing.
-- **Exposure:** FSR measures its own for now; the engine's automatic exposure (section 11)
-  still applies at tonemapping.
+- **Exposure:** give FSR the exposure the tone mapper applies (`FsrInput::exposure`, a
+  1 × 1 `R32_SFLOAT` texture; the frame renderer does it): +0.3 to +0.5 dB against FSR's
+  own measurement (ADR 0072). `None` lets FSR measure its own.
 - **Not available:** frame generation (planned, ADR 0060); FSR 4 (AMD ships it for DX12
   only).
 
@@ -558,8 +671,10 @@ drop(streamline);
   on the first frame. Do it in menus.
 - **Startup:** loading Streamline takes about 0.7 s and attaching the device 0.4 s. Load
   it only when the player enabled DLSS, or early, beside other startup work.
+- **Exposure:** `UpscaleInput::exposure` gives DLSS the exposure the tone mapper applies
+  (+0.1 to +0.8 dB against DLSS's own measurement, ADR 0072); `None` lets DLSS measure.
 - **Not passed to DLSS:** the reactive mask of transparent surfaces (NVIDIA's current
-  networks take none) and the engine's exposure (DLSS measures its own).
+  networks take none).
 - **Not available yet:** DLSS frame generation and Ray Reconstruction (ADR 0063).
 
 What it costs and gives (ref-1, RTX 4060 Ti, `cargo run -p engine_dlss --release

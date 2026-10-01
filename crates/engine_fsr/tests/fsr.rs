@@ -245,6 +245,7 @@ impl Gpu {
                                     meters_per_unit: 1.0,
                                 },
                                 frame_time_ms: 1000.0 / 60.0,
+                                exposure: None,
                             },
                             (output_size, output_size),
                             *frame_number,

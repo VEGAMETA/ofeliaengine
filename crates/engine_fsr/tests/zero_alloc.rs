@@ -141,6 +141,7 @@ fn steady_state_frames_do_not_allocate() {
                             meters_per_unit: 1.0,
                         },
                         frame_time_ms: 16.7,
+                        exposure: None,
                     },
                     (96, 96),
                     number,

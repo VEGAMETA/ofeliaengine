@@ -136,6 +136,10 @@ pub struct FsrInput {
     pub camera: FsrCamera,
     /// Time since the last frame, in milliseconds.
     pub frame_time_ms: f32,
+    /// The exposure the tone mapper applies, a 1 × 1 `R32_SFLOAT` texture
+    /// (`engine_upscale::UpscaleInput::exposure`), or `None` for FSR's own automatic
+    /// exposure. Switching between the two creates a new context.
+    pub exposure: Option<Texture>,
 }
 
 /// An error from the FidelityFX SDK.
@@ -204,6 +208,8 @@ struct Context {
     raw: NonNull<ffi::Context>,
     max_render: (u32, u32),
     output: (u32, u32),
+    /// Created with FSR's automatic exposure (no exposure texture).
+    auto_exposure: bool,
 }
 
 /// FSR 3.1 upscaling (see the crate documentation). One per view: the SDK's context keeps
@@ -342,10 +348,14 @@ impl Fsr {
         let velocity_desc = fg.texture_desc(input.motion.velocity);
         let render = (color_desc.width, color_desc.height);
         let mut reset = core::mem::take(&mut self.reset) || input.motion.reset;
+        let auto_exposure = input.exposure.is_none();
         if self.context.as_ref().is_none_or(|c| {
-            c.output != output_size || c.max_render.0 < render.0 || c.max_render.1 < render.1
+            c.output != output_size
+                || c.max_render.0 < render.0
+                || c.max_render.1 < render.1
+                || c.auto_exposure != auto_exposure
         }) {
-            let context = self.create_context(render, output_size)?;
+            let context = self.create_context(render, output_size, auto_exposure)?;
             if let Some(old) = self.context.replace(context) {
                 self.retired.push((frame_number, old.raw));
             }
@@ -362,10 +372,15 @@ impl Fsr {
         let sharpness = self.sharpness;
         let reactive = input.motion.reactive;
         let reactive_desc = reactive.map(|r| fg.texture_desc(r));
+        let exposure = input.exposure;
+        let exposure_desc = exposure.map(|e| fg.texture_desc(e));
         let velocity = input.motion.velocity;
         let mut pass = fg.add_pass("fsr");
         if let Some(mask) = reactive {
             pass = pass.read(mask, Access::Sampled(ShaderStages::COMPUTE));
+        }
+        if let Some(exposure) = exposure {
+            pass = pass.read(exposure, Access::Sampled(ShaderStages::COMPUTE));
         }
         pass.read(input.color, Access::Sampled(ShaderStages::COMPUTE))
             .read(input.depth, Access::Sampled(ShaderStages::COMPUTE))
@@ -385,11 +400,16 @@ impl Fsr {
                     (Some(mask), Some(desc)) => image(mask, desc),
                     _ => ffi::Image::default(),
                 };
+                let exposure = match (exposure, exposure_desc) {
+                    (Some(texture), Some(desc)) => image(texture, desc),
+                    _ => ffi::Image::default(),
+                };
                 let inputs = [
                     (color.image, vk::ImageAspectFlags::COLOR),
                     (depth.image, vk::ImageAspectFlags::DEPTH),
                     (motion.image, vk::ImageAspectFlags::COLOR),
                     (reactive.image, vk::ImageAspectFlags::COLOR),
+                    (exposure.image, vk::ImageAspectFlags::COLOR),
                 ];
                 // The graph leaves sampled inputs in READ_ONLY_OPTIMAL; the SDK expects
                 // SHADER_READ_ONLY_OPTIMAL for compute reads and returns them in it. The
@@ -436,6 +456,7 @@ impl Fsr {
                     camera_far: input.camera.far,
                     camera_fov_y: input.camera.fov_y,
                     meters_per_unit: input.camera.meters_per_unit,
+                    exposure,
                 };
                 // SAFETY: a live context (retired ones are kept until their frames are
                 // done); the images are alive for the frame and in the layouts the shim
@@ -461,11 +482,17 @@ impl Fsr {
         Ok(output)
     }
 
-    fn create_context(&self, render: (u32, u32), output: (u32, u32)) -> Result<Context, FsrError> {
+    fn create_context(
+        &self,
+        render: (u32, u32),
+        output: (u32, u32),
+        auto_exposure: bool,
+    ) -> Result<Context, FsrError> {
         engine_profiler::zone!("fsr::create_context");
-        let mut flags = ffi::ENABLE_HIGH_DYNAMIC_RANGE
-            | ffi::ENABLE_AUTO_EXPOSURE
-            | ffi::ENABLE_DYNAMIC_RESOLUTION;
+        let mut flags = ffi::ENABLE_HIGH_DYNAMIC_RANGE | ffi::ENABLE_DYNAMIC_RESOLUTION;
+        if auto_exposure {
+            flags |= ffi::ENABLE_AUTO_EXPOSURE;
+        }
         if self.debug_checking {
             flags |= ffi::ENABLE_DEBUG_CHECKING;
         }
@@ -496,6 +523,7 @@ impl Fsr {
                 raw,
                 max_render: render,
                 output,
+                auto_exposure,
             }),
             _ => Err(FsrError::Ffx {
                 call: "ffxFsr3UpscalerContextCreate",
@@ -543,12 +571,12 @@ impl Fsr {
 /// Recording outside a rendering scope; the images are in `from`.
 unsafe fn transition(
     ctx: &engine_render::graph::PassContext<'_>,
-    images: &[(vk::Image, vk::ImageAspectFlags); 4],
+    images: &[(vk::Image, vk::ImageAspectFlags); 5],
     after: (vk::PipelineStageFlags2, vk::AccessFlags2),
     from: vk::ImageLayout,
     to: vk::ImageLayout,
 ) {
-    let mut barriers = [vk::ImageMemoryBarrier2::default(); 4];
+    let mut barriers = [vk::ImageMemoryBarrier2::default(); 5];
     let mut count = 0;
     for &(image, aspect) in images {
         if image == vk::Image::null() {
@@ -648,6 +676,7 @@ impl engine_upscale::Upscaler for Fsr {
                     meters_per_unit: 1.0,
                 },
                 frame_time_ms: input.frame_time_ms,
+                exposure: input.exposure,
             },
             output_size,
             frame_number,

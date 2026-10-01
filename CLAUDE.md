@@ -58,6 +58,7 @@ Decisions change only via an ADR backed by measurements.
   engine_upscale         TAAU (own) and the `Upscaler` interface shared by every upscaler
   engine_fsr             FSR 3.1, built from the FidelityFX SDK sources (C++ via `cc`; ADR 0060)
   engine_dlss            DLSS SR/DLAA through Streamline, user-supplied DLLs (ADR 0063)
+  engine_frame           the frame renderer: composes a view's frame (scene, TAA/upscaling, post; ADR 0072)
   engine_latency         frame pacing, limiter, VK_NV_low_latency2, VK_AMD_anti_lag
   engine_physics         PhysicsBackend trait, shared types, test scenes
   engine_physics_native  own physics (deferred, ADR 0028)

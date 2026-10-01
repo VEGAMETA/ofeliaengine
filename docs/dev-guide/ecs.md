@@ -261,7 +261,7 @@ let input = sample_input();                  // as late as possible
 runtime.frame(seconds_since_last_frame, &input, &mut gpu_scene,
     |world, input, dt| { /* your tick systems: movement, physics, AI */ },
     |world, input, alpha| camera.yaw = input.mouse_x * sensitivity); // every frame
-// Then render: gpu_scene.add_passes(..), renderer.add_scene_passes(..).
+// Then render: gpu_scene.add_passes(..), then the frame renderer (Cameras, below).
 ```
 
 - **Ticks and frames.** The simulation runs at a fixed rate (64 Hz by default, ADR 0019);
@@ -280,3 +280,43 @@ runtime.frame(seconds_since_last_frame, &input, &mut gpu_scene,
   component removes its instance.
 - A full example with a window: `cargo run -p engine_runtime --release --example
   game_loop`. It prints where the frame's time goes and the input latency.
+
+### Cameras
+
+A camera is an entity with a `Transform` and an `engine_runtime::Camera` (ADR 0072). A
+`CameraView` finds the main one every frame (the active camera with the highest
+`priority`) and turns it into what the frame renderer takes
+([rendering.md](rendering.md#how-a-frame-is-put-together-the-frame-renderer)):
+
+```rust
+use engine_frame::{Antialiasing, Quality};
+use engine_runtime::{Camera, CameraView, look_rotation};
+
+let player_camera = world.spawn((
+    Transform::from_translation(eye).with_rotation(look_rotation(eye, target, Vec3::Y)),
+    Camera::perspective(70f32.to_radians(), 0.1, 1000.0)
+        .with_antialiasing(Antialiasing::TAAU, Quality::Quality),
+));
+let mut cameras = CameraView::new(&mut world, defaults.view_settings());
+
+// Every frame: move the camera in the presentation step, from the latest input…
+runtime.frame(dt, &input, &mut gpu_scene, tick, |world, input, _| {
+    world.get_mut::<Transform>(player_camera).unwrap().rotation = aim(input);
+});
+// …and render what it sees, in the same frame.
+let main = cameras.resolve(&runtime.world).unwrap();
+frame.prepare(&mut view, &main.settings, output, prepare_ctx)?;
+frame.add_view(&mut fg, &mut ctx, &mut view, &scene_input, &main.camera, target)?;
+```
+
+- **The camera's fresh `Transform` renders**, not its `GlobalTransform` from the last tick:
+  what the presentation step wrote reaches this frame (ADR 0019 addendum). Under a parent,
+  it is placed under the parent's `GlobalTransform` (the last tick's); for a camera that
+  must follow an interpolated or predicted character smoothly, place it yourself in the
+  presentation step, as a root.
+- **Cuts:** `camera.cut()` (teleports, a new level), or switching the main camera (another
+  becomes active or gets a higher priority): the next frame starts its history anew.
+- **On the camera:** field of view, near and far planes, exposure (fixed, or with
+  `auto_exposure` a compensation in EV), antialiasing and render size, and `cinematic`
+  for cutscenes (the only views that may get camera motion blur, ADR 0067). Everything else
+  (bloom, tone curve, occlusion culling) comes from the `CameraView`'s base settings.

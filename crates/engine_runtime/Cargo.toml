@@ -15,6 +15,8 @@ workspace = true
 bytemuck = { version = "1.25", features = ["derive"] }
 engine_core.workspace = true
 engine_ecs.workspace = true
+# The frame renderer a camera's view goes to (ADR 0072).
+engine_frame.workspace = true
 # The fixed-step clock (`engine_physics::ecs::FixedStep`, ADR 0066), shared with the
 # physics sync rather than duplicated; no physics backend comes with it.
 engine_physics.workspace = true

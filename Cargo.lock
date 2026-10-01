@@ -323,6 +323,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_frame"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_dlss",
+ "engine_fsr",
+ "engine_profiler",
+ "engine_render",
+ "engine_rhi",
+ "engine_upscale",
+]
+
+[[package]]
 name = "engine_fsr"
 version = "0.0.0"
 dependencies = [
@@ -341,8 +354,12 @@ dependencies = [
  "engine_anim",
  "engine_assets",
  "engine_core",
+ "engine_dlss",
+ "engine_ecs",
+ "engine_frame",
  "engine_render",
  "engine_rhi",
+ "engine_runtime",
  "png",
 ]
 
@@ -491,6 +508,7 @@ dependencies = [
  "bytemuck",
  "engine_core",
  "engine_ecs",
+ "engine_frame",
  "engine_physics",
  "engine_platform",
  "engine_profiler",

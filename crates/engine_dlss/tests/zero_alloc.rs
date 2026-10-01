@@ -151,6 +151,7 @@ fn steady_state_frames_do_not_allocate() {
                             fov_y: 1.0,
                         },
                         frame_time_ms: 16.7,
+                        exposure: None,
                     },
                     (128, 128),
                     number,
