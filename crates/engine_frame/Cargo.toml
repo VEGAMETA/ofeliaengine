@@ -26,3 +26,4 @@ engine_rhi.workspace = true
 engine_upscale.workspace = true
 engine_fsr = { workspace = true, optional = true }
 engine_dlss = { workspace = true, optional = true }
+

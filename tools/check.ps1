@@ -78,7 +78,7 @@ $steps = [ordered]@{
 }
 if ($Gpu) {
     # `radeon:` runs the command with ENGINE_ADAPTER=radeon (the AMD iGPU of ref-1).
-    $gpuTests = 'test --locked -p engine_rhi -p engine_render -p engine_render2d -p engine_text -p engine_upscale -p engine_fsr -p engine_dlss -p engine_golden -- --test-threads=1'
+    $gpuTests = 'test --locked -p engine_rhi -p engine_render -p engine_render2d -p engine_text -p engine_upscale -p engine_fsr -p engine_dlss -p engine_frame -p engine_golden -- --test-threads=1'
     $steps['gpu'] = @($gpuTests, "radeon:$gpuTests")
     $prebuild['gpu'] = $gpuTests -replace ' -- ', ' --no-run -- '
     $steps['slang'] = @('test --locked -p engine_shader -- --test-threads=1')
