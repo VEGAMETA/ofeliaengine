@@ -467,6 +467,8 @@ pub(crate) struct ShadowCache {
     previous: Vec<PreviousDraw>,
     /// This frame's changed boxes (draw-list path).
     changes: Vec<[Vec3; 2]>,
+    /// Unions of runs of changed boxes ([`Self::invalidate`]).
+    chunk_unions: Vec<[Vec3; 2]>,
     candidates: Vec<Candidate>,
     order: Vec<u32>,
     stats: LocalShadowStats,
@@ -484,6 +486,8 @@ impl ShadowCache {
             material_revision: None,
             previous: Vec::new(),
             changes: Vec::new(),
+            // Up to 65,536 changes without growing.
+            chunk_unions: Vec::with_capacity(1024),
             candidates: Vec::new(),
             order: Vec::new(),
             stats: LocalShadowStats::default(),
@@ -596,19 +600,35 @@ impl ShadowCache {
         if !all && changes.is_empty() {
             return;
         }
-        let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for b in changes {
-            lo = lo.min(b[0]);
-            hi = hi.max(b[1]);
-        }
-        let union = [lo, hi];
+        // Unions of runs of CHUNK changes, then of everything: a light tests a run's
+        // boxes only when it touches the run's union (many moving instances, many lights).
+        const CHUNK: usize = 64;
+        let union_of = |boxes: &[[Vec3; 2]]| {
+            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+            for b in boxes {
+                lo = lo.min(b[0]);
+                hi = hi.max(b[1]);
+            }
+            [lo, hi]
+        };
+        let mut chunks = core::mem::take(&mut self.chunk_unions);
+        chunks.clear();
+        chunks.extend(changes.chunks(CHUNK).map(union_of));
+        let union = union_of(&chunks);
         for entry in self.entries.iter_mut().flatten() {
             if entry.stale {
                 continue;
             }
-            entry.stale =
-                all || (entry.key.touches(&union) && changes.iter().any(|b| entry.key.touches(b)));
+            entry.stale = all
+                || (entry.key.touches(&union)
+                    && chunks.iter().enumerate().any(|(k, u)| {
+                        entry.key.touches(u)
+                            && changes[k * CHUNK..((k + 1) * CHUNK).min(changes.len())]
+                                .iter()
+                                .any(|b| entry.key.touches(b))
+                    }));
         }
+        self.chunk_unions = chunks;
     }
 
     /// Plans this frame: which shadowed `lights` reach the view of `clip_from_world`
@@ -1083,6 +1103,23 @@ mod tests {
         let plan = frame(&mut cache, &lights, &[]);
         assert_eq!(plan.first_view[0], NO_SHADOW);
         assert!(cache.stats().texels_used < used);
+    }
+
+    #[test]
+    fn many_changes_find_the_one_near_a_light() {
+        let mut cache = ShadowCache::new(LocalShadowSettings::default());
+        let lights = [light(-5.0, false), light(5.0, true)];
+        frame(&mut cache, &lights, &[]);
+        // 1,000 changes far away, one near the spot light deep in the list.
+        let mut changes: Vec<[Vec3; 2]> = (0..1000)
+            .map(|k| {
+                let c = Vec3::new(100.0 + k as f32, 0.0, 50.0);
+                [c - Vec3::ONE, c + Vec3::ONE]
+            })
+            .collect();
+        assert_eq!(frame(&mut cache, &lights, &changes).drawn.len(), 0);
+        changes[700] = [Vec3::new(4.5, 0.0, -0.5), Vec3::new(5.5, 1.0, 0.5)];
+        assert_eq!(frame(&mut cache, &lights, &changes).drawn.len(), 1);
     }
 
     #[test]
