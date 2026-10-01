@@ -1,7 +1,5 @@
 # Local reflections: reflection probes and screen-space reflections
 
-> Status: see "Work status" at the end.
-
 Research for [ADR 0073](../adr/0073-reflection-probes-and-screen-space-reflections.md).
 Checked 2026-10-01.
 
@@ -129,45 +127,3 @@ GTSO needs a bent normal (a follow-up once GTAO outputs one).
 
 No code was copied from Godot or Bevy; FidelityFX SSSR's traversal is adapted (MIT).
 
-## Work status (2026-10-01, paused by the coordinator a second time)
-
-Done (branch `feat/reflections`, origin/main with #101 merged in; clippy `-D warnings`
-clean; every existing golden image byte-identical on both GPUs; Radeon opaque shading
-still 48/64/64/80 VGPRs):
-
-- Probes captured by the forward renderer (one shared shadow cascade per probe), mips and
-  GGX prefilter into a cube array, cached with a face budget, recaptured on probe edits,
-  `refresh`, sky/sun changes and GPU-scene changes inside their boxes; selection by screen
-  cells × z-bins; parallax correction; blending smallest first.
-- SSR: nearest-depth pyramid, FidelityFX SSSR traversal (with its low-occupancy exit),
-  VNDF rays, spatial filter at trace resolution, temporal filter with upsampling and
-  variance clip; half or full resolution.
-- One composite (probes / SSR / both) before the atmosphere and transparent surfaces.
-- Frame renderer: `ViewSettings::screen_space_reflections` (the `View` owns the history),
-  `SceneInput::reflection_probes`. SSR is wired through `ForwardView::reflections` inside
-  the scene passes, **not** the frame renderer's post-scene hook: the composite must land
-  before the atmosphere/fog and transparent surfaces, and tracing the current frame's
-  opaque image needs no previous color (argued in the ADR; the hook's previous color is
-  the path to multiple bounces).
-- Tests (both GPUs): parallax vs analytic box (99.9 % of floor pixels), energy at every
-  probe mip, capture caching/budget (draw lists and GPU scene), SSR vs analytic mirror
-  (full and half res, 100 %), zero allocations (capturing every frame, and cached).
-  Golden shots `procedural_reflections`, `sponza_probes` (both GPUs); perf-gate scene
-  `sponza_reflections` added (baselines not written yet).
-
-Measured so far (Sponza 1080p, `scene_bench`; RTX numbers noisy on the shared machine):
-
-| | RTX 4060 Ti | Radeon iGPU |
-|---|---:|---:|
-| frame, sky + prepass, no reflections | 535–579 µs | 12.9 ms |
-| frame, 6 cached probes | 695 µs | 18.9–20.5 ms |
-| probe composite | 139 µs | 4.9 ms |
-| capture of a whole probe (6 faces, shared shadow) + prefilter | 183 + 47 µs | 2.4 + 0.66 ms |
-| one face per frame | ~70–86 µs | 0.95–1.07 ms |
-| SSR half: depth / trace / spatial / temporal / composite | 28 / 92 / 53 / 55 / 35 µs | 0.37 / 3.1 / 1.7 / 1.7 / 0.9 ms (before the low-occupancy exit) |
-| SSR full: same | 27 / 281 / 196 / 63 / 34 µs | not measured yet |
-
-Next: re-measure SSR after the low-occupancy exit; perf-gate baselines for
-`sponza_reflections` (both GPUs); ADR 0073, dev-guide section (rendering.md §16), perf
-history row, THIRD_PARTY_NOTICES (FidelityFX SSSR traversal, MIT); `tools/check.ps1 -Gpu
--Perf`; PR. Open question for the team: SSR via the hook vs in the scene passes (above).

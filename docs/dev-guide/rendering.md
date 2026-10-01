@@ -1199,10 +1199,10 @@ ssr: Some(&ssr) }, .. }`, with a `ScreenSpaceReflections` per view at the view's
 - **Cost of a capture** (Sponza, 1080p view, 128² probes): a whole probe 0.23 ms on an
   RTX 4060 Ti, 3.1 ms on a Radeon iGPU (one face per frame: 0.08 / 1.0 ms). A static scene
   captures nothing after the first frames.
-- **Cost every frame:** probes cost one full-screen pass (RTX 0.14 ms, Radeon 4.9 ms with
-  6 probes in Sponza at 1080p). SSR at half resolution costs about 0.26 ms on the RTX and
-  6–7 ms on the Radeon iGPU at 1080p: on small integrated GPUs prefer probes alone, or SSR
-  with an upscaler's lower render size.
+- **Cost every frame** (Sponza at 1080p): probes cost one full-screen pass (RTX 4060 Ti
+  0.14 ms, Radeon iGPU 4.5 ms with 6 probes). SSR at half resolution costs about 0.3 ms on
+  the RTX and 7.5 ms on the Radeon iGPU (full resolution: 0.65 / 18 ms). On small
+  integrated GPUs prefer probes alone, or render at a lower size with an upscaler.
 - **`SsrSettings`:** `half_resolution` (default on: a quarter of the rays), `max_roughness`
   (0.6: rougher surfaces use probes; reflections fade towards it), `steps` (64), `thickness`
   (how thick objects are assumed behind what the depth buffer shows), `temporal` (the
