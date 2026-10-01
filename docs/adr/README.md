@@ -71,6 +71,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0061](0061-logging-crash-reports-gpu-faults.md) | Failure visibility: a lock-free log behind the `log` facade, out-of-process crash reports, GPU breadcrumbs and `VK_EXT_device_fault` | Accepted |
 | [0062](0062-golden-images-and-perf-gate.md) | Golden images compared through FLIP, and a per-pass GPU time gate | Accepted |
 | [0063](0063-dlss-through-streamline.md) | DLSS Super Resolution through Streamline with manual hooking, from user-supplied DLLs; one `Upscaler` interface over TAAU, FSR and DLSS | Accepted |
+| [0066](0066-physics-queries-characters-rollback.md) | Physics for games: shape casts and overlaps, Jolt's `CharacterVirtual` behind a backend-agnostic interface, kinematic targets, rollback snapshots into a reusable buffer, ECS sync with interpolation; 2D queries and Box2D's mover | Accepted |
 | [0067](0067-no-camera-motion-blur-in-gameplay.md) | No camera motion blur in gameplay: cinematic views only, by license and by API | Accepted |
 
 ## Template

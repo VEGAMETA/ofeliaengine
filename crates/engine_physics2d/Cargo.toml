@@ -18,3 +18,7 @@ engine_profiler.workspace = true
 [build-dependencies]
 # Compiles the vendored Box2D v3 sources and our shim (MIT OR Apache-2.0).
 cc = { version = "1", features = ["parallel"] }
+
+[[bench]]
+name = "queries2d"
+harness = false
