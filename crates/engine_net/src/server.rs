@@ -228,6 +228,8 @@ pub struct Server<I: InputData, T: Transport> {
     pending: Vec<Entity>,
     chunk_slots: Vec<u32>,
     candidates: Vec<(f32, u32)>,
+    kept: Vec<u32>,
+    measure: BitWriter,
     writer: BitWriter,
     message: Vec<u8>,
     input_bytes: Vec<u8>,
@@ -284,6 +286,8 @@ impl<I: InputData, T: Transport> Server<I, T> {
             pending: Vec::new(),
             chunk_slots: Vec::new(),
             candidates: Vec::new(),
+            kept: Vec::new(),
+            measure: BitWriter::with_limit(1 << 16),
             writer: BitWriter::with_limit(settings.max_snapshot_bytes),
             message: Vec::with_capacity(settings.max_snapshot_bytes + 64),
             input_bytes: vec![0; core::mem::size_of::<I>()],
@@ -642,7 +646,10 @@ impl<I: InputData, T: Transport> Server<I, T> {
         if self.settings.max_rewind > 0.0 {
             self.record_hit_shapes(world);
         }
-        if self.tick.is_multiple_of(self.settings.snapshot_interval.max(1)) {
+        if self
+            .tick
+            .is_multiple_of(self.settings.snapshot_interval.max(1))
+        {
             for index in 0..self.clients.len() {
                 self.write_snapshot(index);
             }
@@ -1032,7 +1039,6 @@ impl<I: InputData, T: Transport> Server<I, T> {
             c.stats.deferred += (self.candidates.len() - k) as u64;
         }
         let chosen = &mut self.candidates[..k];
-        chosen.sort_unstable_by_key(|&(_, s)| s);
 
         let w = &mut self.writer;
         w.reset(limit);
@@ -1053,59 +1059,75 @@ impl<I: InputData, T: Transport> Server<I, T> {
         let mut records_written = 0usize;
         let mut prev: Option<u32> = None;
         let mut full = 0u64;
-        let frames = &self.frames;
-        let frame = &frames[(tick % HISTORY) as usize];
+        let frame_index = (tick % HISTORY) as usize;
+        // Which of the chosen fit, decided in priority order (Fiedler: skip what does not
+        // fit, try the next), each record measured exactly; then they are written in
+        // slot order so the slot gaps stay small.
+        chosen.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+        let gap_bits =
+            1 + crate::bits::golomb_bits(n as u32 / (chosen.len() as u32).max(1), wire::K_GAP)
+                as usize;
+        let mut room = (limit * 8).saturating_sub(w.bits() + 1);
+        let mut skipped = 0u64;
+        self.kept.clear();
+        for &(_, s) in chosen.iter() {
+            let slot = &self.slots[s as usize];
+            let removal = !(slot.alive && relevance(c.view, slot).is_some());
+            self.measure.reset(1 << 16);
+            if encode_record(
+                &self.schema,
+                &self.frames,
+                frame_index,
+                tick,
+                slot,
+                &c.ghosts[s as usize],
+                s,
+                removal,
+                default_base,
+                owner_code,
+                &mut self.measure,
+            )
+            .is_none()
+            {
+                continue;
+            }
+            let cost = gap_bits + self.measure.bits();
+            if cost <= room {
+                room -= cost;
+                self.kept.push(s);
+            } else {
+                skipped += 1;
+            }
+        }
+        self.kept.sort_unstable();
         // Records go into a scratch list until the message id is known.
         c.scratch.clear();
-        let mut skipped = 0u64;
         let records_start_bits = w.bits();
-        for &(_, s) in chosen.iter() {
+        for &s in &self.kept {
             let slot = &self.slots[s as usize];
             let g = &mut c.ghosts[s as usize];
             let mark = w.bits();
             w.bit(true);
             w.golomb(prev.map_or(s, |p| s - p - 1), wire::K_GAP);
             let removal = !(slot.alive && relevance(c.view, slot).is_some());
-            let mut is_full = false;
-            if removal {
-                w.write(wire::KIND_REMOVE, 2);
-                w.write(u32::from(g.sent_gen), 16);
-            } else {
-                let Some((mask, generation, o)) = frame.state(s) else {
-                    w.rewind(mark);
-                    continue;
-                };
-                let base = if g.acked > 0 && g.sent_gen == generation && tick - g.acked < HISTORY {
-                    let b = &frames[(g.acked % HISTORY) as usize];
-                    (b.valid && b.tick == g.acked)
-                        .then(|| b.state(s))
-                        .flatten()
-                        .filter(|&(bm, bg, _)| bm == mask && bg == generation)
-                        .map(|(_, _, bo)| (b, bo))
-                } else {
-                    None
-                };
-                let cur = &frame.words[o as usize..];
-                match base {
-                    Some((b, bo)) => {
-                        w.write(wire::KIND_DELTA, 2);
-                        let default = g.acked == default_base;
-                        w.bit(default);
-                        if !default {
-                            w.golomb(tick - g.acked, 2);
-                        }
-                        encode_delta(&self.schema, mask, cur, &b.words[bo as usize..], w);
-                    }
-                    None => {
-                        w.write(wire::KIND_FULL, 2);
-                        w.write(u32::from(generation), 16);
-                        w.bit(slot.owner == owner_code);
-                        encode_full(&self.schema, mask, cur, w);
-                        is_full = true;
-                    }
-                }
-            }
+            let Some(is_full) = encode_record(
+                &self.schema,
+                &self.frames,
+                frame_index,
+                tick,
+                slot,
+                g,
+                s,
+                removal,
+                default_base,
+                owner_code,
+                w,
+            ) else {
+                w.rewind(mark);
+                continue;
+            };
             if w.bits() + 1 > limit * 8 {
+                // The gap estimate was short (rare): leave it for the next snapshot.
                 w.rewind(mark);
                 skipped += 1;
                 continue;
@@ -1183,6 +1205,62 @@ impl<I: InputData, T: Transport> Server<I, T> {
         }
         c.scratch.clear();
     }
+}
+
+/// Writes one entity record from its kind on: a removal, a delta against the client's
+/// acknowledged state of it, or the whole state. Returns whether it was whole, or `None`
+/// if the entity has no state this tick.
+#[allow(clippy::too_many_arguments)]
+fn encode_record(
+    schema: &NetSchema,
+    frames: &[Frame],
+    frame_index: usize,
+    tick: u32,
+    slot: &Slot,
+    g: &Ghost,
+    s: u32,
+    removal: bool,
+    default_base: u32,
+    owner_code: u16,
+    w: &mut BitWriter,
+) -> Option<bool> {
+    if removal {
+        w.write(wire::KIND_REMOVE, 2);
+        w.write(u32::from(g.sent_gen), 16);
+        return Some(false);
+    }
+    let frame = &frames[frame_index];
+    let (mask, generation, o) = frame.state(s)?;
+    let base = if g.acked > 0 && g.sent_gen == generation && tick - g.acked < HISTORY {
+        let b = &frames[(g.acked % HISTORY) as usize];
+        (b.valid && b.tick == g.acked)
+            .then(|| b.state(s))
+            .flatten()
+            .filter(|&(bm, bg, _)| bm == mask && bg == generation)
+            .map(|(_, _, bo)| (b, bo))
+    } else {
+        None
+    };
+    let cur = &frame.words[o as usize..];
+    Some(match base {
+        Some((b, bo)) => {
+            w.write(wire::KIND_DELTA, 2);
+            let default = g.acked == default_base;
+            w.bit(default);
+            if !default {
+                w.golomb(tick - g.acked, 2);
+            }
+            encode_delta(schema, mask, cur, &b.words[bo as usize..], w);
+            false
+        }
+        None => {
+            w.write(wire::KIND_FULL, 2);
+            w.write(u32::from(generation), 16);
+            w.bit(slot.owner == owner_code);
+            encode_full(schema, mask, cur, w);
+            true
+        }
+    })
 }
 
 fn words_of(schema: &NetSchema, mask: u64) -> usize {

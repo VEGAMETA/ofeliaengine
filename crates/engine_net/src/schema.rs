@@ -631,12 +631,12 @@ impl NetComponent {
 
     /// Writes the interpolation between `a` and `b` at `t` into the component at
     /// `bytes`: floats linearly, quaternions by normalized lerp on the shorter arc,
-    /// everything else from `a` (`b` once `t >= 1`).
+    /// everything else from `a` (`b` once `t >= 1`). `t > 1` extrapolates the floats.
     pub(crate) fn interpolate(&self, a: &[u32], b: &[u32], t: f32, bytes: &mut [u8]) {
         if t <= 0.0 {
             return self.dequantize(a, bytes);
         }
-        if t >= 1.0 {
+        if t == 1.0 {
             return self.dequantize(b, bytes);
         }
         let mut w = 0;
@@ -670,7 +670,8 @@ impl NetComponent {
                     // Discrete values switch at the newer state's tick.
                     let n = c.words();
                     let mut tmp = [0u32; 2];
-                    tmp[..n].copy_from_slice(&a[w..w + n]);
+                    let src = if t >= 1.0 { b } else { a };
+                    tmp[..n].copy_from_slice(&src[w..w + n]);
                     self.dequantize_one(c, &tmp[..n], bytes);
                 }
             }

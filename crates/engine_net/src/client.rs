@@ -113,12 +113,17 @@ pub struct ClientStats {
     pub input_lead: f32,
     /// Current interpolation delay, ticks.
     pub interp_delay: f64,
-    /// Interpolation time fell behind every buffered state of an entity (it froze).
+    /// Frames that showed an entity extrapolated past its newest state.
+    pub extrapolated: u64,
+    /// Frames that held an entity at its newest state (extrapolated as far as allowed).
     pub interp_starved: u64,
 }
 
 const PRED_RING: u32 = 128;
-const INTERP: usize = 4;
+/// States buffered per interpolated entity: covers delays up to about six ticks.
+const INTERP: usize = 8;
+/// Ticks an entity is extrapolated past its newest state before it holds there.
+const MAX_EXTRAPOLATION: f64 = 2.0;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Entry {
@@ -746,8 +751,9 @@ impl<I: InputData, T: Transport> Client<I, T> {
                 .map_or(0.0, |s| s.packet_loss);
             let target = 1.0 + 2.0 * self.lead_dev + if loss > 0.02 { 1.0 } else { 0.0 };
             let error = target - self.lead;
-            if !(-12.0..=6.0).contains(&error) {
-                // Far off (a hitch, a route change): jump, then wait for fresh samples.
+            if !(-12.0..=2.5).contains(&error) {
+                // Inputs arriving too late (just joined, a hitch, a route change), or far
+                // too early: jump, then wait for samples that reflect the jump.
                 self.accum += f64::from(error) * self.dt;
                 self.lead = target;
                 self.lead_cooldown = rtt_ticks.ceil() as u32 + 4;
@@ -761,7 +767,16 @@ impl<I: InputData, T: Transport> Client<I, T> {
 
     fn advance_interp(&mut self, elapsed: f64, local_ticks: f64) {
         let interval = 1.0; // snapshots every tick by default
-        let delay = (interval + 2.0 * self.jitter + 0.25).max(self.settings.min_interp_delay);
+        // One snapshot interval, twice the measured jitter, and under loss one more
+        // interval so a single lost snapshot does not starve the buffer (Source's
+        // `cl_interp_ratio 2`).
+        let loss = self
+            .conn
+            .and_then(|c| self.transport.stats(c))
+            .map_or(0.0, |s| s.packet_loss);
+        let lossy = if loss > 0.01 { interval } else { 0.0 };
+        let delay =
+            (interval + 2.0 * self.jitter + lossy + 0.25).max(self.settings.min_interp_delay);
         self.stats.interp_delay = delay;
         let target = local_ticks + self.offset - delay;
         let error = target - self.interp_time;
@@ -962,13 +977,29 @@ impl<I: InputData, T: Transport> Client<I, T> {
                     (a, b, ((r - ta) / (tb - ta)) as f32)
                 }
                 (Some(a), None) => {
-                    if s.applied_tick == ticks[a] {
-                        continue; // already showing the newest state
+                    // Past the newest state (late or lost snapshots): extrapolate from
+                    // the two newest for up to `MAX_EXTRAPOLATION` ticks, then hold.
+                    let ta = f64::from(ticks[a]);
+                    let previous = ticks
+                        .iter()
+                        .enumerate()
+                        .filter(|&(_, &t)| t < ticks[a])
+                        .max_by_key(|&(_, &t)| t)
+                        .map(|(i, _)| i);
+                    match previous {
+                        Some(p) if r - ta <= MAX_EXTRAPOLATION => {
+                            self.stats.extrapolated += 1;
+                            let tp = f64::from(ticks[p]);
+                            (p, a, ((r - tp) / (ta - tp)) as f32)
+                        }
+                        _ => {
+                            if s.applied_tick == ticks[a] {
+                                continue; // already showing the newest state
+                            }
+                            self.stats.interp_starved += 1;
+                            (a, a, 1.0)
+                        }
                     }
-                    if f64::from(ticks[a]) + 1.0 < r {
-                        self.stats.interp_starved += 1;
-                    }
-                    (a, a, 1.0)
                 }
                 (None, Some(b)) => (b, b, 1.0),
                 (None, None) => continue,
