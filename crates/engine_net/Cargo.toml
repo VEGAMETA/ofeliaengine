@@ -1,0 +1,25 @@
+[package]
+name = "engine_net"
+description = "Replication, client prediction and lag compensation over engine_net_transport: snapshots of reflected components, delta-encoded against acknowledged baselines under per-client budgets (ADR 0074)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Plain-data proofs for replicated components and inputs (already in the tree, ADR 0017).
+bytemuck = { version = "1.25", features = ["derive"] }
+engine_core.workspace = true
+engine_ecs.workspace = true
+engine_net_transport.workspace = true
+engine_profiler.workspace = true
+engine_reflect.workspace = true
+
+[dev-dependencies]
+# The co-op example and its test: characters on Jolt (ADR 0066).
+engine_physics.workspace = true
+engine_physics_jolt.workspace = true

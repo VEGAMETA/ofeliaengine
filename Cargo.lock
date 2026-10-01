@@ -390,6 +390,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_net"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "engine_core",
+ "engine_ecs",
+ "engine_net_transport",
+ "engine_physics",
+ "engine_physics_jolt",
+ "engine_profiler",
+ "engine_reflect",
+]
+
+[[package]]
 name = "engine_net_transport"
 version = "0.0.0"
 dependencies = [

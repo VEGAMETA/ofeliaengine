@@ -637,6 +637,44 @@ impl World {
         true
     }
 
+    /// Pointer to `entity`'s component `id` for writing, valid until the next structural
+    /// change; stamps the component's chunk column as changed, as [`Self::get_mut`] does.
+    pub fn get_raw_mut(&mut self, entity: Entity, id: ComponentId) -> Option<NonNull<u8>> {
+        let loc = self.entities.location(entity)?;
+        let column = self.archetypes[loc.archetype as usize].column_index(id)?;
+        let tick = self.bump_change_tick();
+        let arch = &self.archetypes[loc.archetype as usize];
+        arch.mark_column(loc.chunk as usize, column, tick);
+        NonNull::new(arch.value_ptr(loc.chunk as usize, column, loc.row as usize))
+    }
+
+    /// The bytes of a plain-data column in one chunk of archetype `archetype`, for
+    /// writing by layout (replication applying or rounding state). `mark` stamps the
+    /// column as changed, as a write through a query does; without it the write is
+    /// invisible to [`Changed`](crate::Changed) filters (for writes that keep the value
+    /// the simulation already sees, such as rounding to the network's precision).
+    /// `None` if out of range or the column is not plain data.
+    pub fn pod_column_mut(
+        &mut self,
+        archetype: usize,
+        chunk: usize,
+        column: usize,
+        mark: bool,
+    ) -> Option<&mut [u8]> {
+        let tick = if mark { self.bump_change_tick() } else { 0 };
+        let arch = self.archetypes.get(archetype)?;
+        if chunk >= arch.chunks.len() || !arch.columns.get(column)?.pod {
+            return None;
+        }
+        if mark {
+            arch.mark_column(chunk, column, tick);
+        }
+        let len = arch.chunk_len(chunk) * arch.columns[column].size as usize;
+        // SAFETY: the column holds `chunk_len` initialized plain-data values (any bytes
+        // are valid); `&mut self` makes the borrow exclusive.
+        Some(unsafe { core::slice::from_raw_parts_mut(arch.column_ptr(chunk, column), len) })
+    }
+
     /// Mutable reference to `entity`'s `T` that does **not** stamp the chunk column as
     /// changed: for systems that write only when a value really changes and then call
     /// [`Self::mark_changed`] (the transform propagation does the same internally), so
