@@ -320,7 +320,7 @@ impl<Id: Copy + Eq> RenderExtract<Id> {
     }
 
     /// Places the instances that moved in the last tick at `alpha` between their last
-    /// two transforms ([`crate::Steps::alpha`]). Call it once per render frame, after the
+    /// two transforms ([`crate::FixedStep::alpha`]). Call it once per render frame, after the
     /// frame's ticks and before rendering. Costs one blend per moving instance.
     pub fn interpolate<S: SceneSink<Id = Id>>(&mut self, scene: &mut S, alpha: f32) {
         engine_profiler::zone!("runtime::RenderExtract::interpolate");

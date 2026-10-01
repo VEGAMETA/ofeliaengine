@@ -276,7 +276,7 @@ mod windowed {
                 &mut scene,
                 |world, _input, dt| {
                     spins.for_each(world, |(t, spin)| {
-                        t.rotation *= Quat::from_rotation_y(spin.0 * dt as f32);
+                        t.rotation *= Quat::from_rotation_y(spin.0 * dt);
                     });
                 },
                 |_, input, _alpha| {

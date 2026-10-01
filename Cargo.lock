@@ -472,6 +472,7 @@ dependencies = [
  "bytemuck",
  "engine_core",
  "engine_ecs",
+ "engine_physics",
  "engine_platform",
  "engine_profiler",
  "engine_render",

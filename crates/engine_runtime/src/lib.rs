@@ -1,9 +1,10 @@
 //! The game runtime (ADR 0064): the frame loop that ties the ECS world, the fixed-step
 //! simulation and the renderer together.
 //!
-//! - [`FixedStep`]: the simulation clock. Real time accumulates; the simulation advances
-//!   in fixed ticks (ADR 0019: 64 Hz by default), at most a few per frame, and the
-//!   remainder becomes the interpolation factor of the frame.
+//! - [`FixedStep`] (`engine_physics::ecs`, ADR 0066): the simulation clock. Real time
+//!   accumulates; the simulation advances in fixed ticks (ADR 0019: 64 Hz by default), at
+//!   most a few per frame, and the remainder becomes the interpolation factor of the
+//!   frame.
 //! - [`RenderExtract`]: mirrors the entities with a [`MeshRenderer`] and a
 //!   `GlobalTransform` into a [`GpuScene`](engine_render::gpu_scene::GpuScene) (any
 //!   [`SceneSink`]), with a cost that follows what changed: chunk change detection for
@@ -24,12 +25,16 @@
 //! **Responsiveness.** The camera is not part of the tick: driven by ticks and
 //! interpolated, it would trail input by up to one tick plus the time to the next tick
 //! (31 ms at 64 Hz in the worst case). The tick still consumes the same input (aim,
-//! movement) for the simulation, as sub-tick inputs do in CS2.
+//! movement) for the simulation, as sub-tick inputs do in CS2 (ADR 0019's addendum).
+//!
+//! **Interpolation happens at extraction**, for every renderable and without writing the
+//! simulation's components. `engine_physics::ecs::PhysicsSync::interpolate` (which writes
+//! blended poses into the `Transform` of physics roots) is for loops without this crate:
+//! under [`Runtime`], leave it out, or physics bodies would be blended twice.
 
-mod clock;
 mod extract;
 mod runtime;
 
-pub use clock::{FixedStep, Steps};
+pub use engine_physics::ecs::FixedStep;
 pub use extract::{ExtractStats, MeshRenderer, RenderExtract, SceneSink};
 pub use runtime::{FrameStages, Runtime};

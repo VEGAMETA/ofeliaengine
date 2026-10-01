@@ -305,7 +305,7 @@ fn the_runtime_runs_due_ticks_then_presents_then_interpolates() {
             |w, input, dt| {
                 order.borrow_mut().push(('t', *input));
                 let mut q = engine_ecs::QueryState::<(&mut Transform, &Spin)>::new(w);
-                q.for_each(w, |(t, spin)| t.translation.x += spin.0 * dt as f32);
+                q.for_each(w, |(t, spin)| t.translation.x += spin.0 * dt);
             },
             |_, input, _| {
                 order.borrow_mut().push(('p', *input));
@@ -348,7 +348,7 @@ fn the_runtime_runs_due_ticks_then_presents_then_interpolates() {
 fn per_frame_camera_latency_against_a_tick_camera() {
     for (fps, hz) in [(240.0, 64.0), (144.0, 64.0), (60.0, 64.0), (240.0, 30.0)] {
         let frame_dt = 1.0f64 / fps;
-        let mut clock = FixedStep::new(hz, 8);
+        let mut clock = FixedStep::new(hz);
         // The tick camera: last two ticks' yaw; the input is the target yaw.
         let (mut prev, mut cur) = (0.0f64, 0.0f64);
         let mut events: Vec<f64> = Vec::new();
@@ -369,12 +369,12 @@ fn per_frame_camera_latency_against_a_tick_camera() {
             per_frame.push(t - event);
             pending_tick.push((event, target));
             // Tick camera: ticks consume the latest target, the frame interpolates.
-            let steps = clock.advance(frame_dt);
-            for _ in 0..steps.count {
+            let count = clock.advance(frame_dt as f32);
+            for _ in 0..count {
                 prev = cur;
                 cur = target;
             }
-            let shown = prev + (cur - prev) * f64::from(steps.alpha);
+            let shown = prev + (cur - prev) * f64::from(clock.alpha());
             // Events whose target the shown yaw has fully reached.
             pending_tick.retain(|&(event, target)| {
                 if shown >= target - 1e-9 {

@@ -1,8 +1,8 @@
 //! One frame of the game: input, ticks, presentation, interpolation.
 
-use crate::clock::FixedStep;
 use crate::extract::{RenderExtract, SceneSink};
 use engine_ecs::{TransformPropagation, World};
+use engine_physics::ecs::FixedStep;
 use engine_render::gpu_scene::InstanceId;
 use std::time::Instant;
 
@@ -83,14 +83,17 @@ fn us(start: Instant) -> f64 {
 }
 
 impl<Id: Copy + Eq> Runtime<Id> {
-    /// Runs `world` at `hz` ticks per second (at most 4 per frame), interpolating
-    /// rendered motion between ticks.
+    /// Runs `world` at `hz` ticks per second (at most 4 per frame: a longer hitch slows
+    /// the game down instead of piling up ticks), interpolating rendered motion between
+    /// ticks.
     pub fn new(mut world: World, hz: f64) -> Self {
         let propagation = TransformPropagation::new(&mut world);
+        let mut clock = FixedStep::new(hz);
+        clock.max_steps = 4;
         let extract = RenderExtract::new(&mut world, true);
         Self {
             world,
-            clock: FixedStep::new(hz, 4),
+            clock,
             propagation,
             extract,
         }
@@ -117,21 +120,22 @@ impl<Id: Copy + Eq> Runtime<Id> {
         elapsed: f64,
         input: &I,
         scene: &mut S,
-        mut tick: impl FnMut(&mut World, &I, f64),
+        mut tick: impl FnMut(&mut World, &I, f32),
         mut present: impl FnMut(&mut World, &I, f32),
     ) -> FrameStages
     where
         S: SceneSink<Id = Id>,
     {
         engine_profiler::zone!("runtime::frame");
-        let steps = self.clock.advance(elapsed);
+        let count = self.clock.advance(elapsed as f32);
+        let alpha = self.clock.alpha();
         let mut stages = FrameStages {
-            ticks: steps.count,
-            alpha: steps.alpha,
+            ticks: count,
+            alpha,
             ..FrameStages::default()
         };
-        let dt = self.clock.step();
-        for _ in 0..steps.count {
+        let dt = self.clock.dt();
+        for _ in 0..count {
             let start = Instant::now();
             tick(&mut self.world, input, dt);
             self.world.advance_sim_tick();
@@ -144,10 +148,10 @@ impl<Id: Copy + Eq> Runtime<Id> {
             stages.extract_us += us(start);
         }
         let start = Instant::now();
-        present(&mut self.world, input, steps.alpha);
+        present(&mut self.world, input, alpha);
         stages.present_us = us(start);
         let start = Instant::now();
-        self.extract.interpolate(scene, steps.alpha);
+        self.extract.interpolate(scene, alpha);
         stages.interpolate_us = us(start);
         stages
     }
