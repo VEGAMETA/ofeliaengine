@@ -13,7 +13,7 @@ use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
     Camera, DirectionalLight, ForwardRenderer, ForwardView, Occlusion, ShadowSettings, Temporal,
 };
-use engine_render::gpu_scene::{GpuScene, Instance};
+use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
@@ -111,7 +111,7 @@ fn steady_state_scene_frames_do_not_allocate() {
     };
     let mut ids: Vec<_> = (0..2000)
         .map(|i| {
-            scene.insert(Instance {
+            scene.insert(SceneInstance {
                 mesh,
                 material: palette[i % palette.len()],
                 world_from_object: place(i, 0.0),
@@ -158,7 +158,7 @@ fn steady_state_scene_frames_do_not_allocate() {
         for k in 0..10 {
             let index = (i * 13 + k * 7) % ids.len();
             scene.remove(ids[index]);
-            ids[index] = scene.insert(Instance {
+            ids[index] = scene.insert(SceneInstance {
                 mesh,
                 material: palette[(index + i) % palette.len()],
                 world_from_object: place(index, i as f32),

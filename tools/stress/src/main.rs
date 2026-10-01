@@ -11,11 +11,12 @@
 //!     world transform is recomputed);
 //!   - plus one entity per body and per NPC.
 //! - **Rendering:** every entity as a PBR cube with shadows, at 1920×1080 into HDR, then
-//!   tonemapped, presented with `immediate` (uncapped). One draw per object: there is no
-//!   GPU-driven path yet.
+//!   tonemapped, presented with `immediate` (uncapped). The entities are mirrored into a
+//!   persistent GPU scene by `engine_runtime::RenderExtract` (ADR 0064); `--draw-list`
+//!   builds a draw list from the ECS every frame instead (ADR 0034's path).
 //!
 //! ```text
-//! cargo run --release -p engine_stress -- [frames] [decor] [bodies] [npcs] [--headless]
+//! cargo run --release -p engine_stress -- [frames] [decor] [bodies] [npcs] [--headless] [--draw-list]
 //! ```
 //!
 //! `--headless` runs the simulation parts only (any OS). The report is Markdown on stdout.
@@ -310,7 +311,7 @@ fn report(samples: &[Stages], title: &str, extra: &str) {
         ("Jolt step", |s| s.physics),
         ("physics + script → ECS sync", |s| s.sync),
         ("transform propagation", |s| s.transforms),
-        ("draw list from ECS", |s| s.draw_list),
+        ("draw list / extraction from ECS", |s| s.draw_list),
         ("render graph record + submit (CPU)", |s| s.record),
         ("GPU (all passes)", |s| s.gpu),
         ("whole frame (wall clock)", |s| s.frame),
@@ -343,6 +344,7 @@ fn report(samples: &[Stages], title: &str, extra: &str) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let headless = args.iter().any(|a| a == "--headless");
+    let draw_list = args.iter().any(|a| a == "--draw-list");
     let nums: Vec<usize> = args.iter().filter_map(|a| a.parse().ok()).collect();
     let frames = nums.first().copied().unwrap_or(1500);
     let decor = nums.get(1).copied().unwrap_or(10_000);
@@ -368,7 +370,9 @@ fn main() {
         report(&samples, "simulation only (headless)", &extra);
     } else {
         #[cfg(windows)]
-        windowed::run(sim, frames, &extra);
+        windowed::run(sim, frames, &extra, draw_list);
+        #[cfg(not(windows))]
+        let _ = draw_list;
     }
 }
 
@@ -376,11 +380,12 @@ fn main() {
 mod windowed {
     use super::*;
     use engine_core::math::{Mat4, look_at};
-    use engine_ecs::QueryState;
+    use engine_ecs::{Children, QueryState};
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::forward::{
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
     };
+    use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
     use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
     use engine_render::material::{MaterialDesc, MaterialId, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
@@ -392,9 +397,10 @@ mod windowed {
         AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
         OutputColor, PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
     };
+    use engine_runtime::{MeshRenderer, RenderExtract};
     use std::time::Duration;
 
-    pub(crate) fn run(mut sim: Sim, frames_to_run: usize, extra: &str) {
+    pub(crate) fn run(mut sim: Sim, frames_to_run: usize, extra: &str, draw_list: bool) {
         let mut windows = WindowSystem::start(4096).unwrap();
         let window = windows
             .create_window(&WindowDesc {
@@ -459,6 +465,47 @@ mod windowed {
         let mut graph = RenderGraph::new(&device, in_flight);
         let mut query = QueryState::<(&GlobalTransform, &Look)>::new(&mut sim.world);
         let mut draws: Vec<DrawItem> = Vec::with_capacity(sim.world.len() + 1);
+        let ground_transform = Mat4::from_scale_rotation_translation(
+            Vec3::new(120.0, 0.2, 120.0),
+            Quat::IDENTITY,
+            Vec3::new(0.0, -0.1, 0.0),
+        );
+        // The GPU scene: the ground, then every cube through extraction. A cube's scale
+        // goes into its local transform; a root draws its cube through a child of its own,
+        // so its children keep their placement.
+        let mut scene =
+            GpuScene::new(&device, &bindless, sim.world.len() as u32 + 128, in_flight).unwrap();
+        let mut extract = None;
+        if !draw_list {
+            scene.insert(SceneInstance {
+                mesh,
+                material: ground,
+                world_from_object: ground_transform,
+            });
+            let mut looks = Vec::new();
+            QueryState::<(Entity, &Look, Option<&Children>)>::new(&mut sim.world)
+                .for_each(&mut sim.world, |(e, look, children)| {
+                    looks.push((e, *look, children.is_some()))
+                });
+            for (e, look, root) in looks {
+                let renderer = MeshRenderer::new(mesh, paints[look.paint as usize]);
+                let scale = Vec3::splat(look.scale);
+                if root {
+                    let cube = sim.world.spawn((
+                        Transform::from_scale(scale),
+                        GlobalTransform::IDENTITY,
+                        renderer,
+                    ));
+                    sim.world.set_parent(cube, Some(e)).unwrap();
+                } else {
+                    if let Some(t) = sim.world.get_mut::<Transform>(e) {
+                        t.scale = scale;
+                    }
+                    sim.world.insert(e, renderer);
+                }
+            }
+            extract = Some(RenderExtract::<InstanceId>::new(&mut sim.world, false));
+        }
         let mut samples: Vec<Stages> = Vec::with_capacity(frames_to_run);
         let start = Instant::now();
         let mut total = 0usize;
@@ -503,23 +550,24 @@ mod windowed {
             extent_seen = (extent.width, extent.height);
 
             let dl = Instant::now();
-            draws.clear();
-            draws.push(DrawItem {
-                mesh,
-                material: ground,
-                world_from_object: Mat4::from_scale_rotation_translation(
-                    Vec3::new(120.0, 0.2, 120.0),
-                    Quat::IDENTITY,
-                    Vec3::new(0.0, -0.1, 0.0),
-                ),
-            });
-            query.for_each(&mut sim.world, |(g, look)| {
+            if let Some(extract) = extract.as_mut() {
+                extract.sync(&mut sim.world, &mut scene);
+            } else {
+                draws.clear();
                 draws.push(DrawItem {
                     mesh,
-                    material: paints[look.paint as usize],
-                    world_from_object: Mat4::from(g.0) * Mat4::from_scale(Vec3::splat(look.scale)),
+                    material: ground,
+                    world_from_object: ground_transform,
                 });
-            });
+                query.for_each(&mut sim.world, |(g, look)| {
+                    draws.push(DrawItem {
+                        mesh,
+                        material: paints[look.paint as usize],
+                        world_from_object: Mat4::from(g.0)
+                            * Mat4::from_scale(Vec3::splat(look.scale)),
+                    });
+                });
+            }
             s.draw_list = dl.elapsed().as_secs_f64() * 1e6;
 
             let eye = Vec3::new(55.0 * (t * 0.1).cos(), 28.0, 55.0 * (t * 0.1).sin());
@@ -568,28 +616,47 @@ mod windowed {
                     TextureDesc::new_2d(HDR_FORMAT, extent.width, extent.height),
                 );
                 ring.begin(&frame);
-                renderer.add_passes(
-                    &mut fg,
-                    &mut ring,
-                    &bindless,
-                    &geo,
-                    &mats,
-                    &draws,
-                    &ForwardView {
-                        camera: Camera {
-                            clip_from_world,
-                            position: eye,
-                        },
-                        light,
-                        color: hdr,
-                        depth,
-                        clear: Some([0.02, 0.02, 0.05, 1.0]),
-                        occlusion: None,
-                        temporal: None,
-                        lights: &[],
-                        environment: None,
+                let view = ForwardView {
+                    camera: Camera {
+                        clip_from_world,
+                        position: eye,
                     },
-                );
+                    light,
+                    color: hdr,
+                    depth,
+                    clear: Some([0.02, 0.02, 0.05, 1.0]),
+                    occlusion: None,
+                    temporal: None,
+                    lights: &[],
+                    environment: None,
+                };
+                if extract.is_some() {
+                    let scene_frame = scene
+                        .add_passes(
+                            &mut fg,
+                            &device,
+                            &mut allocator,
+                            &mut ring,
+                            &bindless,
+                            &geo,
+                            &mats,
+                            frame.number,
+                        )
+                        .unwrap();
+                    if let Some(scene_frame) = scene_frame {
+                        renderer.add_scene_passes(
+                            &mut fg,
+                            &mut ring,
+                            &bindless,
+                            &geo,
+                            &mats,
+                            &scene_frame,
+                            &view,
+                        );
+                    }
+                } else {
+                    renderer.add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view);
+                }
                 tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);
                 fg.execute_with_bindless(&mut allocator, Some(&bindless))
                     .unwrap();
@@ -628,10 +695,15 @@ mod windowed {
             .collect();
         let validation = instance.validation_report();
         // The draw list borrows the mesh: release it before the mesh goes.
-        let draw_count = draws.capacity();
+        let draw_count = if draw_list {
+            draws.capacity()
+        } else {
+            scene.len()
+        };
         drop(draws);
         // SAFETY: the device is idle.
         unsafe {
+            scene.destroy(&mut allocator);
             graph.destroy(&mut allocator, Some(&bindless));
             ring.destroy(&mut allocator);
             geometry.destroy(&mut allocator);
@@ -651,8 +723,9 @@ mod windowed {
             std::process::exit(2);
         }
         let extra = format!(
-            "{extra}; {} draws; {}×{} immediate; adapter: {adapter_name}; last GPU passes: {}; validation errors: {}",
+            "{extra}; {} draws ({}); {}×{} immediate; adapter: {adapter_name}; last GPU passes: {}; validation errors: {}",
             draw_count,
+            if draw_list { "draw list" } else { "GPU scene" },
             extent_seen.0,
             extent_seen.1,
             passes.join(", "),

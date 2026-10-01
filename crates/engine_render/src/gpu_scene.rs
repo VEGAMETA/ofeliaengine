@@ -11,12 +11,14 @@
 //!   this frame's instances and last frame's (for motion vectors).
 //! - **Uploads.** Changes are recorded on the CPU ([`GpuScene::set_transform`] ignores a
 //!   transform equal to the current one) and applied once per frame by
-//!   [`GpuScene::add_passes`]: one 16-byte update per touched slot plus 64 bytes of
-//!   instance data go through the [`UploadRing`], and a compute pass (`scene.slang`)
-//!   scatters them, copying the old values into last frame's buffer on the way. A slot
+//!   [`GpuScene::add_passes`]. Usually one 16-byte update per touched slot plus 64 bytes
+//!   of instance data go through the [`UploadRing`], and a compute pass (`scene.slang`)
+//!   scatters them, copying the old values into last frame's buffer on the way; a slot
 //!   that moved last frame and not this one gets a 16-byte update that settles its
-//!   previous transform. A frame where nothing changed uploads nothing and records no
-//!   pass.
+//!   previous transform. When at least half of the slots changed, the whole array is
+//!   copied instead and the two buffers swap roles (this frame's becomes last frame's
+//!   without a copy), which moves no more memory than a draw list does. A frame where
+//!   nothing changed uploads nothing and records no pass.
 //! - **Batches.** Instances that share a mesh and a pipeline state form a batch (a
 //!   blended instance is a batch of its own, as in the draw-list path). Membership is
 //!   kept incrementally: a batch is created or freed only when the set of
@@ -26,21 +28,23 @@
 //! - **Holes.** Removed instances leave holes below the highest slot in use; they are
 //!   parked in a *sink* batch (id 0) that culling may append to but nothing draws.
 //!
-//! Materials and meshes are resolved when a change is uploaded: a material's slot and
-//! kind, the mesh's bounding box. Editing or removing a material re-resolves every
-//! instance once ([`crate::material::MaterialTable`] counts such edits); a removed mesh
-//! draws nothing, as in the draw-list path.
+//! Materials and meshes are resolved when an instance is added or its mesh or material
+//! changes: the material's slot and kind, the mesh's bounding box; moves reuse them.
+//! Editing or removing a material resolves every instance again, once
+//! ([`crate::material::MaterialTable::revision`]); a removed mesh draws nothing, as in
+//! the draw-list path.
 
 use crate::compute::{ComputeShader, Dispatch};
 use crate::cull::transform_box;
-use crate::forward::{BLENDED, InstanceData, mirrored, state};
+use crate::forward::{BLENDED, InstanceData, MIRRORED, mirrored, state};
 use crate::graph::{Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages};
 use crate::material::{MaterialFrame, MaterialId};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::upload::UploadRing;
 use core::cmp::Reverse;
 use core::hash::{BuildHasherDefault, Hasher};
-use engine_core::math::{Mat4, Vec3, Vec4};
+use core::mem::MaybeUninit;
+use engine_core::math::{Affine3A, Mat4, Vec3, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError};
 use std::collections::{BinaryHeap, HashMap};
@@ -56,9 +60,13 @@ pub(crate) const SINK: u32 = 0;
 
 /// Bytes per instance on the GPU.
 const INSTANCE_BYTES: u64 = size_of::<InstanceData>() as u64;
+const UPDATE_BYTES: u64 = size_of::<Update>() as u64;
 
-/// What the scene's buffers are left in after a frame: read (and, by the scatter pass,
-/// written) by compute and vertex shaders.
+/// Fewer slots than this always upload by scatter (a full copy saves nothing there).
+const FULL_MIN_SLOTS: usize = 4096;
+
+/// What the scene's buffers are left in after a frame: read and written by compute and
+/// vertex shaders and copies.
 const SCENE_ACCESS: BufferState = BufferState {
     stages: vk::PipelineStageFlags2::from_raw(
         vk::PipelineStageFlags2::COMPUTE_SHADER.as_raw()
@@ -68,6 +76,7 @@ const SCENE_ACCESS: BufferState = BufferState {
     access: vk::AccessFlags2::from_raw(
         vk::AccessFlags2::SHADER_STORAGE_READ.as_raw()
             | vk::AccessFlags2::SHADER_STORAGE_WRITE.as_raw()
+            | vk::AccessFlags2::TRANSFER_READ.as_raw()
             | vk::AccessFlags2::TRANSFER_WRITE.as_raw(),
     ),
 };
@@ -89,7 +98,7 @@ impl InstanceId {
 
 /// What to draw: a mesh with a material, placed in the world.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct Instance {
+pub struct SceneInstance {
     /// Its mesh in the geometry pool.
     pub mesh: MeshId,
     /// Its material in the material table.
@@ -120,17 +129,23 @@ struct Slot {
     generation: u32,
     alive: bool,
     flags: u8,
-    /// Pipeline state bits (`forward.rs`), subsurface included.
+    /// Pipeline state bits of the material (`forward.rs`, subsurface included), without
+    /// the mirroring bit, which the transform decides.
+    kind_state: u8,
+    /// The full pipeline state bits.
     state: u8,
     mesh: MeshId,
     material: MaterialId,
+    /// The material's slot in the table.
+    material_slot: u32,
     batch: u32,
     /// Upload (frame serial) that last wrote it.
     written: u64,
-    /// World-space box: center, and its corners.
+    /// The mesh's object-space box.
+    local_center: Vec3,
+    local_extents: Vec3,
+    /// The world-space box's center.
     center: Vec3,
-    min: Vec3,
-    max: Vec3,
 }
 
 /// A batch: instances sharing a mesh and a pipeline state.
@@ -150,9 +165,9 @@ pub(crate) struct Batch {
 
 impl Batch {
     /// Where the batch is, for drawing front to back (blended: its instance's center).
-    pub(crate) fn center(&self, slots: &GpuScene) -> Vec3 {
+    fn center(&self, scene: &GpuScene) -> Vec3 {
         if self.state as usize & BLENDED != 0 {
-            return slots.slots[self.blended_slot as usize].center;
+            return scene.slots[self.blended_slot as usize].center;
         }
         let n = f64::from(self.count.max(1));
         Vec3::new(
@@ -176,6 +191,9 @@ impl Hasher for FxHasher {
         for &b in bytes {
             self.write_u64(u64::from(b));
         }
+    }
+    fn write_u8(&mut self, i: u8) {
+        self.write_u64(u64::from(i));
     }
     fn write_u32(&mut self, i: u32) {
         self.write_u64(u64::from(i));
@@ -275,14 +293,84 @@ pub struct SceneStats {
     pub slots: u32,
     /// Live batches.
     pub batches: u32,
-    /// Slots whose instance data was uploaded (added, moved, edited, removed).
+    /// Slots whose instance data changed (added, moved, edited, removed).
     pub uploaded: u32,
     /// Slots whose previous transform was settled (moved last frame, still now).
     pub settled: u32,
     /// Bytes written into the upload ring.
     pub upload_bytes: u64,
+    /// Whether the whole array was copied (most slots changed) instead of scattered.
+    pub full: bool,
     /// Whether the buffers grew this frame.
     pub grew: bool,
+}
+
+/// An empty box (dead slots): ignored by the bounds' minimum and maximum.
+const NO_BOX: [Vec3; 2] = [Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)];
+
+/// World-space boxes by slot as six arrays (minimum and maximum per axis), so the bounds
+/// are six vectorized reductions; dead slots hold [`NO_BOX`].
+#[derive(Debug, Default)]
+struct Boxes {
+    lo: [Vec<f32>; 3],
+    hi: [Vec<f32>; 3],
+}
+
+impl Boxes {
+    fn with_capacity(n: usize) -> Self {
+        Self {
+            lo: core::array::from_fn(|_| Vec::with_capacity(n)),
+            hi: core::array::from_fn(|_| Vec::with_capacity(n)),
+        }
+    }
+
+    fn push(&mut self, b: [Vec3; 2]) {
+        for (k, (lo, hi)) in self.lo.iter_mut().zip(&mut self.hi).enumerate() {
+            lo.push(b[0][k]);
+            hi.push(b[1][k]);
+        }
+    }
+
+    #[inline]
+    fn get(&self, i: usize) -> [Vec3; 2] {
+        [
+            Vec3::new(self.lo[0][i], self.lo[1][i], self.lo[2][i]),
+            Vec3::new(self.hi[0][i], self.hi[1][i], self.hi[2][i]),
+        ]
+    }
+
+    #[inline]
+    fn set(&mut self, i: usize, b: [Vec3; 2]) {
+        for (k, (lo, hi)) in self.lo.iter_mut().zip(&mut self.hi).enumerate() {
+            lo[i] = b[0][k];
+            hi[i] = b[1][k];
+        }
+    }
+
+    /// The union of the first `n` boxes.
+    fn union(&self, n: usize) -> (Vec3, Vec3) {
+        let lo = core::array::from_fn(|k| {
+            reduce(&self.lo[k][..n], f32::MAX, |a, b| if b < a { b } else { a })
+        });
+        let hi = core::array::from_fn(|k| {
+            reduce(&self.hi[k][..n], f32::MIN, |a, b| if b > a { b } else { a })
+        });
+        (Vec3::from_array(lo), Vec3::from_array(hi))
+    }
+}
+
+/// Folds `values` with `f` in 16 independent lanes (vectorized), then the lanes.
+#[inline]
+fn reduce(values: &[f32], init: f32, f: impl Fn(f32, f32) -> f32 + Copy) -> f32 {
+    let mut lanes = [init; 16];
+    let mut chunks = values.chunks_exact(16);
+    for chunk in &mut chunks {
+        for (lane, &v) in lanes.iter_mut().zip(chunk) {
+            *lane = f(*lane, v);
+        }
+    }
+    let tail = chunks.remainder().iter().fold(init, |a, &v| f(a, v));
+    lanes.iter().fold(tail, |a, &v| f(a, v))
 }
 
 /// The persistent GPU scene (see the module documentation).
@@ -290,6 +378,9 @@ pub struct GpuScene {
     slots: Vec<Slot>,
     /// The instance data the GPU holds once the pending changes are uploaded.
     data: Vec<InstanceData>,
+    /// World-space boxes by slot, apart from the slots so the bounds scan reads only
+    /// them.
+    boxes: Boxes,
     /// Free slots below `slots.len()`, lowest first.
     free: BinaryHeap<Reverse<u32>>,
     /// Slots below this are live or holes; culling visits them.
@@ -297,7 +388,7 @@ pub struct GpuScene {
     live: u32,
     /// Slots with pending changes, each once.
     dirty: Vec<u32>,
-    /// Slots moved by the last upload and by this one (to settle in the next).
+    /// Slots moved by the last upload and by this one (settled by the next).
     written_last: Vec<u32>,
     written: Vec<u32>,
     serial: u64,
@@ -311,9 +402,8 @@ pub struct GpuScene {
     bounds_stale: bool,
     /// The material table's edit count the instances were resolved against.
     material_revision: Option<u64>,
-    /// Upload scratch.
+    /// Scatter updates of this upload.
     updates: Vec<Update>,
-    uploads: Vec<InstanceData>,
     buffers: Option<Buffers>,
     /// Slots the first buffers hold.
     initial_capacity: u32,
@@ -352,11 +442,38 @@ fn rows_of(m: &Mat4) -> [[f32; 4]; 3] {
     ]
 }
 
+fn matrix_of(r: &[[f32; 4]; 3]) -> Mat4 {
+    Mat4::from_cols(
+        Vec4::new(r[0][0], r[1][0], r[2][0], 0.0),
+        Vec4::new(r[0][1], r[1][1], r[2][1], 0.0),
+        Vec4::new(r[0][2], r[1][2], r[2][2], 0.0),
+        Vec4::new(r[0][3], r[1][3], r[2][3], 1.0),
+    )
+}
+
 fn same_rows(a: &[[f32; 4]; 3], b: &[[f32; 4]; 3]) -> bool {
     a.iter()
         .flatten()
         .zip(b.iter().flatten())
         .all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+/// Where this upload's instance data goes: straight into the ring (scatter), or into the
+/// CPU array only (full copy afterwards).
+enum Out<'a> {
+    Ring(&'a mut [MaybeUninit<InstanceData>], usize),
+    Full,
+}
+
+/// What a scattered slot's previous transform becomes.
+#[derive(Debug, Clone, Copy)]
+enum Previous {
+    /// Unchanged (holes).
+    Keep,
+    /// The slot's current value (it moved).
+    Copy,
+    /// The new value too (added, teleported).
+    Same,
 }
 
 impl GpuScene {
@@ -370,16 +487,17 @@ impl GpuScene {
     ) -> Result<Self, RhiError> {
         let scatter =
             ComputeShader::<ScatterPush>::new(device, bindless, SCATTER, c"sceneScatter")?;
-        let capacity = capacity.max(1) as usize;
+        let reserve = capacity.max(1) as usize;
         let mut scene = Self {
-            slots: Vec::with_capacity(capacity),
-            data: Vec::with_capacity(capacity),
+            slots: Vec::with_capacity(reserve),
+            data: Vec::with_capacity(reserve),
+            boxes: Boxes::with_capacity(reserve),
             free: BinaryHeap::new(),
             high_water: 0,
             live: 0,
-            dirty: Vec::with_capacity(capacity),
-            written_last: Vec::with_capacity(capacity),
-            written: Vec::with_capacity(capacity),
+            dirty: Vec::with_capacity(reserve),
+            written_last: Vec::with_capacity(reserve),
+            written: Vec::with_capacity(reserve),
             serial: 0,
             batches: Vec::new(),
             batch_keys: HashMap::default(),
@@ -388,10 +506,9 @@ impl GpuScene {
             bounds: (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)),
             bounds_stale: false,
             material_revision: None,
-            updates: Vec::with_capacity(capacity),
-            uploads: Vec::with_capacity(capacity),
+            updates: Vec::with_capacity(reserve),
             buffers: None,
-            initial_capacity: 0,
+            initial_capacity: capacity.max(1),
             retired: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
             state: BufferState::idle(),
@@ -407,7 +524,6 @@ impl GpuScene {
             blended_slot: 0,
             alive: false,
         });
-        scene.initial_capacity = capacity as u32;
         Ok(scene)
     }
 
@@ -449,7 +565,7 @@ impl GpuScene {
 
     /// Adds an instance; it is drawn from the next [`Self::add_passes`] on, without
     /// motion in its first frame. Allocates only when the scene outgrows its capacity.
-    pub fn insert(&mut self, instance: Instance) -> InstanceId {
+    pub fn insert(&mut self, instance: SceneInstance) -> InstanceId {
         let index = match self.free.pop() {
             Some(Reverse(index)) => index,
             None => {
@@ -458,16 +574,19 @@ impl GpuScene {
                     generation: 0,
                     alive: false,
                     flags: 0,
+                    kind_state: 0,
                     state: 0,
                     mesh: instance.mesh,
                     material: instance.material,
+                    material_slot: 0,
                     batch: SINK,
                     written: 0,
+                    local_center: Vec3::ZERO,
+                    local_extents: Vec3::ZERO,
                     center: Vec3::ZERO,
-                    min: Vec3::ZERO,
-                    max: Vec3::ZERO,
                 });
                 self.data.push(HOLE);
+                self.boxes.push(NO_BOX);
                 index
             }
         };
@@ -499,10 +618,28 @@ impl GpuScene {
     /// nothing; otherwise the instance's motion vectors show the move. Returns whether
     /// the transform changed.
     pub fn set_transform(&mut self, id: InstanceId, world_from_object: &Mat4) -> bool {
+        self.set_rows(id, rows_of(world_from_object))
+    }
+
+    /// [`Self::set_transform`] from an affine transform (an ECS world transform), without
+    /// going through a 4 × 4 matrix.
+    pub fn set_affine(&mut self, id: InstanceId, world_from_object: &Affine3A) -> bool {
+        let m = world_from_object.matrix3;
+        let t = world_from_object.translation;
+        self.set_rows(
+            id,
+            [
+                [m.x_axis.x, m.y_axis.x, m.z_axis.x, t.x],
+                [m.x_axis.y, m.y_axis.y, m.z_axis.y, t.y],
+                [m.x_axis.z, m.y_axis.z, m.z_axis.z, t.z],
+            ],
+        )
+    }
+
+    fn set_rows(&mut self, id: InstanceId, rows: [[f32; 4]; 3]) -> bool {
         if self.slot_mut(id).is_none() {
             return false;
         }
-        let rows = rows_of(world_from_object);
         let data = &mut self.data[id.index as usize];
         if same_rows(&data.rows, &rows) {
             return false;
@@ -545,21 +682,15 @@ impl GpuScene {
     }
 
     /// The instance, if `id` is live.
-    pub fn get(&self, id: InstanceId) -> Option<Instance> {
+    pub fn get(&self, id: InstanceId) -> Option<SceneInstance> {
         let slot = self
             .slots
             .get(id.index as usize)
             .filter(|s| s.alive && s.generation == id.generation)?;
-        let r = self.data[id.index as usize].rows;
-        Some(Instance {
+        Some(SceneInstance {
             mesh: slot.mesh,
             material: slot.material,
-            world_from_object: Mat4::from_cols(
-                Vec4::new(r[0][0], r[1][0], r[2][0], 0.0),
-                Vec4::new(r[0][1], r[1][1], r[2][1], 0.0),
-                Vec4::new(r[0][2], r[1][2], r[2][2], 0.0),
-                Vec4::new(r[0][3], r[1][3], r[2][3], 1.0),
-            ),
+            world_from_object: matrix_of(&self.data[id.index as usize].rows),
         })
     }
 
@@ -631,132 +762,152 @@ impl GpuScene {
         id
     }
 
-    /// Whether a box lies on the bounds (so moving it inward or removing it can shrink
+    /// Whether a box lies on the bounds (moving it inward or removing it can shrink
     /// them).
-    fn on_boundary(&self, min: Vec3, max: Vec3) -> bool {
+    fn on_boundary(&self, b: [Vec3; 2]) -> bool {
         let (lo, hi) = self.bounds;
-        min.cmple(lo).any() || max.cmpge(hi).any()
+        b[0].cmple(lo).any() || b[1].cmpge(hi).any()
     }
 
-    /// Applies a slot's pending changes to the CPU state and records its upload.
-    fn apply(&mut self, index: u32, geometry: &GeometryFrame<'_>, materials: &MaterialFrame<'_>) {
-        let slot = self.slots[index as usize];
-        let flags = slot.flags;
-        self.slots[index as usize].flags = 0;
-        let had_box = flags & flag::NEW == 0;
-        // A removed slot is freed only after this upload, so it cannot be live again yet.
-        if flags & flag::REMOVED != 0 {
-            if had_box && self.on_boundary(slot.min, slot.max) {
-                self.bounds_stale = true;
-            }
-            self.leave(index);
-            self.data[index as usize] = HOLE;
-            self.uploads.push(HOLE);
-            self.updates.push(Update {
-                slot: index,
-                current: self.uploads.len() as u32 - 1,
-                previous: KEEP,
-                _pad: 0,
-            });
-            self.mark_written(index, false);
-            return;
-        }
-        self.apply_live(index, flags, had_box, geometry, materials);
-    }
-
-    fn apply_live(
+    /// Applies a slot's pending changes to the CPU state; in scatter mode also writes its
+    /// update and data into the ring.
+    fn apply(
         &mut self,
         index: u32,
-        flags: u8,
-        had_box: bool,
         geometry: &GeometryFrame<'_>,
         materials: &MaterialFrame<'_>,
+        out: &mut Out<'_>,
+        incremental_bounds: bool,
     ) {
-        let slot = self.slots[index as usize];
-        let rows = self.data[index as usize].rows;
-        let world_from_object = Mat4::from_cols(
-            Vec4::new(rows[0][0], rows[1][0], rows[2][0], 0.0),
-            Vec4::new(rows[0][1], rows[1][1], rows[2][1], 0.0),
-            Vec4::new(rows[0][2], rows[1][2], rows[2][2], 0.0),
-            Vec4::new(rows[0][3], rows[1][3], rows[2][3], 1.0),
-        );
-        let (material_slot, kind) = materials.resolve(slot.material);
-        let state_bits = state(kind, mirrored(&world_from_object), true) as u8;
-        // The world box, as the draw-list path computes it.
-        let (local_center, local_extents) = geometry
-            .mesh(slot.mesh)
-            .map_or((Vec3::ZERO, Vec3::ZERO), |m| {
-                ((m.min + m.max) * 0.5, (m.max - m.min) * 0.5)
-            });
-        let (center, extents) = transform_box(&world_from_object, local_center, local_extents);
-        let (min, max) = (center - extents, center + extents);
-        if had_box && self.on_boundary(slot.min, slot.max) {
-            self.bounds_stale = true;
+        let flags = self.slots[index as usize].flags;
+        self.slots[index as usize].flags = 0;
+        // A removed slot is freed only after this upload, so it cannot be live again yet.
+        if flags & flag::REMOVED != 0 {
+            let old = self.boxes.get(index as usize);
+            if incremental_bounds && flags & flag::NEW == 0 && self.on_boundary(old) {
+                self.bounds_stale = true;
+            }
+            self.boxes.set(index as usize, NO_BOX);
+            self.leave(index);
+            self.data[index as usize] = HOLE;
+            self.write(index, HOLE, Previous::Keep, out);
+            self.slots[index as usize].written = self.serial;
+            // Free once its hole is written (nothing inserts during the upload).
+            self.free.push(Reverse(index));
+            return;
         }
-        self.bounds = (self.bounds.0.min(min), self.bounds.1.max(max));
+        let i = index as usize;
+        let world_from_object = matrix_of(&self.data[i].rows);
+        if flags & flag::DRAW != 0 {
+            let slot = self.slots[index as usize];
+            let (material_slot, kind) = materials.resolve(slot.material);
+            let (local_center, local_extents) = geometry
+                .mesh(slot.mesh)
+                .map_or((Vec3::ZERO, Vec3::ZERO), |m| {
+                    ((m.min + m.max) * 0.5, (m.max - m.min) * 0.5)
+                });
+            let s = &mut self.slots[index as usize];
+            s.material_slot = material_slot;
+            s.kind_state = state(kind, false, true) as u8;
+            s.local_center = local_center;
+            s.local_extents = local_extents;
+        }
+        let slot = &self.slots[i];
+        let (kind_state, mesh, batch_id, old_center) =
+            (slot.kind_state, slot.mesh, slot.batch, slot.center);
+        let state_bits = kind_state
+            | if mirrored(&world_from_object) {
+                MIRRORED as u8
+            } else {
+                0
+            };
+        // The world box, as the draw-list path computes it.
+        let (center, extents) =
+            transform_box(&world_from_object, slot.local_center, slot.local_extents);
+        let new_box = [center - extents, center + extents];
+        if incremental_bounds {
+            if flags & flag::NEW == 0 && self.on_boundary(self.boxes.get(i)) {
+                self.bounds_stale = true;
+            }
+            self.bounds = (self.bounds.0.min(new_box[0]), self.bounds.1.max(new_box[1]));
+        }
+        self.boxes.set(i, new_box);
         // Batch membership: kept unless the mesh or the state changed.
-        let current = self.batches[slot.batch as usize];
-        let keep = slot.batch != SINK
-            && current.alive
-            && current.mesh == slot.mesh
-            && current.state == state_bits;
-        if keep {
-            let batch = &mut self.batches[slot.batch as usize];
+        let batch = &mut self.batches[batch_id as usize];
+        if batch_id != SINK && batch.mesh == mesh && batch.state == state_bits {
             for k in 0..3 {
-                batch.sum[k] += f64::from(center[k]) - f64::from(slot.center[k]);
+                batch.sum[k] += f64::from(center[k] - old_center[k]);
             }
         } else {
             self.leave(index);
-            let id = self.batch_for(index, slot.mesh, state_bits);
+            let id = self.batch_for(index, mesh, state_bits);
             let batch = &mut self.batches[id as usize];
             batch.count += 1;
             for k in 0..3 {
                 batch.sum[k] += f64::from(center[k]);
             }
-            self.slots[index as usize].batch = id;
+            self.slots[i].batch = id;
         }
-        let s = &mut self.slots[index as usize];
+        let s = &mut self.slots[i];
         s.state = state_bits;
         s.center = center;
-        s.min = min;
-        s.max = max;
-        let data = InstanceData {
-            rows,
-            material: material_slot,
-            batch: s.batch,
-            _pad: [0; 2],
-        };
-        self.data[index as usize] = data;
-        self.uploads.push(data);
-        let at = self.uploads.len() as u32 - 1;
+        s.written = self.serial;
+        let d = &mut self.data[i];
+        d.material = s.material_slot;
+        d.batch = s.batch;
+        let data = *d;
         let still = flags & (flag::NEW | flag::TELEPORT) != 0;
+        if !still {
+            // Its previous transform differs now: settled by the next upload unless it
+            // moves again.
+            self.written.push(index);
+        }
+        if !matches!(out, Out::Full) {
+            let previous = if still {
+                Previous::Same
+            } else {
+                Previous::Copy
+            };
+            self.write(index, data, previous, out);
+        } else if still {
+            // The full copy writes every slot; only new and teleported slots need their
+            // previous transform set, from the copied array.
+            self.updates.push(Update {
+                slot: index,
+                current: KEEP,
+                previous: index,
+                _pad: 0,
+            });
+        }
+    }
+
+    /// Scatter mode: `data` into the ring for slot `index`, and its update.
+    fn write(&mut self, index: u32, data: InstanceData, previous: Previous, out: &mut Out<'_>) {
+        let Out::Ring(ring, next) = out else {
+            return;
+        };
+        let at = *next as u32;
+        ring[*next].write(data);
+        *next += 1;
         self.updates.push(Update {
             slot: index,
             current: at,
-            previous: if still { at } else { COPY },
+            previous: match previous {
+                Previous::Keep => KEEP,
+                Previous::Copy => COPY,
+                Previous::Same => at,
+            },
             _pad: 0,
         });
-        self.mark_written(index, !still);
     }
 
-    /// Records that this upload writes `index`; `moved`: its previous transform differs
-    /// from the new one, so the next upload settles it unless it moves again.
-    fn mark_written(&mut self, index: u32, moved: bool) {
-        let slot = &mut self.slots[index as usize];
-        slot.written = self.serial;
-        if moved {
-            self.written.push(index);
-        }
-    }
-
-    /// Applies the changes since the last call and declares their upload in `fg`: a
-    /// compute pass that scatters the changed slots into the scene's buffers (none when
-    /// nothing changed), after growing them if the scene outgrew them. Call it once per
-    /// frame, after the frame's changes and before the views draw the scene (with the
-    /// returned [`SceneFrame`]). Returns `None`, uploading nothing, when `ring` is full.
+    /// Applies the changes since the last call and declares their upload in `fg`, after
+    /// growing the scene's buffers if it outgrew them. Call it once per frame, after the
+    /// frame's changes and before the views draw the scene (with the returned
+    /// [`SceneFrame`]). Returns `None`, changing nothing, when `ring` lacks the room.
     ///
     /// Allocates only when the scene grows (or a new batch needs room in its tables).
-    #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn add_passes<'g>(
         &'g mut self,
         fg: &mut FrameGraph<'g>,
@@ -770,11 +921,6 @@ impl GpuScene {
     ) -> Result<Option<SceneFrame<'g>>, RhiError> {
         engine_profiler::zone!("render::GpuScene::add_passes");
         self.collect_retired(allocator, frame_number);
-        self.serial += 1;
-        core::mem::swap(&mut self.written, &mut self.written_last);
-        self.written.clear();
-        self.updates.clear();
-        self.uploads.clear();
         // Material edits: every instance is resolved again (rare: level loads, editing).
         let revision = materials.revision();
         if self.material_revision != Some(revision) {
@@ -785,35 +931,79 @@ impl GpuScene {
                 }
             }
         }
-        let mut uploaded = 0;
-        for k in 0..self.dirty.len() {
-            let index = self.dirty[k];
-            self.apply(index, geometry, materials);
-            uploaded += 1;
+        // Scatter (one update per touched slot) or the whole array, when most slots
+        // changed. Room in the ring first: nothing changes when it is missing.
+        let slot_total = self.slots.len();
+        let touched = self.dirty.len();
+        let full = slot_total >= FULL_MIN_SLOTS && 2 * touched >= slot_total;
+        let needed = if full {
+            slot_total as u64 * INSTANCE_BYTES + touched as u64 * UPDATE_BYTES
+        } else {
+            touched as u64 * INSTANCE_BYTES
+                + (touched + self.written_last.len()) as u64 * UPDATE_BYTES
+        };
+        if needed + 64 > ring.available() {
+            return Ok(None);
         }
+        // The scattered data's room, taken before anything changes.
+        let mut scattered = if !full && touched > 0 {
+            match ring.alloc::<InstanceData>(touched) {
+                Some(room) => Some(room),
+                None => return Ok(None),
+            }
+        } else {
+            None
+        };
+        self.serial += 1;
+        core::mem::swap(&mut self.written, &mut self.written_last);
+        self.written.clear();
+        self.updates.clear();
+        // Bounds: kept incrementally for a few changes, recomputed for many.
+        let incremental_bounds = 8 * touched < slot_total;
+        if !incremental_bounds {
+            self.bounds_stale = true;
+        }
+        let mut data_staged = None;
+        if let Some((slice, staged)) = scattered.take() {
+            let mut out = Out::Ring(slice, 0);
+            for k in 0..touched {
+                let index = self.dirty[k];
+                self.apply(index, geometry, materials, &mut out, incremental_bounds);
+            }
+            data_staged = Some(staged);
+        } else {
+            for k in 0..touched {
+                let index = self.dirty[k];
+                self.apply(
+                    index,
+                    geometry,
+                    materials,
+                    &mut Out::Full,
+                    incremental_bounds,
+                );
+            }
+        }
+        let uploaded = touched as u32;
         // Slots that moved last frame and not now: their previous transform catches up.
+        // (After a full copy the buffers swapped: last frame's current values are this
+        // frame's previous ones, and every slot not moved now holds the same in both.)
         let mut settled = 0;
-        for k in 0..self.written_last.len() {
-            let index = self.written_last[k];
-            let slot = self.slots[index as usize];
-            if slot.alive && slot.written != self.serial {
-                self.updates.push(Update {
-                    slot: index,
-                    current: KEEP,
-                    previous: COPY,
-                    _pad: 0,
-                });
-                settled += 1;
+        if !full {
+            for k in 0..self.written_last.len() {
+                let index = self.written_last[k];
+                let slot = self.slots[index as usize];
+                if slot.alive && slot.written != self.serial {
+                    self.updates.push(Update {
+                        slot: index,
+                        current: KEEP,
+                        previous: COPY,
+                        _pad: 0,
+                    });
+                    settled += 1;
+                }
             }
         }
-        // Removed slots become free now that their holes are written; culling stops at
-        // the highest slot in use.
-        for k in 0..self.dirty.len() {
-            let index = self.dirty[k];
-            if !self.slots[index as usize].alive {
-                self.free.push(Reverse(index));
-            }
-        }
+        // Culling stops at the highest slot in use.
         self.dirty.clear();
         self.high_water = self.slots.len() as u32;
         while self.high_water > 0 && !self.slots[self.high_water as usize - 1].alive {
@@ -821,23 +1011,27 @@ impl GpuScene {
         }
         if self.bounds_stale {
             self.bounds_stale = false;
-            let (mut lo, mut hi) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-            for slot in &self.slots[..self.high_water as usize] {
-                if slot.alive {
-                    lo = lo.min(slot.min);
-                    hi = hi.max(slot.max);
-                }
-            }
-            self.bounds = (lo, hi);
+            self.bounds = self.boxes.union(self.high_water as usize);
         }
+        let full_data = if full {
+            ring.stage(&self.data)
+                .map(|s| (s, self.data.len() as u64 * INSTANCE_BYTES))
+        } else {
+            None
+        };
+        let updates_staged = if self.updates.is_empty() {
+            None
+        } else {
+            ring.stage(&self.updates)
+        };
 
         // The buffers: grown to hold every slot (the holes above the highest live slot
         // too: their hole data may still be in flight).
-        let needed = (self.slots.len() as u32).max(1);
-        let mut grew = None;
+        let needed_slots = (slot_total as u32).max(1);
         let capacity = self.buffers.as_ref().map_or(0, |b| b.capacity);
-        if needed > capacity {
-            let new_capacity = needed
+        let mut grew = None;
+        if needed_slots > capacity {
+            let new_capacity = needed_slots
                 .max(capacity.saturating_mul(2))
                 .max(self.initial_capacity);
             let fresh = Buffers {
@@ -847,9 +1041,14 @@ impl GpuScene {
             };
             grew = self.buffers.replace(fresh);
         }
-        let Some(buffers) = self.buffers.as_ref() else {
+        let Some(buffers) = self.buffers.as_mut() else {
             return Ok(None);
         };
+        if full {
+            // This frame's values go to the buffer that held last frame's previous ones;
+            // last frame's current ones become this frame's previous ones.
+            core::mem::swap(&mut buffers.current, &mut buffers.previous);
+        }
         let size = u64::from(buffers.capacity) * INSTANCE_BYTES;
         let initial = if grew.is_some() || capacity == 0 {
             BufferState::idle()
@@ -887,8 +1086,15 @@ impl GpuScene {
                     },
                 )
             };
-            let old_current = import_old(fg, "scene instances (old)", &old.current);
-            let old_previous = import_old(fg, "scene previous instances (old)", &old.previous);
+            // A full copy rewrites every slot of this frame's buffer: only last frame's
+            // values must carry over, into what is now the previous buffer.
+            let (old_current, old_previous) = if full {
+                (&old.previous, &old.current)
+            } else {
+                (&old.current, &old.previous)
+            };
+            let old_current = import_old(fg, "scene instances (old)", old_current);
+            let old_previous = import_old(fg, "scene previous instances (old)", old_previous);
             fg.add_pass("scene grow")
                 .read(old_current, Access::TransferRead)
                 .read(old_previous, Access::TransferRead)
@@ -920,42 +1126,54 @@ impl GpuScene {
             self.retired.push((frame_number, old));
         }
         self.state = SCENE_ACCESS;
-
         let count = self.updates.len() as u32;
-        let mut push = None;
-        if count > 0 {
-            let Some(updates) = ring.stage(&self.updates) else {
-                return Ok(None);
-            };
-            let data = if self.uploads.is_empty() {
-                0
-            } else {
-                let Some(data) = ring.push(&self.uploads) else {
-                    return Ok(None);
-                };
-                data
-            };
-            push = Some(ScatterPush {
-                instances: current_address,
-                previous: previous_address,
-                updates: updates.address,
-                data,
-                count,
-                _pad: [0; 3],
-            });
-        }
+        let upload_bytes = u64::from(count) * UPDATE_BYTES
+            + full_data.map_or(0, |(_, bytes)| bytes)
+            + data_staged.map_or(0, |_| uploaded as u64 * INSTANCE_BYTES);
         self.stats = SceneStats {
             instances: self.live,
             slots: self.high_water,
             batches: self.live_batches,
             uploaded,
             settled,
-            upload_bytes: u64::from(count) * size_of::<Update>() as u64
-                + self.uploads.len() as u64 * INSTANCE_BYTES,
-            grew: needed > capacity,
+            upload_bytes,
+            full,
+            grew: needed_slots > capacity,
         };
         let this: &'g Self = self;
-        if let Some(push) = push {
+        if let Some((staged, bytes)) = full_data {
+            fg.add_pass("scene upload (full)")
+                .write(current, Access::TransferWrite)
+                .execute(move |ctx| {
+                    // SAFETY: recording outside a rendering scope; the buffer holds every
+                    // slot.
+                    unsafe {
+                        ctx.device.cmd_copy_buffer(
+                            ctx.cmd,
+                            staged.buffer,
+                            ctx.buffer(current),
+                            &[vk::BufferCopy {
+                                src_offset: staged.offset,
+                                dst_offset: 0,
+                                size: bytes,
+                            }],
+                        );
+                    }
+                });
+        }
+        if let Some(updates) = updates_staged {
+            let data = match (full_data, data_staged) {
+                (Some((staged, _)), _) | (None, Some(staged)) => staged.address,
+                (None, None) => 0,
+            };
+            let push = ScatterPush {
+                instances: current_address,
+                previous: previous_address,
+                updates: updates.address,
+                data,
+                count,
+                _pad: [0; 3],
+            };
             fg.add_compute("scene upload", bindless)
                 .read(current, Access::StorageReadWrite(ShaderStages::COMPUTE))
                 .read(previous, Access::StorageReadWrite(ShaderStages::COMPUTE))

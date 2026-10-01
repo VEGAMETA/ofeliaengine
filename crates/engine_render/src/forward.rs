@@ -128,7 +128,7 @@ pub(crate) const SUBSURFACE: usize = 16;
 pub(crate) const BLENDED: usize = 8;
 const MASKED: usize = 4;
 const DOUBLE_SIDED: usize = 2;
-const MIRRORED: usize = 1;
+pub(crate) const MIRRORED: usize = 1;
 /// Bitmasks of states for [`States::draw`]: opaque and masked without subsurface
 /// scattering (0-7), blended (8-15), with subsurface scattering (16-23).
 const PLAIN_STATES: u32 = 0x0000_00FF;

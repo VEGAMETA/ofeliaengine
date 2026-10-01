@@ -10,15 +10,10 @@
 // - settled (moved last frame, not this one): previous = current;
 // - removed: current = data (a hole, parked in the scene's sink batch); previous kept.
 
+// `Instance` in forward.slang, moved as four 16-byte words (vector loads and stores).
 struct Instance
 {
-    float4 row0;
-    float4 row1;
-    float4 row2;
-    uint material;
-    uint batch;
-    uint _pad0;
-    uint _pad1;
+    uint4 words[4];
 };
 
 struct Update

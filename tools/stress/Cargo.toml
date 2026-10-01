@@ -28,3 +28,5 @@ bytemuck = { version = "1.25", features = ["derive"] }
 engine_platform.workspace = true
 engine_render.workspace = true
 engine_rhi.workspace = true
+# ECS to GPU scene extraction (ADR 0064).
+engine_runtime.workspace = true

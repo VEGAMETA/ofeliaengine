@@ -462,6 +462,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_runtime"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "engine_core",
+ "engine_ecs",
+ "engine_platform",
+ "engine_profiler",
+ "engine_render",
+ "engine_rhi",
+]
+
+[[package]]
 name = "engine_scene"
 version = "0.0.0"
 dependencies = [
@@ -503,6 +516,7 @@ dependencies = [
  "engine_profiler",
  "engine_render",
  "engine_rhi",
+ "engine_runtime",
  "engine_script",
 ]
 

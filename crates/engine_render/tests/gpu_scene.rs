@@ -17,7 +17,7 @@ use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion, ShadowSettings,
     Temporal,
 };
-use engine_render::gpu_scene::{GpuScene, Instance, InstanceId, SceneStats};
+use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance, SceneStats};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId, cube};
@@ -539,7 +539,7 @@ fn a_scene_draws_what_the_same_draw_list_draws() {
     let ids: Vec<InstanceId> = items
         .iter()
         .map(|d| {
-            scene.insert(Instance {
+            scene.insert(SceneInstance {
                 mesh: d.mesh,
                 material: d.material,
                 world_from_object: d.world_from_object,
@@ -596,6 +596,115 @@ fn a_scene_draws_what_the_same_draw_list_draws() {
     );
 }
 
+/// When most slots change, the scene copies the whole array and swaps its two buffers
+/// instead of scattering: the frames must still match the draw list, through every
+/// transition (full, scattered, full with new instances, settling, growth).
+#[test]
+fn full_uploads_draw_what_the_draw_list_draws() {
+    const N: usize = 4800;
+    let Some(mut bed) = Bed::new(128) else {
+        return;
+    };
+    let mesh = bed.geometry.add_mesh(&cube().as_data()).unwrap();
+    let palette: Vec<MaterialId> = (0..16)
+        .map(|i| {
+            bed.materials.add(MaterialDesc::solid(
+                [(i % 4) as f32 / 4.0 + 0.2, (i / 4) as f32 / 4.0 + 0.1, 0.5],
+                0.0,
+                0.5,
+            ))
+        })
+        .collect();
+    let place = |i: usize, t: f32| {
+        let (x, z) = ((i % 80) as f32 - 40.0, (i / 80) as f32 - 30.0);
+        Mat4::from_scale_rotation_translation(
+            Vec3::splat(0.35),
+            Quat::from_rotation_y(t + i as f32 * 0.1),
+            Vec3::new(x * 0.5, 0.2 + (t * 3.0 + i as f32).sin() * 0.1, z * 0.5),
+        )
+    };
+    let camera = perspective_camera(Vec3::new(0.0, 14.0, 16.0));
+    let temporal_list = Temporal::new(&bed.device, &mut bed.allocator, 8192).unwrap();
+    let temporal_scene = Temporal::new(&bed.device, &mut bed.allocator, 8192).unwrap();
+    // Starts small: the first upload grows the buffers, during a full copy.
+    let mut scene = bed.scene(64);
+    let mut list: Vec<DrawItem> = Vec::new();
+    let mut ids = Vec::new();
+    let add = |scene: &mut GpuScene,
+               list: &mut Vec<DrawItem>,
+               ids: &mut Vec<InstanceId>,
+               i: usize,
+               t: f32| {
+        let item = DrawItem {
+            mesh,
+            material: palette[i % palette.len()],
+            world_from_object: place(i, t),
+        };
+        list.push(item);
+        ids.push(scene.insert(SceneInstance {
+            mesh,
+            material: item.material,
+            world_from_object: item.world_from_object,
+        }));
+    };
+    for i in 0..N {
+        add(&mut scene, &mut list, &mut ids, i, 0.0);
+    }
+    // (moved instances, new instances, expect a full copy)
+    let steps: [(usize, usize, bool); 6] = [
+        (0, 0, true), // all new: full, growing from 64 slots
+        (N, 0, true), // all moved
+        (N / 10, 0, false),
+        (N, 40, true), // all moved, 40 new: their previous transform is their own
+        (0, 0, false), // nothing moved: everything settles
+        (0, 0, false), // nothing at all
+    ];
+    for (k, &(moved, added, full)) in steps.iter().enumerate() {
+        let t = k as f32 * 0.05;
+        let stride = if moved == 0 { usize::MAX } else { N / moved };
+        let ids_now = ids.len();
+        for i in (0..ids_now).step_by(stride.max(1)).take(moved) {
+            list[i].world_from_object = place(i, t);
+            scene.set_transform(ids[i], &list[i].world_from_object);
+        }
+        for i in ids_now..ids_now + added {
+            add(&mut scene, &mut list, &mut ids, i, t);
+        }
+        let a = bed.frame(Draw::List(&list), camera, None, Some(&temporal_list));
+        let b = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal_scene));
+        let stats = b.scene.unwrap();
+        println!("step {k}: {stats:?}");
+        assert_eq!(stats.full, full, "step {k}");
+        assert_eq!(differing(&a.image, &b.image), 0, "step {k}: image");
+        assert!(a.motion == b.motion, "step {k}: motion vectors");
+        if k == 0 || k == 3 {
+            assert!(stats.grew, "step {k}");
+        }
+        if k == 5 {
+            assert_eq!(stats.upload_bytes, 0, "nothing to do");
+        }
+        if k == 4 {
+            // Still: no motion beyond rounding (the pixel center against the
+            // interpolated previous position).
+            let most = b
+                .motion
+                .iter()
+                .map(|m| m[0].abs().max(m[1].abs()))
+                .fold(0.0, f32::max);
+            assert!(most < 0.01, "settled: {most} px");
+            // The slots moved by the full copy before settle with 16 bytes each.
+            assert_eq!(
+                (stats.settled, stats.upload_bytes),
+                (N as u32, N as u64 * 16)
+            );
+        }
+    }
+    bed.finish(
+        vec![scene],
+        (Vec::new(), vec![temporal_list, temporal_scene]),
+    );
+}
+
 #[test]
 fn slots_are_stable_reused_lowest_first_and_removed_instances_vanish() {
     let Some(mut bed) = Bed::new(64) else {
@@ -610,7 +719,7 @@ fn slots_are_stable_reused_lowest_first_and_removed_instances_vanish() {
         material,
         world_from_object: at(x),
     };
-    let instance = |x: f32| Instance {
+    let instance = |x: f32| SceneInstance {
         mesh,
         material,
         world_from_object: at(x),
@@ -741,7 +850,7 @@ fn motion_vectors_of_moved_still_teleported_new_and_removed_instances() {
     };
     let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
 
-    let a = scene.insert(Instance {
+    let a = scene.insert(SceneInstance {
         mesh,
         material,
         world_from_object: at(-2.0, 1.5),
@@ -771,7 +880,7 @@ fn motion_vectors_of_moved_still_teleported_new_and_removed_instances() {
 
     // A new instance in a reused slot (the removed one's) is still in its first frame,
     // whatever the slot held before; the moving one keeps moving.
-    let b = scene.insert(Instance {
+    let b = scene.insert(SceneInstance {
         mesh,
         material,
         world_from_object: at(-2.0, -1.5),
@@ -782,7 +891,7 @@ fn motion_vectors_of_moved_still_teleported_new_and_removed_instances() {
         near(pixel(&shot.motion, -2.0, -1.5), [0.0; 2]),
         "removed: background"
     );
-    let c = scene.insert(Instance {
+    let c = scene.insert(SceneInstance {
         mesh,
         material,
         world_from_object: at(-1.5, 1.5),
@@ -831,7 +940,7 @@ fn occlusion_culling_keys_off_slots_whatever_the_spawn_order() {
             * look_at(eye, Vec3::ZERO, Vec3::Y),
         position: eye,
     };
-    let wall = Instance {
+    let wall = SceneInstance {
         mesh,
         material: bed.materials.default_material(),
         world_from_object: Mat4::from_scale_rotation_translation(
@@ -840,7 +949,7 @@ fn occlusion_culling_keys_off_slots_whatever_the_spawn_order() {
             Vec3::new(0.0, 0.0, 5.0),
         ),
     };
-    let behind = |i: usize| Instance {
+    let behind = |i: usize| SceneInstance {
         mesh,
         material: palette[i % palette.len()],
         world_from_object: Mat4::from_scale_rotation_translation(
@@ -853,7 +962,7 @@ fn occlusion_culling_keys_off_slots_whatever_the_spawn_order() {
             ),
         ),
     };
-    let front = |i: usize| Instance {
+    let front = |i: usize| SceneInstance {
         mesh,
         material: palette[(i + 3) % palette.len()],
         world_from_object: Mat4::from_scale_rotation_translation(
@@ -862,7 +971,7 @@ fn occlusion_culling_keys_off_slots_whatever_the_spawn_order() {
             Vec3::new((i % 5) as f32 * 0.8 - 1.6, (i / 5) as f32 * 0.8 - 1.2, 8.0),
         ),
     };
-    let all: Vec<Instance> = core::iter::once(wall)
+    let all: Vec<SceneInstance> = core::iter::once(wall)
         .chain((0..BEHIND).map(behind))
         .chain((0..IN_FRONT).map(front))
         .collect();
