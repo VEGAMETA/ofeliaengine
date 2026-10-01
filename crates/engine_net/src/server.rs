@@ -195,7 +195,6 @@ struct ArchInfo {
     words: usize,
     relevance: Option<usize>,
     transform: Option<usize>,
-    lossy: bool,
 }
 
 /// The authoritative side of a networked game, over any [`Transport`] (an `Endpoint` on a
@@ -221,6 +220,8 @@ pub struct Server<I: InputData, T: Transport> {
     inbox: Inbox,
     arch_info: Vec<Option<ArchInfo>>,
     epoch: u64,
+    /// The world's change tick when the last frame was built.
+    built_at: u64,
     lag: LagCompensation,
     hit_query: QueryState<(Entity, &'static HitCapsule, &'static Transform)>,
     // Scratch, kept between ticks so steady state does not allocate.
@@ -280,6 +281,7 @@ impl<I: InputData, T: Transport> Server<I, T> {
             inbox: Inbox::default(),
             arch_info: Vec::new(),
             epoch: world.resync_epoch(),
+            built_at: 0,
             lag: LagCompensation::new(lag_ticks),
             hit_query: QueryState::new(world),
             removed: Vec::new(),
@@ -774,20 +776,11 @@ impl<I: InputData, T: Transport> Server<I, T> {
                 let mut comps = Vec::new();
                 let mut mask = 0u64;
                 let mut words = 0;
-                let mut lossy = false;
                 for (si, &id) in self.comp_ids.iter().enumerate() {
                     if let Some(col) = arch.column_index(id) {
                         comps.push((si, col, words));
                         mask |= 1 << si;
-                        let c = &self.schema.components[si];
-                        words += c.words;
-                        lossy |= c.codecs.iter().any(|k| {
-                            matches!(
-                                k,
-                                crate::schema::Codec::F32Quantized { .. }
-                                    | crate::schema::Codec::Quat { .. }
-                            )
-                        });
+                        words += self.schema.components[si].words;
                     }
                 }
                 ArchInfo {
@@ -797,7 +790,6 @@ impl<I: InputData, T: Transport> Server<I, T> {
                     words,
                     relevance: arch.column_index(self.relevance_id),
                     transform: arch.column_index(self.transform_id),
-                    lossy,
                 }
             });
             self.arch_info.push(info);
@@ -808,13 +800,13 @@ impl<I: InputData, T: Transport> Server<I, T> {
         engine_profiler::zone!("net::server::quantize");
         let tick = self.tick;
         let n = self.slots.len();
-        let (prev_frames, frame) = {
+        let (prev, frame) = {
             let i = (tick % HISTORY) as usize;
             let (a, b) = self.frames.split_at_mut(i);
             let (frame, c) = b.split_first_mut().unwrap_or_else(|| unreachable!());
             // The previous tick's frame: just before `i` (wrapping into `c`).
             let prev = if i > 0 { a.last() } else { c.last() };
-            (prev, frame)
+            (prev.filter(|p| p.valid && p.tick + 1 == tick), frame)
         };
         frame.tick = tick;
         frame.valid = true;
@@ -826,94 +818,13 @@ impl<I: InputData, T: Transport> Server<I, T> {
         frame.generation.resize(n, 0);
         frame.words.clear();
         let schema = &self.schema;
-        for (ai, arch) in world.archetypes().iter().enumerate() {
-            let Some(info) = &self.arch_info[ai] else {
-                continue;
-            };
-            for chunk in 0..arch.chunk_count() {
-                let Some(reps) = arch
-                    .pod_column(chunk, info.rep)
-                    .and_then(|b| bytemuck::try_cast_slice::<u8, Replicated>(b).ok())
-                else {
-                    continue;
-                };
-                for (row, r) in reps.iter().enumerate() {
-                    let Some(slot) = r.id.checked_sub(1) else {
-                        continue;
-                    };
-                    let s = slot as usize;
-                    if s >= n || self.slots[s].entity != arch.chunk_entities(chunk)[row] {
-                        continue;
-                    }
-                    let start = frame.words.len();
-                    frame.offset[s] = start as u32;
-                    frame.mask[s] = info.mask;
-                    frame.generation[s] = self.slots[s].generation;
-                    frame.words.resize(start + info.words, 0);
-                    for &(si, col, w) in &info.comps {
-                        let c = &schema.components[si];
-                        if let Some(bytes) = arch.pod_column(chunk, col) {
-                            c.quantize(
-                                &bytes[row * c.size..(row + 1) * c.size],
-                                &mut frame.words[start + w..start + w + c.words],
-                            );
-                        }
-                    }
-                    let slot = &mut self.slots[s];
-                    slot.has_relevance = info.relevance.is_some();
-                    if let Some(col) = info.relevance
-                        && let Some(bytes) = arch.pod_column(chunk, col)
-                    {
-                        let size = core::mem::size_of::<NetRelevance>();
-                        slot.relevance =
-                            bytemuck::pod_read_unaligned(&bytes[row * size..(row + 1) * size]);
-                        if let Some(tcol) = info.transform
-                            && let Some(tb) = arch.pod_column(chunk, tcol)
-                        {
-                            let size = core::mem::size_of::<Transform>();
-                            let t: Transform =
-                                bytemuck::pod_read_unaligned(&tb[row * size..(row + 1) * size]);
-                            slot.position = t.translation;
-                        }
-                    }
-                }
-            }
-        }
-        // What changed since the previous tick.
-        for s in 0..n {
-            let slot = &mut self.slots[s];
-            if !slot.alive {
-                continue;
-            }
-            let Some((mask, generation, o)) = frame.state(s as u32) else {
-                continue;
-            };
-            let same = prev_frames.is_some_and(|p| {
-                p.valid
-                    && p.tick + 1 == tick
-                    && p.state(s as u32).is_some_and(|(pm, pg, po)| {
-                        let len = words_of(&self.schema, mask);
-                        pm == mask
-                            && pg == generation
-                            && p.words[po as usize..po as usize + len]
-                                == frame.words[o as usize..o as usize + len]
-                    })
-            });
-            if !same {
-                slot.changed_at = tick;
-            }
-        }
-        // Round the simulation's own values to the network precision, so the server goes
-        // on from exactly what clients reconstruct (Fiedler, "State Synchronization").
         for ai in 0..self.arch_info.len() {
             let Some(info) = &self.arch_info[ai] else {
                 continue;
             };
-            if !info.lossy {
-                continue;
-            }
             let chunks = world.archetypes()[ai].chunk_count();
             for chunk in 0..chunks {
+                // The chunk's rows: their slots and where their words go.
                 self.chunk_slots.clear();
                 {
                     let arch = &world.archetypes()[ai];
@@ -923,33 +834,133 @@ impl<I: InputData, T: Transport> Server<I, T> {
                     else {
                         continue;
                     };
-                    self.chunk_slots
-                        .extend(reps.iter().map(|r| r.id.wrapping_sub(1)));
+                    let entities = arch.chunk_entities(chunk);
+                    for (r, &entity) in reps.iter().zip(entities) {
+                        let s = r.id.wrapping_sub(1);
+                        let Some(slot) = self
+                            .slots
+                            .get_mut(s as usize)
+                            .filter(|x| x.entity == entity)
+                        else {
+                            self.chunk_slots.push(NONE);
+                            continue;
+                        };
+                        let start = frame.words.len();
+                        frame.offset[s as usize] = start as u32;
+                        frame.mask[s as usize] = info.mask;
+                        frame.generation[s as usize] = slot.generation;
+                        frame.words.resize(start + info.words, 0);
+                        slot.has_relevance = info.relevance.is_some();
+                        self.chunk_slots.push(s);
+                    }
+                    if let Some(col) = info.relevance
+                        && let Some(bytes) = arch.pod_column(chunk, col)
+                    {
+                        let size = core::mem::size_of::<NetRelevance>();
+                        let tsize = core::mem::size_of::<Transform>();
+                        let transforms = info.transform.and_then(|c| arch.pod_column(chunk, c));
+                        for (row, &s) in self.chunk_slots.iter().enumerate() {
+                            let Some(slot) = self.slots.get_mut(s as usize) else {
+                                continue;
+                            };
+                            slot.relevance =
+                                bytemuck::pod_read_unaligned(&bytes[row * size..(row + 1) * size]);
+                            if let Some(tb) = transforms {
+                                let t: Transform = bytemuck::pod_read_unaligned(
+                                    &tb[row * tsize..(row + 1) * tsize],
+                                );
+                                slot.position = t.translation;
+                            }
+                        }
+                    }
                 }
+                // Quantize each component once; lossy ones are rounded in place, so the
+                // server goes on from exactly what clients reconstruct (Fiedler, "State
+                // Synchronization").
                 for &(si, col, w) in &info.comps {
                     let c = &schema.components[si];
-                    if !c.codecs.iter().any(|k| {
-                        matches!(
-                            k,
-                            crate::schema::Codec::F32Quantized { .. }
-                                | crate::schema::Codec::Quat { .. }
-                        )
-                    }) {
+                    // A chunk column not written since the last frame (ECS change versions,
+                    // ADR 0017; spawns, despawns and moves stamp it too) holds the same
+                    // rows and values: copy their words instead of quantizing again.
+                    let unchanged = prev.is_some()
+                        && world.archetypes()[ai]
+                            .chunk_version(chunk, self.comp_ids[si])
+                            .is_some_and(|v| v <= self.built_at);
+                    if unchanged && let Some(p) = prev {
+                        let bytes = world.archetypes()[ai].pod_column(chunk, col).unwrap_or(&[]);
+                        for (row, &s) in self.chunk_slots.iter().enumerate() {
+                            if s == NONE {
+                                continue;
+                            }
+                            let o = frame.offset[s as usize] as usize + w;
+                            match p.state(s) {
+                                Some((pm, _, po)) if pm == info.mask => {
+                                    let po = po as usize + w;
+                                    frame.words[o..o + c.words]
+                                        .copy_from_slice(&p.words[po..po + c.words]);
+                                }
+                                _ => {
+                                    if let Some(value) = bytes.get(row * c.size..(row + 1) * c.size)
+                                    {
+                                        c.quantize(value, &mut frame.words[o..o + c.words]);
+                                    }
+                                }
+                            }
+                        }
                         continue;
                     }
-                    let Some(bytes) = world.pod_column_mut(ai, chunk, col, false) else {
-                        continue;
-                    };
-                    for (row, &slot) in self.chunk_slots.iter().enumerate() {
-                        if let Some((_, _, o)) = frame.state(slot) {
-                            let o = o as usize + w;
-                            c.dequantize(
-                                &frame.words[o..o + c.words],
-                                &mut bytes[row * c.size..(row + 1) * c.size],
+                    if c.lossy {
+                        let Some(bytes) = world.pod_column_mut(ai, chunk, col, false) else {
+                            continue;
+                        };
+                        for (row, &s) in self.chunk_slots.iter().enumerate() {
+                            if s == NONE {
+                                continue;
+                            }
+                            let o = frame.offset[s as usize] as usize + w;
+                            let words = &mut frame.words[o..o + c.words];
+                            let value = &mut bytes[row * c.size..(row + 1) * c.size];
+                            c.quantize(value, words);
+                            c.dequantize(words, value);
+                        }
+                    } else {
+                        let Some(bytes) = world.archetypes()[ai].pod_column(chunk, col) else {
+                            continue;
+                        };
+                        for (row, &s) in self.chunk_slots.iter().enumerate() {
+                            if s == NONE {
+                                continue;
+                            }
+                            let o = frame.offset[s as usize] as usize + w;
+                            c.quantize(
+                                &bytes[row * c.size..(row + 1) * c.size],
+                                &mut frame.words[o..o + c.words],
                             );
                         }
                     }
                 }
+            }
+        }
+        self.built_at = world.change_tick();
+        // What changed since the previous tick.
+        for (s, slot) in self.slots.iter_mut().enumerate() {
+            if !slot.alive {
+                continue;
+            }
+            let Some((mask, generation, o)) = frame.state(s as u32) else {
+                continue;
+            };
+            let same = prev.is_some_and(|p| {
+                p.state(s as u32).is_some_and(|(pm, pg, po)| {
+                    let len = words_of(schema, mask);
+                    pm == mask
+                        && pg == generation
+                        && p.words[po as usize..po as usize + len]
+                            == frame.words[o as usize..o as usize + len]
+                })
+            });
+            if !same {
+                slot.changed_at = tick;
             }
         }
     }

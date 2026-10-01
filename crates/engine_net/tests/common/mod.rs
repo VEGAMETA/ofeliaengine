@@ -116,8 +116,17 @@ pub fn simulate(
     });
 }
 
+/// A mover that stays put (static scenery: never written, so its chunks stay unchanged).
+#[derive(Debug, Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct Frozen;
+engine_ecs::pod_component!(Frozen);
+
+/// The query of [`move_movers`].
+pub type MoverQuery = QueryState<&'static mut Mover, engine_ecs::Without<Frozen>>;
+
 /// Server-only: movers bounce inside ±50 m.
-pub fn move_movers(world: &mut World, q: &mut QueryState<&'static mut Mover>, dt: f32) {
+pub fn move_movers(world: &mut World, q: &mut MoverQuery, dt: f32) {
     q.for_each(world, |m| {
         m.pos += m.vel * dt;
         for k in 0..3 {
@@ -148,7 +157,7 @@ pub struct ServerSide {
     pub world: World,
     pub server: Server<Input, Endpoint<MemorySocket>>,
     pub pawn_q: QueryState<(&'static NetInput<Input>, &'static mut Pawn)>,
-    pub mover_q: QueryState<&'static mut Mover>,
+    pub mover_q: MoverQuery,
     pub sync_q: QueryState<(&'static Pawn, &'static mut Transform)>,
     pub pawns: Vec<(engine_net::ClientId, Entity)>,
     pub events: Vec<ServerEvent>,
@@ -211,7 +220,7 @@ impl Sim {
             schema.endpoint_config(),
             ServerConfig {
                 private_key: key.clone(),
-                max_clients: 16,
+                max_clients: 64,
                 public_addresses: vec![addr(SERVER)],
             },
             t0,

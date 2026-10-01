@@ -165,3 +165,41 @@ impl Default for NetRelevance {
 /// Plain-data input types ([`NetInput`]).
 pub trait InputData: bytemuck::Pod + Default + PartialEq + Send + Sync + 'static {}
 impl<T: bytemuck::Pod + Default + PartialEq + Send + Sync + 'static> InputData for T {}
+
+/// Encoding internals for the variant measurements of ADR 0074 (`examples/replication_bench.rs`).
+/// Not a stable API.
+#[doc(hidden)]
+pub mod analysis {
+    use crate::NetSchema;
+    use crate::bits::BitWriter;
+
+    /// Words of component `index`.
+    pub fn words(schema: &NetSchema, index: usize) -> usize {
+        schema.components[index].words
+    }
+
+    /// Quantizes component `index` from its bytes.
+    pub fn quantize(schema: &NetSchema, index: usize, bytes: &[u8], out: &mut [u32]) {
+        schema.components[index].quantize(bytes, out);
+    }
+
+    /// Bits of a whole state (mask + every word).
+    pub fn bits_full(schema: &NetSchema, mask: u64, cur: &[u32], w: &mut BitWriter) -> usize {
+        w.reset(1 << 16);
+        crate::server::encode_full(schema, mask, cur, w);
+        w.bits()
+    }
+
+    /// Bits of a delta against `base`.
+    pub fn bits_delta(
+        schema: &NetSchema,
+        mask: u64,
+        cur: &[u32],
+        base: &[u32],
+        w: &mut BitWriter,
+    ) -> usize {
+        w.reset(1 << 16);
+        crate::server::encode_delta(schema, mask, cur, base, w);
+        w.bits()
+    }
+}

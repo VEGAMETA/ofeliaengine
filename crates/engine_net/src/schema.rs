@@ -73,6 +73,9 @@ pub(crate) struct NetComponent {
     /// One per word.
     pub(crate) kinds: Vec<WordKind>,
     pub(crate) words: usize,
+    /// Whether quantizing loses precision (quantized floats, quaternions): the server
+    /// then rounds its own values (see `Server::send`).
+    pub(crate) lossy: bool,
     pub(crate) register: fn(&mut World) -> ComponentId,
 }
 
@@ -242,7 +245,11 @@ impl NetSchema {
                 Codec::Quat { .. } => kinds.extend([WordKind::Int; 4]),
             }
         }
+        let lossy = codecs
+            .iter()
+            .any(|c| matches!(c, Codec::F32Quantized { .. } | Codec::Quat { .. }));
         self.components.push(NetComponent {
+            lossy,
             name: <T as Reflect>::TYPE_INFO.name,
             type_id: TypeId::of::<T>(),
             size: core::mem::size_of::<T>(),
@@ -542,7 +549,7 @@ const QUAT_RANGE: f64 = core::f64::consts::FRAC_1_SQRT_2;
 
 #[inline]
 pub(crate) fn quantize_f32(v: f32, inv: f64) -> u32 {
-    let x = (f64::from(v) * inv).round();
+    let x = (f64::from(v) * inv).round_ties_even(); // one SSE4.1 instruction, deterministic
     // Saturate instead of wrapping (and NaN to 0).
     let x = if x.is_nan() {
         0.0
@@ -717,7 +724,7 @@ fn quantize_quat(q: [f32; 4], bits: u8, out: &mut [u32]) {
     let mut k = 1;
     for (i, v) in n.iter().enumerate() {
         if i != largest {
-            let x = (v * sign * scale).round().clamp(
+            let x = (v * sign * scale).round_ties_even().clamp(
                 -f64::from((1i32 << (bits - 1)) - 1),
                 f64::from((1i32 << (bits - 1)) - 1),
             );
