@@ -191,3 +191,45 @@ impl RenderDefaults {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn motion_vectors_only_when_something_uses_them() {
+        let off = ViewSettings {
+            antialiasing: Antialiasing::Off,
+            ..ViewSettings::default()
+        };
+        assert!(!off.wants_motion());
+        assert!(
+            ViewSettings {
+                previous_color: true,
+                ..off
+            }
+            .wants_motion()
+        );
+        assert!(ViewSettings::default().wants_motion());
+    }
+
+    #[test]
+    fn defaults_by_device_class() {
+        let discrete = RenderDefaults::for_class(DeviceClass::Discrete);
+        assert_eq!(
+            (discrete.antialiasing, discrete.quality),
+            (Antialiasing::TAAU, Quality::Native)
+        );
+        assert_eq!(
+            discrete.ambient_occlusion.map(|a| a.quality),
+            Some(AoQuality::High)
+        );
+        let integrated = RenderDefaults::for_class(DeviceClass::Integrated);
+        assert_eq!(integrated.quality, Quality::Quality);
+        assert_eq!(
+            integrated.ambient_occlusion.map(|a| a.quality),
+            Some(AoQuality::Low)
+        );
+        assert_eq!(integrated.view_settings().quality, Quality::Quality);
+    }
+}

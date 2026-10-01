@@ -853,3 +853,33 @@ impl FrameRenderer {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn render_scale_stays_within_the_output() {
+        assert_eq!(scaled((1920, 1080), 0.5), (960, 540));
+        assert_eq!(scaled((1920, 1080), 2.0), (1920, 1080));
+        assert_eq!(scaled((1920, 1080), 0.0), (96, 54));
+        assert_eq!(scaled((3, 3), 0.1), (1, 1));
+    }
+
+    #[test]
+    fn a_rigid_camera_matches_look_at() {
+        let eye = Vec3::new(3.0, 2.0, 5.0);
+        let target = Vec3::new(-1.0, 0.5, 0.0);
+        let look = engine_core::math::look_at(eye, target, Vec3::Y);
+        let rotation = Quat::from_mat4(&look.inverse());
+        let camera = ViewCamera::from_rigid(rotation, eye, 1.0, 0.1, 100.0);
+        for (a, b) in camera
+            .view_from_world
+            .to_cols_array()
+            .iter()
+            .zip(look.to_cols_array())
+        {
+            assert!((a - b).abs() < 1e-5, "{a} {b}");
+        }
+    }
+}
