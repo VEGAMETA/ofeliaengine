@@ -426,6 +426,8 @@ pub(crate) struct Plan {
 pub(crate) struct PreviousDraw {
     pub rows: [[f32; 4]; 3],
     pub mesh: crate::mesh::MeshId,
+    /// The mesh's shape ([`crate::mesh::MeshInfo::revision`]).
+    pub revision: u32,
     pub material: crate::material::MaterialId,
     pub bounds: [Vec3; 2],
 }
@@ -528,12 +530,13 @@ impl ShadowCache {
     }
 
     /// Compares a draw list with the previous one (by index) and marks the shadows its
-    /// changes touch stale; `local_box` gives a mesh's object-space box (center, half
-    /// extents). `all`: every shadow is stale anyway.
+    /// changes touch stale; `mesh` gives a mesh's object-space box (center, half extents)
+    /// and its shape's revision (a skinned mesh posed differently changes shape). `all`:
+    /// every shadow is stale anyway.
     pub(crate) fn diff_draws(
         &mut self,
         draws: &[crate::forward::DrawItem],
-        local_box: impl Fn(crate::mesh::MeshId) -> (Vec3, Vec3),
+        mesh: impl Fn(crate::mesh::MeshId) -> (Vec3, Vec3, u32),
         all: bool,
     ) {
         let mut changes = core::mem::take(&mut self.changes);
@@ -547,8 +550,10 @@ impl ShadowCache {
                 t.y_axis.to_array(),
                 t.z_axis.to_array(),
             ];
+            let (center, extents, revision) = mesh(draw.mesh);
             let same = self.previous.get(i).is_some_and(|p| {
                 p.mesh == draw.mesh
+                    && p.revision == revision
                     && p.material == draw.material
                     && p.rows
                         .iter()
@@ -559,13 +564,13 @@ impl ShadowCache {
             if same {
                 continue;
             }
-            let (center, extents) = local_box(draw.mesh);
             let (center, extents) =
                 crate::cull::transform_box(&draw.world_from_object, center, extents);
             let bounds = [center - extents, center + extents];
             let entry = PreviousDraw {
                 rows,
                 mesh: draw.mesh,
+                revision,
                 material: draw.material,
                 bounds,
             };

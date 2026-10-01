@@ -692,6 +692,15 @@ impl GpuScene {
         }
     }
 
+    /// Takes an instance's mesh box from the geometry pool again in the next upload: after
+    /// `GeometryPool::set_bounds` on its mesh (a skinned mesh, `crate::skinning`), so the
+    /// scene's bounds and its batch order follow the new box.
+    pub fn refresh_bounds(&mut self, id: InstanceId) {
+        if self.slot_mut(id).is_some() {
+            self.queue(id.index, flag::DRAW);
+        }
+    }
+
     /// Changes an instance's material.
     pub fn set_material(&mut self, id: InstanceId, material: MaterialId) {
         let Some(slot) = self.slot_mut(id) else {

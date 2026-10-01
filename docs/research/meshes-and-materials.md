@@ -106,6 +106,9 @@ Checked 2026-09-27. Sources at the end. No code was copied from any of them.
 | Sponza (Khronos glTF-Sample-Assets) | Cryengine Limited License | local comparisons only (the reference scene of many engines); not committed, no published images |
 | FlightHelmet, Corset, Lantern (Khronos) | CC0 | materials |
 | ABeautifulGame, MetalRoughSpheres, AlphaBlendModeTest, EmissiveStrengthTest (Khronos) | CC-BY 4.0 | materials, conformance |
+| Fox (Khronos; model by PixelMannen, rig and animations by tomkranis, glTF by @AsoboStudio and @scurest) | model CC0; rig, animations and conversion CC-BY 4.0 | skinning and animation (ADR 0068); golden image `animated_fox` (published images carry the attribution) |
+| CesiumMan, RiggedFigure, RiggedSimple (Khronos, Cesium) | CC-BY 4.0 | skinning and animation tests |
+| SimpleSkin (Khronos) | CC0 | skinning and animation tests |
 
 ## Conclusions
 

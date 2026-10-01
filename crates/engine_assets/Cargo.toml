@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 # Mesh simplification for LOD chains (MIT OR Apache-2.0; builds meshoptimizer, MIT); ADR 0053.
 meshopt = "0.6"
+# Skeletons and compressed clips of glTF skins and animations (ADR 0068).
+engine_anim.workspace = true
 engine_core.workspace = true
 engine_ecs.workspace = true
 # Unbuffered reads through an I/O ring for packs (ADR 0056).
