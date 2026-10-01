@@ -583,7 +583,7 @@ impl Environment {
         }
         let sun_color = physical.map(|(a, t)| t.sun_color(&a, view));
         let atmosphere = if physical.is_some() || fog.is_some() {
-            let constants = crate::atmosphere::constants(
+            let mut constants = crate::atmosphere::constants(
                 physical.as_ref().map(|(a, _)| a),
                 fog.as_ref(),
                 view,
@@ -593,6 +593,9 @@ impl Environment {
                 self.intensity.get(),
                 physical.map_or([0; 4], |(_, t)| t.indices()),
             );
+            if let Some((_, t)) = physical {
+                constants.set_sky_view_sun(t.sky_view_sun(constants.sky_view_sun()));
+            }
             let address = ring.push(&[constants])?;
             let textures = physical.map(|(a, t)| {
                 t.add_passes(

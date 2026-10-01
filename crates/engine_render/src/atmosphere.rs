@@ -58,6 +58,9 @@ pub const LUT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// The sky-view table follows the camera's altitude in steps of this many km.
 const SKY_VIEW_ALTITUDE_STEP: f32 = 0.01;
+/// ... and the sun's elevation in steps of this many radians (0.02°, a 13th of the sun's
+/// radius): a sun moving through a day rebuilds it every few seconds, not every frame.
+const SKY_VIEW_SUN_STEP: f32 = 0.000_35;
 /// The radiance cube (image-based light, a costlier rebuild) follows the camera's altitude
 /// in steps of this many km...
 const CUBE_ALTITUDE_STEP: f32 = 0.1;
@@ -336,6 +339,18 @@ pub(crate) struct AtmosphereConstants {
 
 const _: () = assert!(core::mem::size_of::<AtmosphereConstants>() == 464);
 
+impl AtmosphereConstants {
+    /// The cos sun zenith the sky-view table is made for.
+    pub(crate) fn sky_view_sun(&self) -> f32 {
+        self.sun_direction[3]
+    }
+
+    /// Sets [`Self::sky_view_sun`].
+    pub(crate) fn set_sky_view_sun(&mut self, mu: f32) {
+        self.sun_direction[3] = mu;
+    }
+}
+
 /// `Push` in `atmosphere.slang` (24 bytes).
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
@@ -519,6 +534,19 @@ impl AtmosphereTables {
             color,
         )));
         color
+    }
+
+    /// The cos sun zenith the sky-view table is made for this frame: the one it holds while
+    /// the sun's elevation stays within [`SKY_VIEW_SUN_STEP`] of it, else `mu`.
+    pub(crate) fn sky_view_sun(&self, mu: f32) -> f32 {
+        match self.sky_view_of.get() {
+            Some((held, _))
+                if (mu.clamp(-1.0, 1.0).asin() - held.asin()).abs() < SKY_VIEW_SUN_STEP =>
+            {
+                held
+            }
+            _ => mu,
+        }
     }
 
     /// Whether the environment's radiance cube must be redrawn from the sky (the sun or the
