@@ -52,16 +52,16 @@ sponza_atmosphere	forward	12260.6
 sponza_atmosphere	shadow	2286.2
 sponza_atmosphere	shadow cull	65.1
 sponza_atmosphere	tonemap	754.6
-sponza_local_shadows	(frame total)	38816.9
-sponza_local_shadows	(gpu frame)	39157.4
-sponza_local_shadows	bloom downsample	683.0
-sponza_local_shadows	bloom upsample	485.6
-sponza_local_shadows	cull	17.2
-sponza_local_shadows	cull setup	12.0
-sponza_local_shadows	forward	33934.3
+sponza_local_shadows	(frame total)	37681.6
+sponza_local_shadows	(gpu frame)	37704.3
+sponza_local_shadows	bloom downsample	644.6
+sponza_local_shadows	bloom upsample	479.4
+sponza_local_shadows	cull	4.6
+sponza_local_shadows	cull setup	1.7
+sponza_local_shadows	forward	33411.5
 sponza_local_shadows	light tiles	24.1
 sponza_local_shadows	light tiles clear	1.4
-sponza_local_shadows	shadow	2783.5
-sponza_local_shadows	shadow cull	19.6
-sponza_local_shadows	sky	36.6
-sponza_local_shadows	tonemap	771.7
+sponza_local_shadows	shadow	2296.4
+sponza_local_shadows	shadow cull	5.3
+sponza_local_shadows	sky	46.2
+sponza_local_shadows	tonemap	759.8
