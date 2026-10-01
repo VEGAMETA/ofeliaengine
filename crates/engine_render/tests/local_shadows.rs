@@ -757,7 +757,7 @@ fn contact_shadows_darken_what_the_depth_hides_from_the_sun() {
         size: block.size + Vec3::splat(0.15),
     };
     let (mut shadow, mut shadow_dark, mut open, mut open_dark) = (0u32, 0u32, 0u32, 0u32);
-    for i in 0..(WIDTH * HEIGHT) as usize {
+    for (i, &visibility) in mask.iter().enumerate() {
         let (x, y) = (i as u32 % WIDTH, i as u32 / WIDTH);
         let ndc = [
             (x as f32 + 0.5) / WIDTH as f32 * 2.0 - 1.0,
@@ -777,7 +777,7 @@ fn contact_shadows_darken_what_the_depth_hides_from_the_sun() {
             continue;
         }
         let p = origin + direction * t;
-        let dark = mask[i] < 0.5;
+        let dark = visibility < 0.5;
         match block.hit(p, to_sun) {
             // Shadowed within a few dozen pixels on screen.
             Some(h) => {
@@ -789,7 +789,7 @@ fn contact_shadows_darken_what_the_depth_hides_from_the_sun() {
             }
             None if wider.hit(p, to_sun).is_none() => {
                 open += 1;
-                open_dark += u32::from(mask[i] < 0.9);
+                open_dark += u32::from(visibility < 0.9);
             }
             None => {}
         }
