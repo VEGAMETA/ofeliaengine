@@ -7,8 +7,9 @@
 //!   Streamline is (`ENGINE_STREAMLINE_DIR`). Temporal modes accumulate 32 frames with the
 //!   camera still. Reference: the frame rendered at 3840 × 2160 without antialiasing and
 //!   averaged 2 × 2 (in linear light).
-//! - **Ambient occlusion** (no antialiasing): none, Low, Medium, High, Ultra. Reference:
-//!   16 slices × 16 samples per side.
+//! - **Ambient occlusion**: none, Low, Medium, High, Ultra, without antialiasing at the
+//!   output size and with TAAU from 67 % (AO runs at the render size). Reference: 16 slices
+//!   × 16 samples per side, with the same antialiasing.
 //!
 //! `cargo run -p engine_golden --release --example frame_bench [-- --aa | --ao]`
 //! (`ENGINE_ADAPTER=radeon` for the iGPU; `VK_LOADER_LAYERS_DISABLE=~implicit~`)
@@ -86,8 +87,14 @@ fn group(r: &Rendered, names: &[&str]) -> f64 {
         .iter()
         .filter(|(name, _)| names.iter().any(|n| name.starts_with(n)))
         .map(|(_, us)| us)
-        .sum::<f64>()
+        .fold(0.0, |a, b| a + b)
         / 1000.0
+}
+
+/// Every pass, ms (the GPU's busy time; the frame end to end also counts idle gaps when
+/// other work shares the GPU).
+fn total(r: &Rendered) -> f64 {
+    r.pass_us.values().fold(0.0, |a, b| a + b) / 1000.0
 }
 
 fn antialiasing() {
@@ -114,9 +121,9 @@ fn antialiasing() {
         ("DLSS Quality (67 %)", Antialiasing::DLSS, Quality::Quality),
     ];
     println!(
-        "| mode | GPU frame ms | scene passes ms | antialiasing ms | post ms | mean FLIP vs 2×2 SSAA |"
+        "| mode | passes ms | GPU frame ms | scene passes ms | antialiasing ms | post ms | mean FLIP vs 2×2 SSAA |"
     );
-    println!("|---|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|");
     for (label, antialiasing, quality) in modes {
         let shot = Shot {
             antialiasing,
@@ -130,34 +137,42 @@ fn antialiasing() {
         let error = flip(&reference, &image, 1920, 1080, DEFAULT_PPD).mean();
         let aa = group(&r, &["taau", "fsr", "dlss", "exposure value"]);
         let post = group(&r, &["bloom", "tonemap"]);
-        let scene = r.pass_us.values().sum::<f64>() / 1000.0 - aa - post;
+        let scene = total(&r) - aa - post;
         println!(
-            "| {label} | {:.2} | {scene:.2} | {aa:.2} | {post:.2} | {error:.4} |",
+            "| {label} | {:.2} | {:.2} | {scene:.2} | {aa:.2} | {post:.2} | {error:.4} |",
+            total(&r),
             r.frame_us / 1000.0
         );
     }
     println!();
 }
 
-fn ambient_occlusion() {
-    let with = |quality| Shot {
-        ao: Some(AoSettings {
+/// Ambient occlusion presets with `antialiasing` at `quality`: AO runs at the render size.
+fn ambient_occlusion(antialiasing: Antialiasing, quality: Quality, label: &str) {
+    let with = |ao: Option<AoQuality>| Shot {
+        ao: ao.map(|quality| AoSettings {
             quality,
             ..AoSettings::default()
         }),
+        antialiasing,
+        quality,
         ..sponza("ao")
     };
-    let reference = run(&with(AoQuality::Custom {
+    let reference = run(&with(Some(AoQuality::Custom {
         slices: 16,
         steps: 16,
-    }))
+    })))
     .unwrap();
-    println!("Adapter: {}\n", reference.adapter);
+    println!(
+        "Adapter: {}; {label}
+",
+        reference.adapter
+    );
     let reference = linear(&reference);
     println!(
-        "| ambient occlusion | GPU frame ms | AO passes ms | depth prepass ms | mean FLIP vs 16×16 |"
+        "| ambient occlusion | passes ms | GPU frame ms | AO passes ms | depth prepass ms | mean FLIP vs 16×16 |"
     );
-    println!("|---|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|");
     let presets: [(&str, Option<AoQuality>); 5] = [
         ("none", None),
         ("Low (1×2)", Some(AoQuality::Low)),
@@ -165,15 +180,12 @@ fn ambient_occlusion() {
         ("High (3×3)", Some(AoQuality::High)),
         ("Ultra (9×3)", Some(AoQuality::Ultra)),
     ];
-    for (label, quality) in presets {
-        let shot = match quality {
-            Some(q) => with(q),
-            None => sponza("ao"),
-        };
-        let r = run(&shot).unwrap();
+    for (name, ao) in presets {
+        let r = run(&with(ao)).unwrap();
         let error = flip(&reference, &linear(&r), 1920, 1080, DEFAULT_PPD).mean();
         println!(
-            "| {label} | {:.2} | {:.2} | {:.2} | {error:.4} |",
+            "| {name} | {:.2} | {:.2} | {:.2} | {:.2} | {error:.4} |",
+            total(&r),
             r.frame_us / 1000.0,
             group(&r, &["ao"]),
             group(&r, &["depth prepass"]),
@@ -190,6 +202,7 @@ fn main() {
         antialiasing();
     }
     if !only_aa {
-        ambient_occlusion();
+        ambient_occlusion(Antialiasing::Off, Quality::Native, "no antialiasing, 1080p");
+        ambient_occlusion(Antialiasing::TAAU, Quality::Quality, "TAAU from 67 %");
     }
 }
