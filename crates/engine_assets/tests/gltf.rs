@@ -59,7 +59,7 @@ fn quad_json(buffer_uri: Option<&str>, byte_length: usize) -> String {
     format!(
         r#"{{
   "asset": {{"version": "2.0"}},
-  "extensionsUsed": ["KHR_materials_emissive_strength"],
+  "extensionsUsed": ["KHR_materials_emissive_strength", "KHR_materials_volume"],
   "scene": 0,
   "scenes": [{{"nodes": [0]}}],
   "nodes": [
@@ -74,7 +74,10 @@ fn quad_json(buffer_uri: Option<&str>, byte_length: usize) -> String {
     "name": "Brass",
     "pbrMetallicRoughness": {{"baseColorFactor": [0.9, 0.7, 0.3, 1], "metallicFactor": 1, "roughnessFactor": 0.35}},
     "emissiveFactor": [1, 0.5, 0],
-    "extensions": {{"KHR_materials_emissive_strength": {{"emissiveStrength": 4}}}},
+    "extensions": {{
+      "KHR_materials_emissive_strength": {{"emissiveStrength": 4}},
+      "KHR_materials_volume": {{"thicknessFactor": 0.02}}
+    }},
     "alphaMode": "MASK", "alphaCutoff": 0.25, "doubleSided": true
   }}],
   "buffers": [{{{uri}"byteLength": {byte_length}}}],
@@ -109,6 +112,7 @@ fn check_quad(scene: &engine_assets::ImportedScene) {
     assert_eq!(m.emissive, [4.0, 2.0, 0.0], "emissive strength applied");
     assert_eq!(m.alpha, AlphaMode::Mask(0.25f32.to_bits()));
     assert!(m.double_sided);
+    assert_eq!((m.thickness, m.thickness_texture), (0.02, None));
     assert_eq!(scene.roots, [0]);
     assert_eq!(scene.nodes[0].children, [1]);
 }

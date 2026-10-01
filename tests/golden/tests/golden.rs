@@ -110,6 +110,16 @@ fn procedural_scene_with_ambient_occlusion() {
     });
 }
 
+/// The procedural scene with subsurface scattering (ADR 0059): the floor and the
+/// dielectric spheres scatter like wax; the shadows on the floor get soft, reddish edges.
+#[test]
+fn procedural_scene_with_subsurface_scattering() {
+    check(&Shot {
+        subsurface: true,
+        ..procedural("procedural_sss")
+    });
+}
+
 /// Sponza with ambient occlusion: the curtains' folds, the arches, the plants.
 #[test]
 fn sponza_with_ambient_occlusion() {

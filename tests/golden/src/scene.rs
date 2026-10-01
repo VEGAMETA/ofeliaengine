@@ -16,10 +16,11 @@ use engine_render::forward::{
     Spot,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
-use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, TextureRef};
+use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
 use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
 use engine_render::postfx::{Bloom, BloomSettings};
+use engine_render::subsurface::SubsurfaceProfile;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -71,6 +72,9 @@ pub struct Shot {
     pub prepass: bool,
     /// Ambient occlusion (ADR 0058; it turns the depth prepass on).
     pub ao: Option<AoSettings>,
+    /// Subsurface scattering (ADR 0059): in the procedural scene the floor and the
+    /// dielectric spheres scatter light like wax (a profile of a few tenths of a unit).
+    pub subsurface: bool,
 }
 
 impl Shot {
@@ -95,6 +99,7 @@ impl Shot {
             curve: ToneCurve::Gt,
             prepass: false,
             ao: None,
+            subsurface: false,
         }
     }
 }
@@ -208,6 +213,7 @@ fn material_descs(scene: &CookedScene, ids: &[Option<TextureId>]) -> Vec<Materia
                 GltfAlpha::Blend => AlphaMode::Blend,
             },
             double_sided: m.double_sided,
+            subsurface: None,
         })
         .collect()
 }
@@ -246,13 +252,17 @@ pub fn sphere(rings: u32, segments: u32) -> OwnedMeshData {
 
 /// The procedural scene: spheres of graded roughness (top row metal, bottom row
 /// dielectric), a glass cube, a glowing cube, a floor and a wall.
-fn procedural() -> Vec<(OwnedMeshData, MaterialDesc, Mat4)> {
+fn procedural(subsurface: bool) -> Vec<(OwnedMeshData, MaterialDesc, Mat4)> {
     let ball = sphere(24, 48);
     let block = cube();
     let mut items = vec![
         (
             block.clone(),
-            MaterialDesc::solid([0.5, 0.5, 0.5], 0.0, 0.8),
+            MaterialDesc {
+                // Shadow edges show scattering best: a red fringe (red travels furthest).
+                subsurface: subsurface.then(Subsurface::default),
+                ..MaterialDesc::solid([0.5, 0.5, 0.5], 0.0, 0.8)
+            },
             Mat4::from_scale_rotation_translation(
                 Vec3::new(14.0, 0.2, 10.0),
                 Quat::IDENTITY,
@@ -279,7 +289,10 @@ fn procedural() -> Vec<(OwnedMeshData, MaterialDesc, Mat4)> {
         ));
         items.push((
             ball.clone(),
-            MaterialDesc::solid([0.8, 0.1, 0.1], 0.0, roughness),
+            MaterialDesc {
+                subsurface: subsurface.then(Subsurface::default),
+                ..MaterialDesc::solid([0.8, 0.1, 0.1], 0.0, roughness)
+            },
             Mat4::from_translation(Vec3::new(x, 0.5, -1.0)),
         ));
     }
@@ -358,11 +371,11 @@ fn gpu(validation: bool) -> Result<(Instance, Device), Skip> {
     }
 }
 
-fn load(source: &Source) -> Result<Loaded, Skip> {
+fn load(source: &Source, subsurface: bool) -> Result<Loaded, Skip> {
     match source {
         Source::Procedural => Ok(Loaded {
             cooked: None,
-            procedural: procedural(),
+            procedural: procedural(subsurface),
         }),
         Source::Gltf(path) => {
             let path = test_assets().join(path);
@@ -429,7 +442,7 @@ fn median(values: &mut [f64]) -> f64 {
 /// On Vulkan errors and, with validation, on validation errors.
 #[allow(clippy::too_many_lines)]
 pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
-    let loaded = load(&shot.source)?;
+    let loaded = load(&shot.source, shot.subsurface)?;
     let (instance, device) = gpu(options.validation)?;
     let [width, height] = shot.size;
     let d = device.raw();
@@ -448,6 +461,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     renderer
         .set_ambient_occlusion(&device, &bindless, shot.ao)
         .expect("ambient occlusion");
+    if shot.subsurface {
+        renderer
+            .set_subsurface_profiles(
+                &device,
+                &bindless,
+                &[SubsurfaceProfile::from_radius([0.3, 0.12, 0.06])],
+            )
+            .expect("subsurface profiles");
+    }
     let output_format = vk::Format::R8G8B8A8_SRGB;
     let tonemap = Tonemap::new(&device, &bindless, output_format).expect("tonemap");
     let bloom = shot
