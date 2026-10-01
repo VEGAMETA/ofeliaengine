@@ -16,12 +16,20 @@ engine_core.workspace = true
 engine_physics.workspace = true
 engine_profiler.workspace = true
 
+[dev-dependencies]
+# The ECS sync test (ADR 0066).
+engine_ecs.workspace = true
+
 [build-dependencies]
 # Compiles the vendored Jolt Physics and JoltC sources (MIT OR Apache-2.0).
 cc = { version = "1", features = ["parallel"] }
 
 [[bench]]
 name = "physics"
+harness = false
+
+[[bench]]
+name = "queries"
 harness = false
 
 [features]

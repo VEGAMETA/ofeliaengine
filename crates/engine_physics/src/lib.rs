@@ -11,13 +11,32 @@
 //! - **Gravity is first-class**: world gravity, a per-body factor, a per-body vector, or
 //!   the sum of [`GravityField`]s (attractor points, directional volumes), evaluated by the
 //!   backend every sub-step.
-//! - **Batched queries** ([`PhysicsBackend::raycast_batch`]) for AI and sensors.
+//! - **Queries** (ADR 0066): rays and shape casts (closest hit or every hit), overlaps,
+//!   batched rays ([`PhysicsBackend::raycast_batch`]) for AI and sensors. Results go
+//!   into caller-owned buffers, so steady-state queries do not allocate.
+//! - **Characters** ([`character`]): capsule controllers with step-up, slope limit,
+//!   ground detection, moving platforms and pushing, moved by the game before each step.
+//! - **Kinematic bodies** follow a target transform per step
+//!   ([`PhysicsBackend::move_kinematic`]).
+//! - **Rollback** ([`PhysicsSnapshot`]): the simulation state saved into and restored
+//!   from a reusable buffer, with a hash of its bytes.
 //! - **Determinism**: same binary, same API call order, same results;
 //!   [`PhysicsBackend::state_hash`] checks it.
+//! - **ECS** ([`ecs`]): body and character components, a fixed-step clock and transform
+//!   write-back with interpolation.
 
 use engine_core::math::{Quat, Vec3};
 
+pub mod character;
+#[cfg(feature = "ecs")]
+pub mod ecs;
 pub mod scenes;
+mod snapshot;
+
+pub use character::{
+    CharacterContact, CharacterDesc, CharacterId, CharacterMotor, CharacterState, GroundState,
+};
+pub use snapshot::PhysicsSnapshot;
 
 /// A rigid body. Opaque, backend-defined.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -342,6 +361,8 @@ pub struct QueryFilter {
     pub layers: u64,
     /// Include sensors.
     pub sensors: bool,
+    /// A body the query skips, typically the one casting (or a character's proxy body).
+    pub ignore: Option<BodyId>,
 }
 
 impl Default for QueryFilter {
@@ -349,8 +370,71 @@ impl Default for QueryFilter {
         Self {
             layers: u64::MAX,
             sensors: false,
+            ignore: None,
         }
     }
+}
+
+impl QueryFilter {
+    /// Only the layers whose bits are set in `mask`, no sensors.
+    pub fn layers(mask: u64) -> Self {
+        Self {
+            layers: mask,
+            ..Self::default()
+        }
+    }
+
+    /// This filter, also seeing sensors.
+    pub fn with_sensors(self) -> Self {
+        Self {
+            sensors: true,
+            ..self
+        }
+    }
+
+    /// This filter, skipping `body`.
+    pub fn ignoring(self, body: BodyId) -> Self {
+        Self {
+            ignore: Some(body),
+            ..self
+        }
+    }
+}
+
+/// A shape swept through the world: `shape` at `position`/`rotation`, moved by
+/// `direction` (whose length is the range, as for [`Ray`]).
+///
+/// Any shape created with [`PhysicsBackend::create_shape`] except triangle meshes can be
+/// cast: spheres, capsules, boxes, cylinders and convex hulls. Create the shape once and
+/// cast it every frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeCast {
+    /// The shape.
+    pub shape: ShapeId,
+    /// Start position of the shape's origin.
+    pub position: Vec3,
+    /// Orientation (constant along the sweep).
+    pub rotation: Quat,
+    /// Direction × length.
+    pub direction: Vec3,
+}
+
+/// A hit of a shape cast.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShapeHit {
+    /// The body hit.
+    pub body: BodyId,
+    /// Fraction of the sweep (`0..=1`) at first contact; 0 when the shape starts
+    /// overlapping the body.
+    pub fraction: f32,
+    /// Contact point on the hit body (world space).
+    pub point: Vec3,
+    /// Surface normal of the hit body at the contact, pointing toward the cast shape.
+    pub normal: Vec3,
+    /// How deep the shape started inside the body (0 unless `fraction` is 0).
+    pub penetration: f32,
+    /// The body's user data.
+    pub user_data: u64,
 }
 
 /// What happened between two bodies during a step.
@@ -453,6 +537,9 @@ pub enum PhysicsError {
     InvalidHandle,
     /// The step could not complete (too many pairs or contacts for the settings).
     StepFailed(String),
+    /// A snapshot does not fit this world: other bodies, constraints or characters than
+    /// when it was saved, another backend, or damaged bytes.
+    SnapshotMismatch(&'static str),
 }
 
 impl core::fmt::Display for PhysicsError {
@@ -462,6 +549,7 @@ impl core::fmt::Display for PhysicsError {
             Self::InvalidShape(why) => write!(f, "invalid shape: {why}"),
             Self::InvalidHandle => write!(f, "invalid physics handle"),
             Self::StepFailed(why) => write!(f, "physics step failed: {why}"),
+            Self::SnapshotMismatch(why) => write!(f, "snapshot does not fit the world: {why}"),
         }
     }
 }
@@ -537,8 +625,81 @@ pub trait PhysicsBackend {
     /// Bodies whose shapes overlap a sphere, appended to `out`, sorted by id.
     fn overlap_sphere(&self, center: Vec3, radius: f32, filter: QueryFilter, out: &mut Vec<BodyId>);
 
+    /// Every hit along `ray` (at most one per body), appended to `out` sorted by
+    /// fraction, then body.
+    fn raycast_all(&self, ray: &Ray, filter: QueryFilter, out: &mut Vec<RayHit>);
+    /// The first hit of a swept shape: the smallest fraction; among bodies the shape
+    /// starts inside, the deepest.
+    fn cast_shape(&self, cast: &ShapeCast, filter: QueryFilter) -> Option<ShapeHit>;
+    /// Every hit of a swept shape (at most one per body), appended to `out` sorted by
+    /// fraction, then body.
+    fn cast_shape_all(&self, cast: &ShapeCast, filter: QueryFilter, out: &mut Vec<ShapeHit>);
+    /// The first hit of every cast (`out.len() == casts.len()`).
+    fn cast_shape_batch(
+        &self,
+        casts: &[ShapeCast],
+        filter: QueryFilter,
+        out: &mut [Option<ShapeHit>],
+    ) {
+        for (cast, slot) in casts.iter().zip(out) {
+            *slot = self.cast_shape(cast, filter);
+        }
+    }
+    /// Bodies overlapping `shape` placed at `position`/`rotation`, appended to `out`,
+    /// sorted by id.
+    fn overlap_shape(
+        &self,
+        shape: ShapeId,
+        position: Vec3,
+        rotation: Quat,
+        filter: QueryFilter,
+        out: &mut Vec<BodyId>,
+    );
+
+    /// Moves a kinematic body so that it reaches `position`/`rotation` at the end of the
+    /// next step of `dt` seconds: its velocity is set for that, so it pushes dynamic
+    /// bodies and carries characters standing on it (a teleport would not). Call it
+    /// before every step the body should move; without a call it keeps its velocity.
+    fn move_kinematic(&mut self, body: BodyId, position: Vec3, rotation: Quat, dt: f32);
+
+    /// Creates a character controller (see [`character`]).
+    fn create_character(&mut self, desc: &CharacterDesc) -> Result<CharacterId, PhysicsError>;
+    /// Removes a character (and its proxy body).
+    fn destroy_character(&mut self, character: CharacterId);
+    /// Moves a character with `velocity` (m/s, world space, including gravity and jumps;
+    /// see [`CharacterMotor`]) for `dt` seconds: it slides along walls, steps up stairs,
+    /// stays on the ground walking down slopes and steps, does not walk up slopes steeper
+    /// than its limit, and pushes dynamic bodies. Call it before [`PhysicsBackend::step`]
+    /// with the same `dt`. Returns the new state, or `None` for an unknown character.
+    fn move_character(
+        &mut self,
+        character: CharacterId,
+        velocity: Vec3,
+        dt: f32,
+    ) -> Option<CharacterState>;
+    /// A character's current state.
+    fn character(&self, character: CharacterId) -> Option<CharacterState>;
+    /// Teleports a character and finds its new contacts.
+    fn set_character_transform(&mut self, character: CharacterId, position: Vec3, rotation: Quat);
+    /// What a character touched during its last move, appended to `out`.
+    fn character_contacts(&self, character: CharacterId, out: &mut Vec<CharacterContact>);
+
+    /// Saves everything a step changes (body positions, velocities, sleep state, cached
+    /// contacts, constraint state, characters) into `out`, reusing its memory: once its
+    /// buffer has grown, saving does not allocate on the Rust side.
+    ///
+    /// Not saved (as in Jolt's own state recorder): which bodies, shapes, constraints and
+    /// characters exist, and settings the game changes (materials, gravity modes and
+    /// fields, layers). A snapshot restores into the same world with the same objects.
+    fn save_state(&self, out: &mut PhysicsSnapshot) -> Result<(), PhysicsError>;
+    /// Restores a snapshot saved from this world. Stepping afterwards with the same calls
+    /// gives bit-identical results to the first time (same binary). Contact events of
+    /// the last step are cleared.
+    fn restore_state(&mut self, snapshot: &PhysicsSnapshot) -> Result<(), PhysicsError>;
+
     /// A hash of every body's position, orientation and velocities (bit-exact), in body
-    /// id order: equal hashes after the same steps mean a deterministic simulation.
+    /// id order, and of every character's position, orientation and velocity: equal
+    /// hashes after the same steps mean a deterministic simulation.
     fn state_hash(&self) -> u64;
 }
 

@@ -366,7 +366,10 @@ dependencies = [
 name = "engine_physics"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "engine_core",
+ "engine_ecs",
+ "engine_profiler",
 ]
 
 [[package]]
@@ -384,6 +387,7 @@ version = "0.0.0"
 dependencies = [
  "cc",
  "engine_core",
+ "engine_ecs",
  "engine_physics",
  "engine_profiler",
 ]
