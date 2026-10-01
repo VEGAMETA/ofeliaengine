@@ -18,8 +18,9 @@
 // - `skyViewLut` (192 × 108): the sky seen from the camera's altitude by zenith angle
 //   (finer near the horizon) and azimuth from the sun; the ground reflects with its albedo.
 // - `aerialPerspective` (32 × 32 × 32): light scattered towards the camera and
-//   transmittance along each froxel column, every frame; one thread per column marches its
-//   ray through the 32 slices (Hillaire's version marches each froxel from the camera).
+//   transmittance along each froxel column, every frame: one thread per froxel integrates
+//   its slice's segment, and a parallel scan sums each column front to back (Hillaire's
+//   version marches each froxel's whole ray from the camera).
 // - `atmosphereCube`: the sky into the environment's radiance cube, for image-based light.
 // - `compositeFragment`: one full-screen pass after the opaque surfaces: the sky where
 //   nothing was drawn, aerial perspective and height fog over the rest (premultiplied:
@@ -436,17 +437,24 @@ void atmosphereCube(uint3 id : SV_DispatchThreadID)
     g_cube_faces[push.target][id] = float4(sky_luminance(a, d) * a.sun_illuminance.rgb, 1.0);
 }
 
-// Aerial perspective: one thread per froxel column; its ray from the camera through the
-// column's center, marched slice by slice (AERIAL_STEPS each), writing each slice's
-// in-scattered light (per unit sun illuminance) and opacity 1 − mean transmittance.
+groupshared float3 g_light[64];
+groupshared float3 g_through[64];
+
+// Aerial perspective: one thread per froxel, two columns of 32 slices per workgroup. Each
+// thread integrates its own slice's segment of the column's ray (AERIAL_STEPS steps):
+// in-scattered light L and transmittance T; then the column is summed front to back by a
+// parallel scan (Hillis-Steele) of (L, T) under "a then b" = (La + Ta Lb, Ta Tb). Each
+// froxel holds the light (per unit sun illuminance) from the camera to its slice's depth
+// and the opacity 1 − mean transmittance.
 [shader("compute")]
-[numthreads(8, 8, 1)]
-void aerialPerspective(uint3 id : SV_DispatchThreadID)
+[numthreads(32, 2, 1)]
+void aerialPerspective(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThreadID)
 {
-    if (id.x >= uint(AERIAL_SLICES) || id.y >= uint(AERIAL_SLICES))
-        return;
     AtmosphereFrame* a = push.frame;
-    float2 ndc = (float2(id.xy) + 0.5) / AERIAL_SLICES * 2.0 - 1.0;
+    uint slice = local.x;
+    uint lane = local.y * 32 + slice;
+    uint2 column = uint2(id.y % uint(AERIAL_SLICES), id.y / uint(AERIAL_SLICES));
+    float2 ndc = (float2(column) + 0.5) / AERIAL_SLICES * 2.0 - 1.0;
     float4 near = mul(a.aerial_world_from_clip, float4(ndc, 0.0, 1.0));
     float4 mid = mul(a.aerial_world_from_clip, float4(ndc, 0.5, 1.0));
     float3 d = normalize(mid.xyz / mid.w - near.xyz / near.w);
@@ -456,34 +464,47 @@ void aerialPerspective(uint3 id : SV_DispatchThreadID)
     float mie_value = mie_phase(a.mie_extinction.w, c);
     float rayleigh_value = rayleigh_phase(c);
 
-    float3 luminance = 0.0;
-    float3 throughput = 1.0;
-    float t = 0.0;
-    for (uint slice = 0; slice < uint(AERIAL_SLICES); slice++)
+    // This slice's segment: from the previous slice's depth to its own.
+    float w0 = float(slice) - 0.5;
+    float w1 = float(slice) + 0.5;
+    float start = slice == 0 ? 0.0 : w0 * w0 / AERIAL_SLICES * AERIAL_KM_PER_SLICE;
+    float end = w1 * w1 / AERIAL_SLICES * AERIAL_KM_PER_SLICE;
+    float dt = (end - start) / float(AERIAL_STEPS);
+    float3 light = 0.0;
+    float3 through = 1.0;
+    for (uint k = 0; k < AERIAL_STEPS; k++)
     {
-        float w = (float(slice) + 0.5) / AERIAL_SLICES;
-        float end = w * w * AERIAL_SLICES * AERIAL_KM_PER_SLICE;
-        float dt = (end - t) / float(AERIAL_STEPS);
-        for (uint k = 0; k < AERIAL_STEPS; k++)
-        {
-            float3 p = o + (t + (float(k) + 0.5) * dt) * d;
-            // Below the ground (a camera under the world's origin), the air at the ground.
-            float radius = max(length(p), a.planet.x + PLANET_OFFSET);
-            float3 up = normalize(p);
-            p = up * radius;
-            Medium m = medium(a, p);
-            float3 step_transmittance = exp(-m.extinction * dt);
-            float mu_sun = dot(sun, up);
-            float3 to_sun = transmittance_to_top(a, radius, mu_sun);
-            float shadow = ray_sphere(p, sun, a.planet.x + PLANET_OFFSET) >= 0.0 ? 0.0 : 1.0;
-            float3 ms = multiple_scattering(a, radius, mu_sun) * a.planet.z;
-            float3 source = shadow * to_sun * (m.mie * mie_value + m.rayleigh * rayleigh_value) + ms * m.scattering;
-            luminance += throughput * (source - source * step_transmittance) / max(m.extinction, 1e-8);
-            throughput *= step_transmittance;
-        }
-        t = end;
-        g_volume_images[push.target][uint3(id.xy, slice)] = float4(luminance, 1.0 - dot(throughput, 1.0 / 3.0));
+        float3 p = o + (start + (float(k) + 0.5) * dt) * d;
+        // Below the ground (a camera under the world's origin), the air at the ground.
+        float radius = max(length(p), a.planet.x + PLANET_OFFSET);
+        float3 up = normalize(p);
+        p = up * radius;
+        Medium m = medium(a, p);
+        float3 step_transmittance = exp(-m.extinction * dt);
+        float mu_sun = dot(sun, up);
+        float3 to_sun = transmittance_to_top(a, radius, mu_sun);
+        float shadow = ray_sphere(p, sun, a.planet.x + PLANET_OFFSET) >= 0.0 ? 0.0 : 1.0;
+        float3 ms = multiple_scattering(a, radius, mu_sun) * a.planet.z;
+        float3 source = shadow * to_sun * (m.mie * mie_value + m.rayleigh * rayleigh_value) + ms * m.scattering;
+        light += through * (source - source * step_transmittance) / max(m.extinction, 1e-8);
+        through *= step_transmittance;
     }
+    // Front to back along the column: each slice takes the segments before it.
+    for (uint stride = 1; stride < uint(AERIAL_SLICES); stride <<= 1)
+    {
+        g_light[lane] = light;
+        g_through[lane] = through;
+        GroupMemoryBarrierWithGroupSync();
+        if (slice >= stride)
+        {
+            float3 before_light = g_light[lane - stride];
+            float3 before_through = g_through[lane - stride];
+            light = before_light + before_through * light;
+            through = before_through * through;
+        }
+        GroupMemoryBarrierWithGroupSync();
+    }
+    g_volume_images[push.target][uint3(column, slice)] = float4(light, 1.0 - dot(through, 1.0 / 3.0));
 }
 
 struct Composite
@@ -559,5 +580,8 @@ float4 compositeFragment(Composite input) : SV_Target0
         light = light * fog.a + fog.rgb;
         transmittance *= fog.a;
     }
+    // Nothing to add (near surfaces of small scenes): no blend, no color traffic.
+    if (transmittance >= 0.99999 && max(light.r, max(light.g, light.b)) <= 1e-6)
+        discard;
     return float4(light, 1.0 - transmittance);
 }

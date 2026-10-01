@@ -18,7 +18,11 @@
 //! (ADR 0044), `--lights <count>` for point and spot lights spread over the scene and
 //! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
-//! every frame (ADR 0046), `--post` for bloom, automatic exposure and tone mapping every
+//! every frame (ADR 0046), `--atmosphere` for the physically based sky and atmosphere
+//! instead of the gradient sky (ADR 0069; implies `--sky`), `--sun <elevation°>` for the sun's
+//! height (default: the scene's light), `--atmosphere-every-frame` to rebuild its tables and
+//! the image-based light every frame, `--fog` for exponential height fog (implies `--sky`),
+//! `--post` for bloom, automatic exposure and tone mapping every
 //! frame (ADR 0047), `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
 //! levels made at load (ADR 0053), `--pack <file>` to load a cooked pack instead of the glTF
@@ -42,6 +46,7 @@ use engine_assets::{
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::ao::{AoQuality, AoSettings};
+use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
@@ -254,6 +259,8 @@ fn main() {
     let mut light_count = 0usize;
     let mut light_culling = true;
     let (mut with_sky, mut sky_every_frame) = (false, false);
+    let (mut atmosphere, mut atmosphere_every_frame, mut fog) = (false, false, false);
+    let mut sun_elevation: Option<f32> = None;
     let mut lods = false;
     let mut pipeline_stats = false;
     let mut post = false;
@@ -304,6 +311,12 @@ fn main() {
                 }
             }
             "--sky-every-frame" => (with_sky, sky_every_frame) = (true, true),
+            "--atmosphere" => (with_sky, atmosphere) = (true, true),
+            "--atmosphere-every-frame" => {
+                (with_sky, atmosphere, atmosphere_every_frame) = (true, true, true);
+            }
+            "--fog" => (with_sky, fog) = (true, true),
+            "--sun" => sun_elevation = args.next().map(|v| v.parse().unwrap()),
             "--cascades" => shadows.cascades = args.next().unwrap().parse().unwrap(),
             "--shadow-res" => shadows.resolution = args.next().unwrap().parse().unwrap(),
             "--shadow-blend" => shadows.blend = args.next().unwrap().parse().unwrap(),
@@ -708,6 +721,18 @@ fn main() {
                 .collect();
             println!("Pipeline statistics, {name}: {}", line.join("; "));
         }
+        let names = [
+            "atmosphere pass",
+            "transparent under atmosphere",
+            "transparent under atmosphere + lights",
+        ];
+        for (name, stats) in names.iter().zip(renderer.atmosphere_statistics(&device)) {
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
         println!();
     }
     let post_effects = post.then(|| {
@@ -722,8 +747,36 @@ fn main() {
             .unwrap(),
         )
     });
-    let environment = with_sky
-        .then(|| Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap());
+    let mut environment = with_sky.then(|| {
+        let mut environment =
+            Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap();
+        if atmosphere {
+            environment
+                .set_atmosphere(
+                    &device,
+                    &mut allocator,
+                    &bindless,
+                    Some(Atmosphere::earth()),
+                )
+                .unwrap();
+        }
+        if fog {
+            environment.set_fog(Some(HeightFog::default()));
+        }
+        environment
+    });
+    let light = match sun_elevation {
+        Some(degrees) => {
+            let e = degrees.to_radians();
+            let horizontal = Vec3::new(light.direction.x, 0.0, light.direction.z)
+                .normalize_or(Vec3::X);
+            DirectionalLight {
+                direction: -(-horizontal * e.cos() + Vec3::Y * e.sin()),
+                ..light
+            }
+        }
+        None => light,
+    };
     // Motion vectors: the forward pass writes them, a pass fills the background with the
     // camera's motion, and the instances are copied for the next frame.
     let temporal = motion.then(|| {
@@ -742,9 +795,12 @@ fn main() {
         "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs | \
          GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs | \
          GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs | GPU AO µs | \
-         GPU frame µs | CPU execute µs |"
+         GPU frame µs | CPU execute µs | GPU atmosphere tables µs | GPU aerial perspective µs | \
+         GPU atmosphere pass µs |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!(
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+    );
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -758,6 +814,7 @@ fn main() {
         let (mut light_tiles, mut cpu_add) = (Vec::new(), Vec::new());
         let mut cpu_execute = Vec::new();
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
+        let (mut tables, mut aerial, mut composite) = (Vec::new(), Vec::new(), Vec::new());
         let (mut bloom_time, mut exposure_time, mut tonemap_time) =
             (Vec::new(), Vec::new(), Vec::new());
         let mut upload_frames = 0;
@@ -813,6 +870,16 @@ fn main() {
                     let mut sky = Sky::default();
                     sky.zenith.x += (frame_number % 2) as f32 * 1e-3;
                     environment.set_sky(sky);
+                }
+                if let Some(environment) = &mut environment
+                    && atmosphere_every_frame
+                {
+                    // A barely different atmosphere every frame: every table rebuilt.
+                    let mut a = Atmosphere::earth();
+                    a.mie_anisotropy += (frame_number % 2) as f32 * 1e-4;
+                    environment
+                        .set_atmosphere(&device, &mut allocator, &bindless, Some(a))
+                        .unwrap();
                 }
                 let started = Instant::now();
                 renderer
@@ -968,6 +1035,7 @@ fn main() {
                 let mut tiles_frame = 0.0;
                 let mut ao_frame = 0.0;
                 let (mut sky_frame, mut rebuild_frame) = (0.0, 0.0);
+                let (mut tables_frame, mut aerial_frame, mut composite_frame) = (0.0, 0.0, 0.0);
                 let (mut bloom_frame, mut exposure_frame, mut tonemap_frame) = (0.0, 0.0, 0.0);
                 for time in graph.gpu_pass_times() {
                     match time.name {
@@ -992,6 +1060,12 @@ fn main() {
                         "environment sky" | "environment prefilter" | "environment irradiance" => {
                             rebuild_frame += f64::from(time.gpu_us);
                         }
+                        "atmosphere transmittance"
+                        | "atmosphere multiple scattering"
+                        | "atmosphere sky view"
+                        | "atmosphere sky cube" => tables_frame += f64::from(time.gpu_us),
+                        "atmosphere aerial perspective" => aerial_frame += f64::from(time.gpu_us),
+                        "atmosphere" => composite_frame += f64::from(time.gpu_us),
                         _ => {}
                     }
                 }
@@ -1002,6 +1076,9 @@ fn main() {
                 cpu_execute.push(executed.as_secs_f64() * 1e6);
                 sky_pass.push(sky_frame);
                 rebuild.push(rebuild_frame);
+                tables.push(tables_frame);
+                aerial.push(aerial_frame);
+                composite.push(composite_frame);
                 bloom_time.push(bloom_frame);
                 exposure_time.push(exposure_frame);
                 tonemap_time.push(tonemap_frame);
@@ -1021,7 +1098,7 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.1} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
@@ -1036,6 +1113,9 @@ fn main() {
             median(&mut ao_time),
             median(&mut frame_time),
             median(&mut cpu_execute),
+            median(&mut tables),
+            median(&mut aerial),
+            median(&mut composite),
         );
     }
     println!();

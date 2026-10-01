@@ -644,7 +644,7 @@ impl AtmosphereTables {
             .write(aerial, Access::StorageWrite(ShaderStages::COMPUTE))
             .dispatch(
                 aerial_shader,
-                Dispatch::Threads([AERIAL_SLICES, AERIAL_SLICES, 1]),
+                Dispatch::Threads([AERIAL_SLICES, AERIAL_SLICES * AERIAL_SLICES, 1]),
                 move |_| Some(target),
             );
         AtmosphereTextures {

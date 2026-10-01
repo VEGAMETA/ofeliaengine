@@ -1354,6 +1354,20 @@ impl ForwardRenderer {
         core::array::from_fn(|k| self.shading[k].main[0].statistics(device))
     }
 
+    /// The driver's statistics of the atmosphere's pipelines (ADR 0069): the full-screen
+    /// pass, then transparent surfaces under an atmosphere or fog without and with local
+    /// lights. Empty unless the device captures statistics.
+    pub fn atmosphere_statistics(
+        &self,
+        device: &Device,
+    ) -> [Vec<engine_rhi::PipelineStatistic>; 3] {
+        [
+            self.composite.statistics(device),
+            self.blended_atmosphere[0][0].statistics(device),
+            self.blended_atmosphere[1][0].statistics(device),
+        ]
+    }
+
     /// Turns light culling on (the default) or off. Off, every pixel evaluates every light
     /// that reaches the view: the reference for tests and comparisons (ADR 0045).
     pub fn set_light_culling(&mut self, enabled: bool) {
