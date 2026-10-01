@@ -20,7 +20,12 @@
 //! - **The sun:** the directional light's color is the transmittance towards the sun:
 //!   white at noon, red and dim at sunset (the table agrees with the CPU there).
 
-#![allow(clippy::unwrap_used, clippy::print_stdout, clippy::too_many_lines)]
+#![allow(
+    clippy::unwrap_used,
+    clippy::print_stdout,
+    clippy::too_many_lines,
+    clippy::too_many_arguments
+)]
 
 use engine_core::half;
 use engine_core::math::{Mat4, Quat, Vec3, Vec4, look_at, vulkan_perspective};

@@ -389,13 +389,24 @@ pub(crate) struct AtmosphereTables {
     cube_of: Cell<Option<(Vec3, Vec3, f32)>>,
     /// The directional light's color for a sun direction, illuminance, altitude and
     /// atmosphere, kept while they do not change.
-    sun_of: Cell<Option<(Vec3, Vec3, f32, Atmosphere, Vec3)>>,
+    sun_of: Cell<Option<SunColor>>,
 }
 
 impl core::fmt::Debug for AtmosphereTables {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("AtmosphereTables").finish_non_exhaustive()
     }
+}
+
+/// The directional light's color for a sun direction, illuminance, camera altitude and
+/// atmosphere.
+#[derive(Debug, Clone, Copy)]
+struct SunColor {
+    to_sun: Vec3,
+    light: Vec3,
+    altitude: f32,
+    atmosphere: Atmosphere,
+    color: Vec3,
 }
 
 /// What a view needs from the frame to draw its environment's atmosphere and fog.
@@ -527,22 +538,22 @@ impl AtmosphereTables {
             return view.light;
         }
         let altitude = camera_altitude(atmosphere, view.camera);
-        if let Some((to_sun, light, a, of, color)) = self.sun_of.get()
-            && to_sun == view.to_sun
-            && light == view.light
-            && a == altitude
-            && of == *atmosphere
+        if let Some(held) = self.sun_of.get()
+            && held.to_sun == view.to_sun
+            && held.light == view.light
+            && held.altitude == altitude
+            && held.atmosphere == *atmosphere
         {
-            return color;
+            return held.color;
         }
         let color = atmosphere.sun_light(view.light, view.to_sun, altitude);
-        self.sun_of.set(Some((
-            view.to_sun,
-            view.light,
+        self.sun_of.set(Some(SunColor {
+            to_sun: view.to_sun,
+            light: view.light,
             altitude,
-            *atmosphere,
+            atmosphere: *atmosphere,
             color,
-        )));
+        }));
         color
     }
 
