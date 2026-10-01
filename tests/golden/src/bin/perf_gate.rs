@@ -1,4 +1,5 @@
-//! `perf_gate [--update] [--strict] [--runs N] [--threshold PCT]`: GPU time of every pass
+//! `perf_gate [--update] [--strict] [--runs N] [--threshold PCT] [--scene NAME]...`: GPU
+//! time of every pass
 //! of fixed scenes at 1920 × 1080, against this GPU vendor's baseline in
 //! `tests/golden/perf/<vendor>.tsv` (ADR 0062, CLAUDE.md §5).
 //!
@@ -17,6 +18,8 @@
 //! - Without `--strict` regressions are reported, not fatal: ref-1 is not a dedicated
 //!   benchmark machine (docs/perf/reference-hw.md).
 //! - `--update` writes the measured times as the new baseline.
+//! - `--scene NAME` (repeatable) measures only those scenes (comparisons, A/B runs; not
+//!   with `--update`).
 //!
 //! Run it in release with the implicit layers off (`VK_LOADER_LAYERS_DISABLE=~implicit~`,
 //! overlays change timing) and `ENGINE_ADAPTER=radeon` for the iGPU.
@@ -124,12 +127,14 @@ fn main() -> ExitCode {
     let mut strict = false;
     let mut runs = 3usize;
     let mut threshold = 3.0f64;
+    let mut only: Vec<String> = Vec::new();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--update" => update = true,
             "--strict" => strict = true,
             "--runs" => runs = args.next().and_then(|v| v.parse().ok()).unwrap_or(runs),
+            "--scene" => only.extend(args.next()),
             "--threshold" => {
                 threshold = args
                     .next()
@@ -149,7 +154,14 @@ fn main() -> ExitCode {
     let mut measured: BTreeMap<(String, String), f64> = BTreeMap::new();
     let mut vendor = None;
     let mut adapter = String::new();
-    for shot in shots() {
+    if update && !only.is_empty() {
+        eprintln!("--update writes the whole baseline: measure every scene");
+        return ExitCode::from(2);
+    }
+    for shot in shots()
+        .into_iter()
+        .filter(|s| only.is_empty() || only.iter().any(|n| n == s.name))
+    {
         let mut per_pass: BTreeMap<String, Vec<f64>> = BTreeMap::new();
         for _ in 0..runs.max(1) {
             match render(&shot, options) {
@@ -269,7 +281,10 @@ fn main() -> ExitCode {
             if regressed { " **slower**" } else { "" }
         );
     }
-    for (scene, pass) in baseline.keys().filter(|k| !measured.contains_key(*k)) {
+    for (scene, pass) in baseline
+        .keys()
+        .filter(|k| !measured.contains_key(*k) && (only.is_empty() || only.contains(&k.0)))
+    {
         println!(
             "| {scene} | {pass} | {:.1} | — | gone |",
             baseline[&(scene.clone(), pass.clone())]

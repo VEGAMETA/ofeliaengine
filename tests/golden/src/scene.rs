@@ -11,6 +11,7 @@ use engine_assets::{
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3, look_at};
+use engine_ecs::{Entity, GlobalTransform, Transform, World};
 use engine_frame::{
     Antialiasing, Exposure, FrameContext, FrameRenderer, PrepareContext, Quality, SceneDraws,
     SceneInput, View, ViewCamera, ViewSettings, ViewTarget,
@@ -19,6 +20,7 @@ use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{DirectionalLight, DrawItem, LocalLight, ShadowSettings, Spot};
+use engine_render::gpu_scene::GpuScene;
 use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
@@ -31,8 +33,18 @@ use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, MemoryLocation, Wrap,
 };
+use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+
+/// The game runtime a `Shot::runtime` shot goes through.
+struct Game {
+    runtime: Runtime,
+    scene: GpuScene,
+    cameras: CameraView,
+    /// The camera's entity.
+    camera: Entity,
+}
 
 /// Where the scene comes from.
 #[derive(Debug, Clone)]
@@ -103,6 +115,13 @@ pub struct Shot {
     /// The camera's motion per frame (eye and target move together), from the first
     /// temporal frame: ghosting and smearing show in the capture.
     pub camera_motion: Vec3,
+    /// Through the game runtime (ADR 0064, ADR 0072): the draws become ECS entities
+    /// extracted into a GPU scene, and the camera an entity with a `Camera`, resolved by
+    /// a `CameraView` every frame. Implies `rigid_camera`.
+    pub runtime: bool,
+    /// The camera as a rotation and a position (a camera entity's transform) instead of
+    /// `look_at`'s matrix: what the runtime path renders with.
+    pub rigid_camera: bool,
 }
 
 impl Shot {
@@ -137,6 +156,8 @@ impl Shot {
             quality: Quality::Native,
             temporal_frames: 32,
             camera_motion: Vec3::ZERO,
+            runtime: false,
+            rigid_camera: false,
         }
     }
 }
@@ -721,6 +742,32 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     };
     let mut view = View::new(&device, draws.len() as u32);
     let mut antialiasing = Antialiasing::Off;
+    let (near, far) = (extent * 0.001, extent * 2.0);
+    let rotation = look_rotation(eye, target, Vec3::Y);
+    let mut game = shot.runtime.then(|| {
+        let mut world = World::new();
+        for draw in &draws {
+            world.spawn((
+                GlobalTransform(Affine3A::from_mat4(draw.world_from_object)),
+                MeshRenderer::new(draw.mesh, draw.material),
+            ));
+        }
+        let camera = world.spawn((
+            Transform::from_translation(eye).with_rotation(rotation),
+            Camera {
+                exposure: shot.exposure,
+                ..Camera::perspective(shot.fov_y.to_radians(), near, far)
+                    .with_antialiasing(shot.antialiasing, shot.quality)
+            },
+        ));
+        let cameras = CameraView::new(&mut world, settings);
+        Game {
+            scene: GpuScene::new(&device, &bindless, draws.len() as u32 + 16, 1).expect("scene"),
+            runtime: Runtime::new(world, 64.0),
+            cameras,
+            camera,
+        }
+    });
 
     // The skins' skinning matrices at the shot's time plus `elapsed` clip seconds.
     let palettes_at = |elapsed: f32| -> Vec<Vec<[f32; 12]>> {
@@ -761,6 +808,55 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         let accumulated = (!uploading && resident_frames >= TEMPORAL_START)
             .then(|| resident_frames - TEMPORAL_START);
         frame_number += 1;
+        let shift = shot.camera_motion * accumulated.unwrap_or(0) as f32;
+        let (settings, camera) = match game.as_mut() {
+            Some(game) => {
+                let entity = game.camera;
+                game.runtime.frame(
+                    1.0 / 60.0,
+                    &(),
+                    &mut game.scene,
+                    |_, (), _| {},
+                    |world, (), _| {
+                        // The camera follows the shot every rendered frame.
+                        if let Some(t) = world.get_mut::<Transform>(entity) {
+                            t.translation = eye + shift;
+                        }
+                        if accumulated == Some(0)
+                            && let Some(camera) = world.get_mut::<Camera>(entity)
+                        {
+                            camera.cut();
+                        }
+                    },
+                );
+                let main = game.cameras.resolve(&game.runtime.world).expect("camera");
+                (main.settings, main.camera)
+            }
+            None if shot.rigid_camera => (
+                settings,
+                ViewCamera {
+                    cut: accumulated == Some(0),
+                    ..ViewCamera::from_rigid(
+                        rotation,
+                        eye + shift,
+                        shot.fov_y.to_radians(),
+                        near,
+                        far,
+                    )
+                },
+            ),
+            None => (
+                settings,
+                ViewCamera {
+                    view_from_world: look_at(eye + shift, target + shift, Vec3::Y),
+                    position: eye + shift,
+                    fov_y: shot.fov_y.to_radians(),
+                    near,
+                    far,
+                    cut: accumulated == Some(0),
+                },
+            ),
+        };
         let prepared = frame
             .prepare(
                 &mut view,
@@ -776,15 +872,6 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             )
             .expect("prepare");
         antialiasing = prepared.antialiasing;
-        let shift = shot.camera_motion * accumulated.unwrap_or(0) as f32;
-        let camera = ViewCamera {
-            view_from_world: look_at(eye + shift, target + shift, Vec3::Y),
-            position: eye + shift,
-            fov_y: shot.fov_y.to_radians(),
-            near: extent * 0.001,
-            far: extent * 2.0,
-            cut: accumulated == Some(0),
-        };
         if shot.animation_rate != 0.0 {
             palettes = palettes_at(shot.animation_rate * accumulated.unwrap_or(0) as f32);
         }
@@ -827,6 +914,22 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     frame_number,
                 )
                 .expect("skinning");
+            let scene_frame = match game.as_mut() {
+                Some(game) => game
+                    .scene
+                    .add_passes(
+                        &mut fg,
+                        &device,
+                        &mut allocator,
+                        &mut ring,
+                        &bindless,
+                        &geo,
+                        &mats,
+                        frame_number,
+                    )
+                    .expect("scene"),
+                None => None,
+            };
             let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
             frame
                 .add_view(
@@ -843,7 +946,10 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     &SceneInput {
                         geometry: &geo,
                         materials: &mats,
-                        draws: SceneDraws::List(&draws),
+                        draws: match &scene_frame {
+                            Some(scene) => SceneDraws::Scene(scene),
+                            None => SceneDraws::List(&draws),
+                        },
                         skinning: Some(&skinned_frame),
                         light: shot.sun,
                         lights: &shot.lights,
@@ -966,6 +1072,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // again.
     unsafe {
         view.destroy(&mut allocator, &bindless);
+        if let Some(game) = game.as_mut() {
+            game.scene.destroy(&mut allocator);
+        }
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         skinning.destroy(&mut allocator);
@@ -980,6 +1089,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     }
     // Streamline goes before the device it is attached to (ADR 0063).
     drop((
+        game,
         frame,
         view,
         skinning,

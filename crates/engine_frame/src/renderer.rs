@@ -3,7 +3,7 @@
 use crate::settings::{Antialiasing, Exposure, ViewSettings};
 use crate::view::{HistoryImage, Prepared, Retired, View};
 use core::fmt;
-use engine_core::math::{Mat4, Vec3, vulkan_perspective};
+use engine_core::math::{Mat4, Quat, Vec3, vulkan_perspective};
 use engine_render::environment::Environment;
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer, ForwardView, LocalLight,
@@ -84,6 +84,20 @@ pub struct ViewCamera {
 }
 
 impl ViewCamera {
+    /// A camera at `position`, turned by `rotation` (a unit quaternion; the camera looks
+    /// down its −Z axis with +Y up, as `look_at` places it): a camera entity's transform.
+    pub fn from_rigid(rotation: Quat, position: Vec3, fov_y: f32, near: f32, far: f32) -> Self {
+        Self {
+            view_from_world: Mat4::from_quat(rotation.conjugate())
+                * Mat4::from_translation(-position),
+            position,
+            fov_y,
+            near,
+            far,
+            cut: false,
+        }
+    }
+
     /// The projection times the view at an `aspect` (width over height), without jitter
     /// (the forward renderer adds it).
     pub fn clip_from_world(&self, aspect: f32) -> Mat4 {

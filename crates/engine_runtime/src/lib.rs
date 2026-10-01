@@ -16,6 +16,9 @@
 //!   must follow input every frame (the player's camera, the local character's
 //!   presentation) from the latest input, then movers are interpolated and the frame is
 //!   rendered.
+//! - [`Camera`] and [`CameraView`] (ADR 0072): the main camera, read right after the
+//!   presentation step every rendered frame, becomes the frame renderer's view
+//!   (`engine_frame`): projection, exposure, antialiasing, cuts.
 //!
 //! **One world, one simulation.** Singleplayer runs one ECS world and one simulation,
 //! with no network layer: no loopback client and server, no snapshot serialization, no
@@ -32,9 +35,11 @@
 //! blended poses into the `Transform` of physics roots) is for loops without this crate:
 //! under [`Runtime`], leave it out, or physics bodies would be blended twice.
 
+mod camera;
 mod extract;
 mod runtime;
 
+pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;
 pub use extract::{ExtractStats, MeshRenderer, RenderExtract, SceneSink};
 pub use runtime::{FrameStages, Runtime};
