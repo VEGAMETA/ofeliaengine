@@ -129,6 +129,20 @@ fn payload(i: u32, len: usize) -> Vec<u8> {
     v
 }
 
+/// The first connection request leaves on the client's first update, also within an hour
+/// of the machine's start (Windows counts `Instant` from boot; the client used to back-date
+/// its last request by an hour, which failed then and delayed the first request by a retry
+/// interval).
+#[test]
+fn the_first_request_leaves_on_the_first_update() {
+    let mut sim = Sim::new(3, EndpointConfig::new(PROTOCOL), 4);
+    sim.add_client(EndpointConfig::new(PROTOCOL));
+    sim.step(Duration::from_millis(1));
+    let stats = sim.net.stats();
+    // The request reached the server, which sent its challenge back in the same step.
+    assert_eq!((stats.sent, stats.delivered), (2, 1), "{stats:?}");
+}
+
 #[test]
 fn connects_and_exchanges_messages_both_ways() {
     let mut sim = Sim::new(1, EndpointConfig::new(PROTOCOL), 4);
