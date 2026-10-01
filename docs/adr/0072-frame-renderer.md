@@ -119,11 +119,102 @@ branch `feat/frame-renderer`. Sponza, 1920 × 1080, through the golden test bed
 100 frames; FLIP is the mean against the frame rendered at 3840 × 2160 without
 antialiasing and averaged 2 × 2 (AO: against 16 slices × 16 samples).
 
-MEASUREMENTS
+**Antialiasing and render size** (passes: the GPU's busy time, every pass of the frame;
+FLIP: mean against 2 × 2 supersampling, lower is better; the still-camera metric rewards
+sharp textures and does not see shimmer in motion, which is what temporal methods remove):
+
+| mode | RTX 4060 Ti passes ms | of which AA | Radeon iGPU passes ms | of which AA | FLIP (RTX / Radeon) |
+|---|---:|---:|---:|---:|---:|
+| off, 1080p | 0.78 | – | 17.06 | – | 0.0240 / 0.0234 |
+| off, 67 % stretched | 0.52 | – | 10.65 | – | 0.0424 / 0.0405 |
+| TAA (TAAU at 100 %) | 0.92–1.27 | 0.17–0.20 | 23.15 | 3.85 | 0.0321 / 0.0324 |
+| TAAU 67 % | 0.74 | 0.14 | 16.32 | 3.86 | 0.0410 / 0.0415 |
+| TAAU 59 % | 0.70 | 0.13 | 14.96 | 3.86 | 0.0441 / 0.0448 |
+| TAAU 50 % | 0.67 | 0.13 | 13.81 | 3.86 | 0.0485 / 0.0490 |
+| FSR 3.1 Native AA | 1.71 | 0.89 | 42.13 | 20.45 | 0.0333 / 0.0276 |
+| FSR 3.1 Quality (67 %) | 1.17–1.43 | 0.56 | 25.31 | 12.54 | 0.0429 / 0.0398 |
+| FSR 3.1 Performance (50 %) | 0.99 | 0.46 | 20.79 | 10.78 | 0.0499 / 0.0475 |
+| DLAA | 3.11 | 1.78 | – | – | 0.0183 / – |
+| DLSS Quality (67 %) | 1.62 | 0.97 | – | – | 0.0231 / – |
+
+- On the iGPU, **TAAU from 67 % is cheaper than no antialiasing at the output size**
+  (16.3 against 17.1 ms): the scene passes save more than the resolve's 3.9 ms costs. TAA
+  at 100 % costs +6.1 ms there (+36 %), FSR 3.1 is out of reach (12.5–20 ms itself).
+- On the RTX, TAA at 100 % costs +0.14 to +0.49 ms (two runs on the shared machine; the
+  RTX's clocks vary more than the Radeon's); FSR and DLSS cost 4–9× TAAU's resolve, DLSS
+  gives the best image by far.
+- The still image favours no antialiasing over TAAU and FSR (their accumulation softens
+  textures; DLSS does not): on the cube field of ADR 0060, where edges dominate, TAAU wins
+  by 5.3 dB. A temporal-stability metric (shimmer under motion) is a follow-up.
+- A texture LOD bias one level sharper than the standard one helps the still image on
+  Sponza (TAA 0.0321 → 0.0292, FSR Native AA 0.0333 → 0.0300, TAAU 67 % 0.0410 → 0.0400,
+  RTX), unlike ADR 0060's measurement on an upscaled textured ground in motion. The
+  bias stays the upscaler's for now (question for the team in the PR).
+
+**Ambient occlusion presets** (mean FLIP against 16 slices × 16 samples per side, same
+antialiasing; AO runs at the render size):
+
+| preset | RTX 1080p AO ms | RTX TAAU 67 % AO ms | Radeon 1080p AO ms | Radeon TAAU 67 % AO ms | Radeon TAAU 67 % passes ms | FLIP 1080p / TAAU 67 % |
+|---|---:|---:|---:|---:|---:|---:|
+| none | – | – | – | – | 16.85 | 0.1461 / 0.1449 |
+| Low (1 × 2) | 0.32 | 0.14 | 6.03 | 2.58 | 18.24 | 0.1083 / 0.1032 |
+| Medium (2 × 2) | 0.40 | 0.18 | 8.03 | 3.54 | 19.20 | 0.0957 / 0.0938 |
+| High (3 × 3) | 0.52 | 0.24 | 12.11 | 5.35 | 21.06 | 0.0703 / 0.0692 |
+| Ultra (9 × 3) | 1.10 | 0.49 | 29.15 | 12.87 | 28.00 | 0.0687 / 0.0679 |
+
+(plus the depth prepass AO needs: 0.06 ms RTX, 0.93 ms Radeon at 1080p, 0.72 at 67 %.)
+GTAO has no half-resolution mode; rendering at 67 % is the half resolution that exists:
+it cuts every preset's cost by 2.3× on the iGPU at the same FLIP.
+
+**Exposure for FSR and DLSS** (PSNR against 2 × 2 supersampling on ADR 0060's cube
+field, camera still / circling, `upscale_bench` and `dlss_bench` with
+`ENGINE_UPSCALE_EXPOSURE=1`):
+
+| | own automatic exposure | the engine's exposure |
+|---|---:|---:|
+| FSR 1080p from 720p, RTX | 43.26 / 38.70 dB | 43.56 / 38.89 dB |
+| FSR 1080p from 720p, Radeon | 43.20 / 38.67 dB | 43.64 / 38.86 dB |
+| FSR Native AA, RTX | 45.54 / 40.82 dB | 46.08 / 41.00 dB |
+| DLSS 1080p from 720p, RTX | 45.93 / 39.92 dB | 46.66 / 40.06 dB |
+| DLAA, RTX | 47.03 / 41.16 dB | 47.86 / 41.41 dB |
+
+**The composer's own cost**: `prepare` + `add_view` (which includes declaring the scene
+passes) take 3.5–10 µs of CPU per view and frame on ref-1 (`game_loop`, 20,000 instances
+in a GPU scene, RTX; up to 30 µs while the Radeon window ran beside other agents' work),
+TAAU and FSR add a few µs (their passes' setup); 0 heap allocations in
+steady state (`engine_frame/tests/zero_alloc.rs`).
+
+**No change where nothing changed**: every existing golden shot (antialiasing off) renders
+byte-identical through the frame renderer on both GPUs, and an A/B of the perf gate's four
+existing scenes against main, back to back, moves no pass beyond noise (RTX: all within
+±0.3 % except `ao denoise` +2.4 % / 1 µs; Radeon: the branch 1–4 % faster, clock noise).
 
 ## Decision
 
-DECISION
+- `engine_frame::FrameRenderer` composes every view's frame in this order: scene passes
+  at the render size (jitter and motion vectors with temporal antialiasing; the skinned
+  motion pass), automatic exposure measured on the scene, the hook for scene effects
+  (with last frame's antialiased color on request), antialiasing or upscaling through
+  `Box<dyn Upscaler>` with the reactive mask and the engine's exposure for FSR and DLSS,
+  then bloom and tone mapping at the output size. `View` keeps each camera's state;
+  `prepare` applies `ViewSettings` before the materials' frame (jitter phases, LOD bias,
+  creation and retirement of the upscaler and the per-view resources).
+- `Antialiasing::Off | Temporal(Taau | Fsr | Dlss)` with a `Quality` render size and a
+  per-frame `render_scale`; an unavailable upscaler falls back to TAAU.
+- Cuts drop the history (`ViewCamera::cut`, a camera switch or a bumped cut generation in
+  the runtime); upscaler or output-size changes do too.
+- **Defaults** (`RenderDefaults::for_device`):
+  - *discrete*: TAA (TAAU at 100 %) and ambient occlusion High: about 1.8 ms on the RTX
+    for Sponza (the two measurements added); TAAU stays the default (FSR is costlier and, on this metric, not better; DLSS
+    is better but needs the player's DLLs);
+  - *integrated*: TAAU from 67 % and ambient occlusion Low: 18.2 ms on the Radeon against
+    28.0 ms for the old defaults (no antialiasing, AO High at 1080p) and 17.1 ms for no
+    antialiasing and no AO at all. Low recovers about half of AO's improvement at a
+    fifth of High-at-1080p's cost; a game that has the budget raises it (Medium +1.0 ms,
+    High +2.8 ms at 67 %).
+- The runtime has a `Camera` component (projection, exposure, antialiasing, render size,
+  cinematic, priority, active, cut generation) and a `CameraView` that resolves the main
+  camera every rendered frame from its fresh `Transform` (ADR 0019's addendum).
 
 ## Consequences
 
