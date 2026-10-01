@@ -18,7 +18,7 @@
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(1, 0)]] [vk::image_format("r8")] RWTexture2D<float> g_images[];
 
-// `ContactPush` in contact.rs (60 bytes).
+// `ContactPush` in contact.rs (64 bytes).
 struct ContactPush
 {
     float4 light;              // Bend: the light's pixel xy, its depth, sign of its w
@@ -31,6 +31,7 @@ struct ContactPush
     float near_depth;          // depth value of the near plane
     uint depth;                // bindless sampled: the depth target
     uint target;               // bindless storage: the visibility
+    uint light_pixel;          // 1: this dispatch also writes the light's own pixel (lit)
 };
 
 [[vk::push_constant]]
@@ -94,6 +95,9 @@ void wavefront_extents(int3 group, uint thread, out float2 delta_xy, out float2 
 void contactBend(uint3 group_id : SV_GroupID, uint thread : SV_GroupIndex)
 {
     int3 group = int3(group_id);
+    // The lines meet at the light's point on screen: no line covers that pixel.
+    if (push.light_pixel != 0 && all(group_id == 0) && thread == 0)
+        g_images[push.target][int2(push.light.xy)] = 1.0;
     float2 xy_delta;
     float2 pixel_xy;
     float pixel_distance;

@@ -46,7 +46,7 @@ impl Default for ContactShadowSettings {
     }
 }
 
-/// `ContactPush` in `contact.slang` (60 bytes).
+/// `ContactPush` in `contact.slang` (64 bytes).
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
@@ -60,9 +60,11 @@ struct Push {
     near_depth: f32,
     depth: u32,
     target: u32,
+    /// The first dispatch writes the light's own pixel (lit), which no line covers.
+    light_pixel: u32,
 }
 
-const _: () = assert!(size_of::<Push>() == 60);
+const _: () = assert!(size_of::<Push>() == 64);
 
 /// The camera of a frame, as contact shadows need it.
 #[derive(Debug, Clone, Copy)]
@@ -259,29 +261,6 @@ impl ContactShadows {
         // when it is on screen, its own pixel may be left unwritten. Lit there.
         let on_screen = (0.0..size[0] as f32).contains(&coordinate[0])
             && (0.0..size[1] as f32).contains(&coordinate[1]);
-        if on_screen {
-            fg.add_pass("contact shadows clear")
-                .write(mask, Access::TransferWrite)
-                .execute(move |ctx| {
-                    // SAFETY: recording outside a rendering scope; the graph put the
-                    // image in TRANSFER_DST_OPTIMAL for this pass.
-                    unsafe {
-                        ctx.device.cmd_clear_color_image(
-                            ctx.cmd,
-                            ctx.image(mask),
-                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            &vk::ClearColorValue { float32: [1.0; 4] },
-                            &[vk::ImageSubresourceRange {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                base_mip_level: 0,
-                                level_count: 1,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            }],
-                        );
-                    }
-                });
-        }
         // The dispatches cover every pixel once (pixels without geometry are
         // written lit).
         mask_pass(fg, bindless, depth, mask).record(move |rec| {
@@ -290,12 +269,13 @@ impl ContactShadows {
             else {
                 return;
             };
-            for d in &dispatches[..count] {
+            for (k, d) in dispatches[..count].iter().enumerate() {
                 let push = Push {
                     light: coordinate,
                     wave_offset: d.offset,
                     depth,
                     target,
+                    light_pixel: u32::from(on_screen && k == 0),
                     ..base
                 };
                 rec.dispatch(bend, Dispatch::Groups(d.waves), &push);
@@ -312,7 +292,10 @@ fn mask_pass<'a, 'g>(
     depth: Texture,
     mask: Texture,
 ) -> crate::compute::ComputePass<'a, 'g> {
+    // On the async compute queue where that is the default (ADR 0065), as ambient
+    // occlusion.
     fg.add_compute("contact shadows", bindless)
+        .async_compute()
         .read(depth, Access::Sampled(ShaderStages::COMPUTE))
         .write(mask, Access::StorageWrite(ShaderStages::COMPUTE))
 }
