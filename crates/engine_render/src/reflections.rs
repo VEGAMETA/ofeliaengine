@@ -22,6 +22,28 @@
 //! also write their normal, roughness and specular weight, and one full-screen pass after
 //! them adds weight × (reflection − sky). Views without reflections run exactly the
 //! shading they ran before.
+//!
+//! ```no_run
+//! # use engine_render::forward::{ForwardRenderer, ForwardView, Reflections};
+//! # use engine_render::reflections::*;
+//! # use engine_core::math::Vec3;
+//! # fn demo(device: &engine_rhi::Device, allocator: &mut engine_rhi::Allocator,
+//! #         bindless: &engine_rhi::Bindless, renderer: &mut ForwardRenderer,
+//! #         view: ForwardView<'_>) -> Result<(), engine_rhi::RhiError> {
+//! renderer.set_reflections(device, bindless, true)?;
+//! // Once per scene: a probe per room (captured by the next frames that draw it).
+//! let mut probes = ReflectionProbes::new(device, allocator, bindless, ProbeSettings::default())?;
+//! probes.add(ReflectionProbe::room(Vec3::new(0.0, 2.0, 0.0), Vec3::new(5.0, 2.0, 8.0)));
+//! // Once per view: its screen-space reflections at the view's size.
+//! let ssr = ScreenSpaceReflections::new(device, allocator, bindless, 1920, 1080,
+//!     SsrSettings::default())?;
+//! // Every frame:
+//! let view = ForwardView {
+//!     reflections: Reflections { probes: Some(&probes), ssr: Some(&ssr) },
+//!     ..view
+//! };
+//! # let _ = view; Ok(()) }
+//! ```
 
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::cull::Frustum;

@@ -16,16 +16,16 @@
 //   influence box holds it, smallest first, each fading in over its blend distance; the
 //   reflected ray is intersected with the probe's parallax box and the cube read towards
 //   that point (parallax correction). The rest of the weight goes to the sky.
-// - `probeTiles` sets, per 16 × 16 tile, one bit per visible probe whose screen
-//   rectangle covers it; the composite walks the bits of its tile, wave by wave.
+//   The probes a pixel tests are listed by screen cell and view-depth z-bin in the view's
+//   constants (reflections_common.slang).
 // - Screen-space reflections: `ssrDepth` reduces the depth into a pyramid of nearest
 //   depths; `ssrTrace` (at full or half resolution) samples a reflected direction from
 //   the visible normals of the GGX lobe (Heitz 2018; mirror rays below a roughness) and
 //   walks the pyramid (the hierarchical traversal of AMD's FidelityFX SSSR, MIT, see
 //   THIRD_PARTY_NOTICES.md), reading the frame's lit color at the hit; `ssrSpatial`
-//   averages neighbouring rays with depth and normal weights; `ssrTemporal` blends with
-//   last frame's result reprojected through the reflected point, clamped to the current
-//   neighbourhood. Values are premultiplied by their confidence (fading at the screen's
+//   averages neighbouring rays with depth, normal and roughness weights at the trace's
+//   resolution; `ssrTemporal` brings it to full resolution and blends it with last frame's
+//   result reprojected through the reflected point, clipped to the current neighbourhood. Values are premultiplied by their confidence (fading at the screen's
 //   edges, behind thin objects, at the roughness cutoff), so the composite adds the hit
 //   over the probes and the sky by it.
 
@@ -45,8 +45,7 @@ static const float PI = 3.14159265;
 struct ReflectPush
 {
     ReflectFrame* frame;
-    uint* buffer;            // the probes' tile masks (`probeTiles`, the composite), or the SSR's
-                             // nearest depths (float bits, levels 1.. one after the other)
+    uint* buffer;            // SSR: the nearest depths (float bits, levels 1.. one after the other)
     uint t0;                 // bindless indices, by pass (see each entry point)
     uint t1;
     uint t2;
@@ -379,7 +378,12 @@ bool advance(float3 origin, float3 direction, float3 inv_direction, float2 curre
     return skipped;
 }
 
-float3 hierarchical_march(float3 origin, float3 direction, float2 screen, uint steps, uint max_level, out bool valid)
+// Glossy rays stop once at most this many lanes of their wave still march (FidelityFX
+// SSSR's low-occupancy exit): the last few would hold the whole wave; where they stand is
+// checked like any hit.
+static const uint MIN_OCCUPANCY = 4;
+
+float3 hierarchical_march(float3 origin, float3 direction, float2 screen, uint steps, uint max_level, bool glossy, out bool valid)
 {
     float3 inv_direction = float3(
         direction.x != 0.0 ? 1.0 / direction.x : 3.4e38,
@@ -395,8 +399,10 @@ float3 hierarchical_march(float3 origin, float3 direction, float2 screen, uint s
     float3 position;
     initial_advance(origin, direction, inv_direction, resolution, resolution_inv, floor_offset, uv_offset, position, t);
     uint i = 0;
-    while (i < steps && level >= 0)
+    bool low_occupancy = false;
+    while (i < steps && level >= 0 && !low_occupancy)
     {
+        low_occupancy = glossy && WaveActiveCountBits(true) <= MIN_OCCUPANCY;
         float2 current = resolution * position.xy;
         float surface = load_depth(int2(floor(current)), level);
         bool skipped = advance(origin, direction, inv_direction, current, resolution_inv, floor_offset, uv_offset, surface, position, t);
@@ -408,8 +414,9 @@ float3 hierarchical_march(float3 origin, float3 direction, float2 screen, uint s
         }
         i++;
     }
-    // Below level 0: the ray met the surface (otherwise it ran out of steps).
-    valid = level < 0;
+    // Below level 0: the ray met the surface (otherwise it ran out of steps, or stopped
+    // with the wave nearly done).
+    valid = level < 0 || low_occupancy;
     return position;
 }
 
@@ -511,7 +518,7 @@ void ssrTrace(uint3 id : SV_DispatchThreadID)
     float3 end = float3(clip.xy / clip.w * 0.5 + 0.5, clip.z / clip.w);
     float3 direction = end - origin;
     bool valid;
-    float3 hit = hierarchical_march(origin, direction, screen, f.ssr.x, f.ssr.w, valid);
+    float3 hit = hierarchical_march(origin, direction, screen, f.ssr.x, f.ssr.w, roughness >= MIRROR_ROUGHNESS, valid);
     float confidence = 0.0;
     float3 color = 0.0;
     float distance = 0.0;

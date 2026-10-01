@@ -908,9 +908,8 @@ fn main() {
             (Vec::new(), Vec::new(), Vec::new());
         let mut upload_frames = 0;
         // Reflections (ADR 0073): probe captures (their views, copy, mips, prefilter),
-        // probe tiles, SSR passes, the composite.
-        let (mut probe_capture, mut prefilter, mut probe_tiles) =
-            (Vec::new(), Vec::new(), Vec::new());
+        // SSR passes, the composite.
+        let (mut probe_capture, mut prefilter) = (Vec::new(), Vec::new());
         let (mut ssr_depth, mut ssr_trace, mut ssr_spatial, mut ssr_temporal) =
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut reflect_composite = Vec::new();
@@ -1141,15 +1140,13 @@ fn main() {
                 let (mut sky_frame, mut rebuild_frame) = (0.0, 0.0);
                 let (mut tables_frame, mut aerial_frame, mut composite_frame) = (0.0, 0.0, 0.0);
                 let (mut bloom_frame, mut exposure_frame, mut tonemap_frame) = (0.0, 0.0, 0.0);
-                let (mut capture_frame, mut prefilter_frame, mut tiles_probe_frame) =
-                    (0.0, 0.0, 0.0);
+                let (mut capture_frame, mut prefilter_frame) = (0.0, 0.0);
                 let mut ssr_frame = [0.0; 4];
                 let mut reflect_frame = 0.0;
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
                     match time.name {
                         "probe mips" | "probe prefilter" => prefilter_frame += us,
-                        "reflection probe tiles" => tiles_probe_frame += us,
                         "ssr depth" => ssr_frame[0] += us,
                         "ssr trace" => ssr_frame[1] += us,
                         "ssr spatial" => ssr_frame[2] += us,
@@ -1205,7 +1202,6 @@ fn main() {
                 ao_time.push(ao_frame);
                 probe_capture.push(capture_frame);
                 prefilter.push(prefilter_frame);
-                probe_tiles.push(tiles_probe_frame);
                 ssr_depth.push(ssr_frame[0]);
                 ssr_trace.push(ssr_frame[1]);
                 ssr_spatial.push(ssr_frame[2]);
@@ -1248,11 +1244,10 @@ fn main() {
         );
         if probes.is_some() || screen_space.is_some() {
             reflection_rows.push(format!(
-                "| {mode} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} |",
+                "| {mode} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} |",
                 median(&mut faces_drawn),
                 median(&mut probe_capture),
                 median(&mut prefilter),
-                median(&mut probe_tiles),
                 median(&mut ssr_depth),
                 median(&mut ssr_trace),
                 median(&mut ssr_spatial),
@@ -1268,10 +1263,10 @@ fn main() {
         }
         println!(
             "| materials | probe faces per frame | GPU probe capture µs | GPU probe mips + prefilter µs | \
-             GPU probe tiles µs | GPU SSR depth µs | GPU SSR trace µs | GPU SSR spatial µs | \
-             GPU SSR temporal µs | GPU reflections composite µs |"
+             GPU SSR depth µs | GPU SSR trace µs | GPU SSR spatial µs | GPU SSR temporal µs | \
+             GPU reflections composite µs |"
         );
-        println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+        println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|");
         for row in &reflection_rows {
             println!("{row}");
         }
