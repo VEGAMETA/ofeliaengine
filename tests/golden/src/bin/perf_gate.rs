@@ -29,7 +29,7 @@
 use engine_core::math::Vec3;
 use engine_frame::{Antialiasing, Quality};
 use engine_golden::scene::{
-    RenderOptions, Shot, Skip, Source, procedural_lights, render, vendor_name,
+    RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights, vendor_name,
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
@@ -69,6 +69,17 @@ fn shots() -> Vec<Shot> {
             ao: Some(AoSettings::default()),
             ..Shot::new(
                 "sponza_ao",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
+        // Shadows of local lights (ADR 0071): in steady state every shadow is cached, so
+        // this measures what looking them up costs the shading.
+        Shot {
+            size: [1920, 1080],
+            lights: sponza_lights(),
+            local_shadows: true,
+            ..Shot::new(
+                "sponza_local_shadows",
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },
@@ -123,6 +134,17 @@ fn read_baseline(path: &Path) -> BTreeMap<(String, String), f64> {
 }
 
 fn main() -> ExitCode {
+    // The test bed's frame (`scene::render`) keeps large state on the stack; Windows gives
+    // the main thread 1 MiB.
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(run)
+        .ok()
+        .and_then(|t| t.join().ok())
+        .unwrap_or(ExitCode::FAILURE)
+}
+
+fn run() -> ExitCode {
     let mut update = false;
     let mut strict = false;
     let mut runs = 3usize;

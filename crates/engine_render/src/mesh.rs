@@ -346,6 +346,10 @@ pub struct MeshInfo {
     pub lods: [MeshLod; MAX_LODS],
     /// Detail levels (at least 1).
     pub lod_count: u32,
+    /// Changes when the GPU gives the mesh another shape ([`GeometryPool::mark_deformed`],
+    /// a skinned mesh posed differently): what cached shadows of local lights compare
+    /// (ADR 0071).
+    pub revision: u32,
 }
 
 /// Initial sizes of a [`GeometryPool`]; it grows as needed.
@@ -640,6 +644,7 @@ impl GeometryPool {
             max,
             lods: levels_info,
             lod_count: 1 + lods.len() as u32,
+            revision: 0,
         };
         let index = match self.free_slots.pop() {
             Some(index) => index,
@@ -695,6 +700,18 @@ impl GeometryPool {
         {
             info.min = min;
             info.max = max;
+        }
+    }
+
+    /// Records that the GPU gives a mesh another shape this frame (stale ids are ignored):
+    /// for meshes whose vertices it rewrites, like skinned meshes (`crate::skinning`).
+    /// Cached shadows of local lights in its reach are drawn again (ADR 0071).
+    pub fn mark_deformed(&mut self, id: MeshId) {
+        if let Some(slot) = self.slots.get_mut(id.index as usize)
+            && slot.generation == id.generation
+            && let Some((info, _, _)) = slot.mesh.as_mut()
+        {
+            info.revision = info.revision.wrapping_add(1);
         }
     }
 

@@ -346,6 +346,8 @@ pub struct RenderGraph {
     /// One breadcrumb track per frame slot, and the frames recorded (ADR 0061).
     breadcrumbs: Vec<engine_rhi::Track>,
     frames_recorded: u64,
+    /// This frame's [`FrameGraph::serial`].
+    serial: u64,
     stats: GraphStats,
     /// Scopes of the frame being built, and the one new passes go into.
     scopes: Vec<ScopeRecord>,
@@ -558,6 +560,7 @@ impl RenderGraph {
             multi_queue: None,
             breadcrumbs: breadcrumb_tracks(device, frames_in_flight.max(1)),
             frames_recorded: 0,
+            serial: 0,
             stats: GraphStats::default(),
             scopes: Vec::new(),
             current_scope: compile::NO_SCOPE,
@@ -592,6 +595,7 @@ impl RenderGraph {
         self.arena.reset();
         self.scopes.clear();
         self.current_scope = compile::NO_SCOPE;
+        self.serial = FRAME_SERIAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed) + 1;
         FrameGraph {
             slot: slot % self.physical.slots(),
             cmd,
@@ -689,7 +693,17 @@ impl core::fmt::Debug for FrameGraph<'_> {
     }
 }
 
+/// Source of [`FrameGraph::serial`]: unique across every graph of the process.
+static FRAME_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 impl<'g> FrameGraph<'g> {
+    /// A number no other frame of any graph has (never 0): owners of persistent resources
+    /// that several views of one frame use import them once per frame by it (an imported
+    /// resource leaves the graph in its final state only at the end of the frame).
+    pub fn serial(&self) -> u64 {
+        self.graph.serial
+    }
+
     fn add_resource(&mut self, name: &'static str, kind: Kind) -> u32 {
         let records = &mut self.graph.records;
         records.resources.push(ResourceRecord::new(name, kind));
@@ -1523,7 +1537,11 @@ fn begin_rendering(
             LoadOp::Clear(value) => (vk::AttachmentLoadOp::CLEAR, value),
             LoadOp::DontCare => (vk::AttachmentLoadOp::DONT_CARE, [0.0; 4]),
         };
+        // A read-only attachment keeps its contents without a store, which would count as
+        // a write (and race with a layout transition that only waited for reads, such as
+        // a compute pass sampling the depth between the prepass and the shading).
         let store = match a.store {
+            _ if a.read_only => vk::AttachmentStoreOp::NONE,
             StoreOp::Store => vk::AttachmentStoreOp::STORE,
             StoreOp::DontCare => vk::AttachmentStoreOp::DONT_CARE,
         };

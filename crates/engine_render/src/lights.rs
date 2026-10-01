@@ -36,6 +36,12 @@ pub struct LocalLight {
     pub color: Vec3,
     /// A cone, or `None` for a point light.
     pub spot: Option<Spot>,
+    /// Whether it casts shadows (ADR 0071; with
+    /// [`crate::forward::ForwardRenderer::set_local_shadows`]): a spot light one view, a
+    /// point light six cube faces in the shadow atlas, drawn again only when the light or
+    /// a caster in its range changes. Keep the light's index in the list stable: its
+    /// cached shadow is known by it.
+    pub shadow: bool,
 }
 
 /// The cone of a spot light.
@@ -104,6 +110,13 @@ struct Culled {
 #[derive(Debug, Default)]
 pub(crate) struct LightScratch {
     culled: Vec<Culled>,
+}
+
+impl LightScratch {
+    /// The caller's index of each light kept by the last [`cull_lights`], in depth order.
+    pub(crate) fn kept(&self) -> impl Iterator<Item = u32> + '_ {
+        self.culled.iter().map(|c| c.index)
+    }
 }
 
 /// The view: where its near plane is and which way it looks.
@@ -264,7 +277,11 @@ pub(crate) fn write_bins(
 /// extents of its projected quadric (Sigg, Weyrich, Botsch, Gross, "GPU-Based Ray-Casting
 /// of Quadratic Surfaces", 2006), exact for perspective and orthographic projections.
 /// `None` when the sphere reaches the plane of the eye (it may cover the whole screen).
-fn sphere_bounds(clip_from_world: Mat4, center: Vec3, radius: f32) -> Option<[[f32; 2]; 2]> {
+pub(crate) fn sphere_bounds(
+    clip_from_world: Mat4,
+    center: Vec3,
+    radius: f32,
+) -> Option<[[f32; 2]; 2]> {
     // Clip space from the unit sphere; its rows x, y and w.
     let t = clip_from_world
         * Mat4::from_cols(
@@ -333,6 +350,7 @@ mod tests {
             range,
             color: Vec3::ONE,
             spot: None,
+            shadow: false,
         }
     }
 

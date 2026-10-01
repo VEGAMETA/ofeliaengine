@@ -160,6 +160,7 @@ Constants and formulas taken into our own code (no files copied).
 | Sky and atmosphere after Hillaire 2020: the transmittance, multiple scattering, sky-view and aerial perspective tables' parameterizations and sizes, the ray march with per-step analytic integration, the multiple scattering approximation (64 directions, L₂ / (1 − f_ms)), the Cornette-Shanks phase function, Earth's parameters | `engine_render/src/atmosphere.rs`, `engine_render/shaders/atmosphere.slang`, `atmosphere_common.slang`, `engine_render/tests/atmosphere.rs` | Sébastien Hillaire, `sebh/UnrealEngineSkyAtmosphere` (`RenderSkyCommon.hlsl`, `RenderSkyRayMarching.hlsl`, `SkyAtmosphereCommon.cpp`), commit 183ead5bdacc | MIT (Copyright (c) 2020 Epic Games, Inc., below) |
 | The transmittance table's parameterization and the atmosphere's parameters, which that reference takes from Bruneton's implementation | same | Eric Bruneton, `ebruneton/precomputed_atmospheric_scattering`, commit 34f14e745cff | BSD-3-Clause (Copyright (c) 2017 Eric Bruneton, below) |
 | LDR-FLIP: its constants, separable spatial and feature filters, colour transforms and error remapping, ported to Rust | `tests/golden/src/flip.rs` (test-only crate `engine_golden`) | NVIDIA `NVlabs/flip`, `src/cpp/FLIP.h` (Andersson et al., HPG 2020) | BSD-3-Clause (Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES) |
+| Bend Studio's screen-space shadows: the wavefront layout towards the light's screen point, the dispatch list around it, the shared-memory depth line with perspective correction, the hard / averaged / fading sample groups, the edge test and precision offset, the default tuning values (ported to Slang and Rust, modified: Vulkan's y-down clip space, edges ignored, a thicker default surface, the light's own pixel written lit) | `engine_render/shaders/contact.slang`, `engine_render/src/contact.rs` (`bend_dispatches`) | Sony Interactive Entertainment (Bend Studio), `bend_sss_gpu.h`, `bend_sss_cpu.h` (2023), from bendstudio.com/blog/inside-bend-screen-space-shadows | Apache-2.0 (Copyright 2023 Sony Interactive Entertainment, below) |
 
 ### MIT license (Baking Lab)
 
@@ -385,3 +386,23 @@ OTHER INTELLECTUAL PROPERTY RIGHTS IN THE ACADEMY COLOR ENCODING SYSTEM, OR
 APPLICATIONS THEREOF, HELD BY PARTIES OTHER THAN A.M.P.A.S.,WHETHER DISCLOSED OR
 UNDISCLOSED.
 ```
+
+### Apache License 2.0 (Bend Studio screen-space shadows)
+
+```
+Copyright 2023 Sony Interactive Entertainment.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+The adapted files state the changes made (`contact.slang`'s header, `contact.rs`).

@@ -770,6 +770,24 @@ What it costs (ref-1, 1080p; `scene_bench -- --cascades N --shadow-res R`, `draw
 - **On integrated GPUs, start with 2 cascades.** Most of the sharpness is in the first
   ones.
 
+### Contact shadows (ADR 0071)
+
+The cascades cannot resolve what is smaller than their texels: a box resting on the floor,
+a hand on a table. Contact shadows find it in the depth buffer (Bend Studio's screen-space
+shadows):
+
+```rust
+renderer.set_contact_shadows(&device, &bindless, Some(ContactShadowSettings::default()))?;
+```
+
+- They need the depth before shading: the depth prepass runs while they are on.
+- Off by default: Sponza at 1080p costs 0.12 ms on an RTX 4060 Ti and 2.6 ms on the
+  Radeon iGPU (plus ~10 % of its forward pass).
+- They work best with the sun behind or beside objects; a ray that passes behind a thick
+  object's front face is not seen (the shadow map covers it).
+- `surface_thickness` (0.01) is how thick a pixel is assumed to be: larger darkens more and
+  risks false shadows behind thin objects.
+
 ## 9. Point and spot lights
 
 Any number of local lights (ADR 0045), up to 65,535 per view:
@@ -780,10 +798,11 @@ use engine_render::forward::{LocalLight, Spot};
 let lights = [
     // A lamp: color × intensity, and the distance where its light ends.
     LocalLight { position: Vec3::new(2.0, 3.0, -4.0), range: 8.0,
-                 color: Vec3::new(1.0, 0.8, 0.6) * 20.0, spot: None },
+                 color: Vec3::new(1.0, 0.8, 0.6) * 20.0, spot: None, shadow: false },
     // A spot pointing down, full between 0.3 rad of its axis, fading out by 0.5.
     LocalLight { position: Vec3::new(0.0, 5.0, 0.0), range: 12.0, color: Vec3::splat(40.0),
-                 spot: Some(Spot { direction: Vec3::NEG_Y, inner: 0.3, outer: 0.5 }) },
+                 spot: Some(Spot { direction: Vec3::NEG_Y, inner: 0.3, outer: 0.5 }),
+                 shadow: false },
 ];
 let view = ForwardView { lights: &lights, ..view };
 ```
@@ -798,7 +817,7 @@ let view = ForwardView { lights: &lights, ..view };
   light loop then.
 - **Debugging:** `renderer.set_light_culling(false)` makes every pixel evaluate every
   light that reaches the view (the reference; slow).
-- **Not yet:** shadows of local lights, and physical light units.
+- **Shadows:** see below. **Not yet:** physical light units.
 
 What it costs (ref-1, Sponza at 1080p, lights spread over the scene with ranges of 3–8%
 of its size; `scene_bench -- --lights N`):
@@ -813,6 +832,53 @@ of its size; `scene_bench -- --lights N`):
 - **The CPU pays about 55 ns per light** (culling, sorting, binning).
 - **The GPU pays most for the lights that actually overlap each pixel.** Many small
   lights are cheaper than a few huge ones.
+
+### Shadows of point and spot lights (ADR 0071)
+
+Turn the feature on once, then mark the lights that cast shadows:
+
+```rust
+use engine_render::forward::{LocalLight, LocalShadowSettings};
+
+renderer.set_local_shadows(&device, &mut allocator, &bindless,
+                           Some(LocalShadowSettings::default()))?;
+let lamp = LocalLight { shadow: true, ..lamp };
+// ... and when the renderer is destroyed (the atlas lives in device memory):
+unsafe { renderer.destroy(&device, &mut allocator, &bindless) };
+```
+
+- **Shadows are cached.** Each shadowed light gets tiles in one shadow atlas (a spot light
+  one view, a point light six cube faces). They are drawn again only when the light moves
+  or changes its range or cone, or when something within its range is added, moved,
+  removed, gets another mesh or material, or a skinned mesh is posed differently. A still
+  light in a still scene costs nothing but the lookups in shading.
+- **Keep each light's index in the list stable.** The cache knows a light by its index:
+  reordering only costs redraws, never wrong shadows (a light whose parameters differ is
+  drawn again).
+- **Moving lights share a budget.** At most `updates_per_frame` views (12) are redrawn per
+  frame, oldest and largest first; the others keep last frame's shadow for a frame or
+  more. A light seen for the first time is drawn at once. Raise the budget for many
+  moving lights on a fast GPU; lower it on an integrated one (a view costs ~2.5 µs on an
+  RTX 4060 Ti, ~70 µs on a 2-CU Radeon in Sponza).
+- **Resolution follows the light's size on screen** (`texels_per_pixel`, between
+  `min_resolution` and `max_resolution`), and all lights step down together when the
+  atlas (`atlas_size`², 4096² D16 by default: 32 MiB) is full. Lights out of view keep
+  their shadows until space is needed.
+- **Prefer spot lights:** a point light costs six views to draw, and its shadow is looked
+  up like a spot light's.
+- **`renderer.local_shadow_stats()`** tells what the last frame did (lights in view,
+  drawn, waiting for the budget, evicted); `renderer.invalidate_local_shadows()` forgets
+  every shadow (after edits the renderer cannot see, such as a mesh's vertices replaced in
+  place).
+- **Views without shadowed lights pay nothing:** their shading has no code for it.
+
+What it costs (ref-1, Sponza at 1080p, `scene_bench -- --sky --lights N --shadowed-lights N`):
+
+| | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| forward, 16 lights without → with shadows (all cached) | 444 → 445 µs | 16.4 → 18.4 ms |
+| redrawing all 16 lights (63 views) | 172 µs | 4.7 ms |
+| 7 lights covering the whole screen, without → with shadows | 642 → 830 µs | 23.4 → 34.3 ms |
 
 ## 10. Sky light and the sky (image-based lighting)
 
