@@ -519,6 +519,10 @@ impl Records {
                             }
                         }
                         if is_image {
+                            if std::env::var("ENGINE_DEBUG_FIRST_USE_ALL").is_ok() {
+                                src_stages |= vk::PipelineStageFlags2::ALL_COMMANDS;
+                                src_access |= vk::AccessFlags2::MEMORY_WRITE;
+                            }
                             image_barriers.push(ImageBarrier {
                                 resource: a.resource,
                                 src_stages,

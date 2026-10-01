@@ -1323,6 +1323,14 @@ fn repeated_frames_are_identical() {
         use_temporal.then_some(&temporal),
     );
     let _ = first;
+    if let Ok(dir) = std::env::var("STRESS_PROBE_PIPE") {
+        let pl = make_probe_pipeline(bed.device.raw(), &dir);
+        if let Ok(path) = std::env::var("STRESS_ISA") {
+            dump_isa(&bed.instance, &bed.device, pl.0, &path);
+            return;
+        }
+        *engine_render::forward::DEBUG_PROBE.lock().unwrap() = Some(pl);
+    }
     let mut hashes = Vec::with_capacity(n);
     let st = bed.graph.stats();
     eprintln!("STRESS graph: {st:?}");
@@ -1644,6 +1652,38 @@ fn raster_probe_is_deterministic() {
         )
         .unwrap();
     pmem.mapped_slice_mut().unwrap()[..positions.len() * 4].copy_from_slice(bytemuck_cast(&positions));
+    let corner_bits: Vec<u32> = corners.iter().flatten().map(|f| f.to_bits()).collect();
+    let mk_pos = |allocator: &mut Allocator, data: &[u32]| {
+        let (b, mut m) = allocator
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(data.len() as u64 * 4)
+                    .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS),
+                MemoryLocation::Dynamic,
+            )
+            .unwrap();
+        m.mapped_slice_mut().unwrap()[..data.len() * 4].copy_from_slice(bytemuck_cast(data));
+        // SAFETY: valid buffer with device address usage.
+        let a = unsafe { d.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(b)) };
+        (b, m, a)
+    };
+    let (real_buf, real_mem, real_addr) = mk_pos(&mut allocator, &corner_bits);
+    let (decoy_buf, decoy_mem, decoy_addr) = mk_pos(&mut allocator, &vec![0u32; 24]);
+    let push_of = |addr: u64, mode: u32| {
+        let mut push = [0u8; 112];
+        push[..8].copy_from_slice(&addr.to_le_bytes());
+        push[8..12].copy_from_slice(&mode.to_le_bytes());
+        push[56..64].copy_from_slice(&addr.to_le_bytes());
+        push
+    };
+    let (ibuf, mut imem) = allocator
+        .create_buffer(
+            &vk::BufferCreateInfo::default().size(36 * 4).usage(vk::BufferUsageFlags::INDEX_BUFFER),
+            MemoryLocation::Dynamic,
+        )
+        .unwrap();
+    let idx: Vec<u32> = indices.iter().map(|&i| i as u32).collect();
+    imem.mapped_slice_mut().unwrap()[..36 * 4].copy_from_slice(bytemuck_cast(&idx));
     // SAFETY: valid buffer with device address usage.
     let paddr = unsafe { d.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(pbuf)) };
     let module = |name: &str| {
@@ -1654,7 +1694,7 @@ fn raster_probe_is_deterministic() {
     };
     let vs = module("rasterVertex");
     let fs = module("rasterFragment");
-    let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::ALL_GRAPHICS, offset: 0, size: 16 }];
+    let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::ALL_GRAPHICS, offset: 0, size: 112 }];
     // SAFETY: plain object creation.
     let layout = unsafe { d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges), None) }.unwrap();
     let stages = [
@@ -1666,13 +1706,18 @@ fn raster_probe_is_deterministic() {
     let vi = vk::PipelineVertexInputStateCreateInfo::default();
     let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
     let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
-    let rs = vk::PipelineRasterizationStateCreateInfo::default().cull_mode(vk::CullModeFlags::NONE).line_width(1.0);
+    let cull = std::env::var("PROBE_CULL").unwrap_or_default();
+    let rs = vk::PipelineRasterizationStateCreateInfo::default()
+        .cull_mode(if cull == "static" { vk::CullModeFlags::BACK } else { vk::CullModeFlags::NONE })
+        .front_face(vk::FrontFace::CLOCKWISE)
+        .line_width(1.0);
     let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let ds = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(true).depth_compare_op(vk::CompareOp::LESS);
     let blend = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
     let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend);
-    let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
+    let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::CULL_MODE, vk::DynamicState::FRONT_FACE];
+    let dyn_cull = cull == "dynamic";
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(if dyn_cull { &dyns[..] } else { &dyns[..2] });
     let info = vk::GraphicsPipelineCreateInfo::default()
         .push_next(&mut rendering)
         .stages(&stages)
@@ -1738,12 +1783,36 @@ fn raster_probe_is_deterministic() {
                             ctx.device.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
                             ctx.device.cmd_set_viewport(ctx.cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: size as f32, height: size as f32, min_depth: 0.0, max_depth: 1.0 }]);
                             ctx.device.cmd_set_scissor(ctx.cmd, 0, &[area]);
+            if dyn_cull {
+                ctx.device.cmd_set_cull_mode(ctx.cmd, vk::CullModeFlags::BACK);
+                ctx.device.cmd_set_front_face(ctx.cmd, vk::FrontFace::CLOCKWISE);
+            }
                             let mut push = [0u8; 16];
                             push[..8].copy_from_slice(&paddr.to_le_bytes());
                             push[8..12].copy_from_slice(&mode.to_le_bytes());
-                            ctx.device.cmd_push_constants(ctx.cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push);
+                            ctx.device.cmd_push_constants(ctx.cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push_of(paddr, mode));
+                            if mode >= 2 {
+                                ctx.device.cmd_bind_index_buffer(ctx.cmd, ibuf, 0, vk::IndexType::UINT32);
+                            }
                             for _ in 0..repeat {
-                                ctx.device.cmd_draw(ctx.cmd, 36, 60, 0, 0);
+                                if mode >= 2 {
+                                    if mode == 5 || mode == 6 {
+                    for i in 0..60 {
+                        ctx.device.cmd_push_constants(ctx.cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push_of(decoy_addr, mode));
+                        ctx.device.cmd_draw_indexed(ctx.cmd, 36, 1, 0, 0, i);
+                        ctx.device.cmd_push_constants(ctx.cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push_of(real_addr, mode));
+                        ctx.device.cmd_draw_indexed(ctx.cmd, 36, 1, 0, 0, i);
+                    }
+                } else if mode == 3 {
+                    for i in 0..60 {
+                        ctx.device.cmd_draw_indexed(ctx.cmd, 36, 1, 0, 0, i);
+                    }
+                } else {
+                    ctx.device.cmd_draw_indexed(ctx.cmd, 36, 60, 0, 0, 0);
+                }
+                                } else {
+                                    ctx.device.cmd_draw(ctx.cmd, 36, 60, 0, 0);
+                                }
                             }
                         }
                     });
@@ -1817,12 +1886,36 @@ fn raster_probe_is_deterministic() {
             d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
             d.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: size as f32, height: size as f32, min_depth: 0.0, max_depth: 1.0 }]);
             d.cmd_set_scissor(cmd, 0, &[area]);
+            if dyn_cull {
+                d.cmd_set_cull_mode(cmd, vk::CullModeFlags::BACK);
+                d.cmd_set_front_face(cmd, vk::FrontFace::CLOCKWISE);
+            }
             let mut push = [0u8; 16];
             push[..8].copy_from_slice(&paddr.to_le_bytes());
             push[8..12].copy_from_slice(&mode.to_le_bytes());
-            d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push);
+            d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push_of(paddr, mode));
+            if mode >= 2 {
+                d.cmd_bind_index_buffer(cmd, ibuf, 0, vk::IndexType::UINT32);
+            }
             for _ in 0..repeat {
-                d.cmd_draw(cmd, 36, 60, 0, 0);
+                if mode >= 2 {
+                    if mode == 5 || mode == 6 {
+                    for i in 0..60 {
+                        d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push_of(decoy_addr, mode));
+                        d.cmd_draw_indexed(cmd, 36, 1, 0, 0, i);
+                        d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push_of(real_addr, mode));
+                        d.cmd_draw_indexed(cmd, 36, 1, 0, 0, i);
+                    }
+                } else if mode == 3 {
+                    for i in 0..60 {
+                        d.cmd_draw_indexed(cmd, 36, 1, 0, 0, i);
+                    }
+                } else {
+                    d.cmd_draw_indexed(cmd, 36, 60, 0, 0, 0);
+                }
+                } else {
+                    d.cmd_draw(cmd, 36, 60, 0, 0);
+                }
             }
             d.cmd_end_rendering(cmd);
             let to_copy = [
@@ -1901,9 +1994,101 @@ fn raster_probe_is_deterministic() {
         allocator.destroy_image(depth, depth_mem);
         allocator.destroy_buffer(readback, readback_mem);
         allocator.destroy_buffer(pbuf, pmem);
+        allocator.destroy_buffer(ibuf, imem);
+        allocator.destroy_buffer(real_buf, real_mem);
+        allocator.destroy_buffer(decoy_buf, decoy_mem);
     }
     drop(allocator);
     drop(device);
     drop(instance);
     assert_eq!(n - most, 0);
+}
+
+fn dump_isa(instance: &VkInstance, device: &Device, pipeline: vk::Pipeline, path: &str) {
+    let loader = engine_rhi::ash::khr::pipeline_executable_properties::Device::new(instance.raw(), device.raw());
+    let info = vk::PipelineInfoKHR::default().pipeline(pipeline);
+    // SAFETY: valid pipeline created with capture flags.
+    let execs = unsafe { loader.get_pipeline_executable_properties(&info) }.unwrap();
+    let mut out = String::new();
+    for (i, e) in execs.iter().enumerate() {
+        out += &format!("=== executable {i}: {:?}
+", e.name_as_c_str());
+        let ei = vk::PipelineExecutableInfoKHR::default().pipeline(pipeline).executable_index(i as u32);
+        // SAFETY: as above.
+        let n = unsafe { (loader.fp().get_pipeline_executable_internal_representations_khr)(device.raw().handle(), &ei, &mut 0u32 as *mut u32, core::ptr::null_mut()) };
+        let _ = n;
+        let mut count = 0u32;
+        // SAFETY: as above.
+        unsafe { (loader.fp().get_pipeline_executable_internal_representations_khr)(device.raw().handle(), &ei, &mut count, core::ptr::null_mut()) };
+        let mut reps = vec![vk::PipelineExecutableInternalRepresentationKHR::default(); count as usize];
+        // SAFETY: as above.
+        unsafe { (loader.fp().get_pipeline_executable_internal_representations_khr)(device.raw().handle(), &ei, &mut count, reps.as_mut_ptr()) };
+        let mut bufs: Vec<Vec<u8>> = reps.iter().map(|r| vec![0u8; r.data_size]).collect();
+        for (r, b) in reps.iter_mut().zip(bufs.iter_mut()) {
+            r.p_data = b.as_mut_ptr().cast();
+        }
+        // SAFETY: as above.
+        unsafe { (loader.fp().get_pipeline_executable_internal_representations_khr)(device.raw().handle(), &ei, &mut count, reps.as_mut_ptr()) };
+        for (r, b) in reps.iter().zip(&bufs) {
+            out += &format!("--- {:?}
+{}
+", r.name_as_c_str(), String::from_utf8_lossy(b));
+        }
+    }
+    std::fs::write(path, out).unwrap();
+}
+
+fn make_probe_pipeline(d: &engine_rhi::ash::Device, dir: &str) -> (vk::Pipeline, vk::PipelineLayout) {
+    let module = |name: &str| {
+        let bytes = std::fs::read(format!("{dir}/{name}.spv")).unwrap();
+        let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        // SAFETY: valid SPIR-V.
+        unsafe { d.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.unwrap()
+    };
+    let engine_push = std::env::var("STRESS_PROBE_FILE").is_ok();
+    let (vs, fs, vname, fname) = if engine_push {
+        {
+            let e = std::env::var("STRESS_PROBE_ENTRY").unwrap_or_default();
+            let name: &'static str = Box::leak(format!("probeVertex{e}").into_boxed_str());
+            let cname: &'static std::ffi::CStr = Box::leak(std::ffi::CString::new(name).unwrap().into_boxed_c_str());
+            (module(&format!("probe2.{name}")), module("probe2.probeFragment"), cname, c"probeFragment")
+        }
+    } else {
+        (module("raster.rasterVertex"), module("raster.rasterFragment"), c"rasterVertex", c"rasterFragment")
+    };
+    let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::ALL_GRAPHICS, offset: 0, size: 112 }];
+    // SAFETY: plain object creation.
+    let layout = unsafe { d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges), None) }.unwrap();
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs).name(vname),
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs).name(fname),
+    ];
+    let formats = [COLOR];
+    let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats).depth_attachment_format(DEPTH);
+    let vi = vk::PipelineVertexInputStateCreateInfo::default();
+    let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+    let rs = vk::PipelineRasterizationStateCreateInfo::default().line_width(1.0);
+    let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let ds = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(true).depth_compare_op(vk::CompareOp::LESS);
+    let blend = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+    let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend);
+    let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::CULL_MODE, vk::DynamicState::FRONT_FACE];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .push_next(&mut rendering)
+        .stages(&stages)
+        .vertex_input_state(&vi)
+        .input_assembly_state(&ia)
+        .viewport_state(&vp)
+        .rasterization_state(&rs)
+        .multisample_state(&ms)
+        .depth_stencil_state(&ds)
+        .color_blend_state(&cb)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .flags(if std::env::var("STRESS_ISA").is_ok() { vk::PipelineCreateFlags::CAPTURE_INTERNAL_REPRESENTATIONS_KHR } else { vk::PipelineCreateFlags::empty() });
+    // SAFETY: valid create info.
+    let pipeline = unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.unwrap()[0];
+    (pipeline, layout)
 }
