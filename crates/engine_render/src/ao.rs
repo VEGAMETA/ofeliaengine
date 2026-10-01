@@ -206,6 +206,7 @@ impl AmbientOcclusion {
             ..Push::default()
         };
         fg.add_compute("ao depths", bindless)
+            .async_compute()
             .read(depth, Access::Sampled(ShaderStages::COMPUTE))
             .write(atlas, Access::StorageWrite(ShaderStages::COMPUTE))
             .dispatch(
@@ -222,6 +223,7 @@ impl AmbientOcclusion {
         let visibility = fg.create_texture("ao", TextureDesc::new_2d(AO_FORMAT, width, height));
         let edges = fg.create_texture("ao edges", TextureDesc::new_2d(EDGE_FORMAT, width, height));
         fg.add_compute("ao", bindless)
+            .async_compute()
             .read(atlas, Access::Sampled(ShaderStages::COMPUTE))
             .write(visibility, Access::StorageWrite(ShaderStages::COMPUTE))
             .write(edges, Access::StorageWrite(ShaderStages::COMPUTE))
@@ -253,6 +255,7 @@ impl AmbientOcclusion {
                 fg.create_texture("ao denoised", TextureDesc::new_2d(AO_FORMAT, width, height));
             let source = result;
             fg.add_compute("ao denoise", bindless)
+                .async_compute()
                 .read(source, Access::Sampled(ShaderStages::COMPUTE))
                 .read(edges, Access::Sampled(ShaderStages::COMPUTE))
                 .write(blurred, Access::StorageWrite(ShaderStages::COMPUTE))

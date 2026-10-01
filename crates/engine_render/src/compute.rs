@@ -277,6 +277,13 @@ impl<'g> ComputePass<'_, 'g> {
         self
     }
 
+    /// Runs the pass on the async compute queue when the graph has async compute on (as
+    /// [`PassBuilder::async_compute`], ADR 0065).
+    pub fn async_compute(mut self) -> Self {
+        self.pass = self.pass.async_compute();
+        self
+    }
+
     /// Keeps the pass even if nothing reads what it writes (as
     /// [`PassBuilder::side_effects`]).
     pub fn side_effects(mut self) -> Self {

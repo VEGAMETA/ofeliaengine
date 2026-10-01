@@ -21,6 +21,33 @@ const WRITE_ACCESS: vk::AccessFlags2 = vk::AccessFlags2::from_raw(
 
 pub(crate) const UNUSED: u32 = u32::MAX;
 
+/// The queue a pass runs on.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum QueueKind {
+    /// The graphics queue (graphics, compute and transfer).
+    #[default]
+    Graphics,
+    /// The async compute queue: a compute queue of a family without graphics, running
+    /// alongside the graphics queue (ADR 0065).
+    AsyncCompute,
+}
+
+impl QueueKind {
+    pub(crate) fn other(self) -> Self {
+        match self {
+            Self::Graphics => Self::AsyncCompute,
+            Self::AsyncCompute => Self::Graphics,
+        }
+    }
+
+    pub(crate) fn index(self) -> usize {
+        match self {
+            Self::Graphics => 0,
+            Self::AsyncCompute => 1,
+        }
+    }
+}
+
 /// What a graph resource is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Kind {
@@ -71,6 +98,12 @@ pub(crate) struct ResourceRecord {
     pub(crate) last: u32,
     /// Transient resources whose memory this one reuses (into `Records::aliases`).
     pub(crate) aliases: Range<u32>,
+    /// Created with `VK_SHARING_MODE_CONCURRENT` for both queue families (a transient
+    /// used on both queues, with concurrent sharing chosen): no ownership transfers.
+    pub(crate) concurrent: bool,
+    /// An acquired swapchain image: the caller's submission waits for it, so only the
+    /// graph's last graphics segment (the caller's command buffer) may touch it.
+    pub(crate) caller_waits: bool,
 }
 
 impl ResourceRecord {
@@ -85,6 +118,8 @@ impl ResourceRecord {
             first: UNUSED,
             last: UNUSED,
             aliases: 0..0,
+            concurrent: false,
+            caller_waits: false,
         }
     }
 
@@ -113,6 +148,21 @@ pub(crate) struct ImageBarrier {
     pub(crate) dst_access: vk::AccessFlags2,
     pub(crate) old_layout: vk::ImageLayout,
     pub(crate) new_layout: vk::ImageLayout,
+    /// A queue family ownership transfer from the first queue to the second (the release
+    /// half on the first queue, the acquire half on the second).
+    pub(crate) transfer: Option<(QueueKind, QueueKind)>,
+}
+
+/// A buffer barrier: only for queue family ownership transfers (other buffer
+/// dependencies use one global memory barrier per pass).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BufferBarrier {
+    pub(crate) resource: u32,
+    pub(crate) src_stages: vk::PipelineStageFlags2,
+    pub(crate) src_access: vk::AccessFlags2,
+    pub(crate) dst_stages: vk::PipelineStageFlags2,
+    pub(crate) dst_access: vk::AccessFlags2,
+    pub(crate) transfer: (QueueKind, QueueKind),
 }
 
 /// A global memory barrier (buffers need no per-resource barriers).
@@ -146,7 +196,17 @@ pub(crate) struct PassRecord {
     pub(crate) attachments: Range<u32>,
     pub(crate) side_effects: bool,
     pub(crate) needed: bool,
+    /// Declared with `.async_compute()`.
+    pub(crate) async_requested: bool,
+    /// Where it runs this frame (after scheduling).
+    pub(crate) queue: QueueKind,
+    /// Its segment (`Records::segments`) this frame.
+    pub(crate) segment: u32,
+    /// Passes it depends on (into `Records::edges`; with async compute only).
+    pub(crate) preds: Range<u32>,
     pub(crate) image_barriers: Range<u32>,
+    /// Ownership acquires of buffers (into `Records::buffer_barriers`).
+    pub(crate) buffer_barriers: Range<u32>,
     pub(crate) memory_barrier: MemoryBarrier,
 }
 
@@ -164,7 +224,12 @@ impl PassRecord {
             attachments: attachments_start..attachments_start,
             side_effects: false,
             needed: false,
+            async_requested: false,
+            queue: QueueKind::Graphics,
+            segment: 0,
+            preds: 0..0,
             image_barriers: 0..0,
+            buffer_barriers: 0..0,
             memory_barrier: MemoryBarrier::default(),
         }
     }
@@ -186,6 +251,48 @@ struct State {
     /// Stages and accesses the last write is already visible to.
     visible_stages: vk::PipelineStageFlags2,
     visible_access: vk::AccessFlags2,
+    /// The queue that accessed it last, and the segment of that access (or
+    /// [`NO_SEGMENT`] for an imported resource not used yet: the graphics queue owns it).
+    queue: QueueKind,
+    segment: u32,
+}
+
+/// [`Segment::wait`] of a segment that waits for nothing, and the segment of resources
+/// not used yet.
+pub(crate) const NO_SEGMENT: u32 = u32::MAX;
+
+/// A run of passes on one queue submitted as one batch: it waits for a segment of the
+/// other queue (a cross-queue dependency) before it starts, and its end is signaled.
+#[derive(Debug, Clone)]
+pub(crate) struct Segment {
+    pub(crate) queue: QueueKind,
+    /// Its passes, in execution order (into `Records::segment_passes`).
+    pub(crate) passes: Range<u32>,
+    /// The segment of the other queue it waits for, or [`NO_SEGMENT`].
+    pub(crate) wait: u32,
+    /// Position (in `Records::order`) where it starts.
+    pub(crate) first_position: u32,
+    /// For async compute segments: the position of the first graphics pass that waits
+    /// for it (or the end of the frame). Graphics passes before it may run concurrently.
+    pub(crate) join_position: u32,
+    /// Barriers recorded after its last pass: releases of ownership and layout
+    /// transitions for the other queue (into `Records::release_images` / `_buffers`).
+    pub(crate) release_images: Range<u32>,
+    pub(crate) release_buffers: Range<u32>,
+}
+
+impl Segment {
+    pub(crate) fn new(queue: QueueKind, wait: u32, position: u32) -> Self {
+        Self {
+            queue,
+            passes: 0..0,
+            wait,
+            first_position: position,
+            join_position: UNUSED,
+            release_images: 0..0,
+            release_buffers: 0..0,
+        }
+    }
 }
 
 /// Per-frame graph data, reused across frames.
@@ -195,12 +302,29 @@ pub(crate) struct Records {
     pub(crate) passes: Vec<PassRecord>,
     pub(crate) accesses: Vec<AccessRecord>,
     pub(crate) image_barriers: Vec<ImageBarrier>,
+    /// Ownership acquires of buffers (async compute only).
+    pub(crate) buffer_barriers: Vec<BufferBarrier>,
     /// Transitions of imported textures to their final states, after the last pass.
     pub(crate) final_image_barriers: Range<u32>,
+    pub(crate) final_buffer_barriers: Range<u32>,
     pub(crate) final_memory_barrier: MemoryBarrier,
     pub(crate) aliases: Vec<u32>,
+    /// Needed passes in execution order (declaration order without async compute).
+    pub(crate) order: Vec<u32>,
+    /// Batches per queue (one graphics segment without async compute).
+    pub(crate) segments: Vec<Segment>,
+    pub(crate) segment_passes: Vec<u32>,
+    /// Barriers at the ends of segments, grouped by segment.
+    pub(crate) release_images: Vec<ImageBarrier>,
+    pub(crate) release_buffers: Vec<BufferBarrier>,
+    /// Dependencies between passes (async compute scheduling): each pass's are
+    /// `PassRecord::preds`.
+    pub(crate) edges: Vec<u32>,
+    pub(crate) schedule_scratch: super::schedule::Scratch,
     needed: Vec<bool>,
     states: Vec<State>,
+    pending_images: Vec<(u32, u32, ImageBarrier)>,
+    pending_buffers: Vec<(u32, u32, BufferBarrier)>,
 }
 
 impl Records {
@@ -209,9 +333,17 @@ impl Records {
         self.passes.clear();
         self.accesses.clear();
         self.image_barriers.clear();
+        self.buffer_barriers.clear();
         self.final_image_barriers = 0..0;
+        self.final_buffer_barriers = 0..0;
         self.final_memory_barrier = MemoryBarrier::default();
         self.aliases.clear();
+        self.order.clear();
+        self.segments.clear();
+        self.segment_passes.clear();
+        self.release_images.clear();
+        self.release_buffers.clear();
+        self.edges.clear();
     }
 
     /// Adds an access by the last pass, merging with an earlier access of the same
@@ -269,7 +401,11 @@ impl Records {
         }
     }
 
-    /// First/last needed pass and usage flags of every resource.
+    /// First/last position (in [`Self::order`]) and usage flags of every resource. Call
+    /// after scheduling. A resource used by an async compute segment lives over that
+    /// segment's whole window (from its start to the graphics pass that waits for it):
+    /// graphics passes in the window may run at the same time, so its memory must not be
+    /// shared with theirs.
     pub(crate) fn resolve_lifetimes(&mut self) {
         for r in &mut self.resources {
             r.first = UNUSED;
@@ -277,150 +413,390 @@ impl Records {
             r.image_usage = vk::ImageUsageFlags::empty();
             r.buffer_usage = vk::BufferUsageFlags::empty();
         }
-        for (index, pass) in self.passes.iter().enumerate() {
-            if !pass.needed {
-                continue;
-            }
+        for (position, &p) in self.order.iter().enumerate() {
+            let pass = &self.passes[p as usize];
             for a in &self.accesses[pass.accesses.start as usize..pass.accesses.end as usize] {
                 let r = &mut self.resources[a.resource as usize];
                 if r.first == UNUSED {
-                    r.first = index as u32;
+                    r.first = position as u32;
                 }
-                r.last = index as u32;
+                r.last = position as u32;
                 r.image_usage |= a.info.image_usage;
                 r.buffer_usage |= a.info.buffer_usage;
             }
         }
+        for &p in &self.order {
+            let pass = &self.passes[p as usize];
+            if pass.queue != QueueKind::AsyncCompute {
+                continue;
+            }
+            let segment = &self.segments[pass.segment as usize];
+            let (start, end) = (
+                segment.first_position,
+                segment.join_position.saturating_sub(1),
+            );
+            for a in &self.accesses[pass.accesses.start as usize..pass.accesses.end as usize] {
+                let r = &mut self.resources[a.resource as usize];
+                r.first = r.first.min(start);
+                r.last = r.last.max(end);
+            }
+        }
     }
 
-    /// Computes the barriers before every needed pass and the final transitions. Call
-    /// after [`Self::resolve_lifetimes`] and after aliases are known.
+    /// Computes the barriers before every needed pass, at the ends of segments, and the
+    /// final transitions. Call after [`Self::resolve_lifetimes`] and after aliases are
+    /// known.
+    #[allow(clippy::too_many_lines)]
     pub(crate) fn build_barriers(&mut self) {
         let Self {
             resources,
             passes,
             accesses,
             image_barriers,
+            buffer_barriers,
             final_image_barriers,
+            final_buffer_barriers,
             final_memory_barrier,
             aliases,
             states,
+            order,
+            segments,
+            release_images,
+            release_buffers,
+            pending_images,
+            pending_buffers,
             ..
         } = self;
         image_barriers.clear();
+        buffer_barriers.clear();
+        pending_images.clear();
+        pending_buffers.clear();
         states.clear();
         states.resize(resources.len(), State::default());
+        let mut sequence = 0u32;
 
-        for pass in passes.iter_mut() {
+        for &p in order.iter() {
+            let pass = &mut passes[p as usize];
+            let (queue, segment) = (pass.queue, pass.segment);
             let start = image_barriers.len() as u32;
+            let buffer_start = buffer_barriers.len() as u32;
             let mut memory = MemoryBarrier::default();
-            if pass.needed {
-                for a in &accesses[pass.accesses.start as usize..pass.accesses.end as usize] {
-                    let r = a.resource as usize;
-                    let resource = &resources[r];
-                    let is_image = resource.kind == Kind::Texture;
-                    let info = &a.info;
-                    if !states[r].touched {
-                        states[r].touched = true;
-                        if let Some(initial) = resource.initial {
-                            let s = &mut states[r];
-                            s.layout = initial.layout;
-                            let writes = initial.access & WRITE_ACCESS;
-                            if writes.is_empty() {
-                                s.read_stages = initial.stages;
-                            } else {
-                                s.write_stages = initial.stages;
-                                s.write_access = writes;
-                            }
+            for a in &accesses[pass.accesses.start as usize..pass.accesses.end as usize] {
+                let r = a.resource as usize;
+                let resource = &resources[r];
+                let is_image = resource.kind == Kind::Texture;
+                let info = &a.info;
+                if !states[r].touched {
+                    states[r].touched = true;
+                    states[r].queue = QueueKind::Graphics;
+                    states[r].segment = NO_SEGMENT;
+                    if let Some(initial) = resource.initial {
+                        let s = &mut states[r];
+                        s.layout = initial.layout;
+                        let writes = initial.access & WRITE_ACCESS;
+                        if writes.is_empty() {
+                            s.read_stages = initial.stages;
                         } else {
-                            // Transient: nothing to keep, but the memory's previous
-                            // occupants must be done with it.
-                            let (mut src_stages, mut src_access) = Default::default();
-                            for &p in &aliases
-                                [resource.aliases.start as usize..resource.aliases.end as usize]
-                            {
-                                let p = &states[p as usize];
+                            s.write_stages = initial.stages;
+                            s.write_access = writes;
+                        }
+                    } else {
+                        // Transient: nothing to keep, but the memory's previous
+                        // occupants must be done with it. Those on the other queue are:
+                        // a semaphore orders their segment before this one (their
+                        // lifetimes cover their segments' windows), and the barrier
+                        // chains on the wait.
+                        let (mut src_stages, mut src_access) = Default::default();
+                        for &p in
+                            &aliases[resource.aliases.start as usize..resource.aliases.end as usize]
+                        {
+                            let p = &states[p as usize];
+                            if p.queue == queue {
                                 src_stages |= p.write_stages | p.read_stages;
                                 src_access |= p.write_access;
+                            } else {
+                                src_stages |= info.stages;
                             }
-                            if is_image {
-                                image_barriers.push(ImageBarrier {
-                                    resource: a.resource,
-                                    src_stages,
-                                    src_access,
-                                    dst_stages: info.stages,
-                                    dst_access: info.access,
-                                    old_layout: vk::ImageLayout::UNDEFINED,
-                                    new_layout: info.layout,
-                                });
-                            } else if !src_stages.is_empty() {
-                                memory.add((src_stages, src_access), info);
-                            }
-                            after_access(&mut states[r], info);
-                            continue;
                         }
+                        if is_image {
+                            image_barriers.push(ImageBarrier {
+                                resource: a.resource,
+                                src_stages,
+                                src_access,
+                                dst_stages: info.stages,
+                                dst_access: info.access,
+                                old_layout: vk::ImageLayout::UNDEFINED,
+                                new_layout: info.layout,
+                                transfer: None,
+                            });
+                        } else if !src_stages.is_empty() {
+                            memory.add((src_stages, src_access), info);
+                        }
+                        let s = &mut states[r];
+                        after_access(s, info);
+                        s.queue = queue;
+                        s.segment = segment;
+                        continue;
                     }
+                }
+                if states[r].queue != queue {
+                    let s = states[r];
+                    let from = s.queue;
+                    let keep = !info.discards;
+                    let exclusive = !resource.concurrent;
+                    // The other queue's segment that last used it (for an imported
+                    // resource first used on the compute queue: the graphics segment this
+                    // one waits for). The scheduler made this segment wait for it.
+                    let releasing = if s.segment == NO_SEGMENT {
+                        segments[segment as usize].wait
+                    } else {
+                        s.segment
+                    };
+                    let src = (s.write_stages | s.read_stages, s.write_access);
+                    let mut transitioned_here = false;
+                    if is_image {
+                        if keep && exclusive {
+                            // Queue family ownership transfer: released there, acquired
+                            // here, the layout transition between.
+                            let transfer = Some((from, queue));
+                            pending_images.push((
+                                releasing,
+                                sequence,
+                                ImageBarrier {
+                                    resource: a.resource,
+                                    src_stages: src.0,
+                                    src_access: src.1,
+                                    dst_stages: vk::PipelineStageFlags2::NONE,
+                                    dst_access: vk::AccessFlags2::NONE,
+                                    old_layout: s.layout,
+                                    new_layout: info.layout,
+                                    transfer,
+                                },
+                            ));
+                            sequence += 1;
+                            image_barriers.push(ImageBarrier {
+                                resource: a.resource,
+                                src_stages: info.stages,
+                                src_access: vk::AccessFlags2::NONE,
+                                dst_stages: info.stages,
+                                dst_access: info.access,
+                                old_layout: s.layout,
+                                new_layout: info.layout,
+                                transfer,
+                            });
+                            transitioned_here = s.layout != info.layout;
+                        } else if keep && s.layout != info.layout {
+                            // Concurrent sharing: the queue that used it last transitions
+                            // it before signaling. Its own later passes may read it too
+                            // without waiting for the other queue: visible to everything.
+                            pending_images.push((
+                                releasing,
+                                sequence,
+                                ImageBarrier {
+                                    resource: a.resource,
+                                    src_stages: src.0,
+                                    src_access: src.1,
+                                    dst_stages: vk::PipelineStageFlags2::ALL_COMMANDS,
+                                    dst_access: vk::AccessFlags2::MEMORY_READ
+                                        | vk::AccessFlags2::MEMORY_WRITE,
+                                    old_layout: s.layout,
+                                    new_layout: info.layout,
+                                    transfer: None,
+                                },
+                            ));
+                            sequence += 1;
+                        } else if !keep {
+                            // Contents do not matter: no ownership to transfer.
+                            image_barriers.push(ImageBarrier {
+                                resource: a.resource,
+                                src_stages: info.stages,
+                                src_access: vk::AccessFlags2::NONE,
+                                dst_stages: info.stages,
+                                dst_access: info.access,
+                                old_layout: vk::ImageLayout::UNDEFINED,
+                                new_layout: info.layout,
+                                transfer: None,
+                            });
+                            transitioned_here = true;
+                        }
+                    } else if keep && exclusive {
+                        let transfer = (from, queue);
+                        pending_buffers.push((
+                            releasing,
+                            sequence,
+                            BufferBarrier {
+                                resource: a.resource,
+                                src_stages: src.0,
+                                src_access: src.1,
+                                dst_stages: vk::PipelineStageFlags2::NONE,
+                                dst_access: vk::AccessFlags2::NONE,
+                                transfer,
+                            },
+                        ));
+                        sequence += 1;
+                        buffer_barriers.push(BufferBarrier {
+                            resource: a.resource,
+                            src_stages: info.stages,
+                            src_access: vk::AccessFlags2::NONE,
+                            dst_stages: info.stages,
+                            dst_access: info.access,
+                            transfer,
+                        });
+                    }
+                    // The semaphore made the other queue's writes visible to everything
+                    // after the wait: later reads here need no barrier, except after a
+                    // layout transition recorded on this queue.
                     let s = &mut states[r];
-                    let layout_change = is_image && s.layout != info.layout;
-                    if layout_change || info.writes {
-                        let src = (s.write_stages | s.read_stages, s.write_access);
-                        if is_image && (layout_change || !src.0.is_empty()) {
+                    if info.writes {
+                        after_access(s, info);
+                    } else {
+                        s.layout = info.layout;
+                        s.write_stages = if transitioned_here {
+                            info.stages
+                        } else {
+                            vk::PipelineStageFlags2::empty()
+                        };
+                        s.write_access = vk::AccessFlags2::empty();
+                        s.read_stages = info.stages;
+                        s.visible_stages = info.stages;
+                        s.visible_access = info.access;
+                    }
+                    s.queue = queue;
+                    s.segment = segment;
+                    continue;
+                }
+                let s = &mut states[r];
+                s.segment = segment;
+                let layout_change = is_image && s.layout != info.layout;
+                if layout_change || info.writes {
+                    let src = (s.write_stages | s.read_stages, s.write_access);
+                    if is_image && (layout_change || !src.0.is_empty()) {
+                        image_barriers.push(ImageBarrier {
+                            resource: a.resource,
+                            src_stages: src.0,
+                            src_access: src.1,
+                            dst_stages: info.stages,
+                            dst_access: info.access,
+                            old_layout: if info.discards {
+                                vk::ImageLayout::UNDEFINED
+                            } else {
+                                s.layout
+                            },
+                            new_layout: info.layout,
+                            transfer: None,
+                        });
+                    } else if !is_image && !src.0.is_empty() {
+                        memory.add(src, info);
+                    }
+                    after_access(s, info);
+                } else {
+                    // Read in the current layout: wait for the last write unless it is
+                    // already visible to these stages.
+                    let covered = s.visible_stages.contains(info.stages)
+                        && s.visible_access.contains(info.access);
+                    if !s.write_stages.is_empty() && !covered {
+                        let src = (s.write_stages, s.write_access);
+                        if is_image {
                             image_barriers.push(ImageBarrier {
                                 resource: a.resource,
                                 src_stages: src.0,
                                 src_access: src.1,
                                 dst_stages: info.stages,
                                 dst_access: info.access,
-                                old_layout: if info.discards {
-                                    vk::ImageLayout::UNDEFINED
-                                } else {
-                                    s.layout
-                                },
-                                new_layout: info.layout,
+                                old_layout: s.layout,
+                                new_layout: s.layout,
+                                transfer: None,
                             });
-                        } else if !is_image && !src.0.is_empty() {
+                        } else {
                             memory.add(src, info);
                         }
-                        after_access(s, info);
-                    } else {
-                        // Read in the current layout: wait for the last write unless it is
-                        // already visible to these stages.
-                        let covered = s.visible_stages.contains(info.stages)
-                            && s.visible_access.contains(info.access);
-                        if !s.write_stages.is_empty() && !covered {
-                            let src = (s.write_stages, s.write_access);
-                            if is_image {
-                                image_barriers.push(ImageBarrier {
-                                    resource: a.resource,
-                                    src_stages: src.0,
-                                    src_access: src.1,
-                                    dst_stages: info.stages,
-                                    dst_access: info.access,
-                                    old_layout: s.layout,
-                                    new_layout: s.layout,
-                                });
-                            } else {
-                                memory.add(src, info);
-                            }
-                            s.visible_stages |= info.stages;
-                            s.visible_access |= info.access;
-                        }
-                        s.read_stages |= info.stages;
+                        s.visible_stages |= info.stages;
+                        s.visible_access |= info.access;
                     }
+                    s.read_stages |= info.stages;
                 }
             }
             pass.image_barriers = start..image_barriers.len() as u32;
+            pass.buffer_barriers = buffer_start..buffer_barriers.len() as u32;
             pass.memory_barrier = memory;
         }
 
-        // Imported resources leave the graph in the state their owner asked for.
+        // Imported resources leave the graph in the state their owner asked for, owned by
+        // the graphics queue (the last graphics segment waits for every compute segment).
         let start = image_barriers.len() as u32;
+        let buffer_start = buffer_barriers.len() as u32;
         let mut memory = MemoryBarrier::default();
         for (r, resource) in resources.iter().enumerate() {
-            let (Some(target), true) = (resource.final_state, states[r].touched) else {
+            let s = states[r];
+            if !s.touched {
+                continue;
+            }
+            if s.queue == QueueKind::AsyncCompute && resource.initial.is_some() {
+                let target = resource.final_state.unwrap_or(Boundary {
+                    layout: s.layout,
+                    stages: vk::PipelineStageFlags2::ALL_COMMANDS,
+                    access: vk::AccessFlags2::NONE,
+                });
+                let dst_stages = if target.stages.is_empty() {
+                    vk::PipelineStageFlags2::ALL_COMMANDS
+                } else {
+                    target.stages
+                };
+                let src = (s.write_stages | s.read_stages, s.write_access);
+                let transfer = (QueueKind::AsyncCompute, QueueKind::Graphics);
+                if resource.kind == Kind::Texture {
+                    pending_images.push((
+                        s.segment,
+                        sequence,
+                        ImageBarrier {
+                            resource: r as u32,
+                            src_stages: src.0,
+                            src_access: src.1,
+                            dst_stages: vk::PipelineStageFlags2::NONE,
+                            dst_access: vk::AccessFlags2::NONE,
+                            old_layout: s.layout,
+                            new_layout: target.layout,
+                            transfer: Some(transfer),
+                        },
+                    ));
+                    image_barriers.push(ImageBarrier {
+                        resource: r as u32,
+                        src_stages: vk::PipelineStageFlags2::ALL_COMMANDS,
+                        src_access: vk::AccessFlags2::NONE,
+                        dst_stages,
+                        dst_access: target.access,
+                        old_layout: s.layout,
+                        new_layout: target.layout,
+                        transfer: Some(transfer),
+                    });
+                } else {
+                    pending_buffers.push((
+                        s.segment,
+                        sequence,
+                        BufferBarrier {
+                            resource: r as u32,
+                            src_stages: src.0,
+                            src_access: src.1,
+                            dst_stages: vk::PipelineStageFlags2::NONE,
+                            dst_access: vk::AccessFlags2::NONE,
+                            transfer,
+                        },
+                    ));
+                    buffer_barriers.push(BufferBarrier {
+                        resource: r as u32,
+                        src_stages: vk::PipelineStageFlags2::ALL_COMMANDS,
+                        src_access: vk::AccessFlags2::NONE,
+                        dst_stages,
+                        dst_access: target.access,
+                        transfer,
+                    });
+                }
+                sequence += 1;
+                continue;
+            }
+            let Some(target) = resource.final_state else {
                 continue;
             };
-            let s = states[r];
             let src = (s.write_stages | s.read_stages, s.write_access);
             if resource.kind == Kind::Texture {
                 if s.layout != target.layout || !s.write_access.is_empty() {
@@ -432,6 +808,7 @@ impl Records {
                         dst_access: target.access,
                         old_layout: s.layout,
                         new_layout: target.layout,
+                        transfer: None,
                     });
                 }
             } else if !s.write_access.is_empty() {
@@ -442,7 +819,30 @@ impl Records {
             }
         }
         *final_image_barriers = start..image_barriers.len() as u32;
+        *final_buffer_barriers = buffer_start..buffer_barriers.len() as u32;
         *final_memory_barrier = memory;
+
+        // The releases, grouped by segment in the order they were found.
+        pending_images.sort_unstable_by_key(|&(segment, sequence, _)| (segment, sequence));
+        pending_buffers.sort_unstable_by_key(|&(segment, sequence, _)| (segment, sequence));
+        release_images.clear();
+        release_buffers.clear();
+        let (mut i, mut b) = (0, 0);
+        for (index, segment) in segments.iter_mut().enumerate() {
+            let index = index as u32;
+            let start = release_images.len() as u32;
+            while i < pending_images.len() && pending_images[i].0 == index {
+                release_images.push(pending_images[i].2);
+                i += 1;
+            }
+            segment.release_images = start..release_images.len() as u32;
+            let start = release_buffers.len() as u32;
+            while b < pending_buffers.len() && pending_buffers[b].0 == index {
+                release_buffers.push(pending_buffers[b].2);
+                b += 1;
+            }
+            segment.release_buffers = start..release_buffers.len() as u32;
+        }
     }
 }
 
@@ -473,6 +873,7 @@ fn after_access(s: &mut State, info: &AccessInfo) {
 mod tests {
     use super::*;
     use crate::graph::access::{Access, ShaderStages};
+    use crate::graph::schedule::ScheduleOptions;
 
     fn texture(records: &mut Records, name: &'static str) -> u32 {
         records
@@ -506,6 +907,7 @@ mod tests {
 
     fn compile(records: &mut Records) {
         records.cull();
+        records.schedule(ScheduleOptions::default());
         records.resolve_lifetimes();
         records.build_barriers();
     }
@@ -559,7 +961,8 @@ mod tests {
                 rec.resources[color as usize].first,
                 rec.resources[color as usize].last
             ),
-            (0, 2)
+            // Positions in the execution order: the culled pass is not in it.
+            (0, 1)
         );
         assert_eq!(
             rec.resources[color as usize].image_usage,
@@ -837,6 +1240,7 @@ mod tests {
             ],
         );
         rec.cull();
+        rec.schedule(ScheduleOptions::default());
         rec.resolve_lifetimes();
         // `b` reuses `a`'s memory.
         rec.aliases.push(a);

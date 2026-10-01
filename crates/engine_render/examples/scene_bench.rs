@@ -24,7 +24,11 @@
 //! levels made at load (ADR 0053), `--pack <file>` to load a cooked pack instead of the glTF
 //! scene (ADR 0056; `ofeliaengine cook` makes one), `--stream` with it to stream the
 //! textures while drawing (ADR 0057: tails first, then larger levels, through the texture
-//! pool's staging ring)
+//! pool's staging ring), `--async-compute on|off` to run the async passes (ambient occlusion)
+//! on the async compute queue or not (ADR 0065; default: the vendor's measured default or
+//! `ENGINE_ASYNC_COMPUTE`). The last column is the GPU frame time end to end (the graph's
+//! first pass to its last on the graphics queue), which async compute shortens while the
+//! overlapped passes themselves may read longer.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -258,6 +262,7 @@ fn main() {
     let mut pack: Option<String> = None;
     let mut ao: Option<AoSettings> = None;
     let mut stream = false;
+    let mut async_compute: Option<bool> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -305,6 +310,7 @@ fn main() {
             "--ddc" => ddc = args.next().unwrap(),
             "--pack" => pack = args.next(),
             "--stream" => stream = true,
+            "--async-compute" => async_compute = args.next().map(|v| v == "on"),
             "--view" => {
                 let v: Vec<f32> = args
                     .next()
@@ -416,6 +422,9 @@ fn main() {
     let tonemap = Tonemap::new(&device, &bindless, screenshot_format).unwrap();
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 64 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
+    if let Some(on) = async_compute {
+        graph.set_async_compute(on);
+    }
     let readback_size = u64::from(WIDTH * HEIGHT * 4);
     let (readback, readback_mem) = allocator
         .create_buffer(
@@ -649,6 +658,11 @@ fn main() {
     println!();
     println!("Device: {}", device.adapter().summary());
     println!(
+        "Async compute: {} (queue {:?})",
+        if graph.async_compute() { "on" } else { "off" },
+        device.async_compute.map(|q| q.family)
+    );
+    println!(
         "Scene: {}: {} triangles in {} primitives, {} draws; {} materials ({masked} masked, \
          {blended} blended, {double_sided} double-sided)",
         pack.as_deref().unwrap_or(&path),
@@ -727,9 +741,10 @@ fn main() {
     println!(
         "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs | \
          GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs | \
-         GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs | GPU AO µs |"
+         GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs | GPU AO µs | \
+         GPU frame µs | CPU execute µs |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -738,8 +753,10 @@ fn main() {
         }
         let (mut shadow, mut depth_prepass, mut forward) = (Vec::new(), Vec::new(), Vec::new());
         let mut ao_time = Vec::new();
+        let mut frame_time = Vec::new();
         let mut motion_extra = Vec::new();
         let (mut light_tiles, mut cpu_add) = (Vec::new(), Vec::new());
+        let mut cpu_execute = Vec::new();
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
         let (mut bloom_time, mut exposure_time, mut tonemap_time) =
             (Vec::new(), Vec::new(), Vec::new());
@@ -772,6 +789,7 @@ fn main() {
             }
             ring.begin_slot(0);
             let added;
+            let executed;
             {
                 // SAFETY: nothing is in flight.
                 let mut fg = unsafe { graph.begin_slot(0, cmd) };
@@ -911,8 +929,10 @@ fn main() {
                         .side_effects()
                         .execute(|_| {});
                 }
+                let started = Instant::now();
                 fg.execute_with_bindless(&mut allocator, Some(&bindless))
                     .unwrap();
+                executed = started.elapsed();
             }
             // SAFETY: as above.
             unsafe {
@@ -979,12 +999,16 @@ fn main() {
                 shadow.push(shadow_frame);
                 light_tiles.push(tiles_frame);
                 cpu_add.push(added.as_secs_f64() * 1e6);
+                cpu_execute.push(executed.as_secs_f64() * 1e6);
                 sky_pass.push(sky_frame);
                 rebuild.push(rebuild_frame);
                 bloom_time.push(bloom_frame);
                 exposure_time.push(exposure_frame);
                 tonemap_time.push(tonemap_frame);
                 ao_time.push(ao_frame);
+                if let Some(us) = graph.gpu_frame_time() {
+                    frame_time.push(f64::from(us));
+                }
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
@@ -997,7 +1021,7 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
@@ -1010,6 +1034,8 @@ fn main() {
             median(&mut exposure_time),
             median(&mut tonemap_time),
             median(&mut ao_time),
+            median(&mut frame_time),
+            median(&mut cpu_execute),
         );
     }
     println!();

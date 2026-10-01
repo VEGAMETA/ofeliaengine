@@ -896,3 +896,53 @@ let face = materials.add(MaterialDesc {
     pixels.
 - **Limits:** only what is on screen scatters; two scattering objects at the same depth
   exchange a little light; the exit albedo is stored in 8 bits.
+
+## 15. Async compute: compute passes beside graphics work
+
+GPUs with a separate compute queue can run compute work while the graphics queue
+rasterizes (ADR 0065). The render graph does this for passes you mark, and schedules them
+itself: it moves the work they need earlier and lets the graphics work that does not lead
+to them run alongside.
+
+```rust
+fg.add_compute("my blur", &bindless)
+    .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+    .write(target, Access::StorageWrite(ShaderStages::COMPUTE))
+    .async_compute() // may run on the async compute queue
+    .dispatch(&blur, Dispatch::Threads([width, height, 1]), move |ctx| { /* push */ });
+```
+
+- **What runs there:** passes marked `.async_compute()` (on `add_compute` or `add_pass`)
+  with no attachments, whose accesses are compute, transfer or indirect arguments. Others
+  stay on the graphics queue; the result is the same either way.
+- **Declare everything the pass touches.** The graph reorders passes only within the
+  declared accesses; a pass that reads something it did not declare may run before or
+  beside the pass that writes it.
+- **On by default where it was measured faster:** NVIDIA GPUs. Off on AMD and other
+  vendors: on the 2-CU Radeon iGPU the queues only take turns. Change it per graph with
+  `graph.set_async_compute(true | false)`, or for the process with
+  `ENGINE_ASYNC_COMPUTE=1` / `0`. Without a separate compute queue it is always off.
+- **What the engine runs there:** ambient occlusion (beside the shadow maps: Sponza at
+  1080p, 1.25 → 1.19 ms per frame on an RTX 4060 Ti) and the environment rebuild when the
+  sky changes. Light tiles and automatic exposure stay on the graphics queue: too short
+  to pay for the extra synchronization.
+- **Mark a pass only after measuring it:** a pass that pairs with graphics work using
+  different units (math- or memory-bound compute beside depth-only rendering) gains;
+  short passes, or two cache-heavy passes, lose. Run your frame with
+  `scene_bench --async-compute on` and `off` (or your own benchmark) on each GPU you
+  target.
+- **Reading the times:**
+  - `graph.gpu_pass_times()` lists each pass with its `queue`; passes that overlap read
+    longer, because they share the GPU;
+  - `graph.gpu_frame_time()` is the frame from its first pass to its last: compare
+    frames with this, not with the sum of the passes;
+  - `graph.stats()` counts the async passes, the graph's own submissions and ownership
+    transfers.
+- **Submitting:** with async compute on, `fg.execute(...)` submits the frame's earlier
+  parts to the device's graphics and compute queues itself. Submit the frame's command
+  buffer to `device.graphics` afterwards as before; do not submit to these queues from
+  other threads meanwhile.
+- **Sharing between the queues:** resources move between queue families with ownership
+  transfers by default; `graph.set_async_sharing(AsyncSharing::Concurrent)` (or
+  `ENGINE_ASYNC_SHARING=concurrent`) creates the frame's transient resources for both
+  families instead. Both measured the same on the RTX; exclusive keeps image compression.
