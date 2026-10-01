@@ -283,6 +283,8 @@ fn additive_clips_add_back_their_motion() {
     let raw = wave(&skeleton, 1.0, Interpolation::Linear);
     let settings = CompressSettings {
         additive: Some(AdditiveBase::FirstSample),
+        // Measured below at 0.3 from every joint.
+        shell_distance: 0.3,
         ..CompressSettings::default()
     };
     let (additive, stats) = compress(&raw, &skeleton, &settings);

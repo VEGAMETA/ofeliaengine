@@ -363,7 +363,6 @@ fn main() {
             &CompressSettings {
                 error_threshold: threshold,
                 joint_shell_distances: fox.shell.clone(),
-                sample_rate: Some(30.0),
                 ..CompressSettings::default()
             },
         )
@@ -374,8 +373,20 @@ fn main() {
     let raw_clips = [ours(&fox.raws[walk], 0.0), ours(&fox.raws[run], 0.0)];
     let shell: Vec<f32> = fox.shell.iter().map(|&d| d.max(0.03)).collect();
     let reduced = [
-        Reduced::new(&fox.raws[walk], skeleton, 30.0, &shell, bound * 0.25),
-        Reduced::new(&fox.raws[run], skeleton, 30.0, &shell, bound * 0.25),
+        Reduced::new(
+            &fox.raws[walk],
+            skeleton,
+            clips[0].sample_rate(),
+            &shell,
+            bound * 0.25,
+        ),
+        Reduced::new(
+            &fox.raws[run],
+            skeleton,
+            clips[1].sample_rate(),
+            &shell,
+            bound * 0.25,
+        ),
     ];
     let joints = &fox.skin.skin_joints;
     let inverse_bind = &fox.skin.inverse_bind;
@@ -384,7 +395,7 @@ fn main() {
     pool.register_current_thread().unwrap();
 
     println!(
-        "\n## Sampling and blending (Fox: {n} joints, {} skinned; Walk + Run at 30 Hz, blended, local to model, skinning matrices)\n",
+        "\n## Sampling and blending (Fox: {n} joints, {} skinned; Walk + Run, blended, local to model, skinning matrices)\n",
         joints.len()
     );
     println!("| format | characters | threads | µs per character | µs per frame |");

@@ -6,18 +6,23 @@
 //! - **default**: equal to the rest pose (or to identity in an additive clip) and not
 //!   stored;
 //! - **constant**: one value, stored at full precision;
-//! - **animated**: one value per sample, range-reduced over the clip (each component
-//!   relative to its minimum and extent) and quantized to the track's own bit width
-//!   (3–16 bits per component, or 32 for raw floats). A rotation drops one component of
-//!   its quaternion, the one whose magnitude stays largest over the clip (made positive
-//!   and recomputed from the other three, so it is never close to 0 where recomputing
-//!   it loses precision); a rotation without such a component (none stays above 0.25)
-//!   or stored raw keeps all four.
+//! - **animated**: one value per sample, range-reduced and quantized. A rotation drops one
+//!   component of its quaternion, the one whose magnitude stays largest over the clip
+//!   (made positive and recomputed from the other three, so it is never close to 0 where
+//!   recomputing it loses precision); a rotation without such a component (none stays
+//!   above 0.25) or stored raw keeps all four.
 //!
-//! Samples are stored frame by frame (every animated track of sample 0, then of sample
-//! 1...), so sampling a time reads two contiguous bit strings. The bit widths are chosen by
-//! the compressor ([`crate::compress`]) to keep the error of every joint, measured in
-//! object space on virtual vertices around it, under a threshold: the approach of
+//! The samples are cut into **segments** of [`SEGMENT_SAMPLES`] intervals (each segment
+//! also holds the first sample of the next, so the two samples around any time are in one
+//! segment). Per segment, every animated track has its own range, 8-bit fractions of the
+//! track's range over the clip, and every component its own bit width (0, for a component
+//! that stays at the range's minimum, 3–16, or 32 for raw floats): a track that moves
+//! little in a segment, or about one axis only, costs few bits there. Within a
+//! segment the samples are stored frame by frame (every animated track of one sample,
+//! then of the next), so sampling a time reads two contiguous bit strings. The bit widths
+//! are chosen by the compressor ([`crate::compress`]) to keep the error of every joint,
+//! measured in object space on virtual vertices around it, under a threshold: the
+//! approach (segments, range reduction, variable bit rates, the error metric) of
 //! Frechette's Animation Compression Library.
 
 use crate::FormatError;
@@ -55,28 +60,51 @@ pub(crate) struct ConstantTrack {
     pub(crate) value: Vec4,
 }
 
-/// A track with one quantized value per sample.
+/// A track with one quantized value per sample: what is the same in every segment.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AnimatedTrack {
-    /// Range minimum per stored component.
+    /// Range minimum per stored component over the clip.
     pub(crate) min: Vec4,
-    /// Range extent / (2^bits − 1) per stored component (unused for raw floats).
-    pub(crate) scale: Vec4,
+    /// Range extent per stored component over the clip.
+    pub(crate) extent: Vec4,
     pub(crate) joint: u16,
     pub(crate) channel: Channel,
-    /// Bits per component: 1-16, or 32 (raw `f32`).
-    pub(crate) bits: u8,
     /// Rotations: the quaternion component not stored (0-3: x, y, z, w; recomputed,
     /// positive), or [`ALL_FOUR`]; translations and scales: 3 (x, y, z).
     pub(crate) layout: u8,
-    /// First bit of the track's first component within a frame.
-    pub(crate) offset: u32,
 }
+
+/// An animated track in one segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SegmentTrack {
+    /// Bits per component: 0 (the range's minimum), 1-16, or 32 (raw `f32`, the range
+    /// unused).
+    pub(crate) bits: [u8; 4],
+    /// The segment's range per component, in 255ths of the clip's range.
+    pub(crate) lo: [u8; 4],
+    pub(crate) hi: [u8; 4],
+}
+
+/// A run of samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Segment {
+    /// Its first sample.
+    pub(crate) first: u32,
+    /// Samples it stores (the first of the next segment included).
+    pub(crate) count: u32,
+    /// Bits per frame.
+    pub(crate) frame_bits: u32,
+    /// Byte offset of its first frame in the data.
+    pub(crate) data: u32,
+}
+
+/// Sample intervals per segment (ACL's default segment length).
+pub const SEGMENT_SAMPLES: u32 = 16;
 
 /// [`AnimatedTrack::layout`] of a rotation that stores all four components.
 pub(crate) const ALL_FOUR: u8 = 4;
 
-/// Bits per component an animated track may use.
+/// Bits per component of a raw track.
 pub(crate) const RAW_BITS: u8 = 32;
 
 /// A compressed animation clip of one skeleton (see the module documentation).
@@ -90,20 +118,41 @@ pub struct CompressedClip {
     pub(crate) constants: Vec<ConstantTrack>,
     /// Sorted by joint, then channel: the order of their bits within a frame.
     pub(crate) animated: Vec<AnimatedTrack>,
-    pub(crate) frame_bits: u32,
-    /// The frames, then 8 bytes of padding (64-bit reads at any bit).
+    pub(crate) segments: Vec<Segment>,
+    /// Per segment, one per animated track.
+    pub(crate) segment_tracks: Vec<SegmentTrack>,
+    /// The segments' frames (each segment starts on a byte), then 8 bytes of padding
+    /// (64-bit reads at any bit).
     pub(crate) data: Vec<u8>,
+}
+
+/// The segments of `sample_count` samples: `(first, count)`.
+pub(crate) fn segment_layout(sample_count: u32) -> impl Iterator<Item = (u32, u32)> {
+    let last = sample_count.saturating_sub(1);
+    let segments = last.div_ceil(SEGMENT_SAMPLES).max(1);
+    (0..segments).map(move |k| {
+        let first = k * SEGMENT_SAMPLES;
+        (first, (last - first).min(SEGMENT_SAMPLES) + 1)
+    })
+}
+
+/// The 64 bits from the byte holding bit `at` (0 past the end).
+#[inline(always)]
+fn read_word(data: &[u8], at: usize) -> u64 {
+    let byte = at >> 3;
+    if byte + 8 <= data.len() {
+        // SAFETY: the 8 bytes from `byte` are inside `data` (checked just above); an
+        // unaligned read of plain bytes.
+        u64::from_le(unsafe { data.as_ptr().add(byte).cast::<u64>().read_unaligned() })
+    } else {
+        0
+    }
 }
 
 /// Reads `bits` (≤ 32) bits at bit `at` of `data`; 0 past the end.
 #[inline(always)]
 pub(crate) fn read_bits(data: &[u8], at: usize, bits: u32) -> u32 {
-    let byte = at >> 3;
-    let word = match data.get(byte..byte + 8) {
-        Some(b) => u64::from_le_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]),
-        None => 0,
-    };
-    ((word >> (at & 7)) & ((1u64 << bits) - 1)) as u32
+    ((read_word(data, at) >> (at & 7)) & ((1u64 << bits) - 1)) as u32
 }
 
 /// The quantized value of `v` in `bits` bits over `[min, min + scale · (2^bits − 1)]`.
@@ -127,6 +176,86 @@ pub(crate) fn dequantize(q: u32, min: f32, scale: f32, bits: u8) -> f32 {
     } else {
         min + scale * q as f32
     }
+}
+
+/// A segment's range in 255ths of the clip's (`min`, `extent`), containing `[lo, hi]`.
+pub(crate) fn segment_fractions(min: Vec4, extent: Vec4, lo: Vec4, hi: Vec4) -> ([u8; 4], [u8; 4]) {
+    let mut a = [0u8; 4];
+    let mut b = [0u8; 4];
+    for k in 0..4 {
+        if extent[k] > 0.0 {
+            a[k] = ((lo[k] - min[k]) / extent[k] * 255.0)
+                .floor()
+                .clamp(0.0, 255.0) as u8;
+            b[k] = ((hi[k] - min[k]) / extent[k] * 255.0)
+                .ceil()
+                .clamp(0.0, 255.0) as u8;
+            // At least one 255th wide: a component still in a segment keeps a range to
+            // quantize its value in.
+            if b[k] <= a[k] {
+                if a[k] == 255 {
+                    a[k] = 254;
+                }
+                b[k] = a[k] + 1;
+            }
+        }
+    }
+    (a, b)
+}
+
+/// A segment's range minimum and the step of each component's values over it.
+#[inline(always)]
+pub(crate) fn segment_range(track: &AnimatedTrack, st: &SegmentTrack) -> (Vec4, Vec4) {
+    let f = |v: [u8; 4]| {
+        Vec4::new(
+            FRACTION[v[0] as usize],
+            FRACTION[v[1] as usize],
+            FRACTION[v[2] as usize],
+            FRACTION[v[3] as usize],
+        )
+    };
+    let (lo, hi) = (f(st.lo), f(st.hi));
+    let steps = Vec4::new(
+        STEP[(st.bits[0] & 31) as usize],
+        STEP[(st.bits[1] & 31) as usize],
+        STEP[(st.bits[2] & 31) as usize],
+        STEP[(st.bits[3] & 31) as usize],
+    );
+    (
+        track.min + track.extent * lo,
+        track.extent * (hi - lo) * steps,
+    )
+}
+
+/// `k / 255` (a segment range's fractions of the clip's).
+static FRACTION: [f32; 256] = {
+    let mut t = [0.0f32; 256];
+    let mut k = 0;
+    while k < 256 {
+        t[k] = k as f32 / 255.0;
+        k += 1;
+    }
+    t
+};
+
+/// The step of `b`-bit values over a unit range, `1 / (2^b − 1)`; 0 for 0 bits (and for
+/// 32 = raw: the index is masked to 0).
+static STEP: [f32; 32] = {
+    let mut t = [0.0f32; 32];
+    let mut b = 1;
+    while b < 32 {
+        t[b] = 1.0 / ((1u64 << b) - 1) as f32;
+        b += 1;
+    }
+    t
+};
+
+/// Bits of one sample of a track: its components' widths.
+#[inline(always)]
+pub(crate) fn sample_bits(bits: [u8; 4], layout: u8) -> u32 {
+    // Components past the track's are 0 bits wide.
+    let _ = layout;
+    bits.iter().map(|&b| u32::from(b)).sum()
 }
 
 /// Components stored per sample: four for rotations stored whole, else three.
@@ -164,27 +293,52 @@ pub(crate) fn rotation_from_stored(v: Vec4, layout: u8) -> Quat {
     Quat::from_vec4(q)
 }
 
-impl AnimatedTrack {
-    /// The stored components of a frame starting at bit `frame` (the fourth 0 for
-    /// tracks of three).
-    #[inline(always)]
-    fn read(&self, data: &[u8], frame: usize) -> Vec4 {
-        let at = frame + self.offset as usize;
-        let bits = u32::from(self.bits);
-        let n = component_count(self.layout);
-        if self.bits == RAW_BITS {
-            let c = |k: u32| f32::from_bits(read_bits(data, at + 32 * k as usize, 32));
-            return Vec4::new(c(0), c(1), c(2), if n == 4 { c(3) } else { 0.0 });
+/// The stored components of one track at bit `at` (the first component's), with the
+/// segment's range minimum and steps (components past the track's have 0 bits: their
+/// value is the minimum, 0).
+#[inline(always)]
+fn read_components(data: &[u8], at: usize, bits: [u8; 4], min: Vec4, scale: Vec4) -> Vec4 {
+    let [b0, b1, b2, b3] = bits.map(u32::from);
+    let (a0, a1, a2, a3) = (
+        at,
+        at + b0 as usize,
+        at + (b0 + b1) as usize,
+        at + (b0 + b1 + b2) as usize,
+    );
+    if (b0 | b1 | b2 | b3) & u32::from(RAW_BITS) == 0 {
+        let shift = (a0 & 7) as u32;
+        let q = if shift + b0 + b1 + b2 + b3 <= 64 {
+            // The whole sample in one 64-bit read (up to 3 × 16 bits).
+            let word = read_word(data, a0) >> shift;
+            let field = |from: u32, bits: u32| {
+                // `bits` ≤ 16 and `from + bits` ≤ 64 - shift: no shift overflows.
+                ((word >> from.min(63)) & ((1u64 << bits) - 1)) as f32
+            };
+            Vec4::new(
+                field(0, b0),
+                field(b0, b1),
+                field(b0 + b1, b2),
+                field(b0 + b1 + b2, b3),
+            )
+        } else {
+            Vec4::new(
+                read_bits(data, a0, b0) as f32,
+                read_bits(data, a1, b1) as f32,
+                read_bits(data, a2, b2) as f32,
+                read_bits(data, a3, b3) as f32,
+            )
+        };
+        return min + scale * q;
+    }
+    // Raw components (rare): their bits as they are.
+    let c = |a: usize, b: u32, k: usize| {
+        if b == u32::from(RAW_BITS) {
+            f32::from_bits(read_bits(data, a, 32))
+        } else {
+            min[k] + scale[k] * read_bits(data, a, b) as f32
         }
-        let c = |k: u32| read_bits(data, at + (k * bits) as usize, bits) as f32;
-        let q = Vec4::new(c(0), c(1), c(2), if n == 4 { c(3) } else { 0.0 });
-        self.min + self.scale * q
-    }
-
-    /// Bits per sample.
-    pub(crate) fn sample_bits(&self) -> u32 {
-        component_count(self.layout) * u32::from(self.bits)
-    }
+    };
+    Vec4::new(c(a0, b0, 0), c(a1, b1, 1), c(a2, b2, 2), c(a3, b3, 3))
 }
 
 impl CompressedClip {
@@ -223,11 +377,18 @@ impl CompressedClip {
         self.additive
     }
 
-    /// Bytes in memory: the frames and the track tables.
+    /// Bytes of the cooked clip ([`Self::to_bytes`]): what it costs on disk and to load.
+    pub fn stored_bytes(&self) -> usize {
+        self.to_bytes().len()
+    }
+
+    /// Bytes in memory: the frames and the tables.
     pub fn size_bytes(&self) -> usize {
         self.data.len()
             + self.animated.len() * size_of::<AnimatedTrack>()
             + self.constants.len() * size_of::<ConstantTrack>()
+            + self.segments.len() * size_of::<Segment>()
+            + self.segment_tracks.len() * size_of::<SegmentTrack>()
             + size_of::<Self>()
     }
 
@@ -236,18 +397,36 @@ impl CompressedClip {
         (self.constants.len(), self.animated.len())
     }
 
-    /// The two samples around `time` and the weight of the second.
+    /// Segments of [`SEGMENT_SAMPLES`] intervals.
+    pub fn segment_count(&self) -> usize {
+        self.segments.len()
+    }
+
+    /// The segment holding the samples around `time`, the bit offsets of those two
+    /// samples' frames, and the weight of the second.
     #[inline]
-    fn frames(&self, time: f32) -> (usize, usize, f32) {
+    fn frames(&self, time: f32) -> (usize, usize, usize, f32) {
         let last = self.sample_count.saturating_sub(1);
         if last == 0 || self.duration <= 0.0 {
-            return (0, 0, 0.0);
+            let base = self.segments.first().map_or(0, |s| s.data as usize * 8);
+            return (0, base, base, 0.0);
         }
         let f = (time / self.duration).clamp(0.0, 1.0) * last as f32;
         let f0 = (f as u32).min(last);
-        let f1 = (f0 + 1).min(last);
-        let fb = self.frame_bits as usize;
-        (f0 as usize * fb, f1 as usize * fb, f - f0 as f32)
+        let s = ((f0 / SEGMENT_SAMPLES) as usize).min(self.segments.len().saturating_sub(1));
+        let Some(seg) = self.segments.get(s) else {
+            return (0, 0, 0, 0.0);
+        };
+        let local0 = (f0 - seg.first).min(seg.count - 1);
+        let local1 = (local0 + 1).min(seg.count - 1);
+        let base = seg.data as usize * 8;
+        let fb = seg.frame_bits as usize;
+        (
+            s,
+            base + local0 as usize * fb,
+            base + local1 as usize * fb,
+            f - f0 as f32,
+        )
     }
 
     /// The pose at `time` (clamped to the clip) into `out`. Joints the clip does not
@@ -273,14 +452,27 @@ impl CompressedClip {
                 Channel::Scale => out.scales[j] = c.value.truncate().into(),
             }
         }
-        let (a, b, t) = self.frames(time);
+        if self.animated.is_empty() {
+            return;
+        }
+        let (s, a, b, t) = self.frames(time);
+        let n = self.animated.len();
+        let Some(tracks) = self.segment_tracks.get(s * n..s * n + n) else {
+            return;
+        };
         let data = &self.data[..];
-        for track in &self.animated {
+        // Tracks follow each other in a frame: each starts where the one before ended.
+        let mut next = 0usize;
+        for (track, st) in self.animated.iter().zip(tracks) {
+            let offset = next;
+            next += sample_bits(st.bits, track.layout) as usize;
             let j = track.joint as usize;
             if j >= out.len() {
                 continue;
             }
-            let (va, vb) = (track.read(data, a), track.read(data, b));
+            let (min, scale) = segment_range(track, st);
+            let va = read_components(data, a + offset, st.bits, min, scale);
+            let vb = read_components(data, b + offset, st.bits, min, scale);
             match track.channel {
                 Channel::Rotation => {
                     out.rotations[j] = nlerp(
@@ -290,7 +482,7 @@ impl CompressedClip {
                     );
                 }
                 Channel::Translation => {
-                    out.translations[j] = va.truncate().lerp(vb.truncate(), t).into()
+                    out.translations[j] = va.truncate().lerp(vb.truncate(), t).into();
                 }
                 Channel::Scale => out.scales[j] = va.truncate().lerp(vb.truncate(), t).into(),
             }
@@ -312,13 +504,27 @@ impl CompressedClip {
                 Channel::Scale => out.scale = c.value.truncate().into(),
             }
         }
-        let (a, b, t) = self.frames(time);
+        if self.animated.is_empty() {
+            return out;
+        }
+        let (s, a, b, t) = self.frames(time);
         let first = self.animated.partition_point(|k| (k.joint as usize) < j);
-        for track in self.animated[first..]
+        let tracks = &self.segment_tracks[s * self.animated.len()..][..self.animated.len()];
+        let mut next: usize = self.animated[..first]
             .iter()
-            .take_while(|k| k.joint as usize == j)
+            .zip(tracks)
+            .map(|(track, st)| sample_bits(st.bits, track.layout) as usize)
+            .sum();
+        for (track, st) in self.animated[first..]
+            .iter()
+            .zip(&tracks[first..])
+            .take_while(|(k, _)| k.joint as usize == j)
         {
-            let (va, vb) = (track.read(&self.data, a), track.read(&self.data, b));
+            let offset = next;
+            next += sample_bits(st.bits, track.layout) as usize;
+            let (min, scale) = segment_range(track, st);
+            let va = read_components(&self.data, a + offset, st.bits, min, scale);
+            let vb = read_components(&self.data, b + offset, st.bits, min, scale);
             match track.channel {
                 Channel::Rotation => {
                     out.rotation = nlerp(
@@ -328,7 +534,7 @@ impl CompressedClip {
                     );
                 }
                 Channel::Translation => {
-                    out.translation = va.truncate().lerp(vb.truncate(), t).into()
+                    out.translation = va.truncate().lerp(vb.truncate(), t).into();
                 }
                 Channel::Scale => out.scale = va.truncate().lerp(vb.truncate(), t).into(),
             }
@@ -355,20 +561,27 @@ impl CompressedClip {
         for t in &self.animated {
             w.u16(t.joint);
             w.u8(t.channel as u8);
-            w.u8(t.bits);
             w.u8(t.layout);
-            w.u32(t.offset);
             w.f32s(&t.min.to_array());
-            w.f32s(&t.scale.to_array());
+            w.f32s(&t.extent.to_array());
         }
-        w.u32(self.frame_bits);
+        w.u32(self.segments.len() as u32);
+        for s in &self.segments {
+            w.u32(s.frame_bits);
+            w.u32(s.data);
+        }
+        for t in &self.segment_tracks {
+            w.raw(&t.bits);
+            w.raw(&t.lo);
+            w.raw(&t.hi);
+        }
         w.u32(self.data.len() as u32);
         w.raw(&self.data);
         w.bytes
     }
 
-    /// A clip from [`Self::to_bytes`], validated: every track inside the frames, the data
-    /// as long as the frames say.
+    /// A clip from [`Self::to_bytes`], validated: every track inside its frames, the
+    /// segments as the sample count lays them out, the data as long as they say.
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, FormatError> {
         let mut r = Reader { bytes };
         if r.u32()? != CLIP_MAGIC {
@@ -408,44 +621,75 @@ impl CompressedClip {
         for _ in 0..n {
             let joint = r.u16()?;
             let channel = Channel::from_u8(r.u8()?).ok_or(FormatError("bad channel"))?;
-            let bits = r.u8()?;
             let layout = r.u8()?;
-            let offset = r.u32()?;
             let min = Vec4::from_array(r.f32s::<4>()?);
-            let scale = Vec4::from_array(r.f32s::<4>()?);
+            let extent = Vec4::from_array(r.f32s::<4>()?);
             let layout_ok = match channel {
                 Channel::Rotation => layout <= ALL_FOUR,
                 Channel::Translation | Channel::Scale => layout == 3,
             };
-            if joint >= joint_count || !(bits == RAW_BITS || (1..=16).contains(&bits)) || !layout_ok
-            {
+            if joint >= joint_count || !layout_ok || extent.min_element() < 0.0 {
                 return Err(FormatError("bad animated track"));
             }
             animated.push(AnimatedTrack {
                 min,
-                scale,
+                extent,
                 joint,
                 channel,
-                bits,
                 layout,
-                offset,
             });
         }
-        let frame_bits = r.u32()?;
-        let len = r.u32()? as usize;
-        let data = r.take(len)?.to_vec();
-        r.finish()?;
         if !animated.is_sorted_by_key(|t| (t.joint, t.channel)) {
             return Err(FormatError("animated tracks out of order"));
         }
-        if animated
-            .iter()
-            .any(|t| u64::from(t.offset) + u64::from(t.sample_bits()) > u64::from(frame_bits))
-        {
-            return Err(FormatError("track outside its frame"));
+        let expected: Vec<(u32, u32)> = segment_layout(sample_count).collect();
+        if r.u32()? as usize != expected.len() {
+            return Err(FormatError("bad segment count"));
         }
-        let needed = (u64::from(sample_count) * u64::from(frame_bits)).div_ceil(8) + 8;
-        if (data.len() as u64) < needed {
+        let mut segments = Vec::with_capacity(expected.len());
+        for &(first, count) in &expected {
+            let frame_bits = r.u32()?;
+            let data = r.u32()?;
+            segments.push(Segment {
+                first,
+                count,
+                frame_bits,
+                data,
+            });
+        }
+        let mut segment_tracks = Vec::with_capacity(segments.len() * animated.len());
+        for s in &segments {
+            let mut offset = 0u64;
+            for t in &animated {
+                let mut bits = [0u8; 4];
+                bits.copy_from_slice(r.take(4)?);
+                let mut lo = [0u8; 4];
+                let mut hi = [0u8; 4];
+                lo.copy_from_slice(r.take(4)?);
+                hi.copy_from_slice(r.take(4)?);
+                if bits.iter().any(|&b| !(b == RAW_BITS || b <= 16))
+                    || lo.iter().zip(&hi).any(|(l, h)| l > h)
+                {
+                    return Err(FormatError("bad segment track"));
+                }
+                segment_tracks.push(SegmentTrack { bits, lo, hi });
+                offset += u64::from(sample_bits(bits, t.layout));
+            }
+            if offset != u64::from(s.frame_bits) {
+                return Err(FormatError("tracks do not fill their frame"));
+            }
+        }
+        let len = r.u32()? as usize;
+        let data = r.take(len)?.to_vec();
+        r.finish()?;
+        let mut next = 0u64;
+        for s in &segments {
+            if u64::from(s.data) != next {
+                return Err(FormatError("segments out of place"));
+            }
+            next += (u64::from(s.count) * u64::from(s.frame_bits)).div_ceil(8);
+        }
+        if (data.len() as u64) < next + 8 {
             return Err(FormatError("frames truncated"));
         }
         Ok(Self {
@@ -456,10 +700,11 @@ impl CompressedClip {
             additive,
             constants,
             animated,
-            frame_bits,
+            segments,
+            segment_tracks,
             data,
         })
     }
 }
 
-const CLIP_MAGIC: u32 = u32::from_le_bytes(*b"CLP1");
+const CLIP_MAGIC: u32 = u32::from_le_bytes(*b"CLP2");

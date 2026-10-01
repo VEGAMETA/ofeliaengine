@@ -60,7 +60,7 @@ mod root_motion;
 mod skeleton;
 
 pub use blend::{Blender, Layer, LayerMode};
-pub use clip::{Channel, CompressedClip};
+pub use clip::{Channel, CompressedClip, SEGMENT_SAMPLES};
 pub use compress::{AdditiveBase, CompressSettings, CompressionStats, compress};
 pub use ik::{Fabrik, IkOutcome, LookAt, TwoBoneIk, rotate_joint};
 pub use jobs::for_each_parallel;
