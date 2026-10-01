@@ -30,6 +30,9 @@ the dependency.
 | lewton 0.10.2 (+ tinyvec 1.13, byteorder 1.5) | MIT OR Apache-2.0 (tinyvec Zlib OR Apache-2.0 OR MIT; byteorder Unlicense OR MIT) | Ogg Vorbis decoding in `engine_audio_decode` (ADR 0051) |
 | ogg 0.8.0 | BSD-3-Clause | Ogg pages of Opus files in `engine_audio_decode` (ADR 0051) |
 | claxon 0.4.3 | Apache-2.0 | FLAC decoding in `engine_audio_decode` (ADR 0051) |
+| log 0.4.34 | MIT OR Apache-2.0 | the logging facade `engine_log` implements (ADR 0061) |
+| crash-handler 0.8.1 + crash-context 0.8 (© Embark Studios; + parking_lot 0.12, lock_api, parking_lot_core, scopeguard, smallvec, libc, cfg-if) | MIT OR Apache-2.0 (crash-context MIT) | hooks the process's crash paths in `engine_crash` (ADR 0061) |
+| minidumper 0.11.0 + minidump-writer 0.13.0 + minidump-common 0.26 (© Embark Studios; + polling 3, concurrent-queue, crossbeam-utils, pin-project-lite, scroll 0.12 + scroll_derive, goblin 0.9, plain, error-graph, failspot, debugid, uuid, range-map, num-traits, bitflags, serde, serde_json, itoa, memchr, zmij, thiserror 2, windows-sys 0.61) | MIT OR Apache-2.0 (minidump-writer, minidump-common, scroll, goblin, error-graph, failspot, crash-context, zmij MIT; debugid Apache-2.0; memchr Unlicense OR MIT) | the crash monitor process and its minidumps in `engine_crash` (ADR 0061) |
 
 Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profiling`):
 
@@ -88,13 +91,14 @@ condition of this section (ADR 0036). License texts are next to each font.
 | Crate | License | Used for |
 |---|---|---|
 | bytemuck_derive 1.12 (+ proc-macro2, quote, syn 3, unicode-ident) | Zlib OR Apache-2.0 OR MIT (the others MIT OR Apache-2.0; unicode-ident also Unicode-3.0) | `#[derive(Pod, Zeroable)]` with compile-time padding checks (ADR 0017) |
+| num-derive 0.4, smart-default 0.7, serde_derive, thiserror-impl 2 (+ syn 2) | MIT OR Apache-2.0 (smart-default MIT) | derives inside minidump-writer (ADR 0061) |
 
 ## Rust crates (dev-dependencies only, not shipped)
 
 | Crate | License | Used for |
 |---|---|---|
 | rayon 1.12 (+ rayon-core, crossbeam-deque, crossbeam-epoch, crossbeam-utils, either) | MIT OR Apache-2.0 | baseline in `engine_core` job-system benchmarks (ADR 0002) |
-| loom 0.7 (only with `--cfg loom`) | MIT | model checking of the lock-free queues in `engine_core::jobs` |
+| loom 0.7 (only with `--cfg loom`) | MIT | model checking of the lock-free queues in `engine_core::jobs` and the log ring in `engine_log` |
 | gpu-allocator 0.28 (+ log, presser, thiserror, thiserror-impl, proc-macro2, quote, syn, unicode-ident) | MIT OR Apache-2.0 (unicode-ident also Unicode-3.0) | baseline in the `engine_rhi` memory allocator benchmark (ADR 0010) |
 
 ## Research harnesses (outside the workspace, never linked into the engine)

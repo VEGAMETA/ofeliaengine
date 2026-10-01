@@ -12,7 +12,8 @@
 //!   transitions and the final transitions of imported resources (for example to
 //!   `PRESENT_SRC`);
 //! - **records** the passes with dynamic rendering set up from the declared attachments,
-//!   each inside a debug label (RenderDoc, Nsight).
+//!   each inside a debug label (RenderDoc, Nsight), and between GPU breadcrumbs
+//!   (`engine_rhi::Breadcrumbs`, ADR 0061) that tell which pass a crashed GPU was in.
 //!
 //! Pass callbacks live in a frame arena and all bookkeeping is in vectors reused across
 //! frames: a steady-state frame makes no heap allocations.
@@ -269,6 +270,9 @@ pub struct RenderGraph {
     vk_image_barriers: Vec<vk::ImageMemoryBarrier2<'static>>,
     color_attachments: Vec<vk::RenderingAttachmentInfo<'static>>,
     timing: Option<timing::Timing>,
+    /// One breadcrumb track per frame slot, and the frames recorded (ADR 0061).
+    breadcrumbs: Vec<engine_rhi::Track>,
+    frames_recorded: u64,
     stats: GraphStats,
     /// Scopes of the frame being built, and the one new passes go into.
     scopes: Vec<ScopeRecord>,
@@ -315,6 +319,8 @@ impl RenderGraph {
             vk_image_barriers: Vec::new(),
             color_attachments: Vec::new(),
             timing: timing::Timing::new(device, frames_in_flight.max(1)),
+            breadcrumbs: breadcrumb_tracks(device, frames_in_flight.max(1)),
+            frames_recorded: 0,
             stats: GraphStats::default(),
             scopes: Vec::new(),
             current_scope: compile::NO_SCOPE,
@@ -365,6 +371,16 @@ impl RenderGraph {
     /// slot comes around again). Empty until then, or if the queue has no timestamps.
     pub fn gpu_pass_times(&self) -> &[PassTime] {
         self.timing.as_ref().map_or(&[], |t| t.times())
+    }
+
+    /// How far the GPU got in the frame last recorded into `slot`, from the breadcrumbs:
+    /// the index (among the passes recorded, culled ones not counted) of the last pass it
+    /// started and of the last it finished. `None` without breadcrumbs.
+    pub fn gpu_progress(&self, slot: usize) -> Option<(Option<u32>, Option<u32>)> {
+        let slots = self.physical.slots();
+        self.breadcrumbs
+            .get(slot % slots)
+            .map(engine_rhi::Track::progress)
     }
 
     /// Frees the transient heaps and Vulkan objects, and returns their bindless indices to
@@ -554,6 +570,12 @@ impl<'g> FrameGraph<'g> {
             // inside a render pass.
             unsafe { timing.begin_frame(d, cmd, slot, needed * 2) };
         }
+        graph.frames_recorded += 1;
+        let crumbs = graph.breadcrumbs.get(slot);
+        if let Some(track) = crumbs {
+            track.begin_frame(graph.frames_recorded);
+        }
+        let mut recorded = 0u32;
         let physical = graph.physical.current();
         let mut stats = GraphStats {
             passes: graph.records.passes.len() as u32,
@@ -614,6 +636,11 @@ impl<'g> FrameGraph<'g> {
                 // SAFETY: recording; queries were prepared by `begin_frame`.
                 unsafe { timing.pass_begin(d, cmd, slot, pass.name, scope_id) };
             }
+            if let Some(track) = crumbs {
+                // SAFETY: recording, outside a render pass, between the track's
+                // `begin_frame` and `end_frame`.
+                unsafe { track.pass_begin(cmd, recorded, pass.name) };
+            }
             let attachments =
                 &graph.attachments[pass.attachments.start as usize..pass.attachments.end as usize];
             let mut render_area = vk::Rect2D::default();
@@ -646,6 +673,11 @@ impl<'g> FrameGraph<'g> {
                 // SAFETY: after `pass_begin` for this pass.
                 unsafe { timing.pass_end(d, cmd, slot) };
             }
+            if let Some(track) = crumbs {
+                // SAFETY: as above, after `pass_begin` for this pass.
+                unsafe { track.pass_end(cmd, recorded) };
+            }
+            recorded += 1;
             if let Some(utils) = &graph.debug_utils {
                 // SAFETY: matches the label begun above.
                 unsafe { utils.cmd_end_debug_utils_label(cmd) };
@@ -670,6 +702,9 @@ impl<'g> FrameGraph<'g> {
             physical,
             &graph.textures,
         );
+        if let Some(track) = crumbs {
+            track.end_frame(recorded);
+        }
         graph.stats = stats;
         Ok(())
     }
@@ -810,6 +845,24 @@ impl GraphResource for Buffer {
     fn id(self) -> u32 {
         self.0
     }
+}
+
+/// A breadcrumb track per frame slot, if the device has breadcrumbs and enough tracks
+/// are free.
+fn breadcrumb_tracks(device: &Device, slots: usize) -> Vec<engine_rhi::Track> {
+    const LABELS: [&str; 4] = [
+        "render graph, frame slot 0",
+        "render graph, frame slot 1",
+        "render graph, frame slot 2",
+        "render graph",
+    ];
+    let Some(breadcrumbs) = device.breadcrumbs() else {
+        return Vec::new();
+    };
+    (0..slots)
+        .map(|slot| breadcrumbs.track(LABELS[slot.min(3)]))
+        .collect::<Option<Vec<_>>>()
+        .unwrap_or_default()
 }
 
 pub(crate) fn aspect_of(format: vk::Format) -> vk::ImageAspectFlags {

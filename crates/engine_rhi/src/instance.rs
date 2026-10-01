@@ -116,11 +116,9 @@ unsafe extern "system" fn debug_callback(
     let (state, message) = unsafe {
         let state = &*(user as *const DebugState);
         let message = if data.is_null() || (*data).p_message.is_null() {
-            String::from("<no message>")
+            std::borrow::Cow::Borrowed("<no message>")
         } else {
-            CStr::from_ptr((*data).p_message)
-                .to_string_lossy()
-                .into_owned()
+            CStr::from_ptr((*data).p_message).to_string_lossy()
         };
         (state, message)
     };
@@ -129,21 +127,28 @@ unsafe extern "system" fn debug_callback(
         if let Ok(mut first) = state.first_errors.lock()
             && first.len() < 8
         {
-            first.push(message.clone());
+            first.push(message.clone().into_owned());
         }
-        engine_profiler::message(&message);
-        #[allow(clippy::print_stderr)] // until the engine has a logger
-        {
-            eprintln!("[vulkan error] {message}");
-        }
+        report(log::Level::Error, &message);
     } else if severity.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) {
         state.warnings.fetch_add(1, Ordering::Relaxed);
-        #[allow(clippy::print_stderr)] // until the engine has a logger
-        {
-            eprintln!("[vulkan warning] {message}");
-        }
+        report(log::Level::Warn, &message);
     }
     vk::FALSE
+}
+
+/// Sends a validation message to the log (target `vulkan`, ADR 0061); to stderr when no
+/// logger is installed (tests), so messages are never silently dropped.
+fn report(level: log::Level, message: &str) {
+    if log::max_level() == log::LevelFilter::Off {
+        #[allow(clippy::print_stderr)] // no logger: the only place left to report it
+        {
+            eprintln!("[vulkan {level}] {message}");
+        }
+        engine_profiler::message(message);
+    } else {
+        log::log!(target: "vulkan", level, "{message}");
+    }
 }
 
 impl Instance {

@@ -62,7 +62,7 @@ if ($Perf) {
 }
 if ($Deny) { $steps['deny'] = @('deny --locked check') }
 # `--cfg loom` in its own target dir, or it would invalidate the normal build.
-if ($Loom) { $steps['loom'] = @('test -p engine_core --release --lib --locked loom') }
+if ($Loom) { $steps['loom'] = @('test -p engine_core -p engine_log --release --lib --locked loom') }
 if ($Profiles) {
     $steps['profiles'] = @(
         'build --workspace --all-targets --locked --profile dev',

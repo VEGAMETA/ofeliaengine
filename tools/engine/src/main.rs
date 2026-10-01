@@ -201,6 +201,18 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
 }
 
 fn main() -> ExitCode {
+    // The crash monitor is this executable started by `engine_crash::install`.
+    if engine_crash::run_monitor_if_requested() {
+        return ExitCode::SUCCESS;
+    }
+    // Log records of the engine crates (warnings and errors unless ENGINE_LOG says
+    // otherwise) go to stderr; crashes and panics leave a minidump and a report (ADR 0061).
+    let _log = engine_log::init(&engine_log::LogConfig {
+        filter: Some(std::env::var("ENGINE_LOG").unwrap_or_else(|_| String::from("warn"))),
+        ..engine_log::LogConfig::default()
+    });
+    let _crash = engine_crash::install(&engine_crash::CrashConfig::new("ofeliaengine"))
+        .inspect_err(|e| eprintln!("warning: {e}"));
     let command = match parse_command(std::env::args().skip(1)) {
         Ok(args) => args,
         Err(message) => {

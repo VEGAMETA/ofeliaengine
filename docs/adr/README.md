@@ -68,6 +68,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0058](0058-ambient-occlusion.md) | Ambient occlusion: GTAO from the depth prepass, in XeGTAO's structure | Accepted |
 | [0059](0059-subsurface-scattering.md) | Subsurface scattering: a sum-of-Gaussians profile, a forward subsurface pass and a disk-sampled scatter pass | Accepted |
 | [0060](0060-fsr-3-1-upscaling.md) | FSR 3.1 upscaling beside the engine's TAAU, built from source with our own shader generator; a texture LOD bias for both; frame generation later | Accepted |
+| [0061](0061-logging-crash-reports-gpu-faults.md) | Failure visibility: a lock-free log behind the `log` facade, out-of-process crash reports, GPU breadcrumbs and `VK_EXT_device_fault` | Accepted |
 | [0062](0062-golden-images-and-perf-gate.md) | Golden images compared through FLIP, and a per-pass GPU time gate | Accepted |
 
 ## Template
