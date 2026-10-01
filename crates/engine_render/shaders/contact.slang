@@ -1,37 +1,24 @@
 // Contact shadows of the sun (ADR 0071): what the depth buffer hides from the light at
 // small scales the shadow maps miss (a texel of a cascade is centimetres to metres wide).
-// Two ways, measured against each other (docs/research/local-shadows.md):
 //
-// - contactBend: Bend Studio's screen-space shadows (Days Gone; Graham Aldridge,
-//   SIGGRAPH 2023; `bend_sss_gpu.h`, Copyright 2023 Sony Interactive Entertainment,
-//   Apache-2.0, adapted here; see THIRD_PARTY_NOTICES.md). Every wave walks 64 pixels of a
-//   line towards the light's point on screen; each thread reads a few depths along it into
-//   shared memory, perspective-corrected so all rays to the light are parallel there, and
-//   compares its pixel's depth with the next SAMPLE_COUNT depths of the line: one long
-//   shadow for a few texture reads per pixel. The CPU splits the screen into up to eight
-//   dispatches around the light's point (`contact.rs`, after `bend_sss_cpu.h`).
-// - contactMarch: a ray per pixel towards the sun in world space, MARCH_STEPS samples over
-//   a fixed length (jittered by interleaved gradient noise), each projected and compared
-//   with the depth buffer within a thickness.
+// Bend Studio's screen-space shadows (Days Gone; Graham Aldridge, SIGGRAPH 2023;
+// `bend_sss_gpu.h`, Copyright 2023 Sony Interactive Entertainment, Apache-2.0, adapted
+// here; see THIRD_PARTY_NOTICES.md). Every wave walks 64 pixels of a line towards the
+// light's point on screen; each thread reads a few depths along it into shared memory,
+// perspective-corrected so all rays to the light are parallel there, and compares its
+// pixel's depth with the next SAMPLE_COUNT depths of the line: one long shadow for a few
+// texture reads per pixel. The CPU splits the screen into up to eight dispatches around
+// the light's point (`contact.rs`, after `bend_sss_cpu.h`). A per-pixel ray march was
+// measured against it and dropped (2.4× slower on the Radeon iGPU for shorter shadows;
+// docs/research/local-shadows.md).
 //
-// Both write the sun's visibility (1 lit, 0 shadowed) into an R8 target the size of the
+// It writes the sun's visibility (1 lit, 0 shadowed) into an R8 target the size of the
 // depth, which the forward pass's `*Contact` entry points multiply into the sun's light.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(1, 0)]] [vk::image_format("r8")] RWTexture2D<float> g_images[];
 
-// `March` in contact.rs: what contactMarch needs of the view.
-struct March
-{
-    float4x4 clip_from_world;  // jittered, as the depth was drawn
-    float4x4 world_from_clip;
-    float4 to_light;           // xyz unit vector towards the sun; w: the ray's length (world units)
-    float4 eye;                // xyz camera position; w: thickness of a depth sample (world units)
-    float4 forward;            // xyz unit view direction
-    float4 depth_terms;        // x p22, y p32: view depth = p32 / (depth + p22)
-};
-
-// `ContactPush` in contact.rs (72 bytes).
+// `ContactPush` in contact.rs (60 bytes).
 struct ContactPush
 {
     float4 light;              // Bend: the light's pixel xy, its depth, sign of its w
@@ -44,8 +31,6 @@ struct ContactPush
     float near_depth;          // depth value of the near plane
     uint depth;                // bindless sampled: the depth target
     uint target;               // bindless storage: the visibility
-    uint frame;                // contactMarch: noise index
-    March* march;
 };
 
 [[vk::push_constant]]
@@ -101,8 +86,9 @@ void wavefront_extents(int3 group, uint thread, out float2 delta_xy, out float2 
 }
 
 // Bend Studio's screen-space shadow (WriteScreenSpaceShadow), with
-// BilinearSamplingOffsetMode, IgnoreEdgePixels and UsePrecisionOffset off, and the early
-// out for pixels without geometry (the far plane) on.
+// BilinearSamplingOffsetMode off, IgnoreEdgePixels and UsePrecisionOffset on (without them
+// distant flat ground, at grazing angles to the light's lines, shadowed itself in stripes),
+// and the early out for pixels without geometry (the far plane) on.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void contactBend(uint3 group_id : SV_GroupID, uint thread : SV_GroupIndex)
@@ -139,9 +125,9 @@ void contactBend(uint3 group_id : SV_GroupID, uint thread : SV_GroupIndex)
         bool use_point_filter = abs(depths.x - depths.y) > depth_thickness_scale[i] * push.bilinear_threshold;
         sampling_depth[i] = depths.x;
         // Any sample in this wave may be interpolated towards the second depth: cast from
-        // the farther of the two.
+        // the farther of the two. Edges cast nothing (IgnoreEdgePixels).
         float shadow_depth = depths.x + abs(depths.x - depths.y) * z_sign;
-        shadowing_depth[i] = use_point_filter ? depths.x : shadow_depth;
+        shadowing_depth[i] = use_point_filter ? 1e20 : shadow_depth;
         sample_distance[i] = pixel_distance + float(WAVE_SIZE * i) * direction;
         pixel_xy += xy_delta * direction;
     }
@@ -186,7 +172,10 @@ void contactBend(uint3 group_id : SV_GroupID, uint thread : SV_GroupIndex)
     if (skip_pixel)
         return;
 
-    float start_depth = (start - push.light.z) / sample_distance[0];
+    // Bend's precision offset: a pixel's own depth moves a 65535th of the way away from
+    // the far plane. A conventional (not reversed) float depth buffer has little precision
+    // near 1, where distant flat ground would otherwise shadow itself in stripes.
+    float start_depth = (lerp(start, push.far_depth, -1.0 / 65535.0) - push.light.z) / sample_distance[0];
     int sample_index = int(thread) + 1;
     float4 shadow_value = 1.0;
     float hard_shadow = 1.0;
@@ -222,63 +211,4 @@ void contactBend(uint3 group_id : SV_GroupID, uint thread : SV_GroupIndex)
     float result = min(hard_shadow, dot(shadow_value, 0.25));
     if (inside)
         g_images[push.target][out_xy] = result;
-}
-
-// Interleaved gradient noise (Jimenez 2014) in [0, 1) at a pixel.
-float gradient_noise(float2 pixel)
-{
-    return frac(52.9829189 * frac(dot(pixel, float2(0.06711056, 0.00583715))));
-}
-
-static const int MARCH_STEPS = 16;
-
-// A ray per pixel towards the sun (see the file comment).
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void contactMarch(uint3 id : SV_DispatchThreadID)
-{
-    int2 pixel = int2(id.xy);
-    if (any(pixel >= int2(push.size)))
-        return;
-    float depth = load_depth(pixel);
-    if (depth >= push.far_depth)
-    {
-        g_images[push.target][pixel] = 1.0;
-        return;
-    }
-    March* m = push.march;
-    float2 size = float2(push.size);
-    float2 ndc = (float2(pixel) + 0.5) / size * 2.0 - 1.0;
-    float4 h = mul(m.world_from_clip, float4(ndc, depth, 1.0));
-    float3 world = h.xyz / h.w;
-    float3 eye = m.eye.xyz;
-    float3 forward = m.forward.xyz;
-    float reach = m.to_light.w;
-    float thickness = m.eye.w;
-    float step = reach / float(MARCH_STEPS);
-    float jitter = gradient_noise(float2(pixel) + 5.588238 * float(push.frame & 63u));
-    float lit = 1.0;
-    for (int i = 0; i < MARCH_STEPS; i++)
-    {
-        float t = (float(i) + jitter) * step;
-        float3 p = world + m.to_light.xyz * t;
-        float4 c = mul(m.clip_from_world, float4(p, 1.0));
-        if (c.w <= 0.0)
-            break;
-        int2 at = int2((c.xy / c.w * 0.5 + 0.5) * size);
-        if (any(at < int2(0, 0)) || any(at >= int2(push.size)))
-            break;
-        float scene = m.depth_terms.y / (load_depth(at) + m.depth_terms.x);
-        float ray = dot(p - eye, forward);
-        // Behind the depth by more than its own surface's rounding and less than the
-        // thickness: occluded; fading with the distance along the ray.
-        float delta = ray - scene;
-        if (delta > ray * 0.002 && delta < thickness)
-        {
-            float f = t / reach;
-            lit = f * f;
-            break;
-        }
-    }
-    g_images[push.target][pixel] = lit;
 }
