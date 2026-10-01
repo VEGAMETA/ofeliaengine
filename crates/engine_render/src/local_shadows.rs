@@ -711,6 +711,10 @@ impl ShadowCache {
             let target = fit(c.wish, shift);
             let light = &lights[c.index as usize];
             c.tile = target;
+            // In view: not evicted for another light's room this frame.
+            if let Some(e) = self.entries[c.index as usize].as_mut() {
+                e.seen = serial;
+            }
             match &self.entries[c.index as usize] {
                 Some(e) => {
                     // Hysteresis: keep the tile while the wish stays within (⅓, 1.5×].
@@ -1137,6 +1141,30 @@ mod tests {
         assert!(cache.stats().evicted >= 1, "{:?}", cache.stats());
         assert_eq!(plan.first_view[0], NO_SHADOW);
         assert_ne!(plan.first_view[2], NO_SHADOW);
+    }
+
+    #[test]
+    fn lights_in_view_are_never_evicted_for_others() {
+        // Room for two spot lights' tiles: a third new one gets no room rather than
+        // taking a tile from a light in view.
+        let settings = LocalShadowSettings {
+            atlas_size: 512,
+            min_resolution: 256,
+            max_resolution: 256,
+            ..LocalShadowSettings::default()
+        };
+        let mut cache = ShadowCache::new(settings);
+        let mut lights = vec![light(-1.0, true), light(1.0, true)];
+        frame(&mut cache, &lights, &[]);
+        assert_eq!(cache.stats().shadowed, 2);
+        lights.push(light(0.0, true));
+        lights.push(light(0.5, true));
+        lights.push(light(-0.5, true));
+        let plan = frame(&mut cache, &lights, &[]);
+        assert_eq!(cache.stats().evicted, 0, "{:?}", cache.stats());
+        assert_ne!(plan.first_view[0], NO_SHADOW);
+        assert_ne!(plan.first_view[1], NO_SHADOW);
+        assert!(cache.stats().without_room >= 1, "{:?}", cache.stats());
     }
 
     #[test]
