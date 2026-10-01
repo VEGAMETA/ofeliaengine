@@ -6,7 +6,7 @@
 
 [[vk::binding(0, 0)]] Texture3D g_volumes[];
 
-// `AtmosphereConstants` in atmosphere.rs (416 bytes). Distances of the atmosphere in km,
+// `AtmosphereConstants` in atmosphere.rs (464 bytes). Distances of the atmosphere in km,
 // with the planet's center at the origin; the scene's in world units.
 struct AtmosphereFrame
 {
@@ -22,11 +22,14 @@ struct AtmosphereFrame
     float4 sun_illuminance;          // rgb: the light's color outside the atmosphere (sky and aerial perspective scale)
     float4 camera_world;             // xyz camera (world units); w: km per world unit
     float4 camera_planet;            // xyz camera (km, planet's center at 0); w: the sky-view table's radius (km)
-    float4 view;                     // x aerial perspective distance scale, y environment intensity
+    float4 view;                     // x aerial perspective distance scale, y environment intensity, z distance (world units) within which the aerial perspective is invisible
     float4 fog_albedo;               // rgb single-scattering albedo, w: extinction per world unit at the base height
     float4 fog;                      // x base height, y height falloff (per world unit), z start distance, w max opacity
-    float4 fog_phase;                // x anisotropy g of the sun's in-scattering
+    float4 fog_phase;                // x anisotropy g of the sun's in-scattering, y extinction per world unit at the camera's height
     float4 sun_color;                // rgb: the directional light at the camera (after the atmosphere)
+    float4 ray_base;                 // perspective: world direction to view depth 1 at ndc 0 (xyz); w: p22
+    float4 ray_x;                    // its change per ndc x (xyz); w: p32 (view depth = p32 / (depth + p22))
+    float4 ray_y;                    // its change per ndc y (xyz); w: 1 for a perspective camera, else 0
     float4* sh;                      // the environment's 9 irradiance harmonics (fog ambient light)
     uint transmittance;              // bindless: transmittance table
     uint multiple_scattering;        // bindless: multiple scattering table
@@ -59,6 +62,8 @@ float henyey_greenstein(float g, float c)
 // pixel at `uv`: in-scattered light (rgb) and opacity (a, 1 − mean transmittance).
 float4 aerial_perspective(AtmosphereFrame* a, float2 uv, float distance)
 {
+    if (distance <= a.view.z)
+        return float4(0.0, 0.0, 0.0, 0.0);
     float slice = distance * a.camera_world.w * a.view.x / AERIAL_KM_PER_SLICE;
     float weight = 1.0;
     if (slice < 0.5)
@@ -72,20 +77,21 @@ float4 aerial_perspective(AtmosphereFrame* a, float2 uv, float distance)
     return float4(ap.rgb * a.sun_illuminance.rgb * a.view.y, ap.a);
 }
 
-// Optical depth of the height fog from `origin` along unit `d` over `distance` world
-// units: ∫ density · exp(−falloff · (y − base)) along the ray, analytically.
-float fog_optical_depth(AtmosphereFrame* a, float3 origin, float3 d, float distance)
+// Optical depth of the height fog from the camera along unit `d` over `distance` world
+// units: ∫ density · exp(−falloff · (y − base)) along the ray, analytically. The density at
+// the camera's height comes with the constants.
+float fog_optical_depth(AtmosphereFrame* a, float3 d, float distance)
 {
     float start = a.fog.z;
     float len = distance - start;
-    if (len <= 0.0)
-        return 0.0;
-    float y = origin.y + d.y * start - a.fog.x;
     float k = a.fog.y;
+    float density = a.fog_phase.y;
+    if (start > 0.0)
+        density *= exp(clamp(-k * d.y * start, -80.0, 80.0));
     float x = max(k * d.y * len, -80.0);
     // (1 − e^−x) / x, and its series near 0 (horizontal rays, no falloff).
     float g = abs(x) > 1e-4 ? (1.0 - exp(-x)) / x : 1.0 - 0.5 * x;
-    return a.fog_albedo.w * exp(clamp(-k * y, -80.0, 80.0)) * len * g;
+    return density * max(len, 0.0) * g;
 }
 
 // The fog in front of a surface `distance` world units away along unit `d`: in-scattered
@@ -93,7 +99,7 @@ float fog_optical_depth(AtmosphereFrame* a, float3 origin, float3 d, float dista
 // (isotropic) and the sun (Henyey-Greenstein), not shadowed.
 float4 height_fog(AtmosphereFrame* a, float3 d, float distance)
 {
-    float t = exp(-fog_optical_depth(a, a.camera_world.xyz, d, distance));
+    float t = exp(-fog_optical_depth(a, d, distance));
     t = max(t, 1.0 - a.fog.w);
     // Average radiance of the sky: the irradiance harmonics' band 0 (π · Y00 · ∫L Y00) ×
     // Y00 / π.

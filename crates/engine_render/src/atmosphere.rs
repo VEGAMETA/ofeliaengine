@@ -298,7 +298,7 @@ impl HeightFog {
     }
 }
 
-/// `AtmosphereFrame` in `atmosphere_common.slang` (416 bytes).
+/// `AtmosphereFrame` in `atmosphere_common.slang` (464 bytes).
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub(crate) struct AtmosphereConstants {
@@ -319,6 +319,9 @@ pub(crate) struct AtmosphereConstants {
     fog: [f32; 4],
     fog_phase: [f32; 4],
     sun_color: [f32; 4],
+    ray_base: [f32; 4],
+    ray_x: [f32; 4],
+    ray_y: [f32; 4],
     sh: u64,
     transmittance: u32,
     multiple_scattering: u32,
@@ -331,7 +334,7 @@ pub(crate) struct AtmosphereConstants {
     size: [u32; 2],
 }
 
-const _: () = assert!(core::mem::size_of::<AtmosphereConstants>() == 416);
+const _: () = assert!(core::mem::size_of::<AtmosphereConstants>() == 464);
 
 /// `Push` in `atmosphere.slang` (24 bytes).
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -373,7 +376,9 @@ impl core::fmt::Debug for AtmosphereTables {
 /// What a view needs from the frame to draw its environment's atmosphere and fog.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AtmosphereView {
-    /// World from clip of the drawn (jittered) projection.
+    /// Clip from world of the drawn (jittered) projection.
+    pub clip_from_world: Mat4,
+    /// Its inverse.
     pub world_from_clip: Mat4,
     /// The same without jitter.
     pub unjittered_world_from_clip: Mat4,
@@ -702,6 +707,29 @@ fn sky_radius(atmosphere: &Atmosphere, camera: Vec3) -> f32 {
     atmosphere.ground_radius + steps * SKY_VIEW_ALTITUDE_STEP
 }
 
+/// The distance (km, after the aerial perspective's scale) within which the aerial
+/// perspective adds less than 1e-5 of light and hides less than 0.1%: the full-screen pass
+/// skips its lookup there. Its froxels fade in over the first half slice (weight
+/// `x / (AERIAL_KM_PER_SLICE / 2)` at `x` km), and up to `x` the light is at most
+/// x × the brightest in-scattering at the ground (each phase function at its peak, the
+/// multiple scattering table's light taken as at most the sun's) and the opacity at most
+/// x × the extinction at the ground.
+fn aerial_skip_distance(a: &Atmosphere, light: Vec3) -> f32 {
+    let g = a.mie_anisotropy;
+    let mie_peak = 3.0 / (8.0 * core::f32::consts::PI) * (1.0 - g * g) / (2.0 + g * g) * 2.0
+        / (1.0 + g * g - 2.0 * g).max(1e-6).powf(1.5);
+    let rayleigh_peak = 3.0 / (8.0 * core::f32::consts::PI);
+    let scattering = a.rayleigh_scattering + a.mie_scattering;
+    let source = (a.rayleigh_scattering * rayleigh_peak + a.mie_scattering * mie_peak + scattering)
+        * light.max(Vec3::ZERO);
+    let extinction = a.extinction(0.0).max_element().max(1e-9);
+    let half_slice = AERIAL_KM_PER_SLICE * 0.5;
+    // weight · x · bound ≤ limit, weight = x / half_slice.
+    let by_light = (1e-5 * half_slice / source.max_element().max(1e-12)).sqrt();
+    let by_opacity = (1e-3 * half_slice / extinction).sqrt();
+    by_light.min(by_opacity).min(half_slice)
+}
+
 /// This frame's constants. `atmosphere`: the physical sky, or `None` for fog alone (over
 /// the environment's cube); `indices`: the tables' bindless indices.
 #[allow(clippy::too_many_arguments)]
@@ -724,6 +752,7 @@ pub(crate) fn constants(
         sun_illuminance: view.light.extend(0.0).to_array(),
         camera_world: view.camera.extend(km).to_array(),
         view: [1.0, intensity, 0.0, 0.0],
+        ray_base: [0.0; 4],
         sun_color: sun_color.extend(0.0).to_array(),
         sh,
         transmittance: indices[0],
@@ -735,6 +764,23 @@ pub(crate) fn constants(
         size: view.size,
         ..AtmosphereConstants::default()
     };
+    // A perspective camera's rays, affine in the pixel's position: the world direction to
+    // the point at view depth 1 is base + ndc.x · x + ndc.y · y, and a depth-buffer value's
+    // view depth p32 / (depth + p22) (`Camera::view_space`); the full-screen pass then
+    // needs no matrices.
+    let camera = crate::forward::Camera {
+        clip_from_world: view.clip_from_world,
+        position: view.camera,
+    };
+    if let Some(v) = camera.view_space() {
+        let world_from_view = v.view_from_world.transpose();
+        let rotate = |x: f32, y: f32, z: f32| world_from_view.transform_vector3(Vec3::new(x, y, z));
+        c.ray_base = rotate(v.p20 / v.p00, v.p21 / v.p11, -1.0)
+            .extend(v.p22)
+            .to_array();
+        c.ray_x = rotate(1.0 / v.p00, 0.0, 0.0).extend(v.p32).to_array();
+        c.ray_y = rotate(0.0, 1.0 / v.p11, 0.0).extend(1.0).to_array();
+    }
     if let Some(a) = atmosphere {
         c.flags |= FLAG_SKY;
         c.rayleigh = a
@@ -763,7 +809,9 @@ pub(crate) fn constants(
             view.camera.z * km,
         );
         c.camera_planet = planet.extend(sky_radius(a, view.camera)).to_array();
-        c.view[0] = a.aerial_perspective_scale.max(0.0);
+        let scale = a.aerial_perspective_scale.max(0.0);
+        c.view[0] = scale;
+        c.view[2] = aerial_skip_distance(a, view.light * intensity) / (km * scale).max(1e-12);
     } else {
         // The disk of the gradient sky (as the forward renderer's sky pass).
         c.planet[3] = 0.999_988_9;
@@ -777,7 +825,11 @@ pub(crate) fn constants(
             f.start_distance.max(0.0),
             f.max_opacity.clamp(0.0, 1.0),
         ];
-        c.fog_phase = [f.sun_anisotropy.clamp(-0.99, 0.99), 0.0, 0.0, 0.0];
+        let at_camera = f.density.max(0.0)
+            * (-f.falloff * (view.camera.y - f.base_height))
+                .clamp(-80.0, 80.0)
+                .exp();
+        c.fog_phase = [f.sun_anisotropy.clamp(-0.99, 0.99), at_camera, 0.0, 0.0];
     }
     c
 }

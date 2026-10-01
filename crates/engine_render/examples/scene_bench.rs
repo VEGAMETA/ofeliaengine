@@ -768,8 +768,8 @@ fn main() {
     let light = match sun_elevation {
         Some(degrees) => {
             let e = degrees.to_radians();
-            let horizontal = Vec3::new(light.direction.x, 0.0, light.direction.z)
-                .normalize_or(Vec3::X);
+            let horizontal =
+                Vec3::new(light.direction.x, 0.0, light.direction.z).normalize_or(Vec3::X);
             DirectionalLight {
                 direction: -(-horizontal * e.cos() + Vec3::Y * e.sin()),
                 ..light
