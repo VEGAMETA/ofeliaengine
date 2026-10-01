@@ -224,11 +224,11 @@ fn server(entities: usize, clients: usize, moving: f32, ticks: usize) -> (f64, f
     )
 }
 
-fn client(rollback_latency_ms: Option<u64>, ticks: usize) -> (f64, f64, f64) {
+fn client(rollback_latency_ms: Option<u64>, movers: usize, ticks: usize) -> (f64, f64, f64) {
     let latency = rollback_latency_ms.unwrap_or(20);
     let mut sim = Sim::new(4, conditions(latency, 0, 0.0), ServerSettings::default());
     sim.frame_us = sim.tick_us;
-    sim.spawn_movers(1000, 23);
+    sim.spawn_movers(movers, 23);
     sim.add_client();
     if rollback_latency_ms.is_some() {
         // The server nudges the pawn every tick: every snapshot is a misprediction.
@@ -288,16 +288,20 @@ fn main() {
     }
 
     println!(
-        "\n## 3. Client per frame (one tick per frame; 1,000 interpolated entities + own pawn)"
+        "\n## 3. Client per frame (one tick per frame; own pawn predicted; the game's tick is trivial)"
     );
     println!(
-        "| case | median µs per frame | ticks re-simulated per rollback | rollbacks per frame |"
+        "| interpolated entities | case | median µs per frame | ticks re-simulated per rollback | rollbacks per frame |"
     );
-    println!("|---|---:|---:|---:|");
-    let (f, _, _) = client(None, ticks);
-    println!("| no misprediction | {f:.1} | 0 | 0 |");
-    for latency in [10u64, 40, 100] {
-        let (f, k, r) = client(Some(latency), ticks);
-        println!("| rollback every snapshot, {latency} ms one way | {f:.1} | {k:.1} | {r:.2} |");
+    println!("|---:|---|---:|---:|---:|");
+    for movers in [0usize, 1000] {
+        let (f, _, _) = client(None, movers, ticks);
+        println!("| {movers} | no misprediction | {f:.1} | 0 | 0 |");
+        for latency in [10u64, 40, 100] {
+            let (f, k, r) = client(Some(latency), movers, ticks);
+            println!(
+                "| {movers} | rollback every snapshot, {latency} ms one way | {f:.1} | {k:.1} | {r:.2} |"
+            );
+        }
     }
 }
