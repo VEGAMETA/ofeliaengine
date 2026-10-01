@@ -194,7 +194,7 @@ struct Frame
     SubsurfaceProfile* subsurface;
     AtmosphereFrame* atmosphere; // aerial perspective and fog (ADR 0069), for `fragmentBlendedAtmosphere*`
     uint local_shadow_atlas; // bindless: the local lights' shadow atlas (ADR 0071)
-    uint contact_shadows;    // bindless: the sun's contact shadow mask (ADR 0071)
+    uint _pad5;
     uint* light_shadows;     // per sorted light: its first view in `shadow_views`, or NO_SHADOW
     ShadowView* shadow_views; // the views of the shadowed lights in view
     ShadowView* shadow_draws; // the views drawn this frame (culling and drawing)
@@ -1189,16 +1189,16 @@ struct SubsurfaceOut
 // removes the code of the other case, so shading without ambient occlusion or local
 // shadows spends no registers on them (on RDNA2 even dead code under a specialization
 // constant took the shading from 64 to 72 VGPRs, 9 to 13 % slower).
-float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = false)
+float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = false, bool contact = false)
 {
     SubsurfaceOut unused;
-    return shade_surface(input, front, masked, ao, false, unused, shadows);
+    return shade_surface(input, front, masked, ao, false, unused, shadows, contact);
 }
 
 // `shade`; with `subsurface`, the scattered part of the diffuse light goes to `sss`
 // instead of the color. Subsurface materials' pipelines always take `ao` (they are their
 // own; without ambient occlusion `push.ao` skips the read).
-float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, bool shadows = false)
+float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, bool shadows = false, bool contact = false)
 {
     Frame frame = push.frame[0];
     Material m = push.materials[input.material];
@@ -1255,6 +1255,10 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     // A surface facing away from the light is in its own shadow, whatever its normal map
     // says.
     float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+    // The sun's contact shadows (ADR 0071; `contact` is a literal): their mask's bindless
+    // index comes in `push.phase`, which the shading passes do not otherwise read.
+    if (contact && visible > 0.0)
+        visible *= g_textures[push.phase].Load(int3(int2(input.position.xy), 0)).r;
     float3 local_irradiance = 0.0;
     float3 color = (surface_diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
         + ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao)
@@ -1670,6 +1674,69 @@ SubsurfaceShadedMotion fragmentSubsurfaceMotionShadowed(VertexOut input, bool fr
     o.motion = motion(input.position, input.previous_clip);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
+    return o;
+}
+
+// After the depth prepass of a view with the sun's contact shadows (ADR 0071): the
+// shading entry points that read their mask, with and without motion vectors, ambient
+// occlusion and local lights' shadows.
+[shader("fragment")]
+float4 fragmentMainContact(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContact(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainContactShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, false, false, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionAoContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, true, false, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, false, true, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, true, true, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
     return o;
 }
 

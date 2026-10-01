@@ -49,6 +49,7 @@
 use crate::ao::{AmbientOcclusion, AoSettings};
 use crate::atmosphere::{AtmosphereTextures, AtmosphereView, COMPOSITE_FRAGMENT, COMPOSITE_VERTEX};
 use crate::compute::{ComputePass, ComputeShader, ComputeSource, Dispatch};
+use crate::contact::{ContactShadows, ContactView};
 use crate::cull::Frustum;
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
 use crate::gpu_scene::SceneFrame;
@@ -125,7 +126,23 @@ const FRAGMENT_SUBSURFACE_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentSubsurfaceShadowed.spv");
 const FRAGMENT_SUBSURFACE_MOTION_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentSubsurfaceMotionShadowed.spv");
+// The sun's contact shadows (ADR 0071): shading after the prepass that reads their mask.
+const FRAGMENT_CONTACT: &[u8] = include_bytes!("../shaders/forward.fragmentMainContact.spv");
+const FRAGMENT_MOTION_CONTACT: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMainMotionContact.spv");
+const FRAGMENT_AO_CONTACT: &[u8] = include_bytes!("../shaders/forward.fragmentMainAoContact.spv");
+const FRAGMENT_MOTION_AO_CONTACT: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMainMotionAoContact.spv");
+const FRAGMENT_CONTACT_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMainContactShadowed.spv");
+const FRAGMENT_MOTION_CONTACT_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMainMotionContactShadowed.spv");
+const FRAGMENT_AO_CONTACT_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMainAoContactShadowed.spv");
+const FRAGMENT_MOTION_AO_CONTACT_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMainMotionAoContactShadowed.spv");
 
+pub use crate::contact::{ContactMethod, ContactShadowSettings};
 pub use crate::lights::{LocalLight, Spot};
 pub use crate::local_shadows::{LocalShadowSettings, LocalShadowStats};
 pub use crate::shadow::ShadowSettings;
@@ -608,8 +625,7 @@ struct FrameData {
     atmosphere: u64,
     /// Local lights' shadows (ADR 0071): the atlas's bindless index, ...
     local_shadow_atlas: u32,
-    /// ... the sun's contact shadows' (or [`NO_AO`]: none), ...
-    contact_shadows: u32,
+    _pad5: u32,
     /// ... per sorted light its first view (or `NO_SHADOW`), the views, the drawn views
     /// and their count, and one texel of the atlas in uv.
     light_shadows: u64,
@@ -714,6 +730,9 @@ pub struct ForwardPasses {
     /// The environment's atmosphere tables this frame, when it has a physical sky (ADR
     /// 0069): for debugging views and tests.
     pub atmosphere: Option<AtmosphereTextures>,
+    /// The sun's contact shadows ([`crate::contact::CONTACT_FORMAT`], sampled by the
+    /// forward pass), when they are on (ADR 0071): for debugging views and tests.
+    pub contact_shadows: Option<Texture>,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -1279,6 +1298,166 @@ impl ShadowedPipelines {
     }
 }
 
+/// The sun's contact shadows (ADR 0071): their passes and the shading after the depth
+/// prepass that reads their mask, made when they are first turned on; the sets for ambient
+/// occlusion and local lights' shadows when those are on too.
+#[derive(Debug)]
+struct ContactState {
+    passes: ContactShadows,
+    /// Per shading variant: without and with motion vectors.
+    shading: [[Pipeline; 2]; 4],
+    ao: Option<[[Pipeline; 2]; 4]>,
+    /// With local lights' shadows, per environment bit (the local-light variants).
+    shadowed: Option<[[Pipeline; 2]; 2]>,
+    shadowed_ao: Option<[[Pipeline; 2]; 2]>,
+}
+
+/// Shading pipelines after the depth prepass (depth tested for equality, not written) of
+/// `variants`, each without and with motion vectors.
+fn prepass_shading(
+    device: &Device,
+    bindless: &Bindless,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+    fragments: [(&[u8], &core::ffi::CStr); 2],
+    variants: &[usize],
+) -> Result<Vec<[Pipeline; 2]>, RhiError> {
+    let invalid = || RhiError::Vulkan {
+        call: "embedded SPIR-V",
+        result: vk::Result::ERROR_INVALID_SHADER_NV,
+    };
+    let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+    let still = spirv_words(fragments[0].0).ok_or_else(invalid)?;
+    let moving = spirv_words(fragments[1].0).ok_or_else(invalid)?;
+    let formats = [color_format];
+    let motion_formats = [color_format, MOTION_FORMAT];
+    let mut descs = Vec::with_capacity(2 * variants.len());
+    for &variant in variants {
+        for (fragment, entry, formats) in [
+            (&still, fragments[0].1, &formats[..]),
+            (&moving, fragments[1].1, &motion_formats[..]),
+        ] {
+            descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+                depth_write: false,
+                depth_compare: vk::CompareOp::EQUAL,
+                ..shading_desc(
+                    &vertex,
+                    fragment,
+                    entry,
+                    formats,
+                    depth_format,
+                    &VARIANTS[variant],
+                )
+            }));
+        }
+    }
+    let mut pipelines =
+        Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+    let mut out = Vec::with_capacity(variants.len());
+    while let (Some(a), Some(b)) = (pipelines.next(), pipelines.next()) {
+        out.push([a, b]);
+    }
+    Ok(out)
+}
+
+/// The first four (or two) of `pipelines` as an array.
+fn array_of<const N: usize>(pipelines: Vec<[Pipeline; 2]>) -> Result<[[Pipeline; 2]; N], RhiError> {
+    pipelines.try_into().map_err(|_| RhiError::Vulkan {
+        call: "contact shadow pipelines (fewer than described)",
+        result: vk::Result::ERROR_UNKNOWN,
+    })
+}
+
+impl ContactState {
+    fn new(
+        device: &Device,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+    ) -> Result<Self, RhiError> {
+        let shading = prepass_shading(
+            device,
+            bindless,
+            color_format,
+            depth_format,
+            [
+                (FRAGMENT_CONTACT, c"fragmentMainContact"),
+                (FRAGMENT_MOTION_CONTACT, c"fragmentMainMotionContact"),
+            ],
+            &[0, 1, 2, 3],
+        )?;
+        Ok(Self {
+            passes: ContactShadows::new(device, bindless)?,
+            shading: array_of(shading)?,
+            ao: None,
+            shadowed: None,
+            shadowed_ao: None,
+        })
+    }
+
+    /// The sets for ambient occlusion and local lights' shadows, when those are on and the
+    /// sets are not made yet.
+    fn ensure_extras(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        formats: (vk::Format, vk::Format),
+        ao: bool,
+        shadows: bool,
+    ) -> Result<(), RhiError> {
+        let (color, depth) = formats;
+        if ao && self.ao.is_none() {
+            self.ao = Some(array_of(prepass_shading(
+                device,
+                bindless,
+                color,
+                depth,
+                [
+                    (FRAGMENT_AO_CONTACT, c"fragmentMainAoContact"),
+                    (FRAGMENT_MOTION_AO_CONTACT, c"fragmentMainMotionAoContact"),
+                ],
+                &[0, 1, 2, 3],
+            )?)?);
+        }
+        if shadows && self.shadowed.is_none() {
+            self.shadowed = Some(array_of(prepass_shading(
+                device,
+                bindless,
+                color,
+                depth,
+                [
+                    (FRAGMENT_CONTACT_SHADOWED, c"fragmentMainContactShadowed"),
+                    (
+                        FRAGMENT_MOTION_CONTACT_SHADOWED,
+                        c"fragmentMainMotionContactShadowed",
+                    ),
+                ],
+                &[1, 3],
+            )?)?);
+        }
+        if ao && shadows && self.shadowed_ao.is_none() {
+            self.shadowed_ao = Some(array_of(prepass_shading(
+                device,
+                bindless,
+                color,
+                depth,
+                [
+                    (
+                        FRAGMENT_AO_CONTACT_SHADOWED,
+                        c"fragmentMainAoContactShadowed",
+                    ),
+                    (
+                        FRAGMENT_MOTION_AO_CONTACT_SHADOWED,
+                        c"fragmentMainMotionAoContactShadowed",
+                    ),
+                ],
+                &[1, 3],
+            )?)?);
+        }
+        Ok(())
+    }
+}
+
 /// The local-light variant of a shading variant index (bit 1: environment).
 fn shadowed_index(variant: usize) -> usize {
     variant >> 1
@@ -1442,6 +1621,11 @@ pub struct ForwardRenderer {
     /// they are on now.
     local_shadows: Option<LocalShadowState>,
     local_shadows_on: bool,
+    /// The sun's contact shadows (ADR 0071), made when first turned on.
+    contact: Option<ContactState>,
+    contact_settings: Option<ContactShadowSettings>,
+    /// Frames drawn with contact shadows: their noise index under TAA.
+    contact_frame: Cell<u32>,
     /// Atlases replaced by new settings, freed by [`Self::destroy`].
     retired_atlases: Vec<AtlasImage>,
     scratch: RefCell<Scratch>,
@@ -1709,6 +1893,9 @@ impl ForwardRenderer {
             subsurface_profiles: Vec::new(),
             local_shadows: None,
             local_shadows_on: false,
+            contact: None,
+            contact_settings: None,
+            contact_frame: Cell::new(0),
             retired_atlases: Vec::new(),
             scratch: RefCell::new(Scratch::default()),
         })
@@ -1775,13 +1962,49 @@ impl ForwardRenderer {
         bindless: &Bindless,
     ) -> Result<(), RhiError> {
         let (ao, subsurface) = (self.ao.is_some(), self.subsurface_pipelines.is_some());
+        let shadows = self.local_shadows.is_some();
         let (color, depth) = (self.color_format, self.depth_format);
-        match self.local_shadows.as_mut() {
-            Some(state) => state
+        if let Some(state) = self.local_shadows.as_mut() {
+            state
                 .pipelines
-                .ensure_extras(device, bindless, color, depth, ao, subsurface),
-            None => Ok(()),
+                .ensure_extras(device, bindless, color, depth, ao, subsurface)?;
         }
+        if let Some(state) = self.contact.as_mut() {
+            state.ensure_extras(device, bindless, (color, depth), ao, shadows)?;
+        }
+        Ok(())
+    }
+
+    /// Turns the sun's contact shadows on with `settings`, or off (`None`, the default;
+    /// ADR 0071): what the depth buffer hides from the sun at scales its cascades cannot
+    /// resolve (a pebble, a hand on a table, grass), as a mask multiplied into the sun's
+    /// light. They need the depth before shading, so the depth prepass runs whenever they
+    /// are on; perspective views only. Transparent surfaces and subsurface materials do
+    /// not get them. The first time, their pass and up to 16 shading pipelines are made
+    /// (in parallel, through the pipeline cache: ADR 0055); a renderer that never uses
+    /// them pays nothing, not even registers in its shading.
+    pub fn set_contact_shadows(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        settings: Option<ContactShadowSettings>,
+    ) -> Result<(), RhiError> {
+        if settings.is_some() && self.contact.is_none() {
+            self.contact = Some(ContactState::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+            )?);
+            self.ensure_shadowed_extras(device, bindless)?;
+        }
+        self.contact_settings = settings;
+        Ok(())
+    }
+
+    /// The contact shadow settings, when they are on.
+    pub fn contact_shadows(&self) -> Option<ContactShadowSettings> {
+        self.contact_settings
     }
 
     /// The ambient occlusion settings, when it is on.
@@ -1936,7 +2159,7 @@ impl ForwardRenderer {
             }
         }
         self.local_shadows_on = true;
-        Ok(())
+        self.ensure_shadowed_extras(device, bindless)
     }
 
     /// The local shadow settings, when they are on.
@@ -1971,6 +2194,16 @@ impl ForwardRenderer {
         match &self.local_shadows {
             Some(s) => core::array::from_fn(|k| s.pipelines.shading[k].main[0].statistics(device)),
             None => [Vec::new(), Vec::new()],
+        }
+    }
+
+    /// The driver's statistics of the shading pipelines that read the sun's contact
+    /// shadows (after the prepass, without motion vectors), per shading variant. Empty
+    /// unless contact shadows were turned on and the device captures statistics.
+    pub fn contact_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
+        match &self.contact {
+            Some(c) => core::array::from_fn(|k| c.shading[k][0].statistics(device)),
+            None => Default::default(),
         }
     }
 
@@ -2847,7 +3080,7 @@ impl ForwardRenderer {
             subsurface: profiles,
             atmosphere: atmosphere.map_or(0, |a| a.constants),
             local_shadow_atlas: local.map_or(0, |s| s.atlas.sampled),
-            contact_shadows: NO_AO,
+            _pad5: 0,
             light_shadows: local_frame.light_shadows,
             shadow_views: local_frame.views,
             shadow_draws: local_frame.draws,
@@ -3256,6 +3489,7 @@ impl ForwardRenderer {
             environment,
             ao: None,
             local_atlas: local_frame.atlas.filter(|_| local_frame.shadowed),
+            contact: None,
         };
 
         // Ambient occlusion needs the whole depth before shading: the prepass draws it.
@@ -3273,7 +3507,27 @@ impl ForwardRenderer {
         };
         // Subsurface materials need it too: their pass follows the forward pass with the
         // depth tested for equality.
-        let prepass = self.depth_prepass || ao.is_some() || subsurface_draws;
+        // The sun's contact shadows (ADR 0071) need it too.
+        let contact = self
+            .contact_settings
+            .zip(view.camera.view_space())
+            .zip(self.contact.as_ref());
+        let contact_frame = if temporal.is_some() {
+            let frame = self.contact_frame.get().wrapping_add(1);
+            self.contact_frame.set(frame);
+            frame
+        } else {
+            0
+        };
+        let contact_view = ContactView {
+            clip_from_world,
+            eye: view.camera.position,
+            to_light: -view.light.direction.normalize_or(Vec3::NEG_Y),
+            p22: contact.map_or(0.0, |((_, v), _)| v.p22),
+            p32: contact.map_or(0.0, |((_, v), _)| v.p32),
+            forward: axis.map_or(Vec3::NEG_Z, |a| a.forward),
+        };
+        let prepass = self.depth_prepass || ao.is_some() || subsurface_draws || contact.is_some();
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
@@ -3290,7 +3544,22 @@ impl ForwardRenderer {
             Some(p) => &p[shadowed_index(variant)],
             None => &passes.shading[variant],
         });
+        // With contact shadows (the prepass is on then), the shading that reads their mask.
+        let contact_shading = contact.and_then(|(_, c)| {
+            let m = usize::from(velocity.is_some());
+            let k = shadowed_index(variant);
+            match (ao.is_some(), shadowed.is_some()) {
+                (false, false) => Some(&c.shading[variant][m]),
+                (true, false) => c.ao.as_ref().map(|p| &p[variant][m]),
+                (false, true) => c.shadowed.as_ref().map(|p| &p[k][m]),
+                (true, true) => c.shadowed_ao.as_ref().map(|p| &p[k][m]),
+            }
+        });
         let main_pipelines = match (prepass, velocity.is_some()) {
+            _ if contact_shading.is_some() => {
+                let p = contact_shading.unwrap_or(&shading.shade);
+                [p, p]
+            }
             (true, false) => match ao_shading {
                 Some(p) => [&p[0], &p[0]],
                 None => [&shading.shade, &shading.shade],
@@ -3302,16 +3571,22 @@ impl ForwardRenderer {
             (false, false) => [&shading.main[0], &shading.main[1]],
             (false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
         };
+        // `contact`: the sun's contact shadows, whose mask's index the shading that reads
+        // it takes in `phase` (ADR 0071).
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
                                phase: u32,
                                mask: u32,
-                               ao: Option<Texture>| {
+                               ao: Option<Texture>,
+                               contact: Option<Texture>| {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
                 light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
                 ao: ao.and_then(|t| ctx.sampled_index(t)).unwrap_or(NO_AO),
+                phase: contact
+                    .and_then(|t| ctx.sampled_index(t))
+                    .unwrap_or(base.phase),
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
@@ -3352,7 +3627,7 @@ impl ForwardRenderer {
                     )
                     .depth(depth, depth_clear, StoreOp::Store)
                     .execute(move |ctx| {
-                        draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None)
+                        draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None, None)
                     });
                     DepthUse::ReadOnly
                 } else {
@@ -3365,7 +3640,19 @@ impl ForwardRenderer {
                             .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
                     );
                 }
+                if let Some(((settings, _), state)) = contact {
+                    targets.contact = Some(state.passes.add_passes(
+                        fg,
+                        bindless,
+                        ring,
+                        depth,
+                        &contact_view,
+                        &settings,
+                        contact_frame,
+                    )?);
+                }
                 let ao_texture = targets.ao;
+                let contact_texture = targets.contact;
                 shading_pass(
                     fg,
                     "forward",
@@ -3381,7 +3668,14 @@ impl ForwardRenderer {
                     scene_instances,
                 )
                 .execute(move |ctx| {
-                    draw_phase(ctx, main_pipelines, PHASE_ALL, PLAIN_STATES, ao_texture)
+                    draw_phase(
+                        ctx,
+                        main_pipelines,
+                        PHASE_ALL,
+                        PLAIN_STATES,
+                        ao_texture,
+                        contact_texture,
+                    )
                 });
                 ForwardPasses {
                     instances: instance_count,
@@ -3393,6 +3687,7 @@ impl ForwardRenderer {
                     motion: None,
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
+                    contact_shadows: targets.contact,
                 }
             }
             Some(flags) => {
@@ -3412,7 +3707,14 @@ impl ForwardRenderer {
                     )
                     .depth(depth, depth_clear, StoreOp::Store)
                     .execute(move |ctx| {
-                        draw_phase(ctx, prepass_pipelines, PHASE_EARLY, DEPTH_STATES, None)
+                        draw_phase(
+                            ctx,
+                            prepass_pipelines,
+                            PHASE_EARLY,
+                            DEPTH_STATES,
+                            None,
+                            None,
+                        )
                     });
                 } else {
                     shading_pass(
@@ -3430,7 +3732,7 @@ impl ForwardRenderer {
                         scene_instances,
                     )
                     .execute(move |ctx| {
-                        draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, None)
+                        draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, None, None)
                     });
                 }
                 let pyramid = fg.create_buffer(
@@ -3472,7 +3774,7 @@ impl ForwardRenderer {
                     )
                     .depth(depth, LoadOp::Load, StoreOp::Store)
                     .execute(move |ctx| {
-                        draw_phase(ctx, prepass_pipelines, PHASE_LATE, DEPTH_STATES, None)
+                        draw_phase(ctx, prepass_pipelines, PHASE_LATE, DEPTH_STATES, None, None)
                     });
                     if let Some(((settings, view_space), passes)) = &ao {
                         targets.ao = Some(
@@ -3481,7 +3783,19 @@ impl ForwardRenderer {
                                 .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
                         );
                     }
+                    if let Some(((settings, _), state)) = contact {
+                        targets.contact = Some(state.passes.add_passes(
+                            fg,
+                            bindless,
+                            ring,
+                            depth,
+                            &contact_view,
+                            &settings,
+                            contact_frame,
+                        )?);
+                    }
                     let ao_texture = targets.ao;
+                    let contact_texture = targets.contact;
                     shading_pass(
                         fg,
                         "forward",
@@ -3497,8 +3811,22 @@ impl ForwardRenderer {
                         scene_instances,
                     )
                     .execute(move |ctx| {
-                        draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, ao_texture);
-                        draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, ao_texture);
+                        draw_phase(
+                            ctx,
+                            main_pipelines,
+                            PHASE_EARLY,
+                            PLAIN_STATES,
+                            ao_texture,
+                            contact_texture,
+                        );
+                        draw_phase(
+                            ctx,
+                            main_pipelines,
+                            PHASE_LATE,
+                            PLAIN_STATES,
+                            ao_texture,
+                            contact_texture,
+                        );
                     });
                 } else {
                     shading_pass(
@@ -3516,7 +3844,7 @@ impl ForwardRenderer {
                         scene_instances,
                     )
                     .execute(move |ctx| {
-                        draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, None)
+                        draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, None, None)
                     });
                 }
                 ForwardPasses {
@@ -3529,6 +3857,7 @@ impl ForwardRenderer {
                     motion: None,
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
+                    contact_shadows: targets.contact,
                 }
             }
         };
@@ -3571,10 +3900,31 @@ impl ForwardRenderer {
             .execute(move |ctx| {
                 let pipelines = [pipeline, pipeline];
                 if two_phases {
-                    draw_phase(ctx, pipelines, PHASE_EARLY, SUBSURFACE_STATES, ao_texture);
-                    draw_phase(ctx, pipelines, PHASE_LATE, SUBSURFACE_STATES, ao_texture);
+                    draw_phase(
+                        ctx,
+                        pipelines,
+                        PHASE_EARLY,
+                        SUBSURFACE_STATES,
+                        ao_texture,
+                        None,
+                    );
+                    draw_phase(
+                        ctx,
+                        pipelines,
+                        PHASE_LATE,
+                        SUBSURFACE_STATES,
+                        ao_texture,
+                        None,
+                    );
                 } else {
-                    draw_phase(ctx, pipelines, PHASE_ALL, SUBSURFACE_STATES, ao_texture);
+                    draw_phase(
+                        ctx,
+                        pipelines,
+                        PHASE_ALL,
+                        SUBSURFACE_STATES,
+                        ao_texture,
+                        None,
+                    );
                 }
             });
             // The scatter pass: the same batches, adding where their depth is.
@@ -3923,6 +4273,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         motion,
         ao: None,
         atmosphere: None,
+        contact_shadows: None,
     }
 }
 
@@ -3944,6 +4295,8 @@ struct Targets {
     ao: Option<Texture>,
     /// The local lights' shadow atlas, when the shading looks it up (ADR 0071).
     local_atlas: Option<Texture>,
+    /// The sun's contact shadows (ADR 0071), computed after the depth prepass.
+    contact: Option<Texture>,
 }
 
 /// How a shading pass uses the depth target.
@@ -4009,6 +4362,9 @@ fn shading_pass<'a, 'g>(
     }
     if let Some(atlas) = targets.local_atlas {
         pass = pass.read(atlas, Access::Sampled(ShaderStages::FRAGMENT));
+    }
+    if let Some(contact) = targets.contact {
+        pass = pass.read(contact, Access::Sampled(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),
