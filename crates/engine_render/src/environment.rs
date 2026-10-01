@@ -266,6 +266,17 @@ impl Image {
         texture
     }
 
+    /// The state the next import starts from.
+    pub(crate) fn state(&self) -> TextureState {
+        self.state.get()
+    }
+
+    /// Sets the state the next import starts from: what it was before an import whose
+    /// frame did not use the image (the graph leaves an unused import as it was).
+    pub(crate) fn set_state(&self, state: TextureState) {
+        self.state.set(state);
+    }
+
     /// # Safety
     ///
     /// The GPU no longer uses the image after `frame`.

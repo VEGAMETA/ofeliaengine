@@ -838,7 +838,7 @@ fn probe_captures_are_cached_and_budgeted() {
         material: grey,
         world_from_object: Mat4::from_translation(Vec3::new(-2.0, 1.0, 1.0)),
     });
-    let mut scene_faces = |bed: &mut Bed, scene: &mut GpuScene, frames: usize| {
+    let scene_faces = |bed: &mut Bed, scene: &mut GpuScene, frames: usize| {
         let mut total = 0;
         for _ in 0..frames {
             bed.render_scene(view, scene, reflections);

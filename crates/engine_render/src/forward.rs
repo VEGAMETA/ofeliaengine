@@ -64,7 +64,7 @@ use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::reflections::{
     NORMAL_ROUGHNESS_FORMAT, ProbeTextures, ReflectionPasses, ReflectionProbes, ViewInputs,
-    WEIGHT_FORMAT,
+    ViewSetup, WEIGHT_FORMAT,
 };
 use crate::shadow::{self, CascadeFit, MAX_CASCADES};
 use crate::subsurface::{
@@ -957,8 +957,9 @@ impl SubsurfacePipelines {
 }
 
 /// Reflections (ADR 0073): their passes, and per shading variant with an environment
-/// (without and with local lights) the shading that also writes the normal, roughness and
-/// specular weight, after the depth prepass: `[motion][ambient occlusion]`.
+/// (without and with local lights) the shading of views with them, after the depth
+/// prepass, which also writes the normal, roughness and specular weight:
+/// `[lights][motion][ambient occlusion]`.
 #[derive(Debug)]
 struct ReflectionShading {
     passes: ReflectionPasses,
@@ -977,21 +978,14 @@ impl ReflectionShading {
             result: vk::Result::ERROR_INVALID_SHADER_NV,
         };
         let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+        let words = |spirv| spirv_words(spirv).ok_or_else(invalid);
+        // [motion][ambient occlusion].
         let fragments = [
+            (words(FRAGMENT_REFLECT)?, c"fragmentReflect"),
+            (words(FRAGMENT_REFLECT_AO)?, c"fragmentReflectAo"),
+            (words(FRAGMENT_REFLECT_MOTION)?, c"fragmentReflectMotion"),
             (
-                spirv_words(FRAGMENT_REFLECT).ok_or_else(invalid)?,
-                c"fragmentReflect",
-            ),
-            (
-                spirv_words(FRAGMENT_REFLECT_AO).ok_or_else(invalid)?,
-                c"fragmentReflectAo",
-            ),
-            (
-                spirv_words(FRAGMENT_REFLECT_MOTION).ok_or_else(invalid)?,
-                c"fragmentReflectMotion",
-            ),
-            (
-                spirv_words(FRAGMENT_REFLECT_MOTION_AO).ok_or_else(invalid)?,
+                words(FRAGMENT_REFLECT_MOTION_AO)?,
                 c"fragmentReflectMotionAo",
             ),
         ];
@@ -1030,10 +1024,10 @@ impl ReflectionShading {
                 result: vk::Result::ERROR_UNKNOWN,
             })
         };
-        let mut variant = || -> Result<[[Pipeline; 2]; 2], RhiError> {
+        let mut lights = || -> Result<[[Pipeline; 2]; 2], RhiError> {
             Ok([[next()?, next()?], [next()?, next()?]])
         };
-        let shading = [variant()?, variant()?];
+        let shading = [lights()?, lights()?];
         Ok(Self {
             passes: ReflectionPasses::new(device, bindless, color_format)?,
             shading,
@@ -1510,19 +1504,25 @@ impl ForwardRenderer {
     }
 
     /// The driver's statistics of the reflection pipelines (ADR 0073): the opaque shading
-    /// of views with reflections without and with local lights, then the composite pass.
-    /// Empty unless the device captures statistics and reflections were turned on.
+    /// of views with reflections without and with local lights, then the composite pass
+    /// with probes, with screen-space reflections, with both. Empty unless the device
+    /// captures statistics and reflections were turned on.
     pub fn reflection_statistics(
         &self,
         device: &Device,
-    ) -> [Vec<engine_rhi::PipelineStatistic>; 3] {
+    ) -> [Vec<engine_rhi::PipelineStatistic>; 5] {
         match &self.reflections {
-            Some(r) => [
-                r.shading[0][0][0].statistics(device),
-                r.shading[1][0][0].statistics(device),
-                r.passes.composite_statistics(device),
-            ],
-            None => [Vec::new(), Vec::new(), Vec::new()],
+            Some(r) => {
+                let [a, b, c] = r.passes.composite_statistics(device);
+                [
+                    r.shading[0][0][0].statistics(device),
+                    r.shading[1][0][0].statistics(device),
+                    a,
+                    b,
+                    c,
+                ]
+            }
+            None => Default::default(),
         }
     }
 
@@ -1648,10 +1648,16 @@ impl ForwardRenderer {
                 },
             )?;
         }
-        let layout = self.layout_draws(ring, geometry, materials, draws, view, &setup)?;
-        self.declare(
-            fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported,
-        )
+        let layout = self.layout_draws(ring, geometry, materials, draws, view, &setup);
+        let passes = layout.and_then(|layout| {
+            self.declare(
+                fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported,
+            )
+        });
+        if let Some((probes, _)) = imported.probes {
+            probes.finish();
+        }
+        passes
     }
 
     /// Declares the culling, shadow and forward passes for the instances of a persistent
@@ -1704,10 +1710,16 @@ impl ForwardRenderer {
                 },
             )?;
         }
-        let layout = self.layout_scene(ring, geometry, scene, view, &setup)?;
-        self.declare(
-            fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported,
-        )
+        let layout = self.layout_scene(ring, geometry, scene, view, &setup);
+        let passes = layout.and_then(|layout| {
+            self.declare(
+                fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported,
+            )
+        });
+        if let Some((probes, _)) = imported.probes {
+            probes.finish();
+        }
+        passes
     }
 
     /// Imports what a view's passes read once per frame: its environment (rebuilt first
@@ -2357,6 +2369,29 @@ impl ForwardRenderer {
         } else {
             0
         };
+        // Reflections (ADR 0073): with an environment (their last fallback), in perspective
+        // views, never in a probe's capture. Their constants (and visible probes) go to the
+        // ring before the shading that reads them.
+        let reflection_passes = self
+            .reflections
+            .as_ref()
+            .filter(|_| self.reflections_on && !capture && view.reflections.any());
+        let prepared = match (reflection_passes, environment) {
+            (Some(r), Some(env)) => r.passes.prepare(
+                ring,
+                &ViewSetup {
+                    environment: env,
+                    clip_from_world,
+                    camera: view.camera.position,
+                    size: [depth_desc.width, depth_desc.height],
+                    probes: imported.probes.map(|(p, _)| p),
+                    ssr: view.reflections.ssr,
+                },
+            ),
+            _ => None,
+        };
+        // Whether the view reflects anything: visible probes or screen-space reflections.
+        let reflecting = prepared.is_some_and(|p| p.probes > 0 || p.ssr.is_some());
         let settings = &self.shadow_settings;
         let fit = shadow::fit_cascades(
             unjittered,
@@ -2751,15 +2786,7 @@ impl ForwardRenderer {
             // Without a temporal resolve changing noise would flicker.
             0
         };
-        // Reflections (ADR 0073): with an environment (their last fallback), in perspective
-        // views, never in a probe's capture.
-        let reflect = self
-            .reflections
-            .as_ref()
-            .filter(|_| self.reflections_on && !capture && view.reflections.any())
-            .zip(environment)
-            .filter(|_| view.camera.view_space().is_some());
-        targets.reflect = reflect.map(|_| {
+        targets.reflect = reflecting.then(|| {
             let desc = |format| TextureDesc::new_2d(format, depth_desc.width, depth_desc.height);
             (
                 fg.create_texture("reflection normals", desc(NORMAL_ROUGHNESS_FORMAT)),
@@ -2768,7 +2795,7 @@ impl ForwardRenderer {
         });
         // Subsurface materials and reflections need it too: their passes follow the
         // forward pass, or read the depth before it.
-        let prepass = self.depth_prepass || ao.is_some() || subsurface_draws || reflect.is_some();
+        let prepass = self.depth_prepass || ao.is_some() || subsurface_draws || reflecting;
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
@@ -2778,7 +2805,7 @@ impl ForwardRenderer {
         let ao_shading = ao.map(|(_, passes)| &passes.shading[variant]);
         // With reflections, the shading that also writes their inputs (the prepass is on
         // then).
-        let reflect_shading = reflect.map(|(r, _)| {
+        let reflect_shading = reflection_passes.filter(|_| reflecting).map(|r| {
             &r.shading[variant & 1][usize::from(velocity.is_some())][usize::from(ao.is_some())]
         });
         let main_pipelines = match (prepass, velocity.is_some()) {
@@ -3130,24 +3157,25 @@ impl ForwardRenderer {
         }
         // Reflections (ADR 0073): screen-space reflections and probes replace the sky's
         // specular light on the opaque image.
-        if let (Some((r, env)), Some((normal_roughness, weight))) = (reflect, targets.reflect) {
+        if let (Some(r), Some(prepared), Some(env), Some((normal_roughness, weight))) =
+            (reflection_passes, prepared, environment, targets.reflect)
+        {
+            if let Some((probes, _)) = imported.probes.filter(|_| prepared.probes > 0) {
+                probes.mark_used(true, false);
+            }
             r.passes.add_view_passes(
                 fg,
-                ring,
                 bindless,
+                &prepared,
                 &ViewInputs {
                     color,
                     depth,
                     normal_roughness,
                     weight,
                     environment: env,
-                    clip_from_world,
-                    camera: view.camera.position,
-                    size: [depth_desc.width, depth_desc.height],
-                    probes: imported.probes,
-                    ssr: view.reflections.ssr,
+                    probes: imported.probes.map(|(_, t)| t),
                 },
-            )?;
+            );
         }
         // With an atmosphere or fog: the sky, aerial perspective and fog over the opaque
         // image (ADR 0069). A probe's capture fills its sky in its face copy instead.
@@ -3518,6 +3546,7 @@ fn shading_pass<'a, 'g>(
     if let Some(ao) = targets.ao {
         pass = pass.read(ao, Access::Sampled(ShaderStages::FRAGMENT));
     }
+
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),
         DepthUse::ReadOnly => pass.depth_read_only(depth),

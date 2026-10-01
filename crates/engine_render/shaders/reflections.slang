@@ -35,45 +35,12 @@
 [[vk::binding(1, 0)]] [vk::image_format("rgba16f")] RWTexture2DArray<float4> g_layers[];
 [[vk::binding(1, 0)]] [vk::image_format("rgba16f")] RWTexture2D<float4> g_images[];
 [[vk::binding(1, 0)]] [vk::image_format("r16f")] RWTexture2D<float> g_scalars[];
+[[vk::binding(1, 0)]] [vk::image_format("rg16f")] RWTexture2D<float2> g_scalars2[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 
 static const float PI = 3.14159265;
-static const uint NO_TEXTURE = 0xFFFFFFFFu;
-// `PROBE_TILE` in reflections.rs.
-static const uint PROBE_TILE = 16;
 
-// `ProbeData` in reflections.rs (144 bytes).
-struct Probe
-{
-    float4 influence[3];     // rows: world → influence box, scaled to [-1, 1]
-    float4 extents;          // xyz: influence half extents; w: 1 / blend distance
-    float4 parallax[3];      // rows: world → parallax box (rotation and translation)
-    float4 parallax_extents; // xyz: parallax half extents; w: cube index in the array
-    float4 position;         // xyz: capture point; w: intensity
-};
-
-// `ReflectFrame` in reflections.rs.
-struct ReflectFrame
-{
-    float4x4 clip_from_world;          // as the depth was drawn (with any jitter)
-    float4x4 previous_clip_from_world; // the SSR history's
-    float4 camera;                     // xyz: position
-    float4 forward;                    // xyz: view direction; w: near plane distance
-    float4 ray_base;                   // xyz: ray to view depth 1 at ndc 0; w: p22
-    float4 ray_x;                      // xyz: per ndc.x; w: p32 (view depth = p32 / (depth + p22))
-    float4 ray_y;                      // xyz: per ndc.y
-    uint4 size;                        // xy: target; zw: SSR trace
-    uint4 env;                         // x: prefiltered sky cube, y: its mips, z: linear sampler, w: probe array
-    float4 params;                     // x: sky intensity; y: SSR max roughness; z: SSR thickness; w: SSR temporal blend
-    uint4 probe_info;                  // x: visible probes, y: words per tile, z: tiles per row, w: frame
-    Probe* probes;
-    uint* _unused;
-    uint* probe_rects;                 // per probe: min x | min y << 16, max x | max y << 16 (tiles)
-    uint _pad0;
-    uint _pad1;
-    uint4 ssr;                         // x: steps, y: trace scale, z: history valid, w: pyramid levels
-    uint4 pyramid_offsets[4];          // offset of level k (1-16) in floats, at [k - 1]
-};
+#include "reflections_common.slang"
 
 struct ReflectPush
 {
@@ -102,32 +69,6 @@ struct ReflectPush
 ConstantBuffer<ReflectPush> push;
 
 // --- Shared --------------------------------------------------------------------------
-
-// A unit vector from octahedral encoding in [0, 1]² (forward.slang's `encode_octahedral`).
-float3 decode_normal(float2 e)
-{
-    e = e * 2.0 - 1.0;
-    float3 v = float3(e, 1.0 - abs(e.x) - abs(e.y));
-    float t = max(-v.z, 0.0);
-    v.x += v.x >= 0.0 ? -t : t;
-    v.y += v.y >= 0.0 ? -t : t;
-    return normalize(v);
-}
-
-// The world position at pixel `pixel` (centre) with depth-buffer value `depth`, and the
-// view depth.
-float3 world_position(ReflectFrame* f, float2 pixel, float depth, out float view_depth)
-{
-    float2 ndc = pixel / float2(f.size.xy) * 2.0 - 1.0;
-    float3 ray = f.ray_base.xyz + ndc.x * f.ray_x.xyz + ndc.y * f.ray_y.xyz;
-    view_depth = f.ray_x.w / (depth + f.ray_base.w);
-    return f.camera.xyz + ray * view_depth;
-}
-
-float view_depth_of(ReflectFrame* f, float depth)
-{
-    return f.ray_x.w / (depth + f.ray_base.w);
-}
 
 // The direction through the centre of texel `xy` of cube face `face` (environment.slang's
 // convention: +X, −X, +Y, −Y, +Z, −Z; v grows downwards).
@@ -279,106 +220,6 @@ void probePrefilter(uint3 id : SV_DispatchThreadID)
     g_layers[push.target][out_texel] = float4(sum / max(weight, 1e-6), 1.0);
 }
 
-// --- Probe selection ---------------------------------------------------------------
-
-// One thread per tile: one bit per visible probe whose screen rectangle covers it.
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void probeTiles(uint3 id : SV_DispatchThreadID)
-{
-    ReflectFrame* f = push.frame;
-    uint tiles_x = f.probe_info.z;
-    uint tiles_y = push.size;
-    if (id.x >= tiles_x || id.y >= tiles_y)
-        return;
-    uint count = f.probe_info.x;
-    uint words = f.probe_info.y;
-    uint base = (id.y * tiles_x + id.x) * words;
-    for (uint w = 0; w < words; w++)
-    {
-        uint mask = 0;
-        for (uint bit = 0; bit < 32; bit++)
-        {
-            uint p = w * 32 + bit;
-            if (p >= count)
-                break;
-            uint lo = f.probe_rects[p * 2];
-            uint hi = f.probe_rects[p * 2 + 1];
-            bool inside = id.x >= (lo & 0xFFFFu) && id.y >= (lo >> 16) && id.x <= (hi & 0xFFFFu) && id.y <= (hi >> 16);
-            mask |= inside ? 1u << bit : 0u;
-        }
-        push.buffer[base + w] = mask;
-    }
-}
-
-// How much probe `p` covers `world`: 1 inside its influence box less the blend
-// distance, falling to 0 at the box.
-float probe_influence(Probe* p, float3 world)
-{
-    float3 local = float3(dot(p.influence[0].xyz, world) + p.influence[0].w, dot(p.influence[1].xyz, world) + p.influence[1].w, dot(p.influence[2].xyz, world) + p.influence[2].w);
-    float3 inside = (1.0 - abs(local)) * p.extents.xyz;
-    return saturate(min(inside.x, min(inside.y, inside.z)) * p.extents.w);
-}
-
-// Where the ray from `world` along `r` leaves probe `p`'s parallax box, as a direction from
-// its capture point (Lagarde and Zanuttini 2012). A point outside the box starts from the
-// nearest point inside (surfaces on the box's faces, such as a room's floor, lie on
-// either side by rounding).
-float3 probe_direction(Probe* p, float3 world, float3 r)
-{
-    float3 e = p.parallax_extents.xyz;
-    float3 o = clamp(float3(dot(p.parallax[0].xyz, world) + p.parallax[0].w, dot(p.parallax[1].xyz, world) + p.parallax[1].w, dot(p.parallax[2].xyz, world) + p.parallax[2].w), -e, e);
-    float3 d = float3(dot(p.parallax[0].xyz, r), dot(p.parallax[1].xyz, r), dot(p.parallax[2].xyz, r));
-    float3 inv = 1.0 / (abs(d) > 1e-8 ? d : 1e-8);
-    float3 t = max((e - o) * inv, (-e - o) * inv);
-    float distance = min(t.x, min(t.y, t.z));
-    // From the capture point, in the box's frame: (o + d t) − capture.
-    float3 capture = float3(dot(p.parallax[0].xyz, p.position.xyz) + p.parallax[0].w, dot(p.parallax[1].xyz, p.position.xyz) + p.parallax[1].w, dot(p.parallax[2].xyz, p.position.xyz) + p.parallax[2].w);
-    float3 local = o + d * distance - capture;
-    // Back to world axes (the rows are orthonormal).
-    return local.x * p.parallax[0].xyz + local.y * p.parallax[1].xyz + local.z * p.parallax[2].xyz;
-}
-
-// The probes' reflection along `r` at `world` (pixel `pixel`), the rest of the weight from
-// `sky`: front to back in priority order (smallest probes first).
-float3 probe_radiance(ReflectFrame* f, float3 world, float3 r, float lod, uint2 pixel, float3 sky)
-{
-    uint count = f.probe_info.x;
-    if (count == 0)
-        return sky;
-    uint words = f.probe_info.y;
-    uint2 tile = pixel / PROBE_TILE;
-    uint base = (tile.y * f.probe_info.z + tile.x) * words;
-    TextureCubeArray cubes = g_cube_arrays[f.env.w];
-    SamplerState s = g_samplers[f.env.z];
-    float3 sum = 0.0;
-    float covered = 0.0;
-    for (uint w = 0; w < words; w++)
-    {
-        uint mask = push.buffer[base + w];
-        uint merged = WaveActiveBitOr(mask);
-        while (merged != 0)
-        {
-            uint bit = firstbitlow(merged);
-            merged &= merged - 1u;
-            if (((mask >> bit) & 1u) != 0 && covered < 0.999)
-            {
-                Probe* p = f.probes + (w * 32 + bit);
-                float influence = probe_influence(p, world);
-                if (influence > 0.0)
-                {
-                    float3 d = probe_direction(p, world, r);
-                    float3 c = cubes.SampleLevel(s, float4(d, p.parallax_extents.w), lod).rgb * p.position.w;
-                    float share = (1.0 - covered) * influence;
-                    sum += share * c;
-                    covered += share;
-                }
-            }
-        }
-    }
-    return sum + (1.0 - covered) * sky;
-}
-
 // --- Composite -----------------------------------------------------------------------
 
 struct Composite
@@ -395,16 +236,27 @@ Composite compositeVertex(uint vertex : SV_VulkanVertexID)
     return o;
 }
 
-// Added to the opaque image (additive blending): weight × (reflection − sky), the
-// reflection being the screen-space hit over the probes over the sky. `t0`: depth, `t1`:
-// normal and roughness, `t2`: weight, `t3`: SSR (premultiplied by confidence) or none.
-[shader("fragment")]
-float4 compositeFragment(Composite input) : SV_Target0
+// Added to the opaque image (additive blending): weight × (reflection − sky). The forward
+// pass lit each surface with the sky's prefiltered light; the reflection is the
+// screen-space hit (premultiplied by its confidence a) over the probes (front to back by
+// priority) over the sky: a·hit + (1 − a)·probes. `t0`: depth, `t1`: normal and roughness,
+// `t2`: weight, `t3`: the screen-space reflections. `probes` and `ssr` are literals: each
+// combination is an entry point of its own, with only its code (registers set the iGPU's
+// occupancy, and with it how well texture latency hides).
+float4 composite(Composite input, bool probes, bool ssr)
 {
     ReflectFrame* f = push.frame;
     int2 pixel = int2(input.position.xy);
+    float4 hit = 0.0;
+    if (ssr)
+    {
+        hit = g_textures[push.t3].Load(int3(pixel, 0));
+        // Without probes, only the pixels whose rays hit something change.
+        if (!probes && hit.a <= 0.0)
+            discard;
+    }
     float3 weight = g_textures[push.t2].Load(int3(pixel, 0)).rgb;
-    // Sky, subsurface and transparent-free pixels: nothing written there.
+    // The sky and subsurface materials: nothing written there.
     if (max(weight.r, max(weight.g, weight.b)) <= 0.0)
         discard;
     float depth = g_textures[push.t0].Load(int3(pixel, 0)).r;
@@ -416,18 +268,34 @@ float4 compositeFragment(Composite input) : SV_Target0
     float3 v = normalize(f.camera.xyz - world);
     float3 r = reflect(-v, n);
     float lod = roughness * float(f.env.y - 1);
-    SamplerState s = g_samplers[f.env.z];
-    float3 sky = g_cubes[f.env.x].SampleLevel(s, r, lod).rgb * f.params.x;
-    float3 reflection = probe_radiance(f, world, r, lod, uint2(pixel), sky);
-    if (push.t3 != NO_TEXTURE)
-    {
-        float4 hit = g_textures[push.t3].Load(int3(pixel, 0));
+    float3 sky = g_cubes[f.env.x].SampleLevel(g_samplers[f.env.z], r, lod).rgb * f.params.x;
+    float3 reflection = sky;
+    if (probes)
+        reflection = probe_radiance(f, world, r, lod, input.position.xy, view_depth, sky);
+    if (ssr)
         reflection = reflection * (1.0 - hit.a) + hit.rgb;
-    }
     float3 delta = weight * (reflection - sky);
     if (max(abs(delta.r), max(abs(delta.g), abs(delta.b))) <= 1e-7)
         discard;
     return float4(delta, 0.0);
+}
+
+[shader("fragment")]
+float4 compositeProbes(Composite input) : SV_Target0
+{
+    return composite(input, true, false);
+}
+
+[shader("fragment")]
+float4 compositeSsr(Composite input) : SV_Target0
+{
+    return composite(input, false, true);
+}
+
+[shader("fragment")]
+float4 compositeProbesSsr(Composite input) : SV_Target0
+{
+    return composite(input, true, true);
 }
 
 // --- Screen-space reflections -------------------------------------------------------
@@ -675,13 +543,85 @@ void ssrTrace(uint3 id : SV_DispatchThreadID)
     g_scalars[push.read][id.xy] = distance;
 }
 
-// The rays around each pixel, averaged with depth, normal and roughness weights (`t0`:
-// depth, `t1`: normal and roughness, `t2`: weight, `t3`: the trace, `t4`: its distances);
-// writes premultiplied color and confidence (`target`) and the hits' mean distance
-// (`read`). Mirror-like pixels use their nearest ray only.
+// The spatial filter, at the trace's resolution: each trace texel averages the rays of
+// its neighbours (up to 2 texels away, wider for rougher surfaces) with depth, normal and
+// roughness weights, from a tile cached in group shared memory. `t0`: depth, `t1`: normal
+// and roughness, `t3`: the trace, `t4`: its distances; writes premultiplied color and
+// confidence (`target`) and the hits' mean distance with the texel's view depth (`read`).
+static const int SPATIAL_RADIUS = 2;
+static const int SPATIAL_TILE = 8 + 2 * SPATIAL_RADIUS;
+groupshared float4 g_value[SPATIAL_TILE * SPATIAL_TILE];
+groupshared float4 g_normal_roughness[SPATIAL_TILE * SPATIAL_TILE];
+groupshared float2 g_distance_depth[SPATIAL_TILE * SPATIAL_TILE];
+
 [shader("compute")]
 [numthreads(8, 8, 1)]
-void ssrSpatial(uint3 id : SV_DispatchThreadID)
+void ssrSpatial(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint index : SV_GroupIndex)
+{
+    ReflectFrame* f = push.frame;
+    int2 last = int2(f.size.zw) - 1;
+    int2 origin = int2(group.xy * 8) - SPATIAL_RADIUS;
+    for (uint i = index; i < uint(SPATIAL_TILE * SPATIAL_TILE); i += 64)
+    {
+        int2 t = clamp(origin + int2(i % SPATIAL_TILE, i / SPATIAL_TILE), int2(0, 0), last);
+        int2 q = trace_pixel(f, uint2(t));
+        float4 nr = g_textures[push.t1].Load(int3(q, 0));
+        g_value[i] = g_textures[push.t3].Load(int3(t, 0));
+        g_normal_roughness[i] = float4(decode_normal(nr.xy), nr.z);
+        g_distance_depth[i] = float2(g_textures[push.t4].Load(int3(t, 0)).r, view_depth_of(f, g_textures[push.t0].Load(int3(q, 0)).r));
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint2 id = group.xy * 8 + local.xy;
+    if (any(id >= f.size.zw))
+        return;
+    uint center = (local.y + SPATIAL_RADIUS) * SPATIAL_TILE + local.x + SPATIAL_RADIUS;
+    float4 own = g_value[center];
+    float4 nr = g_normal_roughness[center];
+    float depth = g_distance_depth[center].y;
+    float roughness = nr.w;
+    if (roughness >= f.params.y)
+    {
+        g_images[push.target][id] = 0.0;
+        g_scalars2[push.read][id] = float2(0.0, depth);
+        return;
+    }
+    // Mirror-like texels keep their own ray.
+    int radius = roughness < MIRROR_ROUGHNESS ? 0 : (roughness < 0.3 ? 1 : SPATIAL_RADIUS);
+    float4 sum = 0.0;
+    float total = 0.0;
+    float distance_sum = 0.0;
+    float hits = 0.0;
+    for (int y = -radius; y <= radius; y++)
+    {
+        for (int x = -radius; x <= radius; x++)
+        {
+            uint k = center + y * SPATIAL_TILE + x;
+            float4 q = g_normal_roughness[k];
+            float2 dd = g_distance_depth[k];
+            float w = pow(saturate(dot(q.xyz, nr.xyz)), 16.0)
+                * exp(-abs(dd.y - depth) / (0.02 * depth))
+                * exp(-abs(q.w - roughness) * 8.0)
+                * exp(-0.5 * float(x * x + y * y) / max(float(radius * radius), 1.0));
+            float4 value = g_value[k];
+            sum += value * w;
+            total += w;
+            distance_sum += dd.x * value.a * w;
+            hits += value.a * w;
+        }
+    }
+    g_images[push.target][id] = total > 1e-6 ? sum / total : own;
+    g_scalars2[push.read][id] = float2(hits > 1e-6 ? distance_sum / hits : 0.0, depth);
+}
+
+// Up to the full resolution and through time: each pixel takes the bilinear neighbours
+// of the filtered trace (`t3`; distances and view depths `t4`) weighted by their depth's
+// likeness, then last frame's result (`t5`, sampled), reprojected through the reflected
+// point (the surface pushed back along the view ray by the hit's distance) and clipped to
+// the 3 × 3 trace neighbourhood's mean ± 1.25 σ, is blended in; writes `target`. `t0`:
+// depth, `t1`: normal and roughness, `t2`: weight.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void ssrTemporal(uint3 id : SV_DispatchThreadID)
 {
     ReflectFrame* f = push.frame;
     if (any(id.xy >= f.size.xy))
@@ -693,85 +633,59 @@ void ssrSpatial(uint3 id : SV_DispatchThreadID)
     if (max(weight.r, max(weight.g, weight.b)) <= 0.0 || roughness >= f.params.y)
     {
         g_images[push.target][id.xy] = 0.0;
-        g_scalars[push.read][id.xy] = 0.0;
         return;
     }
-    float3 n = decode_normal(nr.xy);
-    float depth = view_depth_of(f, g_textures[push.t0].Load(int3(pixel, 0)).r);
-    uint scale = f.ssr.y;
-    int2 center = pixel / int(scale);
-    int2 last = int2(f.size.zw) - 1;
-    // Wider for rougher surfaces: up to 2 trace texels away.
-    int radius = roughness < MIRROR_ROUGHNESS ? (scale == 1 ? 0 : 1) : (roughness < 0.3 ? 1 : 2);
-    float4 sum = 0.0;
-    float total = 0.0;
-    float distance_sum = 0.0;
-    float hits = 0.0;
-    for (int y = -radius; y <= radius; y++)
-    {
-        for (int x = -radius; x <= radius; x++)
-        {
-            int2 t = clamp(center + int2(x, y), int2(0, 0), last);
-            int2 q = trace_pixel(f, uint2(t));
-            float4 qnr = g_textures[push.t1].Load(int3(q, 0));
-            float qdepth = view_depth_of(f, g_textures[push.t0].Load(int3(q, 0)).r);
-            float w = pow(saturate(dot(decode_normal(qnr.xy), n)), 16.0)
-                * exp(-abs(qdepth - depth) / (0.02 * depth))
-                * exp(-abs(qnr.z - roughness) * 8.0)
-                * exp(-0.5 * float(x * x + y * y) / max(float(radius * radius), 1.0));
-            float4 value = g_textures[push.t3].Load(int3(t, 0));
-            sum += value * w;
-            total += w;
-            float hit_weight = value.a * w;
-            distance_sum += g_textures[push.t4].Load(int3(t, 0)).r * hit_weight;
-            hits += hit_weight;
-        }
-    }
-    g_images[push.target][id.xy] = total > 1e-6 ? sum / total : 0.0;
-    g_scalars[push.read][id.xy] = hits > 1e-6 ? distance_sum / hits : 0.0;
-}
-
-// Blends the spatial result (`t3`, distances `t4`) with last frame's (`t5`, sampled),
-// reprojected through the reflected point (the surface pushed back along the view ray by
-// the hit's distance) and clamped to the 3 × 3 neighbourhood's range; writes `target`.
-// `t0`: depth, `t1`: normal and roughness.
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void ssrTemporal(uint3 id : SV_DispatchThreadID)
-{
-    ReflectFrame* f = push.frame;
-    if (any(id.xy >= f.size.xy))
-        return;
-    int2 pixel = int2(id.xy);
+    float depth = g_textures[push.t0].Load(int3(pixel, 0)).r;
+    float view_depth;
+    float3 world = world_position(f, float2(pixel) + 0.5, depth, view_depth);
     Texture2D current = g_textures[push.t3];
-    float4 value = current.Load(int3(pixel, 0));
-    float4 lo = value;
-    float4 hi = value;
-    int2 last = int2(f.size.xy) - 1;
-    for (int y = -1; y <= 1; y++)
+    Texture2D distances = g_textures[push.t4];
+    int2 last = int2(f.size.zw) - 1;
+    float scale = float(f.ssr.y);
+    float2 tc = (float2(pixel) + 0.5) / scale - 0.5;
+    int2 t0 = int2(floor(tc));
+    float2 fraction = tc - float2(t0);
+    float4 value = 0.0;
+    float distance = 0.0;
+    float total = 0.0;
+    for (uint k = 0; k < 4; k++)
     {
-        for (int x = -1; x <= 1; x++)
-        {
-            float4 s = current.Load(int3(clamp(pixel + int2(x, y), int2(0, 0), last), 0));
-            lo = min(lo, s);
-            hi = max(hi, s);
-        }
+        int2 o = int2(k & 1u, k >> 1);
+        int2 t = clamp(t0 + o, int2(0, 0), last);
+        float2 dd = distances.Load(int3(t, 0)).rg;
+        float2 b = lerp(1.0 - fraction, fraction, float2(o));
+        float w = b.x * b.y * exp(-abs(dd.y - view_depth) / (0.02 * view_depth)) + 1e-5;
+        value += current.Load(int3(t, 0)) * w;
+        distance += dd.x * w;
+        total += w;
     }
+    value /= total;
+    distance /= total;
     float4 result = value;
     if (f.ssr.z != 0)
     {
-        float depth = g_textures[push.t0].Load(int3(pixel, 0)).r;
-        float view_depth;
-        float3 world = world_position(f, float2(pixel) + 0.5, depth, view_depth);
-        float distance = g_textures[push.t4].Load(int3(pixel, 0)).r;
         float3 virtual_point = world + normalize(world - f.camera.xyz) * distance;
         float4 previous = mul(f.previous_clip_from_world, float4(virtual_point, 1.0));
         float2 uv = previous.xy / previous.w * 0.5 + 0.5;
-        if (depth < 1.0 && previous.w > 1e-6 && all(uv >= 0.0) && all(uv <= 1.0))
+        if (previous.w > 1e-6 && all(uv >= 0.0) && all(uv <= 1.0))
         {
+            // The neighbourhood's spread: history outside it is clipped (no ghosts).
+            int2 tn = clamp(int2(round(tc)), int2(0, 0), last);
+            float4 m1 = 0.0;
+            float4 m2 = 0.0;
+            for (int y = -1; y <= 1; y++)
+            {
+                for (int x = -1; x <= 1; x++)
+                {
+                    float4 s = current.Load(int3(clamp(tn + int2(x, y), int2(0, 0), last), 0));
+                    m1 += s;
+                    m2 += s * s;
+                }
+            }
+            m1 /= 9.0;
+            float4 sigma = sqrt(max(m2 / 9.0 - m1 * m1, 0.0));
             float4 history = g_textures[push.t5].SampleLevel(g_samplers[f.env.z], uv, 0.0);
-            history = clamp(history, lo, hi);
-            float roughness = g_textures[push.t1].Load(int3(pixel, 0)).z;
+            history = clamp(history, m1 - 1.25 * sigma, m1 + 1.25 * sigma);
             // Mirror rays carry no noise: follow the current frame more closely.
             float blend = lerp(0.5, f.params.w, saturate(roughness / (2.0 * MIRROR_ROUGHNESS)));
             result = lerp(history, value, blend);

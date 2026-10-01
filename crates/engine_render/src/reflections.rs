@@ -42,9 +42,10 @@ use engine_rhi::{
 const PROBE_FACE: &[u8] = include_bytes!("../shaders/reflections.probeFace.spv");
 const PROBE_DOWNSAMPLE: &[u8] = include_bytes!("../shaders/reflections.probeDownsample.spv");
 const PROBE_PREFILTER: &[u8] = include_bytes!("../shaders/reflections.probePrefilter.spv");
-const PROBE_TILES: &[u8] = include_bytes!("../shaders/reflections.probeTiles.spv");
 const COMPOSITE_VERTEX: &[u8] = include_bytes!("../shaders/reflections.compositeVertex.spv");
-const COMPOSITE_FRAGMENT: &[u8] = include_bytes!("../shaders/reflections.compositeFragment.spv");
+const COMPOSITE_PROBES: &[u8] = include_bytes!("../shaders/reflections.compositeProbes.spv");
+const COMPOSITE_SSR: &[u8] = include_bytes!("../shaders/reflections.compositeSsr.spv");
+const COMPOSITE_PROBES_SSR: &[u8] = include_bytes!("../shaders/reflections.compositeProbesSsr.spv");
 const SSR_DEPTH: &[u8] = include_bytes!("../shaders/reflections.ssrDepth.spv");
 const SSR_TRACE: &[u8] = include_bytes!("../shaders/reflections.ssrTrace.spv");
 const SSR_SPATIAL: &[u8] = include_bytes!("../shaders/reflections.ssrSpatial.spv");
@@ -57,18 +58,24 @@ pub const NORMAL_ROUGHNESS_FORMAT: vk::Format = vk::Format::A2B10G10R10_UNORM_PA
 pub const WEIGHT_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 /// Format of the probes' cubes (and of the screen-space reflections).
 pub const PROBE_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
-/// Side of the screen tiles probes are listed by, in pixels.
-pub const PROBE_TILE: u32 = 16;
+/// The coarse screen grid probes are listed by (`PROBE_CELLS_*` in
+/// `reflections_common.slang`): a probe's bit is set in the cells its screen rectangle
+/// covers.
+pub const PROBE_CELLS: [u32; 2] = [16, 16];
+/// Slices of view depth probes are listed by (`PROBE_BINS` in `reflections_common.slang`),
+/// from the camera to the farthest visible probe.
+pub const PROBE_BINS: usize = 64;
+const PROBE_CELL_COUNT: usize = (PROBE_CELLS[0] * PROBE_CELLS[1]) as usize;
 /// Most probes one view blends (the smallest that reach it; the rest are dropped).
-pub const MAX_VISIBLE_PROBES: usize = 64;
+pub const MAX_VISIBLE_PROBES: usize = 32;
 /// Mips of a probe's cube: perceptual roughness `mip / (levels − 1)`, as the sky's.
 pub const PROBE_LEVELS: u32 = PREFILTERED_LEVELS;
 const PREFILTER_SAMPLES: u32 = 64;
 const SSR_DISTANCE_FORMAT: vk::Format = vk::Format::R16_SFLOAT;
+/// The spatial filter's hit distance and view depth per trace texel.
+const SSR_DISTANCE_DEPTH_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 /// Levels the nearest-depth pyramid has room for (targets up to 65536 on a side).
 const MAX_PYRAMID_LEVELS: u32 = 16;
-/// `NO_TEXTURE` in `reflections.slang`.
-const NO_TEXTURE: u32 = u32::MAX;
 
 /// The six faces' cameras: forward and up (`face_camera` in `reflections.slang`; the faces
 /// in Vulkan's cube order +X, −X, +Y, −Y, +Z, −Z).
@@ -101,7 +108,7 @@ struct Push {
     value: f32,
 }
 
-/// `Probe` in `reflections.slang` (144 bytes).
+/// `Probe` in `reflections_common.slang` (144 bytes).
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 #[repr(C)]
 pub(crate) struct ProbeData {
@@ -128,16 +135,17 @@ struct FrameData {
     params: [f32; 4],
     probe_info: [u32; 4],
     probes: u64,
-    _unused: u64,
-    probe_rects: u64,
+    _unused: [u64; 2],
     _pad: [u32; 2],
     ssr: [u32; 4],
     pyramid_offsets: [u32; 16],
+    probe_cells: [u32; PROBE_CELL_COUNT],
+    probe_bins: [u32; PROBE_BINS],
 }
 
 const _: () = assert!(size_of::<Push>() == 80);
 const _: () = assert!(size_of::<ProbeData>() == 144);
-const _: () = assert!(size_of::<FrameData>() == 384);
+const _: () = assert!(size_of::<FrameData>() == 384 + 4 * (PROBE_CELL_COUNT + PROBE_BINS));
 
 /// What a view reflects: probes, screen-space reflections, both or neither (the default).
 #[derive(Debug, Clone, Copy, Default)]
@@ -259,16 +267,18 @@ pub struct ReflectionProbe {
 }
 
 impl ReflectionProbe {
-    /// A probe for an axis-aligned room: captured from its centre, reflecting and
-    /// correcting parallax with the room's box, fading over a tenth of its smallest
-    /// half extent.
+    /// A probe for an axis-aligned room: captured from its centre, correcting parallax
+    /// with the room's box, reflecting in that box grown by its blend distance (a tenth of
+    /// its smallest half extent), so neighbouring rooms' probes blend across their shared
+    /// walls instead of leaving a seam of sky.
     pub fn room(center: Vec3, half_extents: Vec3) -> Self {
         let b = ProbeBox::new(center, half_extents);
+        let blend = 0.1 * half_extents.min_element().max(1e-3);
         Self {
             position: center,
-            influence: b,
+            influence: ProbeBox::new(center, half_extents + blend),
             parallax: b,
-            blend_distance: 0.1 * half_extents.min_element().max(1e-3),
+            blend_distance: blend,
             intensity: 1.0,
             far: 4.0 * half_extents.length().max(1e-3),
             refresh: ProbeRefresh::OnChange,
@@ -290,7 +300,10 @@ impl ReflectionProbe {
             extents: he.extend(1.0 / self.blend_distance.max(1e-6)).to_array(),
             parallax: self.parallax.rows(Vec3::ONE),
             parallax_extents: pe.extend(layer as f32).to_array(),
-            position: self.position.extend(self.intensity.max(0.0)).to_array(),
+            // The capture point in the parallax box's frame.
+            position: (self.parallax.rotation.inverse() * (self.position - self.parallax.center))
+                .extend(self.intensity.max(0.0))
+                .to_array(),
         }
     }
 }
@@ -421,6 +434,9 @@ pub struct ReflectionProbes {
     source: Image,
     settings: ProbeSettings,
     state: RefCell<State>,
+    /// The images' states before this frame's import, and whether the frame used them.
+    unused_states: Cell<Option<(crate::graph::TextureState, crate::graph::TextureState)>>,
+    used: Cell<[bool; 2]>,
 }
 
 impl core::fmt::Debug for ReflectionProbes {
@@ -500,6 +516,8 @@ impl ReflectionProbes {
             source,
             settings,
             state: RefCell::new(state),
+            unused_states: Cell::new(None),
+            used: Cell::new([false; 2]),
         })
     }
 
@@ -697,9 +715,33 @@ impl ReflectionProbes {
     /// Imports the probes' images into `fg` (once per frame): the cube array, then the
     /// capture cube.
     pub(crate) fn import<'g>(&self, fg: &mut FrameGraph<'g>) -> ProbeTextures {
+        // An import the frame does not use leaves the image as it was (`finish`).
+        self.unused_states
+            .set(Some((self.array.state(), self.source.state())));
+        self.used.set([false; 2]);
         ProbeTextures {
             array: self.array.import(fg, "reflection probes"),
             source: self.source.import(fg, "reflection probe capture"),
+        }
+    }
+
+    /// Records that this frame's passes read or write the cube array (`array`) or the
+    /// capture cube.
+    pub(crate) fn mark_used(&self, array: bool, source: bool) {
+        let [a, s] = self.used.get();
+        self.used.set([a || array, s || source]);
+    }
+
+    /// Ends the frame's import: an image no pass used stays in its state before it.
+    pub(crate) fn finish(&self) {
+        if let Some((array, source)) = self.unused_states.take() {
+            let [a, s] = self.used.get();
+            if !a {
+                self.array.set_state(array);
+            }
+            if !s {
+                self.source.set_state(source);
+            }
         }
     }
 
@@ -716,6 +758,7 @@ impl ReflectionProbes {
         depth: Texture,
         face: u32,
     ) {
+        self.mark_used(false, true);
         let size = self.settings.resolution;
         let target = self.source.storage[0];
         let (sky, intensity) = (environment.source_index, environment.intensity);
@@ -755,6 +798,7 @@ impl ReflectionProbes {
         textures: ProbeTextures,
         slot: u32,
     ) {
+        self.mark_used(true, true);
         let size = self.settings.resolution;
         let levels = size.ilog2() + 1;
         let storage: &'g [u32] = &self.source.storage;
@@ -808,14 +852,14 @@ impl ReflectionProbes {
             });
     }
 
-    /// The captured probes a view with `clip_from_world` (of a `size` target) can see,
-    /// smallest first (at most [`MAX_VISIBLE_PROBES`]), written into `ring` with their
-    /// screen rectangles in tiles. `None` when `ring` is full.
+    /// The captured probes a view with `clip_from_world` can see, smallest first (at most
+    /// [`MAX_VISIBLE_PROBES`]), written into `ring` with the screen grid's cells listing
+    /// them. `None` when `ring` is full.
     pub(crate) fn view_frame(
         &self,
         ring: &mut UploadRing,
         clip_from_world: Mat4,
-        size: [u32; 2],
+        camera: Vec3,
     ) -> Option<VisibleProbes> {
         let mut state = self.state.borrow_mut();
         let state = &mut *state;
@@ -850,14 +894,13 @@ impl ReflectionProbes {
         state.stats.pending = pending;
         state.stats.captured = captured;
         state.stats.visible = count as u32;
-        let tiles = [size[0].div_ceil(PROBE_TILE), size[1].div_ceil(PROBE_TILE)];
         if count == 0 {
             return Some(VisibleProbes {
                 count: 0,
-                words: 0,
-                tiles,
                 probes: 0,
-                rects: 0,
+                cells: [0; PROBE_CELL_COUNT],
+                bins: [0; PROBE_BINS],
+                bin_scale: 0.0,
             });
         }
         let (out, data) = ring.alloc::<ProbeData>(count)?;
@@ -867,21 +910,66 @@ impl ReflectionProbes {
                 .unwrap_or_else(|| ReflectionProbe::room(Vec3::ZERO, Vec3::ONE));
             out.write(probe.gpu(slot));
         }
-        let (out, rects) = ring.alloc::<[u32; 2]>(count)?;
-        for (out, &(_, slot)) in out.iter_mut().zip(&state.visible) {
-            let rect = state.slots[slot as usize]
-                .probe
-                .map_or([0, 0, tiles[0] - 1, tiles[1] - 1], |p| {
-                    screen_rect(&p.influence, clip_from_world, size)
-                });
-            out.write([rect[0] | rect[1] << 16, rect[2] | rect[3] << 16]);
+        // Each probe's bit in the cells its screen rectangle covers.
+        let mut cells = [0u32; PROBE_CELL_COUNT];
+        for (k, &(_, slot)) in state.visible.iter().enumerate() {
+            let Some(probe) = state.slots[slot as usize].probe else {
+                continue;
+            };
+            let [x0, y0, x1, y1] = screen_cells(&probe.influence, clip_from_world);
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    cells[(y * PROBE_CELLS[0] + x) as usize] |= 1 << k;
+                }
+            }
+        }
+        // Each probe's bit in the z-bins its influence box's view-depth range covers.
+        let view = Camera {
+            clip_from_world,
+            position: camera,
+        }
+        .view_space();
+        let mut ranges = [(0.0f32, f32::MAX); MAX_VISIBLE_PROBES];
+        let mut far = 0.0f32;
+        if let Some(view) = view {
+            // View depth: minus the view-space z.
+            let row = -view.view_from_world.row(2);
+            let axis = row.truncate();
+            for (range, &(_, slot)) in ranges.iter_mut().zip(&state.visible) {
+                let Some(probe) = state.slots[slot as usize].probe else {
+                    continue;
+                };
+                let b = &probe.influence;
+                let local_axis = Mat3::from_quat(b.rotation).transpose() * axis;
+                let center = axis.dot(b.center) + row.w;
+                let extent = local_axis.abs().dot(b.half_extents.abs());
+                *range = ((center - extent).max(0.0), center + extent);
+                far = far.max(center + extent);
+            }
+        }
+        let bin_scale = if far > 0.0 {
+            PROBE_BINS as f32 / far
+        } else {
+            0.0
+        };
+        let mut bins = [0u32; PROBE_BINS];
+        for (k, &(lo, hi)) in ranges.iter().take(count).enumerate() {
+            let first = ((lo * bin_scale) as usize).min(PROBE_BINS - 1);
+            let last = if bin_scale > 0.0 {
+                ((hi * bin_scale) as usize).min(PROBE_BINS - 1)
+            } else {
+                PROBE_BINS - 1
+            };
+            for bin in &mut bins[first..=last] {
+                *bin |= 1 << k;
+            }
         }
         Some(VisibleProbes {
             count: count as u32,
-            words: count.div_ceil(32) as u32,
-            tiles,
             probes: data.address,
-            rects: rects.address,
+            cells,
+            bins,
+            bin_scale,
         })
     }
 
@@ -921,14 +1009,11 @@ fn invalidate(slots: &mut [Slot], boxes: &[[Vec3; 2]]) {
     }
 }
 
-/// The tiles (inclusive: min x, min y, max x, max y) a box covers on screen; the whole
-/// screen when it reaches behind the camera.
-fn screen_rect(b: &ProbeBox, clip_from_world: Mat4, size: [u32; 2]) -> [u32; 4] {
-    let tiles = [
-        size[0].div_ceil(PROBE_TILE).max(1),
-        size[1].div_ceil(PROBE_TILE).max(1),
-    ];
-    let whole = [0, 0, tiles[0] - 1, tiles[1] - 1];
+/// The cells of the probes' screen grid (inclusive: min x, min y, max x, max y) a box
+/// covers; every cell when it reaches behind the camera.
+fn screen_cells(b: &ProbeBox, clip_from_world: Mat4) -> [u32; 4] {
+    let last = [PROBE_CELLS[0] - 1, PROBE_CELLS[1] - 1];
+    let whole = [0, 0, last[0], last[1]];
     let m = Mat3::from_quat(b.rotation);
     let (mut lo, mut hi) = (
         Vec3::splat(f32::MAX).truncate(),
@@ -949,15 +1034,14 @@ fn screen_rect(b: &ProbeBox, clip_from_world: Mat4, size: [u32; 2]) -> [u32; 4] 
         lo = lo.min(ndc);
         hi = hi.max(ndc);
     }
-    let to_tile = |ndc: f32, pixels: u32, last: u32| -> u32 {
-        let pixel = (ndc * 0.5 + 0.5) * pixels as f32;
-        ((pixel.max(0.0) as u32) / PROBE_TILE).min(last)
+    let to_cell = |ndc: f32, cells: u32| -> u32 {
+        (((ndc * 0.5 + 0.5) * cells as f32).max(0.0) as u32).min(cells - 1)
     };
     [
-        to_tile(lo.x, size[0], tiles[0] - 1),
-        to_tile(lo.y, size[1], tiles[1] - 1),
-        to_tile(hi.x, size[0], tiles[0] - 1),
-        to_tile(hi.y, size[1], tiles[1] - 1),
+        to_cell(lo.x, PROBE_CELLS[0]),
+        to_cell(lo.y, PROBE_CELLS[1]),
+        to_cell(hi.x, PROBE_CELLS[0]),
+        to_cell(hi.y, PROBE_CELLS[1]),
     ]
 }
 
@@ -972,10 +1056,11 @@ pub(crate) struct ProbeTextures {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct VisibleProbes {
     count: u32,
-    words: u32,
-    tiles: [u32; 2],
     probes: u64,
-    rects: u64,
+    cells: [u32; PROBE_CELL_COUNT],
+    bins: [u32; PROBE_BINS],
+    /// Z-bins per unit of view depth.
+    bin_scale: f32,
 }
 
 /// Screen-space reflections' settings.
@@ -1114,8 +1199,8 @@ impl ScreenSpaceReflections {
 /// The forward renderer's reflection passes (made by
 /// [`crate::forward::ForwardRenderer::set_reflections`]).
 pub(crate) struct ReflectionPasses {
-    composite: Pipeline,
-    tiles: ComputeShader<Push>,
+    /// The composite with probes, with screen-space reflections, with both.
+    composite: [Pipeline; 3],
     depth: ComputeShader<Push>,
     trace: ComputeShader<Push>,
     spatial: ComputeShader<Push>,
@@ -1128,20 +1213,43 @@ impl core::fmt::Debug for ReflectionPasses {
     }
 }
 
-/// What a view's reflection passes read.
+/// What a view's reflections depend on, before its passes.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct ViewInputs<'g> {
+pub(crate) struct ViewSetup<'g> {
+    pub environment: EnvironmentFrame,
+    /// As the depth is drawn (with any jitter).
+    pub clip_from_world: Mat4,
+    pub camera: Vec3,
+    pub size: [u32; 2],
+    pub probes: Option<&'g ReflectionProbes>,
+    pub ssr: Option<&'g ScreenSpaceReflections>,
+}
+
+/// A view's reflection constants in the ring ([`ReflectionPasses::prepare`]).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Prepared<'g> {
+    /// `ReflectFrame` in the ring (the forward shading reads it through its frame).
+    pub address: u64,
+    /// Visible probes (0: the shading needs no probe code).
+    pub probes: u32,
+    /// The view's screen-space reflections, when they run (the target's size matches).
+    pub ssr: Option<&'g ScreenSpaceReflections>,
+    size: [u32; 2],
+    trace_size: [u32; 2],
+    levels: u32,
+    pyramid_floats: u32,
+    clip_from_world: Mat4,
+}
+
+/// What a view's reflection passes read and write.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ViewInputs {
     pub color: Texture,
     pub depth: Texture,
     pub normal_roughness: Texture,
     pub weight: Texture,
     pub environment: EnvironmentFrame,
-    /// As the depth was drawn (with any jitter).
-    pub clip_from_world: Mat4,
-    pub camera: Vec3,
-    pub size: [u32; 2],
-    pub probes: Option<(&'g ReflectionProbes, ProbeTextures)>,
-    pub ssr: Option<&'g ScreenSpaceReflections>,
+    pub probes: Option<ProbeTextures>,
 }
 
 /// Levels of a nearest-depth pyramid of a `width × height` target (level `k` is
@@ -1163,7 +1271,7 @@ fn pyramid_layout(width: u32, height: u32) -> (u32, [u32; 16], u32) {
 }
 
 impl ReflectionPasses {
-    /// Creates the composite pipeline (into `color_format`) and the compute passes.
+    /// Creates the composite pipelines (into `color_format`) and the compute passes.
     pub(crate) fn new(
         device: &Device,
         bindless: &Bindless,
@@ -1174,32 +1282,49 @@ impl ReflectionPasses {
             result: vk::Result::ERROR_INVALID_SHADER_NV,
         };
         let vertex = spirv_words(COMPOSITE_VERTEX).ok_or_else(invalid)?;
-        let fragment = spirv_words(COMPOSITE_FRAGMENT).ok_or_else(invalid)?;
+        let fragments = [
+            (
+                spirv_words(COMPOSITE_PROBES).ok_or_else(invalid)?,
+                c"compositeProbes",
+            ),
+            (
+                spirv_words(COMPOSITE_SSR).ok_or_else(invalid)?,
+                c"compositeSsr",
+            ),
+            (
+                spirv_words(COMPOSITE_PROBES_SSR).ok_or_else(invalid)?,
+                c"compositeProbesSsr",
+            ),
+        ];
         let formats = [color_format];
         let sources = [
-            ComputeSource::<Push>::new(PROBE_TILES, c"probeTiles", &[])?,
             ComputeSource::<Push>::new(SSR_DEPTH, c"ssrDepth", &[])?,
             ComputeSource::<Push>::new(SSR_TRACE, c"ssrTrace", &[])?,
             ComputeSource::<Push>::new(SSR_SPATIAL, c"ssrSpatial", &[])?,
             ComputeSource::<Push>::new(SSR_TEMPORAL, c"ssrTemporal", &[])?,
         ];
-        let mut descs = vec![PipelineDesc::Graphics(GraphicsPipelineDesc {
-            color_formats: &formats,
-            cull_mode: vk::CullModeFlags::NONE,
-            depth_test: false,
-            depth_write: false,
-            blend: Blend::Additive,
-            ..GraphicsPipelineDesc::new(
-                ShaderStageDesc {
-                    spirv: &vertex,
-                    entry: c"compositeVertex",
-                },
-                Some(ShaderStageDesc {
-                    spirv: &fragment,
-                    entry: c"compositeFragment",
-                }),
-            )
-        })];
+        let mut descs: Vec<PipelineDesc<'_>> = fragments
+            .iter()
+            .map(|(fragment, entry)| {
+                PipelineDesc::Graphics(GraphicsPipelineDesc {
+                    color_formats: &formats,
+                    cull_mode: vk::CullModeFlags::NONE,
+                    depth_test: false,
+                    depth_write: false,
+                    blend: Blend::Additive,
+                    ..GraphicsPipelineDesc::new(
+                        ShaderStageDesc {
+                            spirv: &vertex,
+                            entry: c"compositeVertex",
+                        },
+                        Some(ShaderStageDesc {
+                            spirv: fragment,
+                            entry,
+                        }),
+                    )
+                })
+            })
+            .collect();
         descs.extend(sources.iter().map(ComputeSource::desc));
         let mut pipelines =
             Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
@@ -1209,11 +1334,10 @@ impl ReflectionPasses {
                 result: vk::Result::ERROR_UNKNOWN,
             })
         };
-        let composite = next()?;
-        let [tiles, depth, trace, spatial, temporal] = &sources;
+        let composite = [next()?, next()?, next()?];
+        let [depth, trace, spatial, temporal] = &sources;
         Ok(Self {
             composite,
-            tiles: tiles.finish(next()?),
             depth: depth.finish(next()?),
             trace: trace.finish(next()?),
             spatial: spatial.finish(next()?),
@@ -1221,40 +1345,36 @@ impl ReflectionPasses {
         })
     }
 
-    /// The driver's statistics of the composite pipeline.
+    /// The driver's statistics of the composite pipelines: with probes, with screen-space
+    /// reflections, with both.
     pub(crate) fn composite_statistics(
         &self,
         device: &Device,
-    ) -> Vec<engine_rhi::PipelineStatistic> {
-        self.composite.statistics(device)
+    ) -> [Vec<engine_rhi::PipelineStatistic>; 3] {
+        core::array::from_fn(|k| self.composite[k].statistics(device))
     }
 
-    /// Declares a view's reflection passes: the visible probes' tiles, screen-space
-    /// reflections, and the composite into `inputs.color`. `None` when `ring` is full.
-    #[allow(clippy::too_many_lines)]
-    pub(crate) fn add_view_passes<'g>(
-        &'g self,
-        fg: &mut FrameGraph<'g>,
+    /// Writes a view's reflection constants and visible probes into `ring`, before its
+    /// shading reads them. `None` when `ring` is full or the view is not a perspective one.
+    pub(crate) fn prepare<'g>(
+        &self,
         ring: &mut UploadRing,
-        bindless: &'g Bindless,
-        inputs: &ViewInputs<'g>,
-    ) -> Option<()> {
-        engine_profiler::zone!("render::reflections::add_view_passes");
+        setup: &ViewSetup<'g>,
+    ) -> Option<Prepared<'g>> {
+        engine_profiler::zone!("render::reflections::prepare");
         let camera = Camera {
-            clip_from_world: inputs.clip_from_world,
-            position: inputs.camera,
+            clip_from_world: setup.clip_from_world,
+            position: setup.camera,
         };
         let view = camera.view_space()?;
         let world_from_view = view.view_from_world.inverse();
         let to_world = |v: Vec3| world_from_view.transform_vector3(v);
-        let [width, height] = inputs.size;
-        let visible = match inputs.probes {
-            Some((probes, _)) => {
-                Some(probes.view_frame(ring, inputs.clip_from_world, inputs.size)?)
-            }
+        let [width, height] = setup.size;
+        let visible = match setup.probes {
+            Some(probes) => Some(probes.view_frame(ring, setup.clip_from_world, setup.camera)?),
             None => None,
         };
-        let ssr = inputs.ssr.filter(|s| s.size == inputs.size);
+        let ssr = setup.ssr.filter(|s| s.size == setup.size);
         let settings = ssr
             .map(ScreenSpaceReflections::settings)
             .unwrap_or_default();
@@ -1264,12 +1384,12 @@ impl ReflectionPasses {
         let frame_index = ssr.map_or(0, |s| s.frame.get());
         let previous = ssr
             .and_then(|s| s.previous_clip_from_world.get())
-            .unwrap_or(inputs.clip_from_world);
+            .unwrap_or(setup.clip_from_world);
         let history_valid = ssr.is_some_and(|s| s.valid.get());
         let frame = FrameData {
-            clip_from_world: inputs.clip_from_world.to_cols_array(),
+            clip_from_world: setup.clip_from_world.to_cols_array(),
             previous_clip_from_world: previous.to_cols_array(),
-            camera: inputs.camera.extend(1.0).to_array(),
+            camera: setup.camera.extend(1.0).to_array(),
             forward: to_world(Vec3::NEG_Z)
                 .normalize()
                 .extend(view.p32 / view.p22)
@@ -1285,26 +1405,25 @@ impl ReflectionPasses {
                 .to_array(),
             size: [width, height, trace_size[0], trace_size[1]],
             env: [
-                inputs.environment.prefiltered_index,
+                setup.environment.prefiltered_index,
                 PREFILTERED_LEVELS,
                 Bindless::sampler(SamplerKind::LinearClamp),
-                inputs.probes.map_or(0, |(p, _)| p.array_index()),
+                setup.probes.map_or(0, ReflectionProbes::array_index),
             ],
             params: [
-                inputs.environment.intensity,
+                setup.environment.intensity,
                 settings.max_roughness.clamp(0.0, 1.0),
                 settings.thickness.max(1e-4),
                 settings.temporal.clamp(0.01, 1.0),
             ],
             probe_info: [
                 visible.map_or(0, |v| v.count),
-                visible.map_or(0, |v| v.words),
-                visible.map_or(0, |v| v.tiles[0]),
+                visible.map_or(0.0, |v| v.bin_scale).to_bits(),
+                0,
                 frame_index,
             ],
             probes: visible.map_or(0, |v| v.probes),
-            _unused: 0,
-            probe_rects: visible.map_or(0, |v| v.rects),
+            _unused: [0; 2],
             _pad: [0; 2],
             ssr: [
                 settings.steps.clamp(1, 512),
@@ -1313,189 +1432,42 @@ impl ReflectionPasses {
                 levels,
             ],
             pyramid_offsets: offsets,
+            probe_cells: visible.map_or([0; PROBE_CELL_COUNT], |v| v.cells),
+            probe_bins: visible.map_or([0; PROBE_BINS], |v| v.bins),
         };
-        // The tiles' masks are in a graph buffer, whose address the passes get through
-        // their push constants.
-        let tile_words = visible.map_or(0, |v| u64::from(v.tiles[0] * v.tiles[1] * v.words));
-        let address = ring.push(&[frame])?;
-        let tiles = visible.filter(|v| v.count > 0).map(|v| {
-            let buffer = fg.create_buffer(
-                "reflection probe tiles",
-                BufferDesc {
-                    size: tile_words * 4,
-                },
-            );
-            (buffer, v)
-        });
-        let frame_address = address;
-        if let Some((buffer, v)) = tiles {
-            let shader = &self.tiles;
-            fg.add_compute("reflection probe tiles", bindless)
-                .write(buffer, Access::StorageWrite(ShaderStages::COMPUTE))
-                .dispatch(
-                    shader,
-                    Dispatch::Threads([v.tiles[0], v.tiles[1], 1]),
-                    move |ctx| {
-                        Some(Push {
-                            frame: frame_address,
-                            buffer: ctx.address(buffer),
-                            size: v.tiles[1],
-                            ..Push::default()
-                        })
-                    },
-                );
+        Some(Prepared {
+            address: ring.push(&[frame])?,
+            probes: visible.map_or(0, |v| v.count),
+            ssr,
+            size: setup.size,
+            trace_size,
+            levels,
+            pyramid_floats: floats,
+            clip_from_world: setup.clip_from_world,
+        })
+    }
+
+    /// Declares a view's reflection passes after its opaque passes: screen-space
+    /// reflections (the nearest-depth pyramid, the trace, the spatial and temporal
+    /// filters) when they run, and the composite into `inputs.color`.
+    pub(crate) fn add_view_passes<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        prepared: &Prepared<'g>,
+        inputs: &ViewInputs,
+    ) {
+        engine_profiler::zone!("render::reflections::add_view_passes");
+        let ssr = prepared
+            .ssr
+            .map(|state| self.add_ssr_passes(fg, bindless, prepared, inputs, state));
+        let probes = inputs.probes.filter(|_| prepared.probes > 0);
+        if probes.is_none() && ssr.is_none() {
+            return;
         }
-        let mut ssr_result = None;
-        if let Some(state) = ssr {
-            let pyramid = fg.create_buffer(
-                "ssr depth pyramid",
-                BufferDesc {
-                    size: u64::from(floats.max(1)) * 4,
-                },
-            );
-            let depth = inputs.depth;
-            let shader = &self.depth;
-            fg.add_compute("ssr depth", bindless)
-                .read(depth, Access::Sampled(ShaderStages::COMPUTE))
-                .write(pyramid, Access::StorageReadWrite(ShaderStages::COMPUTE))
-                .record(move |rec| {
-                    let ctx = rec.context();
-                    let (Some(t0), p) = (ctx.sampled_index(depth), ctx.address(pyramid)) else {
-                        return;
-                    };
-                    for level in 1..=levels {
-                        if level > 1 {
-                            rec.barrier();
-                        }
-                        let w = ((width - 1) >> level) + 1;
-                        let h = ((height - 1) >> level) + 1;
-                        let push = Push {
-                            frame: frame_address,
-                            buffer: p,
-                            t: [t0, 0, 0, 0, 0, 0],
-                            level,
-                            ..Push::default()
-                        };
-                        rec.dispatch(shader, Dispatch::Threads([w, h, 1]), &push);
-                    }
-                });
-            let trace = fg.create_texture(
-                "ssr trace",
-                TextureDesc::new_2d(PROBE_FORMAT, trace_size[0], trace_size[1]),
-            );
-            let trace_distance = fg.create_texture(
-                "ssr trace distance",
-                TextureDesc::new_2d(SSR_DISTANCE_FORMAT, trace_size[0], trace_size[1]),
-            );
-            let (nr, weight, color) = (inputs.normal_roughness, inputs.weight, inputs.color);
-            fg.add_compute("ssr trace", bindless)
-                .read(depth, Access::Sampled(ShaderStages::COMPUTE))
-                .read(nr, Access::Sampled(ShaderStages::COMPUTE))
-                .read(weight, Access::Sampled(ShaderStages::COMPUTE))
-                .read(color, Access::Sampled(ShaderStages::COMPUTE))
-                .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
-                .write(trace, Access::StorageWrite(ShaderStages::COMPUTE))
-                .write(trace_distance, Access::StorageWrite(ShaderStages::COMPUTE))
-                .dispatch(
-                    &self.trace,
-                    Dispatch::Threads([trace_size[0], trace_size[1], 1]),
-                    move |ctx| {
-                        Some(Push {
-                            frame: frame_address,
-                            buffer: ctx.address(pyramid),
-                            t: [
-                                ctx.sampled_index(depth)?,
-                                ctx.sampled_index(nr)?,
-                                ctx.sampled_index(weight)?,
-                                ctx.sampled_index(color)?,
-                                0,
-                                0,
-                            ],
-                            target: ctx.storage_index(trace)?,
-                            read: ctx.storage_index(trace_distance)?,
-                            ..Push::default()
-                        })
-                    },
-                );
-            let spatial = fg.create_texture(
-                "ssr spatial",
-                TextureDesc::new_2d(PROBE_FORMAT, width, height),
-            );
-            let distance = fg.create_texture(
-                "ssr distance",
-                TextureDesc::new_2d(SSR_DISTANCE_FORMAT, width, height),
-            );
-            fg.add_compute("ssr spatial", bindless)
-                .read(depth, Access::Sampled(ShaderStages::COMPUTE))
-                .read(nr, Access::Sampled(ShaderStages::COMPUTE))
-                .read(weight, Access::Sampled(ShaderStages::COMPUTE))
-                .read(trace, Access::Sampled(ShaderStages::COMPUTE))
-                .read(trace_distance, Access::Sampled(ShaderStages::COMPUTE))
-                .write(spatial, Access::StorageWrite(ShaderStages::COMPUTE))
-                .write(distance, Access::StorageWrite(ShaderStages::COMPUTE))
-                .dispatch(
-                    &self.spatial,
-                    Dispatch::Threads([width, height, 1]),
-                    move |ctx| {
-                        Some(Push {
-                            frame: frame_address,
-                            t: [
-                                ctx.sampled_index(depth)?,
-                                ctx.sampled_index(nr)?,
-                                ctx.sampled_index(weight)?,
-                                ctx.sampled_index(trace)?,
-                                ctx.sampled_index(trace_distance)?,
-                                0,
-                            ],
-                            target: ctx.storage_index(spatial)?,
-                            read: ctx.storage_index(distance)?,
-                            ..Push::default()
-                        })
-                    },
-                );
-            // The history: last frame's (sampled) and this frame's (written).
-            let last = state.current.get();
-            let next = 1 - last;
-            let previous = state.history[last].import(fg, "ssr history");
-            let result = state.history[next].import(fg, "ssr history next");
-            let target = state.history[next].storage[0];
-            let previous_index = state.history[last].sampled;
-            fg.add_compute("ssr temporal", bindless)
-                .read(depth, Access::Sampled(ShaderStages::COMPUTE))
-                .read(nr, Access::Sampled(ShaderStages::COMPUTE))
-                .read(spatial, Access::Sampled(ShaderStages::COMPUTE))
-                .read(distance, Access::Sampled(ShaderStages::COMPUTE))
-                .read(previous, Access::Sampled(ShaderStages::COMPUTE))
-                .write(result, Access::StorageWrite(ShaderStages::COMPUTE))
-                .dispatch(
-                    &self.temporal,
-                    Dispatch::Threads([width, height, 1]),
-                    move |ctx| {
-                        Some(Push {
-                            frame: frame_address,
-                            t: [
-                                ctx.sampled_index(depth)?,
-                                ctx.sampled_index(nr)?,
-                                0,
-                                ctx.sampled_index(spatial)?,
-                                ctx.sampled_index(distance)?,
-                                previous_index,
-                            ],
-                            target,
-                            ..Push::default()
-                        })
-                    },
-                );
-            state.current.set(next);
-            state.valid.set(true);
-            state.frame.set(state.frame.get().wrapping_add(1));
-            state
-                .previous_clip_from_world
-                .set(Some(inputs.clip_from_world));
-            ssr_result = Some(result);
-        }
-        // The composite: weight × (reflection − sky) added to the color.
+        let frame_address = prepared.address;
         let (depth, nr, weight) = (inputs.depth, inputs.normal_roughness, inputs.weight);
+        // The composite: weight × (reflection − sky) added to the color.
         let mut pass = fg
             .add_pass("reflections")
             .color(inputs.color, LoadOp::Load, StoreOp::Store)
@@ -1506,16 +1478,17 @@ impl ReflectionPasses {
                 inputs.environment.prefiltered,
                 Access::Sampled(ShaderStages::FRAGMENT),
             );
-        if let Some((_, textures)) = inputs.probes {
-            pass = pass.read(textures.array, Access::Sampled(ShaderStages::FRAGMENT));
-        }
-        if let Some((buffer, _)) = tiles {
-            pass = pass.read(buffer, Access::StorageRead(ShaderStages::FRAGMENT));
-        }
-        if let Some(result) = ssr_result {
+        if let Some(result) = ssr {
             pass = pass.read(result, Access::Sampled(ShaderStages::FRAGMENT));
         }
-        let pipeline = &self.composite;
+        if let Some(textures) = probes {
+            pass = pass.read(textures.array, Access::Sampled(ShaderStages::FRAGMENT));
+        }
+        let pipeline = match (probes.is_some(), ssr.is_some()) {
+            (true, false) => &self.composite[0],
+            (false, true) => &self.composite[1],
+            _ => &self.composite[2],
+        };
         pass.execute(move |ctx| {
             let (Some(t0), Some(t1), Some(t2)) = (
                 ctx.sampled_index(depth),
@@ -1524,24 +1497,15 @@ impl ReflectionPasses {
             ) else {
                 return;
             };
+            let t3 = ssr.and_then(|r| ctx.sampled_index(r)).unwrap_or(0);
             let push = Push {
                 frame: frame_address,
-                buffer: tiles.map_or(0, |(b, _)| ctx.address(b)),
-                t: [
-                    t0,
-                    t1,
-                    t2,
-                    ssr_result
-                        .and_then(|r| ctx.sampled_index(r))
-                        .unwrap_or(NO_TEXTURE),
-                    0,
-                    0,
-                ],
+                t: [t0, t1, t2, t3, 0, 0],
                 ..Push::default()
             };
             let area = ctx.render_area();
             // SAFETY: recording inside the pass's rendering scope; the constants are in
-            // the ring, the textures and buffers are read by the pass.
+            // the ring, the textures are read by the pass.
             unsafe {
                 pipeline.bind(ctx.cmd);
                 bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
@@ -1562,6 +1526,168 @@ impl ReflectionPasses {
                 ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
             }
         });
-        Some(())
+    }
+
+    /// Screen-space reflections' passes: the nearest-depth pyramid, the trace, the spatial
+    /// and temporal filters. Returns this frame's result (its history).
+    #[allow(clippy::too_many_lines)]
+    fn add_ssr_passes<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        prepared: &Prepared<'g>,
+        inputs: &ViewInputs,
+        state: &'g ScreenSpaceReflections,
+    ) -> Texture {
+        let frame_address = prepared.address;
+        let [width, height] = prepared.size;
+        let trace_size = prepared.trace_size;
+        let levels = prepared.levels;
+        let pyramid = fg.create_buffer(
+            "ssr depth pyramid",
+            BufferDesc {
+                size: u64::from(prepared.pyramid_floats.max(1)) * 4,
+            },
+        );
+        let depth = inputs.depth;
+        let shader = &self.depth;
+        fg.add_compute("ssr depth", bindless)
+            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .write(pyramid, Access::StorageReadWrite(ShaderStages::COMPUTE))
+            .record(move |rec| {
+                let ctx = rec.context();
+                let (Some(t0), p) = (ctx.sampled_index(depth), ctx.address(pyramid)) else {
+                    return;
+                };
+                for level in 1..=levels {
+                    if level > 1 {
+                        rec.barrier();
+                    }
+                    let w = ((width - 1) >> level) + 1;
+                    let h = ((height - 1) >> level) + 1;
+                    let push = Push {
+                        frame: frame_address,
+                        buffer: p,
+                        t: [t0, 0, 0, 0, 0, 0],
+                        level,
+                        ..Push::default()
+                    };
+                    rec.dispatch(shader, Dispatch::Threads([w, h, 1]), &push);
+                }
+            });
+        let trace = fg.create_texture(
+            "ssr trace",
+            TextureDesc::new_2d(PROBE_FORMAT, trace_size[0], trace_size[1]),
+        );
+        let trace_distance = fg.create_texture(
+            "ssr trace distance",
+            TextureDesc::new_2d(SSR_DISTANCE_FORMAT, trace_size[0], trace_size[1]),
+        );
+        let (nr, weight, color) = (inputs.normal_roughness, inputs.weight, inputs.color);
+        fg.add_compute("ssr trace", bindless)
+            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .read(nr, Access::Sampled(ShaderStages::COMPUTE))
+            .read(weight, Access::Sampled(ShaderStages::COMPUTE))
+            .read(color, Access::Sampled(ShaderStages::COMPUTE))
+            .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
+            .write(trace, Access::StorageWrite(ShaderStages::COMPUTE))
+            .write(trace_distance, Access::StorageWrite(ShaderStages::COMPUTE))
+            .dispatch(
+                &self.trace,
+                Dispatch::Threads([trace_size[0], trace_size[1], 1]),
+                move |ctx| {
+                    Some(Push {
+                        frame: frame_address,
+                        buffer: ctx.address(pyramid),
+                        t: [
+                            ctx.sampled_index(depth)?,
+                            ctx.sampled_index(nr)?,
+                            ctx.sampled_index(weight)?,
+                            ctx.sampled_index(color)?,
+                            0,
+                            0,
+                        ],
+                        target: ctx.storage_index(trace)?,
+                        read: ctx.storage_index(trace_distance)?,
+                        ..Push::default()
+                    })
+                },
+            );
+        let spatial = fg.create_texture(
+            "ssr spatial",
+            TextureDesc::new_2d(PROBE_FORMAT, trace_size[0], trace_size[1]),
+        );
+        let distance = fg.create_texture(
+            "ssr distance",
+            TextureDesc::new_2d(SSR_DISTANCE_DEPTH_FORMAT, trace_size[0], trace_size[1]),
+        );
+        fg.add_compute("ssr spatial", bindless)
+            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .read(nr, Access::Sampled(ShaderStages::COMPUTE))
+            .read(trace, Access::Sampled(ShaderStages::COMPUTE))
+            .read(trace_distance, Access::Sampled(ShaderStages::COMPUTE))
+            .write(spatial, Access::StorageWrite(ShaderStages::COMPUTE))
+            .write(distance, Access::StorageWrite(ShaderStages::COMPUTE))
+            .dispatch(
+                &self.spatial,
+                Dispatch::Threads([trace_size[0], trace_size[1], 1]),
+                move |ctx| {
+                    Some(Push {
+                        frame: frame_address,
+                        t: [
+                            ctx.sampled_index(depth)?,
+                            ctx.sampled_index(nr)?,
+                            0,
+                            ctx.sampled_index(trace)?,
+                            ctx.sampled_index(trace_distance)?,
+                            0,
+                        ],
+                        target: ctx.storage_index(spatial)?,
+                        read: ctx.storage_index(distance)?,
+                        ..Push::default()
+                    })
+                },
+            );
+        // The history: last frame's (sampled) and this frame's (written).
+        let last = state.current.get();
+        let next = 1 - last;
+        let previous = state.history[last].import(fg, "ssr history");
+        let result = state.history[next].import(fg, "ssr history next");
+        let target = state.history[next].storage[0];
+        let previous_index = state.history[last].sampled;
+        fg.add_compute("ssr temporal", bindless)
+            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .read(nr, Access::Sampled(ShaderStages::COMPUTE))
+            .read(weight, Access::Sampled(ShaderStages::COMPUTE))
+            .read(spatial, Access::Sampled(ShaderStages::COMPUTE))
+            .read(distance, Access::Sampled(ShaderStages::COMPUTE))
+            .read(previous, Access::Sampled(ShaderStages::COMPUTE))
+            .write(result, Access::StorageWrite(ShaderStages::COMPUTE))
+            .dispatch(
+                &self.temporal,
+                Dispatch::Threads([width, height, 1]),
+                move |ctx| {
+                    Some(Push {
+                        frame: frame_address,
+                        t: [
+                            ctx.sampled_index(depth)?,
+                            ctx.sampled_index(nr)?,
+                            ctx.sampled_index(weight)?,
+                            ctx.sampled_index(spatial)?,
+                            ctx.sampled_index(distance)?,
+                            previous_index,
+                        ],
+                        target,
+                        ..Push::default()
+                    })
+                },
+            );
+        state.current.set(next);
+        state.valid.set(true);
+        state.frame.set(state.frame.get().wrapping_add(1));
+        state
+            .previous_clip_from_world
+            .set(Some(prepared.clip_from_world));
+        result
     }
 }
