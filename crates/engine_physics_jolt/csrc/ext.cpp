@@ -13,6 +13,7 @@
 #include <Jolt/Physics/Character/CharacterVirtual.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
+#include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/StateRecorder.h>
 
@@ -179,7 +180,10 @@ extern "C" EngineJoltCharacter* engine_jolt_character_create(EngineJoltWorld* wo
 	// The capsule stands on the character's position (the feet); Jolt's capsules are
 	// along Y, so the shape is rotated onto `up`.
 	Quat to_up = Quat::sFromTo(Vec3::sAxisY(), up);
-	RefConst<Shape> capsule = new RotatedTranslatedShape(up * (half_height + radius), to_up, new CapsuleShape(half_height, radius));
+	// A capsule without a cylinder part is a sphere (Jolt's capsule needs a positive half
+	// height).
+	RefConst<Shape> core = half_height > 1.0e-4f ? static_cast<const Shape*>(new CapsuleShape(half_height, radius)) : static_cast<const Shape*>(new SphereShape(radius));
+	RefConst<Shape> capsule = new RotatedTranslatedShape(up * (half_height + radius), to_up, core);
 
 	Ref<CharacterVirtualSettings> settings = new CharacterVirtualSettings();
 	settings->mID = CharacterID(desc->id);

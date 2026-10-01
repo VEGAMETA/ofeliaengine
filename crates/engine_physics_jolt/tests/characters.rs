@@ -326,4 +326,12 @@ fn rejects_degenerate_capsules() {
         w.create_character(&CharacterDesc::capsule(Vec3::ZERO, 1.0, 0.0))
             .is_err()
     );
+    // As tall as wide: a sphere, standing on the ground.
+    scenes::ground(&mut w).unwrap();
+    let ball = w
+        .create_character(&CharacterDesc::capsule(Vec3::new(0.0, 0.5, 0.0), 0.6, 0.3))
+        .unwrap();
+    run(&mut w, ball, Vec3::ZERO, 1.0);
+    let s = w.character(ball).unwrap();
+    assert!(s.is_grounded() && s.position.y.abs() < 0.03, "{s:?}");
 }

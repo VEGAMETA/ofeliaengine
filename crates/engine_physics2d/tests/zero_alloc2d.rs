@@ -89,7 +89,11 @@ fn steady_state_2d_queries_and_moves_do_not_allocate() {
             all,
             &mut bodies,
         );
-        let walk = if (i / 60).is_multiple_of(2) { 3.0 } else { -3.0 };
+        let walk = if (i / 60).is_multiple_of(2) {
+            3.0
+        } else {
+            -3.0
+        };
         let v = Vec2::new(walk, mover.velocity.y - 10.0 / 60.0);
         w.move_mover(&mut mover, v, 1.0 / 60.0);
         w.step(1.0 / 60.0, 4);
