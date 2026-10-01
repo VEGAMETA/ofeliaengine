@@ -156,6 +156,16 @@ With the revised pyramid (the first version's pyramid: RTX 23.6-24.6 µs, Radeon
   memory's 83 GB/s (DDR5-5200, two channels), a floor short of reading less depth. The
   RTX: 23.6 → 13.3 µs.
 
+## Patent check (2026-10-01)
+
+US 10,672,182 B2 (Microsoft, "Compact visibility state for GPUs compatible with hardware
+instancing", filed 2018-04-19, active until 2038-05-25) claims a primitive visibility buffer
+holding **one visibility bit per primitive (triangle) of each instance**, consulted to render or
+skip primitives. This ADR keeps **one flag per instance** from the previous frame, and that idea
+predates the filing (Haar and Aaltonen, "GPU-Driven Rendering Pipelines", SIGGRAPH 2015).
+Assessed as low risk; not legal advice. Future meshlet / visibility-buffer work must not keep
+persistent per-triangle visibility bits without a fresh check.
+
 ## Consequences
 
 - **Opt-in per view.**
