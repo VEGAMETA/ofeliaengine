@@ -407,6 +407,10 @@ pub struct GpuScene {
     material_revision: Option<u64>,
     /// Scatter updates of this upload.
     updates: Vec<Update>,
+    /// World boxes that changed in the last upload: of every instance added, moved,
+    /// edited or removed, its box before and after (what cached shadows of local lights
+    /// check, ADR 0071).
+    changes: Vec<[Vec3; 2]>,
     buffers: Option<Buffers>,
     /// Slots the first buffers hold.
     initial_capacity: u32,
@@ -517,6 +521,7 @@ impl GpuScene {
             bounds_stale: false,
             material_revision: None,
             updates: Vec::with_capacity(reserve),
+            changes: Vec::with_capacity(2 * reserve),
             buffers: None,
             initial_capacity: capacity.max(1),
             retired: Vec::new(),
@@ -807,6 +812,13 @@ impl GpuScene {
     ) {
         let flags = self.slots[index as usize].flags;
         self.slots[index as usize].flags = 0;
+        // The box it had: whatever it covered may see a shadow change.
+        if flags & (flag::WAS_LIVE | flag::NEW) != flag::NEW {
+            let old = self.boxes.get(index as usize);
+            if old[0].x <= old[1].x {
+                self.changes.push(old);
+            }
+        }
         // An instance removed from it: its box may have bounded the scene.
         if flags & flag::WAS_LIVE != 0
             && incremental_bounds
@@ -861,6 +873,7 @@ impl GpuScene {
             self.bounds = (self.bounds.0.min(new_box[0]), self.bounds.1.max(new_box[1]));
         }
         self.boxes.set(i, new_box);
+        self.changes.push(new_box);
         // Batch membership: kept unless the mesh or the state changed.
         let batch = &mut self.batches[batch_id as usize];
         if batch_id != SINK && batch.mesh == mesh && batch.state == state_bits {
@@ -986,6 +999,7 @@ impl GpuScene {
         core::mem::swap(&mut self.written, &mut self.written_last);
         self.written.clear();
         self.updates.clear();
+        self.changes.clear();
         // Bounds: kept incrementally for a few changes, recomputed for many.
         let incremental_bounds = 8 * touched < slot_total;
         if !incremental_bounds {
@@ -1300,6 +1314,17 @@ impl SceneFrame<'_> {
     /// The scene's batches by id (id 0 is the sink; dead ones have `alive == false`).
     pub(crate) fn batches(&self) -> &[Batch] {
         &self.scene.batches
+    }
+
+    /// The upload this frame's data comes from: consecutive frames that uploaded have
+    /// consecutive serials.
+    pub(crate) fn serial(&self) -> u64 {
+        self.scene.serial
+    }
+
+    /// World boxes that changed in this frame's upload (see `GpuScene::changes`).
+    pub(crate) fn changes(&self) -> &[[Vec3; 2]] {
+        &self.scene.changes
     }
 
     /// Where batch `id` is, for ordering batches by distance.
