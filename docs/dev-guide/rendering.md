@@ -363,9 +363,10 @@ temporal.reset();
   1 dB better on a panning camera).
 - **Texture LOD bias while upsampling:** textures are sampled for the render size unless
   you bias them towards the output size:
-  `temporal.set_texture_lod_bias(engine_upscale::texture_lod_bias(render_size, output_size))`
+  `materials.set_texture_lod_bias(&bindless, engine_upscale::texture_lod_bias(render_size, output_size))?`
   (log2(render / output): −0.58 from 720p to 1080p, −1 from half the size). It applies to
-  every material texture of the view. On a finely textured ground upsampled from half the
+  every material texture of the table, so to every view drawing with it; set it when the
+  render or output size changes. It costs nothing per pixel (it lives in the samplers). On a finely textured ground upsampled from half the
   size it gains 0.1-0.3 dB with TAAU and FSR; AMD's recommendation of one level more
   (`Fsr::texture_lod_bias`) was worse there (ADR 0060). Leave it at 0 for plain TAA.
 - **Known limits for now:**
@@ -399,7 +400,7 @@ use engine_fsr::{Fsr, FsrCamera, FsrInput, QualityMode};
 let mut fsr = Fsr::new(&device, frames_in_flight);
 let render_size = QualityMode::Quality.render_size(output_size); // 1080p → 1280×720
 temporal.set_jitter_phases(Fsr::jitter_phases(render_size, output_size));
-temporal.set_texture_lod_bias(engine_upscale::texture_lod_bias(render_size, output_size));
+materials.set_texture_lod_bias(&bindless, engine_upscale::texture_lod_bias(render_size, output_size))?;
 fsr.set_sharpness(Some(0.3)); // optional: RCAS after upscaling, 0-1
 
 // Every frame: `color` and `depth` at `render_size`, as for TAAU.

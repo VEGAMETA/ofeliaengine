@@ -55,11 +55,19 @@ and a prebuilt shader compiler, and produces a DLL (research note).
 
 **Texture LOD bias while upscaling** (both upscalers need it; TAAU had none):
 
-- a per-sampler bias in the bindless samplers: global, not per view. Not taken.
-- **a per-view bias in the forward renderer's material sampling (chosen)**:
-  `Temporal::set_texture_lod_bias`, passed in the frame constants (the unused `jitter.z`),
-  applied with `SampleBias` to every material sample, the alpha tests of the depth and
-  shadow passes included, so the prepass and the shading pass keep the same pixels.
+- a per-view bias in the forward renderer's material sampling (`SampleBias` with the
+  bias in the frame constants): the first version. Merged with the other open work, the
+  golden-image gate (ADR 0062) showed the Radeon's forward pass 8 % (procedural scene)
+  to 13 % (Sponza) slower with the bias at 0: the environment shading variant went from
+  64 to 72 VGPRs, fewer waves in flight. Offsetting the sampler index from the frame
+  constants instead (no `SampleBias`) cost the same 72. Not taken.
+- **a bias in the samplers (chosen)**: `MaterialTable::set_texture_lod_bias` resolves
+  its materials against a set of material samplers with that `mipLodBias`
+  (`Bindless::material_samplers`: up to 8 biased sets besides the unbiased one, made on
+  demand, to 1/16 of a level). Shaders are unchanged (64 VGPRs again). The bias is per
+  material table, not per view: every view drawing with those materials gets it, the
+  alpha tests of the depth and shadow passes included (the prepass and the shading pass
+  keep the same pixels); views with different upscaling need separate tables.
 
 ## Measurements
 
@@ -161,7 +169,8 @@ own debug checking reports nothing:
 - **`engine_rhi`** enables `shaderFloat16` and `shaderInt16` where supported
   (`OptionalCaps::shader_float16`, `Device::shader_float16_enabled`) and exposes
   `Device::entry` for libraries that load Vulkan themselves.
-- **Texture LOD bias:** `Temporal::set_texture_lod_bias` (default 0),
+- **Texture LOD bias:** `MaterialTable::set_texture_lod_bias` (default 0; the bias lives in
+  the samplers),
   `engine_upscale::texture_lod_bias(render, output)` = log2(render / output), recommended
   for both upscalers; `Fsr::texture_lod_bias` is AMD's recommendation (one level more).
 - **Frame generation is deferred.** On Vulkan it needs the SDK's replacement swapchain
