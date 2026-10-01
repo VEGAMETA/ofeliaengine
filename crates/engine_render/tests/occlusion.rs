@@ -254,6 +254,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
                         temporal: None,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

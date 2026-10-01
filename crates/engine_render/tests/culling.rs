@@ -283,6 +283,7 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
                         temporal: None,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

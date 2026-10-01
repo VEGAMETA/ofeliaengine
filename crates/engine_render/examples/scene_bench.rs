@@ -901,6 +901,7 @@ fn main() {
                             temporal: temporal.as_ref(),
                             lights: &lights,
                             environment: environment.as_ref(),
+                            reflections: Default::default(),
                         },
                     )
                     .unwrap();

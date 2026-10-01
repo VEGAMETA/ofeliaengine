@@ -470,6 +470,7 @@ fn main() {
                             temporal: None,
                             lights: &[],
                             environment: None,
+                            reflections: Default::default(),
                         };
                         forward.add_passes(fg, ring, bindless, &geo, &mats, draws, &view);
                     },

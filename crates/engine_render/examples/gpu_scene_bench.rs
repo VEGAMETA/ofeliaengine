@@ -304,6 +304,7 @@ fn main() {
                             temporal: motion_vectors.then_some(&temporal),
                             lights: &[],
                             environment: None,
+                            reflections: Default::default(),
                         };
                         let t0 = Instant::now();
                         let passes = if scene_path {

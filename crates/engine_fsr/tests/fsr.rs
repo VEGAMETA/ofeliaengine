@@ -208,6 +208,7 @@ impl Gpu {
                         temporal,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

@@ -261,6 +261,7 @@ impl Bed {
                 temporal,
                 lights: &[],
                 environment: environment.as_ref(),
+                reflections: Default::default(),
             };
             let (passes, scene) = match draw {
                 Draw::List(draws) => (

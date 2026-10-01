@@ -247,6 +247,7 @@ fn the_culling_pass_draws_the_level_the_distance_calls_for() {
                         temporal: None,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

@@ -367,6 +367,7 @@ mod windowed {
                         temporal: None,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 );
                 tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);

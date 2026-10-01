@@ -894,7 +894,7 @@ float multibounce(float visibility, float albedo)
 // Light from the whole sky: the environment's harmonics (diffuse) and prefiltered cube
 // (specular), or the flat ambient color without an environment. `occlusion` is the
 // material's, times the view's ambient occlusion when `ao` (ADR 0058).
-float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao)
+float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao, bool reflective, inout float3 weight)
 {
     // With the view's ambient occlusion, the fit of its bounces (for the albedo's
     // luminance: one value instead of three, fewer registers); without it, the material's
@@ -922,6 +922,10 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
     // Lagarde and de Rousiers' specular occlusion; 1 without occlusion (most materials),
     // where skipping it frees registers (72 → 64 VGPRs on the Radeon).
     float specular_occlusion = occlusion < 1.0 ? saturate(pow(n_dot_v + occlusion, exp2(-16.0 * a - 1.0)) - 1.0 + occlusion) : 1.0;
+    // Reflections (ADR 0073): what multiplies the prefiltered radiance, for the reflection
+    // composite to swap the sky's radiance for local probes and screen-space hits.
+    if (reflective)
+        weight = lerp(dfg.xxx, dfg.yyy, f0) * (1.0 + f0 * (1.0 / max(dfg.y, 1e-4) - 1.0)) * specular_occlusion;
     return (diffuse * irradiance * diffuse_occlusion + specular * specular_occlusion) * push.frame.env_intensity;
 }
 
@@ -1002,13 +1006,22 @@ struct SubsurfaceOut
 float4 shade(VertexOut input, bool front, bool masked, bool ao)
 {
     SubsurfaceOut unused;
-    return shade_surface(input, front, masked, ao, false, unused);
+    ReflectOut unused_reflect;
+    return shade_surface(input, front, masked, ao, false, false, unused, unused_reflect);
 }
+
+// What the reflection entry points write besides the color (ADR 0073).
+struct ReflectOut
+{
+    float3 normal;           // the shading normal (world, unit)
+    float roughness;         // perceptual, as the image-based light used it
+    float3 weight;           // multiplies the prefiltered radiance (split sum × specular occlusion)
+};
 
 // `shade`; with `subsurface`, the scattered part of the diffuse light goes to `sss`
 // instead of the color. Subsurface materials' pipelines always take `ao` (they are their
 // own; without ambient occlusion `push.ao` skips the read).
-float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss)
+float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, bool reflective, out SubsurfaceOut sss, out ReflectOut refl)
 {
     Frame frame = push.frame[0];
     Material m = push.materials[input.material];
@@ -1066,11 +1079,19 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     // says.
     float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     float3 local_irradiance = 0.0;
+    float3 reflect_weight = 0.0;
     float3 color = (surface_diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
-        + ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao)
+        + ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight)
         + emissive
         + local_lights(input.world_position, input.position.xy, n, v, surface_diffuse, f0, a, local_irradiance);
     sss = (SubsurfaceOut)0;
+    refl = (ReflectOut)0;
+    if (reflective)
+    {
+        refl.normal = n;
+        refl.roughness = roughness;
+        refl.weight = reflect_weight;
+    }
     if (subsurface)
     {
         uint bits = m.subsurface;
@@ -1227,6 +1248,83 @@ ShadedMotion fragmentMaskedMotion(VertexOut input, bool front : SV_IsFrontFace)
     return o;
 }
 
+// Reflections (ADR 0073): after the depth prepass of a view with reflection probes or
+// screen-space reflections, the shading also writes, per pixel, what the reflection
+// composite (reflections.slang) needs to replace the sky's specular light: the normal and
+// roughness, and the weight of the prefiltered radiance. Entry points of their own (two
+// more targets), so the other shading carries none of it.
+
+// A unit vector in octahedral encoding (Cigolle et al. 2014), in [0, 1]².
+float2 encode_octahedral(float3 n)
+{
+    n /= abs(n.x) + abs(n.y) + abs(n.z);
+    float2 e = n.z >= 0.0 ? n.xy : (1.0 - abs(n.yx)) * float2(n.x >= 0.0 ? 1.0 : -1.0, n.y >= 0.0 ? 1.0 : -1.0);
+    return e * 0.5 + 0.5;
+}
+
+struct Reflected
+{
+    float4 color : SV_Target0;
+    float4 normal_roughness : SV_Target1;
+    float4 weight : SV_Target2;
+};
+
+struct ReflectedMotion
+{
+    float4 color : SV_Target0;
+    float2 motion : SV_Target1;
+    float4 normal_roughness : SV_Target2;
+    float4 weight : SV_Target3;
+};
+
+// `ao`: a literal, as in `shade`.
+Reflected shade_reflected(VertexOut input, bool front, bool ao)
+{
+    SubsurfaceOut unused;
+    ReflectOut refl;
+    Reflected o;
+    o.color = float4(shade_surface(input, front, false, ao, false, true, unused, refl).rgb, 1.0);
+    o.normal_roughness = float4(encode_octahedral(refl.normal), refl.roughness, 1.0);
+    o.weight = float4(refl.weight, 1.0);
+    return o;
+}
+
+[shader("fragment")]
+Reflected fragmentReflect(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAo(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true);
+}
+
+[shader("fragment")]
+ReflectedMotion fragmentReflectMotion(VertexOut input, bool front : SV_IsFrontFace)
+{
+    Reflected r = shade_reflected(input, front, false);
+    ReflectedMotion o;
+    o.color = r.color;
+    o.motion = motion(input.position, input.previous_clip);
+    o.normal_roughness = r.normal_roughness;
+    o.weight = r.weight;
+    return o;
+}
+
+[shader("fragment")]
+ReflectedMotion fragmentReflectMotionAo(VertexOut input, bool front : SV_IsFrontFace)
+{
+    Reflected r = shade_reflected(input, front, true);
+    ReflectedMotion o;
+    o.color = r.color;
+    o.motion = motion(input.position, input.previous_clip);
+    o.normal_roughness = r.normal_roughness;
+    o.weight = r.weight;
+    return o;
+}
+
 // The scatter pass (ADR 0059). The forward subsurface pass left, at every pixel of a
 // subsurface material, its diffuse light per unit albedo (rgb) with its depth from the
 // near plane (a; 0 elsewhere), and its exit albedo with its profile's index. Drawn with
@@ -1347,7 +1445,8 @@ SubsurfaceShaded fragmentSubsurface(VertexOut input, bool front : SV_IsFrontFace
 {
     SubsurfaceOut sss;
     SubsurfaceShaded o;
-    o.color = float4(shade_surface(input, front, false, true, true, sss).rgb, 1.0);
+    ReflectOut unused;
+    o.color = float4(shade_surface(input, front, false, true, true, false, sss, unused).rgb, 1.0);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
     return o;
@@ -1366,7 +1465,8 @@ SubsurfaceShadedMotion fragmentSubsurfaceMotion(VertexOut input, bool front : SV
 {
     SubsurfaceOut sss;
     SubsurfaceShadedMotion o;
-    o.color = float4(shade_surface(input, front, false, true, true, sss).rgb, 1.0);
+    ReflectOut unused;
+    o.color = float4(shade_surface(input, front, false, true, true, false, sss, unused).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;

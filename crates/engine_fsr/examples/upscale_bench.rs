@@ -184,6 +184,7 @@ impl Bench {
                         temporal: (upscaler != Upscaler::None).then_some(&*temporal),
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

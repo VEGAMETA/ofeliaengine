@@ -282,6 +282,7 @@ impl Scene {
                             temporal: frame.temporal.then_some(&self.temporal),
                             lights: frame.lights,
                             environment: frame.environment.then_some(&self.environment),
+                            reflections: Default::default(),
                         },
                     )
                     .unwrap();

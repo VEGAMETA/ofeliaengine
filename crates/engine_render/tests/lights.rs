@@ -253,6 +253,7 @@ fn culled_lights_match_every_light_for_every_pixel() {
                         temporal: None,
                         lights,
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

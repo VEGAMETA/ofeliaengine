@@ -311,6 +311,7 @@ fn main() {
                             temporal: Some(&temporal),
                             lights: &[],
                             environment: None,
+                            reflections: Default::default(),
                         },
                     )
                     .unwrap();

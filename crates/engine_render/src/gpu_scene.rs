@@ -407,6 +407,9 @@ pub struct GpuScene {
     material_revision: Option<u64>,
     /// Scatter updates of this upload.
     updates: Vec<Update>,
+    /// World boxes the last upload changed (an instance's old and new place): what
+    /// reflection probes see change (ADR 0073).
+    changed: Vec<[Vec3; 2]>,
     buffers: Option<Buffers>,
     /// Slots the first buffers hold.
     initial_capacity: u32,
@@ -517,6 +520,7 @@ impl GpuScene {
             bounds_stale: false,
             material_revision: None,
             updates: Vec::with_capacity(reserve),
+            changed: Vec::with_capacity(2 * reserve),
             buffers: None,
             initial_capacity: capacity.max(1),
             retired: Vec::new(),
@@ -807,6 +811,11 @@ impl GpuScene {
     ) {
         let flags = self.slots[index as usize].flags;
         self.slots[index as usize].flags = 0;
+        // Where it was: a change there shows in reflections.
+        let old_box = self.boxes.get(index as usize);
+        if old_box != NO_BOX {
+            self.changed.push(old_box);
+        }
         // An instance removed from it: its box may have bounded the scene.
         if flags & flag::WAS_LIVE != 0
             && incremental_bounds
@@ -861,6 +870,7 @@ impl GpuScene {
             self.bounds = (self.bounds.0.min(new_box[0]), self.bounds.1.max(new_box[1]));
         }
         self.boxes.set(i, new_box);
+        self.changed.push(new_box);
         // Batch membership: kept unless the mesh or the state changed.
         let batch = &mut self.batches[batch_id as usize];
         if batch_id != SINK && batch.mesh == mesh && batch.state == state_bits {
@@ -986,6 +996,7 @@ impl GpuScene {
         core::mem::swap(&mut self.written, &mut self.written_last);
         self.written.clear();
         self.updates.clear();
+        self.changed.clear();
         // Bounds: kept incrementally for a few changes, recomputed for many.
         let incremental_bounds = 8 * touched < slot_total;
         if !incremental_bounds {
@@ -1295,6 +1306,12 @@ impl SceneFrame<'_> {
     /// World-space bounds of the live instances.
     pub fn bounds(&self) -> (Vec3, Vec3) {
         self.scene.bounds
+    }
+
+    /// World boxes (min, max) this frame's upload changed: the old and new places of the
+    /// instances added, moved, edited or removed (reflection probes see them, ADR 0073).
+    pub fn changed_boxes(&self) -> &[[Vec3; 2]] {
+        &self.scene.changed
     }
 
     /// The scene's batches by id (id 0 is the sink; dead ones have `alive == false`).

@@ -15,6 +15,8 @@
 //!   their motion vectors (ADR 0068).
 //! - [`atmosphere`]: a physically based sky and atmosphere, aerial perspective and
 //!   exponential height fog (ADR 0069).
+//! - [`reflections`]: local reflections: reflection probes and screen-space reflections
+//!   (ADR 0073).
 //! - [`subsurface`]: screen-space subsurface scattering: diffusion profiles, transmission
 //!   and the scatter pass (ADR 0059).
 //! - [`gpu_scene`]: the persistent GPU scene: instances in stable slots in device
@@ -42,6 +44,7 @@ pub mod mesh;
 pub mod png;
 pub mod post;
 pub mod postfx;
+pub mod reflections;
 pub mod shadow;
 pub mod skinning;
 pub mod subsurface;
