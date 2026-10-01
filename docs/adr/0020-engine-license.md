@@ -81,6 +81,9 @@ copy; only the original is closed to outside changes. Open to commercial offers.
      and payment terms.
   6. Do "transactions" include subscriptions and DLC sold through a store?
   7. Jurisdiction and the languages of the text.
+- **Usage restriction (team, 2026-10-01; ADR 0067):** the final license must forbid motion
+  blur from the camera's own motion during interactive gameplay; it is allowed in
+  non-interactive sequences (cutscenes). The engine's API enforces the same.
 - **Consequences recorded then:** no telemetry or DRM for royalty enforcement (reporting
   is self-declared); outside contributions would need a CLA; the license must say what a
   shipped game may contain (compiled engine code, the editor or not) and which notices it
