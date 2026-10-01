@@ -190,7 +190,7 @@ fn mispredictions_are_corrected_by_rollback() {
             ..Input::default()
         };
         let c = &sim.clients[0];
-        if c.frames.last().is_some_and(|f| f.resimulated > 0) {
+        if c.last_frame.resimulated > 0 {
             let pawn = common::iter_replicated(&c.world)
                 .into_iter()
                 .find(|(e, _)| c.world.has::<Predicted>(*e))

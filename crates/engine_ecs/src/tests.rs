@@ -1182,3 +1182,58 @@ fn set_parent_at_inserts_at_an_index() {
     back.reverse();
     assert_eq!(back, w.children(p).collect::<Vec<_>>());
 }
+
+#[test]
+fn raw_chunk_access_reads_and_writes_plain_data_by_layout() {
+    let mut w = World::new();
+    let es: Vec<Entity> = (0..2000)
+        .map(|i| w.spawn((Id(i), Pos(i as f32, 1.0))))
+        .collect();
+    w.spawn((Tracked(Arc::new(())), Id(9)));
+    let pos = w.component_id::<Pos>().unwrap();
+    let tracked = w.component_id::<Tracked>().unwrap();
+    let mut seen = 0;
+    let mut targets = Vec::new();
+    for (ai, arch) in w.archetypes().iter().enumerate() {
+        if let Some(col) = arch.column_index(tracked) {
+            assert!(arch.pod_column(0, col).is_none(), "not plain data");
+        }
+        let Some(col) = arch.column_index(pos) else {
+            continue;
+        };
+        for chunk in 0..arch.chunk_count() {
+            let bytes = arch.pod_column(chunk, col).unwrap();
+            let values: &[Pos] = bytemuck::cast_slice(bytes);
+            assert_eq!(values.len(), arch.chunk_len(chunk));
+            for (e, p) in arch.chunk_entities(chunk).iter().zip(values) {
+                assert_eq!(w.get::<Pos>(*e), Some(p));
+                seen += 1;
+            }
+            targets.push((ai, chunk, col));
+        }
+    }
+    assert_eq!(seen, 2000);
+    // Writing by layout, with and without change marking.
+    let mut changed = QueryState::<&Pos, Changed<Pos>>::new(&mut w);
+    changed.for_each(&mut w, |_| {});
+    for &(ai, chunk, col) in &targets {
+        let bytes = w.pod_column_mut(ai, chunk, col, false).unwrap();
+        for p in bytemuck::cast_slice_mut::<u8, Pos>(bytes) {
+            p.1 = 2.0;
+        }
+    }
+    let mut n = 0;
+    changed.for_each(&mut w, |_| n += 1);
+    assert_eq!(n, 0, "unmarked writes are invisible to Changed");
+    let (ai, chunk, col) = targets[0];
+    w.pod_column_mut(ai, chunk, col, true).unwrap();
+    changed.for_each(&mut w, |_| n += 1);
+    assert!(n > 0, "marked writes are seen");
+    assert_eq!(w.get::<Pos>(es[1500]), Some(&Pos(1500.0, 2.0)));
+    // `get_raw_mut` writes one entity and marks it.
+    let p = w.get_raw_mut(es[3], pos).unwrap();
+    // SAFETY: a live `Pos` of this entity; `&mut World` is not used while writing.
+    unsafe { p.cast::<Pos>().as_ptr().write(Pos(-1.0, -1.0)) };
+    assert_eq!(w.get::<Pos>(es[3]), Some(&Pos(-1.0, -1.0)));
+    assert!(w.pod_column_mut(99, 0, 0, false).is_none());
+}

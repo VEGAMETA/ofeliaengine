@@ -161,7 +161,7 @@ pub struct ClientSide {
     pub sync_q: QueryState<(&'static Pawn, &'static mut Transform)>,
     pub input: Input,
     pub events: Vec<ClientEvent>,
-    pub frames: Vec<engine_net::FrameInfo>,
+    pub last_frame: engine_net::FrameInfo,
 }
 
 /// A server-side hook run every tick after the shared systems.
@@ -272,7 +272,7 @@ impl Sim {
             sync_q,
             input: Input::default(),
             events: Vec::new(),
-            frames: Vec::new(),
+            last_frame: engine_net::FrameInfo::default(),
         });
         i
     }
@@ -352,7 +352,7 @@ impl Sim {
             sync_transforms(w, sync_q);
         });
         sync_transforms(world, sync_q);
-        c.frames.push(info);
+        c.last_frame = info;
         while let Some(e) = c.client.poll_event() {
             c.events.push(e);
         }
