@@ -774,6 +774,13 @@ fn slots_are_stable_reused_lowest_first_and_removed_instances_vanish() {
         None,
     );
     assert_eq!(differing(&list.image, &shot.image), 0);
+    // Culling off: the hole goes to the sink's command (counted there, drawn by none).
+    bed.renderer.set_frustum_culling(false);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, None);
+    assert_eq!(shot.drawn(0, 1), 3);
+    assert_eq!(shot.counts[1], 1, "the sink");
+    assert_eq!(differing(&list.image, &shot.image), 0);
+    bed.renderer.set_frustum_culling(true);
 
     // A new instance takes the lowest free slot; the removed one's id stays stale.
     let new = scene.insert(instance(0.0));

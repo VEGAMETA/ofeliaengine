@@ -26,7 +26,8 @@
 //!   into indirect commands every frame, at a cost that follows the number of batches,
 //!   not of instances ([`crate::forward::ForwardRenderer::add_scene_passes`]).
 //! - **Holes.** Removed instances leave holes below the highest slot in use; they are
-//!   parked in a *sink* batch (id 0) that culling may append to but nothing draws.
+//!   parked in a *sink* batch (id 0) with an inside-out box that frustum culling always
+//!   rejects (with culling off they are appended to its command, which nothing draws).
 //!
 //! Materials and meshes are resolved when an instance is added or its mesh or material
 //! changes: the material's slot and kind, the mesh's bounding box; moves reuse them.
@@ -426,8 +427,15 @@ impl core::fmt::Debug for GpuScene {
 }
 
 /// A hole: an empty box, parked in the sink batch.
+/// A hole: parked in the sink batch, whose inside-out box (negative extents, see
+/// `ForwardRenderer::add_scene_passes`) fails every frustum plane, so culling drops it
+/// without an atomic. The identity basis keeps those extents as they are.
 const HOLE: InstanceData = InstanceData {
-    rows: [[0.0; 4]; 3],
+    rows: [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+    ],
     material: 0,
     batch: SINK,
     _pad: [0; 2],

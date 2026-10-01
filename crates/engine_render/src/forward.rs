@@ -1690,14 +1690,17 @@ impl ForwardRenderer {
         let batch_table = {
             let (out, staged) = ring.alloc::<BatchData>(batches.len())?;
             // The sink's entry (id 0, named by the holes), and dead batches' (named by
-            // no instance): blended (no shadows, nothing early), one level, no box.
+            // no instance): blended (no shadows, nothing early), one level, and an
+            // inside-out box (negative extents) that fails every frustum plane, so holes
+            // are culled without touching the sink's counter. With culling off they are
+            // appended to the sink's command, which no state draws.
             let empty = BatchData {
                 command: sink_command,
                 slot: sink_slot,
                 count: holes,
                 lods: 1 | 1 << 8,
                 center: [0.0; 4],
-                extents: [0.0; 4],
+                extents: [-1e30, -1e30, -1e30, 0.0],
                 errors: [0.0; 4],
             };
             for out in out.iter_mut() {
