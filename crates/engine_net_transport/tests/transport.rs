@@ -489,3 +489,38 @@ fn loopback_udp() {
     }
     assert!(c.is_some() && got);
 }
+
+/// A large reliable transfer on a clean link causes no spurious losses (one
+/// acknowledgement covers every packet the receiver got since its last one) and no
+/// retransmission.
+#[test]
+fn bulk_reliable_transfer_without_spurious_losses() {
+    let mut config = EndpointConfig::new(PROTOCOL);
+    config.channels[0] = ChannelConfig { buffer_bytes: 1 << 20, max_message_size: 256 * 1024, ..ChannelConfig::reliable() };
+    config.max_packets_per_flush = 1024;
+    let mut sim = Sim::new(12, config.clone(), 2);
+    sim.add_client(config);
+    sim.run(10);
+    sim.net.set_default_conditions(LinkConditions::new(Duration::from_millis(30), Duration::ZERO, 0.0));
+    let s = sim.server_conn(100).unwrap();
+    let c = sim.client_conn(0).unwrap();
+    let message = payload(1, 200_000);
+    for _ in 0..4 {
+        sim.server.send(s, ChannelId(0), &message).unwrap();
+    }
+    let mut got = 0;
+    for _ in 0..500 {
+        sim.step(Duration::from_millis(16));
+        while let Some(m) = sim.clients[0].0.receive(c, ChannelId(0)) {
+            assert_eq!(m, &message[..]);
+            got += 1;
+        }
+        if got == 4 {
+            break;
+        }
+    }
+    assert_eq!(got, 4);
+    let stats = sim.server.stats(s).unwrap();
+    assert_eq!(stats.packets_lost, 0, "{stats:?}");
+    assert!(stats.bytes_sent < 4 * 200_000 * 21 / 20, "{} bytes sent for 800 000", stats.bytes_sent);
+}

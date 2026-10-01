@@ -357,6 +357,24 @@ impl Gateway {
         client.zip(port).ok_or(NatError::Malformed)
     }
 
+    /// The `index`-th mapping of the gateway's table (any protocol): external port,
+    /// protocol, internal client, internal port, description. Diagnostics: list until it
+    /// fails.
+    pub fn mapping_at(&self, index: u32) -> Result<(u16, String, IpAddr, u16, String), NatError> {
+        let response = self.soap(
+            "GetGenericPortMappingEntry",
+            &format!("<NewPortMappingIndex>{index}</NewPortMappingIndex>"),
+        )?;
+        let text = |tag: &str| xml_text(&response, tag).ok_or(NatError::Malformed);
+        Ok((
+            text("NewExternalPort")?.parse().map_err(|_| NatError::Malformed)?,
+            text("NewProtocol")?,
+            text("NewInternalClient")?.parse().map_err(|_| NatError::Malformed)?,
+            text("NewInternalPort")?.parse().map_err(|_| NatError::Malformed)?,
+            xml_text(&response, "NewPortMappingDescription").unwrap_or_default(),
+        ))
+    }
+
     /// Removes the mapping of external UDP `external_port`.
     pub fn delete_mapping(&self, external_port: u16) -> Result<(), NatError> {
         let args = format!(

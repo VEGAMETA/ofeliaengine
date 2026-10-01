@@ -10,7 +10,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
-use crate::ack::{AckTracker, Outcome};
+use crate::ack::{AckHeader, AckTracker, MAX_ACK_WORDS, Outcome};
 use crate::bytes::{Reader, Writer};
 use crate::channel::{
     ChannelConfig, ChannelKind, EntryList, MAX_CHANNELS, MessageId, Notice, RECORD_FRAG, ReliableRecv,
@@ -439,6 +439,32 @@ fn apply_outcome(
     }
 }
 
+/// Writes the acknowledgement header: flags 1, newest u16, delay u16, word count u8, words.
+fn write_ack(w: &mut Writer<'_>, ack: &AckHeader) -> Option<()> {
+    w.u8(1)?;
+    w.u16(ack.largest)?;
+    w.u16(ack.delay)?;
+    w.u8(ack.count as u8)?;
+    for word in &ack.words[..ack.count] {
+        w.u64(*word)?;
+    }
+    Some(())
+}
+
+fn read_ack(r: &mut Reader<'_>) -> Option<AckHeader> {
+    let largest = r.u16()?;
+    let delay = r.u16()?;
+    let count = usize::from(r.u8()?);
+    if !(1..=MAX_ACK_WORDS).contains(&count) {
+        return None;
+    }
+    let mut words = [0u64; MAX_ACK_WORDS];
+    for word in &mut words[..count] {
+        *word = r.u64()?;
+    }
+    Some(AckHeader { largest, delay, words, count })
+}
+
 /// Why a payload was not accepted.
 enum PayloadError {
     Malformed,
@@ -847,9 +873,9 @@ impl<S: DatagramSocket> Endpoint<S> {
                     return false;
                 };
                 let ack = if flags & 1 != 0 {
-                    match (r.u16(), r.u32(), r.u16()) {
-                        (Some(l), Some(b), Some(d)) => Some((l, b, d)),
-                        _ => {
+                    match read_ack(&mut r) {
+                        Some(a) => Some(a),
+                        None => {
                             stats.dropped += 1;
                             return false;
                         }
@@ -870,9 +896,9 @@ impl<S: DatagramSocket> Endpoint<S> {
                     }
                 }
                 conn.replay.record(seq);
-                if let Some((l, b, d)) = ack {
+                if let Some(ack) = ack {
                     let Connection { acks, channels, .. } = conn;
-                    acks.on_ack(l, b, d, now, &mut |o| apply_outcome(channels, o, events, id));
+                    acks.on_ack(&ack, now, &mut |o| apply_outcome(channels, o, events, id));
                 }
                 // Validated above; applying cannot fail.
                 let _ = walk_records(&mut conn.channels, records, true);
@@ -1305,7 +1331,7 @@ impl<S: DatagramSocket> Endpoint<S> {
         }
         let Some(cipher) = conn.send_cipher.as_ref() else { return };
         for packet_index in 0..config.max_packets_per_flush {
-            let has_budget = conn.tokens > 0.0;
+            let has_budget = conn.tokens > 0.0 && conn.acks.may_send_data();
             let data = has_budget && conn.has_pending();
             let keepalive = now.saturating_duration_since(conn.last_send) >= config.keepalive_interval;
             if !(data || conn.acks.ack_pending || keepalive || (force && packet_index == 0)) {
@@ -1317,17 +1343,12 @@ impl<S: DatagramSocket> Endpoint<S> {
             debug_assert!(h <= MAX_HEADER_BYTES);
             let mut w = Writer::new(&mut out[h..end]);
             let mut entries = EntryList::new();
-            let ack = conn.acks.ack_header(now);
-            let ok = match ack {
-                Some((l, b, d)) => (|| {
-                    w.u8(1)?;
-                    w.u16(l)?;
-                    w.u32(b)?;
-                    w.u16(d)
-                })(),
+            let ok = match conn.acks.ack_header(now) {
+                Some(ack) => write_ack(&mut w, &ack),
                 None => w.u8(0),
             };
             debug_assert!(ok.is_some());
+            let header_end = w.pos();
             if has_budget {
                 for (ch, state) in conn.channels.iter_mut().enumerate() {
                     if let ChannelState::Reliable { send, .. } = state
@@ -1345,12 +1366,13 @@ impl<S: DatagramSocket> Endpoint<S> {
                 }
             }
             let len = w.pos();
+            let carries_data = len > header_end;
             let n = packet::seal(out, Kind::Payload, seq, config.protocol_id, cipher, len);
             let _ = socket.send_to(now, conn.addr, &out[..n]);
             conn.send_seq += 1;
             let Connection { acks, channels, .. } = conn;
-            acks.on_sent(seq, now, n, &entries, &mut |o| apply_outcome(channels, o, events, id));
-            conn.acks.ack_pending = false;
+            acks.on_sent(seq, now, n, carries_data, &entries, &mut |o| apply_outcome(channels, o, events, id));
+            conn.acks.ack_sent();
             conn.last_send = now;
             conn.packets_sent += 1;
             conn.bytes_sent += n as u64;
@@ -1358,7 +1380,7 @@ impl<S: DatagramSocket> Endpoint<S> {
             if config.send_rate.is_some() {
                 conn.tokens -= n as f64;
             }
-            if !conn.has_pending() {
+            if !conn.has_pending() || !conn.acks.may_send_data() {
                 break;
             }
         }
@@ -1450,17 +1472,41 @@ impl<S: DatagramSocket> Endpoint<S> {
     }
 
     /// Ids of live connections.
-    pub fn connections(&self) -> impl Iterator<Item = ConnectionId> + '_ {
-        self.slots
-            .iter()
-            .enumerate()
-            .filter(|(_, c)| c.active)
-            .map(|(i, c)| c.id(i))
+    pub fn connections(&self) -> Connections<'_> {
+        Connections { slots: &self.slots, next: 0 }
     }
 
     /// Live connections.
     pub fn connection_count(&self) -> usize {
         self.active
+    }
+}
+
+/// Iterator over live connection ids ([`Endpoint::connections`]).
+#[derive(Debug)]
+pub struct Connections<'a> {
+    slots: &'a [Box<Connection>],
+    next: usize,
+}
+
+impl std::fmt::Debug for Connection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Connection").field("addr", &self.addr).field("active", &self.active).finish_non_exhaustive()
+    }
+}
+
+impl Iterator for Connections<'_> {
+    type Item = ConnectionId;
+
+    fn next(&mut self) -> Option<ConnectionId> {
+        while let Some(c) = self.slots.get(self.next) {
+            let i = self.next;
+            self.next += 1;
+            if c.active {
+                return Some(c.id(i));
+            }
+        }
+        None
     }
 }
 
