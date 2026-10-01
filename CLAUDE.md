@@ -104,6 +104,12 @@ If the structure does not exist yet, create it as needed, not all at once.
 4. **Implementation.** Small, self-contained commits.
 5. **Report** in the PR/commit description: what was done, before/after numbers, what was not done, risks.
 
+### Parallel agents
+Several agents may work at once, each on one task in its own git worktree with its own
+`CARGO_TARGET_DIR` (never shared), ending in a pull request that the coordinator merges after
+`tools/check.ps1 -Gpu -Perf` on both GPUs. Their rules, including the owner's goals and the
+team decisions to respect, are in `docs/agent-rules.md`; every agent reads them first.
+
 ### When to stop and ask the humans
 - Irreversible architectural decisions (on-disk asset format, ECS model, public scripting API).
 - Any licensing uncertainty.
@@ -209,6 +215,16 @@ version must include the date it was checked.
 - Latency and frame pacing: PresentMon, low-latency markers, and hardware measurement
   (LDAT/OSLTT) at milestones where possible.
 - Measurement history goes in `docs/perf/history.md` (briefly: date, commit, scene, numbers).
+- **Per-pass GPU time gate** (ADR 0062): `tools/check.ps1 -Perf` renders fixed scenes on both
+  GPUs and compares every pass with the vendor's baseline (`tests/golden/perf`); 3 % and more
+  than max(5 µs, 0.5 % of the frame) is a regression; uniform shifts (clocks, other work) are
+  reported as such. Advisory on ref-1 until a dedicated machine exists, but every merge checks it.
+- **A feature costs nothing where it is not used — not even shader registers.** On the AMD
+  driver, dead code under a specialization constant still raised forward shading from 64 to 72
+  VGPRs (9–13 % slower). Use separate entry points with literal arguments and lazily created
+  pipelines, or keep the parameter out of the shader (the LOD bias lives in the samplers).
+  Check with `ENGINE_PIPELINE_STATS=1 ENGINE_ADAPTER=radeon scene_bench --sky --pipeline-stats`
+  (ADR 0058, ADR 0060).
 
 ---
 
@@ -473,8 +489,13 @@ physics and navigation visualizers, 2D editor (tilemaps, sprites), viewport mana
 - In-game UI: our own, sharing the UI system with the editor where it does not hurt performance.
 - Input: raw input, gamepads (XInput / GameInput, evaluate), remapping, in-game rebinding.
 - Localization: string tables, plural rules, per-language fonts.
-- Networking: not a first priority, but physics determinism and the tick architecture must allow
-  for future rollback/lockstep.
+- Networking (ADR 0019 and its addendum; next after the runtime loop): authoritative fixed
+  ticks, snapshot replication of components marked for the network through reflection, client
+  prediction with the same systems, lag compensation; RPC/events only for one-shot events,
+  never for state (player actions travel in the input stream). Singleplayer has no loopback
+  client/server; the player's camera follows the latest input every rendered frame. Co-op hosts
+  (listen servers) traverse NAT: UPnP IGD → NAT-PMP/PCP → STUN hole punching → relay, one UDP
+  port mapped per session and removed on exit. The transport gets its own ADR.
 
 ---
 
@@ -524,7 +545,9 @@ physics and navigation visualizers, 2D editor (tilemaps, sprites), viewport mana
 
 ### Tests
 - Unit tests in every crate.
-- Golden-image render tests (with tolerance, on the reference GPU in CI).
+- Golden-image render tests (ADR 0062, `tests/golden`): fixed shots on both GPUs compared
+  through FLIP with per-vendor images; a change that alters the picture updates them (after
+  looking at the renders), a new rendering feature adds its shot.
 - Physics determinism (identical state hash after N steps).
 - "Zero allocations per frame" test.
 - Fuzzing of asset parsers (`cargo-fuzz`).
@@ -562,12 +585,20 @@ Written together with the feature, not after. At minimum:
 internals that are thought through and fast, measured on both reference GPUs, before what
 makes a game developer's day easier. In this order:
 
-1. Transparency (sorted and order-independent paths, lighting, TAA interplay).
-2. Shader and pipeline cache and warm-up (PSO collection, persistent caches, no hitches).
-3. Assets and streaming (cooked runtime format, IoRing, GPU decompression research).
-4. Ambient occlusion and subsurface scattering.
-5. FSR 3.1 and DLSS (Streamline), then XeSS.
-6. Review what else the core lacks.
+1. ✔ Transparency (ADR 0054).
+2. ✔ Shader and pipeline cache and warm-up (ADR 0055).
+3. ✔ Assets and streaming (ADRs 0056, 0057; texture streaming step 2 pending).
+4. ✔ Ambient occlusion (GTAO, ADR 0058) and subsurface scattering (ADR 0059).
+5. ✔ FSR 3.1 (ADR 0060) and DLSS (Streamline, ADR 0063); XeSS later.
+6. Review what else the core lacks: done 2026-10-01 (a core audit); its queue, in order:
+   - ✔ crash, GPU-fault and logging basics (ADR 0061); ✔ golden images and the perf gate (ADR 0062);
+   - ✔ async compute (ADR 0065); ✔ the physics API: queries, characters, rollback (ADR 0066);
+   - in progress: persistent GPU scene, ECS extraction and the runtime frame loop (ADR 0064);
+     skeletal animation and skinning (ADR 0068); atmosphere and fog (ADR 0069);
+   - next: networking with NAT traversal (§13), then GPU memory budget and texture streaming
+     step 2, local-light and contact shadows, local reflections, GPU particles, clustered
+     decals, GI, visibility buffer/meshlets, virtual shadow maps, remaining post effects
+     (motion blur only on cinematic views, ADR 0067).
 7. Only then: editor tools, Luau bindings and debugger, other tooling.
 
 The initial order below is kept for reference; its remaining items follow these.
