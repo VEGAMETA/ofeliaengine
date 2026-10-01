@@ -1327,6 +1327,17 @@ impl Recorder<'_> {
             [pass.image_barriers.start as usize..pass.image_barriers.end as usize];
         let buffers = &records.buffer_barriers
             [pass.buffer_barriers.start as usize..pass.buffer_barriers.end as usize];
+        if let Ok(mode) = std::env::var("ENGINE_DEBUG_FULL_BARRIERS") {
+            if mode == "all" || mode.split(',').any(|n| n == pass.name) {
+                let full = [vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .src_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)];
+                // SAFETY: debugging aid, recording outside a rendering scope.
+                unsafe { d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&full)) };
+            }
+        }
         self.stats.image_barriers += barriers.len() as u32;
         self.stats.memory_barriers += u32::from(!pass.memory_barrier.is_empty());
         self.stats.ownership_transfers +=

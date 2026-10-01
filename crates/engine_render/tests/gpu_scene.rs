@@ -71,6 +71,7 @@ enum Draw<'a> {
 /// What one frame produced.
 struct Shot {
     image: Vec<u8>,
+    depth: Vec<u8>,
     /// Motion vectors in pixels, with a temporal state.
     motion: Vec<[f32; 2]>,
     /// `instance_count` of every command of the forward lists (early, then late).
@@ -140,7 +141,7 @@ impl Bed {
         let materials = MaterialTable::new(1);
         let ring = UploadRing::new(&device, &mut allocator, 1, 8 << 20).unwrap();
         let graph = RenderGraph::new(&device, 1);
-        let bytes = u64::from(size * size * 4) * 2 + COMMAND_BYTES;
+        let bytes = u64::from(size * size * 4) * 3 + COMMAND_BYTES;
         let (readback, readback_memory) = allocator
             .create_buffer(
                 &vk::BufferCreateInfo::default()
@@ -217,7 +218,7 @@ impl Bed {
         } = self;
         let (d, cmd, size) = (device.raw(), *cmd, *size);
         let image_bytes = u64::from(size * size * 4);
-        let total = image_bytes * 2 + COMMAND_BYTES;
+        let total = image_bytes * 3 + COMMAND_BYTES;
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -231,6 +232,11 @@ impl Bed {
         }
         ring.begin_slot(0);
         *frame_number += 1;
+        if std::env::var("ENGINE_DEBUG_SENTINEL").is_ok() {
+            let ptr = readback_memory.as_ref().unwrap().mapped_ptr().unwrap();
+            // SAFETY: the GPU is idle; the mapping covers the buffer.
+            unsafe { core::ptr::write_bytes(ptr.as_ptr(), 0xCD, total as usize) };
+        }
         let light = DirectionalLight {
             direction: Vec3::new(-0.3, -1.0, -0.4),
             color: Vec3::splat(2.5),
@@ -307,6 +313,7 @@ impl Bed {
             assert!(command_bytes <= COMMAND_BYTES);
             let velocity = passes.motion.map(|m| m.velocity);
             let commands = passes.commands;
+            let read_depth = std::env::var("ENGINE_DEBUG_DEPTH_STORE").is_ok();
             let mut pass = fg
                 .add_pass("read back")
                 .read(color, Access::TransferRead)
@@ -316,6 +323,9 @@ impl Bed {
             }
             if let Some(c) = commands {
                 pass = pass.read(c, Access::TransferRead);
+            }
+            if read_depth {
+                pass = pass.read(depth, Access::TransferRead);
             }
             pass.execute(move |ctx| {
                 let region = |offset| vk::BufferImageCopy {
@@ -349,6 +359,17 @@ impl Bed {
                             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                             ctx.buffer(out),
                             &[region(image_bytes)],
+                        );
+                    }
+                    if read_depth {
+                        let mut r = region(2 * image_bytes + COMMAND_BYTES);
+                        r.image_subresource.aspect_mask = vk::ImageAspectFlags::DEPTH;
+                        ctx.device.cmd_copy_image_to_buffer(
+                            ctx.cmd,
+                            ctx.image(depth),
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            ctx.buffer(out),
+                            &[r],
                         );
                     }
                     if let Some(c) = commands.filter(|_| command_bytes > 0) {
@@ -385,6 +406,10 @@ impl Bed {
         // SAFETY: the GPU is idle; the mapping covers the buffer.
         let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), total as usize) };
         let image = bytes[..image_bytes as usize].to_vec();
+        let sentinel = image.chunks_exact(4).filter(|p| *p == [0xCD; 4]).count();
+        if sentinel > 0 {
+            eprintln!("DIFF sentinel pixels: {sentinel}");
+        }
         let motion = if has_motion {
             bytes[image_bytes as usize..2 * image_bytes as usize]
                 .chunks_exact(4)
@@ -397,6 +422,7 @@ impl Bed {
             Vec::new()
         };
         let commands = &bytes[2 * image_bytes as usize..(2 * image_bytes + command_bytes) as usize];
+        let depth_bytes = bytes[(2 * image_bytes + COMMAND_BYTES) as usize..(3 * image_bytes + COMMAND_BYTES) as usize].to_vec();
         // `instance_count`, the second word of each 20-byte command.
         let counts = commands
             .chunks_exact(20)
@@ -404,6 +430,7 @@ impl Bed {
             .collect();
         Shot {
             image,
+            depth: depth_bytes,
             motion,
             counts,
             list_commands: passes.list_commands,
@@ -607,6 +634,31 @@ fn a_scene_draws_what_the_same_draw_list_draws() {
             let shot = bed.frame(Draw::Scene(&mut scene), camera, os, Some(&temporal_scene));
             let label =
                 format!("prepass {prepass}, occlusion {occlusion}, atmosphere {atmosphere}, t {t}");
+            if differing(&list.image, &shot.image) != 0 {
+                let mut n = 0;
+                for (i, (a, b)) in list.image.chunks_exact(4).zip(shot.image.chunks_exact(4)).enumerate() {
+                    if a != b && n < 40 {
+                        eprintln!("DIFF px ({}, {}): list {:?} scene {:?}", i % 128, i / 128, a, b);
+                        n += 1;
+                    }
+                }
+                eprintln!("DIFF list counts {:?}", list.counts);
+                eprintln!("DIFF scene counts {:?}", shot.counts);
+                let again = bed.frame(Draw::List(&items), camera, ol, Some(&temporal_list));
+                eprintln!("DIFF list again vs list: {}, vs scene: {}", differing(&list.image, &again.image), differing(&shot.image, &again.image));
+                eprintln!("DIFF again counts {:?}", again.counts);
+                if let Ok(dir) = std::env::var("ENGINE_DIFF_DIR") {
+                    let stamp = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap()
+                        .as_millis();
+                    for (name, img) in [("list", &list.image), ("scene", &shot.image), ("again", &again.image)] {
+                        let png = engine_render::png::encode_png(128, 128, engine_render::png::PngFormat::Rgba, img).unwrap();
+                        std::fs::write(format!("{dir}/{stamp}_{name}.png"), png).unwrap();
+                    }
+                    eprintln!("DIFF images {dir}/{stamp}_*.png");
+                }
+            }
             assert_eq!(
                 differing(&list.image, &shot.image),
                 0,
@@ -1109,4 +1161,82 @@ fn occlusion_culling_keys_off_slots_whatever_the_spawn_order() {
         }
     }
     bed.finish(vec![scene], (vec![occlusion], Vec::new()));
+}
+
+/// Debug: the same frame rendered again and again gives the same bytes.
+#[test]
+#[ignore = "stress"]
+fn repeated_frames_are_identical() {
+    let Some(mut bed) = Bed::new(128) else {
+        return;
+    };
+    let cube_a = bed.geometry.add_mesh(&cube().as_data()).unwrap();
+    let cube_b = bed.geometry.add_mesh(&cube().as_data()).unwrap();
+    let mut palette = Vec::new();
+    for i in 0..9 {
+        let c = [(i % 3) as f32 / 3.0 + 0.2, (i % 4) as f32 / 4.0 + 0.1, 0.5];
+        palette.push(bed.materials.add(MaterialDesc::solid(c, 0.0, 0.5)));
+    }
+    let mode = std::env::var("STRESS_MODE").unwrap_or_default();
+    let n: usize = std::env::var("STRESS_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let camera = perspective_camera(Vec3::new(2.0, 7.0, 9.0));
+    let items = mixed_items([cube_a, cube_b], &palette, 0.25);
+    let other = mixed_items([cube_a, cube_b], &palette, 0.5);
+    let temporal = Temporal::new(&bed.device, &mut bed.allocator, 1024).unwrap();
+    temporal.set_jitter_phases(0);
+    let use_temporal = mode.contains("temporal");
+    bed.renderer.set_depth_prepass(mode.contains("prepass"));
+    let first = bed.frame(Draw::List(&items), camera, None, use_temporal.then_some(&temporal));
+    let reference = bed.frame(Draw::List(&items), camera, None, use_temporal.then_some(&temporal));
+    let _ = first;
+    let mut bad = 0;
+    for k in 0..n {
+        if mode.contains("same") {
+            let _ = bed.frame(Draw::List(&other), camera, None, use_temporal.then_some(&temporal));
+        } else if mode.contains("alternate") {
+            let _ = bed.frame(Draw::List(&items[..30]), camera, None, use_temporal.then_some(&temporal));
+            if k < 3 {
+                eprintln!("STRESS created after other: {}", bed.graph.stats().created_objects);
+            }
+        }
+        let shot = bed.frame(Draw::List(&items), camera, None, use_temporal.then_some(&temporal));
+        if k < 3 {
+            eprintln!("STRESS created: {}", bed.graph.stats().created_objects);
+        }
+        let d = differing(&reference.image, &shot.image);
+        let dd = differing(&reference.depth, &shot.depth);
+        if dd != 0 {
+            eprintln!("STRESS frame {k}: {dd} depth texels differ");
+            let mut m = 0;
+            for (i, (a, b)) in reference.depth.chunks_exact(4).zip(shot.depth.chunks_exact(4)).enumerate() {
+                if a != b && m < 12 {
+                    let (x, y) = (u32::from_le_bytes(a.try_into().unwrap()), u32::from_le_bytes(b.try_into().unwrap()));
+                    eprintln!("STRESS   depth px ({}, {}): ref {x:08x} {} got {y:08x} {} xor {:08x}", i % 128, i / 128, f32::from_bits(x), f32::from_bits(y), x ^ y);
+                    m += 1;
+                }
+            }
+        }
+        if d != 0 {
+            bad += 1;
+            let mut m = 0;
+            for (i, (a, b)) in reference.image.chunks_exact(4).zip(shot.image.chunks_exact(4)).enumerate() {
+                if a != b && m < 8 {
+                    let dr = f32::from_le_bytes(reference.depth[i * 4..i * 4 + 4].try_into().unwrap());
+                    let dg = f32::from_le_bytes(shot.depth[i * 4..i * 4 + 4].try_into().unwrap());
+                    eprintln!("STRESS frame {k} px ({}, {}): ref {:?} got {:?} depth ref {dr} got {dg}", i % 128, i / 128, a, b);
+                    m += 1;
+                }
+            }
+            if let Ok(dir) = std::env::var("ENGINE_DIFF_DIR") {
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+                for (name, img) in [("ref", &reference.image), ("got", &shot.image)] {
+                    let png = engine_render::png::encode_png(128, 128, engine_render::png::PngFormat::Rgba, img).unwrap();
+                    std::fs::write(format!("{dir}/{stamp}_{name}.png"), png).unwrap();
+                }
+            }
+        }
+    }
+    eprintln!("STRESS {mode}: {bad} of {n} frames differ");
+    bed.finish(Vec::new(), (Vec::new(), vec![temporal]));
+    assert_eq!(bad, 0);
 }
