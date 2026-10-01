@@ -24,6 +24,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use engine_core::math::Vec3;
+use engine_frame::{Antialiasing, Quality};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, vendor_name,
 };
@@ -79,7 +80,22 @@ fn shots() -> Vec<Shot> {
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },
+        // Temporal antialiasing and upscaling through the frame renderer (ADR 0072): TAA at
+        // the output size, TAAU and FSR 3.1 from 67 % (motion vectors, the resolve, the
+        // upscaler's passes; the post chain at the output size).
+        antialiased("sponza_taa", Antialiasing::TAAU, Quality::Native),
+        antialiased("sponza_taau_67", Antialiasing::TAAU, Quality::Quality),
+        antialiased("sponza_fsr_quality", Antialiasing::FSR, Quality::Quality),
     ]
+}
+
+fn antialiased(name: &'static str, antialiasing: Antialiasing, quality: Quality) -> Shot {
+    Shot {
+        size: [1920, 1080],
+        antialiasing,
+        quality,
+        ..Shot::new(name, Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
+    }
 }
 
 fn baseline_path(vendor: &str) -> PathBuf {

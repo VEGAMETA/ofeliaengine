@@ -9,6 +9,7 @@
 #![allow(clippy::print_stdout)]
 
 use engine_core::math::Vec3;
+use engine_frame::{Antialiasing, Quality};
 use engine_golden::golden::{Outcome, Tolerance, compare};
 use engine_golden::scene::{RenderOptions, Shot, Skip, Source, procedural_lights, render};
 use engine_render::ao::AoSettings;
@@ -248,4 +249,97 @@ fn procedural_scene_with_height_fog() {
         }),
         ..atmosphere_shot("procedural_fog", 20.0)
     });
+}
+
+/// Sponza through a temporal antialiaser (ADR 0072): `temporal_frames` frames accumulated
+/// from a fresh history with the camera still, the last one captured.
+fn sponza_antialiased(name: &'static str, antialiasing: Antialiasing, quality: Quality) -> Shot {
+    Shot {
+        antialiasing,
+        quality,
+        ..Shot::new(name, Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
+    }
+}
+
+/// TAA at the output size: the plants' alpha-tested edges, the columns' silhouettes and
+/// the shadow edges resolved over 32 jittered frames.
+#[test]
+fn sponza_with_taa() {
+    check(&sponza_antialiased(
+        "sponza_taa",
+        Antialiasing::TAAU,
+        Quality::Native,
+    ));
+}
+
+/// TAAU from 67 % of the output size per axis (Quality: 1.5×), with the texture LOD bias
+/// the upscaler asks for.
+#[test]
+fn sponza_with_taau_at_67_percent() {
+    check(&sponza_antialiased(
+        "sponza_taau_67",
+        Antialiasing::TAAU,
+        Quality::Quality,
+    ));
+}
+
+/// FSR 3.1 Quality (1.5×).
+#[test]
+fn sponza_with_fsr_quality() {
+    check(&sponza_antialiased(
+        "sponza_fsr_quality",
+        Antialiasing::FSR,
+        Quality::Quality,
+    ));
+}
+
+/// DLSS Quality, where the Streamline DLLs are (`ENGINE_STREAMLINE_DIR`) and the GPU
+/// runs it; skipped elsewhere.
+#[test]
+fn sponza_with_dlss_quality() {
+    check(&sponza_antialiased(
+        "sponza_dlss_quality",
+        Antialiasing::DLSS,
+        Quality::Quality,
+    ));
+}
+
+/// TAAU at 67 % with the camera strafing slowly (1 cm per frame, 31 cm over the
+/// accumulation): ghosting and smearing behind the columns and the plants show here.
+#[test]
+fn sponza_with_taau_and_a_moving_camera() {
+    check(&Shot {
+        camera_motion: Vec3::new(0.0, 0.0, 0.01),
+        ..sponza_antialiased("sponza_taau_moving", Antialiasing::TAAU, Quality::Quality)
+    });
+}
+
+/// A temporal shot renders the same bytes every time (the history and the jitter start
+/// fresh once the scene is resident), so its golden image can be exact.
+#[test]
+fn temporal_shots_are_deterministic() {
+    let options = RenderOptions {
+        validation: false,
+        timed_frames: 0,
+    };
+    let shot = Shot {
+        antialiasing: Antialiasing::TAAU,
+        quality: Quality::Quality,
+        camera_motion: Vec3::new(0.01, 0.0, 0.0),
+        temporal_frames: 12,
+        ..procedural("procedural_taau")
+    };
+    let (one, two) = match (render(&shot, options), render(&shot, options)) {
+        (Ok(one), Ok(two)) => (one, two),
+        (Err(Skip::NoGpu(e)), _) | (_, Err(Skip::NoGpu(e))) => {
+            println!("skipped, no GPU ({e})");
+            return;
+        }
+        (Err(e), _) | (_, Err(e)) => panic!("{e:?}"),
+    };
+    assert_eq!(one.antialiasing, Antialiasing::TAAU);
+    assert!(
+        one.rgba8 == two.rgba8,
+        "two renders of a temporal shot differ"
+    );
 }
