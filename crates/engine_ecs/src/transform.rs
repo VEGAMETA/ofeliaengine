@@ -6,14 +6,17 @@
 //! [`Children`]. Entities need both components to take part; a child without them
 //! breaks the chain for its own subtree.
 //!
-//! The pass skips all work when no `Transform`, `Parent` or `Children` was written since
-//! its previous run (a static scene costs three chunk-version scans). Otherwise it
-//! recomputes every world transform: the cost is linear in the entities with transforms
-//! (ADR 0027 has numbers). Updating only the changed subtrees is a later optimization.
+//! Propagation is incremental (ADR 0064): it visits only the chunks whose `Transform`,
+//! `Parent` or `GlobalTransform` was written since its previous run, recomputes their
+//! entities and the subtrees below the ones whose world transform changed, and writes a
+//! `GlobalTransform` only when its value changes. Chunks whose world transforms stayed
+//! the same are not marked, so [`Changed<GlobalTransform>`](crate::Changed) downstream
+//! (the renderer's extraction) skips them. A static scene costs one chunk-version scan.
 
+use crate::component::ComponentId;
 use crate::entity::Entity;
 use crate::hierarchy::{Children, Parent};
-use crate::query::{Changed, QueryState, With, Without};
+use crate::query::{QueryState, With, Without};
 use crate::world::World;
 use crate::{bytemuck, pod_component, reflect_component};
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
@@ -125,13 +128,51 @@ pod_component!(GlobalTransform);
 /// Roots of hierarchies: no parent, at least one child.
 type RootsWithChildren = (Without<Parent>, With<Children>);
 
-/// A child in the hierarchy: one entity lookup fetches everything the walk needs.
+/// A child in the hierarchy: one entity lookup fetches everything the full walk needs.
 type Node = (
     &'static Parent,
     &'static Transform,
     &'static mut GlobalTransform,
     Option<&'static Children>,
 );
+
+/// Whether two affine transforms have the same bytes, the unused fourth lanes of the SIMD
+/// columns included: the state hash and snapshots see them, so "unchanged" must mean
+/// byte-identical to what a full pass would have written.
+#[inline]
+fn same_bits(a: &Affine3A, b: &Affine3A) -> bool {
+    bytemuck::bytes_of(a) == bytemuck::bytes_of(b)
+}
+
+/// The columns of one archetype that propagation reads.
+#[derive(Debug, Clone, Copy)]
+struct Tracked {
+    archetype: u32,
+    global: usize,
+    local: Option<usize>,
+    parent: Option<usize>,
+    children: Option<usize>,
+}
+
+/// Component ids the pass works with.
+#[derive(Debug, Clone, Copy)]
+struct Ids {
+    local: ComponentId,
+    global: ComponentId,
+    parent: ComponentId,
+    children: ComponentId,
+}
+
+/// What the last [`TransformPropagation::run`] did, for tests and profiling.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PropagationStats {
+    /// Chunks whose `Transform`, `Parent` or `GlobalTransform` had changed.
+    pub chunks: u32,
+    /// Entities recomputed (those in changed chunks, and the subtrees below changes).
+    pub recomputed: u32,
+    /// World transforms whose value changed (written and marked).
+    pub written: u32,
+}
 
 /// Recomputes [`GlobalTransform`] from [`Transform`] down the hierarchy.
 ///
@@ -153,43 +194,229 @@ type Node = (
 /// schedule.run(&mut world, None);
 /// assert_eq!(world.get::<GlobalTransform>(wheel).unwrap().translation().x, 11.0);
 /// ```
+///
+/// **Incremental.** An entity is a *candidate* when its chunk's `Transform`, `Parent` or
+/// `GlobalTransform` column was written since the previous run (chunk granularity, as for
+/// [`Changed`](crate::Changed)). Candidates are recomputed from their parent's world transform, roots
+/// first and then by depth, together with their direct children (which picks up subtrees
+/// that structural changes reconnected); below that, a subtree is only walked where a
+/// world transform actually changed. Every result is bit-identical to recomputing the
+/// whole hierarchy ([`Self::run_full`]): both evaluate the same products, and values
+/// that are not recomputed are the ones a full pass would reproduce. Entities that a
+/// full pass cannot reach (under a parent without transforms, or with a despawned
+/// parent) are left alone by both.
 pub struct TransformPropagation {
+    world_id: u64,
+    ids: Ids,
+    /// Archetypes seen so far, and those with a world transform.
+    seen: usize,
+    tracked: Vec<Tracked>,
+    last_run: u64,
+    /// Candidates below the roots: (depth, entity).
+    pending: Vec<(u32, Entity)>,
+    /// Child lists still to visit (first child, count) with their parent's world
+    /// transform, and whether to visit grandchildren even if a child does not change.
+    stack: Vec<(Entity, u32, Affine3A)>,
+    stats: PropagationStats,
+    // The full pass, kept as the reference.
     roots: QueryState<(&'static Transform, &'static mut GlobalTransform), Without<Parent>>,
     parents: QueryState<(&'static GlobalTransform, &'static Children), RootsWithChildren>,
     nodes: QueryState<Node>,
-    changed_local: QueryState<Entity, Changed<Transform>>,
-    changed_parent: QueryState<Entity, Changed<Parent>>,
-    changed_children: QueryState<Entity, Changed<Children>>,
-    /// Child lists still to visit (first child, count) with their parent's world
-    /// transform.
-    stack: Vec<(Entity, u32, Affine3A)>,
+}
+
+impl core::fmt::Debug for TransformPropagation {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("TransformPropagation")
+            .field("tracked", &self.tracked.len())
+            .field("last_run", &self.last_run)
+            .field("stats", &self.stats)
+            .finish_non_exhaustive()
+    }
 }
 
 impl TransformPropagation {
-    /// Creates the pass's queries in `world`.
+    /// Creates the pass's state for `world`.
     pub fn new(world: &mut World) -> Self {
+        let ids = Ids {
+            local: world.register::<Transform>(),
+            global: world.register::<GlobalTransform>(),
+            parent: world.register::<Parent>(),
+            children: world.register::<Children>(),
+        };
         Self {
+            world_id: world.id(),
+            ids,
+            seen: 0,
+            tracked: Vec::new(),
+            last_run: 0,
+            pending: Vec::new(),
+            stack: Vec::new(),
+            stats: PropagationStats::default(),
             roots: QueryState::new(world),
             parents: QueryState::new(world),
             nodes: QueryState::new(world),
-            changed_local: QueryState::new(world),
-            changed_parent: QueryState::new(world),
-            changed_children: QueryState::new(world),
-            stack: Vec::new(),
         }
     }
 
-    /// Updates every [`GlobalTransform`] if anything in the hierarchy or any local
-    /// transform changed since the previous run. Returns whether it did.
+    /// What the last [`Self::run`] did.
+    pub fn stats(&self) -> PropagationStats {
+        self.stats
+    }
+
+    fn update_archetypes(&mut self, world: &World) {
+        assert_eq!(
+            self.world_id,
+            world.id(),
+            "transform propagation used with another world"
+        );
+        for index in self.seen..world.archetypes.len() {
+            let arch = &world.archetypes[index];
+            if let Some(global) = arch.column_index(self.ids.global) {
+                self.tracked.push(Tracked {
+                    archetype: index as u32,
+                    global,
+                    local: arch.column_index(self.ids.local),
+                    parent: arch.column_index(self.ids.parent),
+                    children: arch.column_index(self.ids.children),
+                });
+            }
+        }
+        self.seen = world.archetypes.len();
+    }
+
+    /// Updates the world transforms that changed since the previous run (see the type's
+    /// documentation). Returns whether any world transform changed value.
     pub fn run(&mut self, world: &mut World) -> bool {
         engine_profiler::zone!("ecs::TransformPropagation::run");
-        // Evaluate all three so each query's change tick advances.
-        let local = self.changed_local.iter(world).next().is_some();
-        let parent = self.changed_parent.iter(world).next().is_some();
-        let children = self.changed_children.iter(world).next().is_some();
-        if !(local || parent || children) {
-            return false;
+        self.update_archetypes(world);
+        let tick = world.bump_change_tick();
+        let last_run = core::mem::replace(&mut self.last_run, tick);
+        let ids = self.ids;
+        let mut stats = PropagationStats::default();
+        self.pending.clear();
+        self.stack.clear();
+        // Candidates: roots now, the others by depth below.
+        for t in 0..self.tracked.len() {
+            let tracked = self.tracked[t];
+            let chunk_count = world.archetypes[tracked.archetype as usize].chunks.len();
+            for chunk in 0..chunk_count {
+                let arch = &world.archetypes[tracked.archetype as usize];
+                let changed = |column: Option<usize>| {
+                    column.is_some_and(|c| arch.column_version(chunk, c) > last_run)
+                };
+                if !(changed(Some(tracked.global))
+                    || changed(tracked.local)
+                    || changed(tracked.parent))
+                {
+                    continue;
+                }
+                stats.chunks += 1;
+                let len = arch.chunk_len(chunk);
+                for row in 0..len {
+                    let arch = &world.archetypes[tracked.archetype as usize];
+                    // SAFETY: `row < len` rows of a live chunk are initialized.
+                    let entity = unsafe { *arch.entity_ptr(chunk, row) };
+                    if tracked.parent.is_some() {
+                        // A child: only if a full pass reaches it, after its ancestors.
+                        if tracked.local.is_some()
+                            && let Some(depth) = reach_depth(world, ids, entity)
+                        {
+                            self.pending.push((depth, entity));
+                        }
+                        continue;
+                    }
+                    // A root: its own transform, then its children.
+                    let global = match tracked.local {
+                        Some(local) => {
+                            // SAFETY: the column holds an initialized `Transform` here.
+                            let local =
+                                unsafe { *arch.value_ptr(chunk, local, row).cast::<Transform>() };
+                            let global = local.to_affine();
+                            stats.recomputed += 1;
+                            if store(
+                                world,
+                                tracked.archetype,
+                                tracked.global,
+                                chunk,
+                                row,
+                                global,
+                                tick,
+                            ) {
+                                stats.written += 1;
+                            }
+                            global
+                        }
+                        // A root without a local transform keeps its world transform and
+                        // still passes it down.
+                        // SAFETY: the column holds an initialized `GlobalTransform` here.
+                        None => unsafe {
+                            (*arch
+                                .value_ptr(chunk, tracked.global, row)
+                                .cast::<GlobalTransform>())
+                            .0
+                        },
+                    };
+                    if let Some(children) = tracked.children {
+                        let arch = &world.archetypes[tracked.archetype as usize];
+                        // SAFETY: the column holds an initialized `Children` here.
+                        let c = unsafe { *arch.value_ptr(chunk, children, row).cast::<Children>() };
+                        self.stack.push((c.first, c.count, global));
+                    }
+                }
+            }
         }
+        // The candidates' direct children are recomputed whatever happened to the
+        // candidate (structural changes can reconnect stale subtrees); deeper levels only
+        // below a change.
+        walk(world, ids, &mut self.stack, tick, &mut stats);
+        self.pending.sort_unstable_by_key(|&(depth, _)| depth);
+        for k in 0..self.pending.len() {
+            let entity = self.pending[k].1;
+            // Its ancestors are final: any change above it was walked down already.
+            let Some(loc) = world.entities.location(entity) else {
+                continue;
+            };
+            let arch = &world.archetypes[loc.archetype as usize];
+            let (Some(local), Some(global), Some(parent)) = (
+                arch.column_index(ids.local),
+                arch.column_index(ids.global),
+                arch.column_index(ids.parent),
+            ) else {
+                continue;
+            };
+            let (chunk, row) = (loc.chunk as usize, loc.row as usize);
+            // SAFETY: the columns hold initialized values of these types at this row.
+            let (local_value, parent_entity) = unsafe {
+                (
+                    *arch.value_ptr(chunk, local, row).cast::<Transform>(),
+                    (*arch.value_ptr(chunk, parent, row).cast::<Parent>()).get(),
+                )
+            };
+            let Some(parent_global) = read_global(world, ids, parent_entity) else {
+                continue;
+            };
+            let value = parent_global * local_value.to_affine();
+            stats.recomputed += 1;
+            if store(world, loc.archetype, global, chunk, row, value, tick) {
+                stats.written += 1;
+            }
+            let arch = &world.archetypes[loc.archetype as usize];
+            if let Some(children) = arch.column_index(ids.children) {
+                // SAFETY: the column holds an initialized `Children` here.
+                let c = unsafe { *arch.value_ptr(chunk, children, row).cast::<Children>() };
+                self.stack.push((c.first, c.count, value));
+                walk(world, ids, &mut self.stack, tick, &mut stats);
+            }
+        }
+        self.stats = stats;
+        stats.written > 0
+    }
+
+    /// Recomputes and writes every world transform from scratch, marking every chunk it
+    /// visits: the reference [`Self::run`] is tested against, and the way to rebuild
+    /// after writing `GlobalTransform` values by hand. Returns true.
+    pub fn run_full(&mut self, world: &mut World) -> bool {
+        engine_profiler::zone!("ecs::TransformPropagation::run_full");
         self.roots.for_each_chunk(world, |(locals, globals)| {
             for (l, g) in locals.iter().zip(globals.iter_mut()) {
                 g.0 = l.to_affine();
@@ -220,6 +447,138 @@ impl TransformPropagation {
                 child = next;
             }
         }
+        // The next incremental run starts from here.
+        self.update_archetypes(world);
+        self.last_run = world.bump_change_tick();
         true
+    }
+}
+
+/// Writes `value` into the `GlobalTransform` at (`chunk`, `row`) of archetype
+/// `archetype` (column `column`) if its bits differ, marking the column; returns whether
+/// it wrote.
+#[inline]
+fn store(
+    world: &World,
+    archetype: u32,
+    column: usize,
+    chunk: usize,
+    row: usize,
+    value: Affine3A,
+    tick: u64,
+) -> bool {
+    let arch = &world.archetypes[archetype as usize];
+    let ptr = arch.value_ptr(chunk, column, row).cast::<GlobalTransform>();
+    // SAFETY: the column holds an initialized `GlobalTransform` at this row.
+    let old = unsafe { ptr.read() };
+    if same_bits(&old.0, &value) {
+        return false;
+    }
+    // SAFETY: as above; the caller holds the world exclusively (`run` takes `&mut World`
+    // and only passes it on as a shared reference), so nothing else reads the value.
+    unsafe { ptr.write(GlobalTransform(value)) };
+    arch.mark_column(chunk, column, tick);
+    true
+}
+
+/// The world transform of `entity`, if it has one.
+#[inline]
+fn read_global(world: &World, ids: Ids, entity: Entity) -> Option<Affine3A> {
+    let loc = world.entities.location(entity)?;
+    let arch = &world.archetypes[loc.archetype as usize];
+    let column = arch.column_index(ids.global)?;
+    // SAFETY: the column holds an initialized `GlobalTransform` at this row.
+    Some(unsafe {
+        (*arch
+            .value_ptr(loc.chunk as usize, column, loc.row as usize)
+            .cast::<GlobalTransform>())
+        .0
+    })
+}
+
+/// Depth of a child (1 below a root) when a full pass reaches it, i.e. every ancestor
+/// below the root has a `Transform` and a `GlobalTransform` and the root a
+/// `GlobalTransform` and `Children`; `None` otherwise (a broken chain, a despawned
+/// ancestor).
+fn reach_depth(world: &World, ids: Ids, entity: Entity) -> Option<u32> {
+    let mut depth = 1u32;
+    let mut current = parent_of(world, ids, entity)?;
+    loop {
+        let loc = world.entities.location(current)?;
+        let arch = &world.archetypes[loc.archetype as usize];
+        arch.column_index(ids.global)?;
+        arch.column_index(ids.children)?;
+        let Some(parent) = arch.column_index(ids.parent) else {
+            return Some(depth);
+        };
+        arch.column_index(ids.local)?;
+        // SAFETY: the column holds an initialized `Parent` at this row.
+        current = unsafe {
+            (*arch
+                .value_ptr(loc.chunk as usize, parent, loc.row as usize)
+                .cast::<Parent>())
+            .get()
+        };
+        depth += 1;
+    }
+}
+
+/// `entity`'s parent, if it has one.
+#[inline]
+fn parent_of(world: &World, ids: Ids, entity: Entity) -> Option<Entity> {
+    let loc = world.entities.location(entity)?;
+    let arch = &world.archetypes[loc.archetype as usize];
+    let column = arch.column_index(ids.parent)?;
+    // SAFETY: the column holds an initialized `Parent` at this row.
+    Some(unsafe {
+        (*arch
+            .value_ptr(loc.chunk as usize, column, loc.row as usize)
+            .cast::<Parent>())
+        .get()
+    })
+}
+
+/// Visits the child lists on `stack`: every listed child is recomputed from its
+/// parent's world transform, and its own children are visited only if its value
+/// changed.
+fn walk(
+    world: &World,
+    ids: Ids,
+    stack: &mut Vec<(Entity, u32, Affine3A)>,
+    tick: u64,
+    stats: &mut PropagationStats,
+) {
+    while let Some((first, count, parent_global)) = stack.pop() {
+        let mut child = first;
+        for _ in 0..count {
+            let Some(loc) = world.entities.location(child) else {
+                break;
+            };
+            let arch = &world.archetypes[loc.archetype as usize];
+            let Some(parent) = arch.column_index(ids.parent) else {
+                break;
+            };
+            let (chunk, row) = (loc.chunk as usize, loc.row as usize);
+            // SAFETY: the column holds an initialized `Parent` at this row.
+            let link = unsafe { *arch.value_ptr(chunk, parent, row).cast::<Parent>() };
+            // A child without transforms: its subtree is skipped (as in a full pass).
+            if let (Some(local), Some(global)) =
+                (arch.column_index(ids.local), arch.column_index(ids.global))
+            {
+                // SAFETY: the column holds an initialized `Transform` at this row.
+                let local = unsafe { *arch.value_ptr(chunk, local, row).cast::<Transform>() };
+                let value = parent_global * local.to_affine();
+                stats.recomputed += 1;
+                if store(world, loc.archetype, global, chunk, row, value, tick) {
+                    stats.written += 1;
+                    if let Some(children) = arch.column_index(ids.children) {
+                        // SAFETY: the column holds an initialized `Children` here.
+                        let c = unsafe { *arch.value_ptr(chunk, children, row).cast::<Children>() };
+                        stack.push((c.first, c.count, value));
+                    }
+                }
+            }
+            child = link.next;
+        }
     }
 }
