@@ -56,6 +56,7 @@ struct Heap {
 struct CachedImage {
     desc: TextureDesc,
     usage: vk::ImageUsageFlags,
+    concurrent: bool,
     heap: u64,
     offset: u64,
     image: vk::Image,
@@ -107,6 +108,7 @@ impl CachedImage {
 struct CachedBuffer {
     size: u64,
     usage: vk::BufferUsageFlags,
+    concurrent: bool,
     heap: u64,
     offset: u64,
     buffer: vk::Buffer,
@@ -148,8 +150,15 @@ fn find_from<T>(list: &[T], cursor: usize, mut matches: impl FnMut(&T) -> bool) 
 pub(crate) struct PhysicalResources {
     slots: Vec<Slot>,
     current: Vec<Physical>,
-    image_requirements: Vec<(TextureDesc, vk::ImageUsageFlags, vk::MemoryRequirements)>,
-    buffer_requirements: Vec<(u64, vk::BufferUsageFlags, vk::MemoryRequirements)>,
+    image_requirements: Vec<(
+        TextureDesc,
+        vk::ImageUsageFlags,
+        bool,
+        vk::MemoryRequirements,
+    )>,
+    buffer_requirements: Vec<(u64, vk::BufferUsageFlags, bool, vk::MemoryRequirements)>,
+    /// The graphics and async compute queue families, for resources shared concurrently.
+    families: [u32; 2],
     requirements: Vec<vk::MemoryRequirements>,
     groups: Vec<GroupKey>,
     items: Vec<Item>,
@@ -160,8 +169,13 @@ pub(crate) struct PhysicalResources {
     next_heap_id: u64,
 }
 
-fn image_info(desc: &TextureDesc, usage: vk::ImageUsageFlags) -> vk::ImageCreateInfo<'static> {
-    vk::ImageCreateInfo::default()
+/// Create info of a transient image; `families` for concurrent sharing between queues.
+fn image_info<'a>(
+    desc: &TextureDesc,
+    usage: vk::ImageUsageFlags,
+    families: Option<&'a [u32; 2]>,
+) -> vk::ImageCreateInfo<'a> {
+    let info = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(desc.format)
         .extent(vk::Extent3D {
@@ -174,20 +188,38 @@ fn image_info(desc: &TextureDesc, usage: vk::ImageUsageFlags) -> vk::ImageCreate
         .samples(desc.samples)
         .tiling(vk::ImageTiling::OPTIMAL)
         .usage(usage)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+    match families {
+        Some(families) => info
+            .sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(families),
+        None => info.sharing_mode(vk::SharingMode::EXCLUSIVE),
+    }
 }
 
-fn buffer_info(size: u64, usage: vk::BufferUsageFlags) -> vk::BufferCreateInfo<'static> {
-    vk::BufferCreateInfo::default()
+/// Create info of a transient buffer; `families` for concurrent sharing between queues.
+fn buffer_info<'a>(
+    size: u64,
+    usage: vk::BufferUsageFlags,
+    families: Option<&'a [u32; 2]>,
+) -> vk::BufferCreateInfo<'a> {
+    let info = vk::BufferCreateInfo::default()
         .size(size.max(4))
-        .usage(usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
-        .sharing_mode(vk::SharingMode::EXCLUSIVE)
+        .usage(usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+    match families {
+        Some(families) => info
+            .sharing_mode(vk::SharingMode::CONCURRENT)
+            .queue_family_indices(families),
+        None => info.sharing_mode(vk::SharingMode::EXCLUSIVE),
+    }
 }
 
 impl PhysicalResources {
-    pub(crate) fn new(slots: usize) -> Self {
+    /// `families`: the graphics and async compute queue families (for transients shared
+    /// concurrently between them).
+    pub(crate) fn new(slots: usize, families: [u32; 2]) -> Self {
         Self {
+            families,
             slots: (0..slots).map(|_| Slot::default()).collect(),
             current: Vec::new(),
             image_requirements: Vec::new(),
@@ -212,6 +244,7 @@ impl PhysicalResources {
         &self.current
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn requirements_of(
         &mut self,
         device: &ash::Device,
@@ -220,17 +253,20 @@ impl PhysicalResources {
         buffer: &BufferDesc,
         image_usage: vk::ImageUsageFlags,
         buffer_usage: vk::BufferUsageFlags,
+        concurrent: bool,
     ) -> vk::MemoryRequirements {
+        let families = self.families;
+        let families = concurrent.then_some(&families);
         match kind {
             Kind::Texture => {
-                if let Some(&(_, _, r)) = self
+                if let Some(&(_, _, _, r)) = self
                     .image_requirements
                     .iter()
-                    .find(|(d, u, _)| d == texture && *u == image_usage)
+                    .find(|(d, u, c, _)| d == texture && *u == image_usage && *c == concurrent)
                 {
                     return r;
                 }
-                let info = image_info(texture, image_usage);
+                let info = image_info(texture, image_usage, families);
                 let mut out = vk::MemoryRequirements2::default();
                 // SAFETY: valid create info (maintenance4 is core in Vulkan 1.3).
                 unsafe {
@@ -240,18 +276,17 @@ impl PhysicalResources {
                     );
                 }
                 let r = out.memory_requirements;
-                self.image_requirements.push((*texture, image_usage, r));
+                self.image_requirements
+                    .push((*texture, image_usage, concurrent, r));
                 r
             }
             Kind::Buffer => {
-                if let Some(&(_, _, r)) = self
-                    .buffer_requirements
-                    .iter()
-                    .find(|(s, u, _)| *s == buffer.size && *u == buffer_usage)
-                {
+                if let Some(&(_, _, _, r)) = self.buffer_requirements.iter().find(|(s, u, c, _)| {
+                    *s == buffer.size && *u == buffer_usage && *c == concurrent
+                }) {
                     return r;
                 }
-                let info = buffer_info(buffer.size, buffer_usage);
+                let info = buffer_info(buffer.size, buffer_usage, families);
                 let mut out = vk::MemoryRequirements2::default();
                 // SAFETY: valid create info.
                 unsafe {
@@ -262,7 +297,7 @@ impl PhysicalResources {
                 }
                 let r = out.memory_requirements;
                 self.buffer_requirements
-                    .push((buffer.size, buffer_usage, r));
+                    .push((buffer.size, buffer_usage, concurrent, r));
                 r
             }
         }
@@ -300,8 +335,12 @@ impl PhysicalResources {
                 self.requirements.push(vk::MemoryRequirements::default());
                 continue;
             }
-            let (kind, image_usage, buffer_usage) =
-                (resource.kind, resource.image_usage, resource.buffer_usage);
+            let (kind, image_usage, buffer_usage, concurrent) = (
+                resource.kind,
+                resource.image_usage,
+                resource.buffer_usage,
+                resource.concurrent,
+            );
             let req = self.requirements_of(
                 device,
                 kind,
@@ -309,6 +348,7 @@ impl PhysicalResources {
                 &buffers[r],
                 image_usage,
                 buffer_usage,
+                concurrent,
             );
             self.requirements.push(req);
             let key = GroupKey {
@@ -354,6 +394,9 @@ impl PhysicalResources {
                 hasher.write_u64(item.align);
                 hasher.write_u64(u64::from(item.first) << 32 | u64::from(item.last));
                 hasher.write_u64(u64::from(r));
+            }
+            for &r in &self.item_resources {
+                hasher.write_u64(u64::from(records.resources[r as usize].concurrent));
             }
             let hash = hasher.finish();
             let slot = &mut self.slots[slot_index];
@@ -462,12 +505,14 @@ impl PhysicalResources {
                     Kind::Texture => {
                         let desc = &textures[r];
                         let usage = resource.image_usage;
+                        let concurrent = resource.concurrent;
                         let cached = find_from(&slot.images, slot.image_cursor, |c| {
                             !c.used
                                 && c.heap == heap_id
                                 && c.offset == item.offset
                                 && c.desc == *desc
                                 && c.usage == usage
+                                && c.concurrent == concurrent
                         });
                         let index = match cached {
                             Some(i) => {
@@ -476,14 +521,23 @@ impl PhysicalResources {
                                 i
                             }
                             None => {
+                                let families = concurrent.then_some(&self.families);
                                 // SAFETY: memory and offset come from the heap and placement.
                                 let (image, view) = unsafe {
-                                    create_image(device, desc, usage, memory, base + item.offset)
+                                    create_image(
+                                        device,
+                                        desc,
+                                        usage,
+                                        families,
+                                        memory,
+                                        base + item.offset,
+                                    )
                                 }?;
                                 name_object(debug_utils, image, resource.name);
                                 slot.images.push(CachedImage {
                                     desc: *desc,
                                     usage,
+                                    concurrent,
                                     heap: heap_id,
                                     offset: item.offset,
                                     image,
@@ -513,12 +567,14 @@ impl PhysicalResources {
                     Kind::Buffer => {
                         let size = buffers[r].size;
                         let usage = resource.buffer_usage;
+                        let concurrent = resource.concurrent;
                         let cached = find_from(&slot.buffers, slot.buffer_cursor, |c| {
                             !c.used
                                 && c.heap == heap_id
                                 && c.offset == item.offset
                                 && c.size == size
                                 && c.usage == usage
+                                && c.concurrent == concurrent
                         });
                         let (buffer, address) = match cached {
                             Some(i) => {
@@ -528,14 +584,23 @@ impl PhysicalResources {
                                 (c.buffer, c.address)
                             }
                             None => {
+                                let families = concurrent.then_some(&self.families);
                                 // SAFETY: memory and offset come from the heap and placement.
                                 let (buffer, address) = unsafe {
-                                    create_buffer(device, size, usage, memory, base + item.offset)
+                                    create_buffer(
+                                        device,
+                                        size,
+                                        usage,
+                                        families,
+                                        memory,
+                                        base + item.offset,
+                                    )
                                 }?;
                                 name_object(debug_utils, buffer, resource.name);
                                 slot.buffers.push(CachedBuffer {
                                     size,
                                     usage,
+                                    concurrent,
                                     heap: heap_id,
                                     offset: item.offset,
                                     buffer,
@@ -659,17 +724,17 @@ unsafe fn create_image(
     device: &ash::Device,
     desc: &TextureDesc,
     usage: vk::ImageUsageFlags,
+    families: Option<&[u32; 2]>,
     memory: vk::DeviceMemory,
     offset: u64,
 ) -> Result<(vk::Image, vk::ImageView), RhiError> {
     // SAFETY: valid create info.
-    let image =
-        unsafe { device.create_image(&image_info(desc, usage), None) }.map_err(|result| {
-            RhiError::Vulkan {
-                call: "vkCreateImage",
-                result,
-            }
-        })?;
+    let image = unsafe { device.create_image(&image_info(desc, usage, families), None) }.map_err(
+        |result| RhiError::Vulkan {
+            call: "vkCreateImage",
+            result,
+        },
+    )?;
     // SAFETY: guaranteed by the caller.
     if let Err(result) = unsafe { device.bind_image_memory(image, memory, offset) } {
         // SAFETY: never used.
@@ -726,16 +791,15 @@ unsafe fn create_buffer(
     device: &ash::Device,
     size: u64,
     usage: vk::BufferUsageFlags,
+    families: Option<&[u32; 2]>,
     memory: vk::DeviceMemory,
     offset: u64,
 ) -> Result<(vk::Buffer, vk::DeviceAddress), RhiError> {
     // SAFETY: valid create info.
-    let buffer =
-        unsafe { device.create_buffer(&buffer_info(size, usage), None) }.map_err(|result| {
-            RhiError::Vulkan {
-                call: "vkCreateBuffer",
-                result,
-            }
+    let buffer = unsafe { device.create_buffer(&buffer_info(size, usage, families), None) }
+        .map_err(|result| RhiError::Vulkan {
+            call: "vkCreateBuffer",
+            result,
         })?;
     // SAFETY: guaranteed by the caller.
     if let Err(result) = unsafe { device.bind_buffer_memory(buffer, memory, offset) } {

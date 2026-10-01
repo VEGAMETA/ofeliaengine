@@ -75,6 +75,8 @@ pub struct Shot {
     /// Subsurface scattering (ADR 0059): in the procedural scene the floor and the
     /// dielectric spheres scatter light like wax (a profile of a few tenths of a unit).
     pub subsurface: bool,
+    /// Async compute (ADR 0065) on or off, or `None` for the device's default.
+    pub async_compute: Option<bool>,
 }
 
 impl Shot {
@@ -100,6 +102,7 @@ impl Shot {
             prepass: false,
             ao: None,
             subsurface: false,
+            async_compute: None,
         }
     }
 }
@@ -120,6 +123,11 @@ pub struct Rendered {
     /// Median GPU time of each pass over the timed frames, µs, by pass name (passes of
     /// the same name in one frame are added).
     pub pass_us: BTreeMap<&'static str, f64>,
+    /// Median GPU time of the frames end to end (first pass to last), µs: with async
+    /// compute, less than the sum of the passes.
+    pub frame_us: f64,
+    /// Whether async passes ran on the async compute queue.
+    pub async_compute: bool,
 }
 
 /// How to run [`render`].
@@ -480,6 +488,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     });
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 64 << 20).expect("ring");
     let mut graph = RenderGraph::new(&device, 1);
+    if let Some(on) = shot.async_compute {
+        graph.set_async_compute(on);
+    }
     let readback_size = u64::from(width * height * 4);
     let (readback, readback_mem) = allocator
         .create_buffer(
@@ -600,6 +611,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     };
 
     let mut timings: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
+    let mut frame_times = Vec::new();
     let mut frame_number = 0u64;
     let mut timed = 0;
     let mut captured = false;
@@ -757,6 +769,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 for (name, us) in frame {
                     timings.entry(name).or_default().push(us);
                 }
+                if let Some(us) = graph.gpu_frame_time() {
+                    frame_times.push(f64::from(us));
+                }
                 timed += 1;
             }
         }
@@ -772,6 +787,8 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         .into_iter()
         .map(|(name, mut v)| (name, median(&mut v)))
         .collect();
+    let frame_us = median(&mut frame_times);
+    let async_compute = graph.async_compute();
 
     let mut environment = environment;
     // SAFETY: the device is idle; everything below was created above and is not used
@@ -802,5 +819,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         height,
         rgba8,
         pass_us,
+        frame_us,
+        async_compute,
     })
 }

@@ -120,6 +120,38 @@ fn procedural_scene_with_subsurface_scattering() {
     });
 }
 
+/// The ambient occlusion shot with async compute on and off (ADR 0065): the passes run
+/// on another queue, in another order, with ownership transfers, and the bytes are the
+/// same. Without an async compute queue both renders take the single-queue path.
+#[test]
+fn async_compute_renders_the_same_bytes_as_one_queue() {
+    let options = RenderOptions {
+        validation: true,
+        timed_frames: 0,
+    };
+    let shot = |on| Shot {
+        ao: Some(AoSettings::default()),
+        async_compute: Some(on),
+        ..procedural("procedural_ao")
+    };
+    let (one, two) = match (render(&shot(false), options), render(&shot(true), options)) {
+        (Ok(one), Ok(two)) => (one, two),
+        (Err(Skip::NoGpu(e)), _) | (_, Err(Skip::NoGpu(e))) => {
+            println!("skipped, no GPU ({e})");
+            return;
+        }
+        (Err(Skip::NoScene(path)), _) | (_, Err(Skip::NoScene(path))) => {
+            panic!("procedural scene needs no files: {}", path.display())
+        }
+    };
+    println!(
+        "{}: async compute {} vs {}",
+        two.adapter, one.async_compute, two.async_compute
+    );
+    assert!(!one.async_compute);
+    assert!(one.rgba8 == two.rgba8, "async compute changed the picture");
+}
+
 /// Sponza with ambient occlusion: the curtains' folds, the arches, the plants.
 #[test]
 fn sponza_with_ambient_occlusion() {

@@ -459,6 +459,7 @@ impl Environment {
         if !self.dfg_ready.replace(true) {
             let target = self.dfg.storage[0];
             fg.add_compute("environment dfg", bindless)
+                .async_compute()
                 .write(dfg, Access::StorageWrite(ShaderStages::COMPUTE))
                 .dispatch(
                     dfg_table,
@@ -485,6 +486,7 @@ impl Environment {
             };
             let storage: &'g [u32] = &self.source.storage;
             fg.add_compute("environment sky", bindless)
+                .async_compute()
                 .write(source, Access::StorageWrite(ShaderStages::COMPUTE))
                 .record(move |rec| {
                     let push = Push {
@@ -513,6 +515,7 @@ impl Environment {
             let targets: &'g [u32] = &self.prefiltered.storage;
             let source_index = self.source.sampled;
             fg.add_compute("environment prefilter", bindless)
+                .async_compute()
                 .read(source, Access::Sampled(ShaderStages::COMPUTE))
                 .write(prefiltered, Access::StorageWrite(ShaderStages::COMPUTE))
                 .record(move |rec| {
@@ -532,6 +535,7 @@ impl Environment {
                     }
                 });
             fg.add_compute("environment irradiance", bindless)
+                .async_compute()
                 .read(source, Access::Sampled(ShaderStages::COMPUTE))
                 .write(sh, Access::StorageWrite(ShaderStages::COMPUTE))
                 .dispatch(irradiance, Dispatch::Groups([1, 1, 1]), move |ctx| {
