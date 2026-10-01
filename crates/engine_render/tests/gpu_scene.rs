@@ -2169,16 +2169,24 @@ fn compute_is_deterministic() {
         .unwrap();
     // SAFETY: valid buffer with device address usage.
     let addr = unsafe { d.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(out)) };
-    let code = std::fs::read(format!("{dir}/alu.aluMain.spv")).unwrap();
+    let lds = std::env::var("ALU_LDS").is_ok();
+    let code = std::fs::read(if lds { format!("{dir}/lds.ldsMain.spv") } else { format!("{dir}/alu.aluMain.spv") }).unwrap();
     let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
     // SAFETY: plain object creation.
     let (module, layout, pipeline, pool, cmd) = unsafe {
         let module = d.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None).unwrap();
         let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: 16 }];
         let layout = d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges), None).unwrap();
-        let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(module).name(c"aluMain");
+        let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(module).name(if lds { c"ldsMain" } else { c"aluMain" });
         let pipeline = d
-            .create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout)], None)
+            .create_compute_pipelines(
+                vk::PipelineCache::null(),
+                &[vk::ComputePipelineCreateInfo::default()
+                    .stage(stage)
+                    .layout(layout)
+                    .flags(if std::env::var("STRESS_ISA").is_ok() { vk::PipelineCreateFlags::CAPTURE_INTERNAL_REPRESENTATIONS_KHR } else { vk::PipelineCreateFlags::empty() })],
+                None,
+            )
             .unwrap()[0];
         let pool = d
             .create_command_pool(
@@ -2193,7 +2201,25 @@ fn compute_is_deterministic() {
             .unwrap()[0];
         (module, layout, pipeline, pool, cmd)
     };
-    let mut first: Option<Vec<u32>> = None;
+    if let Ok(path) = std::env::var("STRESS_ISA") {
+        dump_isa(&instance, &device, pipeline, &path);
+    }
+    // The LDS kernel's exact results, computed on the CPU.
+    let reference: Option<Vec<u32>> = lds.then(|| {
+        let mut out = vec![0u32; threads as usize];
+        for g in 0..(threads / 256) as usize {
+            let mut x: Vec<u32> = (0..256u32).map(|l| (g as u32 * 256 + l).wrapping_mul(2654435761).wrapping_add(1)).collect();
+            for i in 0..iterations {
+                let y: Vec<u32> = (0..256u32).map(|l| x[((l + 1 + i * 37) & 255) as usize]).collect();
+                for l in 0..256 {
+                    x[l] ^= y[l].wrapping_add(x[l] << 6).wrapping_add(x[l] >> 2);
+                }
+            }
+            out[g * 256..(g + 1) * 256].copy_from_slice(&x);
+        }
+        out
+    });
+    let mut first: Option<Vec<u32>> = reference;
     let mut bad = 0;
     for k in 0..n {
         // SAFETY: one-shot recording and submission, then wait.
@@ -2212,7 +2238,7 @@ fn compute_is_deterministic() {
             push[..8].copy_from_slice(&addr.to_le_bytes());
             push[8..12].copy_from_slice(&iterations.to_le_bytes());
             d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::COMPUTE, 0, &push);
-            d.cmd_dispatch(cmd, threads / 64, 1, 1);
+            d.cmd_dispatch(cmd, threads / if lds { 256 } else { 64 }, 1, 1);
             let b = [vk::MemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
                 .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
@@ -2242,6 +2268,16 @@ fn compute_is_deterministic() {
                     bad += 1;
                     let i = wrong[0];
                     eprintln!("ALU run {k}: {} threads differ, first {i}: {:08x} vs {:08x} (xor {:08x})", wrong.len(), f[i], got[i], f[i] ^ got[i]);
+                    if iterations == 1 && lds {
+                        // With one round, a thread's result is x ^ (y + (x << 6) + (x >> 2)) of
+                        // the y it read: recover y and find which thread's initial value it is.
+                        for &w in wrong.iter().take(8) {
+                            let x = (w as u32).wrapping_mul(2654435761).wrapping_add(1);
+                            let y = (got[w] ^ x).wrapping_sub(x << 6).wrapping_sub(x >> 2);
+                            let src = (0..threads).find(|&t| t.wrapping_mul(2654435761).wrapping_add(1) == y);
+                            eprintln!("  thread {w} (group {}, lane {}): read {y:08x}, from thread {:?} (expected {})", w / 256, w % 256, src.map(|t| (t, t / 256, t % 256)), (w / 256) * 256 + ((w % 256 + 1) & 255));
+                        }
+                    }
                 }
             }
         }
