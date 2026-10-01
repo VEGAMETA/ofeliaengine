@@ -1,0 +1,20 @@
+[package]
+name = "acl-compare"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Research harness for animation compression (ADR 0068): engine_anim's clip format against the Animation Compression Library (ACL, MIT) on the same clips, same error metric. Outside the workspace, like bench/ecs-compare. ACL is not vendored: point ACL_DIR and RTM_DIR at clones (README)."
+
+[workspace]
+
+[dependencies]
+engine_anim = { path = "../../crates/engine_anim" }
+engine_assets = { path = "../../crates/engine_assets" }
+engine_core = { path = "../../crates/engine_core" }
+
+[build-dependencies]
+cc = "1"
+
+[profile.release]
+opt-level = 3
+debug = false

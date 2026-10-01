@@ -41,8 +41,13 @@ const _: () = assert!(
 pub const BLOCK: u64 = READ_ALIGN as u64;
 /// First bytes of a pack.
 pub const MAGIC: [u8; 4] = *b"OFPK";
-/// Version of the layout.
-pub const VERSION: u32 = 1;
+/// Version of the layout: the newest this engine writes and reads. A pack is written as
+/// version 1 unless it holds entries of a later version (skins and clips: version 2,
+/// ADR 0068), so packs without them stay readable by engines that only know version 1;
+/// those refuse a version 2 pack instead of misreading it.
+pub const VERSION: u32 = 2;
+/// Oldest version this engine reads.
+pub const MIN_VERSION: u32 = 1;
 /// Largest entry a pack accepts (raw bytes): 4 GiB.
 pub const MAX_ENTRY_BYTES: u64 = 1 << 32;
 /// Chunks of 1 MiB: measured on BC7/BC5 textures and meshes, they compress within
@@ -91,6 +96,10 @@ pub enum EntryKind {
     Mesh,
     /// A scene: textures, materials and instances.
     Scene,
+    /// A skin: its skeleton, joints and inverse bind matrices (version 2).
+    Skin,
+    /// A compressed animation clip of a skin's skeleton (version 2).
+    Clip,
 }
 
 impl EntryKind {
@@ -99,6 +108,16 @@ impl EntryKind {
             Self::TextureLevels => 1,
             Self::Mesh => 2,
             Self::Scene => 3,
+            Self::Skin => 4,
+            Self::Clip => 5,
+        }
+    }
+
+    /// The first pack version that has this kind.
+    pub fn since_version(self) -> u32 {
+        match self {
+            Self::TextureLevels | Self::Mesh | Self::Scene => 1,
+            Self::Skin | Self::Clip => 2,
         }
     }
 
@@ -107,6 +126,8 @@ impl EntryKind {
             1 => Some(Self::TextureLevels),
             2 => Some(Self::Mesh),
             3 => Some(Self::Scene),
+            4 => Some(Self::Skin),
+            5 => Some(Self::Clip),
             _ => None,
         }
     }
@@ -324,6 +345,8 @@ pub struct PackWriter {
     chunk_shift: u32,
     stats: PackStats,
     offset: u64,
+    /// The version the entries so far need.
+    version: u32,
 }
 
 impl PackWriter {
@@ -351,6 +374,7 @@ impl PackWriter {
             chunk_shift,
             stats: PackStats::default(),
             offset: BLOCK,
+            version: MIN_VERSION,
         })
     }
 
@@ -366,6 +390,9 @@ impl PackWriter {
         let expected = prepared.entry.bytes.div_ceil(1 << self.chunk_shift);
         if u64::from(prepared.entry.chunk_count) != expected {
             return Err(invalid("entry prepared with another chunk size"));
+        }
+        if let Some(kind) = EntryKind::from_code(prepared.entry.kind) {
+            self.version = self.version.max(kind.since_version());
         }
         self.file.write_all(&prepared.stored)?;
         let padded = (prepared.stored.len() as u64).next_multiple_of(BLOCK);
@@ -392,7 +419,7 @@ impl PackWriter {
         write_zeros(&mut self.file, end - self.offset - toc.len() as u64)?;
         let header = Header {
             magic: MAGIC,
-            version: VERSION,
+            version: self.version,
             entry_count: self.entries.len() as u32,
             chunk_count: self.chunks.len() as u32,
             chunk_shift: self.chunk_shift,
@@ -480,9 +507,9 @@ impl Pack {
         if header.magic != MAGIC {
             return Err(invalid("not a pack"));
         }
-        if header.version != VERSION {
+        if !(MIN_VERSION..=VERSION).contains(&header.version) {
             return Err(invalid(format!(
-                "version {}, this engine reads {VERSION}",
+                "version {}, this engine reads {MIN_VERSION} to {VERSION}",
                 header.version
             )));
         }
@@ -525,8 +552,12 @@ impl Pack {
         let chunk_bytes = 1u64 << header.chunk_shift;
         for (i, e) in entries.iter().enumerate() {
             let fail = |why: &str| invalid(format!("entry {i}: {why}"));
-            if EntryKind::from_code(e.kind).is_none() {
-                return Err(fail("unknown kind"));
+            match EntryKind::from_code(e.kind) {
+                None => return Err(fail("unknown kind")),
+                Some(kind) if kind.since_version() > header.version => {
+                    return Err(fail("a kind its version does not have"));
+                }
+                Some(_) => {}
             }
             if e.bytes > MAX_ENTRY_BYTES || e.stored_bytes > MAX_ENTRY_BYTES {
                 return Err(fail("too large"));

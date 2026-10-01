@@ -185,6 +185,18 @@ fn flight_helmet() {
     ));
 }
 
+/// The fox (ADR 0068), skinned on the GPU at 0.4 s into its Walk cycle (clip 1): legs
+/// apart, tail curved. Seen from its side, its texture, sun shadows on itself.
+#[test]
+fn animated_fox() {
+    check(&Shot {
+        eye: Some(Vec3::new(105.0, 60.0, 30.0)),
+        target: Some(Vec3::new(0.0, 40.0, -5.0)),
+        animation: Some((1, 0.4)),
+        ..Shot::new("animated_fox", Source::Gltf(PathBuf::from("Fox/Fox.gltf")))
+    });
+}
+
 /// The procedural scene under the physically based sky (ADR 0069), looking out over the
 /// wall towards the horizon: the sun at `elevation` degrees, its light's color from the
 /// atmosphere, the sky and the image-based light from its tables.

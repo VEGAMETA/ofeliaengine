@@ -131,6 +131,14 @@ encryption against Windows CNG (the engine uses CNG):
 | parley 0.11.1 (+ fontique, parlance, ICU4X crates and data) | Apache-2.0 OR MIT (ICU4X: Unicode-3.0) | text layout comparison |
 | cosmic-text 0.19.0 (+ fontdb, swash, older harfrust and skrifa) | MIT OR Apache-2.0 | text layout comparison |
 
+`bench/acl-compare` (ADR 0068) builds with its own `Cargo.lock`: the `cc` crate 1.x (MIT
+OR Apache-2.0, already a build dependency above) and the engine's own crates. It compiles
+a small C shim against clones of the Animation Compression Library 2.1.0 (Nicholas
+Frechette, MIT) and Realtime Math 2.3.1 (Nicholas Frechette, MIT) that the user points
+it at (`ACL_DIR`, `RTM_DIR`); neither is vendored, committed or linked into the engine.
+`engine_anim`'s compression follows ACL's published approach (ideas only, no code
+copied; `docs/research/animation.md`).
+
 ## Loaded at run time, not distributed
 
 | Component | License | Used for |
