@@ -1,7 +1,8 @@
 //! CLAUDE.md §5: zero heap allocations per frame in steady state, for local lights'
 //! shadows (ADR 0071): casters moving near shadowed lights every frame (shadows redrawn
-//! within the budget), a moving light, lights entering and leaving the view, through the
-//! persistent GPU scene and a draw list, uploaded and declared, culled and drawn, recorded.
+//! within the budget), a moving light, lights entering and leaving the view, and the sun's
+//! contact shadows, through the persistent GPU scene and a draw list, uploaded and
+//! declared, culled and drawn, recorded.
 //!
 //! A counting global allocator observes the process while frames are declared and
 //! recorded after a warm-up (driver allocations happen in C and are not counted). One
@@ -101,6 +102,9 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
                 ..LocalShadowSettings::default()
             }),
         )
+        .unwrap();
+    renderer
+        .set_contact_shadows(&device, &bindless, Some(Default::default()))
         .unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 2).unwrap();
