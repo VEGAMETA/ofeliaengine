@@ -55,7 +55,9 @@ Decisions change only via an ADR backed by measurements.
   engine_render          render graph, 3D renderer, materials, post-processing, viewports
   engine_render2d        2D renderer: batching, sprites, tilemaps, vector primitives, 2D lighting
   engine_shader          Slang compilation, permutations, cache, pipeline cache, hot reload
-  engine_upscale         TAAU (own), FSR 3.1, loaders for user-supplied DLLs (Streamline, XeSS)
+  engine_upscale         TAAU (own) and the `Upscaler` interface shared by every upscaler
+  engine_fsr             FSR 3.1, built from the FidelityFX SDK sources (C++ via `cc`; ADR 0060)
+  engine_dlss            DLSS SR/DLAA through Streamline, user-supplied DLLs (ADR 0063)
   engine_latency         frame pacing, limiter, VK_NV_low_latency2, VK_AMD_anti_lag
   engine_physics         PhysicsBackend trait, shared types, test scenes
   engine_physics_native  own physics (deferred, ADR 0028)
@@ -71,11 +73,14 @@ Decisions change only via an ADR backed by measurements.
   engine_text            shaping, rasterization (MSDF), layout
   engine_ui              in-game UI (runtime)
   engine_profiler        Tracy integration + built-in panels
+  engine_log             logging backend of the `log` facade, lock-free ring (ADR 0061)
+  engine_crash           crash reports: minidumps, panic reports, log tail (ADR 0061)
   engine_editor          editor
   engine_runtime         game executable (player)
 /tools                   CLI: cook, shaders, bench, pack
 /bench                   benchmarks (criterion + scene benchmarks)
-/tests                   golden-image render tests, physics determinism, integration tests
+/tests                   golden-image render tests and the GPU time gate (tests/golden, ADR 0062),
+                         physics determinism, integration tests
 /docs
   /adr                   architecture decision records (NNNN-title.md)
   /research              research notes (sources, conclusions)
@@ -243,6 +248,12 @@ A viewport is a first-class entity, not a "camera window":
 - 2D lights and shadows, normal maps for sprites.
 - Full custom shader support (the same Slang pipeline as 3D).
 - Sorting: layers + y-sort + user key; deterministic.
+
+### Motion blur: never from the player's camera in gameplay (ADR 0067)
+Team decision (2026-10-01): blur from the camera's own motion is forbidden while the game is
+interactive, by the engine's license (the final license must say so; ADR 0020) and by the API:
+camera motion blur exists only on views marked cinematic (cutscenes, sequences); a gameplay view
+cannot turn it on. The full effect is implemented and tested; only its use is limited.
 
 ### Upscaling and frame generation
 `Upscaler` interface: color, depth, motion vectors, exposure, jitter, reactive/transparency masks.
