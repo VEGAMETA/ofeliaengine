@@ -1935,6 +1935,7 @@ impl ForwardRenderer {
                 ring,
                 bindless,
                 &AtmosphereView {
+                    clip_from_world,
                     world_from_clip,
                     unjittered_world_from_clip: unjittered.inverse(),
                     camera: view.camera.position,
