@@ -1324,7 +1324,11 @@ fn repeated_frames_are_identical() {
     );
     let _ = first;
     if let Ok(dir) = std::env::var("STRESS_PROBE_PIPE") {
-        let pl = make_probe_pipeline(bed.device.raw(), &dir);
+        let pl = make_probe_pipeline_with(
+            bed.device.raw(),
+            &dir,
+            std::env::var("STRESS_BINDLESS_LAYOUT").is_ok().then(|| bed.bindless.pipeline_layout()),
+        );
         if let Ok(path) = std::env::var("STRESS_ISA") {
             dump_isa(&bed.instance, &bed.device, pl.0, &path);
             return;
@@ -1732,6 +1736,15 @@ fn raster_probe_is_deterministic() {
         .layout(layout);
     // SAFETY: valid create info.
     let pipeline = unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.unwrap()[0];
+    let (pipeline, layout) = if std::env::var("STRESS_PROBE_FILE").is_ok() {
+        let pl = make_probe_pipeline(d, &dir);
+        if let Ok(path) = std::env::var("STRESS_ISA") {
+            dump_isa(&instance, &device, pl.0, &path);
+        }
+        pl
+    } else {
+        (pipeline, layout)
+    };
     // SAFETY: test setup.
     let (pool, cmd) = unsafe {
         let pool = d
@@ -1750,6 +1763,7 @@ fn raster_probe_is_deterministic() {
     let range = |aspect| vk::ImageSubresourceRange { aspect_mask: aspect, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
     let mut hashes: Vec<u64> = Vec::new();
     let use_graph = std::env::var("PROBE_GRAPH").is_ok();
+    let mut saved = 0;
     let mut graph = RenderGraph::new(&device, 1);
     for _ in 0..n {
         if use_graph {
@@ -1967,7 +1981,16 @@ fn raster_probe_is_deterministic() {
             h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
         }
         hashes.push(h);
+        if hashes.len() > 1 && h != hashes[0] && saved < 12 {
+            if let Ok(dir) = std::env::var("ENGINE_DIFF_DIR") {
+                std::fs::write(format!("{dir}/probe_diff_{saved}.bin"), bytes).unwrap();
+                saved += 1;
+            }
+        }
         if hashes.len() == 1 {
+            if let Ok(dir) = std::env::var("ENGINE_DIFF_DIR") {
+                std::fs::write(format!("{dir}/probe_first.bin"), bytes).unwrap();
+            }
             if let Ok(dir) = std::env::var("ENGINE_DIFF_DIR") {
                 let png = engine_render::png::encode_png(size, size, engine_render::png::PngFormat::Rgba, &bytes[..image_bytes as usize]).unwrap();
                 std::fs::write(format!("{dir}/probe_first.png"), png).unwrap();
@@ -2029,16 +2052,23 @@ fn dump_isa(instance: &VkInstance, device: &Device, pipeline: vk::Pipeline, path
         }
         // SAFETY: as above.
         unsafe { (loader.fp().get_pipeline_executable_internal_representations_khr)(device.raw().handle(), &ei, &mut count, reps.as_mut_ptr()) };
-        for (r, b) in reps.iter().zip(&bufs) {
+        for (k, (r, b)) in reps.iter().zip(&bufs).enumerate() {
             out += &format!("--- {:?}
 {}
 ", r.name_as_c_str(), String::from_utf8_lossy(b));
+            if r.is_text == vk::FALSE {
+                std::fs::write(format!("{path}.{i}.{k}.bin"), b).unwrap();
+            }
         }
     }
     std::fs::write(path, out).unwrap();
 }
 
 fn make_probe_pipeline(d: &engine_rhi::ash::Device, dir: &str) -> (vk::Pipeline, vk::PipelineLayout) {
+    make_probe_pipeline_with(d, dir, None)
+}
+
+fn make_probe_pipeline_with(d: &engine_rhi::ash::Device, dir: &str, given_layout: Option<vk::PipelineLayout>) -> (vk::Pipeline, vk::PipelineLayout) {
     let module = |name: &str| {
         let bytes = std::fs::read(format!("{dir}/{name}.spv")).unwrap();
         let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
@@ -2051,14 +2081,28 @@ fn make_probe_pipeline(d: &engine_rhi::ash::Device, dir: &str) -> (vk::Pipeline,
             let e = std::env::var("STRESS_PROBE_ENTRY").unwrap_or_default();
             let name: &'static str = Box::leak(format!("probeVertex{e}").into_boxed_str());
             let cname: &'static std::ffi::CStr = Box::leak(std::ffi::CString::new(name).unwrap().into_boxed_c_str());
-            (module(&format!("probe2.{name}")), module("probe2.probeFragment"), cname, c"probeFragment")
+            if let Ok(vsname) = std::env::var("STRESS_ENGINE_VS") {
+                let cv: &'static std::ffi::CStr = Box::leak(std::ffi::CString::new(vsname.clone()).unwrap().into_boxed_c_str());
+                let fsn = std::env::var("STRESS_ENGINE_FS").unwrap_or_else(|_| "J".into());
+                let fname: &'static str = Box::leak(format!("probeFragment{fsn}").into_boxed_str());
+                let cf: &'static std::ffi::CStr = Box::leak(std::ffi::CString::new(fname).unwrap().into_boxed_c_str());
+                (module(&format!("engine.{vsname}")), module(&format!("probe2.{fname}")), cv, cf)
+            } else if let Ok(fsn) = std::env::var("STRESS_PROBE_FS_NAME") {
+                let fname: &'static str = Box::leak(format!("probeFragment{fsn}").into_boxed_str());
+                let cf: &'static std::ffi::CStr = Box::leak(std::ffi::CString::new(fname).unwrap().into_boxed_c_str());
+                (module(&format!("probe2.{name}")), module(&format!("probe2.{fname}")), cname, cf)
+            } else if std::env::var("STRESS_PROBE_FS").is_ok() {
+                (module(&format!("probe2.{name}")), module("probe2.probeFragmentI"), cname, c"probeFragmentI")
+            } else {
+                (module(&format!("probe2.{name}")), module("probe2.probeFragment"), cname, c"probeFragment")
+            }
         }
     } else {
         (module("raster.rasterVertex"), module("raster.rasterFragment"), c"rasterVertex", c"rasterFragment")
     };
     let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::ALL_GRAPHICS, offset: 0, size: 112 }];
     // SAFETY: plain object creation.
-    let layout = unsafe { d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges), None) }.unwrap();
+    let layout = given_layout.unwrap_or_else(|| unsafe { d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges), None) }.unwrap());
     let stages = [
         vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs).name(vname),
         vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs).name(fname),
@@ -2068,13 +2112,17 @@ fn make_probe_pipeline(d: &engine_rhi::ash::Device, dir: &str) -> (vk::Pipeline,
     let vi = vk::PipelineVertexInputStateCreateInfo::default();
     let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
     let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
-    let rs = vk::PipelineRasterizationStateCreateInfo::default().line_width(1.0);
+    let cull = std::env::var("PROBE_CULL").unwrap_or_default();
+    let rs = vk::PipelineRasterizationStateCreateInfo::default()
+        .cull_mode(if cull == "static" { vk::CullModeFlags::BACK } else { vk::CullModeFlags::NONE })
+        .front_face(vk::FrontFace::CLOCKWISE)
+        .line_width(1.0);
     let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let ds = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(true).depth_compare_op(vk::CompareOp::LESS);
     let blend = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
     let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend);
     let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR, vk::DynamicState::CULL_MODE, vk::DynamicState::FRONT_FACE];
-    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(if cull == "dynamic" { &dyns[..] } else { &dyns[..2] });
     let info = vk::GraphicsPipelineCreateInfo::default()
         .push_next(&mut rendering)
         .stages(&stages)
@@ -2091,4 +2139,125 @@ fn make_probe_pipeline(d: &engine_rhi::ash::Device, dir: &str) -> (vk::Pipeline,
     // SAFETY: valid create info.
     let pipeline = unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.unwrap()[0];
     (pipeline, layout)
+}
+
+/// Debug: a compute kernel (integer and float chain per thread) gives the same results
+/// every run.
+#[test]
+#[ignore = "stress"]
+fn compute_is_deterministic() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let dir = std::env::var("PROBE_SHADERS").unwrap();
+    let mut allocator = Allocator::new(&device);
+    let d = device.raw();
+    let n: usize = std::env::var("STRESS_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let threads: u32 = 1 << 18;
+    let iterations: u32 = std::env::var("ALU_ITERATIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(256);
+    let bytes = u64::from(threads) * 4;
+    let (out, out_mem) = allocator
+        .create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(bytes)
+                .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::TRANSFER_SRC),
+            MemoryLocation::Device,
+        )
+        .unwrap();
+    let (rb, rb_mem) = allocator
+        .create_buffer(&vk::BufferCreateInfo::default().size(bytes).usage(vk::BufferUsageFlags::TRANSFER_DST), MemoryLocation::Readback)
+        .unwrap();
+    // SAFETY: valid buffer with device address usage.
+    let addr = unsafe { d.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(out)) };
+    let code = std::fs::read(format!("{dir}/alu.aluMain.spv")).unwrap();
+    let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    // SAFETY: plain object creation.
+    let (module, layout, pipeline, pool, cmd) = unsafe {
+        let module = d.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None).unwrap();
+        let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::COMPUTE, offset: 0, size: 16 }];
+        let layout = d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges), None).unwrap();
+        let stage = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(module).name(c"aluMain");
+        let pipeline = d
+            .create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(stage).layout(layout)], None)
+            .unwrap()[0];
+        let pool = d
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(device.graphics.family),
+                None,
+            )
+            .unwrap();
+        let cmd = d
+            .allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool).command_buffer_count(1))
+            .unwrap()[0];
+        (module, layout, pipeline, pool, cmd)
+    };
+    let mut first: Option<Vec<u32>> = None;
+    let mut bad = 0;
+    for k in 0..n {
+        // SAFETY: one-shot recording and submission, then wait.
+        unsafe {
+            d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
+            d.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).unwrap();
+            d.cmd_fill_buffer(cmd, out, 0, vk::WHOLE_SIZE, 0);
+            let b = [vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)];
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&b));
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
+            let mut push = [0u8; 16];
+            push[..8].copy_from_slice(&addr.to_le_bytes());
+            push[8..12].copy_from_slice(&iterations.to_le_bytes());
+            d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::COMPUTE, 0, &push);
+            d.cmd_dispatch(cmd, threads / 64, 1, 1);
+            let b = [vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+                .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)];
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&b));
+            d.cmd_copy_buffer(cmd, out, rb, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size: bytes }]);
+            let b = [vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&b));
+            d.end_command_buffer(cmd).unwrap();
+            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            d.queue_submit2(device.graphics.raw, &[vk::SubmitInfo2::default().command_buffer_infos(&infos)], vk::Fence::null()).unwrap();
+            device.wait_idle().unwrap();
+        }
+        let ptr = rb_mem.mapped_ptr().unwrap();
+        // SAFETY: idle; in bounds.
+        let got = unsafe { core::slice::from_raw_parts(ptr.as_ptr().cast::<u32>(), threads as usize) };
+        match &first {
+            None => first = Some(got.to_vec()),
+            Some(f) => {
+                let wrong: Vec<usize> = f.iter().zip(got).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
+                if !wrong.is_empty() {
+                    bad += 1;
+                    let i = wrong[0];
+                    eprintln!("ALU run {k}: {} threads differ, first {i}: {:08x} vs {:08x} (xor {:08x})", wrong.len(), f[i], got[i], f[i] ^ got[i]);
+                }
+            }
+        }
+    }
+    eprintln!("STRESS alu: {bad} of {n} runs wrong");
+    // SAFETY: idle.
+    unsafe {
+        d.destroy_pipeline(pipeline, None);
+        d.destroy_pipeline_layout(layout, None);
+        d.destroy_shader_module(module, None);
+        d.destroy_command_pool(pool, None);
+        allocator.destroy_buffer(out, out_mem);
+        allocator.destroy_buffer(rb, rb_mem);
+    }
+    drop(allocator);
+    drop(device);
+    drop(instance);
+    assert_eq!(bad, 0);
 }
