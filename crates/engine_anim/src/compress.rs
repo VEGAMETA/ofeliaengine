@@ -16,8 +16,8 @@
 //! removes the most error per added bit is taken.
 
 use crate::clip::{
-    AnimatedTrack, Channel, CompressedClip, ConstantTrack, RAW_BITS, dequantize, quantize,
-    rotation_from_xyz,
+    ALL_FOUR, AnimatedTrack, Channel, CompressedClip, ConstantTrack, RAW_BITS, component_count,
+    dequantize, quantize, rotation_from_stored, stored_components,
 };
 use crate::pose::{Pose, Transform, nlerp, safe_scale};
 use crate::raw::RawClip;
@@ -109,12 +109,22 @@ enum Kind {
     Animated(usize),
 }
 
-/// A component's stored values over the samples (rotations as x, y, z, w with w ≥ 0;
-/// deltas for additive clips).
+/// A component's values over the samples (rotations whole, each in the hemisphere of the
+/// one before; deltas for additive clips), and the range of the components stored.
 struct TrackValues {
     values: Vec<Vec4>,
-    min: Vec3A,
-    max: Vec3A,
+    min: Vec4,
+    max: Vec4,
+    /// [`AnimatedTrack::layout`] when quantized.
+    layout: u8,
+}
+
+/// The components a track stores of `v` in `layout`.
+fn stored(channel: Channel, v: Vec4, layout: u8) -> Vec4 {
+    match channel {
+        Channel::Rotation => stored_components(v, layout),
+        Channel::Translation | Channel::Scale => v.truncate().extend(0.0),
+    }
 }
 
 struct Compressor<'a> {
@@ -194,16 +204,30 @@ impl Compressor<'_> {
             Kind::Default | Kind::Constant => track.values[0],
             Kind::Animated(rate) => {
                 let bits = BIT_RATES[rate];
+                let v = track.values[s];
+                if bits == RAW_BITS {
+                    // Raw floats: rotations whole, vectors as they are.
+                    return v;
+                }
                 let (min, scale) = range(track, bits);
-                let v = track.values[s].truncate();
-                let q = Vec3::new(
-                    dequantize(quantize(v.x, min.x, scale.x, bits), min.x, scale.x, bits),
-                    dequantize(quantize(v.y, min.y, scale.y, bits), min.y, scale.y, bits),
-                    dequantize(quantize(v.z, min.z, scale.z, bits), min.z, scale.z, bits),
-                );
+                let c = stored(channel, v, track.layout);
+                let n = if channel == Channel::Rotation {
+                    component_count(track.layout) as usize
+                } else {
+                    3
+                };
+                let mut q = Vec4::ZERO;
+                for k in 0..n {
+                    q[k] = dequantize(
+                        quantize(c[k], min[k], scale[k], bits),
+                        min[k],
+                        scale[k],
+                        bits,
+                    );
+                }
                 match channel {
-                    Channel::Rotation => Vec4::from(rotation_from_xyz(q.into())),
-                    _ => q.extend(0.0),
+                    Channel::Rotation => Vec4::from(rotation_from_stored(q, track.layout)),
+                    _ => q,
                 }
             }
         }
@@ -340,9 +364,9 @@ impl Compressor<'_> {
 }
 
 /// Range minimum and step of a track's components for `bits`.
-fn range(track: &TrackValues, bits: u8) -> (Vec3A, Vec3A) {
+fn range(track: &TrackValues, bits: u8) -> (Vec4, Vec4) {
     if bits == RAW_BITS {
-        return (Vec3A::ZERO, Vec3A::ZERO);
+        return (Vec4::ZERO, Vec4::ZERO);
     }
     let steps = ((1u32 << bits) - 1) as f32;
     (track.min, (track.max - track.min) / steps)
@@ -383,12 +407,18 @@ pub fn compress(
         })
         .collect();
 
-    // Sample rate: the source's key rate, doubled while interpolation alone misses.
+    // Sample rate: the source's key rate, or the smallest multiple of it on whose grid
+    // every key lies (keys off the grid get their corners cut), doubled while
+    // interpolation alone misses.
+    let max_rate = settings.max_sample_rate.max(1.0);
     let mut rate = settings
         .sample_rate
-        .or_else(|| raw.min_key_interval().map(|d| 1.0 / d))
+        .or_else(|| {
+            let base = 1.0 / raw.min_key_interval()?;
+            Some(aligned_rate(raw, base, max_rate).unwrap_or(base))
+        })
         .unwrap_or(30.0)
-        .clamp(1.0, settings.max_sample_rate.max(1.0));
+        .clamp(1.0, max_rate);
     let mut compressor;
     loop {
         let samples = if duration > 0.0 {
@@ -435,6 +465,21 @@ pub fn compress(
     for j in 0..joints {
         compressor.optimize(j);
     }
+    // Raising an ancestor's bits for one joint can move the error of joints done before
+    // it (other branches) a little either way: check every joint again until all hold.
+    for _ in 0..8 {
+        compressor.update_objects(0, joints);
+        let over: Vec<usize> = (0..joints)
+            .filter(|&j| compressor.error(j, j, &compressor.decoded[j]) > threshold)
+            .collect();
+        if over.is_empty() {
+            break;
+        }
+        for j in over {
+            compressor.update_objects(0, joints);
+            compressor.optimize(j);
+        }
+    }
 
     let clip = encode(
         raw,
@@ -469,6 +514,35 @@ pub fn compress(
     stats.max_error = error;
     stats.worst_joint = worst;
     (clip, stats)
+}
+
+/// The smallest multiple of `base` (up to `max`) whose sample grid holds every key time
+/// and the duration (within a hundredth of a sample).
+fn aligned_rate(raw: &RawClip, base: f32, max: f32) -> Option<f32> {
+    let mut times: Vec<f32> = raw
+        .joints
+        .iter()
+        .flat_map(|j| {
+            let t = j.translation.iter().flat_map(|t| t.times.iter());
+            let r = j.rotation.iter().flat_map(|t| t.times.iter());
+            let s = j.scale.iter().flat_map(|t| t.times.iter());
+            t.chain(r).chain(s).copied()
+        })
+        .collect();
+    times.push(raw.duration);
+    times.sort_by(f32::total_cmp);
+    times.dedup();
+    (1..=16)
+        .map(|m| base * m as f32)
+        .take_while(|&r| r <= max * 1.0001)
+        .find(|&r| {
+            times.iter().all(|&t| {
+                (f64::from(t) * f64::from(r))
+                    .fract()
+                    .min(1.0 - (f64::from(t) * f64::from(r)).fract())
+                    < 0.01
+            })
+        })
 }
 
 /// Samples, stored values, track kinds and the source's object transforms.
@@ -522,7 +596,7 @@ fn build<'a>(
                     match channel {
                         Channel::Rotation => {
                             let r = b.map_or(t.rotation, |b| b.rotation.conjugate() * t.rotation);
-                            Vec4::from(positive_w(r.normalize()))
+                            Vec4::from(r.normalize())
                         }
                         Channel::Translation => {
                             Vec3::from(t.translation - b.map_or(Vec3A::ZERO, |b| b.translation))
@@ -537,13 +611,43 @@ fn build<'a>(
                 .collect()
         };
         let mut joint_tracks = Channel::ALL.map(|c| {
-            let values = values(c);
-            let (mut min, mut max) = (Vec3A::splat(f32::MAX), Vec3A::splat(f32::MIN));
-            for v in &values {
-                min = min.min(v.truncate().into());
-                max = max.max(v.truncate().into());
+            let mut values = values(c);
+            let mut layout = 3;
+            if c == Channel::Rotation {
+                // Each in the hemisphere of the one before (no sign flips in the ranges),
+                // then the component whose magnitude stays largest is dropped (made
+                // positive), unless none stays above 0.25: then all four are stored.
+                for s in 1..values.len() {
+                    if values[s].dot(values[s - 1]) < 0.0 {
+                        values[s] = -values[s];
+                    }
+                }
+                let smallest =
+                    |i: usize| values.iter().map(|v| v[i].abs()).fold(f32::MAX, f32::min);
+                let (best, magnitude) = (0..4)
+                    .map(|i| (i, smallest(i)))
+                    .fold((3, f32::MIN), |a, b| if b.1 > a.1 { b } else { a });
+                if magnitude >= 0.25 {
+                    layout = best as u8;
+                    if values[0][best] < 0.0 {
+                        values.iter_mut().for_each(|v| *v = -*v);
+                    }
+                } else {
+                    layout = ALL_FOUR;
+                }
             }
-            TrackValues { values, min, max }
+            let (mut min, mut max) = (Vec4::splat(f32::MAX), Vec4::splat(f32::MIN));
+            for v in &values {
+                let c = stored(c, *v, layout);
+                min = min.min(c);
+                max = max.max(c);
+            }
+            TrackValues {
+                values,
+                min,
+                max,
+                layout,
+            }
         });
         let joint_kinds = Channel::ALL.map(|c| {
             let track = &joint_tracks[c as usize];
@@ -612,15 +716,22 @@ fn encode(
                 Kind::Animated(rate) => {
                     let bits = BIT_RATES[rate];
                     let (min, scale) = range(track, bits);
-                    animated.push(AnimatedTrack {
+                    let layout = match channel {
+                        Channel::Rotation if bits == RAW_BITS => ALL_FOUR,
+                        Channel::Rotation => track.layout,
+                        Channel::Translation | Channel::Scale => 3,
+                    };
+                    let t = AnimatedTrack {
                         min,
                         scale,
                         joint: j as u16,
                         channel,
                         bits,
+                        layout,
                         offset,
-                    });
-                    offset += 3 * u32::from(bits);
+                    };
+                    offset += t.sample_bits();
+                    animated.push(t);
                 }
             }
         }
@@ -639,20 +750,14 @@ fn encode(
     for s in 0..c.samples {
         let frame = s as u64 * u64::from(frame_bits);
         for t in &animated {
-            let v = c.tracks[t.joint as usize][t.channel as usize].values[s].truncate();
+            let v = c.tracks[t.joint as usize][t.channel as usize].values[s];
+            let v = stored(t.channel, v, t.layout);
             let at = frame + u64::from(t.offset);
             let bits = u32::from(t.bits);
-            for (k, (x, (min, scale))) in [
-                (v.x, (t.min.x, t.scale.x)),
-                (v.y, (t.min.y, t.scale.y)),
-                (v.z, (t.min.z, t.scale.z)),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            for k in 0..component_count(t.layout) as usize {
                 put(
                     at + k as u64 * u64::from(bits),
-                    quantize(x, min, scale, t.bits),
+                    quantize(v[k], t.min[k], t.scale[k], t.bits),
                     bits,
                 );
             }

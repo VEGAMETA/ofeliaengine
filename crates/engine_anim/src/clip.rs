@@ -8,8 +8,11 @@
 //! - **constant**: one value, stored at full precision;
 //! - **animated**: one value per sample, range-reduced over the clip (each component
 //!   relative to its minimum and extent) and quantized to the track's own bit width
-//!   (3–16 bits per component, or 32 for raw floats). Rotations are stored as x, y, z of
-//!   the quaternion with w ≥ 0, w recomputed.
+//!   (3–16 bits per component, or 32 for raw floats). A rotation drops one component of
+//!   its quaternion, the one whose magnitude stays largest over the clip (made positive
+//!   and recomputed from the other three, so it is never close to 0 where recomputing
+//!   it loses precision); a rotation without such a component (none stays above 0.25)
+//!   or stored raw keeps all four.
 //!
 //! Samples are stored frame by frame (every animated track of sample 0, then of sample
 //! 1...), so sampling a time reads two contiguous bit strings. The bit widths are chosen by
@@ -55,17 +58,23 @@ pub(crate) struct ConstantTrack {
 /// A track with one quantized value per sample.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct AnimatedTrack {
-    /// Range minimum per component.
-    pub(crate) min: Vec3A,
-    /// Range extent / (2^bits − 1) per component (unused for raw floats).
-    pub(crate) scale: Vec3A,
+    /// Range minimum per stored component.
+    pub(crate) min: Vec4,
+    /// Range extent / (2^bits − 1) per stored component (unused for raw floats).
+    pub(crate) scale: Vec4,
     pub(crate) joint: u16,
     pub(crate) channel: Channel,
     /// Bits per component: 1-16, or 32 (raw `f32`).
     pub(crate) bits: u8,
-    /// First bit of the track's x within a frame.
+    /// Rotations: the quaternion component not stored (0-3: x, y, z, w; recomputed,
+    /// positive), or [`ALL_FOUR`]; translations and scales: 3 (x, y, z).
+    pub(crate) layout: u8,
+    /// First bit of the track's first component within a frame.
     pub(crate) offset: u32,
 }
+
+/// [`AnimatedTrack::layout`] of a rotation that stores all four components.
+pub(crate) const ALL_FOUR: u8 = 4;
 
 /// Bits per component an animated track may use.
 pub(crate) const RAW_BITS: u8 = 32;
@@ -120,32 +129,61 @@ pub(crate) fn dequantize(q: u32, min: f32, scale: f32, bits: u8) -> f32 {
     }
 }
 
-/// The rotation of stored x, y, z (w ≥ 0 recomputed).
+/// Components stored per sample: four for rotations stored whole, else three.
 #[inline(always)]
-pub(crate) fn rotation_from_xyz(v: Vec3A) -> Quat {
-    let w = (1.0 - v.length_squared()).max(0.0).sqrt();
-    Quat::from_xyzw(v.x, v.y, v.z, w).normalize()
+pub(crate) fn component_count(layout: u8) -> u32 {
+    if layout == ALL_FOUR { 4 } else { 3 }
+}
+
+/// The stored components of a quaternion in `layout` (the first three, or four).
+#[inline]
+pub(crate) fn stored_components(q: Vec4, layout: u8) -> Vec4 {
+    match layout {
+        0 => Vec4::new(q.y, q.z, q.w, 0.0),
+        1 => Vec4::new(q.x, q.z, q.w, 0.0),
+        2 => Vec4::new(q.x, q.y, q.w, 0.0),
+        3 => Vec4::new(q.x, q.y, q.z, 0.0),
+        _ => q,
+    }
+}
+
+/// The rotation of stored components in `layout`: the dropped one recomputed (≥ 0). Not
+/// normalized (sampling's nlerp normalizes).
+#[inline(always)]
+pub(crate) fn rotation_from_stored(v: Vec4, layout: u8) -> Quat {
+    if layout == ALL_FOUR {
+        return Quat::from_vec4(v);
+    }
+    let d = (1.0 - (v.x * v.x + v.y * v.y + v.z * v.z)).max(0.0).sqrt();
+    let q = match layout {
+        0 => Vec4::new(d, v.x, v.y, v.z),
+        1 => Vec4::new(v.x, d, v.y, v.z),
+        2 => Vec4::new(v.x, v.y, d, v.z),
+        _ => Vec4::new(v.x, v.y, v.z, d),
+    };
+    Quat::from_vec4(q)
 }
 
 impl AnimatedTrack {
-    /// The stored x, y, z of a frame starting at bit `frame`.
+    /// The stored components of a frame starting at bit `frame` (the fourth 0 for
+    /// tracks of three).
     #[inline(always)]
-    fn read(&self, data: &[u8], frame: usize) -> Vec3A {
+    fn read(&self, data: &[u8], frame: usize) -> Vec4 {
         let at = frame + self.offset as usize;
         let bits = u32::from(self.bits);
+        let n = component_count(self.layout);
         if self.bits == RAW_BITS {
-            return Vec3A::new(
-                f32::from_bits(read_bits(data, at, 32)),
-                f32::from_bits(read_bits(data, at + 32, 32)),
-                f32::from_bits(read_bits(data, at + 64, 32)),
-            );
+            let c = |k: u32| f32::from_bits(read_bits(data, at + 32 * k as usize, 32));
+            return Vec4::new(c(0), c(1), c(2), if n == 4 { c(3) } else { 0.0 });
         }
-        let q = Vec3A::new(
-            read_bits(data, at, bits) as f32,
-            read_bits(data, at + bits as usize, bits) as f32,
-            read_bits(data, at + 2 * bits as usize, bits) as f32,
-        );
+        let c = |k: u32| read_bits(data, at + (k * bits) as usize, bits) as f32;
+        let q = Vec4::new(c(0), c(1), c(2), if n == 4 { c(3) } else { 0.0 });
         self.min + self.scale * q
+    }
+
+    /// Bits per sample.
+    pub(crate) fn sample_bits(&self) -> u32 {
+        component_count(self.layout) * u32::from(self.bits)
     }
 }
 
@@ -245,10 +283,16 @@ impl CompressedClip {
             let (va, vb) = (track.read(data, a), track.read(data, b));
             match track.channel {
                 Channel::Rotation => {
-                    out.rotations[j] = nlerp(rotation_from_xyz(va), rotation_from_xyz(vb), t);
+                    out.rotations[j] = nlerp(
+                        rotation_from_stored(va, track.layout),
+                        rotation_from_stored(vb, track.layout),
+                        t,
+                    );
                 }
-                Channel::Translation => out.translations[j] = va.lerp(vb, t),
-                Channel::Scale => out.scales[j] = va.lerp(vb, t),
+                Channel::Translation => {
+                    out.translations[j] = va.truncate().lerp(vb.truncate(), t).into()
+                }
+                Channel::Scale => out.scales[j] = va.truncate().lerp(vb.truncate(), t).into(),
             }
         }
     }
@@ -277,10 +321,16 @@ impl CompressedClip {
             let (va, vb) = (track.read(&self.data, a), track.read(&self.data, b));
             match track.channel {
                 Channel::Rotation => {
-                    out.rotation = nlerp(rotation_from_xyz(va), rotation_from_xyz(vb), t);
+                    out.rotation = nlerp(
+                        rotation_from_stored(va, track.layout),
+                        rotation_from_stored(vb, track.layout),
+                        t,
+                    );
                 }
-                Channel::Translation => out.translation = va.lerp(vb, t),
-                Channel::Scale => out.scale = va.lerp(vb, t),
+                Channel::Translation => {
+                    out.translation = va.truncate().lerp(vb.truncate(), t).into()
+                }
+                Channel::Scale => out.scale = va.truncate().lerp(vb.truncate(), t).into(),
             }
         }
         out
@@ -306,6 +356,7 @@ impl CompressedClip {
             w.u16(t.joint);
             w.u8(t.channel as u8);
             w.u8(t.bits);
+            w.u8(t.layout);
             w.u32(t.offset);
             w.f32s(&t.min.to_array());
             w.f32s(&t.scale.to_array());
@@ -358,10 +409,16 @@ impl CompressedClip {
             let joint = r.u16()?;
             let channel = Channel::from_u8(r.u8()?).ok_or(FormatError("bad channel"))?;
             let bits = r.u8()?;
+            let layout = r.u8()?;
             let offset = r.u32()?;
-            let min = Vec3A::from(r.f32s::<3>()?);
-            let scale = Vec3A::from(r.f32s::<3>()?);
-            if joint >= joint_count || !(bits == RAW_BITS || (1..=16).contains(&bits)) {
+            let min = Vec4::from_array(r.f32s::<4>()?);
+            let scale = Vec4::from_array(r.f32s::<4>()?);
+            let layout_ok = match channel {
+                Channel::Rotation => layout <= ALL_FOUR,
+                Channel::Translation | Channel::Scale => layout == 3,
+            };
+            if joint >= joint_count || !(bits == RAW_BITS || (1..=16).contains(&bits)) || !layout_ok
+            {
                 return Err(FormatError("bad animated track"));
             }
             animated.push(AnimatedTrack {
@@ -370,6 +427,7 @@ impl CompressedClip {
                 joint,
                 channel,
                 bits,
+                layout,
                 offset,
             });
         }
@@ -382,7 +440,7 @@ impl CompressedClip {
         }
         if animated
             .iter()
-            .any(|t| u64::from(t.offset) + 3 * u64::from(t.bits) > u64::from(frame_bits))
+            .any(|t| u64::from(t.offset) + u64::from(t.sample_bits()) > u64::from(frame_bits))
         {
             return Err(FormatError("track outside its frame"));
         }

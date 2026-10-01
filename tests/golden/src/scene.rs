@@ -401,6 +401,7 @@ fn load(source: &Source, subsurface: bool) -> Result<Loaded, Skip> {
                 lods: false,
                 compression_level: 0,
                 block_compression: true,
+                ..CookSettings::default()
             };
             let (cooked, _) = cook_scene(&scene, dir, Some(&cache), &jobs, &settings)
                 .map_err(|_| Skip::NoScene(path.clone()))?;

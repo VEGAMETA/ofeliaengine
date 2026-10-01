@@ -9,9 +9,15 @@
 //!   - textures with their wrap modes: file names, or the bytes of images embedded in
 //!     the file. [`read_texture`] loads a texture's encoded image; decoding and mip
 //!     levels are [`crate::decode_image`] and [`crate::build_mips`].
+//!   - skins (joints, inverse bind matrices; `JOINTS_n`/`WEIGHTS_n` of the primitives,
+//!     every set: 4 influences per set) and animations (translation, rotation and scale
+//!     channels with step, linear and cubic spline interpolation; morph target weights
+//!     are skipped), turned into `engine_anim` skeletons and clips by
+//!     [`crate::animation`] (ADR 0068).
 //! - [`spawn_scene`] turns the hierarchy into ECS entities with `Transform`,
 //!   `GlobalTransform`, parent links and a [`MeshInstance`] per mesh-bearing node.
 
+use engine_anim::{Interpolation, RawTrack};
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{Entity, GlobalTransform, Transform, World, pod_component};
 use std::path::Path;
@@ -35,9 +41,19 @@ pub struct Primitive {
     pub min: [f32; 3],
     /// Bounding box: maximum corner.
     pub max: [f32; 3],
+    /// Joint indices into the node's skin (`JOINTS_n`), four per set; every vertex has
+    /// [`Self::influence_sets`] sets, consecutive. Empty without a skin.
+    pub joints: Vec<[u16; 4]>,
+    /// The weights of `joints` (`WEIGHTS_n`), as stored (normalized by the cooker).
+    pub weights: Vec<[f32; 4]>,
 }
 
 impl Primitive {
+    /// Sets of four joint influences per vertex (0 without a skin).
+    pub fn influence_sets(&self) -> usize {
+        self.joints.len() / self.positions.len().max(1)
+    }
+
     /// The triangles as (position, normal) triples, unindexed (for renderers that pull
     /// vertices without an index buffer).
     pub fn triangle_vertices(&self) -> impl Iterator<Item = ([f32; 3], [f32; 3])> + '_ {
@@ -158,6 +174,49 @@ pub struct NodeData {
     pub mesh: Option<usize>,
     /// Indices into [`ImportedScene::nodes`].
     pub children: Vec<usize>,
+    /// Index into [`ImportedScene::skins`] (a skinned mesh).
+    pub skin: Option<usize>,
+}
+
+/// A skin: the joints that deform meshes and their inverse bind matrices.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SkinData {
+    /// Name from the file.
+    pub name: String,
+    /// Joints, as indices into [`ImportedScene::nodes`]; `JOINTS_n` index this list.
+    pub joints: Vec<usize>,
+    /// Per joint: from the mesh's space to the joint's (column major; identity when the
+    /// file has none).
+    pub inverse_bind_matrices: Vec<[f32; 16]>,
+}
+
+/// Keys of one animated property of a node.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ChannelKeys {
+    /// Translation keys.
+    Translation(RawTrack<Vec3>),
+    /// Rotation keys.
+    Rotation(RawTrack<Quat>),
+    /// Scale keys.
+    Scale(RawTrack<Vec3>),
+}
+
+/// One channel of an animation: a node's property over time.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChannelData {
+    /// The node (index into [`ImportedScene::nodes`]).
+    pub node: usize,
+    /// Its keys.
+    pub keys: ChannelKeys,
+}
+
+/// An animation: channels over nodes.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AnimationData {
+    /// Name from the file.
+    pub name: String,
+    /// Channels (morph target weights are not imported).
+    pub channels: Vec<ChannelData>,
 }
 
 /// Everything imported from one glTF file.
@@ -173,6 +232,10 @@ pub struct ImportedScene {
     pub nodes: Vec<NodeData>,
     /// Root nodes of the default scene (or of the first scene).
     pub roots: Vec<usize>,
+    /// Skins.
+    pub skins: Vec<SkinData>,
+    /// Animations.
+    pub animations: Vec<AnimationData>,
 }
 
 impl ImportedScene {
@@ -481,6 +544,36 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
                 .read_tangents()
                 .map(Iterator::collect)
                 .unwrap_or_default();
+            // Influences: every set present with both joints and weights.
+            let mut sets: Vec<InfluenceSet> = Vec::new();
+            while let (Some(j), Some(w)) = (
+                reader.read_joints(sets.len() as u32),
+                reader.read_weights(sets.len() as u32),
+            ) {
+                let j: Vec<[u16; 4]> = j.into_u16().collect();
+                let w: Vec<[f32; 4]> = w.into_f32().collect();
+                if j.len() != positions.len() || w.len() != positions.len() {
+                    return Err(ImportError::Invalid(format!(
+                        "mesh `{}`: influence set {} has {} joints and {} weights for {} vertices",
+                        mesh.name().unwrap_or(""),
+                        sets.len(),
+                        j.len(),
+                        w.len(),
+                        positions.len()
+                    )));
+                }
+                sets.push((j, w));
+            }
+            let mut joints = Vec::with_capacity(positions.len() * sets.len());
+            let mut weights = Vec::with_capacity(positions.len() * sets.len());
+            if !sets.is_empty() {
+                for v in 0..positions.len() {
+                    for (j, w) in &sets {
+                        joints.push(j[v]);
+                        weights.push(w[v]);
+                    }
+                }
+            }
             let bounds = p.bounding_box();
             primitives.push(Primitive {
                 positions,
@@ -491,6 +584,8 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
                 material: p.material().index(),
                 min: bounds.min,
                 max: bounds.max,
+                joints,
+                weights,
             });
         }
         scene.meshes.push(MeshData {
@@ -508,6 +603,100 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
             scale,
             mesh: node.mesh().map(|m| m.index()),
             children: node.children().map(|c| c.index()).collect(),
+            skin: node.skin().map(|s| s.index()),
+        });
+    }
+    let node_count = scene.nodes.len();
+    for skin in document.skins() {
+        let joints: Vec<usize> = skin.joints().map(|j| j.index()).collect();
+        let reader = skin.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
+        let inverse_bind_matrices: Vec<[f32; 16]> = match reader.read_inverse_bind_matrices() {
+            Some(m) => m
+                .map(|m| {
+                    let mut out = [0.0; 16];
+                    for (c, column) in m.iter().enumerate() {
+                        out[c * 4..c * 4 + 4].copy_from_slice(column);
+                    }
+                    out
+                })
+                .collect(),
+            None => vec![engine_core::math::Mat4::IDENTITY.to_cols_array(); joints.len()],
+        };
+        if inverse_bind_matrices.len() < joints.len() {
+            return Err(ImportError::Invalid(format!(
+                "skin {}: {} inverse bind matrices for {} joints",
+                skin.index(),
+                inverse_bind_matrices.len(),
+                joints.len()
+            )));
+        }
+        scene.skins.push(SkinData {
+            name: skin.name().unwrap_or_default().to_owned(),
+            joints,
+            inverse_bind_matrices,
+        });
+    }
+    for animation in document.animations() {
+        let mut channels = Vec::new();
+        for channel in animation.channels() {
+            let node = channel.target().node().index();
+            if node >= node_count {
+                continue;
+            }
+            let interpolation = match channel.sampler().interpolation() {
+                gltf::animation::Interpolation::Step => Interpolation::Step,
+                gltf::animation::Interpolation::Linear => Interpolation::Linear,
+                gltf::animation::Interpolation::CubicSpline => Interpolation::CubicSpline,
+            };
+            let reader = channel.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
+            let (Some(inputs), Some(outputs)) = (reader.read_inputs(), reader.read_outputs())
+            else {
+                continue;
+            };
+            let times: Vec<f32> = inputs.collect();
+            let per_key = if interpolation == Interpolation::CubicSpline {
+                3
+            } else {
+                1
+            };
+            let keys = match outputs {
+                gltf::animation::util::ReadOutputs::Translations(t) => {
+                    ChannelKeys::Translation(RawTrack {
+                        interpolation,
+                        times: times.clone(),
+                        values: t.map(Vec3::from).collect(),
+                    })
+                }
+                gltf::animation::util::ReadOutputs::Rotations(r) => {
+                    ChannelKeys::Rotation(RawTrack {
+                        interpolation,
+                        times: times.clone(),
+                        values: r.into_f32().map(Quat::from_array).collect(),
+                    })
+                }
+                gltf::animation::util::ReadOutputs::Scales(s) => ChannelKeys::Scale(RawTrack {
+                    interpolation,
+                    times: times.clone(),
+                    values: s.map(Vec3::from).collect(),
+                }),
+                gltf::animation::util::ReadOutputs::MorphTargetWeights(_) => continue,
+            };
+            let values = match &keys {
+                ChannelKeys::Translation(t) | ChannelKeys::Scale(t) => t.values.len(),
+                ChannelKeys::Rotation(r) => r.values.len(),
+            };
+            if values != times.len() * per_key || !times.is_sorted() {
+                return Err(ImportError::Invalid(format!(
+                    "animation {} channel of node {node}: {values} values for {} keys",
+                    animation.index(),
+                    times.len()
+                )));
+            }
+            channels.push(ChannelData { node, keys });
+        }
+        scene.animations.push(AnimationData {
+            name: animation.name().unwrap_or_default().to_owned(),
+            channels,
         });
     }
     let root_scene = document
@@ -528,6 +717,9 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
     };
     Ok(scene)
 }
+
+/// One `JOINTS_n` / `WEIGHTS_n` pair of a primitive, per vertex.
+type InfluenceSet = (Vec<[u16; 4]>, Vec<[f32; 4]>);
 
 /// Marks an entity that draws a mesh of an imported scene.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]

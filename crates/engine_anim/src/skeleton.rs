@@ -217,7 +217,7 @@ impl Skeleton {
             let s = Vec3A::from(r.f32s::<3>()?);
             rest.push(Transform {
                 translation: t.into(),
-                rotation: q.normalize(),
+                rotation: q,
                 scale: s,
             });
             names.push(r.str()?);
