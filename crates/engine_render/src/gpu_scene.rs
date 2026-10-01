@@ -121,8 +121,10 @@ mod flag {
     pub(super) const MOVED: u8 = 8;
     /// Moved without motion (teleported).
     pub(super) const TELEPORT: u8 = 16;
-    /// Removed: becomes a hole, then free.
+    /// Removed: becomes a hole unless inserted into again before the upload.
     pub(super) const REMOVED: u8 = 32;
+    /// Held an uploaded instance before this upload (whose box may bound the scene).
+    pub(super) const WAS_LIVE: u8 = 64;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -609,16 +611,23 @@ impl GpuScene {
         InstanceId { index, generation }
     }
 
-    /// Removes an instance (stale ids are ignored); its slot is reused after the next
-    /// upload. Returns whether it was live.
+    /// Removes an instance (stale ids are ignored). Its slot is free at once: an insert
+    /// before the next upload takes it over (lowest free slot first), so removing and
+    /// adding as many instances leaves no holes. Returns whether it was live.
     pub fn remove(&mut self, id: InstanceId) -> bool {
         let Some(slot) = self.slot_mut(id) else {
             return false;
         };
         slot.alive = false;
         slot.generation = slot.generation.wrapping_add(1);
+        let was_live = if slot.flags & flag::NEW == 0 {
+            flag::WAS_LIVE
+        } else {
+            0
+        };
         self.live -= 1;
-        self.queue(id.index, flag::REMOVED);
+        self.queue(id.index, flag::REMOVED | was_live);
+        self.free.push(Reverse(id.index));
         true
     }
 
@@ -789,21 +798,24 @@ impl GpuScene {
     ) {
         let flags = self.slots[index as usize].flags;
         self.slots[index as usize].flags = 0;
-        // A removed slot is freed only after this upload, so it cannot be live again yet.
-        if flags & flag::REMOVED != 0 {
-            let old = self.boxes.get(index as usize);
-            if incremental_bounds && flags & flag::NEW == 0 && self.on_boundary(old) {
-                self.bounds_stale = true;
-            }
+        // An instance removed from it: its box may have bounded the scene.
+        if flags & flag::WAS_LIVE != 0
+            && incremental_bounds
+            && self.on_boundary(self.boxes.get(index as usize))
+        {
+            self.bounds_stale = true;
+        }
+        if flags & flag::REMOVED != 0 && !self.slots[index as usize].alive {
+            // A hole (the slot is already free).
             self.boxes.set(index as usize, NO_BOX);
             self.leave(index);
             self.data[index as usize] = HOLE;
             self.write(index, HOLE, Previous::Keep, out);
             self.slots[index as usize].written = self.serial;
-            // Free once its hole is written (nothing inserts during the upload).
-            self.free.push(Reverse(index));
             return;
         }
+        // Otherwise live: added, moved or edited; removed and taken over by a new instance
+        // counts as added (`NEW`), keeping the batch if it draws the same.
         let i = index as usize;
         let world_from_object = matrix_of(&self.data[i].rows);
         if flags & flag::DRAW != 0 {
@@ -834,7 +846,7 @@ impl GpuScene {
             transform_box(&world_from_object, slot.local_center, slot.local_extents);
         let new_box = [center - extents, center + extents];
         if incremental_bounds {
-            if flags & flag::NEW == 0 && self.on_boundary(self.boxes.get(i)) {
+            if flags & (flag::NEW | flag::WAS_LIVE) == 0 && self.on_boundary(self.boxes.get(i)) {
                 self.bounds_stale = true;
             }
             self.bounds = (self.bounds.0.min(new_box[0]), self.bounds.1.max(new_box[1]));
