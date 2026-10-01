@@ -175,6 +175,7 @@ fn culled_lights_match_every_light_for_every_pixel() {
                 },
                 color,
                 spot,
+                shadow: false,
             }
         })
         .collect();
@@ -184,12 +185,14 @@ fn culled_lights_match_every_light_for_every_pixel() {
         range: 5.0,
         color: Vec3::splat(3.0),
         spot: None,
+        shadow: false,
     });
     lights.push(LocalLight {
         position: Vec3::new(0.0, 2.0, 3.0),
         range: 4.0,
         color: Vec3::splat(3.0),
         spot: None,
+        shadow: false,
     });
 
     let eye = Vec3::new(0.0, 2.0, 0.0);

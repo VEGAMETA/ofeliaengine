@@ -289,6 +289,9 @@ struct Skinned {
     drawn: Option<[[f32; 4]; 3]>,
     bounds: [Vec3; 2],
     bounds_dirty: bool,
+    /// Posed differently since the last [`Skinning::update_bounds`]: its shape changes
+    /// (cached shadows of local lights, ADR 0071).
+    deformed: bool,
     scene: Option<InstanceId>,
 }
 
@@ -648,6 +651,7 @@ impl Skinning {
             drawn: None,
             bounds,
             bounds_dirty: false,
+            deformed: true,
             scene: None,
         };
         let index = match self.free_instances.pop() {
@@ -716,6 +720,9 @@ impl Skinning {
         let boxes = &self.skins[skin].joint_boxes;
         let instance = &mut self.instances[index];
         let n = instance.palette.len().min(palette.len());
+        if instance.palette[..n] != palette[..n] {
+            instance.deformed = true;
+        }
         instance.palette[..n].copy_from_slice(&palette[..n]);
         instance.posed = true;
         instance.rows = rows_of(world_from_object);
@@ -755,16 +762,23 @@ impl Skinning {
     }
 
     /// Gives the posed instances' boxes to the geometry pool (GPU culling) and their scene
-    /// instances. Call after the frame's [`Self::set_pose`] calls, before
+    /// instances, and tells both which instances changed shape (cached shadows of local
+    /// lights, ADR 0071). Call after the frame's [`Self::set_pose`] calls, before
     /// [`GeometryPool::begin_frame`].
     pub fn update_bounds(&mut self, geometry: &mut GeometryPool, mut scene: Option<&mut GpuScene>) {
         for instance in self
             .instances
             .iter_mut()
-            .filter(|i| i.live && i.bounds_dirty)
+            .filter(|i| i.live && (i.bounds_dirty || i.deformed))
         {
+            if instance.bounds_dirty {
+                geometry.set_bounds(instance.mesh, instance.bounds[0], instance.bounds[1]);
+            }
+            if instance.deformed {
+                geometry.mark_deformed(instance.mesh);
+            }
             instance.bounds_dirty = false;
-            geometry.set_bounds(instance.mesh, instance.bounds[0], instance.bounds[1]);
+            instance.deformed = false;
             if let (Some(scene), Some(id)) = (scene.as_deref_mut(), instance.scene) {
                 scene.refresh_bounds(id);
             }

@@ -11,10 +11,12 @@
 use engine_core::math::Vec3;
 use engine_frame::{Antialiasing, Quality};
 use engine_golden::golden::{Outcome, Tolerance, compare};
-use engine_golden::scene::{RenderOptions, Shot, Skip, Source, procedural_lights, render};
+use engine_golden::scene::{
+    RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights,
+};
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
-use engine_render::forward::DirectionalLight;
+use engine_render::forward::{DirectionalLight, LocalLight, Spot};
 use engine_render::reflections::SsrSettings;
 use std::path::PathBuf;
 
@@ -120,6 +122,78 @@ fn procedural_scene_with_ambient_occlusion() {
     check(&Shot {
         ao: Some(AoSettings::default()),
         ..procedural("procedural_ao")
+    });
+}
+
+/// The procedural scene at dusk with shadows of a point light in front of the spheres and
+/// a spot light above them (ADR 0071): the spheres' shadows on the wall (several cube
+/// faces), on the floor and on each other.
+#[test]
+fn procedural_scene_with_local_shadows() {
+    check(&Shot {
+        local_shadows: true,
+        sky: false,
+        sun: DirectionalLight {
+            direction: Vec3::new(-0.3, -1.0, -0.2),
+            color: Vec3::splat(0.1),
+            ambient: Vec3::splat(0.02),
+        },
+        lights: vec![
+            LocalLight {
+                position: Vec3::new(-0.6, 1.3, 0.2),
+                range: 7.0,
+                color: Vec3::new(6.0, 4.0, 2.0),
+                spot: None,
+                shadow: true,
+            },
+            LocalLight {
+                position: Vec3::new(2.4, 4.2, 0.6),
+                range: 8.0,
+                color: Vec3::new(20.0, 26.0, 40.0),
+                spot: Some(Spot {
+                    direction: Vec3::new(0.0, -1.0, -0.35).normalize(),
+                    inner: 0.35,
+                    outer: 0.6,
+                }),
+                shadow: true,
+            },
+        ],
+        ..procedural("procedural_local_shadows")
+    });
+}
+
+/// Sponza at night with point lights along the hall and spot lights from above casting
+/// shadows (ADR 0071): columns, arches, plants and curtains on the floor and walls.
+#[test]
+fn sponza_with_local_shadows() {
+    check(&Shot {
+        lights: sponza_lights(),
+        local_shadows: true,
+        sky: false,
+        sun: DirectionalLight {
+            direction: Vec3::new(-0.3, -1.0, -0.2),
+            color: Vec3::splat(0.05),
+            ambient: Vec3::splat(0.01),
+        },
+        ..Shot::new(
+            "sponza_local_shadows",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
+/// The procedural scene with the sun low from the side and the sun's contact shadows (ADR
+/// 0071): the spheres' and cubes' contact with the floor, sharper than the cascades.
+#[test]
+fn procedural_scene_with_contact_shadows() {
+    check(&Shot {
+        contact_shadows: true,
+        sun: DirectionalLight {
+            direction: Vec3::new(-0.8, -0.4, -0.3).normalize(),
+            color: Vec3::splat(3.0),
+            ambient: Vec3::splat(0.08),
+        },
+        ..procedural("procedural_contact_shadows")
     });
 }
 

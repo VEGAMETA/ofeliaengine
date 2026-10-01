@@ -47,6 +47,15 @@
 // tile's bits and its bin's index range; the wave walks the union of its lanes' bits, one
 // light at a time, so light data loads are shared.
 //
+// Shadows of local lights (local_shadows.rs, ADR 0071): lights marked as casting shadows
+// get views in a persistent depth atlas (a spot light one perspective view, a point light
+// six cube faces), drawn only when the light or a caster in its range changed. Only the
+// `*Shadowed` entry points look them up (`shadows` is a literal everywhere, so the other
+// shading carries no code for it): per sorted light `light_shadows` holds its first view
+// or NO_SHADOW; a point light's face is its major axis; four bilinear comparisons make a
+// 3 × 3 tent filter. `cullShadowViews` culls the instances per drawn view and
+// `localShadowVertex` draws them into the view's tile.
+//
 // Ambient light (environment.rs, ADR 0046): with an environment, diffuse light comes from
 // its 9 irradiance harmonics and specular light from its prefiltered cube at the pixel's
 // roughness times the DFG table (split sum), with Filament's multiple-scattering
@@ -91,6 +100,17 @@ struct Cascade
     float4 offset;           // xyz: offset; w: NDC edge within which the filter stays inside
     float4 atlas;            // cascade NDC → atlas uv: xy scale, zw offset
     float4 bounds;           // light view: xy center, z half size, w far depth (−z)
+};
+
+// `ShadowViewData` in local_shadows.rs: one view of a light's shadow in the atlas.
+struct ShadowView
+{
+    float4x4 clip_from_world; // the light's view and projection
+    float4 atlas;            // NDC → atlas uv: xy scale, zw offset
+    float4 eye_bias;         // xyz light position; w normal offset per unit of distance (world)
+    float4 tile;             // drawn views: x, y, size of the tile in texels; w pixels per unit at
+                             // distance 1 over the LOD threshold. Looked-up point light faces: x
+                             // 1 / tan(half angle), y and z the depth's A and B (A + B / major)
 };
 
 // `LightData` in lights.rs.
@@ -173,7 +193,13 @@ struct Frame
     float4* sh;              // 9 irradiance harmonics
     SubsurfaceProfile* subsurface;
     AtmosphereFrame* atmosphere; // aerial perspective and fog (ADR 0069), for `fragmentBlendedAtmosphere*`
-    uint2 _pad5;
+    uint local_shadow_atlas; // bindless: the local lights' shadow atlas (ADR 0071)
+    uint _pad5;
+    uint* light_shadows;     // per sorted light: its first view in `shadow_views`, or NO_SHADOW
+    ShadowView* shadow_views; // the views of the shadowed lights in view
+    ShadowView* shadow_draws; // the views drawn this frame (culling and drawing)
+    uint shadow_draw_count;
+    float shadow_texel;      // 1 / atlas size
 };
 
 struct Instance
@@ -251,6 +277,8 @@ static const uint TRANSMISSION_THIN = 1;
 static const uint SUBSURFACE_SPLIT_TEXTURING = 1u << 18;
 
 static const uint NO_TEXTURE = 0xFFFFFFFFu;
+// `NO_SHADOW` in local_shadows.rs: a light without a shadow.
+static const uint NO_SHADOW = 0xFFFFFFFFu;
 
 // VkDrawIndexedIndirectCommand.
 struct DrawCommand
@@ -532,6 +560,68 @@ void cullMain(uint3 id : SV_DispatchThreadID)
     append(push.commands, push.visible, command, first, index, visible);
 }
 
+// The coarsest detail level a shadow view seen from `eye` with `lod_scale` pixels per unit
+// at distance 1 (over the threshold) may draw: `choose_lod` from the light.
+uint choose_lod_from(Instance inst, Batch batch, float3 center, float3 extents, float3 eye, float lod_scale)
+{
+    uint lods = batch.lods & LOD_COUNT_MASK;
+    if (lods <= 1 || lod_scale <= 0.0)
+        return 0;
+    float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+    float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+    float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+    float scale = sqrt(max(dot(c0, c0), max(dot(c1, c1), dot(c2, c2))));
+    float distance = max(length(center - eye) - length(extents), 1e-3);
+    float allowed = distance / (scale * lod_scale);
+    uint lod = 0;
+    for (uint k = 1; k < lods; k++)
+    {
+        if (batch.errors[k] <= allowed)
+            lod = k;
+    }
+    return lod;
+}
+
+// Local light shadows (ADR 0071): one thread per instance and drawn view (y). An instance
+// casts into a view when its box is inside the view's frustum (planes from its matrix,
+// Gribb and Hartmann); it is appended to the view's command list and caster list.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullShadowViews(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    uint view = id.y;
+    if (index >= push.instance_count)
+        return;
+    Instance inst = push.instances[index];
+    Batch batch = push.batches[inst.batch];
+    float3 center = transform_point(inst, batch.center.xyz);
+    float3 e = batch.extents.xyz;
+    float3 extents = float3(dot(abs(inst.row0.xyz), e), dot(abs(inst.row1.xyz), e), dot(abs(inst.row2.xyz), e));
+    ShadowView v = push.frame.shadow_draws[view];
+    // Rows of the view's matrix (the planes are sums and differences of them).
+    float4x4 m = v.clip_from_world;
+    float4 r0 = m[0];
+    float4 r1 = m[1];
+    float4 r2 = m[2];
+    float4 r3 = m[3];
+    float4 planes[6] = { r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2 };
+    bool caster = (batch.lods & BATCH_BLENDED) == 0;
+    if (push.frame.cull != 0)
+    {
+        [unroll]
+        for (int i = 0; i < 6; i++)
+        {
+            float4 plane = planes[i];
+            caster = caster && dot(plane.xyz, center) + dot(abs(plane.xyz), extents) + plane.w >= 0.0;
+        }
+    }
+    uint lod = choose_lod_from(inst, batch, center, extents, v.eye_bias.xyz, v.tile.w);
+    uint command = batch.command + lod;
+    uint first = batch.slot + lod * batch.count;
+    append(push.commands + view * push.frame.command_count, push.visible + view * push.frame.slot_count, command, first, index, caster);
+}
+
 // One group per light: its bit is set in the (cleared) bitmasks of every tile of its
 // rectangle. `visible` holds the rectangles (min x | min y << 16, max x | max y << 16).
 // The work follows what the lights cover, not tiles × lights.
@@ -618,6 +708,15 @@ float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstan
     return shadow_clip(transform_point(inst, load_position(vertex)));
 }
 
+// A local light's shadow view (`push.phase`: the drawn view): positions only.
+[shader("vertex")]
+float4 localShadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
+{
+    Instance inst = push.instances[push.visible[slot]];
+    float3 world = transform_point(inst, load_position(vertex));
+    return mul(push.frame.shadow_draws[push.phase].clip_from_world, float4(world, 1.0));
+}
+
 // The depth prepass: the visible instances' depth, positions only.
 [shader("vertex")]
 float4 depthVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
@@ -640,6 +739,19 @@ ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_Vul
     Instance inst = push.instances[push.visible[slot]];
     ShadowOut o;
     o.position = shadow_clip(transform_point(inst, load_position(vertex)));
+    o.uv = push.attributes[vertex].uv;
+    o.material = inst.material;
+    return o;
+}
+
+// Local light shadows of masked materials.
+[shader("vertex")]
+ShadowOut localShadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    Instance inst = push.instances[push.visible[slot]];
+    ShadowOut o;
+    float3 world = transform_point(inst, load_position(vertex));
+    o.position = mul(push.frame.shadow_draws[push.phase].clip_from_world, float4(world, 1.0));
     o.uv = push.attributes[vertex].uv;
     o.material = inst.material;
     return o;
@@ -811,10 +923,71 @@ float3 surface_light(float3 n, float3 v, float3 l, float3 diffuse, float3 f0, fl
     return (diffuse + specular) * n_dot_l;
 }
 
+// How lit `p` (normal `n`) is by a local light whose shadow views start at `first` (ADR
+// 0071). The receiver moves along its normal by about a texel at its depth in the view
+// (the shading normal: the geometric one would cost the light loop three more registers on
+// RDNA2). A spot light projects it with its view's matrix (loaded once per wave: the light
+// is the same for the whole wave). A point light's face is the major axis from the light
+// (faces +x, −x, +y, −y, +z, −z), projected without a matrix and without branches: the
+// face's two other axes (signed as `look_at` and the Vulkan projection orient them) over
+// the major distance, and the depth A + B / major; only the face's tile differs per pixel.
+// Four bilinear comparisons half a texel apart make a 3 × 3 tent filter. Outside the view
+// (a spot light's cone beyond its projection) it is lit.
+float local_shadow(uint first, Light light, float3 p, float3 n)
+{
+    float3 position = light.position_range.xyz;
+    // World size of a texel per unit of depth, times the normal bias.
+    float bias = push.frame.shadow_views[first].eye_bias.w;
+    float3 d = p - position;
+    float3 ndc;
+    float4 atlas;
+    if (light.color_scale.w == 0.0)
+    {
+        float3 a = abs(d);
+        bool x_major = a.x >= a.y && a.x >= a.z;
+        bool y_major = !x_major && a.y >= a.z;
+        float major = x_major ? a.x : (y_major ? a.y : a.z);
+        float3 q = d + n * (bias * major);
+        // The receiver's signed coordinate along the face's axis, and the other two.
+        float along = x_major ? q.x : (y_major ? q.y : q.z);
+        float flip = along < 0.0 ? -1.0 : 1.0;
+        float u = x_major ? flip * q.z : (y_major ? flip * q.x : -flip * q.x);
+        float v = y_major ? -q.z : -q.y;
+        uint face = (x_major ? 0u : (y_major ? 2u : 4u)) + (along < 0.0 ? 1u : 0u);
+        // x: 1 / tan(half angle); y, z: depth A + B / major.
+        float4 terms = push.frame.shadow_views[first].tile;
+        float inverse = 1.0 / max(abs(along), 1e-6);
+        ndc = float3(float2(u, v) * (terms.x * inverse), terms.y + terms.z * inverse);
+        atlas = push.frame.shadow_views[first + face].atlas;
+    }
+    else
+    {
+        float3 q = p + n * (bias * max(dot(d, light.direction_offset.xyz), 0.0));
+        ShadowView s = push.frame.shadow_views[first];
+        float4 c = mul(s.clip_from_world, float4(q, 1.0));
+        if (c.w <= 0.0)
+            return 1.0;
+        ndc = c.xyz / c.w;
+        atlas = s.atlas;
+    }
+    if (abs(ndc.x) > 1.0 || abs(ndc.y) > 1.0 || ndc.z > 1.0)
+        return 1.0;
+    float2 uv = ndc.xy * atlas.xy + atlas.zw;
+    Texture2D map = g_textures[push.frame.local_shadow_atlas];
+    SamplerComparisonState cmp = g_compare_samplers[push.frame.shadow_sampler];
+    float t = 0.5 * push.frame.shadow_texel;
+    float lit = map.SampleCmpLevelZero(cmp, uv + float2(-t, -t), ndc.z)
+        + map.SampleCmpLevelZero(cmp, uv + float2(t, -t), ndc.z)
+        + map.SampleCmpLevelZero(cmp, uv + float2(-t, t), ndc.z)
+        + map.SampleCmpLevelZero(cmp, uv + float2(t, t), ndc.z);
+    return lit * 0.25;
+}
+
 // One local light at `p`: inverse-square falloff windowed to zero at its range (Karis 2013),
 // times the spot cone. Adds the irradiance it brings to `irradiance` (subsurface
-// materials; unused and compiled away elsewhere).
-float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance)
+// materials; unused and compiled away elsewhere). With `shadows` (a literal), light `index`
+// is shadowed when it has views (ADR 0071).
+float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance, bool shadows, uint index)
 {
     float3 to = light.position_range.xyz - p;
     float d2 = dot(to, to);
@@ -826,6 +999,13 @@ float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, fl
     float3 l = to * rsqrt(max(d2, 1e-8));
     float cone = saturate(dot(-l, light.direction_offset.xyz) * light.color_scale.w + light.direction_offset.w);
     float attenuation = window * window / max(d2, 1e-4) * cone * cone;
+    if (shadows)
+    {
+        uint first = push.frame.light_shadows[index];
+        // Surfaces facing away get nothing from the light anyway: no lookup.
+        if (first != NO_SHADOW && attenuation > 0.0 && dot(n, l) > 0.0)
+            attenuation *= local_shadow(first, light, p, n);
+    }
     irradiance += light.color_scale.rgb * attenuation * saturate(dot(n, l));
     return surface_light(n, v, l, diffuse, f0, a) * light.color_scale.rgb * attenuation;
 }
@@ -842,8 +1022,8 @@ uint range_bits(uint w, uint lo, uint hi)
 
 // The local lights reaching `p` (at `pixel`): those in both its tile's bits and its
 // z-bin's index range, or every light without culling. Their irradiance adds to
-// `irradiance`.
-float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance)
+// `irradiance`. `shadows` (a literal) looks up the shadowed lights' shadows.
+float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance, bool shadows)
 {
     uint count = push.frame.light_count;
     float3 sum = 0.0;
@@ -852,7 +1032,7 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
     if (push.frame.light_culling == 0)
     {
         for (uint i = 0; i < count; i++)
-            sum += local_light(push.frame.lights[i], p, n, v, diffuse, f0, a, irradiance);
+            sum += local_light(push.frame.lights[i], p, n, v, diffuse, f0, a, irradiance, shadows, i);
         return sum;
     }
     float depth = dot(p, push.frame.view_axis.xyz) + push.frame.view_axis.w;
@@ -875,7 +1055,7 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
             uint bit = firstbitlow(merged);
             merged &= merged - 1u;
             if ((mask >> bit) & 1u)
-                sum += local_light(push.frame.lights[w * 32 + bit], p, n, v, diffuse, f0, a, irradiance);
+                sum += local_light(push.frame.lights[w * 32 + bit], p, n, v, diffuse, f0, a, irradiance, shadows, w * 32 + bit);
         }
     }
     return sum;
@@ -999,15 +1179,16 @@ struct SubsurfaceOut
 };
 
 // The shading of the forward entry points, with the material's alpha; `masked` discards
-// below the alpha cutoff; `ao` reads the view's ambient occlusion (ADR 0058). Both are
-// literals at every call: the compiler removes the code of the other case, so shading
-// without ambient occlusion spends no registers on it (on RDNA2 even dead code under a
-// specialization constant took the shading from 64 to 72 VGPRs, 9 to 13 % slower).
-float4 shade(VertexOut input, bool front, bool masked, bool ao)
+// below the alpha cutoff; `ao` reads the view's ambient occlusion (ADR 0058); `shadows`
+// looks up local lights' shadows (ADR 0071). All are literals at every call: the compiler
+// removes the code of the other case, so shading without ambient occlusion or local
+// shadows spends no registers on them (on RDNA2 even dead code under a specialization
+// constant took the shading from 64 to 72 VGPRs, 9 to 13 % slower).
+float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = false, bool contact = false)
 {
     SubsurfaceOut unused;
     ReflectOut unused_reflect;
-    return shade_surface(input, front, masked, ao, false, false, unused, unused_reflect);
+    return shade_surface(input, front, masked, ao, false, unused, unused_reflect, shadows, contact);
 }
 
 // What the reflection entry points write besides the color (ADR 0073).
@@ -1021,7 +1202,7 @@ struct ReflectOut
 // `shade`; with `subsurface`, the scattered part of the diffuse light goes to `sss`
 // instead of the color. Subsurface materials' pipelines always take `ao` (they are their
 // own; without ambient occlusion `push.ao` skips the read).
-float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, bool reflective, out SubsurfaceOut sss, out ReflectOut refl)
+float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false)
 {
     Frame frame = push.frame[0];
     Material m = push.materials[input.material];
@@ -1078,12 +1259,16 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     // A surface facing away from the light is in its own shadow, whatever its normal map
     // says.
     float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+    // The sun's contact shadows (ADR 0071; `contact` is a literal): their mask's bindless
+    // index comes in `push.phase`, which the shading passes do not otherwise read.
+    if (contact && visible > 0.0)
+        visible *= g_textures[push.phase].Load(int3(int2(input.position.xy), 0)).r;
     float3 local_irradiance = 0.0;
     float3 reflect_weight = 0.0;
     float3 color = (surface_diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
         + ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight)
         + emissive
-        + local_lights(input.world_position, input.position.xy, n, v, surface_diffuse, f0, a, local_irradiance);
+        + local_lights(input.world_position, input.position.xy, n, v, surface_diffuse, f0, a, local_irradiance, shadows);
     sss = (SubsurfaceOut)0;
     refl = (ReflectOut)0;
     if (reflective)
@@ -1277,52 +1462,124 @@ struct ReflectedMotion
     float4 weight : SV_Target3;
 };
 
-// `ao`: a literal, as in `shade`.
-Reflected shade_reflected(VertexOut input, bool front, bool ao)
+// `ao`, `shadows` (local lights', ADR 0071) and `contact` (the sun's, ADR 0071): literals,
+// as in `shade`.
+Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bool contact)
 {
     SubsurfaceOut unused;
     ReflectOut refl;
     Reflected o;
-    o.color = float4(shade_surface(input, front, false, ao, false, true, unused, refl).rgb, 1.0);
+    o.color = float4(shade_surface(input, front, false, ao, false, unused, refl, shadows, contact, true).rgb, 1.0);
     o.normal_roughness = float4(encode_octahedral(refl.normal), refl.roughness, 1.0);
     o.weight = float4(refl.weight, 1.0);
+    return o;
+}
+
+ReflectedMotion shade_reflected_motion(VertexOut input, bool front, bool ao, bool shadows, bool contact)
+{
+    Reflected r = shade_reflected(input, front, ao, shadows, contact);
+    ReflectedMotion o;
+    o.color = r.color;
+    o.motion = motion(input.position, input.previous_clip);
+    o.normal_roughness = r.normal_roughness;
+    o.weight = r.weight;
     return o;
 }
 
 [shader("fragment")]
 Reflected fragmentReflect(VertexOut input, bool front : SV_IsFrontFace)
 {
-    return shade_reflected(input, front, false);
+    return shade_reflected(input, front, false, false, false);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, true, false);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, true, true);
 }
 
 [shader("fragment")]
 Reflected fragmentReflectAo(VertexOut input, bool front : SV_IsFrontFace)
 {
-    return shade_reflected(input, front, true);
+    return shade_reflected(input, front, true, false, false);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, false);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, true);
 }
 
 [shader("fragment")]
 ReflectedMotion fragmentReflectMotion(VertexOut input, bool front : SV_IsFrontFace)
 {
-    Reflected r = shade_reflected(input, front, false);
-    ReflectedMotion o;
-    o.color = r.color;
-    o.motion = motion(input.position, input.previous_clip);
-    o.normal_roughness = r.normal_roughness;
-    o.weight = r.weight;
-    return o;
+    return shade_reflected_motion(input, front, false, false, false);
+}
+
+[shader("fragment")]
+ReflectedMotion fragmentReflectMotionShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected_motion(input, front, false, true, false);
+}
+
+[shader("fragment")]
+ReflectedMotion fragmentReflectMotionContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected_motion(input, front, false, false, true);
+}
+
+[shader("fragment")]
+ReflectedMotion fragmentReflectMotionContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected_motion(input, front, false, true, true);
 }
 
 [shader("fragment")]
 ReflectedMotion fragmentReflectMotionAo(VertexOut input, bool front : SV_IsFrontFace)
 {
-    Reflected r = shade_reflected(input, front, true);
-    ReflectedMotion o;
-    o.color = r.color;
-    o.motion = motion(input.position, input.previous_clip);
-    o.normal_roughness = r.normal_roughness;
-    o.weight = r.weight;
-    return o;
+    return shade_reflected_motion(input, front, true, false, false);
+}
+
+[shader("fragment")]
+ReflectedMotion fragmentReflectMotionAoShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected_motion(input, front, true, true, false);
+}
+
+[shader("fragment")]
+ReflectedMotion fragmentReflectMotionAoContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected_motion(input, front, true, false, true);
+}
+
+[shader("fragment")]
+ReflectedMotion fragmentReflectMotionAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected_motion(input, front, true, true, true);
 }
 
 // The scatter pass (ADR 0059). The forward subsurface pass left, at every pixel of a
@@ -1446,7 +1703,7 @@ SubsurfaceShaded fragmentSubsurface(VertexOut input, bool front : SV_IsFrontFace
     SubsurfaceOut sss;
     SubsurfaceShaded o;
     ReflectOut unused;
-    o.color = float4(shade_surface(input, front, false, true, true, false, sss, unused).rgb, 1.0);
+    o.color = float4(shade_surface(input, front, false, true, true, sss, unused).rgb, 1.0);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
     return o;
@@ -1466,10 +1723,185 @@ SubsurfaceShadedMotion fragmentSubsurfaceMotion(VertexOut input, bool front : SV
     SubsurfaceOut sss;
     SubsurfaceShadedMotion o;
     ReflectOut unused;
-    o.color = float4(shade_surface(input, front, false, true, true, false, sss, unused).rgb, 1.0);
+    o.color = float4(shade_surface(input, front, false, true, true, sss, unused).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
+    return o;
+}
+
+// The entry points above with local lights' shadows (ADR 0071): drawn instead of them
+// while shadowed lights reach the view, so the others carry no code for it.
+[shader("fragment")]
+float4 fragmentMainShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMaskedShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentBlendedShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    float4 c = shade(input, front, false, false, true);
+    float alpha = saturate(c.a);
+    return float4(c.rgb * alpha, alpha);
+}
+
+[shader("fragment")]
+float4 fragmentBlendedAtmosphereShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    float4 c = shade(input, front, false, false, true);
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    float alpha = saturate(c.a);
+    return float4(c.rgb * alpha, alpha);
+}
+
+[shader("fragment")]
+BlendedReactive fragmentBlendedReactiveShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    float4 c = shade(input, front, false, false, true);
+    float alpha = saturate(c.a);
+    BlendedReactive o;
+    o.color = float4(c.rgb * alpha, alpha);
+    o.reactive = float4(alpha, 0.0, 0.0, alpha);
+    return o;
+}
+
+[shader("fragment")]
+BlendedReactive fragmentBlendedAtmosphereReactiveShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    float4 c = shade(input, front, false, false, true);
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    float alpha = saturate(c.a);
+    BlendedReactive o;
+    o.color = float4(c.rgb * alpha, alpha);
+    o.reactive = float4(alpha, 0.0, 0.0, alpha);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, false, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionAoShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, true, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMaskedMotionShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, true, false, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    ReflectOut unused;
+    o.color = float4(shade_surface(input, front, false, true, true, sss, unused, true).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+[shader("fragment")]
+SubsurfaceShadedMotion fragmentSubsurfaceMotionShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShadedMotion o;
+    ReflectOut unused;
+    o.color = float4(shade_surface(input, front, false, true, true, sss, unused, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+// After the depth prepass of a view with the sun's contact shadows (ADR 0071): the
+// shading entry points that read their mask, with and without motion vectors, ambient
+// occlusion and local lights' shadows.
+[shader("fragment")]
+float4 fragmentMainContact(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContact(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainContactShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, false, false, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionAoContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, true, false, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, false, true, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
+    return o;
+}
+
+[shader("fragment")]
+ShadedMotion fragmentMainMotionAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    ShadedMotion o;
+    o.color = float4(shade(input, front, false, true, true, true).rgb, 1.0);
+    o.motion = motion(input.position, input.previous_clip);
     return o;
 }
 

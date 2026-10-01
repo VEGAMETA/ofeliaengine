@@ -161,6 +161,7 @@ Constants and formulas taken into our own code (no files copied).
 | The transmittance table's parameterization and the atmosphere's parameters, which that reference takes from Bruneton's implementation | same | Eric Bruneton, `ebruneton/precomputed_atmospheric_scattering`, commit 34f14e745cff | BSD-3-Clause (Copyright (c) 2017 Eric Bruneton, below) |
 | The hierarchical screen-space traversal: the initial advance, the advance against a texel's boundaries and the surface's plane, the level stepping, the 0.005-texel offset, the low-occupancy exit for glossy rays | `engine_render/shaders/reflections.slang` (`initial_advance`, `advance`, `hierarchical_march`) | AMD FidelityFX SSSR, `GPUOpen-Effects/FidelityFX-SSSR`, `ffx-sssr/ffx_sssr.h` (`FFX_SSSR_InitialAdvanceRay`, `FFX_SSSR_AdvanceRay`, `FFX_SSSR_HierarchicalRaymarch`), master as of 2026-10-01 | MIT (Copyright (c) 2021 Advanced Micro Devices, Inc., below) |
 | LDR-FLIP: its constants, separable spatial and feature filters, colour transforms and error remapping, ported to Rust | `tests/golden/src/flip.rs` (test-only crate `engine_golden`) | NVIDIA `NVlabs/flip`, `src/cpp/FLIP.h` (Andersson et al., HPG 2020) | BSD-3-Clause (Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES) |
+| Bend Studio's screen-space shadows: the wavefront layout towards the light's screen point, the dispatch list around it, the shared-memory depth line with perspective correction, the hard / averaged / fading sample groups, the edge test and precision offset, the default tuning values (ported to Slang and Rust, modified: Vulkan's y-down clip space, edges ignored, a thicker default surface, the light's own pixel written lit) | `engine_render/shaders/contact.slang`, `engine_render/src/contact.rs` (`bend_dispatches`) | Sony Interactive Entertainment (Bend Studio), `bend_sss_gpu.h`, `bend_sss_cpu.h` (2023), from bendstudio.com/blog/inside-bend-screen-space-shadows | Apache-2.0 (Copyright 2023 Sony Interactive Entertainment, below) |
 
 ### MIT license (Baking Lab)
 
@@ -410,3 +411,23 @@ OTHER INTELLECTUAL PROPERTY RIGHTS IN THE ACADEMY COLOR ENCODING SYSTEM, OR
 APPLICATIONS THEREOF, HELD BY PARTIES OTHER THAN A.M.P.A.S.,WHETHER DISCLOSED OR
 UNDISCLOSED.
 ```
+
+### Apache License 2.0 (Bend Studio screen-space shadows)
+
+```
+Copyright 2023 Sony Interactive Entertainment.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+```
+
+The adapted files state the changes made (`contact.slang`'s header, `contact.rs`).

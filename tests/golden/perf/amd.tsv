@@ -67,6 +67,19 @@ sponza_fsr_quality	shadow	2706.6
 sponza_fsr_quality	shadow cull	14.4
 sponza_fsr_quality	sky	27.6
 sponza_fsr_quality	tonemap	765.7
+sponza_local_shadows	(frame total)	37496.3
+sponza_local_shadows	(gpu frame)	37534.8
+sponza_local_shadows	bloom downsample	642.4
+sponza_local_shadows	bloom upsample	478.4
+sponza_local_shadows	cull	4.2
+sponza_local_shadows	cull setup	1.8
+sponza_local_shadows	forward	33235.3
+sponza_local_shadows	light tiles	24.1
+sponza_local_shadows	light tiles clear	1.4
+sponza_local_shadows	shadow	2299.3
+sponza_local_shadows	shadow cull	5.0
+sponza_local_shadows	sky	34.3
+sponza_local_shadows	tonemap	758.2
 sponza_taa	(frame total)	23353.7
 sponza_taa	(gpu frame)	23717.6
 sponza_taa	bloom downsample	680.2

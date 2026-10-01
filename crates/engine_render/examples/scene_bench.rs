@@ -16,7 +16,12 @@
 //! `--motion` for a jittered projection and motion vectors (ADR 0043), `--cascades <1-4>`
 //! `--shadow-res <texels per cascade>` and `--shadow-blend <band>` for the shadows
 //! (ADR 0044), `--lights <count>` for point and spot lights spread over the scene and
-//! `--no-light-culling` to evaluate every light for every pixel (ADR 0045), `--sky` for
+//! `--no-light-culling` to evaluate every light for every pixel (ADR 0045),
+//! `--shadowed-lights <count>` for shadows of the first lights (ADR 0071; at least that many
+//! lights), `--local-shadow-budget <views>`, `--local-shadow-atlas <texels>` and
+//! `--local-shadow-res <min>,<max>` for their settings, `--local-shadows-every-frame` to draw
+//! every shadow again every frame (the cache dropped), `--contact` for the sun's contact
+//! shadows (ADR 0071; implies the prepass), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--atmosphere` for the physically based sky and atmosphere
 //! instead of the gradient sky (ADR 0069; implies `--sky`), `--sun <elevation°>` for the sun's
@@ -265,6 +270,10 @@ fn main() {
     let mut motion = false;
     let mut shadows = ShadowSettings::default();
     let mut light_count = 0usize;
+    let mut shadowed_lights = 0usize;
+    let mut local_shadows = engine_render::forward::LocalShadowSettings::default();
+    let mut local_shadows_every_frame = false;
+    let mut contact: Option<engine_render::forward::ContactShadowSettings> = None;
     let mut light_culling = true;
     let (mut with_sky, mut sky_every_frame) = (false, false);
     let (mut atmosphere, mut atmosphere_every_frame, mut fog) = (false, false, false);
@@ -309,6 +318,21 @@ fn main() {
             }
             "--motion" => motion = true,
             "--lights" => light_count = args.next().unwrap().parse().unwrap(),
+            "--shadowed-lights" => shadowed_lights = args.next().unwrap().parse().unwrap(),
+            "--local-shadow-budget" => {
+                local_shadows.updates_per_frame = args.next().unwrap().parse().unwrap();
+            }
+            "--local-shadow-atlas" => {
+                local_shadows.atlas_size = args.next().unwrap().parse().unwrap();
+            }
+            "--local-shadow-res" => {
+                let value = args.next().unwrap();
+                let (min, max) = value.split_once(',').unwrap();
+                local_shadows.min_resolution = min.parse().unwrap();
+                local_shadows.max_resolution = max.parse().unwrap();
+            }
+            "--local-shadows-every-frame" => local_shadows_every_frame = true,
+            "--contact" => contact = Some(Default::default()),
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
             "--lods" => lods = true,
@@ -649,6 +673,7 @@ fn main() {
         seed ^= seed << 5;
         (seed >> 8) as f32 / (1 << 24) as f32
     };
+    let light_count = light_count.max(shadowed_lights);
     let lights: Vec<LocalLight> = (0..light_count)
         .map(|k| {
             let t = Vec3::new(next(), next(), next());
@@ -662,6 +687,7 @@ fn main() {
                     inner: 0.4,
                     outer: 0.7,
                 }),
+                shadow: k < shadowed_lights,
             }
         })
         .collect();
@@ -778,6 +804,14 @@ fn main() {
         )
         .unwrap()
     });
+    if shadowed_lights > 0 {
+        renderer
+            .set_local_shadows(&device, &mut allocator, &bindless, Some(local_shadows))
+            .unwrap();
+    }
+    renderer
+        .set_contact_shadows(&device, &bindless, contact)
+        .unwrap();
     if pipeline_stats {
         // Needs ENGINE_PIPELINE_STATS=1 (the device captures statistics at creation).
         let names = [
@@ -806,6 +840,33 @@ fn main() {
             println!("Pipeline statistics, {name}: {}", line.join("; "));
         }
         let names = [
+            "contact shadows",
+            "contact shadows + lights",
+            "contact shadows + environment",
+            "contact shadows + lights + environment",
+        ];
+        for (name, stats) in names.iter().zip(renderer.contact_statistics(&device)) {
+            if stats.is_empty() {
+                continue;
+            }
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
+        let names = ["lights with shadows", "lights with shadows + environment"];
+        for (name, stats) in names.iter().zip(renderer.shadowed_statistics(&device)) {
+            if stats.is_empty() {
+                continue;
+            }
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
+        let names = [
             "reflections shading",
             "reflections shading + lights",
             "reflections composite, probes",
@@ -813,13 +874,14 @@ fn main() {
             "reflections composite, probes + SSR",
         ];
         for (name, stats) in names.iter().zip(renderer.reflection_statistics(&device)) {
+            if stats.is_empty() {
+                continue;
+            }
             let line: Vec<String> = stats
                 .iter()
                 .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
                 .collect();
-            if !line.is_empty() {
-                println!("Pipeline statistics, {name}: {}", line.join("; "));
-            }
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
         }
         println!();
     }
@@ -874,8 +936,13 @@ fn main() {
     });
     if light_count > 0 {
         println!(
-            "Lights: {light_count} ({} culling)",
-            if light_culling { "with" } else { "without" }
+            "Lights: {light_count} ({} culling), {shadowed_lights} with shadows{}",
+            if light_culling { "with" } else { "without" },
+            if local_shadows_every_frame {
+                " (drawn again every frame)"
+            } else {
+                ""
+            }
         );
         println!();
     }
@@ -884,10 +951,10 @@ fn main() {
          GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs | \
          GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs | GPU AO µs | \
          GPU frame µs | CPU execute µs | GPU atmosphere tables µs | GPU aerial perspective µs | \
-         GPU atmosphere pass µs |"
+         GPU atmosphere pass µs | GPU local shadows µs | local shadow views | GPU contact shadows µs |"
     );
     println!(
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     );
 
     let mut frame_number = 0u64;
@@ -902,6 +969,8 @@ fn main() {
         let mut motion_extra = Vec::new();
         let (mut light_tiles, mut cpu_add) = (Vec::new(), Vec::new());
         let mut cpu_execute = Vec::new();
+        let (mut local_time, mut local_views) = (Vec::new(), Vec::new());
+        let mut contact_time = Vec::new();
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
         let (mut tables, mut aerial, mut composite) = (Vec::new(), Vec::new(), Vec::new());
         let (mut bloom_time, mut exposure_time, mut tonemap_time) =
@@ -979,6 +1048,9 @@ fn main() {
                 }
                 if probes_every_frame && let Some(p) = &probes {
                     p.refresh_all();
+                }
+                if local_shadows_every_frame {
+                    renderer.invalidate_local_shadows();
                 }
                 let started = Instant::now();
                 renderer
@@ -1143,6 +1215,8 @@ fn main() {
                 let (mut capture_frame, mut prefilter_frame) = (0.0, 0.0);
                 let mut ssr_frame = [0.0; 4];
                 let mut reflect_frame = 0.0;
+                let mut local_frame = 0.0;
+                let mut contact_frame = 0.0;
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
                     match time.name {
@@ -1156,6 +1230,12 @@ fn main() {
                         _ => {}
                     }
                     match time.name {
+                        "contact shadows" | "contact shadows clear" => {
+                            contact_frame += f64::from(time.gpu_us);
+                        }
+                        "local shadow cull" | "local shadows" => {
+                            local_frame += f64::from(time.gpu_us);
+                        }
                         "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
                         "forward" => forward.push(f64::from(time.gpu_us)),
                         "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
@@ -1208,6 +1288,9 @@ fn main() {
                 ssr_temporal.push(ssr_frame[3]);
                 reflect_composite.push(reflect_frame);
                 faces_drawn.push(f64::from(probes.as_ref().map_or(0, |p| p.stats().faces)));
+                local_time.push(local_frame);
+                contact_time.push(contact_frame);
+                local_views.push(f64::from(renderer.local_shadow_stats().views_drawn));
                 if let Some(us) = graph.gpu_frame_time() {
                     frame_time.push(f64::from(us));
                 }
@@ -1223,7 +1306,7 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.1} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} | {:.1} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
@@ -1241,6 +1324,9 @@ fn main() {
             median(&mut tables),
             median(&mut aerial),
             median(&mut composite),
+            median(&mut local_time),
+            median(&mut local_views),
+            median(&mut contact_time),
         );
         if probes.is_some() || screen_space.is_some() {
             reflection_rows.push(format!(
@@ -1296,8 +1382,15 @@ fn main() {
         println!("Screenshot: {file} (eye {eye}, target {target})");
     }
 
+    if shadowed_lights > 0 {
+        println!(
+            "Local shadows, last frame: {:?}",
+            renderer.local_shadow_stats()
+        );
+    }
     // SAFETY: the device is idle.
     unsafe {
+        renderer.destroy(&device, &mut allocator, &bindless);
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);

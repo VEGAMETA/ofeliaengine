@@ -500,6 +500,7 @@ fn zero_radius_matches_ordinary_shading() {
         range: 3.0,
         color: Vec3::new(0.3, 0.2, 0.1),
         spot: None,
+        shadow: false,
     }];
     let mut worst = 0.0f32;
     for (mask, environment) in [(1.0, false), (0.5, false), (1.0, true)] {

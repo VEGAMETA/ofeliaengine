@@ -19,7 +19,9 @@ use engine_frame::{
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
-use engine_render::forward::{DirectionalLight, DrawItem, LocalLight, ShadowSettings, Spot};
+use engine_render::forward::{
+    DirectionalLight, DrawItem, LocalLight, LocalShadowSettings, ShadowSettings, Spot,
+};
 use engine_render::gpu_scene::GpuScene;
 use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
@@ -105,6 +107,10 @@ pub struct Shot {
     pub atmosphere: Option<Atmosphere>,
     /// Exponential height fog (ADR 0069; with `sky`).
     pub fog: Option<HeightFog>,
+    /// Shadows of local lights (ADR 0071): every light casts them.
+    pub local_shadows: bool,
+    /// The sun's contact shadows (ADR 0071; they turn the depth prepass on).
+    pub contact_shadows: bool,
     /// Antialiasing (ADR 0072): off, or a temporal upscaler. Temporal shots start
     /// accumulating once the scene is resident and are captured `temporal_frames` later.
     pub antialiasing: Antialiasing,
@@ -160,6 +166,8 @@ impl Shot {
             animation_rate: 0.0,
             atmosphere: None,
             fog: None,
+            local_shadows: false,
+            contact_shadows: false,
             antialiasing: Antialiasing::Off,
             quality: Quality::Native,
             temporal_frames: 32,
@@ -417,6 +425,7 @@ pub fn procedural_lights() -> Vec<LocalLight> {
             range: 4.0,
             color: Vec3::new(3.0, 1.8, 0.8),
             spot: None,
+            shadow: false,
         },
         LocalLight {
             position: Vec3::new(2.5, 3.5, 0.0),
@@ -427,8 +436,41 @@ pub fn procedural_lights() -> Vec<LocalLight> {
                 inner: 0.3,
                 outer: 0.6,
             }),
+            shadow: false,
         },
     ]
+}
+
+/// Warm point lights along Sponza's hall, alternating sides, and two cold spot lights
+/// from above.
+pub fn sponza_lights() -> Vec<LocalLight> {
+    let mut lights: Vec<LocalLight> = (0..5)
+        .map(|k| LocalLight {
+            position: Vec3::new(
+                -6.0 + 4.0 * k as f32,
+                1.4,
+                if k % 2 == 0 { 2.2 } else { -2.2 },
+            ),
+            range: 8.0,
+            color: Vec3::new(24.0, 15.0, 8.0),
+            spot: None,
+            shadow: true,
+        })
+        .collect();
+    for x in [-2.0, 6.0] {
+        lights.push(LocalLight {
+            position: Vec3::new(x, 7.0, 0.0),
+            range: 12.0,
+            color: Vec3::new(90.0, 100.0, 140.0),
+            spot: Some(Spot {
+                direction: Vec3::new(0.15, -1.0, 0.1).normalize(),
+                inner: 0.4,
+                outer: 0.65,
+            }),
+            shadow: true,
+        });
+    }
+    lights
 }
 
 /// Streamline when the shot asks for DLSS (ADR 0063), loaded before the instance.
@@ -601,6 +643,25 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 &[SubsurfaceProfile::from_radius([0.3, 0.12, 0.06])],
             )
             .expect("subsurface profiles");
+    }
+    if shot.local_shadows {
+        renderer
+            .set_local_shadows(
+                &device,
+                &mut allocator,
+                &bindless,
+                Some(LocalShadowSettings::default()),
+            )
+            .expect("local shadows");
+    }
+    if shot.contact_shadows {
+        renderer
+            .set_contact_shadows(&device, &bindless, Some(Default::default()))
+            .expect("contact shadows");
+    }
+    let mut lights = shot.lights.clone();
+    for light in lights.iter_mut() {
+        light.shadow = shot.local_shadows;
     }
     let environment = shot.sky.then(|| {
         let mut environment =
@@ -1015,7 +1076,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         },
                         skinning: Some(&skinned_frame),
                         light: shot.sun,
-                        lights: &shot.lights,
+                        lights: &lights,
                         environment: environment.as_ref(),
                         reflection_probes: probes.as_ref(),
                     },
@@ -1145,6 +1206,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // SAFETY: the device is idle; everything below was created above and is not used
     // again.
     unsafe {
+        frame
+            .forward_mut()
+            .destroy(&device, &mut allocator, &bindless);
         view.destroy(&mut allocator, &bindless);
         if let Some(game) = game.as_mut() {
             game.scene.destroy(&mut allocator);

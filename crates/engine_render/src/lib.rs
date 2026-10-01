@@ -11,6 +11,8 @@
 //!   bytes per frame (ADR 0040).
 //! - [`forward`]: forward PBR with a directional light and a shadow map (ADR 0014), drawn
 //!   GPU-driven: GPU frustum culling and indirect instanced draws (ADR 0034).
+//! - [`contact`]: contact shadows of the sun from the depth buffer (ADR 0071).
+//! - [`local_shadows`]: shadows of point and spot lights in a cached atlas (ADR 0071).
 //! - [`skinning`]: skinned meshes skinned by a compute pass into the geometry pool, and
 //!   their motion vectors (ADR 0068).
 //! - [`atmosphere`]: a physically based sky and atmosphere, aerial perspective and
@@ -32,6 +34,7 @@
 pub mod ao;
 pub mod atmosphere;
 pub mod compute;
+pub mod contact;
 pub mod cull;
 pub mod environment;
 pub mod forward;
@@ -39,6 +42,7 @@ pub mod gpu_scene;
 pub mod graph;
 pub mod hiz;
 pub mod lights;
+pub mod local_shadows;
 pub mod material;
 pub mod mesh;
 pub mod png;
