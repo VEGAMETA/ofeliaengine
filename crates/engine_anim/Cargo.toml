@@ -13,6 +13,3 @@ workspace = true
 [dependencies]
 engine_core.workspace = true
 engine_profiler.workspace = true
-
-[[example]]
-name = "anim_bench"
