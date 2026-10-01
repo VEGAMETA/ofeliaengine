@@ -4,12 +4,13 @@
 //! back as 8-bit sRGB, with the GPU time of every pass. The golden-image tests and the
 //! performance gate both use it (ADR 0062).
 
+use engine_anim::{local_to_model, skinning_matrices};
 use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
     TextureSlot, TextureWrap, cook_scene, import_gltf,
 };
 use engine_core::jobs::ThreadPool;
-use engine_core::math::{Mat4, Quat, Vec3, look_at};
+use engine_core::math::{Affine3A, Mat4, Quat, Vec3, look_at};
 use engine_frame::{
     Antialiasing, Exposure, FrameContext, FrameRenderer, PrepareContext, Quality, SceneDraws,
     SceneInput, View, ViewCamera, ViewSettings, ViewTarget,
@@ -22,6 +23,7 @@ use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGr
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
 use engine_render::post::ToneCurve;
+use engine_render::skinning::{SkinnedMeshData, Skinning};
 use engine_render::subsurface::SubsurfaceProfile;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
@@ -79,6 +81,12 @@ pub struct Shot {
     pub subsurface: bool,
     /// Async compute (ADR 0065) on or off, or `None` for the device's default.
     pub async_compute: Option<bool>,
+    /// Skinned scenes (ADR 0068): every skin posed by its clip of this index at this time
+    /// (seconds); `None` draws skinned meshes in their bind pose, unskinned.
+    pub animation: Option<(usize, f32)>,
+    /// Clip seconds per frame from the first temporal frame (the clip plays; the skinned
+    /// motion pass gives the moving vertices their motion vectors). 0: a still pose.
+    pub animation_rate: f32,
     /// A physically based sky and atmosphere (ADR 0069) instead of the gradient sky (with
     /// `sky`); it drives the sun's color.
     pub atmosphere: Option<Atmosphere>,
@@ -121,6 +129,8 @@ impl Shot {
             ao: None,
             subsurface: false,
             async_compute: None,
+            animation: None,
+            animation_rate: 0.0,
             atmosphere: None,
             fog: None,
             antialiasing: Antialiasing::Off,
@@ -455,6 +465,7 @@ fn load(source: &Source, subsurface: bool) -> Result<Loaded, Skip> {
                 lods: false,
                 compression_level: 0,
                 block_compression: true,
+                ..CookSettings::default()
             };
             let (cooked, _) = cook_scene(&scene, dir, Some(&cache), &jobs, &settings)
                 .map_err(|_| Skip::NoScene(path.clone()))?;
@@ -582,6 +593,11 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
 
     let mut geometry = GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1)
         .expect("geometry");
+    let mut skinning = Skinning::new(&device, &mut allocator, &bindless, depth_format, 1 << 14, 1)
+        .expect("skinning");
+    // Skinned instances: (skinning id, skin, world transform).
+    let mut skinned = Vec::new();
+    let mut skins = Vec::new();
     let mut textures = TexturePool::new(&device, 256 << 20, 1);
     let mut materials = MaterialTable::new(1);
     let mut draws: Vec<DrawItem> = Vec::new();
@@ -633,11 +649,34 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             .map(|m| materials.add(m))
             .collect();
         let fallback = materials.default_material();
+        skins = std::mem::take(&mut cooked.skins);
         for instance in &cooked.instances {
             let world = Mat4::from_cols_array(&instance.world_from_object);
             let mesh = &cooked.meshes[instance.mesh as usize];
+            let mut drawn = meshes[instance.mesh as usize];
+            if let (Some(_), Some(skin)) = (shot.animation, instance.skin) {
+                let source = skinning
+                    .add_skin(&SkinnedMeshData {
+                        mesh: MeshData {
+                            positions: &mesh.positions,
+                            normals: &mesh.normals,
+                            tangents: &mesh.tangents,
+                            uvs: &mesh.uvs,
+                            indices: &mesh.indices,
+                        },
+                        joints: &mesh.joints,
+                        weights: &mesh.weights,
+                        joint_count: skins[skin as usize].joints.len() as u16,
+                    })
+                    .expect("skin");
+                let (id, out) = skinning
+                    .add_instance(source, &mut geometry)
+                    .expect("skinned instance");
+                skinned.push((id, skin as usize, world));
+                drawn = out;
+            }
             draws.push(DrawItem {
-                mesh: meshes[instance.mesh as usize],
+                mesh: drawn,
                 material: instance
                     .material
                     .map_or(fallback, |i| material_ids[i as usize]),
@@ -662,8 +701,8 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let extent = (max - min).length();
     let temporal = shot.antialiasing != Antialiasing::Off;
     // Frames after residency before the capture: the sky's environment is built on the
-    // first; a temporal shot then accumulates `temporal_frames` frames from a fresh
-    // history (its view turns temporal at `TEMPORAL_START`), the last one captured.
+    // first; a temporal shot then accumulates `temporal_frames` frames from a camera cut
+    // at `TEMPORAL_START` (its history starts there), the last one captured.
     const TEMPORAL_START: usize = 2;
     let capture_at = TEMPORAL_START
         + if temporal {
@@ -683,6 +722,31 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut view = View::new(&device, draws.len() as u32);
     let mut antialiasing = Antialiasing::Off;
 
+    // The skins' skinning matrices at the shot's time plus `elapsed` clip seconds.
+    let palettes_at = |elapsed: f32| -> Vec<Vec<[f32; 12]>> {
+        skins
+            .iter()
+            .map(|skin| {
+                let n = skin.skeleton.joint_count();
+                let mut pose = skin.skeleton.rest().clone();
+                if let Some(clip) = shot.animation.and_then(|(clip, _)| skin.clips.get(clip)) {
+                    let time = shot.animation.map_or(0.0, |(_, t)| t) + elapsed;
+                    clip.sample(time, skin.skeleton.rest(), &mut pose);
+                }
+                let mut model = vec![Affine3A::IDENTITY; n];
+                local_to_model(&skin.skeleton, &pose, &Affine3A::IDENTITY, &mut model);
+                let inverse_bind: Vec<Affine3A> = skin
+                    .inverse_bind
+                    .iter()
+                    .map(|m| Affine3A::from_mat4(Mat4::from_cols_array(m)))
+                    .collect();
+                let mut palette = vec![[0.0; 12]; skin.joints.len()];
+                skinning_matrices(&model, &skin.joints, &inverse_bind, &mut palette);
+                palette
+            })
+            .collect()
+    };
+    let mut palettes = palettes_at(0.0);
     let mut timings: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
     let mut frame_times = Vec::new();
     let mut frame_number = 0u64;
@@ -692,23 +756,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     while timed < options.timed_frames || !captured {
         let uploading = textures.pending().0 > 0;
         let capture = !uploading && !captured && resident_frames >= capture_at;
-        // The view turns temporal once the scene is resident: its history and jitter
-        // sequence start there on every run.
+        // Frames since the cut that starts a temporal shot's history (the jitter sequence
+        // runs from the first frame: the scene's upload takes the same frames every run).
         let accumulated = (!uploading && resident_frames >= TEMPORAL_START)
             .then(|| resident_frames - TEMPORAL_START);
-        let view_settings = ViewSettings {
-            antialiasing: if accumulated.is_some() {
-                shot.antialiasing
-            } else {
-                Antialiasing::Off
-            },
-            ..settings
-        };
         frame_number += 1;
         let prepared = frame
             .prepare(
                 &mut view,
-                &view_settings,
+                &settings,
                 (width, height),
                 PrepareContext {
                     device: &device,
@@ -719,9 +775,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 },
             )
             .expect("prepare");
-        if accumulated.is_some() {
-            antialiasing = prepared.antialiasing;
-        }
+        antialiasing = prepared.antialiasing;
         let shift = shot.camera_motion * accumulated.unwrap_or(0) as f32;
         let camera = ViewCamera {
             view_from_world: look_at(eye + shift, target + shift, Vec3::Y),
@@ -729,8 +783,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             fov_y: shot.fov_y.to_radians(),
             near: extent * 0.001,
             far: extent * 2.0,
-            cut: false,
+            cut: accumulated == Some(0),
         };
+        if shot.animation_rate != 0.0 {
+            palettes = palettes_at(shot.animation_rate * accumulated.unwrap_or(0) as f32);
+        }
+        for &(id, skin, world) in &skinned {
+            skinning.set_pose(id, &palettes[skin], &world);
+        }
+        skinning.update_bounds(&mut geometry, None);
         // SAFETY: the previous frame finished (waited below).
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -755,6 +816,17 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             let geo = geometry
                 .begin_frame(&mut fg, &device, &mut allocator, frame_number)
                 .expect("geometry");
+            let skinned_frame = skinning
+                .begin_frame(
+                    &mut fg,
+                    &mut ring,
+                    &device,
+                    &mut allocator,
+                    &bindless,
+                    &geo,
+                    frame_number,
+                )
+                .expect("skinning");
             let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
             frame
                 .add_view(
@@ -772,6 +844,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         geometry: &geo,
                         materials: &mats,
                         draws: SceneDraws::List(&draws),
+                        skinning: Some(&skinned_frame),
                         light: shot.sun,
                         lights: &shot.lights,
                         environment: environment.as_ref(),
@@ -895,6 +968,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         view.destroy(&mut allocator, &bindless);
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
+        skinning.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
         materials.destroy(&mut allocator);
         textures.destroy(&mut allocator, &bindless);
@@ -905,7 +979,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         d.destroy_command_pool(command_pool, None);
     }
     // Streamline goes before the device it is attached to (ADR 0063).
-    drop((frame, view, streamline, environment, bindless, allocator));
+    drop((
+        frame,
+        view,
+        skinning,
+        streamline,
+        environment,
+        bindless,
+        allocator,
+    ));
     let report = instance.validation_report();
     assert_eq!(
         report.errors, 0,

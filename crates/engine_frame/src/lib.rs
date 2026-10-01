@@ -7,6 +7,7 @@
 //!  cull → shadows → (prepass, AO)  →  TAAU / FSR / DLSS   →   bloom → exposure → tonemap
 //!  → forward → (SSS) → sky/fog        (or nothing: Off)        → the view's target
 //!  → transparent (+ reactive mask)
+//!  → skinned motion (ADR 0068)
 //!  jitter + motion vectors            history per view
 //! ```
 //!
@@ -20,6 +21,10 @@
 //! - [`ViewSettings`] says what a view wants: [`Antialiasing`] (`Off`, or a temporal
 //!   upscaler: the engine's TAAU, FSR 3.1, DLSS), the render size (`Quality`, or a
 //!   dynamic `render_scale`), exposure, tone curve, bloom.
+//!
+//! Scene-level work runs once per frame before the views: the pools' and tables'
+//! `begin_frame` (geometry, textures, materials), the GPU scene's `add_passes` and the
+//! skinning pass (`Skinning::begin_frame`); their frames go into [`SceneInput`].
 //!
 //! Every frame, per view:
 //!

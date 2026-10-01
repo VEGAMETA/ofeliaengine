@@ -380,6 +380,7 @@ fn main() {
                 lods,
                 compression_level: 0,
                 block_compression: !uncompressed,
+                ..CookSettings::default()
             };
             let (cooked, stats) = cook_scene(&scene, dir, Some(&cache), &jobs, &settings).unwrap();
             let source = format!(

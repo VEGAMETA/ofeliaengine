@@ -685,6 +685,19 @@ impl GeometryPool {
         slot.mesh.as_ref().map(|(info, _, _)| info)
     }
 
+    /// Replaces a mesh's object-space box (stale ids are ignored): for meshes whose
+    /// vertices the GPU rewrites, like skinned meshes (`crate::skinning`). Culling and the
+    /// draw order use it from the next frame on.
+    pub fn set_bounds(&mut self, id: MeshId, min: Vec3, max: Vec3) {
+        if let Some(slot) = self.slots.get_mut(id.index as usize)
+            && slot.generation == id.generation
+            && let Some((info, _, _)) = slot.mesh.as_mut()
+        {
+            info.min = min;
+            info.max = max;
+        }
+    }
+
     /// Live meshes.
     pub fn mesh_count(&self) -> usize {
         self.slots.len() - self.free_slots.len()

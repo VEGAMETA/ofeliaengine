@@ -18,6 +18,7 @@ use engine_render::material::{MaterialFrame, MaterialTable};
 use engine_render::mesh::GeometryFrame;
 use engine_render::post::{Composite, HDR_FORMAT, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings};
+use engine_render::skinning::SkinningFrame;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocator, Bindless, Device, RhiError, SamplerKind};
@@ -108,6 +109,10 @@ pub struct SceneInput<'a, 'g> {
     pub materials: &'a MaterialFrame<'g>,
     /// What is drawn.
     pub draws: SceneDraws<'a, 'g>,
+    /// This frame's skinning (`Skinning::begin_frame`, ADR 0068), when the scene has
+    /// skinned meshes: views with motion vectors get the skinned motion pass after their
+    /// scene passes (each skinned vertex's own motion).
+    pub skinning: Option<&'a SkinningFrame<'g>>,
     /// The sun.
     pub light: DirectionalLight,
     /// Point and spot lights.
@@ -617,6 +622,9 @@ impl FrameRenderer {
             ),
         }
         .ok_or(FrameError::RingFull)?;
+        if let (Some(skinning), Some(motion)) = (scene.skinning, &passes.motion) {
+            skinning.add_motion_pass(fg, ctx.ring, ctx.bindless, scene.geometry, depth, motion)?;
+        }
 
         // The previous antialiased color, kept for screen-space effects.
         let kept = history.as_mut().map(|h| {

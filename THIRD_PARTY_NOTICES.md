@@ -8,7 +8,7 @@ the dependency.
 
 | Crate | License | Used for |
 |---|---|---|
-| windows-sys 0.61 (+ windows-link 0.2) | MIT OR Apache-2.0 | Win32 bindings in `engine_platform` (ADR 0004); loading and signature checks of the Streamline DLLs in `engine_dlss` (ADR 0063) |
+| windows-sys 0.61 (+ windows-link 0.2) | MIT OR Apache-2.0 | Win32 bindings in `engine_platform` (ADR 0004); loading and signature checks of the Streamline DLLs in `engine_dlss` (ADR 0063); Winsock, IP Helper and CNG (AES-GCM, random numbers) in `engine_net_transport` (ADR 0070) |
 | ash 0.38 | MIT OR Apache-2.0 | Vulkan bindings in `engine_rhi` (ADR 0006) |
 | libloading 0.8 (+ cfg-if 1) | ISC (cfg-if: MIT OR Apache-2.0) | loads the Vulkan loader at run time (dependency of ash) |
 | glam 0.33 | MIT OR Apache-2.0 | vectors, matrices, quaternions in `engine_core::math` (ADR 0012) |
@@ -30,6 +30,7 @@ the dependency.
 | lewton 0.10.2 (+ tinyvec 1.13, byteorder 1.5) | MIT OR Apache-2.0 (tinyvec Zlib OR Apache-2.0 OR MIT; byteorder Unlicense OR MIT) | Ogg Vorbis decoding in `engine_audio_decode` (ADR 0051) |
 | ogg 0.8.0 | BSD-3-Clause | Ogg pages of Opus files in `engine_audio_decode` (ADR 0051) |
 | claxon 0.4.3 | Apache-2.0 | FLAC decoding in `engine_audio_decode` (ADR 0051) |
+| thiserror 2.0 (+ thiserror-impl at compile time; already in the tree through meshopt and minidumper) | MIT OR Apache-2.0 | error types of `engine_net_transport` (CLAUDE.md §15: `thiserror` in libraries; ADR 0070) |
 | log 0.4.34 | MIT OR Apache-2.0 | the logging facade `engine_log` implements (ADR 0061) |
 | crash-handler 0.8.1 + crash-context 0.8 (© Embark Studios; + parking_lot 0.12, lock_api, parking_lot_core, scopeguard, smallvec, libc, cfg-if) | MIT OR Apache-2.0 (crash-context MIT) | hooks the process's crash paths in `engine_crash` (ADR 0061) |
 | minidumper 0.11.0 + minidump-writer 0.13.0 + minidump-common 0.26 (© Embark Studios; + polling 3, concurrent-queue, crossbeam-utils, pin-project-lite, scroll 0.12 + scroll_derive, goblin 0.9, plain, error-graph, failspot, debugid, uuid, range-map, num-traits, bitflags, serde, serde_json, itoa, memchr, zmij, thiserror 2, windows-sys 0.61) | MIT OR Apache-2.0 (minidump-writer, minidump-common, scroll, goblin, error-graph, failspot, crash-context, zmij MIT; debugid Apache-2.0; memchr Unlicense OR MIT) | the crash monitor process and its minidumps in `engine_crash` (ADR 0061) |
@@ -112,6 +113,14 @@ workspace `deny.toml` license allow-list (checked 2026-09-26).
 | bevy_ecs 0.18.1 (and its bevy_* dependencies) | MIT OR Apache-2.0 | ECS comparison |
 | flecs_ecs 0.2.2 (+ flecs_ecs_sys, bundled flecs C sources) | MIT | ECS comparison |
 
+`bench/net-crypto` (ADR 0070) builds these with its own `Cargo.lock`, to compare packet
+encryption against Windows CNG (the engine uses CNG):
+
+| Crate | License | Used for |
+|---|---|---|
+| chacha20poly1305 0.11.0 (+ aead, chacha20, poly1305, cipher, universal-hash, inout, crypto-common, hybrid-array, typenum, cpufeatures, rand_core, block-buffer, cmov, ctutils) | Apache-2.0 OR MIT (typenum MIT OR Apache-2.0) | AEAD comparison |
+| ring 0.17.14 (+ untrusted, cfg-if, getrandom 0.2, libc; build: cc, shlex, find-msvc-tools) | Apache-2.0 AND ISC (untrusted ISC; the others MIT OR Apache-2.0) | AEAD comparison |
+
 `bench/texture-compress` (ADR 0041) builds these with its own `Cargo.lock`: block_compression
 0.10.0 (MIT, above) and the engine's own crates.
 
@@ -121,6 +130,14 @@ workspace `deny.toml` license allow-list (checked 2026-09-26).
 |---|---|---|
 | parley 0.11.1 (+ fontique, parlance, ICU4X crates and data) | Apache-2.0 OR MIT (ICU4X: Unicode-3.0) | text layout comparison |
 | cosmic-text 0.19.0 (+ fontdb, swash, older harfrust and skrifa) | MIT OR Apache-2.0 | text layout comparison |
+
+`bench/acl-compare` (ADR 0068) builds with its own `Cargo.lock`: the `cc` crate 1.x (MIT
+OR Apache-2.0, already a build dependency above) and the engine's own crates. It compiles
+a small C shim against clones of the Animation Compression Library 2.1.0 (Nicholas
+Frechette, MIT) and Realtime Math 2.3.1 (Nicholas Frechette, MIT) that the user points
+it at (`ACL_DIR`, `RTM_DIR`); neither is vendored, committed or linked into the engine.
+`engine_anim`'s compression follows ACL's published approach (ideas only, no code
+copied; `docs/research/animation.md`).
 
 ## Loaded at run time, not distributed
 

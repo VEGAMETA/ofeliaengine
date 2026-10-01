@@ -15,8 +15,21 @@
 //!   meshes: the whole scene at low resolution); each larger level has its own entry,
 //!   written after every tail, smallest first.
 //! - **scene:** `[textures, materials, instances]`; [`TextureRecord`]s (which entry holds
-//!   each level), [`MaterialRecord`]s, [`InstanceRecord`]s (meshes by entry index).
+//!   each level), [`MaterialRecord`]s, [`InstanceRecord`]s (meshes by entry index; a
+//!   skinned instance's skin + 1 in `reserved[0]`).
+//!
+//! Skinned scenes (pack version 2, ADR 0068) add, after the meshes:
+//!
+//! - **skin:** `[joints, skeleton bytes, clips]`; the `engine_anim` skeleton
+//!   ([`Skeleton::to_bytes`]), the skeleton joint of each skin joint (`u16`), the inverse
+//!   bind matrices (16 floats each). Skins are numbered in file order.
+//! - **clip:** `[skin, bytes]`; a [`CompressedClip::to_bytes`] of that skin's skeleton.
+//!
+//! and a skinned mesh entry has attribute bit 8 (influences) with its sets of four in
+//! `meta[4]`: after the tangents, `[u16; 4]` joints then `[f32; 4]` weights, `vertices ×
+//! sets` each.
 
+use crate::animation::{raw_clip, shell_distances, skin_skeleton};
 use crate::ddc::{DerivedDataCache, import_texture};
 use crate::gltf_import::{AlphaMode, ImportError, ImportedScene, TextureWrap, read_texture};
 use crate::lod::{Lod, LodSettings, generate_lods};
@@ -26,6 +39,7 @@ use crate::pack::{
 };
 use crate::texture_compress::{EncodedTexture, TextureFormat};
 use crate::texture_import::{ImageError, TextureUsage, build_mips, decode_image};
+use engine_anim::{CompressSettings, CompressedClip, CompressionStats, Skeleton, compress};
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3};
 use std::path::Path;
@@ -50,6 +64,25 @@ pub struct CookedMesh {
     pub min: [f32; 3],
     /// Bounds of the positions.
     pub max: [f32; 3],
+    /// Joint influences of a skinned mesh: joints of its skin, four per set, a vertex's
+    /// sets consecutive (`vertices × sets`); empty otherwise.
+    pub joints: Vec<[u16; 4]>,
+    /// Their weights, normalized per vertex.
+    pub weights: Vec<[f32; 4]>,
+}
+
+/// A skin with its skeleton and clips (ADR 0068).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CookedSkin {
+    /// The skeleton: the skin's joints and their ancestors; its model space is the
+    /// scene's world space.
+    pub skeleton: Skeleton,
+    /// The skeleton joint of each skin joint (the meshes' joint indices index this).
+    pub joints: Vec<u16>,
+    /// Inverse bind matrices, per skin joint, column major.
+    pub inverse_bind: Vec<[f32; 16]>,
+    /// The scene's animations that move this skeleton, compressed.
+    pub clips: Vec<CompressedClip>,
 }
 
 /// A texture of a material: which one and how it repeats.
@@ -99,8 +132,11 @@ pub struct CookedInstance {
     pub mesh: u32,
     /// Index into [`CookedScene::materials`], or none (the default material).
     pub material: Option<u32>,
-    /// Object to world, column major.
+    /// Object to world, column major (identity for skinned instances: their skeleton
+    /// places them).
     pub world_from_object: [f32; 16],
+    /// Index into [`CookedScene::skins`] for a skinned mesh.
+    pub skin: Option<u32>,
 }
 
 /// A scene as the runtime uses it (see the module documentation).
@@ -114,6 +150,8 @@ pub struct CookedScene {
     pub materials: Vec<CookedMaterial>,
     /// Instances.
     pub instances: Vec<CookedInstance>,
+    /// Skins, with their skeletons and clips.
+    pub skins: Vec<CookedSkin>,
 }
 
 /// How to cook.
@@ -127,6 +165,9 @@ pub struct CookSettings {
     pub compression_level: i32,
     /// Block-compress textures (BC7, BC5; ADR 0041). Off: RGBA8 levels, for comparisons.
     pub block_compression: bool,
+    /// Largest error of a compressed clip, in scene units, measured on virtual vertices at
+    /// each joint's farthest skinned vertex (ADR 0068; 0.1 mm for meters).
+    pub animation_error: f32,
 }
 
 impl Default for CookSettings {
@@ -135,6 +176,7 @@ impl Default for CookSettings {
             lods: true,
             compression_level: 19,
             block_compression: true,
+            animation_error: 1e-4,
         }
     }
 }
@@ -199,6 +241,27 @@ fn texture_uses(scene: &ImportedScene) -> Vec<(usize, TextureUsage)> {
     uses
 }
 
+/// Weights scaled to sum to 1 per vertex (all on the first joint when they sum to 0).
+fn normalized_weights(weights: &[[f32; 4]], sets: usize) -> Vec<[f32; 4]> {
+    if sets == 0 {
+        return Vec::new();
+    }
+    let mut out = weights.to_vec();
+    for vertex in out.chunks_mut(sets) {
+        let total: f32 = vertex.iter().flatten().map(|w| w.max(0.0)).sum();
+        for (k, set) in vertex.iter_mut().enumerate() {
+            for (i, w) in set.iter_mut().enumerate() {
+                *w = if total > 0.0 {
+                    w.max(0.0) / total
+                } else {
+                    f32::from(u8::from(k == 0 && i == 0))
+                };
+            }
+        }
+    }
+    out
+}
+
 /// What [`cook_scene`] did.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct CookStats {
@@ -208,6 +271,16 @@ pub struct CookStats {
     pub texture_seconds: f64,
     /// Seconds spent on meshes (detail levels).
     pub mesh_seconds: f64,
+    /// Seconds spent compressing clips.
+    pub animation_seconds: f64,
+    /// Clips compressed: source and compressed bytes, largest error.
+    pub clips: usize,
+    /// Bytes of the clips' source keys.
+    pub clip_source_bytes: usize,
+    /// Bytes of the compressed clips.
+    pub clip_bytes: usize,
+    /// Largest error of any clip.
+    pub clip_error: f32,
 }
 
 /// Cooks `scene` (imported from a glTF file in `base_dir`): its textures read, filtered
@@ -294,6 +367,8 @@ pub fn cook_scene(
                 lods,
                 min: p.min,
                 max: p.max,
+                joints: p.joints.clone(),
+                weights: normalized_weights(&p.weights, p.influence_sets()),
             });
         }
     });
@@ -331,6 +406,60 @@ pub fn cook_scene(
         })
         .collect();
 
+    // Skins: skeletons, and every animation that moves one, compressed in parallel.
+    let start = std::time::Instant::now();
+    let skeletons = (0..scene.skins.len())
+        .map(|k| skin_skeleton(scene, k))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(CookError::Import)?;
+    let jobs_list: Vec<(usize, usize)> = (0..skeletons.len())
+        .flat_map(|k| (0..scene.animations.len()).map(move |a| (k, a)))
+        .collect();
+    let compressed: Vec<OnceLock<Option<(CompressedClip, CompressionStats)>>> =
+        jobs_list.iter().map(|_| OnceLock::new()).collect();
+    let shells: Vec<Vec<f32>> = skeletons
+        .iter()
+        .enumerate()
+        .map(|(k, s)| shell_distances(scene, k, s))
+        .collect();
+    jobs.parallel_for(jobs_list.len(), 1, |_, range| {
+        for i in range {
+            let (k, a) = jobs_list[i];
+            let clip = raw_clip(scene, a, &skeletons[k]).map(|raw| {
+                let clip_settings = CompressSettings {
+                    error_threshold: settings.animation_error,
+                    joint_shell_distances: shells[k].clone(),
+                    ..CompressSettings::default()
+                };
+                compress(&raw, &skeletons[k].skeleton, &clip_settings)
+            });
+            let _ = compressed[i].set(clip);
+        }
+    });
+    cooked.skins = skeletons
+        .into_iter()
+        .map(|s| CookedSkin {
+            skeleton: s.skeleton,
+            joints: s.skin_joints,
+            inverse_bind: s
+                .inverse_bind
+                .iter()
+                .map(|m| Mat4::from(*m).to_cols_array())
+                .collect(),
+            clips: Vec::new(),
+        })
+        .collect();
+    for ((k, _), clip) in jobs_list.iter().zip(compressed) {
+        if let Some((clip, clip_stats)) = clip.into_inner().flatten() {
+            stats.clips += 1;
+            stats.clip_source_bytes += clip_stats.source_bytes;
+            stats.clip_bytes += clip_stats.compressed_bytes;
+            stats.clip_error = stats.clip_error.max(clip_stats.max_error);
+            cooked.skins[*k].clips.push(clip);
+        }
+    }
+    stats.animation_seconds = start.elapsed().as_secs_f64();
+
     // Instances: the node tree flattened, one instance per primitive of each mesh node.
     let first_primitive: Vec<u32> = scene
         .meshes
@@ -351,11 +480,20 @@ pub fn cook_scene(
                 Vec3::from(node.translation),
             );
         if let Some(mesh) = node.mesh {
+            // A skinned mesh is placed by its skeleton (glTF ignores its node's
+            // transform), when it has influences.
+            let skin = node.skin.filter(|&k| k < cooked.skins.len());
             for (p, primitive) in scene.meshes[mesh].primitives.iter().enumerate() {
+                let skinned = skin.filter(|_| !primitive.joints.is_empty());
                 cooked.instances.push(CookedInstance {
                     mesh: first_primitive[mesh] + p as u32,
                     material: primitive.material.map(|m| m as u32),
-                    world_from_object: world.to_cols_array(),
+                    world_from_object: if skinned.is_some() {
+                        Mat4::IDENTITY.to_cols_array()
+                    } else {
+                        world.to_cols_array()
+                    },
+                    skin: skinned.map(|k| k as u32),
                 });
             }
         }
@@ -422,7 +560,7 @@ pub struct InstanceRecord {
     pub mesh: u32,
     /// Material index in the scene, or `u32::MAX`.
     pub material: u32,
-    /// Reserved, 0.
+    /// `reserved[0]`: the skin + 1 of a skinned instance (0: none; version 2); the rest 0.
     pub reserved: [u32; 2],
     /// Object to world, column major.
     pub world_from_object: [f32; 16],
@@ -511,6 +649,12 @@ fn mesh_entry(m: &CookedMesh, level: i32) -> PreparedEntry {
         attributes |= 4;
         section(&mut data, bytemuck::cast_slice(&m.tangents));
     }
+    let sets = m.joints.len() / m.positions.len().max(1);
+    if sets > 0 {
+        attributes |= 8;
+        section(&mut data, bytemuck::cast_slice(&m.joints));
+        section(&mut data, bytemuck::cast_slice(&m.weights));
+    }
     section(&mut data, bytemuck::cast_slice(&[m.min, m.max]));
     section(&mut data, bytemuck::cast_slice(&m.indices));
     let table: Vec<u32> = m
@@ -527,17 +671,44 @@ fn mesh_entry(m: &CookedMesh, level: i32) -> PreparedEntry {
         m.indices.len() as u32,
         m.lods.len() as u32,
         attributes,
-        0,
+        sets as u32,
         0,
         0,
     ];
     PreparedEntry::new(EntryKind::Mesh, meta, &data, level, DEFAULT_CHUNK_SHIFT)
 }
 
+fn skin_entry(skin: &CookedSkin, level: i32) -> PreparedEntry {
+    let skeleton = skin.skeleton.to_bytes();
+    let mut data = Vec::new();
+    section(&mut data, bytemuck::cast_slice(&skin.joints));
+    section(&mut data, &skeleton);
+    section(&mut data, bytemuck::cast_slice(&skin.inverse_bind));
+    let meta = [
+        skin.joints.len() as u32,
+        skeleton.len() as u32,
+        skin.clips.len() as u32,
+        0,
+        0,
+        0,
+        0,
+    ];
+    PreparedEntry::new(EntryKind::Skin, meta, &data, level, DEFAULT_CHUNK_SHIFT)
+}
+
+fn clip_entry(skin: u32, clip: &CompressedClip, level: i32) -> PreparedEntry {
+    let bytes = clip.to_bytes();
+    let meta = [skin, bytes.len() as u32, 0, 0, 0, 0, 0];
+    PreparedEntry::new(EntryKind::Clip, meta, &bytes, level, DEFAULT_CHUNK_SHIFT)
+}
+
 /// A part of the scene stored as one entry.
 #[derive(Debug, Clone, Copy)]
 enum Piece {
     Mesh(usize),
+    Skin(usize),
+    /// Skin, clip.
+    Clip(usize, usize),
     /// Texture, first level, level count.
     Levels(usize, u32, u32),
 }
@@ -553,6 +724,10 @@ pub fn write_pack(
 ) -> Result<PackStats, PackError> {
     engine_profiler::zone!("assets::write_pack");
     let mut pieces: Vec<Piece> = (0..scene.meshes.len()).map(Piece::Mesh).collect();
+    for (k, skin) in scene.skins.iter().enumerate() {
+        pieces.push(Piece::Skin(k));
+        pieces.extend((0..skin.clips.len()).map(|c| Piece::Clip(k, c)));
+    }
     let mut large = Vec::new();
     for (t, texture) in scene.textures.iter().enumerate() {
         let levels = texture.levels.len() as u32;
@@ -562,7 +737,7 @@ pub fn write_pack(
     }
     let bytes = |p: &Piece| match *p {
         Piece::Levels(t, k, _) => scene.textures[t].levels[k as usize].len(),
-        Piece::Mesh(_) => 0,
+        Piece::Mesh(_) | Piece::Skin(_) | Piece::Clip(..) => 0,
     };
     large.sort_by_key(bytes);
     pieces.extend(large);
@@ -573,6 +748,8 @@ pub fn write_pack(
         for k in range {
             let entry = match pieces[k] {
                 Piece::Mesh(m) => mesh_entry(&scene.meshes[m], level),
+                Piece::Skin(k) => skin_entry(&scene.skins[k], level),
+                Piece::Clip(k, c) => clip_entry(k as u32, &scene.skins[k].clips[c], level),
                 Piece::Levels(t, first, count) => {
                     texture_levels_entry(&scene.textures[t], first, count, level)
                 }
@@ -600,6 +777,7 @@ pub fn write_pack(
         let index = writer.add(&entry)?;
         match *piece {
             Piece::Mesh(m) => mesh_entries[m] = index,
+            Piece::Skin(_) | Piece::Clip(..) => {}
             Piece::Levels(t, first, count) => {
                 for k in first..first + count {
                     let slot = records[t]
@@ -653,7 +831,7 @@ pub fn write_pack(
         .map(|i| InstanceRecord {
             mesh: mesh_entries[i.mesh as usize],
             material: i.material.unwrap_or(NONE),
-            reserved: [0; 2],
+            reserved: [i.skin.map_or(0, |k| k + 1), 0],
             world_from_object: i.world_from_object,
         })
         .collect();
@@ -766,6 +944,17 @@ fn read_mesh_entry(meta: [u32; 7], data: &[u8]) -> Result<CookedMesh, PackError>
     } else {
         Vec::new()
     };
+    let sets = meta[4] as usize;
+    let (joints, weights) = if attributes & 8 != 0 && (1..=8).contains(&sets) {
+        let n = vertices
+            .checked_mul(sets)
+            .ok_or_else(|| invalid("too many influences"))?;
+        (s.next::<[u16; 4]>(n)?, s.next::<[f32; 4]>(n)?)
+    } else if attributes & 8 != 0 {
+        return Err(invalid("bad influence sets"));
+    } else {
+        (Vec::new(), Vec::new())
+    };
     let bounds = s.next::<[f32; 3]>(2)?;
     let indices = s.next::<u32>(index_count)?;
     let table = s.next::<[u32; 2]>(lod_count)?;
@@ -791,6 +980,26 @@ fn read_mesh_entry(meta: [u32; 7], data: &[u8]) -> Result<CookedMesh, PackError>
         lods,
         min: bounds[0],
         max: bounds[1],
+        joints,
+        weights,
+    })
+}
+
+fn read_skin_entry(meta: [u32; 7], data: &[u8]) -> Result<CookedSkin, PackError> {
+    let [joint_count, skeleton_bytes, ..] = meta.map(|m| m as usize);
+    let mut s = Sections { data, at: 0 };
+    let joints = s.next::<u16>(joint_count)?;
+    let skeleton =
+        Skeleton::from_bytes(s.slice(skeleton_bytes)?).map_err(|e| invalid(e.to_string()))?;
+    let inverse_bind = s.next::<[f32; 16]>(joint_count)?;
+    if joints.iter().any(|&j| j as usize >= skeleton.joint_count()) {
+        return Err(invalid("skin joint past its skeleton"));
+    }
+    Ok(CookedSkin {
+        skeleton,
+        joints,
+        inverse_bind,
+        clips: Vec::new(),
     })
 }
 
@@ -834,6 +1043,8 @@ pub struct SceneLayout {
 /// An entry decoded by kind.
 enum Decoded {
     Mesh(CookedMesh),
+    Skin(CookedSkin),
+    Clip(u32, CompressedClip),
     Scene(Vec<TextureRecord>, Vec<MaterialRecord>, Vec<InstanceRecord>),
 }
 
@@ -871,6 +1082,14 @@ pub fn open_scene(
                 let instances = s.next::<InstanceRecord>(e.meta[2] as usize)?;
                 Decoded::Scene(textures, materials, instances)
             }
+            EntryKind::Skin => Decoded::Skin(read_skin_entry(e.meta, &data)?),
+            EntryKind::Clip => {
+                let bytes = data
+                    .get(..e.meta[1] as usize)
+                    .ok_or_else(|| invalid("clip entry truncated"))?;
+                let clip = CompressedClip::from_bytes(bytes).map_err(|e| invalid(e.to_string()))?;
+                Decoded::Clip(e.meta[0], clip)
+            }
             EntryKind::TextureLevels => return Err(invalid("texture levels loaded early")),
         };
         if let Ok(mut slot) = decoded[index as usize].lock() {
@@ -881,12 +1100,15 @@ pub fn open_scene(
     let mut layout = SceneLayout::default();
     let mut mesh_of = vec![NONE; entries.len()];
     let mut records = None;
+    let mut clips = Vec::new();
     for (i, slot) in decoded.into_iter().enumerate() {
         match slot.into_inner().ok().flatten() {
             Some(Decoded::Mesh(m)) => {
                 mesh_of[i] = layout.scene.meshes.len() as u32;
                 layout.scene.meshes.push(m);
             }
+            Some(Decoded::Skin(skin)) => layout.scene.skins.push(skin),
+            Some(Decoded::Clip(skin, clip)) => clips.push((skin, clip)),
             Some(Decoded::Scene(t, m, inst)) => {
                 if records.replace((t, m, inst)).is_some() {
                     return Err(invalid("more than one scene"));
@@ -899,6 +1121,17 @@ pub fn open_scene(
     let Some((textures, materials, instances)) = records else {
         return Err(invalid("no scene"));
     };
+    for (skin, clip) in clips {
+        let skin = layout
+            .scene
+            .skins
+            .get_mut(skin as usize)
+            .ok_or_else(|| invalid("clip of a missing skin"))?;
+        if clip.joint_count() != skin.skeleton.joint_count() {
+            return Err(invalid("clip of another skeleton"));
+        }
+        skin.clips.push(clip);
+    }
     // Every texture's levels are in texture entries that match it.
     for (t, record) in textures.iter().enumerate() {
         texture_shape(record.format, record.width, record.height, record.levels)?;
@@ -976,10 +1209,15 @@ pub fn open_scene(
         if material.is_some_and(|m| m as usize >= layout.scene.materials.len()) {
             return Err(invalid("instance refers to a missing material"));
         }
+        let skin = i.reserved[0].checked_sub(1);
+        if skin.is_some_and(|k| k as usize >= layout.scene.skins.len()) {
+            return Err(invalid("instance refers to a missing skin"));
+        }
         layout.scene.instances.push(CookedInstance {
             mesh,
             material,
             world_from_object: i.world_from_object,
+            skin,
         });
     }
     layout.textures = textures;
@@ -1078,6 +1316,8 @@ mod tests {
             }],
             min: [0.0; 3],
             max: [1.0, 1.0, 0.0],
+            joints: Vec::new(),
+            weights: Vec::new(),
         };
         let data_texture = EncodedTexture {
             format: TextureFormat::Rgba8Unorm,
@@ -1140,14 +1380,71 @@ mod tests {
                     mesh: 0,
                     material: Some(0),
                     world_from_object: Mat4::from_translation(Vec3::X).to_cols_array(),
+                    skin: None,
                 },
                 CookedInstance {
                     mesh: 1,
                     material: None,
                     world_from_object: Mat4::IDENTITY.to_cols_array(),
+                    skin: None,
                 },
             ],
+            skins: Vec::new(),
         }
+    }
+
+    /// The sample with a skinned copy of the quad (two sets of influences), a two-joint
+    /// skin and a clip.
+    fn skinned_sample() -> CookedScene {
+        use engine_anim::{
+            CompressSettings, Interpolation, JointDesc, RawClip, RawJointTracks, RawTrack,
+            Transform, compress,
+        };
+        let mut scene = sample();
+        let mut mesh = scene.meshes[1].clone();
+        mesh.joints = [[0, 1, 0, 0], [1, 0, 0, 0]].repeat(4);
+        mesh.weights = [[0.5, 0.25, 0.0, 0.0], [0.25, 0.0, 0.0, 0.0]].repeat(4);
+        scene.meshes.push(mesh);
+        let (skeleton, _) = Skeleton::new(&[
+            JointDesc {
+                name: "root".into(),
+                parent: None,
+                rest: Transform::IDENTITY,
+            },
+            JointDesc {
+                name: "tip".into(),
+                parent: Some(0),
+                rest: Transform::new(Vec3::Y, Quat::IDENTITY, Vec3::ONE),
+            },
+        ])
+        .unwrap();
+        let mut raw = RawClip {
+            name: "bend".into(),
+            duration: 1.0,
+            joints: vec![RawJointTracks::default(); 2],
+        };
+        raw.joints[1].rotation = Some(RawTrack {
+            interpolation: Interpolation::Linear,
+            times: vec![0.0, 1.0],
+            values: vec![Quat::IDENTITY, Quat::from_rotation_z(1.0)],
+        });
+        let (clip, _) = compress(&raw, &skeleton, &CompressSettings::default());
+        scene.skins.push(CookedSkin {
+            skeleton,
+            joints: vec![0, 1],
+            inverse_bind: vec![
+                Mat4::IDENTITY.to_cols_array(),
+                Mat4::from_translation(-Vec3::Y).to_cols_array(),
+            ],
+            clips: vec![clip],
+        });
+        scene.instances.push(CookedInstance {
+            mesh: 2,
+            material: None,
+            world_from_object: Mat4::IDENTITY.to_cols_array(),
+            skin: Some(0),
+        });
+        scene
     }
 
     #[test]
@@ -1176,6 +1473,30 @@ mod tests {
             assert!(large.is_sorted(), "{large:?}");
             assert_eq!(kinds[8].0, EntryKind::Scene);
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn a_skinned_scene_survives_its_pack_as_version_2() {
+        let jobs = ThreadPool::builder().workers(2).build().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("engine_assets_skinned_{}.pack", std::process::id()));
+        let scene = skinned_sample();
+        write_pack(&path, &scene, &jobs, 3).unwrap();
+        let header = std::fs::read(&path).unwrap();
+        assert_eq!(
+            u32::from_le_bytes([header[4], header[5], header[6], header[7]]),
+            2
+        );
+        let (loaded, _) = load_pack(&path, &jobs, 4).unwrap();
+        assert_eq!(loaded, scene);
+        // Without skins a pack stays version 1 (engines that only read 1 can open it).
+        write_pack(&path, &sample(), &jobs, 3).unwrap();
+        let header = std::fs::read(&path).unwrap();
+        assert_eq!(
+            u32::from_le_bytes([header[4], header[5], header[6], header[7]]),
+            1
+        );
         let _ = std::fs::remove_file(path);
     }
 
