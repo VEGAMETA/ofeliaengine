@@ -41,6 +41,15 @@ fn check(shot: &Shot) {
             println!("{}: skipped, {} missing", shot.name, path.display());
             return;
         }
+        Err(Skip::NoDlss(e)) => {
+            assert!(
+                !std::env::var("ENGINE_REQUIRE_DLSS").is_ok_and(|v| v == "1"),
+                "{}: ENGINE_REQUIRE_DLSS=1 but DLSS is unavailable: {e}",
+                shot.name
+            );
+            println!("{}: skipped, no DLSS ({e})", shot.name);
+            return;
+        }
     };
     match compare(&rendered, shot.name, Tolerance::default()) {
         Outcome::Matched(result) => println!(
@@ -144,6 +153,9 @@ fn async_compute_renders_the_same_bytes_as_one_queue() {
         }
         (Err(Skip::NoScene(path)), _) | (_, Err(Skip::NoScene(path))) => {
             panic!("procedural scene needs no files: {}", path.display())
+        }
+        (Err(Skip::NoDlss(e)), _) | (_, Err(Skip::NoDlss(e))) => {
+            panic!("the shot does not use DLSS: {e}")
         }
     };
     println!(

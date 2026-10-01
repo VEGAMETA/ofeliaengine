@@ -15,5 +15,8 @@ workspace = true
 png = "0.18"
 engine_assets.workspace = true
 engine_core.workspace = true
+# The frame renderer the shots go through (ADR 0072), and DLSS's Streamline for its shot.
+engine_dlss.workspace = true
+engine_frame.workspace = true
 engine_render.workspace = true
 engine_rhi.workspace = true

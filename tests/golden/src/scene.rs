@@ -1,26 +1,27 @@
 //! A test bed: fixed scenes through the whole frame (culling, shadows, forward shading,
-//! local lights, sky light, transparency, bloom, tone mapping), rendered on one GPU and
-//! read back as 8-bit sRGB, with the GPU time of every pass. The golden-image tests and
-//! the performance gate both use it (ADR 0062).
+//! local lights, sky light, transparency, antialiasing or upscaling, bloom, tone mapping),
+//! composed by the frame renderer (`engine_frame`, ADR 0072), rendered on one GPU and read
+//! back as 8-bit sRGB, with the GPU time of every pass. The golden-image tests and the
+//! performance gate both use it (ADR 0062).
 
 use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
     TextureSlot, TextureWrap, cook_scene, import_gltf,
 };
 use engine_core::jobs::ThreadPool;
-use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
+use engine_core::math::{Mat4, Quat, Vec3, look_at};
+use engine_frame::{
+    Antialiasing, Exposure, FrameContext, FrameRenderer, PrepareContext, Quality, SceneDraws,
+    SceneInput, View, ViewCamera, ViewSettings, ViewTarget,
+};
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
-use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
-    Spot,
-};
-use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
+use engine_render::forward::{DirectionalLight, DrawItem, LocalLight, ShadowSettings, Spot};
+use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
-use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
-use engine_render::postfx::{Bloom, BloomSettings};
+use engine_render::post::ToneCurve;
 use engine_render::subsurface::SubsurfaceProfile;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
@@ -83,6 +84,17 @@ pub struct Shot {
     pub atmosphere: Option<Atmosphere>,
     /// Exponential height fog (ADR 0069; with `sky`).
     pub fog: Option<HeightFog>,
+    /// Antialiasing (ADR 0072): off, or a temporal upscaler. Temporal shots start
+    /// accumulating once the scene is resident and are captured `temporal_frames` later.
+    pub antialiasing: Antialiasing,
+    /// The render size relative to `size` (the upscaler's ratio for `quality`).
+    pub quality: Quality,
+    /// Frames accumulated before the capture of a temporal shot (the history's state at
+    /// the capture is then the same on every run).
+    pub temporal_frames: u32,
+    /// The camera's motion per frame (eye and target move together), from the first
+    /// temporal frame: ghosting and smearing show in the capture.
+    pub camera_motion: Vec3,
 }
 
 impl Shot {
@@ -111,6 +123,10 @@ impl Shot {
             async_compute: None,
             atmosphere: None,
             fog: None,
+            antialiasing: Antialiasing::Off,
+            quality: Quality::Native,
+            temporal_frames: 32,
+            camera_motion: Vec3::ZERO,
         }
     }
 }
@@ -136,6 +152,8 @@ pub struct Rendered {
     pub frame_us: f64,
     /// Whether async passes ran on the async compute queue.
     pub async_compute: bool,
+    /// The antialiasing used (the shot's, or TAAU when its upscaler was unavailable).
+    pub antialiasing: Antialiasing,
 }
 
 /// How to run [`render`].
@@ -154,6 +172,9 @@ pub enum Skip {
     NoGpu(String),
     /// A glTF scene is missing (fetch it with `tools/fetch-test-assets.ps1`).
     NoScene(PathBuf),
+    /// The shot needs DLSS, which is not available here (no Streamline DLLs in
+    /// `ENGINE_STREAMLINE_DIR`, or not an NVIDIA RTX GPU).
+    NoDlss(String),
 }
 
 /// The test scenes: `ENGINE_TEST_ASSETS`, or `test-assets/` in the repository (a git
@@ -363,25 +384,50 @@ pub fn procedural_lights() -> Vec<LocalLight> {
     ]
 }
 
-fn gpu(validation: bool) -> Result<(Instance, Device), Skip> {
+/// Streamline when the shot asks for DLSS (ADR 0063), loaded before the instance.
+type Dlss = Option<engine_dlss::Streamline>;
+
+fn gpu(validation: bool, dlss: bool) -> Result<(Instance, Device, Dlss), Skip> {
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
-    let attempt = || -> Result<(Instance, Device), engine_rhi::RhiError> {
-        let instance = Instance::new(&InstanceDesc {
-            app_name: String::from("engine_golden"),
-            validation,
-            debug_utils: true,
-            surface: false,
-            headless_surface: false,
-            sync_validation: validation,
-        })?;
+    let streamline = if dlss {
+        match engine_dlss::Streamline::load(&engine_dlss::StreamlineDesc::default()) {
+            Ok(streamline) => Some(streamline),
+            Err(e) => return Err(Skip::NoDlss(e.to_string())),
+        }
+    } else {
+        None
+    };
+    let desc = InstanceDesc {
+        app_name: String::from("engine_golden"),
+        validation,
+        debug_utils: true,
+        surface: false,
+        headless_surface: false,
+        sync_validation: validation,
+    };
+    let attempt = || -> Result<Result<(Instance, Device, Dlss), Skip>, engine_rhi::RhiError> {
+        let instance = match &streamline {
+            Some(s) => Instance::with_extensions(&desc, &s.instance_extensions())?,
+            None => Instance::new(&desc)?,
+        };
         let preference =
             AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);
         let adapter = instance.select_adapter(&preference)?;
-        let device = Device::new(&instance, &adapter)?;
-        Ok((instance, device))
+        let Some(streamline) = &streamline else {
+            let device = Device::new(&instance, &adapter)?;
+            return Ok(Ok((instance, device, None)));
+        };
+        if let Err(e) = streamline.check_adapter(&instance, &adapter) {
+            return Ok(Err(Skip::NoDlss(format!("{}: {e}", adapter.name()))));
+        }
+        let device = Device::with_extensions(&instance, &adapter, &streamline.device_extensions())?;
+        if let Err(e) = streamline.attach(&device) {
+            return Ok(Err(Skip::NoDlss(e.to_string())));
+        }
+        Ok(Ok((instance, device, Some(streamline.clone()))))
     };
     match attempt() {
-        Ok(pair) => Ok(pair),
+        Ok(result) => result,
         Err(e) if !required => Err(Skip::NoGpu(e.to_string())),
         Err(e) => panic!("GPU required but unavailable: {e}"),
     }
@@ -459,20 +505,25 @@ fn median(values: &mut [f64]) -> f64 {
 #[allow(clippy::too_many_lines)]
 pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let loaded = load(&shot.source, shot.subsurface)?;
-    let (instance, device) = gpu(options.validation)?;
+    let (instance, device, streamline) =
+        gpu(options.validation, shot.antialiasing == Antialiasing::DLSS)?;
     let [width, height] = shot.size;
     let d = device.raw();
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).expect("bindless");
     let depth_format = vk::Format::D32_SFLOAT;
-    let mut renderer = ForwardRenderer::new(
+    let output_format = vk::Format::R8G8B8A8_SRGB;
+    let mut frame = FrameRenderer::new(
         &device,
         &bindless,
-        HDR_FORMAT,
+        output_format,
         depth_format,
         ShadowSettings::default(),
+        1,
     )
-    .expect("renderer");
+    .expect("frame renderer");
+    frame.set_streamline(streamline.clone());
+    let renderer = frame.forward_mut();
     renderer.set_depth_prepass(shot.prepass);
     renderer
         .set_ambient_occlusion(&device, &bindless, shot.ao)
@@ -486,11 +537,6 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             )
             .expect("subsurface profiles");
     }
-    let output_format = vk::Format::R8G8B8A8_SRGB;
-    let tonemap = Tonemap::new(&device, &bindless, output_format).expect("tonemap");
-    let bloom = shot
-        .bloom
-        .then(|| Bloom::new(&device, &bindless, BloomSettings::default()).expect("bloom"));
     let environment = shot.sky.then(|| {
         let mut environment =
             Environment::new(&device, &mut allocator, &bindless, Sky::default()).expect("sky");
@@ -614,15 +660,28 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let eye = shot.eye.unwrap_or(default_eye);
     let target = shot.target.unwrap_or(default_target);
     let extent = (max - min).length();
-    let camera = Camera {
-        clip_from_world: vulkan_perspective(
-            shot.fov_y.to_radians(),
-            width as f32 / height as f32,
-            extent * 0.001,
-            extent * 2.0,
-        ) * look_at(eye, target, Vec3::Y),
-        position: eye,
+    let temporal = shot.antialiasing != Antialiasing::Off;
+    // Frames after residency before the capture: the sky's environment is built on the
+    // first; a temporal shot then accumulates `temporal_frames` frames from a fresh
+    // history (its view turns temporal at `TEMPORAL_START`), the last one captured.
+    const TEMPORAL_START: usize = 2;
+    let capture_at = TEMPORAL_START
+        + if temporal {
+            shot.temporal_frames.max(1) as usize - 1
+        } else {
+            0
+        };
+    let settings = ViewSettings {
+        antialiasing: shot.antialiasing,
+        quality: shot.quality,
+        exposure: Exposure::Fixed(shot.exposure),
+        curve: shot.curve,
+        bloom: shot.bloom,
+        clear: Some([0.02, 0.02, 0.05, 1.0]),
+        ..ViewSettings::default()
     };
+    let mut view = View::new(&device, draws.len() as u32);
+    let mut antialiasing = Antialiasing::Off;
 
     let mut timings: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
     let mut frame_times = Vec::new();
@@ -632,9 +691,46 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut resident_frames = 0;
     while timed < options.timed_frames || !captured {
         let uploading = textures.pending().0 > 0;
-        // The captured frame: the second after everything is resident (the sky's
-        // environment is built on the first).
-        let capture = !uploading && !captured && resident_frames >= 2;
+        let capture = !uploading && !captured && resident_frames >= capture_at;
+        // The view turns temporal once the scene is resident: its history and jitter
+        // sequence start there on every run.
+        let accumulated = (!uploading && resident_frames >= TEMPORAL_START)
+            .then(|| resident_frames - TEMPORAL_START);
+        let view_settings = ViewSettings {
+            antialiasing: if accumulated.is_some() {
+                shot.antialiasing
+            } else {
+                Antialiasing::Off
+            },
+            ..settings
+        };
+        frame_number += 1;
+        let prepared = frame
+            .prepare(
+                &mut view,
+                &view_settings,
+                (width, height),
+                PrepareContext {
+                    device: &device,
+                    allocator: &mut allocator,
+                    bindless: &bindless,
+                    materials: &mut materials,
+                    frame_number,
+                },
+            )
+            .expect("prepare");
+        if accumulated.is_some() {
+            antialiasing = prepared.antialiasing;
+        }
+        let shift = shot.camera_motion * accumulated.unwrap_or(0) as f32;
+        let camera = ViewCamera {
+            view_from_world: look_at(eye + shift, target + shift, Vec3::Y),
+            position: eye + shift,
+            fov_y: shot.fov_y.to_radians(),
+            near: extent * 0.001,
+            far: extent * 2.0,
+            cut: false,
+        };
         // SAFETY: the previous frame finished (waited below).
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -650,7 +746,6 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
-            frame_number += 1;
             textures
                 .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
                 .expect("textures");
@@ -660,46 +755,35 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             let geo = geometry
                 .begin_frame(&mut fg, &device, &mut allocator, frame_number)
                 .expect("geometry");
-            let hdr = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, width, height));
-            let depth =
-                fg.create_texture("depth", TextureDesc::new_2d(depth_format, width, height));
-            renderer
-                .add_passes(
+            let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
+            frame
+                .add_view(
                     &mut fg,
-                    &mut ring,
-                    &bindless,
-                    &geo,
-                    &mats,
-                    &draws,
-                    &ForwardView {
-                        camera,
+                    &mut FrameContext {
+                        device: &device,
+                        allocator: &mut allocator,
+                        bindless: &bindless,
+                        ring: &mut ring,
+                        frame_number,
+                        dt: 1.0 / 60.0,
+                    },
+                    &mut view,
+                    &SceneInput {
+                        geometry: &geo,
+                        materials: &mats,
+                        draws: SceneDraws::List(&draws),
                         light: shot.sun,
-                        color: hdr,
-                        depth,
-                        clear: Some([0.02, 0.02, 0.05, 1.0]),
-                        occlusion: None,
-                        temporal: None,
                         lights: &shot.lights,
                         environment: environment.as_ref(),
                     },
+                    &camera,
+                    ViewTarget {
+                        texture: ldr,
+                        rect: None,
+                        load: LoadOp::DontCare,
+                    },
                 )
-                .expect("forward");
-            let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
-            let bloomed = bloom
-                .as_ref()
-                .map(|b| b.add_passes(&mut fg, &bindless, hdr));
-            tonemap.add_composite_pass(
-                &mut fg,
-                &bindless,
-                hdr,
-                ldr,
-                Composite {
-                    curve: shot.curve,
-                    exposure: shot.exposure,
-                    bloom: bloomed,
-                    ..Composite::default()
-                },
-            );
+                .expect("frame");
             if capture {
                 let out = fg.import_buffer(
                     "readback",
@@ -808,6 +892,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // SAFETY: the device is idle; everything below was created above and is not used
     // again.
     unsafe {
+        view.destroy(&mut allocator, &bindless);
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
@@ -819,7 +904,8 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);
     }
-    drop((renderer, tonemap, bloom, environment, bindless, allocator));
+    // Streamline goes before the device it is attached to (ADR 0063).
+    drop((frame, view, streamline, environment, bindless, allocator));
     let report = instance.validation_report();
     assert_eq!(
         report.errors, 0,
@@ -835,5 +921,6 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         pass_us,
         frame_us,
         async_compute,
+        antialiasing,
     })
 }
