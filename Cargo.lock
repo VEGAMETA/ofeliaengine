@@ -363,6 +363,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_net_transport"
+version = "0.0.0"
+dependencies = [
+ "engine_profiler",
+ "thiserror",
+ "windows-sys",
+]
+
+[[package]]
 name = "engine_physics"
 version = "0.0.0"
 dependencies = [
