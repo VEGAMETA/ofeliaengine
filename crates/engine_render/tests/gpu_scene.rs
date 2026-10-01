@@ -13,6 +13,8 @@
 
 use engine_core::half;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_orthographic, vulkan_perspective};
+use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion, ShadowSettings,
     Temporal,
@@ -108,6 +110,8 @@ struct Bed {
     readback_memory: Option<Allocation>,
     size: u32,
     frame_number: u64,
+    /// Sky light, atmosphere and fog for the frames, when set (ADR 0069).
+    environment: Option<Environment>,
     device: Device,
     instance: VkInstance,
 }
@@ -181,6 +185,7 @@ impl Bed {
             readback_memory: Some(readback_memory),
             size,
             frame_number: 0,
+            environment: None,
         })
     }
 
@@ -207,6 +212,7 @@ impl Bed {
             readback_memory,
             size,
             frame_number,
+            environment,
             ..
         } = self;
         let (d, cmd, size) = (device.raw(), *cmd, *size);
@@ -254,7 +260,7 @@ impl Bed {
                 occlusion,
                 temporal,
                 lights: &[],
-                environment: None,
+                environment: environment.as_ref(),
             };
             let (passes, scene) = match draw {
                 Draw::List(draws) => (
@@ -429,6 +435,9 @@ impl Bed {
             self.geometry.destroy(allocator);
             self.materials.destroy(allocator);
             self.textures.destroy(allocator, &self.bindless);
+            if let Some(environment) = self.environment.as_mut() {
+                environment.destroy(allocator, &self.bindless);
+            }
             if let Some(memory) = self.readback_memory.take() {
                 allocator.destroy_buffer(self.readback, memory);
             }
@@ -550,7 +559,39 @@ fn a_scene_draws_what_the_same_draw_list_draws() {
     let occlusion_scene = Occlusion::new(&bed.device, &mut bed.allocator, 1024).unwrap();
     let temporal_list = Temporal::new(&bed.device, &mut bed.allocator, 1024).unwrap();
     let temporal_scene = Temporal::new(&bed.device, &mut bed.allocator, 1024).unwrap();
-    for (prepass, occlusion) in [(false, false), (true, false), (false, true)] {
+    // The last round under the atmosphere and height fog (ADR 0069): its passes come from
+    // the shared declaration, the same on both paths.
+    for (prepass, occlusion, atmosphere) in [
+        (false, false, false),
+        (true, false, false),
+        (false, true, false),
+        (false, true, true),
+    ] {
+        if atmosphere {
+            let mut environment = Environment::new(
+                &bed.device,
+                &mut bed.allocator,
+                &bed.bindless,
+                Sky::default(),
+            )
+            .unwrap();
+            environment
+                .set_atmosphere(
+                    &bed.device,
+                    &mut bed.allocator,
+                    &bed.bindless,
+                    Some(Atmosphere {
+                        aerial_perspective_scale: 1000.0,
+                        ..Atmosphere::earth()
+                    }),
+                )
+                .unwrap();
+            environment.set_fog(Some(HeightFog {
+                density: 0.05,
+                ..HeightFog::default()
+            }));
+            bed.environment = Some(environment);
+        }
         bed.renderer.set_depth_prepass(prepass);
         let (ol, os) = if occlusion {
             (Some(&occlusion_list), Some(&occlusion_scene))
@@ -564,7 +605,8 @@ fn a_scene_draws_what_the_same_draw_list_draws() {
             }
             let list = bed.frame(Draw::List(&items), camera, ol, Some(&temporal_list));
             let shot = bed.frame(Draw::Scene(&mut scene), camera, os, Some(&temporal_scene));
-            let label = format!("prepass {prepass}, occlusion {occlusion}, t {t}");
+            let label =
+                format!("prepass {prepass}, occlusion {occlusion}, atmosphere {atmosphere}, t {t}");
             assert_eq!(
                 differing(&list.image, &shot.image),
                 0,
