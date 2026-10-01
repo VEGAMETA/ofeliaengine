@@ -3312,7 +3312,11 @@ impl States {
                         bytes[..8].copy_from_slice(&push.positions.to_le_bytes());
                         bytes[8..12].copy_from_slice(&1u32.to_le_bytes());
                     }
-                    ctx.device.cmd_push_constants(ctx.cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &bytes);
+                    if layout == bindless.pipeline_layout() {
+                        bindless.push_constants(ctx.cmd, push_bytes(push));
+                    } else {
+                        ctx.device.cmd_push_constants(ctx.cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &bytes);
+                    }
                     bound = None;
                 }
                 if !shadow && std::env::var("ENGINE_DEBUG_DIRECT").is_ok() {
