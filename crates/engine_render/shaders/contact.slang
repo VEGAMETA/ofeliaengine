@@ -12,6 +12,11 @@
 // measured against it and dropped (2.4× slower on the Radeon iGPU for shorter shadows;
 // docs/research/local-shadows.md).
 //
+// Changes from Bend's code: ported from HLSL to Slang (Vulkan: clip y points down, depth
+// loads instead of a clamp-to-border sampler), edge pixels ignored and the precision offset
+// always on, a thicker default surface (contact.rs), the light's own pixel written lit, the
+// debug outputs removed.
+//
 // It writes the sun's visibility (1 lit, 0 shadowed) into an R8 target the size of the
 // depth, which the forward pass's `*Contact` entry points multiply into the sun's light.
 
