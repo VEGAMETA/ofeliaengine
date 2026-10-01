@@ -338,6 +338,7 @@ dependencies = [
 name = "engine_golden"
 version = "0.0.0"
 dependencies = [
+ "engine_anim",
  "engine_assets",
  "engine_core",
  "engine_render",

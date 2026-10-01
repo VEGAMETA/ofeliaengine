@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 # Reading and writing the golden images (the version engine_assets uses).
 png = "0.18"
+engine_anim.workspace = true
 engine_assets.workspace = true
 engine_core.workspace = true
 engine_render.workspace = true
