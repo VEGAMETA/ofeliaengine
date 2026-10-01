@@ -8,7 +8,12 @@ listed in `THIRD_PARTY_NOTICES.md`.
 | `JoltPhysics/` (only `Jolt/` and `LICENSE`) | [Jolt Physics](https://github.com/jrouwe/JoltPhysics) | v5.6.0, commit `e77f175595e64cb44218cc9d9d56fc365ad0e36a` | MIT | `engine_physics_jolt` |
 | `box2d/` (only `include/`, `src/` without `CMakeLists.txt`, `LICENSE`) | [Box2D](https://github.com/erincatto/box2d) | v3.1.1, commit `8c661469c9507d3ad6fbd2fea3f1aa71669c2fe3` | MIT | `engine_physics2d` |
 | `joltc/` (only `include/`, `src/`, `LICENSE`) | [JoltC](https://github.com/amerkoleci/joltc) | commit `886e088675bae3a086f8318c7803f8ee962c2f2c` (builds Jolt v5.6.0) | MIT | `engine_physics_jolt` |
+| `FidelityFX-SDK/` (only `LICENSE.txt`, `sdk/LICENSE.txt` and the files of the FSR 3.1 upscaler, the Vulkan backend and their shared code, headers and GLSL) | [AMD FidelityFX SDK](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK) | v1.1.4, commit `c6efa6bf7f2027b3ec94f28578bb5965eabb9e55` | MIT | `engine_fsr` |
+| `Vulkan-Headers/` (only `include/vulkan/{vulkan.h,vulkan_core.h,vk_platform.h}`, `include/vk_video/`, `LICENSE.md`, `LICENSES/`) | [Vulkan-Headers](https://github.com/KhronosGroup/Vulkan-Headers) | v1.4.350, commit `8864cdc896bbc2a9b6eb36b3218fc9ef57908d77` | Apache-2.0 OR MIT | `engine_fsr` (the FidelityFX SDK's Vulkan backend) |
 
 To update, replace the directory with the new version's files, record the version and
 commit here, and run the `engine_physics_jolt` tests: the FFI layout test catches struct
-changes.
+changes. For the FidelityFX SDK, also regenerate the shaders
+(`cargo run -p engine_fsr --example ffx_shaders -- --glslang <the SDK's
+sdk/tools/binary_store/glslangValidator.exe>`) and run the `engine_fsr` tests on both GPUs
+(ADR 0060).

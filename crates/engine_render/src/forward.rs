@@ -33,6 +33,11 @@
 //! and nothing visible is ever missing: a wrong guess from the previous frame only costs
 //! time.
 //!
+//! Materials with subsurface scattering (ADR 0059, [`crate::subsurface`]) are shaded by a
+//! **forward subsurface** pass after the forward pass (the depth prepass then always
+//! runs), which keeps their diffuse light apart; a **subsurface scatter** pass draws them
+//! again and adds that light spread by their profile.
+//!
 //! Each drawing pass records one `vkCmdDrawIndexedIndirect` per pipeline state in use, so
 //! beyond writing 64 bytes per instance into the [`UploadRing`] the CPU cost of a frame
 //! does not grow with the number of draws. Shaders read everything through device
@@ -41,6 +46,7 @@
 //! [`GeometryPool`]: crate::mesh::GeometryPool
 //! [`MaterialTable`]: crate::material::MaterialTable
 
+use crate::ao::{AmbientOcclusion, AoSettings};
 use crate::compute::{ComputePass, ComputeShader, ComputeSource, Dispatch};
 use crate::cull::Frustum;
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
@@ -55,9 +61,13 @@ use crate::lights::{
 use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::shadow::{self, CascadeFit, MAX_CASCADES};
+use crate::subsurface::{
+    self, ALBEDO_FORMAT, Footprint, GpuProfile, IRRADIANCE_FORMAT, SubsurfaceProfile,
+    SubsurfaceSettings,
+};
 use crate::upload::UploadRing;
 use core::cell::{Cell, RefCell};
-use engine_core::math::{Mat4, Vec3};
+use engine_core::math::{Mat4, Vec3, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     Allocation, Allocator, Bindless, Blend, DepthBias, Device, GraphicsPipelineDesc,
@@ -72,10 +82,16 @@ const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked.spv");
 const DEPTH_VERTEX: &[u8] = include_bytes!("../shaders/forward.depthVertex.spv");
 const FRAGMENT_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotion.spv");
+const FRAGMENT_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainAo.spv");
+const FRAGMENT_MOTION_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotionAo.spv");
 const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
 const SKY_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.skyFragment.spv");
+const FRAGMENT_SUBSURFACE: &[u8] = include_bytes!("../shaders/forward.fragmentSubsurface.spv");
+const FRAGMENT_SUBSURFACE_MOTION: &[u8] =
+    include_bytes!("../shaders/forward.fragmentSubsurfaceMotion.spv");
+const SCATTER_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.scatterFragment.spv");
 
 pub use crate::lights::{LocalLight, Spot};
 pub use crate::shadow::ShadowSettings;
@@ -99,15 +115,26 @@ const PHASE_EARLY: u32 = 1;
 const PHASE_LATE: u32 = 2;
 const PHASE_SHADOW: u32 = 3;
 
-/// Pipeline states of batches, drawn in this order: bit 2 masked, bit 1 double-sided,
-/// bit 0 mirrored (negative determinant, so front faces wind clockwise on screen).
-const STATES: usize = 16;
+/// Pipeline states of batches, drawn in this order: bit 4 subsurface scattering, bit 3
+/// blended, bit 2 masked, bit 1 double-sided, bit 0 mirrored (negative determinant, so
+/// front faces wind clockwise on screen).
+const STATES: usize = 32;
+/// Subsurface scattering (ADR 0059): shaded by the forward subsurface pass, after the
+/// depth prepass. Never blended.
+const SUBSURFACE: usize = 16;
 /// Blended surfaces: drawn by the transparent pass only, one batch per instance, back to
 /// front (ADR 0054).
 const BLENDED: usize = 8;
 const MASKED: usize = 4;
 const DOUBLE_SIDED: usize = 2;
 const MIRRORED: usize = 1;
+/// Bitmasks of states for [`States::draw`]: opaque and masked without subsurface
+/// scattering (0-7), blended (8-15), with subsurface scattering (16-23).
+const PLAIN_STATES: u32 = 0x0000_00FF;
+const BLENDED_STATES: u32 = 0x0000_FF00;
+const SUBSURFACE_STATES: u32 = 0x00FF_0000;
+/// Everything that writes depth and casts shadows.
+const DEPTH_STATES: u32 = PLAIN_STATES | SUBSURFACE_STATES;
 
 /// One object to draw.
 ///
@@ -146,6 +173,89 @@ pub struct Camera {
     pub clip_from_world: Mat4,
     /// World-space position (for specular).
     pub position: Vec3,
+}
+
+/// A perspective camera's view and projection, recovered from its `clip_from_world`, for
+/// screen-space effects (ADR 0058). View space is right-handed, looking down −z; the
+/// projection maps it as `clip = (p00·x + p20·z, p11·y + p21·z, p22·z + p32, −z)` (`p20`
+/// and `p21` hold an off-center projection or the TAA jitter).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ViewSpace {
+    /// View from world: the camera's rotation and position.
+    pub view_from_world: Mat4,
+    /// Horizontal scale.
+    pub p00: f32,
+    /// Vertical scale (negative for Vulkan's downward y).
+    pub p11: f32,
+    /// Horizontal offset.
+    pub p20: f32,
+    /// Vertical offset.
+    pub p21: f32,
+    /// Depth terms: `depth = p22 + p32 / z`.
+    pub p22: f32,
+    /// See `p22`.
+    pub p32: f32,
+}
+
+impl ViewSpace {
+    /// Distance along the view direction of a depth-buffer value.
+    pub fn linear_depth(&self, depth: f32) -> f32 {
+        self.p32 / (depth + self.p22)
+    }
+}
+
+impl Camera {
+    /// The view and projection of a perspective camera whose view is rigid (rotation and
+    /// translation), or `None` (orthographic, scaled or skewed).
+    pub fn view_space(&self) -> Option<ViewSpace> {
+        let m = self.clip_from_world;
+        let (r0, r1, r2, r3) = (m.row(0), m.row(1), m.row(2), m.row(3));
+        // clip.w = −z: the fourth row is minus the view's third row, a unit vector for a
+        // rigid view (zero for an orthographic projection).
+        let back = -r3.truncate();
+        let tz = -r3.w;
+        if (back.length() - 1.0).abs() > 1e-3 {
+            return None;
+        }
+        let p22 = r2.truncate().dot(back);
+        let p32 = r2.w - p22 * tz;
+        let p20 = r0.truncate().dot(back);
+        let right = r0.truncate() - p20 * back;
+        let p00 = right.length();
+        let p21 = r1.truncate().dot(back);
+        let up = r1.truncate() - p21 * back;
+        let mut p11 = up.length();
+        if p00 < 1e-6 || p11 < 1e-6 {
+            return None;
+        }
+        let right = right / p00;
+        let mut up = up / p11;
+        // Right-handed: right × up = back; Vulkan's projection flips y.
+        if right.cross(up).dot(back) < 0.0 {
+            up = -up;
+            p11 = -p11;
+        }
+        if right.dot(up).abs() > 1e-3 {
+            return None;
+        }
+        let tx = (r0.w - p20 * tz) / p00;
+        let ty = (r1.w - p21 * tz) / p11;
+        let view_from_world = Mat4::from_cols(
+            Vec4::new(right.x, up.x, back.x, 0.0),
+            Vec4::new(right.y, up.y, back.y, 0.0),
+            Vec4::new(right.z, up.z, back.z, 0.0),
+            Vec4::new(tx, ty, tz, 1.0),
+        );
+        Some(ViewSpace {
+            view_from_world,
+            p00,
+            p11,
+            p20,
+            p21,
+            p22,
+            p32,
+        })
+    }
 }
 
 /// What one [`ForwardRenderer::add_passes`] call renders, and where.
@@ -421,7 +531,9 @@ struct FrameData {
     previous_clip_from_clip: [f32; 16],
     jitter: [f32; 4],
     previous_count: u32,
-    _pad2: [u32; 3],
+    /// The subsurface budget (ADR 0059).
+    scatter_budget: u32,
+    _pad2: [u32; 2],
     cascades: [CascadeData; MAX_CASCADES],
     cascade_count: u32,
     /// Draw commands per list (one per detail level of each batch).
@@ -429,7 +541,8 @@ struct FrameData {
     cascade_blend: f32,
     normal_bias: f32,
     fade_last: u32,
-    _pad3: [u32; 3],
+    /// The scatter pass's footprint: pixels per unit, clip w scale and offset.
+    scatter_footprint: [f32; 3],
     view_axis: [f32; 4],
     lights: u64,
     zbins: u64,
@@ -438,7 +551,9 @@ struct FrameData {
     tiles_x: u32,
     bin_scale: f32,
     light_culling: u32,
-    _pad4: [u32; 3],
+    /// The scatter pass's noise index.
+    scatter_frame: u32,
+    _pad4: [u32; 2],
     world_from_clip: [f32; 16],
     environment: u32,
     sky_cube: u32,
@@ -447,9 +562,10 @@ struct FrameData {
     env_levels: u32,
     env_intensity: f32,
     linear_sampler: u32,
-    _pad5: u32,
+    /// Subsurface profiles (ADR 0059) at `subsurface`.
+    subsurface_count: u32,
     sh: u64,
-    _pad6: [u32; 2],
+    subsurface: u64,
 }
 
 /// `Instance` in `forward.slang` (64 bytes).
@@ -499,8 +615,12 @@ struct Push {
     instance_count: u32,
     texture: u32,
     phase: u32,
-    _pad: u32,
+    /// Bindless index of the view's ambient occlusion, or [`NO_AO`].
+    ao: u32,
 }
+
+/// `NO_TEXTURE` in `forward.slang`: no ambient occlusion.
+const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
 const _: () = assert!(core::mem::size_of::<FrameData>() == 1008);
@@ -532,6 +652,9 @@ pub struct ForwardPasses {
     pub commands: Option<Buffer>,
     /// Motion vectors and jitter, with a [`Temporal`] state.
     pub motion: Option<MotionOutput>,
+    /// The view's ambient occlusion ([`crate::ao::AO_FORMAT`], sampled by the forward
+    /// pass), when it is on: for debugging views and effects of your own.
+    pub ao: Option<Texture>,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -588,6 +711,213 @@ struct Shading {
     blended: [Pipeline; 2],
 }
 
+/// Ambient occlusion (ADR 0058): its passes, and the shading that reads it after the depth
+/// prepass (`fragmentMainAo`, `fragmentMainMotionAo`), per shading variant: without and
+/// with motion vectors. The other entry points have no code for it (see `shade` in
+/// `forward.slang`).
+#[derive(Debug)]
+struct AoPasses {
+    passes: AmbientOcclusion,
+    shading: [[Pipeline; 2]; 4],
+}
+
+/// The specialization constants of each shading variant: `LOCAL_LIGHTS`, `ENVIRONMENT`
+/// (`forward.slang`).
+const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
+
+/// A shading pipeline of the forward pass.
+fn shading_desc<'a>(
+    vertex: &'a [u32],
+    fragment: &'a [u32],
+    entry: &'a core::ffi::CStr,
+    color_formats: &'a [vk::Format],
+    depth_format: vk::Format,
+    specialization: &'a [u32],
+) -> GraphicsPipelineDesc<'a> {
+    GraphicsPipelineDesc {
+        specialization,
+        color_formats,
+        depth_format,
+        // Cull mode and front face come with each batch's pipeline state.
+        dynamic_culling: true,
+        ..GraphicsPipelineDesc::new(
+            ShaderStageDesc {
+                spirv: vertex,
+                entry: c"vertexMain",
+            },
+            Some(ShaderStageDesc {
+                spirv: fragment,
+                entry,
+            }),
+        )
+    }
+}
+
+impl AoPasses {
+    fn new(
+        device: &Device,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+    ) -> Result<Self, RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+        let fragment = spirv_words(FRAGMENT_AO).ok_or_else(invalid)?;
+        let fragment_motion = spirv_words(FRAGMENT_MOTION_AO).ok_or_else(invalid)?;
+        let formats = [color_format];
+        let motion_formats = [color_format, MOTION_FORMAT];
+        // After the depth prepass: tested for equality, not written.
+        let shade = |fragment, entry, formats, variant: usize| GraphicsPipelineDesc {
+            depth_write: false,
+            depth_compare: vk::CompareOp::EQUAL,
+            ..shading_desc(
+                &vertex,
+                fragment,
+                entry,
+                formats,
+                depth_format,
+                &VARIANTS[variant],
+            )
+        };
+        let descs: Vec<PipelineDesc<'_>> = (0..VARIANTS.len())
+            .flat_map(|v| {
+                [
+                    shade(&fragment, c"fragmentMainAo", &formats[..], v),
+                    shade(
+                        &fragment_motion,
+                        c"fragmentMainMotionAo",
+                        &motion_formats[..],
+                        v,
+                    ),
+                ]
+            })
+            .map(PipelineDesc::Graphics)
+            .collect();
+        let mut pipelines =
+            Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
+                call: "ambient occlusion pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        let mut pair = || -> Result<[Pipeline; 2], RhiError> { Ok([next()?, next()?]) };
+        let shading = [pair()?, pair()?, pair()?, pair()?];
+        Ok(Self {
+            passes: AmbientOcclusion::new(device, bindless)?,
+            shading,
+        })
+    }
+}
+
+/// The pipelines of subsurface materials (ADR 0059), created with the first profiles.
+#[derive(Debug)]
+struct SubsurfacePipelines {
+    /// Per shading variant, their shading after the prepass (also writing their diffuse
+    /// light and albedo): without and with motion vectors.
+    shading: [[Pipeline; 2]; 4],
+    /// The scatter pass: the subsurface batches again, adding where their depth is.
+    scatter: Pipeline,
+}
+
+impl SubsurfacePipelines {
+    fn new(
+        device: &Device,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+    ) -> Result<Self, RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+        let depth_vertex = spirv_words(DEPTH_VERTEX).ok_or_else(invalid)?;
+        let fragment = spirv_words(FRAGMENT_SUBSURFACE).ok_or_else(invalid)?;
+        let fragment_motion = spirv_words(FRAGMENT_SUBSURFACE_MOTION).ok_or_else(invalid)?;
+        let scatter = spirv_words(SCATTER_FRAGMENT).ok_or_else(invalid)?;
+        let formats = [color_format, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
+        let motion_formats = [
+            color_format,
+            MOTION_FORMAT,
+            IRRADIANCE_FORMAT,
+            ALBEDO_FORMAT,
+        ];
+        // After the prepass, as `ForwardRenderer::shading`'s `shade`.
+        let shade = |fragment, entry, color_formats, specialization| {
+            PipelineDesc::Graphics(GraphicsPipelineDesc {
+                specialization,
+                color_formats,
+                depth_format,
+                dynamic_culling: true,
+                depth_write: false,
+                depth_compare: vk::CompareOp::EQUAL,
+                ..GraphicsPipelineDesc::new(
+                    ShaderStageDesc {
+                        spirv: &vertex,
+                        entry: c"vertexMain",
+                    },
+                    Some(ShaderStageDesc {
+                        spirv: fragment,
+                        entry,
+                    }),
+                )
+            })
+        };
+        let mut descs = Vec::with_capacity(2 * VARIANTS.len() + 1);
+        for variant in &VARIANTS {
+            descs.push(shade(
+                &fragment,
+                c"fragmentSubsurface",
+                &formats[..],
+                variant,
+            ));
+            descs.push(shade(
+                &fragment_motion,
+                c"fragmentSubsurfaceMotion",
+                &motion_formats[..],
+                variant,
+            ));
+        }
+        let color = [color_format];
+        descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+            color_formats: &color,
+            depth_format,
+            dynamic_culling: true,
+            depth_write: false,
+            depth_compare: vk::CompareOp::EQUAL,
+            blend: Blend::Additive,
+            ..GraphicsPipelineDesc::new(
+                ShaderStageDesc {
+                    spirv: &depth_vertex,
+                    entry: c"depthVertex",
+                },
+                Some(ShaderStageDesc {
+                    spirv: &scatter,
+                    entry: c"scatterFragment",
+                }),
+            )
+        }));
+        let mut pipelines =
+            Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
+                call: "subsurface pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        let mut pair = || -> Result<[Pipeline; 2], RhiError> { Ok([next()?, next()?]) };
+        let shading = [pair()?, pair()?, pair()?, pair()?];
+        Ok(Self {
+            shading,
+            scatter: next()?,
+        })
+    }
+}
+
 /// The forward PBR pipelines.
 #[derive(Debug)]
 pub struct ForwardRenderer {
@@ -613,6 +943,18 @@ pub struct ForwardRenderer {
     /// Screen-space error (pixels) a coarser detail level may have; 0 draws full meshes.
     lod_threshold: f32,
     depth_prepass: bool,
+    color_format: vk::Format,
+    depth_format: vk::Format,
+    /// Ambient occlusion's passes and shading pipelines, made when it is first turned on.
+    ao: Option<AoPasses>,
+    ao_settings: Option<AoSettings>,
+    /// Frames drawn with ambient occlusion: its noise index under TAA.
+    ao_frame: Cell<u32>,
+    /// Subsurface materials' pipelines (ADR 0059), once there are profiles.
+    subsurface_pipelines: Option<SubsurfacePipelines>,
+    subsurface_settings: Option<SubsurfaceSettings>,
+    /// The profiles as the shaders read them.
+    subsurface_profiles: Vec<GpuProfile>,
     scratch: RefCell<Scratch>,
 }
 
@@ -653,36 +995,8 @@ impl ForwardRenderer {
         let reactive_formats = [color_format, REACTIVE_FORMAT];
         let formats = [color_format];
         let motion_formats = [color_format, MOTION_FORMAT];
-        // The specialization constants of each shading variant.
-        const VARIANTS: [[u32; 2]; 4] = [[0, 0], [1, 0], [0, 1], [1, 1]];
         // Every graphics pipeline is described first and created in parallel below
         // (ADR 0055); they are taken back in the order they were described.
-        fn shading_desc<'a>(
-            vertex: &'a [u32],
-            fragment: &'a [u32],
-            entry: &'a core::ffi::CStr,
-            color_formats: &'a [vk::Format],
-            depth_format: vk::Format,
-            specialization: &'a [u32],
-        ) -> GraphicsPipelineDesc<'a> {
-            GraphicsPipelineDesc {
-                specialization,
-                color_formats,
-                depth_format,
-                // Cull mode and front face come with each batch's pipeline state.
-                dynamic_culling: true,
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: vertex,
-                        entry: c"vertexMain",
-                    },
-                    Some(ShaderStageDesc {
-                        spirv: fragment,
-                        entry,
-                    }),
-                )
-            }
-        }
         let main = |fragment, entry, formats, equal: bool, variant: usize| GraphicsPipelineDesc {
             // After the depth prepass: tested for equality, not written.
             depth_write: !equal,
@@ -852,6 +1166,14 @@ impl ForwardRenderer {
             light_culling: true,
             lod_threshold: 1.0,
             depth_prepass: false,
+            color_format,
+            depth_format,
+            ao: None,
+            ao_settings: None,
+            ao_frame: Cell::new(0),
+            subsurface_pipelines: None,
+            subsurface_settings: Some(SubsurfaceSettings::default()),
+            subsurface_profiles: Vec::new(),
             scratch: RefCell::new(Scratch::default()),
         })
     }
@@ -882,6 +1204,79 @@ impl ForwardRenderer {
     /// Whether the depth prepass is on.
     pub fn depth_prepass(&self) -> bool {
         self.depth_prepass
+    }
+
+    /// Turns ambient occlusion (GTAO, ADR 0058) on with `settings`, or off (`None`, the
+    /// default). It darkens the ambient and environment light where the surroundings hide
+    /// the sky, not the sun or local lights. It needs the depth before shading, so the
+    /// depth prepass runs whenever it is on. Perspective views only: orthographic ones
+    /// draw without it. The first time it is turned on its passes and 8 shading pipelines
+    /// are made (in parallel, through the pipeline cache: ADR 0055), so a renderer that
+    /// never uses it pays nothing, not even registers in its shading.
+    pub fn set_ambient_occlusion(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        settings: Option<AoSettings>,
+    ) -> Result<(), RhiError> {
+        if settings.is_some() && self.ao.is_none() {
+            self.ao = Some(AoPasses::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+            )?);
+        }
+        self.ao_settings = settings;
+        Ok(())
+    }
+
+    /// The ambient occlusion settings, when it is on.
+    pub fn ambient_occlusion(&self) -> Option<AoSettings> {
+        self.ao_settings
+    }
+
+    /// Turns subsurface scattering (ADR 0059) on with `settings` (the default) or off
+    /// (`None`: subsurface materials shade as ordinary ones). It needs the depth before
+    /// shading, so the depth prepass runs whenever a subsurface material is drawn.
+    pub fn set_subsurface(&mut self, settings: Option<SubsurfaceSettings>) {
+        self.subsurface_settings = settings;
+    }
+
+    /// The subsurface scattering settings, when it is on.
+    pub fn subsurface(&self) -> Option<SubsurfaceSettings> {
+        self.subsurface_settings
+    }
+
+    /// Sets the diffusion profiles that subsurface materials name by index
+    /// ([`crate::material::Subsurface::profile`]; at most [`subsurface::MAX_PROFILES`],
+    /// the rest are ignored). Without profiles, subsurface materials shade as ordinary
+    /// ones. The first profiles also create subsurface materials' 9 pipelines (in
+    /// parallel, through the pipeline cache: ADR 0055), so a game without them never
+    /// compiles them; each profile's sample kernels take well under a millisecond. Call it
+    /// when profiles change (a level load), not every frame.
+    pub fn set_subsurface_profiles(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        profiles: &[SubsurfaceProfile],
+    ) -> Result<(), RhiError> {
+        if !profiles.is_empty() && self.subsurface_pipelines.is_none() {
+            self.subsurface_pipelines = Some(SubsurfacePipelines::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+            )?);
+        }
+        self.subsurface_profiles.clear();
+        self.subsurface_profiles.extend(
+            profiles
+                .iter()
+                .take(subsurface::MAX_PROFILES)
+                .map(SubsurfaceProfile::gpu),
+        );
+        Ok(())
     }
 
     /// The driver's statistics of the opaque forward pipeline of each shading variant (see
@@ -974,6 +1369,7 @@ impl ForwardRenderer {
                 occlusion: false,
                 commands: None,
                 motion,
+                ao: None,
             });
         }
         let instance_count = draws.len() as u32;
@@ -989,7 +1385,15 @@ impl ForwardRenderer {
         // within a state, front to back (by the first instance's box), so the depth test
         // rejects hidden fragments before shading.
         let mut counts = [0u32; STATES];
-        batches(draws, materials, slots, runs, &mut counts);
+        // Subsurface materials get a pipeline state of their own while scattering is on
+        // and there are profiles; otherwise they shade as ordinary ones.
+        let subsurface = self
+            .subsurface_pipelines
+            .as_ref()
+            .filter(|_| self.subsurface_settings.is_some() && !self.subsurface_profiles.is_empty());
+        let subsurface_on = subsurface.is_some();
+        batches(draws, materials, slots, runs, &mut counts, subsurface_on);
+        let subsurface_draws = counts[SUBSURFACE..SUBSURFACE + 8].iter().any(|&c| c > 0);
         let mut starts = [0u32; STATES];
         let mut next = 0;
         for (start, count) in starts.iter_mut().zip(counts) {
@@ -1187,6 +1591,12 @@ impl ForwardRenderer {
             };
             (layout, uploaded)
         };
+        // Subsurface profiles, for transmission and the scatter pass (ADR 0059).
+        let profiles = if subsurface_draws {
+            ring.push(&self.subsurface_profiles)?
+        } else {
+            0
+        };
         let settings = &self.shadow_settings;
         let fit = shadow::fit_cascades(
             unjittered,
@@ -1231,14 +1641,20 @@ impl ForwardRenderer {
                 .to_cols_array(),
             jitter: [jitter_ndc[0], jitter_ndc[1], 0.0, 0.0],
             previous_count,
-            _pad2: [0; 3],
+            scatter_budget: self.subsurface_settings.unwrap_or_default().budget(),
+            _pad2: [0; 2],
             cascades: cascade_data(&fit, settings),
             cascade_count: fit.count as u32,
             command_count,
             cascade_blend: settings.blend.clamp(0.0, 1.0),
             normal_bias: settings.normal_bias,
             fade_last: u32::from(fit.fade),
-            _pad3: [0; 3],
+            scatter_footprint: {
+                let (forward, near_center) =
+                    axis.map_or((Vec3::NEG_Z, Vec3::ZERO), |a| (a.forward, a.near_center));
+                let f = Footprint::new(unjittered, forward, near_center, depth_desc.height);
+                [f.pixels_per_unit, f.w_scale, f.w_offset]
+            },
             view_axis: axis.map_or([0.0; 4], |a| {
                 a.forward.extend(-a.forward.dot(a.near_center)).to_array()
             }),
@@ -1249,7 +1665,9 @@ impl ForwardRenderer {
             tiles_x: light_layout.tiles[0],
             bin_scale: light_layout.bin_scale,
             light_culling: u32::from(self.light_culling),
-            _pad4: [0; 3],
+            // New noise every frame only when a temporal resolve averages it.
+            scatter_frame: temporal.map_or(0, |t| t.frame.get() as u32),
+            _pad4: [0; 2],
             world_from_clip: clip_from_world.inverse().to_cols_array(),
             environment: u32::from(environment.is_some()),
             sky_cube: environment.map_or(0, |e| e.source_index),
@@ -1258,9 +1676,13 @@ impl ForwardRenderer {
             env_levels: PREFILTERED_LEVELS,
             env_intensity: environment.map_or(1.0, |e| e.intensity),
             linear_sampler: Bindless::sampler(SamplerKind::LinearClamp),
-            _pad5: 0,
+            subsurface_count: if subsurface_draws {
+                self.subsurface_profiles.len() as u32
+            } else {
+                0
+            },
             sh: environment.map_or(0, |e| e.sh_address),
-            _pad6: [0; 2],
+            subsurface: profiles,
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -1279,7 +1701,7 @@ impl ForwardRenderer {
             instance_count,
             texture: 0,
             phase: PHASE_ALL,
-            _pad: 0,
+            ao: NO_AO,
         };
 
         let command_bytes = u64::from(command_count) * COMMAND_BYTES;
@@ -1453,7 +1875,7 @@ impl ForwardRenderer {
                             [&shadow_pipelines[0], &shadow_pipelines[1]],
                             &push,
                             true,
-                            false,
+                            DEPTH_STATES,
                             ctx.buffer(shadow_commands),
                             u64::from(cascade) * command_bytes,
                             tile,
@@ -1525,34 +1947,61 @@ impl ForwardRenderer {
             }
             _ => None,
         };
-        let targets = Targets {
+        let mut targets = Targets {
             color,
             color_load: load,
             velocity,
             previous,
             light_tiles,
             environment,
+            ao: None,
         };
 
-        let prepass = self.depth_prepass;
+        // Ambient occlusion needs the whole depth before shading: the prepass draws it.
+        let ao = self
+            .ao_settings
+            .zip(view.camera.view_space())
+            .zip(self.ao.as_ref());
+        let ao_frame = if temporal.is_some() {
+            let frame = self.ao_frame.get().wrapping_add(1);
+            self.ao_frame.set(frame);
+            frame
+        } else {
+            // Without a temporal resolve changing noise would flicker.
+            0
+        };
+        // Subsurface materials need it too: their pass follows the forward pass with the
+        // depth tested for equality.
+        let prepass = self.depth_prepass || ao.is_some() || subsurface_draws;
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
-        let shading = &self.shading
-            [usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1];
+        let variant = usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1;
+        let shading = &self.shading[variant];
+        // With ambient occlusion, the shading that reads it (the prepass is on then).
+        let ao_shading = ao.map(|(_, passes)| &passes.shading[variant]);
         let main_pipelines = match (prepass, velocity.is_some()) {
-            (true, false) => [&shading.shade, &shading.shade],
-            (true, true) => [&shading.shade_motion, &shading.shade_motion],
+            (true, false) => match ao_shading {
+                Some(p) => [&p[0], &p[0]],
+                None => [&shading.shade, &shading.shade],
+            },
+            (true, true) => match ao_shading {
+                Some(p) => [&p[1], &p[1]],
+                None => [&shading.shade_motion, &shading.shade_motion],
+            },
             (false, false) => [&shading.main[0], &shading.main[1]],
             (false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
         };
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
-                               phase: u32| {
+                               phase: u32,
+                               mask: u32,
+                               ao: Option<Texture>| {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
                 light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
+                ao: ao.and_then(|t| ctx.sampled_index(t)).unwrap_or(NO_AO),
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
@@ -1566,7 +2015,7 @@ impl ForwardRenderer {
                     pipelines,
                     &push,
                     false,
-                    false,
+                    mask,
                     ctx.buffer(culled),
                     offset,
                     ctx.render_area(),
@@ -1584,16 +2033,28 @@ impl ForwardRenderer {
                 let depth_use = if prepass {
                     prepass_pass(fg, "depth prepass", &geometry, &materials, culled, visible)
                         .depth(depth, depth_clear, StoreOp::Store)
-                        .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_ALL));
+                        .execute(move |ctx| {
+                            draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None)
+                        });
                     DepthUse::ReadOnly
                 } else {
                     DepthUse::Write(depth_clear, depth_store)
                 };
+                if let Some(((settings, view_space), passes)) = &ao {
+                    targets.ao = Some(
+                        passes
+                            .passes
+                            .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
+                    );
+                }
+                let ao_texture = targets.ao;
                 shading_pass(
                     fg, "forward", &geometry, &materials, shadow_map, culled, visible, targets,
                     true, depth, depth_use,
                 )
-                .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_ALL));
+                .execute(move |ctx| {
+                    draw_phase(ctx, main_pipelines, PHASE_ALL, PLAIN_STATES, ao_texture)
+                });
                 ForwardPasses {
                     instances: instance_count,
                     batches: batch_count,
@@ -1601,6 +2062,7 @@ impl ForwardRenderer {
                     occlusion: false,
                     commands: Some(culled),
                     motion: None,
+                    ao: targets.ao,
                 }
             }
             Some(flags) => {
@@ -1618,7 +2080,9 @@ impl ForwardRenderer {
                         visible,
                     )
                     .depth(depth, depth_clear, StoreOp::Store)
-                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_EARLY));
+                    .execute(move |ctx| {
+                        draw_phase(ctx, prepass_pipelines, PHASE_EARLY, DEPTH_STATES, None)
+                    });
                 } else {
                     shading_pass(
                         fg,
@@ -1633,7 +2097,9 @@ impl ForwardRenderer {
                         depth,
                         DepthUse::Write(depth_clear, StoreOp::Store),
                     )
-                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_EARLY));
+                    .execute(move |ctx| {
+                        draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, None)
+                    });
                 }
                 let pyramid = fg.create_buffer(
                     "depth pyramid",
@@ -1671,7 +2137,17 @@ impl ForwardRenderer {
                         visible,
                     )
                     .depth(depth, LoadOp::Load, StoreOp::Store)
-                    .execute(move |ctx| draw_phase(ctx, prepass_pipelines, PHASE_LATE));
+                    .execute(move |ctx| {
+                        draw_phase(ctx, prepass_pipelines, PHASE_LATE, DEPTH_STATES, None)
+                    });
+                    if let Some(((settings, view_space), passes)) = &ao {
+                        targets.ao = Some(
+                            passes
+                                .passes
+                                .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
+                        );
+                    }
+                    let ao_texture = targets.ao;
                     shading_pass(
                         fg,
                         "forward",
@@ -1686,8 +2162,8 @@ impl ForwardRenderer {
                         DepthUse::ReadOnly,
                     )
                     .execute(move |ctx| {
-                        draw_phase(ctx, main_pipelines, PHASE_EARLY);
-                        draw_phase(ctx, main_pipelines, PHASE_LATE);
+                        draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, ao_texture);
+                        draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, ao_texture);
                     });
                 } else {
                     shading_pass(
@@ -1703,7 +2179,9 @@ impl ForwardRenderer {
                         depth,
                         DepthUse::Write(LoadOp::Load, depth_store),
                     )
-                    .execute(move |ctx| draw_phase(ctx, main_pipelines, PHASE_LATE));
+                    .execute(move |ctx| {
+                        draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, None)
+                    });
                 }
                 ForwardPasses {
                     instances: instance_count,
@@ -1712,9 +2190,104 @@ impl ForwardRenderer {
                     occlusion: true,
                     commands: Some(culled),
                     motion: None,
+                    ao: targets.ao,
                 }
             }
         };
+        // Subsurface materials (ADR 0059): shaded after the others, also writing their
+        // diffuse light and albedo, then scattered into the color target.
+        if let Some(pipelines) = subsurface.filter(|_| subsurface_draws) {
+            let variant =
+                usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1;
+            let irradiance = fg.create_texture(
+                "subsurface irradiance",
+                TextureDesc::new_2d(IRRADIANCE_FORMAT, depth_desc.width, depth_desc.height),
+            );
+            let albedo = fg.create_texture(
+                "subsurface albedo",
+                TextureDesc::new_2d(ALBEDO_FORMAT, depth_desc.width, depth_desc.height),
+            );
+            let pipeline = &pipelines.shading[variant][usize::from(velocity.is_some())];
+            let two_phases = flag_buffer.is_some();
+            // Their diffuse light is occluded by the view's ambient occlusion too.
+            let ao_texture = targets.ao;
+            shading_pass(
+                fg,
+                "forward subsurface",
+                &geometry,
+                &materials,
+                shadow_map,
+                culled,
+                visible,
+                targets,
+                false,
+                depth,
+                DepthUse::ReadOnly,
+            )
+            .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+            .color(albedo, LoadOp::DontCare, StoreOp::Store)
+            .execute(move |ctx| {
+                let pipelines = [pipeline, pipeline];
+                if two_phases {
+                    draw_phase(ctx, pipelines, PHASE_EARLY, SUBSURFACE_STATES, ao_texture);
+                    draw_phase(ctx, pipelines, PHASE_LATE, SUBSURFACE_STATES, ao_texture);
+                } else {
+                    draw_phase(ctx, pipelines, PHASE_ALL, SUBSURFACE_STATES, ao_texture);
+                }
+            });
+            // The scatter pass: the same batches, adding where their depth is.
+            let scatter = &pipelines.scatter;
+            forward_pass(
+                fg,
+                "subsurface scatter",
+                &geometry,
+                &materials,
+                shadow_map,
+                culled,
+                visible,
+            )
+            .read(irradiance, Access::Sampled(ShaderStages::FRAGMENT))
+            .read(albedo, Access::Sampled(ShaderStages::FRAGMENT))
+            .color(color, LoadOp::Load, StoreOp::Store)
+            .depth_read_only(depth)
+            .execute(move |ctx| {
+                let (Some(light), Some(albedo)) =
+                    (ctx.sampled_index(irradiance), ctx.sampled_index(albedo))
+                else {
+                    return;
+                };
+                let push = Push {
+                    visible: ctx.address(visible),
+                    texture: light,
+                    phase: albedo,
+                    ..base
+                };
+                let phases: &[u32] = if two_phases {
+                    &[PHASE_EARLY, PHASE_LATE]
+                } else {
+                    &[PHASE_ALL]
+                };
+                for &phase in phases {
+                    let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
+                    // SAFETY: recording inside the pass's rendering scope; the pass reads
+                    // the pool, the material table and the commands.
+                    unsafe {
+                        states.draw(
+                            ctx,
+                            bindless,
+                            &geometry,
+                            [scatter, scatter],
+                            &push,
+                            false,
+                            SUBSURFACE_STATES,
+                            ctx.buffer(culled),
+                            offset,
+                            ctx.render_area(),
+                        );
+                    }
+                }
+            });
+        }
         // The sky where no geometry was drawn (depth still 1).
         if let Some(env) = environment {
             let sky = &self.sky;
@@ -1793,7 +2366,7 @@ impl ForwardRenderer {
                         [pipelines, pipelines],
                         &push,
                         false,
-                        true,
+                        BLENDED_STATES,
                         ctx.buffer(culled),
                         offset,
                         ctx.render_area(),
@@ -1875,6 +2448,8 @@ struct Targets {
     light_tiles: Option<Buffer>,
     /// The environment's lighting.
     environment: Option<EnvironmentFrame>,
+    /// The view's ambient occlusion (ADR 0058), computed after the depth prepass.
+    ao: Option<Texture>,
 }
 
 /// How a shading pass uses the depth target.
@@ -1930,6 +2505,9 @@ fn shading_pass<'a, 'g>(
             .read(env.prefiltered, Access::Sampled(ShaderStages::FRAGMENT))
             .read(env.dfg, Access::Sampled(ShaderStages::FRAGMENT))
             .read(env.sh, Access::StorageRead(ShaderStages::FRAGMENT));
+    }
+    if let Some(ao) = targets.ao {
+        pass = pass.read(ao, Access::Sampled(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),
@@ -2002,30 +2580,34 @@ fn mirrored(m: &Mat4) -> bool {
         < 0.0
 }
 
-/// A batch's pipeline state.
-fn state(kind: MaterialKind, mirrored: bool) -> usize {
-    // Masked and blended exclude each other (both come from the alpha mode).
-    (usize::from(kind.blended) * BLENDED)
+/// A batch's pipeline state; `subsurface`: whether subsurface materials get theirs.
+fn state(kind: MaterialKind, mirrored: bool, subsurface: bool) -> usize {
+    // Masked and blended exclude each other (both come from the alpha mode), blended and
+    // subsurface too (the material table never sets both).
+    (usize::from(kind.subsurface && subsurface) * SUBSURFACE)
+        | (usize::from(kind.blended) * BLENDED)
         | (usize::from(kind.masked) * MASKED)
         | (usize::from(kind.double_sided) * DOUBLE_SIDED)
         | (usize::from(mirrored) * MIRRORED)
 }
 
 /// Fills `slots` with every draw's material slot and `runs` with the runs of consecutive
-/// draws that share a mesh and a pipeline state; counts the runs per state.
+/// draws that share a mesh and a pipeline state; counts the runs per state. `subsurface`:
+/// whether subsurface materials get their own states.
 fn batches(
     draws: &[DrawItem],
     materials: &MaterialFrame<'_>,
     slots: &mut Vec<u32>,
     runs: &mut Vec<Run>,
     counts: &mut [u32; STATES],
+    subsurface: bool,
 ) {
     slots.clear();
     runs.clear();
     let mut mesh = None;
     for (i, draw) in draws.iter().enumerate() {
         let (slot, kind) = materials.resolve(draw.material);
-        let state = state(kind, mirrored(&draw.world_from_object));
+        let state = state(kind, mirrored(&draw.world_from_object), subsurface);
         slots.push(slot);
         match runs.last_mut() {
             Some(run) if run.state == state && mesh == Some(draw.mesh) => run.len += 1,
@@ -2058,10 +2640,11 @@ struct States {
 impl States {
     /// Records one indirect draw per pipeline state in use, from the commands at `offset`
     /// in `buffer` (one per batch, in state order), into `area` of the target: `pipelines`
-    /// are the opaque and the masked one. `blended` draws the blended states only (the
-    /// transparent pass), otherwise only the others. The shadow pass renders back faces of single-sided
-    /// geometry (fewer self-shadowing artifacts on closed meshes); the forward passes cull
-    /// them.
+    /// are the opaque and the masked one. Only the states whose bits `mask` sets are drawn
+    /// (`*_STATES`). The shadow pass renders back faces of single-sided
+    /// geometry (fewer self-shadowing artifacts on closed meshes), except for subsurface
+    /// materials (their front faces, where light enters, for thick transmission); the
+    /// forward passes cull them.
     ///
     /// # Safety
     ///
@@ -2076,7 +2659,7 @@ impl States {
         pipelines: [&Pipeline; 2],
         push: &Push,
         shadow: bool,
-        blended: bool,
+        mask: u32,
         buffer: vk::Buffer,
         offset: u64,
         area: vk::Rect2D,
@@ -2084,12 +2667,15 @@ impl States {
         let mut bound = None;
         for state in 0..STATES {
             let count = self.counts[state];
-            if count == 0 || (state & BLENDED != 0) != blended {
+            if count == 0 || mask & (1 << state) == 0 {
                 continue;
             }
             let masked = state & MASKED != 0;
             let cull = match (state & DOUBLE_SIDED != 0, shadow) {
                 (true, _) => vk::CullModeFlags::NONE,
+                // Subsurface materials cast from the faces towards the light: the shadow
+                // map then holds where light enters them, for thick transmission.
+                (false, true) if state & SUBSURFACE != 0 => vk::CullModeFlags::BACK,
                 (false, true) => vk::CullModeFlags::FRONT,
                 (false, false) => vk::CullModeFlags::BACK,
             };
@@ -2180,5 +2766,67 @@ unsafe fn set_viewport(device: &engine_rhi::ash::Device, cmd: vk::CommandBuffer,
             }],
         );
         device.cmd_set_scissor(cmd, 0, &[area]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_core::math::{look_at, vulkan_orthographic, vulkan_perspective};
+
+    #[test]
+    fn the_view_and_projection_come_back_from_clip_from_world() {
+        let views = [
+            look_at(Vec3::new(3.0, 2.0, 5.0), Vec3::ZERO, Vec3::Y),
+            look_at(
+                Vec3::new(-10.0, 40.0, 1.0),
+                Vec3::new(2.0, 0.0, -3.0),
+                Vec3::Y,
+            ),
+            look_at(
+                Vec3::new(0.5, -2.0, -7.0),
+                Vec3::new(0.0, 1.0, 0.0),
+                Vec3::X,
+            ),
+        ];
+        for view in views {
+            for jitter in [(0.0, 0.0), (0.0013, -0.0021)] {
+                let projection = Mat4::from_translation(Vec3::new(jitter.0, jitter.1, 0.0))
+                    * vulkan_perspective(1.1, 16.0 / 9.0, 0.1, 300.0);
+                let camera = Camera {
+                    clip_from_world: projection * view,
+                    position: view.inverse().w_axis.truncate(),
+                };
+                let v = camera.view_space().unwrap();
+                assert!(v.view_from_world.abs_diff_eq(view, 1e-4), "{view:?}");
+                // The projection rebuilt from its terms.
+                let rebuilt = Mat4::from_cols(
+                    Vec4::new(v.p00, 0.0, 0.0, 0.0),
+                    Vec4::new(0.0, v.p11, 0.0, 0.0),
+                    Vec4::new(v.p20, v.p21, v.p22, -1.0),
+                    Vec4::new(0.0, 0.0, v.p32, 0.0),
+                );
+                assert!(
+                    rebuilt.abs_diff_eq(projection, 1e-4),
+                    "{rebuilt:?} {projection:?}"
+                );
+                // Linear depth of a point 12 units in front.
+                let p = view.inverse().transform_point3(Vec3::new(0.3, -0.2, -12.0));
+                let clip = camera.clip_from_world * p.extend(1.0);
+                assert!((v.linear_depth(clip.z / clip.w) - 12.0).abs() < 1e-3);
+            }
+        }
+        let ortho = Camera {
+            clip_from_world: vulkan_orthographic(-1.0, 1.0, -1.0, 1.0, 0.1, 10.0) * views[0],
+            position: Vec3::ZERO,
+        };
+        assert!(ortho.view_space().is_none());
+        let scaled = Camera {
+            clip_from_world: vulkan_perspective(1.0, 1.0, 0.1, 10.0)
+                * Mat4::from_scale(Vec3::splat(2.0))
+                * views[0],
+            position: Vec3::ZERO,
+        };
+        assert!(scaled.view_space().is_none());
     }
 }
