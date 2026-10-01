@@ -1,6 +1,7 @@
 # GPU µs per pass (median), AMD Radeon(TM) Graphics (integrated, Vulkan 1.4.315, 22.6 GiB, AMD proprietary driver 25.10.36 (AMD proprietary shader compiler))
 # scene	pass	µs
 procedural	(frame total)	12785.4
+procedural	(gpu frame)	12779.7
 procedural	bloom downsample	662.0
 procedural	bloom upsample	475.8
 procedural	cull	3.6
@@ -14,6 +15,7 @@ procedural	sky	63.2
 procedural	tonemap	763.4
 procedural	transparent	272.5
 sponza	(frame total)	16498.4
+sponza	(gpu frame)	16453.8
 sponza	bloom downsample	648.3
 sponza	bloom upsample	476.6
 sponza	cull	3.9
@@ -23,3 +25,18 @@ sponza	shadow	2290.4
 sponza	shadow cull	4.9
 sponza	sky	46.0
 sponza	tonemap	771.0
+sponza_ao	(frame total)	26993.0
+sponza_ao	(gpu frame)	26905.2
+sponza_ao	ao	10600.8
+sponza_ao	ao denoise	785.2
+sponza_ao	ao depths	595.5
+sponza_ao	bloom downsample	638.5
+sponza_ao	bloom upsample	478.2
+sponza_ao	cull	3.6
+sponza_ao	cull setup	0.9
+sponza_ao	depth prepass	906.1
+sponza_ao	forward	9879.9
+sponza_ao	shadow	2301.5
+sponza_ao	shadow cull	4.4
+sponza_ao	sky	32.6
+sponza_ao	tonemap	757.2

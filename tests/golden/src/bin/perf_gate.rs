@@ -8,7 +8,9 @@
 //! - A pass regresses when it is slower than its baseline by more than `--threshold`
 //!   percent (3) and by more than 5 µs or 0.5 % of its scene's frame, whichever is more
 //!   (small passes are noisy, and a few µs of a 12 ms frame matter to nobody); the
-//!   frame's total too.
+//!   frame's total too, and `(gpu frame)`, the frame end to end on the GPU (with async
+//!   compute, ADR 0065, passes overlap: an overlapped pass may read longer while the frame
+//!   gets shorter).
 //! - When every large pass of a scene moved by about the frame's percentage, the GPU ran
 //!   at other clocks or shared with other work: reported as such, and not counted without
 //!   `--strict`.
@@ -25,12 +27,16 @@ use engine_core::math::Vec3;
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, vendor_name,
 };
+use engine_render::ao::AoSettings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 const TOTAL: &str = "(frame total)";
+/// The frame end to end on the GPU (ADR 0065): with async compute, passes overlap and
+/// their sum is not the frame's time.
+const FRAME: &str = "(gpu frame)";
 const FLOOR_US: f64 = 5.0;
 const FLOOR_OF_FRAME: f64 = 0.005;
 /// Passes of at least this share of the frame decide whether a scene moved as a whole.
@@ -50,6 +56,16 @@ fn shots() -> Vec<Shot> {
         Shot {
             size: [1920, 1080],
             ..Shot::new("sponza", Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
+        },
+        // Ambient occlusion, which runs on the async compute queue where that is the
+        // default (ADR 0065).
+        Shot {
+            size: [1920, 1080],
+            ao: Some(AoSettings::default()),
+            ..Shot::new(
+                "sponza_ao",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
         },
     ]
 }
@@ -117,6 +133,12 @@ fn main() -> ExitCode {
                         per_pass.entry(name.to_owned()).or_default().push(us);
                     }
                     per_pass.entry(TOTAL.to_owned()).or_default().push(total);
+                    if r.frame_us > 0.0 {
+                        per_pass
+                            .entry(FRAME.to_owned())
+                            .or_default()
+                            .push(r.frame_us);
+                    }
                 }
                 Err(Skip::NoGpu(e)) => {
                     eprintln!("no GPU: {e}");
@@ -177,7 +199,9 @@ fn main() -> ExitCode {
             };
             let large: Vec<f64> = baseline
                 .iter()
-                .filter(|((s, p), us)| s == scene && p != TOTAL && **us >= frame * UNIFORM_SHARE)
+                .filter(|((s, p), us)| {
+                    s == scene && p != TOTAL && p != FRAME && **us >= frame * UNIFORM_SHARE
+                })
                 .filter_map(|(key, _)| change_of(key))
                 .collect();
             frame_change > threshold

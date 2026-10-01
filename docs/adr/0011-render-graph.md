@@ -134,7 +134,7 @@ record, steady state, empty callbacks.
   set of passes in the frame's graph.
 - Next steps, in this order:
   1. **Async compute:** a queue per pass and cross-queue timeline semaphores. Pass
-     reordering can come with it.
+     reordering can come with it. Done in [ADR 0065](0065-async-compute.md).
   2. Periodic Tracy clock resync (AMD GPUs reset their timers in low-power states) and
      calibrated timestamps (`VK_KHR_calibrated_timestamps`) instead of the one-off
      submission.

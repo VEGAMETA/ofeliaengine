@@ -1,14 +1,17 @@
 //! GPU time per pass (CLAUDE.md §14: GPU passes per viewport in the editor profiler,
-//! Tracy GPU zones).
+//! Tracy GPU zones), on each queue the graph uses, and the frame's GPU time end to end.
 //!
-//! Each frame slot owns a timestamp query pool. Every needed pass is bracketed by two
-//! timestamps; when the slot comes around again (its previous frame has finished), the
+//! Each queue has a timestamp query pool per frame slot. Every needed pass is bracketed by
+//! two timestamps; when the slot comes around again (its previous frame has finished), the
 //! results are read without waiting, turned into per-pass GPU times and, in profiling
-//! builds, uploaded to Tracy as GPU zones.
+//! builds, uploaded to Tracy as GPU zones. On the graphics queue two more timestamps open
+//! and close the graph's frame: with async compute, passes overlap, and only the frame's
+//! own span tells what the overlap saved.
 
-use engine_rhi::Device;
+use super::compile::QueueKind;
 use engine_rhi::ash::vk::Handle as _;
 use engine_rhi::ash::{self, vk};
+use engine_rhi::{Device, Queue};
 
 /// GPU time of one pass of a completed frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -17,6 +20,9 @@ pub struct PassTime {
     pub name: &'static str,
     /// The scope the pass was declared in ([`crate::graph::FrameGraph::begin_scope`]).
     pub scope: Option<u32>,
+    /// The queue it ran on. Async compute passes overlap graphics work: their times do
+    /// not add up to the frame's.
+    pub queue: QueueKind,
     /// Time between the pass's start and end timestamps, in microseconds.
     pub gpu_us: f32,
 }
@@ -27,26 +33,33 @@ struct SlotQueries {
     capacity: u32,
     /// Passes recorded in this slot's last frame: name, scope and first query index.
     pending: Vec<(&'static str, Option<u32>, u32)>,
+    /// The queries opening and closing the frame, if written.
+    frame: [Option<u32>; 2],
     /// Queries written in that frame.
     written: u32,
 }
 
 pub(crate) struct Timing {
+    queue: QueueKind,
     slots: Vec<SlotQueries>,
     period_ns: f32,
     valid_mask: u64,
     results: Vec<u64>,
     times: Vec<PassTime>,
+    frame_us: Option<f32>,
     tracy: Option<engine_profiler::GpuContext>,
 }
 
 impl Timing {
-    /// `None` when the graphics queue has no timestamps.
-    pub(crate) fn new(device: &Device, slots: usize) -> Option<Self> {
+    /// `None` when `queue`'s family has no timestamps.
+    pub(crate) fn new(
+        device: &Device,
+        slots: usize,
+        queue: Queue,
+        kind: QueueKind,
+    ) -> Option<Self> {
         let adapter = device.adapter();
-        let bits = adapter
-            .queue_family(device.graphics.family)?
-            .timestamp_valid_bits;
+        let bits = adapter.queue_family(queue.family)?.timestamp_valid_bits;
         let period_ns = adapter.limits.timestamp_period;
         if bits == 0 || period_ns <= 0.0 {
             return None;
@@ -57,10 +70,14 @@ impl Timing {
             (1u64 << bits) - 1
         };
         let tracy = if engine_profiler::ENABLED {
-            // SAFETY: one-off submission on the graphics queue, waited for.
-            unsafe { calibrate(device) }.and_then(|timestamp| {
+            let name = match kind {
+                QueueKind::Graphics => "graphics queue",
+                QueueKind::AsyncCompute => "async compute queue",
+            };
+            // SAFETY: one-off submission on the queue, waited for.
+            unsafe { calibrate(device, queue) }.and_then(|timestamp| {
                 engine_profiler::GpuContext::new_vulkan(
-                    "graphics queue",
+                    name,
                     (timestamp & valid_mask) as i64,
                     period_ns,
                 )
@@ -69,11 +86,13 @@ impl Timing {
             None
         };
         Some(Self {
+            queue: kind,
             slots: (0..slots).map(|_| SlotQueries::default()).collect(),
             period_ns,
             valid_mask,
             results: Vec::new(),
             times: Vec::new(),
+            frame_us: None,
             tracy,
         })
     }
@@ -83,26 +102,31 @@ impl Timing {
         &self.times
     }
 
+    /// The span between the frame's opening and closing timestamps, µs.
+    pub(crate) fn frame_us(&self) -> Option<f32> {
+        self.frame_us
+    }
+
     fn tracy_query(&self, slot: usize, query: u32) -> u16 {
         let capacity = self.slots[slot].capacity;
         ((slot as u32 * capacity + query) & 0xFFFF) as u16
     }
 
-    /// Reads the results of `slot`'s previous frame and prepares `queries` queries for
-    /// this one (recording the reset into `cmd`).
+    fn ticks_us(&self, start: u64, end: u64) -> f32 {
+        let ticks = (end & self.valid_mask).wrapping_sub(start & self.valid_mask) & self.valid_mask;
+        ticks as f32 * self.period_ns / 1000.0
+    }
+
+    /// Reads the results of `slot`'s previous frame (if it used this queue) and forgets
+    /// them; call once per frame, before [`Self::reset`].
     ///
     /// # Safety
     ///
-    /// `slot`'s previous frame has finished on the GPU; `cmd` is recording, outside a
-    /// render pass.
-    pub(crate) unsafe fn begin_frame(
-        &mut self,
-        device: &ash::Device,
-        cmd: vk::CommandBuffer,
-        slot: usize,
-        queries: u32,
-    ) {
+    /// `slot`'s previous frame has finished on the GPU.
+    pub(crate) unsafe fn collect(&mut self, device: &ash::Device, slot: usize) {
         let state = &mut self.slots[slot];
+        self.times.clear();
+        self.frame_us = None;
         if state.written > 0 && !state.pool.is_null() {
             self.results.clear();
             self.results.resize(state.written as usize, 0);
@@ -117,16 +141,23 @@ impl Timing {
                 )
             };
             if read.is_ok() {
-                self.times.clear();
+                let state = &self.slots[slot];
                 for &(name, scope, first) in &state.pending {
-                    let start = self.results[first as usize] & self.valid_mask;
-                    let end = self.results[first as usize + 1] & self.valid_mask;
-                    let ticks = end.wrapping_sub(start) & self.valid_mask;
+                    let gpu_us = self.ticks_us(
+                        self.results[first as usize],
+                        self.results[first as usize + 1],
+                    );
                     self.times.push(PassTime {
                         name,
                         scope,
-                        gpu_us: ticks as f32 * self.period_ns / 1000.0,
+                        queue: self.queue,
+                        gpu_us,
                     });
+                }
+                if let [Some(begin), Some(end)] = state.frame {
+                    self.frame_us = Some(
+                        self.ticks_us(self.results[begin as usize], self.results[end as usize]),
+                    );
                 }
                 if let Some(tracy) = &self.tracy {
                     let capacity = state.capacity;
@@ -137,8 +168,27 @@ impl Timing {
                 }
             }
         }
+        let state = &mut self.slots[slot];
         state.pending.clear();
+        state.frame = [None; 2];
         state.written = 0;
+    }
+
+    /// Prepares `queries` queries of `slot` for this frame, recording the reset into
+    /// `cmd` (the first command buffer of this queue in the frame).
+    ///
+    /// # Safety
+    ///
+    /// `slot`'s previous frame has finished on the GPU; `cmd` is recording, outside a
+    /// render pass, and is submitted to this queue before the others of the frame.
+    pub(crate) unsafe fn reset(
+        &mut self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        slot: usize,
+        queries: u32,
+    ) {
+        let state = &mut self.slots[slot];
         if state.capacity < queries {
             if !state.pool.is_null() {
                 // SAFETY: the slot's previous frame has finished.
@@ -171,11 +221,40 @@ impl Timing {
         }
     }
 
+    /// Records the timestamp opening (`end == false`) or closing the frame.
+    ///
+    /// # Safety
+    ///
+    /// `cmd` is recording on this queue; [`Self::reset`] prepared enough queries.
+    pub(crate) unsafe fn frame_mark(
+        &mut self,
+        device: &ash::Device,
+        cmd: vk::CommandBuffer,
+        slot: usize,
+        end: bool,
+    ) {
+        let state = &mut self.slots[slot];
+        let query = state.written;
+        if query >= state.capacity {
+            return;
+        }
+        let stage = if end {
+            vk::PipelineStageFlags2::BOTTOM_OF_PIPE
+        } else {
+            vk::PipelineStageFlags2::TOP_OF_PIPE
+        };
+        // SAFETY: the query was reset in this frame's first command buffer of the queue.
+        unsafe { device.cmd_write_timestamp2(cmd, stage, state.pool, query) };
+        state.frame[usize::from(end)] = Some(query);
+        state.written += 1;
+    }
+
     /// Records the timestamp opening a pass.
     ///
     /// # Safety
     ///
-    /// `cmd` is recording; [`Self::begin_frame`] prepared enough queries for `slot`.
+    /// `cmd` is recording on this queue; [`Self::reset`] prepared enough queries for
+    /// `slot`.
     pub(crate) unsafe fn pass_begin(
         &mut self,
         device: &ash::Device,
@@ -190,7 +269,7 @@ impl Timing {
         }
         let id = self.tracy_query(slot, query);
         let state = &mut self.slots[slot];
-        // SAFETY: the query was reset in this command buffer.
+        // SAFETY: the query was reset in this frame.
         unsafe {
             device.cmd_write_timestamp2(
                 cmd,
@@ -218,7 +297,11 @@ impl Timing {
         slot: usize,
     ) {
         let state = &self.slots[slot];
-        if state.written.is_multiple_of(2) || state.written >= state.capacity {
+        let opened = state
+            .pending
+            .last()
+            .is_some_and(|&(_, _, first)| first + 1 == state.written);
+        if !opened || state.written >= state.capacity {
             return;
         }
         let query = state.written;
@@ -256,18 +339,18 @@ impl Timing {
     }
 }
 
-/// A GPU timestamp taken now, for correlating the GPU and CPU timelines.
+/// A GPU timestamp taken now on `queue`, for correlating the GPU and CPU timelines.
 ///
 /// # Safety
 ///
-/// The graphics queue is not used concurrently by another thread.
-unsafe fn calibrate(device: &Device) -> Option<u64> {
+/// `queue` is not used concurrently by another thread.
+unsafe fn calibrate(device: &Device, queue: Queue) -> Option<u64> {
     let d = device.raw();
     // SAFETY: plain object creation and a one-off, waited-for submission.
     unsafe {
         let pool = d
             .create_command_pool(
-                &vk::CommandPoolCreateInfo::default().queue_family_index(device.graphics.family),
+                &vk::CommandPoolCreateInfo::default().queue_family_index(queue.family),
                 None,
             )
             .ok()?;
@@ -302,7 +385,7 @@ unsafe fn calibrate(device: &Device) -> Option<u64> {
                 let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
                 if d.end_command_buffer(cmd).is_ok()
                     && d.queue_submit2(
-                        device.graphics.raw,
+                        queue.raw,
                         &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
                         fence,
                     )
