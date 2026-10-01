@@ -116,6 +116,9 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
         .collect();
     let mut ring = UploadRing::new(&device, &mut allocator, 2, 4 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 2);
+    // Nothing here is submitted: with async compute (the contact shadows' pass) the graph
+    // would submit the earlier segments itself, waiting on work that never runs.
+    graph.set_async_compute(false);
     let occlusion = Occlusion::new(&device, &mut allocator, 4096).unwrap();
     let temporal = Temporal::new(&device, &mut allocator, 16).unwrap();
     let mut scene = GpuScene::new(&device, &bindless, 4096, 2).unwrap();
