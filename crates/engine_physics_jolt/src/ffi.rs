@@ -953,3 +953,259 @@ mod layout {
         );
     }
 }
+
+// ---------------------------------------------------------------------------------------
+// Shape casts and all-hit rays (JoltC), ADR 0066.
+
+pub(crate) const JPH_BACK_FACE_MODE_IGNORE: u32 = 0;
+pub(crate) const JPH_BACK_FACE_MODE_COLLIDE: u32 = 1;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct JPH_ShapeCastSettings {
+    pub(crate) base: JPH_CollideSettingsBase,
+    pub(crate) backFaceModeTriangles: u32,
+    pub(crate) backFaceModeConvex: u32,
+    pub(crate) useShrunkenShapeAndConvexRadius: bool,
+    pub(crate) returnDeepestPoint: bool,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct JPH_ShapeCastResult {
+    pub(crate) contactPointOn1: JPH_Vec3,
+    pub(crate) contactPointOn2: JPH_Vec3,
+    pub(crate) penetrationAxis: JPH_Vec3,
+    pub(crate) penetrationDepth: f32,
+    pub(crate) subShapeID1: JPH_SubShapeID,
+    pub(crate) subShapeID2: JPH_SubShapeID,
+    pub(crate) bodyID2: JPH_BodyID,
+    pub(crate) fraction: f32,
+    pub(crate) isBackFaceHit: bool,
+}
+
+pub(crate) type JPH_CastRayCollectorCallback =
+    unsafe extern "C" fn(context: *mut c_void, result: *const JPH_RayCastResult) -> f32;
+pub(crate) type JPH_CastShapeCollectorCallback =
+    unsafe extern "C" fn(context: *mut c_void, result: *const JPH_ShapeCastResult) -> f32;
+
+unsafe extern "C" {
+    pub(crate) fn JPH_ShapeCastSettings_Init(settings: *mut JPH_ShapeCastSettings);
+    pub(crate) fn JPH_NarrowPhaseQuery_CastRay2(
+        query: *const JPH_NarrowPhaseQuery,
+        origin: *const JPH_RVec3,
+        direction: *const JPH_Vec3,
+        settings: *const c_void,
+        callback: JPH_CastRayCollectorCallback,
+        user_data: *mut c_void,
+        bp_filter: *const JPH_BroadPhaseLayerFilter,
+        layer_filter: *const JPH_ObjectLayerFilter,
+        body_filter: *const JPH_BodyFilter,
+        shape_filter: *const JPH_ShapeFilter,
+    ) -> bool;
+    pub(crate) fn JPH_NarrowPhaseQuery_CastShape(
+        query: *const JPH_NarrowPhaseQuery,
+        shape: *const JPH_Shape,
+        world_transform: *const JPH_RMat4,
+        direction: *const JPH_Vec3,
+        settings: *const JPH_ShapeCastSettings,
+        base_offset: *mut JPH_RVec3,
+        callback: JPH_CastShapeCollectorCallback,
+        user_data: *mut c_void,
+        bp_filter: *const JPH_BroadPhaseLayerFilter,
+        layer_filter: *const JPH_ObjectLayerFilter,
+        body_filter: *const JPH_BodyFilter,
+        shape_filter: *const JPH_ShapeFilter,
+    ) -> bool;
+    pub(crate) fn JPH_Shape_GetCenterOfMass(shape: *const JPH_Shape, result: *mut JPH_Vec3);
+    pub(crate) fn JPH_BodyInterface_MoveKinematic(
+        body_interface: *mut JPH_BodyInterface,
+        body: JPH_BodyID,
+        target_position: *mut JPH_RVec3,
+        target_rotation: *mut JPH_Quat,
+        delta_time: f32,
+    );
+}
+
+// ---------------------------------------------------------------------------------------
+// Our extension over Jolt's C++ API (csrc/ext.cpp), ADR 0066.
+
+opaque!(EngineJoltWorld, EngineJoltCharacter);
+
+pub(crate) const ENGINE_JOLT_NONE: u32 = 0xFFFF_FFFF;
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EngineJoltCharacterDesc {
+    pub(crate) position: [f32; 3],
+    pub(crate) rotation: [f32; 4],
+    pub(crate) up: [f32; 3],
+    pub(crate) half_height: f32,
+    pub(crate) radius: f32,
+    pub(crate) max_slope: f32,
+    pub(crate) step_height: f32,
+    pub(crate) snap_to_ground: f32,
+    pub(crate) mass: f32,
+    pub(crate) max_push_force: f32,
+    pub(crate) id: u32,
+    pub(crate) object_layer: u32,
+    pub(crate) proxy_layer: u32,
+    pub(crate) _padding: u32,
+    pub(crate) user_data: u64,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EngineJoltCharacterState {
+    pub(crate) position: [f32; 3],
+    pub(crate) rotation: [f32; 4],
+    pub(crate) velocity: [f32; 3],
+    pub(crate) ground_normal: [f32; 3],
+    pub(crate) ground_point: [f32; 3],
+    pub(crate) ground_velocity: [f32; 3],
+    pub(crate) ground_state: u32,
+    pub(crate) ground_body: u32,
+    pub(crate) proxy_body: u32,
+    pub(crate) _padding: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct EngineJoltCharacterContact {
+    pub(crate) point: [f32; 3],
+    pub(crate) normal: [f32; 3],
+    pub(crate) body: u32,
+    pub(crate) character: u32,
+    pub(crate) collided: u32,
+    pub(crate) sensor: u32,
+}
+
+unsafe extern "C" {
+    pub(crate) fn engine_jolt_count_allocations();
+    pub(crate) fn engine_jolt_allocations() -> u64;
+    pub(crate) fn engine_jolt_world_create(system: *mut JPH_PhysicsSystem) -> *mut EngineJoltWorld;
+    pub(crate) fn engine_jolt_world_destroy(world: *mut EngineJoltWorld);
+    pub(crate) fn engine_jolt_character_create(
+        world: *mut EngineJoltWorld,
+        desc: *const EngineJoltCharacterDesc,
+    ) -> *mut EngineJoltCharacter;
+    pub(crate) fn engine_jolt_character_destroy(
+        world: *mut EngineJoltWorld,
+        character: *mut EngineJoltCharacter,
+    );
+    pub(crate) fn engine_jolt_character_state(
+        character: *const EngineJoltCharacter,
+        out: *mut EngineJoltCharacterState,
+    );
+    pub(crate) fn engine_jolt_character_move(
+        world: *mut EngineJoltWorld,
+        character: *mut EngineJoltCharacter,
+        velocity: *const f32,
+        dt: f32,
+        out: *mut EngineJoltCharacterState,
+    );
+    pub(crate) fn engine_jolt_character_update_ground_velocity(character: *mut EngineJoltCharacter);
+    pub(crate) fn engine_jolt_character_set_transform(
+        world: *mut EngineJoltWorld,
+        character: *mut EngineJoltCharacter,
+        position: *const f32,
+        rotation: *const f32,
+    );
+    pub(crate) fn engine_jolt_character_contacts(
+        character: *const EngineJoltCharacter,
+        out: *mut EngineJoltCharacterContact,
+        capacity: u32,
+    ) -> u32;
+    pub(crate) fn engine_jolt_save_state(
+        world: *mut EngineJoltWorld,
+        characters: *const *mut EngineJoltCharacter,
+        count: u32,
+        out: *mut u8,
+        capacity: usize,
+    ) -> usize;
+    pub(crate) fn engine_jolt_restore_state(
+        world: *mut EngineJoltWorld,
+        characters: *const *mut EngineJoltCharacter,
+        count: u32,
+        bytes: *const u8,
+        size: usize,
+    ) -> bool;
+}
+
+/// Layout checks of the structs added for ADR 0066 (`csrc/ext.cpp`).
+#[cfg(test)]
+mod ext_layout {
+    use super::*;
+    use core::mem::{offset_of, size_of};
+
+    unsafe extern "C" {
+        fn engine_jolt_sizeof_character_desc() -> usize;
+        fn engine_jolt_sizeof_character_state() -> usize;
+        fn engine_jolt_sizeof_character_contact() -> usize;
+        fn engine_jolt_offsetof_character_desc_user_data() -> usize;
+        fn engine_jolt_offsetof_character_state_ground_state() -> usize;
+        fn engine_jolt_sizeof_JPH_ShapeCastSettings() -> usize;
+        fn engine_jolt_offsetof_JPH_ShapeCastSettings_returnDeepestPoint() -> usize;
+        fn engine_jolt_sizeof_JPH_ShapeCastResult() -> usize;
+        fn engine_jolt_offsetof_JPH_ShapeCastResult_fraction() -> usize;
+    }
+
+    #[test]
+    fn extension_layouts_match_c() {
+        // SAFETY: the functions only return constants.
+        let checks: [(&str, usize, usize); 9] = unsafe {
+            [
+                (
+                    "CharacterDesc",
+                    size_of::<EngineJoltCharacterDesc>(),
+                    engine_jolt_sizeof_character_desc(),
+                ),
+                (
+                    "CharacterDesc.user_data",
+                    offset_of!(EngineJoltCharacterDesc, user_data),
+                    engine_jolt_offsetof_character_desc_user_data(),
+                ),
+                (
+                    "CharacterState",
+                    size_of::<EngineJoltCharacterState>(),
+                    engine_jolt_sizeof_character_state(),
+                ),
+                (
+                    "CharacterState.ground_state",
+                    offset_of!(EngineJoltCharacterState, ground_state),
+                    engine_jolt_offsetof_character_state_ground_state(),
+                ),
+                (
+                    "CharacterContact",
+                    size_of::<EngineJoltCharacterContact>(),
+                    engine_jolt_sizeof_character_contact(),
+                ),
+                (
+                    "ShapeCastSettings",
+                    size_of::<JPH_ShapeCastSettings>(),
+                    engine_jolt_sizeof_JPH_ShapeCastSettings(),
+                ),
+                (
+                    "ShapeCastSettings.returnDeepestPoint",
+                    offset_of!(JPH_ShapeCastSettings, returnDeepestPoint),
+                    engine_jolt_offsetof_JPH_ShapeCastSettings_returnDeepestPoint(),
+                ),
+                (
+                    "ShapeCastResult",
+                    size_of::<JPH_ShapeCastResult>(),
+                    engine_jolt_sizeof_JPH_ShapeCastResult(),
+                ),
+                (
+                    "ShapeCastResult.fraction",
+                    offset_of!(JPH_ShapeCastResult, fraction),
+                    engine_jolt_offsetof_JPH_ShapeCastResult_fraction(),
+                ),
+            ]
+        };
+        let mismatches: Vec<_> = checks.iter().filter(|(_, rust, c)| rust != c).collect();
+        assert!(
+            mismatches.is_empty(),
+            "layout mismatches (name, Rust, C): {mismatches:?}"
+        );
+    }
+}

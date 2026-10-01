@@ -4,6 +4,11 @@
 - Date: 2026-09-26
 - Amends: [ADR 0018](0018-physics-interface-and-jolt.md), CLAUDE.md §1, §2, §8, §17
 
+> **Update 2026-10-01 ([ADR 0066](0066-physics-queries-characters-rollback.md)):** trigger 1
+> measured. Jolt saves and restores 1 000 contacting bodies in 0.27 + 0.21 ms, 10 000 in
+> 5.6–6.1 + 2.4–2.7 ms (one thread). Not acted on: rollback games rarely simulate
+> thousands of bodies.
+
 ## Context
 
 CLAUDE.md §8 planned our own Rust physics (P2) as a parallel track, measured against

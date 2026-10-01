@@ -1,4 +1,4 @@
-# Physics: bodies, gravity, queries, determinism
+# Physics: bodies, gravity, queries, characters, rollback
 
 The engine simulates rigid bodies through one interface, `engine_physics::PhysicsBackend`.
 Today the backend is Jolt Physics; the engine's own solver will plug into the same
@@ -57,17 +57,126 @@ Change a body's mode at any time with `set_body_gravity`.
 
 ## 4. Queries
 
+Rays:
 - `raycast(&Ray { origin, direction }, filter)`: the closest hit, with point, normal,
   fraction and the body's `user_data`. The direction's length is the range.
+- `raycast_all(&ray, filter, &mut hits)`: every body along the ray, nearest first
+  (penetrating bullets, line of sight through glass).
 - `raycast_batch(&rays, filter, &mut hits)`: many rays at once (AI line of sight,
   sensors).
-- `overlap_sphere(center, radius, filter, &mut bodies)`: everything touching a sphere
-  (explosions, pickups).
 
-Sensors (`BodyDesc::sensor`) report overlaps but do not collide. Queries skip them unless
-`QueryFilter::sensors` is set.
+Swept shapes ("does this fit?", melee swings, thick projectiles, camera collision):
 
-## 5. Events
+```rust
+let probe = world.create_shape(&ShapeDesc::Capsule { half_height: 0.5, radius: 0.3 })?; // once
+let cast = ShapeCast {
+    shape: probe,
+    position: from,
+    rotation: Quat::IDENTITY,
+    direction: to - from, // its length is the range
+};
+if let Some(hit) = world.cast_shape(&cast, QueryFilter::default()) {
+    let safe = from + (to - from) * hit.fraction; // where the capsule first touches
+}
+```
+
+- `cast_shape` gives the first hit; `cast_shape_all` every body along the way, nearest
+  first; `cast_shape_batch` many casts at once.
+- Any shape except triangle meshes can be swept: spheres, capsules, boxes, cylinders,
+  convex hulls. Create it once and reuse it.
+- A shape that starts inside a body reports it at `fraction` 0 with the `penetration`
+  depth (the deepest first). One that starts touching a body and moves away from it does
+  not report it.
+
+Overlaps:
+- `overlap_shape(shape, position, rotation, filter, &mut bodies)`: everything touching a
+  shape (area triggers, "is this spot free?").
+- `overlap_sphere(center, radius, filter, &mut bodies)`: the same for a sphere, without a
+  shape.
+
+Filters (`QueryFilter`):
+- `QueryFilter::layers(mask)`: only these layers;
+- `.with_sensors()`: sensors too (`BodyDesc::sensor` bodies report overlaps but do not
+  collide; queries skip them by default);
+- `.ignoring(body)`: skip one body, typically the one casting (or your character's proxy
+  body).
+
+Results are written into vectors you keep: clear and reuse them every frame, and queries
+do not allocate.
+
+## 5. Kinematic bodies: lifts, doors, moving platforms
+
+A `Kinematic` body moves only where you put it, and pushes dynamic bodies out of the way.
+Move it with a target per fixed update:
+
+```rust
+// Before every step: where the lift should be at the end of it.
+world.move_kinematic(lift, Vec3::new(0.0, height_at(time + dt), 0.0), Quat::IDENTITY, dt);
+world.step(dt, 1)?;
+```
+
+- `move_kinematic` sets the body's velocity so it arrives exactly at the end of the
+  step. Things on it are carried and things in its way are pushed.
+- `set_transform` teleports: nothing on it moves along. Use it to place, not to move.
+- Without a new target the body keeps its last velocity.
+
+## 6. Characters
+
+A character is a capsule that your code moves, not the solver. It walks up stairs, stops
+at steep slopes, stays on the ground when walking down, rides moving platforms and pushes
+crates.
+
+```rust
+use engine_physics::{CharacterDesc, CharacterMotor};
+
+let hero = world.create_character(&CharacterDesc {
+    max_slope: 45f32.to_radians(),
+    step_height: 0.35,
+    ..CharacterDesc::capsule(spawn_feet, 1.8, 0.3) // feet position, height, radius
+})?;
+let motor = CharacterMotor { jump_speed: 6.0, ..CharacterMotor::default() };
+
+// Every fixed update, before world.step:
+let state = world.character(hero).unwrap();
+let walk = input_direction * 4.0; // m/s along the ground
+let velocity = motor.velocity(&state, walk, input.jump_pressed, dt);
+let state = world.move_character(hero, velocity, dt).unwrap();
+world.step(dt, 1)?;
+if state.is_grounded() { /* footsteps, coyote time... */ }
+```
+
+- **Position is the feet** (the bottom of the capsule).
+- **You decide the velocity**, gravity included. `CharacterMotor` does the usual: walk on
+  the ground, jump only when grounded, fall, steer in the air (`air_control`), ride
+  platforms (`follow_ground`). Write your own for anything else: swimming, ladders,
+  dashes.
+- `CharacterDesc` controls:
+
+  | field | default | what |
+  |---|---|---|
+  | `max_slope` | 50° | steeper slopes are walls |
+  | `step_height` | 0.4 m | steps climbed without jumping; 0 off |
+  | `snap_to_ground` | 0.5 m | how far it is pulled down to stay on the ground; 0 off |
+  | `mass`, `max_push_force` | 70 kg, 100 N | pushing crates, pressing on platforms |
+  | `layer` | 1 | what it collides with (`PhysicsSettings::collides`) |
+  | `proxy_layer` | none | a body that follows it, so rays, sensors and bullets see it |
+
+- `CharacterState` tells where it stands:
+  - `ground`: `OnGround`, `OnSteepGround` (slides), `NotSupported`, `InAir`;
+  - the ground's normal, point, body and velocity;
+  - the velocity left after sliding along walls.
+- `character_contacts(hero, &mut contacts)` lists what it touched in its last move
+  (walls, crates, other characters).
+- **Proxy body.** Without it, rays and other bodies pass through the character. With it,
+  shots hit the proxy (`state.proxy` is its `BodyId`, with the character's `user_data`).
+  It is a kinematic body: on a layer that collides with crates it shoves them with
+  infinite strength. Give it a layer that only collides with what should feel it that
+  way, and cast your own rays with `.ignoring(proxy)`.
+- **Characters block each other.** Every character tests every other one: fine for
+  dozens, not crowds of hundreds (1.9 µs per move alone, 7 µs among 128).
+- `set_character_transform` teleports (respawns, portals).
+
+## 7. Events
 
 After each `step`, `contact_events()` lists `Begin` and `End` of contacts:
 - `a < b`;
@@ -76,15 +185,89 @@ After each `step`, `contact_events()` lists `Begin` and `End` of contacts:
 
 Read them in your fixed update. Your code never runs on physics threads.
 
-## 6. Determinism
+## 8. Determinism and rollback
 
 Same build, same inputs, same order of API calls: same results, on any number of threads
-(tested in CI). `state_hash()` hashes every body's state; compare it between runs or
-between a client and a server to detect divergence. For identical results across
-compilers and CPUs, build with the `cross-platform-deterministic` feature (about 8%
+(tested in CI). `state_hash()` hashes every body's and character's state; compare it
+between runs or between a client and a server to detect divergence. For identical results
+across compilers and CPUs, build with the `cross-platform-deterministic` feature (about 8%
 slower).
 
-## 7. Performance
+**Rollback netcode** saves the world every frame and, when a late input arrives, restores
+an earlier frame and re-simulates:
+
+```rust
+use engine_physics::PhysicsSnapshot;
+
+// Once: a ring of snapshots for the rollback window.
+let mut ring: Vec<PhysicsSnapshot> = (0..8).map(|_| PhysicsSnapshot::new()).collect();
+
+// Every frame, before simulating it:
+world.save_state(&mut ring[frame % 8])?;
+
+// A late input for frame `f`:
+world.restore_state(&ring[f % 8])?;
+for g in f..now {
+    // the same calls as the first time, with the corrected input
+}
+```
+
+- Saving reuses the snapshot's memory: no allocations once the ring has warmed up.
+- After a restore, the same calls give bit-identical results (same build).
+- `snapshot.hash()` hashes the saved bytes: sleep state, contacts and joints too. Send it
+  to the other players for desync checks.
+- **What a snapshot holds:** everything a step changes. Positions, velocities, sleep
+  state, contacts, joint state and characters.
+- **What it does not hold:**
+  - which bodies, shapes, joints and characters exist: restore only into the world it was
+    saved from, with the same objects. Creating or destroying one in between makes
+    `restore_state` fail with `SnapshotMismatch`;
+  - settings you change (materials, gravity modes and fields): restore those yourself.
+- If `restore_state` fails on damaged bytes, the world may be partly restored: restore a
+  good snapshot.
+- **Cost** (ref-1, one thread):
+  - 1 000 bodies resting on each other: save 0.27 ms, restore 0.21 ms, 0.5 MiB;
+  - 10 000: save about 6 ms, restore 2.7 ms, 5.6 MiB. Contacts dominate.
+  - Fine for typical rollback games (tens to hundreds of moving bodies). Ask before
+    building rollback over thousands.
+- 2D (Box2D) has no snapshots. `Mover2d` is plain data: copy it.
+
+## 9. Physics in the ECS
+
+Physics runs at a fixed rate; frames come at any rate. Draw the bodies between their
+last two steps, and motion looks smooth whatever the frame rate:
+
+```rust
+use engine_physics::ecs::{FixedStep, KinematicTarget, PhysicsPose, PhysicsSync, RigidBody};
+
+let mut clock = FixedStep::new(60.0);
+let mut sync = PhysicsSync::new(&mut ecs);
+let crate_entity = ecs.spawn((
+    RigidBody::new(body),
+    PhysicsPose::at(position, rotation), // the spawn pose: no blending from the origin
+    Transform::from_translation(position),
+));
+
+// Every rendered frame:
+for _ in 0..clock.advance(frame_seconds) {
+    // game logic, characters (move_character)...
+    sync.push(&mut ecs, &mut physics, clock.dt()); // KinematicTarget → move_kinematic
+    physics.step(clock.dt(), 1)?;
+    sync.pull(&mut ecs, &physics);                 // new poses into PhysicsPose
+}
+sync.interpolate(&mut ecs, clock.alpha());         // Transform between the last two steps
+```
+
+- `RigidBody` and `Character` tie an entity to a body or a character. `PhysicsPose`
+  keeps their last two poses. `KinematicTarget` moves a kinematic body.
+- `interpolate` writes the translation and rotation of root entities (no `Parent`); scale
+  stays yours. Keep entities with physics at the root of the hierarchy.
+- `FixedStep` runs at most 8 steps per frame (`max_steps`) and drops the rest, so a long
+  hitch does not make the next frames slow too.
+- All components are plain data: ECS snapshots save them for rollback next to the physics
+  snapshot.
+
+## 10. Performance
 
 - Keep shapes simple: spheres, capsules and boxes are cheapest; convex hulls next;
   triangle meshes only for static geometry.
@@ -113,8 +296,12 @@ slower).
     the second hardware thread of a core (SMT) rarely helps.
   - Measure your scene with `cargo bench -p engine_physics_jolt --bench physics`, which
     sweeps 1 to 16 threads.
+- Queries on ref-1, one thread, over 1 000 bodies: a ray 0.15 µs, a sphere or capsule
+  cast 0.36–0.39 µs, a box or hull cast 0.47–0.49 µs, a capsule overlap 0.65 µs
+  (`cargo bench -p engine_physics_jolt --bench queries`, which also measures characters
+  and save/restore).
 
-## 8. 2D physics
+## 11. 2D physics
 
 2D games use `engine_physics2d`, a small layer over Box2D v3:
 
@@ -135,7 +322,34 @@ for contact in world.contact_begins() { /* contact.a, contact.b */ }
 
 - Units are metres, kilograms and seconds. Keep moving objects between 0.1 and 10 m;
   scale pixels to metres, for example 1 m = 32 px.
-- It currently supports boxes and circles; static, kinematic and dynamic bodies;
-  velocities, teleports and begin-contact events.
-- Joints, polygons, raycasts and sensors come when a game needs them. Ask for them.
+- It supports boxes, circles and capsules; static, kinematic and dynamic bodies;
+  velocities, teleports, kinematic targets (`move_kinematic`) and begin-contact events.
+- Queries:
+  - `raycast` / `raycast_all`;
+  - `cast_shape` / `cast_shape_all` (a `Shape` swept along a translation);
+  - `overlap_shape`.
+  - A `QueryFilter2d` takes a layer mask and a body to ignore. Put shapes on layers with
+    `add_shape_on_layer` (0..64; `add_shape` uses layer 0).
+- **Characters** use `Mover2d`, a capsule moved by your code (Box2D 3.1's mover):
+
+  ```rust
+  use engine_physics2d::Mover2d;
+
+  let mut hero = Mover2d::new(Vec2::new(0.0, 0.0), 1.8, 0.3); // feet, height, radius
+  // Every fixed update, before world.step:
+  let mut v = Vec2::new(input_x * 5.0, if hero.ground.is_some() { 0.0 } else { hero.velocity.y });
+  v.y -= 10.0 * dt;
+  if let Some(ground) = hero.ground { v += ground.velocity; } // ride platforms
+  world.move_mover(&mut hero, v, dt);
+  ```
+
+  - It slides along walls and does not walk up slopes steeper than `max_slope` (50°).
+  - It reports the ground it stands on and snaps down slopes and small steps
+    (`snap_to_ground`).
+  - It rests within Box2D's 5 mm contact slop of the ground.
+  - Unlike 3D characters it does not climb steps (its round bottom rolls over small
+    ledges) and does not push bodies.
+  - It is plain data: copy it to save it.
+- Joints, polygons, sensors and world snapshots come when a game needs them. Ask for
+  them.
 - It runs on one thread. The same build with the same calls gives the same result.
