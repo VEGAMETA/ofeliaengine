@@ -257,6 +257,12 @@ impl World {
         let Some(link) = self.remove::<Parent>(child) else {
             return;
         };
+        self.unlink(child, link);
+    }
+
+    /// Takes `child` (whose link was `link`) out of its parent's list of children. Its
+    /// own `Parent` is left to the caller.
+    pub(crate) fn unlink(&mut self, child: Entity, link: Parent) {
         if let Some(prev) = self.get_mut::<Parent>(link.prev) {
             prev.next = link.next;
         }

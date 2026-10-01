@@ -3,6 +3,9 @@
 - Status: Accepted
 - Date: 2026-09-26
 - Research: [docs/research/transforms.md](../research/transforms.md)
+- Revised by [ADR 0064](0064-gpu-scene-extraction-runtime.md): propagation is incremental
+  and writes only changed values ("one moved root recomputes the whole world" no longer
+  holds).
 - Follows: [ADR 0017](0017-ecs.md) (next step 5), [ADR 0026](0026-system-scheduler.md)
 
 ## Context

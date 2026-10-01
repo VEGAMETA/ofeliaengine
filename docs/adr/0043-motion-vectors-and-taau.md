@@ -6,6 +6,8 @@
   [ADR 0035](0035-occlusion-culling.md) (per-view state kept across frames),
   [ADR 0042](0042-depth-prepass.md) (the passes motion vectors are written in)
 - Research: [`docs/research/temporal-aa.md`](../research/temporal-aa.md)
+- Extended by [ADR 0064](0064-gpu-scene-extraction-runtime.md): the GPU scene keeps last
+  frame's transforms itself (no per-view copy of every instance).
 
 ## Context
 

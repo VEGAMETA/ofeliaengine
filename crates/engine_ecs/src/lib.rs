@@ -42,13 +42,13 @@ pub use component::{
 pub use engine_reflect as reflect;
 pub use entity::Entity;
 pub use hierarchy::{ChildIter, Children, HierarchyError, Parent};
-pub use query::{Changed, Fetch, Filter, QueryIter, QueryState, ReadOnlyFetch, With, Without};
+pub use query::{Changed, Fetch, Filter, Or, QueryIter, QueryState, ReadOnlyFetch, With, Without};
 pub use schedule::{
     Access, FnSystem, Res, ResMut, Schedule, System, SystemContext, SystemQuery, system,
 };
 pub use snapshot::{Snapshot, SnapshotError};
 pub use storage::{Archetype, CHUNK_CLASSES};
-pub use transform::{GlobalTransform, Transform, TransformPropagation};
+pub use transform::{GlobalTransform, PropagationStats, Transform, TransformPropagation};
 pub use world::World;
 
 #[cfg(test)]

@@ -445,6 +445,39 @@ filter_tuple!(A 0, B 1);
 filter_tuple!(A 0, B 1, C 2);
 filter_tuple!(A 0, B 1, C 2, D 3);
 
+/// Any of a tuple of filters: archetypes that match at least one of them, and chunks
+/// that pass the chunk test of at least one that matched. `Or<(Changed<A>, Changed<B>)>`
+/// visits the chunks where `A` or `B` was written.
+pub struct Or<T>(PhantomData<fn() -> T>);
+
+macro_rules! or_tuple {
+    ($($f:ident $i:tt),+) => {
+        impl<$($f: Filter),+> Filter for Or<($($f,)+)> {
+            type State = ($(Option<$f::State>,)+);
+            const CHUNK: bool = $($f::CHUNK)||+;
+
+            fn register(world: &mut World) {
+                $($f::register(world);)+
+            }
+
+            #[inline]
+            fn state(world: &World, archetype: &Archetype) -> Option<Self::State> {
+                let state = ($($f::state(world, archetype),)+);
+                if $(state.$i.is_none())&&+ { None } else { Some(state) }
+            }
+
+            #[inline]
+            fn chunk(state: Self::State, archetype: &Archetype, chunk: usize, last_run: u64) -> bool {
+                $(state.$i.is_some_and(|s| $f::chunk(s, archetype, chunk, last_run)))||+
+            }
+        }
+    };
+}
+
+or_tuple!(A 0, B 1);
+or_tuple!(A 0, B 1, C 2);
+or_tuple!(A 0, B 1, C 2, D 3);
+
 #[derive(Clone, Copy)]
 struct Matched<S, FS> {
     archetype: u32,

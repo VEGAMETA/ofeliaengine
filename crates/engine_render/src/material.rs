@@ -190,7 +190,8 @@ impl Default for MaterialDesc {
 
 /// A material in a [`MaterialTable`]. Ids of removed materials are stale: they draw with
 /// the default material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct MaterialId {
     index: u32,
     generation: u32,
@@ -280,6 +281,9 @@ pub struct MaterialTable {
     frames_in_flight: u64,
     /// The texture pool's generation the materials were last resolved against.
     resolved: Option<u64>,
+    /// Edits that change how instances resolve: a material's kind changed, or a material
+    /// was removed (its ids now mean the default material).
+    revision: u64,
     /// The texture LOD bias and the first index of its material samplers.
     lod_bias: f32,
     samplers: u32,
@@ -297,6 +301,7 @@ impl MaterialTable {
             retired: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
             resolved: None,
+            revision: 0,
             lod_bias: 0.0,
             samplers: Bindless::material_sampler(Wrap::Repeat, Wrap::Repeat),
         };
@@ -362,6 +367,7 @@ impl MaterialTable {
 
     fn store(&mut self, index: u32, desc: MaterialDesc) {
         let slot = &mut self.slots[index as usize];
+        let old_kind = slot.desc.map(|_| slot.kind);
         slot.desc = Some(desc);
         slot.kind = MaterialKind {
             masked: matches!(desc.alpha, AlphaMode::Mask { .. }),
@@ -369,10 +375,21 @@ impl MaterialTable {
             blended: desc.alpha == AlphaMode::Blend,
             subsurface: desc.subsurface.is_some() && desc.alpha != AlphaMode::Blend,
         };
+        if old_kind.is_some_and(|k| k != slot.kind) {
+            self.revision += 1;
+        }
         if !slot.dirty {
             slot.dirty = true;
             self.dirty.push(index);
         }
+    }
+
+    /// Counts the edits that change how a material id resolves for drawing: a material's
+    /// kind changed ([`MaterialKind`]: masked, blended, double-sided, subsurface), or a
+    /// material was removed. Scenes that cache resolved materials
+    /// ([`crate::gpu_scene::GpuScene`]) resolve again when it changes.
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// Removes a material: draws that still use its id draw with the default material.
@@ -385,6 +402,7 @@ impl MaterialTable {
         slot.desc = None;
         slot.generation = slot.generation.wrapping_add(1);
         self.free_slots.push(id.index);
+        self.revision += 1;
     }
 
     /// A material's description; `None` for stale ids.
@@ -698,6 +716,11 @@ impl MaterialFrame<'_> {
             }
             _ => (0, self.table.slots[0].kind),
         }
+    }
+
+    /// The table's [`MaterialTable::revision`].
+    pub fn revision(&self) -> u64 {
+        self.table.revision
     }
 
     /// Device address of the table.

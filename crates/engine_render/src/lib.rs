@@ -13,6 +13,8 @@
 //!   GPU-driven: GPU frustum culling and indirect instanced draws (ADR 0034).
 //! - [`subsurface`]: screen-space subsurface scattering: diffusion profiles, transmission
 //!   and the scatter pass (ADR 0059).
+//! - [`gpu_scene`]: the persistent GPU scene: instances in stable slots in device
+//!   buffers, only changes uploaded each frame (ADR 0064).
 //! - [`cull`]: frustum and bounding-box tests shared by CPU code and the GPU culling pass.
 //! - [`upload`]: per-frame GPU data (camera, lights, draw lists) in a ring per frame slot.
 //! - [`post`]: post-processing (tonemapping from the HDR target).
@@ -26,6 +28,7 @@ pub mod compute;
 pub mod cull;
 pub mod environment;
 pub mod forward;
+pub mod gpu_scene;
 pub mod graph;
 pub mod hiz;
 pub mod lights;
