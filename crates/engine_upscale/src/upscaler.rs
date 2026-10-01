@@ -118,7 +118,16 @@ pub struct UpscaleInput {
     pub camera: UpscaleCamera,
     /// Time since the last frame, in milliseconds.
     pub frame_time_ms: f32,
+    /// The exposure the tone mapper will apply to the output, as a 1 × 1
+    /// [`EXPOSURE_FORMAT`] texture (a linear multiplier), so the upscaler judges colors as
+    /// the player sees them (FSR's and DLSS's exposure input); `None` lets the upscaler
+    /// measure its own (FSR's and DLSS's automatic exposure). TAAU needs none: it blends
+    /// reversibly tonemapped colors, which do not depend on the exposure.
+    pub exposure: Option<Texture>,
 }
+
+/// Format of [`UpscaleInput::exposure`].
+pub const EXPOSURE_FORMAT: engine_rhi::ash::vk::Format = engine_rhi::ash::vk::Format::R32_SFLOAT;
 
 /// The engine objects an upscaler may need while declaring its pass.
 pub struct UpscaleContext<'a, 'g> {

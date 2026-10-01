@@ -1,6 +1,7 @@
 //! A game frame loop on `engine_runtime` (ADR 0064): one ECS world simulated at 64 Hz,
-//! extracted into a persistent GPU scene, interpolated and drawn every render frame, with
-//! the camera following the mouse every render frame.
+//! extracted into a persistent GPU scene, interpolated and drawn every render frame by the
+//! frame renderer (ADR 0072), with the camera entity following the mouse every render
+//! frame (written in the presentation step, read by a `CameraView`).
 //!
 //! The world: a field of static props (most of a game's scene) and spinning hierarchies
 //! (movers, about 5 %). Move the mouse over the window to turn the camera. At the end it
@@ -12,6 +13,7 @@
 //!
 //! ```text
 //! cargo run -p engine_runtime --release --example game_loop -- [frames] [props] [--vsync]
+//!     [--aa off|taau|fsr] [--quality native|quality|balanced|performance]
 //! ```
 
 #![allow(
@@ -33,17 +35,18 @@ fn main() {
 
 #[cfg(windows)]
 mod windowed {
-    use engine_core::math::{Mat4, Quat, Vec3, look_at};
+    use engine_core::math::{Mat4, Quat, Vec3};
     use engine_ecs::{GlobalTransform, QueryState, Transform, World, bytemuck, pod_component};
-    use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
-    use engine_render::forward::{
-        Camera, DirectionalLight, ForwardRenderer, ForwardView, ShadowSettings,
+    use engine_frame::{
+        Antialiasing, FrameContext, FrameRenderer, PrepareContext, Quality, RenderDefaults,
+        SceneDraws, SceneInput, View, ViewTarget,
     };
+    use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
+    use engine_render::forward::{DirectionalLight, ShadowSettings};
     use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
-    use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
+    use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
     use engine_render::material::{MaterialDesc, MaterialTable};
-    use engine_render::mesh::{GeometryCapacity, GeometryPool, cube, perspective};
-    use engine_render::post::{HDR_FORMAT, Tonemap};
+    use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
     use engine_render::texture_pool::TexturePool;
     use engine_render::upload::UploadRing;
     use engine_rhi::ash::vk;
@@ -51,7 +54,7 @@ mod windowed {
         AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
         OutputColor, PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
     };
-    use engine_runtime::{FrameStages, MeshRenderer, Runtime};
+    use engine_runtime::{Camera, CameraView, FrameStages, MeshRenderer, Runtime, look_rotation};
     use std::time::{Duration, Instant};
 
     /// Turns its entity about Y, radians per second.
@@ -79,6 +82,12 @@ mod windowed {
         let vsync = args.iter().any(|a| a == "--vsync");
         let nums: Vec<usize> = args.iter().filter_map(|a| a.parse().ok()).collect();
         let frames_to_run = nums.first().copied().unwrap_or(2000);
+        let option = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str)
+        };
         let props = nums.get(1).copied().unwrap_or(20_000);
 
         let mut windows = WindowSystem::start(4096).unwrap();
@@ -119,15 +128,30 @@ mod windowed {
         let mut allocator = Allocator::new(&device);
         let bindless = Bindless::new(&device).unwrap();
         let depth_format = vk::Format::D32_SFLOAT;
-        let renderer = ForwardRenderer::new(
+        let frame_renderer = FrameRenderer::new(
             &device,
             &bindless,
-            HDR_FORMAT,
+            swapchain.format(),
             depth_format,
             ShadowSettings::default(),
+            in_flight,
         )
         .unwrap();
-        let tonemap = Tonemap::new(&device, &bindless, swapchain.format()).unwrap();
+        // The device class's measured defaults (ADR 0072), unless the command line says.
+        let defaults = RenderDefaults::for_device(&device);
+        let antialiasing = match option("--aa") {
+            Some("off") => Antialiasing::Off,
+            Some("taau") => Antialiasing::TAAU,
+            Some("fsr") => Antialiasing::FSR,
+            _ => defaults.antialiasing,
+        };
+        let quality = match option("--quality") {
+            Some("native") => Quality::Native,
+            Some("quality") => Quality::Quality,
+            Some("balanced") => Quality::Balanced,
+            Some("performance") => Quality::Performance,
+            _ => defaults.quality,
+        };
         let mut geometry = GeometryPool::new(
             &device,
             &mut allocator,
@@ -196,6 +220,14 @@ mod windowed {
                 Vec3::new(0.0, -0.1, 0.0),
             ),
         });
+        // The player's camera: an entity, moved every rendered frame.
+        let camera = world.spawn((
+            Transform::IDENTITY,
+            Camera::perspective(60f32.to_radians(), 0.1, 400.0)
+                .with_antialiasing(antialiasing, quality),
+        ));
+        let mut cameras = CameraView::new(&mut world, defaults.view_settings());
+        let mut view = View::new(&device, entities as u32 + 16);
         let mut runtime = Runtime::<InstanceId>::new(world, 64.0);
         let mut spins = QueryState::<(&mut Transform, &Spin)>::new(&mut runtime.world);
 
@@ -205,7 +237,7 @@ mod windowed {
             ambient: Vec3::splat(0.08),
         };
         let mut input = Input::default();
-        let mut yaw = 0.0f32;
+        let mut composer = Vec::new();
         let mut last = Instant::now();
         let start = last;
         let (mut stages, mut latency, mut upload, mut record, mut frame_times) =
@@ -279,23 +311,40 @@ mod windowed {
                         t.rotation *= Quat::from_rotation_y(spin.0 * dt);
                     });
                 },
-                |_, input, _alpha| {
+                |world, input, _alpha| {
                     // The camera follows the newest input every frame, not every tick.
-                    yaw = (input.cursor_x / 1600.0 - 0.5) * core::f32::consts::TAU;
+                    let yaw = (input.cursor_x / 1600.0 - 0.5) * core::f32::consts::TAU;
+                    let eye = Vec3::new(yaw.sin() * 40.0, 22.0, yaw.cos() * 40.0);
+                    if let Some(t) = world.get_mut::<Transform>(camera) {
+                        *t = Transform::from_translation(eye).with_rotation(look_rotation(
+                            eye,
+                            Vec3::ZERO,
+                            Vec3::Y,
+                        ));
+                    }
                 },
             );
             stages.push(s);
 
             // 4. Render.
             let extent = swapchain.extent();
-            let eye = Vec3::new(yaw.sin() * 40.0, 22.0, yaw.cos() * 40.0);
-            let clip_from_world = perspective(
-                60f32.to_radians(),
-                extent.width as f32 / extent.height.max(1) as f32,
-                0.1,
-                400.0,
-            ) * look_at(eye, Vec3::ZERO, Vec3::Y);
             let rec = Instant::now();
+            let main = cameras.resolve(&runtime.world).unwrap();
+            frame_renderer
+                .prepare(
+                    &mut view,
+                    &main.settings,
+                    (extent.width, extent.height),
+                    PrepareContext {
+                        device: &device,
+                        allocator: &mut allocator,
+                        bindless: &bindless,
+                        materials: &mut materials,
+                        frame_number: frame.number,
+                    },
+                )
+                .unwrap();
+            let mut composed = rec.elapsed().as_secs_f64() * 1e6;
             {
                 let mut fg = graph.begin(&frame);
                 ring.begin(&frame);
@@ -335,41 +384,41 @@ mod windowed {
                         storage_index: None,
                     },
                 );
-                let depth = fg.create_texture(
-                    "depth",
-                    TextureDesc::new_2d(depth_format, extent.width, extent.height),
-                );
-                let hdr = fg.create_texture(
-                    "hdr",
-                    TextureDesc::new_2d(HDR_FORMAT, extent.width, extent.height),
-                );
                 // The camera is written for the GPU here: input → here is the latency.
                 if let Some(at) = input.at.filter(|_| fresh) {
                     latency.push(at.elapsed().as_secs_f64() * 1e6);
                 }
-                renderer.add_scene_passes(
-                    &mut fg,
-                    &mut ring,
-                    &bindless,
-                    &geo,
-                    &mats,
-                    &scene_frame,
-                    &ForwardView {
-                        camera: Camera {
-                            clip_from_world,
-                            position: eye,
+                let t = Instant::now();
+                frame_renderer
+                    .add_view(
+                        &mut fg,
+                        &mut FrameContext {
+                            device: &device,
+                            allocator: &mut allocator,
+                            bindless: &bindless,
+                            ring: &mut ring,
+                            frame_number: frame.number,
+                            dt: elapsed as f32,
                         },
-                        light,
-                        color: hdr,
-                        depth,
-                        clear: Some([0.02, 0.02, 0.05, 1.0]),
-                        occlusion: None,
-                        temporal: None,
-                        lights: &[],
-                        environment: None,
-                    },
-                );
-                tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);
+                        &mut view,
+                        &SceneInput {
+                            geometry: &geo,
+                            materials: &mats,
+                            draws: SceneDraws::Scene(&scene_frame),
+                            skinning: None,
+                            light,
+                            lights: &[],
+                            environment: None,
+                        },
+                        &main.camera,
+                        ViewTarget {
+                            texture: backbuffer,
+                            rect: None,
+                            load: LoadOp::DontCare,
+                        },
+                    )
+                    .unwrap();
+                composed += t.elapsed().as_secs_f64() * 1e6;
                 fg.execute_with_bindless(&mut allocator, Some(&bindless))
                     .unwrap();
             }
@@ -383,6 +432,7 @@ mod windowed {
                 .unwrap();
             let _ = swapchain.present(device.graphics, acquired.index);
             record.push(rec.elapsed().as_secs_f64() * 1e6);
+            composer.push(composed);
             frame_times.push(frame_start.elapsed().as_secs_f64() * 1e6);
             drawn += 1;
         }
@@ -420,6 +470,11 @@ mod windowed {
         println!("| per-frame camera | {:.1} |", column(|s| s.present_us));
         println!("| interpolation | {:.1} |", column(|s| s.interpolate_us));
         println!("| scene upload (CPU) | {:.1} |", median(&mut upload));
+        println!(
+            "| frame renderer: prepare + add_view (CPU, {}) | {:.1} |",
+            antialiasing.name(),
+            median(&mut composer)
+        );
         println!("| record + submit + present | {:.1} |", median(&mut record));
         println!("| whole frame | {:.1} |", median(&mut frame_times));
         println!(
@@ -430,6 +485,7 @@ mod windowed {
 
         // SAFETY: the device is idle.
         unsafe {
+            view.destroy(&mut allocator, &bindless);
             scene.destroy(&mut allocator);
             graph.destroy(&mut allocator, Some(&bindless));
             ring.destroy(&mut allocator);
@@ -438,8 +494,7 @@ mod windowed {
             textures.destroy(&mut allocator, &bindless);
         }
         drop(frames);
-        drop(renderer);
-        drop(tonemap);
+        drop(frame_renderer);
         drop(bindless);
         drop(allocator);
         drop(swapchain);

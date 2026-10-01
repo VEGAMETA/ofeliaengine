@@ -55,6 +55,8 @@ pub(crate) struct DispatchDesc {
     pub(crate) camera_far: f32,
     pub(crate) camera_fov_y: f32,
     pub(crate) meters_per_unit: f32,
+    /// Null image: FSR's automatic exposure.
+    pub(crate) exposure: Image,
 }
 
 /// `EngineFsr`: opaque.
@@ -93,7 +95,7 @@ mod tests {
 
     #[test]
     fn layout_matches_the_shim() {
-        let mut shim = [0u32; 9];
+        let mut shim = [0u32; 10];
         // SAFETY: writes at most `shim.len()` values.
         unsafe { engine_fsr_layout(shim.as_mut_ptr(), shim.len() as u32) };
         let ours = [
@@ -106,6 +108,7 @@ mod tests {
             offset_of!(DispatchDesc, output),
             offset_of!(DispatchDesc, jitter),
             offset_of!(DispatchDesc, meters_per_unit),
+            offset_of!(DispatchDesc, exposure),
         ]
         .map(|v| v as u32);
         assert_eq!(ours, shim);

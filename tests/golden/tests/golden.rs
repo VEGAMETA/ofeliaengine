@@ -9,6 +9,7 @@
 #![allow(clippy::print_stdout)]
 
 use engine_core::math::Vec3;
+use engine_frame::{Antialiasing, Quality};
 use engine_golden::golden::{Outcome, Tolerance, compare};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights,
@@ -41,6 +42,15 @@ fn check(shot: &Shot) {
                 path.display()
             );
             println!("{}: skipped, {} missing", shot.name, path.display());
+            return;
+        }
+        Err(Skip::NoDlss(e)) => {
+            assert!(
+                !std::env::var("ENGINE_REQUIRE_DLSS").is_ok_and(|v| v == "1"),
+                "{}: ENGINE_REQUIRE_DLSS=1 but DLSS is unavailable: {e}",
+                shot.name
+            );
+            println!("{}: skipped, no DLSS ({e})", shot.name);
             return;
         }
     };
@@ -219,6 +229,9 @@ fn async_compute_renders_the_same_bytes_as_one_queue() {
         (Err(Skip::NoScene(path)), _) | (_, Err(Skip::NoScene(path))) => {
             panic!("procedural scene needs no files: {}", path.display())
         }
+        (Err(Skip::NoDlss(e)), _) | (_, Err(Skip::NoDlss(e))) => {
+            panic!("the shot does not use DLSS: {e}")
+        }
     };
     println!(
         "{}: async compute {} vs {}",
@@ -268,6 +281,24 @@ fn animated_fox() {
         target: Some(Vec3::new(0.0, 40.0, -5.0)),
         animation: Some((1, 0.4)),
         ..Shot::new("animated_fox", Source::Gltf(PathBuf::from("Fox/Fox.gltf")))
+    });
+}
+
+/// The fox walking under TAA (ADR 0068, ADR 0072): its clip plays at 60 frames per second
+/// while 32 frames accumulate; the skinned motion pass gives the legs and tail their own
+/// motion vectors, so they stay sharp instead of smearing.
+#[test]
+fn animated_fox_with_taa() {
+    check(&Shot {
+        eye: Some(Vec3::new(105.0, 60.0, 30.0)),
+        target: Some(Vec3::new(0.0, 40.0, -5.0)),
+        animation: Some((1, 0.4)),
+        animation_rate: 1.0 / 60.0,
+        antialiasing: Antialiasing::TAAU,
+        ..Shot::new(
+            "animated_fox_taa",
+            Source::Gltf(PathBuf::from("Fox/Fox.gltf")),
+        )
     });
 }
 
@@ -322,4 +353,145 @@ fn procedural_scene_with_height_fog() {
         }),
         ..atmosphere_shot("procedural_fog", 20.0)
     });
+}
+
+/// Sponza through a temporal antialiaser (ADR 0072): `temporal_frames` frames accumulated
+/// from a fresh history with the camera still, the last one captured.
+fn sponza_antialiased(name: &'static str, antialiasing: Antialiasing, quality: Quality) -> Shot {
+    Shot {
+        antialiasing,
+        quality,
+        ..Shot::new(name, Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
+    }
+}
+
+/// TAA at the output size: the plants' alpha-tested edges, the columns' silhouettes and
+/// the shadow edges resolved over 32 jittered frames.
+#[test]
+fn sponza_with_taa() {
+    check(&sponza_antialiased(
+        "sponza_taa",
+        Antialiasing::TAAU,
+        Quality::Native,
+    ));
+}
+
+/// TAAU from 67 % of the output size per axis (Quality: 1.5×), with the texture LOD bias
+/// the upscaler asks for.
+#[test]
+fn sponza_with_taau_at_67_percent() {
+    check(&sponza_antialiased(
+        "sponza_taau_67",
+        Antialiasing::TAAU,
+        Quality::Quality,
+    ));
+}
+
+/// FSR 3.1 Quality (1.5×).
+#[test]
+fn sponza_with_fsr_quality() {
+    check(&sponza_antialiased(
+        "sponza_fsr_quality",
+        Antialiasing::FSR,
+        Quality::Quality,
+    ));
+}
+
+/// DLSS Quality, where the Streamline DLLs are (`ENGINE_STREAMLINE_DIR`) and the GPU
+/// runs it; skipped elsewhere.
+#[test]
+fn sponza_with_dlss_quality() {
+    check(&sponza_antialiased(
+        "sponza_dlss_quality",
+        Antialiasing::DLSS,
+        Quality::Quality,
+    ));
+}
+
+/// TAAU at 67 % with the camera strafing slowly (1 cm per frame, 31 cm over the
+/// accumulation): ghosting and smearing behind the columns and the plants show here.
+#[test]
+fn sponza_with_taau_and_a_moving_camera() {
+    check(&Shot {
+        camera_motion: Vec3::new(0.0, 0.0, 0.01),
+        ..sponza_antialiased("sponza_taau_moving", Antialiasing::TAAU, Quality::Quality)
+    });
+}
+
+/// A temporal shot renders the same bytes every time (the history and the jitter start
+/// fresh once the scene is resident), so its golden image can be exact.
+#[test]
+fn temporal_shots_are_deterministic() {
+    let options = RenderOptions {
+        validation: false,
+        timed_frames: 0,
+    };
+    let shot = Shot {
+        antialiasing: Antialiasing::TAAU,
+        quality: Quality::Quality,
+        camera_motion: Vec3::new(0.01, 0.0, 0.0),
+        temporal_frames: 12,
+        ..procedural("procedural_taau")
+    };
+    let (one, two) = match (render(&shot, options), render(&shot, options)) {
+        (Ok(one), Ok(two)) => (one, two),
+        (Err(Skip::NoGpu(e)), _) | (_, Err(Skip::NoGpu(e))) => {
+            println!("skipped, no GPU ({e})");
+            return;
+        }
+        (Err(e), _) | (_, Err(e)) => panic!("{e:?}"),
+    };
+    assert_eq!(one.antialiasing, Antialiasing::TAAU);
+    let differing = one
+        .rgba8
+        .chunks(4)
+        .zip(two.rgba8.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    println!("{}: {differing} pixels differ", one.adapter);
+    assert_eq!(differing, 0, "two renders of a temporal shot differ");
+}
+
+/// The game runtime's path (ECS entities extracted into a GPU scene, a `Camera` entity
+/// resolved every frame by a `CameraView`; ADR 0064, ADR 0072) renders the same bytes as
+/// the test bed's draw list with the same camera, without and with TAA.
+#[test]
+fn the_runtime_renders_what_the_test_bed_renders() {
+    let options = RenderOptions {
+        validation: true,
+        timed_frames: 0,
+    };
+    for antialiasing in [Antialiasing::Off, Antialiasing::TAAU] {
+        let reference = Shot {
+            rigid_camera: true,
+            antialiasing,
+            temporal_frames: 8,
+            camera_motion: Vec3::new(0.02, 0.0, 0.0),
+            ..procedural("procedural_runtime")
+        };
+        let runtime = Shot {
+            runtime: true,
+            ..reference.clone()
+        };
+        let (one, two) = match (render(&reference, options), render(&runtime, options)) {
+            (Ok(one), Ok(two)) => (one, two),
+            (Err(Skip::NoGpu(e)), _) | (_, Err(Skip::NoGpu(e))) => {
+                println!("skipped, no GPU ({e})");
+                return;
+            }
+            (Err(e), _) | (_, Err(e)) => panic!("{e:?}"),
+        };
+        let differing = one
+            .rgba8
+            .chunks(4)
+            .zip(two.rgba8.chunks(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        println!(
+            "{}: antialiasing {}: {differing} pixels differ",
+            one.adapter,
+            antialiasing.name()
+        );
+        assert_eq!(differing, 0, "the runtime path drew another picture");
+    }
 }

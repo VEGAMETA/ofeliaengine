@@ -185,6 +185,8 @@ struct EngineFsrDispatchDesc {
     float cameraFar;
     float cameraFovY;
     float metersPerUnit;
+    /// Null image: the context's automatic exposure.
+    EngineFsrImage exposure;
 };
 
 /// The images FSR 3.1 shares with other effects (frame generation); their owner creates
@@ -309,6 +311,7 @@ int32_t engine_fsr_dispatch(EngineFsr* fsr, const EngineFsrDispatchDesc* desc)
     d.depth = resource(desc->depth, FFX_RESOURCE_USAGE_DEPTHTARGET, FFX_RESOURCE_STATE_COMPUTE_READ, L"engine depth");
     d.motionVectors = resource(desc->motionVectors, FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ, L"engine motion vectors");
     d.reactive = resource(desc->reactive, FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ, L"engine reactive mask");
+    d.exposure = resource(desc->exposure, FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ, L"engine exposure");
     d.output = resource(desc->output, FFX_RESOURCE_USAGE_UAV, FFX_RESOURCE_STATE_UNORDERED_ACCESS, L"engine upscaled");
     d.dilatedDepth = fsr->backend.fpGetResource(&fsr->backend, fsr->shared[0]);
     d.dilatedMotionVectors = fsr->backend.fpGetResource(&fsr->backend, fsr->shared[1]);
@@ -376,6 +379,7 @@ void engine_fsr_layout(uint32_t* out, uint32_t count)
         offsetof(EngineFsrDispatchDesc, output),
         offsetof(EngineFsrDispatchDesc, jitter),
         offsetof(EngineFsrDispatchDesc, metersPerUnit),
+        offsetof(EngineFsrDispatchDesc, exposure),
     };
     for (uint32_t i = 0; i < count && i < sizeof(values) / sizeof(values[0]); ++i)
         out[i] = values[i];

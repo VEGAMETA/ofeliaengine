@@ -52,16 +52,46 @@ sponza_atmosphere	forward	12260.6
 sponza_atmosphere	shadow	2286.2
 sponza_atmosphere	shadow cull	65.1
 sponza_atmosphere	tonemap	754.6
-sponza_local_shadows	(frame total)	37681.6
-sponza_local_shadows	(gpu frame)	37704.3
-sponza_local_shadows	bloom downsample	644.6
-sponza_local_shadows	bloom upsample	479.4
-sponza_local_shadows	cull	4.6
-sponza_local_shadows	cull setup	1.7
-sponza_local_shadows	forward	33411.5
-sponza_local_shadows	light tiles	24.1
-sponza_local_shadows	light tiles clear	1.4
-sponza_local_shadows	shadow	2296.4
-sponza_local_shadows	shadow cull	5.3
-sponza_local_shadows	sky	46.2
-sponza_local_shadows	tonemap	759.8
+sponza_fsr_quality	(frame total)	25373.2
+sponza_fsr_quality	(gpu frame)	25744.6
+sponza_fsr_quality	bloom downsample	687.3
+sponza_fsr_quality	bloom upsample	490.1
+sponza_fsr_quality	cull	12.0
+sponza_fsr_quality	cull setup	6.9
+sponza_fsr_quality	exposure value	1.2
+sponza_fsr_quality	forward	8043.2
+sponza_fsr_quality	fsr	12534.0
+sponza_fsr_quality	motion background	13.7
+sponza_fsr_quality	remember instances	13.0
+sponza_fsr_quality	shadow	2706.6
+sponza_fsr_quality	shadow cull	14.4
+sponza_fsr_quality	sky	27.6
+sponza_fsr_quality	tonemap	765.7
+sponza_taa	(frame total)	23353.7
+sponza_taa	(gpu frame)	23717.6
+sponza_taa	bloom downsample	680.2
+sponza_taa	bloom upsample	485.4
+sponza_taa	cull	5.2
+sponza_taa	cull setup	2.4
+sponza_taa	forward	14919.7
+sponza_taa	motion background	33.2
+sponza_taa	remember instances	32.4
+sponza_taa	shadow	2497.9
+sponza_taa	shadow cull	6.1
+sponza_taa	sky	44.9
+sponza_taa	taau	3844.9
+sponza_taa	tonemap	770.3
+sponza_taau_67	(frame total)	16778.8
+sponza_taau_67	(gpu frame)	16970.1
+sponza_taau_67	bloom downsample	675.7
+sponza_taau_67	bloom upsample	483.9
+sponza_taau_67	cull	17.4
+sponza_taau_67	cull setup	12.0
+sponza_taau_67	forward	8033.8
+sponza_taau_67	motion background	13.6
+sponza_taau_67	remember instances	12.8
+sponza_taau_67	shadow	2814.4
+sponza_taau_67	shadow cull	19.7
+sponza_taau_67	sky	27.6
+sponza_taau_67	taau	3858.1
+sponza_taau_67	tonemap	790.9

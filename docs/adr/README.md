@@ -79,6 +79,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0069](0069-sky-atmosphere-and-fog.md) | Physically based sky and atmosphere (Hillaire 2020): tables in compute passes, the sun's color and the image-based light from them, aerial perspective and exponential height fog in one full-screen pass | Accepted |
 | [0070](0070-network-transport.md) | Network transport: own sans-I/O UDP endpoint with netcode-style connect tokens, AES-256-GCM through CNG, reliable-stream and unreliable channels with delivery notification, no I/O thread; NAT traversal UPnP → PCP/NAT-PMP → STUN hole punching → relay | Accepted |
 | [0071](0071-local-light-and-contact-shadows.md) | Shadows of point and spot lights in a cached atlas (screen-size resolution, redrawn on change within a budget, GPU-driven per view, separate shading entry points) and Bend Studio's screen-space contact shadows of the sun | Accepted |
+| [0072](0072-frame-renderer.md) | The frame renderer: one object composes a view's frame (scene passes, temporal antialiasing or upscaling, bloom, exposure, tone mapping), per-view state, the engine's exposure for FSR and DLSS, camera entities, measured defaults per device class | Accepted |
 
 ## Template
 

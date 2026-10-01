@@ -112,6 +112,7 @@ pub(crate) const BUFFER_DEPTH: u32 = 0;
 pub(crate) const BUFFER_MOTION_VECTORS: u32 = 1;
 pub(crate) const BUFFER_SCALING_INPUT_COLOR: u32 = 3;
 pub(crate) const BUFFER_SCALING_OUTPUT_COLOR: u32 = 4;
+pub(crate) const BUFFER_EXPOSURE: u32 = 13;
 pub(crate) const BUFFER_TRANSPARENCY_HINT: u32 = 27;
 pub(crate) const BUFFER_BIAS_CURRENT_COLOR_HINT: u32 = 29;
 
