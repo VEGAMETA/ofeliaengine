@@ -6,6 +6,9 @@
 
 > **Update 2026-09-26 (ADR 0028):** our own 3D solver (P2) is deferred; Jolt stays the
 > physics engine. The consequences below that mention P2 apply only if it is reopened.
+>
+> **Update 2026-10-01 ([ADR 0066](0066-physics-queries-characters-rollback.md)):** shape
+> casts, the character controller and save/restore (follow-ups below) are done.
 
 ## Context
 

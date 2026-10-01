@@ -212,7 +212,7 @@ fn characters() {
 fn rollback() {
     println!("\n### Save and restore (one thread)\n");
     println!(
-        "Pile scenes: \"falling\" after 30 steps (most bodies awake and in contact), \"settled\" after 600.\n"
+        "Pile scenes after 30 steps (\"falling\": in the air, few contacts), 120 (\"landed\": awake, in contact) and 600 (\"settled\": mostly asleep, contacts kept).\n"
     );
     println!(
         "| bodies | state | snapshot KiB | save µs | restore µs | save + restore ns per body | Jolt allocations per save / restore |"
@@ -221,7 +221,7 @@ fn rollback() {
     for bodies in [1_000u32, 10_000] {
         let mut w = JoltBackend::new(&PhysicsSettings::default()).unwrap();
         scenes::pile(&mut w, bodies).unwrap();
-        for (state, steps) in [("falling", 30u32), ("settled", 570)] {
+        for (state, steps) in [("falling", 30u32), ("landed", 90), ("settled", 480)] {
             for _ in 0..steps {
                 w.step(DT, 1).unwrap();
             }
