@@ -149,6 +149,8 @@ Constants and formulas taken into our own code (no files copied).
 | AgX inset/outset matrices for Rec.2020 and the polynomial sigmoid's coefficients | `engine_render/src/post.rs` (`AGX_IN`, `AGX_OUT`, `agx_sigmoid`), `engine_render/shaders/tonemap.slang` | Filament `filament/src/ToneMapper.cpp` (matrices from Blender's AgX via EaryChow/AgX_LUT_Gen, no license, accepted by the team, ADR 0048; sigmoid adapted from B. Wrensch's minimal AgX) | Apache-2.0 (Filament) |
 | The Streamline ABI: structure layouts, GUIDs, enumeration values and function signatures of `sl.h`, `sl_consts.h`, `sl_core_api.h`, `sl_core_types.h`, `sl_dlss.h`, `sl_helpers_vk.h`, `sl_result.h`, `sl_struct.h`, `sl_version.h` (v2.14.1), declared in Rust | `engine_dlss/src/sl.rs` | NVIDIA Streamline, github.com/NVIDIAGameWorks/Streamline | MIT (Copyright (c) 2022-2023 NVIDIA CORPORATION, below) |
 | GTAO as structured by XeGTAO: the depth MIP filter, the main pass's slice and horizon math, the constants (radius × 1.457, falloff 0.615, MIP offset 3.3, the 0.03 floor, ÷ 1.5 before the blur), R2 + Hilbert noise, the edges and their 2-bit packing, the denoise weights | `engine_render/src/ao.rs`, `engine_render/shaders/ao.slang` | Intel XeGTAO, `XeGTAO.h`, `XeGTAO.hlsli` (after Jimenez et al., SIGGRAPH 2016) | MIT (Copyright (C) 2016-2021, Intel Corporation) |
+| Sky and atmosphere after Hillaire 2020: the transmittance, multiple scattering, sky-view and aerial perspective tables' parameterizations and sizes, the ray march with per-step analytic integration, the multiple scattering approximation (64 directions, L₂ / (1 − f_ms)), the Cornette-Shanks phase function, Earth's parameters | `engine_render/src/atmosphere.rs`, `engine_render/shaders/atmosphere.slang`, `atmosphere_common.slang`, `engine_render/tests/atmosphere.rs` | Sébastien Hillaire, `sebh/UnrealEngineSkyAtmosphere` (`RenderSkyCommon.hlsl`, `RenderSkyRayMarching.hlsl`, `SkyAtmosphereCommon.cpp`), commit 183ead5bdacc | MIT (Copyright (c) 2020 Epic Games, Inc., below) |
+| The transmittance table's parameterization and the atmosphere's parameters, which that reference takes from Bruneton's implementation | same | Eric Bruneton, `ebruneton/precomputed_atmospheric_scattering`, commit 34f14e745cff | BSD-3-Clause (Copyright (c) 2017 Eric Bruneton, below) |
 | LDR-FLIP: its constants, separable spatial and feature filters, colour transforms and error remapping, ported to Rust | `tests/golden/src/flip.rs` (test-only crate `engine_golden`) | NVIDIA `NVlabs/flip`, `src/cpp/FLIP.h` (Andersson et al., HPG 2020) | BSD-3-Clause (Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES) |
 
 ### MIT license (Baking Lab)
@@ -217,6 +219,64 @@ PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS 
 FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
 OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
+```
+
+### MIT license (UnrealEngineSkyAtmosphere)
+
+```
+MIT License
+
+Copyright (c) 2020 Epic Games, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+### BSD 3-Clause license (precomputed_atmospheric_scattering)
+
+```
+Copyright (c) 2017 Eric Bruneton
+All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its contributors
+may be used to endorse or promote products derived from this software without
+specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### BSD 3-Clause license (FLIP)

@@ -42,6 +42,33 @@ Set-Location $root
 $logs = Join-Path $root 'target\check-logs'
 New-Item -ItemType Directory -Force $logs | Out-Null
 
+# Steps that use the GPUs: built first, then run holding a lock shared by every check on the
+# machine, so parallel checks (several agents, ADR 0062) neither share the GPUs while one
+# measures nor compile while one runs. The Radeon is an APU: a compilation next to it lowers
+# its clocks by 3-8 %, so the perf step also waits (up to $quietLimit s) for the CPU to calm.
+$prebuild = @{}
+$gpuLockName = 'Local\ofeliaengine-gpu-steps'
+$quietLimit = 600
+function Wait-QuietCpu([string]$log) {
+    $watch = [Diagnostics.Stopwatch]::StartNew()
+    $calm = 0
+    while ($true) {
+        $load = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
+        # Three calm samples in a row: a compilation pausing between crates is not quiet.
+        if ($load -lt 20) { $calm++ } else { $calm = 0 }
+        if ($calm -ge 3) {
+            if ($watch.Elapsed.TotalSeconds -ge 1) { "CPU quiet ($load %) after $([int]$watch.Elapsed.TotalSeconds) s" | Out-File -Append -Encoding utf8 $log }
+            return
+        }
+        if ($watch.Elapsed.TotalSeconds -ge $quietLimit) {
+            "CPU still busy ($load %) after $quietLimit s: measuring anyway, expect a uniform shift" | Out-File -Append -Encoding utf8 $log
+            Write-Output "        CPU busy ($load %): perf numbers may show a uniform shift"
+            return
+        }
+        Start-Sleep -Seconds $(if ($calm) { 1 } else { 5 })
+    }
+}
+
 $steps = [ordered]@{
     rustfmt = @('fmt --all --check')
     clippy  = @('clippy --workspace --all-targets --locked -- -D warnings')
@@ -53,12 +80,14 @@ if ($Gpu) {
     # `radeon:` runs the command with ENGINE_ADAPTER=radeon (the AMD iGPU of ref-1).
     $gpuTests = 'test --locked -p engine_rhi -p engine_render -p engine_render2d -p engine_text -p engine_upscale -p engine_fsr -p engine_dlss -p engine_golden -- --test-threads=1'
     $steps['gpu'] = @($gpuTests, "radeon:$gpuTests")
+    $prebuild['gpu'] = $gpuTests -replace ' -- ', ' --no-run -- '
     $steps['slang'] = @('test --locked -p engine_shader -- --test-threads=1')
 }
 if ($Perf) {
     # Release, overlays off; regressions are reported (below), not fatal (ADR 0062).
     $perfGate = 'run --release --locked -p engine_golden --bin perf_gate'
     $steps['perf'] = @($perfGate, "radeon:$perfGate")
+    $prebuild['perf'] = 'build --release --locked -p engine_golden --bin perf_gate'
 }
 if ($Deny) { $steps['deny'] = @('deny --locked check') }
 # `--cfg loom` in its own target dir, or it would invalidate the normal build.
@@ -125,7 +154,21 @@ foreach ($name in $steps.Keys) {
     Remove-Item $log -ErrorAction SilentlyContinue
     $watch = [Diagnostics.Stopwatch]::StartNew()
     $ok = $true
-    foreach ($command in $steps[$name]) {
+    $lock = $null
+    if ($prebuild.ContainsKey($name)) {
+        cmd /c "cargo $($prebuild[$name]) >> `"$log`" 2>&1"
+        if ($LASTEXITCODE -ne 0) { $ok = $false }
+        else {
+            $lock = New-Object System.Threading.Mutex($false, $gpuLockName)
+            $waited = [Diagnostics.Stopwatch]::StartNew()
+            # A check that died holding the lock abandons it: the wait then succeeds.
+            try { $null = $lock.WaitOne() } catch [System.Threading.AbandonedMutexException] {}
+            if ($waited.Elapsed.TotalSeconds -ge 1) {
+                "waited $([int]$waited.Elapsed.TotalSeconds) s for another check's GPU steps" | Out-File -Append -Encoding utf8 $log
+            }
+        }
+    }
+    foreach ($command in $(if ($ok) { $steps[$name] } else { @() })) {
         # Steps set these for their commands; the caller's values come back afterwards.
         $saved = @{}
         foreach ($var in $stepVars) { $saved[$var] = [Environment]::GetEnvironmentVariable($var) }
@@ -140,6 +183,7 @@ foreach ($name in $steps.Keys) {
             $env:ENGINE_REQUIRE_GOLDEN = '1'
         }
         if ($name -eq 'perf') {
+            Wait-QuietCpu $log
             $env:ENGINE_REQUIRE_GPU = '1'
             $env:VK_LOADER_LAYERS_DISABLE = '~implicit~'
         }
@@ -157,6 +201,7 @@ foreach ($name in $steps.Keys) {
         foreach ($var in $stepVars) { [Environment]::SetEnvironmentVariable($var, $saved[$var]) }
         if ($code -ne 0) { $ok = $false; break }
     }
+    if ($lock) { $lock.ReleaseMutex(); $lock.Dispose() }
     $time = '{0,6:N1} s' -f $watch.Elapsed.TotalSeconds
     if ($ok) {
         Write-Output "ok      $time  $name"

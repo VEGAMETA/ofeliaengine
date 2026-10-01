@@ -11,6 +11,8 @@
 //!   bytes per frame (ADR 0040).
 //! - [`forward`]: forward PBR with a directional light and a shadow map (ADR 0014), drawn
 //!   GPU-driven: GPU frustum culling and indirect instanced draws (ADR 0034).
+//! - [`atmosphere`]: a physically based sky and atmosphere, aerial perspective and
+//!   exponential height fog (ADR 0069).
 //! - [`subsurface`]: screen-space subsurface scattering: diffusion profiles, transmission
 //!   and the scatter pass (ADR 0059).
 //! - [`gpu_scene`]: the persistent GPU scene: instances in stable slots in device
@@ -24,6 +26,7 @@
 //!   placement; nesting, split screen, pixel-perfect scaling (ADR 0016).
 
 pub mod ao;
+pub mod atmosphere;
 pub mod compute;
 pub mod cull;
 pub mod environment;
