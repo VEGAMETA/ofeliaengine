@@ -60,6 +60,9 @@ use crate::hiz::{self, DepthPyramid, PyramidLayout};
 use crate::lights::{
     LightData, LightLayout, ViewAxis, Z_BINS, cull_lights, write_bins, write_lights, write_rects,
 };
+use crate::local_shadows::{
+    ChangeSource, Continuity, NO_SHADOW, Plan, ShadowCache, ShadowViewData,
+};
 use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::shadow::{self, CascadeFit, MAX_CASCADES};
@@ -94,8 +97,37 @@ const FRAGMENT_SUBSURFACE: &[u8] = include_bytes!("../shaders/forward.fragmentSu
 const FRAGMENT_SUBSURFACE_MOTION: &[u8] =
     include_bytes!("../shaders/forward.fragmentSubsurfaceMotion.spv");
 const SCATTER_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.scatterFragment.spv");
+// Local lights' shadows (ADR 0071): culling and drawing the views, and the shading that
+// looks them up.
+const CULL_SHADOW_VIEWS: &[u8] = include_bytes!("../shaders/forward.cullShadowViews.spv");
+const LOCAL_SHADOW_VERTEX: &[u8] = include_bytes!("../shaders/forward.localShadowVertex.spv");
+const LOCAL_SHADOW_VERTEX_MASKED: &[u8] =
+    include_bytes!("../shaders/forward.localShadowVertexMasked.spv");
+const FRAGMENT_SHADOWED: &[u8] = include_bytes!("../shaders/forward.fragmentMainShadowed.spv");
+const FRAGMENT_MASKED_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMaskedShadowed.spv");
+const FRAGMENT_MOTION_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMainMotionShadowed.spv");
+const FRAGMENT_MASKED_MOTION_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMaskedMotionShadowed.spv");
+const FRAGMENT_BLENDED_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentBlendedShadowed.spv");
+const FRAGMENT_BLENDED_REACTIVE_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentBlendedReactiveShadowed.spv");
+const FRAGMENT_BLENDED_ATMOSPHERE_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentBlendedAtmosphereShadowed.spv");
+const FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentBlendedAtmosphereReactiveShadowed.spv");
+const FRAGMENT_AO_SHADOWED: &[u8] = include_bytes!("../shaders/forward.fragmentMainAoShadowed.spv");
+const FRAGMENT_MOTION_AO_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentMainMotionAoShadowed.spv");
+const FRAGMENT_SUBSURFACE_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentSubsurfaceShadowed.spv");
+const FRAGMENT_SUBSURFACE_MOTION_SHADOWED: &[u8] =
+    include_bytes!("../shaders/forward.fragmentSubsurfaceMotionShadowed.spv");
 
 pub use crate::lights::{LocalLight, Spot};
+pub use crate::local_shadows::{LocalShadowSettings, LocalShadowStats};
 pub use crate::shadow::ShadowSettings;
 
 /// Format of the motion vector target (ADR 0043).
@@ -511,7 +543,7 @@ struct CascadeData {
     bounds: [f32; 4],
 }
 
-/// `Frame` in `forward.slang` (1024 bytes).
+/// `Frame` in `forward.slang` (1056 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -574,7 +606,17 @@ struct FrameData {
     subsurface: u64,
     /// The atmosphere's and fog's constants (ADR 0069), for the transparent surfaces.
     atmosphere: u64,
-    _pad5: [u32; 2],
+    /// Local lights' shadows (ADR 0071): the atlas's bindless index, ...
+    local_shadow_atlas: u32,
+    /// ... the sun's contact shadows' (or [`NO_AO`]: none), ...
+    contact_shadows: u32,
+    /// ... per sorted light its first view (or `NO_SHADOW`), the views, the drawn views
+    /// and their count, and one texel of the atlas in uv.
+    light_shadows: u64,
+    shadow_views: u64,
+    shadow_draws: u64,
+    shadow_draw_count: u32,
+    shadow_texel: f32,
 }
 
 /// `Instance` in `forward.slang` (64 bytes): the rows of the affine
@@ -633,7 +675,7 @@ struct Push {
 const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1024);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1056);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
 const _: () = assert!(crate::mesh::MAX_LODS == 4);
@@ -675,10 +717,17 @@ pub struct ForwardPasses {
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
-/// (`0..phases`) have their own regions, and each cascade's shadow list (`phases + k`) has
-/// region `k` (the shadow lists are culled apart from the forward ones).
-fn list_offset(list: u32, phases: u32) -> u32 {
-    if list < phases { list } else { list - phases }
+/// (`0..phases`) have their own regions, each cascade's shadow list (`phases + k`) has
+/// region `k`, and each local light shadow view's (`phases + cascades + j`) region `j`
+/// (each group of lists is culled into its own buffer).
+fn list_offset(list: u32, phases: u32, cascades: u32) -> u32 {
+    if list < phases {
+        list
+    } else if list < phases + cascades {
+        list - phases
+    } else {
+        list - phases - cascades
+    }
 }
 
 /// A batch while the draw list is turned into batches.
@@ -935,6 +984,417 @@ impl SubsurfacePipelines {
     }
 }
 
+/// Shading that looks up local lights' shadows (ADR 0071), per environment bit (the
+/// local-light variants of [`VARIANTS`]: `[1, 0]`, `[1, 1]`), created with the feature.
+#[derive(Debug)]
+struct ShadowedPipelines {
+    shading: [Shading; 2],
+    /// Transparent surfaces under an atmosphere or fog: without and with the reactive mask.
+    blended_atmosphere: [Pipeline; 2],
+    /// With ambient occlusion, per environment bit: without and with motion vectors.
+    ao: Option<[[Pipeline; 2]; 2]>,
+    /// Subsurface materials, per environment bit: without and with motion vectors.
+    subsurface: Option<[[Pipeline; 2]; 2]>,
+    /// The shadow views: opaque (depth only), masked.
+    depth: [Pipeline; 2],
+    cull: ComputeShader<Push>,
+}
+
+impl ShadowedPipelines {
+    fn new(
+        device: &Device,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        settings: &LocalShadowSettings,
+    ) -> Result<Self, RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let words = |bytes| spirv_words(bytes).ok_or_else(invalid);
+        let vertex = words(VERTEX)?;
+        let fragment = words(FRAGMENT_SHADOWED)?;
+        let fragment_masked = words(FRAGMENT_MASKED_SHADOWED)?;
+        let fragment_motion = words(FRAGMENT_MOTION_SHADOWED)?;
+        let fragment_masked_motion = words(FRAGMENT_MASKED_MOTION_SHADOWED)?;
+        let fragment_blended = words(FRAGMENT_BLENDED_SHADOWED)?;
+        let fragment_blended_reactive = words(FRAGMENT_BLENDED_REACTIVE_SHADOWED)?;
+        let fragment_blended_atmosphere = words(FRAGMENT_BLENDED_ATMOSPHERE_SHADOWED)?;
+        let fragment_blended_atmosphere_reactive =
+            words(FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE_SHADOWED)?;
+        let shadow_vertex = words(LOCAL_SHADOW_VERTEX)?;
+        let shadow_vertex_masked = words(LOCAL_SHADOW_VERTEX_MASKED)?;
+        let shadow_fragment_masked = words(SHADOW_FRAGMENT_MASKED)?;
+        let formats = [color_format];
+        let motion_formats = [color_format, MOTION_FORMAT];
+        let reactive_formats = [color_format, REACTIVE_FORMAT];
+        // As `ForwardRenderer::new`'s, for the local-light variants only.
+        let main = |fragment, entry, formats, equal: bool, variant: usize| GraphicsPipelineDesc {
+            depth_write: !equal,
+            depth_compare: if equal {
+                vk::CompareOp::EQUAL
+            } else {
+                vk::CompareOp::LESS
+            },
+            ..shading_desc(
+                &vertex,
+                fragment,
+                entry,
+                formats,
+                depth_format,
+                &VARIANTS[variant],
+            )
+        };
+        let blended = |fragment, entry, formats, variant: usize| GraphicsPipelineDesc {
+            depth_write: false,
+            depth_compare: vk::CompareOp::LESS,
+            blend: Blend::Premultiplied,
+            ..shading_desc(
+                &vertex,
+                fragment,
+                entry,
+                formats,
+                depth_format,
+                &VARIANTS[variant],
+            )
+        };
+        let mut descs = Vec::with_capacity(20);
+        for lit in [1, 3] {
+            descs.extend([
+                main(&fragment, c"fragmentMainShadowed", &formats[..], false, lit),
+                main(
+                    &fragment_masked,
+                    c"fragmentMaskedShadowed",
+                    &formats[..],
+                    false,
+                    lit,
+                ),
+                main(&fragment, c"fragmentMainShadowed", &formats[..], true, lit),
+                main(
+                    &fragment_motion,
+                    c"fragmentMainMotionShadowed",
+                    &motion_formats[..],
+                    false,
+                    lit,
+                ),
+                main(
+                    &fragment_masked_motion,
+                    c"fragmentMaskedMotionShadowed",
+                    &motion_formats[..],
+                    false,
+                    lit,
+                ),
+                main(
+                    &fragment_motion,
+                    c"fragmentMainMotionShadowed",
+                    &motion_formats[..],
+                    true,
+                    lit,
+                ),
+                blended(
+                    &fragment_blended,
+                    c"fragmentBlendedShadowed",
+                    &formats[..],
+                    lit,
+                ),
+                blended(
+                    &fragment_blended_reactive,
+                    c"fragmentBlendedReactiveShadowed",
+                    &reactive_formats[..],
+                    lit,
+                ),
+            ]);
+        }
+        descs.push(blended(
+            &fragment_blended_atmosphere,
+            c"fragmentBlendedAtmosphereShadowed",
+            &formats[..],
+            3,
+        ));
+        descs.push(blended(
+            &fragment_blended_atmosphere_reactive,
+            c"fragmentBlendedAtmosphereReactiveShadowed",
+            &reactive_formats[..],
+            3,
+        ));
+        let masked_depth = ShaderStageDesc {
+            spirv: &shadow_fragment_masked,
+            entry: c"shadowFragmentMasked",
+        };
+        let shadow = |spirv, entry, fragment| GraphicsPipelineDesc {
+            depth_format: settings.format,
+            dynamic_culling: true,
+            depth_bias: Some(settings.depth_bias),
+            ..GraphicsPipelineDesc::new(ShaderStageDesc { spirv, entry }, fragment)
+        };
+        descs.push(shadow(&shadow_vertex, c"localShadowVertex", None));
+        descs.push(shadow(
+            &shadow_vertex_masked,
+            c"localShadowVertexMasked",
+            Some(masked_depth),
+        ));
+        let cull = ComputeSource::<Push>::new(CULL_SHADOW_VIEWS, c"cullShadowViews", &[])?;
+        let mut all: Vec<PipelineDesc<'_>> =
+            descs.iter().copied().map(PipelineDesc::Graphics).collect();
+        all.push(cull.desc());
+        let mut pipelines =
+            Pipeline::create_many(device, bindless.pipeline_layout(), &all)?.into_iter();
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
+                call: "local shadow pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        let mut shading = || -> Result<Shading, RhiError> {
+            Ok(Shading {
+                main: [next()?, next()?],
+                shade: next()?,
+                main_motion: [next()?, next()?],
+                shade_motion: next()?,
+                blended: [next()?, next()?],
+            })
+        };
+        let shading = [shading()?, shading()?];
+        let blended_atmosphere = [next()?, next()?];
+        let depth = [next()?, next()?];
+        let cull = cull.finish(next()?);
+        Ok(Self {
+            shading,
+            blended_atmosphere,
+            ao: None,
+            subsurface: None,
+            depth,
+            cull,
+        })
+    }
+
+    /// The shading with ambient occlusion, or of subsurface materials, when the renderer
+    /// has those features on and they are not made yet.
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_extras(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+        ao: bool,
+        subsurface: bool,
+    ) -> Result<(), RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let words = |bytes| spirv_words(bytes).ok_or_else(invalid);
+        let make_ao = ao && self.ao.is_none();
+        let make_subsurface = subsurface && self.subsurface.is_none();
+        if !make_ao && !make_subsurface {
+            return Ok(());
+        }
+        let vertex = words(VERTEX)?;
+        let fragment_ao = words(FRAGMENT_AO_SHADOWED)?;
+        let fragment_motion_ao = words(FRAGMENT_MOTION_AO_SHADOWED)?;
+        let fragment_subsurface = words(FRAGMENT_SUBSURFACE_SHADOWED)?;
+        let fragment_subsurface_motion = words(FRAGMENT_SUBSURFACE_MOTION_SHADOWED)?;
+        let formats = [color_format];
+        let motion_formats = [color_format, MOTION_FORMAT];
+        let subsurface_formats = [color_format, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
+        let subsurface_motion_formats = [
+            color_format,
+            MOTION_FORMAT,
+            IRRADIANCE_FORMAT,
+            ALBEDO_FORMAT,
+        ];
+        // After the depth prepass: tested for equality, not written.
+        let shade = |fragment, entry, formats, variant: usize| {
+            PipelineDesc::Graphics(GraphicsPipelineDesc {
+                depth_write: false,
+                depth_compare: vk::CompareOp::EQUAL,
+                ..shading_desc(
+                    &vertex,
+                    fragment,
+                    entry,
+                    formats,
+                    depth_format,
+                    &VARIANTS[variant],
+                )
+            })
+        };
+        let mut descs = Vec::with_capacity(8);
+        for lit in [1, 3] {
+            if make_ao {
+                descs.push(shade(
+                    &fragment_ao,
+                    c"fragmentMainAoShadowed",
+                    &formats[..],
+                    lit,
+                ));
+                descs.push(shade(
+                    &fragment_motion_ao,
+                    c"fragmentMainMotionAoShadowed",
+                    &motion_formats[..],
+                    lit,
+                ));
+            }
+            if make_subsurface {
+                descs.push(shade(
+                    &fragment_subsurface,
+                    c"fragmentSubsurfaceShadowed",
+                    &subsurface_formats[..],
+                    lit,
+                ));
+                descs.push(shade(
+                    &fragment_subsurface_motion,
+                    c"fragmentSubsurfaceMotionShadowed",
+                    &subsurface_motion_formats[..],
+                    lit,
+                ));
+            }
+        }
+        let mut pipelines =
+            Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
+                call: "local shadow pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        let mut ao_pairs = [None, None];
+        let mut subsurface_pairs = [None, None];
+        for k in 0..2 {
+            if make_ao {
+                ao_pairs[k] = Some([next()?, next()?]);
+            }
+            if make_subsurface {
+                subsurface_pairs[k] = Some([next()?, next()?]);
+            }
+        }
+        if let [Some(a), Some(b)] = ao_pairs {
+            self.ao = Some([a, b]);
+        }
+        if let [Some(a), Some(b)] = subsurface_pairs {
+            self.subsurface = Some([a, b]);
+        }
+        Ok(())
+    }
+}
+
+/// The local-light variant of a shading variant index (bit 1: environment).
+fn shadowed_index(variant: usize) -> usize {
+    variant >> 1
+}
+
+/// The atlas of local lights' shadows: a depth image that lives across frames.
+#[derive(Debug)]
+struct AtlasImage {
+    image: vk::Image,
+    allocation: Option<Allocation>,
+    view: vk::ImageView,
+    sampled: u32,
+    desc: TextureDesc,
+    state: Cell<crate::graph::TextureState>,
+}
+
+impl AtlasImage {
+    fn new(
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        settings: &LocalShadowSettings,
+    ) -> Result<Self, RhiError> {
+        let size = settings.atlas_size;
+        let (image, allocation) = allocator.create_image(
+            &vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(settings.format)
+                .extent(vk::Extent3D {
+                    width: size,
+                    height: size,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT | vk::ImageUsageFlags::SAMPLED)
+                .initial_layout(vk::ImageLayout::UNDEFINED),
+            MemoryLocation::Device,
+        )?;
+        // SAFETY: a view of the image just created.
+        let view = unsafe {
+            device.raw().create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(settings.format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::DEPTH,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+                None,
+            )
+        };
+        let view = match view {
+            Ok(view) => view,
+            Err(e) => {
+                // SAFETY: never used by the GPU.
+                unsafe { allocator.destroy_image(image, allocation) };
+                return Err(RhiError::vk("vkCreateImageView")(e));
+            }
+        };
+        let Some(sampled) = bindless.add_sampled_image(view) else {
+            // SAFETY: never used by the GPU.
+            unsafe {
+                device.raw().destroy_image_view(view, None);
+                allocator.destroy_image(image, allocation);
+            }
+            return Err(RhiError::Vulkan {
+                call: "bindless set full",
+                result: vk::Result::ERROR_OUT_OF_POOL_MEMORY,
+            });
+        };
+        Ok(Self {
+            image,
+            allocation: Some(allocation),
+            view,
+            sampled,
+            desc: TextureDesc::new_2d(settings.format, size, size),
+            state: Cell::new(crate::graph::TextureState::undefined()),
+        })
+    }
+
+    /// # Safety
+    ///
+    /// The GPU no longer uses the image.
+    unsafe fn destroy(&mut self, device: &Device, allocator: &mut Allocator, bindless: &Bindless) {
+        if let Some(allocation) = self.allocation.take() {
+            bindless.remove_sampled_image(self.sampled, 0);
+            // SAFETY: guaranteed by the caller.
+            unsafe {
+                device.raw().destroy_image_view(self.view, None);
+                allocator.destroy_image(self.image, allocation);
+            }
+        }
+    }
+}
+
+/// Local lights' shadows (ADR 0071): the atlas, its cache and the pipelines, made when the
+/// feature is first turned on.
+#[derive(Debug)]
+struct LocalShadowState {
+    atlas: AtlasImage,
+    pipelines: ShadowedPipelines,
+    cache: RefCell<ShadowCache>,
+    plan: RefCell<Plan>,
+    /// The frame (graph serial) the atlas was last imported into, and its handle there.
+    imported: Cell<Option<(u64, Texture)>>,
+    /// The tiles drawn in that frame, by every view (each view's pass records its range).
+    rects: RefCell<Vec<vk::Rect2D>>,
+}
+
 /// The forward PBR pipelines.
 #[derive(Debug)]
 pub struct ForwardRenderer {
@@ -978,6 +1438,12 @@ pub struct ForwardRenderer {
     subsurface_settings: Option<SubsurfaceSettings>,
     /// The profiles as the shaders read them.
     subsurface_profiles: Vec<GpuProfile>,
+    /// Local lights' shadows (ADR 0071), once turned on; `local_shadows_on` says whether
+    /// they are on now.
+    local_shadows: Option<LocalShadowState>,
+    local_shadows_on: bool,
+    /// Atlases replaced by new settings, freed by [`Self::destroy`].
+    retired_atlases: Vec<AtlasImage>,
     scratch: RefCell<Scratch>,
 }
 
@@ -1241,6 +1707,9 @@ impl ForwardRenderer {
             subsurface_pipelines: None,
             subsurface_settings: Some(SubsurfaceSettings::default()),
             subsurface_profiles: Vec::new(),
+            local_shadows: None,
+            local_shadows_on: false,
+            retired_atlases: Vec::new(),
             scratch: RefCell::new(Scratch::default()),
         })
     }
@@ -1295,7 +1764,24 @@ impl ForwardRenderer {
             )?);
         }
         self.ao_settings = settings;
-        Ok(())
+        self.ensure_shadowed_extras(device, bindless)
+    }
+
+    /// Local shadows' shading for ambient occlusion and subsurface materials, once both
+    /// features are in use.
+    fn ensure_shadowed_extras(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+    ) -> Result<(), RhiError> {
+        let (ao, subsurface) = (self.ao.is_some(), self.subsurface_pipelines.is_some());
+        let (color, depth) = (self.color_format, self.depth_format);
+        match self.local_shadows.as_mut() {
+            Some(state) => state
+                .pipelines
+                .ensure_extras(device, bindless, color, depth, ao, subsurface),
+            None => Ok(()),
+        }
     }
 
     /// The ambient occlusion settings, when it is on.
@@ -1343,7 +1829,173 @@ impl ForwardRenderer {
                 .take(subsurface::MAX_PROFILES)
                 .map(SubsurfaceProfile::gpu),
         );
+        self.ensure_shadowed_extras(device, bindless)
+    }
+
+    /// Turns shadows of point and spot lights on with `settings`, or off (`None`, the
+    /// default; ADR 0071). Lights cast them when marked ([`LocalLight::shadow`]). The
+    /// first time, the atlas (`atlas_size`² texels of `format`, 32 MiB at the default) and
+    /// 22 pipelines are made (in parallel, through the pipeline cache: ADR 0055); a view
+    /// with no shadowed light in reach keeps its shading pipelines, which carry no code
+    /// for it. New settings that change the atlas start over with an empty one (the old
+    /// one is freed by [`Self::destroy`]); off keeps the atlas for later.
+    ///
+    /// The atlas is a cache: shadows are drawn again only when their light or a caster in
+    /// its range changes (see [`crate::local_shadows`]). Views of one renderer share it:
+    /// give them the same light list.
+    pub fn set_local_shadows(
+        &mut self,
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        settings: Option<LocalShadowSettings>,
+    ) -> Result<(), RhiError> {
+        let Some(settings) = settings.map(|s| s.sanitized()) else {
+            self.local_shadows_on = false;
+            return Ok(());
+        };
+        let rebuild_atlas = self.local_shadows.as_ref().is_none_or(|state| {
+            let old = state.cache.borrow().settings().to_owned();
+            old.atlas_size != settings.atlas_size || old.format != settings.format
+        });
+        let rebuild_pipelines = self.local_shadows.as_ref().is_none_or(|state| {
+            let old = state.cache.borrow().settings().to_owned();
+            old.format != settings.format || old.depth_bias != settings.depth_bias
+        });
+        if rebuild_atlas || rebuild_pipelines {
+            let pipelines = if rebuild_pipelines {
+                let mut p = ShadowedPipelines::new(
+                    device,
+                    bindless,
+                    self.color_format,
+                    self.depth_format,
+                    &settings,
+                )?;
+                p.ensure_extras(
+                    device,
+                    bindless,
+                    self.color_format,
+                    self.depth_format,
+                    self.ao.is_some(),
+                    self.subsurface_pipelines.is_some(),
+                )?;
+                Some(p)
+            } else {
+                None
+            };
+            let atlas = if rebuild_atlas {
+                Some(AtlasImage::new(device, allocator, bindless, &settings)?)
+            } else {
+                None
+            };
+            match self.local_shadows.take() {
+                Some(old) => {
+                    let LocalShadowState {
+                        atlas: old_atlas,
+                        pipelines: old_pipelines,
+                        ..
+                    } = old;
+                    let atlas = match atlas {
+                        Some(new) => {
+                            self.retired_atlases.push(old_atlas);
+                            new
+                        }
+                        None => old_atlas,
+                    };
+                    self.local_shadows = Some(LocalShadowState {
+                        atlas,
+                        pipelines: pipelines.unwrap_or(old_pipelines),
+                        cache: RefCell::new(ShadowCache::new(settings)),
+                        plan: RefCell::new(Plan::default()),
+                        imported: Cell::new(None),
+                        rects: RefCell::new(Vec::new()),
+                    });
+                }
+                None => {
+                    self.local_shadows = Some(LocalShadowState {
+                        atlas: atlas.ok_or(RhiError::Vulkan {
+                            call: "local shadow atlas",
+                            result: vk::Result::ERROR_UNKNOWN,
+                        })?,
+                        pipelines: pipelines.ok_or(RhiError::Vulkan {
+                            call: "local shadow pipelines",
+                            result: vk::Result::ERROR_UNKNOWN,
+                        })?,
+                        cache: RefCell::new(ShadowCache::new(settings)),
+                        plan: RefCell::new(Plan::default()),
+                        imported: Cell::new(None),
+                        rects: RefCell::new(Vec::new()),
+                    });
+                }
+            }
+        } else if let Some(state) = &self.local_shadows {
+            // Same atlas and pipelines: new tile sizes or budgets start from scratch.
+            let mut cache = state.cache.borrow_mut();
+            if *cache.settings() != settings {
+                *cache = ShadowCache::new(settings);
+            }
+        }
+        self.local_shadows_on = true;
         Ok(())
+    }
+
+    /// The local shadow settings, when they are on.
+    pub fn local_shadows(&self) -> Option<LocalShadowSettings> {
+        self.local_shadows
+            .as_ref()
+            .filter(|_| self.local_shadows_on)
+            .map(|s| *s.cache.borrow().settings())
+    }
+
+    /// What the last frame did with local lights' shadows: lights in view, drawn, views
+    /// drawn, waiting for the budget.
+    pub fn local_shadow_stats(&self) -> LocalShadowStats {
+        self.local_shadows
+            .as_ref()
+            .map_or_else(LocalShadowStats::default, |s| s.cache.borrow().stats())
+    }
+
+    /// Forgets every cached local shadow: each is drawn again when next in view (after a
+    /// level load, or edits the renderer cannot see, such as a mesh's vertices replaced in
+    /// place).
+    pub fn invalidate_local_shadows(&self) {
+        if let Some(state) = &self.local_shadows {
+            state.cache.borrow_mut().clear();
+        }
+    }
+
+    /// The driver's statistics of the opaque forward pipelines that look up local lights'
+    /// shadows: without and with an environment. Empty unless local shadows were turned on
+    /// and the device captures statistics.
+    pub fn shadowed_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 2] {
+        match &self.local_shadows {
+            Some(s) => core::array::from_fn(|k| s.pipelines.shading[k].main[0].statistics(device)),
+            None => [Vec::new(), Vec::new()],
+        }
+    }
+
+    /// Frees what the renderer keeps in device memory: the local shadow atlases (ADR
+    /// 0071). Nothing to do for a renderer that never turned them on.
+    ///
+    /// # Safety
+    ///
+    /// The GPU no longer uses them.
+    pub unsafe fn destroy(
+        &mut self,
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+    ) {
+        for mut atlas in self.retired_atlases.drain(..) {
+            // SAFETY: guaranteed by the caller.
+            unsafe { atlas.destroy(device, allocator, bindless) };
+        }
+        if let Some(state) = self.local_shadows.as_mut() {
+            // SAFETY: guaranteed by the caller.
+            unsafe { state.atlas.destroy(device, allocator, bindless) };
+        }
+        self.local_shadows = None;
+        self.local_shadows_on = false;
     }
 
     /// The driver's statistics of the opaque forward pipeline of each shading variant (see
@@ -1407,7 +2059,9 @@ impl ForwardRenderer {
         if draws.is_empty() {
             return Some(empty_frame(fg, view));
         }
-        let setup = self.setup(fg, view);
+        let mut setup = self.setup(fg, view);
+        setup.shadow_draws =
+            self.plan_local_shadows(view, geometry, materials, &setup, Changes::Draws(draws));
         let layout = self.layout_draws(ring, geometry, materials, draws, view, &setup)?;
         self.declare(
             fg, ring, bindless, geometry, materials, view, &setup, &layout,
@@ -1443,7 +2097,9 @@ impl ForwardRenderer {
         if scene.instances() == 0 {
             return Some(empty_frame(fg, view));
         }
-        let setup = self.setup(fg, view);
+        let mut setup = self.setup(fg, view);
+        setup.shadow_draws =
+            self.plan_local_shadows(view, geometry, materials, &setup, Changes::Scene(scene));
         let layout = self.layout_scene(ring, geometry, scene, view, &setup)?;
         self.declare(
             fg, ring, bindless, geometry, materials, view, &setup, &layout,
@@ -1469,7 +2125,56 @@ impl ForwardRenderer {
             depth_desc,
             phases: if occlusion { 2 } else { 1 },
             cascade_count: self.shadow_settings.cascade_count() as u32,
+            shadow_draws: 0,
         }
+    }
+
+    /// Plans this frame's local light shadows (ADR 0071): finds what changed, which
+    /// shadowed lights are in view, their tiles and which views are drawn. Returns the
+    /// number of views drawn.
+    fn plan_local_shadows(
+        &self,
+        view: &ForwardView<'_>,
+        geometry: &GeometryFrame<'_>,
+        materials: &MaterialFrame<'_>,
+        setup: &Setup,
+        changes: Changes<'_, '_>,
+    ) -> u32 {
+        let Some(state) = self
+            .local_shadows
+            .as_ref()
+            .filter(|_| self.local_shadows_on)
+        else {
+            return 0;
+        };
+        let mut cache = state.cache.borrow_mut();
+        let revision = materials.revision();
+        match changes {
+            Changes::Draws(draws) => {
+                let continuity = cache.begin(ChangeSource::Draws, revision);
+                cache.diff_draws(
+                    draws,
+                    |mesh| local_box(geometry, mesh),
+                    continuity == Continuity::Broken,
+                );
+            }
+            Changes::Scene(scene) => {
+                match cache.begin(ChangeSource::Scene(scene.serial()), revision) {
+                    Continuity::Same => {}
+                    Continuity::Next => cache.invalidate(scene.changes(), false),
+                    Continuity::Broken => cache.invalidate(&[], true),
+                }
+            }
+        }
+        let mut plan = state.plan.borrow_mut();
+        cache.plan(
+            view.lights,
+            view.camera.clip_from_world,
+            [setup.depth_desc.width, setup.depth_desc.height],
+            self.lod_threshold,
+            &mut plan,
+        );
+        plan.drawn.len() as u32
     }
 
     /// Lays out a draw list: instances, batches (runs of consecutive draws) and draw
@@ -1487,8 +2192,10 @@ impl ForwardRenderer {
         let Setup {
             phases,
             cascade_count,
+            shadow_draws,
             ..
         } = *setup;
+        let lists = phases + cascade_count + shadow_draws;
         let instance_count = draws.len() as u32;
         let mut scratch = self.scratch.borrow_mut();
         let Scratch {
@@ -1614,9 +2321,8 @@ impl ForwardRenderer {
         // slots follow the previous list's).
         let commands = {
             let per_list = command_count as usize;
-            let (out, staged) = ring.alloc::<vk::DrawIndexedIndirectCommand>(
-                (phases + cascade_count) as usize * per_list,
-            )?;
+            let (out, staged) =
+                ring.alloc::<vk::DrawIndexedIndirectCommand>(lists as usize * per_list)?;
             // One list's commands, in command order (the sorted batches' levels)...
             command_scratch.clear();
             for &(_, k) in keys.iter() {
@@ -1635,8 +2341,8 @@ impl ForwardRenderer {
                 }
             }
             // ... then copied into each list, which has its own slot region.
-            for list in 0..phases + cascade_count {
-                let slots = list_offset(list, phases) * slot_count;
+            for list in 0..lists {
+                let slots = list_offset(list, phases, cascade_count) * slot_count;
                 let out = &mut out[list as usize * per_list..(list as usize + 1) * per_list];
                 for (out, command) in out.iter_mut().zip(command_scratch.iter()) {
                     out.write(vk::DrawIndexedIndirectCommand {
@@ -1679,8 +2385,10 @@ impl ForwardRenderer {
         let Setup {
             phases,
             cascade_count,
+            shadow_draws,
             ..
         } = *setup;
+        let lists = phases + cascade_count + shadow_draws;
         let mut scratch = self.scratch.borrow_mut();
         let Scratch {
             runs,
@@ -1799,9 +2507,8 @@ impl ForwardRenderer {
         };
         let commands = {
             let per_list = command_count as usize;
-            let (out, staged) = ring.alloc::<vk::DrawIndexedIndirectCommand>(
-                (phases + cascade_count) as usize * per_list,
-            )?;
+            let (out, staged) =
+                ring.alloc::<vk::DrawIndexedIndirectCommand>(lists as usize * per_list)?;
             command_scratch.clear();
             for &(_, k) in keys.iter() {
                 let run = &runs[k as usize];
@@ -1825,8 +2532,8 @@ impl ForwardRenderer {
                 vertex_offset: 0,
                 first_instance: sink_slot,
             });
-            for list in 0..phases + cascade_count {
-                let slots = list_offset(list, phases) * slot_count;
+            for list in 0..lists {
+                let slots = list_offset(list, phases, cascade_count) * slot_count;
                 let out = &mut out[list as usize * per_list..(list as usize + 1) * per_list];
                 for (out, command) in out.iter_mut().zip(command_scratch.iter()) {
                     out.write(vk::DrawIndexedIndirectCommand {
@@ -1880,6 +2587,7 @@ impl ForwardRenderer {
             depth_desc,
             phases,
             cascade_count,
+            shadow_draws,
         } = *setup;
         let occlusion = view.occlusion.filter(|_| phases == 2);
         let Layout {
@@ -1976,6 +2684,68 @@ impl ForwardRenderer {
             };
             (layout, uploaded)
         };
+        // Local lights' shadows (ADR 0071): each kept light's first view, the views, the
+        // views drawn this frame, and the atlas (imported once per frame).
+        let local = self
+            .local_shadows
+            .as_ref()
+            .filter(|_| self.local_shadows_on);
+        let mut local_frame = LocalFrame::default();
+        if let Some(state) = local {
+            let plan = state.plan.borrow();
+            if light_layout.count > 0 && !plan.views.is_empty() {
+                let scratch = self.scratch.borrow();
+                let n = light_layout.count as usize;
+                let (out, staged) = ring.alloc::<u32>(n)?;
+                for (out, index) in out.iter_mut().zip(scratch.lights.kept()) {
+                    let first = plan.first_view[index as usize];
+                    local_frame.shadowed |= first != NO_SHADOW;
+                    out.write(first);
+                }
+                local_frame.light_shadows = staged.address;
+            }
+            if local_frame.shadowed {
+                local_frame.views = ring.push(&plan.views)?;
+            }
+            if !plan.drawn.is_empty() {
+                let (out, staged) = ring.alloc::<ShadowViewData>(plan.drawn.len())?;
+                for (out, view) in out.iter_mut().zip(plan.drawn.iter()) {
+                    out.write(view.data);
+                }
+                local_frame.draws = staged.address;
+            }
+            if local_frame.shadowed || !plan.drawn.is_empty() {
+                let serial = fg.serial();
+                let atlas = match state.imported.get() {
+                    Some((s, texture)) if s == serial => texture,
+                    _ => {
+                        let final_state =
+                            crate::graph::TextureState::shader_read(ShaderStages::FRAGMENT);
+                        let texture = fg.import_texture(
+                            "local shadow atlas",
+                            crate::graph::ImportedTexture {
+                                image: state.atlas.image,
+                                view: state.atlas.view,
+                                desc: state.atlas.desc,
+                                initial: state.atlas.state.get(),
+                                final_state: Some(final_state),
+                                sampled_index: Some(state.atlas.sampled),
+                                storage_index: None,
+                            },
+                        );
+                        state.atlas.state.set(final_state);
+                        state.imported.set(Some((serial, texture)));
+                        state.rects.borrow_mut().clear();
+                        texture
+                    }
+                };
+                local_frame.atlas = Some(atlas);
+                let mut rects = state.rects.borrow_mut();
+                let first = rects.len();
+                rects.extend(plan.drawn.iter().map(|d| d.rect));
+                local_frame.rects = first..rects.len();
+            }
+        }
         // Subsurface profiles, for transmission and the scatter pass (ADR 0059).
         let profiles = if subsurface_draws {
             ring.push(&self.subsurface_profiles)?
@@ -2073,7 +2843,13 @@ impl ForwardRenderer {
             sh: environment.map_or(0, |e| e.sh_address),
             subsurface: profiles,
             atmosphere: atmosphere.map_or(0, |a| a.constants),
-            _pad5: [0; 2],
+            local_shadow_atlas: local.map_or(0, |s| s.atlas.sampled),
+            contact_shadows: NO_AO,
+            light_shadows: local_frame.light_shadows,
+            shadow_views: local_frame.views,
+            shadow_draws: local_frame.draws,
+            shadow_draw_count: shadow_draws,
+            shadow_texel: local.map_or(0.0, |s| 1.0 / s.atlas.desc.width.max(1) as f32),
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -2126,6 +2902,23 @@ impl ForwardRenderer {
                 size: u64::from(cascade_count) * visible_bytes,
             },
         );
+        // Local lights' shadow views drawn this frame: their command and caster lists.
+        let local_lists = (shadow_draws > 0).then(|| {
+            (
+                fg.create_buffer(
+                    "local shadow commands",
+                    BufferDesc {
+                        size: u64::from(shadow_draws) * command_bytes,
+                    },
+                ),
+                fg.create_buffer(
+                    "local shadow casters",
+                    BufferDesc {
+                        size: u64::from(shadow_draws) * visible_bytes,
+                    },
+                ),
+            )
+        });
         let flags = occlusion.map(|o| {
             // Flags written by the previous frame's late phase, or to be cleared now.
             let stale = o.stale.replace(false);
@@ -2153,6 +2946,9 @@ impl ForwardRenderer {
         if let Some((flags, true)) = flags {
             setup = setup.write(flags, Access::TransferWrite);
         }
+        if let Some((local_commands, _)) = local_lists {
+            setup = setup.write(local_commands, Access::TransferWrite);
+        }
         setup.execute(move |ctx| {
             let region = vk::BufferCopy {
                 src_offset: commands.offset,
@@ -2177,6 +2973,20 @@ impl ForwardRenderer {
                 if let Some((flags, true)) = flags {
                     ctx.device
                         .cmd_fill_buffer(ctx.cmd, ctx.buffer(flags), 0, vk::WHOLE_SIZE, 0);
+                }
+                if let Some((local_commands, _)) = local_lists {
+                    let region = vk::BufferCopy {
+                        src_offset: commands.offset
+                            + u64::from(phases + cascade_count) * command_bytes,
+                        dst_offset: 0,
+                        size: u64::from(shadow_draws) * command_bytes,
+                    };
+                    ctx.device.cmd_copy_buffer(
+                        ctx.cmd,
+                        commands.buffer,
+                        ctx.buffer(local_commands),
+                        &[region],
+                    );
                 }
             }
         });
@@ -2282,6 +3092,87 @@ impl ForwardRenderer {
                     }
                 }
             });
+        // Local lights' shadow views (ADR 0071): culled per view, then each drawn into its
+        // tile of the atlas (cleared first); the rest of the atlas keeps its contents.
+        if let (Some(state), Some((local_commands, local_casters)), Some(atlas)) =
+            (local, local_lists, local_frame.atlas)
+        {
+            let pipelines = &state.pipelines;
+            fg.add_compute("local shadow cull", bindless)
+                .read(
+                    local_commands,
+                    Access::StorageReadWrite(ShaderStages::COMPUTE),
+                )
+                .write(local_casters, Access::StorageWrite(ShaderStages::COMPUTE))
+                .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE))
+                .dispatch(
+                    &pipelines.cull,
+                    Dispatch::Threads([instance_count, shadow_draws, 1]),
+                    move |ctx| {
+                        Some(Push {
+                            visible: ctx.address(local_casters),
+                            commands: ctx.address(local_commands),
+                            ..base
+                        })
+                    },
+                );
+            let rects = &state.rects;
+            let range = local_frame.rects.clone();
+            materials
+                .read(geometry.read(fg.add_pass("local shadows")))
+                .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
+                .read(local_commands, Access::Indirect)
+                .read(local_casters, Access::StorageRead(ShaderStages::VERTEX))
+                .depth(atlas, LoadOp::Load, StoreOp::Store)
+                .execute(move |ctx| {
+                    let rects = rects.borrow();
+                    let push = Push {
+                        visible: ctx.address(local_casters),
+                        ..base
+                    };
+                    for (k, rect) in rects[range].iter().enumerate() {
+                        let clear = vk::ClearAttachment {
+                            aspect_mask: vk::ImageAspectFlags::DEPTH,
+                            color_attachment: 0,
+                            clear_value: vk::ClearValue {
+                                depth_stencil: vk::ClearDepthStencilValue {
+                                    depth: 1.0,
+                                    stencil: 0,
+                                },
+                            },
+                        };
+                        // SAFETY: recording inside the pass's rendering scope; the pass
+                        // reads the commands (indirect), the caster lists, the pool and the
+                        // material table.
+                        unsafe {
+                            ctx.device.cmd_clear_attachments(
+                                ctx.cmd,
+                                &[clear],
+                                &[vk::ClearRect {
+                                    rect: *rect,
+                                    base_array_layer: 0,
+                                    layer_count: 1,
+                                }],
+                            );
+                            states.draw(
+                                ctx,
+                                bindless,
+                                &geometry,
+                                [&pipelines.depth[0], &pipelines.depth[1]],
+                                &Push {
+                                    phase: k as u32,
+                                    ..push
+                                },
+                                true,
+                                DEPTH_STATES,
+                                ctx.buffer(local_commands),
+                                k as u64 * command_bytes,
+                                *rect,
+                            );
+                        }
+                    }
+                });
+        }
         // Motion vectors: a second target, last frame's transforms read by the vertex
         // shader, and this frame's copied for the next one afterwards.
         let velocity = temporal.map(|_| {
@@ -2358,6 +3249,7 @@ impl ForwardRenderer {
             light_tiles,
             environment,
             ao: None,
+            local_atlas: local_frame.atlas.filter(|_| local_frame.shadowed),
         };
 
         // Ambient occlusion needs the whole depth before shading: the prepass draws it.
@@ -2380,9 +3272,18 @@ impl ForwardRenderer {
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
         let variant = usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1;
-        let shading = &self.shading[variant];
+        // With shadowed local lights in reach, the shading that looks their shadows up
+        // (ADR 0071; only then, so other views carry no code for it).
+        let shadowed = local.filter(|_| local_frame.shadowed).map(|s| &s.pipelines);
+        let shading = match shadowed {
+            Some(p) => &p.shading[shadowed_index(variant)],
+            None => &self.shading[variant],
+        };
         // With ambient occlusion, the shading that reads it (the prepass is on then).
-        let ao_shading = ao.map(|(_, passes)| &passes.shading[variant]);
+        let ao_shading = ao.map(|(_, passes)| match shadowed.and_then(|p| p.ao.as_ref()) {
+            Some(p) => &p[shadowed_index(variant)],
+            None => &passes.shading[variant],
+        });
         let main_pipelines = match (prepass, velocity.is_some()) {
             (true, false) => match ao_shading {
                 Some(p) => [&p[0], &p[0]],
@@ -2638,7 +3539,10 @@ impl ForwardRenderer {
                 "subsurface albedo",
                 TextureDesc::new_2d(ALBEDO_FORMAT, depth_desc.width, depth_desc.height),
             );
-            let pipeline = &pipelines.shading[variant][usize::from(velocity.is_some())];
+            let pipeline = match shadowed.and_then(|p| p.subsurface.as_ref()) {
+                Some(p) => &p[shadowed_index(variant)][usize::from(velocity.is_some())],
+                None => &pipelines.shading[variant][usize::from(velocity.is_some())],
+            };
             let two_phases = flag_buffer.is_some();
             // Their diffuse light is occluded by the view's ambient occlusion too.
             let ao_texture = targets.ao;
@@ -2767,10 +3671,11 @@ impl ForwardRenderer {
         });
         if blended_commands > 0 {
             let reactive_index = usize::from(reactive.is_some());
-            let pipelines = match atmosphere {
+            let pipelines = match (atmosphere, shadowed) {
                 // Under an atmosphere or fog (the environment variants).
-                Some(_) => &self.blended_atmosphere[variant & 1][reactive_index],
-                None => &shading.blended[reactive_index],
+                (Some(_), Some(p)) => &p.blended_atmosphere[reactive_index],
+                (Some(_), None) => &self.blended_atmosphere[variant & 1][reactive_index],
+                (None, _) => &shading.blended[reactive_index],
             };
             let mut pass = forward_pass(
                 fg,
@@ -2797,6 +3702,9 @@ impl ForwardRenderer {
             }
             if let Some(t) = atmosphere.and_then(|a| a.textures) {
                 pass = pass.read(t.aerial, Access::Sampled(ShaderStages::FRAGMENT));
+            }
+            if let Some(atlas) = local_frame.atlas.filter(|_| local_frame.shadowed) {
+                pass = pass.read(atlas, Access::Sampled(ShaderStages::FRAGMENT));
             }
             let offset = u64::from(phases - 1) * command_bytes;
             pass.depth_read_only(depth).execute(move |ctx| {
@@ -2896,6 +3804,31 @@ struct Setup {
     /// Forward command lists: 2 with occlusion culling (early, late), else 1.
     phases: u32,
     cascade_count: u32,
+    /// Local light shadow views drawn this frame (ADR 0071): one command list each, after
+    /// the cascades'.
+    shadow_draws: u32,
+}
+
+/// What a frame's shading and passes take of the local lights' shadows (ADR 0071).
+#[derive(Debug, Default)]
+struct LocalFrame {
+    /// Some kept light has a shadow: the shading looks them up.
+    shadowed: bool,
+    /// Addresses of the per-light first views, the views and the drawn views (0: none).
+    light_shadows: u64,
+    views: u64,
+    draws: u64,
+    /// The atlas in this frame's graph.
+    atlas: Option<Texture>,
+    /// This view's drawn tiles among the frame's.
+    rects: core::ops::Range<usize>,
+}
+
+/// Where a frame's instance changes come from, for the local shadows' cache.
+#[derive(Clone, Copy)]
+enum Changes<'a, 'g> {
+    Draws(&'a [DrawItem]),
+    Scene(&'a SceneFrame<'g>),
 }
 
 /// Where the instances come from.
@@ -3003,6 +3936,8 @@ struct Targets {
     environment: Option<EnvironmentFrame>,
     /// The view's ambient occlusion (ADR 0058), computed after the depth prepass.
     ao: Option<Texture>,
+    /// The local lights' shadow atlas, when the shading looks it up (ADR 0071).
+    local_atlas: Option<Texture>,
 }
 
 /// How a shading pass uses the depth target.
@@ -3065,6 +4000,9 @@ fn shading_pass<'a, 'g>(
     }
     if let Some(ao) = targets.ao {
         pass = pass.read(ao, Access::Sampled(ShaderStages::FRAGMENT));
+    }
+    if let Some(atlas) = targets.local_atlas {
+        pass = pass.read(atlas, Access::Sampled(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),

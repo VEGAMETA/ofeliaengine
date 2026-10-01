@@ -349,6 +349,7 @@ pub fn procedural_lights() -> Vec<LocalLight> {
             range: 4.0,
             color: Vec3::new(3.0, 1.8, 0.8),
             spot: None,
+            shadow: false,
         },
         LocalLight {
             position: Vec3::new(2.5, 3.5, 0.0),
@@ -359,6 +360,7 @@ pub fn procedural_lights() -> Vec<LocalLight> {
                 inner: 0.3,
                 outer: 0.6,
             }),
+            shadow: false,
         },
     ]
 }

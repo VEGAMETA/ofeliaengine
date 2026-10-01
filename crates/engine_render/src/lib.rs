@@ -11,6 +11,7 @@
 //!   bytes per frame (ADR 0040).
 //! - [`forward`]: forward PBR with a directional light and a shadow map (ADR 0014), drawn
 //!   GPU-driven: GPU frustum culling and indirect instanced draws (ADR 0034).
+//! - [`local_shadows`]: shadows of point and spot lights in a cached atlas (ADR 0071).
 //! - [`atmosphere`]: a physically based sky and atmosphere, aerial perspective and
 //!   exponential height fog (ADR 0069).
 //! - [`subsurface`]: screen-space subsurface scattering: diffusion profiles, transmission
@@ -35,6 +36,7 @@ pub mod gpu_scene;
 pub mod graph;
 pub mod hiz;
 pub mod lights;
+pub mod local_shadows;
 pub mod material;
 pub mod mesh;
 pub mod png;
