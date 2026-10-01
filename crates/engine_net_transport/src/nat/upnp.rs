@@ -14,7 +14,10 @@ use std::time::{Duration, Instant};
 use super::NatError;
 
 /// The SSDP multicast address.
-pub const SSDP_ADDR: SocketAddr = SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::new(239, 255, 255, 250)), 1900);
+pub const SSDP_ADDR: SocketAddr = SocketAddr::new(
+    IpAddr::V4(std::net::Ipv4Addr::new(239, 255, 255, 250)),
+    1900,
+);
 /// Largest HTTP response read (descriptions are a few KiB).
 const MAX_RESPONSE: usize = 256 * 1024;
 const SEARCH_TARGETS: [&str; 2] = [
@@ -40,7 +43,9 @@ struct Url {
 }
 
 fn parse_url(url: &str) -> Option<Url> {
-    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("HTTP://"))?;
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("HTTP://"))?;
     let (host, path) = match rest.find('/') {
         Some(i) => (&rest[..i], &rest[i..]),
         None => (rest, "/"),
@@ -48,7 +53,9 @@ fn parse_url(url: &str) -> Option<Url> {
     let addr: SocketAddr = if host.contains(':') && !host.starts_with('[') {
         host.parse().ok()?
     } else if host.starts_with('[') {
-        host.parse().ok().or_else(|| format!("{host}:80").parse().ok())?
+        host.parse()
+            .ok()
+            .or_else(|| format!("{host}:80").parse().ok())?
     } else {
         format!("{host}:80").parse().ok()?
     };
@@ -69,11 +76,20 @@ fn join_url(base: &Url, reference: &str) -> Option<Url> {
         let dir = base.path.rfind('/').map_or("/", |i| &base.path[..=i]);
         format!("{dir}{reference}")
     };
-    Some(Url { path, ..base.clone() })
+    Some(Url {
+        path,
+        ..base.clone()
+    })
 }
 
 /// One HTTP/1.1 request with `Connection: close`; returns status and body.
-fn http(url: &Url, method: &str, headers: &str, body: &str, timeout: Duration) -> Result<(u16, String), NatError> {
+fn http(
+    url: &Url,
+    method: &str,
+    headers: &str,
+    body: &str,
+    timeout: Duration,
+) -> Result<(u16, String), NatError> {
     let mut stream = TcpStream::connect_timeout(&url.addr, timeout)?;
     stream.set_read_timeout(Some(timeout))?;
     stream.set_write_timeout(Some(timeout))?;
@@ -115,7 +131,10 @@ fn http(url: &Url, method: &str, headers: &str, body: &str, timeout: Duration) -
 fn complete_length(response: &[u8]) -> Option<usize> {
     let head_end = response.windows(4).position(|w| w == b"\r\n\r\n")? + 4;
     let head = std::str::from_utf8(&response[..head_end]).ok()?;
-    let len = header(head, "content-length")?.trim().parse::<usize>().ok()?;
+    let len = header(head, "content-length")?
+        .trim()
+        .parse::<usize>()
+        .ok()?;
     Some(head_end + len)
 }
 
@@ -163,7 +182,7 @@ fn dechunk(mut data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// The text of the first `<tag>` (any namespace prefix), unescaped.
-fn xml_text<'a>(xml: &'a str, tag: &str) -> Option<String> {
+fn xml_text(xml: &str, tag: &str) -> Option<String> {
     let mut at = 0;
     while let Some(open) = xml[at..].find('<') {
         let start = at + open + 1;
@@ -189,7 +208,9 @@ fn unescape(s: &str) -> String {
 }
 
 fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// Finds the control URL and service type of a WAN connection service in a device
@@ -199,7 +220,9 @@ fn find_service(description: &str, base: &Url) -> Option<(Url, String)> {
     let base = url_base.as_ref().unwrap_or(base);
     for wanted in SERVICES {
         for block in description.split("</service>") {
-            let Some(start) = block.rfind("<service>") else { continue };
+            let Some(start) = block.rfind("<service>") else {
+                continue;
+            };
             let block = &block[start..];
             if xml_text(block, "serviceType").as_deref() == Some(wanted) {
                 let control = xml_text(block, "controlURL")?;
@@ -254,18 +277,33 @@ pub fn discover(target: SocketAddr, local: IpAddr, timeout: Duration) -> Result<
         socket.set_read_timeout(Some(wait))?;
         let (n, _) = match socket.recv_from(&mut buf) {
             Ok(r) => r,
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => continue,
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
+                continue;
+            }
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => continue,
             Err(e) => return Err(e.into()),
         };
-        let Ok(text) = std::str::from_utf8(&buf[..n]) else { continue };
-        let Some(location) = header(text, "location") else { continue };
+        let Ok(text) = std::str::from_utf8(&buf[..n]) else {
+            continue;
+        };
+        let Some(location) = header(text, "location") else {
+            continue;
+        };
         if tried.iter().any(|t| t == location) {
             continue;
         }
         tried.push(location.to_string());
-        let Some(url) = parse_url(location) else { continue };
-        let left = deadline.saturating_duration_since(Instant::now()).max(Duration::from_millis(500));
+        let Some(url) = parse_url(location) else {
+            continue;
+        };
+        let left = deadline
+            .saturating_duration_since(Instant::now())
+            .max(Duration::from_millis(500));
         match http(&url, "GET", "", "", left.min(Duration::from_secs(3))) {
             Ok((200, description)) => {
                 if let Some((control, service)) = find_service(&description, &url) {
@@ -291,7 +329,11 @@ pub fn discover(target: SocketAddr, local: IpAddr, timeout: Duration) -> Result<
 /// The local address the stack uses to reach `addr`.
 fn local_toward(addr: SocketAddr) -> Option<IpAddr> {
     let probe = UdpSocket::bind(SocketAddr::new(
-        if addr.is_ipv4() { IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED) } else { IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED) },
+        if addr.is_ipv4() {
+            IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)
+        } else {
+            IpAddr::V6(std::net::Ipv6Addr::UNSPECIFIED)
+        },
         0,
     ))
     .ok()?;
@@ -332,7 +374,13 @@ impl Gateway {
 
     /// Maps external UDP `external_port` to `internal_port` on this machine for `lease`
     /// (0: permanent, for gateways that refuse leases).
-    pub fn add_mapping(&self, external_port: u16, internal_port: u16, lease: Duration, description: &str) -> Result<(), NatError> {
+    pub fn add_mapping(
+        &self,
+        external_port: u16,
+        internal_port: u16,
+        lease: Duration,
+        description: &str,
+    ) -> Result<(), NatError> {
         let args = format!(
             "<NewRemoteHost></NewRemoteHost><NewExternalPort>{external_port}</NewExternalPort>\
              <NewProtocol>UDP</NewProtocol><NewInternalPort>{internal_port}</NewInternalPort>\
@@ -367,10 +415,16 @@ impl Gateway {
         )?;
         let text = |tag: &str| xml_text(&response, tag).ok_or(NatError::Malformed);
         Ok((
-            text("NewExternalPort")?.parse().map_err(|_| NatError::Malformed)?,
+            text("NewExternalPort")?
+                .parse()
+                .map_err(|_| NatError::Malformed)?,
             text("NewProtocol")?,
-            text("NewInternalClient")?.parse().map_err(|_| NatError::Malformed)?,
-            text("NewInternalPort")?.parse().map_err(|_| NatError::Malformed)?,
+            text("NewInternalClient")?
+                .parse()
+                .map_err(|_| NatError::Malformed)?,
+            text("NewInternalPort")?
+                .parse()
+                .map_err(|_| NatError::Malformed)?,
             xml_text(&response, "NewPortMappingDescription").unwrap_or_default(),
         ))
     }
@@ -395,7 +449,10 @@ mod tests {
         assert_eq!(base.addr, "192.168.1.1:5000".parse().unwrap());
         assert_eq!(join_url(&base, "/ctl/IPConn").unwrap().path, "/ctl/IPConn");
         assert_eq!(join_url(&base, "ctl/IPConn").unwrap().path, "/ctl/IPConn");
-        assert_eq!(parse_url("http://10.0.0.1/x").unwrap().addr, "10.0.0.1:80".parse().unwrap());
+        assert_eq!(
+            parse_url("http://10.0.0.1/x").unwrap().addr,
+            "10.0.0.1:80".parse().unwrap()
+        );
         let xml = "<root><device><serviceList>\
             <service><serviceType>urn:schemas-upnp-org:service:Layer3Forwarding:1</serviceType><controlURL>/l3f</controlURL></service>\
             <service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType><controlURL>/ctl/IPConn</controlURL></service>\
@@ -404,9 +461,16 @@ mod tests {
         assert_eq!(url.path, "/ctl/IPConn");
         assert_eq!(service, "urn:schemas-upnp-org:service:WANIPConnection:1");
         assert_eq!(
-            xml_text("<s:Body><u:R><NewExternalIPAddress>203.0.113.4</NewExternalIPAddress></u:R>", "NewExternalIPAddress").as_deref(),
+            xml_text(
+                "<s:Body><u:R><NewExternalIPAddress>203.0.113.4</NewExternalIPAddress></u:R>",
+                "NewExternalIPAddress"
+            )
+            .as_deref(),
             Some("203.0.113.4")
         );
-        assert_eq!(dechunk(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n").unwrap(), b"Wikipedia");
+        assert_eq!(
+            dechunk(b"4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n").unwrap(),
+            b"Wikipedia"
+        );
     }
 }

@@ -181,7 +181,9 @@ pub struct PortMapper {
 
 impl std::fmt::Debug for PortMapper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PortMapper").field("status", &self.status()).finish()
+        f.debug_struct("PortMapper")
+            .field("status", &self.status())
+            .finish()
     }
 }
 
@@ -195,12 +197,18 @@ impl PortMapper {
             .name(String::from("net::port-mapper"))
             .spawn(move || run_mapper(&config, internal_port, &shared, &stopped))
             .ok();
-        Self { status, stop: Some(stop), thread }
+        Self {
+            status,
+            stop: Some(stop),
+            thread,
+        }
     }
 
     /// The current status.
     pub fn status(&self) -> MappingStatus {
-        self.status.lock().map_or(MappingStatus::Pending, |s| s.clone())
+        self.status
+            .lock()
+            .map_or(MappingStatus::Pending, |s| s.clone())
     }
 
     /// Removes the mapping and waits for the thread (at most a few seconds).
@@ -228,7 +236,11 @@ fn set(status: &Mutex<MappingStatus>, value: MappingStatus) {
     }
 }
 
-fn try_upnp(config: &NatConfig, local: IpAddr, port: u16) -> Result<(upnp::Gateway, PortMapping), NatError> {
+fn try_upnp(
+    config: &NatConfig,
+    local: IpAddr,
+    port: u16,
+) -> Result<(upnp::Gateway, PortMapping), NatError> {
     let gw = upnp::discover(config.ssdp_target, local, config.discovery_timeout)?;
     let external_ip = gw.external_ip()?;
     let mut lease = config.lease;
@@ -240,7 +252,8 @@ fn try_upnp(config: &NatConfig, local: IpAddr, port: u16) -> Result<(upnp::Gatew
     let mut last = NatError::NoAnswer;
     for external in candidates {
         let mut result = gw.add_mapping(external, port, lease, &config.description);
-        if matches!(result, Err(NatError::Refused(upnp::ERROR_ONLY_PERMANENT))) && !lease.is_zero() {
+        if matches!(result, Err(NatError::Refused(upnp::ERROR_ONLY_PERMANENT))) && !lease.is_zero()
+        {
             lease = Duration::ZERO;
             result = gw.add_mapping(external, port, lease, &config.description);
         }
@@ -254,17 +267,26 @@ fn try_upnp(config: &NatConfig, local: IpAddr, port: u16) -> Result<(upnp::Gatew
                 };
                 return Ok((gw, mapping));
             }
-            Err(NatError::Refused(upnp::ERROR_CONFLICT)) => last = NatError::Refused(upnp::ERROR_CONFLICT),
+            Err(NatError::Refused(upnp::ERROR_CONFLICT)) => {
+                last = NatError::Refused(upnp::ERROR_CONFLICT)
+            }
             Err(e) => return Err(e),
         }
     }
     Err(last)
 }
 
-fn run_mapper(config: &NatConfig, port: u16, status: &Mutex<MappingStatus>, stopped: &mpsc::Receiver<()>) {
+fn run_mapper(
+    config: &NatConfig,
+    port: u16,
+    status: &Mutex<MappingStatus>,
+    stopped: &mpsc::Receiver<()>,
+) {
     let route = gateway::default_route(false).ok();
     let local = config.local_ip.or(route.map(|r| r.local));
-    let gw = config.gateway.or(route.map(|r| SocketAddr::new(r.gateway, pmp::SERVER_PORT)));
+    let gw = config
+        .gateway
+        .or(route.map(|r| SocketAddr::new(r.gateway, pmp::SERVER_PORT)));
     let mut reasons = Vec::new();
     let mut held = None;
     match local {
@@ -305,7 +327,11 @@ fn run_mapper(config: &NatConfig, port: u16, status: &Mutex<MappingStatus>, stop
     };
     set(status, MappingStatus::Mapped(mapping));
     loop {
-        let wait = if mapping.lease.is_zero() { Duration::from_secs(3600) } else { mapping.lease / 2 };
+        let wait = if mapping.lease.is_zero() {
+            Duration::from_secs(3600)
+        } else {
+            mapping.lease / 2
+        };
         match stopped.recv_timeout(wait) {
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if mapping.lease.is_zero() {
@@ -315,10 +341,14 @@ fn run_mapper(config: &NatConfig, port: u16, status: &Mutex<MappingStatus>, stop
                     Held::Upnp(g, external) => g
                         .add_mapping(*external, port, mapping.lease, &config.description)
                         .map(|()| mapping.lease),
-                    Held::Pmp(gw, m) => pmp::map(*gw, m.local_ip(), port, config.lease, config.retry, Some(m)).map(|n| {
-                        *m = n;
-                        n.lifetime
-                    }),
+                    Held::Pmp(gw, m) => {
+                        pmp::map(*gw, m.local_ip(), port, config.lease, config.retry, Some(m)).map(
+                            |n| {
+                                *m = n;
+                                n.lifetime
+                            },
+                        )
+                    }
                 };
                 if let Ok(lease) = renewed {
                     mapping.lease = lease;
@@ -356,15 +386,20 @@ pub struct NatReport {
 ///
 /// A mapping whose external address is not global (a router behind another NAT, or
 /// behind carrier-grade NAT) or disagrees with what STUN saw is useless and skipped.
-pub fn decide(local: SocketAddr, mapping: Option<&PortMapping>, stun: Option<&stun::StunResult>, relay: bool) -> NatReport {
+pub fn decide(
+    local: SocketAddr,
+    mapping: Option<&PortMapping>,
+    stun: Option<&stun::StunResult>,
+    relay: bool,
+) -> NatReport {
     let mut addresses = Vec::new();
     let stun_mapped = stun.and_then(|s| s.mapped);
     let method = if let Some(mapped) = stun_mapped.filter(|m| *m == local && is_global(m.ip())) {
         addresses.push(mapped);
         Method::Public
-    } else if let Some(m) =
-        mapping.filter(|m| is_global(m.external.ip()) && stun_mapped.is_none_or(|s| s.ip() == m.external.ip()))
-    {
+    } else if let Some(m) = mapping.filter(|m| {
+        is_global(m.external.ip()) && stun_mapped.is_none_or(|s| s.ip() == m.external.ip())
+    }) {
         addresses.push(m.external);
         m.method
     } else if let Some(s) = stun.filter(|s| s.mapped.is_some() && !s.mapping_varies) {
@@ -455,8 +490,17 @@ mod tests {
     #[test]
     fn global_addresses() {
         for ip in [
-            "10.1.2.3", "192.168.0.1", "172.16.5.4", "100.64.0.1", "100.127.255.255", "127.0.0.1", "169.254.1.1", "0.0.0.0",
-            "fd00::1", "fe80::1", "::1",
+            "10.1.2.3",
+            "192.168.0.1",
+            "172.16.5.4",
+            "100.64.0.1",
+            "100.127.255.255",
+            "127.0.0.1",
+            "169.254.1.1",
+            "0.0.0.0",
+            "fd00::1",
+            "fe80::1",
+            "::1",
         ] {
             assert!(!is_global(ip.parse().unwrap()), "{ip}");
         }
@@ -474,21 +518,58 @@ mod tests {
             lease: Duration::from_secs(3600),
             renewals: 0,
         };
-        let cgnat = PortMapping { external: a("100.70.1.2:27015"), ..upnp };
-        let stun_ok = stun::StunResult { mapped: Some(a("203.0.113.4:40001")), answers: 2, mapping_varies: false };
-        let stun_sym = stun::StunResult { mapping_varies: true, ..stun_ok };
-        let stun_other = stun::StunResult { mapped: Some(a("198.51.100.9:40001")), ..stun_ok };
-        assert_eq!(decide(local, Some(&upnp), Some(&stun_ok), false).method, Method::Upnp);
-        assert_eq!(decide(local, Some(&upnp), Some(&stun_ok), false).addresses, vec![a("203.0.113.4:27015"), local]);
+        let cgnat = PortMapping {
+            external: a("100.70.1.2:27015"),
+            ..upnp
+        };
+        let stun_ok = stun::StunResult {
+            mapped: Some(a("203.0.113.4:40001")),
+            answers: 2,
+            mapping_varies: false,
+        };
+        let stun_sym = stun::StunResult {
+            mapping_varies: true,
+            ..stun_ok
+        };
+        let stun_other = stun::StunResult {
+            mapped: Some(a("198.51.100.9:40001")),
+            ..stun_ok
+        };
+        assert_eq!(
+            decide(local, Some(&upnp), Some(&stun_ok), false).method,
+            Method::Upnp
+        );
+        assert_eq!(
+            decide(local, Some(&upnp), Some(&stun_ok), false).addresses,
+            vec![a("203.0.113.4:27015"), local]
+        );
         // A mapping on a router behind carrier-grade NAT is useless.
-        assert_eq!(decide(local, Some(&cgnat), Some(&stun_other), true).method, Method::HolePunch);
+        assert_eq!(
+            decide(local, Some(&cgnat), Some(&stun_other), true).method,
+            Method::HolePunch
+        );
         // The mapped address disagrees with STUN (double NAT with a public inner WAN).
-        assert_eq!(decide(local, Some(&upnp), Some(&stun_other), false).method, Method::HolePunch);
-        assert_eq!(decide(local, None, Some(&stun_sym), true).method, Method::Relay);
-        assert_eq!(decide(local, None, Some(&stun_sym), false).method, Method::LanOnly);
+        assert_eq!(
+            decide(local, Some(&upnp), Some(&stun_other), false).method,
+            Method::HolePunch
+        );
+        assert_eq!(
+            decide(local, None, Some(&stun_sym), true).method,
+            Method::Relay
+        );
+        assert_eq!(
+            decide(local, None, Some(&stun_sym), false).method,
+            Method::LanOnly
+        );
         let public = a("203.0.113.4:27015");
-        let stun_public = stun::StunResult { mapped: Some(public), ..stun_ok };
-        assert_eq!(decide(public, None, Some(&stun_public), false).method, Method::Public);
+        let stun_public = stun::StunResult {
+            mapped: Some(public),
+            ..stun_ok
+        };
+        assert_eq!(
+            decide(public, None, Some(&stun_public), false).method,
+            Method::Public
+        );
         assert_eq!(decide(local, None, None, false).method, Method::LanOnly);
     }
 }

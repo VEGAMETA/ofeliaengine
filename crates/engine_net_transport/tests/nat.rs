@@ -2,6 +2,8 @@
 //! through the endpoint, and a full co-op join through two NATs by hole punching.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Real sockets and mock routers on other threads: plain sleeps are fine here.
+#![allow(clippy::disallowed_methods)]
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpListener, UdpSocket as StdUdp};
@@ -11,14 +13,20 @@ use std::time::{Duration, Instant};
 
 use engine_net_transport::memory::{MemoryNetwork, NatBehavior};
 use engine_net_transport::nat::punch::{LocalRendezvous, PunchState, Puncher, Rendezvous};
-use engine_net_transport::nat::{self, MappingStatus, Method, NatConfig, NatSession, PortMapper, pmp, stun};
+use engine_net_transport::nat::{
+    self, MappingStatus, Method, NatConfig, NatSession, PortMapper, pmp, stun,
+};
 use engine_net_transport::*;
 
 fn addr(s: &str) -> SocketAddr {
     s.parse().unwrap()
 }
 
-fn wait_for(mapper: &PortMapper, what: impl Fn(&MappingStatus) -> bool, secs: u64) -> MappingStatus {
+fn wait_for(
+    mapper: &PortMapper,
+    what: impl Fn(&MappingStatus) -> bool,
+    secs: u64,
+) -> MappingStatus {
     let deadline = Instant::now() + Duration::from_secs(secs);
     loop {
         let s = mapper.status();
@@ -46,7 +54,8 @@ impl MockIgd {
         let stop = Arc::new(AtomicBool::new(false));
         {
             let stop = stop.clone();
-            ssdp.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+            ssdp.set_read_timeout(Some(Duration::from_millis(50)))
+                .unwrap();
             std::thread::spawn(move || {
                 let mut buf = [0u8; 2048];
                 while !stop.load(Ordering::Relaxed) {
@@ -74,7 +83,9 @@ impl MockIgd {
                         continue;
                     };
                     stream.set_nonblocking(false).unwrap();
-                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
                     let mut req = Vec::new();
                     let mut buf = [0u8; 4096];
                     loop {
@@ -87,7 +98,11 @@ impl MockIgd {
                         if let Some(head_end) = text.find("\r\n\r\n") {
                             let len = text[..head_end]
                                 .lines()
-                                .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+                                .find_map(|l| {
+                                    l.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .map(|v| v.trim().parse::<usize>().unwrap())
+                                })
                                 .unwrap_or(0);
                             if req.len() >= head_end + 4 + len {
                                 break;
@@ -97,29 +112,73 @@ impl MockIgd {
                     let text = String::from_utf8_lossy(&req).into_owned();
                     let (status, body) = if text.starts_with("GET /rootDesc.xml") {
                         // Chunked, as some routers send it.
-                        (200, String::from(
-                            "<?xml version=\"1.0\"?><root xmlns=\"urn:schemas-upnp-org:device-1-0\"><device><deviceList><device><deviceList><device>\
+                        (
+                            200,
+                            String::from(
+                                "<?xml version=\"1.0\"?><root xmlns=\"urn:schemas-upnp-org:device-1-0\"><device><deviceList><device><deviceList><device>\
                              <serviceList><service><serviceType>urn:schemas-upnp-org:service:WANIPConnection:1</serviceType>\
                              <controlURL>/ctl/IPConn</controlURL></service></serviceList></device></deviceList></device></deviceList></device></root>",
-                        ))
+                            ),
+                        )
                     } else {
-                        let action = text.split("SOAPAction: \"").nth(1).and_then(|s| s.split('#').nth(1)).and_then(|s| s.split('"').next()).unwrap_or("").to_string();
-                        let arg = |name: &str| text.split(&format!("<{name}>")).nth(1).and_then(|s| s.split('<').next()).unwrap_or("").to_string();
+                        let action = text
+                            .split("SOAPAction: \"")
+                            .nth(1)
+                            .and_then(|s| s.split('#').nth(1))
+                            .and_then(|s| s.split('"').next())
+                            .unwrap_or("")
+                            .to_string();
+                        let arg = |name: &str| {
+                            text.split(&format!("<{name}>"))
+                                .nth(1)
+                                .and_then(|s| s.split('<').next())
+                                .unwrap_or("")
+                                .to_string()
+                        };
                         match action.as_str() {
-                            "GetExternalIPAddress" => (200, String::from("<s:Envelope><s:Body><u:GetExternalIPAddressResponse><NewExternalIPAddress>203.0.113.77</NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body></s:Envelope>")),
+                            "GetExternalIPAddress" => (
+                                200,
+                                String::from(
+                                    "<s:Envelope><s:Body><u:GetExternalIPAddressResponse><NewExternalIPAddress>203.0.113.77</NewExternalIPAddress></u:GetExternalIPAddressResponse></s:Body></s:Envelope>",
+                                ),
+                            ),
                             "AddPortMapping" => {
                                 let lease = arg("NewLeaseDuration");
-                                calls.lock().unwrap().push(format!("add {} {} {} {}", arg("NewExternalPort"), arg("NewInternalPort"), arg("NewInternalClient"), lease));
+                                calls.lock().unwrap().push(format!(
+                                    "add {} {} {} {}",
+                                    arg("NewExternalPort"),
+                                    arg("NewInternalPort"),
+                                    arg("NewInternalClient"),
+                                    lease
+                                ));
                                 if lease_zero_only && lease != "0" {
-                                    (500, String::from("<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>725</errorCode></UPnPError></detail></s:Fault></s:Body></s:Envelope>"))
+                                    (
+                                        500,
+                                        String::from(
+                                            "<s:Envelope><s:Body><s:Fault><detail><UPnPError><errorCode>725</errorCode></UPnPError></detail></s:Fault></s:Body></s:Envelope>",
+                                        ),
+                                    )
                                 } else {
                                     lease_zero_only = only_permanent;
-                                    (200, String::from("<s:Envelope><s:Body><u:AddPortMappingResponse/></s:Body></s:Envelope>"))
+                                    (
+                                        200,
+                                        String::from(
+                                            "<s:Envelope><s:Body><u:AddPortMappingResponse/></s:Body></s:Envelope>",
+                                        ),
+                                    )
                                 }
                             }
                             "DeletePortMapping" => {
-                                calls.lock().unwrap().push(format!("delete {}", arg("NewExternalPort")));
-                                (200, String::from("<s:Envelope><s:Body><u:DeletePortMappingResponse/></s:Body></s:Envelope>"))
+                                calls
+                                    .lock()
+                                    .unwrap()
+                                    .push(format!("delete {}", arg("NewExternalPort")));
+                                (
+                                    200,
+                                    String::from(
+                                        "<s:Envelope><s:Body><u:DeletePortMappingResponse/></s:Body></s:Envelope>",
+                                    ),
+                                )
                             }
                             _ => (500, String::from("<errorCode>401</errorCode>")),
                         }
@@ -127,15 +186,26 @@ impl MockIgd {
                     let chunked = text.starts_with("GET");
                     let response = if chunked {
                         let (a, b) = body.split_at(body.len() / 2);
-                        format!("HTTP/1.1 {status} OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/xml\r\n\r\n{:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n", a.len(), b.len())
+                        format!(
+                            "HTTP/1.1 {status} OK\r\nTransfer-Encoding: chunked\r\nContent-Type: text/xml\r\n\r\n{:x}\r\n{a}\r\n{:x}\r\n{b}\r\n0\r\n\r\n",
+                            a.len(),
+                            b.len()
+                        )
                     } else {
-                        format!("HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\n\r\n{body}", body.len())
+                        format!(
+                            "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nContent-Type: text/xml\r\n\r\n{body}",
+                            body.len()
+                        )
                     };
                     let _ = stream.write_all(response.as_bytes());
                 }
             });
         }
-        Self { ssdp: ssdp_addr, calls, stop }
+        Self {
+            ssdp: ssdp_addr,
+            calls,
+            stop,
+        }
     }
 }
 
@@ -157,12 +227,21 @@ fn upnp_maps_renews_and_removes_one_port() {
     };
     let mapper = PortMapper::start(config, 27015);
     let status = wait_for(&mapper, |s| !matches!(s, MappingStatus::Pending), 5);
-    let MappingStatus::Mapped(m) = status else { panic!("{status:?}") };
+    let MappingStatus::Mapped(m) = status else {
+        panic!("{status:?}")
+    };
     assert_eq!(m.method, Method::Upnp);
     assert_eq!(m.external, addr("203.0.113.77:27015"));
     // Renewed at half the 2 s lease.
-    let status = wait_for(&mapper, |s| matches!(s, MappingStatus::Mapped(m) if m.renewals >= 1), 5);
-    assert!(matches!(status, MappingStatus::Mapped(m) if m.renewals >= 1), "{status:?}");
+    let status = wait_for(
+        &mapper,
+        |s| matches!(s, MappingStatus::Mapped(m) if m.renewals >= 1),
+        5,
+    );
+    assert!(
+        matches!(status, MappingStatus::Mapped(m) if m.renewals >= 1),
+        "{status:?}"
+    );
     mapper.stop();
     let calls = igd.calls.lock().unwrap().clone();
     assert_eq!(calls[0], "add 27015 27015 127.0.0.1 2");
@@ -182,17 +261,29 @@ fn upnp_falls_back_to_a_permanent_mapping_and_still_removes_it() {
     };
     let mapper = PortMapper::start(config, 30000);
     let status = wait_for(&mapper, |s| !matches!(s, MappingStatus::Pending), 5);
-    assert!(matches!(status, MappingStatus::Mapped(m) if m.lease.is_zero()), "{status:?}");
+    assert!(
+        matches!(status, MappingStatus::Mapped(m) if m.lease.is_zero()),
+        "{status:?}"
+    );
     drop(mapper);
     let calls = igd.calls.lock().unwrap().clone();
-    assert_eq!(calls, vec!["add 30000 30000 127.0.0.1 3600", "add 30000 30000 127.0.0.1 0", "delete 30000"]);
+    assert_eq!(
+        calls,
+        vec![
+            "add 30000 30000 127.0.0.1 3600",
+            "add 30000 30000 127.0.0.1 0",
+            "delete 30000"
+        ]
+    );
 }
 
 /// A PCP server, or a NAT-PMP-only one (answers PCP with "unsupported version").
 fn mock_pmp(pcp: bool) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>) {
     let socket = StdUdp::bind("127.0.0.1:0").unwrap();
     let at = socket.local_addr().unwrap();
-    socket.set_read_timeout(Some(Duration::from_millis(50))).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
     let calls = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
     let (c, s) = (calls.clone(), stop.clone());
@@ -200,7 +291,9 @@ fn mock_pmp(pcp: bool) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>)
         let mut buf = [0u8; 1100];
         let mut nonces: Vec<[u8; 12]> = Vec::new();
         while !s.load(Ordering::Relaxed) {
-            let Ok((n, from)) = socket.recv_from(&mut buf) else { continue };
+            let Ok((n, from)) = socket.recv_from(&mut buf) else {
+                continue;
+            };
             let req = &buf[..n];
             if req[0] == 2 {
                 if !pcp {
@@ -212,17 +305,29 @@ fn mock_pmp(pcp: bool) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>)
                 if !nonces.contains(&nonce) {
                     nonces.push(nonce);
                 }
-                c.lock().unwrap().push(format!("pcp {} {} nonce#{}", u16::from_be_bytes([req[40], req[41]]), lifetime, nonces.iter().position(|x| *x == nonce).unwrap()));
+                c.lock().unwrap().push(format!(
+                    "pcp {} {} nonce#{}",
+                    u16::from_be_bytes([req[40], req[41]]),
+                    lifetime,
+                    nonces.iter().position(|x| *x == nonce).unwrap()
+                ));
                 let mut r = [0u8; 60];
                 r[0] = 2;
                 r[1] = 0x81;
                 r[4..8].copy_from_slice(&lifetime.to_be_bytes());
                 r[24..60].copy_from_slice(&req[24..60]);
                 r[42..44].copy_from_slice(&40_123u16.to_be_bytes());
-                r[44..60].copy_from_slice(&"::ffff:203.0.113.88".parse::<std::net::Ipv6Addr>().unwrap().octets());
+                r[44..60].copy_from_slice(
+                    &"::ffff:203.0.113.88"
+                        .parse::<std::net::Ipv6Addr>()
+                        .unwrap()
+                        .octets(),
+                );
                 socket.send_to(&r, from).unwrap();
             } else if req[0] == 0 && req[1] == 0 {
-                socket.send_to(&[0, 0x80, 0, 0, 0, 0, 0, 1, 203, 0, 113, 99], from).unwrap();
+                socket
+                    .send_to(&[0, 0x80, 0, 0, 0, 0, 0, 1, 203, 0, 113, 99], from)
+                    .unwrap();
             } else if req[0] == 0 && req[1] == 1 {
                 let internal = u16::from_be_bytes([req[4], req[5]]);
                 let lifetime = u32::from_be_bytes(req[8..12].try_into().unwrap());
@@ -230,7 +335,8 @@ fn mock_pmp(pcp: bool) -> (SocketAddr, Arc<Mutex<Vec<String>>>, Arc<AtomicBool>)
                 let mut r = [0u8; 16];
                 r[1] = 0x81;
                 r[8..10].copy_from_slice(&internal.to_be_bytes());
-                r[10..12].copy_from_slice(&(if lifetime == 0 { 0u16 } else { 40_124 }).to_be_bytes());
+                r[10..12]
+                    .copy_from_slice(&(if lifetime == 0 { 0u16 } else { 40_124 }).to_be_bytes());
                 r[12..16].copy_from_slice(&lifetime.to_be_bytes());
                 socket.send_to(&r, from).unwrap();
             }
@@ -250,9 +356,18 @@ fn pcp_maps_renews_with_the_same_nonce_and_removes() {
         ..NatConfig::default()
     };
     let mapper = PortMapper::start(config, 27016);
-    let status = wait_for(&mapper, |s| matches!(s, MappingStatus::Mapped(m) if m.renewals >= 1), 5);
-    let MappingStatus::Mapped(m) = status else { panic!("{status:?}") };
-    assert_eq!((m.method, m.external), (Method::Pcp, addr("203.0.113.88:40123")));
+    let status = wait_for(
+        &mapper,
+        |s| matches!(s, MappingStatus::Mapped(m) if m.renewals >= 1),
+        5,
+    );
+    let MappingStatus::Mapped(m) = status else {
+        panic!("{status:?}")
+    };
+    assert_eq!(
+        (m.method, m.external),
+        (Method::Pcp, addr("203.0.113.88:40123"))
+    );
     mapper.stop();
     stop.store(true, Ordering::Relaxed);
     let calls = calls.lock().unwrap().clone();
@@ -265,12 +380,23 @@ fn pcp_maps_renews_with_the_same_nonce_and_removes() {
 fn nat_pmp_only_gateways_are_used_after_pcp_is_refused() {
     let (gw, calls, stop) = mock_pmp(false);
     let local: IpAddr = "127.0.0.1".parse().unwrap();
-    let m = pmp::map(gw, local, 27017, Duration::from_secs(7200), pmp::Retry::default(), None).unwrap();
+    let m = pmp::map(
+        gw,
+        local,
+        27017,
+        Duration::from_secs(7200),
+        pmp::Retry::default(),
+        None,
+    )
+    .unwrap();
     assert_eq!(m.protocol, pmp::PmpProtocol::NatPmp);
     assert_eq!(m.external, addr("203.0.113.99:40124"));
     pmp::unmap(gw, &m, pmp::Retry::default()).unwrap();
     stop.store(true, Ordering::Relaxed);
-    assert_eq!(*calls.lock().unwrap(), vec!["pmp 27017 7200", "pmp 27017 0"]);
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec!["pmp 27017 7200", "pmp 27017 0"]
+    );
 }
 
 #[test]
@@ -283,14 +409,21 @@ fn nothing_answering_fails_fast() {
         ssdp_target: silent.local_addr().unwrap(),
         gateway: Some(silent.local_addr().unwrap()),
         local_ip: Some("127.0.0.1".parse().unwrap()),
-        retry: pmp::Retry { initial: Duration::from_millis(50), attempts: 2 },
+        retry: pmp::Retry {
+            initial: Duration::from_millis(50),
+            attempts: 2,
+        },
         ..NatConfig::default()
     };
     let start = Instant::now();
     let mapper = PortMapper::start(config, 1234);
     let status = wait_for(&mapper, |s| !matches!(s, MappingStatus::Pending), 5);
     assert!(matches!(status, MappingStatus::Failed(_)), "{status:?}");
-    assert!(start.elapsed() < Duration::from_secs(2), "{:?}", start.elapsed());
+    assert!(
+        start.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        start.elapsed()
+    );
 }
 
 const PROTOCOL: u64 = 0x0f1e_0a77;
@@ -302,16 +435,24 @@ fn stun_through_the_endpoint() {
     for behavior in [NatBehavior::PortRestricted, NatBehavior::Symmetric] {
         let net = MemoryNetwork::new(4);
         let home = net.add_nat("198.51.100.20".parse().unwrap(), behavior);
-        let mut servers = [net.bind(addr("203.0.113.1:3478")), net.bind(addr("203.0.113.2:3478"))];
+        let mut servers = [
+            net.bind(addr("203.0.113.1:3478")),
+            net.bind(addr("203.0.113.2:3478")),
+        ];
         let t0 = Instant::now();
         let mut host = Endpoint::server(
             net.bind_behind_nat(addr("192.168.0.5:27015"), home),
             EndpointConfig::new(PROTOCOL),
-            ServerConfig { private_key: Key::random(), max_clients: 2, public_addresses: vec![] },
+            ServerConfig {
+                private_key: Key::random(),
+                max_clients: 2,
+                public_addresses: vec![],
+            },
             t0,
         )
         .unwrap();
-        let mut session = NatSession::new(&[addr("203.0.113.1:3478"), addr("203.0.113.2:3478")], t0);
+        let mut session =
+            NatSession::new(&[addr("203.0.113.1:3478"), addr("203.0.113.2:3478")], t0);
         let mut buf = [0u8; 256];
         let mut out = [0u8; 256];
         for ms in (0..1000).step_by(10) {
@@ -330,10 +471,17 @@ fn stun_through_the_endpoint() {
         }
         let r = session.stun_result().unwrap();
         assert_eq!(r.answers, 2);
-        assert_eq!(r.mapped.unwrap().ip(), "198.51.100.20".parse::<IpAddr>().unwrap());
+        assert_eq!(
+            r.mapped.unwrap().ip(),
+            "198.51.100.20".parse::<IpAddr>().unwrap()
+        );
         assert_eq!(r.mapping_varies, behavior == NatBehavior::Symmetric);
         let report = nat::decide(addr("192.168.0.5:27015"), None, Some(&r), false);
-        let expected = if behavior == NatBehavior::Symmetric { Method::LanOnly } else { Method::HolePunch };
+        let expected = if behavior == NatBehavior::Symmetric {
+            Method::LanOnly
+        } else {
+            Method::HolePunch
+        };
         assert_eq!(report.method, expected);
     }
 }
@@ -345,7 +493,10 @@ fn stun_through_the_endpoint() {
 fn coop_join_through_two_nats_by_hole_punching() {
     assert!(coop_join(true), "the player did not get through");
     // Control: without the host punching toward the player, its NAT drops the requests.
-    assert!(!coop_join(false), "joined without punching: the test proves nothing");
+    assert!(
+        !coop_join(false),
+        "joined without punching: the test proves nothing"
+    );
 }
 
 fn coop_join(host_punches: bool) -> bool {
@@ -359,20 +510,25 @@ fn coop_join(host_punches: bool) -> bool {
     let mut host = Endpoint::server(
         net.bind_behind_nat(host_lan, host_nat),
         EndpointConfig::new(PROTOCOL),
-        ServerConfig { private_key: key.clone(), max_clients: 4, public_addresses: vec![] },
+        ServerConfig {
+            private_key: key.clone(),
+            max_clients: 4,
+            public_addresses: vec![],
+        },
         t0,
     )
     .unwrap();
     let mut host_nat_session = NatSession::new(&[addr("203.0.113.1:3478")], t0);
     let mut buf = [0u8; 256];
     let mut out = [0u8; 256];
-    let mut serve_stun = |now: Instant, stun_server: &mut engine_net_transport::memory::MemorySocket| {
-        while let Some((n, from)) = stun_server.recv_from(now, &mut buf).unwrap() {
-            if let Some(m) = stun::answer_binding(&buf[..n], from, &mut out) {
-                stun_server.send_to(now, from, &out[..m]).unwrap();
+    let mut serve_stun =
+        |now: Instant, stun_server: &mut engine_net_transport::memory::MemorySocket| {
+            while let Some((n, from)) = stun_server.recv_from(now, &mut buf).unwrap() {
+                if let Some(m) = stun::answer_binding(&buf[..n], from, &mut out) {
+                    stun_server.send_to(now, from, &out[..m]).unwrap();
+                }
             }
-        }
-    };
+        };
     // 1. The host learns its public address.
     let mut now = t0;
     while !host_nat_session.stun_done(now) {
@@ -381,7 +537,12 @@ fn coop_join(host_punches: bool) -> bool {
         host.update(now);
         host_nat_session.service(&mut host, now);
     }
-    let report = nat::decide(host_lan, None, host_nat_session.stun_result().as_ref(), false);
+    let report = nat::decide(
+        host_lan,
+        None,
+        host_nat_session.stun_result().as_ref(),
+        false,
+    );
     assert_eq!(report.method, Method::HolePunch);
     host.set_public_addresses(&report.addresses);
     // 2. The host issues the player's token (it is the one admitting players) and posts
@@ -423,16 +584,33 @@ fn coop_join(host_punches: bool) -> bool {
         host_nat_session.service(&mut host, now);
         if !posted && player_nat_session.stun_done(now) {
             let mine = player_nat_session.stun_result().unwrap().mapped.unwrap();
-            player_board.publish(session_id, &AddressList::new(&[mine, player.local_addr().unwrap()]).unwrap());
+            player_board.publish(
+                session_id,
+                &AddressList::new(&[mine, player.local_addr().unwrap()]).unwrap(),
+            );
             let theirs = player_board.peer_candidates(session_id).unwrap();
-            player_nat_session.punches.push(Puncher::new(&token.punch_key(), session_id, true, theirs, now, Duration::from_secs(5)));
+            player_nat_session.punches.push(Puncher::new(
+                &token.punch_key(),
+                session_id,
+                true,
+                theirs,
+                now,
+                Duration::from_secs(5),
+            ));
             posted = true;
         }
         if host_punches
             && host_nat_session.punches.is_empty()
             && let Some(theirs) = host_board.peer_candidates(session_id)
         {
-            host_nat_session.punches.push(Puncher::new(&token.punch_key(), session_id, false, theirs, now, Duration::from_secs(5)));
+            host_nat_session.punches.push(Puncher::new(
+                &token.punch_key(),
+                session_id,
+                false,
+                theirs,
+                now,
+                Duration::from_secs(5),
+            ));
         }
         while let Some(e) = player.poll_event() {
             if let Event::Connected(id) = e {
@@ -452,6 +630,9 @@ fn coop_join(host_punches: bool) -> bool {
     assert_eq!(host.connection_count(), 1);
     let peer = host.peer_addr(host.connections().next().unwrap()).unwrap();
     assert_eq!(peer.ip(), "198.51.100.2".parse::<IpAddr>().unwrap());
-    assert!(matches!(player_nat_session.punches[0].state(), PunchState::Open(_) | PunchState::Probing));
+    assert!(matches!(
+        player_nat_session.punches[0].state(),
+        PunchState::Open(_) | PunchState::Probing
+    ));
     true
 }

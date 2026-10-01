@@ -43,7 +43,12 @@ fn xor_address(value: &[u8], transaction: &[u8; 12]) -> Option<SocketAddr> {
     let ip = match family {
         1 => {
             let b = value.get(4..8)?;
-            IpAddr::V4(Ipv4Addr::new(b[0] ^ cookie[0], b[1] ^ cookie[1], b[2] ^ cookie[2], b[3] ^ cookie[3]))
+            IpAddr::V4(Ipv4Addr::new(
+                b[0] ^ cookie[0],
+                b[1] ^ cookie[1],
+                b[2] ^ cookie[2],
+                b[3] ^ cookie[3],
+            ))
         }
         2 => {
             let b = value.get(4..20)?;
@@ -66,7 +71,9 @@ fn plain_address(value: &[u8]) -> Option<SocketAddr> {
     let port = u16::from_be_bytes([*value.get(2)?, *value.get(3)?]);
     let ip = match family {
         1 => IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(value.get(4..8)?).ok()?)),
-        2 => IpAddr::V6(Ipv6Addr::from(<[u8; 16]>::try_from(value.get(4..20)?).ok()?)),
+        2 => IpAddr::V6(Ipv6Addr::from(
+            <[u8; 16]>::try_from(value.get(4..20)?).ok()?,
+        )),
         _ => return None,
     };
     Some(SocketAddr::new(ip, port))
@@ -87,7 +94,9 @@ pub fn parse_response(data: &[u8]) -> Option<([u8; 12], SocketAddr)> {
         let alen = usize::from(u16::from_be_bytes([body[at + 2], body[at + 3]]));
         let value = body.get(at + 4..at + 4 + alen)?;
         match kind {
-            ATTR_XOR_MAPPED_ADDRESS => return Some((transaction, xor_address(value, &transaction)?)),
+            ATTR_XOR_MAPPED_ADDRESS => {
+                return Some((transaction, xor_address(value, &transaction)?));
+            }
             ATTR_MAPPED_ADDRESS => plain = plain_address(value),
             _ => {}
         }
@@ -162,7 +171,9 @@ pub struct StunProbe {
 
 impl std::fmt::Debug for StunProbe {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("StunProbe").field("result", &self.result()).finish()
+        f.debug_struct("StunProbe")
+            .field("result", &self.result())
+            .finish()
     }
 }
 
@@ -188,7 +199,11 @@ impl StunProbe {
     }
 
     /// The next request due now: fills `out` and returns where to send it.
-    pub fn poll_transmit(&mut self, now: Instant, out: &mut [u8; REQUEST_BYTES]) -> Option<SocketAddr> {
+    pub fn poll_transmit(
+        &mut self,
+        now: Instant,
+        out: &mut [u8; REQUEST_BYTES],
+    ) -> Option<SocketAddr> {
         for q in self.queries.iter_mut().flatten() {
             if q.answer.is_none() && q.attempts < ATTEMPTS && now >= q.next_send {
                 q.attempts += 1;
@@ -203,7 +218,9 @@ impl StunProbe {
 
     /// Offers a received datagram; returns whether it was an answer to this probe.
     pub fn handle(&mut self, from: SocketAddr, data: &[u8]) -> bool {
-        let Some((transaction, mapped)) = parse_response(data) else { return false };
+        let Some((transaction, mapped)) = parse_response(data) else {
+            return false;
+        };
         for q in self.queries.iter_mut().flatten() {
             if q.transaction == transaction && q.server == from {
                 q.answer = Some(mapped);
@@ -223,7 +240,12 @@ impl StunProbe {
 
     /// The findings so far.
     pub fn result(&self) -> StunResult {
-        let answers: Vec<SocketAddr> = self.queries.iter().flatten().filter_map(|q| q.answer).collect();
+        let answers: Vec<SocketAddr> = self
+            .queries
+            .iter()
+            .flatten()
+            .filter_map(|q| q.answer)
+            .collect();
         StunResult {
             mapped: answers.first().copied(),
             answers: answers.len(),
@@ -242,7 +264,10 @@ mod tests {
         // RFC 5769 §2.2 sample IPv4 response (attributes: SOFTWARE, XOR-MAPPED-ADDRESS,
         // MESSAGE-INTEGRITY, FINGERPRINT); mapped address 192.0.2.1:32853.
         let hex = "0101003c2112a442b7e7a701bc34d686fa87dfae8022000b7465737420766563746f7220002000080001a147e112a643000800142b91f599fd9e90c38c7489f92af9ba53f06be7d780280004c07d4c96";
-        let bytes: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let bytes: Vec<u8> = (0..hex.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+            .collect();
         let (_, addr) = parse_response(&bytes).unwrap();
         assert_eq!(addr, "192.0.2.1:32853".parse().unwrap());
     }

@@ -75,13 +75,24 @@ fn aad(protocol_id: u64, prefix: u8) -> [u8; 17] {
 
 /// Finishes an encrypted packet whose plaintext is already at
 /// `buf[header_len(seq)..header_len(seq) + len]`; returns the packet's length.
-pub(crate) fn seal(buf: &mut [u8], kind: Kind, seq: u64, protocol_id: u64, cipher: &Cipher, len: usize) -> usize {
+pub(crate) fn seal(
+    buf: &mut [u8],
+    kind: Kind,
+    seq: u64,
+    protocol_id: u64,
+    cipher: &Cipher,
+    len: usize,
+) -> usize {
     let n = sequence_bytes(seq);
     let prefix = ((n as u8) << 4) | kind as u8;
     buf[0] = prefix;
     buf[1..1 + n].copy_from_slice(&seq.to_le_bytes()[..n]);
     let h = 1 + n;
-    let tag = cipher.seal(&sequence_nonce(seq), &aad(protocol_id, prefix), &mut buf[h..h + len]);
+    let tag = cipher.seal(
+        &sequence_nonce(seq),
+        &aad(protocol_id, prefix),
+        &mut buf[h..h + len],
+    );
     buf[h + len..h + len + TAG_BYTES].copy_from_slice(&tag);
     h + len + TAG_BYTES
 }
@@ -115,7 +126,11 @@ pub(crate) fn open(
 ) -> Option<std::ops::Range<usize>> {
     let prefix = packet[0];
     let len = cipher
-        .open_appended(&sequence_nonce(seq), &aad(protocol_id, prefix), &mut packet[header..])
+        .open_appended(
+            &sequence_nonce(seq),
+            &aad(protocol_id, prefix),
+            &mut packet[header..],
+        )
         .ok()?;
     Some(header..header + len)
 }
@@ -182,7 +197,10 @@ mod tests {
                 let mut copy = buf;
                 copy[i] ^= 0x01;
                 if let Some((_, s2, h2)) = parse_header(&copy[..n]) {
-                    assert!(open(&mut copy[..n], s2, h2, 7, &cipher).is_none(), "byte {i}");
+                    assert!(
+                        open(&mut copy[..n], s2, h2, 7, &cipher).is_none(),
+                        "byte {i}"
+                    );
                 }
             }
         }

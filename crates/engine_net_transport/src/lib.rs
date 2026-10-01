@@ -85,8 +85,8 @@ mod token;
 pub use channel::{ChannelConfig, ChannelKind, FRAGMENT_BYTES, MAX_CHANNELS, MessageId, SendError};
 pub use crypto::Key;
 pub use endpoint::{
-    ChannelId, ConfigError, ConnectionId, Connections, ConnectionStats, DisconnectReason, Endpoint, EndpointConfig,
-    EndpointStats, Event, ServerConfig, Transport,
+    ChannelId, ConfigError, ConnectionId, ConnectionStats, Connections, DisconnectReason, Endpoint,
+    EndpointConfig, EndpointStats, Event, ServerConfig, Transport,
 };
 pub use packet::is_transport_packet;
 pub use socket::{DatagramSocket, UdpSocket};

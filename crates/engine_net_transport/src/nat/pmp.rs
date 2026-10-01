@@ -67,7 +67,13 @@ fn from_pcp_addr(b: [u8; 16]) -> IpAddr {
 }
 
 /// A PCP MAP request (60 bytes).
-pub fn pcp_map_request(local: IpAddr, nonce: &[u8; 12], internal_port: u16, suggested_port: u16, lifetime: u32) -> [u8; 60] {
+pub fn pcp_map_request(
+    local: IpAddr,
+    nonce: &[u8; 12],
+    internal_port: u16,
+    suggested_port: u16,
+    lifetime: u32,
+) -> [u8; 60] {
     let mut r = [0u8; 60];
     r[0] = PCP_VERSION;
     r[1] = PCP_OPCODE_MAP;
@@ -136,7 +142,10 @@ pub fn parse_response(b: &[u8]) -> Option<PmpResponse> {
                 lifetime: u32::from_be_bytes(b[4..8].try_into().ok()?),
                 nonce: b[24..36].try_into().ok()?,
                 internal_port: u16::from_be_bytes([b[40], b[41]]),
-                external: SocketAddr::new(from_pcp_addr(b[44..60].try_into().ok()?), u16::from_be_bytes([b[42], b[43]])),
+                external: SocketAddr::new(
+                    from_pcp_addr(b[44..60].try_into().ok()?),
+                    u16::from_be_bytes([b[42], b[43]]),
+                ),
             })
         }
         0 => {
@@ -155,7 +164,9 @@ pub fn parse_response(b: &[u8]) -> Option<PmpResponse> {
                 }),
                 // A NAT-PMP server answering an unknown version echoes the opcode with
                 // the response bit and result 1.
-                _ if result == u16::from(UNSUPPORTED_VERSION) => Some(PmpResponse::UnsupportedVersion),
+                _ if result == u16::from(UNSUPPORTED_VERSION) => {
+                    Some(PmpResponse::UnsupportedVersion)
+                }
                 _ => None,
             }
         }
@@ -210,9 +221,18 @@ fn exchange(
                         return Ok(r);
                     }
                 }
-                Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => break,
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                    ) =>
+                {
+                    break;
+                }
                 // An ICMP "port unreachable": nothing listens on the gateway.
-                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => return Err(NatError::NoAnswer),
+                Err(e) if e.kind() == io::ErrorKind::ConnectionReset => {
+                    return Err(NatError::NoAnswer);
+                }
                 Err(e) => return Err(e.into()),
             }
         }
@@ -250,7 +270,12 @@ pub fn map(
             PmpResponse::UnsupportedVersion => true,
             _ => false,
         }) {
-            Ok(PmpResponse::Pcp { result: 0, lifetime, external, .. }) => {
+            Ok(PmpResponse::Pcp {
+                result: 0,
+                lifetime,
+                external,
+                ..
+            }) => {
                 return Ok(PmpMapping {
                     protocol: PmpProtocol::Pcp,
                     external,
@@ -260,7 +285,9 @@ pub fn map(
                     local,
                 });
             }
-            Ok(PmpResponse::Pcp { result, .. }) => return Err(NatError::Refused(u16::from(result))),
+            Ok(PmpResponse::Pcp { result, .. }) => {
+                return Err(NatError::Refused(u16::from(result)));
+            }
             // Unsupported version: a NAT-PMP-only gateway (RFC 6887 §9), NAT-PMP below.
             Ok(_) => {}
             // Silence: neither protocol (NAT-PMP servers answer unknown versions).
@@ -282,10 +309,19 @@ pub fn map(
     request[4..6].copy_from_slice(&internal_port.to_be_bytes());
     request[6..8].copy_from_slice(&suggested.to_be_bytes());
     request[8..12].copy_from_slice(&seconds.to_be_bytes());
-    match exchange(&socket, gateway, &request, retry, &mut |r| {
-        matches!(r, PmpResponse::Map { internal_port: p, .. } if p == internal_port)
-    })? {
-        PmpResponse::Map { result: 0, external_port, lifetime, .. } => Ok(PmpMapping {
+    match exchange(
+        &socket,
+        gateway,
+        &request,
+        retry,
+        &mut |r| matches!(r, PmpResponse::Map { internal_port: p, .. } if p == internal_port),
+    )? {
+        PmpResponse::Map {
+            result: 0,
+            external_port,
+            lifetime,
+            ..
+        } => Ok(PmpMapping {
             protocol: PmpProtocol::NatPmp,
             external: SocketAddr::new(IpAddr::V4(ip), external_port),
             lifetime: Duration::from_secs(u64::from(lifetime)),
@@ -303,18 +339,27 @@ pub fn unmap(gateway: SocketAddr, mapping: &PmpMapping, retry: Retry) -> Result<
     let socket = socket_for(mapping.local)?;
     match mapping.protocol {
         PmpProtocol::Pcp => {
-            let request = pcp_map_request(mapping.local, &mapping.nonce, mapping.internal_port, 0, 0);
-            exchange(&socket, gateway, &request, retry, &mut |r| {
-                matches!(r, PmpResponse::Pcp { nonce, .. } if nonce == mapping.nonce)
-            })?;
+            let request =
+                pcp_map_request(mapping.local, &mapping.nonce, mapping.internal_port, 0, 0);
+            exchange(
+                &socket,
+                gateway,
+                &request,
+                retry,
+                &mut |r| matches!(r, PmpResponse::Pcp { nonce, .. } if nonce == mapping.nonce),
+            )?;
         }
         PmpProtocol::NatPmp => {
             let mut request = [0u8; 12];
             request[1] = NATPMP_OP_MAP_UDP;
             request[4..6].copy_from_slice(&mapping.internal_port.to_be_bytes());
-            exchange(&socket, gateway, &request, retry, &mut |r| {
-                matches!(r, PmpResponse::Map { internal_port, .. } if internal_port == mapping.internal_port)
-            })?;
+            exchange(
+                &socket,
+                gateway,
+                &request,
+                retry,
+                &mut |r| matches!(r, PmpResponse::Map { internal_port, .. } if internal_port == mapping.internal_port),
+            )?;
         }
     }
     Ok(())
@@ -331,11 +376,17 @@ mod tests {
         assert_eq!(r[0], 2);
         assert_eq!(r[1], 1);
         assert_eq!(u32::from_be_bytes(r[4..8].try_into().unwrap()), 7200);
-        assert_eq!(&r[8..24], &"::ffff:192.168.1.5".parse::<Ipv6Addr>().unwrap().octets());
+        assert_eq!(
+            &r[8..24],
+            &"::ffff:192.168.1.5".parse::<Ipv6Addr>().unwrap().octets()
+        );
         assert_eq!(&r[24..36], &[7; 12]);
         assert_eq!(r[36], 17);
         assert_eq!(u16::from_be_bytes([r[40], r[41]]), 27015);
-        assert_eq!(&r[44..60], &"::ffff:0.0.0.0".parse::<Ipv6Addr>().unwrap().octets());
+        assert_eq!(
+            &r[44..60],
+            &"::ffff:0.0.0.0".parse::<Ipv6Addr>().unwrap().octets()
+        );
     }
 
     #[test]
@@ -347,8 +398,16 @@ mod tests {
         b[12..16].copy_from_slice(&3600u32.to_be_bytes());
         assert_eq!(
             parse_response(&b),
-            Some(PmpResponse::Map { result: 0, internal_port: 27015, external_port: 40000, lifetime: 3600 })
+            Some(PmpResponse::Map {
+                result: 0,
+                internal_port: 27015,
+                external_port: 40000,
+                lifetime: 3600
+            })
         );
-        assert_eq!(parse_response(&[0, 0x81, 0, 1]), Some(PmpResponse::UnsupportedVersion));
+        assert_eq!(
+            parse_response(&[0, 0x81, 0, 1]),
+            Some(PmpResponse::UnsupportedVersion)
+        );
     }
 }

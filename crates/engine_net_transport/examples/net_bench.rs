@@ -8,6 +8,8 @@
 //!    UDP, with busy polling and with blocking waits (the I/O-thread question).
 
 #![allow(clippy::print_stdout, clippy::unwrap_used, clippy::expect_used)]
+// Real sockets and mock routers on other threads: plain sleeps are fine here.
+#![allow(clippy::disallowed_methods)]
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
@@ -43,9 +45,15 @@ impl DatagramSocket for PipeSocket {
         Ok(())
     }
 
-    fn recv_from(&mut self, _now: Instant, out: &mut [u8]) -> std::io::Result<Option<(usize, SocketAddr)>> {
+    fn recv_from(
+        &mut self,
+        _now: Instant,
+        out: &mut [u8],
+    ) -> std::io::Result<Option<(usize, SocketAddr)>> {
         let mut p = self.pipe.borrow_mut();
-        let Some((buf, n)) = p.queues[self.side].pop_front() else { return Ok(None) };
+        let Some((buf, n)) = p.queues[self.side].pop_front() else {
+            return Ok(None);
+        };
         out[..n].copy_from_slice(&buf[..n]);
         p.pool.push(buf);
         Ok(Some((n, self.peer)))
@@ -59,7 +67,11 @@ impl DatagramSocket for PipeSocket {
 fn config() -> EndpointConfig {
     let mut c = EndpointConfig::new(PROTOCOL);
     c.channels = vec![
-        ChannelConfig { buffer_bytes: 1 << 20, max_message_size: 512 * 1024, ..ChannelConfig::reliable() },
+        ChannelConfig {
+            buffer_bytes: 1 << 20,
+            max_message_size: 512 * 1024,
+            ..ChannelConfig::reliable()
+        },
         ChannelConfig::unreliable(),
         ChannelConfig::unreliable_sequenced(),
     ];
@@ -84,7 +96,10 @@ fn token(key: &Key, server: SocketAddr) -> ConnectToken {
     .unwrap()
 }
 
-fn connect<S: DatagramSocket>(server: &mut Endpoint<S>, client: &mut Endpoint<S>) -> (ConnectionId, ConnectionId) {
+fn connect<S: DatagramSocket>(
+    server: &mut Endpoint<S>,
+    client: &mut Endpoint<S>,
+) -> (ConnectionId, ConnectionId) {
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut c = None;
     while c.is_none() {
@@ -107,21 +122,47 @@ fn connect<S: DatagramSocket>(server: &mut Endpoint<S>, client: &mut Endpoint<S>
 
 fn pipe_pair() -> (Endpoint<PipeSocket>, Endpoint<PipeSocket>) {
     let pipe = Rc::new(RefCell::new(Pipe::default()));
-    let (sa, ca): (SocketAddr, SocketAddr) = ("10.0.0.1:1".parse().unwrap(), "10.0.0.2:1".parse().unwrap());
+    let (sa, ca): (SocketAddr, SocketAddr) =
+        ("10.0.0.1:1".parse().unwrap(), "10.0.0.2:1".parse().unwrap());
     let key = Key::random();
     let now = Instant::now();
     let server = Endpoint::server(
-        PipeSocket { pipe: pipe.clone(), side: 0, addr: sa, peer: ca },
+        PipeSocket {
+            pipe: pipe.clone(),
+            side: 0,
+            addr: sa,
+            peer: ca,
+        },
         config(),
-        ServerConfig { private_key: key.clone(), max_clients: 4, public_addresses: vec![sa] },
+        ServerConfig {
+            private_key: key.clone(),
+            max_clients: 4,
+            public_addresses: vec![sa],
+        },
         now,
     )
     .unwrap();
-    let client = Endpoint::client(PipeSocket { pipe, side: 1, addr: ca, peer: sa }, config(), token(&key, sa), now).unwrap();
+    let client = Endpoint::client(
+        PipeSocket {
+            pipe,
+            side: 1,
+            addr: ca,
+            peer: sa,
+        },
+        config(),
+        token(&key, sa),
+        now,
+    )
+    .unwrap();
     (server, client)
 }
 
-fn cpu_per_packet<S: DatagramSocket>(label: &str, server: &mut Endpoint<S>, client: &mut Endpoint<S>, message: usize) {
+fn cpu_per_packet<S: DatagramSocket>(
+    label: &str,
+    server: &mut Endpoint<S>,
+    client: &mut Endpoint<S>,
+    message: usize,
+) {
     let (c, s) = connect(server, client);
     let payload = vec![0x5au8; message];
     let rounds = 20_000;
@@ -176,11 +217,21 @@ fn udp_pair() -> (Endpoint<UdpSocket>, Endpoint<UdpSocket>) {
     let server = Endpoint::server(
         server_socket,
         config(),
-        ServerConfig { private_key: key.clone(), max_clients: 4, public_addresses: vec![sa] },
+        ServerConfig {
+            private_key: key.clone(),
+            max_clients: 4,
+            public_addresses: vec![sa],
+        },
         now,
     )
     .unwrap();
-    let client = Endpoint::client(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap(), config(), token(&key, sa), now).unwrap();
+    let client = Endpoint::client(
+        UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap(),
+        config(),
+        token(&key, sa),
+        now,
+    )
+    .unwrap();
     (server, client)
 }
 
@@ -301,7 +352,11 @@ fn latency(blocking: bool) {
         let mut server = Endpoint::server(
             server_socket,
             config(),
-            ServerConfig { private_key: server_key, max_clients: 4, public_addresses: vec![sa] },
+            ServerConfig {
+                private_key: server_key,
+                max_clients: 4,
+                public_addresses: vec![sa],
+            },
             Instant::now(),
         )
         .unwrap();
@@ -324,7 +379,13 @@ fn latency(blocking: bool) {
             server.flush(now);
         }
     });
-    let mut client = Endpoint::client(UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap(), config(), token(&key, sa), Instant::now()).unwrap();
+    let mut client = Endpoint::client(
+        UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap(),
+        config(),
+        token(&key, sa),
+        Instant::now(),
+    )
+    .unwrap();
     let mut c = None;
     while c.is_none() || !ready.load(std::sync::atomic::Ordering::Acquire) {
         let now = Instant::now();
@@ -356,9 +417,16 @@ fn latency(blocking: bool) {
     }
     stop.store(true, std::sync::atomic::Ordering::Relaxed);
     echo.join().unwrap();
-    let mode = if blocking { "blocking (WSAPoll)" } else { "busy polling" };
+    let mode = if blocking {
+        "blocking (WSAPoll)"
+    } else {
+        "busy polling"
+    };
     let (r50, r99) = (percentile(&mut raw, 0.5), percentile(&mut raw, 0.99));
-    let (e50, e99) = (percentile(&mut endpoint, 0.5), percentile(&mut endpoint, 0.99));
+    let (e50, e99) = (
+        percentile(&mut endpoint, 0.5),
+        percentile(&mut endpoint, 0.99),
+    );
     println!(
         "localhost round trip, {mode:<18}: raw UDP median {r50:.1} µs (p99 {r99:.1}), endpoints {e50:.1} µs (p99 {e99:.1}); added per one-way trip {:.1} µs",
         (e50 - r50) / 2.0
@@ -372,7 +440,10 @@ fn empty_update_cost() {
     for _ in 0..n {
         server.update(Instant::now());
     }
-    println!("empty update (one recvfrom returning WSAEWOULDBLOCK): {:.2} µs", t.elapsed().as_secs_f64() * 1e6 / n as f64);
+    println!(
+        "empty update (one recvfrom returning WSAEWOULDBLOCK): {:.2} µs",
+        t.elapsed().as_secs_f64() * 1e6 / n as f64
+    );
 }
 
 fn main() {

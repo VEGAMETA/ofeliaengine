@@ -13,15 +13,15 @@ use std::time::{Duration, Instant};
 use crate::ack::{AckHeader, AckTracker, MAX_ACK_WORDS, Outcome};
 use crate::bytes::{Reader, Writer};
 use crate::channel::{
-    ChannelConfig, ChannelKind, EntryList, MAX_CHANNELS, MessageId, Notice, RECORD_FRAG, ReliableRecv,
-    ReliableSend, SendError, UnreliableRecv, UnreliableSend,
+    ChannelConfig, ChannelKind, EntryList, MAX_CHANNELS, MessageId, Notice, RECORD_FRAG,
+    ReliableRecv, ReliableSend, SendError, UnreliableRecv, UnreliableSend,
 };
 use crate::crypto::{Cipher, Key, TAG_BYTES, random_u64};
 use crate::packet::{self, Kind, MAX_HEADER_BYTES, REQUEST_BYTES, ReplayWindow};
 use crate::socket::DatagramSocket;
 use crate::token::{
-    CHALLENGE_TOKEN_BYTES, ConnectToken, PRIVATE_TOKEN_BYTES, PrivateToken, USER_DATA_BYTES, VERSION,
-    open_challenge, seal_challenge,
+    CHALLENGE_TOKEN_BYTES, ConnectToken, PRIVATE_TOKEN_BYTES, PrivateToken, USER_DATA_BYTES,
+    VERSION, open_challenge, seal_challenge,
 };
 
 /// Largest datagram the endpoint reads (bigger foreign datagrams are truncated).
@@ -208,8 +208,14 @@ pub struct EndpointStats {
 }
 
 enum ChannelState {
-    Reliable { send: ReliableSend, recv: ReliableRecv },
-    Unreliable { send: UnreliableSend, recv: UnreliableRecv },
+    Reliable {
+        send: ReliableSend,
+        recv: ReliableRecv,
+    },
+    Unreliable {
+        send: UnreliableSend,
+        recv: UnreliableRecv,
+    },
 }
 
 struct RateWindow {
@@ -257,7 +263,7 @@ struct Connection {
 }
 
 impl Connection {
-    fn new(config: &EndpointConfig, now: Instant) -> Box<Self> {
+    fn new(config: &EndpointConfig, now: Instant) -> Self {
         let channels = config
             .channels
             .iter()
@@ -266,13 +272,15 @@ impl Connection {
                     send: ReliableSend::new(c),
                     recv: ReliableRecv::new(c),
                 },
-                ChannelKind::Unreliable | ChannelKind::UnreliableSequenced => ChannelState::Unreliable {
-                    send: UnreliableSend::new(c),
-                    recv: UnreliableRecv::new(c),
-                },
+                ChannelKind::Unreliable | ChannelKind::UnreliableSequenced => {
+                    ChannelState::Unreliable {
+                        send: UnreliableSend::new(c),
+                        recv: UnreliableRecv::new(c),
+                    }
+                }
             })
             .collect();
-        Box::new(Self {
+        Self {
             active: false,
             generation: 0,
             addr: SocketAddr::from(([0, 0, 0, 0], 0)),
@@ -293,10 +301,18 @@ impl Connection {
             packets_received: 0,
             bytes_sent: 0,
             bytes_received: 0,
-            send_rate: RateWindow { start: now, bytes: 0, rate: 0.0 },
-            recv_rate: RateWindow { start: now, bytes: 0, rate: 0.0 },
+            send_rate: RateWindow {
+                start: now,
+                bytes: 0,
+                rate: 0.0,
+            },
+            recv_rate: RateWindow {
+                start: now,
+                bytes: 0,
+                rate: 0.0,
+            },
             send_dropped: 0,
-        })
+        }
     }
 
     /// Prepares the slot for a new peer. The send sequence starts at a random point
@@ -345,8 +361,16 @@ impl Connection {
         self.packets_received = 0;
         self.bytes_sent = 0;
         self.bytes_received = 0;
-        self.send_rate = RateWindow { start: now, bytes: 0, rate: 0.0 };
-        self.recv_rate = RateWindow { start: now, bytes: 0, rate: 0.0 };
+        self.send_rate = RateWindow {
+            start: now,
+            bytes: 0,
+            rate: 0.0,
+        };
+        self.recv_rate = RateWindow {
+            start: now,
+            bytes: 0,
+            rate: 0.0,
+        };
         self.send_dropped = 0;
     }
 
@@ -462,7 +486,12 @@ fn read_ack(r: &mut Reader<'_>) -> Option<AckHeader> {
     for word in &mut words[..count] {
         *word = r.u64()?;
     }
-    Some(AckHeader { largest, delay, words, count })
+    Some(AckHeader {
+        largest,
+        delay,
+        words,
+        count,
+    })
 }
 
 /// Why a payload was not accepted.
@@ -516,7 +545,11 @@ fn walk_records(
                     }
                 } else {
                     let sequenced = recv.is_sequenced();
-                    let seq = if sequenced { r.u16().ok_or(PayloadError::Malformed)? } else { 0 };
+                    let seq = if sequenced {
+                        r.u16().ok_or(PayloadError::Malformed)?
+                    } else {
+                        0
+                    };
                     let len = r.varint().ok_or(PayloadError::Malformed)? as usize;
                     let data = r.bytes(len).ok_or(PayloadError::Malformed)?;
                     if apply {
@@ -598,7 +631,7 @@ pub struct Endpoint<S: DatagramSocket> {
     socket: S,
     config: EndpointConfig,
     role: Role,
-    slots: Vec<Box<Connection>>,
+    slots: Vec<Connection>,
     active: usize,
     by_addr: HashMap<SocketAddr, u16>,
     events: VecDeque<Event>,
@@ -620,7 +653,13 @@ impl<S: DatagramSocket> std::fmt::Debug for Endpoint<S> {
 }
 
 impl<S: DatagramSocket> Endpoint<S> {
-    fn with_role(socket: S, config: EndpointConfig, role: Role, now: Instant, slots: usize) -> Self {
+    fn with_role(
+        socket: S,
+        config: EndpointConfig,
+        role: Role,
+        now: Instant,
+        slots: usize,
+    ) -> Self {
         let foreign = Foreign {
             data: vec![0u8; config.foreign_capacity * FOREIGN_BYTES].into_boxed_slice(),
             meta: VecDeque::with_capacity(config.foreign_capacity),
@@ -645,7 +684,12 @@ impl<S: DatagramSocket> Endpoint<S> {
     }
 
     /// A server accepting tokens sealed with `server.private_key`.
-    pub fn server(socket: S, config: EndpointConfig, server: ServerConfig, now: Instant) -> Result<Self, ConfigError> {
+    pub fn server(
+        socket: S,
+        config: EndpointConfig,
+        server: ServerConfig,
+        now: Instant,
+    ) -> Result<Self, ConfigError> {
         config.validate()?;
         if server.max_clients == 0 || server.max_clients > usize::from(u16::MAX) {
             return Err(ConfigError("max_clients must be 1..=65535"));
@@ -662,14 +706,27 @@ impl<S: DatagramSocket> Endpoint<S> {
             history: Vec::with_capacity(max * 8),
             history_next: 0,
         };
-        Ok(Self::with_role(socket, config, Role::Server(Box::new(state)), now, max))
+        Ok(Self::with_role(
+            socket,
+            config,
+            Role::Server(Box::new(state)),
+            now,
+            max,
+        ))
     }
 
     /// A client that starts connecting with `token` on the first `update`.
-    pub fn client(socket: S, config: EndpointConfig, token: ConnectToken, now: Instant) -> Result<Self, ConfigError> {
+    pub fn client(
+        socket: S,
+        config: EndpointConfig,
+        token: ConnectToken,
+        now: Instant,
+    ) -> Result<Self, ConfigError> {
         config.validate()?;
         if token.protocol_id != config.protocol_id {
-            return Err(ConfigError("the token's protocol_id differs from the endpoint's"));
+            return Err(ConfigError(
+                "the token's protocol_id differs from the endpoint's",
+            ));
         }
         let state = ClientState {
             phase: Phase::Requesting,
@@ -742,14 +799,12 @@ impl<S: DatagramSocket> Endpoint<S> {
     fn conn(&self, id: ConnectionId) -> Option<&Connection> {
         self.slots
             .get(usize::from(id.index))
-            .map(|c| &**c)
             .filter(|c| c.active && c.generation == id.generation)
     }
 
     fn conn_mut(&mut self, id: ConnectionId) -> Option<&mut Connection> {
         self.slots
             .get_mut(usize::from(id.index))
-            .map(|c| &mut **c)
             .filter(|c| c.active && c.generation == id.generation)
     }
 
@@ -836,7 +891,15 @@ impl<S: DatagramSocket> Endpoint<S> {
     }
 
     /// A packet of a live connection (payload or disconnect).
-    fn connection_packet(&mut self, now: Instant, index: usize, kind: Kind, seq: u64, header: usize, len: usize) {
+    fn connection_packet(
+        &mut self,
+        now: Instant,
+        index: usize,
+        kind: Kind,
+        seq: u64,
+        header: usize,
+        len: usize,
+    ) {
         if self.connection_packet_inner(now, index, kind, seq, header, len) {
             self.close(index, Some(DisconnectReason::ByPeer));
         }
@@ -852,14 +915,24 @@ impl<S: DatagramSocket> Endpoint<S> {
         header: usize,
         len: usize,
     ) -> bool {
-        let Self { slots, buf, events, config, stats, .. } = self;
-        let conn = &mut *slots[index];
+        let Self {
+            slots,
+            buf,
+            events,
+            config,
+            stats,
+            ..
+        } = self;
+        let conn = &mut slots[index];
         if conn.replay.is_replay(seq) {
             stats.dropped += 1;
             return false;
         }
-        let Some(cipher) = &conn.recv_cipher else { return false };
-        let Some(range) = packet::open(&mut buf[..len], seq, header, config.protocol_id, cipher) else {
+        let Some(cipher) = &conn.recv_cipher else {
+            return false;
+        };
+        let Some(range) = packet::open(&mut buf[..len], seq, header, config.protocol_id, cipher)
+        else {
             stats.dropped += 1;
             return false;
         };
@@ -921,7 +994,7 @@ impl<S: DatagramSocket> Endpoint<S> {
     }
 
     fn close(&mut self, index: usize, reason: Option<DisconnectReason>) {
-        let conn = &mut *self.slots[index];
+        let conn = &mut self.slots[index];
         if !conn.active {
             return;
         }
@@ -947,7 +1020,7 @@ impl<S: DatagramSocket> Endpoint<S> {
         }
         for index in 0..self.slots.len() {
             let Self { slots, events, .. } = self;
-            let conn = &mut *slots[index];
+            let conn = &mut slots[index];
             if !conn.active {
                 continue;
             }
@@ -958,7 +1031,10 @@ impl<S: DatagramSocket> Endpoint<S> {
             let id = conn.id(index);
             let Connection { acks, channels, .. } = conn;
             acks.detect_lost(now, &mut |o| apply_outcome(channels, o, events, id));
-            let broken = conn.channels.iter().any(|c| matches!(c, ChannelState::Reliable { recv, .. } if recv.broken));
+            let broken = conn
+                .channels
+                .iter()
+                .any(|c| matches!(c, ChannelState::Reliable { recv, .. } if recv.broken));
             if broken {
                 self.send_disconnect(now, index);
                 self.close(index, Some(DisconnectReason::ProtocolError));
@@ -973,7 +1049,15 @@ impl<S: DatagramSocket> Endpoint<S> {
     // Server handshake.
     // -----------------------------------------------------------------------------------
 
-    fn server_packet(&mut self, now: Instant, kind: Kind, seq: u64, header: usize, len: usize, from: SocketAddr) {
+    fn server_packet(
+        &mut self,
+        now: Instant,
+        kind: Kind,
+        seq: u64,
+        header: usize,
+        len: usize,
+        from: SocketAddr,
+    ) {
         if let Some(&index) = self.by_addr.get(&from) {
             match kind {
                 Kind::Payload | Kind::Disconnect => {
@@ -1001,7 +1085,9 @@ impl<S: DatagramSocket> Endpoint<S> {
         }
         let unix_now = self.unix_now(now);
         let protocol_id = self.config.protocol_id;
-        let Role::Server(server) = &mut self.role else { return };
+        let Role::Server(server) = &mut self.role else {
+            return;
+        };
         let mut r = Reader::new(&self.buf[1..len]);
         let parsed = (|| {
             let version = r.array::<8>()?;
@@ -1019,26 +1105,42 @@ impl<S: DatagramSocket> Endpoint<S> {
             self.stats.dropped += 1;
             return;
         }
-        let mac: [u8; TAG_BYTES] = sealed[PRIVATE_TOKEN_BYTES - TAG_BYTES..].try_into().unwrap_or_default();
-        let Some(token) = PrivateToken::open(&server.private, protocol_id, expire, &nonce, &mut sealed) else {
+        let mac: [u8; TAG_BYTES] = sealed[PRIVATE_TOKEN_BYTES - TAG_BYTES..]
+            .try_into()
+            .unwrap_or_default();
+        let Some(token) =
+            PrivateToken::open(&server.private, protocol_id, expire, &nonce, &mut sealed)
+        else {
             self.stats.dropped += 1;
             return;
         };
         if !server.public_addresses.is_empty()
-            && !token.server_addresses.as_slice().iter().any(|a| server.public_addresses.contains(a))
+            && !token
+                .server_addresses
+                .as_slice()
+                .iter()
+                .any(|a| server.public_addresses.contains(a))
         {
             self.stats.dropped += 1;
             return;
         }
         // One token, one address: a token copied off the wire cannot be used elsewhere.
-        match server.history.iter().find(|h| h.mac == mac && h.expire_unix > unix_now) {
+        match server
+            .history
+            .iter()
+            .find(|h| h.mac == mac && h.expire_unix > unix_now)
+        {
             Some(h) if h.addr != from => {
                 self.stats.dropped += 1;
                 return;
             }
             Some(_) => {}
             None => {
-                let entry = TokenUse { mac, addr: from, expire_unix: expire };
+                let entry = TokenUse {
+                    mac,
+                    addr: from,
+                    expire_unix: expire,
+                };
                 if server.history.len() < server.history.capacity() {
                     server.history.push(entry);
                 } else {
@@ -1049,7 +1151,11 @@ impl<S: DatagramSocket> Endpoint<S> {
             }
         }
         // A client id already connected (from another address) is refused silently.
-        if self.slots.iter().any(|c| c.active && c.client_id == token.client_id) {
+        if self
+            .slots
+            .iter()
+            .any(|c| c.active && c.client_id == token.client_id)
+        {
             self.stats.dropped += 1;
             return;
         }
@@ -1098,27 +1204,62 @@ impl<S: DatagramSocket> Endpoint<S> {
         let pending = &server.pending[pending_index];
         let h = packet::header_len(seq);
         let n = if full {
-            packet::seal(&mut self.out, Kind::Denied, seq, protocol_id, &pending.send, 0)
+            packet::seal(
+                &mut self.out,
+                Kind::Denied,
+                seq,
+                protocol_id,
+                &pending.send,
+                0,
+            )
         } else {
             let challenge_seq = server.challenge_seq;
             server.challenge_seq += 1;
             let mut sealed = [0u8; CHALLENGE_TOKEN_BYTES];
-            seal_challenge(&server.challenge_key, challenge_seq, pending.client_id, &pending.user_data, &mut sealed);
+            seal_challenge(
+                &server.challenge_key,
+                challenge_seq,
+                pending.client_id,
+                &pending.user_data,
+                &mut sealed,
+            );
             self.out[h..h + 8].copy_from_slice(&challenge_seq.to_le_bytes());
             self.out[h + 8..h + 8 + CHALLENGE_TOKEN_BYTES].copy_from_slice(&sealed);
-            packet::seal(&mut self.out, Kind::Challenge, seq, protocol_id, &pending.send, 8 + CHALLENGE_TOKEN_BYTES)
+            packet::seal(
+                &mut self.out,
+                Kind::Challenge,
+                seq,
+                protocol_id,
+                &pending.send,
+                8 + CHALLENGE_TOKEN_BYTES,
+            )
         };
         let _ = self.socket.send_to(now, from, &self.out[..n]);
     }
 
-    fn handle_response(&mut self, now: Instant, seq: u64, header: usize, len: usize, from: SocketAddr) {
+    fn handle_response(
+        &mut self,
+        now: Instant,
+        seq: u64,
+        header: usize,
+        len: usize,
+        from: SocketAddr,
+    ) {
         let protocol_id = self.config.protocol_id;
-        let Role::Server(server) = &mut self.role else { return };
+        let Role::Server(server) = &mut self.role else {
+            return;
+        };
         let Some(pi) = server.pending.iter().position(|p| p.addr == from) else {
             self.stats.dropped += 1;
             return;
         };
-        let Some(range) = packet::open(&mut self.buf[..len], seq, header, protocol_id, &server.pending[pi].recv) else {
+        let Some(range) = packet::open(
+            &mut self.buf[..len],
+            seq,
+            header,
+            protocol_id,
+            &server.pending[pi].recv,
+        ) else {
             self.stats.dropped += 1;
             return;
         };
@@ -1130,7 +1271,9 @@ impl<S: DatagramSocket> Endpoint<S> {
         let challenge_seq = u64::from_le_bytes(payload[..8].try_into().unwrap_or_default());
         let mut sealed = [0u8; CHALLENGE_TOKEN_BYTES];
         sealed.copy_from_slice(&payload[8..]);
-        let Some((client_id, _)) = open_challenge(&server.challenge_key, challenge_seq, &mut sealed) else {
+        let Some((client_id, _)) =
+            open_challenge(&server.challenge_key, challenge_seq, &mut sealed)
+        else {
             self.stats.dropped += 1;
             return;
         };
@@ -1141,7 +1284,14 @@ impl<S: DatagramSocket> Endpoint<S> {
         if self.active >= server.max_clients {
             let seq = server.global_seq;
             server.global_seq += 1;
-            let n = packet::seal(&mut self.out, Kind::Denied, seq, protocol_id, &server.pending[pi].send, 0);
+            let n = packet::seal(
+                &mut self.out,
+                Kind::Denied,
+                seq,
+                protocol_id,
+                &server.pending[pi].send,
+                0,
+            );
             let _ = self.socket.send_to(now, from, &self.out[..n]);
             return;
         }
@@ -1154,7 +1304,7 @@ impl<S: DatagramSocket> Endpoint<S> {
                 self.slots.len() - 1
             }
         };
-        let conn = &mut *self.slots[index];
+        let conn = &mut self.slots[index];
         conn.open(
             now,
             from,
@@ -1177,9 +1327,19 @@ impl<S: DatagramSocket> Endpoint<S> {
     // Client handshake.
     // -----------------------------------------------------------------------------------
 
-    fn client_packet(&mut self, now: Instant, kind: Kind, seq: u64, header: usize, len: usize, from: SocketAddr) {
+    fn client_packet(
+        &mut self,
+        now: Instant,
+        kind: Kind,
+        seq: u64,
+        header: usize,
+        len: usize,
+        from: SocketAddr,
+    ) {
         let protocol_id = self.config.protocol_id;
-        let Role::Client(client) = &mut self.role else { return };
+        let Role::Client(client) = &mut self.role else {
+            return;
+        };
         let server = client.token.server_addresses.as_slice()[client.address_index];
         if from != server || client.phase == Phase::Failed {
             self.stats.dropped += 1;
@@ -1190,7 +1350,7 @@ impl<S: DatagramSocket> Endpoint<S> {
                 self.connection_packet(now, 0, kind, seq, header, len);
             }
             (Kind::Payload, Phase::Requesting | Phase::Responding) => {
-                let conn = &mut *self.slots[0];
+                let conn = &mut self.slots[0];
                 conn.active = true;
                 conn.addr = server;
                 conn.last_recv = now;
@@ -1202,8 +1362,12 @@ impl<S: DatagramSocket> Endpoint<S> {
                 self.connection_packet(now, 0, kind, seq, header, len);
             }
             (Kind::Challenge, Phase::Requesting) => {
-                let Some(cipher) = &self.slots[0].recv_cipher else { return };
-                let Some(range) = packet::open(&mut self.buf[..len], seq, header, protocol_id, cipher) else {
+                let Some(cipher) = &self.slots[0].recv_cipher else {
+                    return;
+                };
+                let Some(range) =
+                    packet::open(&mut self.buf[..len], seq, header, protocol_id, cipher)
+                else {
                     self.stats.dropped += 1;
                     return;
                 };
@@ -1212,28 +1376,34 @@ impl<S: DatagramSocket> Endpoint<S> {
                     self.stats.dropped += 1;
                     return;
                 }
-                client.challenge_seq = u64::from_le_bytes(payload[..8].try_into().unwrap_or_default());
+                client.challenge_seq =
+                    u64::from_le_bytes(payload[..8].try_into().unwrap_or_default());
                 client.challenge.copy_from_slice(&payload[8..]);
                 client.phase = Phase::Responding;
                 client.phase_start = now;
                 self.send_response(now);
             }
             (Kind::Denied, Phase::Requesting | Phase::Responding) => {
-                let Some(cipher) = &self.slots[0].recv_cipher else { return };
+                let Some(cipher) = &self.slots[0].recv_cipher else {
+                    return;
+                };
                 if packet::open(&mut self.buf[..len], seq, header, protocol_id, cipher).is_none() {
                     self.stats.dropped += 1;
                     return;
                 }
                 client.phase = Phase::Failed;
                 let id = self.slots[0].id(0);
-                self.events.push_back(Event::Disconnected(id, DisconnectReason::Denied));
+                self.events
+                    .push_back(Event::Disconnected(id, DisconnectReason::Denied));
             }
             _ => self.stats.dropped += 1,
         }
     }
 
     fn send_request(&mut self, now: Instant) {
-        let Role::Client(client) = &mut self.role else { return };
+        let Role::Client(client) = &mut self.role else {
+            return;
+        };
         let token = &client.token;
         let server = token.server_addresses.as_slice()[client.address_index];
         let mut w = Writer::new(&mut self.out[..REQUEST_BYTES]);
@@ -1252,16 +1422,27 @@ impl<S: DatagramSocket> Endpoint<S> {
 
     fn send_response(&mut self, now: Instant) {
         let protocol_id = self.config.protocol_id;
-        let Role::Client(client) = &mut self.role else { return };
+        let Role::Client(client) = &mut self.role else {
+            return;
+        };
         let server = client.token.server_addresses.as_slice()[client.address_index];
-        let conn = &mut *self.slots[0];
-        let Some(cipher) = &conn.send_cipher else { return };
+        let conn = &mut self.slots[0];
+        let Some(cipher) = &conn.send_cipher else {
+            return;
+        };
         let seq = conn.send_seq;
         conn.send_seq += 1;
         let h = packet::header_len(seq);
         self.out[h..h + 8].copy_from_slice(&client.challenge_seq.to_le_bytes());
         self.out[h + 8..h + 8 + CHALLENGE_TOKEN_BYTES].copy_from_slice(&client.challenge);
-        let n = packet::seal(&mut self.out, Kind::Response, seq, protocol_id, cipher, 8 + CHALLENGE_TOKEN_BYTES);
+        let n = packet::seal(
+            &mut self.out,
+            Kind::Response,
+            seq,
+            protocol_id,
+            cipher,
+            8 + CHALLENGE_TOKEN_BYTES,
+        );
         client.last_send = now;
         let _ = self.socket.send_to(now, server, &self.out[..n]);
     }
@@ -1270,16 +1451,21 @@ impl<S: DatagramSocket> Endpoint<S> {
         let unix_now = self.unix_now(now);
         let retry = self.config.connect_retry;
         let connect_timeout = self.config.connect_timeout;
-        let Role::Client(client) = &mut self.role else { return };
+        let Role::Client(client) = &mut self.role else {
+            return;
+        };
         match client.phase {
             Phase::Requesting | Phase::Responding => {
                 if client.token.expire_timestamp <= unix_now && client.phase == Phase::Requesting {
                     client.phase = Phase::Failed;
                     let id = self.slots[0].id(0);
-                    self.events.push_back(Event::Disconnected(id, DisconnectReason::TokenExpired));
+                    self.events
+                        .push_back(Event::Disconnected(id, DisconnectReason::TokenExpired));
                     return;
                 }
-                let per_address = connect_timeout.min(Duration::from_secs(u64::from(client.token.timeout_seconds.max(1))));
+                let per_address = connect_timeout.min(Duration::from_secs(u64::from(
+                    client.token.timeout_seconds.max(1),
+                )));
                 if now.saturating_duration_since(client.phase_start) > per_address {
                     if client.address_index + 1 < client.token.server_addresses.as_slice().len() {
                         client.address_index += 1;
@@ -1289,7 +1475,8 @@ impl<S: DatagramSocket> Endpoint<S> {
                     } else {
                         client.phase = Phase::Failed;
                         let id = self.slots[0].id(0);
-                        self.events.push_back(Event::Disconnected(id, DisconnectReason::ConnectTimedOut));
+                        self.events
+                            .push_back(Event::Disconnected(id, DisconnectReason::ConnectTimedOut));
                         return;
                     }
                 }
@@ -1321,19 +1508,31 @@ impl<S: DatagramSocket> Endpoint<S> {
     }
 
     fn flush_connection(&mut self, now: Instant, index: usize, force: bool) {
-        let Self { slots, out, socket, events, config, .. } = self;
-        let conn = &mut *slots[index];
+        let Self {
+            slots,
+            out,
+            socket,
+            events,
+            config,
+            ..
+        } = self;
+        let conn = &mut slots[index];
         let id = conn.id(index);
         if let Some(rate) = config.send_rate {
-            let dt = now.saturating_duration_since(conn.last_refill).as_secs_f64();
+            let dt = now
+                .saturating_duration_since(conn.last_refill)
+                .as_secs_f64();
             conn.tokens = (conn.tokens + dt * f64::from(rate)).min(burst(Some(rate)));
             conn.last_refill = now;
         }
-        let Some(cipher) = conn.send_cipher.as_ref() else { return };
+        let Some(cipher) = conn.send_cipher.as_ref() else {
+            return;
+        };
         for packet_index in 0..config.max_packets_per_flush {
             let has_budget = conn.tokens > 0.0 && conn.acks.may_send_data();
             let data = has_budget && conn.has_pending();
-            let keepalive = now.saturating_duration_since(conn.last_send) >= config.keepalive_interval;
+            let keepalive =
+                now.saturating_duration_since(conn.last_send) >= config.keepalive_interval;
             if !(data || conn.acks.ack_pending || keepalive || (force && packet_index == 0)) {
                 break;
             }
@@ -1371,7 +1570,9 @@ impl<S: DatagramSocket> Endpoint<S> {
             let _ = socket.send_to(now, conn.addr, &out[..n]);
             conn.send_seq += 1;
             let Connection { acks, channels, .. } = conn;
-            acks.on_sent(seq, now, n, carries_data, &entries, &mut |o| apply_outcome(channels, o, events, id));
+            acks.on_sent(seq, now, n, carries_data, &entries, &mut |o| {
+                apply_outcome(channels, o, events, id)
+            });
             conn.acks.ack_sent();
             conn.last_send = now;
             conn.packets_sent += 1;
@@ -1399,9 +1600,17 @@ impl<S: DatagramSocket> Endpoint<S> {
     }
 
     fn send_disconnect(&mut self, now: Instant, index: usize) {
-        let Self { slots, out, socket, config, .. } = self;
-        let conn = &mut *slots[index];
-        let Some(cipher) = conn.send_cipher.as_ref() else { return };
+        let Self {
+            slots,
+            out,
+            socket,
+            config,
+            ..
+        } = self;
+        let conn = &mut slots[index];
+        let Some(cipher) = conn.send_cipher.as_ref() else {
+            return;
+        };
         for _ in 0..DISCONNECT_REDUNDANCY {
             let seq = conn.send_seq;
             conn.send_seq += 1;
@@ -1415,14 +1624,22 @@ impl<S: DatagramSocket> Endpoint<S> {
     // -----------------------------------------------------------------------------------
 
     /// Queues a message; it goes out on the next flush.
-    pub fn send(&mut self, id: ConnectionId, channel: ChannelId, message: &[u8]) -> Result<MessageId, SendError> {
+    pub fn send(
+        &mut self,
+        id: ConnectionId,
+        channel: ChannelId,
+        message: &[u8],
+    ) -> Result<MessageId, SendError> {
         let Self { events, slots, .. } = self;
         let conn = slots
             .get_mut(usize::from(id.index))
-            .map(|c| &mut **c)
             .filter(|c| c.active && c.generation == id.generation)
             .ok_or(SendError::NotConnected)?;
-        match conn.channels.get_mut(usize::from(channel.0)).ok_or(SendError::NoChannel)? {
+        match conn
+            .channels
+            .get_mut(usize::from(channel.0))
+            .ok_or(SendError::NoChannel)?
+        {
             ChannelState::Reliable { send, .. } => send.queue(message),
             ChannelState::Unreliable { send, .. } => send.queue(message, &mut |n| {
                 if let Notice::Lost(m) = n {
@@ -1473,7 +1690,10 @@ impl<S: DatagramSocket> Endpoint<S> {
 
     /// Ids of live connections.
     pub fn connections(&self) -> Connections<'_> {
-        Connections { slots: &self.slots, next: 0 }
+        Connections {
+            slots: &self.slots,
+            next: 0,
+        }
     }
 
     /// Live connections.
@@ -1485,13 +1705,16 @@ impl<S: DatagramSocket> Endpoint<S> {
 /// Iterator over live connection ids ([`Endpoint::connections`]).
 #[derive(Debug)]
 pub struct Connections<'a> {
-    slots: &'a [Box<Connection>],
+    slots: &'a [Connection],
     next: usize,
 }
 
 impl std::fmt::Debug for Connection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Connection").field("addr", &self.addr).field("active", &self.active).finish_non_exhaustive()
+        f.debug_struct("Connection")
+            .field("addr", &self.addr)
+            .field("active", &self.active)
+            .finish_non_exhaustive()
     }
 }
 
@@ -1532,7 +1755,12 @@ pub trait Transport {
     /// The next event.
     fn poll_event(&mut self) -> Option<Event>;
     /// Queues a message.
-    fn send(&mut self, conn: ConnectionId, channel: ChannelId, message: &[u8]) -> Result<MessageId, SendError>;
+    fn send(
+        &mut self,
+        conn: ConnectionId,
+        channel: ChannelId,
+        message: &[u8],
+    ) -> Result<MessageId, SendError>;
     /// The next received message, valid until the next call.
     fn receive(&mut self, conn: ConnectionId, channel: ChannelId) -> Option<&[u8]>;
     /// Estimates and counters.
@@ -1555,7 +1783,12 @@ impl<S: DatagramSocket> Transport for Endpoint<S> {
     fn poll_event(&mut self) -> Option<Event> {
         Endpoint::poll_event(self)
     }
-    fn send(&mut self, conn: ConnectionId, channel: ChannelId, message: &[u8]) -> Result<MessageId, SendError> {
+    fn send(
+        &mut self,
+        conn: ConnectionId,
+        channel: ChannelId,
+        message: &[u8],
+    ) -> Result<MessageId, SendError> {
         Endpoint::send(self, conn, channel, message)
     }
     fn receive(&mut self, conn: ConnectionId, channel: ChannelId) -> Option<&[u8]> {

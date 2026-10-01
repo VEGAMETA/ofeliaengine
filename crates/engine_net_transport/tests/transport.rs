@@ -1,6 +1,8 @@
 //! End-to-end tests of the endpoint on the in-memory network and on loopback UDP.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
+// Real sockets and mock routers on other threads: plain sleeps are fine here.
+#![allow(clippy::disallowed_methods)]
 
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
@@ -49,18 +51,32 @@ impl Sim {
         let server = Endpoint::server(
             net.bind(addr(SERVER)),
             config,
-            ServerConfig { private_key: key.clone(), max_clients, public_addresses: vec![addr(SERVER)] },
+            ServerConfig {
+                private_key: key.clone(),
+                max_clients,
+                public_addresses: vec![addr(SERVER)],
+            },
             t0,
         )
         .unwrap();
-        Self { net, key, now: t0, server, server_events: Vec::new(), clients: Vec::new() }
+        Self {
+            net,
+            key,
+            now: t0,
+            server,
+            server_events: Vec::new(),
+            clients: Vec::new(),
+        }
     }
 
     fn add_client(&mut self, config: EndpointConfig) -> usize {
         let i = self.clients.len();
         let t = token(&self.key, 100 + i as u64, &[addr(SERVER)], 30, unix_now());
         let socket = self.net.bind(addr(&format!("10.0.1.{}:5000", i + 1)));
-        self.clients.push((Endpoint::client(socket, config, t, self.now).unwrap(), Vec::new()));
+        self.clients.push((
+            Endpoint::client(socket, config, t, self.now).unwrap(),
+            Vec::new(),
+        ));
         i
     }
 
@@ -98,7 +114,9 @@ impl Sim {
     }
 
     fn server_conn(&self, client_id: u64) -> Option<ConnectionId> {
-        self.server.connections().find(|&c| self.server.client_id(c) == Some(client_id))
+        self.server
+            .connections()
+            .find(|&c| self.server.client_id(c) == Some(client_id))
     }
 }
 
@@ -120,11 +138,17 @@ fn connects_and_exchanges_messages_both_ways() {
     let s = sim.server_conn(100).expect("server sees the client");
     assert_eq!(sim.server.user_data(s).unwrap()[0], 100);
     assert!(matches!(sim.server_events[0], Event::Connected(_)));
-    sim.clients[0].0.send(c, ChannelId(0), b"to server").unwrap();
+    sim.clients[0]
+        .0
+        .send(c, ChannelId(0), b"to server")
+        .unwrap();
     sim.server.send(s, ChannelId(1), b"to client").unwrap();
     sim.run(3);
     assert_eq!(sim.server.receive(s, ChannelId(0)), Some(&b"to server"[..]));
-    assert_eq!(sim.clients[0].0.receive(c, ChannelId(1)), Some(&b"to client"[..]));
+    assert_eq!(
+        sim.clients[0].0.receive(c, ChannelId(1)),
+        Some(&b"to client"[..])
+    );
     assert_eq!(sim.server.receive(s, ChannelId(0)), None);
 }
 
@@ -153,10 +177,20 @@ fn reliable_delivery_under_loss_and_reordering() {
         };
         let (mut next_c, mut next_s, mut got_c, mut got_s) = (0u32, 0u32, 0u32, 0u32);
         for _ in 0..3000 {
-            while next_c < count && sim.clients[0].0.send(c, ChannelId(0), &payload(next_c, size(next_c))).is_ok() {
+            while next_c < count
+                && sim.clients[0]
+                    .0
+                    .send(c, ChannelId(0), &payload(next_c, size(next_c)))
+                    .is_ok()
+            {
                 next_c += 1;
             }
-            while next_s < count && sim.server.send(s, ChannelId(0), &payload(next_s, size(next_s))).is_ok() {
+            while next_s < count
+                && sim
+                    .server
+                    .send(s, ChannelId(0), &payload(next_s, size(next_s)))
+                    .is_ok()
+            {
                 next_s += 1;
             }
             sim.step(Duration::from_millis(10));
@@ -174,9 +208,19 @@ fn reliable_delivery_under_loss_and_reordering() {
         }
         assert_eq!((got_s, got_c), (count, count), "loss {loss}");
         let stats = sim.server.stats(s).unwrap();
-        assert!(sim.clients[0].1.iter().all(|e| matches!(e, Event::Connected(_))), "loss {loss}");
+        assert!(
+            sim.clients[0]
+                .1
+                .iter()
+                .all(|e| matches!(e, Event::Connected(_))),
+            "loss {loss}"
+        );
         if loss >= 0.15 {
-            assert!(stats.packet_loss > 0.05, "loss estimate {} at {loss}", stats.packet_loss);
+            assert!(
+                stats.packet_loss > 0.05,
+                "loss estimate {} at {loss}",
+                stats.packet_loss
+            );
         }
         // RTT about 60 ms + jitter (plus up to a step of polling on each side).
         let rtt = stats.rtt.as_secs_f64();
@@ -248,7 +292,12 @@ fn unreliable_fragmentation_sequencing_and_notification() {
     assert_eq!(delivered.len() + lost.len(), 500);
     // Every message the client got was acknowledged, unless its ack was lost.
     assert!(delivered.len() <= seen.len() + 5);
-    assert!(delivered.len() + 60 >= seen.len(), "{} {}", delivered.len(), seen.len());
+    assert!(
+        delivered.len() + 60 >= seen.len(),
+        "{} {}",
+        delivered.len(),
+        seen.len()
+    );
 }
 
 #[test]
@@ -262,15 +311,32 @@ fn timeouts_and_disconnects() {
     let c0 = sim.client_conn(0).unwrap();
     sim.clients[0].0.disconnect(sim.now, c0);
     sim.run(2);
-    assert!(sim.server_events.iter().any(|e| matches!(e, Event::Disconnected(_, DisconnectReason::ByPeer))));
+    assert!(
+        sim.server_events
+            .iter()
+            .any(|e| matches!(e, Event::Disconnected(_, DisconnectReason::ByPeer)))
+    );
     // Client 1's link dies: both sides time out after the token's 5 s.
-    sim.net.set_link_conditions(addr("10.0.1.2:5000"), addr(SERVER), LinkConditions::new(Duration::ZERO, Duration::ZERO, 1.0));
-    sim.net.set_link_conditions(addr(SERVER), addr("10.0.1.2:5000"), LinkConditions::new(Duration::ZERO, Duration::ZERO, 1.0));
+    sim.net.set_link_conditions(
+        addr("10.0.1.2:5000"),
+        addr(SERVER),
+        LinkConditions::new(Duration::ZERO, Duration::ZERO, 1.0),
+    );
+    sim.net.set_link_conditions(
+        addr(SERVER),
+        addr("10.0.1.2:5000"),
+        LinkConditions::new(Duration::ZERO, Duration::ZERO, 1.0),
+    );
     sim.run(490);
     assert_eq!(sim.server.connection_count(), 1);
     sim.run(20);
     assert_eq!(sim.server.connection_count(), 0);
-    assert!(sim.clients[1].1.iter().any(|e| matches!(e, Event::Disconnected(_, DisconnectReason::TimedOut))));
+    assert!(
+        sim.clients[1]
+            .1
+            .iter()
+            .any(|e| matches!(e, Event::Disconnected(_, DisconnectReason::TimedOut)))
+    );
 }
 
 #[test]
@@ -280,7 +346,13 @@ fn connect_failures() {
     let net = MemoryNetwork::new(1);
     let key = Key::random();
     let t0 = Instant::now();
-    let t = token(&key, 1, &[addr("10.9.9.9:1"), addr("10.9.9.8:1")], 30, unix_now());
+    let t = token(
+        &key,
+        1,
+        &[addr("10.9.9.9:1"), addr("10.9.9.8:1")],
+        30,
+        unix_now(),
+    );
     let mut client = Endpoint::client(net.bind(addr("10.0.0.2:1")), config.clone(), t, t0).unwrap();
     let mut failed = None;
     for step in 0..1200 {
@@ -301,7 +373,13 @@ fn connect_failures() {
     sim.run(10);
     sim.add_client(config.clone());
     sim.run(10);
-    assert!(sim.clients[1].1.contains(&Event::Disconnected(ConnectionId { index: 0, generation: 1 }, DisconnectReason::Denied)));
+    assert!(sim.clients[1].1.contains(&Event::Disconnected(
+        ConnectionId {
+            index: 0,
+            generation: 1
+        },
+        DisconnectReason::Denied
+    )));
 
     // Expired token, wrong key: no answer at all.
     let mut sim = Sim::new(5, config.clone(), 4);
@@ -309,15 +387,29 @@ fn connect_failures() {
     let wrong_key = token(&Key::random(), 8, &[addr(SERVER)], 30, unix_now());
     for (i, t) in [expired, wrong_key].into_iter().enumerate() {
         let socket = sim.net.bind(addr(&format!("10.0.2.{}:1", i + 1)));
-        sim.clients.push((Endpoint::client(socket, config.clone(), t, sim.now).unwrap(), Vec::new()));
+        sim.clients.push((
+            Endpoint::client(socket, config.clone(), t, sim.now).unwrap(),
+            Vec::new(),
+        ));
     }
     sim.run(100);
     assert_eq!(sim.server.connection_count(), 0);
-    assert!(sim.clients[0].1.contains(&Event::Disconnected(ConnectionId { index: 0, generation: 1 }, DisconnectReason::TokenExpired)));
+    assert!(sim.clients[0].1.contains(&Event::Disconnected(
+        ConnectionId {
+            index: 0,
+            generation: 1
+        },
+        DisconnectReason::TokenExpired
+    )));
     assert!(sim.clients[1].1.is_empty());
-    assert!(sim.server.endpoint_stats().dropped >= 9, "{:?}", sim.server.endpoint_stats());
+    assert!(
+        sim.server.endpoint_stats().dropped >= 9,
+        "{:?}",
+        sim.server.endpoint_stats()
+    );
     // A valid token for an address that is not one of the server's: refused.
-    sim.server.set_public_addresses(&[addr("203.0.113.1:27015")]);
+    sim.server
+        .set_public_addresses(&[addr("203.0.113.1:27015")]);
     let i = sim.add_client(config.clone());
     sim.run(100);
     assert_eq!(sim.server.connection_count(), 0);
@@ -338,13 +430,27 @@ fn token_reuse_replay_and_tampering() {
         Vec::new(),
     ));
     sim.clients.push((
-        Endpoint::client(sim.net.bind(addr("10.0.3.2:1")), config.clone(), ConnectToken::read(&bytes).unwrap(), sim.now)
-            .unwrap(),
+        Endpoint::client(
+            sim.net.bind(addr("10.0.3.2:1")),
+            config.clone(),
+            ConnectToken::read(&bytes).unwrap(),
+            sim.now,
+        )
+        .unwrap(),
         Vec::new(),
     ));
     sim.run(50);
     assert_eq!(sim.server.connection_count(), 1);
-    let connected: Vec<bool> = sim.clients.iter().map(|(_, e)| e.contains(&Event::Connected(ConnectionId { index: 0, generation: 1 }))).collect();
+    let connected: Vec<bool> = sim
+        .clients
+        .iter()
+        .map(|(_, e)| {
+            e.contains(&Event::Connected(ConnectionId {
+                index: 0,
+                generation: 1,
+            }))
+        })
+        .collect();
     assert_eq!(connected.iter().filter(|&&c| c).count(), 1);
 
     let dropped_before = sim.server.endpoint_stats().dropped;
@@ -373,7 +479,11 @@ fn replayed_and_tampered_packets_are_dropped() {
             self.captured.lock().unwrap().push(data.to_vec());
             self.inner.send_to(now, to, data)
         }
-        fn recv_from(&mut self, now: Instant, buf: &mut [u8]) -> std::io::Result<Option<(usize, SocketAddr)>> {
+        fn recv_from(
+            &mut self,
+            now: Instant,
+            buf: &mut [u8],
+        ) -> std::io::Result<Option<(usize, SocketAddr)>> {
             self.inner.recv_from(now, buf)
         }
         fn local_addr(&self) -> std::io::Result<SocketAddr> {
@@ -388,22 +498,36 @@ fn replayed_and_tampered_packets_are_dropped() {
     let mut server = Endpoint::server(
         net.bind(addr(SERVER)),
         config.clone(),
-        ServerConfig { private_key: key.clone(), max_clients: 2, public_addresses: vec![] },
+        ServerConfig {
+            private_key: key.clone(),
+            max_clients: 2,
+            public_addresses: vec![],
+        },
         t0,
     )
     .unwrap();
     let captured = Arc::new(Mutex::new(Vec::new()));
     let client_addr = addr("10.0.4.1:1");
-    let tap = Tap { inner: net.bind(client_addr), captured: captured.clone() };
-    let mut client = Endpoint::client(tap, config, token(&key, 5, &[addr(SERVER)], 30, unix_now()), t0).unwrap();
-    let mut now = t0;
-    let step = |client: &mut Endpoint<Tap>, server: &mut Endpoint<MemorySocket>, now: &mut Instant| {
-        *now += Duration::from_millis(10);
-        client.update(*now);
-        server.update(*now);
-        client.flush(*now);
-        server.flush(*now);
+    let tap = Tap {
+        inner: net.bind(client_addr),
+        captured: captured.clone(),
     };
+    let mut client = Endpoint::client(
+        tap,
+        config,
+        token(&key, 5, &[addr(SERVER)], 30, unix_now()),
+        t0,
+    )
+    .unwrap();
+    let mut now = t0;
+    let step =
+        |client: &mut Endpoint<Tap>, server: &mut Endpoint<MemorySocket>, now: &mut Instant| {
+            *now += Duration::from_millis(10);
+            client.update(*now);
+            server.update(*now);
+            client.flush(*now);
+            server.flush(*now);
+        };
     for _ in 0..10 {
         step(&mut client, &mut server, &mut now);
     }
@@ -435,8 +559,15 @@ fn replayed_and_tampered_packets_are_dropped() {
         spoofed.send_to(now, addr(SERVER), &t).unwrap();
     }
     server.update(now + Duration::from_millis(1));
-    assert_eq!(server.receive(s, ChannelId(1)), None, "replayed message delivered again");
-    assert_eq!(server.endpoint_stats().dropped, dropped + 2 * packets.len() as u64);
+    assert_eq!(
+        server.receive(s, ChannelId(1)),
+        None,
+        "replayed message delivered again"
+    );
+    assert_eq!(
+        server.endpoint_stats().dropped,
+        dropped + 2 * packets.len() as u64
+    );
 }
 
 /// Two endpoints on loopback UDP sockets.
@@ -450,7 +581,11 @@ fn loopback_udp() {
     let mut server = Endpoint::server(
         server_socket,
         config.clone(),
-        ServerConfig { private_key: key.clone(), max_clients: 2, public_addresses: vec![server_addr] },
+        ServerConfig {
+            private_key: key.clone(),
+            max_clients: 2,
+            public_addresses: vec![server_addr],
+        },
         t0,
     )
     .unwrap();
@@ -477,11 +612,11 @@ fn loopback_udp() {
         }
         while server.poll_event().is_some() {}
         let first = server.connections().next();
-        if let Some(s) = first {
-            if let Some(m) = server.receive(s, ChannelId(0)) {
-                assert_eq!(m, &big[..]);
-                got = true;
-            }
+        if let Some(s) = first
+            && let Some(m) = server.receive(s, ChannelId(0))
+        {
+            assert_eq!(m, &big[..]);
+            got = true;
         }
         client.flush(now);
         server.flush(now);
@@ -496,12 +631,20 @@ fn loopback_udp() {
 #[test]
 fn bulk_reliable_transfer_without_spurious_losses() {
     let mut config = EndpointConfig::new(PROTOCOL);
-    config.channels[0] = ChannelConfig { buffer_bytes: 1 << 20, max_message_size: 256 * 1024, ..ChannelConfig::reliable() };
+    config.channels[0] = ChannelConfig {
+        buffer_bytes: 1 << 20,
+        max_message_size: 256 * 1024,
+        ..ChannelConfig::reliable()
+    };
     config.max_packets_per_flush = 1024;
     let mut sim = Sim::new(12, config.clone(), 2);
     sim.add_client(config);
     sim.run(10);
-    sim.net.set_default_conditions(LinkConditions::new(Duration::from_millis(30), Duration::ZERO, 0.0));
+    sim.net.set_default_conditions(LinkConditions::new(
+        Duration::from_millis(30),
+        Duration::ZERO,
+        0.0,
+    ));
     let s = sim.server_conn(100).unwrap();
     let c = sim.client_conn(0).unwrap();
     let message = payload(1, 200_000);
@@ -522,5 +665,9 @@ fn bulk_reliable_transfer_without_spurious_losses() {
     assert_eq!(got, 4);
     let stats = sim.server.stats(s).unwrap();
     assert_eq!(stats.packets_lost, 0, "{stats:?}");
-    assert!(stats.bytes_sent < 4 * 200_000 * 21 / 20, "{} bytes sent for 800 000", stats.bytes_sent);
+    assert!(
+        stats.bytes_sent < 4 * 200_000 * 21 / 20,
+        "{} bytes sent for 800 000",
+        stats.bytes_sent
+    );
 }

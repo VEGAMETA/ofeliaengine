@@ -16,7 +16,11 @@ pub trait DatagramSocket {
     /// Sends one datagram. A full send buffer may drop it silently (UDP semantics).
     fn send_to(&mut self, now: Instant, to: SocketAddr, data: &[u8]) -> io::Result<()>;
     /// Receives one datagram if one is waiting; never blocks.
-    fn recv_from(&mut self, now: Instant, buf: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>>;
+    fn recv_from(
+        &mut self,
+        now: Instant,
+        buf: &mut [u8],
+    ) -> io::Result<Option<(usize, SocketAddr)>>;
     /// The address the socket is bound to.
     fn local_addr(&self) -> io::Result<SocketAddr>;
 }
@@ -74,7 +78,11 @@ impl DatagramSocket for UdpSocket {
         }
     }
 
-    fn recv_from(&mut self, _now: Instant, buf: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>> {
+    fn recv_from(
+        &mut self,
+        _now: Instant,
+        buf: &mut [u8],
+    ) -> io::Result<Option<(usize, SocketAddr)>> {
         loop {
             match self.socket.recv_from(buf) {
                 Ok((n, from)) => return Ok(Some((n, normalize_addr(from)))),
@@ -106,8 +114,8 @@ mod sys {
 
     use windows_sys::Win32::Networking::WinSock::{
         AF_INET6, IN6_ADDR, INVALID_SOCKET, IPPROTO_IPV6, IPPROTO_UDP, IPV6_V6ONLY, POLLRDNORM,
-        SIO_UDP_CONNRESET, SOCK_DGRAM, SOCKADDR, SOCKADDR_IN6, SOCKET, SOL_SOCKET, SO_RCVBUF,
-        SO_SNDBUF, WSAIoctl, WSAPOLLFD, WSAPoll, bind, closesocket, setsockopt, socket,
+        SIO_UDP_CONNRESET, SO_RCVBUF, SO_SNDBUF, SOCK_DGRAM, SOCKADDR, SOCKADDR_IN6, SOCKET,
+        SOL_SOCKET, WSAIoctl, WSAPOLLFD, WSAPoll, bind, closesocket, setsockopt, socket,
     };
 
     pub(super) const WSAEMSGSIZE: i32 = 10040;
@@ -142,7 +150,13 @@ mod sys {
         for option in [SO_RCVBUF, SO_SNDBUF] {
             // SAFETY: a valid socket and a 4-byte int option value.
             let r = unsafe {
-                setsockopt(s, SOL_SOCKET, option, std::ptr::from_ref(&BUFFER_BYTES).cast(), 4)
+                setsockopt(
+                    s,
+                    SOL_SOCKET,
+                    option,
+                    std::ptr::from_ref(&BUFFER_BYTES).cast(),
+                    4,
+                )
             };
             if r != 0 {
                 return Err(last_error());
@@ -163,7 +177,14 @@ mod sys {
         // SAFETY: `s` is a socket we own; on every error path it is closed once.
         unsafe {
             let off: i32 = 0;
-            if setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, std::ptr::from_ref(&off).cast(), 4) != 0 {
+            if setsockopt(
+                s,
+                IPPROTO_IPV6,
+                IPV6_V6ONLY,
+                std::ptr::from_ref(&off).cast(),
+                4,
+            ) != 0
+            {
                 let e = last_error();
                 closesocket(s);
                 return Err(e);
@@ -175,7 +196,12 @@ mod sys {
                 sin6_addr: IN6_ADDR::default(),
                 Anonymous: Default::default(),
             };
-            if bind(s, std::ptr::from_ref(&addr).cast::<SOCKADDR>(), size_of::<SOCKADDR_IN6>() as i32) != 0 {
+            if bind(
+                s,
+                std::ptr::from_ref(&addr).cast::<SOCKADDR>(),
+                size_of::<SOCKADDR_IN6>() as i32,
+            ) != 0
+            {
                 let e = last_error();
                 closesocket(s);
                 return Err(e);
@@ -227,6 +253,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::disallowed_methods)] // waits for a real ICMP reply
     fn unreachable_peers_do_not_break_receiving() {
         let now = Instant::now();
         let mut a = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
@@ -238,7 +265,8 @@ mod tests {
         a.send_to(now, gone_addr, b"x").unwrap();
         std::thread::sleep(Duration::from_millis(50));
         let mut b = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
-        b.send_to(now, a.local_addr().unwrap(), b"still here").unwrap();
+        b.send_to(now, a.local_addr().unwrap(), b"still here")
+            .unwrap();
         assert!(a.wait_readable(Duration::from_secs(2)).unwrap());
         let mut buf = [0u8; 64];
         let (n, _) = a.recv_from(now, &mut buf).unwrap().unwrap();

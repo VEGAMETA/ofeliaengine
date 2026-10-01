@@ -2,6 +2,8 @@
 //! flush, events), on loopback UDP and on the in-memory network. One test per file.
 
 #![allow(clippy::unwrap_used)]
+// Real sockets and mock routers on other threads: plain sleeps are fine here.
+#![allow(clippy::disallowed_methods)]
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -147,16 +149,33 @@ fn network_steps_do_not_allocate() {
     let mut server = Endpoint::server(
         net.bind(server_addr),
         config(),
-        ServerConfig { private_key: key.clone(), max_clients: 4, public_addresses: vec![server_addr] },
+        ServerConfig {
+            private_key: key.clone(),
+            max_clients: 4,
+            public_addresses: vec![server_addr],
+        },
         t0,
     )
     .unwrap();
-    let mut client = Endpoint::client(net.bind("10.0.0.2:1".parse().unwrap()), config(), token(&key, server_addr), t0).unwrap();
-    let mut conditions = LinkConditions::new(Duration::from_millis(20), Duration::from_millis(10), 0.1);
+    let mut client = Endpoint::client(
+        net.bind("10.0.0.2:1".parse().unwrap()),
+        config(),
+        token(&key, server_addr),
+        t0,
+    )
+    .unwrap();
+    let mut conditions =
+        LinkConditions::new(Duration::from_millis(20), Duration::from_millis(10), 0.1);
     conditions.reorder = 0.05;
     conditions.duplicate = 0.02;
     net.set_default_conditions(conditions);
-    let (allocations, received) = run(&mut server, &mut client, |s| t0 + Duration::from_millis(16 * s as u64), 300, 2300);
+    let (allocations, received) = run(
+        &mut server,
+        &mut client,
+        |s| t0 + Duration::from_millis(16 * s as u64),
+        300,
+        2300,
+    );
     assert!(received > 3000, "{received}");
     assert_eq!(allocations, 0, "in-memory network steps allocated");
 
@@ -167,7 +186,11 @@ fn network_steps_do_not_allocate() {
     let mut server = Endpoint::server(
         server_socket,
         config(),
-        ServerConfig { private_key: key.clone(), max_clients: 4, public_addresses: vec![server_addr] },
+        ServerConfig {
+            private_key: key.clone(),
+            max_clients: 4,
+            public_addresses: vec![server_addr],
+        },
         t0,
     )
     .unwrap();

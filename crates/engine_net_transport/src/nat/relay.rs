@@ -86,13 +86,24 @@ impl RelayTicket {
 /// The virtual address of relay peer `peer` (a unique-local IPv6 address, port 1).
 pub fn peer_addr(peer: u32) -> SocketAddr {
     SocketAddr::new(
-        IpAddr::V6(Ipv6Addr::new(0xfd00, 0x6f66, 0x6c79, 0x7265, 0x6c61, 0x7900, (peer >> 16) as u16, peer as u16)),
+        IpAddr::V6(Ipv6Addr::new(
+            0xfd00,
+            0x6f66,
+            0x6c79,
+            0x7265,
+            0x6c61,
+            0x7900,
+            (peer >> 16) as u16,
+            peer as u16,
+        )),
         1,
     )
 }
 
 fn peer_of(addr: SocketAddr) -> Option<u32> {
-    let IpAddr::V6(v6) = addr.ip() else { return None };
+    let IpAddr::V6(v6) = addr.ip() else {
+        return None;
+    };
     let s = v6.segments();
     (s[..6] == [0xfd00, 0x6f66, 0x6c79, 0x7265, 0x6c61, 0x7900] && addr.port() == 1)
         .then(|| (u32::from(s[6]) << 16) | u32::from(s[7]))
@@ -109,7 +120,9 @@ pub struct RelayServer {
 
 impl std::fmt::Debug for RelayServer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RelayServer").field("bindings", &self.bindings.len()).finish()
+        f.debug_struct("RelayServer")
+            .field("bindings", &self.bindings.len())
+            .finish()
     }
 }
 
@@ -126,7 +139,8 @@ impl RelayServer {
     }
 
     fn cookie_aad(&self, now: Instant, from: SocketAddr, epoch_back: u64) -> [u8; 27] {
-        let epoch = now.saturating_duration_since(self.start).as_secs() / 30 - epoch_back.min(now.saturating_duration_since(self.start).as_secs() / 30);
+        let epoch = now.saturating_duration_since(self.start).as_secs() / 30
+            - epoch_back.min(now.saturating_duration_since(self.start).as_secs() / 30);
         let mut aad = [0u8; 27];
         aad[..8].copy_from_slice(&epoch.to_le_bytes());
         let (ip, port) = match from.ip() {
@@ -139,14 +153,29 @@ impl RelayServer {
     }
 
     fn cookie_valid(&self, now: Instant, from: SocketAddr, cookie: &[u8]) -> bool {
-        let Ok(nonce) = <[u8; NONCE_BYTES]>::try_from(&cookie[..NONCE_BYTES]) else { return false };
-        let Ok(tag) = <[u8; TAG_BYTES]>::try_from(&cookie[NONCE_BYTES..]) else { return false };
+        let Ok(nonce) = <[u8; NONCE_BYTES]>::try_from(&cookie[..NONCE_BYTES]) else {
+            return false;
+        };
+        let Ok(tag) = <[u8; TAG_BYTES]>::try_from(&cookie[NONCE_BYTES..]) else {
+            return false;
+        };
         // This epoch or the previous one (30-60 s validity).
-        (0..2).any(|back| self.cookies.open(&nonce, &self.cookie_aad(now, from, back), &mut [], &tag).is_ok())
+        (0..2).any(|back| {
+            self.cookies
+                .open(&nonce, &self.cookie_aad(now, from, back), &mut [], &tag)
+                .is_ok()
+        })
     }
 
     /// Handles one datagram; returns a datagram to send, if any.
-    pub fn handle(&mut self, now: Instant, unix_now: u64, from: SocketAddr, data: &[u8], out: &mut [u8]) -> Option<(SocketAddr, usize)> {
+    pub fn handle(
+        &mut self,
+        now: Instant,
+        unix_now: u64,
+        from: SocketAddr,
+        data: &[u8],
+        out: &mut [u8],
+    ) -> Option<(SocketAddr, usize)> {
         if data.len() < 2 || data[0] != RELAY_PREFIX {
             return None;
         }
@@ -161,7 +190,9 @@ impl RelayServer {
                 if !self.cookie_valid(now, from, cookie) {
                     let mut nonce = [0u8; NONCE_BYTES];
                     random_bytes(&mut nonce);
-                    let tag = self.cookies.seal(&nonce, &self.cookie_aad(now, from, 0), &mut []);
+                    let tag = self
+                        .cookies
+                        .seal(&nonce, &self.cookie_aad(now, from, 0), &mut []);
                     out[0] = RELAY_PREFIX;
                     out[1] = OP_CHALLENGE;
                     out[2..14].copy_from_slice(&nonce);
@@ -251,7 +282,14 @@ impl<S: DatagramSocket> RelaySocket<S> {
     fn maintain(&mut self, now: Instant) -> io::Result<()> {
         let due = match self.last_bind {
             None => true,
-            Some(t) => now.saturating_duration_since(t) >= if self.bound { REBIND } else { Duration::from_millis(250) },
+            Some(t) => {
+                now.saturating_duration_since(t)
+                    >= if self.bound {
+                        REBIND
+                    } else {
+                        Duration::from_millis(250)
+                    }
+            }
         };
         if due {
             self.last_bind = Some(now);
@@ -274,7 +312,10 @@ impl<S: DatagramSocket> DatagramSocket for RelaySocket<S> {
         };
         let n = data.len() + RELAY_OVERHEAD;
         let Some(out) = self.scratch.get_mut(..n) else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "datagram too large for the relay"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "datagram too large for the relay",
+            ));
         };
         out[0] = RELAY_PREFIX;
         out[1] = OP_SEND;
@@ -283,10 +324,16 @@ impl<S: DatagramSocket> DatagramSocket for RelaySocket<S> {
         self.inner.send_to(now, self.relay, &self.scratch[..n])
     }
 
-    fn recv_from(&mut self, now: Instant, buf: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>> {
+    fn recv_from(
+        &mut self,
+        now: Instant,
+        buf: &mut [u8],
+    ) -> io::Result<Option<(usize, SocketAddr)>> {
         self.maintain(now)?;
         loop {
-            let Some((n, from)) = self.inner.recv_from(now, buf)? else { return Ok(None) };
+            let Some((n, from)) = self.inner.recv_from(now, buf)? else {
+                return Ok(None);
+            };
             if from != self.relay || n < 2 || buf[0] != RELAY_PREFIX {
                 return Ok(Some((n, from)));
             }
@@ -329,11 +376,27 @@ mod tests {
         let nat_a = net.add_nat("198.51.100.1".parse().unwrap(), NatBehavior::Symmetric);
         let nat_b = net.add_nat("198.51.100.2".parse().unwrap(), NatBehavior::Symmetric);
         let unix = crate::unix_now();
-        let mut a = RelaySocket::new(net.bind_behind_nat("192.168.1.2:1".parse().unwrap(), nat_a), relay_addr, RelayTicket::issue(&key, 7, 1, unix + 60));
-        let mut b = RelaySocket::new(net.bind_behind_nat("192.168.2.2:1".parse().unwrap(), nat_b), relay_addr, RelayTicket::issue(&key, 7, 2, unix + 60));
-        let mut other = RelaySocket::new(net.bind("203.0.113.9:1".parse().unwrap()), relay_addr, RelayTicket::issue(&key, 8, 3, unix + 60));
+        let mut a = RelaySocket::new(
+            net.bind_behind_nat("192.168.1.2:1".parse().unwrap(), nat_a),
+            relay_addr,
+            RelayTicket::issue(&key, 7, 1, unix + 60),
+        );
+        let mut b = RelaySocket::new(
+            net.bind_behind_nat("192.168.2.2:1".parse().unwrap(), nat_b),
+            relay_addr,
+            RelayTicket::issue(&key, 7, 2, unix + 60),
+        );
+        let mut other = RelaySocket::new(
+            net.bind("203.0.113.9:1".parse().unwrap()),
+            relay_addr,
+            RelayTicket::issue(&key, 8, 3, unix + 60),
+        );
         let forged = RelayTicket::issue(&Key::random(), 7, 4, unix + 60);
-        let mut mallory = RelaySocket::new(net.bind("203.0.113.10:1".parse().unwrap()), relay_addr, forged);
+        let mut mallory = RelaySocket::new(
+            net.bind("203.0.113.10:1".parse().unwrap()),
+            relay_addr,
+            forged,
+        );
         let mut buf = [0u8; 2048];
         let mut out = [0u8; 2048];
         let mut got_b = Vec::new();

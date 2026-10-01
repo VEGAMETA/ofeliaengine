@@ -52,7 +52,9 @@ mod sys {
         // SAFETY: the family field is shared by every variant; the variant read matches it.
         unsafe {
             match s.si_family {
-                AF_INET => Some(IpAddr::V4(Ipv4Addr::from(s.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes()))),
+                AF_INET => Some(IpAddr::V4(Ipv4Addr::from(
+                    s.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes(),
+                ))),
                 AF_INET6 => Some(IpAddr::V6(Ipv6Addr::from(s.Ipv6.sin6_addr.u.Byte))),
                 _ => None,
             }
@@ -66,16 +68,28 @@ mod sys {
         // SAFETY: valid pointers for the call; a null LUID and index 0 let the stack pick
         // the interface.
         let r = unsafe {
-            GetBestRoute2(std::ptr::null(), 0, std::ptr::null(), &dest, 0, &mut row, &mut source)
+            GetBestRoute2(
+                std::ptr::null(),
+                0,
+                std::ptr::null(),
+                &dest,
+                0,
+                &mut row,
+                &mut source,
+            )
         };
         if r != 0 {
             return Err(io::Error::from_raw_os_error(r as i32));
         }
-        let gateway = from_sockaddr(&row.NextHop).ok_or_else(|| io::Error::other("no gateway family"))?;
+        let gateway =
+            from_sockaddr(&row.NextHop).ok_or_else(|| io::Error::other("no gateway family"))?;
         let local = from_sockaddr(&source).ok_or_else(|| io::Error::other("no source family"))?;
         if gateway.is_unspecified() {
             // On-link route (no router): nothing to map.
-            return Err(io::Error::new(io::ErrorKind::NotFound, "no default gateway"));
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "no default gateway",
+            ));
         }
         Ok(super::Route { gateway, local })
     }

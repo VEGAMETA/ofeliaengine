@@ -96,7 +96,9 @@ impl ChannelConfig {
                     return Err("a reliable channel's buffer_bytes must be at most 1 GiB");
                 }
                 if self.max_message_size + 5 > self.buffer_bytes {
-                    return Err("a reliable channel's max_message_size must be <= buffer_bytes - 5");
+                    return Err(
+                        "a reliable channel's max_message_size must be <= buffer_bytes - 5",
+                    );
                 }
                 if self.notify {
                     return Err("delivery notification is for unreliable channels");
@@ -285,7 +287,8 @@ impl ReliableSend {
 
     /// Whether anything waits to be sent (new bytes or lost chunks).
     pub(crate) fn has_pending(&self) -> bool {
-        self.lost > 0 || (self.sent_until < self.written && self.head.wrapping_sub(self.tail) < CHUNKS as u32)
+        self.lost > 0
+            || (self.sent_until < self.written && self.head.wrapping_sub(self.tail) < CHUNKS as u32)
     }
 
     /// Writes lost chunks again, then new bytes, while they fit. `entries` gets one entry
@@ -477,7 +480,11 @@ impl ReliableRecv {
             if run == 0 {
                 break;
             }
-            let clear = if run == 64 { u64::MAX } else { ((1u64 << run) - 1) << bit };
+            let clear = if run == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << run) - 1) << bit
+            };
             self.bits[word] &= !clear;
             self.contiguous += run;
         }
@@ -491,7 +498,11 @@ impl ReliableRecv {
             let word = (p / 64) as usize;
             let bit = p % 64;
             let n = (to - pos).min(64 - bit);
-            let set = if n == 64 { u64::MAX } else { ((1u64 << n) - 1) << bit };
+            let set = if n == 64 {
+                u64::MAX
+            } else {
+                ((1u64 << n) - 1) << bit
+            };
             self.bits[word] |= set;
             pos += n;
         }
@@ -571,7 +582,11 @@ pub(crate) struct UnreliableSend {
 }
 
 fn fragment_count(len: usize) -> usize {
-    if len <= FRAGMENT_BYTES { 1 } else { len.div_ceil(FRAGMENT_BYTES) }
+    if len <= FRAGMENT_BYTES {
+        1
+    } else {
+        len.div_ceil(FRAGMENT_BYTES)
+    }
 }
 
 impl UnreliableSend {
@@ -602,7 +617,11 @@ impl UnreliableSend {
         }
     }
 
-    pub(crate) fn queue(&mut self, message: &[u8], notices: &mut impl FnMut(Notice)) -> Result<MessageId, SendError> {
+    pub(crate) fn queue(
+        &mut self,
+        message: &[u8],
+        notices: &mut impl FnMut(Notice),
+    ) -> Result<MessageId, SendError> {
         if message.len() > self.max_message {
             return Err(SendError::TooLarge);
         }
@@ -646,7 +665,12 @@ impl UnreliableSend {
 
     /// Writes queued messages (or their fragments) while they fit. Returns `false` once
     /// the packet or entry list is full.
-    pub(crate) fn write(&mut self, channel: u8, w: &mut Writer<'_>, entries: &mut EntryList) -> bool {
+    pub(crate) fn write(
+        &mut self,
+        channel: u8,
+        w: &mut Writer<'_>,
+        entries: &mut EntryList,
+    ) -> bool {
         let notify = self.notify.is_some();
         while self.cursor < self.queue.len() {
             let m = self.queue[self.cursor];
@@ -674,11 +698,19 @@ impl UnreliableSend {
                 self.cursor += 1;
             } else {
                 let count = fragment_count(len);
-                while (m.next_fragment as usize) < count {
+                loop {
                     let index = self.queue[self.cursor].next_fragment as usize;
+                    if index >= count {
+                        break;
+                    }
                     let start = index * FRAGMENT_BYTES;
                     let flen = (len - start).min(FRAGMENT_BYTES);
-                    let need = 1 + 2 + varint_len(index as u32) + varint_len(count as u32) + varint_len(flen as u32) + flen;
+                    let need = 1
+                        + 2
+                        + varint_len(index as u32)
+                        + varint_len(count as u32)
+                        + varint_len(flen as u32)
+                        + flen;
                     if need > w.remaining() || (notify && entries.is_full()) {
                         return false;
                     }
@@ -723,7 +755,9 @@ impl UnreliableSend {
     }
 
     fn resolve(&mut self, id: u32, delivered: bool, notices: &mut impl FnMut(Notice)) {
-        let Some(slots) = &mut self.notify else { return };
+        let Some(slots) = &mut self.notify else {
+            return;
+        };
         let slot = &mut slots[id as usize & (NOTIFY_SLOTS - 1)];
         if !slot.live || slot.id != id {
             return;
@@ -894,8 +928,15 @@ impl UnreliableRecv {
             received: 0,
             total: 0,
             bits: vec![0u64; max_frags.div_ceil(64)].into_boxed_slice(),
-            buf: vec![0u8; if config.max_message_size > FRAGMENT_BYTES { config.max_message_size } else { 0 }]
-                .into_boxed_slice(),
+            buf: vec![
+                0u8;
+                if config.max_message_size > FRAGMENT_BYTES {
+                    config.max_message_size
+                } else {
+                    0
+                }
+            ]
+            .into_boxed_slice(),
             age: 0,
         };
         Self {
@@ -949,7 +990,8 @@ impl UnreliableRecv {
         if index + 1 < count {
             len == FRAGMENT_BYTES
         } else {
-            (1..=FRAGMENT_BYTES).contains(&len) && (count - 1) * FRAGMENT_BYTES + len <= self.max_message
+            (1..=FRAGMENT_BYTES).contains(&len)
+                && (count - 1) * FRAGMENT_BYTES + len <= self.max_message
         }
     }
 
@@ -1071,7 +1113,11 @@ mod tests {
 
     #[test]
     fn reliable_stream_reassembles_out_of_order_chunks() {
-        let config = ChannelConfig { buffer_bytes: 4096, max_message_size: 4000, ..ChannelConfig::reliable() };
+        let config = ChannelConfig {
+            buffer_bytes: 4096,
+            max_message_size: 4000,
+            ..ChannelConfig::reliable()
+        };
         let mut send = ReliableSend::new(&config);
         let mut recv = ReliableRecv::new(&config);
         let messages: Vec<Vec<u8>> = (0..5).map(|i| vec![i as u8; 300 + i * 100]).collect();

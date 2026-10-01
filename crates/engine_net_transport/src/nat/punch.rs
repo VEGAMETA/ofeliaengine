@@ -43,25 +43,39 @@ pub struct LocalRendezvous {
 impl LocalRendezvous {
     /// A board; `for_peer` gives the other side's handle.
     pub fn new_host() -> Self {
-        Self { board: Default::default(), host: true }
+        Self {
+            board: Default::default(),
+            host: true,
+        }
     }
 
     /// The other side's handle on the same board.
     pub fn for_peer(&self) -> Self {
-        Self { board: self.board.clone(), host: !self.host }
+        Self {
+            board: self.board.clone(),
+            host: !self.host,
+        }
     }
 }
 
 impl Rendezvous for LocalRendezvous {
     fn publish(&mut self, session: u64, candidates: &AddressList) {
-        let mut b = self.board.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut b = self
+            .board
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         b.retain(|(s, h, _)| !(*s == session && *h == self.host));
         b.push((session, self.host, *candidates));
     }
 
     fn peer_candidates(&mut self, session: u64) -> Option<AddressList> {
-        let b = self.board.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        b.iter().find(|(s, h, _)| *s == session && *h != self.host).map(|(_, _, c)| *c)
+        let b = self
+            .board
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        b.iter()
+            .find(|(s, h, _)| *s == session && *h != self.host)
+            .map(|(_, _, c)| *c)
     }
 }
 
@@ -94,7 +108,10 @@ pub struct Puncher {
 
 impl std::fmt::Debug for Puncher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Puncher").field("session", &self.session).field("state", &self.state).finish()
+        f.debug_struct("Puncher")
+            .field("session", &self.session)
+            .field("state", &self.state)
+            .finish()
     }
 }
 
@@ -102,7 +119,14 @@ impl Puncher {
     /// A punch for `session` toward `remotes`, sealed with `key`. One side is the
     /// `initiator` (the client), the other not (the host). Probes go to every candidate
     /// every 50 ms until `timeout`.
-    pub fn new(key: &Key, session: u64, initiator: bool, remotes: AddressList, now: Instant, timeout: Duration) -> Self {
+    pub fn new(
+        key: &Key,
+        session: u64,
+        initiator: bool,
+        remotes: AddressList,
+        now: Instant,
+        timeout: Duration,
+    ) -> Self {
         Self {
             cipher: Cipher::new(key),
             session,
@@ -144,12 +168,18 @@ impl Puncher {
             a[8..17].copy_from_slice(&out[0..9]);
             a
         };
-        let tag = self.cipher.seal(&sequence_nonce(nonce_seq), &aad, &mut out[17..18]);
+        let tag = self
+            .cipher
+            .seal(&sequence_nonce(nonce_seq), &aad, &mut out[17..18]);
         out[18..].copy_from_slice(&tag);
     }
 
     /// The next packet due now: fills `out`, returns where to send it.
-    pub fn poll_transmit(&mut self, now: Instant, out: &mut [u8; PUNCH_BYTES]) -> Option<SocketAddr> {
+    pub fn poll_transmit(
+        &mut self,
+        now: Instant,
+        out: &mut [u8; PUNCH_BYTES],
+    ) -> Option<SocketAddr> {
         if let Some(to) = self.ack_to.take() {
             self.seal(ACK, out);
             return Some(to);
@@ -158,7 +188,8 @@ impl Puncher {
             self.state = PunchState::Failed;
         }
         // Keep probing a little after opening so the peer's side opens too.
-        let probing = self.state == PunchState::Probing || (matches!(self.state, PunchState::Open(_)) && now < self.deadline);
+        let probing = self.state == PunchState::Probing
+            || (matches!(self.state, PunchState::Open(_)) && now < self.deadline);
         if !probing || now < self.next_round {
             return None;
         }
@@ -169,10 +200,10 @@ impl Puncher {
             self.next_index = 0;
             self.next_round = now + self.interval;
         }
-        if let PunchState::Open(addr) = self.state {
-            if to != addr {
-                return None;
-            }
+        if let PunchState::Open(addr) = self.state
+            && to != addr
+        {
+            return None;
         }
         self.seal(PROBE, out);
         Some(to)
@@ -180,7 +211,10 @@ impl Puncher {
 
     /// Offers a received datagram; returns whether it was this punch's.
     pub fn handle(&mut self, now: Instant, from: SocketAddr, data: &[u8]) -> bool {
-        if data.len() != PUNCH_BYTES || data[0] != PUNCH_PREFIX || data[1..9] != self.session.to_le_bytes() {
+        if data.len() != PUNCH_BYTES
+            || data[0] != PUNCH_PREFIX
+            || data[1..9] != self.session.to_le_bytes()
+        {
             return false;
         }
         let nonce_seq = u64::from_le_bytes(data[9..17].try_into().unwrap_or_default());
@@ -193,7 +227,11 @@ impl Puncher {
         aad[8..17].copy_from_slice(&data[0..9]);
         let mut kind = [data[17]];
         let tag: [u8; TAG_BYTES] = data[18..].try_into().unwrap_or_default();
-        if self.cipher.open(&sequence_nonce(nonce_seq), &aad, &mut kind, &tag).is_err() {
+        if self
+            .cipher
+            .open(&sequence_nonce(nonce_seq), &aad, &mut kind, &tag)
+            .is_err()
+        {
             return false;
         }
         match kind[0] {
@@ -248,13 +286,29 @@ mod tests {
         let t0 = Instant::now();
         // Each side learns its mapping from a STUN server (as the probe would).
         let mut buf = [0u8; 64];
-        a.send_to(t0, "203.0.113.1:3478".parse().unwrap(), b"?").unwrap();
-        b.send_to(t0, "203.0.113.1:3478".parse().unwrap(), b"?").unwrap();
+        a.send_to(t0, "203.0.113.1:3478".parse().unwrap(), b"?")
+            .unwrap();
+        b.send_to(t0, "203.0.113.1:3478".parse().unwrap(), b"?")
+            .unwrap();
         let (_, a_pub) = stun.recv_from(t0, &mut buf).unwrap().unwrap();
         let (_, b_pub) = stun.recv_from(t0, &mut buf).unwrap().unwrap();
         let key = Key::random();
-        let mut pa = Puncher::new(&key, 9, true, AddressList::new(&["192.168.2.2:7000".parse().unwrap(), b_pub]).unwrap(), t0, Duration::from_secs(3));
-        let mut pb = Puncher::new(&key, 9, false, AddressList::new(&["192.168.1.2:7000".parse().unwrap(), a_pub]).unwrap(), t0, Duration::from_secs(3));
+        let mut pa = Puncher::new(
+            &key,
+            9,
+            true,
+            AddressList::new(&["192.168.2.2:7000".parse().unwrap(), b_pub]).unwrap(),
+            t0,
+            Duration::from_secs(3),
+        );
+        let mut pb = Puncher::new(
+            &key,
+            9,
+            false,
+            AddressList::new(&["192.168.1.2:7000".parse().unwrap(), a_pub]).unwrap(),
+            t0,
+            Duration::from_secs(3),
+        );
         let mut out = [0u8; PUNCH_BYTES];
         for ms in 0..4000 {
             let now = t0 + Duration::from_millis(ms);
@@ -277,8 +331,14 @@ mod tests {
     #[test]
     fn punches_through_cone_nats_but_not_symmetric_ones() {
         let (a, b) = punch(NatBehavior::PortRestricted);
-        assert!(matches!(a, PunchState::Open(addr) if addr.ip().to_string() == "198.51.100.2"), "{a:?}");
-        assert!(matches!(b, PunchState::Open(addr) if addr.ip().to_string() == "198.51.100.1"), "{b:?}");
+        assert!(
+            matches!(a, PunchState::Open(addr) if addr.ip().to_string() == "198.51.100.2"),
+            "{a:?}"
+        );
+        assert!(
+            matches!(b, PunchState::Open(addr) if addr.ip().to_string() == "198.51.100.1"),
+            "{b:?}"
+        );
         let (a, b) = punch(NatBehavior::Symmetric);
         assert_eq!(a, PunchState::Failed);
         assert_eq!(b, PunchState::Failed);
@@ -288,7 +348,14 @@ mod tests {
     fn forged_probes_are_ignored() {
         let t0 = Instant::now();
         let remotes = AddressList::new(&["10.0.0.1:1".parse().unwrap()]).unwrap();
-        let mut honest = Puncher::new(&Key::random(), 3, false, remotes, t0, Duration::from_secs(1));
+        let mut honest = Puncher::new(
+            &Key::random(),
+            3,
+            false,
+            remotes,
+            t0,
+            Duration::from_secs(1),
+        );
         let mut forger = Puncher::new(&Key::random(), 3, true, remotes, t0, Duration::from_secs(1));
         let mut out = [0u8; PUNCH_BYTES];
         forger.poll_transmit(t0, &mut out).unwrap();

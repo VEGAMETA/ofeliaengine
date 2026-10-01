@@ -187,7 +187,17 @@ mod tests {
     #[test]
     fn varints_round_trip() {
         let mut buf = [0u8; 64];
-        let values = [0u32, 1, 127, 128, 16_383, 16_384, 2_097_151, 2_097_152, u32::MAX];
+        let values = [
+            0u32,
+            1,
+            127,
+            128,
+            16_383,
+            16_384,
+            2_097_151,
+            2_097_152,
+            u32::MAX,
+        ];
         let mut w = Writer::new(&mut buf);
         for &v in &values {
             let before = w.pos();

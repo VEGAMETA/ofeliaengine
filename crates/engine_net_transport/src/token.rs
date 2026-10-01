@@ -180,7 +180,11 @@ impl ConnectToken {
     /// token.write(&mut bytes);
     /// assert_eq!(ConnectToken::read(&bytes).unwrap().server_addresses.as_slice(), &[server]);
     /// ```
-    pub fn generate(params: &TokenParams<'_>, private_key: &Key, now: u64) -> Result<Self, TokenError> {
+    pub fn generate(
+        params: &TokenParams<'_>,
+        private_key: &Key,
+        now: u64,
+    ) -> Result<Self, TokenError> {
         let addresses = AddressList::new(params.server_addresses).ok_or(TokenError::Addresses)?;
         let client_to_server_key = Key::random();
         let server_to_client_key = Key::random();
@@ -342,7 +346,10 @@ mod tests {
     #[test]
     fn tokens_round_trip_and_open_only_with_the_key() {
         let key = Key::random();
-        let addrs: [SocketAddr; 2] = ["127.0.0.1:4000".parse().unwrap(), "[::1]:4000".parse().unwrap()];
+        let addrs: [SocketAddr; 2] = [
+            "127.0.0.1:4000".parse().unwrap(),
+            "[::1]:4000".parse().unwrap(),
+        ];
         let token = ConnectToken::generate(&params(&addrs), &key, 1_000).unwrap();
         assert_eq!(token.expire_timestamp, 1_030);
         let mut bytes = [0u8; CONNECT_TOKEN_BYTES];
@@ -353,7 +360,8 @@ mod tests {
 
         let mut sealed = read.private;
         let private =
-            PrivateToken::open(&Cipher::new(&key), 0x1234, 1_030, &read.nonce, &mut sealed).unwrap();
+            PrivateToken::open(&Cipher::new(&key), 0x1234, 1_030, &read.nonce, &mut sealed)
+                .unwrap();
         assert_eq!(private.client_id, 77);
         assert_eq!(private.server_addresses.as_slice(), &addrs);
         assert_eq!(private.server_to_client_key, token.server_to_client_key);
@@ -361,22 +369,46 @@ mod tests {
 
         // Wrong key, wrong protocol, extended expiry, flipped byte: all refused.
         let mut sealed = read.private;
-        assert!(PrivateToken::open(&Cipher::new(&Key::random()), 0x1234, 1_030, &read.nonce, &mut sealed).is_none());
+        assert!(
+            PrivateToken::open(
+                &Cipher::new(&Key::random()),
+                0x1234,
+                1_030,
+                &read.nonce,
+                &mut sealed
+            )
+            .is_none()
+        );
         let mut sealed = read.private;
-        assert!(PrivateToken::open(&Cipher::new(&key), 0x1235, 1_030, &read.nonce, &mut sealed).is_none());
+        assert!(
+            PrivateToken::open(&Cipher::new(&key), 0x1235, 1_030, &read.nonce, &mut sealed)
+                .is_none()
+        );
         let mut sealed = read.private;
-        assert!(PrivateToken::open(&Cipher::new(&key), 0x1234, 9_999, &read.nonce, &mut sealed).is_none());
+        assert!(
+            PrivateToken::open(&Cipher::new(&key), 0x1234, 9_999, &read.nonce, &mut sealed)
+                .is_none()
+        );
         let mut sealed = read.private;
         sealed[100] ^= 1;
-        assert!(PrivateToken::open(&Cipher::new(&key), 0x1234, 1_030, &read.nonce, &mut sealed).is_none());
+        assert!(
+            PrivateToken::open(&Cipher::new(&key), 0x1234, 1_030, &read.nonce, &mut sealed)
+                .is_none()
+        );
     }
 
     #[test]
     fn address_limits_and_malformed_tokens() {
         let key = Key::random();
-        assert_eq!(ConnectToken::generate(&params(&[]), &key, 0).unwrap_err(), TokenError::Addresses);
+        assert_eq!(
+            ConnectToken::generate(&params(&[]), &key, 0).unwrap_err(),
+            TokenError::Addresses
+        );
         let many = ["127.0.0.1:1".parse().unwrap(); 9];
-        assert_eq!(ConnectToken::generate(&params(&many), &key, 0).unwrap_err(), TokenError::Addresses);
+        assert_eq!(
+            ConnectToken::generate(&params(&many), &key, 0).unwrap_err(),
+            TokenError::Addresses
+        );
         assert!(ConnectToken::read(&[0u8; 10]).is_err());
         assert!(ConnectToken::read(&[0u8; CONNECT_TOKEN_BYTES]).is_err());
     }

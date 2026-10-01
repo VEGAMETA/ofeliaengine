@@ -118,7 +118,10 @@ impl Cipher {
             )
         };
         // Only fails for invalid arguments or out of memory.
-        assert!(status == 0, "BCryptGenerateSymmetricKey failed: {status:#x}");
+        assert!(
+            status == 0,
+            "BCryptGenerateSymmetricKey failed: {status:#x}"
+        );
         Self { key: handle }
     }
 
@@ -250,9 +253,11 @@ mod tests {
     /// NIST GCM test vector (gcmEncryptExtIV256.rsp style; McGrew & Viega test case 16).
     #[test]
     fn aes_256_gcm_matches_the_reference_vector() {
-        let key = Key(hex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308")
-            .try_into()
-            .unwrap());
+        let key = Key(
+            hex("feffe9928665731c6d6a8f9467308308feffe9928665731c6d6a8f9467308308")
+                .try_into()
+                .unwrap(),
+        );
         let nonce: [u8; 12] = hex("cafebabefacedbaddecaf888").try_into().unwrap();
         let aad = hex("feedfacedeadbeeffeedfacedeadbeefabaddad2");
         let mut text = hex(concat!(
@@ -283,14 +288,29 @@ mod tests {
         for i in 0..len {
             let mut copy = buf;
             copy[i] ^= 0x10;
-            assert!(cipher.open_appended(&nonce, b"aad", &mut copy[..len]).is_err());
+            assert!(
+                cipher
+                    .open_appended(&nonce, b"aad", &mut copy[..len])
+                    .is_err()
+            );
         }
         let mut copy = buf;
-        assert!(cipher.open_appended(&sequence_nonce(8), b"aad", &mut copy[..len]).is_err());
+        assert!(
+            cipher
+                .open_appended(&sequence_nonce(8), b"aad", &mut copy[..len])
+                .is_err()
+        );
         let mut copy = buf;
-        assert!(cipher.open_appended(&nonce, b"aae", &mut copy[..len]).is_err());
+        assert!(
+            cipher
+                .open_appended(&nonce, b"aae", &mut copy[..len])
+                .is_err()
+        );
         let mut copy = buf;
-        assert_eq!(cipher.open_appended(&nonce, b"aad", &mut copy[..len]), Ok(5));
+        assert_eq!(
+            cipher.open_appended(&nonce, b"aad", &mut copy[..len]),
+            Ok(5)
+        );
         assert_eq!(&copy[..5], b"hello");
     }
 }

@@ -88,7 +88,11 @@ fn shift_up(bits: &mut [u64; MAX_ACK_WORDS], n: u64) {
     for i in (0..MAX_ACK_WORDS).rev() {
         let lo = i.checked_sub(words).map_or(0, |j| bits[j]);
         let below = i.checked_sub(words + 1).map_or(0, |j| bits[j]);
-        bits[i] = if rest == 0 { lo } else { (lo << rest) | (below >> (64 - rest)) };
+        bits[i] = if rest == 0 {
+            lo
+        } else {
+            (lo << rest) | (below >> (64 - rest))
+        };
     }
 }
 
@@ -159,7 +163,11 @@ impl AckTracker {
     }
 
     pub(crate) fn min_rtt(&self) -> Duration {
-        if self.has_sample { Duration::from_secs_f64(self.min_rtt) } else { Duration::ZERO }
+        if self.has_sample {
+            Duration::from_secs_f64(self.min_rtt)
+        } else {
+            Duration::ZERO
+        }
     }
 
     pub(crate) fn loss(&self) -> f32 {
@@ -232,15 +240,23 @@ impl AckTracker {
     }
 
     /// Processes an acknowledgement header from the peer.
-    pub(crate) fn on_ack(&mut self, ack: &AckHeader, now: Instant, outcome: &mut impl FnMut(Outcome)) {
+    pub(crate) fn on_ack(
+        &mut self,
+        ack: &AckHeader,
+        now: Instant,
+        outcome: &mut impl FnMut(Outcome),
+    ) {
         if self.next == 0 {
             return;
         }
         let last = self.next - 1;
         let back = u64::from((last as u16).wrapping_sub(ack.largest));
-        let Some(largest) = last.checked_sub(back) else { return };
+        let Some(largest) = last.checked_sub(back) else {
+            return;
+        };
         if let Some(sent_at) = self.acked(largest, outcome) {
-            let delay = Duration::from_micros(u64::from(ack.delay) * ACK_DELAY_UNIT_US).min(self.max_ack_delay);
+            let delay = Duration::from_micros(u64::from(ack.delay) * ACK_DELAY_UNIT_US)
+                .min(self.max_ack_delay);
             self.rtt_sample(now.saturating_duration_since(sent_at), delay);
         }
         for (w, &word) in ack.words[..ack.count.min(MAX_ACK_WORDS)].iter().enumerate() {
@@ -264,7 +280,11 @@ impl AckTracker {
         self.min_rtt = self.min_rtt.min(rtt);
         // Remove the receiver's holding time unless that would go below the minimum.
         let delay = ack_delay.as_secs_f64();
-        let adjusted = if rtt - delay >= self.min_rtt { rtt - delay } else { rtt };
+        let adjusted = if rtt - delay >= self.min_rtt {
+            rtt - delay
+        } else {
+            rtt
+        };
         self.latest_rtt = adjusted;
         if !self.has_sample {
             self.srtt = adjusted;
@@ -285,7 +305,9 @@ impl AckTracker {
     pub(crate) fn detect_lost(&mut self, now: Instant, outcome: &mut impl FnMut(Outcome)) {
         let time_threshold = self.srtt.max(self.latest_rtt) * 9.0 / 8.0;
         let pto = self.pto();
-        let mut seq = self.oldest.max(self.next.saturating_sub(SENT_RECORDS as u64));
+        let mut seq = self
+            .oldest
+            .max(self.next.saturating_sub(SENT_RECORDS as u64));
         let mut all_done = true;
         while seq < self.next {
             let slot = (seq % SENT_RECORDS as u64) as usize;
@@ -344,7 +366,8 @@ impl AckTracker {
     /// The acknowledgement header to send now.
     pub(crate) fn ack_header(&self, now: Instant) -> Option<AckHeader> {
         let largest = self.recv_largest?;
-        let delay = now.saturating_duration_since(self.recv_time).as_micros() as u64 / ACK_DELAY_UNIT_US;
+        let delay =
+            now.saturating_duration_since(self.recv_time).as_micros() as u64 / ACK_DELAY_UNIT_US;
         // Enough words to reach the oldest packet received since the last acknowledgement.
         let span = self.unacked_from.map_or(0, |u| largest.saturating_sub(u));
         let count = (span.div_ceil(64) as usize).clamp(1, MAX_ACK_WORDS);
@@ -364,7 +387,11 @@ impl AckTracker {
 
     /// Bytes sent in packets still in flight.
     pub(crate) fn bytes_in_flight(&self) -> u64 {
-        self.sent.iter().filter(|r| r.in_flight).map(|r| u64::from(r.bytes)).sum()
+        self.sent
+            .iter()
+            .filter(|r| r.in_flight)
+            .map(|r| u64::from(r.bytes))
+            .sum()
     }
 }
 
@@ -407,11 +434,20 @@ mod tests {
         // Send 100 packets 10 ms apart; drop every 7th; ack each arrival 30 ms later.
         for i in 0..100u32 {
             let now = t0 + Duration::from_millis(10 * u64::from(i));
-            sender.on_sent(1_000_000 + u64::from(i), now, 100, true, &entries(i), &mut record);
+            sender.on_sent(
+                1_000_000 + u64::from(i),
+                now,
+                100,
+                true,
+                &entries(i),
+                &mut record,
+            );
             if i % 7 != 3 {
                 receiver.on_received(1_000_000 + u64::from(i), now + Duration::from_millis(15));
             }
-            let ack = receiver.ack_header(now + Duration::from_millis(15)).unwrap();
+            let ack = receiver
+                .ack_header(now + Duration::from_millis(15))
+                .unwrap();
             receiver.ack_sent();
             sender.on_ack(&ack, now + Duration::from_millis(30), &mut record);
         }

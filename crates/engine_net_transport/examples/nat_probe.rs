@@ -22,21 +22,46 @@ fn main() {
     let start = Instant::now();
     match upnp::discover(upnp::SSDP_ADDR, route.local, Duration::from_secs(3)) {
         Ok(gw) => {
-            println!("UPnP: found {} in {:?} (local {})", gw.location, start.elapsed(), gw.local);
+            println!(
+                "UPnP: found {} in {:?} (local {})",
+                gw.location,
+                start.elapsed(),
+                gw.local
+            );
             let ip = gw.external_ip();
-            println!("UPnP: external address {ip:?} (global: {})", ip.as_ref().is_ok_and(|ip| is_global(*ip)));
+            println!(
+                "UPnP: external address {ip:?} (global: {})",
+                ip.as_ref().is_ok_and(|ip| is_global(*ip))
+            );
             let t = Instant::now();
-            let added = gw.add_mapping(port, port, Duration::from_secs(120), "ofeliaengine nat_probe");
-            println!("UPnP: AddPortMapping {port} -> {port} lease 120 s: {added:?} in {:?}", t.elapsed());
+            let added = gw.add_mapping(
+                port,
+                port,
+                Duration::from_secs(120),
+                "ofeliaengine nat_probe",
+            );
+            println!(
+                "UPnP: AddPortMapping {port} -> {port} lease 120 s: {added:?} in {:?}",
+                t.elapsed()
+            );
             if added.is_ok() {
                 println!("UPnP: GetSpecificPortMappingEntry: {:?}", gw.mapping(port));
                 let t = Instant::now();
-                println!("UPnP: DeletePortMapping: {:?} in {:?}", gw.delete_mapping(port), t.elapsed());
-                println!("UPnP: after delete, entry: {:?} (an error = gone)", gw.mapping(port));
+                println!(
+                    "UPnP: DeletePortMapping: {:?} in {:?}",
+                    gw.delete_mapping(port),
+                    t.elapsed()
+                );
+                println!(
+                    "UPnP: after delete, entry: {:?} (an error = gone)",
+                    gw.mapping(port)
+                );
                 // The whole table, to be sure nothing of ours is left (other programs'
                 // entries are counted, not printed).
                 let (mut ours, mut total) = (0, 0);
-                while total < 1024 && let Ok(entry) = gw.mapping_at(total) {
+                while total < 1024
+                    && let Ok(entry) = gw.mapping_at(total)
+                {
                     total += 1;
                     if entry.4.contains("ofeliaengine") {
                         ours += 1;
@@ -51,10 +76,27 @@ fn main() {
     // PCP, then NAT-PMP.
     let gw = SocketAddr::new(route.gateway, pmp::SERVER_PORT);
     let start = Instant::now();
-    match pmp::map(gw, route.local, port, Duration::from_secs(120), pmp::Retry::default(), None) {
+    match pmp::map(
+        gw,
+        route.local,
+        port,
+        Duration::from_secs(120),
+        pmp::Retry::default(),
+        None,
+    ) {
         Ok(m) => {
-            println!("{:?}: mapped {port} -> {} for {:?} in {:?}", m.protocol, m.external, m.lifetime, start.elapsed());
-            println!("{:?}: unmap {:?}", m.protocol, pmp::unmap(gw, &m, pmp::Retry::default()));
+            println!(
+                "{:?}: mapped {port} -> {} for {:?} in {:?}",
+                m.protocol,
+                m.external,
+                m.lifetime,
+                start.elapsed()
+            );
+            println!(
+                "{:?}: unmap {:?}",
+                m.protocol,
+                pmp::unmap(gw, &m, pmp::Retry::default())
+            );
         }
         Err(e) => println!("PCP/NAT-PMP: {e} after {:?}", start.elapsed()),
     }

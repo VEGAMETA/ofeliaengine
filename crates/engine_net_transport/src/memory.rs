@@ -141,10 +141,16 @@ impl Inner {
 
     /// The source address the world sees, creating a NAT mapping if needed.
     fn translate_out(&mut self, from: SocketAddr, to: SocketAddr) -> SocketAddr {
-        let Some(&n) = self.behind.get(&from) else { return from };
+        let Some(&n) = self.behind.get(&from) else {
+            return from;
+        };
         let nat = &mut self.nats[n];
         let remote = (nat.behavior == NatBehavior::Symmetric).then_some(to);
-        let port = match nat.mappings.iter().find(|m| m.internal == from && m.remote == remote) {
+        let port = match nat
+            .mappings
+            .iter()
+            .find(|m| m.internal == from && m.remote == remote)
+        {
             Some(m) => m.external_port,
             None => {
                 let port = nat.next_port;
@@ -211,7 +217,9 @@ impl MemoryNetwork {
 
     fn lock(&self) -> MutexGuard<'_, Inner> {
         // A panic while holding the lock is a test failure already; keep going.
-        self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// Conditions for every link without its own.
@@ -220,7 +228,12 @@ impl MemoryNetwork {
     }
 
     /// Conditions from `from` to `to` (one direction; internal addresses).
-    pub fn set_link_conditions(&self, from: SocketAddr, to: SocketAddr, conditions: LinkConditions) {
+    pub fn set_link_conditions(
+        &self,
+        from: SocketAddr,
+        to: SocketAddr,
+        conditions: LinkConditions,
+    ) {
         self.lock().links.insert((from, to), conditions);
     }
 
@@ -229,7 +242,9 @@ impl MemoryNetwork {
         let mut inner = self.lock();
         inner.inboxes.insert(addr, Vec::with_capacity(4096));
         // Datagram buffers for the wire, so steady traffic does not allocate.
-        inner.pool.extend((0..512).map(|_| Vec::with_capacity(DATAGRAM_CAPACITY)));
+        inner
+            .pool
+            .extend((0..512).map(|_| Vec::with_capacity(DATAGRAM_CAPACITY)));
         drop(inner);
         MemorySocket {
             net: self.clone(),
@@ -264,7 +279,11 @@ impl MemoryNetwork {
     fn send(&self, now: Instant, from: SocketAddr, to: SocketAddr, data: &[u8]) {
         let mut inner = self.lock();
         inner.stats.sent += 1;
-        let conditions = inner.links.get(&(from, to)).copied().unwrap_or(inner.default);
+        let conditions = inner
+            .links
+            .get(&(from, to))
+            .copied()
+            .unwrap_or(inner.default);
         let source = inner.translate_out(from, to);
         if inner.random() < conditions.loss {
             inner.stats.lost += 1;
@@ -278,13 +297,20 @@ impl MemoryNetwork {
             inner.stats.filtered += 1;
             return;
         }
-        let copies = if inner.random() < conditions.duplicate { 2 } else { 1 };
+        let copies = if inner.random() < conditions.duplicate {
+            2
+        } else {
+            1
+        };
         for _ in 0..copies {
             let mut delay = conditions.latency + conditions.jitter.mul_f32(inner.random());
             if inner.random() < conditions.reorder {
                 delay += conditions.latency.max(Duration::from_millis(1));
             }
-            let mut buf = inner.pool.pop().unwrap_or_else(|| Vec::with_capacity(DATAGRAM_CAPACITY));
+            let mut buf = inner
+                .pool
+                .pop()
+                .unwrap_or_else(|| Vec::with_capacity(DATAGRAM_CAPACITY));
             buf.clear();
             buf.extend_from_slice(data);
             inner.order += 1;
@@ -332,7 +358,11 @@ impl DatagramSocket for MemorySocket {
         Ok(())
     }
 
-    fn recv_from(&mut self, now: Instant, buf: &mut [u8]) -> io::Result<Option<(usize, SocketAddr)>> {
+    fn recv_from(
+        &mut self,
+        now: Instant,
+        buf: &mut [u8],
+    ) -> io::Result<Option<(usize, SocketAddr)>> {
         Ok(self.net.recv(now, self.addr, buf))
     }
 
@@ -362,7 +392,11 @@ mod tests {
     #[test]
     fn latency_loss_and_order() {
         let net = MemoryNetwork::new(7);
-        net.set_default_conditions(LinkConditions::new(Duration::from_millis(50), Duration::ZERO, 0.25));
+        net.set_default_conditions(LinkConditions::new(
+            Duration::from_millis(50),
+            Duration::ZERO,
+            0.25,
+        ));
         let mut a = net.bind(addr("10.0.0.1:1"));
         let mut b = net.bind(addr("10.0.0.2:1"));
         let t0 = Instant::now();
@@ -370,9 +404,16 @@ mod tests {
             a.send_to(t0, addr("10.0.0.2:1"), &i.to_le_bytes()).unwrap();
         }
         let mut buf = [0u8; 8];
-        assert!(b.recv_from(t0 + Duration::from_millis(49), &mut buf).unwrap().is_none());
+        assert!(
+            b.recv_from(t0 + Duration::from_millis(49), &mut buf)
+                .unwrap()
+                .is_none()
+        );
         let mut got = Vec::new();
-        while let Some((n, from)) = b.recv_from(t0 + Duration::from_millis(50), &mut buf).unwrap() {
+        while let Some((n, from)) = b
+            .recv_from(t0 + Duration::from_millis(50), &mut buf)
+            .unwrap()
+        {
             assert_eq!((n, from), (4, addr("10.0.0.1:1")));
             got.push(u32::from_le_bytes(buf[..4].try_into().unwrap()));
         }
@@ -395,11 +436,17 @@ mod tests {
         // The server may answer; a stranger may not until the host sends to it.
         server.send_to(t0, mapped, b"y").unwrap();
         stranger.send_to(t0, mapped, b"z").unwrap();
-        assert_eq!(host.recv_from(t0, &mut buf).unwrap().unwrap().1, addr("203.0.113.5:3478"));
+        assert_eq!(
+            host.recv_from(t0, &mut buf).unwrap().unwrap().1,
+            addr("203.0.113.5:3478")
+        );
         assert!(host.recv_from(t0, &mut buf).unwrap().is_none());
         host.send_to(t0, addr("203.0.113.9:1"), b"p").unwrap();
         stranger.recv_from(t0, &mut buf).unwrap().unwrap();
         stranger.send_to(t0, mapped, b"z").unwrap();
-        assert_eq!(host.recv_from(t0, &mut buf).unwrap().unwrap().1, addr("203.0.113.9:1"));
+        assert_eq!(
+            host.recv_from(t0, &mut buf).unwrap().unwrap().1,
+            addr("203.0.113.9:1")
+        );
     }
 }
