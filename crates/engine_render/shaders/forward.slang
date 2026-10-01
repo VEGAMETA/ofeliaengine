@@ -72,6 +72,10 @@
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 [[vk::binding(2, 0)]] SamplerComparisonState g_compare_samplers[];
 
+// The atmosphere and height fog (ADR 0069): only the transparent surfaces' atmosphere
+// variants read them (the opaque ones get theirs from atmosphere.slang's full-screen pass).
+#include "atmosphere_common.slang"
+
 // `VertexAttributes` in mesh.rs.
 struct Attributes
 {
@@ -168,6 +172,8 @@ struct Frame
     uint subsurface_count;   // profiles at `subsurface` (0: no subsurface draws)
     float4* sh;              // 9 irradiance harmonics
     SubsurfaceProfile* subsurface;
+    AtmosphereFrame* atmosphere; // aerial perspective and fog (ADR 0069), for `fragmentBlendedAtmosphere*`
+    uint2 _pad5;
 };
 
 struct Instance
@@ -1132,6 +1138,18 @@ float4 fragmentBlended(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
     return float4(c.rgb * alpha, alpha);
 }
 
+// Transparent surfaces of a view with an atmosphere or height fog (ADR 0069): the light
+// scattered between them and the camera, and its absorption, before blending. Entry points
+// of their own, so the other shading carries none of it.
+[shader("fragment")]
+float4 fragmentBlendedAtmosphere(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    float4 c = shade(input, front, false, false);
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    float alpha = saturate(c.a);
+    return float4(c.rgb * alpha, alpha);
+}
+
 struct BlendedReactive
 {
     float4 color : SV_Target0;
@@ -1144,6 +1162,18 @@ struct BlendedReactive
 BlendedReactive fragmentBlendedReactive(VertexOut input, bool front : SV_IsFrontFace)
 {
     float4 c = shade(input, front, false, false);
+    float alpha = saturate(c.a);
+    BlendedReactive o;
+    o.color = float4(c.rgb * alpha, alpha);
+    o.reactive = float4(alpha, 0.0, 0.0, alpha);
+    return o;
+}
+
+[shader("fragment")]
+BlendedReactive fragmentBlendedAtmosphereReactive(VertexOut input, bool front : SV_IsFrontFace)
+{
+    float4 c = shade(input, front, false, false);
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
     float alpha = saturate(c.a);
     BlendedReactive o;
     o.color = float4(c.rgb * alpha, alpha);

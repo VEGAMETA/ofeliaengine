@@ -13,7 +13,11 @@
 //! compute passes of that frame's graph. The forward renderer reads them when a view has an
 //! environment ([`crate::forward::ForwardView::environment`]).
 
+use crate::atmosphere::{
+    Atmosphere, AtmosphereFrame, AtmosphereTables, AtmosphereView, HeightFog,
+};
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
+use crate::upload::UploadRing;
 use crate::graph::{
     Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, ShaderStages,
     Texture, TextureDesc, TextureState,
@@ -98,31 +102,51 @@ struct Push {
     mode: u32,
 }
 
-/// An image owned by the environment: sampled through one view, written through one
-/// storage view per mip.
+/// The shape of an [`Image`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImageKind {
+    /// A 2D image.
+    Flat,
+    /// Six square faces, sampled as a cube.
+    Cube,
+    /// A 3D image of this depth.
+    Volume(u32),
+}
+
+/// An image owned by the environment (or its atmosphere): sampled through one view,
+/// written through one storage view per mip.
 #[derive(Debug)]
-struct Image {
+pub(crate) struct Image {
     image: vk::Image,
     allocation: Option<Allocation>,
     view: vk::ImageView,
-    sampled: u32,
+    /// Bindless index of the sampled view.
+    pub(crate) sampled: u32,
     mip_views: Vec<vk::ImageView>,
-    storage: Vec<u32>,
+    /// Bindless indices of the storage views, one per mip.
+    pub(crate) storage: Vec<u32>,
     desc: TextureDesc,
     state: Cell<TextureState>,
 }
 
 impl Image {
-    fn new(
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
         device: &Device,
         allocator: &mut Allocator,
         bindless: &Bindless,
         format: vk::Format,
-        size: u32,
+        width: u32,
+        height: u32,
         levels: u32,
-        cube: bool,
+        kind: ImageKind,
     ) -> Result<Self, RhiError> {
+        let cube = kind == ImageKind::Cube;
         let layers = if cube { 6 } else { 1 };
+        let (image_type, depth) = match kind {
+            ImageKind::Volume(depth) => (vk::ImageType::TYPE_3D, depth),
+            _ => (vk::ImageType::TYPE_2D, 1),
+        };
         let (image, allocation) = allocator.create_image(
             &vk::ImageCreateInfo::default()
                 .flags(if cube {
@@ -130,12 +154,12 @@ impl Image {
                 } else {
                     vk::ImageCreateFlags::empty()
                 })
-                .image_type(vk::ImageType::TYPE_2D)
+                .image_type(image_type)
                 .format(format)
                 .extent(vk::Extent3D {
-                    width: size,
-                    height: size,
-                    depth: 1,
+                    width,
+                    height,
+                    depth,
                 })
                 .mip_levels(levels)
                 .array_layers(layers)
@@ -159,7 +183,7 @@ impl Image {
             desc: TextureDesc {
                 mip_levels: levels,
                 layers,
-                ..TextureDesc::new_2d(format, size, size)
+                ..TextureDesc::new_2d(format, width, height)
             },
             state: Cell::new(TextureState::undefined()),
         };
@@ -187,10 +211,10 @@ impl Image {
             call: "bindless set full",
             result: vk::Result::ERROR_OUT_OF_POOL_MEMORY,
         };
-        let (sampled_kind, storage_kind) = if cube {
-            (vk::ImageViewType::CUBE, vk::ImageViewType::TYPE_2D_ARRAY)
-        } else {
-            (vk::ImageViewType::TYPE_2D, vk::ImageViewType::TYPE_2D)
+        let (sampled_kind, storage_kind) = match kind {
+            ImageKind::Cube => (vk::ImageViewType::CUBE, vk::ImageViewType::TYPE_2D_ARRAY),
+            ImageKind::Flat => (vk::ImageViewType::TYPE_2D, vk::ImageViewType::TYPE_2D),
+            ImageKind::Volume(_) => (vk::ImageViewType::TYPE_3D, vk::ImageViewType::TYPE_3D),
         };
         // Built step by step so a failure frees what exists (`destroy` skips null views).
         let result = (|| -> Result<(), RhiError> {
@@ -215,7 +239,7 @@ impl Image {
     }
 
     /// Imports the image into `fg`, left readable by any shader.
-    fn import<'g>(&self, fg: &mut FrameGraph<'g>, name: &'static str) -> Texture {
+    pub(crate) fn import<'g>(&self, fg: &mut FrameGraph<'g>, name: &'static str) -> Texture {
         let final_state = TextureState::shader_read(ShaderStages::ALL);
         let texture = fg.import_texture(
             name,
@@ -236,7 +260,7 @@ impl Image {
     /// # Safety
     ///
     /// The GPU no longer uses the image after `frame`.
-    unsafe fn destroy(
+    pub(crate) unsafe fn destroy(
         &mut self,
         device: &engine_rhi::ash::Device,
         allocator: &mut Allocator,
@@ -282,6 +306,12 @@ pub(crate) struct EnvironmentFrame {
     pub sh_address: u64,
     /// Radiance multiplier.
     pub intensity: f32,
+    /// The atmosphere and height fog, when the environment has either (ADR 0069): the
+    /// background, aerial perspective and fog are then drawn by the atmosphere's
+    /// full-screen pass, and transparent surfaces use their atmosphere pipelines.
+    pub atmosphere: Option<AtmosphereFrame>,
+    /// The directional light's color this frame when the atmosphere drives it.
+    pub sun_color: Option<Vec3>,
 }
 
 /// Image-based lighting from a sky (see the module documentation). Rebuilding after
@@ -304,6 +334,10 @@ pub struct Environment {
     debug_directions: Cell<bool>,
     dirty: Cell<bool>,
     dfg_ready: Cell<bool>,
+    /// The physical sky (ADR 0069), when on; its tables once it was first turned on.
+    atmosphere: Cell<Option<Atmosphere>>,
+    tables: Option<AtmosphereTables>,
+    fog: Cell<Option<HeightFog>>,
 }
 
 impl core::fmt::Debug for Environment {
@@ -311,6 +345,8 @@ impl core::fmt::Debug for Environment {
         f.debug_struct("Environment")
             .field("sky", &self.sky.get())
             .field("intensity", &self.intensity.get())
+            .field("atmosphere", &self.atmosphere.get())
+            .field("fog", &self.fog.get())
             .finish_non_exhaustive()
     }
 }
@@ -342,8 +378,9 @@ impl Environment {
             bindless,
             CUBE_FORMAT,
             SOURCE_SIZE,
+            SOURCE_SIZE,
             SOURCE_LEVELS,
-            true,
+            ImageKind::Cube,
         )?;
         let prefiltered = Image::new(
             device,
@@ -351,8 +388,9 @@ impl Environment {
             bindless,
             CUBE_FORMAT,
             PREFILTERED_SIZE,
+            PREFILTERED_SIZE,
             PREFILTERED_LEVELS,
-            true,
+            ImageKind::Cube,
         )?;
         let dfg = Image::new(
             device,
@@ -360,8 +398,9 @@ impl Environment {
             bindless,
             vk::Format::R16G16_SFLOAT,
             DFG_SIZE,
+            DFG_SIZE,
             1,
-            false,
+            ImageKind::Flat,
         )?;
         let (sh, sh_allocation) = allocator.create_buffer(
             &vk::BufferCreateInfo::default().size(9 * 16).usage(
@@ -392,15 +431,65 @@ impl Environment {
             debug_directions: Cell::new(false),
             dirty: Cell::new(true),
             dfg_ready: Cell::new(false),
+            atmosphere: Cell::new(None),
+            tables: None,
+            fog: Cell::new(None),
         })
     }
 
-    /// Changes the sky; the next frame rebuilds the lighting from it.
+    /// Changes the sky; the next frame rebuilds the lighting from it. With an atmosphere
+    /// ([`Self::set_atmosphere`]) the gradient is kept for when it is turned off.
     pub fn set_sky(&self, sky: Sky) {
         if sky != self.sky.get() {
             self.sky.set(sky);
+            self.dirty.set(self.dirty.get() || self.atmosphere.get().is_none());
+        }
+    }
+
+    /// Turns the physical sky and atmosphere on with `atmosphere`, or off (`None`, back to
+    /// the gradient [`Sky`]); see [`crate::atmosphere`]. The first time it is turned on its
+    /// tables and passes are made (four small images, five compute pipelines), so an
+    /// environment that never uses it pays nothing. Changing the parameters rebuilds the
+    /// tables and the image-based light in the next frame; moving the sun (the directional
+    /// light) rebuilds the sky-view table, and the image-based light once it moved by 0.1°.
+    pub fn set_atmosphere(
+        &mut self,
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        atmosphere: Option<Atmosphere>,
+    ) -> Result<(), RhiError> {
+        if atmosphere.is_some() && self.tables.is_none() {
+            self.tables = Some(AtmosphereTables::new(device, allocator, bindless)?);
+        }
+        if atmosphere.is_none() && self.atmosphere.get().is_some() {
+            // Back to the gradient.
             self.dirty.set(true);
         }
+        if atmosphere.is_some()
+            && let Some(tables) = &self.tables
+        {
+            tables.forget_cube();
+        }
+        self.atmosphere.set(atmosphere);
+        Ok(())
+    }
+
+    /// The physical sky's parameters, when it is on.
+    pub fn atmosphere(&self) -> Option<Atmosphere> {
+        self.atmosphere.get()
+    }
+
+    /// Turns exponential height fog on with `fog`, or off (`None`, the default). It is lit
+    /// by this environment's sky light and the directional light, and drawn with the sky by
+    /// the atmosphere's full-screen pass, with or without the physical sky.
+    pub fn set_fog(&self, fog: Option<HeightFog>) {
+        self.fog.set(fog);
+    }
+
+    /// The height fog, when it is on.
+    pub fn fog(&self) -> Option<HeightFog> {
+        self.fog.get()
     }
 
     /// The sky.
@@ -428,13 +517,17 @@ impl Environment {
     }
 
     /// Imports the environment into `fg`, first declaring the passes that rebuild it if
-    /// the sky changed (and the DFG table on the first frame). The frame must execute with
-    /// `bindless`.
+    /// the sky changed (and the DFG table on the first frame), and with an atmosphere or
+    /// fog those of the frame's atmosphere (`view`: the camera and the light), writing its
+    /// constants into `ring`. The frame must execute with `bindless`. `None` when `ring`
+    /// is full.
     pub(crate) fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
         bindless: &'g Bindless,
-    ) -> EnvironmentFrame {
+        view: &AtmosphereView,
+    ) -> Option<EnvironmentFrame> {
         engine_profiler::zone!("render::Environment::add_passes");
         let source = self.source.import(fg, "environment radiance");
         let prefiltered = self.prefiltered.import(fg, "environment prefiltered");
@@ -474,7 +567,52 @@ impl Environment {
                     },
                 );
         }
-        if self.dirty.replace(false) {
+        // The physical sky: its tables, and whether it redraws the radiance cube.
+        let fog = self.fog.get();
+        let physical = self.atmosphere.get().zip(self.tables.as_ref());
+        let debug = self.debug_directions.get();
+        let mut rebuild = self.dirty.replace(false);
+        let mut cube_from_atmosphere = false;
+        if let Some((atmosphere, tables)) = physical {
+            if rebuild {
+                tables.forget_cube();
+            }
+            if !debug && tables.cube_stale(&atmosphere, view) {
+                rebuild = true;
+                cube_from_atmosphere = true;
+            }
+        }
+        let sun_color = physical.map(|(a, t)| t.sun_color(&a, view));
+        let atmosphere = if physical.is_some() || fog.is_some() {
+            let constants = crate::atmosphere::constants(
+                physical.as_ref().map(|(a, _)| a),
+                fog.as_ref(),
+                view,
+                sun_color.unwrap_or(view.light),
+                self.sh_address,
+                self.source.sampled,
+                self.intensity.get(),
+                physical.map_or([0; 4], |(_, t)| t.indices()),
+            );
+            let address = ring.push(&[constants])?;
+            let textures = physical.map(|(a, t)| {
+                t.add_passes(
+                    fg,
+                    bindless,
+                    &a,
+                    &constants,
+                    address,
+                    cube_from_atmosphere.then(|| (source, self.source.storage[0])),
+                )
+            });
+            Some(AtmosphereFrame {
+                constants: address,
+                textures,
+            })
+        } else {
+            None
+        };
+        if rebuild {
             let sky = self.sky.get();
             let base = Push {
                 zenith: sky.zenith.extend(0.0).to_array(),
@@ -485,23 +623,33 @@ impl Environment {
                 ..Push::default()
             };
             let storage: &'g [u32] = &self.source.storage;
+            // With the atmosphere, its pass drew mip 0 already: only the mips remain.
+            let access = if cube_from_atmosphere {
+                Access::StorageReadWrite(ShaderStages::COMPUTE)
+            } else {
+                Access::StorageWrite(ShaderStages::COMPUTE)
+            };
             fg.add_compute("environment sky", bindless)
                 .async_compute()
-                .write(source, Access::StorageWrite(ShaderStages::COMPUTE))
+                .write(source, access)
                 .record(move |rec| {
-                    let push = Push {
-                        target: storage[0],
-                        size: SOURCE_SIZE,
-                        ..base
-                    };
-                    rec.dispatch(
-                        sky_cube,
-                        Dispatch::Threads([SOURCE_SIZE, SOURCE_SIZE, 6]),
-                        &push,
-                    );
+                    if !cube_from_atmosphere {
+                        let push = Push {
+                            target: storage[0],
+                            size: SOURCE_SIZE,
+                            ..base
+                        };
+                        rec.dispatch(
+                            sky_cube,
+                            Dispatch::Threads([SOURCE_SIZE, SOURCE_SIZE, 6]),
+                            &push,
+                        );
+                    }
                     for level in 1..SOURCE_LEVELS {
                         // Each mip reads the one above, written by the previous dispatch.
-                        rec.barrier();
+                        if level > 1 || !cube_from_atmosphere {
+                            rec.barrier();
+                        }
                         let size = SOURCE_SIZE >> level;
                         let push = Push {
                             target: storage[level as usize],
@@ -548,7 +696,7 @@ impl Environment {
                     })
                 });
         }
-        EnvironmentFrame {
+        Some(EnvironmentFrame {
             source,
             prefiltered,
             dfg,
@@ -558,7 +706,9 @@ impl Environment {
             dfg_index: self.dfg.sampled,
             sh_address: self.sh_address,
             intensity: self.intensity.get(),
-        }
+            atmosphere,
+            sun_color: sun_color.filter(|_| physical.is_some_and(|(a, _)| a.drives_sun)),
+        })
     }
 
     /// Frees the images and the buffer.
@@ -573,6 +723,9 @@ impl Environment {
             self.prefiltered
                 .destroy(&self.device, allocator, bindless, 0);
             self.dfg.destroy(&self.device, allocator, bindless, 0);
+            if let Some(tables) = self.tables.as_mut() {
+                tables.destroy(&self.device, allocator, bindless);
+            }
             if let Some(allocation) = self.sh_allocation.take() {
                 allocator.destroy_buffer(self.sh, allocation);
             }

@@ -47,6 +47,7 @@
 //! [`MaterialTable`]: crate::material::MaterialTable
 
 use crate::ao::{AmbientOcclusion, AoSettings};
+use crate::atmosphere::{AtmosphereTextures, AtmosphereView, COMPOSITE_FRAGMENT, COMPOSITE_VERTEX};
 use crate::compute::{ComputePass, ComputeShader, ComputeSource, Dispatch};
 use crate::cull::Frustum;
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
@@ -103,6 +104,10 @@ const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
 const FRAGMENT_BLENDED: &[u8] = include_bytes!("../shaders/forward.fragmentBlended.spv");
 const FRAGMENT_BLENDED_REACTIVE: &[u8] =
     include_bytes!("../shaders/forward.fragmentBlendedReactive.spv");
+const FRAGMENT_BLENDED_ATMOSPHERE: &[u8] =
+    include_bytes!("../shaders/forward.fragmentBlendedAtmosphere.spv");
+const FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE: &[u8] =
+    include_bytes!("../shaders/forward.fragmentBlendedAtmosphereReactive.spv");
 
 /// Format of the reactive mask the transparent pass writes for temporal upsampling: how much
 /// of each pixel transparent surfaces cover (their combined alpha).
@@ -505,7 +510,7 @@ struct CascadeData {
     bounds: [f32; 4],
 }
 
-/// `Frame` in `forward.slang` (1008 bytes).
+/// `Frame` in `forward.slang` (1024 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -566,6 +571,9 @@ struct FrameData {
     subsurface_count: u32,
     sh: u64,
     subsurface: u64,
+    /// The atmosphere's and fog's constants (ADR 0069), for the transparent surfaces.
+    atmosphere: u64,
+    _pad5: [u32; 2],
 }
 
 /// `Instance` in `forward.slang` (64 bytes).
@@ -623,7 +631,7 @@ struct Push {
 const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1008);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1024);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
 const _: () = assert!(crate::mesh::MAX_LODS == 4);
@@ -655,6 +663,9 @@ pub struct ForwardPasses {
     /// The view's ambient occlusion ([`crate::ao::AO_FORMAT`], sampled by the forward
     /// pass), when it is on: for debugging views and effects of your own.
     pub ao: Option<Texture>,
+    /// The environment's atmosphere tables this frame, when it has a physical sky (ADR
+    /// 0069): for debugging views and tests.
+    pub atmosphere: Option<AtmosphereTextures>,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -931,6 +942,12 @@ pub struct ForwardRenderer {
     background: Pipeline,
     /// The environment's sky where no geometry was drawn.
     sky: Pipeline,
+    /// With an atmosphere or height fog (ADR 0069): the sky, aerial perspective and fog
+    /// in one full-screen pass after the opaque surfaces.
+    composite: Pipeline,
+    /// Transparent surfaces under an atmosphere or fog (the environment variants, without
+    /// and with local lights): without and with the reactive mask.
+    blended_atmosphere: [[Pipeline; 2]; 2],
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
     cull: ComputeShader<Push>,
@@ -1027,7 +1044,7 @@ impl ForwardRenderer {
                 &VARIANTS[variant],
             )
         };
-        let mut descs = Vec::with_capacity(8 * VARIANTS.len() + 6);
+        let mut descs = Vec::with_capacity(8 * VARIANTS.len() + 11);
         for lit in 0..VARIANTS.len() {
             descs.extend([
                 main(&fragment, c"fragmentMain", &formats, false, lit),
@@ -1123,6 +1140,46 @@ impl ForwardRenderer {
             c"shadowVertexMasked",
             Some(masked_depth),
         ));
+        // The atmosphere's full-screen pass (blended premultiplied: light + target ×
+        // transmittance; it samples the depth) and the transparent surfaces under it, in
+        // the environment variants only.
+        let composite_vertex = spirv_words(COMPOSITE_VERTEX).ok_or_else(invalid)?;
+        let composite_fragment = spirv_words(COMPOSITE_FRAGMENT).ok_or_else(invalid)?;
+        descs.push(GraphicsPipelineDesc {
+            color_formats: &formats,
+            cull_mode: vk::CullModeFlags::NONE,
+            depth_test: false,
+            depth_write: false,
+            blend: Blend::Premultiplied,
+            ..GraphicsPipelineDesc::new(
+                ShaderStageDesc {
+                    spirv: &composite_vertex,
+                    entry: c"compositeVertex",
+                },
+                Some(ShaderStageDesc {
+                    spirv: &composite_fragment,
+                    entry: c"compositeFragment",
+                }),
+            )
+        });
+        let fragment_blended_atmosphere =
+            spirv_words(FRAGMENT_BLENDED_ATMOSPHERE).ok_or_else(invalid)?;
+        let fragment_blended_atmosphere_reactive =
+            spirv_words(FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE).ok_or_else(invalid)?;
+        for lit in [2, 3] {
+            descs.push(blended(
+                &fragment_blended_atmosphere,
+                c"fragmentBlendedAtmosphere",
+                &formats,
+                lit,
+            ));
+            descs.push(blended(
+                &fragment_blended_atmosphere_reactive,
+                c"fragmentBlendedAtmosphereReactive",
+                &reactive_formats,
+                lit,
+            ));
+        }
         // The compute passes' shaders, created with the rest.
         let cull = ComputeSource::<Push>::new(CULL, c"cullMain", &[])?;
         let light_tiles = ComputeSource::<Push>::new(LIGHT_TILES, c"lightTiles", &[])?;
@@ -1152,11 +1209,15 @@ impl ForwardRenderer {
         let sky = next()?;
         let prepass = [next()?, next()?];
         let shadow = [next()?, next()?];
+        let composite = next()?;
+        let blended_atmosphere = [[next()?, next()?], [next()?, next()?]];
         Ok(Self {
             shading,
             prepass,
             background,
             sky,
+            composite,
+            blended_atmosphere,
             shadow,
             cull: cull.finish(next()?),
             light_tiles: light_tiles.finish(next()?),
@@ -1370,6 +1431,7 @@ impl ForwardRenderer {
                 commands: None,
                 motion,
                 ao: None,
+                atmosphere: None,
             });
         }
         let instance_count = draws.len() as u32;
@@ -1560,8 +1622,26 @@ impl ForwardRenderer {
             .and_then(|t| t.previous_clip_from_world.get())
             .unwrap_or(unjittered);
         let previous_count = temporal.map_or(0, |t| t.previous_count.get());
-        // The environment: rebuilt first if its sky changed (ADR 0046).
-        let environment = view.environment.map(|e| e.add_passes(fg, bindless));
+        // The environment: rebuilt first if its sky changed (ADR 0046); its atmosphere's
+        // tables and aerial perspective (ADR 0069).
+        let world_from_clip = clip_from_world.inverse();
+        let environment = match view.environment {
+            Some(e) => Some(e.add_passes(
+                fg,
+                ring,
+                bindless,
+                &AtmosphereView {
+                    world_from_clip,
+                    unjittered_world_from_clip: unjittered.inverse(),
+                    camera: view.camera.position,
+                    to_sun: -view.light.direction.normalize_or(Vec3::NEG_Y),
+                    light: view.light.color,
+                    size: [depth_desc.width, depth_desc.height],
+                },
+            )?),
+            None => None,
+        };
+        let atmosphere = environment.and_then(|e| e.atmosphere);
         // Local lights: culled, sorted and binned on the CPU (ADR 0045).
         let axis = ViewAxis::new(unjittered);
         let (light_layout, uploaded) = {
@@ -1613,7 +1693,11 @@ impl ForwardRenderer {
             to_light: (-view.light.direction.normalize_or(Vec3::NEG_Y))
                 .extend(0.0)
                 .to_array(),
-            light_color: view.light.color.extend(0.0).to_array(),
+            light_color: environment
+                .and_then(|e| e.sun_color)
+                .unwrap_or(view.light.color)
+                .extend(0.0)
+                .to_array(),
             ambient: view.light.ambient.extend(0.0).to_array(),
             planes: Frustum::from_clip_from_world(view.camera.clip_from_world)
                 .planes
@@ -1668,7 +1752,7 @@ impl ForwardRenderer {
             // New noise every frame only when a temporal resolve averages it.
             scatter_frame: temporal.map_or(0, |t| t.frame.get() as u32),
             _pad4: [0; 2],
-            world_from_clip: clip_from_world.inverse().to_cols_array(),
+            world_from_clip: world_from_clip.to_cols_array(),
             environment: u32::from(environment.is_some()),
             sky_cube: environment.map_or(0, |e| e.source_index),
             prefiltered: environment.map_or(0, |e| e.prefiltered_index),
@@ -1683,6 +1767,8 @@ impl ForwardRenderer {
             },
             sh: environment.map_or(0, |e| e.sh_address),
             subsurface: profiles,
+            atmosphere: atmosphere.map_or(0, |a| a.constants),
+            _pad5: [0; 2],
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -2063,6 +2149,7 @@ impl ForwardRenderer {
                     commands: Some(culled),
                     motion: None,
                     ao: targets.ao,
+                    atmosphere: atmosphere.and_then(|a| a.textures),
                 }
             }
             Some(flags) => {
@@ -2191,6 +2278,7 @@ impl ForwardRenderer {
                     commands: Some(culled),
                     motion: None,
                     ao: targets.ao,
+                    atmosphere: atmosphere.and_then(|a| a.textures),
                 }
             }
         };
@@ -2288,8 +2376,20 @@ impl ForwardRenderer {
                 }
             });
         }
-        // The sky where no geometry was drawn (depth still 1).
-        if let Some(env) = environment {
+        // With an atmosphere or fog: the sky, aerial perspective and fog over the opaque
+        // image (ADR 0069).
+        if let (Some(env), Some(atmosphere)) = (environment, atmosphere) {
+            crate::atmosphere::add_composite_pass(
+                fg,
+                bindless,
+                &self.composite,
+                color,
+                depth,
+                &env,
+                &atmosphere,
+            );
+        } else if let Some(env) = environment {
+            // The sky where no geometry was drawn (depth still 1).
             let sky = &self.sky;
             fg.add_pass("sky")
                 .color(color, LoadOp::Load, StoreOp::Store)
@@ -2321,10 +2421,11 @@ impl ForwardRenderer {
             )
         });
         if blended_commands > 0 {
-            let pipelines = if reactive.is_some() {
-                &shading.blended[1]
-            } else {
-                &shading.blended[0]
+            let reactive_index = usize::from(reactive.is_some());
+            let pipelines = match atmosphere {
+                // Under an atmosphere or fog (the environment variants).
+                Some(_) => &self.blended_atmosphere[variant & 1][reactive_index],
+                None => &shading.blended[reactive_index],
             };
             let mut pass = forward_pass(
                 fg,
@@ -2347,6 +2448,9 @@ impl ForwardRenderer {
                     .read(env.prefiltered, Access::Sampled(ShaderStages::FRAGMENT))
                     .read(env.dfg, Access::Sampled(ShaderStages::FRAGMENT))
                     .read(env.sh, Access::StorageRead(ShaderStages::FRAGMENT));
+            }
+            if let Some(t) = atmosphere.and_then(|a| a.textures) {
+                pass = pass.read(t.aerial, Access::Sampled(ShaderStages::FRAGMENT));
             }
             let offset = u64::from(phases - 1) * command_bytes;
             pass.depth_read_only(depth).execute(move |ctx| {
