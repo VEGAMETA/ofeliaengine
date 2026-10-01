@@ -50,7 +50,10 @@ Everything that differed between runs on the Radeon went through LDS:
   (`memtest`-style check, 16 threads, 10 min) showed no errors.
 
 The flaky test failed in about 3 % of runs with three copies of it on the Radeon (their CPU
-use is the load), never with one copy on an idle machine, never on the RTX.
+use is the load), never with one copy on an idle machine, never on the RTX. The golden
+test `async_compute_renders_the_same_bytes_as_one_queue` (`ENGINE_ASYNC_COMPUTE=1`, ambient
+occlusion) failed in 33 of 40 runs on the Radeon with 16 busy CPU threads, 5 of 40 while
+another agent's build kept the CPU at 98 %, and 0 of 20 on the RTX with 16 busy threads.
 
 ## What was ruled out (each with the stress repro below)
 
