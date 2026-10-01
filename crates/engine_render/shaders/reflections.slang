@@ -555,6 +555,8 @@ void ssrTrace(uint3 id : SV_DispatchThreadID)
 // roughness weights, from a tile cached in group shared memory. `t0`: depth, `t1`: normal
 // and roughness, `t3`: the trace, `t4`: its distances; writes premultiplied color and
 // confidence (`target`) and the hits' mean distance with the texel's view depth (`read`).
+static const float LOG2E = 1.44269504;
+static const float ROUGHNESS_FALLOFF = 8.0 * LOG2E;
 static const int SPATIAL_RADIUS = 2;
 static const int SPATIAL_TILE = 8 + 2 * SPATIAL_RADIUS;
 groupshared float4 g_value[SPATIAL_TILE * SPATIAL_TILE];
@@ -594,6 +596,8 @@ void ssrSpatial(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint i
     }
     // Mirror-like texels keep their own ray.
     int radius = roughness < MIRROR_ROUGHNESS ? 0 : (roughness < 0.3 ? 1 : SPATIAL_RADIUS);
+    float depth_falloff = LOG2E / (0.02 * depth);
+    float distance_falloff = 0.5 * LOG2E / max(float(radius * radius), 1.0);
     float4 sum = 0.0;
     float total = 0.0;
     float distance_sum = 0.0;
@@ -605,10 +609,14 @@ void ssrSpatial(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint i
             uint k = center + y * SPATIAL_TILE + x;
             float4 q = g_normal_roughness[k];
             float2 dd = g_distance_depth[k];
-            float w = pow(saturate(dot(q.xyz, nr.xyz)), 16.0)
-                * exp(-abs(dd.y - depth) / (0.02 * depth))
-                * exp(-abs(q.w - roughness) * 8.0)
-                * exp(-0.5 * float(x * x + y * y) / max(float(radius * radius), 1.0));
+            // normal^16 × e^(−depth difference / 2 %) × e^(−8 roughness difference)
+            // × the Gaussian of the distance, in one exponential.
+            float c = saturate(dot(q.xyz, nr.xyz));
+            c *= c;
+            c *= c;
+            c *= c;
+            c *= c;
+            float w = c * exp2(-(abs(dd.y - depth) * depth_falloff + abs(q.w - roughness) * ROUGHNESS_FALLOFF + float(x * x + y * y) * distance_falloff));
             float4 value = g_value[k];
             sum += value * w;
             total += w;

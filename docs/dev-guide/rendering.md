@@ -1147,3 +1147,66 @@ fg.add_compute("my blur", &bindless)
   transfers by default; `graph.set_async_sharing(AsyncSharing::Concurrent)` (or
   `ENGINE_ASYNC_SHARING=concurrent`) creates the frame's transient resources for both
   families instead. Both measured the same on the RTX; exclusive keeps image compression.
+
+## 16. Reflections: probes and screen-space reflections
+
+Without them, every glossy surface reflects the sky (section 10): right outdoors, wrong
+indoors, where a polished floor should show the room. Two features replace the sky's
+reflections where they know better (ADR 0073):
+
+- **Reflection probes:** boxes you place (one per room is typical). Each is a cube the
+  engine renders from a point inside it, blurred per roughness, and kept until something
+  in it changes. A surface inside a probe's box reflects that cube, corrected for the
+  box's walls so reflections line up (parallax correction); probes blend over their edges,
+  the smallest first; outside every probe the sky remains.
+- **Screen-space reflections (SSR):** each glossy pixel traces its reflected ray through
+  what is on screen this frame. Where the ray finds something it reflects it exactly
+  (moving objects, small details no probe has); where it leaves the screen or goes behind
+  something, the probes and the sky take over. Rough surfaces trace scattered rays that
+  are filtered over space and time.
+
+```rust
+use engine_render::reflections::{ReflectionProbe, ReflectionProbes, ProbeSettings, SsrSettings};
+
+// Once: the renderer's reflection passes (a renderer that never does this pays nothing).
+frame.forward_mut().set_reflections(&device, &bindless, true)?;
+// Once per scene: probes (captured by the next frames that draw the scene).
+let mut probes = ReflectionProbes::new(&device, &mut allocator, &bindless, ProbeSettings::default())?;
+let hall = probes.add(ReflectionProbe::room(Vec3::new(0.0, 2.0, 0.0), Vec3::new(12.0, 4.0, 6.0)));
+// Per view: screen-space reflections are a setting (the view keeps their history).
+settings.screen_space_reflections = Some(SsrSettings::default());
+// Every frame: the probes come with the scene.
+let scene = SceneInput { reflection_probes: Some(&probes), environment: Some(&environment), .. };
+```
+
+Without the frame renderer: `ForwardView { reflections: Reflections { probes: Some(&probes),
+ssr: Some(&ssr) }, .. }`, with a `ScreenSpaceReflections` per view at the view's size.
+
+- **They need an environment** (the sky is their last fallback) and a perspective camera.
+  Views with reflections run the depth prepass. Transparent surfaces keep the sky's
+  reflections.
+- **Placing probes:** `ReflectionProbe::room(center, half_extents)` fits a box room. For
+  other shapes set `influence` (where the probe is used, it fades in over
+  `blend_distance` from its faces) and `parallax` (the box the reflections are projected
+  on: usually the walls) apart; boxes can be rotated (`ProbeBox::rotation`). Capture from
+  where the camera usually is (`position`).
+- **When probes are captured again:** after `set`, `refresh(id)` / `refresh_all()`, when
+  the sky or the sun changes, and, for scenes drawn from a `GpuScene`, when instances
+  inside a probe's boxes move, appear or disappear. With draw lists, tell it yourself:
+  `probes.invalidate_region(min, max)`. `ProbeRefresh::Manual` probes change only when
+  asked. `faces_per_frame` (6 by default) spreads a capture over frames; the nearest
+  waiting probe goes first.
+- **Cost of a capture** (Sponza, 1080p view, 128² probes): a whole probe 0.23 ms on an
+  RTX 4060 Ti, 3.1 ms on a Radeon iGPU (one face per frame: 0.08 / 1.0 ms). A static scene
+  captures nothing after the first frames.
+- **Cost every frame:** probes cost one full-screen pass (RTX 0.14 ms, Radeon 4.9 ms with
+  6 probes in Sponza at 1080p). SSR at half resolution costs about 0.26 ms on the RTX and
+  6–7 ms on the Radeon iGPU at 1080p: on small integrated GPUs prefer probes alone, or SSR
+  with an upscaler's lower render size.
+- **`SsrSettings`:** `half_resolution` (default on: a quarter of the rays), `max_roughness`
+  (0.6: rougher surfaces use probes; reflections fade towards it), `steps` (64), `thickness`
+  (how thick objects are assumed behind what the depth buffer shows), `temporal` (the
+  current frame's share for glossy surfaces). After a camera cut call `reset` (the frame
+  renderer does it on `ViewCamera::cut`).
+- **Debugging:** `probes.stats()` (captured, waiting, faces drawn last frame, visible);
+  `ForwardPasses::reflections` gives the normals, weights and SSR result to look at.

@@ -79,6 +79,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0069](0069-sky-atmosphere-and-fog.md) | Physically based sky and atmosphere (Hillaire 2020): tables in compute passes, the sun's color and the image-based light from them, aerial perspective and exponential height fog in one full-screen pass | Accepted |
 | [0070](0070-network-transport.md) | Network transport: own sans-I/O UDP endpoint with netcode-style connect tokens, AES-256-GCM through CNG, reliable-stream and unreliable channels with delivery notification, no I/O thread; NAT traversal UPnP → PCP/NAT-PMP → STUN hole punching → relay | Accepted |
 | [0072](0072-frame-renderer.md) | The frame renderer: one object composes a view's frame (scene passes, temporal antialiasing or upscaling, bloom, exposure, tone mapping), per-view state, the engine's exposure for FSR and DLSS, camera entities, measured defaults per device class | Accepted |
+| [0073](0073-reflection-probes-and-screen-space-reflections.md) | Local reflections: probes captured by the forward renderer and prefiltered into a cube array, selected by screen cells and z-bins with parallax correction; Hi-Z stochastic screen-space reflections with spatial and temporal filters; one composite after the opaque surfaces, nothing in other views' shading | Accepted |
 
 ## Template
 
