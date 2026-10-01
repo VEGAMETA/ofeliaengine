@@ -5,6 +5,8 @@
 - Research: [docs/research/gpu-driven-rendering.md](../research/gpu-driven-rendering.md)
 - Extended by [ADR 0035](0035-occlusion-culling.md): two-phase occlusion culling;
   `add_passes` takes a `ForwardView`.
+- Next step 1 done by [ADR 0064](0064-gpu-scene-extraction-runtime.md): a persistent GPU
+  scene, drawn by `add_scene_passes`.
 
 ## Context
 

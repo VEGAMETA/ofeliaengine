@@ -795,6 +795,7 @@ mod schedule {
 }
 
 mod transforms {
+    use super::{Marker, Pos, Vel};
     use crate::*;
     use engine_core::math::{Quat, Vec3};
 
@@ -879,6 +880,256 @@ mod transforms {
         for (r, &tip) in tips.iter().enumerate() {
             assert!(close(pos(&w, tip), Vec3::new(r as f32, 40.0, 0.0)));
         }
+    }
+
+    /// Small deterministic generator (xorshift64*).
+    struct Rng(u64);
+    impl Rng {
+        fn next(&mut self) -> u64 {
+            self.0 ^= self.0 >> 12;
+            self.0 ^= self.0 << 25;
+            self.0 ^= self.0 >> 27;
+            self.0.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: usize) -> usize {
+            (self.next() >> 33) as usize % n.max(1)
+        }
+        fn unit(&mut self) -> f32 {
+            (self.next() >> 40) as f32 / (1u64 << 24) as f32
+        }
+        fn transform(&mut self) -> Transform {
+            Transform::from_xyz(
+                self.unit() * 8.0 - 4.0,
+                self.unit() * 8.0 - 4.0,
+                self.unit() * 8.0 - 4.0,
+            )
+            .with_rotation(Quat::from_euler(
+                engine_core::math::EulerRot::XYZ,
+                self.unit() * 6.0,
+                self.unit() * 6.0,
+                self.unit() * 6.0,
+            ))
+            .with_scale(Vec3::new(
+                0.5 + self.unit(),
+                0.5 + self.unit(),
+                0.5 + self.unit(),
+            ))
+        }
+    }
+
+    /// One edit of a world; returns the entity it spawned, if any.
+    fn apply(w: &mut World, op: usize, e: Entity, other: Entity, t: Transform) -> Option<Entity> {
+        match op {
+            0 => return Some(w.spawn((t, GlobalTransform::IDENTITY))),
+            // A root with a world transform only: an input for its children.
+            1 => return Some(w.spawn((GlobalTransform(t.to_affine()),))),
+            _ if !w.contains(e) => {}
+            2 | 3 => {
+                let child = w.spawn((t, GlobalTransform::IDENTITY));
+                let _ = w.set_parent(child, Some(e));
+                return Some(child);
+            }
+            4..=6 => {
+                if let Some(local) = w.get_mut::<Transform>(e) {
+                    *local = t;
+                }
+            }
+            7 => {
+                let _ = w.set_parent(e, w.contains(other).then_some(other));
+            }
+            8 => {
+                let _ = w.set_parent(e, None);
+            }
+            9 => {
+                // Breaks the chain below `e`, or reconnects it.
+                if w.remove::<Transform>(e).is_none() {
+                    w.insert(e, t);
+                }
+            }
+            10 => {
+                // Leaves its children with a dead parent.
+                w.despawn(e);
+            }
+            11 => {
+                w.despawn_recursive(e);
+            }
+            12 => {
+                // Moves it to another archetype.
+                if w.remove::<Marker>(e).is_none() {
+                    w.insert(e, Marker);
+                }
+            }
+            _ => {
+                // A world transform written by hand: kept on roots without a local
+                // transform, overwritten everywhere a full pass reaches.
+                if let Some(g) = w.get_mut::<GlobalTransform>(e) {
+                    g.0 = t.to_affine();
+                }
+            }
+        }
+        None
+    }
+
+    #[test]
+    fn incremental_propagation_equals_full_propagation() {
+        for seed in 1..=40u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut a = World::new();
+            let mut b = World::new();
+            let mut incremental = TransformPropagation::new(&mut a);
+            let mut full = TransformPropagation::new(&mut b);
+            let mut entities: Vec<Entity> = Vec::new();
+            for step in 0..60 {
+                let edits = 1 + rng.below(if step == 0 { 200 } else { 12 });
+                for _ in 0..edits {
+                    let op = if entities.is_empty() {
+                        0
+                    } else if rng.below(10) == 0 {
+                        rng.below(2)
+                    } else {
+                        2 + rng.below(13)
+                    };
+                    let e = entities.get(rng.below(entities.len())).copied();
+                    let other = entities.get(rng.below(entities.len())).copied();
+                    let (e, other) = (e.unwrap_or(Entity::NULL), other.unwrap_or(Entity::NULL));
+                    let t = rng.transform();
+                    let spawned = apply(&mut a, op, e, other, t);
+                    assert_eq!(spawned, apply(&mut b, op, e, other, t));
+                    entities.extend(spawned);
+                }
+                incremental.run(&mut a);
+                full.run_full(&mut b);
+                let stats = incremental.stats();
+                assert!(stats.written <= stats.recomputed, "{stats:?}");
+                for &e in &entities {
+                    assert_eq!(a.contains(e), b.contains(e));
+                    let (ga, gb) = (a.get::<GlobalTransform>(e), b.get::<GlobalTransform>(e));
+                    assert_eq!(
+                        ga.map(bytemuck::bytes_of),
+                        gb.map(bytemuck::bytes_of),
+                        "seed {seed}, step {step}, entity {e:?}"
+                    );
+                }
+                // Everything else equal too, to the byte (determinism, ADR 0019).
+                assert_eq!(a.state_hash(), b.state_hash(), "seed {seed}, step {step}");
+            }
+        }
+    }
+
+    #[test]
+    fn unchanged_world_transforms_are_not_marked() {
+        let mut w = World::new();
+        let mut p = TransformPropagation::new(&mut w);
+        // Two archetypes: still props, and movers (with a marker).
+        let still: Vec<Entity> = (0..1000)
+            .map(|i| spawn(&mut w, Transform::from_xyz(i as f32, 0.0, 0.0)))
+            .collect();
+        let movers: Vec<Entity> = (0..10)
+            .map(|i| {
+                w.spawn((
+                    Transform::from_xyz(0.0, i as f32, 0.0),
+                    GlobalTransform::IDENTITY,
+                    Marker,
+                ))
+            })
+            .collect();
+        let mut changed = QueryState::<Entity, Changed<GlobalTransform>>::new(&mut w);
+        p.run(&mut w);
+        assert_eq!(changed.iter(&mut w).count(), 1010);
+        // Nothing moved: no chunk scanned, nothing marked.
+        assert!(!p.run(&mut w));
+        assert_eq!(p.stats().chunks, 0);
+        assert_eq!(changed.iter(&mut w).count(), 0);
+        // One mover moved: only its chunk is visited downstream.
+        w.get_mut::<Transform>(movers[3]).unwrap().translation.z = 5.0;
+        assert!(p.run(&mut w));
+        assert_eq!(p.stats().written, 1);
+        assert_eq!(changed.iter(&mut w).count(), 10);
+        // A transform rewritten with its own value marks nothing downstream.
+        let same = *w.get::<Transform>(still[7]).unwrap();
+        *w.get_mut::<Transform>(still[7]).unwrap() = same;
+        assert!(!p.run(&mut w));
+        assert_eq!(p.stats().written, 0);
+        assert_eq!(changed.iter(&mut w).count(), 0);
+    }
+
+    #[test]
+    fn one_moved_root_recomputes_its_chunk_and_its_subtree() {
+        let mut w = World::new();
+        let mut p = TransformPropagation::new(&mut w);
+        let mut roots = Vec::new();
+        for r in 0..200 {
+            let root = spawn(&mut w, Transform::from_xyz(r as f32, 0.0, 0.0));
+            roots.push(root);
+            for c in 0..10 {
+                let child = spawn(&mut w, Transform::from_xyz(0.0, c as f32, 0.0));
+                w.set_parent(child, Some(root)).unwrap();
+            }
+        }
+        p.run(&mut w);
+        w.get_mut::<Transform>(roots[150]).unwrap().translation.y = 3.0;
+        assert!(p.run(&mut w));
+        let stats = p.stats();
+        // The root and its 10 children change; the other roots of its chunk and their
+        // direct children are recomputed, nothing else.
+        assert_eq!(stats.written, 11, "{stats:?}");
+        assert!(stats.recomputed < 2200 / 2, "{stats:?}");
+    }
+
+    #[test]
+    fn removals_are_logged_for_tracked_components() {
+        let mut w = World::new();
+        w.track_removals::<Marker>();
+        let a = w.spawn((Pos(0.0, 0.0), Marker));
+        let b = w.spawn((Pos(1.0, 0.0), Marker));
+        let c = w.spawn((Pos(2.0, 0.0),));
+        w.despawn(a);
+        w.remove::<Marker>(b);
+        w.despawn(c); // never had one
+        w.insert(b, Pos(3.0, 0.0)); // keeps no marker
+        let mut seen = Vec::new();
+        w.drain_removed::<Marker>(|e| seen.push(e));
+        assert_eq!(seen, [a, b]);
+        seen.clear();
+        w.drain_removed::<Marker>(|e| seen.push(e));
+        assert!(seen.is_empty());
+        // Untracked components log nothing.
+        let d = w.spawn((Vel(0.0, 0.0),));
+        w.despawn(d);
+        w.drain_removed::<Vel>(|e| seen.push(e));
+        assert!(seen.is_empty());
+        // Clear and restore are not logged: the epoch tells mirrors to resynchronize.
+        let epoch = w.resync_epoch();
+        w.clear();
+        assert_ne!(w.resync_epoch(), epoch);
+    }
+
+    #[test]
+    fn untracked_writes_are_invisible_until_marked() {
+        let mut w = World::new();
+        let e = w.spawn((Pos(0.0, 0.0),));
+        let mut changed = QueryState::<Entity, Changed<Pos>>::new(&mut w);
+        assert_eq!(changed.iter(&mut w).count(), 1);
+        w.get_mut_untracked::<Pos>(e).unwrap().0 = 5.0;
+        assert_eq!(changed.iter(&mut w).count(), 0);
+        assert!(w.mark_changed::<Pos>(e));
+        assert_eq!(changed.iter(&mut w).count(), 1);
+        assert_eq!(w.get::<Pos>(e), Some(&Pos(5.0, 0.0)));
+        assert!(!w.mark_changed::<Vel>(e));
+    }
+
+    #[test]
+    fn or_filters_visit_chunks_where_any_changed() {
+        let mut w = World::new();
+        let e = w.spawn((Pos(0.0, 0.0), Vel(0.0, 0.0)));
+        let f = w.spawn((Pos(0.0, 0.0), Vel(0.0, 0.0), Marker));
+        let mut q = QueryState::<Entity, Or<(Changed<Pos>, Changed<Vel>)>>::new(&mut w);
+        assert_eq!(q.iter(&mut w).count(), 2);
+        assert_eq!(q.iter(&mut w).count(), 0);
+        w.get_mut::<Vel>(e).unwrap().0 = 1.0;
+        assert_eq!(q.iter(&mut w).collect::<Vec<_>>(), [e]);
+        w.get_mut::<Pos>(f).unwrap().0 = 1.0;
+        assert_eq!(q.iter(&mut w).collect::<Vec<_>>(), [f]);
     }
 
     #[test]

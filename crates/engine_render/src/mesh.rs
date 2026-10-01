@@ -319,7 +319,8 @@ pub struct LodIndices<'a> {
 }
 
 /// A mesh in a [`GeometryPool`]. Ids of removed meshes are stale: lookups give `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct MeshId {
     index: u32,
     generation: u32,

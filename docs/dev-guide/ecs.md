@@ -213,7 +213,70 @@ schedule.add_exclusive("transforms", move |w| {
 - Write `Transform`; read `GlobalTransform` (rendering, physics sync, audio).
 - `GlobalTransform` is updated when the transforms step runs. Add it after the systems
   that move things and before the systems that read world positions.
-- If nothing moved and the hierarchy did not change, the step costs almost nothing.
-  If anything moved, every world transform is recomputed: about 2 ms per 100 000
-  entities on the 4-core test machine.
+- The step is incremental (ADR 0064): it looks only at chunks whose `Transform`,
+  `Parent` or `GlobalTransform` changed, and writes a world transform only when its value
+  changes. 100,000 entities in 1,000 hierarchies: one root moved 13 µs, every root moved
+  0.9 ms, nothing moved 0.1 µs. Chunks whose world transforms stayed the same are not
+  marked, so `Changed<GlobalTransform>` downstream (rendering, audio) skips them.
+- Give things that move every frame a component of their own (a velocity, an AI state):
+  they then live in their own chunks, and the chunks of still entities stay untouched. 1 %
+  movers in their own archetype among 100,000: 11 µs.
+- `run_full` recomputes everything (after writing `GlobalTransform` by hand, say).
 - A child without both components cuts off its own children: they are not updated.
+
+## 10. Mirroring the world elsewhere: renderers and removal logs
+
+Systems that keep a copy of part of the world (the renderer's scene, an audio scene, a
+network replicator) need what changed since their last run, including what went away:
+
+```rust
+world.track_removals::<MeshRenderer>();          // once
+let mut changed = QueryState::<(Entity, &GlobalTransform, &MeshRenderer),
+    Or<(Changed<GlobalTransform>, Changed<MeshRenderer>)>>::new(&mut world);
+// Each frame:
+world.drain_removed::<MeshRenderer>(|entity| mirror.remove(entity)); // despawned or removed
+changed.for_each_readonly(&world, |(e, g, r)| mirror.update(e, g, r));
+if world.resync_epoch() != seen_epoch { /* clear or snapshot restore: rebuild */ }
+```
+
+- A removal log grows until drained: track only what something drains every frame.
+- `Or<(..)>` matches chunks where any of the filters' components changed.
+- `get_mut_untracked` writes without marking the chunk; follow it with `mark_changed`
+  when the value really changed (that is how propagation keeps unchanged chunks clean).
+- Logs, change ticks and epochs are bookkeeping: snapshots, restores and the state hash
+  ignore them, so determinism is unaffected.
+- `World::despawn` takes the entity out of its parent's list of children; its own
+  children keep a dead parent (use `despawn_recursive` for subtrees).
+
+### Drawing entities: `MeshRenderer` and `engine_runtime`
+
+```rust
+use engine_runtime::{MeshRenderer, Runtime};
+
+world.spawn((Transform::from_xyz(0.0, 1.0, 0.0), GlobalTransform::IDENTITY,
+    MeshRenderer::new(mesh, material)));
+let mut runtime = Runtime::new(world, 64.0); // ticks per second
+// Each frame, after waiting for the swapchain image:
+let input = sample_input();                  // as late as possible
+runtime.frame(seconds_since_last_frame, &input, &mut gpu_scene,
+    |world, input, dt| { /* your tick systems: movement, physics, AI */ },
+    |world, input, alpha| camera.yaw = input.mouse_x * sensitivity); // every frame
+// Then render: gpu_scene.add_passes(..), renderer.add_scene_passes(..).
+```
+
+- **Ticks and frames.** The simulation runs at a fixed rate (64 Hz by default, ADR 0019);
+  each frame runs the ticks that are due (at most 4), then transform propagation and
+  extraction into the scene after each. Rendering interpolates moving objects between
+  their last two ticks, so motion is smooth at any frame rate. Do not also call
+  `PhysicsSync::interpolate`: bodies would be blended twice.
+- **The camera is not part of the tick.** The second closure runs every frame with the
+  latest input, after the ticks and right before rendering. A camera driven by ticks and
+  interpolated trails the mouse by 18 ms (median at 240 FPS and 64 Hz); this way input
+  reaches the frame's command buffer in 44 µs (RTX) / 109 µs (Radeon) in the example. Your
+  tick systems still consume the same input for the simulation (aiming, movement).
+- **One world, one simulation.** Singleplayer has no client and server (ADR 0019
+  addendum).
+- **Hide** an entity with `MeshRenderer::visible = 0`; despawning or removing the
+  component removes its instance.
+- A full example with a window: `cargo run -p engine_runtime --release --example
+  game_loop`. It prints where the frame's time goes and the input latency.

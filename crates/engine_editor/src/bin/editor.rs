@@ -68,8 +68,9 @@ mod windowed {
         MouseButton, WindowDesc, WindowEvent, WindowEventKind, WindowSystem,
     };
     use engine_render::forward::{
-        Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+        Camera, DirectionalLight, ForwardRenderer, ForwardView, ShadowSettings,
     };
+    use engine_render::gpu_scene::{GpuScene, SceneInstance};
     use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
     use engine_render::material::{MaterialDesc, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
@@ -639,16 +640,17 @@ mod windowed {
         let mut canvas = Canvas::new();
         let ui_ready = started.elapsed();
 
-        // Scene and panels (demo data).
+        // Scene and panels (demo data). The scene's instances live on the GPU (ADR 0064):
+        // a frame uploads only what changed.
         let objects = demo_objects();
-        let mut draws: Vec<DrawItem> = objects
-            .iter()
-            .map(|(world_from_object, material)| DrawItem {
+        let mut scene = GpuScene::new(&device, &bindless, objects.len() as u32, IN_FLIGHT)?;
+        for (world_from_object, material) in &objects {
+            scene.insert(SceneInstance {
                 mesh,
                 material: materials.add(*material),
                 world_from_object: *world_from_object,
-            })
-            .collect();
+            });
+        }
         let light = DirectionalLight {
             direction: Vec3::new(-0.5, -1.0, -0.35),
             color: Vec3::splat(2.6),
@@ -1005,9 +1007,19 @@ mod windowed {
                     &textures,
                     frame.number,
                 )?;
+                // `None` only when the upload ring is full: the view is not drawn then.
+                let scene_frame = scene.add_passes(
+                    &mut fg,
+                    &device,
+                    &mut allocator,
+                    &mut ring,
+                    &bindless,
+                    &geo,
+                    &mats,
+                    frame.number,
+                )?;
                 {
-                    let (forward, tonemap, bindless, draws) =
-                        (&forward, &output.view_tonemap, &bindless, &draws);
+                    let (forward, tonemap, bindless) = (&forward, &output.view_tonemap, &bindless);
                     // HDR: the view keeps highlights up to the display's peak.
                     let peak = output.levels.peak();
                     let ring = &mut ring;
@@ -1031,25 +1043,27 @@ mod windowed {
                                 LoadOp::Clear(c) => Some(c),
                                 _ => None,
                             };
-                            forward.add_passes(
-                                fg,
-                                ring,
-                                bindless,
-                                &geo,
-                                &mats,
-                                draws,
-                                &ForwardView {
-                                    camera: render_camera,
-                                    light,
-                                    color: hdr,
-                                    depth,
-                                    clear,
-                                    occlusion: None,
-                                    temporal: None,
-                                    lights: &[],
-                                    environment: None,
-                                },
-                            );
+                            if let Some(scene_frame) = &scene_frame {
+                                forward.add_scene_passes(
+                                    fg,
+                                    ring,
+                                    bindless,
+                                    &geo,
+                                    &mats,
+                                    scene_frame,
+                                    &ForwardView {
+                                        camera: render_camera,
+                                        light,
+                                        color: hdr,
+                                        depth,
+                                        clear,
+                                        occlusion: None,
+                                        temporal: None,
+                                        lights: &[],
+                                        environment: None,
+                                    },
+                                );
+                            }
                             tonemap.add_composite_pass(
                                 fg,
                                 bindless,
@@ -1246,9 +1260,9 @@ mod windowed {
             println!("{}", line.trim_end_matches(','));
         }
         let present_mode = swapchain.present_mode();
-        draws.clear();
         // SAFETY: the device is idle.
         unsafe {
+            scene.destroy(&mut allocator);
             viewports.destroy_all(&mut allocator, &bindless);
             graph.destroy(&mut allocator, Some(&bindless));
             ring.destroy(&mut allocator);

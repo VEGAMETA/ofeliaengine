@@ -154,6 +154,12 @@ impl UploadRing {
         self.slots[self.current].offset
     }
 
+    /// Bytes still free in the current slot (each allocation may also skip up to 15
+    /// bytes to align).
+    pub fn available(&self) -> u64 {
+        self.capacity.saturating_sub(self.used())
+    }
+
     /// Frees the buffers.
     ///
     /// # Safety

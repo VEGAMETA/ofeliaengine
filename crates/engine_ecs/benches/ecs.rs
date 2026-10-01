@@ -389,6 +389,80 @@ fn main() {
             "transforms: 100k, nothing changed (skip)".into(),
             measure(300, || (), |_| assert!(!p.run(&mut w))),
         ));
+        // 10 roots spread over the world (1 % of the hierarchies), then all of them.
+        let mut frame = 0.0f32;
+        rows.push((
+            "transforms: 100k, 1 % of the roots moved (spread)".into(),
+            measure(
+                50,
+                || (),
+                |_| {
+                    frame += 1.0;
+                    for &root in roots.iter().step_by(100) {
+                        w.get_mut::<engine_ecs::Transform>(root)
+                            .unwrap()
+                            .translation
+                            .y = frame;
+                    }
+                    assert!(p.run(&mut w));
+                },
+            ),
+        ));
+        rows.push((
+            "transforms: 100k, every root moved".into(),
+            measure(
+                20,
+                || (),
+                |_| {
+                    frame += 1.0;
+                    for &root in &roots {
+                        w.get_mut::<engine_ecs::Transform>(root)
+                            .unwrap()
+                            .translation
+                            .y = frame;
+                    }
+                    assert!(p.run(&mut w));
+                },
+            ),
+        ));
+    }
+
+    {
+        // 100k flat entities: still props, and 1 000 movers (1 %) in an archetype of their
+        // own (a velocity, say), as games tend to have.
+        #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+        #[repr(C)]
+        struct Mover(f32);
+        engine_ecs::pod_component!(Mover);
+        let mut w = World::new();
+        let mut p = TransformPropagation::new(&mut w);
+        for i in 0..99_000 {
+            w.spawn((
+                engine_ecs::Transform::from_xyz(i as f32, 0.0, 0.0),
+                GlobalTransform::IDENTITY,
+            ));
+        }
+        for i in 0..1_000 {
+            w.spawn((
+                engine_ecs::Transform::from_xyz(i as f32, 1.0, 0.0),
+                GlobalTransform::IDENTITY,
+                Mover(1.0),
+            ));
+        }
+        let mut movers =
+            engine_ecs::QueryState::<(&mut engine_ecs::Transform, &Mover)>::new(&mut w);
+        p.run(&mut w);
+        rows.push((
+            "transforms: 100k flat, 1 % movers in their own archetype".into(),
+            measure(
+                50,
+                || (),
+                |_| {
+                    movers.for_each(&mut w, |(t, m)| t.translation.z += m.0);
+                    assert!(p.run(&mut w));
+                },
+            ),
+        ));
     }
 
     println!("### engine_ecs (µs, median; lower is better)\n");

@@ -271,6 +271,12 @@ impl<'g> ComputePass<'_, 'g> {
         self
     }
 
+    /// Declares a read when `resource` is `Some` (as [`PassBuilder::maybe_read`]).
+    pub fn maybe_read(mut self, resource: Option<impl GraphResource>, access: Access) -> Self {
+        self.pass = self.pass.maybe_read(resource, access);
+        self
+    }
+
     /// Runs the pass on the async compute queue when the graph has async compute on (as
     /// [`PassBuilder::async_compute`], ADR 0065).
     pub fn async_compute(mut self) -> Self {
