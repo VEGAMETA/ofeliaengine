@@ -672,6 +672,8 @@ pub struct ForwardPasses {
     /// The environment's atmosphere tables this frame, when it has a physical sky (ADR
     /// 0069): for debugging views and tests.
     pub atmosphere: Option<AtmosphereTextures>,
+    /// DEBUG: visible list, shadow commands, shadow casters.
+    pub debug: Option<(Buffer, Buffer, Buffer)>,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -1875,7 +1877,12 @@ impl ForwardRenderer {
     ) -> Option<ForwardPasses> {
         let (color, depth) = (view.color, view.depth);
         let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
-        let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
+        let depth_clear = LoadOp::Clear([
+            std::env::var("ENGINE_DEBUG_DEPTH_CLEAR").ok().and_then(|v| v.parse().ok()).unwrap_or(1.0),
+            0.0,
+            0.0,
+            0.0,
+        ]);
         let Setup {
             depth_desc,
             phases,
@@ -2489,6 +2496,7 @@ impl ForwardRenderer {
                     motion: None,
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
+                    debug: Some((visible, shadow_commands, casters)),
                 }
             }
             Some(flags) => {
@@ -2625,6 +2633,7 @@ impl ForwardRenderer {
                     motion: None,
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
+                    debug: Some((visible, shadow_commands, casters)),
                 }
             }
         };
@@ -2987,6 +2996,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         motion,
         ao: None,
         atmosphere: None,
+        debug: None,
     }
 }
 
@@ -3267,13 +3277,25 @@ impl States {
                 }
                 ctx.device.cmd_set_cull_mode(ctx.cmd, cull);
                 ctx.device.cmd_set_front_face(ctx.cmd, front);
-                ctx.device.cmd_draw_indexed_indirect(
-                    ctx.cmd,
-                    buffer,
-                    offset + u64::from(self.starts[state]) * COMMAND_BYTES,
-                    count,
-                    COMMAND_BYTES as u32,
-                );
+                if std::env::var("ENGINE_DEBUG_SINGLE_DRAWS").is_ok() {
+                    for i in 0..count {
+                        ctx.device.cmd_draw_indexed_indirect(
+                            ctx.cmd,
+                            buffer,
+                            offset + u64::from(self.starts[state] + i) * COMMAND_BYTES,
+                            1,
+                            COMMAND_BYTES as u32,
+                        );
+                    }
+                } else {
+                    ctx.device.cmd_draw_indexed_indirect(
+                        ctx.cmd,
+                        buffer,
+                        offset + u64::from(self.starts[state]) * COMMAND_BYTES,
+                        count,
+                        COMMAND_BYTES as u32,
+                    );
+                }
             }
         }
     }

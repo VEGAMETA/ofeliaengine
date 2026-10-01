@@ -34,17 +34,19 @@ use engine_rhi::{
 const COLOR: vk::Format = vk::Format::R8G8B8A8_UNORM;
 const DEPTH: vk::Format = vk::Format::D32_SFLOAT;
 const COMMAND_BYTES: u64 = 64 * 1024;
+const DEBUG_BYTES: u64 = 256 * 1024;
+const PROBE_BYTES: u64 = 256 * 1024;
 
 fn gpu() -> Option<(VkInstance, Device)> {
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
     let attempt = || -> Result<(VkInstance, Device), engine_rhi::RhiError> {
         let instance = VkInstance::new(&InstanceDesc {
             app_name: String::from("engine_render gpu scene test"),
-            validation: true,
+            validation: std::env::var("STRESS_NO_VALIDATION").is_err(),
             debug_utils: true,
             surface: false,
             headless_surface: false,
-            sync_validation: true,
+            sync_validation: std::env::var("STRESS_NO_VALIDATION").is_err(),
         })?;
         let preference =
             AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);
@@ -70,6 +72,7 @@ enum Draw<'a> {
 
 /// What one frame produced.
 struct Shot {
+    debug: Vec<u8>,
     image: Vec<u8>,
     depth: Vec<u8>,
     /// Motion vectors in pixels, with a temporal state.
@@ -130,7 +133,8 @@ impl Bed {
             COLOR,
             DEPTH,
             ShadowSettings {
-                resolution: 512,
+                resolution: std::env::var("STRESS_SHADOW_RES").ok().and_then(|v| v.parse().ok()).unwrap_or(512),
+                cascades: std::env::var("STRESS_CASCADES").ok().and_then(|v| v.parse().ok()).unwrap_or(4),
                 ..ShadowSettings::default()
             },
         )
@@ -141,15 +145,23 @@ impl Bed {
         let materials = MaterialTable::new(1);
         let ring = UploadRing::new(&device, &mut allocator, 1, 8 << 20).unwrap();
         let graph = RenderGraph::new(&device, 1);
-        let bytes = u64::from(size * size * 4) * 3 + COMMAND_BYTES;
+        let bytes = u64::from(size * size * 4) * 3 + COMMAND_BYTES + 3 * DEBUG_BYTES + PROBE_BYTES;
         let (readback, readback_memory) = allocator
             .create_buffer(
                 &vk::BufferCreateInfo::default()
                     .size(bytes)
                     .usage(vk::BufferUsageFlags::TRANSFER_DST),
-                MemoryLocation::Readback,
+                if std::env::var("ENGINE_DEBUG_UNCACHED_READBACK").is_ok() {
+                    MemoryLocation::Upload
+                } else {
+                    MemoryLocation::Readback
+                },
             )
             .unwrap();
+        eprintln!(
+            "readback memory type {}",
+            readback_memory.memory_type()
+        );
         // SAFETY: plain object creation.
         let (pool, cmd) = unsafe {
             let pool = d
@@ -218,7 +230,10 @@ impl Bed {
         } = self;
         let (d, cmd, size) = (device.raw(), *cmd, *size);
         let image_bytes = u64::from(size * size * 4);
-        let total = image_bytes * 3 + COMMAND_BYTES;
+        let total = image_bytes * 3 + COMMAND_BYTES + 3 * DEBUG_BYTES + PROBE_BYTES;
+        let probe_offset = image_bytes * 3 + COMMAND_BYTES + 3 * DEBUG_BYTES;
+        let probe_words = (PROBE_BYTES / 4) as usize;
+        let probe_on = std::env::var("STRESS_PROBE").is_ok();
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -255,6 +270,16 @@ impl Bed {
             let geo = geometry
                 .begin_frame(&mut fg, device, allocator, *frame_number)
                 .unwrap();
+            let probe = if probe_on {
+                let (out, staged) = ring.alloc::<u32>(probe_words).unwrap();
+                let tag = (*frame_number as u32) << 20;
+                for (i, w) in out.iter_mut().enumerate() {
+                    w.write(tag | i as u32);
+                }
+                Some(staged)
+            } else {
+                None
+            };
             let color = fg.create_texture("color", TextureDesc::new_2d(COLOR, size, size));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(DEPTH, size, size));
             let view = ForwardView {
@@ -313,6 +338,21 @@ impl Bed {
             assert!(command_bytes <= COMMAND_BYTES);
             let velocity = passes.motion.map(|m| m.velocity);
             let commands = passes.commands;
+            if let Some(staged) = probe {
+                fg.add_pass("probe")
+                    .write(out, Access::TransferWrite)
+                    .execute(move |ctx| {
+                        // SAFETY: recording; in bounds.
+                        unsafe {
+                            ctx.device.cmd_copy_buffer(
+                                ctx.cmd,
+                                staged.buffer,
+                                ctx.buffer(out),
+                                &[vk::BufferCopy { src_offset: staged.offset, dst_offset: probe_offset, size: PROBE_BYTES }],
+                            );
+                        }
+                    });
+            }
             let read_depth = std::env::var("ENGINE_DEBUG_DEPTH_STORE").is_ok();
             let mut pass = fg
                 .add_pass("read back")
@@ -326,6 +366,15 @@ impl Bed {
             }
             if read_depth {
                 pass = pass.read(depth, Access::TransferRead);
+            }
+            let debug = passes.debug;
+            let inst = u64::from(passes.instances);
+            let casc: u64 = std::env::var("STRESS_CASCADES").ok().and_then(|v| v.parse().ok()).unwrap_or(4); let debug_sizes = [phases * inst * 4, casc * u64::from(passes.list_commands) * 20, casc * inst * 4];
+            if let Some((a, b, c)) = debug {
+                pass = pass
+                    .read(a, Access::TransferRead)
+                    .read(b, Access::TransferRead)
+                    .read(c, Access::TransferRead);
             }
             pass.execute(move |ctx| {
                 let region = |offset| vk::BufferImageCopy {
@@ -361,6 +410,21 @@ impl Bed {
                             &[region(image_bytes)],
                         );
                     }
+                    if let Some((a, b, c)) = debug {
+                        for (i, buf) in [a, b, c].into_iter().enumerate() {
+                            let size = debug_sizes[i].min(DEBUG_BYTES);
+                            ctx.device.cmd_copy_buffer(
+                                ctx.cmd,
+                                ctx.buffer(buf),
+                                ctx.buffer(out),
+                                &[vk::BufferCopy {
+                                    src_offset: 0,
+                                    dst_offset: 3 * image_bytes + COMMAND_BYTES + i as u64 * DEBUG_BYTES,
+                                    size,
+                                }],
+                            );
+                        }
+                    }
                     if read_depth {
                         let mut r = region(2 * image_bytes + COMMAND_BYTES);
                         r.image_subresource.aspect_mask = vk::ImageAspectFlags::DEPTH;
@@ -390,6 +454,9 @@ impl Bed {
             shot = (passes, scene, command_bytes, velocity.is_some());
         }
         // SAFETY: as above.
+        if let Some(us) = std::env::var("STRESS_SLEEP_US").ok().and_then(|v| v.parse::<u64>().ok()) {
+            std::thread::sleep(std::time::Duration::from_micros(us));
+        }
         unsafe {
             d.end_command_buffer(cmd).unwrap();
             let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
@@ -400,6 +467,14 @@ impl Bed {
             )
             .unwrap();
             device.wait_idle().unwrap();
+        }
+        if std::env::var("STRESS_RING_HASH").is_ok() {
+            let bytes = ring.debug_used_bytes();
+            let mut h: u64 = 0xcbf29ce484222325;
+            for &b in &bytes {
+                h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+            }
+            eprintln!("RING frame {frame_number}: {} bytes hash {h:016x}", bytes.len());
         }
         let (passes, scene, command_bytes, has_motion) = shot;
         let ptr = readback_memory.as_ref().unwrap().mapped_ptr().unwrap();
@@ -422,6 +497,20 @@ impl Bed {
             Vec::new()
         };
         let commands = &bytes[2 * image_bytes as usize..(2 * image_bytes + command_bytes) as usize];
+        let debug_bytes = bytes[(3 * image_bytes + COMMAND_BYTES) as usize..probe_offset as usize].to_vec();
+        if probe_on {
+            let tag = (*frame_number as u32) << 20;
+            let words = &bytes[probe_offset as usize..(probe_offset + PROBE_BYTES) as usize];
+            let wrong: Vec<(usize, u32)> = words
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+                .enumerate()
+                .filter(|&(i, w)| w != tag | i as u32)
+                .collect();
+            if !wrong.is_empty() {
+                eprintln!("PROBE frame {frame_number}: {} words stale, first {:x?}", wrong.len(), &wrong[..wrong.len().min(4)]);
+            }
+        }
         let depth_bytes = bytes[(2 * image_bytes + COMMAND_BYTES) as usize
             ..(3 * image_bytes + COMMAND_BYTES) as usize]
             .to_vec();
@@ -431,6 +520,7 @@ impl Bed {
             .map(|c| u32::from_le_bytes([c[4], c[5], c[6], c[7]]))
             .collect();
         Shot {
+            debug: debug_bytes,
             image,
             depth: depth_bytes,
             motion,
@@ -1210,7 +1300,11 @@ fn repeated_frames_are_identical() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(100);
     let camera = perspective_camera(Vec3::new(2.0, 7.0, 9.0));
-    let items = mixed_items([cube_a, cube_b], &palette, 0.25);
+    let mut items = mixed_items([cube_a, cube_b], &palette, 0.25);
+    if let Some(count) = std::env::var("STRESS_ITEMS").ok().and_then(|v| v.parse::<usize>().ok()) {
+        items.truncate(count);
+    }
+    bed.renderer.set_frustum_culling(!mode.contains("noculling"));
     let other = mixed_items([cube_a, cube_b], &palette, 0.5);
     let temporal = Temporal::new(&bed.device, &mut bed.allocator, 1024).unwrap();
     temporal.set_jitter_phases(0);
@@ -1229,6 +1323,9 @@ fn repeated_frames_are_identical() {
         use_temporal.then_some(&temporal),
     );
     let _ = first;
+    let mut hashes = Vec::with_capacity(n);
+    let st = bed.graph.stats();
+    eprintln!("STRESS graph: {st:?}");
     let mut bad = 0;
     for k in 0..n {
         if mode.contains("same") {
@@ -1261,8 +1358,28 @@ fn repeated_frames_are_identical() {
         if k < 3 {
             eprintln!("STRESS created: {}", bed.graph.stats().created_objects);
         }
+        hashes.push({
+            let mut h: u64 = 0xcbf29ce484222325;
+            for &b in &shot.image {
+                h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+            }
+            h
+        });
         let d = differing(&reference.image, &shot.image);
         let dd = differing(&reference.depth, &shot.depth);
+        for (i, name) in ["visible", "shadow commands", "casters"].iter().enumerate() {
+            let r = &reference.debug[i * DEBUG_BYTES as usize..(i + 1) * DEBUG_BYTES as usize];
+            let g = &shot.debug[i * DEBUG_BYTES as usize..(i + 1) * DEBUG_BYTES as usize];
+            let wrong: Vec<usize> = r.chunks_exact(4).zip(g.chunks_exact(4)).enumerate().filter(|(_, (a, b))| a != b).map(|(i, _)| i).collect();
+            if !wrong.is_empty() {
+                let w = |b: &[u8], i: usize| u32::from_le_bytes(b[i * 4..i * 4 + 4].try_into().unwrap());
+                eprintln!(
+                    "STRESS frame {k}: {name} differs in {} words, first {:?}",
+                    wrong.len(),
+                    wrong.iter().take(6).map(|&i| (i, w(r, i), w(g, i))).collect::<Vec<_>>()
+                );
+            }
+        }
         if dd != 0 {
             eprintln!("STRESS frame {k}: {dd} depth texels differ");
             let mut m = 0;
@@ -1317,6 +1434,8 @@ fn repeated_frames_are_identical() {
                     .duration_since(std::time::UNIX_EPOCH)
                     .unwrap()
                     .as_millis();
+                std::fs::write(format!("{dir}/{stamp}_refdepth.bin"), &reference.depth).unwrap();
+                std::fs::write(format!("{dir}/{stamp}_gotdepth.bin"), &shot.depth).unwrap();
                 for (name, img) in [("ref", &reference.image), ("got", &shot.image)] {
                     let png = engine_render::png::encode_png(
                         128,
@@ -1330,7 +1449,119 @@ fn repeated_frames_are_identical() {
             }
         }
     }
+    let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for h in &hashes {
+        *counts.entry(*h).or_default() += 1;
+    }
+    let most = counts.values().copied().max().unwrap_or(0);
+    eprintln!("STRESS {mode}: {} of {n} frames off the majority ({} distinct images)", n - most, counts.len());
     eprintln!("STRESS {mode}: {bad} of {n} frames differ");
     bed.finish(Vec::new(), (Vec::new(), vec![temporal]));
     assert_eq!(bad, 0);
 }
+
+/// Debug: buffer copies through device memory return what the host wrote.
+#[test]
+#[ignore = "stress"]
+fn copies_are_exact() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let mut allocator = Allocator::new(&device);
+    let d = device.raw();
+    let size: u64 = 16 << 20;
+    let n: usize = std::env::var("STRESS_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let mk = |allocator: &mut Allocator, usage: vk::BufferUsageFlags, loc: MemoryLocation| {
+        allocator
+            .create_buffer(&vk::BufferCreateInfo::default().size(size).usage(usage), loc)
+            .unwrap()
+    };
+    let (u, mut um) = mk(&mut allocator, vk::BufferUsageFlags::TRANSFER_SRC, MemoryLocation::Upload);
+    let (a, am) = mk(&mut allocator, vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::Device);
+    let (b, bm) = mk(&mut allocator, vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::Device);
+    let (r, rm) = mk(&mut allocator, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::Readback);
+    // SAFETY: test setup.
+    let (pool, cmd) = unsafe {
+        let pool = d
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(device.graphics.family),
+                None,
+            )
+            .unwrap();
+        let cmd = d
+            .allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool).command_buffer_count(1))
+            .unwrap()[0];
+        (pool, cmd)
+    };
+    let words = (size / 4) as usize;
+    let mut bad = 0;
+    for k in 0..n {
+        let mut x = (k as u32).wrapping_mul(0x9E37_79B9) | 1;
+        let pattern: Vec<u32> = (0..words)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x
+            })
+            .collect();
+        um.mapped_slice_mut().unwrap().copy_from_slice(bytemuck_cast(&pattern));
+        let barrier = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)];
+        let host = [vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+            .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+        let region = [vk::BufferCopy { src_offset: 0, dst_offset: 0, size }];
+        // SAFETY: one-shot recording and submission, then wait.
+        unsafe {
+            d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
+            d.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).unwrap();
+            d.cmd_copy_buffer(cmd, u, a, &region);
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&barrier));
+            d.cmd_copy_buffer(cmd, a, b, &region);
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&barrier));
+            d.cmd_copy_buffer(cmd, b, r, &region);
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&host));
+            d.end_command_buffer(cmd).unwrap();
+            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            d.queue_submit2(device.graphics.raw, &[vk::SubmitInfo2::default().command_buffer_infos(&infos)], vk::Fence::null())
+                .unwrap();
+            device.wait_idle().unwrap();
+        }
+        let ptr = rm.mapped_ptr().unwrap();
+        // SAFETY: idle GPU; the mapping covers the buffer.
+        let got = unsafe { core::slice::from_raw_parts(ptr.as_ptr().cast::<u32>(), words) };
+        let wrong = got.iter().zip(&pattern).filter(|(a, b)| a != b).count();
+        if wrong > 0 {
+            bad += 1;
+            let first = got.iter().zip(&pattern).position(|(a, b)| a != b).unwrap();
+            eprintln!("STRESS copy {k}: {wrong} words wrong, first at {first}: {:08x} vs {:08x}", got[first], pattern[first]);
+        }
+    }
+    eprintln!("STRESS copies: {bad} of {n} wrong");
+    // SAFETY: idle.
+    unsafe {
+        d.destroy_command_pool(pool, None);
+        allocator.destroy_buffer(u, um);
+        allocator.destroy_buffer(a, am);
+        allocator.destroy_buffer(b, bm);
+        allocator.destroy_buffer(r, rm);
+    }
+    drop(allocator);
+    drop(device);
+    drop(instance);
+    assert_eq!(bad, 0);
+}
+
+fn bytemuck_cast(v: &[u32]) -> &[u8] {
+    // SAFETY: u32 has no padding; u8 alignment is 1.
+    unsafe { core::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len() * 4) }
+}
+

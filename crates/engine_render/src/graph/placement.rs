@@ -17,6 +17,9 @@ pub(crate) struct Item {
 
 impl Item {
     fn lifetime_overlaps(&self, other: &Self) -> bool {
+        if std::env::var("ENGINE_DEBUG_NO_ALIAS").is_ok() {
+            return true;
+        }
         self.first <= other.last && other.first <= self.last
     }
 
