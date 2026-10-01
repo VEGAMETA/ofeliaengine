@@ -23,3 +23,5 @@ engine_reflect.workspace = true
 # The co-op example and its test: characters on Jolt (ADR 0066).
 engine_physics.workspace = true
 engine_physics_jolt.workspace = true
+# The example's frame pacing (PreciseSleeper).
+engine_platform.workspace = true

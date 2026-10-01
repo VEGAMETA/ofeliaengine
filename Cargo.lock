@@ -399,6 +399,7 @@ dependencies = [
  "engine_net_transport",
  "engine_physics",
  "engine_physics_jolt",
+ "engine_platform",
  "engine_profiler",
  "engine_reflect",
 ]
