@@ -2426,7 +2426,10 @@ impl ForwardRenderer {
             }
         };
         // The depth is needed after the frame's passes for motion vectors and upsampling.
-        let depth_store = if velocity.is_some() || environment.is_some() {
+        let depth_store = if velocity.is_some()
+            || environment.is_some()
+            || std::env::var("ENGINE_DEBUG_DEPTH_STORE").is_ok()
+        {
             StoreOp::Store
         } else {
             StoreOp::DontCare
