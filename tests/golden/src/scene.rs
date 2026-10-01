@@ -9,6 +9,7 @@ use engine_assets::{
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
+use engine_render::ao::AoSettings;
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
@@ -68,6 +69,8 @@ pub struct Shot {
     pub curve: ToneCurve,
     /// Depth prepass.
     pub prepass: bool,
+    /// Ambient occlusion (ADR 0058; it turns the depth prepass on).
+    pub ao: Option<AoSettings>,
 }
 
 impl Shot {
@@ -91,6 +94,7 @@ impl Shot {
             exposure: 1.0,
             curve: ToneCurve::Gt,
             prepass: false,
+            ao: None,
         }
     }
 }
@@ -441,6 +445,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     )
     .expect("renderer");
     renderer.set_depth_prepass(shot.prepass);
+    renderer
+        .set_ambient_occlusion(&device, &bindless, shot.ao)
+        .expect("ambient occlusion");
     let output_format = vk::Format::R8G8B8A8_SRGB;
     let tonemap = Tonemap::new(&device, &bindless, output_format).expect("tonemap");
     let bloom = shot

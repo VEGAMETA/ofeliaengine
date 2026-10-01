@@ -12,6 +12,7 @@
 //! `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
 //! (scenes: `tools/fetch-test-assets.ps1`; options: `--screenshot <png>`,
 //! `--view <eye x,y,z,target x,y,z>`, `--uncompressed` for RGBA8 textures, `--prepass` for the depth prepass,
+//! `--ao low|medium|high|ultra|<slices>x<steps>` for ambient occlusion (ADR 0058, implies the prepass),
 //! `--motion` for a jittered projection and motion vectors (ADR 0043), `--cascades <1-4>`
 //! `--shadow-res <texels per cascade>` and `--shadow-blend <band>` for the shadows
 //! (ADR 0044), `--lights <count>` for point and spot lights spread over the scene and
@@ -36,6 +37,7 @@ use engine_assets::{
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
+use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
@@ -253,6 +255,7 @@ fn main() {
     let mut curve = ToneCurve::Gt;
     let mut ddc = String::from("test-assets/.ddc");
     let mut pack: Option<String> = None;
+    let mut ao: Option<AoSettings> = None;
     let mut stream = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -260,6 +263,25 @@ fn main() {
             "--screenshot" => screenshot = args.next(),
             "--uncompressed" => uncompressed = true,
             "--prepass" => prepass = true,
+            "--ao" => {
+                let quality = match args.next().as_deref() {
+                    Some("low") => AoQuality::Low,
+                    Some("medium") => AoQuality::Medium,
+                    Some("ultra") => AoQuality::Ultra,
+                    Some(custom) if custom.contains('x') => {
+                        let (slices, steps) = custom.split_once('x').unwrap();
+                        AoQuality::Custom {
+                            slices: slices.parse().unwrap(),
+                            steps: steps.parse().unwrap(),
+                        }
+                    }
+                    _ => AoQuality::High,
+                };
+                ao = Some(AoSettings {
+                    quality,
+                    ..AoSettings::default()
+                });
+            }
             "--motion" => motion = true,
             "--lights" => light_count = args.next().unwrap().parse().unwrap(),
             "--no-light-culling" => light_culling = false,
@@ -652,6 +674,9 @@ fn main() {
     );
     println!();
     renderer.set_depth_prepass(prepass);
+    renderer
+        .set_ambient_occlusion(&device, &bindless, ao)
+        .unwrap();
     renderer.set_light_culling(light_culling);
     if pipeline_stats {
         // Needs ENGINE_PIPELINE_STATS=1 (the device captures statistics at creation).
@@ -701,9 +726,9 @@ fn main() {
     println!(
         "| materials | upload frames | GPU shadow µs | GPU depth prepass µs | GPU forward µs | \
          GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs | \
-         GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs |"
+         GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs | GPU AO µs |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
 
     let mut frame_number = 0u64;
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -711,6 +736,7 @@ fn main() {
             materials.set(id, desc);
         }
         let (mut shadow, mut depth_prepass, mut forward) = (Vec::new(), Vec::new(), Vec::new());
+        let mut ao_time = Vec::new();
         let mut motion_extra = Vec::new();
         let (mut light_tiles, mut cpu_add) = (Vec::new(), Vec::new());
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
@@ -919,6 +945,7 @@ fn main() {
                 let mut extra = 0.0;
                 let mut shadow_frame = 0.0;
                 let mut tiles_frame = 0.0;
+                let mut ao_frame = 0.0;
                 let (mut sky_frame, mut rebuild_frame) = (0.0, 0.0);
                 let (mut bloom_frame, mut exposure_frame, mut tonemap_frame) = (0.0, 0.0, 0.0);
                 for time in graph.gpu_pass_times() {
@@ -926,6 +953,7 @@ fn main() {
                         "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
                         "forward" => forward.push(f64::from(time.gpu_us)),
                         "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
+                        "ao depths" | "ao" | "ao denoise" => ao_frame += f64::from(time.gpu_us),
                         "motion background" | "remember instances" => {
                             extra += f64::from(time.gpu_us);
                         }
@@ -955,6 +983,7 @@ fn main() {
                 bloom_time.push(bloom_frame);
                 exposure_time.push(exposure_frame);
                 tonemap_time.push(tonemap_frame);
+                ao_time.push(ao_frame);
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
@@ -967,7 +996,7 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
@@ -979,6 +1008,7 @@ fn main() {
             median(&mut bloom_time),
             median(&mut exposure_time),
             median(&mut tonemap_time),
+            median(&mut ao_time),
         );
     }
     println!();

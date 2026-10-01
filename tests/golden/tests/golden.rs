@@ -11,6 +11,7 @@
 use engine_core::math::Vec3;
 use engine_golden::golden::{Outcome, Tolerance, compare};
 use engine_golden::scene::{RenderOptions, Shot, Skip, Source, procedural_lights, render};
+use engine_render::ao::AoSettings;
 use std::path::PathBuf;
 
 fn require_golden() -> bool {
@@ -96,6 +97,28 @@ fn procedural_scene_without_sky() {
         bloom: false,
         prepass: true,
         ..procedural("procedural_no_sky")
+    });
+}
+
+/// The procedural scene with ambient occlusion (High): contact shadows under the spheres
+/// and cubes and along the wall.
+#[test]
+fn procedural_scene_with_ambient_occlusion() {
+    check(&Shot {
+        ao: Some(AoSettings::default()),
+        ..procedural("procedural_ao")
+    });
+}
+
+/// Sponza with ambient occlusion: the curtains' folds, the arches, the plants.
+#[test]
+fn sponza_with_ambient_occlusion() {
+    check(&Shot {
+        ao: Some(AoSettings::default()),
+        ..Shot::new(
+            "sponza_ao",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
     });
 }
 
