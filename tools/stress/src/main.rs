@@ -11,12 +11,14 @@
 //!     world transform is recomputed);
 //!   - plus one entity per body and per NPC.
 //! - **Rendering:** every entity as a PBR cube with shadows, at 1920×1080 into HDR, then
-//!   tonemapped, presented with `immediate` (uncapped). The entities are mirrored into a
-//!   persistent GPU scene by `engine_runtime::RenderExtract` (ADR 0064); `--draw-list`
-//!   builds a draw list from the ECS every frame instead (ADR 0034's path).
+//!   tonemapped, presented with `immediate` (uncapped). A draw list is built from the ECS
+//!   every frame (ADR 0034): every object here moves every frame, the case where it costs
+//!   less CPU than a persistent scene. `--gpu-scene` mirrors the entities into a
+//!   persistent GPU scene through `engine_runtime::RenderExtract` instead (ADR 0064), to
+//!   compare.
 //!
 //! ```text
-//! cargo run --release -p engine_stress -- [frames] [decor] [bodies] [npcs] [--headless] [--draw-list]
+//! cargo run --release -p engine_stress -- [frames] [decor] [bodies] [npcs] [--headless] [--gpu-scene]
 //! ```
 //!
 //! `--headless` runs the simulation parts only (any OS). The report is Markdown on stdout.
@@ -344,7 +346,7 @@ fn report(samples: &[Stages], title: &str, extra: &str) {
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let headless = args.iter().any(|a| a == "--headless");
-    let draw_list = args.iter().any(|a| a == "--draw-list");
+    let draw_list = !args.iter().any(|a| a == "--gpu-scene");
     let nums: Vec<usize> = args.iter().filter_map(|a| a.parse().ok()).collect();
     let frames = nums.first().copied().unwrap_or(1500);
     let decor = nums.get(1).copied().unwrap_or(10_000);

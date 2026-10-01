@@ -875,7 +875,6 @@ impl GpuScene {
         let d = &mut self.data[i];
         d.material = s.material_slot;
         d.batch = s.batch;
-        let data = *d;
         let still = flags & (flag::NEW | flag::TELEPORT) != 0;
         if !still {
             // Its previous transform differs now: settled by the next upload unless it
@@ -888,7 +887,7 @@ impl GpuScene {
             } else {
                 Previous::Copy
             };
-            self.write(index, data, previous, out);
+            self.write(index, self.data[i], previous, out);
         } else if still {
             // The full copy writes every slot; only new and teleported slots need their
             // previous transform set, from the copied array.
