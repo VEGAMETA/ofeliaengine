@@ -18,7 +18,13 @@ $models = @(
     @('FlightHelmet', 'FlightHelmet/glTF/FlightHelmet.gltf', 'CC0'),
     @('MetalRoughSpheres', 'MetalRoughSpheres/glTF/MetalRoughSpheres.gltf', 'CC-BY 4.0'),
     @('NormalTangentMirrorTest', 'NormalTangentMirrorTest/glTF/NormalTangentMirrorTest.gltf', 'CC-BY 4.0'),
-    @('AlphaBlendModeTest', 'AlphaBlendModeTest/glTF/AlphaBlendModeTest.gltf', 'CC-BY 4.0')
+    @('AlphaBlendModeTest', 'AlphaBlendModeTest/glTF/AlphaBlendModeTest.gltf', 'CC-BY 4.0'),
+    # Skinned and animated (ADR 0068).
+    @('Fox', 'Fox/glTF/Fox.gltf', 'CC0 (model, PixelMannen) + CC-BY 4.0 (rig and animations, @tomkranis; glTF by @AsoboStudio and @scurest)'),
+    @('CesiumMan', 'CesiumMan/glTF/CesiumMan.gltf', 'CC-BY 4.0 (Cesium)'),
+    @('RiggedFigure', 'RiggedFigure/glTF/RiggedFigure.gltf', 'CC-BY 4.0 (Cesium)'),
+    @('RiggedSimple', 'RiggedSimple/glTF/RiggedSimple.gltf', 'CC-BY 4.0 (Cesium)'),
+    @('SimpleSkin', 'SimpleSkin/glTF/SimpleSkin.gltf', 'CC0')
 )
 
 function Fetch($url, $path) {

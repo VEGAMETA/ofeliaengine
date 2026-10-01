@@ -383,12 +383,18 @@ pub fn compress(
         })
         .collect();
 
-    // Sample rate: the source's key rate, doubled while interpolation alone misses.
+    // Sample rate: the source's key rate, or the smallest multiple of it on whose grid
+    // every key lies (keys off the grid get their corners cut), doubled while
+    // interpolation alone misses.
+    let max_rate = settings.max_sample_rate.max(1.0);
     let mut rate = settings
         .sample_rate
-        .or_else(|| raw.min_key_interval().map(|d| 1.0 / d))
+        .or_else(|| {
+            let base = 1.0 / raw.min_key_interval()?;
+            Some(aligned_rate(raw, base, max_rate).unwrap_or(base))
+        })
         .unwrap_or(30.0)
-        .clamp(1.0, settings.max_sample_rate.max(1.0));
+        .clamp(1.0, max_rate);
     let mut compressor;
     loop {
         let samples = if duration > 0.0 {
@@ -469,6 +475,35 @@ pub fn compress(
     stats.max_error = error;
     stats.worst_joint = worst;
     (clip, stats)
+}
+
+/// The smallest multiple of `base` (up to `max`) whose sample grid holds every key time
+/// and the duration (within a hundredth of a sample).
+fn aligned_rate(raw: &RawClip, base: f32, max: f32) -> Option<f32> {
+    let mut times: Vec<f32> = raw
+        .joints
+        .iter()
+        .flat_map(|j| {
+            let t = j.translation.iter().flat_map(|t| t.times.iter());
+            let r = j.rotation.iter().flat_map(|t| t.times.iter());
+            let s = j.scale.iter().flat_map(|t| t.times.iter());
+            t.chain(r).chain(s).copied()
+        })
+        .collect();
+    times.push(raw.duration);
+    times.sort_by(f32::total_cmp);
+    times.dedup();
+    (1..=16)
+        .map(|m| base * m as f32)
+        .take_while(|&r| r <= max * 1.0001)
+        .find(|&r| {
+            times.iter().all(|&t| {
+                (f64::from(t) * f64::from(r))
+                    .fract()
+                    .min(1.0 - (f64::from(t) * f64::from(r)).fract())
+                    < 0.01
+            })
+        })
 }
 
 /// Samples, stored values, track kinds and the source's object transforms.
