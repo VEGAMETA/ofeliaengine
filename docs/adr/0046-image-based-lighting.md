@@ -122,7 +122,8 @@ ref-1, release, Sponza textured / factors only, 1920 × 1080, 4 shadow cascades,
 
 - **Scenes get sky light and a sky** with one object and one field.
 - **Not done yet:**
-  - a physically based atmosphere (Hillaire 2020) to fill the cube: next;
+  - a physically based atmosphere (Hillaire 2020) to fill the cube: next (done:
+    [ADR 0069](0069-sky-atmosphere-and-fog.md));
   - HDR environment images;
   - local reflection probes;
   - one environment shared by several views in one frame (each view imports it; split

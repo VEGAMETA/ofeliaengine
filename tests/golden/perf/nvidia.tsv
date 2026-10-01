@@ -40,3 +40,15 @@ sponza_ao	shadow	209.8
 sponza_ao	shadow cull	5.1
 sponza_ao	sky	3.1
 sponza_ao	tonemap	27.6
+sponza_atmosphere	(frame total)	777.7
+sponza_atmosphere	(gpu frame)	803.3
+sponza_atmosphere	atmosphere	56.3
+sponza_atmosphere	atmosphere aerial perspective	12.0
+sponza_atmosphere	bloom downsample	82.9
+sponza_atmosphere	bloom upsample	34.8
+sponza_atmosphere	cull	4.4
+sponza_atmosphere	cull setup	1.7
+sponza_atmosphere	forward	395.3
+sponza_atmosphere	shadow	159.5
+sponza_atmosphere	shadow cull	3.1
+sponza_atmosphere	tonemap	27.6

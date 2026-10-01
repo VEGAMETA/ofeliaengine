@@ -11,6 +11,7 @@ use engine_assets::{
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::ao::AoSettings;
+use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
@@ -82,6 +83,11 @@ pub struct Shot {
     /// Skinned scenes (ADR 0068): every skin posed by its clip of this index at this time
     /// (seconds); `None` draws skinned meshes in their bind pose, unskinned.
     pub animation: Option<(usize, f32)>,
+    /// A physically based sky and atmosphere (ADR 0069) instead of the gradient sky (with
+    /// `sky`); it drives the sun's color.
+    pub atmosphere: Option<Atmosphere>,
+    /// Exponential height fog (ADR 0069; with `sky`).
+    pub fog: Option<HeightFog>,
 }
 
 impl Shot {
@@ -109,6 +115,8 @@ impl Shot {
             subsurface: false,
             async_compute: None,
             animation: None,
+            atmosphere: None,
+            fog: None,
         }
     }
 }
@@ -491,7 +499,13 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         .bloom
         .then(|| Bloom::new(&device, &bindless, BloomSettings::default()).expect("bloom"));
     let environment = shot.sky.then(|| {
-        Environment::new(&device, &mut allocator, &bindless, Sky::default()).expect("sky")
+        let mut environment =
+            Environment::new(&device, &mut allocator, &bindless, Sky::default()).expect("sky");
+        environment
+            .set_atmosphere(&device, &mut allocator, &bindless, shot.atmosphere)
+            .expect("atmosphere");
+        environment.set_fog(shot.fog);
+        environment
     });
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 64 << 20).expect("ring");
     let mut graph = RenderGraph::new(&device, 1);

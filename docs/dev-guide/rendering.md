@@ -740,6 +740,50 @@ What it costs (ref-1, Sponza at 1080p): the forward pass goes from 0.32 to 0.40 
 RTX 4060 Ti, and from 7.7 to 12.2 ms on the Radeon iGPU. That is the price of real
 reflections on every surface. The sky pass itself costs 3 µs and 33 µs.
 
+### A physical sky, sunsets, aerial perspective and fog
+
+Instead of the gradient, an environment can carry a physically based atmosphere
+(ADR 0069): the sky follows the sun, the sun reddens towards the horizon and sets, the sky
+light matches the sky, and far objects fade into the air. Height fog works with either
+sky.
+
+```rust
+use engine_render::atmosphere::{Atmosphere, HeightFog};
+
+// Once (the first call makes the atmosphere's tables and pipelines).
+environment.set_atmosphere(&device, &mut allocator, &bindless, Some(Atmosphere::earth()))?;
+environment.set_fog(Some(HeightFog {
+    density: 0.02,      // per world unit at base_height
+    base_height: 0.0,
+    falloff: 0.2,       // thins by e every 5 units up
+    ..HeightFog::default()
+}));
+
+// Every frame: the directional light is the sun. Its color is the sunlight outside the
+// atmosphere; the renderer dims and reddens it for the sun's height.
+let light = DirectionalLight { direction: -to_sun, color: Vec3::splat(4.0), ambient: Vec3::ZERO };
+let view = ForwardView { light, environment: Some(&environment), ..view };
+```
+
+- **Move the sun freely.** Its azimuth costs nothing; its height rebuilds the sky's table
+  every 0.02° (0.01 ms on an RTX 4060 Ti, 0.3 ms on a Radeon iGPU) and the sky light
+  every 0.1° (about 0.06 / 1.3 ms). Changing the atmosphere's parameters also rebuilds
+  its other tables (0.03 / 0.8 ms more): fine for weather changes, not every frame.
+- **Units.** The atmosphere is in kilometres; your scene is in metres by default
+  (`meters_per_unit`). `origin_altitude` puts the world's origin above the ground (a
+  mountain level). Air is thin: across a 50 m room nothing shows. For small scenes that
+  should look vast, raise `aerial_perspective_scale` (distances count that many times).
+- **`drives_sun: false`** keeps your light's color as it is (a stylized sun), while the sky
+  still follows its direction.
+- **Fog** is lit by the sky's average color and the sun (a glow towards it,
+  `sun_anisotropy`); it casts no shadows (no light shafts yet). `start_distance` keeps it
+  off the near field, `max_opacity` keeps distant shapes visible.
+- **Transparent surfaces** get the aerial perspective and fog in their own shaders.
+- **What it costs** (1080p): one full-screen pass after the opaque surfaces, 0.03 ms
+  (0.06 with fog) on the RTX 4060 Ti, 1.1 ms (2.0 with fog) on the Radeon iGPU, replacing the
+  sky pass; the forward pass does not change. Views without an atmosphere or fog pay
+  nothing.
+
 ## 11. Bloom and automatic exposure
 
 Before tone mapping, two passes make HDR frames read like photographs (ADR 0047):

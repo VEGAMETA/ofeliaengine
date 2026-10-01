@@ -57,6 +57,11 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
 - **Perf gate** (`check.ps1 -Perf`): no pass may get slower. If a pass got faster or slower on
   purpose, update the baseline (`perf_gate --update`, both GPUs) and record numbers in
   `docs/perf/history.md`.
+  Several agents share the machine: `check.ps1` runs the GPU steps under one machine-wide lock
+  and the perf step waits for the CPU to calm (the Radeon is an APU; compilations next to it
+  lower its clocks by 3–8 %). If the gate still shows a uniform shift on passes you didn't
+  touch, A/B against main back to back (main's `perf_gate` in its own target dir) before
+  concluding.
 - **Shader registers (hard rule, learned the hard way):** a feature must add no code to the
   shaders of views/materials that don't use it. On the AMD driver even dead code under a
   specialization constant costs VGPRs (forward shading sits at exactly 64; 72 made it 9–13 %
