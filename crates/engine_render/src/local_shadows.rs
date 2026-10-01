@@ -1164,31 +1164,37 @@ mod tests {
     /// `local_shadow`'s projection of a point light's faces, as in `forward.slang`.
     fn shader_point_ndc(d: Vec3, terms: [f32; 4]) -> (usize, Vec3) {
         let a = d.abs();
-        let (face, major, xy) = if a.x >= a.y && a.x >= a.z {
-            (
-                usize::from(d.x < 0.0),
-                a.x,
-                [if d.x < 0.0 { -d.z } else { d.z }, -d.y],
-            )
-        } else if a.y >= a.z {
-            (
-                2 + usize::from(d.y < 0.0),
-                a.y,
-                [if d.y < 0.0 { -d.x } else { d.x }, -d.z],
-            )
+        let x_major = a.x >= a.y && a.x >= a.z;
+        let y_major = !x_major && a.y >= a.z;
+        let along = if x_major {
+            d.x
+        } else if y_major {
+            d.y
         } else {
-            (
-                4 + usize::from(d.z < 0.0),
-                a.z,
-                [if d.z < 0.0 { d.x } else { -d.x }, -d.y],
-            )
+            d.z
         };
-        let inverse = 1.0 / major;
+        let flip = if along < 0.0 { -1.0 } else { 1.0 };
+        let u = if x_major {
+            flip * d.z
+        } else if y_major {
+            flip * d.x
+        } else {
+            -flip * d.x
+        };
+        let v = if y_major { -d.z } else { -d.y };
+        let face = if x_major {
+            0
+        } else if y_major {
+            2
+        } else {
+            4
+        } + usize::from(along < 0.0);
+        let inverse = 1.0 / along.abs();
         (
             face,
             Vec3::new(
-                xy[0] * terms[0] * inverse,
-                xy[1] * terms[0] * inverse,
+                u * terms[0] * inverse,
+                v * terms[0] * inverse,
                 terms[1] + terms[2] * inverse,
             ),
         )

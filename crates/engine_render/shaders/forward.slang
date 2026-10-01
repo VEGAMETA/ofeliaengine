@@ -924,54 +924,45 @@ float3 surface_light(float3 n, float3 v, float3 l, float3 diffuse, float3 f0, fl
 }
 
 // How lit `p` (normal `n`) is by a local light whose shadow views start at `first` (ADR
-// 0071). The receiver moves along its normal by about a texel at its distance (the shading
-// normal: the geometric one would cost the light loop three more registers on RDNA2). A spot light projects it with its view's matrix. A point light's face is the
-// major axis from the light (faces +x, −x, +y, −y, +z, −z), projected without a matrix: the
+// 0071). The receiver moves along its normal by about a texel at its depth in the view
+// (the shading normal: the geometric one would cost the light loop three more registers on
+// RDNA2). A spot light projects it with its view's matrix (loaded once per wave: the light
+// is the same for the whole wave). A point light's face is the major axis from the light
+// (faces +x, −x, +y, −y, +z, −z), projected without a matrix and without branches: the
 // face's two other axes (signed as `look_at` and the Vulkan projection orient them) over
-// the major distance, and the depth A + B / major; only the face's tile is read per pixel,
-// the rest is the same for the whole wave (scalar loads, no vector registers). Four
-// bilinear comparisons half a texel apart make a 3 × 3 tent filter. Outside the view (a
-// spot light's cone beyond its projection) it is lit.
+// the major distance, and the depth A + B / major; only the face's tile differs per pixel.
+// Four bilinear comparisons half a texel apart make a 3 × 3 tent filter. Outside the view
+// (a spot light's cone beyond its projection) it is lit.
 float local_shadow(uint first, Light light, float3 p, float3 n)
 {
     float3 position = light.position_range.xyz;
-    float4 eye_bias = push.frame.shadow_views[first].eye_bias;
-    float3 q = p + n * (eye_bias.w * length(p - position));
+    // World size of a texel per unit of depth, times the normal bias.
+    float bias = push.frame.shadow_views[first].eye_bias.w;
+    float3 d = p - position;
     float3 ndc;
     float4 atlas;
     if (light.color_scale.w == 0.0)
     {
-        float3 d = q - position;
         float3 a = abs(d);
-        uint face;
-        float major;
-        float2 xy;
-        if (a.x >= a.y && a.x >= a.z)
-        {
-            face = d.x < 0.0 ? 1u : 0u;
-            major = a.x;
-            xy = float2(d.x < 0.0 ? -d.z : d.z, -d.y);
-        }
-        else if (a.y >= a.z)
-        {
-            face = d.y < 0.0 ? 3u : 2u;
-            major = a.y;
-            xy = float2(d.y < 0.0 ? -d.x : d.x, -d.z);
-        }
-        else
-        {
-            face = d.z < 0.0 ? 5u : 4u;
-            major = a.z;
-            xy = float2(d.z < 0.0 ? d.x : -d.x, -d.y);
-        }
+        bool x_major = a.x >= a.y && a.x >= a.z;
+        bool y_major = !x_major && a.y >= a.z;
+        float major = x_major ? a.x : (y_major ? a.y : a.z);
+        float3 q = d + n * (bias * major);
+        // The receiver's signed coordinate along the face's axis, and the other two.
+        float along = x_major ? q.x : (y_major ? q.y : q.z);
+        float flip = along < 0.0 ? -1.0 : 1.0;
+        float u = x_major ? flip * q.z : (y_major ? flip * q.x : -flip * q.x);
+        float v = y_major ? -q.z : -q.y;
+        uint face = (x_major ? 0u : (y_major ? 2u : 4u)) + (along < 0.0 ? 1u : 0u);
         // x: 1 / tan(half angle); y, z: depth A + B / major.
         float4 terms = push.frame.shadow_views[first].tile;
-        float inverse = 1.0 / max(major, 1e-6);
-        ndc = float3(xy * (terms.x * inverse), terms.y + terms.z * inverse);
+        float inverse = 1.0 / max(abs(along), 1e-6);
+        ndc = float3(float2(u, v) * (terms.x * inverse), terms.y + terms.z * inverse);
         atlas = push.frame.shadow_views[first + face].atlas;
     }
     else
     {
+        float3 q = p + n * (bias * max(dot(d, light.direction_offset.xyz), 0.0));
         ShadowView s = push.frame.shadow_views[first];
         float4 c = mul(s.clip_from_world, float4(q, 1.0));
         if (c.w <= 0.0)
