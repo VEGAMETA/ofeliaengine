@@ -11,6 +11,7 @@ use engine_core::math::{Mat4, Quat, Vec2, Vec3, look_at, vulkan_orthographic};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
 };
+use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::MaterialTable;
 use engine_render::mesh::{
@@ -293,234 +294,269 @@ fn skinning() {
     let world = Mat4::IDENTITY;
 
     let default_material = materials.default_material();
-    let mut render =
-        |angle: f32, renderer: &ForwardRenderer, skinning: &mut Skinning| -> [Frame; 2] {
-            for &(id, _) in &meshes {
-                skinning.set_pose(id, &palette(angle), &world);
-            }
-            skinning.update_bounds(&mut geometry, None);
-            // SAFETY: one-shot recording and submission, then wait.
-            unsafe {
-                d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
-                    .unwrap();
-                d.begin_command_buffer(
-                    cmd,
-                    &vk::CommandBufferBeginInfo::default()
-                        .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+    // The same bar in a persistent scene (ADR 0064).
+    let mut scene = GpuScene::new(&device, &bindless, 16, 1).unwrap();
+    let scene_id = scene.insert(SceneInstance {
+        mesh: meshes[0].1,
+        material: default_material,
+        world_from_object: world,
+    });
+    skinning.set_scene_instance(meshes[0].0, Some(scene_id));
+    let mut render = |angle: f32,
+                      renderer: &ForwardRenderer,
+                      skinning: &mut Skinning,
+                      scene: Option<&mut GpuScene>|
+     -> [Frame; 2] {
+        for &(id, _) in &meshes {
+            skinning.set_pose(id, &palette(angle), &world);
+        }
+        let mut scene = scene;
+        skinning.update_bounds(&mut geometry, scene.as_deref_mut());
+        // SAFETY: one-shot recording and submission, then wait.
+        unsafe {
+            d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .unwrap();
+            d.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .unwrap();
+        }
+        ring.begin_slot(0);
+        frame_number += 1;
+        let jitter;
+        {
+            // SAFETY: nothing is in flight.
+            let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            textures
+                .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
+                .unwrap();
+            let mats = materials
+                .begin_frame(&mut fg, &device, &mut allocator, &textures, frame_number)
+                .unwrap();
+            let geo = geometry
+                .begin_frame(&mut fg, &device, &mut allocator, frame_number)
+                .unwrap();
+            let skins_frame = skinning
+                .begin_frame(
+                    &mut fg,
+                    &mut ring,
+                    &device,
+                    &mut allocator,
+                    &bindless,
+                    &geo,
+                    frame_number,
                 )
                 .unwrap();
-            }
-            ring.begin_slot(0);
-            frame_number += 1;
-            let jitter;
-            {
-                // SAFETY: nothing is in flight.
-                let mut fg = unsafe { graph.begin_slot(0, cmd) };
-                textures
-                    .begin_frame(&mut fg, &mut allocator, &bindless, frame_number)
-                    .unwrap();
-                let mats = materials
-                    .begin_frame(&mut fg, &device, &mut allocator, &textures, frame_number)
-                    .unwrap();
-                let geo = geometry
-                    .begin_frame(&mut fg, &device, &mut allocator, frame_number)
-                    .unwrap();
-                let skins_frame = skinning
-                    .begin_frame(
-                        &mut fg,
-                        &mut ring,
-                        &device,
-                        &mut allocator,
-                        &bindless,
-                        &geo,
-                        frame_number,
-                    )
-                    .unwrap();
-                assert_eq!(skins_frame.instances(), 2);
-                let color = fg.create_texture(
-                    "color",
-                    TextureDesc::new_2d(vk::Format::R16G16B16A16_SFLOAT, SIZE, SIZE),
-                );
-                let depth =
-                    fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
-                let draws = [DrawItem {
-                    mesh: meshes[0].1,
-                    material: default_material,
-                    world_from_object: world,
-                }];
-                let passes = renderer
-                    .add_passes(
-                        &mut fg,
-                        &mut ring,
-                        &bindless,
-                        &geo,
-                        &mats,
-                        &draws,
-                        &ForwardView {
-                            camera: camera(),
-                            light,
-                            color,
-                            depth,
-                            clear: Some([0.0; 4]),
-                            occlusion: None,
-                            temporal: Some(&temporal),
-                            lights: &[],
-                            environment: None,
-                        },
-                    )
-                    .unwrap();
-                let motion = passes.motion.unwrap();
-                jitter = motion.jitter;
-                skins_frame
-                    .add_motion_pass(&mut fg, &mut ring, &bindless, &geo, depth, &motion)
-                    .unwrap();
-                let velocity = motion.velocity;
-                let out = fg.import_buffer(
-                    "readback",
-                    ImportedBuffer {
-                        buffer: readback,
-                        size: readback_size,
-                        address: 0,
-                        initial: BufferState::idle(),
-                        final_state: Some(BufferState::host_read()),
-                    },
-                );
-                let firsts: Vec<(u64, u64, u64)> = meshes
-                    .iter()
-                    .map(|&(id, mesh)| {
-                        let info = geo.mesh(mesh).unwrap();
-                        let (offset, _) = skins_frame.previous_range(id).unwrap();
-                        (u64::from(info.first_vertex), offset, 0)
-                    })
-                    .collect();
-                let (positions, attributes, previous) =
-                    (geo.positions, geo.attributes, skins_frame.previous_buffer());
-                fg.add_pass("read back")
-                    .read(velocity, Access::TransferRead)
-                    .read(positions, Access::TransferRead)
-                    .read(attributes, Access::TransferRead)
-                    .read(previous, Access::TransferRead)
-                    .write(out, Access::TransferWrite)
-                    .execute(move |ctx| {
-                        let region = vk::BufferImageCopy {
-                            image_subresource: vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: 0,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            },
-                            image_extent: vk::Extent3D {
-                                width: SIZE,
-                                height: SIZE,
-                                depth: 1,
-                            },
-                            ..Default::default()
-                        };
-                        // SAFETY: recording; layouts arranged by the graph; every region lies
-                        // in its buffer.
-                        unsafe {
-                            ctx.device.cmd_copy_image_to_buffer(
-                                ctx.cmd,
-                                ctx.image(velocity),
-                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                                ctx.buffer(out),
-                                &[region],
-                            );
-                            let mut at = motion_bytes;
-                            for &(first, prev, _) in &firsts {
-                                for (source, offset, size) in [
-                                    (positions, first * 12, geometry_bytes),
-                                    (attributes, first * 16, vertex_count * 16),
-                                    (previous, prev, geometry_bytes),
-                                ] {
-                                    ctx.device.cmd_copy_buffer(
-                                        ctx.cmd,
-                                        ctx.buffer(source),
-                                        ctx.buffer(out),
-                                        &[vk::BufferCopy {
-                                            src_offset: offset,
-                                            dst_offset: at,
-                                            size,
-                                        }],
-                                    );
-                                    at += size;
-                                }
-                            }
-                        }
-                    });
-                fg.execute_with_bindless(&mut allocator, Some(&bindless))
-                    .unwrap();
-            }
-            // SAFETY: as above.
-            unsafe {
-                d.end_command_buffer(cmd).unwrap();
-                let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
-                d.queue_submit2(
-                    device.graphics.raw,
-                    &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
-                    vk::Fence::null(),
-                )
+            assert_eq!(skins_frame.instances(), 2);
+            let color = fg.create_texture(
+                "color",
+                TextureDesc::new_2d(vk::Format::R16G16B16A16_SFLOAT, SIZE, SIZE),
+            );
+            let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, SIZE, SIZE));
+            let draws = [DrawItem {
+                mesh: meshes[0].1,
+                material: default_material,
+                world_from_object: world,
+            }];
+            let view = ForwardView {
+                camera: camera(),
+                light,
+                color,
+                depth,
+                clear: Some([0.0; 4]),
+                occlusion: None,
+                temporal: Some(&temporal),
+                lights: &[],
+                environment: None,
+            };
+            let passes = match scene {
+                None => renderer
+                    .add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view)
+                    .unwrap(),
+                Some(scene) => {
+                    let frame = scene
+                        .add_passes(
+                            &mut fg,
+                            &device,
+                            &mut allocator,
+                            &mut ring,
+                            &bindless,
+                            &geo,
+                            &mats,
+                            frame_number,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    renderer
+                        .add_scene_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &frame, &view)
+                        .unwrap()
+                }
+            };
+            let motion = passes.motion.unwrap();
+            jitter = motion.jitter;
+            skins_frame
+                .add_motion_pass(&mut fg, &mut ring, &bindless, &geo, depth, &motion)
                 .unwrap();
-                device.wait_idle().unwrap();
-            }
-            let ptr = readback_memory.mapped_ptr().unwrap();
-            // SAFETY: the GPU is idle; the mapping covers the buffer.
-            let raw = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), readback_size as usize) };
-            let motion: Vec<[f32; 2]> = raw[..motion_bytes as usize]
-                .chunks_exact(4)
-                .map(|p| {
-                    let h = |a: u8, b: u8| half::to_f32(u16::from_le_bytes([a, b])) * SIZE as f32;
-                    [h(p[0], p[1]), h(p[2], p[3])]
+            let velocity = motion.velocity;
+            let out = fg.import_buffer(
+                "readback",
+                ImportedBuffer {
+                    buffer: readback,
+                    size: readback_size,
+                    address: 0,
+                    initial: BufferState::idle(),
+                    final_state: Some(BufferState::host_read()),
+                },
+            );
+            let firsts: Vec<(u64, u64, u64)> = meshes
+                .iter()
+                .map(|&(id, mesh)| {
+                    let info = geo.mesh(mesh).unwrap();
+                    let (offset, _) = skins_frame.previous_range(id).unwrap();
+                    (u64::from(info.first_vertex), offset, 0)
                 })
                 .collect();
-            let floats = |bytes: &[u8]| -> Vec<Vec3> {
-                bytes
-                    .chunks_exact(12)
-                    .map(|c| {
-                        let f = |i: usize| f32::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3]]);
-                        Vec3::new(f(0), f(4), f(8))
-                    })
-                    .collect()
-            };
-            let mut at = motion_bytes as usize;
-            let mut take = |n: u64| {
-                let s = &raw[at..at + n as usize];
-                at += n as usize;
-                s
-            };
-            core::array::from_fn(|_| {
-                let positions = floats(take(geometry_bytes));
-                let normals = take(vertex_count * 16)
-                    .chunks_exact(16)
-                    .map(|c| {
-                        Vec3::from(decode_octahedral(u32::from_le_bytes([
-                            c[0], c[1], c[2], c[3],
-                        ])))
-                    })
-                    .collect();
-                let previous = floats(take(geometry_bytes));
-                Frame {
-                    positions,
-                    normals,
-                    previous,
-                    motion: motion.clone(),
-                    jitter,
-                }
+            let (positions, attributes, previous) =
+                (geo.positions, geo.attributes, skins_frame.previous_buffer());
+            fg.add_pass("read back")
+                .read(velocity, Access::TransferRead)
+                .read(positions, Access::TransferRead)
+                .read(attributes, Access::TransferRead)
+                .read(previous, Access::TransferRead)
+                .write(out, Access::TransferWrite)
+                .execute(move |ctx| {
+                    let region = vk::BufferImageCopy {
+                        image_subresource: vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        image_extent: vk::Extent3D {
+                            width: SIZE,
+                            height: SIZE,
+                            depth: 1,
+                        },
+                        ..Default::default()
+                    };
+                    // SAFETY: recording; layouts arranged by the graph; every region lies
+                    // in its buffer.
+                    unsafe {
+                        ctx.device.cmd_copy_image_to_buffer(
+                            ctx.cmd,
+                            ctx.image(velocity),
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            ctx.buffer(out),
+                            &[region],
+                        );
+                        let mut at = motion_bytes;
+                        for &(first, prev, _) in &firsts {
+                            for (source, offset, size) in [
+                                (positions, first * 12, geometry_bytes),
+                                (attributes, first * 16, vertex_count * 16),
+                                (previous, prev, geometry_bytes),
+                            ] {
+                                ctx.device.cmd_copy_buffer(
+                                    ctx.cmd,
+                                    ctx.buffer(source),
+                                    ctx.buffer(out),
+                                    &[vk::BufferCopy {
+                                        src_offset: offset,
+                                        dst_offset: at,
+                                        size,
+                                    }],
+                                );
+                                at += size;
+                            }
+                        }
+                    }
+                });
+            fg.execute_with_bindless(&mut allocator, Some(&bindless))
+                .unwrap();
+        }
+        // SAFETY: as above.
+        unsafe {
+            d.end_command_buffer(cmd).unwrap();
+            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            d.queue_submit2(
+                device.graphics.raw,
+                &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
+                vk::Fence::null(),
+            )
+            .unwrap();
+            device.wait_idle().unwrap();
+        }
+        let ptr = readback_memory.mapped_ptr().unwrap();
+        // SAFETY: the GPU is idle; the mapping covers the buffer.
+        let raw = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), readback_size as usize) };
+        let motion: Vec<[f32; 2]> = raw[..motion_bytes as usize]
+            .chunks_exact(4)
+            .map(|p| {
+                let h = |a: u8, b: u8| half::to_f32(u16::from_le_bytes([a, b])) * SIZE as f32;
+                [h(p[0], p[1]), h(p[2], p[3])]
             })
+            .collect();
+        let floats = |bytes: &[u8]| -> Vec<Vec3> {
+            bytes
+                .chunks_exact(12)
+                .map(|c| {
+                    let f = |i: usize| f32::from_le_bytes([c[i], c[i + 1], c[i + 2], c[i + 3]]);
+                    Vec3::new(f(0), f(4), f(8))
+                })
+                .collect()
         };
+        let mut at = motion_bytes as usize;
+        let mut take = |n: u64| {
+            let s = &raw[at..at + n as usize];
+            at += n as usize;
+            s
+        };
+        core::array::from_fn(|_| {
+            let positions = floats(take(geometry_bytes));
+            let normals = take(vertex_count * 16)
+                .chunks_exact(16)
+                .map(|c| {
+                    Vec3::from(decode_octahedral(u32::from_le_bytes([
+                        c[0], c[1], c[2], c[3],
+                    ])))
+                })
+                .collect();
+            let previous = floats(take(geometry_bytes));
+            Frame {
+                positions,
+                normals,
+                previous,
+                motion: motion.clone(),
+                jitter,
+            }
+        })
+    };
 
-    for prepass in [false, true] {
+    let mut list_motion = Vec::new();
+    for (prepass, use_scene) in [(false, false), (true, false), (false, true), (true, true)] {
         renderer.set_depth_prepass(prepass);
         temporal.reset();
-        temporal.set_jitter_phases(8);
+        temporal.set_jitter_phases(2);
         for &(id, _) in &meshes {
             skinning.teleport(id);
         }
-        let first = render(0.3, &renderer, &mut skinning);
-        let second = render(0.6, &renderer, &mut skinning);
+        let first = render(
+            0.3,
+            &renderer,
+            &mut skinning,
+            use_scene.then_some(&mut scene),
+        );
+        let second = render(
+            0.6,
+            &renderer,
+            &mut skinning,
+            use_scene.then_some(&mut scene),
+        );
         for (k, (mesh, joints, weights)) in skins.iter().enumerate() {
             let label = format!(
-                "{} influences, prepass {prepass}",
+                "{} influences, prepass {prepass}, scene {use_scene}",
                 if k == 0 { 4 } else { 8 }
             );
             for (frame, angle) in [(&first[k], 0.3), (&second[k], 0.6)] {
@@ -587,11 +623,24 @@ fn skinning() {
         // The lower part (joint 0 only) is still.
         let still = frame.motion[(44 * SIZE + 32) as usize];
         assert!(Vec2::from(still).length() < 0.01, "{still:?}");
+        // The scene path draws the same pixels: identical motion to the draw list's at the
+        // same jitter.
+        if use_scene {
+            let (list_jitter, list) = &list_motion[usize::from(prepass)];
+            assert_eq!(
+                *list_jitter, frame.jitter,
+                "two jitter phases, two frames a run"
+            );
+            assert!(*list == frame.motion, "scene vs list motion");
+        } else {
+            list_motion.push((frame.jitter, frame.motion.clone()));
+        }
     }
 
     // SAFETY: the device is idle.
     unsafe {
         let mut temporal = temporal;
+        scene.destroy(&mut allocator);
         skinning.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
         ring.destroy(&mut allocator);
