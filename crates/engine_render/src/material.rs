@@ -280,6 +280,9 @@ pub struct MaterialTable {
     frames_in_flight: u64,
     /// The texture pool's generation the materials were last resolved against.
     resolved: Option<u64>,
+    /// The texture LOD bias and the first index of its material samplers.
+    lod_bias: f32,
+    samplers: u32,
 }
 
 impl MaterialTable {
@@ -294,9 +297,40 @@ impl MaterialTable {
             retired: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
             resolved: None,
+            lod_bias: 0.0,
+            samplers: Bindless::material_sampler(Wrap::Repeat, Wrap::Repeat),
         };
         table.add(MaterialDesc::default());
         table
+    }
+
+    /// Biases the level of detail of every material texture by `bias` (negative: sharper;
+    /// 0 by default). A temporal upscaler reconstructs detail finer than a render pixel,
+    /// so textures should be sampled as if at the output resolution: log2(render width /
+    /// output width) (`engine_upscale::texture_lod_bias`; upscalers may ask for more,
+    /// `engine_fsr::Fsr::texture_lod_bias`). The bias lives in the samplers (ADR 0060):
+    /// every view drawing with these materials gets it, the alpha tests of the depth and
+    /// shadow passes included, and the shaders pay nothing for it. Changing it rewrites
+    /// every material in the next [`Self::begin_frame`]: set it when the render or output
+    /// size changes, not every frame.
+    ///
+    /// # Errors
+    ///
+    /// When a sampler cannot be created.
+    pub fn set_texture_lod_bias(&mut self, bindless: &Bindless, bias: f32) -> Result<(), RhiError> {
+        let samplers = bindless.material_samplers(bias)?;
+        self.lod_bias = bias;
+        if samplers != self.samplers {
+            self.samplers = samplers;
+            // Resolved again (with the other samplers) in the next frame.
+            self.resolved = None;
+        }
+        Ok(())
+    }
+
+    /// The bias set by [`Self::set_texture_lod_bias`].
+    pub fn texture_lod_bias(&self) -> f32 {
+        self.lod_bias
     }
 
     /// Adds a material; it reaches the GPU in the next [`Self::begin_frame`].
@@ -455,7 +489,7 @@ impl MaterialTable {
                 let Some(desc) = slot.desc else {
                     continue;
                 };
-                let gpu = resolve(&desc, textures);
+                let gpu = resolve(&desc, textures, self.samplers);
                 if gpu != slot.gpu {
                     slot.gpu = gpu;
                     if !slot.dirty {
@@ -523,7 +557,7 @@ impl MaterialTable {
                 let slot = &mut self.slots[index as usize];
                 slot.dirty = false;
                 if let Some(desc) = slot.desc {
-                    slot.gpu = resolve(&desc, textures);
+                    slot.gpu = resolve(&desc, textures, self.samplers);
                 }
                 let src = k as u64 * MATERIAL_BYTES;
                 // SAFETY: `GpuMaterial` is plain `repr(C)` data without padding bytes
@@ -600,11 +634,11 @@ impl MaterialTable {
 
 /// A material's GPU form: its textures' bindless indices with their samplers
 /// ([`NO_TEXTURE`] until they are uploaded).
-fn resolve(desc: &MaterialDesc, textures: &TexturePool) -> GpuMaterial {
+fn resolve(desc: &MaterialDesc, textures: &TexturePool, samplers: u32) -> GpuMaterial {
     let texture = |r: Option<TextureRef>| {
         r.and_then(|r| {
             let index = textures.index(r.texture)?;
-            Some(index | (Bindless::material_sampler(r.wrap[0], r.wrap[1]) << 24))
+            Some(index | (Bindless::material_sampler_in(samplers, r.wrap[0], r.wrap[1]) << 24))
         })
         .unwrap_or(NO_TEXTURE)
     };

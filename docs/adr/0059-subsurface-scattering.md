@@ -1,6 +1,6 @@
 # 0059. Subsurface scattering: a sum-of-Gaussians profile, a forward subsurface pass and a disk-sampled scatter pass
 
-- Status: Accepted (the profile's patent question is open, see "Questions")
+- Status: Accepted
 - Date: 2026-10-01
 - Research: [docs/research/subsurface-scattering.md](../research/subsurface-scattering.md)
 - Related: [ADR 0040](0040-materials-and-textures.md) (materials),
@@ -186,11 +186,14 @@ within 0.25% of `SubsurfaceProfile::transmission`.
   curvature from derivatives) is the next step if so.
 - Transmission from local lights; subsurface in the transparent pass; profiles in cooked
   packs (the thickness is imported from glTF, not cooked yet: a pack format change).
-- A golden-image shot (the golden-image PR, #84, is not on main yet).
 
-## Questions
+## Decided since (2026-10-01)
 
-- **Patent:** may the engine use Burley's normalized diffusion (US 9,659,404 B2, active
-  until 2035-03-24 per Google Patents)? Until then the sum of Gaussians stays.
-- **iGPU tier:** is ~0.4 ms per 10% of 1080p at 8 samples acceptable as the iGPU default,
-  or should the LUT tier be the default there?
+- **Patent:** the team does not touch Burley's normalized diffusion (US 9,659,404 B2): the
+  sum of Gaussians is the engine's profile, not a placeholder.
+- **iGPU tier:** the screen-space scatter stays the default everywhere; the Radeon iGPU
+  is a correctness machine (docs/perf/reference-hw.md) and ~0.4 ms per 10 % of 1080p at 8
+  samples is acceptable there. The LUT tier waits for a weak target GPU.
+- **Golden image:** `procedural_sss` (tests/golden): the floor and the dielectric spheres
+  with a 0.3/0.12/0.06-unit profile; mean FLIP 0.014 against the scene without scattering,
+  on the shadows' edges.

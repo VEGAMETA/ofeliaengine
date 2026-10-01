@@ -72,6 +72,10 @@ impl Wrap {
 /// wrap modes.
 const MATERIAL_SAMPLERS: u32 = 9;
 
+/// Sets of material samplers with a level-of-detail bias (temporal upscaling, ADR 0060),
+/// besides the unbiased set: their slots are reserved, the samplers made on demand.
+const LOD_BIAS_SETS: u32 = 8;
+
 const SAMPLER_KINDS: [SamplerKind; 6] = [
     SamplerKind::LinearRepeat,
     SamplerKind::LinearClamp,
@@ -139,6 +143,10 @@ pub struct Bindless {
     set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
     samplers: Vec<vk::Sampler>,
+    /// Material sampler sets with a LOD bias: the bias in 1/16 levels, the samplers.
+    biased: RefCell<Vec<(i32, Vec<vk::Sampler>)>>,
+    max_anisotropy: f32,
+    max_lod_bias: f32,
     sampled: RefCell<Indices>,
     storage: RefCell<Indices>,
 }
@@ -167,7 +175,7 @@ impl Bindless {
                 .instance_raw()
                 .get_physical_device_properties2(device.physical(), &mut props2)
         };
-        let samplers_count = SAMPLER_KINDS.len() as u32 + MATERIAL_SAMPLERS;
+        let samplers_count = SAMPLER_KINDS.len() as u32 + MATERIAL_SAMPLERS * (1 + LOD_BIAS_SETS);
         let per_stage_total = props12
             .max_per_stage_update_after_bind_resources
             .saturating_sub(samplers_count);
@@ -216,6 +224,9 @@ impl Bindless {
             set: vk::DescriptorSet::null(),
             pipeline_layout: vk::PipelineLayout::null(),
             samplers: Vec::with_capacity(SAMPLER_KINDS.len()),
+            biased: RefCell::new(Vec::new()),
+            max_anisotropy: 16.0f32.min(limits.max_sampler_anisotropy),
+            max_lod_bias: limits.max_sampler_lod_bias,
             sampled: RefCell::new(Indices::new(sampled_count)),
             storage: RefCell::new(Indices::new(storage_count)),
         };
@@ -314,24 +325,8 @@ impl Bindless {
                         .map_err(RhiError::vk("vkCreateSampler"))?,
                 );
             }
-            for s in Wrap::ALL {
-                for t in Wrap::ALL {
-                    let info = vk::SamplerCreateInfo::default()
-                        .mag_filter(vk::Filter::LINEAR)
-                        .min_filter(vk::Filter::LINEAR)
-                        .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
-                        .address_mode_u(s.address_mode())
-                        .address_mode_v(t.address_mode())
-                        .address_mode_w(vk::SamplerAddressMode::REPEAT)
-                        .max_lod(vk::LOD_CLAMP_NONE)
-                        .anisotropy_enable(true)
-                        .max_anisotropy(16.0f32.min(limits.max_sampler_anisotropy));
-                    partial.samplers.push(
-                        d.create_sampler(&info, None)
-                            .map_err(RhiError::vk("vkCreateSampler"))?,
-                    );
-                }
-            }
+            let materials = partial.create_material_samplers(0.0)?;
+            partial.samplers.extend(materials);
             let image_infos: Vec<vk::DescriptorImageInfo> = partial
                 .samplers
                 .iter()
@@ -381,7 +376,99 @@ impl Bindless {
     /// Index in `g_samplers` of the 16× anisotropic trilinear sampler that wraps `s`
     /// horizontally and `t` vertically (material textures).
     pub fn material_sampler(s: Wrap, t: Wrap) -> u32 {
-        SAMPLER_KINDS.len() as u32 + s as u32 * 3 + t as u32
+        Self::material_sampler_in(SAMPLER_KINDS.len() as u32, s, t)
+    }
+
+    /// Index in `g_samplers` of the material sampler for `s` and `t` in the set starting
+    /// at `first` ([`Self::material_samplers`]).
+    pub fn material_sampler_in(first: u32, s: Wrap, t: Wrap) -> u32 {
+        first + s as u32 * 3 + t as u32
+    }
+
+    /// The first index in `g_samplers` of a set of material samplers whose level of
+    /// detail is biased by `bias` (negative: sharper; to 1/16 of a level, within the
+    /// device's limit). The unbiased set is always there; up to 8 biased sets are made
+    /// on first request (a few samplers, no pipelines); beyond that the set with the
+    /// nearest bias is returned. The bias lives in the samplers, so shaders pay nothing
+    /// for it (ADR 0060: a bias in the shader cost the Radeon 8 registers in every
+    /// shading pipeline).
+    ///
+    /// # Errors
+    ///
+    /// When a sampler cannot be created.
+    pub fn material_samplers(&self, bias: f32) -> Result<u32, RhiError> {
+        let base = SAMPLER_KINDS.len() as u32;
+        let limit = self.max_lod_bias.max(0.0);
+        let sixteenths = (bias.clamp(-limit, limit) * 16.0).round() as i32;
+        if sixteenths == 0 {
+            return Ok(base);
+        }
+        let first = |k: usize| base + MATERIAL_SAMPLERS * (1 + k as u32);
+        let mut biased = self.biased.borrow_mut();
+        if let Some(k) = biased.iter().position(|(b, _)| *b == sixteenths) {
+            return Ok(first(k));
+        }
+        if biased.len() as u32 >= LOD_BIAS_SETS {
+            let nearest = biased
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, (b, _))| (b - sixteenths).abs())
+                .map_or(0, |(k, _)| k);
+            return Ok(first(nearest));
+        }
+        let samplers = self.create_material_samplers(sixteenths as f32 / 16.0)?;
+        let k = biased.len();
+        let infos: Vec<vk::DescriptorImageInfo> = samplers
+            .iter()
+            .map(|&sampler| vk::DescriptorImageInfo::default().sampler(sampler))
+            .collect();
+        // SAFETY: the slots were never written, so no submitted work reads them
+        // (UPDATE_UNUSED_WHILE_PENDING); the samplers are live.
+        unsafe {
+            self.device.update_descriptor_sets(
+                &[vk::WriteDescriptorSet::default()
+                    .dst_set(self.set)
+                    .dst_binding(2)
+                    .dst_array_element(first(k))
+                    .descriptor_type(vk::DescriptorType::SAMPLER)
+                    .image_info(&infos)],
+                &[],
+            );
+        }
+        biased.push((sixteenths, samplers));
+        Ok(first(k))
+    }
+
+    /// The 9 material samplers (one per pair of wrap modes) with `bias`.
+    fn create_material_samplers(&self, bias: f32) -> Result<Vec<vk::Sampler>, RhiError> {
+        let mut samplers = Vec::with_capacity(MATERIAL_SAMPLERS as usize);
+        for s in Wrap::ALL {
+            for t in Wrap::ALL {
+                let info = vk::SamplerCreateInfo::default()
+                    .mag_filter(vk::Filter::LINEAR)
+                    .min_filter(vk::Filter::LINEAR)
+                    .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+                    .address_mode_u(s.address_mode())
+                    .address_mode_v(t.address_mode())
+                    .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                    .mip_lod_bias(bias)
+                    .max_lod(vk::LOD_CLAMP_NONE)
+                    .anisotropy_enable(true)
+                    .max_anisotropy(self.max_anisotropy);
+                // SAFETY: valid create info; the device is live.
+                match unsafe { self.device.create_sampler(&info, None) } {
+                    Ok(sampler) => samplers.push(sampler),
+                    Err(e) => {
+                        for sampler in samplers {
+                            // SAFETY: just created, never used.
+                            unsafe { self.device.destroy_sampler(sampler, None) };
+                        }
+                        return Err(RhiError::vk("vkCreateSampler")(e));
+                    }
+                }
+            }
+        }
+        Ok(samplers)
     }
 
     /// Adds a sampled image view (in `READ_ONLY_OPTIMAL` when sampled); returns its
@@ -490,6 +577,11 @@ impl Drop for Bindless {
         unsafe {
             for &sampler in &self.samplers {
                 self.device.destroy_sampler(sampler, None);
+            }
+            for (_, samplers) in self.biased.get_mut().iter() {
+                for &sampler in samplers {
+                    self.device.destroy_sampler(sampler, None);
+                }
             }
             if self.pipeline_layout != vk::PipelineLayout::null() {
                 self.device

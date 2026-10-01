@@ -361,11 +361,18 @@ temporal.reset();
 - **History filter:** bilinear by default (the fastest). For sharper images in motion,
   `taau.set_history_filter(HistoryFilter::CatmullRom)`: 10-15% more resolve time (about
   1 dB better on a panning camera).
+- **Texture LOD bias while upsampling:** textures are sampled for the render size unless
+  you bias them towards the output size:
+  `materials.set_texture_lod_bias(&bindless, engine_upscale::texture_lod_bias(render_size, output_size))?`
+  (log2(render / output): −0.58 from 720p to 1080p, −1 from half the size). It applies to
+  every material texture of the table, so to every view drawing with it; set it when the
+  render or output size changes. It costs nothing per pixel (it lives in the samplers). On a finely textured ground upsampled from half the
+  size it gains 0.1-0.3 dB with TAAU and FSR; AMD's recommendation of one level more
+  (`Fsr::texture_lod_bias`) was worse there (ADR 0060). Leave it at 0 for plain TAA.
 - **Known limits for now:**
-  - no texture LOD bias while upsampling (textures are slightly softer than native);
   - transparent surfaces lower the history's weight where they cover (section 12), but
     there is no mask for animated textures yet;
-  - no sharpening.
+  - no sharpening in TAAU (FSR has one, below).
 
 What it costs (ref-1, 1080p):
 
@@ -379,6 +386,63 @@ What it costs (ref-1, 1080p):
 - **Upsampling from 720p** is cheaper than native 1080p with TAA on both GPUs:
   - RTX: 0.19 ms against 0.30 ms for forward + resolve in that benchmark;
   - Radeon: 5.8 ms against 7.7 ms.
+
+### AMD FSR 3.1 instead of TAAU
+
+`engine_fsr` runs AMD's FidelityFX Super Resolution 3.1 upscaler on the same inputs (ADR
+0060). It is compiled into the engine from the FidelityFX SDK's source: there is no DLL to
+ship or install, and it works on any GPU the engine runs on.
+
+```rust
+use engine_fsr::{Fsr, FsrCamera, FsrInput, QualityMode};
+
+// Once per view.
+let mut fsr = Fsr::new(&device, frames_in_flight);
+let render_size = QualityMode::Quality.render_size(output_size); // 1080p → 1280×720
+temporal.set_jitter_phases(Fsr::jitter_phases(render_size, output_size));
+materials.set_texture_lod_bias(&bindless, engine_upscale::texture_lod_bias(render_size, output_size))?;
+fsr.set_sharpness(Some(0.3)); // optional: RCAS after upscaling, 0-1
+
+// Every frame: `color` and `depth` at `render_size`, as for TAAU.
+let passes = renderer.add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view)?;
+let upscaled = fsr.add_pass(&mut fg, FsrInput {
+    color,
+    depth,
+    motion: passes.motion.expect("a temporal view reports motion"),
+    camera: FsrCamera { near, far, fov_y, meters_per_unit: 1.0 },
+    frame_time_ms,
+}, output_size, frame_number)?;
+tonemap.add_pass(&mut fg, &bindless, upscaled, backbuffer, exposure);
+```
+
+- **Quality modes:** `NativeAa` (1.0×, antialiasing only), `Quality` (1.5× per axis),
+  `Balanced` (1.7×), `Performance` (2.0×), `UltraPerformance` (3.0×).
+- **Give it the camera you drew with:** near and far planes and the vertical field of
+  view (radians) of the projection, and the real frame time in milliseconds. FSR
+  linearizes depth and scales its motion thresholds with them.
+- **Cuts:** `temporal.reset()` as for TAAU (or `fsr.reset()`).
+- **Changing the output size**, or a render size larger than any before, creates a new
+  FSR context: 11-14 ms on the RTX 4060 Ti, 55-70 ms on the Radeon iGPU. Do it in menus,
+  not every frame. A smaller render size (dynamic resolution) costs nothing.
+- **Exposure:** FSR measures its own for now; the engine's automatic exposure (section 11)
+  still applies at tonemapping.
+- **Not available:** frame generation (planned, ADR 0060); FSR 4 (AMD ships it for DX12
+  only).
+
+When to choose it (ref-1, `cargo run -p engine_fsr --release --example upscale_bench`):
+
+| 1080p from 720p | TAAU | FSR 3.1 |
+|---|---:|---:|
+| RTX 4060 Ti, GPU time | 0.12 ms | 0.53 ms |
+| Radeon iGPU, GPU time | 3.9 ms | 10.9 ms |
+| image, camera still / moving (PSNR against 2×2 supersampling) | 42.6 / 36.9 dB | 43.7 / 38.6 dB |
+
+- FSR's image is better, about 1 dB with the camera still and 1.6-2.1 dB in motion, at 3-5×
+  TAAU's cost on a discrete GPU. On the integrated Radeon it costs more than rendering at
+  the output size: keep TAAU there.
+- FSR pays when the rendering it saves (1080p against 720p is 2.25× the pixels) costs
+  more than its 0.5 ms. In a light scene it does not; in a heavy one it does.
+- FSR holds about 130 MiB of GPU memory at 1440p (its history and intermediate images).
 
 ## 8. Shadows of the sun: cascaded shadow maps
 
@@ -614,7 +678,45 @@ draws.push(DrawItem { mesh: window_pane, material: glass, world_from_object });
 - **Not yet:** refraction and distortion, colored shadows through glass,
   order-independent transparency.
 
-## 13. Skin, wax and leaves: subsurface scattering
+## 13. Ambient occlusion
+
+Ambient occlusion darkens the sky light where the surroundings hide the sky: creases,
+corners, the undersides of arches, folds of cloth (GTAO, ADR 0058). Turn it on per
+renderer:
+
+```rust
+use engine_render::ao::{AoQuality, AoSettings};
+
+renderer.set_ambient_occlusion(&device, &bindless, Some(AoSettings {
+    quality: AoQuality::High, // 3 directions × 3 samples per side
+    radius: 0.5,              // how far occluders count, in world units
+    ..AoSettings::default()
+}))?;
+```
+
+- **What it darkens:** the ambient light and the sky's diffuse and reflected light, never
+  the sun or point and spot lights (their shadows are their occlusion).
+  - Bright surfaces lose less than dark ones (light bounces inside the crease).
+  - It multiplies with the material's own occlusion texture.
+- **Radius is in world units:** 0.5 is half a metre in a metre-scaled scene. Larger radii
+  darken wider areas at the same cost.
+- **Quality and cost** at 1920 × 1080 on an RTX 4060 Ti: `Low` 0.23 ms, `Medium` 0.31,
+  `High` 0.46 (default), `Ultra` 1.06. Under TAAU it runs at the render resolution, so
+  upscaling makes it cheaper too.
+  - `Low` and `Medium` are noisy per frame: use them with TAA/TAAU, which averages the noise
+    (the noise changes per frame only when TAA is on, otherwise it would flicker).
+  - `AoQuality::Custom { slices, steps }` for references and comparisons.
+- **It turns the depth prepass on** (its depth must be ready before shading): about
+  0.06 ms on Sponza.
+- **Perspective cameras only:** orthographic views draw without it.
+- **Look:** `power` (2.2) darkens or lightens the whole effect, `falloff` softens its outer
+  edge, `denoise_passes` (0–3, 1) blurs it along surfaces without crossing depth edges.
+- **Limits of screen space:** nothing off screen or hidden behind the nearest surface
+  occludes, and thin objects (poles, railings) occlude everything behind them within the
+  radius.
+- Measure with `scene_bench -- --ao low|medium|high|ultra|<slices>x<steps>`.
+
+## 14. Skin, wax and leaves: subsurface scattering
 
 Light that enters skin, wax, marble, jade, fruit or leaves spreads under the surface and
 comes out around where it entered (ADR 0059). Give the renderer the diffusion profiles,

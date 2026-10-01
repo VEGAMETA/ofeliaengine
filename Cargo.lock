@@ -235,6 +235,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_fsr"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "engine_core",
+ "engine_profiler",
+ "engine_render",
+ "engine_rhi",
+ "engine_upscale",
+]
+
+[[package]]
+name = "engine_golden"
+version = "0.0.0"
+dependencies = [
+ "engine_assets",
+ "engine_core",
+ "engine_render",
+ "engine_rhi",
+ "png",
+]
+
+[[package]]
 name = "engine_input"
 version = "0.0.0"
 dependencies = [
