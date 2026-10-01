@@ -1,6 +1,8 @@
 //! Known answers: compression within its bound, sampling against the source, additive
 //! round trips, IK reaching or clamping, root motion.
 
+#![allow(clippy::unwrap_used, clippy::print_stdout)]
+
 use engine_anim::*;
 use engine_core::math::{Affine3A, Quat, Vec3, Vec3A};
 

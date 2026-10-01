@@ -254,8 +254,8 @@ impl Compressor<'_> {
         let vv = self.virtual_vertices(j);
         let joints = self.skeleton.joint_count();
         let mut worst = 0.0f32;
-        for c in 0..self.checkpoints {
-            let mut m = start.map_or(Affine3A::IDENTITY, |p| self.object[p][c]) * replaced[c];
+        for (c, local) in replaced.iter().enumerate().take(self.checkpoints) {
+            let mut m = start.map_or(Affine3A::IDENTITY, |p| self.object[p][c]) * *local;
             for &k in &path {
                 m *= self.decoded[k][c];
             }
@@ -417,8 +417,8 @@ pub fn compress(
             })
             .collect();
         let mut worst = 0.0f32;
-        for j in 0..joints {
-            compressor.decoded[j] = compressor.decode_joint(j, raw_kinds[j]);
+        for (j, &kinds) in raw_kinds.iter().enumerate() {
+            compressor.decoded[j] = compressor.decode_joint(j, kinds);
             compressor.update_objects(j, j + 1);
             let e = compressor.error(j, j, &compressor.decoded[j]);
             worst = worst.max(e);

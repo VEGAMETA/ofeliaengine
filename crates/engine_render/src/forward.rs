@@ -330,6 +330,12 @@ pub struct MotionOutput {
     /// were any: their pixels do not move with the motion vectors, so a temporal resolve
     /// should trust its history less there.
     pub reactive: Option<Texture>,
+    /// The camera this frame was drawn with, jitter included: passes that must match the
+    /// forward pass's depth exactly (the skinned motion pass, `crate::skinning`)
+    /// project with it.
+    pub clip_from_world: Mat4,
+    /// Last frame's camera, without jitter (where the motion vectors point back to).
+    pub previous_clip_from_world: Mat4,
 }
 
 /// The `index`-th element (from 1) of the van der Corput sequence in `base`.
@@ -2765,6 +2771,8 @@ impl ForwardRenderer {
                 jitter,
                 reset,
                 reactive,
+                clip_from_world,
+                previous_clip_from_world,
             }),
             ..passes
         })
@@ -2846,14 +2854,18 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         let jitter = t.next_jitter();
         let reset = t.reset.replace(false);
         t.previous_count.set(0);
-        t.previous_clip_from_world
-            .set(Some(view.camera.clip_from_world));
+        let previous_clip_from_world = t
+            .previous_clip_from_world
+            .replace(Some(view.camera.clip_from_world))
+            .unwrap_or(view.camera.clip_from_world);
         t.frame.set(t.frame.get() + 1);
         MotionOutput {
             velocity,
             jitter,
             reset,
             reactive: None,
+            clip_from_world: view.camera.clip_from_world,
+            previous_clip_from_world,
         }
     });
     ForwardPasses {
