@@ -800,6 +800,14 @@ impl<'g> PassBuilder<'_, 'g> {
         self.read(resource, access)
     }
 
+    /// [`Self::read`] when `resource` is `Some`.
+    pub fn maybe_read(self, resource: Option<impl GraphResource>, access: Access) -> Self {
+        match resource {
+            Some(resource) => self.read(resource, access),
+            None => self,
+        }
+    }
+
     /// Never cull this pass (it writes outside the graph: readbacks, queries, UI state).
     pub fn side_effects(self) -> Self {
         if let Some(pass) = self.frame.graph.records.passes.last_mut() {

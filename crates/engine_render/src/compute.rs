@@ -271,6 +271,12 @@ impl<'g> ComputePass<'_, 'g> {
         self
     }
 
+    /// Declares a read when `resource` is `Some` (as [`PassBuilder::maybe_read`]).
+    pub fn maybe_read(mut self, resource: Option<impl GraphResource>, access: Access) -> Self {
+        self.pass = self.pass.maybe_read(resource, access);
+        self
+    }
+
     /// Keeps the pass even if nothing reads what it writes (as
     /// [`PassBuilder::side_effects`]).
     pub fn side_effects(mut self) -> Self {
