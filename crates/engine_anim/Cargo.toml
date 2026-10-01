@@ -1,0 +1,18 @@
+[package]
+name = "engine_anim"
+description = "Skeletal animation: skeletons, compressed clips, sampling, blending, root motion, IK."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_core.workspace = true
+engine_profiler.workspace = true
+
+[[example]]
+name = "anim_bench"
