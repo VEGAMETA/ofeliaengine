@@ -13,15 +13,13 @@
 //! compute passes of that frame's graph. The forward renderer reads them when a view has an
 //! environment ([`crate::forward::ForwardView::environment`]).
 
-use crate::atmosphere::{
-    Atmosphere, AtmosphereFrame, AtmosphereTables, AtmosphereView, HeightFog,
-};
+use crate::atmosphere::{Atmosphere, AtmosphereFrame, AtmosphereTables, AtmosphereView, HeightFog};
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
-use crate::upload::UploadRing;
 use crate::graph::{
     Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, ShaderStages,
     Texture, TextureDesc, TextureState,
 };
+use crate::upload::UploadRing;
 use core::cell::Cell;
 use engine_core::math::Vec3;
 use engine_rhi::ash::vk;
@@ -442,7 +440,8 @@ impl Environment {
     pub fn set_sky(&self, sky: Sky) {
         if sky != self.sky.get() {
             self.sky.set(sky);
-            self.dirty.set(self.dirty.get() || self.atmosphere.get().is_none());
+            self.dirty
+                .set(self.dirty.get() || self.atmosphere.get().is_none());
         }
     }
 

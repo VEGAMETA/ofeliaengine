@@ -10,7 +10,8 @@
 // color where they are read.
 //
 // - `transmittanceLut` (256 × 64): transmittance from a point to the top of the
-//   atmosphere, by altitude and zenith angle (Bruneton's parameterization), 40 steps.
+//   atmosphere, by altitude and zenith angle (Bruneton's parameterization), 40 steps
+//   (midpoints).
 // - `multipleScatteringLut` (32 × 32): light scattered twice or more, by altitude and sun
 //   zenith angle: 64 directions per texel (one thread each) gather second-order light
 //   L₂ and the fraction f_ms re-scattered, summed as the series L₂ / (1 − f_ms).
@@ -258,14 +259,14 @@ Scattering integrate(AtmosphereFrame* a, float3 o, float3 d, float3 sun, float s
             float t1 = (s + 1.0) / count_floor;
             t0 = t0 * t0 * t_max_floor;
             t1 = t1 > 1.0 ? t_max : t1 * t1 * t_max_floor;
-            t = t0 + (t1 - t0) * 0.3;
+            t = t0 + (t1 - t0) * 0.5;
             dt = t1 - t0;
         }
         else
         {
-            float next = t_max * (s + 0.3) / count;
-            dt = next - t;
-            t = next;
+            // Midpoints of even steps (the reference puts samples 0.3 into each step and
+            // leaves the last 0.7 of the ray out).
+            t = t_max * (s + 0.5) / count;
         }
         float3 p = o + t * d;
         Medium m = medium(a, p);
@@ -318,14 +319,10 @@ void transmittanceLut(uint3 id : SV_DispatchThreadID)
     float t_top = ray_sphere(o, d, a.planet.y);
     float t_max = t_bottom >= 0.0 && t_top >= 0.0 ? min(t_top, t_bottom) : max(t_top, 0.0);
     float3 depth = 0.0;
-    float t = 0.0;
     const float steps = 40.0;
     for (float s = 0.0; s < steps; s += 1.0)
-    {
-        float next = t_max * (s + 0.3) / steps;
-        depth += medium(a, o + next * d).extinction * (next - t);
-        t = next;
-    }
+        depth += medium(a, o + t_max * (s + 0.5) / steps * d).extinction;
+    depth *= t_max / steps;
     g_images[push.target][id.xy] = float4(exp(-depth), 1.0);
 }
 
@@ -397,7 +394,6 @@ void skyViewLut(uint3 id : SV_DispatchThreadID)
 float3 sky_luminance(AtmosphereFrame* a, float3 d)
 {
     float radius = a.camera_planet.w;
-    float3 up = float3(0.0, 1.0, 0.0);
     float mu = d.y;
     // Azimuth from the sun: both projected on the horizontal plane.
     float2 view_h = d.xz;

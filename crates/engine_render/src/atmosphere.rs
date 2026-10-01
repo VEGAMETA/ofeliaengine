@@ -24,7 +24,7 @@
 
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::environment::{EnvironmentFrame, Image, ImageKind};
-use crate::graph::{Access, FrameGraph, ShaderStages, StoreOp, LoadOp, Texture};
+use crate::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
 use core::cell::Cell;
 use engine_core::math::{Mat4, Vec3};
 use engine_rhi::ash::vk;
@@ -175,8 +175,7 @@ impl Atmosphere {
         let h = altitude.max(0.0);
         let rayleigh = (-h / self.rayleigh_scale_height).exp();
         let mie = (-h / self.mie_scale_height).exp();
-        let ozone =
-            (1.0 - (h - self.ozone_peak_altitude).abs() / self.ozone_half_width).max(0.0);
+        let ozone = (1.0 - (h - self.ozone_peak_altitude).abs() / self.ozone_half_width).max(0.0);
         self.rayleigh_scattering * rayleigh
             + (self.mie_scattering + self.mie_absorption) * mie
             + self.ozone_absorption * ozone
@@ -433,7 +432,16 @@ impl AtmosphereTables {
             ],
         )?;
         let flat = |allocator: &mut Allocator, [w, h]: [u32; 2]| {
-            Image::new(device, allocator, bindless, LUT_FORMAT, w, h, 1, ImageKind::Flat)
+            Image::new(
+                device,
+                allocator,
+                bindless,
+                LUT_FORMAT,
+                w,
+                h,
+                1,
+                ImageKind::Flat,
+            )
         };
         let mut images: Vec<Image> = Vec::with_capacity(4);
         let result = (|| -> Result<(), RhiError> {
@@ -463,10 +471,12 @@ impl AtmosphereTables {
             return Err(e);
         }
         let mut images = images.into_iter();
-        let mut next = || images.next().ok_or(RhiError::Vulkan {
-            call: "atmosphere tables",
-            result: vk::Result::ERROR_UNKNOWN,
-        });
+        let mut next = || {
+            images.next().ok_or(RhiError::Vulkan {
+                call: "atmosphere tables",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
         Ok(Self {
             shaders,
             transmittance: next()?,
@@ -496,8 +506,13 @@ impl AtmosphereTables {
             return color;
         }
         let color = atmosphere.sun_light(view.light, view.to_sun, altitude);
-        self.sun_of
-            .set(Some((view.to_sun, view.light, altitude, *atmosphere, color)));
+        self.sun_of.set(Some((
+            view.to_sun,
+            view.light,
+            altitude,
+            *atmosphere,
+            color,
+        )));
         color
     }
 
@@ -510,13 +525,15 @@ impl AtmosphereTables {
                 to_sun.dot(view.to_sun) < CUBE_SUN_STEP_COS
                     || light != view.light
                     || (r - radius).abs() >= CUBE_ALTITUDE_STEP
-                    || self.tables_of.get().is_none_or(|t| !t.same_tables(atmosphere))
+                    || self
+                        .tables_of
+                        .get()
+                        .is_none_or(|t| !t.same_tables(atmosphere))
             }
             None => true,
         };
         if stale {
-            self.cube_of
-                .set(Some((view.to_sun, view.light, radius)));
+            self.cube_of.set(Some((view.to_sun, view.light, radius)));
         }
         stale
     }
@@ -841,7 +858,10 @@ mod tests {
             + a.ozone_absorption * a.ozone_half_width;
         let expected = Vec3::new((-depth.x).exp(), (-depth.y).exp(), (-depth.z).exp());
         let t = a.transmittance(0.0, 1.0);
-        assert!((t - expected).abs().max_element() < 1e-4, "{t} vs {expected}");
+        assert!(
+            (t - expected).abs().max_element() < 1e-4,
+            "{t} vs {expected}"
+        );
         // Blue is lost most: (0.940, 0.868, 0.762).
         assert!(t.x > t.y && t.y > t.z);
     }
@@ -867,10 +887,13 @@ mod tests {
         assert!(sunset.x / sunset.z > evening.x / evening.z, "{sunset}");
         assert!(sunset.x > sunset.y && sunset.y > sunset.z, "{sunset}");
         assert_eq!(night, Vec3::ZERO);
-        // Half the disk above the horizon: half the light of a disk just above it.
+        // Half the disk above the horizon: half its light through the horizontal air.
         let horizon = a.sun_light(white, elevation(0.0), 0.0);
-        let above = a.sun_light(white, elevation(a.sun_angular_radius.to_degrees()), 0.0);
-        assert!((horizon.x / above.x - 0.5).abs() < 0.05, "{horizon} {above}");
+        let expected = a.transmittance(0.0, 0.0) * 0.5;
+        assert!(
+            (horizon - expected).abs().max_element() < 1e-3 * expected.x,
+            "{horizon} vs {expected}"
+        );
     }
 
     #[test]
