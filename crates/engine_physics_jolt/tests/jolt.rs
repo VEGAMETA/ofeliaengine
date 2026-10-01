@@ -101,10 +101,7 @@ fn raycasts_and_layer_filters() {
     assert!((hit.point.y - 2.0).abs() < 1e-3);
 
     // Layer 0 excluded: nothing (everything static is on layer 0).
-    let only_moving = QueryFilter {
-        layers: 1 << 1,
-        sensors: false,
-    };
+    let only_moving = QueryFilter::layers(1 << 1);
     assert!(w.raycast(&down, only_moving).is_none());
 
     // Batched: every ray over the ground hits it at y = 0.

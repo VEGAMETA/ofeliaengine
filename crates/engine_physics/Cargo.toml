@@ -12,3 +12,7 @@ workspace = true
 
 [dependencies]
 engine_core.workspace = true
+engine_ecs.workspace = true
+engine_profiler.workspace = true
+# Plain-data proofs for the ECS components (already a dependency of engine_ecs; ADR 0017).
+bytemuck = { version = "1.25", features = ["derive"] }

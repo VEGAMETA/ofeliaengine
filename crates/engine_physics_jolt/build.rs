@@ -54,35 +54,15 @@ fn target_dir(out_dir: &Path) -> Option<PathBuf> {
     out_dir.ancestors().nth(4).map(Path::to_path_buf)
 }
 
-fn main() {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let root = manifest.join("../../third_party");
-    let jolt = root.join("JoltPhysics");
-    let joltc = root.join("joltc");
-    println!("cargo:rerun-if-changed=build.rs");
-    println!("cargo:rerun-if-changed={}", jolt.join("Jolt").display());
-    println!("cargo:rerun-if-changed={}", joltc.display());
-    println!("cargo:rerun-if-changed=csrc");
-    println!("cargo:rerun-if-env-changed=ENGINE_JOLTC_CACHE");
-
-    let mut sources = Vec::new();
-    collect(&jolt.join("Jolt"), &mut sources, &["cpp"]);
-    sources.sort();
-    sources.push(joltc.join("src/joltc.cpp"));
-    sources.push(joltc.join("src/joltc_assert.cpp"));
-    // Struct sizes and offsets for the binding layout tests.
-    sources.push(manifest.join("csrc/layout.cpp"));
-
-    let target = std::env::var("TARGET").unwrap_or_default();
-    let msvc = target.contains("msvc");
-    let cross_platform = std::env::var_os("CARGO_FEATURE_CROSS_PLATFORM_DETERMINISTIC").is_some();
-
+/// The compiler setup shared by Jolt, JoltC and our extension: the same defines and
+/// flags, which must also match what the Rust bindings assume (32-bit object layers,
+/// single precision).
+fn configure(jolt: &Path, joltc: &Path, msvc: bool, cross_platform: bool) -> cc::Build {
     let mut build = cc::Build::new();
     build
         .cpp(true)
         .std("c++17")
-        .files(&sources)
-        .include(&jolt)
+        .include(jolt)
         .include(joltc.join("include"))
         .warnings(false)
         .define("JPH_OBJECT_LAYER_BITS", "32")
@@ -122,6 +102,41 @@ fn main() {
     // Jolt is always optimized: debug builds of the engine would otherwise simulate an
     // order of magnitude slower (CLAUDE.md §15: dependencies at opt-level 3 in dev).
     build.opt_level(3).debug(false);
+
+    build
+}
+
+fn main() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = manifest.join("../../third_party");
+    let jolt = root.join("JoltPhysics");
+    let joltc = root.join("joltc");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={}", jolt.join("Jolt").display());
+    println!("cargo:rerun-if-changed={}", joltc.display());
+    println!("cargo:rerun-if-changed=csrc");
+    println!("cargo:rerun-if-env-changed=ENGINE_JOLTC_CACHE");
+
+    let mut sources = Vec::new();
+    collect(&jolt.join("Jolt"), &mut sources, &["cpp"]);
+    sources.sort();
+    sources.push(joltc.join("src/joltc.cpp"));
+    sources.push(joltc.join("src/joltc_assert.cpp"));
+    // Struct sizes and offsets for the binding layout tests.
+    sources.push(manifest.join("csrc/layout.cpp"));
+
+    let target = std::env::var("TARGET").unwrap_or_default();
+    let msvc = target.contains("msvc");
+    let cross_platform = std::env::var_os("CARGO_FEATURE_CROSS_PLATFORM_DETERMINISTIC").is_some();
+
+    let mut build = configure(&jolt, &joltc, msvc, cross_platform);
+    build.files(&sources);
+    // Our extension (csrc/ext.cpp, ADR 0066): one file against Jolt's C++ API, built with
+    // the same defines and flags (the ABI must match) but outside the cached library, so
+    // changing it does not rebuild Jolt.
+    let mut ext = configure(&jolt, &joltc, msvc, cross_platform);
+    ext.file(manifest.join("csrc/ext.cpp"));
+    ext.compile("joltc_ext");
 
     // Content hash: every source and header, the compiler and its arguments, the target.
     let mut inputs = sources.clone();

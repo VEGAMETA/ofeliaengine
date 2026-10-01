@@ -20,19 +20,29 @@
 //!   start threads). `threads = 0` keeps everything on the calling thread. Jolt's results
 //!   do not depend on the thread count. Routing Jolt's jobs through `engine_core::jobs`
 //!   is a follow-up (ADR 0018).
+//! - Queries (ADR 0066) go through JoltC's narrow-phase queries with collector callbacks
+//!   that write into reusable buffers; results are sorted, because Jolt reports narrow-
+//!   phase hits in an order that is not guaranteed.
+//! - Characters, state save/restore and the allocation counter go through our own small
+//!   C++ extension over Jolt's C++ API (`csrc/ext.cpp`): Jolt's `CharacterVirtual` with
+//!   `ExtendedUpdate`, its `StateRecorder` over the caller's buffer, and wrappers around
+//!   Jolt's allocation hooks.
 
 mod ffi;
 
+use core::cell::RefCell;
 use core::cell::{Cell, UnsafeCell};
 use core::ffi::c_void;
 use core::mem::MaybeUninit;
 use core::ptr::null;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use engine_core::math::Mat4;
 use engine_core::math::{Quat, Vec3};
 use engine_physics::{
-    BodyDesc, BodyId, ConstraintDesc, ConstraintId, ContactEvent, ContactKind, GravityField,
-    GravityMode, HASH_SEED, MotionQuality, MotionType, PhysicsBackend, PhysicsError,
-    PhysicsSettings, PhysicsStats, QueryFilter, Ray, RayHit, ShapeDesc, ShapeId, hash_words,
+    BodyDesc, BodyId, CharacterContact, CharacterDesc, CharacterId, CharacterState, ConstraintDesc,
+    ConstraintId, ContactEvent, ContactKind, GravityField, GravityMode, GroundState, HASH_SEED,
+    MotionQuality, MotionType, PhysicsBackend, PhysicsError, PhysicsSettings, PhysicsSnapshot,
+    PhysicsStats, QueryFilter, Ray, RayHit, ShapeCast, ShapeDesc, ShapeHit, ShapeId, hash_words,
 };
 use ffi::*;
 use std::collections::BTreeMap;
@@ -62,6 +72,56 @@ fn quat(q: Quat) -> JPH_Quat {
 fn from_quat(q: JPH_Quat) -> Quat {
     Quat::from_xyzw(q.x, q.y, q.z, q.w)
 }
+
+fn mat4(position: Vec3, rotation: Quat) -> JPH_RMat4 {
+    let m = Mat4::from_rotation_translation(rotation, position);
+    let column = |c: engine_core::math::Vec4| JPH_Vec4 {
+        x: c.x,
+        y: c.y,
+        z: c.z,
+        w: c.w,
+    };
+    JPH_RMat4 {
+        column: [
+            column(m.x_axis),
+            column(m.y_axis),
+            column(m.z_axis),
+            column(m.w_axis),
+        ],
+    }
+}
+
+fn arr3(a: [f32; 3]) -> Vec3 {
+    Vec3::from_array(a)
+}
+
+fn body_or_none(raw: u32) -> Option<BodyId> {
+    (raw != ENGINE_JOLT_NONE).then_some(BodyId(u64::from(raw)))
+}
+
+fn character_state(raw: &EngineJoltCharacterState) -> CharacterState {
+    CharacterState {
+        position: arr3(raw.position),
+        rotation: Quat::from_array(raw.rotation),
+        velocity: arr3(raw.velocity),
+        ground: match raw.ground_state {
+            0 => GroundState::OnGround,
+            1 => GroundState::OnSteepGround,
+            2 => GroundState::NotSupported,
+            _ => GroundState::InAir,
+        },
+        ground_normal: arr3(raw.ground_normal),
+        ground_point: arr3(raw.ground_point),
+        ground_body: body_or_none(raw.ground_body),
+        ground_velocity: arr3(raw.ground_velocity),
+        proxy: body_or_none(raw.proxy_body),
+    }
+}
+
+/// First four bytes of a Jolt backend snapshot ("OEJ1"), then the numbers of bodies,
+/// constraints and characters, then Jolt's state.
+const SNAPSHOT_MAGIC: u32 = u32::from_le_bytes(*b"OEJ1");
+const SNAPSHOT_HEADER: usize = 16;
 
 static INIT: Once = Once::new();
 
@@ -108,6 +168,8 @@ fn init_jolt() {
         // SAFETY: first and only initialization; the procedure tables are 'static.
         unsafe {
             JPH_Init();
+            // Before any world exists, so every Jolt allocation goes through the counter.
+            engine_jolt_count_allocations();
             JPH_ContactListener_SetProcs(&CONTACT_PROCS);
             JPH_PhysicsStepListener_SetProcs(&STEP_PROCS);
             JPH_ObjectLayerFilter_SetProcs(&LAYER_FILTER_PROCS);
@@ -138,6 +200,8 @@ struct Shared {
     body_interface_no_lock: *mut JPH_BodyInterface,
     query_layers: Cell<u64>,
     query_sensors: Cell<bool>,
+    /// A body the current query skips, or `JPH_INVALID_BODY_ID`.
+    query_ignore: Cell<JPH_BodyID>,
 }
 
 // SAFETY: accessed by Jolt worker threads during `step` only through `push_event` (disjoint
@@ -267,16 +331,83 @@ static BODY_FILTER_PROCS: JPH_BodyFilter_Procs = JPH_BodyFilter_Procs {
     ShouldCollideLocked: Some(body_filter_locked),
 };
 
-unsafe extern "C" fn body_filter(_user_data: *mut c_void, _body: JPH_BodyID) -> bool {
-    true
+unsafe extern "C" fn body_filter(user_data: *mut c_void, body: JPH_BodyID) -> bool {
+    // SAFETY: the user data is the world's `Shared`; queries run on its thread.
+    let shared = unsafe { &*user_data.cast::<Shared>() };
+    body != shared.query_ignore.get()
 }
 
 unsafe extern "C" fn body_filter_locked(user_data: *mut c_void, body: *const JPH_Body) -> bool {
     // SAFETY: as above; the body is locked by Jolt for the call.
     unsafe {
         let shared = &*user_data.cast::<Shared>();
-        shared.query_sensors.get() || !JPH_Body_IsSensor(body)
+        (shared.query_sensors.get() || !JPH_Body_IsSensor(body))
+            && JPH_Body_GetID(body) != shared.query_ignore.get()
     }
+}
+
+/// A raw ray hit: body, fraction, sub-shape.
+type RawRayHit = (JPH_BodyID, f32, JPH_SubShapeID);
+
+unsafe extern "C" fn collect_ray(context: *mut c_void, result: *const JPH_RayCastResult) -> f32 {
+    // SAFETY: the context is the scratch `Vec<RawRayHit>` passed by `raycast_all` for this
+    // call; the result is valid for the callback.
+    unsafe {
+        let out = &mut *context.cast::<Vec<RawRayHit>>();
+        let r = &*result;
+        out.push((r.bodyID, r.fraction, r.subShapeID2));
+    }
+    // Keep the early-out fraction: collect every hit.
+    f32::MAX
+}
+
+/// Jolt's ordering of shape-cast hits: the fraction, or minus the penetration depth for
+/// hits the shape starts in (deeper first).
+fn early_out(hit: &JPH_ShapeCastResult) -> f32 {
+    if hit.fraction > 0.0 {
+        hit.fraction
+    } else {
+        -hit.penetrationDepth
+    }
+}
+
+/// State of a closest-hit shape cast.
+struct ClosestShape {
+    best: Option<JPH_ShapeCastResult>,
+}
+
+unsafe extern "C" fn collect_closest_shape(
+    context: *mut c_void,
+    result: *const JPH_ShapeCastResult,
+) -> f32 {
+    // SAFETY: the context is the `ClosestShape` of this `cast_shape` call; the result is
+    // valid for the callback.
+    unsafe {
+        let state = &mut *context.cast::<ClosestShape>();
+        let hit = *result;
+        let better = state
+            .best
+            .as_ref()
+            .is_none_or(|best| (early_out(&hit), hit.bodyID2) < (early_out(best), best.bodyID2));
+        if better {
+            state.best = Some(hit);
+        }
+        // Only hits closer than the best so far are of interest now.
+        state.best.as_ref().map_or(f32::MAX, early_out)
+    }
+}
+
+unsafe extern "C" fn collect_shape(
+    context: *mut c_void,
+    result: *const JPH_ShapeCastResult,
+) -> f32 {
+    // SAFETY: the context is the scratch `Vec<JPH_ShapeCastResult>` of this
+    // `cast_shape_all` call.
+    unsafe {
+        let out = &mut *context.cast::<Vec<JPH_ShapeCastResult>>();
+        out.push(*result);
+    }
+    f32::MAX
 }
 
 unsafe extern "C" fn collect_body(
@@ -294,6 +425,11 @@ unsafe extern "C" fn collect_body(
 
 struct BodyInfo {
     gravity: GravityMode,
+}
+
+/// A character controller of this world (owned; destroyed with it).
+struct CharacterInfo {
+    handle: *mut EngineJoltCharacter,
 }
 
 /// A Jolt physics world.
@@ -316,6 +452,19 @@ pub struct JoltBackend {
     unit_sphere: *mut JPH_Shape,
     shared: Box<Shared>,
     shapes: Vec<*mut JPH_Shape>,
+    /// Per shape: it can be swept or overlapped by queries (not a triangle mesh).
+    shape_castable: Vec<bool>,
+    /// Our C++ extension's per-world state (characters' temporary memory and
+    /// character-versus-character collision).
+    ext: *mut EngineJoltWorld,
+    characters: BTreeMap<u64, CharacterInfo>,
+    /// The characters' handles in id order (the order snapshots store them in).
+    character_handles: Vec<*mut EngineJoltCharacter>,
+    next_character: u32,
+    /// Reused buffers of the `&self` queries.
+    ray_scratch: RefCell<Vec<RawRayHit>>,
+    shape_scratch: RefCell<Vec<JPH_ShapeCastResult>>,
+    contact_scratch: RefCell<Vec<EngineJoltCharacterContact>>,
     constraints: Vec<*mut JPH_Constraint>,
     bodies: BTreeMap<JPH_BodyID, BodyInfo>,
     gravity_dirty: bool,
@@ -405,6 +554,7 @@ impl JoltBackend {
                 body_interface_no_lock: JPH_PhysicsSystem_GetBodyInterfaceNoLock(system),
                 query_layers: Cell::new(u64::MAX),
                 query_sensors: Cell::new(false),
+                query_ignore: Cell::new(JPH_INVALID_BODY_ID),
             });
             let user_data = (&raw mut *shared).cast::<c_void>();
             let contact_listener = JPH_ContactListener_Create(user_data);
@@ -413,6 +563,7 @@ impl JoltBackend {
             JPH_PhysicsSystem_AddStepListener(system, step_listener);
             let gravity = v3(settings.gravity);
             JPH_PhysicsSystem_SetGravity(system, &gravity);
+            let ext = engine_jolt_world_create(system);
             let world = Self {
                 system,
                 body_interface: JPH_PhysicsSystem_GetBodyInterface(system),
@@ -429,6 +580,14 @@ impl JoltBackend {
                 unit_sphere: JPH_SphereShape_Create(1.0),
                 shared,
                 shapes: Vec::new(),
+                shape_castable: Vec::new(),
+                ext,
+                characters: BTreeMap::new(),
+                character_handles: Vec::new(),
+                next_character: 1,
+                ray_scratch: RefCell::new(Vec::new()),
+                shape_scratch: RefCell::new(Vec::new()),
+                contact_scratch: RefCell::new(Vec::new()),
                 constraints: Vec::new(),
                 bodies: BTreeMap::new(),
                 gravity_dirty: false,
@@ -436,6 +595,13 @@ impl JoltBackend {
                 stats: PhysicsStats::default(),
                 name: String::from("Jolt Physics 5.6.0 (JoltC)"),
             };
+            if world.ext.is_null() {
+                // JoltC's private system layout changed (a JoltC update): dropping the
+                // world frees what was created.
+                return Err(PhysicsError::StepFailed(String::from(
+                    "the JoltC physics system layout does not match csrc/ext.cpp",
+                )));
+            }
             Ok(world)
         }
     }
@@ -485,6 +651,115 @@ impl JoltBackend {
     fn set_query_filter(&self, filter: QueryFilter) {
         self.shared.query_layers.set(filter.layers);
         self.shared.query_sensors.set(filter.sensors);
+        self.shared.query_ignore.set(
+            filter
+                .ignore
+                .map_or(JPH_INVALID_BODY_ID, |b| b.0 as JPH_BodyID),
+        );
+    }
+
+    /// Heap allocations Jolt has made so far, in every world and thread (Jolt allocates
+    /// through its own hooks, which Rust's global allocator does not see). For tests and
+    /// diagnostics: the difference over a call is what the call allocated.
+    pub fn jolt_allocations() -> u64 {
+        init_jolt();
+        // SAFETY: reads an atomic counter.
+        unsafe { engine_jolt_allocations() }
+    }
+
+    /// The shape of a cast, if it can be swept.
+    fn cast_shape_ptr(&self, shape: ShapeId) -> Option<*mut JPH_Shape> {
+        let index = shape.0 as usize;
+        let ptr = *self.shapes.get(index)?;
+        (!ptr.is_null() && self.shape_castable.get(index).copied().unwrap_or(false)).then_some(ptr)
+    }
+
+    fn user_data(&self, body: JPH_BodyID) -> u64 {
+        // SAFETY: a body id reported by a query of this world.
+        unsafe { JPH_BodyInterface_GetUserData(self.body_interface, body) }
+    }
+
+    /// World-space surface normal of `body` at `point`.
+    fn surface_normal(&self, body: JPH_BodyID, sub_shape: JPH_SubShapeID, point: Vec3) -> Vec3 {
+        let mut normal = JPH_Vec3::default();
+        let mut lock = JPH_BodyLockRead {
+            lockInterface: null(),
+            mutex: core::ptr::null_mut(),
+            body: null(),
+        };
+        // SAFETY: lock, read the surface normal, unlock.
+        unsafe {
+            JPH_BodyLockInterface_LockRead(self.lock_interface, body, &mut lock);
+            if !lock.body.is_null() {
+                JPH_Body_GetWorldSpaceSurfaceNormal(lock.body, sub_shape, &v3(point), &mut normal);
+            }
+            JPH_BodyLockInterface_UnlockRead(self.lock_interface, &mut lock);
+        }
+        from_v3(normal)
+    }
+
+    fn shape_hit(&self, hit: &JPH_ShapeCastResult) -> ShapeHit {
+        let axis = from_v3(hit.penetrationAxis);
+        ShapeHit {
+            body: BodyId(u64::from(hit.bodyID2)),
+            fraction: hit.fraction,
+            point: from_v3(hit.contactPointOn2),
+            // The axis points from the cast shape into the body hit.
+            normal: -axis.normalize_or_zero(),
+            penetration: if hit.fraction > 0.0 {
+                0.0
+            } else {
+                hit.penetrationDepth.max(0.0)
+            },
+            user_data: self.user_data(hit.bodyID2),
+        }
+    }
+
+    /// Runs a shape cast with `callback` collecting into `context`.
+    fn run_shape_cast(
+        &self,
+        shape: *mut JPH_Shape,
+        cast: &ShapeCast,
+        filter: QueryFilter,
+        callback: JPH_CastShapeCollectorCallback,
+        context: *mut c_void,
+    ) {
+        self.set_query_filter(filter);
+        let mut settings = MaybeUninit::<JPH_ShapeCastSettings>::zeroed();
+        let transform = mat4(cast.position, cast.rotation);
+        let mut base_offset = JPH_Vec3::default();
+        // SAFETY: settings initialized by JoltC from Jolt's defaults; the callback writes
+        // only to `context`, which the caller keeps alive for the call.
+        unsafe {
+            JPH_ShapeCastSettings_Init(settings.as_mut_ptr());
+            let mut settings = settings.assume_init();
+            // Starting inside a body: report how deep (costs time only in that case).
+            settings.returnDeepestPoint = true;
+            JPH_NarrowPhaseQuery_CastShape(
+                self.query,
+                shape,
+                &transform,
+                &v3(cast.direction),
+                &settings,
+                &mut base_offset,
+                callback,
+                context,
+                null(),
+                self.layer_filter,
+                self.body_filter,
+                null(),
+            );
+        }
+    }
+
+    fn character_handle(&self, character: CharacterId) -> Option<*mut EngineJoltCharacter> {
+        self.characters.get(&character.0).map(|c| c.handle)
+    }
+
+    fn rebuild_character_handles(&mut self) {
+        self.character_handles.clear();
+        self.character_handles
+            .extend(self.characters.values().map(|c| c.handle));
     }
 }
 
@@ -571,6 +846,8 @@ impl PhysicsBackend for JoltBackend {
         if shape.is_null() {
             return Err(PhysicsError::InvalidShape(format!("{desc:?}")));
         }
+        self.shape_castable
+            .push(!matches!(desc, ShapeDesc::TriangleMesh { .. }));
         self.shapes.push(shape);
         Ok(ShapeId((self.shapes.len() - 1) as u64))
     }
@@ -959,6 +1236,12 @@ impl PhysicsBackend for JoltBackend {
             contact_events: self.events.len() as u32,
             step_threads,
         };
+        // The ground under the characters moved: refresh its velocity (moving
+        // platforms), in id order.
+        for &handle in &self.character_handles {
+            // SAFETY: a live character of this world.
+            unsafe { engine_jolt_character_update_ground_velocity(handle) };
+        }
         if error != 0 {
             return Err(PhysicsError::StepFailed(format!(
                 "Jolt update error flags {error:#x} (raise the pair or contact limits)"
@@ -995,32 +1278,12 @@ impl PhysicsBackend for JoltBackend {
             return None;
         }
         let point = ray.origin + ray.direction * hit.fraction;
-        let mut normal = JPH_Vec3::default();
-        let mut lock = JPH_BodyLockRead {
-            lockInterface: null(),
-            mutex: core::ptr::null_mut(),
-            body: null(),
-        };
-        // SAFETY: lock, read the surface normal, unlock.
-        let user_data = unsafe {
-            JPH_BodyLockInterface_LockRead(self.lock_interface, hit.bodyID, &mut lock);
-            if !lock.body.is_null() {
-                JPH_Body_GetWorldSpaceSurfaceNormal(
-                    lock.body,
-                    hit.subShapeID2,
-                    &v3(point),
-                    &mut normal,
-                );
-            }
-            JPH_BodyLockInterface_UnlockRead(self.lock_interface, &mut lock);
-            JPH_BodyInterface_GetUserData(self.body_interface, hit.bodyID)
-        };
         Some(RayHit {
             body: BodyId(u64::from(hit.bodyID)),
             fraction: hit.fraction,
             point,
-            normal: from_v3(normal),
-            user_data,
+            normal: self.surface_normal(hit.bodyID, hit.subShapeID2, point),
+            user_data: self.user_data(hit.bodyID),
         })
     }
 
@@ -1093,6 +1356,343 @@ impl PhysicsBackend for JoltBackend {
         out.truncate(end);
     }
 
+    fn raycast_all(&self, ray: &Ray, filter: QueryFilter, out: &mut Vec<RayHit>) {
+        engine_profiler::zone!("physics::jolt::raycast_all");
+        self.set_query_filter(filter);
+        let mut raw = self.ray_scratch.borrow_mut();
+        raw.clear();
+        // SAFETY: valid query and filters; the callback appends to `raw`, alive for the
+        // call. No ray-cast settings: Jolt's defaults (convex shapes are solid).
+        unsafe {
+            JPH_NarrowPhaseQuery_CastRay2(
+                self.query,
+                &v3(ray.origin),
+                &v3(ray.direction),
+                null(),
+                collect_ray,
+                (&raw mut *raw).cast(),
+                null(),
+                self.layer_filter,
+                self.body_filter,
+                null(),
+            );
+        }
+        // One hit per body (a mesh can report several faces), the nearest; then in ray
+        // order. Jolt's narrow phase reports hits in no guaranteed order.
+        raw.sort_unstable_by(|a, b| a.0.cmp(&b.0).then(a.1.total_cmp(&b.1)));
+        raw.dedup_by_key(|h| h.0);
+        raw.sort_unstable_by(|a, b| a.1.total_cmp(&b.1).then(a.0.cmp(&b.0)));
+        for &(body, fraction, sub_shape) in raw.iter() {
+            let point = ray.origin + ray.direction * fraction;
+            out.push(RayHit {
+                body: BodyId(u64::from(body)),
+                fraction,
+                point,
+                normal: self.surface_normal(body, sub_shape, point),
+                user_data: self.user_data(body),
+            });
+        }
+    }
+
+    fn cast_shape(&self, cast: &ShapeCast, filter: QueryFilter) -> Option<ShapeHit> {
+        engine_profiler::zone!("physics::jolt::cast_shape");
+        let shape = self.cast_shape_ptr(cast.shape)?;
+        let mut state = ClosestShape { best: None };
+        self.run_shape_cast(
+            shape,
+            cast,
+            filter,
+            collect_closest_shape,
+            (&raw mut state).cast(),
+        );
+        state.best.map(|hit| self.shape_hit(&hit))
+    }
+
+    fn cast_shape_all(&self, cast: &ShapeCast, filter: QueryFilter, out: &mut Vec<ShapeHit>) {
+        engine_profiler::zone!("physics::jolt::cast_shape_all");
+        let Some(shape) = self.cast_shape_ptr(cast.shape) else {
+            return;
+        };
+        let mut raw = self.shape_scratch.borrow_mut();
+        raw.clear();
+        self.run_shape_cast(shape, cast, filter, collect_shape, (&raw mut *raw).cast());
+        // The first hit per body, then in sweep order.
+        raw.sort_unstable_by(|a, b| {
+            a.bodyID2
+                .cmp(&b.bodyID2)
+                .then(early_out(a).total_cmp(&early_out(b)))
+        });
+        raw.dedup_by_key(|h| h.bodyID2);
+        raw.sort_unstable_by(|a, b| {
+            early_out(a)
+                .total_cmp(&early_out(b))
+                .then(a.bodyID2.cmp(&b.bodyID2))
+        });
+        out.extend(raw.iter().map(|hit| self.shape_hit(hit)));
+    }
+
+    fn overlap_shape(
+        &self,
+        shape: ShapeId,
+        position: Vec3,
+        rotation: Quat,
+        filter: QueryFilter,
+        out: &mut Vec<BodyId>,
+    ) {
+        engine_profiler::zone!("physics::jolt::overlap_shape");
+        let Some(shape) = self.cast_shape_ptr(shape) else {
+            return;
+        };
+        self.set_query_filter(filter);
+        let start = out.len();
+        let mut com = JPH_Vec3::default();
+        let mut settings = MaybeUninit::<JPH_CollideShapeSettings>::zeroed();
+        let mut base_offset = JPH_Vec3::default();
+        // SAFETY: a live shape; settings initialized by Jolt; the callback appends to
+        // `out`, which lives for the call.
+        unsafe {
+            JPH_Shape_GetCenterOfMass(shape, &mut com);
+            // Jolt places the shape by its center of mass.
+            let transform = mat4(position + rotation * from_v3(com), rotation);
+            JPH_CollideShapeSettings_Init(settings.as_mut_ptr());
+            JPH_NarrowPhaseQuery_CollideShape(
+                self.query,
+                shape,
+                &v3(Vec3::ONE),
+                &transform,
+                settings.as_ptr(),
+                &mut base_offset,
+                collect_body,
+                (out as *mut Vec<BodyId>).cast(),
+                null(),
+                self.layer_filter,
+                self.body_filter,
+                null(),
+            );
+        }
+        out[start..].sort_unstable();
+        let mut end = start;
+        for i in start..out.len() {
+            if end == start || out[end - 1] != out[i] {
+                out[end] = out[i];
+                end += 1;
+            }
+        }
+        out.truncate(end);
+    }
+
+    fn move_kinematic(&mut self, body: BodyId, position: Vec3, rotation: Quat, dt: f32) {
+        let raw = body.0 as JPH_BodyID;
+        if self.bodies.contains_key(&raw) && dt > 0.0 {
+            let (mut p, mut r) = (v3(position), quat(rotation.normalize()));
+            // SAFETY: a live body. Jolt ignores the call for non-kinematic bodies.
+            unsafe {
+                JPH_BodyInterface_MoveKinematic(self.body_interface, raw, &mut p, &mut r, dt)
+            };
+        }
+    }
+
+    fn create_character(&mut self, desc: &CharacterDesc) -> Result<CharacterId, PhysicsError> {
+        let valid = desc.radius > 0.0
+            && desc.radius.is_finite()
+            && desc.height.is_finite()
+            && desc.height >= 2.0 * desc.radius;
+        if !valid {
+            return Err(PhysicsError::InvalidShape(format!(
+                "character capsule {} m tall, radius {} m",
+                desc.height, desc.radius
+            )));
+        }
+        let id = self.next_character;
+        if id == ENGINE_JOLT_NONE {
+            return Err(PhysicsError::Full("characters"));
+        }
+        let raw = EngineJoltCharacterDesc {
+            position: desc.position.to_array(),
+            rotation: desc.rotation.to_array(),
+            up: desc.up.to_array(),
+            half_height: desc.height * 0.5 - desc.radius,
+            radius: desc.radius,
+            max_slope: desc.max_slope,
+            step_height: desc.step_height.max(0.0),
+            snap_to_ground: desc.snap_to_ground.max(0.0),
+            mass: desc.mass,
+            max_push_force: desc.max_push_force.max(0.0),
+            id,
+            object_layer: u32::from(desc.layer.0) * 2 + 1,
+            proxy_layer: desc
+                .proxy_layer
+                .map_or(ENGINE_JOLT_NONE, |l| u32::from(l.0) * 2 + 1),
+            _padding: 0,
+            user_data: desc.user_data,
+        };
+        // SAFETY: the extension world is alive; `raw` is a valid description.
+        let handle = unsafe { engine_jolt_character_create(self.ext, &raw) };
+        if handle.is_null() {
+            return Err(PhysicsError::Full("characters"));
+        }
+        self.next_character += 1;
+        self.characters
+            .insert(u64::from(id), CharacterInfo { handle });
+        self.rebuild_character_handles();
+        Ok(CharacterId(u64::from(id)))
+    }
+
+    fn destroy_character(&mut self, character: CharacterId) {
+        if let Some(info) = self.characters.remove(&character.0) {
+            // SAFETY: a live character of this world, destroyed once.
+            unsafe { engine_jolt_character_destroy(self.ext, info.handle) };
+            self.rebuild_character_handles();
+        }
+    }
+
+    fn move_character(
+        &mut self,
+        character: CharacterId,
+        velocity: Vec3,
+        dt: f32,
+    ) -> Option<CharacterState> {
+        engine_profiler::zone!("physics::jolt::move_character");
+        let handle = self.character_handle(character)?;
+        let mut raw = EngineJoltCharacterState::default();
+        let velocity = velocity.to_array();
+        // SAFETY: a live character of this world; outside a step (`&mut self`).
+        unsafe {
+            engine_jolt_character_move(self.ext, handle, velocity.as_ptr(), dt.max(0.0), &mut raw)
+        };
+        Some(character_state(&raw))
+    }
+
+    fn character(&self, character: CharacterId) -> Option<CharacterState> {
+        let handle = self.character_handle(character)?;
+        let mut raw = EngineJoltCharacterState::default();
+        // SAFETY: a live character of this world.
+        unsafe { engine_jolt_character_state(handle, &mut raw) };
+        Some(character_state(&raw))
+    }
+
+    fn set_character_transform(&mut self, character: CharacterId, position: Vec3, rotation: Quat) {
+        if let Some(handle) = self.character_handle(character) {
+            let (p, r) = (position.to_array(), rotation.to_array());
+            // SAFETY: a live character of this world.
+            unsafe {
+                engine_jolt_character_set_transform(self.ext, handle, p.as_ptr(), r.as_ptr())
+            };
+        }
+    }
+
+    fn character_contacts(&self, character: CharacterId, out: &mut Vec<CharacterContact>) {
+        let Some(handle) = self.character_handle(character) else {
+            return;
+        };
+        let mut scratch = self.contact_scratch.borrow_mut();
+        loop {
+            let capacity = scratch.len();
+            // SAFETY: a live character; `scratch` holds `capacity` contacts.
+            let count = unsafe {
+                engine_jolt_character_contacts(handle, scratch.as_mut_ptr(), capacity as u32)
+            } as usize;
+            if count <= capacity {
+                out.extend(scratch[..count].iter().map(|c| {
+                    CharacterContact {
+                        body: body_or_none(c.body),
+                        character: (c.character != ENGINE_JOLT_NONE)
+                            .then_some(CharacterId(u64::from(c.character))),
+                        point: arr3(c.point),
+                        normal: arr3(c.normal),
+                        collided: c.collided != 0,
+                        sensor: c.sensor != 0,
+                    }
+                }));
+                return;
+            }
+            scratch.resize(
+                count.next_power_of_two(),
+                EngineJoltCharacterContact::default(),
+            );
+        }
+    }
+
+    fn save_state(&self, out: &mut PhysicsSnapshot) -> Result<(), PhysicsError> {
+        engine_profiler::zone!("physics::jolt::save_state");
+        let live_constraints = self.constraints.iter().filter(|c| !c.is_null()).count();
+        let buffer = out.buffer_mut();
+        buffer.clear();
+        for word in [
+            SNAPSHOT_MAGIC,
+            self.bodies.len() as u32,
+            live_constraints as u32,
+            self.characters.len() as u32,
+        ] {
+            buffer.extend_from_slice(&word.to_le_bytes());
+        }
+        loop {
+            let capacity = buffer.capacity() - SNAPSHOT_HEADER;
+            // SAFETY: writes at most `capacity` bytes into the buffer's spare capacity after
+            // the header (and reports the full size); the characters are live.
+            let size = unsafe {
+                engine_jolt_save_state(
+                    self.ext,
+                    self.character_handles.as_ptr(),
+                    self.character_handles.len() as u32,
+                    buffer.as_mut_ptr().add(SNAPSHOT_HEADER),
+                    capacity,
+                )
+            };
+            if size <= capacity {
+                // SAFETY: the extension wrote `size` bytes after the header.
+                unsafe { buffer.set_len(SNAPSHOT_HEADER + size) };
+                return Ok(());
+            }
+            // Grow (with headroom for a growing contact count) and save again.
+            buffer.reserve(size + size / 8);
+        }
+    }
+
+    fn restore_state(&mut self, snapshot: &PhysicsSnapshot) -> Result<(), PhysicsError> {
+        engine_profiler::zone!("physics::jolt::restore_state");
+        let bytes = snapshot.bytes();
+        let word = |i: usize| {
+            bytes
+                .get(i * 4..i * 4 + 4)
+                .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+        };
+        if word(0) != Some(SNAPSHOT_MAGIC) {
+            return Err(PhysicsError::SnapshotMismatch(
+                "not a Jolt backend snapshot",
+            ));
+        }
+        let live_constraints = self.constraints.iter().filter(|c| !c.is_null()).count();
+        if word(1) != Some(self.bodies.len() as u32)
+            || word(2) != Some(live_constraints as u32)
+            || word(3) != Some(self.characters.len() as u32)
+        {
+            return Err(PhysicsError::SnapshotMismatch(
+                "other numbers of bodies, constraints or characters",
+            ));
+        }
+        let state = &bytes[SNAPSHOT_HEADER..];
+        // SAFETY: the characters are live and in the order they were saved in (id order;
+        // the count matches); `state` is valid for its length.
+        let ok = unsafe {
+            engine_jolt_restore_state(
+                self.ext,
+                self.character_handles.as_ptr(),
+                self.character_handles.len() as u32,
+                state.as_ptr(),
+                state.len(),
+            )
+        };
+        self.events.clear();
+        if ok {
+            Ok(())
+        } else {
+            Err(PhysicsError::SnapshotMismatch(
+                "Jolt could not restore it (other bodies, or damaged bytes)",
+            ))
+        }
+    }
+
     fn state_hash(&self) -> u64 {
         let mut hash = HASH_SEED;
         for &id in self.bodies.keys() {
@@ -1128,6 +1728,19 @@ impl PhysicsBackend for JoltBackend {
                 ],
             );
         }
+        for (&id, info) in &self.characters {
+            let mut raw = EngineJoltCharacterState::default();
+            // SAFETY: a live character of this world.
+            unsafe { engine_jolt_character_state(info.handle, &mut raw) };
+            hash_words(
+                &mut hash,
+                [id as u32]
+                    .into_iter()
+                    .chain(raw.position.iter().map(|f| f.to_bits()))
+                    .chain(raw.rotation.iter().map(|f| f.to_bits()))
+                    .chain(raw.velocity.iter().map(|f| f.to_bits())),
+            );
+        }
         hash
     }
 }
@@ -1137,6 +1750,9 @@ impl Drop for JoltBackend {
         // SAFETY: destroys everything this world created: constraints and bodies before
         // the system (which also frees the layer tables it owns), listeners after it.
         unsafe {
+            for info in self.characters.values() {
+                engine_jolt_character_destroy(self.ext, info.handle);
+            }
             for &constraint in &self.constraints {
                 if !constraint.is_null() {
                     JPH_PhysicsSystem_RemoveConstraint(self.system, constraint);
@@ -1149,6 +1765,9 @@ impl Drop for JoltBackend {
             {
                 let _serialized = jolt_lock();
                 JPH_PhysicsSystem_Destroy(self.system);
+            }
+            if !self.ext.is_null() {
+                engine_jolt_world_destroy(self.ext);
             }
             JPH_ContactListener_Destroy(self.contact_listener);
             JPH_PhysicsStepListener_Destroy(self.step_listener);
