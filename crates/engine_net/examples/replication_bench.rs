@@ -20,6 +20,7 @@
 mod common;
 
 use common::*;
+use engine_core::jobs::ThreadPool;
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{bytemuck, reflect_component};
 use engine_net::bits::BitWriter;
@@ -182,7 +183,13 @@ fn variants() {
     }
 }
 
-fn server(entities: usize, clients: usize, moving: f32, ticks: usize) -> (f64, f64, f64, f64) {
+fn server(
+    entities: usize,
+    clients: usize,
+    moving: f32,
+    ticks: usize,
+    pool: Option<&ThreadPool>,
+) -> (f64, f64, f64, f64) {
     let mut sim = Sim::new(3, conditions(20, 0, 0.0), ServerSettings::default());
     sim.frame_us = sim.tick_us; // one client frame per tick
     // Moving ones, and static scenery that no system writes (its own archetype).
@@ -225,7 +232,7 @@ fn server(entities: usize, clients: usize, moving: f32, ticks: usize) -> (f64, f
         move_movers(&mut s.world, &mut s.mover_q, dt);
         sync_transforms(&mut s.world, &mut s.sync_q);
         let t2 = Instant::now();
-        s.server.send(&mut s.world, now);
+        s.server.send_with(&mut s.world, now, pool);
         let t3 = Instant::now();
         update.push((t1 - t0).as_secs_f64() * 1e6);
         send.push((t3 - t2).as_secs_f64() * 1e6);
@@ -301,22 +308,47 @@ fn main() {
     println!(
         "\n## 2. Server per tick (median µs; receive + quantize + snapshots + transport), bytes per client per tick"
     );
-    println!("| entities | moving | clients | update µs | send µs | total µs | B/client/tick |");
-    println!("|---:|---:|---:|---:|---:|---:|---:|");
+    let mut cases = Vec::new();
     for &entities in &[100usize, 1000, 10_000] {
         for &moving in &[1.0f32, 0.1] {
             for &clients in &[1usize, 8, 32] {
-                if quick && clients == 32 && entities == 10_000 {
-                    continue;
+                if !(quick && clients == 32 && entities == 10_000) {
+                    cases.push((entities, moving, clients));
                 }
-                let (u, s, t, b) = server(entities, clients, moving, ticks);
-                println!(
-                    "| {entities} | {:.0} % | {clients} | {u:.1} | {s:.1} | {t:.1} | {b:.0} |",
-                    moving * 100.0
-                );
             }
         }
     }
+    // Serial first, before the pool exists (its idle workers would share the cores).
+    let serial: Vec<_> = cases
+        .iter()
+        .map(|&(e, m, c)| server(e, c, m, ticks, None))
+        .collect();
+    let workers = std::thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .saturating_sub(1);
+    let pool = ThreadPool::builder().workers(workers).build().unwrap();
+    pool.register_current_thread().unwrap();
+    let parallel: Vec<_> = cases
+        .iter()
+        .map(|&(e, m, c)| server(e, c, m, ticks, Some(&pool)))
+        .collect();
+    println!(
+        "Snapshots packed on one thread, and in parallel on {} threads (the job system).",
+        workers + 1
+    );
+    println!(
+        "| entities | moving | clients | update µs | send µs | total µs | total µs, parallel | B/client/tick |"
+    );
+    println!("|---:|---:|---:|---:|---:|---:|---:|---:|");
+    for ((&(entities, moving, clients), &(u, s, t, b)), &(_, _, tp, _)) in
+        cases.iter().zip(&serial).zip(&parallel)
+    {
+        println!(
+            "| {entities} | {:.0} % | {clients} | {u:.1} | {s:.1} | {t:.1} | {tp:.1} | {b:.0} |",
+            moving * 100.0
+        );
+    }
+    drop(pool);
 
     println!(
         "\n## 3. Client per frame (one tick per frame; own pawn predicted; the game's tick is trivial)"

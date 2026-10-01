@@ -20,6 +20,7 @@ use crate::schema::{NetSchema, WordKind};
 use crate::wire::{self, CH_RELIABLE, CH_SNAPSHOT, CH_UNRELIABLE, HISTORY, INPUT_RING, Inbox};
 use crate::{InputData, InputHeader, NetInput, NetRelevance, Replicated};
 use engine_core::math::Vec3;
+use engine_core::jobs::ThreadPool;
 use engine_ecs::{ComponentId, Entity, QueryState, Transform, World, bytemuck};
 use engine_net_transport::{ConnectionId, DisconnectReason, Event, MessageId, Transport};
 use std::collections::VecDeque;
@@ -187,6 +188,13 @@ struct ClientState<I> {
     avg_record_bits: f32,
     /// Records of the snapshot being written (swapped into its `Sent` entry).
     scratch: Vec<Record>,
+    // Packing scratch, per client so clients pack in parallel.
+    budget: usize,
+    candidates: Vec<(f32, u32)>,
+    kept: Vec<u32>,
+    measure: BitWriter,
+    writer: BitWriter,
+    out: Vec<u8>,
     stats: ServerStats,
 }
 
@@ -232,10 +240,6 @@ pub struct Server<I: InputData, T: Transport> {
     removed: Vec<Entity>,
     pending: Vec<Entity>,
     chunk_slots: Vec<u32>,
-    candidates: Vec<(f32, u32)>,
-    kept: Vec<u32>,
-    measure: BitWriter,
-    writer: BitWriter,
     message: Vec<u8>,
     input_bytes: Vec<u8>,
 }
@@ -291,10 +295,6 @@ impl<I: InputData, T: Transport> Server<I, T> {
             removed: Vec::new(),
             pending: Vec::new(),
             chunk_slots: Vec::new(),
-            candidates: Vec::new(),
-            kept: Vec::new(),
-            measure: BitWriter::with_limit(1 << 16),
-            writer: BitWriter::with_limit(settings.max_snapshot_bytes),
             message: Vec::with_capacity(settings.max_snapshot_bytes + 64),
             input_bytes: vec![0; core::mem::size_of::<I>()],
             schema,
@@ -415,6 +415,12 @@ impl<I: InputData, T: Transport> Server<I, T> {
             view: None,
             avg_record_bits: 64.0,
             scratch: Vec::new(),
+            budget: 0,
+            candidates: Vec::new(),
+            kept: Vec::new(),
+            measure: BitWriter::with_limit(1 << 16),
+            writer: BitWriter::with_limit(self.settings.max_snapshot_bytes),
+            out: Vec::with_capacity(self.settings.max_snapshot_bytes + 16),
             stats: ServerStats::default(),
         }));
         let mut welcome = [0u8; 19];
@@ -647,6 +653,13 @@ impl<I: InputData, T: Transport> Server<I, T> {
     /// shapes, sends each client its snapshot, flushes the transport and advances the
     /// tick. Call after the game's systems.
     pub fn send(&mut self, world: &mut World, now: Instant) {
+        self.send_with(world, now, None);
+    }
+
+    /// [`Self::send`], packing the clients' snapshots in parallel on `pool` (worth it
+    /// from a few clients with many entities: each client's packing scans every
+    /// networked entity).
+    pub fn send_with(&mut self, world: &mut World, now: Instant, pool: Option<&ThreadPool>) {
         engine_profiler::zone!("net::server::send");
         self.sync_entities(world);
         self.build_frame(world);
@@ -657,9 +670,7 @@ impl<I: InputData, T: Transport> Server<I, T> {
             .tick
             .is_multiple_of(self.settings.snapshot_interval.max(1))
         {
-            for index in 0..self.clients.len() {
-                self.write_snapshot(index);
-            }
+            self.write_snapshots(pool);
         }
         self.transport.flush(now);
         self.tick += 1;
@@ -979,180 +990,183 @@ impl<I: InputData, T: Transport> Server<I, T> {
         lag.finish();
     }
 
-    fn write_snapshot(&mut self, index: usize) {
-        engine_profiler::zone!("net::server::snapshot");
-        let tick = self.tick;
-        let Some(c) = self.clients[index].as_deref_mut() else {
-            return;
+    /// Builds every client's snapshot (in parallel on `pool` when given: each client's
+    /// packing reads the shared frames and writes only its own state, ADR 0019), then
+    /// queues them on the transport in client order.
+    fn write_snapshots(&mut self, pool: Option<&ThreadPool>) {
+        engine_profiler::zone!("net::server::snapshots");
+        let Self {
+            schema,
+            slots,
+            frames,
+            clients,
+            transport,
+            settings,
+            tick,
+            ..
+        } = self;
+        for c in clients.iter_mut().flatten() {
+            c.budget = transport
+                .send_budget(c.conn)
+                .unwrap_or(0)
+                .min(settings.max_snapshot_bytes);
+        }
+        let shared = Shared {
+            schema,
+            slots,
+            frames,
+            tick: *tick,
+            owner_priority: settings.owner_priority,
         };
-        let budget = self
-            .transport
-            .send_budget(c.conn)
-            .unwrap_or(0)
-            .min(self.settings.max_snapshot_bytes);
-        if budget < 32 {
-            return;
+        let shared = &shared;
+        match pool {
+            Some(pool) if clients.iter().flatten().count() > 1 => pool.scope(|s| {
+                for c in clients.iter_mut().flatten() {
+                    s.spawn(move || build_snapshot(shared, c));
+                }
+            }),
+            _ => {
+                for c in clients.iter_mut().flatten() {
+                    build_snapshot(shared, c);
+                }
+            }
         }
-        let n = self.slots.len();
-        if c.ghosts.len() < n {
-            c.ghosts.resize(n, Ghost::default());
+        for c in clients.iter_mut().flatten() {
+            if c.out.is_empty() {
+                continue;
+            }
+            let result = transport.send(c.conn, CH_SNAPSHOT, &c.out);
+            deliver_snapshot(c, result, *tick);
         }
-        let owner_code = c.id.0 + 1;
-        // Candidates and their accumulated priority.
-        self.candidates.clear();
-        for s in 0..n {
-            let slot = &self.slots[s];
-            let g = &mut c.ghosts[s];
-            let relevance = if slot.alive {
-                relevance(c.view, slot)
+    }
+}
+
+/// What every client's snapshot reads.
+struct Shared<'a> {
+    schema: &'a NetSchema,
+    slots: &'a [Slot],
+    frames: &'a [Frame],
+    tick: u32,
+    owner_priority: f32,
+}
+
+/// Packs one client's snapshot into `c.out` (empty: nothing to send this tick) and its
+/// records into `c.scratch`.
+fn build_snapshot<I: InputData>(sh: &Shared<'_>, c: &mut ClientState<I>) {
+    engine_profiler::zone!("net::server::snapshot");
+    c.out.clear();
+    let tick = sh.tick;
+    let budget = c.budget;
+    if budget < 32 {
+        return;
+    }
+    let n = sh.slots.len();
+    if c.ghosts.len() < n {
+        c.ghosts.resize(n, Ghost::default());
+    }
+    let owner_code = c.id.0 + 1;
+    // Candidates and their accumulated priority.
+    c.candidates.clear();
+    for (s, (slot, g)) in sh.slots.iter().zip(c.ghosts.iter_mut()).enumerate() {
+        let relevance = if slot.alive {
+            relevance(c.view, slot)
+        } else {
+            None
+        };
+        let need = if let Some(rel) = relevance {
+            if g.has && g.sent_gen != slot.generation {
+                // A new entity in this slot: the client gets it whole.
+                g.acked = 0;
+                g.acked_prev = 0;
+                g.alive_tick = 0;
+                g.lost_alive = false;
+            }
+            let removal_in_flight = g.removal_tick > g.alive_tick;
+            let need = if g.acked == 0 {
+                g.alive_tick == 0 || g.lost_alive || removal_in_flight
             } else {
-                None
-            };
-            let need = if let Some(rel) = relevance {
-                if g.has && g.sent_gen != slot.generation {
-                    // A new entity in this slot: the client gets it whole.
-                    g.acked = 0;
-                    g.acked_prev = 0;
-                    g.alive_tick = 0;
-                    g.lost_alive = false;
-                }
-                let removal_in_flight = g.removal_tick > g.alive_tick;
-                let need = if g.acked == 0 {
-                    g.alive_tick == 0 || g.lost_alive || removal_in_flight
-                } else {
-                    slot.changed_at > g.alive_tick
-                        || (g.lost_alive && g.alive_tick > g.acked)
-                        || removal_in_flight
-                };
-                if need {
-                    g.priority += if slot.owner == owner_code {
-                        rel * self.settings.owner_priority
-                    } else {
-                        rel
-                    };
-                }
-                need
-            } else if g.has {
-                let need = g.removal_tick <= g.alive_tick || g.lost_removal;
-                if need {
-                    g.priority += 10.0;
-                }
-                need
-            } else {
-                false
+                slot.changed_at > g.alive_tick
+                    || (g.lost_alive && g.alive_tick > g.acked)
+                    || removal_in_flight
             };
             if need {
-                self.candidates.push((g.priority, s as u32));
+                g.priority += if slot.owner == owner_code {
+                    rel * sh.owner_priority
+                } else {
+                    rel
+                };
             }
+            need
+        } else if g.has {
+            let need = g.removal_tick <= g.alive_tick || g.lost_removal;
+            if need {
+                g.priority += 10.0;
+            }
+            need
+        } else {
+            false
+        };
+        if need {
+            c.candidates.push((g.priority, s as u32));
         }
-        // The highest priorities that probably fit, in slot order.
-        let header_bytes = 5;
-        let limit = budget - header_bytes;
-        let estimate = ((limit * 8) as f32 / c.avg_record_bits.max(8.0) * 1.5) as usize + 8;
-        let k = estimate.min(self.candidates.len());
-        if k < self.candidates.len() {
-            self.candidates
-                .select_nth_unstable_by(k, |a, b| b.0.total_cmp(&a.0));
-            c.stats.deferred += (self.candidates.len() - k) as u64;
-        }
-        let chosen = &mut self.candidates[..k];
+    }
+    // The highest priorities that probably fit.
+    let header_bytes = 5;
+    let limit = budget - header_bytes;
+    let estimate = ((limit * 8) as f32 / c.avg_record_bits.max(8.0) * 1.5) as usize + 8;
+    let k = estimate.min(c.candidates.len());
+    if k < c.candidates.len() {
+        c.candidates
+            .select_nth_unstable_by(k, |a, b| b.0.total_cmp(&a.0));
+        c.stats.deferred += (c.candidates.len() - k) as u64;
+    }
+    let chosen = &mut c.candidates[..k];
 
-        let w = &mut self.writer;
-        w.reset(limit);
-        // Header: input acknowledgement and lead, default baseline.
-        let has_input = c.newest_input > 0;
-        w.bit(has_input);
-        if has_input {
-            let lead = (i64::from(c.newest_input) - i64::from(tick)).clamp(-1000, 1000) as i32;
-            w.signed(lead, 2);
-            c.stats.input_lead = lead;
-        }
-        let default_base = c.acked_snapshot;
-        let has_default = default_base > 0 && tick - default_base < HISTORY;
-        w.bit(has_default);
-        if has_default {
-            w.golomb(tick - default_base, 2);
-        }
-        let mut records_written = 0usize;
-        let mut prev: Option<u32> = None;
-        let mut full = 0u64;
-        let frame_index = (tick % HISTORY) as usize;
-        // Which of the chosen fit, decided in priority order (Fiedler: skip what does not
-        // fit, try the next), each record measured exactly; then they are written in
-        // slot order so the slot gaps stay small.
-        chosen.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
-        let gap_bits =
-            1 + crate::bits::golomb_bits(n as u32 / (chosen.len() as u32).max(1), wire::K_GAP)
-                as usize;
-        let mut room = (limit * 8).saturating_sub(w.bits() + 1);
-        let mut skipped = 0u64;
-        self.kept.clear();
-        for &(_, s) in chosen.iter() {
-            let slot = &self.slots[s as usize];
-            let removal = !(slot.alive && relevance(c.view, slot).is_some());
-            let g = &c.ghosts[s as usize];
-            if removal {
-                let cost = gap_bits + 2 + 16;
-                if cost <= room {
-                    room -= cost;
-                    self.kept.push(s);
-                } else {
-                    skipped += 1;
-                }
-                continue;
-            }
-            if g.acked > 0 && g.last_bits > 0 {
-                // A delta again: about as large as the last one (+12 %); the final pass
-                // skips the rare record that turns out larger than its room.
-                let cost = gap_bits + usize::from(g.last_bits) * 9 / 8 + 2;
-                if cost <= room {
-                    room -= cost;
-                    self.kept.push(s);
-                } else {
-                    skipped += 1;
-                }
-                continue;
-            }
-            self.measure.reset(1 << 16);
+    let w = &mut c.writer;
+    w.reset(limit);
+    // Header: input acknowledgement and lead, default baseline.
+    let has_input = c.newest_input > 0;
+    w.bit(has_input);
+    if has_input {
+        let lead = (i64::from(c.newest_input) - i64::from(tick)).clamp(-1000, 1000) as i32;
+        w.signed(lead, 2);
+        c.stats.input_lead = lead;
+    }
+    let default_base = c.acked_snapshot;
+    let has_default = default_base > 0 && tick - default_base < HISTORY;
+    w.bit(has_default);
+    if has_default {
+        w.golomb(tick - default_base, 2);
+    }
+    let mut records_written = 0usize;
+    let mut prev: Option<u32> = None;
+    let mut full = 0u64;
+    let frame_index = (tick % HISTORY) as usize;
+    // Which of the chosen fit, decided in priority order (Fiedler: skip what does not
+    // fit, try the next); then they are written in slot order so the slot gaps stay
+    // small.
+    chosen.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
+    let gap_bits =
+        1 + crate::bits::golomb_bits(n as u32 / (chosen.len() as u32).max(1), wire::K_GAP)
+            as usize;
+    let mut room = (limit * 8).saturating_sub(w.bits() + 1);
+    let mut skipped = 0u64;
+    c.kept.clear();
+    for &(_, s) in chosen.iter() {
+        let slot = &sh.slots[s as usize];
+        let removal = !(slot.alive && relevance(c.view, slot).is_some());
+        let g = &c.ghosts[s as usize];
+        let cost = if removal {
+            gap_bits + 2 + 16
+        } else if g.acked > 0 && g.last_bits > 0 {
+            // A delta again: about as large as the last one (+12 %); the final pass
+            // skips the rare record that turns out larger than its room.
+            gap_bits + usize::from(g.last_bits) * 9 / 8 + 2
+        } else {
+            c.measure.reset(1 << 16);
             if encode_record(
-                &self.schema,
-                &self.frames,
-                frame_index,
-                tick,
-                slot,
-                &c.ghosts[s as usize],
-                s,
-                removal,
-                default_base,
-                owner_code,
-                &mut self.measure,
-            )
-            .is_none()
-            {
-                continue;
-            }
-            let cost = gap_bits + self.measure.bits();
-            if cost <= room {
-                room -= cost;
-                self.kept.push(s);
-            } else {
-                skipped += 1;
-            }
-        }
-        self.kept.sort_unstable();
-        // Records go into a scratch list until the message id is known.
-        c.scratch.clear();
-        let records_start_bits = w.bits();
-        for &s in &self.kept {
-            let slot = &self.slots[s as usize];
-            let g = &mut c.ghosts[s as usize];
-            let mark = w.bits();
-            w.bit(true);
-            w.golomb(prev.map_or(s, |p| s - p - 1), wire::K_GAP);
-            let removal = !(slot.alive && relevance(c.view, slot).is_some());
-            let Some(is_full) = encode_record(
-                &self.schema,
-                &self.frames,
+                sh.schema,
+                sh.frames,
                 frame_index,
                 tick,
                 slot,
@@ -1161,83 +1175,109 @@ impl<I: InputData, T: Transport> Server<I, T> {
                 removal,
                 default_base,
                 owner_code,
-                w,
-            ) else {
-                w.rewind(mark);
-                continue;
-            };
-            if w.bits() + 1 > limit * 8 {
-                // The gap estimate was short (rare): leave it for the next snapshot.
-                w.rewind(mark);
-                skipped += 1;
+                &mut c.measure,
+            )
+            .is_none()
+            {
                 continue;
             }
-            prev = Some(s);
-            records_written += 1;
-            full += u64::from(is_full);
-            g.priority = 0.0;
-            g.last_bits = if is_full {
-                0
-            } else {
-                (w.bits() - mark).min(usize::from(u16::MAX)) as u16
-            };
-            if removal {
-                g.removal_tick = tick;
-                g.lost_removal = false;
-            } else {
-                g.has = true;
-                g.sent_gen = slot.generation;
-                g.alive_tick = tick;
-                g.lost_alive = false;
-            }
-            c.scratch.push(Record {
-                slot: s,
-                removal,
-                generation: if removal { g.sent_gen } else { slot.generation },
-            });
+            gap_bits + c.measure.bits()
+        };
+        if cost <= room {
+            room -= cost;
+            c.kept.push(s);
+        } else {
+            skipped += 1;
         }
-        w.bit(false);
-        let record_bits = w.bits() - records_start_bits;
-        if records_written > 0 {
-            let avg = record_bits as f32 / records_written as f32;
-            c.avg_record_bits = c.avg_record_bits * 0.8 + avg * 0.2;
+    }
+    c.kept.sort_unstable();
+    // Records go into a scratch list until the message id is known.
+    c.scratch.clear();
+    let records_start_bits = w.bits();
+    for &s in &c.kept {
+        let slot = &sh.slots[s as usize];
+        let g = &mut c.ghosts[s as usize];
+        let mark = w.bits();
+        w.bit(true);
+        w.golomb(prev.map_or(s, |p| s - p - 1), wire::K_GAP);
+        let removal = !(slot.alive && relevance(c.view, slot).is_some());
+        let Some(is_full) = encode_record(
+            sh.schema,
+            sh.frames,
+            frame_index,
+            tick,
+            slot,
+            g,
+            s,
+            removal,
+            default_base,
+            owner_code,
+            w,
+        ) else {
+            w.rewind(mark);
+            continue;
+        };
+        if w.bits() + 1 > limit * 8 {
+            // The estimate was short (rare): leave it for the next snapshot.
+            w.rewind(mark);
+            skipped += 1;
+            continue;
         }
-        let bits = w.finish();
-        self.message.clear();
-        self.message.push(wire::TAG_SNAPSHOT);
-        self.message.extend_from_slice(&tick.to_le_bytes());
-        self.message.extend_from_slice(bits);
-        c.stats.deferred += skipped;
-        match self.transport.send(c.conn, CH_SNAPSHOT, &self.message) {
-            Ok(msg) => {
-                c.stats.snapshots += 1;
-                c.stats.snapshot_bytes += self.message.len() as u64;
-                c.stats.last_snapshot_bytes = self.message.len();
-                c.stats.records += records_written as u64;
-                c.stats.full_records += full;
-                let entry = &mut c.sent[msg.0 as usize % wire::SENT_RING];
-                if entry.active {
-                    // Never resolved (more than the ring in flight): treat as lost.
-                    c.stats.lost += 1;
-                    for r in &entry.records {
-                        if let Some(g) = c.ghosts.get_mut(r.slot as usize) {
-                            if r.removal {
-                                g.lost_removal = true;
-                            } else {
-                                g.lost_alive = true;
-                            }
-                        }
-                    }
-                }
-                let entry = &mut c.sent[msg.0 as usize % wire::SENT_RING];
-                core::mem::swap(&mut entry.records, &mut c.scratch);
-                entry.active = true;
-                entry.msg = msg.0;
-                entry.tick = tick;
-            }
-            Err(_) => {
-                // Not queued: as if lost.
-                for r in &c.scratch {
+        prev = Some(s);
+        records_written += 1;
+        full += u64::from(is_full);
+        g.priority = 0.0;
+        g.last_bits = if is_full {
+            0
+        } else {
+            (w.bits() - mark).min(usize::from(u16::MAX)) as u16
+        };
+        if removal {
+            g.removal_tick = tick;
+            g.lost_removal = false;
+        } else {
+            g.has = true;
+            g.sent_gen = slot.generation;
+            g.alive_tick = tick;
+            g.lost_alive = false;
+        }
+        c.scratch.push(Record {
+            slot: s,
+            removal,
+            generation: if removal { g.sent_gen } else { slot.generation },
+        });
+    }
+    w.bit(false);
+    let record_bits = w.bits() - records_start_bits;
+    if records_written > 0 {
+        let avg = record_bits as f32 / records_written as f32;
+        c.avg_record_bits = c.avg_record_bits * 0.8 + avg * 0.2;
+    }
+    let bits = w.finish();
+    c.out.push(wire::TAG_SNAPSHOT);
+    c.out.extend_from_slice(&tick.to_le_bytes());
+    c.out.extend_from_slice(bits);
+    c.stats.deferred += skipped;
+    c.stats.records += records_written as u64;
+    c.stats.full_records += full;
+}
+
+/// Records a queued snapshot for delivery notification (or marks its records lost).
+fn deliver_snapshot<I: InputData>(
+    c: &mut ClientState<I>,
+    result: Result<MessageId, engine_net_transport::SendError>,
+    tick: u32,
+) {
+    match result {
+        Ok(msg) => {
+            c.stats.snapshots += 1;
+            c.stats.snapshot_bytes += c.out.len() as u64;
+            c.stats.last_snapshot_bytes = c.out.len();
+            let entry = &mut c.sent[msg.0 as usize % wire::SENT_RING];
+            if entry.active {
+                // Never resolved (more than the ring in flight): treat as lost.
+                c.stats.lost += 1;
+                for r in &entry.records {
                     if let Some(g) = c.ghosts.get_mut(r.slot as usize) {
                         if r.removal {
                             g.lost_removal = true;
@@ -1247,9 +1287,26 @@ impl<I: InputData, T: Transport> Server<I, T> {
                     }
                 }
             }
+            let entry = &mut c.sent[msg.0 as usize % wire::SENT_RING];
+            core::mem::swap(&mut entry.records, &mut c.scratch);
+            entry.active = true;
+            entry.msg = msg.0;
+            entry.tick = tick;
         }
-        c.scratch.clear();
+        Err(_) => {
+            // Not queued: as if lost.
+            for r in &c.scratch {
+                if let Some(g) = c.ghosts.get_mut(r.slot as usize) {
+                    if r.removal {
+                        g.lost_removal = true;
+                    } else {
+                        g.lost_alive = true;
+                    }
+                }
+            }
+        }
     }
+    c.scratch.clear();
 }
 
 /// Writes one entity record from its kind on: a removal, a delta against the client's
