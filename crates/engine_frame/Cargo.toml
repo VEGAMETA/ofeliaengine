@@ -1,0 +1,29 @@
+[package]
+name = "engine_frame"
+description = "The frame renderer: one object that composes a view's frame (scene passes, temporal antialiasing or upscaling, bloom, exposure, tone mapping) into the render graph (ADR 0072)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["fsr", "dlss"]
+# FSR 3.1, built from the vendored FidelityFX SDK (C++ through `cc`, ADR 0060).
+fsr = ["dep:engine_fsr"]
+# DLSS through Streamline, with DLLs the user supplies (ADR 0063).
+dlss = ["dep:engine_dlss"]
+
+[dependencies]
+engine_core.workspace = true
+engine_profiler.workspace = true
+engine_render.workspace = true
+engine_rhi.workspace = true
+# TAAU and the Upscaler interface every upscaler implements (ADR 0063).
+engine_upscale.workspace = true
+engine_fsr = { workspace = true, optional = true }
+engine_dlss = { workspace = true, optional = true }
+

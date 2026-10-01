@@ -188,6 +188,7 @@ impl Bench {
                     },
                 )
                 .unwrap();
+            let exposure = engine_exposure(&mut fg);
             let result: Texture = match upscaler {
                 Upscaler::None => color,
                 Upscaler::Taau => taau
@@ -220,6 +221,7 @@ impl Bench {
                                 meters_per_unit: 1.0,
                             },
                             frame_time_ms: 1000.0 / 60.0,
+                            exposure,
                         },
                         output,
                         *frame_number,
@@ -342,6 +344,41 @@ fn psnr(a: &[[f32; 3]], b: &[[f32; 3]]) -> f64 {
     }
     let mse = sum / (a.len() * 3) as f64;
     10.0 * (1.0 / mse.max(1e-12)).log10()
+}
+
+/// `ENGINE_UPSCALE_EXPOSURE=1`: give the upscaler the exposure the image is judged at (1, a
+/// 1 × 1 texture, ADR 0072) instead of its own automatic exposure.
+fn engine_exposure(fg: &mut engine_render::graph::FrameGraph<'_>) -> Option<Texture> {
+    if !std::env::var("ENGINE_UPSCALE_EXPOSURE").is_ok_and(|v| v == "1") {
+        return None;
+    }
+    let texture = fg.create_texture(
+        "exposure",
+        TextureDesc::new_2d(engine_upscale::EXPOSURE_FORMAT, 1, 1),
+    );
+    fg.add_pass("exposure value")
+        .write(texture, Access::TransferWrite)
+        .execute(move |pass| {
+            // SAFETY: recording outside a rendering scope; the graph arranged the layout.
+            unsafe {
+                pass.device.cmd_clear_color_image(
+                    pass.cmd,
+                    pass.image(texture),
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &vk::ClearColorValue {
+                        float32: [1.0, 0.0, 0.0, 0.0],
+                    },
+                    &[vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }],
+                );
+            }
+        });
+    Some(texture)
 }
 
 fn main() {
