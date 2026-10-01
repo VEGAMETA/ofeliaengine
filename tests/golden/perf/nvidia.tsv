@@ -52,3 +52,16 @@ sponza_atmosphere	forward	395.3
 sponza_atmosphere	shadow	159.5
 sponza_atmosphere	shadow cull	3.1
 sponza_atmosphere	tonemap	27.6
+sponza_local_shadows	(frame total)	1117.6
+sponza_local_shadows	(gpu frame)	1138.9
+sponza_local_shadows	bloom downsample	85.0
+sponza_local_shadows	bloom upsample	34.8
+sponza_local_shadows	cull	4.5
+sponza_local_shadows	cull setup	0.7
+sponza_local_shadows	forward	787.3
+sponza_local_shadows	light tiles	10.2
+sponza_local_shadows	light tiles clear	2.0
+sponza_local_shadows	shadow	158.8
+sponza_local_shadows	shadow cull	3.1
+sponza_local_shadows	sky	3.1
+sponza_local_shadows	tonemap	27.6
