@@ -1565,3 +1565,345 @@ fn bytemuck_cast(v: &[u32]) -> &[u8] {
     unsafe { core::slice::from_raw_parts(v.as_ptr().cast::<u8>(), v.len() * 4) }
 }
 
+
+/// Debug: a minimal raw-Vulkan rasterization probe (no engine renderer): 60 cubes placed
+/// by arithmetic, depth tested, read back; every frame must be identical.
+#[test]
+#[ignore = "stress"]
+fn raster_probe_is_deterministic() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let dir = std::env::var("PROBE_SHADERS").unwrap();
+    let mut allocator = Allocator::new(&device);
+    let d = device.raw();
+    let n: usize = std::env::var("STRESS_FRAMES").ok().and_then(|v| v.parse().ok()).unwrap_or(100);
+    let mode: u32 = std::env::var("PROBE_MODE").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+    let size = 128u32;
+    let repeat: u32 = std::env::var("PROBE_REPEAT").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let image = |allocator: &mut Allocator, format: vk::Format, usage: vk::ImageUsageFlags| {
+        allocator
+            .create_image(
+                &vk::ImageCreateInfo::default()
+                    .image_type(vk::ImageType::TYPE_2D)
+                    .format(format)
+                    .extent(vk::Extent3D { width: size, height: size, depth: 1 })
+                    .mip_levels(1)
+                    .array_layers(1)
+                    .samples(vk::SampleCountFlags::TYPE_1)
+                    .tiling(vk::ImageTiling::OPTIMAL)
+                    .usage(usage | vk::ImageUsageFlags::TRANSFER_SRC),
+                MemoryLocation::Device,
+            )
+            .unwrap()
+    };
+    let (color, color_mem) = image(&mut allocator, COLOR, vk::ImageUsageFlags::COLOR_ATTACHMENT);
+    let (depth, depth_mem) = image(&mut allocator, DEPTH, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT);
+    let view = |image, format, aspect| {
+        // SAFETY: valid image.
+        unsafe {
+            d.create_image_view(
+                &vk::ImageViewCreateInfo::default()
+                    .image(image)
+                    .view_type(vk::ImageViewType::TYPE_2D)
+                    .format(format)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: aspect,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    }),
+                None,
+            )
+        }
+        .unwrap()
+    };
+    let color_view = view(color, COLOR, vk::ImageAspectFlags::COLOR);
+    let depth_view = view(depth, DEPTH, vk::ImageAspectFlags::DEPTH);
+    let image_bytes = u64::from(size * size * 4);
+    let (readback, readback_mem) = allocator
+        .create_buffer(
+            &vk::BufferCreateInfo::default().size(image_bytes * 2).usage(vk::BufferUsageFlags::TRANSFER_DST),
+            MemoryLocation::Readback,
+        )
+        .unwrap();
+    // Positions of the 36 vertices, for mode 1.
+    let corners = [
+        [-0.5f32, -0.5, -0.5], [0.5, -0.5, -0.5], [0.5, 0.5, -0.5], [-0.5, 0.5, -0.5],
+        [-0.5, -0.5, 0.5], [0.5, -0.5, 0.5], [0.5, 0.5, 0.5], [-0.5, 0.5, 0.5],
+    ];
+    let indices = [0usize, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4, 3, 6, 2, 3, 7, 6, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5];
+    let positions: Vec<u32> = indices.iter().flat_map(|&i| corners[i]).map(f32::to_bits).collect();
+    let (pbuf, mut pmem) = allocator
+        .create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(positions.len() as u64 * 4)
+                .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS),
+            MemoryLocation::Dynamic,
+        )
+        .unwrap();
+    pmem.mapped_slice_mut().unwrap()[..positions.len() * 4].copy_from_slice(bytemuck_cast(&positions));
+    // SAFETY: valid buffer with device address usage.
+    let paddr = unsafe { d.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(pbuf)) };
+    let module = |name: &str| {
+        let bytes = std::fs::read(format!("{dir}/raster.{name}.spv")).unwrap();
+        let words: Vec<u32> = bytes.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        // SAFETY: valid SPIR-V.
+        unsafe { d.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.unwrap()
+    };
+    let vs = module("rasterVertex");
+    let fs = module("rasterFragment");
+    let ranges = [vk::PushConstantRange { stage_flags: vk::ShaderStageFlags::ALL_GRAPHICS, offset: 0, size: 16 }];
+    // SAFETY: plain object creation.
+    let layout = unsafe { d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&ranges), None) }.unwrap();
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vs).name(c"rasterVertex"),
+        vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(fs).name(c"rasterFragment"),
+    ];
+    let formats = [COLOR];
+    let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats).depth_attachment_format(DEPTH);
+    let vi = vk::PipelineVertexInputStateCreateInfo::default();
+    let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    let vp = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+    let rs = vk::PipelineRasterizationStateCreateInfo::default().cull_mode(vk::CullModeFlags::NONE).line_width(1.0);
+    let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let ds = vk::PipelineDepthStencilStateCreateInfo::default().depth_test_enable(true).depth_write_enable(true).depth_compare_op(vk::CompareOp::LESS);
+    let blend = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+    let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&blend);
+    let dyns = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .push_next(&mut rendering)
+        .stages(&stages)
+        .vertex_input_state(&vi)
+        .input_assembly_state(&ia)
+        .viewport_state(&vp)
+        .rasterization_state(&rs)
+        .multisample_state(&ms)
+        .depth_stencil_state(&ds)
+        .color_blend_state(&cb)
+        .dynamic_state(&dynamic)
+        .layout(layout);
+    // SAFETY: valid create info.
+    let pipeline = unsafe { d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None) }.unwrap()[0];
+    // SAFETY: test setup.
+    let (pool, cmd) = unsafe {
+        let pool = d
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(device.graphics.family),
+                None,
+            )
+            .unwrap();
+        let cmd = d
+            .allocate_command_buffers(&vk::CommandBufferAllocateInfo::default().command_pool(pool).command_buffer_count(1))
+            .unwrap()[0];
+        (pool, cmd)
+    };
+    let range = |aspect| vk::ImageSubresourceRange { aspect_mask: aspect, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+    let mut hashes: Vec<u64> = Vec::new();
+    let use_graph = std::env::var("PROBE_GRAPH").is_ok();
+    let mut graph = RenderGraph::new(&device, 1);
+    for _ in 0..n {
+        if use_graph {
+            // SAFETY: one-shot recording and submission, then wait.
+            unsafe {
+                d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
+                d.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).unwrap();
+            }
+            {
+                // SAFETY: nothing in flight.
+                let mut fg = unsafe { graph.begin_slot(0, cmd) };
+                let gc = fg.create_texture("color", TextureDesc::new_2d(COLOR, size, size));
+                let gd = fg.create_texture("depth", TextureDesc::new_2d(DEPTH, size, size));
+                let out = fg.import_buffer(
+                    "readback",
+                    ImportedBuffer {
+                        buffer: readback,
+                        size: image_bytes * 2,
+                        address: 0,
+                        initial: BufferState::idle(),
+                        final_state: Some(BufferState::host_read()),
+                    },
+                );
+                fg.add_pass("probe")
+                    .color(gc, engine_render::graph::LoadOp::Clear([0.0, 0.0, 0.25, 1.0]), engine_render::graph::StoreOp::Store)
+                    .depth(gd, engine_render::graph::LoadOp::Clear([1.0, 0.0, 0.0, 0.0]), engine_render::graph::StoreOp::Store)
+                    .execute(move |ctx| {
+                        let area = ctx.render_area();
+                        // SAFETY: recording inside the pass's rendering scope.
+                        unsafe {
+                            ctx.device.cmd_bind_pipeline(ctx.cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+                            ctx.device.cmd_set_viewport(ctx.cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: size as f32, height: size as f32, min_depth: 0.0, max_depth: 1.0 }]);
+                            ctx.device.cmd_set_scissor(ctx.cmd, 0, &[area]);
+                            let mut push = [0u8; 16];
+                            push[..8].copy_from_slice(&paddr.to_le_bytes());
+                            push[8..12].copy_from_slice(&mode.to_le_bytes());
+                            ctx.device.cmd_push_constants(ctx.cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push);
+                            for _ in 0..repeat {
+                                ctx.device.cmd_draw(ctx.cmd, 36, 60, 0, 0);
+                            }
+                        }
+                    });
+                fg.add_pass("read back")
+                    .read(gc, Access::TransferRead)
+                    .read(gd, Access::TransferRead)
+                    .write(out, Access::TransferWrite)
+                    .execute(move |ctx| {
+                        let region = |offset, aspect| vk::BufferImageCopy {
+                            buffer_offset: offset,
+                            image_subresource: vk::ImageSubresourceLayers { aspect_mask: aspect, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                            image_extent: vk::Extent3D { width: size, height: size, depth: 1 },
+                            ..Default::default()
+                        };
+                        // SAFETY: recording; layouts arranged by the graph.
+                        unsafe {
+                            ctx.device.cmd_copy_image_to_buffer(ctx.cmd, ctx.image(gc), vk::ImageLayout::TRANSFER_SRC_OPTIMAL, ctx.buffer(out), &[region(0, vk::ImageAspectFlags::COLOR)]);
+                            ctx.device.cmd_copy_image_to_buffer(ctx.cmd, ctx.image(gd), vk::ImageLayout::TRANSFER_SRC_OPTIMAL, ctx.buffer(out), &[region(image_bytes, vk::ImageAspectFlags::DEPTH)]);
+                        }
+                    });
+                fg.execute(&mut allocator).unwrap();
+            }
+            // SAFETY: as above.
+            unsafe {
+                d.end_command_buffer(cmd).unwrap();
+                let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+                d.queue_submit2(device.graphics.raw, &[vk::SubmitInfo2::default().command_buffer_infos(&infos)], vk::Fence::null()).unwrap();
+                device.wait_idle().unwrap();
+            }
+        } else {
+        // SAFETY: one-shot recording and submission, then wait.
+        unsafe {
+            d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty()).unwrap();
+            d.begin_command_buffer(cmd, &vk::CommandBufferBeginInfo::default()).unwrap();
+            let to_attach = [
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .dst_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+                    .image(color)
+                    .subresource_range(range(vk::ImageAspectFlags::COLOR)),
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                    .dst_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+                    .dst_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+                    .image(depth)
+                    .subresource_range(range(vk::ImageAspectFlags::DEPTH)),
+            ];
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_attach));
+            let colors = [vk::RenderingAttachmentInfo::default()
+                .image_view(color_view)
+                .image_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.25, 1.0] } })];
+            let depth_info = vk::RenderingAttachmentInfo::default()
+                .image_view(depth_view)
+                .image_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue { depth_stencil: vk::ClearDepthStencilValue { depth: 1.0, stencil: 0 } });
+            let area = vk::Rect2D { offset: vk::Offset2D::default(), extent: vk::Extent2D { width: size, height: size } };
+            d.cmd_begin_rendering(
+                cmd,
+                &vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&colors).depth_attachment(&depth_info),
+            );
+            d.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::GRAPHICS, pipeline);
+            d.cmd_set_viewport(cmd, 0, &[vk::Viewport { x: 0.0, y: 0.0, width: size as f32, height: size as f32, min_depth: 0.0, max_depth: 1.0 }]);
+            d.cmd_set_scissor(cmd, 0, &[area]);
+            let mut push = [0u8; 16];
+            push[..8].copy_from_slice(&paddr.to_le_bytes());
+            push[8..12].copy_from_slice(&mode.to_le_bytes());
+            d.cmd_push_constants(cmd, layout, vk::ShaderStageFlags::ALL_GRAPHICS, 0, &push);
+            for _ in 0..repeat {
+                d.cmd_draw(cmd, 36, 60, 0, 0);
+            }
+            d.cmd_end_rendering(cmd);
+            let to_copy = [
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)
+                    .src_access_mask(vk::AccessFlags2::COLOR_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .old_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .image(color)
+                    .subresource_range(range(vk::ImageAspectFlags::COLOR)),
+                vk::ImageMemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS | vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS)
+                    .src_access_mask(vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+                    .old_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+                    .new_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                    .image(depth)
+                    .subresource_range(range(vk::ImageAspectFlags::DEPTH)),
+            ];
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().image_memory_barriers(&to_copy));
+            let region = |offset, aspect| vk::BufferImageCopy {
+                buffer_offset: offset,
+                image_subresource: vk::ImageSubresourceLayers { aspect_mask: aspect, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                image_extent: vk::Extent3D { width: size, height: size, depth: 1 },
+                ..Default::default()
+            };
+            d.cmd_copy_image_to_buffer(cmd, color, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, readback, &[region(0, vk::ImageAspectFlags::COLOR)]);
+            d.cmd_copy_image_to_buffer(cmd, depth, vk::ImageLayout::TRANSFER_SRC_OPTIMAL, readback, &[region(image_bytes, vk::ImageAspectFlags::DEPTH)]);
+            let host = [vk::MemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+                .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+                .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+            d.cmd_pipeline_barrier2(cmd, &vk::DependencyInfo::default().memory_barriers(&host));
+            d.end_command_buffer(cmd).unwrap();
+            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            d.queue_submit2(device.graphics.raw, &[vk::SubmitInfo2::default().command_buffer_infos(&infos)], vk::Fence::null()).unwrap();
+            device.wait_idle().unwrap();
+        }
+        }
+        let ptr = readback_mem.mapped_ptr().unwrap();
+        // SAFETY: idle; in bounds.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), (image_bytes * 2) as usize) };
+        let mut h: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            h = (h ^ u64::from(b)).wrapping_mul(0x100000001b3);
+        }
+        hashes.push(h);
+        if hashes.len() == 1 {
+            if let Ok(dir) = std::env::var("ENGINE_DIFF_DIR") {
+                let png = engine_render::png::encode_png(size, size, engine_render::png::PngFormat::Rgba, &bytes[..image_bytes as usize]).unwrap();
+                std::fs::write(format!("{dir}/probe_first.png"), png).unwrap();
+            }
+        }
+    }
+    let mut counts: std::collections::HashMap<u64, usize> = std::collections::HashMap::new();
+    for h in &hashes {
+        *counts.entry(*h).or_default() += 1;
+    }
+    let most = counts.values().copied().max().unwrap_or(0);
+    eprintln!("STRESS probe mode {mode}: {} of {n} frames off the majority ({} distinct images)", n - most, counts.len());
+    // SAFETY: idle.
+    unsafe {
+        graph.destroy(&mut allocator, None);
+        d.destroy_pipeline(pipeline, None);
+        d.destroy_pipeline_layout(layout, None);
+        d.destroy_shader_module(vs, None);
+        d.destroy_shader_module(fs, None);
+        d.destroy_command_pool(pool, None);
+        d.destroy_image_view(color_view, None);
+        d.destroy_image_view(depth_view, None);
+        allocator.destroy_image(color, color_mem);
+        allocator.destroy_image(depth, depth_mem);
+        allocator.destroy_buffer(readback, readback_mem);
+        allocator.destroy_buffer(pbuf, pmem);
+    }
+    drop(allocator);
+    drop(device);
+    drop(instance);
+    assert_eq!(n - most, 0);
+}

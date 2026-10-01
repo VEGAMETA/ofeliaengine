@@ -545,7 +545,8 @@ impl RenderGraph {
             vk_buffer_barriers: Vec::new(),
             color_attachments: Vec::new(),
             timing: [
-                timing::Timing::new(device, slots, device.graphics, QueueKind::Graphics),
+                timing::Timing::new(device, slots, device.graphics, QueueKind::Graphics)
+                    .filter(|_| std::env::var("ENGINE_DEBUG_NO_TIMING").is_err()),
                 compute
                     .and_then(|q| timing::Timing::new(device, slots, q, QueueKind::AsyncCompute)),
             ],
