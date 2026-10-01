@@ -28,6 +28,7 @@
 use engine_core::math::{Quat, Vec3};
 
 pub mod character;
+#[cfg(feature = "ecs")]
 pub mod ecs;
 pub mod scenes;
 mod snapshot;

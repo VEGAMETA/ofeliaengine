@@ -12,7 +12,13 @@ workspace = true
 
 [dependencies]
 engine_core.workspace = true
-engine_ecs.workspace = true
+# The `ecs` module: components and sync with the ECS (feature `ecs`, on by default; off,
+# the physics interface stands alone).
+engine_ecs = { workspace = true, optional = true }
 engine_profiler.workspace = true
 # Plain-data proofs for the ECS components (already a dependency of engine_ecs; ADR 0017).
-bytemuck = { version = "1.25", features = ["derive"] }
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
+
+[features]
+default = ["ecs"]
+ecs = ["dep:engine_ecs", "dep:bytemuck"]
