@@ -1263,6 +1263,22 @@ pub(crate) struct Prepared<'g> {
     clip_from_world: Mat4,
 }
 
+/// A view's reflections this frame ([`crate::forward::ForwardPasses::reflections`]), for
+/// effects of your own after the scene passes (the frame renderer's hook, debug views).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ReflectionOutput {
+    /// The opaque surfaces' octahedral normal and perceptual roughness
+    /// ([`NORMAL_ROUGHNESS_FORMAT`]; zero where nothing reflects: the sky, subsurface
+    /// materials).
+    pub normal_roughness: Texture,
+    /// The weight of their prefiltered radiance, split sum × specular occlusion
+    /// ([`WEIGHT_FORMAT`]).
+    pub weight: Texture,
+    /// The screen-space reflections, premultiplied by their confidence (alpha), at the
+    /// render size, when they ran.
+    pub ssr: Option<Texture>,
+}
+
 /// What a view's reflection passes read and write.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ViewInputs {
@@ -1478,14 +1494,14 @@ impl ReflectionPasses {
         bindless: &'g Bindless,
         prepared: &Prepared<'g>,
         inputs: &ViewInputs,
-    ) {
+    ) -> Option<Texture> {
         engine_profiler::zone!("render::reflections::add_view_passes");
         let ssr = prepared
             .ssr
             .map(|state| self.add_ssr_passes(fg, bindless, prepared, inputs, state));
         let probes = inputs.probes.filter(|_| prepared.probes > 0);
         if probes.is_none() && ssr.is_none() {
-            return;
+            return None;
         }
         let frame_address = prepared.address;
         let (depth, nr, weight) = (inputs.depth, inputs.normal_roughness, inputs.weight);
@@ -1548,6 +1564,7 @@ impl ReflectionPasses {
                 ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
             }
         });
+        ssr
     }
 
     /// Screen-space reflections' passes: the nearest-depth pyramid, the trace, the spatial

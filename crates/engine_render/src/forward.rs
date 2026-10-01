@@ -693,6 +693,9 @@ pub struct ForwardPasses {
     /// The environment's atmosphere tables this frame, when it has a physical sky (ADR
     /// 0069): for debugging views and tests.
     pub atmosphere: Option<AtmosphereTextures>,
+    /// The view's reflection inputs and screen-space reflections (ADR 0073), when it has
+    /// reflections: for effects of your own after the scene passes.
+    pub reflections: Option<crate::reflections::ReflectionOutput>,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -2897,7 +2900,7 @@ impl ForwardRenderer {
         } else {
             StoreOp::DontCare
         };
-        let passes = match flag_buffer {
+        let mut passes = match flag_buffer {
             None => {
                 let depth_use = if prepass {
                     prepass_pass(
@@ -2952,6 +2955,7 @@ impl ForwardRenderer {
                     motion: None,
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
+                    reflections: None,
                 }
             }
             Some(flags) => {
@@ -3088,6 +3092,7 @@ impl ForwardRenderer {
                     motion: None,
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
+                    reflections: None,
                 }
             }
         };
@@ -3200,7 +3205,7 @@ impl ForwardRenderer {
             if let Some((probes, _)) = imported.probes.filter(|_| prepared.probes > 0) {
                 probes.mark_used(true, false);
             }
-            r.passes.add_view_passes(
+            let ssr = r.passes.add_view_passes(
                 fg,
                 bindless,
                 &prepared,
@@ -3213,6 +3218,11 @@ impl ForwardRenderer {
                     probes: imported.probes.map(|(_, t)| t),
                 },
             );
+            passes.reflections = Some(crate::reflections::ReflectionOutput {
+                normal_roughness,
+                weight,
+                ssr,
+            });
         }
         // With an atmosphere or fog: the sky, aerial perspective and fog over the opaque
         // image (ADR 0069). A probe's capture fills its sky in its face copy instead.
@@ -3487,6 +3497,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         motion,
         ao: None,
         atmosphere: None,
+        reflections: None,
     }
 }
 
