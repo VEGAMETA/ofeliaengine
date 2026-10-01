@@ -104,8 +104,9 @@ spatial and a temporal filter (chosen)**; full vs **half resolution (default)**.
     the reflected point, clips history to mean ± 1.25 σ).
   - The composite: three entry points (probes, SSR, both), additive blending; the SSR-only
     one skips every pixel without a hit.
-- **`ForwardRenderer::set_reflections`** makes the 8 reflection shading pipelines
-  (`fragmentReflect*`: with/without motion, with/without AO, without/with local lights)
+- **`ForwardRenderer::set_reflections`** makes the reflection shading (16 entry points
+  `fragmentReflect*`: with/without motion vectors, ambient occlusion, the sun's contact
+  shadows and local lights' shadows, ADR 0071; 24 pipelines with the local-light variants)
   and the passes lazily; **`ForwardView::reflections`** (`Reflections::NONE` elsewhere).
   Views with reflections run the depth prepass. Specular occlusion (Lagarde 2014) from the
   material's occlusion and GTAO's is in the weight, so probes and SSR are occluded alike.
@@ -171,6 +172,9 @@ end (the machine was shared with other agents; RTX numbers vary ±10 %).
   Under TAAU from 67 % (ADR 0072) they scale with the render size. `RenderDefaults` keeps
   reflections off by default; turning them on for integrated GPUs is a product decision.
 - Transparent surfaces keep the sky's reflections; reflections in fog are fogged.
+- Views with reflections keep local and contact shadows (tested: identical images with SSR
+  on and off on a rough floor under a shadowed spot light); probe captures draw without
+  ambient occlusion, contact or local-light shadows (their cubes are blurred anyway).
 - **Not done:** probes relit from G-buffers; probe shadow maps cached across frames (one
   face per frame draws its cascade each frame); probes or SSR on transparent surfaces;
   SSR ray reuse across neighbours (Stachowiak) and last frame's color for multiple

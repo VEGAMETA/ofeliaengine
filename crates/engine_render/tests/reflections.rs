@@ -19,7 +19,8 @@ use engine_core::half;
 use engine_core::math::{Mat4, Quat, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Reflections, ShadowSettings,
+    Camera, ContactShadowSettings, DirectionalLight, DrawItem, ForwardRenderer, ForwardView,
+    LocalLight, LocalShadowSettings, Reflections, ShadowSettings, Spot,
 };
 use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
@@ -88,6 +89,8 @@ struct Bed {
     cmd: vk::CommandBuffer,
     mesh: MeshId,
     frame: u64,
+    /// Point and spot lights of the frames.
+    lights: Vec<LocalLight>,
 }
 
 const NO_SUN: DirectionalLight = DirectionalLight {
@@ -162,6 +165,7 @@ impl Bed {
             cmd,
             mesh,
             frame: 0,
+            lights: Vec::new(),
         })
     }
 
@@ -270,7 +274,7 @@ impl Bed {
                         clear: Some([0.0; 4]),
                         occlusion: None,
                         temporal: None,
-                        lights: &[],
+                        lights: &self.lights,
                         environment: Some(&self.environment),
                         reflections,
                     },
@@ -442,6 +446,8 @@ impl Bed {
         let d = self.device.raw().clone();
         // SAFETY: the device is idle.
         unsafe {
+            self.renderer
+                .destroy(&self.device, &mut self.allocator, &self.bindless);
             for p in &mut probes {
                 p.destroy(&mut self.allocator, &self.bindless);
             }
@@ -1025,4 +1031,91 @@ fn slab_hit(b: &ProbeBox, o: Vec3, d: Vec3) -> bool {
         t1 = t1.min(a.max(c));
     }
     t0 <= t1
+}
+
+/// Views with reflections keep the shading's other features: a rough floor (beyond SSR's
+/// roughness cutoff, nothing reflects there) lit by a shadowed spot light beside a block,
+/// with the sun's contact shadows, renders the same with screen-space reflections on as
+/// off (their shading has the local and contact shadow variants too).
+#[test]
+fn reflections_keep_local_and_contact_shadows() {
+    let Some(mut bed) = Bed::new() else {
+        return;
+    };
+    bed.renderer
+        .set_local_shadows(
+            &bed.device,
+            &mut bed.allocator,
+            &bed.bindless,
+            Some(LocalShadowSettings::default()),
+        )
+        .unwrap();
+    bed.renderer
+        .set_contact_shadows(
+            &bed.device,
+            &bed.bindless,
+            Some(ContactShadowSettings::default()),
+        )
+        .unwrap();
+    bed.lights = vec![LocalLight {
+        position: Vec3::new(2.5, 2.0, 0.0),
+        range: 10.0,
+        color: Vec3::splat(20.0),
+        spot: Some(Spot {
+            direction: Vec3::new(-1.0, -0.8, 0.0).normalize(),
+            inner: 0.5,
+            outer: 0.9,
+        }),
+        shadow: true,
+    }];
+    let rough = bed.material(MaterialDesc::solid([0.8; 3], 0.0, 0.95));
+    let draws = vec![
+        bed.block(rough, Vec3::new(-6.0, -0.2, -6.0), Vec3::new(6.0, 0.0, 6.0)),
+        bed.block(rough, Vec3::new(-0.5, 0.0, -0.5), Vec3::new(0.5, 1.0, 0.5)),
+    ];
+    let view = camera(Vec3::new(0.0, 3.5, 4.0), Vec3::new(0.0, 0.0, -0.5));
+    let ssr = bed.ssr(SsrSettings::default());
+    let mut without = Vec::new();
+    let mut with = Vec::new();
+    for _ in 0..3 {
+        without = bed.render(view, &draws, Reflections::NONE);
+        with = bed.render(
+            view,
+            &draws,
+            Reflections {
+                probes: None,
+                ssr: Some(&ssr),
+            },
+        );
+    }
+    let worst = without
+        .iter()
+        .zip(&with)
+        .map(|(a, b)| (*a - *b).abs().max_element())
+        .fold(0.0f32, f32::max);
+    // The block's local shadow is there: the same light without shadows lights the floor
+    // behind the block (from the light) much more.
+    let ssr_view = Reflections {
+        probes: None,
+        ssr: Some(&ssr),
+    };
+    let stats = bed.renderer.local_shadow_stats();
+    println!("local shadows: {stats:?}");
+    bed.lights[0].shadow = false;
+    let mut unshadowed = Vec::new();
+    for _ in 0..3 {
+        unshadowed = bed.render(view, &draws, ssr_view);
+    }
+    // Pixels the shadow darkens to less than half.
+    let shadowed = with
+        .iter()
+        .zip(&unshadowed)
+        .filter(|(a, b)| a.max_element() < 0.5 * b.max_element())
+        .count();
+    println!(
+        "largest difference with reflections {worst}; {shadowed} pixels in the block's shadow"
+    );
+    assert!(shadowed > 200, "no local shadow ({shadowed} pixels)");
+    assert!(worst < 1e-3, "{worst}");
+    bed.finish(Vec::new(), vec![ssr]);
 }
