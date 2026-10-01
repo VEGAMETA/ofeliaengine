@@ -75,6 +75,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0065](0065-async-compute.md) | Async compute in the render graph: opt-in passes scheduled by the graph across two queues, on by default where measured faster (NVIDIA) | Accepted |
 | [0066](0066-physics-queries-characters-rollback.md) | Physics for games: shape casts and overlaps, Jolt's `CharacterVirtual` behind a backend-agnostic interface, kinematic targets, rollback snapshots into a reusable buffer, ECS sync with interpolation; 2D queries and Box2D's mover | Accepted |
 | [0067](0067-no-camera-motion-blur-in-gameplay.md) | No camera motion blur in gameplay: cinematic views only, by license and by API | Accepted |
+| [0068](0068-skeletal-animation-and-skinning.md) | Skeletal animation and skinning: an ozz-style runtime, ACL-style compressed clips in Rust, pre-skinning in compute with a depth-equal motion pass | Accepted |
 | [0069](0069-sky-atmosphere-and-fog.md) | Physically based sky and atmosphere (Hillaire 2020): tables in compute passes, the sun's color and the image-based light from them, aerial perspective and exponential height fog in one full-screen pass | Accepted |
 
 ## Template
