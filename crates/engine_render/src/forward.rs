@@ -1876,7 +1876,8 @@ pub struct ForwardRenderer {
     /// Atlases replaced by new settings, freed by [`Self::destroy`].
     retired_atlases: Vec<AtlasImage>,
     /// Reflections' passes and shading pipelines (ADR 0073), made when first turned on.
-    reflections: Option<ReflectionShading>,
+    /// Boxed: 24 pipelines and the passes' would make every renderer large on the stack.
+    reflections: Option<Box<ReflectionShading>>,
     reflections_on: bool,
     scratch: RefCell<Scratch>,
 }
@@ -2277,12 +2278,12 @@ impl ForwardRenderer {
         enabled: bool,
     ) -> Result<(), RhiError> {
         if enabled && self.reflections.is_none() {
-            self.reflections = Some(ReflectionShading::new(
+            self.reflections = Some(Box::new(ReflectionShading::new(
                 device,
                 bindless,
                 self.color_format,
                 self.depth_format,
-            )?);
+            )?));
         }
         self.reflections_on = enabled;
         Ok(())
