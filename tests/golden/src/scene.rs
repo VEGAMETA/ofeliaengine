@@ -781,12 +781,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // first; a temporal shot then accumulates `temporal_frames` frames from a camera cut
     // at `TEMPORAL_START` (its history starts there), the last one captured.
     const TEMPORAL_START: usize = 2;
+    const SSR_FRAMES: usize = 8;
     let capture_at = TEMPORAL_START
         + if temporal {
             shot.temporal_frames.max(1) as usize - 1
         } else {
             0
-        };
+        }
+        // Screen-space reflections' own temporal filter converges over a few frames.
+        + if shot.ssr.is_some() { SSR_FRAMES } else { 0 };
     let settings = ViewSettings {
         antialiasing: shot.antialiasing,
         quality: shot.quality,

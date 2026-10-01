@@ -1087,6 +1087,14 @@ struct Imported<'g> {
     probes: Option<(&'g ReflectionProbes, ProbeTextures)>,
 }
 
+/// The shadows of a reflection probe's capture (ADR 0073): one cascade around the probe,
+/// drawn by its first face this frame and read by the others.
+#[derive(Debug)]
+struct CaptureShadow {
+    fit: CascadeFit,
+    map: Cell<Option<Texture>>,
+}
+
 /// The view's jitter in pixels, its camera without and with it.
 fn jittered(view: &ForwardView<'_>, depth_desc: &TextureDesc) -> ([f32; 2], Mat4, Mat4) {
     let jitter = view.temporal.map_or([0.0; 2], Temporal::next_jitter);
@@ -1651,7 +1659,7 @@ impl ForwardRenderer {
         let layout = self.layout_draws(ring, geometry, materials, draws, view, &setup);
         let passes = layout.and_then(|layout| {
             self.declare(
-                fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported,
+                fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported, None,
             )
         });
         if let Some((probes, _)) = imported.probes {
@@ -1713,7 +1721,7 @@ impl ForwardRenderer {
         let layout = self.layout_scene(ring, geometry, scene, view, &setup);
         let passes = layout.and_then(|layout| {
             self.declare(
-                fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported,
+                fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported, None,
             )
         });
         if let Some((probes, _)) = imported.probes {
@@ -1798,6 +1806,7 @@ impl ForwardRenderer {
             probes: None,
         };
         let mut laid_out = None;
+        let mut shadow = None;
         for face in plan.first_face..plan.first_face + plan.faces {
             let color = fg.create_texture(
                 "probe face",
@@ -1829,6 +1838,18 @@ impl ForwardRenderer {
                 laid_out = Some(layout(self, ring, &capture, &setup)?);
             }
             let laid = laid_out.as_ref()?;
+            // One shadow cascade around the probe, shared by its faces this frame.
+            let shadow = shadow.get_or_insert_with(|| CaptureShadow {
+                fit: shadow::fit_sphere(
+                    plan.position,
+                    plan.far,
+                    view.light.direction,
+                    laid.min,
+                    laid.max,
+                    &self.shadow_settings,
+                ),
+                map: Cell::new(None),
+            });
             self.declare(
                 fg,
                 ring,
@@ -1839,6 +1860,7 @@ impl ForwardRenderer {
                 &setup,
                 laid,
                 &capture_imported,
+                Some(shadow),
             )?;
             probes.add_face_pass(fg, bindless, textures, &environment, color, depth, face);
         }
@@ -2273,6 +2295,7 @@ impl ForwardRenderer {
         setup: &Setup,
         layout: &Layout,
         imported: &Imported<'g>,
+        capture_shadow: Option<&CaptureShadow>,
     ) -> Option<ForwardPasses> {
         let names = if setup.capture {
             &CAPTURE_NAMES
@@ -2393,14 +2416,17 @@ impl ForwardRenderer {
         // Whether the view reflects anything: visible probes or screen-space reflections.
         let reflecting = prepared.is_some_and(|p| p.probes > 0 || p.ssr.is_some());
         let settings = &self.shadow_settings;
-        let fit = shadow::fit_cascades(
-            unjittered,
-            view.camera.position,
-            view.light.direction,
-            min,
-            max,
-            settings,
-        );
+        let fit = match capture_shadow {
+            Some(c) => c.fit,
+            None => shadow::fit_cascades(
+                unjittered,
+                view.camera.position,
+                view.light.direction,
+                min,
+                max,
+                settings,
+            ),
+        };
         let frame = FrameData {
             clip_from_world: clip_from_world.to_cols_array(),
             light_from_world: fit.light_from_world.to_cols_array(),
@@ -2623,75 +2649,86 @@ impl ForwardRenderer {
             })
         });
 
-        // Shadow casters of each cascade, then each cascade drawn into its atlas tile.
-        fg.add_compute(names.shadow_cull, bindless)
-            .read(
-                shadow_commands,
-                Access::StorageReadWrite(ShaderStages::COMPUTE),
-            )
-            .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
-            .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE))
-            .dispatch(cull, cull_threads, move |ctx| {
-                Some(Push {
-                    visible: ctx.address(casters),
-                    commands: ctx.address(shadow_commands),
-                    phase: PHASE_SHADOW,
-                    ..base
-                })
-            });
-        let resolution = settings.resolution;
-        let (atlas_width, atlas_height) = settings.atlas_size();
-        let columns = settings.atlas_grid().0;
-        let shadow_map = fg.create_texture(
-            "shadow map",
-            TextureDesc::new_2d(settings.format, atlas_width, atlas_height),
-        );
-        let shadow_pipelines = &self.shadow;
+        // Shadow casters of each cascade, then each cascade drawn into its atlas tile; a
+        // probe's later faces read its first face's map.
+        let shared_shadow = capture_shadow.and_then(|c| c.map.get());
         let geometry = *geometry;
         let materials = *materials;
-        let drawn_cascades = fit.count as u32;
-        materials
-            .read(geometry.read(fg.add_pass(names.shadow)))
-            .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
-            .read(shadow_commands, Access::Indirect)
-            .read(casters, Access::StorageRead(ShaderStages::VERTEX))
-            .depth(shadow_map, depth_clear, StoreOp::Store)
-            .execute(move |ctx| {
-                for cascade in 0..drawn_cascades {
-                    let tile = vk::Rect2D {
-                        offset: vk::Offset2D {
-                            x: ((cascade % columns) * resolution) as i32,
-                            y: ((cascade / columns) * resolution) as i32,
-                        },
-                        extent: vk::Extent2D {
-                            width: resolution,
-                            height: resolution,
-                        },
-                    };
-                    let push = Push {
-                        visible: ctx.address(casters),
-                        phase: cascade,
-                        ..base
-                    };
-                    // SAFETY: recording inside the pass's rendering scope; the pass reads
-                    // the commands (indirect), the caster lists, the pool and the material
-                    // table.
-                    unsafe {
-                        states.draw(
-                            ctx,
-                            bindless,
-                            &geometry,
-                            [&shadow_pipelines[0], &shadow_pipelines[1]],
-                            &push,
-                            true,
-                            DEPTH_STATES,
-                            ctx.buffer(shadow_commands),
-                            u64::from(cascade) * command_bytes,
-                            tile,
-                        );
-                    }
+        let shadow_map = match shared_shadow {
+            Some(map) => map,
+            None => {
+                fg.add_compute(names.shadow_cull, bindless)
+                    .read(
+                        shadow_commands,
+                        Access::StorageReadWrite(ShaderStages::COMPUTE),
+                    )
+                    .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
+                    .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE))
+                    .dispatch(cull, cull_threads, move |ctx| {
+                        Some(Push {
+                            visible: ctx.address(casters),
+                            commands: ctx.address(shadow_commands),
+                            phase: PHASE_SHADOW,
+                            ..base
+                        })
+                    });
+                let resolution = settings.resolution;
+                let (atlas_width, atlas_height) = settings.atlas_size();
+                let columns = settings.atlas_grid().0;
+                let shadow_map = fg.create_texture(
+                    "shadow map",
+                    TextureDesc::new_2d(settings.format, atlas_width, atlas_height),
+                );
+                let shadow_pipelines = &self.shadow;
+                let drawn_cascades = fit.count as u32;
+                materials
+                    .read(geometry.read(fg.add_pass(names.shadow)))
+                    .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
+                    .read(shadow_commands, Access::Indirect)
+                    .read(casters, Access::StorageRead(ShaderStages::VERTEX))
+                    .depth(shadow_map, depth_clear, StoreOp::Store)
+                    .execute(move |ctx| {
+                        for cascade in 0..drawn_cascades {
+                            let tile = vk::Rect2D {
+                                offset: vk::Offset2D {
+                                    x: ((cascade % columns) * resolution) as i32,
+                                    y: ((cascade / columns) * resolution) as i32,
+                                },
+                                extent: vk::Extent2D {
+                                    width: resolution,
+                                    height: resolution,
+                                },
+                            };
+                            let push = Push {
+                                visible: ctx.address(casters),
+                                phase: cascade,
+                                ..base
+                            };
+                            // SAFETY: recording inside the pass's rendering scope; the pass reads
+                            // the commands (indirect), the caster lists, the pool and the material
+                            // table.
+                            unsafe {
+                                states.draw(
+                                    ctx,
+                                    bindless,
+                                    &geometry,
+                                    [&shadow_pipelines[0], &shadow_pipelines[1]],
+                                    &push,
+                                    true,
+                                    DEPTH_STATES,
+                                    ctx.buffer(shadow_commands),
+                                    u64::from(cascade) * command_bytes,
+                                    tile,
+                                );
+                            }
+                        }
+                    });
+                if let Some(c) = capture_shadow {
+                    c.map.set(Some(shadow_map));
                 }
-            });
+                shadow_map
+            }
+        };
         // Motion vectors: a second target, last frame's transforms read by the vertex
         // shader, and this frame's copied for the next one afterwards.
         let velocity = temporal.map(|_| {
