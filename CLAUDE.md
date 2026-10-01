@@ -58,6 +58,7 @@ Decisions change only via an ADR backed by measurements.
   engine_upscale         TAAU (own) and the `Upscaler` interface shared by every upscaler
   engine_fsr             FSR 3.1, built from the FidelityFX SDK sources (C++ via `cc`; ADR 0060)
   engine_dlss            DLSS SR/DLAA through Streamline, user-supplied DLLs (ADR 0063)
+  engine_frame           the frame renderer: composes a view's frame (scene, TAA/upscaling, post; ADR 0072)
   engine_latency         frame pacing, limiter, VK_NV_low_latency2, VK_AMD_anti_lag
   engine_physics         PhysicsBackend trait, shared types, test scenes
   engine_physics_native  own physics (deferred, ADR 0028)
@@ -70,6 +71,7 @@ Decisions change only via an ADR backed by measurements.
   engine_script          Luau: VM, bindings, .d.luau generation, hot reload, DAP debugger
   engine_anim            skeletal animation, blending, IK
   engine_nav             navigation
+  engine_net_transport   encrypted UDP connections, channels, network simulator, NAT traversal (ADR 0070)
   engine_text            shaping, rasterization (MSDF), layout
   engine_ui              in-game UI (runtime)
   engine_profiler        Tracy integration + built-in panels
@@ -495,7 +497,8 @@ physics and navigation visualizers, 2D editor (tilemaps, sprites), viewport mana
   never for state (player actions travel in the input stream). Singleplayer has no loopback
   client/server; the player's camera follows the latest input every rendered frame. Co-op hosts
   (listen servers) traverse NAT: UPnP IGD → NAT-PMP/PCP → STUN hole punching → relay, one UDP
-  port mapped per session and removed on exit. The transport gets its own ADR.
+  port mapped per session and removed on exit. The transport: ADR 0070 (`engine_net_transport`;
+  no I/O thread, connect tokens, AES-256-GCM through CNG, no default third-party servers).
 
 ---
 
@@ -595,7 +598,8 @@ makes a game developer's day easier. In this order:
    - ✔ async compute (ADR 0065); ✔ the physics API: queries, characters, rollback (ADR 0066);
    - in progress: persistent GPU scene, ECS extraction and the runtime frame loop (ADR 0064);
      skeletal animation and skinning (ADR 0068); atmosphere and fog (ADR 0069);
-   - next: networking with NAT traversal (§13), then GPU memory budget and texture streaming
+   - networking (§13): ✔ transport and NAT traversal (ADR 0070); replication next;
+   - next: GPU memory budget and texture streaming
      step 2, local-light and contact shadows, local reflections, GPU particles, clustered
      decals, GI, visibility buffer/meshlets, virtual shadow maps, remaining post effects
      (motion blur only on cinematic views, ADR 0067).

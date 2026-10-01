@@ -8,6 +8,7 @@
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
+use engine_core::math::Mat4;
 use engine_fsr::{Fsr, FsrCamera, FsrInput};
 use engine_render::forward::{MOTION_FORMAT, MotionOutput};
 use engine_render::graph::{Access, LoadOp, RenderGraph, ShaderStages, StoreOp, TextureDesc};
@@ -130,6 +131,8 @@ fn steady_state_frames_do_not_allocate() {
                             jitter: [0.25, -0.25],
                             reset: false,
                             reactive: None,
+                            clip_from_world: Mat4::IDENTITY,
+                            previous_clip_from_world: Mat4::IDENTITY,
                         },
                         camera: FsrCamera {
                             near: 0.1,
@@ -138,6 +141,7 @@ fn steady_state_frames_do_not_allocate() {
                             meters_per_unit: 1.0,
                         },
                         frame_time_ms: 16.7,
+                        exposure: None,
                     },
                     (96, 96),
                     number,

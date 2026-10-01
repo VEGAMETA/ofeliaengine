@@ -11,6 +11,8 @@
 //!   bytes per frame (ADR 0040).
 //! - [`forward`]: forward PBR with a directional light and a shadow map (ADR 0014), drawn
 //!   GPU-driven: GPU frustum culling and indirect instanced draws (ADR 0034).
+//! - [`skinning`]: skinned meshes skinned by a compute pass into the geometry pool, and
+//!   their motion vectors (ADR 0068).
 //! - [`atmosphere`]: a physically based sky and atmosphere, aerial perspective and
 //!   exponential height fog (ADR 0069).
 //! - [`subsurface`]: screen-space subsurface scattering: diffusion profiles, transmission
@@ -41,6 +43,7 @@ pub mod png;
 pub mod post;
 pub mod postfx;
 pub mod shadow;
+pub mod skinning;
 pub mod subsurface;
 pub mod texture;
 pub mod texture_pool;

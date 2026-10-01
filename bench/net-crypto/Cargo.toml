@@ -1,0 +1,18 @@
+[package]
+name = "net-crypto"
+description = "Research harness for ADR 0070: authenticated encryption of game packets with Windows CNG, RustCrypto and ring. Not part of the engine build."
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: its dependencies are for measurement only and never reach the engine.
+[workspace]
+
+[dependencies]
+chacha20poly1305 = "=0.11.0"
+ring = "=0.17.14"
+windows-sys = { version = "0.61", features = ["Win32_Security_Cryptography"] }
+
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 1
