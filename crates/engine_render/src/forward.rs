@@ -51,6 +51,7 @@ use crate::atmosphere::{AtmosphereTextures, AtmosphereView, COMPOSITE_FRAGMENT, 
 use crate::compute::{ComputePass, ComputeShader, ComputeSource, Dispatch};
 use crate::cull::Frustum;
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
+use crate::gpu_scene::SceneFrame;
 use crate::graph::{
     Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, LoadOp, PassBuilder,
     ShaderStages, StoreOp, Texture, TextureDesc,
@@ -126,13 +127,13 @@ const PHASE_SHADOW: u32 = 3;
 const STATES: usize = 32;
 /// Subsurface scattering (ADR 0059): shaded by the forward subsurface pass, after the
 /// depth prepass. Never blended.
-const SUBSURFACE: usize = 16;
+pub(crate) const SUBSURFACE: usize = 16;
 /// Blended surfaces: drawn by the transparent pass only, one batch per instance, back to
 /// front (ADR 0054).
-const BLENDED: usize = 8;
+pub(crate) const BLENDED: usize = 8;
 const MASKED: usize = 4;
 const DOUBLE_SIDED: usize = 2;
-const MIRRORED: usize = 1;
+pub(crate) const MIRRORED: usize = 1;
 /// Bitmasks of states for [`States::draw`]: opaque and masked without subsurface
 /// scattering (0-7), blended (8-15), with subsurface scattering (16-23).
 const PLAIN_STATES: u32 = 0x0000_00FF;
@@ -576,14 +577,15 @@ struct FrameData {
     _pad5: [u32; 2],
 }
 
-/// `Instance` in `forward.slang` (64 bytes).
-#[derive(Clone, Copy)]
+/// `Instance` in `forward.slang` (64 bytes): the rows of the affine
+/// `world_from_object`, the material's slot and the batch.
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(C)]
-struct InstanceData {
-    rows: [[f32; 4]; 3],
-    material: u32,
-    batch: u32,
-    _pad: [u32; 2],
+pub(crate) struct InstanceData {
+    pub(crate) rows: [[f32; 4]; 3],
+    pub(crate) material: u32,
+    pub(crate) batch: u32,
+    pub(crate) _pad: [u32; 2],
 }
 
 /// `Batch` in `forward.slang` (64 bytes).
@@ -649,11 +651,15 @@ pub struct ForwardPasses {
     /// Draw commands per list: one per detail level of each batch's mesh (equal to
     /// `batches` without LODs), in the order of `commands`.
     pub draw_commands: u32,
+    /// Commands per list in `commands`: `draw_commands`, plus one that draws nothing on
+    /// the persistent-scene path (its sink of removed instances, ADR 0064).
+    pub list_commands: u32,
     /// Whether culling ran in two phases (occlusion culling).
     pub occlusion: bool,
     /// The forward pass's indirect draw commands, one `vk::DrawIndexedIndirectCommand` (20
-    /// bytes) per batch, ordered by pipeline state and within a state in draw order; with
-    /// occlusion culling, the early phase's, then the late phase's.
+    /// bytes) per batch, ordered by pipeline state and within a state in draw order
+    /// (`list_commands` per list); with occlusion culling, the early phase's, then the late
+    /// phase's.
     /// After culling, each `instance_count` is the number of instances its phase drew of
     /// its batch: read it back to count what was drawn. `None` when there was nothing to
     /// draw.
@@ -1384,56 +1390,91 @@ impl ForwardRenderer {
         view: &ForwardView<'g>,
     ) -> Option<ForwardPasses> {
         engine_profiler::zone!("render::forward::add_passes");
-        let (color, depth) = (view.color, view.depth);
-        let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
-        let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
         if draws.is_empty() {
-            // Nothing drawn: the target is the clear color everywhere, so no motion shows.
-            // A temporal view still gets its (zero) motion vectors and a stored depth, and
-            // its state moves on, so a resolve after it needs no special case.
-            let temporal = view.temporal;
-            let velocity = temporal.map(|_| {
-                let desc = fg.texture_desc(depth);
-                fg.create_texture(
-                    "motion vectors",
-                    TextureDesc::new_2d(MOTION_FORMAT, desc.width, desc.height),
-                )
-            });
-            let mut pass = fg.add_pass("forward").color(color, load, StoreOp::Store);
-            if let Some(velocity) = velocity {
-                pass = pass.color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store);
-            }
-            let depth_store = if velocity.is_some() {
-                StoreOp::Store
-            } else {
-                StoreOp::DontCare
-            };
-            pass.depth(depth, depth_clear, depth_store).execute(|_| {});
-            let motion = temporal.zip(velocity).map(|(t, velocity)| {
-                let jitter = t.next_jitter();
-                let reset = t.reset.replace(false);
-                t.previous_count.set(0);
-                t.previous_clip_from_world
-                    .set(Some(view.camera.clip_from_world));
-                t.frame.set(t.frame.get() + 1);
-                MotionOutput {
-                    velocity,
-                    jitter,
-                    reset,
-                    reactive: None,
-                }
-            });
-            return Some(ForwardPasses {
-                instances: 0,
-                batches: 0,
-                draw_commands: 0,
-                occlusion: false,
-                commands: None,
-                motion,
-                ao: None,
-                atmosphere: None,
-            });
+            return Some(empty_frame(fg, view));
         }
+        let setup = self.setup(fg, view);
+        let layout = self.layout_draws(ring, geometry, materials, draws, view, &setup)?;
+        self.declare(
+            fg, ring, bindless, geometry, materials, view, &setup, &layout,
+        )
+    }
+
+    /// Declares the culling, shadow and forward passes for the instances of a persistent
+    /// [`GpuScene`](crate::gpu_scene::GpuScene) (ADR 0064) into the view's targets, as
+    /// [`Self::add_passes`] does for a draw list. `scene` is this frame's
+    /// ([`GpuScene::add_passes`](crate::gpu_scene::GpuScene::add_passes), called once per
+    /// frame before every view that draws it).
+    ///
+    /// Nothing here depends on the number of instances on the CPU: batches, their draw
+    /// commands and the frame constants are written into `ring` (a cost per batch), the
+    /// instances are already on the GPU. Per-view state keys off the instances' slots:
+    /// occlusion culling ([`Occlusion`], sized to at least
+    /// [`GpuScene::slot_count`](crate::gpu_scene::GpuScene::slot_count) to remember every
+    /// instance) and motion vectors (the scene keeps last frame's transforms; a
+    /// [`Temporal`] state provides the camera and jitter, and its own buffer stays
+    /// unused). Returns `None`, declaring nothing, when `ring` is full.
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_scene_passes<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        geometry: &GeometryFrame<'g>,
+        materials: &MaterialFrame<'g>,
+        scene: &SceneFrame<'g>,
+        view: &ForwardView<'g>,
+    ) -> Option<ForwardPasses> {
+        engine_profiler::zone!("render::forward::add_scene_passes");
+        if scene.instances() == 0 {
+            return Some(empty_frame(fg, view));
+        }
+        let setup = self.setup(fg, view);
+        let layout = self.layout_scene(ring, geometry, scene, view, &setup)?;
+        self.declare(
+            fg, ring, bindless, geometry, materials, view, &setup, &layout,
+        )
+    }
+
+    /// Subsurface materials' pipelines, when they get pipeline states of their own:
+    /// scattering on and profiles set. Otherwise they shade as ordinary ones.
+    fn subsurface_states(&self) -> Option<&SubsurfacePipelines> {
+        self.subsurface_pipelines
+            .as_ref()
+            .filter(|_| self.subsurface_settings.is_some() && !self.subsurface_profiles.is_empty())
+    }
+
+    /// What a frame's layout depends on besides the instances.
+    fn setup(&self, fg: &FrameGraph<'_>, view: &ForwardView<'_>) -> Setup {
+        let depth_desc = fg.texture_desc(view.depth);
+        let occlusion = view.occlusion.is_some()
+            && self.frustum_culling
+            && depth_desc.width > 0
+            && depth_desc.height > 0;
+        Setup {
+            depth_desc,
+            phases: if occlusion { 2 } else { 1 },
+            cascade_count: self.shadow_settings.cascade_count() as u32,
+        }
+    }
+
+    /// Lays out a draw list: instances, batches (runs of consecutive draws) and draw
+    /// commands, all written into `ring`.
+    #[allow(clippy::too_many_lines)]
+    fn layout_draws(
+        &self,
+        ring: &mut UploadRing,
+        geometry: &GeometryFrame<'_>,
+        materials: &MaterialFrame<'_>,
+        draws: &[DrawItem],
+        view: &ForwardView<'_>,
+        setup: &Setup,
+    ) -> Option<Layout> {
+        let Setup {
+            phases,
+            cascade_count,
+            ..
+        } = *setup;
         let instance_count = draws.len() as u32;
         let mut scratch = self.scratch.borrow_mut();
         let Scratch {
@@ -1449,11 +1490,7 @@ impl ForwardRenderer {
         let mut counts = [0u32; STATES];
         // Subsurface materials get a pipeline state of their own while scattering is on
         // and there are profiles; otherwise they shade as ordinary ones.
-        let subsurface = self
-            .subsurface_pipelines
-            .as_ref()
-            .filter(|_| self.subsurface_settings.is_some() && !self.subsurface_profiles.is_empty());
-        let subsurface_on = subsurface.is_some();
+        let subsurface_on = self.subsurface_states().is_some();
         batches(draws, materials, slots, runs, &mut counts, subsurface_on);
         let subsurface_draws = counts[SUBSURFACE..SUBSURFACE + 8].iter().any(|&c| c > 0);
         let mut starts = [0u32; STATES];
@@ -1507,12 +1544,6 @@ impl ForwardRenderer {
             *start = next;
             next += count;
         }
-        let depth_desc = fg.texture_desc(depth);
-        let occlusion = view
-            .occlusion
-            .filter(|_| self.frustum_culling && depth_desc.width > 0 && depth_desc.height > 0);
-        let phases: u32 = if occlusion.is_some() { 2 } else { 1 };
-
         // Instances in draw order, and the scene's bounding box for the light on the way.
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
         let instances = {
@@ -1567,7 +1598,6 @@ impl ForwardRenderer {
         // Draw commands, in state order: the forward pass's for each phase, then the shadow
         // pass's for each cascade, with no instances until culling counts them (each list's
         // slots follow the previous list's).
-        let cascade_count = self.shadow_settings.cascade_count() as u32;
         let commands = {
             let per_list = command_count as usize;
             let (out, staged) = ring.alloc::<vk::DrawIndexedIndirectCommand>(
@@ -1604,7 +1634,261 @@ impl ForwardRenderer {
             staged
         };
         drop(scratch);
-        let states = States { starts, counts };
+        Some(Layout {
+            instance_count,
+            instances,
+            source: Source::Ring(instances_staged),
+            batch_table,
+            commands,
+            command_count,
+            drawn_commands: command_count,
+            slot_count,
+            batch_count,
+            states: States { starts, counts },
+            min,
+            max,
+            subsurface_draws,
+        })
+    }
+
+    /// Lays out a persistent scene: its batches and their draw commands, written into
+    /// `ring`, with the sink batch's command and slots after them.
+    #[allow(clippy::too_many_lines)]
+    fn layout_scene(
+        &self,
+        ring: &mut UploadRing,
+        geometry: &GeometryFrame<'_>,
+        scene: &SceneFrame<'_>,
+        view: &ForwardView<'_>,
+        setup: &Setup,
+    ) -> Option<Layout> {
+        let Setup {
+            phases,
+            cascade_count,
+            ..
+        } = *setup;
+        let mut scratch = self.scratch.borrow_mut();
+        let Scratch {
+            runs,
+            keys,
+            commands: command_scratch,
+            ..
+        } = &mut *scratch;
+        let subsurface_on = self.subsurface_states().is_some();
+        let batches = scene.batches();
+        // One run per live batch (`first` holds its id), counted per pipeline state.
+        let mut counts = [0u32; STATES];
+        runs.clear();
+        for (id, batch) in batches.iter().enumerate().skip(1) {
+            if !batch.alive || batch.count == 0 {
+                continue;
+            }
+            let mut state = batch.state as usize;
+            if !subsurface_on {
+                state &= !SUBSURFACE;
+            }
+            runs.push(Run {
+                first: id as u32,
+                len: batch.count,
+                state,
+                order: 0,
+                command: 0,
+                slot: 0,
+                lods: 1,
+            });
+            counts[state] += 1;
+        }
+        let subsurface_draws = counts[SUBSURFACE..SUBSURFACE + 8].iter().any(|&c| c > 0);
+        // Ordered by state, then front to back (blended: back to front) by the batch's
+        // center, as the draw-list path orders its runs.
+        keys.clear();
+        keys.extend(runs.iter().enumerate().map(|(k, run)| {
+            let center = scene.batch_center(run.first);
+            let distance = center.distance(view.camera.position).max(0.0).to_bits();
+            let distance = if run.state & BLENDED != 0 {
+                !distance
+            } else {
+                distance
+            };
+            (((run.state as u64) << 32) | u64::from(distance), k as u32)
+        }));
+        keys.sort_unstable();
+        for (order, &(_, k)) in keys.iter().enumerate() {
+            runs[k as usize].order = order as u32;
+        }
+        let batch_count = runs.len() as u32;
+        counts = [0; STATES];
+        let mut command_count = 0u32;
+        for &(_, k) in keys.iter() {
+            let run = &mut runs[k as usize];
+            run.lods = geometry
+                .mesh(batches[run.first as usize].mesh)
+                .map_or(1, |m| m.lod_count.clamp(1, crate::mesh::MAX_LODS as u32));
+            run.command = command_count;
+            command_count += run.lods;
+            counts[run.state] += run.lods;
+        }
+        let mut slot_count = 0u32;
+        for run in runs.iter_mut() {
+            run.slot = slot_count;
+            slot_count += run.lods * run.len;
+        }
+        let drawn_commands = command_count;
+        // The sink: its command follows the drawn ones in every list (no state draws it),
+        // its slots follow theirs; culling appends holes there when it keeps them.
+        let holes = scene.holes();
+        let sink_command = command_count;
+        let sink_slot = slot_count;
+        command_count += 1;
+        slot_count += holes;
+        let mut starts = [0u32; STATES];
+        let mut next = 0;
+        for (start, count) in starts.iter_mut().zip(counts) {
+            *start = next;
+            next += count;
+        }
+        // The batch table, indexed by batch id: what the instances' `batch` fields name.
+        let batch_table = {
+            let (out, staged) = ring.alloc::<BatchData>(batches.len())?;
+            // The sink's entry (id 0, named by the holes), and dead batches' (named by
+            // no instance): blended (no shadows, nothing early), one level, and an
+            // inside-out box (negative extents) that fails every frustum plane, so holes
+            // are culled without touching the sink's counter. With culling off they are
+            // appended to the sink's command, which no state draws.
+            let empty = BatchData {
+                command: sink_command,
+                slot: sink_slot,
+                count: holes,
+                lods: 1 | 1 << 8,
+                center: [0.0; 4],
+                extents: [-1e30, -1e30, -1e30, 0.0],
+                errors: [0.0; 4],
+            };
+            for out in out.iter_mut() {
+                out.write(empty);
+            }
+            for run in runs.iter() {
+                let mesh = batches[run.first as usize].mesh;
+                let (center, extents) = local_box(geometry, mesh);
+                let lods = geometry.mesh(mesh).map(|m| m.lods).unwrap_or_default();
+                out[run.first as usize].write(BatchData {
+                    command: run.command,
+                    slot: run.slot,
+                    count: run.len,
+                    lods: run.lods | u32::from(run.state & BLENDED != 0) << 8,
+                    center: center.extend(0.0).to_array(),
+                    extents: extents.extend(0.0).to_array(),
+                    errors: lods.map(|l| l.error),
+                });
+            }
+            staged.address
+        };
+        let commands = {
+            let per_list = command_count as usize;
+            let (out, staged) = ring.alloc::<vk::DrawIndexedIndirectCommand>(
+                (phases + cascade_count) as usize * per_list,
+            )?;
+            command_scratch.clear();
+            for &(_, k) in keys.iter() {
+                let run = &runs[k as usize];
+                // A removed mesh draws nothing.
+                let mesh = geometry.mesh(batches[run.first as usize].mesh);
+                for lod in 0..run.lods {
+                    let level = mesh.map(|m| m.lods[lod as usize]).unwrap_or_default();
+                    command_scratch.push(vk::DrawIndexedIndirectCommand {
+                        index_count: level.index_count,
+                        instance_count: 0,
+                        first_index: level.first_index,
+                        vertex_offset: mesh.map_or(0, |m| m.first_vertex as i32),
+                        first_instance: run.slot + lod * run.len,
+                    });
+                }
+            }
+            command_scratch.push(vk::DrawIndexedIndirectCommand {
+                index_count: 0,
+                instance_count: 0,
+                first_index: 0,
+                vertex_offset: 0,
+                first_instance: sink_slot,
+            });
+            for list in 0..phases + cascade_count {
+                let slots = list_offset(list, phases) * slot_count;
+                let out = &mut out[list as usize * per_list..(list as usize + 1) * per_list];
+                for (out, command) in out.iter_mut().zip(command_scratch.iter()) {
+                    out.write(vk::DrawIndexedIndirectCommand {
+                        first_instance: command.first_instance + slots,
+                        ..*command
+                    });
+                }
+            }
+            staged
+        };
+        drop(scratch);
+        let (min, max) = scene.bounds();
+        Some(Layout {
+            instance_count: scene.slot_count(),
+            instances: scene.current_address,
+            source: Source::Scene {
+                current: scene.current,
+                previous: scene.previous,
+                previous_address: scene.previous_address,
+            },
+            batch_table,
+            commands,
+            command_count,
+            drawn_commands,
+            slot_count,
+            batch_count,
+            states: States { starts, counts },
+            min,
+            max,
+            subsurface_draws,
+        })
+    }
+
+    /// Declares the passes of a laid-out frame (both paths).
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn declare<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        geometry: &GeometryFrame<'g>,
+        materials: &MaterialFrame<'g>,
+        view: &ForwardView<'g>,
+        setup: &Setup,
+        layout: &Layout,
+    ) -> Option<ForwardPasses> {
+        let (color, depth) = (view.color, view.depth);
+        let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
+        let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
+        let Setup {
+            depth_desc,
+            phases,
+            cascade_count,
+        } = *setup;
+        let occlusion = view.occlusion.filter(|_| phases == 2);
+        let Layout {
+            instance_count,
+            instances,
+            source,
+            batch_table,
+            commands,
+            command_count,
+            drawn_commands,
+            slot_count,
+            batch_count,
+            states,
+            min,
+            max,
+            subsurface_draws,
+        } = *layout;
+        let subsurface = self.subsurface_states();
+        // The scene's instances, read by culling and by the vertex shaders.
+        let scene_instances = match source {
+            Source::Scene { current, .. } => Some(current),
+            Source::Ring(_) => None,
+        };
         let pyramid_layout = PyramidLayout::new(depth_desc.width, depth_desc.height);
         // Temporal state: this frame's jitter (the projection moved by a sub-pixel
         // offset), last frame's camera, whether last frame is related at all.
@@ -1621,7 +1905,13 @@ impl ForwardRenderer {
         let previous_clip_from_world = temporal
             .and_then(|t| t.previous_clip_from_world.get())
             .unwrap_or(unjittered);
-        let previous_count = temporal.map_or(0, |t| t.previous_count.get());
+        let previous_count = match source {
+            Source::Ring(_) => temporal.map_or(0, |t| t.previous_count.get()),
+            // Every slot holds last frame's transform (new and teleported instances their
+            // current one), unless the view's history was reset.
+            Source::Scene { .. } if reset => 0,
+            Source::Scene { .. } => instance_count,
+        };
         // The environment: rebuilt first if its sky changed (ADR 0046); its atmosphere's
         // tables and aerial perspective (ADR 0069).
         let world_from_clip = clip_from_world.inverse();
@@ -1782,7 +2072,12 @@ impl ForwardRenderer {
             positions: geometry.position_address(),
             attributes: geometry.attribute_address(),
             materials: materials.address(),
-            previous_instances: temporal.map_or(0, |t| t.address),
+            previous_instances: match source {
+                Source::Ring(_) => temporal.map_or(0, |t| t.address),
+                Source::Scene {
+                    previous_address, ..
+                } => previous_address,
+            },
             light_tiles: 0,
             instance_count,
             texture: 0,
@@ -1892,6 +2187,7 @@ impl ForwardRenderer {
             visible,
             flag_buffer,
             first_phase,
+            scene_instances,
         )
         .dispatch(cull, cull_threads, move |ctx| {
             Some(Push {
@@ -1909,6 +2205,7 @@ impl ForwardRenderer {
                 Access::StorageReadWrite(ShaderStages::COMPUTE),
             )
             .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
+            .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE))
             .dispatch(cull, cull_threads, move |ctx| {
                 Some(Push {
                     visible: ctx.address(casters),
@@ -1930,6 +2227,7 @@ impl ForwardRenderer {
         let drawn_cascades = fit.count as u32;
         materials
             .read(geometry.read(fg.add_pass("shadow")))
+            .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
             .read(shadow_commands, Access::Indirect)
             .read(casters, Access::StorageRead(ShaderStages::VERTEX))
             .depth(shadow_map, depth_clear, StoreOp::Store)
@@ -1982,6 +2280,10 @@ impl ForwardRenderer {
             access: vk::AccessFlags2::TRANSFER_WRITE,
         };
         let previous = temporal.map(|t| {
+            // The scene keeps last frame's instances itself.
+            if let Source::Scene { previous, .. } = source {
+                return previous;
+            }
             let buffer = fg.import_buffer(
                 "previous instances",
                 ImportedBuffer {
@@ -2117,11 +2419,19 @@ impl ForwardRenderer {
         let passes = match flag_buffer {
             None => {
                 let depth_use = if prepass {
-                    prepass_pass(fg, "depth prepass", &geometry, &materials, culled, visible)
-                        .depth(depth, depth_clear, StoreOp::Store)
-                        .execute(move |ctx| {
-                            draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None)
-                        });
+                    prepass_pass(
+                        fg,
+                        "depth prepass",
+                        &geometry,
+                        &materials,
+                        culled,
+                        visible,
+                        scene_instances,
+                    )
+                    .depth(depth, depth_clear, StoreOp::Store)
+                    .execute(move |ctx| {
+                        draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None)
+                    });
                     DepthUse::ReadOnly
                 } else {
                     DepthUse::Write(depth_clear, depth_store)
@@ -2135,8 +2445,18 @@ impl ForwardRenderer {
                 }
                 let ao_texture = targets.ao;
                 shading_pass(
-                    fg, "forward", &geometry, &materials, shadow_map, culled, visible, targets,
-                    true, depth, depth_use,
+                    fg,
+                    "forward",
+                    &geometry,
+                    &materials,
+                    shadow_map,
+                    culled,
+                    visible,
+                    targets,
+                    true,
+                    depth,
+                    depth_use,
+                    scene_instances,
                 )
                 .execute(move |ctx| {
                     draw_phase(ctx, main_pipelines, PHASE_ALL, PLAIN_STATES, ao_texture)
@@ -2144,7 +2464,8 @@ impl ForwardRenderer {
                 ForwardPasses {
                     instances: instance_count,
                     batches: batch_count,
-                    draw_commands: command_count,
+                    draw_commands: drawn_commands,
+                    list_commands: command_count,
                     occlusion: false,
                     commands: Some(culled),
                     motion: None,
@@ -2165,6 +2486,7 @@ impl ForwardRenderer {
                         &materials,
                         culled,
                         visible,
+                        scene_instances,
                     )
                     .depth(depth, depth_clear, StoreOp::Store)
                     .execute(move |ctx| {
@@ -2183,6 +2505,7 @@ impl ForwardRenderer {
                         true,
                         depth,
                         DepthUse::Write(depth_clear, StoreOp::Store),
+                        scene_instances,
                     )
                     .execute(move |ctx| {
                         draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, None)
@@ -2203,6 +2526,7 @@ impl ForwardRenderer {
                     visible,
                     Some(flags),
                     PHASE_LATE,
+                    scene_instances,
                 )
                 .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
                 .dispatch(cull, cull_threads, move |ctx| {
@@ -2222,6 +2546,7 @@ impl ForwardRenderer {
                         &materials,
                         culled,
                         visible,
+                        scene_instances,
                     )
                     .depth(depth, LoadOp::Load, StoreOp::Store)
                     .execute(move |ctx| {
@@ -2247,6 +2572,7 @@ impl ForwardRenderer {
                         true,
                         depth,
                         DepthUse::ReadOnly,
+                        scene_instances,
                     )
                     .execute(move |ctx| {
                         draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, ao_texture);
@@ -2265,6 +2591,7 @@ impl ForwardRenderer {
                         false,
                         depth,
                         DepthUse::Write(LoadOp::Load, depth_store),
+                        scene_instances,
                     )
                     .execute(move |ctx| {
                         draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, None)
@@ -2273,7 +2600,8 @@ impl ForwardRenderer {
                 ForwardPasses {
                     instances: instance_count,
                     batches: batch_count,
-                    draw_commands: command_count,
+                    draw_commands: drawn_commands,
+                    list_commands: command_count,
                     occlusion: true,
                     commands: Some(culled),
                     motion: None,
@@ -2311,6 +2639,7 @@ impl ForwardRenderer {
                 false,
                 depth,
                 DepthUse::ReadOnly,
+                scene_instances,
             )
             .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
             .color(albedo, LoadOp::DontCare, StoreOp::Store)
@@ -2333,6 +2662,7 @@ impl ForwardRenderer {
                 shadow_map,
                 culled,
                 visible,
+                scene_instances,
             )
             .read(irradiance, Access::Sampled(ShaderStages::FRAGMENT))
             .read(albedo, Access::Sampled(ShaderStages::FRAGMENT))
@@ -2435,6 +2765,7 @@ impl ForwardRenderer {
                 shadow_map,
                 culled,
                 visible,
+                scene_instances,
             )
             .color(color, LoadOp::Load, StoreOp::Store);
             if let Some(reactive) = reactive {
@@ -2500,9 +2831,14 @@ impl ForwardRenderer {
                     ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
                 }
             });
-        // This frame's transforms are next frame's previous ones.
-        let copied = instance_count.min(temporal.capacity);
-        if copied > 0 {
+        // This frame's transforms are next frame's previous ones (the scene path keeps
+        // them in the scene).
+        let instances_staged = match source {
+            Source::Ring(staged) => Some(staged),
+            Source::Scene { .. } => None,
+        };
+        let copied = instances_staged.map_or(0, |_| instance_count.min(temporal.capacity));
+        if let Some(instances_staged) = instances_staged.filter(|_| copied > 0) {
             let size = u64::from(copied) * size_of::<InstanceData>() as u64;
             fg.add_pass("remember instances")
                 .write(previous, Access::TransferWrite)
@@ -2535,6 +2871,104 @@ impl ForwardRenderer {
             }),
             ..passes
         })
+    }
+}
+
+/// What a frame's layout depends on besides the instances.
+#[derive(Debug, Clone, Copy)]
+struct Setup {
+    depth_desc: TextureDesc,
+    /// Forward command lists: 2 with occlusion culling (early, late), else 1.
+    phases: u32,
+    cascade_count: u32,
+}
+
+/// Where the instances come from.
+#[derive(Debug, Clone, Copy)]
+enum Source {
+    /// Written into the ring this frame, in draw order (the draw-list path).
+    Ring(crate::upload::Staged),
+    /// A persistent scene's buffers.
+    Scene {
+        current: Buffer,
+        previous: Buffer,
+        previous_address: vk::DeviceAddress,
+    },
+}
+
+/// One frame's instances, batches and draw commands.
+#[derive(Debug, Clone, Copy)]
+struct Layout {
+    /// Instances the culling pass visits (one thread each).
+    instance_count: u32,
+    instances: vk::DeviceAddress,
+    source: Source,
+    batch_table: vk::DeviceAddress,
+    /// The command lists, in the ring.
+    commands: crate::upload::Staged,
+    /// Commands per list.
+    command_count: u32,
+    /// Commands that draw (the scene path's sink follows them).
+    drawn_commands: u32,
+    /// Visible-list slots per list.
+    slot_count: u32,
+    batch_count: u32,
+    states: States,
+    /// World-space bounds of the instances (the shadow cascades' fit).
+    min: Vec3,
+    max: Vec3,
+    subsurface_draws: bool,
+}
+
+/// A frame with nothing to draw: the target is the clear color everywhere, so no motion
+/// shows. A temporal view still gets its (zero) motion vectors and a stored depth, and its
+/// state moves on, so a resolve after it needs no special case.
+fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPasses {
+    let (color, depth) = (view.color, view.depth);
+    let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
+    let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
+    let temporal = view.temporal;
+    let velocity = temporal.map(|_| {
+        let desc = fg.texture_desc(depth);
+        fg.create_texture(
+            "motion vectors",
+            TextureDesc::new_2d(MOTION_FORMAT, desc.width, desc.height),
+        )
+    });
+    let mut pass = fg.add_pass("forward").color(color, load, StoreOp::Store);
+    if let Some(velocity) = velocity {
+        pass = pass.color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store);
+    }
+    let depth_store = if velocity.is_some() {
+        StoreOp::Store
+    } else {
+        StoreOp::DontCare
+    };
+    pass.depth(depth, depth_clear, depth_store).execute(|_| {});
+    let motion = temporal.zip(velocity).map(|(t, velocity)| {
+        let jitter = t.next_jitter();
+        let reset = t.reset.replace(false);
+        t.previous_count.set(0);
+        t.previous_clip_from_world
+            .set(Some(view.camera.clip_from_world));
+        t.frame.set(t.frame.get() + 1);
+        MotionOutput {
+            velocity,
+            jitter,
+            reset,
+            reactive: None,
+        }
+    });
+    ForwardPasses {
+        instances: 0,
+        batches: 0,
+        draw_commands: 0,
+        list_commands: 0,
+        occlusion: false,
+        commands: None,
+        motion,
+        ao: None,
+        atmosphere: None,
     }
 }
 
@@ -2580,8 +3014,12 @@ fn shading_pass<'a, 'g>(
     first: bool,
     depth: Texture,
     depth_use: DepthUse,
+    instances: Option<Buffer>,
 ) -> PassBuilder<'a, 'g> {
-    let mut pass = forward_pass(fg, name, geometry, materials, shadow_map, culled, visible).color(
+    let mut pass = forward_pass(
+        fg, name, geometry, materials, shadow_map, culled, visible, instances,
+    )
+    .color(
         targets.color,
         if first {
             targets.color_load
@@ -2621,6 +3059,7 @@ fn shading_pass<'a, 'g>(
 
 /// A culling pass of `phase` with its buffer accesses (`flags`: occlusion culling's
 /// visibility flags, read early and rewritten late).
+#[allow(clippy::too_many_arguments)]
 fn cull_pass<'a, 'g>(
     fg: &'a mut FrameGraph<'g>,
     bindless: &'g Bindless,
@@ -2629,11 +3068,13 @@ fn cull_pass<'a, 'g>(
     visible: Buffer,
     flags: Option<Buffer>,
     phase: u32,
+    instances: Option<Buffer>,
 ) -> ComputePass<'a, 'g> {
     let pass = fg
         .add_compute(name, bindless)
         .read(culled, Access::StorageReadWrite(ShaderStages::COMPUTE))
-        .write(visible, Access::StorageWrite(ShaderStages::COMPUTE));
+        .write(visible, Access::StorageWrite(ShaderStages::COMPUTE))
+        .maybe_read(instances, Access::StorageRead(ShaderStages::COMPUTE));
     match flags {
         Some(flags) if phase == PHASE_LATE => {
             pass.read(flags, Access::StorageReadWrite(ShaderStages::COMPUTE))
@@ -2644,6 +3085,7 @@ fn cull_pass<'a, 'g>(
 }
 
 /// A depth prepass phase that draws the culled commands, without its attachment.
+#[allow(clippy::too_many_arguments)]
 fn prepass_pass<'a, 'g>(
     fg: &'a mut FrameGraph<'g>,
     name: &'static str,
@@ -2651,14 +3093,17 @@ fn prepass_pass<'a, 'g>(
     materials: &MaterialFrame<'_>,
     culled: Buffer,
     visible: Buffer,
+    instances: Option<Buffer>,
 ) -> PassBuilder<'a, 'g> {
     materials
         .read(geometry.read(fg.add_pass(name)))
         .read(culled, Access::Indirect)
         .read(visible, Access::StorageRead(ShaderStages::VERTEX))
+        .maybe_read(instances, Access::StorageRead(ShaderStages::VERTEX))
 }
 
 /// A forward pass that draws the culled commands, without its attachments.
+#[allow(clippy::too_many_arguments)]
 fn forward_pass<'a, 'g>(
     fg: &'a mut FrameGraph<'g>,
     name: &'static str,
@@ -2667,16 +3112,18 @@ fn forward_pass<'a, 'g>(
     shadow_map: Texture,
     culled: Buffer,
     visible: Buffer,
+    instances: Option<Buffer>,
 ) -> PassBuilder<'a, 'g> {
     materials
         .read(geometry.read(fg.add_pass(name)))
         .read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
         .read(culled, Access::Indirect)
         .read(visible, Access::StorageRead(ShaderStages::VERTEX))
+        .maybe_read(instances, Access::StorageRead(ShaderStages::VERTEX))
 }
 
 /// Whether a transform mirrors (negative determinant of its linear part).
-fn mirrored(m: &Mat4) -> bool {
+pub(crate) fn mirrored(m: &Mat4) -> bool {
     m.x_axis
         .truncate()
         .cross(m.y_axis.truncate())
@@ -2685,7 +3132,7 @@ fn mirrored(m: &Mat4) -> bool {
 }
 
 /// A batch's pipeline state; `subsurface`: whether subsurface materials get theirs.
-fn state(kind: MaterialKind, mirrored: bool, subsurface: bool) -> usize {
+pub(crate) fn state(kind: MaterialKind, mirrored: bool, subsurface: bool) -> usize {
     // Masked and blended exclude each other (both come from the alpha mode), blended and
     // subsurface too (the material table never sets both).
     (usize::from(kind.subsurface && subsurface) * SUBSURFACE)

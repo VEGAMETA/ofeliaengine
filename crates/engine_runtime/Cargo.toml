@@ -1,0 +1,26 @@
+[package]
+name = "engine_runtime"
+description = "The game's frame loop: fixed-step simulation, render-frame presentation, ECS to GPU scene extraction."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Plain-data proofs for the renderer components (the version engine_ecs uses).
+bytemuck = { version = "1.25", features = ["derive"] }
+engine_core.workspace = true
+engine_ecs.workspace = true
+# The fixed-step clock (`engine_physics::ecs::FixedStep`, ADR 0066), shared with the
+# physics sync rather than duplicated; no physics backend comes with it.
+engine_physics.workspace = true
+engine_profiler.workspace = true
+engine_render.workspace = true
+
+[dev-dependencies]
+engine_platform.workspace = true
+engine_rhi.workspace = true

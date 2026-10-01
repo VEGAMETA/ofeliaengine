@@ -57,6 +57,16 @@ pub struct World {
     pub(crate) sim_tick: u64,
     scratch: Vec<ComponentId>,
     pub(crate) resources: crate::resource::Resources,
+    /// Removal logs of the components [`World::track_removals`] asked for.
+    removals: Vec<RemovalLog>,
+    /// Bumped when entities vanish without being logged (clear, restore).
+    pub(crate) resync_epoch: u64,
+}
+
+/// Entities that lost one tracked component (despawned or removed), oldest first.
+struct RemovalLog {
+    id: ComponentId,
+    entities: Vec<Entity>,
 }
 
 impl Default for World {
@@ -143,6 +153,8 @@ impl World {
             sim_tick: 0,
             scratch: Vec::new(),
             resources: crate::resource::Resources::default(),
+            removals: Vec::new(),
+            resync_epoch: 0,
         };
         world.archetype_for_sorted(&[]);
         world
@@ -318,12 +330,24 @@ impl World {
         self.entities.location(entity).is_some()
     }
 
-    /// Despawns `entity`, dropping its components. False if it was not alive.
+    /// Despawns `entity`, dropping its components, and takes it out of its parent's list of
+    /// children (its own children keep a dead parent: use
+    /// [`Self::despawn_recursive`] for subtrees). False if it was not alive.
     pub fn despawn(&mut self, entity: Entity) -> bool {
+        if !self.contains(entity) {
+            return false;
+        }
+        // Out of its parent's list first, so the list never holds a dead entity (walks
+        // over children would stop there). Its own children keep a dead parent.
+        if let Some(link) = self.get::<crate::Parent>(entity).copied() {
+            self.unlink(entity, link);
+        }
+        // Unlinking can move rows (the parent may lose `Children`): look it up now.
         let Some(loc) = self.entities.location(entity) else {
             return false;
         };
         let tick = self.bump_change_tick();
+        self.log_removals(loc.archetype, None, entity);
         let arch = &mut self.archetypes[loc.archetype as usize];
         for column in 0..arch.columns.len() {
             if let Some(drop) = arch.columns[column].drop {
@@ -382,6 +406,8 @@ impl World {
             }
         }
         self.bump_change_tick();
+        // Nothing was logged: mirrors of the world start over.
+        self.resync_epoch += 1;
     }
 
     fn add_target(&mut self, source: u32, id: ComponentId) -> u32 {
@@ -475,6 +501,7 @@ impl World {
                 .read()
         };
         let target = self.remove_target(loc.archetype, id);
+        self.log_removals(loc.archetype, Some(target), entity);
         move_row(
             &mut self.archetypes,
             &mut self.pool,
@@ -597,6 +624,7 @@ impl World {
             unsafe { drop(arch.value_ptr(loc.chunk as usize, column, loc.row as usize)) };
         }
         let target = self.remove_target(loc.archetype, id);
+        self.log_removals(loc.archetype, Some(target), entity);
         move_row(
             &mut self.archetypes,
             &mut self.pool,
@@ -607,6 +635,101 @@ impl World {
             tick,
         );
         true
+    }
+
+    /// Mutable reference to `entity`'s `T` that does **not** stamp the chunk column as
+    /// changed: for systems that write only when a value really changes and then call
+    /// [`Self::mark_changed`] (the transform propagation does the same internally), so
+    /// [`Changed`] filters downstream skip chunks whose values stayed the same. Writing
+    /// through it without marking hides the write from every [`Changed`] filter.
+    ///
+    /// [`Changed`]: crate::Changed
+    #[inline]
+    pub fn get_mut_untracked<T: Component>(&mut self, entity: Entity) -> Option<&mut T> {
+        let id = self.components.id_of::<T>()?;
+        let loc = self.entities.location(entity)?;
+        let arch = &mut self.archetypes[loc.archetype as usize];
+        let column = arch.column_index(id)?;
+        // SAFETY: the column holds an initialized `T` at this row; `&mut self` makes the
+        // reference unique.
+        Some(unsafe {
+            &mut *arch
+                .value_ptr(loc.chunk as usize, column, loc.row as usize)
+                .cast::<T>()
+        })
+    }
+
+    /// Stamps `entity`'s `T` (its chunk column) as changed, as a write through
+    /// [`Self::get_mut`] does. False if the entity is not alive or has no `T`.
+    pub fn mark_changed<T: Component>(&mut self, entity: Entity) -> bool {
+        let Some(id) = self.components.id_of::<T>() else {
+            return false;
+        };
+        let Some(loc) = self.entities.location(entity) else {
+            return false;
+        };
+        let Some(column) = self.archetypes[loc.archetype as usize].column_index(id) else {
+            return false;
+        };
+        let tick = self.bump_change_tick();
+        self.archetypes[loc.archetype as usize].mark_column(loc.chunk as usize, column, tick);
+        true
+    }
+
+    /// Starts logging the entities that lose a `T` (despawned, or `T` removed), for
+    /// systems that mirror the world elsewhere (the renderer's scene) and need removals
+    /// without scanning. Idempotent. The log grows until [`Self::drain_removed`] empties
+    /// it, so a tracked component needs a consumer that drains it every frame. Logs are
+    /// bookkeeping, like change ticks: snapshots, restores and the state hash ignore them.
+    pub fn track_removals<T: Component>(&mut self) {
+        let id = self.components.register::<T>();
+        if !self.removals.iter().any(|log| log.id == id) {
+            self.removals.push(RemovalLog {
+                id,
+                entities: Vec::new(),
+            });
+        }
+    }
+
+    /// Calls `f` with every entity that lost its `T` since the previous drain, oldest
+    /// first, and empties the log (keeping its memory). Nothing if `T` is not tracked.
+    /// An entity can appear more than once (removed, re-added, removed again), and its
+    /// index may already belong to a newer entity: compare generations.
+    pub fn drain_removed<T: Component>(&mut self, mut f: impl FnMut(Entity)) {
+        let Some(id) = self.components.id_of::<T>() else {
+            return;
+        };
+        if let Some(log) = self.removals.iter_mut().find(|log| log.id == id) {
+            for &entity in &log.entities {
+                f(entity);
+            }
+            log.entities.clear();
+        }
+    }
+
+    /// Changes whenever entities disappear without removal logs: [`Self::clear`] and
+    /// [`Snapshot`](crate::Snapshot) restores. A mirror of the world that sees it change
+    /// rebuilds from scratch instead of trusting [`Self::drain_removed`].
+    pub fn resync_epoch(&self) -> u64 {
+        self.resync_epoch
+    }
+
+    /// Logs `entity` for every tracked component that its archetype `from` has and `to`
+    /// (the archetype it moves to; `None` when despawned) lacks.
+    #[inline]
+    fn log_removals(&mut self, from: u32, to: Option<u32>, entity: Entity) {
+        if self.removals.is_empty() {
+            return;
+        }
+        let source = &self.archetypes[from as usize];
+        let target = to.map(|to| &self.archetypes[to as usize]);
+        for log in &mut self.removals {
+            let lost = source.column_index(log.id).is_some()
+                && target.is_none_or(|t| t.column_index(log.id).is_none());
+            if lost {
+                log.entities.push(entity);
+            }
+        }
     }
 
     /// Location of a live entity.

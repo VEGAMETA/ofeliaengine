@@ -175,6 +175,8 @@ impl World {
         self.entities.free.clone_from(&snapshot.free);
         self.entities.alive = snapshot.alive;
         self.sim_tick = snapshot.sim_tick;
+        // Entities may have vanished without removal logs: mirrors start over.
+        self.resync_epoch += 1;
         Ok(())
     }
 

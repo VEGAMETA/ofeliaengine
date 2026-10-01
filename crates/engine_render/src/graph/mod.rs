@@ -1133,6 +1133,14 @@ impl<'g> PassBuilder<'_, 'g> {
         self.read(resource, access)
     }
 
+    /// [`Self::read`] when `resource` is `Some`.
+    pub fn maybe_read(self, resource: Option<impl GraphResource>, access: Access) -> Self {
+        match resource {
+            Some(resource) => self.read(resource, access),
+            None => self,
+        }
+    }
+
     /// Runs this pass on the async compute queue when the graph has async compute on
     /// (ADR 0065), overlapping graphics work that does not lead to it. The pass must
     /// declare every resource it touches; one with attachments, or with accesses in
