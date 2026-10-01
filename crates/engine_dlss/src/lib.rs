@@ -932,7 +932,7 @@ impl Dlss {
 
     /// The texture LOD bias NVIDIA recommends, log2(render / output) − 1 (DLSS
     /// Programming Guide §3.5), one level sharper than the engine's standard bias; it
-    /// measured better with DLSS (ADR 0063). Pass it to `Temporal::set_texture_lod_bias`.
+    /// measured better with DLSS (ADR 0063). Pass it to `MaterialTable::set_texture_lod_bias`.
     pub fn texture_lod_bias(render: (u32, u32), output: (u32, u32)) -> f32 {
         engine_upscale::texture_lod_bias(render, output) - 1.0
     }

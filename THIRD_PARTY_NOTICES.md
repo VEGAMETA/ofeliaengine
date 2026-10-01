@@ -30,6 +30,9 @@ the dependency.
 | lewton 0.10.2 (+ tinyvec 1.13, byteorder 1.5) | MIT OR Apache-2.0 (tinyvec Zlib OR Apache-2.0 OR MIT; byteorder Unlicense OR MIT) | Ogg Vorbis decoding in `engine_audio_decode` (ADR 0051) |
 | ogg 0.8.0 | BSD-3-Clause | Ogg pages of Opus files in `engine_audio_decode` (ADR 0051) |
 | claxon 0.4.3 | Apache-2.0 | FLAC decoding in `engine_audio_decode` (ADR 0051) |
+| log 0.4.34 | MIT OR Apache-2.0 | the logging facade `engine_log` implements (ADR 0061) |
+| crash-handler 0.8.1 + crash-context 0.8 (© Embark Studios; + parking_lot 0.12, lock_api, parking_lot_core, scopeguard, smallvec, libc, cfg-if) | MIT OR Apache-2.0 (crash-context MIT) | hooks the process's crash paths in `engine_crash` (ADR 0061) |
+| minidumper 0.11.0 + minidump-writer 0.13.0 + minidump-common 0.26 (© Embark Studios; + polling 3, concurrent-queue, crossbeam-utils, pin-project-lite, scroll 0.12 + scroll_derive, goblin 0.9, plain, error-graph, failspot, debugid, uuid, range-map, num-traits, bitflags, serde, serde_json, itoa, memchr, zmij, thiserror 2, windows-sys 0.61) | MIT OR Apache-2.0 (minidump-writer, minidump-common, scroll, goblin, error-graph, failspot, crash-context, zmij MIT; debugid Apache-2.0; memchr Unlicense OR MIT) | the crash monitor process and its minidumps in `engine_crash` (ADR 0061) |
 
 Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profiling`):
 
@@ -88,13 +91,14 @@ condition of this section (ADR 0036). License texts are next to each font.
 | Crate | License | Used for |
 |---|---|---|
 | bytemuck_derive 1.12 (+ proc-macro2, quote, syn 3, unicode-ident) | Zlib OR Apache-2.0 OR MIT (the others MIT OR Apache-2.0; unicode-ident also Unicode-3.0) | `#[derive(Pod, Zeroable)]` with compile-time padding checks (ADR 0017) |
+| num-derive 0.4, smart-default 0.7, serde_derive, thiserror-impl 2 (+ syn 2) | MIT OR Apache-2.0 (smart-default MIT) | derives inside minidump-writer (ADR 0061) |
 
 ## Rust crates (dev-dependencies only, not shipped)
 
 | Crate | License | Used for |
 |---|---|---|
 | rayon 1.12 (+ rayon-core, crossbeam-deque, crossbeam-epoch, crossbeam-utils, either) | MIT OR Apache-2.0 | baseline in `engine_core` job-system benchmarks (ADR 0002) |
-| loom 0.7 (only with `--cfg loom`) | MIT | model checking of the lock-free queues in `engine_core::jobs` |
+| loom 0.7 (only with `--cfg loom`) | MIT | model checking of the lock-free queues in `engine_core::jobs` and the log ring in `engine_log` |
 | gpu-allocator 0.28 (+ log, presser, thiserror, thiserror-impl, proc-macro2, quote, syn, unicode-ident) | MIT OR Apache-2.0 (unicode-ident also Unicode-3.0) | baseline in the `engine_rhi` memory allocator benchmark (ADR 0010) |
 
 ## Research harnesses (outside the workspace, never linked into the engine)
@@ -135,6 +139,8 @@ Constants and formulas taken into our own code (no files copied).
 | The ACES transforms that fit approximates | same | Academy Color Encoding System, A.M.P.A.S. | ACES license (below) |
 | AgX inset/outset matrices for Rec.2020 and the polynomial sigmoid's coefficients | `engine_render/src/post.rs` (`AGX_IN`, `AGX_OUT`, `agx_sigmoid`), `engine_render/shaders/tonemap.slang` | Filament `filament/src/ToneMapper.cpp` (matrices from Blender's AgX via EaryChow/AgX_LUT_Gen, no license, accepted by the team, ADR 0048; sigmoid adapted from B. Wrensch's minimal AgX) | Apache-2.0 (Filament) |
 | The Streamline ABI: structure layouts, GUIDs, enumeration values and function signatures of `sl.h`, `sl_consts.h`, `sl_core_api.h`, `sl_core_types.h`, `sl_dlss.h`, `sl_helpers_vk.h`, `sl_result.h`, `sl_struct.h`, `sl_version.h` (v2.14.1), declared in Rust | `engine_dlss/src/sl.rs` | NVIDIA Streamline, github.com/NVIDIAGameWorks/Streamline | MIT (Copyright (c) 2022-2023 NVIDIA CORPORATION, below) |
+| GTAO as structured by XeGTAO: the depth MIP filter, the main pass's slice and horizon math, the constants (radius × 1.457, falloff 0.615, MIP offset 3.3, the 0.03 floor, ÷ 1.5 before the blur), R2 + Hilbert noise, the edges and their 2-bit packing, the denoise weights | `engine_render/src/ao.rs`, `engine_render/shaders/ao.slang` | Intel XeGTAO, `XeGTAO.h`, `XeGTAO.hlsli` (after Jimenez et al., SIGGRAPH 2016) | MIT (Copyright (C) 2016-2021, Intel Corporation) |
+| LDR-FLIP: its constants, separable spatial and feature filters, colour transforms and error remapping, ported to Rust | `tests/golden/src/flip.rs` (test-only crate `engine_golden`) | NVIDIA `NVlabs/flip`, `src/cpp/FLIP.h` (Andersson et al., HPG 2020) | BSD-3-Clause (Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES) |
 
 ### MIT license (Baking Lab)
 
@@ -180,6 +186,59 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### MIT license (XeGTAO)
+
+```
+Copyright (C) 2016-2021, Intel Corporation
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of this
+software and associated documentation files (the "Software"), to deal in the Software
+without restriction, including without limitation the rights to use, copy, modify,
+merge, publish, distribute, sublicense, and/or sell copies of the Software, and to permit
+persons to whom the Software is furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all copies or
+substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
+
+### BSD 3-Clause license (FLIP)
+
+```
+Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+this list of conditions and the following disclaimer in the documentation
+and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+contributors may be used to endorse or promote products derived from
+this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
 ### ACES license (A.M.P.A.S.)

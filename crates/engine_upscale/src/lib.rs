@@ -41,7 +41,7 @@ pub const HISTORY_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// The texture LOD bias for upsampling `render` to `output`: log2(render width / output
 /// width), 0 for plain TAA. Textures are then sampled as if rendered at the output size, the
-/// detail the resolve reconstructs. Pass it to `Temporal::set_texture_lod_bias`.
+/// detail the resolve reconstructs. Pass it to `MaterialTable::set_texture_lod_bias`.
 pub fn texture_lod_bias(render: (u32, u32), output: (u32, u32)) -> f32 {
     (render.0.max(1) as f32 / output.0.max(1) as f32).log2()
 }

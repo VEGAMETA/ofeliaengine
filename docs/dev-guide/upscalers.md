@@ -9,7 +9,10 @@ The engine has three upscalers (how to use them in code: [rendering.md
 | AMD FSR 3.1 | every GPU | none: built into the engine from AMD's MIT source |
 | NVIDIA DLSS Super Resolution / DLAA | NVIDIA RTX | NVIDIA's DLLs, below |
 
-The engine does not ship or download NVIDIA's DLLs (CLAUDE.md §0). A game either ships
+The engine does not ship or download NVIDIA's DLLs (CLAUDE.md §0; team decision, ADR
+0063). When they are present, load Streamline at startup (`Streamline::load` before
+creating the instance): it costs about 1.1 s once, and DLSS can then be switched on
+without a restart. A game either ships
 them itself, under NVIDIA's license, or lets players add them. Without them the DLSS
 option simply is not there: nothing fails.
 

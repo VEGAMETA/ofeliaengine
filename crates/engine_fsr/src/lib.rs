@@ -275,7 +275,7 @@ impl Fsr {
 
     /// The texture LOD bias AMD recommends for FSR, log2(render width / output width) − 1
     /// (the SDK's documentation, "Mipmap biasing"): one level sharper than the output size.
-    /// Pass it to `Temporal::set_texture_lod_bias`; `engine_upscale::texture_lod_bias` is the
+    /// Pass it to `MaterialTable::set_texture_lod_bias`; `engine_upscale::texture_lod_bias` is the
     /// same without the extra level.
     pub fn texture_lod_bias(render: (u32, u32), output: (u32, u32)) -> f32 {
         (render.0.max(1) as f32 / output.0.max(1) as f32).log2() - 1.0

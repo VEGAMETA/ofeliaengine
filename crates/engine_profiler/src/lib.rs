@@ -137,6 +137,18 @@ pub fn message(text: &str) {
     let _ = text;
 }
 
+/// Sends a text message in color (`0xRRGGBB`) to the profiler timeline: log records
+/// (`engine_log`).
+#[inline]
+pub fn message_color(text: &str, rgb: u32) {
+    #[cfg(feature = "tracy-base")]
+    if let Some(client) = tracy_client::Client::running() {
+        client.color_message(text, rgb << 8 | 0xFF, 0);
+    }
+    #[cfg(not(feature = "tracy-base"))]
+    let _ = (text, rgb);
+}
+
 /// Names the calling thread in the profiler. Call once when a thread starts. Interior NUL
 /// characters are removed.
 pub fn set_thread_name(name: &str) {

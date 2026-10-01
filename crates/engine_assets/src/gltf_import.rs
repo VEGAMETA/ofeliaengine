@@ -99,6 +99,12 @@ pub struct MaterialData {
     pub alpha: AlphaMode,
     /// Render both faces.
     pub double_sided: bool,
+    /// Thickness of the volume under the surface in the mesh's units
+    /// (`KHR_materials_volume`'s `thicknessFactor`; 0 without the extension), for
+    /// transmission through subsurface-scattering materials (ADR 0059).
+    pub thickness: f32,
+    /// Thickness texture (green), multiplied by `thickness` (`thicknessTexture`).
+    pub thickness_texture: Option<usize>,
 }
 
 /// Where a texture's encoded image is (decoded later by the texture pipeline).
@@ -423,6 +429,11 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
                 gltf::material::AlphaMode::Blend => AlphaMode::Blend,
             },
             double_sided: m.double_sided(),
+            thickness: m.volume().map_or(0.0, |v| v.thickness_factor()),
+            thickness_texture: m
+                .volume()
+                .and_then(|v| v.thickness_texture())
+                .map(|t| t.texture().index()),
         });
     }
 

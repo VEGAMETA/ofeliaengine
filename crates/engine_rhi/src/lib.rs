@@ -15,14 +15,19 @@
 //!   layout all pipelines share (ADR 0013).
 //! - [`Pipeline`]: graphics pipelines with dynamic rendering and vertex pulling, and
 //!   compute pipelines (ADR 0013).
+//! - GPU crash diagnostics (ADR 0061): [`Breadcrumbs`] mark render graph passes in the
+//!   command stream, and a device loss or hang produces a [`GpuFaultReport`] with
+//!   `VK_EXT_device_fault` data ([`last_gpu_fault`]).
 //!
 //! The minimum GPU tier is Vulkan 1.3 with dynamic rendering, synchronization2, timeline
 //! semaphores, buffer device address and bindless descriptor indexing (ADR 0006).
 
 mod adapter;
 mod bindless;
+mod breadcrumbs;
 mod device;
 mod error;
+mod fault;
 mod frames;
 mod instance;
 mod memory;
@@ -34,8 +39,10 @@ mod swapchain;
 pub use adapter::{Adapter, AdapterKind, AdapterPreference, OptionalCaps};
 pub use ash;
 pub use bindless::{Bindless, PUSH_CONSTANT_BYTES, SamplerKind, Wrap};
+pub use breadcrumbs::{Breadcrumbs, MAX_PASSES, MAX_TRACKS, Track};
 pub use device::{Device, LatencyExtensions, Queue};
 pub use error::RhiError;
+pub use fault::{AddressFault, DeviceFault, GpuFaultReport, VendorFault, last_gpu_fault};
 pub use frames::{Frame, Frames};
 pub use instance::{Instance, InstanceDesc, ValidationReport};
 pub use memory::{

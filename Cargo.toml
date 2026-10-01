@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "tools/*"]
+members = ["crates/*", "tools/*", "tests/*"]
 
 [workspace.package]
 version = "0.0.0"
@@ -20,6 +20,8 @@ engine_text = { path = "crates/engine_text" }
 engine_ecs = { path = "crates/engine_ecs" }
 engine_input = { path = "crates/engine_input" }
 engine_latency = { path = "crates/engine_latency" }
+engine_log = { path = "crates/engine_log" }
+engine_crash = { path = "crates/engine_crash" }
 engine_physics = { path = "crates/engine_physics" }
 engine_physics_jolt = { path = "crates/engine_physics_jolt" }
 engine_physics2d = { path = "crates/engine_physics2d" }

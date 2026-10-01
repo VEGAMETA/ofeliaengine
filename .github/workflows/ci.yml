@@ -133,7 +133,7 @@ jobs:
           RUSTFLAGS: --cfg loom
           CARGO_TARGET_DIR: target/loom
         run: |
-          cargo test -p engine_core --release --lib --locked loom > logs\loom.txt 2>&1
+          cargo test -p engine_core -p engine_log --release --lib --locked loom > logs\loom.txt 2>&1
           set rc=%ERRORLEVEL%
           if not %rc%==0 echo.> logs\loom.failed
           type logs\loom.txt

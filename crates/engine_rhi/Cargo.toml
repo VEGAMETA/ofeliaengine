@@ -17,6 +17,10 @@ ash = "0.38"
 # The pipeline cache file's checksum and the job pool pipelines are created on (ADR 0055).
 engine_core.workspace = true
 engine_profiler.workspace = true
+# Validation messages and GPU fault reports go to the log; fault reports and breadcrumbs
+# into crash reports (ADR 0061).
+engine_log.workspace = true
+log = "0.4"
 
 [dev-dependencies]
 # Benchmark reference only (ADR 0010): MIT OR Apache-2.0; not linked into the engine.

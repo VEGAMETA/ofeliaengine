@@ -1,0 +1,19 @@
+[package]
+name = "engine_golden"
+description = "Golden-image render tests: fixed scenes on both reference GPUs, compared with FLIP."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Reading and writing the golden images (the version engine_assets uses).
+png = "0.18"
+engine_assets.workspace = true
+engine_core.workspace = true
+engine_render.workspace = true
+engine_rhi.workspace = true

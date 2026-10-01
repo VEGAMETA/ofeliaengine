@@ -363,9 +363,10 @@ temporal.reset();
   1 dB better on a panning camera).
 - **Texture LOD bias while upsampling:** textures are sampled for the render size unless
   you bias them towards the output size:
-  `temporal.set_texture_lod_bias(engine_upscale::texture_lod_bias(render_size, output_size))`
+  `materials.set_texture_lod_bias(&bindless, engine_upscale::texture_lod_bias(render_size, output_size))?`
   (log2(render / output): −0.58 from 720p to 1080p, −1 from half the size). It applies to
-  every material texture of the view. On a finely textured ground upsampled from half the
+  every material texture of the table, so to every view drawing with it; set it when the
+  render or output size changes. It costs nothing per pixel (it lives in the samplers). On a finely textured ground upsampled from half the
   size it gains 0.1-0.3 dB with TAAU and FSR; AMD's recommendation of one level more
   (`Fsr::texture_lod_bias`) was worse there (ADR 0060). Leave it at 0 for plain TAA.
 - **Known limits for now:**
@@ -399,7 +400,7 @@ use engine_fsr::{Fsr, FsrCamera, FsrInput, QualityMode};
 let mut fsr = Fsr::new(&device, frames_in_flight);
 let render_size = QualityMode::Quality.render_size(output_size); // 1080p → 1280×720
 temporal.set_jitter_phases(Fsr::jitter_phases(render_size, output_size));
-temporal.set_texture_lod_bias(engine_upscale::texture_lod_bias(render_size, output_size));
+materials.set_texture_lod_bias(&bindless, engine_upscale::texture_lod_bias(render_size, output_size))?;
 fsr.set_sharpness(Some(0.3)); // optional: RCAS after upscaling, 0-1
 
 // Every frame: `color` and `depth` at `render_size`, as for TAAU.
@@ -485,7 +486,7 @@ if let Some(streamline) = &streamline {
 let mut dlss = Dlss::new(streamline.as_ref().unwrap(), frames_in_flight)?;
 let render_size = dlss.render_size(Quality::Quality, output_size)?; // 1080p → 1280×720
 temporal.set_jitter_phases(Dlss::jitter_phases(render_size, output_size));
-temporal.set_texture_lod_bias(Dlss::texture_lod_bias(render_size, output_size));
+materials.set_texture_lod_bias(&bindless, Dlss::texture_lod_bias(render_size, output_size))?;
 
 // Every frame: as for FSR.
 let upscaled = dlss.add_pass(&mut fg, UpscaleInput {
@@ -550,7 +551,7 @@ let mut upscaler: Box<dyn Upscaler> = match settings.upscaler {
 };
 let render_size = upscaler.render_size(settings.quality, output_size);
 temporal.set_jitter_phases(upscaler.jitter_phases(render_size, output_size));
-temporal.set_texture_lod_bias(upscaler.texture_lod_bias(render_size, output_size));
+materials.set_texture_lod_bias(&bindless, upscaler.texture_lod_bias(render_size, output_size))?;
 
 // Every frame:
 let upscaled = upscaler.add_pass(&mut fg,
@@ -794,3 +795,104 @@ draws.push(DrawItem { mesh: window_pane, material: glass, world_from_object });
   - Measure with `draw_bench -- --blended`.
 - **Not yet:** refraction and distortion, colored shadows through glass,
   order-independent transparency.
+
+## 13. Ambient occlusion
+
+Ambient occlusion darkens the sky light where the surroundings hide the sky: creases,
+corners, the undersides of arches, folds of cloth (GTAO, ADR 0058). Turn it on per
+renderer:
+
+```rust
+use engine_render::ao::{AoQuality, AoSettings};
+
+renderer.set_ambient_occlusion(&device, &bindless, Some(AoSettings {
+    quality: AoQuality::High, // 3 directions × 3 samples per side
+    radius: 0.5,              // how far occluders count, in world units
+    ..AoSettings::default()
+}))?;
+```
+
+- **What it darkens:** the ambient light and the sky's diffuse and reflected light, never
+  the sun or point and spot lights (their shadows are their occlusion).
+  - Bright surfaces lose less than dark ones (light bounces inside the crease).
+  - It multiplies with the material's own occlusion texture.
+- **Radius is in world units:** 0.5 is half a metre in a metre-scaled scene. Larger radii
+  darken wider areas at the same cost.
+- **Quality and cost** at 1920 × 1080 on an RTX 4060 Ti: `Low` 0.23 ms, `Medium` 0.31,
+  `High` 0.46 (default), `Ultra` 1.06. Under TAAU it runs at the render resolution, so
+  upscaling makes it cheaper too.
+  - `Low` and `Medium` are noisy per frame: use them with TAA/TAAU, which averages the noise
+    (the noise changes per frame only when TAA is on, otherwise it would flicker).
+  - `AoQuality::Custom { slices, steps }` for references and comparisons.
+- **It turns the depth prepass on** (its depth must be ready before shading): about
+  0.06 ms on Sponza.
+- **Perspective cameras only:** orthographic views draw without it.
+- **Look:** `power` (2.2) darkens or lightens the whole effect, `falloff` softens its outer
+  edge, `denoise_passes` (0–3, 1) blurs it along surfaces without crossing depth edges.
+- **Limits of screen space:** nothing off screen or hidden behind the nearest surface
+  occludes, and thin objects (poles, railings) occlude everything behind them within the
+  radius.
+- Measure with `scene_bench -- --ao low|medium|high|ultra|<slices>x<steps>`.
+
+## 14. Skin, wax and leaves: subsurface scattering
+
+Light that enters skin, wax, marble, jade, fruit or leaves spreads under the surface and
+comes out around where it entered (ADR 0059). Give the renderer the diffusion profiles,
+and the materials a `Subsurface`:
+
+```rust
+use engine_render::material::{Subsurface, Transmission};
+use engine_render::subsurface::SubsurfaceProfile;
+
+// Profile 0: human skin at its real size (millimetres, a metre-scaled scene).
+// Profile 1: wax, light spreading 8 mm in red, 5 in green, 3 in blue.
+renderer.set_subsurface_profiles(&device, &bindless, &[
+    SubsurfaceProfile::skin(),
+    SubsurfaceProfile::from_radius([8.0, 5.0, 3.0]),
+])?;
+let face = materials.add(MaterialDesc {
+    subsurface: Some(Subsurface {
+        profile: 0,
+        transmission: Transmission::Thick, // ears and nostrils light up from behind
+        ..Subsurface::default()
+    }),
+    ..MaterialDesc::solid([0.85, 0.62, 0.52], 0.0, 0.45)
+});
+```
+
+- **Profiles** belong to the renderer; materials name them by index. Call
+  `set_subsurface_profiles` when they change (a level load), not every frame: the first
+  call also creates the 9 pipelines subsurface materials need (about 0.1 s cold, a few
+  ms from the pipeline cache). A game that never calls it never pays for them.
+  - `skin()` is d'Eon and Luebke's measured six-Gaussian fit. `with_scale(k)` makes a
+    profile `k` world units per millimetre: larger values look softer (stylized or
+    miniature scenes); 0 turns scattering off.
+  - `from_radius([r, g, b])`: one Gaussian per channel, 99% of the light within those
+    millimetres. `SubsurfaceProfile::new` takes your own Gaussians.
+- **`Subsurface` on a material** (opaque or masked; blended materials ignore it):
+  - `mask`: how much of the diffuse light scatters (1: all).
+  - `transmission`: `Thin` (leaves, paper: the material's `thickness`), `Thick` (solid
+    objects: the thicker of `thickness` and the object itself as the sun's shadow map
+    sees it), or `None`. Only the sun transmits.
+  - `texturing`: `PostScatter` keeps the base color's detail sharp (pores, freckles);
+    `PreAndPostScatter` blurs half of it with the light (scans whose texture already
+    holds the scattering).
+  - `thickness` and `thickness_texture` (green) in world units; glTF's
+    `KHR_materials_volume` thickness is imported into `MaterialData`.
+- **Settings:** `renderer.set_subsurface(Some(SubsurfaceSettings { quality }))`,
+  `SubsurfaceQuality::Low | Medium | High | Ultra` = 8 / 20 / 40 / 80 samples per pixel
+  (Medium by default); `None` shades subsurface materials as ordinary ones. Under TAA the
+  noise changes every frame and averages out; without it the pattern is fixed.
+- **What happens:** a view that draws subsurface materials runs the depth prepass, draws
+  them in a "forward subsurface" pass after the others, then a "subsurface scatter" pass
+  adds their spread light. Other materials are shaded exactly as before.
+- **What it costs** at 1080p (`subsurface_bench`), scatter pass for skin a metre away /
+  four times larger:
+  - RTX 4060 Ti: 17–27 µs / 18–33 µs when it covers 10% of the screen (Low–Medium),
+    108 / 137–256 µs at 100%;
+  - Radeon iGPU: 0.4 / 0.5–1.0 ms at 10%, 3.9 / 5.3–9.6 ms at 100%: use `Low` there,
+    and keep close-ups of skin moderate.
+  - The forward subsurface pass costs 6–12% more than ordinary shading of the same
+    pixels.
+- **Limits:** only what is on screen scatters; two scattering objects at the same depth
+  exchange a little light; the exit albedo is stored in 8 bits.

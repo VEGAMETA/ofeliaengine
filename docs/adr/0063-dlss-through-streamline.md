@@ -144,8 +144,12 @@ medians of 200 frames.
   marks on the splash screen, about box and credits, NVIDIA GPUs only
   (`docs/dev-guide/rendering.md`). The engine itself carries no NVIDIA mark.
 - Streamline must start before the instance and device, and costs about 1.1 s at startup
-  (load + NGX initialization): start it early (it needs no window), or only when the
-  player enabled DLSS.
+  (load + NGX initialization). **Team decision (2026-10-01): load it at startup whenever
+  the DLLs are present**, so DLSS can be switched on without a restart; without the DLLs
+  nothing is loaded and nothing is paid.
+- **Team decision (2026-10-01): the engine does not ship NVIDIA's DLLs**, in its
+  repository, builds or installers. A game that ships them takes on NVIDIA's terms
+  itself (`docs/dev-guide/upscalers.md`).
 - Without presents (headless) Streamline logs once that it saw none; nothing depends on
   it, since the engine frees replaced features itself. Games should hook presents
   (`set_present_function`), which frame generation will require anyway.

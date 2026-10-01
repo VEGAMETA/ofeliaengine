@@ -10,7 +10,7 @@
 //! };
 //! let render = upscaler.render_size(Quality::Quality, output);
 //! temporal.set_jitter_phases(upscaler.jitter_phases(render, output));
-//! temporal.set_texture_lod_bias(upscaler.texture_lod_bias(render, output));
+//! materials.set_texture_lod_bias(&bindless, upscaler.texture_lod_bias(render, output))?;
 //! // every frame:
 //! let upscaled = upscaler.add_pass(&mut fg, UpscaleContext { device: &device,
 //!     allocator: &mut allocator, bindless: &bindless }, input, output, frame.number)?;
@@ -187,7 +187,7 @@ pub trait Upscaler {
     fn jitter_phases(&self, render: (u32, u32), output: (u32, u32)) -> u32;
 
     /// The texture LOD bias for upscaling `render` to `output`; pass it to
-    /// `Temporal::set_texture_lod_bias`. By default [`crate::texture_lod_bias`],
+    /// `MaterialTable::set_texture_lod_bias`. By default [`crate::texture_lod_bias`],
     /// log2(render / output), which measured best for TAAU and FSR (ADR 0060).
     fn texture_lod_bias(&self, render: (u32, u32), output: (u32, u32)) -> f32 {
         crate::texture_lod_bias(render, output)

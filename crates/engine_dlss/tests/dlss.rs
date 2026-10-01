@@ -897,13 +897,17 @@ fn texture_lod_bias_with_dlss() {
     let nvidia = engine_dlss::Dlss::texture_lod_bias((render, render), (output, output));
     let mut scores = Vec::new();
     for bias in [0.0, standard, nvidia] {
-        temporal.set_texture_lod_bias(bias);
+        gpu.materials
+            .set_texture_lod_bias(&gpu.bindless, bias)
+            .unwrap();
         let (image, _) = gpu.run(&draws, &temporal, Resolver::Dlss, (render, output), 48, 0.0);
         let db = psnr(&image, &truth);
         println!("DLSS from half size, LOD bias {bias:+.2}: {db:.2} dB against 4×4 supersampling");
         scores.push(db);
     }
-    temporal.set_texture_lod_bias(0.0);
+    gpu.materials
+        .set_texture_lod_bias(&gpu.bindless, 0.0)
+        .unwrap();
     assert!(
         scores[1] > scores[0],
         "the LOD bias sharpens DLSS's textures: {scores:?}"

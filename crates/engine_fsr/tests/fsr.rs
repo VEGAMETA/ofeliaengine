@@ -731,7 +731,7 @@ fn detail_texture() -> TextureLevels {
     }
 }
 
-/// The texture LOD bias of the forward renderer (`Temporal::set_texture_lod_bias`) against
+/// The texture LOD bias of the materials (`MaterialTable::set_texture_lod_bias`) against
 /// a supersampled reference, on a finely textured ground seen at a grazing angle, upscaled
 /// from half the size.
 #[test]
@@ -766,7 +766,9 @@ fn texture_lod_bias_recovers_texture_detail() {
         (Resolver::Fsr, standard),
         (Resolver::Fsr, fsr),
     ] {
-        temporal.set_texture_lod_bias(bias);
+        gpu.materials
+            .set_texture_lod_bias(&gpu.bindless, bias)
+            .unwrap();
         let (image, _) = gpu.run(&draws, &temporal, resolver, (render, output), 48, 0.0);
         let db = psnr(&image, &truth);
         println!(
@@ -774,7 +776,9 @@ fn texture_lod_bias_recovers_texture_detail() {
         );
         scores.push(db);
     }
-    temporal.set_texture_lod_bias(0.0);
+    gpu.materials
+        .set_texture_lod_bias(&gpu.bindless, 0.0)
+        .unwrap();
     assert!(
         scores[1] > scores[0],
         "the LOD bias sharpens TAAU's textures: {scores:?}"

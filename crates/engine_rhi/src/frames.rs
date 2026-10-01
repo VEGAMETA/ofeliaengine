@@ -249,7 +249,13 @@ impl Frames {
                 GPU_TIMEOUT_NS,
             )
         }
-        .map_err(RhiError::vk("vkWaitSemaphores"))
+        .map_err(|result| {
+            if result == vk::Result::TIMEOUT {
+                // The GPU did not finish a frame in 5 s: report where it is stuck.
+                crate::fault::gpu_hang("vkWaitSemaphores");
+            }
+            RhiError::vk("vkWaitSemaphores")(result)
+        })
     }
 }
 
