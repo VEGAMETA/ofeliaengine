@@ -100,8 +100,8 @@ fn variants() {
     let mut w = BitWriter::with_limit(1 << 16);
     let floats = 4 + 3 + 3;
     let raw_bits = (floats * 32 + 32) as f64; // every field as 32 bits
-    let (mut full, mut d1, mut d8, mut pred8, mut tribes8) =
-        (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (mut full, mut d1, mut d8, mut pred8, mut pred1, mut shipped, mut tribes8) =
+        (0usize, 0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
     let mut samples = 0usize;
     let age = 8; // ticks between the baseline and now: ~125 ms round trip at 64 Hz
     for t in (2 * age)..ticks {
@@ -127,6 +127,26 @@ fn variants() {
                 })
                 .collect();
             pred8 += analysis::bits_delta(&schema, 1, cur, &predicted, &mut w);
+            // The same from two consecutive acknowledged states (a velocity from one tick,
+            // extrapolated `age` ticks: quantization noise grows with the ratio).
+            let b1 = s(t - age - 1);
+            let predicted: Vec<u32> = b
+                .iter()
+                .zip(b1)
+                .enumerate()
+                .map(|(k, (&x, &y))| {
+                    if (4..7).contains(&k) {
+                        x.wrapping_add(x.wrapping_sub(y).wrapping_mul(age as u32))
+                    } else {
+                        x
+                    }
+                })
+                .collect();
+            pred1 += analysis::bits_delta(&schema, 1, cur, &predicted, &mut w);
+            // What ships: every quantized float extrapolated from the two newest
+            // acknowledged states, chosen per component when cheaper (+1 bit each).
+            shipped +=
+                analysis::bits_delta_predicted(&schema, 1, cur, b, b1, age as i64, 1, &mut w);
             // Tribes: unchanged → 1 bit; changed → the whole (quantized) state.
             tribes8 += if cur == b {
                 1
@@ -143,8 +163,19 @@ fn variants() {
         ("raw 32-bit fields", raw_bits),
         ("quantized, whole state (exp-Golomb)", per(full)),
         ("delta vs previous tick (ideal acks)", per(d1)),
-        ("delta vs acknowledged state 8 ticks old (shipped)", per(d8)),
-        ("delta vs extrapolated baseline, 8 ticks", per(pred8)),
+        ("delta vs acknowledged state 8 ticks old", per(d8)),
+        (
+            "delta vs extrapolated baseline (two acks 8 ticks apart), 8 ticks",
+            per(pred8),
+        ),
+        (
+            "delta vs extrapolated baseline (two consecutive acks), 8 ticks",
+            per(pred1),
+        ),
+        (
+            "shipped: predicted baseline per component when cheaper, 8 ticks",
+            per(shipped),
+        ),
         ("Tribes: changed state whole, 8 ticks", per(tribes8)),
     ] {
         println!("| {name} | {bits:.1} | {:.0} % |", bits / raw_bits * 100.0);

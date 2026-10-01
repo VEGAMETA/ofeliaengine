@@ -72,6 +72,10 @@ pub(crate) struct NetComponent {
     pub(crate) codecs: Vec<Codec>,
     /// One per word.
     pub(crate) kinds: Vec<WordKind>,
+    /// One per word: a quantized float, extrapolated for predicted baselines.
+    pub(crate) linear: Vec<bool>,
+    /// Whether any word is.
+    pub(crate) any_linear: bool,
     pub(crate) words: usize,
     /// Whether quantizing loses precision (quantized floats, quaternions): the server
     /// then rounds its own values (see `Server::send`).
@@ -236,7 +240,13 @@ impl NetSchema {
             core::any::type_name::<T>()
         );
         let mut kinds = Vec::new();
+        let mut linear = Vec::new();
         for c in &codecs {
+            let n = c.words();
+            linear.extend(core::iter::repeat_n(
+                matches!(c, Codec::F32Quantized { .. }),
+                n,
+            ));
             match *c {
                 Codec::F32Quantized { .. } | Codec::Int { .. } => kinds.push(WordKind::Int),
                 Codec::F32 { .. } => kinds.push(WordKind::Raw),
@@ -248,7 +258,10 @@ impl NetSchema {
         let lossy = codecs
             .iter()
             .any(|c| matches!(c, Codec::F32Quantized { .. } | Codec::Quat { .. }));
+        let any_linear = linear.iter().any(|&l| l);
         self.components.push(NetComponent {
+            linear,
+            any_linear,
             lossy,
             name: <T as Reflect>::TYPE_INFO.name,
             type_id: TypeId::of::<T>(),

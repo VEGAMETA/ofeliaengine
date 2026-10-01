@@ -145,6 +145,8 @@ struct Ghost {
     sent_gen: u16,
     /// Newest tick whose state of this entity the client acknowledged (0: none).
     acked: u32,
+    /// The acknowledged state before `acked` (0: none), for predicted baselines.
+    acked_prev: u32,
     /// Tick of the last alive record sent (0: none).
     alive_tick: u32,
     /// Tick of the last removal sent (0: none).
@@ -152,6 +154,8 @@ struct Ghost {
     lost_alive: bool,
     lost_removal: bool,
     priority: f32,
+    /// Bits of the last delta record sent (an estimate for the next one).
+    last_bits: u16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -467,6 +471,7 @@ impl<I: InputData, T: Transport> Server<I, T> {
             match (r.removal, delivered) {
                 (false, true) => {
                     if r.generation == g.sent_gen && tick > g.acked {
+                        g.acked_prev = g.acked;
                         g.acked = tick;
                     }
                     if tick == g.alive_tick {
@@ -1007,6 +1012,7 @@ impl<I: InputData, T: Transport> Server<I, T> {
                 if g.has && g.sent_gen != slot.generation {
                     // A new entity in this slot: the client gets it whole.
                     g.acked = 0;
+                    g.acked_prev = 0;
                     g.alive_tick = 0;
                     g.lost_alive = false;
                 }
@@ -1084,6 +1090,29 @@ impl<I: InputData, T: Transport> Server<I, T> {
         for &(_, s) in chosen.iter() {
             let slot = &self.slots[s as usize];
             let removal = !(slot.alive && relevance(c.view, slot).is_some());
+            let g = &c.ghosts[s as usize];
+            if removal {
+                let cost = gap_bits + 2 + 16;
+                if cost <= room {
+                    room -= cost;
+                    self.kept.push(s);
+                } else {
+                    skipped += 1;
+                }
+                continue;
+            }
+            if g.acked > 0 && g.last_bits > 0 {
+                // A delta again: about as large as the last one (+12 %); the final pass
+                // skips the rare record that turns out larger than its room.
+                let cost = gap_bits + usize::from(g.last_bits) * 9 / 8 + 2;
+                if cost <= room {
+                    room -= cost;
+                    self.kept.push(s);
+                } else {
+                    skipped += 1;
+                }
+                continue;
+            }
             self.measure.reset(1 << 16);
             if encode_record(
                 &self.schema,
@@ -1147,6 +1176,11 @@ impl<I: InputData, T: Transport> Server<I, T> {
             records_written += 1;
             full += u64::from(is_full);
             g.priority = 0.0;
+            g.last_bits = if is_full {
+                0
+            } else {
+                (w.bits() - mark).min(usize::from(u16::MAX)) as u16
+            };
             if removal {
                 g.removal_tick = tick;
                 g.lost_removal = false;
@@ -1261,7 +1295,24 @@ fn encode_record(
             if !default {
                 w.golomb(tick - g.acked, 2);
             }
-            encode_delta(schema, mask, cur, &b.words[bo as usize..], w);
+            // An older acknowledged state for predicted baselines, if both sides have it.
+            let older = (g.acked_prev > 0 && tick - g.acked_prev < HISTORY)
+                .then(|| &frames[(g.acked_prev % HISTORY) as usize])
+                .filter(|p| p.valid && p.tick == g.acked_prev)
+                .and_then(|p| {
+                    p.state(s)
+                        .filter(|&(pm, pg, _)| pm == mask && pg == generation)
+                        .map(|(_, _, po)| Older {
+                            words: &p.words[po as usize..],
+                            ahead: i64::from(tick - g.acked),
+                            span: i64::from(g.acked - g.acked_prev),
+                        })
+                });
+            w.bit(older.is_some());
+            if older.is_some() {
+                w.golomb(g.acked - g.acked_prev - 1, 0);
+            }
+            encode_delta(schema, mask, cur, &b.words[bo as usize..], older, w);
             false
         }
         None => {
@@ -1301,14 +1352,56 @@ fn relevance(view: Option<Vec3>, s: &Slot) -> Option<f32> {
     }
 }
 
+/// A second baseline for prediction: the words of an older acknowledged state, and the
+/// ticks for extrapolating from it through the baseline to now.
+#[derive(Clone, Copy)]
+pub(crate) struct Older<'a> {
+    pub(crate) words: &'a [u32],
+    /// Ticks from the baseline to now.
+    pub(crate) ahead: i64,
+    /// Ticks from the older state to the baseline.
+    pub(crate) span: i64,
+}
+
+/// The baseline word `b` extrapolated linearly through the older word `p` (integer
+/// arithmetic, truncating: the same on every machine).
+#[inline]
+pub(crate) fn extrapolate(b: u32, p: u32, older: &Older<'_>) -> u32 {
+    let step = i64::from(b.wrapping_sub(p) as i32);
+    b.wrapping_add(((step * older.ahead) / older.span.max(1)) as i32 as u32)
+}
+
+/// Bits the words of `cur` take against `reference` (Int words only; others cost the
+/// same either way).
+fn cost(cur: &[u32], reference: impl Iterator<Item = u32>, kinds: &[WordKind]) -> u32 {
+    cur.iter()
+        .zip(reference)
+        .zip(kinds)
+        .map(|((&x, r), &k)| match (k, x == r) {
+            (_, true) => 1,
+            (WordKind::Int, false) => {
+                1 + crate::bits::golomb_bits(
+                    crate::bits::zigzag(x.wrapping_sub(r) as i32),
+                    wire::K_DELTA,
+                )
+            }
+            _ => 0,
+        })
+        .sum()
+}
+
 /// Encodes `cur` against `base` component by component: a changed bit per component and
 /// per word, then the value: integer deltas zigzag exponential-Golomb coded, raw words
-/// whole, bits implied by their changed bit.
+/// whole, bits implied by their changed bit. With an `older` state, a changed component
+/// with quantized floats says (one bit) whether its words are coded against the baseline
+/// extrapolated through the older state instead (Unity's predicted baselines; the
+/// encoder picks the cheaper).
 pub(crate) fn encode_delta(
     schema: &NetSchema,
     mask: u64,
     cur: &[u32],
     base: &[u32],
+    older: Option<Older<'_>>,
     w: &mut BitWriter,
 ) {
     let mut m = mask;
@@ -1319,13 +1412,33 @@ pub(crate) fn encode_delta(
         let c = &schema.components[i];
         let cw = &cur[o..o + c.words];
         let bw = &base[o..o + c.words];
+        let pw = older.map(|p| &p.words[o..o + c.words]);
         o += c.words;
         let changed = cw != bw;
         w.bit(changed);
         if !changed {
             continue;
         }
-        for ((&x, &y), &kind) in cw.iter().zip(bw).zip(&c.kinds) {
+        let mut predicted = false;
+        if let (Some(old), Some(pw)) = (older, pw)
+            && c.any_linear
+        {
+            let guess = |j: usize| {
+                if c.linear[j] {
+                    extrapolate(bw[j], pw[j], &old)
+                } else {
+                    bw[j]
+                }
+            };
+            predicted = cost(cw, (0..c.words).map(guess), &c.kinds)
+                < cost(cw, bw.iter().copied(), &c.kinds);
+            w.bit(predicted);
+        }
+        for (j, (&x, &kind)) in cw.iter().zip(&c.kinds).enumerate() {
+            let y = match (predicted, older, pw) {
+                (true, Some(old), Some(pw)) if c.linear[j] => extrapolate(bw[j], pw[j], &old),
+                _ => bw[j],
+            };
             if x == y {
                 w.bit(false);
                 continue;

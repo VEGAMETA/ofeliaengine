@@ -199,7 +199,30 @@ pub mod analysis {
         w: &mut BitWriter,
     ) -> usize {
         w.reset(1 << 16);
-        crate::server::encode_delta(schema, mask, cur, base, w);
+        crate::server::encode_delta(schema, mask, cur, base, None, w);
+        w.bits()
+    }
+
+    /// Bits of a delta against `base` with a predicted baseline through `older` (`ahead`
+    /// ticks from the baseline to now, `span` from `older` to the baseline).
+    #[allow(clippy::too_many_arguments)]
+    pub fn bits_delta_predicted(
+        schema: &NetSchema,
+        mask: u64,
+        cur: &[u32],
+        base: &[u32],
+        older: &[u32],
+        ahead: i64,
+        span: i64,
+        w: &mut BitWriter,
+    ) -> usize {
+        w.reset(1 << 16);
+        let older = crate::server::Older {
+            words: older,
+            ahead,
+            span,
+        };
+        crate::server::encode_delta(schema, mask, cur, base, Some(older), w);
         w.bits()
     }
 }

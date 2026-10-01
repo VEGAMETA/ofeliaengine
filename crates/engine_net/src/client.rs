@@ -222,6 +222,8 @@ pub struct Client<I: InputData, T: Transport> {
     newest_snapshot: u32,
     // State.
     frames: Vec<Frame>,
+    /// The largest decoded snapshot: (entries, words).
+    frame_capacity: (usize, usize),
     slots: Vec<Slot>,
     interp_words: Vec<u32>,
     max_words: usize,
@@ -294,6 +296,7 @@ impl<I: InputData, T: Transport> Client<I, T> {
             interp_time: 0.0,
             newest_snapshot: 0,
             frames: (0..CLIENT_FRAMES).map(|_| Frame::default()).collect(),
+            frame_capacity: (0, 0),
             slots: Vec::new(),
             interp_words: Vec::new(),
             max_words,
@@ -586,7 +589,21 @@ impl<I: InputData, T: Transport> Client<I, T> {
         frame.words.clear();
         let result = self.decode_into(r, tick, default_base, &mut frame);
         frame.valid = result.is_some();
+        // A new largest snapshot: grow every frame of the ring to it at once, so the
+        // ring does not keep allocating as each of its frames meets the peak in turn.
+        let (entries, words) = (frame.entries.capacity(), frame.words.capacity());
         self.frames[index] = frame;
+        if entries > self.frame_capacity.0 || words > self.frame_capacity.1 {
+            self.frame_capacity = (
+                entries.max(self.frame_capacity.0),
+                words.max(self.frame_capacity.1),
+            );
+            let (e, w) = self.frame_capacity;
+            for f in &mut self.frames {
+                f.entries.reserve(e.saturating_sub(f.entries.len()));
+                f.words.reserve(w.saturating_sub(f.words.len()));
+            }
+        }
         result
     }
 
@@ -660,29 +677,64 @@ impl<I: InputData, T: Transport> Client<I, T> {
                     if be.removal {
                         return None;
                     }
+                    // The older state for predicted baselines.
+                    let older = if r.bit()? {
+                        let span = r.golomb(0)?.checked_add(1)?;
+                        let older_tick = base_tick.checked_sub(span)?;
+                        let of = &self.frames[(older_tick % CLIENT_FRAMES) as usize];
+                        if !of.valid || of.tick != older_tick {
+                            return None;
+                        }
+                        let oe = *of.find(slot)?;
+                        if oe.removal || oe.mask != be.mask {
+                            return None;
+                        }
+                        Some((of, oe.offset as usize, span))
+                    } else {
+                        None
+                    };
                     let mut m = be.mask;
                     let mut bo = be.offset as usize;
+                    let mut oo = older.map_or(0, |o| o.1);
                     while m != 0 {
                         let i = m.trailing_zeros() as usize;
                         m &= m - 1;
                         let c = &self.schema.components[i];
                         let bw = &base.words[bo..bo + c.words];
                         bo += c.words;
+                        let pw = older.map(|(of, _, span)| {
+                            (
+                                &of.words[oo..oo + c.words],
+                                crate::server::Older {
+                                    words: &[],
+                                    ahead: i64::from(tick - base_tick),
+                                    span: i64::from(span),
+                                },
+                            )
+                        });
+                        oo += c.words;
                         if !r.bit()? {
                             frame.words.extend_from_slice(bw);
                             continue;
                         }
-                        for (&b, &kind) in bw.iter().zip(&c.kinds) {
+                        let predicted = pw.is_some() && c.any_linear && r.bit()?;
+                        for (j, (&b, &kind)) in bw.iter().zip(&c.kinds).enumerate() {
+                            let reference = match pw {
+                                Some((pw, ref old)) if predicted && c.linear[j] => {
+                                    crate::server::extrapolate(b, pw[j], old)
+                                }
+                                _ => b,
+                            };
                             let v = if r.bit()? {
                                 match kind {
                                     WordKind::Int => {
-                                        b.wrapping_add(r.signed(wire::K_DELTA)? as u32)
+                                        reference.wrapping_add(r.signed(wire::K_DELTA)? as u32)
                                     }
                                     WordKind::Raw => r.read(32)?,
-                                    WordKind::Bit => (b ^ 1) & 1,
+                                    WordKind::Bit => (reference ^ 1) & 1,
                                 }
                             } else {
-                                b
+                                reference
                             };
                             frame.words.push(v);
                         }
