@@ -20,8 +20,8 @@
 //! `--shadowed-lights <count>` for shadows of the first lights (ADR 0071; at least that many
 //! lights), `--local-shadow-budget <views>`, `--local-shadow-atlas <texels>` and
 //! `--local-shadow-res <min>,<max>` for their settings, `--local-shadows-every-frame` to draw
-//! every shadow again every frame (the cache dropped), `--contact bend|march` for the sun's
-//! contact shadows (ADR 0071; implies the prepass), `--sky` for
+//! every shadow again every frame (the cache dropped), `--contact` for the sun's contact
+//! shadows (ADR 0071; implies the prepass), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--atmosphere` for the physically based sky and atmosphere
 //! instead of the gradient sky (ADR 0069; implies `--sky`), `--sun <elevation°>` for the sun's
@@ -320,16 +320,7 @@ fn main() {
                 local_shadows.max_resolution = max.parse().unwrap();
             }
             "--local-shadows-every-frame" => local_shadows_every_frame = true,
-            "--contact" => {
-                let method = match args.next().as_deref() {
-                    Some("march") => engine_render::forward::ContactMethod::March,
-                    _ => engine_render::forward::ContactMethod::Bend,
-                };
-                contact = Some(engine_render::forward::ContactShadowSettings {
-                    method,
-                    ..Default::default()
-                });
-            }
+            "--contact" => contact = Some(Default::default()),
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
             "--lods" => lods = true,

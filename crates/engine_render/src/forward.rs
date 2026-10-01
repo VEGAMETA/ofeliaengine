@@ -142,7 +142,7 @@ const FRAGMENT_AO_CONTACT_SHADOWED: &[u8] =
 const FRAGMENT_MOTION_AO_CONTACT_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentMainMotionAoContactShadowed.spv");
 
-pub use crate::contact::{ContactMethod, ContactShadowSettings};
+pub use crate::contact::ContactShadowSettings;
 pub use crate::lights::{LocalLight, Spot};
 pub use crate::local_shadows::{LocalShadowSettings, LocalShadowStats};
 pub use crate::shadow::ShadowSettings;
@@ -1630,8 +1630,6 @@ pub struct ForwardRenderer {
     /// The sun's contact shadows (ADR 0071), made when first turned on.
     contact: Option<ContactState>,
     contact_settings: Option<ContactShadowSettings>,
-    /// Frames drawn with contact shadows: their noise index under TAA.
-    contact_frame: Cell<u32>,
     /// Atlases replaced by new settings, freed by [`Self::destroy`].
     retired_atlases: Vec<AtlasImage>,
     scratch: RefCell<Scratch>,
@@ -1901,7 +1899,6 @@ impl ForwardRenderer {
             local_shadows_on: false,
             contact: None,
             contact_settings: None,
-            contact_frame: Cell::new(0),
             retired_atlases: Vec::new(),
             scratch: RefCell::new(Scratch::default()),
         })
@@ -3522,20 +3519,9 @@ impl ForwardRenderer {
             .contact_settings
             .zip(view.camera.view_space())
             .zip(self.contact.as_ref());
-        let contact_frame = if temporal.is_some() {
-            let frame = self.contact_frame.get().wrapping_add(1);
-            self.contact_frame.set(frame);
-            frame
-        } else {
-            0
-        };
         let contact_view = ContactView {
             clip_from_world,
-            eye: view.camera.position,
             to_light: -view.light.direction.normalize_or(Vec3::NEG_Y),
-            p22: contact.map_or(0.0, |((_, v), _)| v.p22),
-            p32: contact.map_or(0.0, |((_, v), _)| v.p32),
-            forward: axis.map_or(Vec3::NEG_Z, |a| a.forward),
         };
         let prepass = self.depth_prepass || ao.is_some() || subsurface_draws || contact.is_some();
         let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
@@ -3565,21 +3551,18 @@ impl ForwardRenderer {
                 (true, true) => c.shadowed_ao.as_ref().map(|p| &p[k][m]),
             }
         });
-        let main_pipelines = match (prepass, velocity.is_some()) {
-            _ if contact_shading.is_some() => {
-                let p = contact_shading.unwrap_or(&shading.shade);
-                [p, p]
-            }
-            (true, false) => match ao_shading {
+        let main_pipelines = match (contact_shading, prepass, velocity.is_some()) {
+            (Some(p), _, _) => [p, p],
+            (None, true, false) => match ao_shading {
                 Some(p) => [&p[0], &p[0]],
                 None => [&shading.shade, &shading.shade],
             },
-            (true, true) => match ao_shading {
+            (None, true, true) => match ao_shading {
                 Some(p) => [&p[1], &p[1]],
                 None => [&shading.shade_motion, &shading.shade_motion],
             },
-            (false, false) => [&shading.main[0], &shading.main[1]],
-            (false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
+            (None, false, false) => [&shading.main[0], &shading.main[1]],
+            (None, false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
         };
         // `contact`: the sun's contact shadows, whose mask's index the shading that reads
         // it takes in `phase` (ADR 0071).
@@ -3654,12 +3637,10 @@ impl ForwardRenderer {
                     targets.contact = Some(state.passes.add_passes(
                         fg,
                         bindless,
-                        ring,
                         depth,
                         &contact_view,
                         &settings,
-                        contact_frame,
-                    )?);
+                    ));
                 }
                 let ao_texture = targets.ao;
                 let contact_texture = targets.contact;
@@ -3797,12 +3778,10 @@ impl ForwardRenderer {
                         targets.contact = Some(state.passes.add_passes(
                             fg,
                             bindless,
-                            ring,
                             depth,
                             &contact_view,
                             &settings,
-                            contact_frame,
-                        )?);
+                        ));
                     }
                     let ao_texture = targets.ao;
                     let contact_texture = targets.contact;

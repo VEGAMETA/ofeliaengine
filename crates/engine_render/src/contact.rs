@@ -1,27 +1,21 @@
 //! Contact shadows of the sun (ADR 0071, docs/research/local-shadows.md): what the depth
 //! buffer hides from the sun at scales its cascades cannot resolve, as a visibility mask
-//! the forward pass multiplies into the sun's light. See `contact.slang` for the two ways
-//! it can be computed:
-//!
-//! - [`ContactMethod::Bend`]: Bend Studio's screen-space shadows (Days Gone; `bend_sss`,
-//!   Copyright 2023 Sony Interactive Entertainment, Apache-2.0, adapted; see
-//!   THIRD_PARTY_NOTICES.md): lines of 64 pixels towards the light's point on screen,
-//!   their depths shared between the threads; 60 samples per pixel for a few reads.
-//! - [`ContactMethod::March`]: a ray per pixel towards the sun, 16 samples over a fixed
-//!   length in world units.
+//! the forward pass multiplies into the sun's light. Bend Studio's screen-space shadows
+//! (Days Gone; `bend_sss`, Copyright 2023 Sony Interactive Entertainment, Apache-2.0,
+//! adapted; see THIRD_PARTY_NOTICES.md): lines of 64 pixels towards the light's point on
+//! screen, their depths shared between the threads; 60 samples per pixel for a few reads.
+//! See `contact.slang`.
 //!
 //! The forward renderer runs it after its depth prepass when
 //! [`crate::forward::ForwardRenderer::set_contact_shadows`] turns it on.
 
-use crate::compute::{ComputeShader, ComputeSource, Dispatch};
+use crate::compute::{ComputeShader, Dispatch};
 use crate::graph::{Access, FrameGraph, ShaderStages, Texture, TextureDesc};
-use crate::upload::UploadRing;
 use engine_core::math::{Mat4, Vec3, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{Bindless, Device, RhiError};
 
 const BEND: &[u8] = include_bytes!("../shaders/contact.contactBend.spv");
-const MARCH: &[u8] = include_bytes!("../shaders/contact.contactMarch.spv");
 
 /// Format of the visibility mask: 1 lit, 0 in a contact shadow.
 pub const CONTACT_FORMAT: vk::Format = vk::Format::R8_UNORM;
@@ -29,48 +23,30 @@ pub const CONTACT_FORMAT: vk::Format = vk::Format::R8_UNORM;
 /// Threads of a Bend wave (`WAVE_SIZE` in `contact.slang`).
 const WAVE: i32 = 64;
 
-/// How contact shadows are computed (see the module documentation).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ContactMethod {
-    /// Bend Studio's wave-based screen-space shadows: 60 pixels long.
-    Bend,
-    /// A ray per pixel: [`ContactShadowSettings::length`] long.
-    March,
-}
-
 /// Contact shadows' settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ContactShadowSettings {
-    /// The method.
-    pub method: ContactMethod,
-    /// Bend: a pixel's assumed thickness, as a part of the depth between it and the far
-    /// plane (0.005).
+    /// A pixel's assumed thickness, as a part of the depth between it and the far
+    /// plane (0.01; Bend's 0.005 leaves solid casters' shadows faint with a conventional depth buffer, ADR 0071).
     pub surface_thickness: f32,
-    /// Bend: a depth step, as such a part, beyond which two neighbours are not interpolated
+    /// A depth step, as such a part, beyond which two neighbours are not interpolated
     /// (0.02).
     pub bilinear_threshold: f32,
-    /// Bend: contrast of the transition into shadow (4).
+    /// Contrast of the transition into shadow (4).
     pub contrast: f32,
-    /// March: how far the ray goes towards the sun, in world units (0.5).
-    pub length: f32,
-    /// March: how thick a depth sample is assumed to be, in world units (0.2).
-    pub thickness: f32,
 }
 
 impl Default for ContactShadowSettings {
     fn default() -> Self {
         Self {
-            method: ContactMethod::Bend,
-            surface_thickness: 0.005,
+            surface_thickness: 0.01,
             bilinear_threshold: 0.02,
             contrast: 4.0,
-            length: 0.5,
-            thickness: 0.2,
         }
     }
 }
 
-/// `ContactPush` in `contact.slang` (72 bytes).
+/// `ContactPush` in `contact.slang` (60 bytes).
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
@@ -84,39 +60,17 @@ struct Push {
     near_depth: f32,
     depth: u32,
     target: u32,
-    frame: u32,
-    march: u64,
 }
 
-const _: () = assert!(size_of::<Push>() == 72);
-
-/// `March` in `contact.slang` (192 bytes).
-#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-#[repr(C)]
-struct March {
-    clip_from_world: [f32; 16],
-    world_from_clip: [f32; 16],
-    to_light: [f32; 4],
-    eye: [f32; 4],
-    forward: [f32; 4],
-    depth_terms: [f32; 4],
-}
-
-const _: () = assert!(size_of::<March>() == 192);
+const _: () = assert!(size_of::<Push>() == 60);
 
 /// The camera of a frame, as contact shadows need it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ContactView {
     /// Clip from world as the depth was drawn (jittered).
     pub clip_from_world: Mat4,
-    /// Camera position.
-    pub eye: Vec3,
     /// Unit vector towards the sun.
     pub to_light: Vec3,
-    /// The projection's depth terms (`ViewSpace::p22`, `p32`) and unit view direction.
-    pub p22: f32,
-    pub p32: f32,
-    pub forward: Vec3,
 }
 
 /// One dispatch of the Bend method: its wave counts and first wave.
@@ -257,7 +211,6 @@ pub(crate) fn bend_dispatches(light: Vec4, size: [u32; 2]) -> ([f32; 4], [BendDi
 /// The contact shadow passes.
 pub struct ContactShadows {
     bend: ComputeShader<Push>,
-    march: ComputeShader<Push>,
 }
 
 impl core::fmt::Debug for ContactShadows {
@@ -269,30 +222,21 @@ impl core::fmt::Debug for ContactShadows {
 impl ContactShadows {
     /// Creates the pipelines.
     pub fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
-        let [bend, march] = ComputeSource::create_all(
-            device,
-            bindless,
-            [
-                ComputeSource::new(BEND, c"contactBend", &[])?,
-                ComputeSource::new(MARCH, c"contactMarch", &[])?,
-            ],
-        )?;
-        Ok(Self { bend, march })
+        Ok(Self {
+            bend: ComputeShader::new(device, bindless, BEND, c"contactBend")?,
+        })
     }
 
     /// Adds the pass computing the sun's contact shadows from `depth` (sampled) seen by
-    /// `view`, and returns the visibility ([`CONTACT_FORMAT`], the depth's size). `frame`
-    /// rotates the march's noise. `None` when `ring` is full.
+    /// `view`, and returns the visibility ([`CONTACT_FORMAT`], the depth's size).
     pub(crate) fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
         bindless: &'g Bindless,
-        ring: &mut UploadRing,
         depth: Texture,
         view: &ContactView,
         settings: &ContactShadowSettings,
-        frame: u32,
-    ) -> Option<Texture> {
+    ) -> Texture {
         let desc = fg.texture_desc(depth);
         let size = [desc.width.max(1), desc.height.max(1)];
         let mask = fg.create_texture(
@@ -306,88 +250,58 @@ impl ContactShadows {
             shadow_contrast: settings.contrast.max(1.0),
             far_depth: 1.0,
             near_depth: 0.0,
-            frame,
             ..Push::default()
         };
-        match settings.method {
-            ContactMethod::Bend => {
-                let light = view.clip_from_world * view.to_light.extend(0.0);
-                let (coordinate, dispatches, count) = bend_dispatches(light, size);
-                let bend = &self.bend;
-                // The lines meet at the light's point (in front of the camera or behind):
-                // when it is on screen, its own pixel may be left unwritten. Lit there.
-                let on_screen = (0.0..size[0] as f32).contains(&coordinate[0])
-                    && (0.0..size[1] as f32).contains(&coordinate[1]);
-                if on_screen {
-                    fg.add_pass("contact shadows clear")
-                        .write(mask, Access::TransferWrite)
-                        .execute(move |ctx| {
-                            // SAFETY: recording outside a rendering scope; the graph put the
-                            // image in TRANSFER_DST_OPTIMAL for this pass.
-                            unsafe {
-                                ctx.device.cmd_clear_color_image(
-                                    ctx.cmd,
-                                    ctx.image(mask),
-                                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                                    &vk::ClearColorValue { float32: [1.0; 4] },
-                                    &[vk::ImageSubresourceRange {
-                                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                                        base_mip_level: 0,
-                                        level_count: 1,
-                                        base_array_layer: 0,
-                                        layer_count: 1,
-                                    }],
-                                );
-                            }
-                        });
-                }
-                // The dispatches cover every pixel once (pixels without geometry are
-                // written lit).
-                mask_pass(fg, bindless, depth, mask).record(move |rec| {
-                    let ctx = rec.context();
-                    let (Some(depth), Some(target)) =
-                        (ctx.sampled_index(depth), ctx.storage_index(mask))
-                    else {
-                        return;
-                    };
-                    for d in &dispatches[..count] {
-                        let push = Push {
-                            light: coordinate,
-                            wave_offset: d.offset,
-                            depth,
-                            target,
-                            ..base
-                        };
-                        rec.dispatch(bend, Dispatch::Groups(d.waves), &push);
+        let light = view.clip_from_world * view.to_light.extend(0.0);
+        let (coordinate, dispatches, count) = bend_dispatches(light, size);
+        let bend = &self.bend;
+        // The lines meet at the light's point (in front of the camera or behind):
+        // when it is on screen, its own pixel may be left unwritten. Lit there.
+        let on_screen = (0.0..size[0] as f32).contains(&coordinate[0])
+            && (0.0..size[1] as f32).contains(&coordinate[1]);
+        if on_screen {
+            fg.add_pass("contact shadows clear")
+                .write(mask, Access::TransferWrite)
+                .execute(move |ctx| {
+                    // SAFETY: recording outside a rendering scope; the graph put the
+                    // image in TRANSFER_DST_OPTIMAL for this pass.
+                    unsafe {
+                        ctx.device.cmd_clear_color_image(
+                            ctx.cmd,
+                            ctx.image(mask),
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &vk::ClearColorValue { float32: [1.0; 4] },
+                            &[vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            }],
+                        );
                     }
                 });
-            }
-            ContactMethod::March => {
-                let march = March {
-                    clip_from_world: view.clip_from_world.to_cols_array(),
-                    world_from_clip: view.clip_from_world.inverse().to_cols_array(),
-                    to_light: view.to_light.extend(settings.length.max(1e-4)).to_array(),
-                    eye: view.eye.extend(settings.thickness.max(1e-4)).to_array(),
-                    forward: view.forward.extend(0.0).to_array(),
-                    depth_terms: [view.p22, view.p32, 0.0, 0.0],
-                };
-                let constants = ring.push(&[march])?;
-                let shader = &self.march;
-                mask_pass(fg, bindless, depth, mask).dispatch(
-                    shader,
-                    Dispatch::Threads([size[0], size[1], 1]),
-                    move |ctx| {
-                        Some(Push {
-                            depth: ctx.sampled_index(depth)?,
-                            target: ctx.storage_index(mask)?,
-                            march: constants,
-                            ..base
-                        })
-                    },
-                );
-            }
         }
-        Some(mask)
+        // The dispatches cover every pixel once (pixels without geometry are
+        // written lit).
+        mask_pass(fg, bindless, depth, mask).record(move |rec| {
+            let ctx = rec.context();
+            let (Some(depth), Some(target)) = (ctx.sampled_index(depth), ctx.storage_index(mask))
+            else {
+                return;
+            };
+            for d in &dispatches[..count] {
+                let push = Push {
+                    light: coordinate,
+                    wave_offset: d.offset,
+                    depth,
+                    target,
+                    ..base
+                };
+                rec.dispatch(bend, Dispatch::Groups(d.waves), &push);
+            }
+        });
+        mask
     }
 }
 

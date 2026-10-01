@@ -13,8 +13,8 @@
 use engine_core::half;
 use engine_core::math::{Mat4, Quat, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
-    LocalShadowSettings, ShadowSettings, Spot,
+    Camera, ContactShadowSettings, DirectionalLight, DrawItem, ForwardRenderer, ForwardView,
+    LocalLight, LocalShadowSettings, ShadowSettings, Spot,
 };
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
@@ -122,6 +122,8 @@ struct Bed {
 }
 
 const BYTES: u64 = (WIDTH * HEIGHT * 8) as u64;
+/// The color and an R8 mask after it.
+const READBACK: u64 = BYTES + (WIDTH * HEIGHT) as u64;
 
 impl Bed {
     fn new() -> Option<Self> {
@@ -138,7 +140,7 @@ impl Bed {
         let (readback, readback_memory) = allocator
             .create_buffer(
                 &vk::BufferCreateInfo::default()
-                    .size(BYTES)
+                    .size(READBACK)
                     .usage(vk::BufferUsageFlags::TRANSFER_DST),
                 MemoryLocation::Readback,
             )
@@ -191,6 +193,26 @@ impl Bed {
         scene: Option<&mut GpuScene>,
         lights: &[LocalLight],
     ) -> Vec<f32> {
+        let sun = DirectionalLight {
+            direction: Vec3::NEG_Y,
+            color: Vec3::ZERO,
+            ambient: Vec3::ZERO,
+        };
+        self.render_full(renderer, camera, draws, scene, lights, sun)
+            .0
+    }
+
+    /// [`Self::render`] under `sun`; also the contact shadow mask when the renderer makes
+    /// one.
+    fn render_full(
+        &mut self,
+        renderer: &ForwardRenderer,
+        camera: Camera,
+        draws: &[DrawItem],
+        scene: Option<&mut GpuScene>,
+        lights: &[LocalLight],
+        sun: DirectionalLight,
+    ) -> (Vec<f32>, Option<Vec<f32>>) {
         let d = self.device.raw();
         let cmd = self.cmd;
         // SAFETY: one-shot recording and submission, then wait.
@@ -207,6 +229,7 @@ impl Bed {
         self.ring.begin_slot(0);
         self.frame_number += 1;
         let frame_number = self.frame_number;
+        let mask;
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { self.graph.begin_slot(0, cmd) };
@@ -231,11 +254,7 @@ impl Bed {
             let depth = fg.create_texture("depth", TextureDesc::new_2d(DEPTH, WIDTH, HEIGHT));
             let view = ForwardView {
                 camera,
-                light: DirectionalLight {
-                    direction: Vec3::NEG_Y,
-                    color: Vec3::ZERO,
-                    ambient: Vec3::ZERO,
-                },
+                light: sun,
                 color,
                 depth,
                 clear: Some([0.0; 4]),
@@ -244,7 +263,7 @@ impl Bed {
                 lights,
                 environment: None,
             };
-            match scene {
+            let passes = match scene {
                 Some(scene) => {
                     let scene_frame = scene
                         .add_passes(
@@ -269,61 +288,74 @@ impl Bed {
                             &scene_frame,
                             &view,
                         )
-                        .unwrap();
+                        .unwrap()
                 }
-                None => {
-                    renderer
-                        .add_passes(
-                            &mut fg,
-                            &mut self.ring,
-                            &self.bindless,
-                            &geo,
-                            &mats,
-                            draws,
-                            &view,
-                        )
-                        .unwrap();
-                }
-            }
+                None => renderer
+                    .add_passes(
+                        &mut fg,
+                        &mut self.ring,
+                        &self.bindless,
+                        &geo,
+                        &mats,
+                        draws,
+                        &view,
+                    )
+                    .unwrap(),
+            };
+            mask = passes.contact_shadows;
             let out = fg.import_buffer(
                 "readback",
                 ImportedBuffer {
                     buffer: self.readback,
-                    size: BYTES,
+                    size: READBACK,
                     address: 0,
                     initial: BufferState::idle(),
                     final_state: Some(BufferState::host_read()),
                 },
             );
-            fg.add_pass("read back")
+            let mut read_back = fg
+                .add_pass("read back")
                 .read(color, Access::TransferRead)
-                .write(out, Access::TransferWrite)
-                .execute(move |ctx| {
-                    let region = vk::BufferImageCopy {
-                        image_subresource: vk::ImageSubresourceLayers {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            mip_level: 0,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        },
-                        image_extent: vk::Extent3D {
-                            width: WIDTH,
-                            height: HEIGHT,
-                            depth: 1,
-                        },
-                        ..Default::default()
-                    };
-                    // SAFETY: recording; layouts arranged by the graph.
-                    unsafe {
+                .write(out, Access::TransferWrite);
+            if let Some(mask) = mask {
+                read_back = read_back.read(mask, Access::TransferRead);
+            }
+            read_back.execute(move |ctx| {
+                let region = |offset| vk::BufferImageCopy {
+                    buffer_offset: offset,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_extent: vk::Extent3D {
+                        width: WIDTH,
+                        height: HEIGHT,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: recording; layouts arranged by the graph; the buffer holds both.
+                unsafe {
+                    ctx.device.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        ctx.image(color),
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(out),
+                        &[region(0)],
+                    );
+                    if let Some(mask) = mask {
                         ctx.device.cmd_copy_image_to_buffer(
                             ctx.cmd,
-                            ctx.image(color),
+                            ctx.image(mask),
                             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                             ctx.buffer(out),
-                            &[region],
+                            &[region(BYTES)],
                         );
                     }
-                });
+                }
+            });
             fg.execute_with_bindless(&mut self.allocator, Some(&self.bindless))
                 .unwrap();
         }
@@ -340,11 +372,18 @@ impl Bed {
             self.device.wait_idle().unwrap();
         }
         let ptr = self.readback_memory.as_ref().unwrap().mapped_ptr().unwrap();
-        // SAFETY: the GPU is idle; the mapping covers the image.
-        let raw = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), BYTES as usize) };
-        (0..(WIDTH * HEIGHT) as usize)
+        // SAFETY: the GPU is idle; the mapping covers both images.
+        let raw = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), READBACK as usize) };
+        let color = (0..(WIDTH * HEIGHT) as usize)
             .map(|i| half::to_f32(u16::from_le_bytes([raw[i * 8], raw[i * 8 + 1]])))
-            .collect()
+            .collect();
+        let mask = mask.map(|_| {
+            raw[BYTES as usize..]
+                .iter()
+                .map(|&b| f32::from(b) / 255.0)
+                .collect()
+        });
+        (color, mask)
     }
 
     fn finish(mut self, mut renderers: Vec<ForwardRenderer>, scenes: Vec<GpuScene>) {
@@ -647,4 +686,125 @@ fn local_shadows_match_analytic_shadows_and_cache() {
     assert_eq!(scene_views(&mut bed, &mut scene), 1);
 
     bed.finish(vec![shadowed, plain, cached, scene_renderer], vec![scene]);
+}
+
+/// The sun's contact shadows (ADR 0071): a low sun behind a small box on the ground, its
+/// shadow towards the camera. Ground pixels whose ray towards the sun meets the box
+/// within a few dozen pixels on screen are darkened by the mask; ground in the open is
+/// not (no false shadows). (A screen-space shadow sees an occluder where the ray crosses
+/// its visible surface: the sun behind casters is its best case, the sun beside them
+/// leaves rays passing behind a thick caster's front face unseen.)
+#[test]
+fn contact_shadows_darken_what_the_depth_hides_from_the_sun() {
+    let Some(mut bed) = Bed::new() else {
+        return;
+    };
+    let mesh = bed.geometry.add_mesh(&cube().as_data()).unwrap();
+    let gray = bed
+        .materials
+        .add(MaterialDesc::solid([0.5, 0.5, 0.5], 0.0, 1.0));
+    let ground = Block {
+        center: Vec3::new(0.0, -0.1, 0.0),
+        size: Vec3::new(60.0, 0.2, 60.0),
+    };
+    let block = Block {
+        center: Vec3::new(0.0, 0.2, 0.0),
+        size: Vec3::splat(0.4),
+    };
+    let draws = [ground.draw(mesh, gray), block.draw(mesh, gray)];
+    let sun = DirectionalLight {
+        direction: Vec3::new(-0.3, -0.45, 0.85).normalize(),
+        color: Vec3::splat(3.0),
+        ambient: Vec3::splat(0.05),
+    };
+    let eye = Vec3::new(1.2, 1.6, 2.4);
+    let clip_from_world = vulkan_perspective(0.9, WIDTH as f32 / HEIGHT as f32, 0.05, 50.0)
+        * look_at(eye, Vec3::new(0.4, 0.1, 0.0), Vec3::Y);
+    let camera = Camera {
+        clip_from_world,
+        position: eye,
+    };
+    let mut renderer = ForwardRenderer::new(
+        &bed.device,
+        &bed.bindless,
+        HDR,
+        DEPTH,
+        ShadowSettings::default(),
+    )
+    .unwrap();
+    renderer
+        .set_contact_shadows(
+            &bed.device,
+            &bed.bindless,
+            Some(ContactShadowSettings::default()),
+        )
+        .unwrap();
+    let (_, mask) = bed.render_full(&renderer, camera, &draws, None, &[], sun);
+    let mask = mask.expect("a contact shadow mask");
+
+    let inverse = clip_from_world.inverse();
+    let to_sun = -sun.direction;
+    let pixel_of = |p: Vec3| {
+        let c = clip_from_world * p.extend(1.0);
+        Vec3::new(
+            (c.x / c.w * 0.5 + 0.5) * WIDTH as f32,
+            (c.y / c.w * 0.5 + 0.5) * HEIGHT as f32,
+            0.0,
+        )
+    };
+    let wider = Block {
+        center: block.center,
+        size: block.size + Vec3::splat(0.15),
+    };
+    let (mut shadow, mut shadow_dark, mut open, mut open_dark) = (0u32, 0u32, 0u32, 0u32);
+    for i in 0..(WIDTH * HEIGHT) as usize {
+        let (x, y) = (i as u32 % WIDTH, i as u32 / WIDTH);
+        let ndc = [
+            (x as f32 + 0.5) / WIDTH as f32 * 2.0 - 1.0,
+            (y as f32 + 0.5) / HEIGHT as f32 * 2.0 - 1.0,
+        ];
+        let unproject = |z: f32| {
+            let p = inverse * Vec4::new(ndc[0], ndc[1], z, 1.0);
+            p.truncate() / p.w
+        };
+        let origin = unproject(0.0);
+        let direction = (unproject(1.0) - origin).normalize();
+        if direction.y >= -1e-4 {
+            continue;
+        }
+        let t = -origin.y / direction.y;
+        if wider.hit(origin, direction).is_some_and(|h| h < t) {
+            continue;
+        }
+        let p = origin + direction * t;
+        let dark = mask[i] < 0.5;
+        match block.hit(p, to_sun) {
+            // Shadowed within a few dozen pixels on screen.
+            Some(h) => {
+                let distance = (pixel_of(p + to_sun * h) - pixel_of(p)).length();
+                if distance < 30.0 {
+                    shadow += 1;
+                    shadow_dark += u32::from(dark);
+                }
+            }
+            None if wider.hit(p, to_sun).is_none() => {
+                open += 1;
+                open_dark += u32::from(mask[i] < 0.9);
+            }
+            None => {}
+        }
+    }
+    println!(
+        "contact shadows: {shadow_dark} of {shadow} shadowed pixels dark, {open_dark} of {open} open ones"
+    );
+    assert!(shadow > 200 && open > 20_000, "{shadow} {open}");
+    assert!(
+        shadow_dark * 10 >= shadow * 7,
+        "the box's contact shadow: {shadow_dark} of {shadow}"
+    );
+    assert!(
+        open_dark == 0,
+        "no shadows in the open: {open_dark} of {open}"
+    );
+    bed.finish(vec![renderer], Vec::new());
 }
