@@ -622,6 +622,8 @@ ShadowOut depthVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_Vulk
 // A material texture: bindless index and sampler from the packed field; white without
 // one. Indices differ between instances of one draw, hence non-uniform; the branch is
 // uniform across a quad (a quad belongs to one primitive), so derivatives stay defined.
+// A LOD bias (temporal upscaling) lives in the samplers (`MaterialTable::set_texture_lod_bias`):
+// here it would cost registers in every shading pipeline (ADR 0060).
 float4 sample_material(uint packed, float2 uv)
 {
     if (packed == NO_TEXTURE)

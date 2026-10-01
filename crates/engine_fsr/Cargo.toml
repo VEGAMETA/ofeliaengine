@@ -1,0 +1,27 @@
+[package]
+name = "engine_fsr"
+description = "AMD FidelityFX Super Resolution 3.1 upscaling, built from the vendored FidelityFX SDK source (ADR 0060)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+links = "ffx_fsr"
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_profiler.workspace = true
+engine_render.workspace = true
+engine_rhi.workspace = true
+
+[build-dependencies]
+# Compiles the vendored FidelityFX SDK sources (MIT) and the shim (MIT OR Apache-2.0).
+cc = { version = "1", features = ["parallel"] }
+
+[dev-dependencies]
+# Math and half floats for the tests and the benchmark.
+engine_core.workspace = true
+# The engine's TAAU, compared against in the tests and the benchmark.
+engine_upscale.workspace = true
