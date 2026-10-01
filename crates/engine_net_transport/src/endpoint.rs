@@ -608,7 +608,10 @@ struct ClientState {
     phase: Phase,
     address_index: usize,
     phase_start: Instant,
-    last_send: Instant,
+    /// When the last request or response left; `None`: send at the next update. Not
+    /// `now - retry`: `Instant` counts from boot on Windows, and an hour after it would
+    /// not exist yet.
+    last_send: Option<Instant>,
     challenge_seq: u64,
     challenge: [u8; CHALLENGE_TOKEN_BYTES],
 }
@@ -732,7 +735,7 @@ impl<S: DatagramSocket> Endpoint<S> {
             phase: Phase::Requesting,
             address_index: 0,
             phase_start: now,
-            last_send: now.checked_sub(Duration::from_secs(3600)).unwrap_or(now),
+            last_send: None,
             challenge_seq: 0,
             challenge: [0; CHALLENGE_TOKEN_BYTES],
             token,
@@ -1416,7 +1419,7 @@ impl<S: DatagramSocket> Endpoint<S> {
             w.bytes(&token.private)
         })();
         debug_assert!(ok.is_some());
-        client.last_send = now;
+        client.last_send = Some(now);
         let _ = self.socket.send_to(now, server, &self.out[..REQUEST_BYTES]);
     }
 
@@ -1443,7 +1446,7 @@ impl<S: DatagramSocket> Endpoint<S> {
             cipher,
             8 + CHALLENGE_TOKEN_BYTES,
         );
-        client.last_send = now;
+        client.last_send = Some(now);
         let _ = self.socket.send_to(now, server, &self.out[..n]);
     }
 
@@ -1471,7 +1474,7 @@ impl<S: DatagramSocket> Endpoint<S> {
                         client.address_index += 1;
                         client.phase = Phase::Requesting;
                         client.phase_start = now;
-                        client.last_send = now.checked_sub(retry).unwrap_or(now);
+                        client.last_send = None;
                     } else {
                         client.phase = Phase::Failed;
                         let id = self.slots[0].id(0);
@@ -1480,7 +1483,10 @@ impl<S: DatagramSocket> Endpoint<S> {
                         return;
                     }
                 }
-                if now.saturating_duration_since(client.last_send) >= retry {
+                if client
+                    .last_send
+                    .is_none_or(|t| now.saturating_duration_since(t) >= retry)
+                {
                     if client.phase == Phase::Requesting {
                         self.send_request(now);
                     } else {
