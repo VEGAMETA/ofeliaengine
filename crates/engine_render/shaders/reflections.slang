@@ -321,18 +321,22 @@ float probe_influence(Probe* p, float3 world)
 }
 
 // Where the ray from `world` along `r` leaves probe `p`'s parallax box, as a direction from
-// its capture point (Lagarde and Zanuttini 2012). From outside the box, `r` itself.
+// its capture point (Lagarde and Zanuttini 2012). A point outside the box starts from the
+// nearest point inside (surfaces on the box's faces, such as a room's floor, lie on
+// either side by rounding).
 float3 probe_direction(Probe* p, float3 world, float3 r)
 {
-    float3 o = float3(dot(p.parallax[0].xyz, world) + p.parallax[0].w, dot(p.parallax[1].xyz, world) + p.parallax[1].w, dot(p.parallax[2].xyz, world) + p.parallax[2].w);
-    float3 d = float3(dot(p.parallax[0].xyz, r), dot(p.parallax[1].xyz, r), dot(p.parallax[2].xyz, r));
     float3 e = p.parallax_extents.xyz;
-    if (any(abs(o) > e))
-        return r;
+    float3 o = clamp(float3(dot(p.parallax[0].xyz, world) + p.parallax[0].w, dot(p.parallax[1].xyz, world) + p.parallax[1].w, dot(p.parallax[2].xyz, world) + p.parallax[2].w), -e, e);
+    float3 d = float3(dot(p.parallax[0].xyz, r), dot(p.parallax[1].xyz, r), dot(p.parallax[2].xyz, r));
     float3 inv = 1.0 / (abs(d) > 1e-8 ? d : 1e-8);
     float3 t = max((e - o) * inv, (-e - o) * inv);
     float distance = min(t.x, min(t.y, t.z));
-    return world + r * distance - p.position.xyz;
+    // From the capture point, in the box's frame: (o + d t) − capture.
+    float3 capture = float3(dot(p.parallax[0].xyz, p.position.xyz) + p.parallax[0].w, dot(p.parallax[1].xyz, p.position.xyz) + p.parallax[1].w, dot(p.parallax[2].xyz, p.position.xyz) + p.parallax[2].w);
+    float3 local = o + d * distance - capture;
+    // Back to world axes (the rows are orthonormal).
+    return local.x * p.parallax[0].xyz + local.y * p.parallax[1].xyz + local.z * p.parallax[2].xyz;
 }
 
 // The probes' reflection along `r` at `world` (pixel `pixel`), the rest of the weight from
