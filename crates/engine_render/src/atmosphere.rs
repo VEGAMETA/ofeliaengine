@@ -21,6 +21,16 @@
 //! [`HeightFog`] is exponential height fog: density `d · exp(−falloff · (y − base))`,
 //! integrated analytically along each view ray, lit by the sky's average radiance and by
 //! the sun through a Henyey-Greenstein phase function (not shadowed).
+//!
+//! ```text
+//! // Once: Earth's sky instead of the gradient, and ground fog.
+//! environment.set_atmosphere(&device, &mut allocator, &bindless, Some(Atmosphere::earth()))?;
+//! environment.set_fog(Some(HeightFog { density: 0.02, falloff: 0.2, ..HeightFog::default() }));
+//!
+//! // Every frame: the directional light is the sun (its color: sunlight above the
+//! // atmosphere); the view draws the sky, the aerial perspective and the fog.
+//! let view = ForwardView { light: sun, environment: Some(&environment), ..view };
+//! ```
 
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::environment::{EnvironmentFrame, Image, ImageKind};
@@ -110,7 +120,7 @@ pub struct Atmosphere {
     /// Altitude of the world's origin above the ground, km: the camera is at this altitude
     /// plus its `y`.
     pub origin_altitude: f32,
-    /// World units per metre ÷ 1: metres per world unit (1 for a scene in metres).
+    /// Metres per world unit (1 for a scene in metres).
     pub meters_per_unit: f32,
     /// Distance scale of the aerial perspective (Unreal's "aerial perspective view distance
     /// scale"): above 1, small scenes look as far away as this many times their size.
