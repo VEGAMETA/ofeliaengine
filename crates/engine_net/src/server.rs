@@ -19,8 +19,8 @@ use crate::lagcomp::{HitCapsule, LagCompensation};
 use crate::schema::{NetSchema, WordKind};
 use crate::wire::{self, CH_RELIABLE, CH_SNAPSHOT, CH_UNRELIABLE, HISTORY, INPUT_RING, Inbox};
 use crate::{InputData, InputHeader, NetInput, NetRelevance, Replicated};
-use engine_core::math::Vec3;
 use engine_core::jobs::ThreadPool;
+use engine_core::math::Vec3;
 use engine_ecs::{ComponentId, Entity, QueryState, Transform, World, bytemuck};
 use engine_net_transport::{ConnectionId, DisconnectReason, Event, MessageId, Transport};
 use std::collections::VecDeque;
@@ -1147,8 +1147,7 @@ fn build_snapshot<I: InputData>(sh: &Shared<'_>, c: &mut ClientState<I>) {
     // small.
     chosen.sort_unstable_by(|a, b| b.0.total_cmp(&a.0));
     let gap_bits =
-        1 + crate::bits::golomb_bits(n as u32 / (chosen.len() as u32).max(1), wire::K_GAP)
-            as usize;
+        1 + crate::bits::golomb_bits(n as u32 / (chosen.len() as u32).max(1), wire::K_GAP) as usize;
     let mut room = (limit * 8).saturating_sub(w.bits() + 1);
     let mut skipped = 0u64;
     c.kept.clear();
