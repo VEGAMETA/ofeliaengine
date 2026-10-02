@@ -128,7 +128,7 @@ the level asked for and the next on both GPUs; a hidden quad reports nothing.
 
 | feedback pass, µs | RTX | Radeon |
 |---|---:|---:|
-| perf gate `sponza_streamed` (static view down the nave, pass + clear + readback) | 14.4 | 165 |
+| perf gate `sponza_streamed` (static view down the nave, pass + clear + readback) | 14.4 | 151–165 |
 | flight, median (unpaced) | 8.4 | 49 |
 | all commands every pass (1 slice), flight | 15 | 204 |
 
