@@ -761,7 +761,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // feedback within the shot's budget.
     let mut streaming = None;
     let mut loaded = loaded;
-    if let (Some(limit), Some(cooked)) = (shot.texture_budget, loaded.cooked.take()) {
+    if let Some(limit) = shot.texture_budget
+        && let Some(cooked) = loaded.cooked.take()
+    {
         let pack = std::env::temp_dir().join(format!(
             "engine_golden_{}_{}.pack",
             shot.name,
