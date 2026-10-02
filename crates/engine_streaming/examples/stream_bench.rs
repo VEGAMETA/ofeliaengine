@@ -49,6 +49,8 @@ use std::time::{Duration, Instant};
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 const MIB: f64 = (1u64 << 20) as f64;
+/// Frames left out of the statistics at the start.
+const WARMUP: usize = 10;
 
 fn percentile(values: &[f64], p: f64) -> f64 {
     if values.is_empty() {
@@ -370,6 +372,7 @@ fn main() {
         Duration::ZERO
     };
     let mut gpu_frame = Vec::new();
+    let mut frame_log: Vec<(usize, f64, f64, f64, (&'static str, f64))> = Vec::new();
     let mut cpu_frame = Vec::new();
     let mut stream_cpu = Vec::new();
     let mut feedback_gpu = Vec::new();
@@ -410,7 +413,9 @@ fn main() {
             frame_number,
         );
         budget.update(&allocator);
-        stream_cpu.push(t.elapsed().as_secs_f64() * 1e3);
+        if frame >= WARMUP {
+            stream_cpu.push(t.elapsed().as_secs_f64() * 1e3);
+        }
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -495,13 +500,26 @@ fn main() {
             .unwrap();
             device.wait_idle().unwrap();
         }
-        cpu_frame.push(frame_start.elapsed().as_secs_f64() * 1e3);
-        if let Some(us) = graph.gpu_frame_time() {
-            gpu_frame.push(f64::from(us) / 1e3);
-        }
+        // The first frames (pipelines' first use, the scene's meshes uploaded) are not
+        // the flight's: left out of the statistics.
+        let warm = frame >= WARMUP;
+        let cpu_ms = frame_start.elapsed().as_secs_f64() * 1e3;
+        let gpu_ms = graph.gpu_frame_time().map_or(0.0, |us| f64::from(us) / 1e3);
+        let top = graph
+            .gpu_pass_times()
+            .iter()
+            .max_by(|a, b| a.gpu_us.total_cmp(&b.gpu_us))
+            .map_or(("", 0.0), |t| (t.name, f64::from(t.gpu_us)));
+        frame_log.push((
+            frame,
+            gpu_ms,
+            cpu_ms,
+            textures.last_frame_bytes() as f64 / MIB,
+            top,
+        ));
         let mut fb = 0.0;
         let mut up = 0.0;
-        for time in graph.gpu_pass_times() {
+        for time in graph.gpu_pass_times().iter().filter(|_| warm) {
             passes_us
                 .entry(time.name)
                 .or_default()
@@ -514,11 +532,15 @@ fn main() {
                 _ => {}
             }
         }
-        if use_feedback {
-            feedback_gpu.push(fb);
+        if warm {
+            cpu_frame.push(cpu_ms);
+            gpu_frame.push(gpu_ms);
+            if use_feedback {
+                feedback_gpu.push(fb);
+            }
+            upload_gpu.push(up);
+            frame_bytes.push(textures.last_frame_bytes() as f64 / MIB);
         }
-        upload_gpu.push(up);
-        frame_bytes.push(textures.last_frame_bytes() as f64 / MIB);
         let (live, retiring) = textures.memory();
         let resident = live + retiring;
         peak_resident = peak_resident.max(resident);
@@ -610,6 +632,21 @@ fn main() {
         "Worst GPU frame / median: {:.2}×",
         percentile(&gpu_frame, 1.0) / percentile(&gpu_frame, 0.5).max(1e-9)
     );
+    let median = percentile(&gpu_frame, 0.5);
+    let slow: Vec<_> = frame_log
+        .iter()
+        .filter(|f| f.0 >= WARMUP && f.1 > 2.0 * median)
+        .collect();
+    println!(
+        "Frames over twice the median GPU time (after the first {WARMUP}): {}",
+        slow.len()
+    );
+    for f in slow.iter().take(8) {
+        println!(
+            "  frame {}: GPU {:.2} ms, CPU {:.2} ms, texture traffic {:.2} MiB, longest pass `{}` {:.0} µs",
+            f.0, f.1, f.2, f.3, f.4.0, f.4.1
+        );
+    }
     if let Some(f) = feedback.as_ref()
         && device.pipeline_statistics_enabled()
     {
