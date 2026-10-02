@@ -304,8 +304,9 @@ fn lds_exchanges_are_exact() {
     }
     drop(load);
     println!(
-        "{wrong_dispatches} of {dispatches} dispatches wrong ({load_threads} busy CPU threads); \
-         wrong threads per wave32 lane: {lanes:?}"
+        "{wrong_dispatches} of {dispatches} dispatches wrong, {} wrong threads in all \
+         ({load_threads} busy CPU threads); wrong threads per wave32 lane: {lanes:?}",
+        lanes.iter().map(|&n| u64::from(n)).sum::<u64>()
     );
     // SAFETY: the device is idle.
     unsafe {

@@ -38,11 +38,12 @@ What this machine covers:
   (the dGPU must be picked by default).
 - AVX-512 (Zen 4): the widest runtime-dispatch path of §5 can be tested here.
 
-**Known fault (2026-10-01):** while the CPU is busy, the iGPU's groupshared memory (LDS)
-returns wrong bits now and then (lane 24 of a wave, mostly bit 9), so exact image
-comparisons on the Radeon can fail under load with no engine bug behind them. Check with
-`cargo test -p engine_render --test gpu_selfcheck -- --ignored` (`ENGINE_ADAPTER=radeon`);
-details and what to check in the BIOS: `docs/research/radeon-igpu-lds-faults.md`.
+**Platform setting (2026-10-02):** VDDCR_SOC 1.25 V (and the PBO "performance" preset,
+Tjmax 80 °C). At the automatic SoC voltage the iGPU's groupshared memory (LDS) returned
+wrong bits under CPU load (lane 24 of a wave, mostly bit 9), and exact image comparisons
+on the Radeon failed with no engine bug behind them. `check.ps1 -Gpu` runs
+`cargo test -p engine_render --test gpu_selfcheck -- --ignored` on the Radeon first;
+details: `docs/research/radeon-igpu-lds-faults.md`.
 
 What it does **not** cover:
 
