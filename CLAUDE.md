@@ -68,6 +68,7 @@ Decisions change only via an ADR backed by measurements.
   engine_audio_vst3      VST3 host (scanning, isolation, PDC, state)
   engine_ecs             ECS / scene model
   engine_assets          import, cook, DDC (derived data cache), streaming
+  engine_streaming       a cooked scene streamed within the GPU memory budget (ADR 0076)
   engine_script          Luau: VM, bindings, .d.luau generation, hot reload, DAP debugger
   engine_anim            skeletal animation, blending, IK
   engine_nav             navigation
@@ -605,7 +606,7 @@ GPU-fault reports (0061), golden images and the perf gate (0062), the persistent
 and runtime loop (0064), async compute (0065), the physics API (0066), skeletal animation
 (0068), atmosphere and fog (0069), the network transport (0070), local-light and contact
 shadows (0071), the frame renderer (0072), reflections (0073), replication and lag
-compensation (0074).
+compensation (0074), the GPU memory budget with texture and mesh streaming (0076).
 
 The initial order below is kept for reference; its remaining items follow these.
 

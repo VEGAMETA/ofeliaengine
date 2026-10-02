@@ -69,7 +69,7 @@ tooling included) about **50 %**.
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
 | Physics API on Jolt/Box2D: queries, characters, rollback | done | ADR 0066 |
 | Networking: encrypted UDP transport with NAT traversal; replication, prediction, lag compensation, co-op example | done | ADRs 0070, 0074 |
-| Assets: glTF, cooking, packs, IoRing streaming, texture streaming step 1 | done | ADRs 0056, 0057 |
+| Assets: glTF, cooking, packs, IoRing streaming; GPU memory budget, texture streaming by GPU feedback, mesh LOD streaming (`engine_streaming`) | done | ADRs 0056, 0057, 0076 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
 | Editor, Luau | skeleton only, by plan | §10, §12 |
@@ -79,8 +79,6 @@ tooling included) about **50 %**.
 - **Every antialiasing and scaling mode** (`feat/aa-modes`, ADR 0075): MSAA 2/4/8× with
   alpha-to-coverage, FXAA, MLAA, SMAA 1x/S2x/T2x, nearest/bilinear/integer/FSR 1. Each is
   measured on both GPUs, and `available()` lists what the GPU supports.
-- **GPU memory budget, texture streaming step 2 and mesh LOD streaming**
-  (`feat/streaming-budget`, ADR 0076).
 
 ## 5. Queue (in order)
 
@@ -150,6 +148,10 @@ tooling included) about **50 %**.
   - replication: predicted spawns (projectiles), per-component update rates,
     PVS/portal relevance, built-in visual error smoothing;
   - runtime: a windowed demo (needs a dilated client clock in `engine_runtime`).
+- **Streaming (ADR 0076):** memory priorities (`VK_EXT_pageable_device_local_memory`),
+  feedback from several views, LOD crossfades and impostors, sparse residency. Screen-size
+  prefetch is blocked: the Graphine texture-streaming prediction patents (US10748241 and
+  family) claim combining prediction schemes, so feedback is the only source of wanted levels.
 - **Runtime:** parallel ECS extraction and upload on the job system (100 % moving objects
   cost 2× the draw list's CPU).
 - **Reliability:** two silent process exits (`perf_gate` once, `frame_bench` once) were

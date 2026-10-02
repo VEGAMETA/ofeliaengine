@@ -395,6 +395,11 @@ let id = geometry.add_mesh_with_lods(&mesh.as_data(), &lods)?;
 - **Known limits:** levels switch without a cross-fade (at 1 pixel it rarely shows; TAA
   hides the rest); orthographic cameras draw full meshes; making levels at load takes
   time (155 ms for Sponza) until the derived data cache keeps them.
+- **Streamed levels** (ADR 0076): a cooked pack stores each mesh by level; the engine
+  loads the coarsest one first and the finer ones as objects come close enough to need
+  them, within the GPU memory budget (`GeometryPool::add_streamed_mesh`,
+  `engine_streaming::SceneStreamer`, see the assets guide). A level not loaded yet draws
+  the finest one that is.
 
 ## 5. Occlusion culling: skipping what is hidden
 

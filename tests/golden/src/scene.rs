@@ -7,7 +7,7 @@
 use engine_anim::{local_to_model, skinning_matrices};
 use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
-    TextureSlot, TextureWrap, cook_scene, import_gltf,
+    TextureSlot, TextureWrap, cook_scene, import_gltf, write_pack,
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3, look_at};
@@ -18,7 +18,9 @@ use engine_frame::{
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::budget::{BudgetSettings, GpuBudget};
 use engine_render::environment::{Environment, Sky};
+use engine_render::feedback::{FeedbackSettings, TextureFeedback};
 use engine_render::forward::{
     DirectionalLight, DrawItem, LocalLight, LocalShadowSettings, ShadowSettings, Spot,
 };
@@ -37,6 +39,7 @@ use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, MemoryLocation, Wrap,
 };
 use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
+use engine_streaming::{SceneStreamSettings, SceneStreamer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -136,6 +139,10 @@ pub struct Shot {
     pub ssr: Option<SsrSettings>,
     /// The procedural scene's floor as polished metal (reflections show on it).
     pub glossy_floor: bool,
+    /// A glTF scene's textures streamed from a pack with texture feedback, in a streaming
+    /// pool of this many bytes (ADR 0076); `None`: every level uploaded. The shot is
+    /// captured once streaming has settled.
+    pub texture_budget: Option<u64>,
 }
 
 impl Shot {
@@ -177,6 +184,7 @@ impl Shot {
             probe_grid: None,
             ssr: None,
             glossy_floor: false,
+            texture_budget: None,
         }
     }
 }
@@ -749,6 +757,58 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             max = max.max(c);
         }
     };
+    // Streaming (ADR 0076): the cooked scene into a pack, its textures streamed by
+    // feedback within the shot's budget.
+    let mut streaming = None;
+    let mut loaded = loaded;
+    if let Some(limit) = shot.texture_budget
+        && let Some(cooked) = loaded.cooked.take()
+    {
+        let pack = std::env::temp_dir().join(format!(
+            "engine_golden_{}_{}.pack",
+            shot.name,
+            std::process::id()
+        ));
+        let jobs = ThreadPool::builder().build().expect("jobs");
+        write_pack(&pack, &cooked, &jobs, 1).expect("pack");
+        let mut budget = GpuBudget::with_settings(BudgetSettings {
+            streaming_limit: Some(limit),
+            ..BudgetSettings::default()
+        });
+        let streamer = SceneStreamer::open(
+            &pack,
+            &jobs,
+            &mut textures,
+            &mut geometry,
+            &mut allocator,
+            &mut budget,
+            SceneStreamSettings::default(),
+        )
+        .expect("streaming");
+        let feedback = TextureFeedback::new(&device, &bindless, FeedbackSettings::default(), 1)
+            .expect("feedback");
+        let scene = &streamer.layout().scene;
+        let ids = streamer.textures().to_vec();
+        let material_ids: Vec<_> = scene
+            .materials
+            .iter()
+            .map(|m| materials.add(engine_streaming::material_desc(m, &ids)))
+            .collect();
+        let fallback = materials.default_material();
+        for instance in &scene.instances {
+            let world = Mat4::from_cols_array(&instance.world_from_object);
+            let mesh = &scene.meshes[instance.mesh as usize];
+            draws.push(DrawItem {
+                mesh: streamer.meshes()[instance.mesh as usize],
+                material: instance
+                    .material
+                    .map_or(fallback, |i| material_ids[i as usize]),
+                world_from_object: world,
+            });
+            grow(world, mesh.min, mesh.max);
+        }
+        streaming = Some((streamer, budget, feedback, pack));
+    }
     if let Some(mut cooked) = loaded.cooked {
         let meshes: Vec<MeshId> = cooked
             .meshes
@@ -922,8 +982,26 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut captured = false;
     let mut resident_frames = 0;
     let mut previous_faces = 0;
+    // Frames in a row with nothing to stream (feedback lags a few frames, and a coarser
+    // level waits for its hold).
+    let mut quiet = 0;
     while timed < options.timed_frames || !captured {
-        let uploading = textures.pending().0 > 0;
+        if let Some((streamer, budget, feedback, _)) = streaming.as_mut() {
+            streamer.update(
+                &mut textures,
+                &mut geometry,
+                &mut allocator,
+                budget,
+                Some(feedback),
+                None,
+                &materials,
+                frame_number + 1,
+            );
+            budget.update(&allocator);
+            let idle = streamer.idle() && textures.pending_moves() == 0;
+            quiet = if idle { quiet + 1 } else { 0 };
+        }
+        let uploading = textures.pending().0 > 0 || (streaming.is_some() && quiet < 70);
         // With probes, once every probe was captured with the textures resident.
         let probes_ready = probes.as_ref().is_none_or(|p| p.stats().pending == 0);
         let capture = !uploading && !captured && resident_frames >= capture_at && probes_ready;
@@ -1003,6 +1081,8 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             skinning.set_pose(id, &palettes[skin], &world);
         }
         skinning.update_bounds(&mut geometry, None);
+        // The texture LOD bias the frame's materials sample with (texture feedback).
+        let lod_bias = materials.texture_lod_bias();
         // SAFETY: the previous frame finished (waited below).
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -1055,7 +1135,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 None => None,
             };
             let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
-            frame
+            let view_frame = frame
                 .add_view(
                     &mut fg,
                     &mut FrameContext {
@@ -1088,6 +1168,22 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     },
                 )
                 .expect("frame");
+            if let Some((_, _, feedback, _)) = streaming.as_mut() {
+                feedback
+                    .add_pass(
+                        &mut fg,
+                        &device,
+                        &mut allocator,
+                        &bindless,
+                        &geo,
+                        &mats,
+                        &view_frame.passes,
+                        view_frame.render,
+                        lod_bias,
+                        frame_number,
+                    )
+                    .expect("feedback");
+            }
             if capture {
                 let out = fg.import_buffer(
                     "readback",
@@ -1203,9 +1299,16 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let async_compute = graph.async_compute();
 
     let mut environment = environment;
+    let mut streaming = streaming;
     // SAFETY: the device is idle; everything below was created above and is not used
     // again.
     unsafe {
+        if let Some((streamer, _, mut feedback, pack)) = streaming.take() {
+            streamer.finish(&mut textures);
+            feedback.destroy(&mut allocator);
+            drop(feedback);
+            let _ = std::fs::remove_file(pack);
+        }
         frame
             .forward_mut()
             .destroy(&device, &mut allocator, &bindless);

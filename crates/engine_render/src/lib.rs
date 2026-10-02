@@ -21,22 +21,29 @@
 //!   (ADR 0073).
 //! - [`subsurface`]: screen-space subsurface scattering: diffusion profiles, transmission
 //!   and the scatter pass (ADR 0059).
+//! - [`budget`]: the GPU memory budget every streaming system asks (ADR 0076).
+//! - [`feedback`]: texture feedback: the texture levels the GPU samples, per material
+//!   (ADR 0076).
 //! - [`gpu_scene`]: the persistent GPU scene: instances in stable slots in device
 //!   buffers, only changes uploaded each frame (ADR 0064).
 //! - [`cull`]: frustum and bounding-box tests shared by CPU code and the GPU culling pass.
 //! - [`upload`]: per-frame GPU data (camera, lights, draw lists) in a ring per frame slot.
 //! - [`post`]: post-processing (tonemapping from the HDR target).
 //! - [`png`]: a small PNG encoder for screenshots and golden-image tests.
+//! - [`streaming`]: texture streaming: levels resident by GPU feedback within the GPU
+//!   memory budget (ADR 0076).
 //! - [`texture`]: textures that live across frames, uploaded through the ring.
 //! - [`viewport`]: viewports: render targets with their own size, update rate and
 //!   placement; nesting, split screen, pixel-perfect scaling (ADR 0016).
 
 pub mod ao;
 pub mod atmosphere;
+pub mod budget;
 pub mod compute;
 pub mod contact;
 pub mod cull;
 pub mod environment;
+pub mod feedback;
 pub mod forward;
 pub mod gpu_scene;
 pub mod graph;
@@ -51,6 +58,7 @@ pub mod postfx;
 pub mod reflections;
 pub mod shadow;
 pub mod skinning;
+pub mod streaming;
 pub mod subsurface;
 pub mod texture;
 pub mod texture_pool;

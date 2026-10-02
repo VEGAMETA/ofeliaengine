@@ -16,8 +16,9 @@ mod texture_import;
 
 pub use cook::{
     CookError, CookSettings, CookStats, CookedInstance, CookedMaterial, CookedMesh, CookedScene,
-    CookedSkin, SceneLayout, TextureEntry, TextureSlot, cook_scene, load_pack, open_scene,
-    write_pack,
+    CookedSkin, MeshLevelData, MeshLevelRecord, MeshRecord, SceneLayout, StreamedMesh,
+    TextureEntry, TextureSlot, cook_scene, load_pack, open_scene, open_scene_streamed,
+    order_for_streaming, read_mesh_level_entry, streamed_vertex_counts, write_pack,
 };
 pub use ddc::{
     CacheOutcome, DerivedDataCache, import_texture, texture_from_bytes, texture_key,

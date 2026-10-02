@@ -792,6 +792,55 @@ void shadowFragmentMasked(ShadowOut input)
         discard;
 }
 
+// Texture feedback (feedback.rs, ADR 0076): drawn with `depthVertexMasked` into a small
+// depth target (the view's size over a divisor), after the view's culling, with the same
+// commands. Each fragment works out the finest level a texture of its material would be
+// sampled at, in units of texture coordinates (the level of a texture of size S is this
+// plus log2 S), and keeps the minimum per material slot, with a pixel count. No other pass
+// has this code: views without streaming pay nothing for it.
+//
+// `push.light_tiles`: per material slot, the minimum (fixed point, FEEDBACK_SCALE per level,
+// FEEDBACK_ZERO at level 0) and the pixel count. `push.texture`: the bits of a float added
+// to the level, the sampler's LOD bias minus log2 of the divisor (a pixel here spans
+// `divisor` of the view's).
+static const float FEEDBACK_SCALE = 256.0;
+static const float FEEDBACK_ZERO = 64.0;
+
+[shader("fragment")]
+[earlydepthstencil]
+void feedbackFragment(ShadowOut input)
+{
+    float2 dx = ddx(input.uv);
+    float2 dy = ddy(input.uv);
+    float x2 = dot(dx, dx);
+    float y2 = dot(dy, dy);
+    // 16× anisotropic filtering samples along the longer axis: the level follows the
+    // shorter one, but no more than 16 times finer than the longer (squared: 256).
+    float level = 0.5 * log2(max(max(min(x2, y2), max(x2, y2) / 256.0), 1e-30)) + asfloat(push.texture);
+    uint q = uint(clamp((level + FEEDBACK_ZERO) * FEEDBACK_SCALE, 0.0, 65535.0 * FEEDBACK_SCALE));
+    uint material = input.material;
+    uint* slot = push.light_tiles + material * 2;
+    // One pair of atomics per wave when the wave shades one material (the usual case),
+    // made by a lane that is not a helper (helpers' atomics do nothing).
+    bool real = !IsHelperLane();
+    if (WaveActiveAllEqual(material))
+    {
+        uint least = WaveActiveMin(real ? q : 0xFFFFFFFFu);
+        uint count = WaveActiveCountBits(real);
+        if (real && WavePrefixCountBits(real) == 0)
+        {
+            InterlockedMin(slot[0], least);
+            // Counted down from the cleared 0xFFFFFFFF: the CPU inverts it.
+            InterlockedAdd(slot[1], 0u - count);
+        }
+    }
+    else if (real)
+    {
+        InterlockedMin(slot[0], q);
+        InterlockedAdd(slot[1], 0xFFFFFFFFu);
+    }
+}
+
 static const float PI = 3.14159265;
 
 float distribution_ggx(float n_dot_h, float a)

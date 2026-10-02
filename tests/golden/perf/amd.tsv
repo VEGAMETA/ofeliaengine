@@ -125,3 +125,17 @@ sponza_reflections	ssr spatial	1500.2
 sponza_reflections	ssr temporal	1673.3
 sponza_reflections	ssr trace	2549.1
 sponza_reflections	tonemap	756.6
+sponza_streamed	(frame total)	16532.9
+sponza_streamed	(gpu frame)	16536.7
+sponza_streamed	bloom downsample	635.2
+sponza_streamed	bloom upsample	478.6
+sponza_streamed	cull	3.4
+sponza_streamed	cull setup	0.8
+sponza_streamed	forward	12186.5
+sponza_streamed	shadow	2285.5
+sponza_streamed	shadow cull	4.2
+sponza_streamed	sky	32.7
+sponza_streamed	texture feedback	150.0
+sponza_streamed	texture feedback clear	0.4
+sponza_streamed	texture feedback readback	0.6
+sponza_streamed	tonemap	753.6
