@@ -739,3 +739,68 @@ pub mod sdk {
         unsafe { super::ffi::engine_fsr_upscale_ratio(mode.ffx()) }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_rhi::{AdapterPreference, Instance, InstanceDesc};
+
+    /// Contexts are created on several devices at once, as tests do (each renders on its
+    /// own thread with its own instance and device): every context must get its own
+    /// device's functions and `VkDeviceContext`, and the module tables must outlive every
+    /// `Fsr`. The validation layer catches a context built on another thread's device.
+    #[test]
+    fn contexts_are_created_on_several_devices_at_once() {
+        let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+        let threads: Vec<_> = (0..4)
+            .map(|thread| {
+                std::thread::spawn(move || {
+                    let gpu = || -> Result<(Instance, Device), engine_rhi::RhiError> {
+                        let instance = Instance::new(&InstanceDesc {
+                            app_name: String::from("engine_fsr contexts"),
+                            validation: true,
+                            debug_utils: true,
+                            surface: false,
+                            headless_surface: false,
+                            sync_validation: false,
+                        })?;
+                        let preference = AdapterPreference::from_env()
+                            .unwrap_or(AdapterPreference::HighPerformance);
+                        let adapter = instance.select_adapter(&preference)?;
+                        let device = Device::new(&instance, &adapter)?;
+                        Ok((instance, device))
+                    };
+                    let (instance, device) = match gpu() {
+                        Ok(pair) => pair,
+                        Err(e) if !required => return Some(e.to_string()),
+                        Err(e) => panic!("GPU required but unavailable: {e}"),
+                    };
+                    for round in 0..6u32 {
+                        // A new `Fsr` every round: another thread may be creating a
+                        // context while this one's `Fsr` is dropped.
+                        let fsr = Fsr::new(&device, 1);
+                        let render = (64 + 8 * thread + round, 64);
+                        let context = fsr
+                            .create_context(render, (128, 128), round % 2 == 0)
+                            .unwrap();
+                        // SAFETY: the context was never used on the GPU.
+                        unsafe { ffi::engine_fsr_destroy(context.raw.as_ptr()) };
+                    }
+                    drop(device);
+                    let report = instance.validation_report();
+                    assert_eq!(
+                        report.errors, 0,
+                        "validation errors: {:#?}",
+                        report.first_errors
+                    );
+                    None
+                })
+            })
+            .collect();
+        for thread in threads {
+            if let Some(skipped) = thread.join().unwrap() {
+                println!("skipping GPU test: {skipped}");
+            }
+        }
+    }
+}
