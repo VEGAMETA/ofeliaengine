@@ -10,15 +10,15 @@
 //!   4 × 4 the size without antialiasing, averaged 4 × 4 in linear light;
 //! - **moving**: the same for the last of `SEQUENCE` frames of a camera strafing slowly
 //!   (temporal modes accumulate while it moves), against the reference at that position;
-//! - **shimmer**: flicker under the moving camera: the mean over the sequence and the
-//!   pixels of |Δ²F − Δ²R|, Δ²X = X[t+1] − 2 X[t] + X[t−1] in display-encoded luma
-//!   (0–255), F the mode's frames, R the reference's. At a constant camera speed a
-//!   correct image changes smoothly; crawling edges, popping texels and per-frame noise
-//!   do not (blur and lag show in the moving FLIP instead). With every feature on the
-//!   effects' own per-frame noise counts too (ambient occlusion's and reflections' noise
-//!   changes every frame under temporal modes, for them to average); **shimmer, plain**
-//!   measures it on Sponza lit by the sun and the sky alone, where only edges and
-//!   textures can flicker.
+//! - **flicker**: under the moving camera, the share (%) of pixels and frames whose
+//!   luma jumps visibly beyond what the reference's does: |Δ²F − Δ²R| > 8 of 255,
+//!   Δ²X = X[t+1] − 2 X[t] + X[t−1] in display-encoded luma, F the mode's frames, R the
+//!   reference's. At a constant camera speed a correct image changes smoothly; crawling
+//!   edges, popping texels and per-frame noise jump (blur and lag show in the moving FLIP
+//!   instead). With every feature on the effects' own per-frame noise counts too
+//!   (ambient occlusion's and reflections' noise changes every frame under temporal
+//!   modes, for them to average); **flicker, plain** measures it on Sponza lit by the sun
+//!   and the sky alone, where only edges and textures can flicker.
 //!
 //! `cargo run -p engine_golden --release --example aa_bench [-- --quick] [-- --only <label>]`
 //! (`ENGINE_ADAPTER=radeon` for the iGPU; `VK_LOADER_LAYERS_DISABLE=~implicit~`). `--quick`
@@ -205,24 +205,26 @@ fn luma(frame: &[[f32; 3]]) -> Vec<f32> {
         .collect()
 }
 
-/// Flicker: the mean over the sequence and the pixels of |Δ²F − Δ²R|, with
-/// Δ²X = X[t+1] − 2 X[t] + X[t−1] (display-encoded luma, 0–255). Under a camera moving at a
-/// constant speed a correct image changes smoothly (its second difference is small and
-/// the reference's); edges that step from pixel to pixel, popping texels and noise that
-/// changes every frame do not. Blur and lag change the first difference, hardly the
-/// second: they show in the moving FLIP and PSNR instead.
+/// Visible flicker: the share (%) of pixels and frames where |Δ²F − Δ²R| > 8 of 255, with
+/// Δ²X = X[t+1] − 2 X[t] + X[t−1] in display-encoded luma. Under a camera moving at a
+/// constant speed a correct image changes smoothly (its second difference is small, as
+/// the reference's); an edge stepping from pixel to pixel, a popping texel or noise that
+/// changes every frame jumps. Blur and lag change the first difference, hardly the
+/// second (they show in the moving FLIP and PSNR); a temporal method's faint jitter wobble
+/// stays under the threshold.
 fn shimmer(reference: &[Vec<f32>], test: &[Vec<f32>]) -> f64 {
-    let mut sum = 0.0f64;
+    const VISIBLE: f32 = 8.0;
+    let mut flicker = 0usize;
     let mut n = 0usize;
     for t in 1..reference.len().min(test.len()).saturating_sub(1) {
         for i in 0..reference[t].len() {
             let dr = reference[t + 1][i] - 2.0 * reference[t][i] + reference[t - 1][i];
             let df = test[t + 1][i] - 2.0 * test[t][i] + test[t - 1][i];
-            sum += f64::from((df - dr).abs());
+            flicker += usize::from((df - dr).abs() > VISIBLE);
             n += 1;
         }
     }
-    sum / n.max(1) as f64
+    100.0 * flicker as f64 / n.max(1) as f64
 }
 
 /// The passes that are an antialiasing mode's own (MSAA's other cost is in the scene
@@ -381,7 +383,7 @@ fn bench() {
     let (_, plain_luma) = reference_sequence(plain(settings.size), settings.sequence);
 
     println!(
-        "| mode | passes ms | vs off ms | own passes ms | still FLIP | still PSNR dB | moving FLIP | moving PSNR dB | shimmer | shimmer, plain |"
+        "| mode | passes ms | vs off ms | own passes ms | still FLIP | still PSNR dB | moving FLIP | moving PSNR dB | flicker % | flicker %, plain |"
     );
     println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     let mut off_ms = None;
@@ -421,7 +423,7 @@ fn bench() {
         let passes = total(&timed);
         let off = *off_ms.get_or_insert(passes);
         println!(
-            "| {label} | {passes:.2} | {:+.2} | {:.2} | {still_flip:.4} | {still_psnr:.2} | {moving_flip:.4} | {moving_psnr:.2} | {shimmer:.3} | {plain_shimmer:.3} |",
+            "| {label} | {passes:.2} | {:+.2} | {:.2} | {still_flip:.4} | {still_psnr:.2} | {moving_flip:.4} | {moving_psnr:.2} | {shimmer:.2} | {plain_shimmer:.2} |",
             passes - off,
             aa_ms(&timed),
         );
