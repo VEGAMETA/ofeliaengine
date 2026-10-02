@@ -14,7 +14,11 @@
 //!   reference changes: the mean over the sequence and the pixels of
 //!   |(F[t] − F[t−1]) − (R[t] − R[t−1])| in display-encoded luma (0–255). Aliased edges
 //!   crawl and flicker as the camera moves (high), temporal modes are stable but may lag
-//!   (ghosting raises it too); the reference's own change is subtracted.
+//!   (ghosting raises it too); the reference's own change is subtracted. With every
+//!   feature on, the effects' own per-frame noise (ambient occlusion's and reflections'
+//!   noise changes every frame under temporal modes, for them to average) counts too;
+//!   **shimmer, plain** measures the same on Sponza lit by the sun and the sky alone,
+//!   where only edges and textures can crawl.
 //!
 //! `cargo run -p engine_golden --release --example aa_bench [-- --quick] [-- --only <label>]`
 //! (`ENGINE_ADAPTER=radeon` for the iGPU; `VK_LOADER_LAYERS_DISABLE=~implicit~`). `--quick`
@@ -65,6 +69,57 @@ fn sponza(size: [u32; 2]) -> Shot {
         capture_after: Some(WARMUP),
         ..Shot::new("aa", Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
     }
+}
+
+/// Sponza with the sun and the sky only: nothing stochastic, for the plain shimmer.
+fn plain(size: [u32; 2]) -> Shot {
+    Shot {
+        size,
+        capture_after: Some(WARMUP),
+        ..Shot::new(
+            "aa plain",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    }
+}
+
+/// The reference sequence of `base`: frames at 4 × 4 the size, averaged, and their luma.
+fn reference_sequence(base: Shot, sequence: u32) -> (Vec<Vec<[f32; 3]>>, Vec<Vec<f32>>) {
+    let big = [
+        base.size[0] * REFERENCE_SCALE,
+        base.size[1] * REFERENCE_SCALE,
+    ];
+    let k = REFERENCE_SCALE as usize;
+    let r = run(
+        &Shot {
+            size: big,
+            camera_motion: MOTION,
+            captures: sequence,
+            ..base
+        },
+        0,
+    )
+    .unwrap();
+    let frames: Vec<Vec<[f32; 3]>> = r
+        .frames
+        .iter()
+        .map(|f| downsample(f, big[0] as usize, big[1] as usize, k))
+        .collect();
+    let lumas = frames.iter().map(|f| luma(f)).collect();
+    (frames, lumas)
+}
+
+/// `shot`'s sequence with the camera moving: its frames, linear.
+fn sequence_of(shot: &Shot, sequence: u32) -> Option<Vec<Vec<[f32; 3]>>> {
+    let r = run(
+        &Shot {
+            camera_motion: MOTION,
+            captures: sequence,
+            ..shot.clone()
+        },
+        0,
+    )?;
+    Some(r.frames.iter().map(|f| linear(f)).collect())
 }
 
 fn run(shot: &Shot, timed: usize) -> Option<Rendered> {
@@ -165,9 +220,10 @@ fn shimmer(reference: &[Vec<f32>], test: &[Vec<f32>]) -> f64 {
     sum / n.max(1) as f64
 }
 
-/// The passes an antialiasing mode adds: its own names.
+/// The passes that are an antialiasing mode's own (MSAA's other cost is in the scene
+/// passes: compare the total with "off").
 fn aa_ms(r: &Rendered) -> f64 {
-    const NAMES: [&str; 12] = [
+    const NAMES: [&str; 13] = [
         "taau",
         "fsr",
         "dlss",
@@ -176,10 +232,11 @@ fn aa_ms(r: &Rendered) -> f64 {
         "smaa",
         "easu",
         "rcas",
-        "msaa",
+        "msaa resolve",
+        "subsurface resolve",
+        "reflection inputs resolve",
+        "temporal",
         "perceptual",
-        "tonemap",
-        "composite",
     ];
     r.pass_us
         .iter()
@@ -199,6 +256,11 @@ fn modes() -> Vec<(&'static str, Antialiasing, Quality)> {
     vec![
         ("off", A::OFF, Quality::Native),
         ("FXAA", A::FXAA, Quality::Native),
+        (
+            "SMAA 1x medium",
+            A::post(PostAntialiasing::Smaa(SmaaQuality::Medium)),
+            Quality::Native,
+        ),
         ("MLAA", A::MLAA, Quality::Native),
         (
             "SMAA 1x low",
@@ -237,6 +299,11 @@ fn modes() -> Vec<(&'static str, Antialiasing, Quality)> {
         ("bilinear 67 %", A::OFF, Quality::Quality),
         ("bilinear 50 %", A::OFF, Quality::Performance),
         (
+            "nearest 67 %",
+            A::spatial(Upscale::Nearest),
+            Quality::Quality,
+        ),
+        (
             "nearest 50 %",
             A::spatial(Upscale::Nearest),
             Quality::Performance,
@@ -245,6 +312,11 @@ fn modes() -> Vec<(&'static str, Antialiasing, Quality)> {
             "integer 50 %",
             A::spatial(Upscale::Integer),
             Quality::Performance,
+        ),
+        (
+            "FSR 1 RCAS only (100 %)",
+            A::spatial(Upscale::Fsr1),
+            Quality::Native,
         ),
         ("FSR 1 67 %", A::spatial(Upscale::Fsr1), Quality::Quality),
         (
@@ -299,27 +371,15 @@ fn bench() {
     let still = run(&sponza(big), 0).unwrap();
     println!("Adapter: {}\n", still.adapter);
     let still = downsample(&still.rgba8, big[0] as usize, big[1] as usize, k);
-    let moving = run(
-        &Shot {
-            camera_motion: MOTION,
-            captures: settings.sequence,
-            ..sponza(big)
-        },
-        0,
-    )
-    .unwrap();
-    let moving: Vec<Vec<[f32; 3]>> = moving
-        .frames
-        .iter()
-        .map(|f| downsample(f, big[0] as usize, big[1] as usize, k))
-        .collect();
-    let moving_luma: Vec<Vec<f32>> = moving.iter().map(|f| luma(f)).collect();
+    let (moving, moving_luma) = reference_sequence(sponza(settings.size), settings.sequence);
     let last = moving.last().unwrap();
+    let (_, plain_luma) = reference_sequence(plain(settings.size), settings.sequence);
 
     println!(
-        "| mode | passes ms | antialiasing + post ms | still FLIP | still PSNR dB | moving FLIP | moving PSNR dB | shimmer |"
+        "| mode | passes ms | vs off ms | own passes ms | still FLIP | still PSNR dB | moving FLIP | moving PSNR dB | shimmer | shimmer, plain |"
     );
-    println!("|---|---:|---:|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
+    let mut off_ms = None;
     for (label, antialiasing, quality) in modes() {
         if !only.is_empty() && !only.contains(&label) {
             continue;
@@ -335,25 +395,29 @@ fn bench() {
         let image = linear(&timed.rgba8);
         let still_flip = flip(&still, &image, w as usize, h as usize, DEFAULT_PPD).mean();
         let still_psnr = psnr(&still, &image);
-        let Some(sequence) = run(
-            &Shot {
-                camera_motion: MOTION,
-                captures: settings.sequence,
-                ..shot.clone()
-            },
-            0,
-        ) else {
+        let Some(frames) = sequence_of(&shot, settings.sequence) else {
             continue;
         };
-        let frames: Vec<Vec<[f32; 3]>> = sequence.frames.iter().map(|f| linear(f)).collect();
+        let plain_shot = Shot {
+            antialiasing,
+            quality,
+            ..plain(settings.size)
+        };
+        let Some(plain_frames) = sequence_of(&plain_shot, settings.sequence) else {
+            continue;
+        };
+        let plain_lumas: Vec<Vec<f32>> = plain_frames.iter().map(|f| luma(f)).collect();
+        let plain_shimmer = shimmer(&plain_luma, &plain_lumas);
         let moving_image = frames.last().unwrap();
         let moving_flip = flip(last, moving_image, w as usize, h as usize, DEFAULT_PPD).mean();
         let moving_psnr = psnr(last, moving_image);
         let frames_luma: Vec<Vec<f32>> = frames.iter().map(|f| luma(f)).collect();
         let shimmer = shimmer(&moving_luma, &frames_luma);
+        let passes = total(&timed);
+        let off = *off_ms.get_or_insert(passes);
         println!(
-            "| {label} | {:.2} | {:.2} | {still_flip:.4} | {still_psnr:.2} | {moving_flip:.4} | {moving_psnr:.2} | {shimmer:.3} |",
-            total(&timed),
+            "| {label} | {passes:.2} | {:+.2} | {:.2} | {still_flip:.4} | {still_psnr:.2} | {moving_flip:.4} | {moving_psnr:.2} | {shimmer:.3} | {plain_shimmer:.3} |",
+            passes - off,
             aa_ms(&timed),
         );
         if let Ok(dir) = std::env::var("ENGINE_AA_BENCH_DUMP") {
@@ -367,6 +431,13 @@ fn bench() {
                 .flat_map(|p| [p[0], p[1], p[2]])
                 .collect();
             engine_golden::golden::write_png(&path, w, h, &rgb).unwrap();
+            let encode8 = |c: f32| (encode(c) * 255.0).round() as u8;
+            let moving_rgb: Vec<u8> = moving_image
+                .iter()
+                .flat_map(|c| c.map(encode8))
+                .collect();
+            let path = path.with_extension("moving.png");
+            engine_golden::golden::write_png(&path, w, h, &moving_rgb).unwrap();
         }
     }
 }

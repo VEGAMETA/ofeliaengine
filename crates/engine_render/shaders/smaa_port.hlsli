@@ -16,4 +16,4 @@
 #define SMAA_FLATTEN [flatten]
 #define SMAA_BRANCH [branch]
 #define SMAAGather(tex, coord) tex.Gather(g_samplers[push.linear_sampler], coord)
-#include "SMAA.hlsl"
+#include "../../../third_party/smaa/SMAA.hlsl"

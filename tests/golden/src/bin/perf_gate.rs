@@ -27,7 +27,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use engine_core::math::Vec3;
-use engine_frame::{Antialiasing, Quality};
+use engine_frame::{Antialiasing, Msaa, Quality, Upscale};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights, vendor_name,
 };
@@ -101,6 +101,22 @@ fn shots() -> Vec<Shot> {
         antialiased("sponza_taa", Antialiasing::TAAU, Quality::Native),
         antialiased("sponza_taau_67", Antialiasing::TAAU, Quality::Quality),
         antialiased("sponza_fsr_quality", Antialiasing::FSR, Quality::Quality),
+        // The other antialiasing and scaling modes (ADR 0075): MSAA 4× (the depth prepass,
+        // multisampled shading, the resolves), the filters after tone mapping (FXAA, SMAA
+        // 1x, SMAA T2x with its temporal resolve), FSR 1 from 67 %.
+        antialiased(
+            "sponza_msaa4",
+            Antialiasing::msaa(Msaa::X4),
+            Quality::Native,
+        ),
+        antialiased("sponza_fxaa", Antialiasing::FXAA, Quality::Native),
+        antialiased("sponza_smaa", Antialiasing::SMAA_1X, Quality::Native),
+        antialiased("sponza_smaa_t2x", Antialiasing::SMAA_T2X, Quality::Native),
+        antialiased(
+            "sponza_fsr1_67",
+            Antialiasing::spatial(Upscale::Fsr1),
+            Quality::Quality,
+        ),
         // Local reflections (ADR 0073): six cached probes over the atrium and screen-space
         // reflections at half resolution (their passes every frame, no captures).
         Shot {
