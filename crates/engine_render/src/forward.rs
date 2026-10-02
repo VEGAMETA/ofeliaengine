@@ -226,7 +226,8 @@ pub use crate::shadow::ShadowSettings;
 
 /// Format of the motion vector target (ADR 0043).
 pub const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
-const DEPTH_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.depthVertexMasked.spv");
+pub(crate) const DEPTH_VERTEX_MASKED: &[u8] =
+    include_bytes!("../shaders/forward.depthVertexMasked.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
 const FRAGMENT_BLENDED: &[u8] = include_bytes!("../shaders/forward.fragmentBlended.spv");
 const FRAGMENT_BLENDED_REACTIVE: &[u8] =
@@ -263,10 +264,10 @@ pub(crate) const MIRRORED: usize = 1;
 /// Bitmasks of states for [`States::draw`]: opaque and masked without subsurface
 /// scattering (0-7), blended (8-15), with subsurface scattering (16-23).
 const PLAIN_STATES: u32 = 0x0000_00FF;
-const BLENDED_STATES: u32 = 0x0000_FF00;
+pub(crate) const BLENDED_STATES: u32 = 0x0000_FF00;
 const SUBSURFACE_STATES: u32 = 0x00FF_0000;
 /// Everything that writes depth and casts shadows.
-const DEPTH_STATES: u32 = PLAIN_STATES | SUBSURFACE_STATES;
+pub(crate) const DEPTH_STATES: u32 = PLAIN_STATES | SUBSURFACE_STATES;
 
 /// One object to draw.
 ///
@@ -766,26 +767,26 @@ struct BatchData {
 }
 
 /// `Push` in `forward.slang` (112 bytes).
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
-struct Push {
-    frame: u64,
-    instances: u64,
-    batches: u64,
-    visible: u64,
-    commands: u64,
-    visibility: u64,
-    pyramid: u64,
-    positions: u64,
-    attributes: u64,
-    materials: u64,
-    previous_instances: u64,
-    light_tiles: u64,
-    instance_count: u32,
-    texture: u32,
-    phase: u32,
+pub(crate) struct Push {
+    pub(crate) frame: u64,
+    pub(crate) instances: u64,
+    pub(crate) batches: u64,
+    pub(crate) visible: u64,
+    pub(crate) commands: u64,
+    pub(crate) visibility: u64,
+    pub(crate) pyramid: u64,
+    pub(crate) positions: u64,
+    pub(crate) attributes: u64,
+    pub(crate) materials: u64,
+    pub(crate) previous_instances: u64,
+    pub(crate) light_tiles: u64,
+    pub(crate) instance_count: u32,
+    pub(crate) texture: u32,
+    pub(crate) phase: u32,
     /// Bindless index of the view's ambient occlusion, or [`NO_AO`].
-    ao: u32,
+    pub(crate) ao: u32,
 }
 
 /// `NO_TEXTURE` in `forward.slang`: no ambient occlusion.
@@ -842,6 +843,26 @@ pub struct ForwardPasses {
     /// and culling read). The color and the motion vectors stay multisampled: the caller
     /// resolves them (`engine_render::msaa`), after its own passes on them.
     pub resolved_depth: Option<Texture>,
+    /// What passes drawing the view's visible instances again need (texture feedback,
+    /// [`crate::feedback`]).
+    pub(crate) draws: Option<DrawLists>,
+}
+
+/// The view's culled draw lists in this frame's graph, for passes that draw the visible
+/// instances again ([`crate::feedback::TextureFeedback`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct DrawLists {
+    /// The forward pass's push constants without the per-pass fields (`visible`,
+    /// `texture`, `light_tiles`, `ao`, `phase`).
+    pub(crate) push: Push,
+    /// The draw commands: `phases` lists of `command_bytes`.
+    pub(crate) commands: Buffer,
+    pub(crate) visible: Buffer,
+    /// The persistent scene's instances, read by the vertex shaders.
+    pub(crate) instances: Option<Buffer>,
+    pub(crate) phases: u32,
+    pub(crate) command_bytes: u64,
+    pub(crate) states: States,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -3676,17 +3697,8 @@ impl ForwardRenderer {
             visibility_capacity: occlusion.map_or(0, Occlusion::capacity),
             hiz_levels: pyramid_layout.levels,
             depth_size: [depth_desc.width, depth_desc.height],
-            lod_scale: {
-                // Pixels per unit at distance 1: the projection's vertical scale (the length
-                // of the clip matrix's y row, whatever the camera's rotation) times half
-                // the height. Orthographic views (no perspective divide) draw full meshes.
-                let (y_row, w_row) = (unjittered.row(1).truncate(), unjittered.row(3).truncate());
-                if self.lod_threshold > 0.0 && w_row.length() > 1e-6 {
-                    y_row.length() * depth_desc.height as f32 * 0.5 / self.lod_threshold
-                } else {
-                    0.0
-                }
-            },
+            // Orthographic views (no perspective divide) draw full meshes.
+            lod_scale: crate::cull::lod_scale(&unjittered, depth_desc.height, self.lod_threshold),
             slot_count,
             hiz_offsets: pyramid_layout.offsets,
             previous_clip_from_world: previous_clip_from_world.to_cols_array(),
@@ -4356,6 +4368,15 @@ impl ForwardRenderer {
         } else {
             StoreOp::DontCare
         };
+        let draw_lists = DrawLists {
+            push: base,
+            commands: culled,
+            visible,
+            instances: scene_instances,
+            phases,
+            command_bytes,
+            states,
+        };
         let mut passes =
             match flag_buffer {
                 None => {
@@ -4434,6 +4455,7 @@ impl ForwardRenderer {
                         contact_shadows: targets.contact,
                         reflections: None,
                         resolved_depth,
+                        draws: Some(draw_lists),
                     }
                 }
                 Some(flags) => {
@@ -4609,6 +4631,7 @@ impl ForwardRenderer {
                         contact_shadows: targets.contact,
                         reflections: None,
                         resolved_depth,
+                        draws: Some(draw_lists),
                     }
                 }
             };
@@ -5177,6 +5200,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         contact_shadows: None,
         reflections: None,
         resolved_depth,
+        draws: None,
     }
 }
 
@@ -5430,8 +5454,8 @@ fn batches(
 }
 
 /// Where each pipeline state's batches are among the commands.
-#[derive(Debug, Clone, Copy)]
-struct States {
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct States {
     starts: [u32; STATES],
     counts: [u32; STATES],
 }
@@ -5450,7 +5474,7 @@ impl States {
     /// `ctx` records inside a rendering scope of a pass that reads the geometry pool and
     /// the material table; `buffer` holds the commands and has indirect-buffer usage.
     #[allow(clippy::too_many_arguments)]
-    unsafe fn draw(
+    pub(crate) unsafe fn draw(
         &self,
         ctx: &crate::graph::PassContext<'_>,
         bindless: &Bindless,
@@ -5463,9 +5487,49 @@ impl States {
         offset: u64,
         area: vk::Rect2D,
     ) {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            self.draw_slice(
+                ctx,
+                bindless,
+                geometry,
+                pipelines,
+                push,
+                shadow,
+                mask,
+                buffer,
+                offset,
+                area,
+                (0, 1),
+            );
+        }
+    }
+
+    /// [`Self::draw`] for one slice of the commands: with `(k, n)`, every `n`-th command of
+    /// each state from its `k`-th (texture feedback spreads its draws over `n` frames).
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::draw`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn draw_slice(
+        &self,
+        ctx: &crate::graph::PassContext<'_>,
+        bindless: &Bindless,
+        geometry: &GeometryFrame<'_>,
+        pipelines: [&Pipeline; 2],
+        push: &Push,
+        shadow: bool,
+        mask: u32,
+        buffer: vk::Buffer,
+        offset: u64,
+        area: vk::Rect2D,
+        (slice, slices): (u32, u32),
+    ) {
+        let slices = slices.max(1);
         let mut bound = None;
         for state in 0..STATES {
-            let count = self.counts[state];
+            let count = self.counts[state].saturating_sub(slice).div_ceil(slices);
             if count == 0 || mask & (1 << state) == 0 {
                 continue;
             }
@@ -5500,9 +5564,9 @@ impl States {
                 ctx.device.cmd_draw_indexed_indirect(
                     ctx.cmd,
                     buffer,
-                    offset + u64::from(self.starts[state]) * COMMAND_BYTES,
+                    offset + u64::from(self.starts[state] + slice) * COMMAND_BYTES,
                     count,
-                    COMMAND_BYTES as u32,
+                    COMMAND_BYTES as u32 * slices,
                 );
             }
         }

@@ -21,6 +21,16 @@
 //!
 //! `begin_frame` also imports the three buffers into the frame's graph
 //! ([`GeometryFrame`]), so the passes that draw from them are ordered after the copies.
+//!
+//! **Streamed meshes** (ADR 0076): [`GeometryPool::add_streamed_mesh`] adds a mesh with
+//! only its coarsest detail level; its vertices are ordered so every level uses a prefix
+//! of them (`engine_assets::order_for_streaming`). [`GeometryPool::upload_mesh_level`]
+//! adds the next finer level: a vertex range of the larger prefix, the old prefix copied
+//! into it on the GPU, the new vertices and the level's indices uploaded;
+//! [`GeometryPool::evict_mesh_levels`] drops the finest levels the same way. Levels not
+//! resident draw the finest resident one: their entries in [`MeshInfo::lods`] repeat its
+//! indices, so the culling pass, which picks a level per instance by screen size, needs
+//! no change.
 
 use crate::graph::{
     Access, Buffer, BufferState, FrameGraph, ImportedBuffer, PassContext, ShaderStages,
@@ -30,7 +40,7 @@ use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Device, MemoryLocation, Range, RangeAllocator, RhiError};
 
 /// Vertex attributes besides the position, as the shaders read them (16 bytes).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct VertexAttributes {
     /// Unit normal, [`encode_octahedral`].
@@ -154,6 +164,24 @@ pub fn encode_tangent(t: [f32; 4]) -> u32 {
     bits | (u32::from(t[3] < 0.0) << 16)
 }
 
+/// Appends the encoded attributes of `data`'s vertices (normals, tangents or tangents
+/// made up from the normals, texture coordinates) as the pool stores them.
+pub fn encode_attributes(data: &MeshData<'_>, out: &mut Vec<VertexAttributes>) {
+    out.extend((0..data.positions.len()).map(|v| {
+        let normal = data.normals.get(v).copied().unwrap_or([0.0, 0.0, 1.0]);
+        let tangent = data
+            .tangents
+            .get(v)
+            .copied()
+            .unwrap_or_else(|| any_tangent(Vec3::from(normal)).extend(1.0).to_array());
+        VertexAttributes {
+            normal: encode_octahedral(normal),
+            tangent: encode_tangent(tangent),
+            uv: data.uvs.get(v).copied().unwrap_or([0.0; 2]),
+        }
+    }));
+}
+
 /// The tangent and bitangent sign of [`encode_tangent`].
 pub fn decode_tangent(bits: u32) -> ([f32; 3], f32) {
     let sign = if bits & (1 << 16) != 0 { -1.0 } else { 1.0 };
@@ -273,6 +301,12 @@ pub enum MeshError {
     PoolFull,
     /// More detail levels than [`MAX_LODS`] (the full mesh included).
     TooManyLods,
+    /// A streamed mesh's level that does not follow its resident ones, or a mesh that is
+    /// not streamed.
+    BadLevel,
+    /// The mesh's last change has not reached the GPU yet ([`GeometryPool::begin_frame`]):
+    /// try again next frame.
+    Busy,
 }
 
 impl core::fmt::Display for MeshError {
@@ -286,6 +320,8 @@ impl core::fmt::Display for MeshError {
                 vertex_count,
             } => write!(f, "index {index} beyond {vertex_count} vertices"),
             Self::PoolFull => write!(f, "geometry pool is full"),
+            Self::BadLevel => write!(f, "detail level does not follow the resident ones"),
+            Self::Busy => write!(f, "the mesh's last change is not on the GPU yet"),
         }
     }
 }
@@ -324,6 +360,22 @@ pub struct LodIndices<'a> {
 pub struct MeshId {
     index: u32,
     generation: u32,
+}
+
+impl MeshId {
+    /// Its slot in the pool: stable while the mesh lives, reused after it is removed.
+    pub fn slot(self) -> u32 {
+        self.index
+    }
+
+    /// An id from a slot and generation, for tests of code that keys off ids.
+    #[doc(hidden)]
+    pub fn from_parts(slot: u32, generation: u32) -> Self {
+        Self {
+            index: slot,
+            generation,
+        }
+    }
 }
 
 /// Where a mesh lives in the pool, and its bounds.
@@ -454,10 +506,50 @@ impl PoolBuffer {
     }
 }
 
+/// A detail level of a streamed mesh ([`GeometryPool::add_streamed_mesh`]).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct StreamedLevel {
+    /// Its indices.
+    pub index_count: u32,
+    /// Its error in object-space units (0 for the full mesh).
+    pub error: f32,
+    /// The vertices it uses: a prefix of the mesh's.
+    pub vertices: u32,
+}
+
+/// A streamed mesh's levels and their index ranges.
+#[derive(Debug)]
+struct Streamed {
+    levels: [StreamedLevel; MAX_LODS],
+    ranges: [Option<Range>; MAX_LODS],
+    count: u32,
+    /// The finest resident level.
+    resident: u32,
+}
+
+#[derive(Debug)]
+struct SlotMesh {
+    info: MeshInfo,
+    vertices: Range,
+    /// The indices of every level, or `None` for a streamed mesh (per level).
+    indices: Option<Range>,
+    streamed: Option<Box<Streamed>>,
+    /// Data waits for the next `begin_frame` (vertex moves need it on the GPU).
+    pending: bool,
+}
+
 #[derive(Debug)]
 struct Slot {
     generation: u32,
-    mesh: Option<(MeshInfo, Range, Range)>,
+    mesh: Option<SlotMesh>,
+}
+
+/// A copy of a streamed mesh's vertex prefix into its new range (`begin_frame`).
+#[derive(Debug, Clone, Copy)]
+struct Move {
+    from: Range,
+    to: u32,
+    count: u32,
 }
 
 /// A mesh's data waiting for [`GeometryPool::begin_frame`]: where it goes in the pool and
@@ -477,6 +569,9 @@ struct Upload {
 enum Retired {
     /// A removed mesh's vertex and index ranges.
     Ranges(Range, Range),
+    /// A vertex range moved away from, or an evicted level's indices.
+    Vertices(Range),
+    Indices(Range),
     /// A buffer replaced by a larger one, or a staging buffer.
     Buffer(PoolBuffer),
 }
@@ -495,6 +590,12 @@ pub struct GeometryPool {
     staged_attributes: Vec<VertexAttributes>,
     staged_indices: Vec<u32>,
     uploads: Vec<Upload>,
+    /// Streamed meshes' vertex prefixes to copy into their new ranges.
+    moves: Vec<Move>,
+    /// Slots with data waiting for `begin_frame`.
+    pending_slots: Vec<u32>,
+    /// Bytes of streamed meshes' vertices and indices in the pool.
+    streamed_bytes: u64,
     retired: Vec<(u64, Retired)>,
     frames_in_flight: u64,
 }
@@ -537,6 +638,9 @@ impl GeometryPool {
             staged_attributes: Vec::new(),
             staged_indices: Vec::new(),
             uploads: Vec::new(),
+            moves: Vec::new(),
+            pending_slots: Vec::new(),
+            streamed_bytes: 0,
             retired: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
         })
@@ -657,11 +761,341 @@ impl GeometryPool {
             }
         };
         let slot = &mut self.slots[index as usize];
-        slot.mesh = Some((info, vertices, indices));
+        slot.mesh = Some(SlotMesh {
+            info,
+            vertices,
+            indices: Some(indices),
+            streamed: None,
+            pending: true,
+        });
+        self.pending_slots.push(index);
         Ok(MeshId {
             index,
             generation: slot.generation,
         })
+    }
+
+    /// Stages vertices `data` (positions and attributes) and `indices` for upload to
+    /// `first_vertex` and `first_index`.
+    fn stage(&mut self, data: &MeshData<'_>, first_vertex: u32, first_index: u32) {
+        self.uploads.push(Upload {
+            first_vertex,
+            vertex_count: data.positions.len() as u32,
+            first_index,
+            index_count: data.indices.len() as u32,
+            staged_vertex: self.staged_positions.len() as u32,
+            staged_index: self.staged_indices.len() as u32,
+        });
+        self.staged_positions.extend_from_slice(data.positions);
+        encode_attributes(data, &mut self.staged_attributes);
+        self.staged_indices.extend_from_slice(data.indices);
+    }
+
+    /// Stages vertices already encoded (positions, [`VertexAttributes`]) and indices.
+    fn stage_encoded(
+        &mut self,
+        positions: &[[f32; 3]],
+        attributes: &[VertexAttributes],
+        indices: &[u32],
+        first_vertex: u32,
+        first_index: u32,
+    ) {
+        self.uploads.push(Upload {
+            first_vertex,
+            vertex_count: positions.len() as u32,
+            first_index,
+            index_count: indices.len() as u32,
+            staged_vertex: self.staged_positions.len() as u32,
+            staged_index: self.staged_indices.len() as u32,
+        });
+        self.staged_positions.extend_from_slice(positions);
+        self.staged_attributes.extend_from_slice(attributes);
+        self.staged_indices.extend_from_slice(indices);
+    }
+
+    /// Adds a mesh streamed by detail level (ADR 0076) with its coarsest level resident:
+    /// `coarse` holds the vertices that level uses and its indices; `levels` describes every
+    /// level from the full mesh to the coarsest (the last is `coarse`'s); `min`, `max` are
+    /// the full mesh's bounds. Finer levels follow with [`Self::upload_mesh_level`].
+    pub fn add_streamed_mesh(
+        &mut self,
+        coarse: &MeshData<'_>,
+        levels: &[StreamedLevel],
+        min: Vec3,
+        max: Vec3,
+    ) -> Result<MeshId, MeshError> {
+        if levels.is_empty() || levels.len() > MAX_LODS {
+            return Err(MeshError::TooManyLods);
+        }
+        let coarsest = levels.len() - 1;
+        let vertex_count = coarse.positions.len();
+        if vertex_count as u32 != levels[coarsest].vertices
+            || coarse.indices.len() as u32 != levels[coarsest].index_count
+            || coarse.normals.len() != vertex_count
+            || !(coarse.uvs.is_empty() || coarse.uvs.len() == vertex_count)
+            || !(coarse.tangents.is_empty() || coarse.tangents.len() == vertex_count)
+            || levels.windows(2).any(|w| w[1].vertices > w[0].vertices)
+        {
+            return Err(MeshError::MismatchedLengths);
+        }
+        if !coarse.indices.len().is_multiple_of(3) {
+            return Err(MeshError::NotTriangles);
+        }
+        if let Some(&index) = coarse.indices.iter().find(|&&i| i as usize >= vertex_count) {
+            return Err(MeshError::IndexOutOfRange {
+                index,
+                vertex_count: vertex_count as u32,
+            });
+        }
+        let vertices = reserve(&mut self.vertex_ranges, vertex_count as u64)?;
+        let indices = match reserve(&mut self.index_ranges, coarse.indices.len() as u64) {
+            Ok(range) => range,
+            Err(e) => {
+                self.vertex_ranges.free(vertices);
+                return Err(e);
+            }
+        };
+        self.stage(coarse, vertices.offset() as u32, indices.offset() as u32);
+        let mut streamed = Streamed {
+            levels: [StreamedLevel::default(); MAX_LODS],
+            ranges: [None; MAX_LODS],
+            count: levels.len() as u32,
+            resident: coarsest as u32,
+        };
+        streamed.levels[..levels.len()].copy_from_slice(levels);
+        streamed.ranges[coarsest] = Some(indices);
+        self.streamed_bytes += vertex_count as u64 * (POSITION_BYTES + ATTRIBUTE_BYTES)
+            + coarse.indices.len() as u64 * INDEX_BYTES;
+        let mut info = MeshInfo {
+            first_vertex: vertices.offset() as u32,
+            vertex_count: vertex_count as u32,
+            first_index: 0,
+            index_count: 0,
+            min,
+            max,
+            lods: [MeshLod::default(); MAX_LODS],
+            lod_count: levels.len() as u32,
+            revision: 0,
+        };
+        streamed_lods(&mut info, &streamed);
+        let index = match self.free_slots.pop() {
+            Some(index) => index,
+            None => {
+                self.slots.push(Slot {
+                    generation: 0,
+                    mesh: None,
+                });
+                (self.slots.len() - 1) as u32
+            }
+        };
+        let slot = &mut self.slots[index as usize];
+        slot.mesh = Some(SlotMesh {
+            info,
+            vertices,
+            indices: None,
+            streamed: Some(Box::new(streamed)),
+            pending: true,
+        });
+        self.pending_slots.push(index);
+        Ok(MeshId {
+            index,
+            generation: slot.generation,
+        })
+    }
+
+    /// A streamed mesh's finest resident level and its level count; `None` for stale ids
+    /// and meshes that are not streamed.
+    pub fn mesh_residency(&self, id: MeshId) -> Option<(u32, u32)> {
+        let m = self.slot_mesh(id)?;
+        let s = m.streamed.as_ref()?;
+        Some((s.resident, s.count))
+    }
+
+    /// Bytes of streamed meshes' resident vertices and indices (for the GPU budget).
+    pub fn streamed_bytes(&self) -> u64 {
+        self.streamed_bytes
+    }
+
+    fn slot_mesh(&self, id: MeshId) -> Option<&SlotMesh> {
+        let slot = self.slots.get(id.index as usize)?;
+        (slot.generation == id.generation)
+            .then_some(slot.mesh.as_ref())
+            .flatten()
+    }
+
+    /// Adds the next finer level of a streamed mesh (`level` = its finest resident − 1):
+    /// `data` holds the vertices it adds to the coarser levels' (positions and attributes)
+    /// and its indices over all of them. Reaches the GPU in the next
+    /// [`Self::begin_frame`]; draws use it from then on. [`MeshError::Busy`] while the
+    /// mesh's last change is not on the GPU yet.
+    pub fn upload_mesh_level(
+        &mut self,
+        id: MeshId,
+        level: u32,
+        data: &MeshData<'_>,
+    ) -> Result<(), MeshError> {
+        if data.normals.len() != data.positions.len() {
+            return Err(MeshError::MismatchedLengths);
+        }
+        let first_vertex = self.grow_level(id, level, data.positions.len() as u32, data.indices)?;
+        self.stage(data, first_vertex.0, first_vertex.1);
+        Ok(())
+    }
+
+    /// [`Self::upload_mesh_level`] with the vertices already encoded as the pool stores
+    /// them ([`encode_attributes`]): a copy on the frame's thread, the encoding done where
+    /// the data was read (the streaming thread, ADR 0076).
+    pub fn upload_mesh_level_encoded(
+        &mut self,
+        id: MeshId,
+        level: u32,
+        positions: &[[f32; 3]],
+        attributes: &[VertexAttributes],
+        indices: &[u32],
+    ) -> Result<(), MeshError> {
+        if attributes.len() != positions.len() {
+            return Err(MeshError::MismatchedLengths);
+        }
+        let (first_vertex, first_index) =
+            self.grow_level(id, level, positions.len() as u32, indices)?;
+        self.stage_encoded(positions, attributes, indices, first_vertex, first_index);
+        Ok(())
+    }
+
+    /// Makes room for level `level` of a streamed mesh adding `added` vertices and
+    /// `indices`: a new vertex range (the old prefix moved into it in `begin_frame`) and
+    /// an index range. Returns where the new vertices and the indices go.
+    fn grow_level(
+        &mut self,
+        id: MeshId,
+        level: u32,
+        added: u32,
+        indices: &[u32],
+    ) -> Result<(u32, u32), MeshError> {
+        let Some(slot) = self.slots.get_mut(id.index as usize) else {
+            return Err(MeshError::BadLevel);
+        };
+        let Some(m) = slot
+            .mesh
+            .as_mut()
+            .filter(|_| slot.generation == id.generation)
+        else {
+            return Err(MeshError::BadLevel);
+        };
+        let Some(s) = m.streamed.as_mut() else {
+            return Err(MeshError::BadLevel);
+        };
+        if m.pending {
+            return Err(MeshError::Busy);
+        }
+        if level + 1 != s.resident {
+            return Err(MeshError::BadLevel);
+        }
+        let old = s.levels[s.resident as usize].vertices;
+        let new = s.levels[level as usize].vertices;
+        if old + added != new || indices.len() as u32 != s.levels[level as usize].index_count {
+            return Err(MeshError::MismatchedLengths);
+        }
+        if let Some(&index) = indices.iter().find(|&&i| i >= new) {
+            return Err(MeshError::IndexOutOfRange {
+                index,
+                vertex_count: new,
+            });
+        }
+        let vertices = reserve(&mut self.vertex_ranges, u64::from(new))?;
+        let index_range = match reserve(&mut self.index_ranges, indices.len() as u64) {
+            Ok(range) => range,
+            Err(e) => {
+                self.vertex_ranges.free(vertices);
+                return Err(e);
+            }
+        };
+        let Some(m) = self.slots[id.index as usize].mesh.as_mut() else {
+            unreachable!("looked up above");
+        };
+        let Some(s) = m.streamed.as_mut() else {
+            unreachable!("looked up above");
+        };
+        self.moves.push(Move {
+            from: m.vertices,
+            to: vertices.offset() as u32,
+            count: old,
+        });
+        m.vertices = vertices;
+        s.ranges[level as usize] = Some(index_range);
+        s.resident = level;
+        m.info.first_vertex = vertices.offset() as u32;
+        m.info.vertex_count = new;
+        streamed_lods(&mut m.info, s);
+        m.info.revision = m.info.revision.wrapping_add(1);
+        m.pending = true;
+        self.streamed_bytes += u64::from(added) * (POSITION_BYTES + ATTRIBUTE_BYTES)
+            + indices.len() as u64 * INDEX_BYTES;
+        self.pending_slots.push(id.index);
+        Ok((vertices.offset() as u32 + old, index_range.offset() as u32))
+    }
+
+    /// Drops the levels of a streamed mesh finer than `first`: their indices, and the
+    /// vertices only they use (the rest are copied into a smaller range in the next
+    /// [`Self::begin_frame`]); their memory is reused once the frames up to
+    /// `frame_number` have finished. Draws use level `first` instead from then on.
+    pub fn evict_mesh_levels(
+        &mut self,
+        id: MeshId,
+        first: u32,
+        frame_number: u64,
+    ) -> Result<(), MeshError> {
+        let Some(slot) = self.slots.get_mut(id.index as usize) else {
+            return Err(MeshError::BadLevel);
+        };
+        let Some(m) = slot
+            .mesh
+            .as_mut()
+            .filter(|_| slot.generation == id.generation)
+        else {
+            return Err(MeshError::BadLevel);
+        };
+        let Some(s) = m.streamed.as_mut() else {
+            return Err(MeshError::BadLevel);
+        };
+        if m.pending {
+            return Err(MeshError::Busy);
+        }
+        if first <= s.resident || first >= s.count {
+            return Err(MeshError::BadLevel);
+        }
+        let kept = s.levels[first as usize].vertices;
+        let Some(vertices) = self.vertex_ranges.allocate(u64::from(kept), 1) else {
+            return Err(MeshError::PoolFull);
+        };
+        let Some(m) = self.slots[id.index as usize].mesh.as_mut() else {
+            unreachable!("looked up above");
+        };
+        let Some(s) = m.streamed.as_mut() else {
+            unreachable!("looked up above");
+        };
+        for k in s.resident..first {
+            if let Some(range) = s.ranges[k as usize].take() {
+                self.streamed_bytes -= range.size() * INDEX_BYTES;
+                self.retired.push((frame_number, Retired::Indices(range)));
+            }
+        }
+        let dropped = m.info.vertex_count - kept;
+        self.streamed_bytes -= u64::from(dropped) * (POSITION_BYTES + ATTRIBUTE_BYTES);
+        self.moves.push(Move {
+            from: m.vertices,
+            to: vertices.offset() as u32,
+            count: kept,
+        });
+        m.vertices = vertices;
+        s.resident = first;
+        m.info.first_vertex = vertices.offset() as u32;
+        m.info.vertex_count = kept;
+        streamed_lods(&mut m.info, s);
+        m.info.revision = m.info.revision.wrapping_add(1);
+        m.pending = true;
+        self.pending_slots.push(id.index);
+        Ok(())
     }
 
     /// Removes a mesh. Draws of it in later frames draw nothing; its ranges are reused once
@@ -673,9 +1107,27 @@ impl GeometryPool {
         if slot.generation != id.generation {
             return;
         }
-        if let Some((_, vertices, indices)) = slot.mesh.take() {
-            self.retired
-                .push((frame_number, Retired::Ranges(vertices, indices)));
+        if let Some(m) = slot.mesh.take() {
+            match (m.indices, m.streamed) {
+                (Some(indices), _) => {
+                    self.retired
+                        .push((frame_number, Retired::Ranges(m.vertices, indices)));
+                }
+                (None, Some(s)) => {
+                    self.streamed_bytes -=
+                        u64::from(m.info.vertex_count) * (POSITION_BYTES + ATTRIBUTE_BYTES);
+                    self.retired
+                        .push((frame_number, Retired::Vertices(m.vertices)));
+                    for range in s.ranges.into_iter().flatten() {
+                        self.streamed_bytes -= range.size() * INDEX_BYTES;
+                        self.retired.push((frame_number, Retired::Indices(range)));
+                    }
+                }
+                (None, None) => {
+                    self.retired
+                        .push((frame_number, Retired::Vertices(m.vertices)));
+                }
+            }
         }
         slot.generation = slot.generation.wrapping_add(1);
         self.free_slots.push(id.index);
@@ -687,7 +1139,7 @@ impl GeometryPool {
         if slot.generation != id.generation {
             return None;
         }
-        slot.mesh.as_ref().map(|(info, _, _)| info)
+        slot.mesh.as_ref().map(|m| &m.info)
     }
 
     /// Replaces a mesh's object-space box (stale ids are ignored): for meshes whose
@@ -696,10 +1148,10 @@ impl GeometryPool {
     pub fn set_bounds(&mut self, id: MeshId, min: Vec3, max: Vec3) {
         if let Some(slot) = self.slots.get_mut(id.index as usize)
             && slot.generation == id.generation
-            && let Some((info, _, _)) = slot.mesh.as_mut()
+            && let Some(m) = slot.mesh.as_mut()
         {
-            info.min = min;
-            info.max = max;
+            m.info.min = min;
+            m.info.max = max;
         }
     }
 
@@ -709,9 +1161,9 @@ impl GeometryPool {
     pub fn mark_deformed(&mut self, id: MeshId) {
         if let Some(slot) = self.slots.get_mut(id.index as usize)
             && slot.generation == id.generation
-            && let Some((info, _, _)) = slot.mesh.as_mut()
+            && let Some(m) = slot.mesh.as_mut()
         {
-            info.revision = info.revision.wrapping_add(1);
+            m.info.revision = m.info.revision.wrapping_add(1);
         }
     }
 
@@ -811,8 +1263,20 @@ impl GeometryPool {
             self.retired.push((frame_number, Retired::Buffer(old)));
         }
 
+        if !self.moves.is_empty() {
+            self.record_moves(fg, frame_number, [positions, attributes]);
+        }
         if !self.uploads.is_empty() {
             self.record_uploads(fg, allocator, frame_number, targets)?;
+        }
+        for index in self.pending_slots.drain(..) {
+            if let Some(m) = self
+                .slots
+                .get_mut(index as usize)
+                .and_then(|s| s.mesh.as_mut())
+            {
+                m.pending = false;
+            }
         }
         Ok(GeometryFrame {
             pool: self,
@@ -820,6 +1284,63 @@ impl GeometryPool {
             attributes,
             indices,
         })
+    }
+
+    /// Copies streamed meshes' vertex prefixes into their new ranges (the same buffers;
+    /// ranges never overlap) and retires the old ranges with the frame.
+    fn record_moves(
+        &mut self,
+        fg: &mut FrameGraph<'_>,
+        frame_number: u64,
+        [positions, attributes]: [Buffer; 2],
+    ) {
+        let moves = core::mem::take(&mut self.moves);
+        for m in &moves {
+            self.retired.push((frame_number, Retired::Vertices(m.from)));
+        }
+        fg.add_pass("geometry move")
+            .write(positions, Access::TransferWrite)
+            .write(attributes, Access::TransferWrite)
+            .execute(move |ctx| {
+                let region = |m: &Move, bytes: u64| vk::BufferCopy {
+                    src_offset: m.from.offset() * bytes,
+                    dst_offset: u64::from(m.to) * bytes,
+                    size: u64::from(m.count) * bytes,
+                };
+                let position_regions: Vec<_> = moves
+                    .iter()
+                    .filter(|m| m.count > 0)
+                    .map(|m| region(m, POSITION_BYTES))
+                    .collect();
+                let attribute_regions: Vec<_> = moves
+                    .iter()
+                    .filter(|m| m.count > 0)
+                    .map(|m| region(m, ATTRIBUTE_BYTES))
+                    .collect();
+                if position_regions.is_empty() {
+                    return;
+                }
+                let (p, a) = (ctx.buffer(positions), ctx.buffer(attributes));
+                // The copies read what earlier frames' uploads wrote (available since): make
+                // it visible to this pass's reads, which the graph's barrier (for its
+                // writes) does not.
+                let barrier = vk::MemoryBarrier2::default()
+                    .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                    .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+                    .dst_stage_mask(vk::PipelineStageFlags2::COPY)
+                    .dst_access_mask(vk::AccessFlags2::TRANSFER_READ);
+                // SAFETY: recording outside a rendering scope; source and destination
+                // ranges come from the range allocator, inside the buffers and disjoint.
+                unsafe {
+                    ctx.device.cmd_pipeline_barrier2(
+                        ctx.cmd,
+                        &vk::DependencyInfo::default().memory_barriers(&[barrier]),
+                    );
+                    ctx.device.cmd_copy_buffer(ctx.cmd, p, p, &position_regions);
+                    ctx.device
+                        .cmd_copy_buffer(ctx.cmd, a, a, &attribute_regions);
+                }
+            });
     }
 
     /// Copies the staged meshes into the pool through a staging buffer freed with the
@@ -957,6 +1478,8 @@ impl GeometryPool {
                     self.vertex_ranges.free(vertices);
                     self.index_ranges.free(indices);
                 }
+                Retired::Vertices(vertices) => self.vertex_ranges.free(vertices),
+                Retired::Indices(indices) => self.index_ranges.free(indices),
                 // SAFETY: the frames that used it have finished.
                 Retired::Buffer(mut buffer) => unsafe { buffer.destroy(allocator) },
             }
@@ -981,6 +1504,25 @@ impl GeometryPool {
             }
         }
     }
+}
+
+/// A streamed mesh's levels for drawing: resident ones their own indices, finer ones the
+/// finest resident level's (with their own errors, so the culling pass picks the same
+/// level it would and draws what is there).
+fn streamed_lods(info: &mut MeshInfo, s: &Streamed) {
+    let resident = s.resident as usize;
+    let own =
+        |k: usize| s.ranges[k].map_or((0, 0), |r| (r.offset() as u32, s.levels[k].index_count));
+    for k in 0..s.count as usize {
+        let (first_index, index_count) = own(k.max(resident));
+        info.lods[k] = MeshLod {
+            first_index,
+            index_count,
+            error: s.levels[k].error,
+        };
+    }
+    info.first_index = info.lods[0].first_index;
+    info.index_count = info.lods[0].index_count;
 }
 
 /// A range of `size` units, growing the allocator when it is full: to twice its capacity,

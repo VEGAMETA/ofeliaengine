@@ -45,6 +45,7 @@ engine_upscale = { path = "crates/engine_upscale" }
 engine_ui = { path = "crates/engine_ui" }
 engine_rhi = { path = "crates/engine_rhi" }
 engine_shader = { path = "crates/engine_shader" }
+engine_streaming = { path = "crates/engine_streaming" }
 
 [workspace.lints.rust]
 # CLAUDE.md §15: every unsafe operation inside an unsafe fn needs its own unsafe block.

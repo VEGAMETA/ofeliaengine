@@ -47,8 +47,8 @@ pub use fault::{AddressFault, DeviceFault, GpuFaultReport, VendorFault, last_gpu
 pub use frames::{Frame, Frames};
 pub use instance::{Instance, InstanceDesc, ValidationReport};
 pub use memory::{
-    Allocation, AllocationRequest, Allocator, AllocatorConfig, DedicatedTo, HeapStats,
-    MemoryLocation, Range, RangeAllocator, ResourceKind,
+    Allocation, AllocationRequest, Allocator, AllocatorConfig, DedicatedTo, HeapBudget, HeapStats,
+    MemoryBudget, MemoryLocation, Range, RangeAllocator, ResourceKind,
 };
 pub use pipeline::{
     Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineCreationStats, PipelineDesc,

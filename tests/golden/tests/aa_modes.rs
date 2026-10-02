@@ -158,6 +158,23 @@ fn every_mode_renders_with_every_feature() {
     }
 }
 
+/// Texture streaming with feedback (ADR 0076) under MSAA: the feedback pass redraws the
+/// view's culled lists into its own single-sampled target, whatever the view's samples.
+#[test]
+fn texture_feedback_with_msaa() {
+    let shot = Shot {
+        texture_budget: Some(64 << 20),
+        antialiasing: Antialiasing::msaa(Msaa::X4).with_post(PostAntialiasing::SMAA),
+        ..Shot::new(
+            "sponza streamed msaa",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    };
+    if let Some(r) = run(&shot, true) {
+        assert!(luma_spread(&r) > 100);
+    }
+}
+
 /// Skinned meshes' motion pass into multisampled targets (with TAA, which reads it).
 #[test]
 fn skinned_motion_with_msaa() {

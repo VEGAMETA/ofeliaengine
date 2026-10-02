@@ -80,6 +80,7 @@ everything to sample 0 or the average (halos), or sample-rate shading of everyth
 | Reflections (probes, SSR) | inputs of the nearest and of the farthest sample; the composite adds the front surface's reflection to its own samples only (`SV_Coverage` output, a tolerance from the surface's own depth slope) and, with probes, a second draw on the samples behind (`compositeProbesFarMs`, stops inside surfaces); SSR traces the averaged lit image | one reflection for the whole pixel spilled over silhouettes |
 | Atmosphere, fog | per sample (sample-rate shading of the full-screen pass, each sample's own depth) | per pixel put the far side's fog over the near side |
 | Transparency | multisampled depth test; the reactive mask averaged | – |
+| Texture feedback (ADR 0076) | unchanged: it redraws the view's culled lists into its own single-sampled target at a fraction of the size, so the view's sample count does not matter (texture levels follow per-pixel derivatives, which MSAA does not change); `aa_modes.rs` renders a streamed Sponza with MSAA 4× + SMAA under validation | – |
 | Skinned motion | `Skinning::set_motion_samples`: its pass into the multisampled targets | its depth test must see the samples |
 | The hook (`add_view_with`) | gets the resolved color, depth and motion | effects of the game's own see one value per pixel |
 
@@ -303,6 +304,10 @@ FXAA, MSAA 4× + SMAA, SMAA 4x, MSAA 2× + TAAU (`engine_frame/tests/zero_alloc.
   integer scaling, FSR 1 from 67 % on both GPUs; `tests/golden/tests/aa_modes.rs` runs
   every combination under the validation layer with every feature on, and the halo
   test; the perf gate measures MSAA 4×, FXAA, SMAA 1x, SMAA T2x and FSR 1.
+- Known issue: in one `aa_bench` run, creating DLSS a second time in the same process
+  failed (`slSetVulkanInfo` returned `eErrorExceptionHandler`) and the process then hung;
+  the same mode alone in a fresh process worked. Not reproduced since; not known to the
+  team. A game creating DLSS once per process is unaffected.
 - Follow-ups: dynamic resolution with MSAA (each size makes new multisampled
   transients), a bilateral AO read for MSAA if a game shows a halo, FSR 1 after tone
   mapping as an option, `aa_bench` in the perf history when modes change.

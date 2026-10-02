@@ -128,6 +128,17 @@ fn shots() -> Vec<Shot> {
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },
+        // Textures streamed by texture feedback within an ample budget (ADR 0076): the
+        // same frame as `sponza` plus the feedback pass (a quarter of the commands each
+        // frame) and the streamer's steady state.
+        Shot {
+            size: [1920, 1080],
+            texture_budget: Some(4 << 30),
+            ..Shot::new(
+                "sponza_streamed",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
     ]
 }
 

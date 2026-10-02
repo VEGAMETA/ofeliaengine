@@ -360,6 +360,7 @@ dependencies = [
  "engine_render",
  "engine_rhi",
  "engine_runtime",
+ "engine_streaming",
  "png",
 ]
 
@@ -559,6 +560,19 @@ dependencies = [
  "engine_platform",
  "engine_profiler",
  "libloading",
+]
+
+[[package]]
+name = "engine_streaming"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "engine_assets",
+ "engine_core",
+ "engine_platform",
+ "engine_profiler",
+ "engine_render",
+ "engine_rhi",
 ]
 
 [[package]]

@@ -271,6 +271,29 @@ fn sponza() {
     ));
 }
 
+/// Sponza's atrium with its textures streamed by texture feedback in a pool of 4 GiB
+/// (ADR 0076): every level the view samples is resident, so the picture is `sponza`'s.
+#[test]
+fn sponza_streamed_with_an_ample_budget_is_sponza() {
+    check(&Shot {
+        texture_budget: Some(4 << 30),
+        ..Shot::new("sponza", Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
+    });
+}
+
+/// Sponza's atrium with its textures streamed in a pool of 3 MiB (ADR 0076): the tails
+/// (2 MiB) and as much more as fits, every texture its finest levels dropped evenly.
+#[test]
+fn sponza_streamed_in_a_tight_budget() {
+    check(&Shot {
+        texture_budget: Some(3 << 20),
+        ..Shot::new(
+            "sponza_streamed_tight",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
 /// The flight helmet: close-up materials (leather, glass, metal, rubber), normal maps.
 #[test]
 fn flight_helmet() {

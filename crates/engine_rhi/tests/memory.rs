@@ -241,3 +241,83 @@ fn blocks_are_shared_released_and_large_resources_get_their_own_memory() {
     drop(allocator);
     assert_no_validation_errors(&instance);
 }
+
+/// The allocator's own count of device-local bytes follows the OS's usage
+/// (`VK_EXT_memory_budget`): what streaming budgets are computed from (ADR 0076).
+#[test]
+fn budget_accounting_follows_the_os_usage() {
+    let Some((instance, device)) = gpu(false) else {
+        return;
+    };
+    let mut allocator = Allocator::new(&device);
+    let before = allocator.budget();
+    if !before.from_os {
+        println!("no VK_EXT_memory_budget: nothing to compare");
+        return;
+    }
+    let local = before.device_local();
+    println!(
+        "device-local: size {} MiB, budget {} MiB, usage {} MiB, ours {} MiB",
+        local.size >> 20,
+        local.budget >> 20,
+        local.usage >> 20,
+        local.allocated >> 20
+    );
+    assert!(local.budget > 0 && local.budget <= local.size);
+    // 48 textures of 2048² RGBA8 (16 MiB each, 768 MiB): blocks and dedicated memory.
+    let mut images = Vec::new();
+    for _ in 0..48 {
+        images.push(
+            allocator
+                .create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(vk::Format::R8G8B8A8_UNORM)
+                        .extent(vk::Extent3D {
+                            width: 2048,
+                            height: 2048,
+                            depth: 1,
+                        })
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(vk::ImageUsageFlags::SAMPLED)
+                        .initial_layout(vk::ImageLayout::UNDEFINED),
+                    MemoryLocation::Device,
+                )
+                .unwrap(),
+        );
+    }
+    let after = allocator.budget().device_local();
+    let ours = after.allocated - local.allocated;
+    let os = after.usage.saturating_sub(local.usage);
+    println!(
+        "after 768 MiB of images: ours +{} MiB, OS usage +{} MiB, budget {} MiB",
+        ours >> 20,
+        os >> 20,
+        after.budget >> 20
+    );
+    assert!(ours >= 768 << 20, "{ours}");
+    // Within 5% (plus 16 MiB for the driver's own): what the allocator holds is what the
+    // OS counts.
+    let tolerance = ours / 20 + (16 << 20);
+    assert!(
+        os.abs_diff(ours) <= tolerance,
+        "OS usage +{os} against ours +{ours}"
+    );
+    for (image, memory) in images {
+        // SAFETY: never used by the GPU; each pair comes from one create call.
+        unsafe { allocator.destroy_image(image, memory) };
+    }
+    let freed = allocator.budget().device_local();
+    // Freed memory leaves the usage (the allocator may keep one empty block).
+    assert!(
+        freed.usage <= local.usage + (256 << 20),
+        "{} after {}",
+        freed.usage,
+        local.usage
+    );
+    drop(allocator);
+    assert_no_validation_errors(&instance);
+}

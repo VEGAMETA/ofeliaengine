@@ -143,9 +143,64 @@ Sponza (104.5 MB once loaded, 71.5 MB in its pack), on the reference machine:
 - Keep 8–32 reads in flight for small reads: on NVMe that is 9× faster than one at a
   time.
 
+## Streaming within a memory budget (ADR 0076)
+
+The section above streams every level of every texture. A game keeps only what the
+camera needs, within the GPU memory the OS gives it: `engine_streaming::SceneStreamer`
+does that for a cooked scene, textures and mesh detail levels alike.
+
+```rust
+use engine_render::budget::GpuBudget;
+use engine_render::feedback::{FeedbackSettings, TextureFeedback};
+use engine_render::streaming::LodView;
+use engine_streaming::{SceneStreamSettings, SceneStreamer, material_desc};
+
+// Once: the budget (the OS's, a share of it for the game), the scene, the feedback pass.
+let mut budget = GpuBudget::new(&device);
+let mut scene = SceneStreamer::open("packs/level1.pack".as_ref(), &jobs, &mut textures,
+    &mut geometry, &mut allocator, &mut budget, SceneStreamSettings::default())?;
+let mut feedback = TextureFeedback::new(&device, &bindless, FeedbackSettings::default(), frames_in_flight)?;
+// Materials and draws from scene.layout().scene, with scene.textures() and scene.meshes().
+
+// Every frame, before the pools' begin_frame:
+let view = LodView::new(&camera.clip_from_world, camera.position, height, 1.0);
+scene.update(&mut textures, &mut geometry, &mut allocator, &mut budget,
+    Some(&mut feedback), Some(&view), &materials, frame_number);
+budget.update(&allocator);
+// In the frame's graph, after the view's forward passes (the frame renderer's hook gets
+// them in `SceneTargets::passes`):
+feedback.add_pass(&mut fg, &device, &mut allocator, &bindless, &geo, &mats, &passes,
+    render_size, materials.texture_lod_bias(), frame_number)?;
+```
+
+- **Every texture shows at once** (its levels up to 128 texels, never evicted), and every
+  mesh with its coarsest detail level. Finer texture levels follow what the GPU actually
+  samples: a small pass (1/8 of the view per side) draws the visible instances again and
+  reports, per material, the finest level sampled; the textures of the materials on
+  screen get their levels, nearest-to-full-detail first. Finer mesh levels follow the
+  level the culling pass will draw each instance at.
+- **The budget.** By default 90 % of the device-local memory the OS grants the process on
+  a discrete GPU, half on an integrated one (its "video memory" is system memory the game
+  needs too); render targets and everything else the process holds come off it, the rest
+  is the streaming pool. Set a share, a cap or a fixed pool with
+  `budget.set_settings(BudgetSettings { .. })` (a low-memory setting, a test).
+- **When it does not fit**, every visible texture drops its finest level together, then
+  the textures covering most of the screen get theirs back while room remains; textures
+  not seen for a second stay cached until room is needed. The picture gets evenly
+  blurrier instead of missing textures, and recovers when memory frees up.
+- **No hitches by design:** reads and decompression run on the streaming thread (mesh
+  levels are decoded there too); the GPU copies at most the texture pool's frame budget
+  (`TexturePool::set_frame_budget`) per frame.
+- **Packs:** cook again (`ofeliaengine cook`) to get meshes stored by detail level (pack
+  version 3). Older packs still load; their meshes are whole and not streamed.
+- **Overlay numbers:** `scene.stats()` (levels arrived, latency, failures), `budget.stats()`
+  and `budget.client(id)` (the pool, each streamer's resident bytes, demand and grant).
+
+On Sponza (a flight through the nave at 60 fps, 1080p), see ADR 0076 for the numbers on
+both reference GPUs: textures settle at 84 of their 91 MiB (what the views sample), the
+feedback pass costs about 10 µs a frame on the RTX 4060 Ti and 50 µs on the Radeon iGPU.
+
 ## Not yet
 
-- Loading only the levels the camera needs, and a memory budget that evicts the rest:
-  today every level streams in.
-- Streaming detail levels of meshes.
 - Hot reload of packs: cook on save, swap while running.
+- Memory priorities for the OS (`VK_EXT_pageable_device_local_memory`), sparse textures.
