@@ -17,6 +17,7 @@ use engine_golden::scene::{
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::forward::{DirectionalLight, LocalLight, Spot};
+use engine_render::reflections::SsrSettings;
 use std::path::PathBuf;
 
 fn require_golden() -> bool {
@@ -494,4 +495,30 @@ fn the_runtime_renders_what_the_test_bed_renders() {
         );
         assert_eq!(differing, 0, "the runtime path drew another picture");
     }
+}
+
+/// The procedural scene on a polished metal floor with reflection probes and screen-space
+/// reflections (ADR 0073): the spheres, cubes and wall mirrored in the floor where the
+/// screen sees them, the probe's capture elsewhere.
+#[test]
+fn procedural_scene_with_reflections() {
+    check(&Shot {
+        glossy_floor: true,
+        probe_grid: Some([1, 1, 1]),
+        ssr: Some(SsrSettings::default()),
+        ..procedural("procedural_reflections")
+    });
+}
+
+/// Sponza with reflection probes (ADR 0073): the atrium cut into boxes, each captured from
+/// its centre; inside, the stone and the floor reflect the arches instead of the sky.
+#[test]
+fn sponza_with_reflection_probes() {
+    check(&Shot {
+        probe_grid: Some([3, 1, 2]),
+        ..Shot::new(
+            "sponza_probes",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
 }

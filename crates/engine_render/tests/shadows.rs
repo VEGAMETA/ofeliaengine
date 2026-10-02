@@ -327,6 +327,7 @@ fn cascaded_shadows_match_analytic_shadows() {
                         temporal: None,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

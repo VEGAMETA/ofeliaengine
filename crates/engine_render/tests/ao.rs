@@ -267,6 +267,7 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
                             temporal: temporal_state.then_some(&temporal),
                             lights: &[],
                             environment: None,
+                            reflections: Default::default(),
                         },
                     )
                     .unwrap();

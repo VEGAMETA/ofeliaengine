@@ -257,6 +257,7 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
                 temporal: Some(&temporal),
                 lights: &lights,
                 environment: None,
+                reflections: Default::default(),
             };
             let passes = if use_scene {
                 renderer.add_scene_passes(

@@ -273,6 +273,7 @@ fn image_based_lighting_matches_the_cpu() {
                         temporal: None,
                         lights: &[],
                         environment: Some(&environment),
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();
