@@ -52,6 +52,19 @@ sponza_atmosphere	forward	12260.6
 sponza_atmosphere	shadow	2286.2
 sponza_atmosphere	shadow cull	65.1
 sponza_atmosphere	tonemap	754.6
+sponza_fsr1_67	(frame total)	2e+04
+sponza_fsr1_67	(gpu frame)	2e+04
+sponza_fsr1_67	bloom downsample	6e+02
+sponza_fsr1_67	bloom upsample	5e+02
+sponza_fsr1_67	cull	3e+00
+sponza_fsr1_67	cull setup	0.8
+sponza_fsr1_67	easu	4e+03
+sponza_fsr1_67	forward	6e+03
+sponza_fsr1_67	rcas	8e+02
+sponza_fsr1_67	shadow	2e+03
+sponza_fsr1_67	shadow cull	4e+00
+sponza_fsr1_67	sky	1e+01
+sponza_fsr1_67	tonemap	8e+02
 sponza_fsr_quality	(frame total)	25373.2
 sponza_fsr_quality	(gpu frame)	25744.6
 sponza_fsr_quality	bloom downsample	687.3
@@ -67,6 +80,18 @@ sponza_fsr_quality	shadow	2706.6
 sponza_fsr_quality	shadow cull	14.4
 sponza_fsr_quality	sky	27.6
 sponza_fsr_quality	tonemap	765.7
+sponza_fxaa	(frame total)	2e+04
+sponza_fxaa	(gpu frame)	2e+04
+sponza_fxaa	bloom downsample	6e+02
+sponza_fxaa	bloom upsample	5e+02
+sponza_fxaa	cull	3e+00
+sponza_fxaa	cull setup	0.8
+sponza_fxaa	forward	1e+04
+sponza_fxaa	fxaa	2e+03
+sponza_fxaa	shadow	2e+03
+sponza_fxaa	shadow cull	4e+00
+sponza_fxaa	sky	3e+01
+sponza_fxaa	tonemap	8e+02
 sponza_local_shadows	(frame total)	37496.3
 sponza_local_shadows	(gpu frame)	37534.8
 sponza_local_shadows	bloom downsample	642.4
@@ -80,6 +105,68 @@ sponza_local_shadows	shadow	2299.3
 sponza_local_shadows	shadow cull	5.0
 sponza_local_shadows	sky	34.3
 sponza_local_shadows	tonemap	758.2
+sponza_msaa4	(frame total)	2e+04
+sponza_msaa4	(gpu frame)	2e+04
+sponza_msaa4	bloom downsample	7e+02
+sponza_msaa4	bloom upsample	5e+02
+sponza_msaa4	cull	3e+00
+sponza_msaa4	cull setup	0.8
+sponza_msaa4	depth prepass	3e+03
+sponza_msaa4	forward	1e+04
+sponza_msaa4	msaa resolve	8e+02
+sponza_msaa4	shadow	2e+03
+sponza_msaa4	shadow cull	4e+00
+sponza_msaa4	sky	3e+01
+sponza_msaa4	tonemap	8e+02
+sponza_reflections	(frame total)	25128.3
+sponza_reflections	(gpu frame)	25048.7
+sponza_reflections	bloom downsample	659.5
+sponza_reflections	bloom upsample	477.5
+sponza_reflections	cull	4.1
+sponza_reflections	cull setup	1.3
+sponza_reflections	depth prepass	906.0
+sponza_reflections	forward	8861.8
+sponza_reflections	reflections	5001.0
+sponza_reflections	shadow	2302.6
+sponza_reflections	shadow cull	4.9
+sponza_reflections	sky	46.3
+sponza_reflections	ssr depth	369.7
+sponza_reflections	ssr spatial	1500.2
+sponza_reflections	ssr temporal	1673.3
+sponza_reflections	ssr trace	2549.1
+sponza_reflections	tonemap	756.6
+sponza_smaa	(frame total)	2e+04
+sponza_smaa	(gpu frame)	2e+04
+sponza_smaa	bloom downsample	6e+02
+sponza_smaa	bloom upsample	5e+02
+sponza_smaa	cull	3e+00
+sponza_smaa	cull setup	0.8
+sponza_smaa	forward	1e+04
+sponza_smaa	shadow	2e+03
+sponza_smaa	shadow cull	4e+00
+sponza_smaa	sky	3e+01
+sponza_smaa	smaa blend	7e+02
+sponza_smaa	smaa edges	6e+02
+sponza_smaa	smaa weights	2e+03
+sponza_smaa	tonemap	8e+02
+sponza_smaa_t2x	(frame total)	2e+04
+sponza_smaa_t2x	(gpu frame)	2e+04
+sponza_smaa_t2x	bloom downsample	6e+02
+sponza_smaa_t2x	bloom upsample	5e+02
+sponza_smaa_t2x	cull	4e+00
+sponza_smaa_t2x	cull setup	0.8
+sponza_smaa_t2x	forward	1e+04
+sponza_smaa_t2x	motion background	3e+01
+sponza_smaa_t2x	remember instances	3e+01
+sponza_smaa_t2x	shadow	2e+03
+sponza_smaa_t2x	shadow cull	4e+00
+sponza_smaa_t2x	sky	3e+01
+sponza_smaa_t2x	smaa blend	8e+02
+sponza_smaa_t2x	smaa edges	6e+02
+sponza_smaa_t2x	smaa history	2e+02
+sponza_smaa_t2x	smaa resolve	6e+02
+sponza_smaa_t2x	smaa weights	2e+03
+sponza_smaa_t2x	tonemap	8e+02
 sponza_taa	(frame total)	23353.7
 sponza_taa	(gpu frame)	23717.6
 sponza_taa	bloom downsample	680.2
@@ -108,20 +195,3 @@ sponza_taau_67	shadow cull	19.7
 sponza_taau_67	sky	27.6
 sponza_taau_67	taau	3858.1
 sponza_taau_67	tonemap	790.9
-sponza_reflections	(frame total)	25128.3
-sponza_reflections	(gpu frame)	25048.7
-sponza_reflections	bloom downsample	659.5
-sponza_reflections	bloom upsample	477.5
-sponza_reflections	cull	4.1
-sponza_reflections	cull setup	1.3
-sponza_reflections	depth prepass	906.0
-sponza_reflections	forward	8861.8
-sponza_reflections	reflections	5001.0
-sponza_reflections	shadow	2302.6
-sponza_reflections	shadow cull	4.9
-sponza_reflections	sky	46.3
-sponza_reflections	ssr depth	369.7
-sponza_reflections	ssr spatial	1500.2
-sponza_reflections	ssr temporal	1673.3
-sponza_reflections	ssr trace	2549.1
-sponza_reflections	tonemap	756.6
