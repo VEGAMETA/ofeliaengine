@@ -1127,6 +1127,10 @@ impl PackStreamer {
     }
 }
 
+/// Work run on the streaming thread on each entry that arrived ([`StreamThread::spawn_with`]):
+/// the entry and its whole target, which it may rewrite.
+pub type PostProcess = Box<dyn Fn(&Entry, &mut [u8]) -> Result<(), PackError> + Send>;
+
 /// A request to [`StreamThread`].
 struct ThreadRequest {
     index: u32,
@@ -1170,6 +1174,20 @@ impl StreamThread {
         capacity: usize,
         workers: usize,
     ) -> Result<Self, PackError> {
+        Self::spawn_with(pack, depth, capacity, workers, None)
+    }
+
+    /// [`Self::spawn`], with `post` run on the streaming thread on every entry that
+    /// arrived checked, over its whole target (the entry's raw bytes first), before it is
+    /// handed back: work the frame's thread should not do (decoding into the form the GPU
+    /// takes, ADR 0076). An error from it fails the entry.
+    pub fn spawn_with(
+        pack: Pack,
+        depth: usize,
+        capacity: usize,
+        workers: usize,
+        post: Option<PostProcess>,
+    ) -> Result<Self, PackError> {
         let capacity = capacity.max(1);
         let entries = pack.entries().to_vec();
         let mut streamer = PackStreamer::new(pack, depth)?;
@@ -1189,6 +1207,8 @@ impl StreamThread {
                 lower_priority();
                 let mut done = Vec::with_capacity(capacity);
                 let mut waiting: Option<ThreadRequest> = None;
+                // Targets by tag, for `post`.
+                let mut targets: Vec<(u64, Address, usize)> = Vec::with_capacity(capacity);
                 loop {
                     // New requests, as many as the streamer takes.
                     while streamer.has_room() {
@@ -1199,6 +1219,9 @@ impl StreamThread {
                         // `StreamThread::request`'s contract, which is the streamer's.
                         let requested =
                             unsafe { streamer.request(r.index, r.target.0, r.len, r.tag) };
+                        if requested.is_ok() && post.is_some() {
+                            targets.push((r.tag, Address(r.target.0), r.len));
+                        }
                         if let Err(error) = requested {
                             done.push(Streamed {
                                 tag: r.tag,
@@ -1231,6 +1254,21 @@ impl StreamThread {
                     }
                     for streamed in done.drain(..) {
                         let mut streamed = streamed;
+                        if let Some(post) = post.as_ref()
+                            && let Some(k) = targets.iter().position(|t| t.0 == streamed.tag)
+                        {
+                            let (_, target, len) = targets.swap_remove(k);
+                            if streamed.result.is_ok()
+                                && let Some(entry) =
+                                    streamer.pack().entries.get(streamed.index as usize)
+                            {
+                                // SAFETY: the target is this entry's until it is handed
+                                // back below (`request`'s contract), and holds `len` bytes.
+                                let bytes =
+                                    unsafe { core::slice::from_raw_parts_mut(target.0, len) };
+                                streamed.result = post(entry, bytes);
+                            }
+                        }
                         // Never full: at most `capacity` entries are in flight.
                         while let Err(back) = outgoing.push(streamed) {
                             streamed = back;

@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Reading decoded mesh levels in place (already in the tree through engine_render).
+bytemuck = { version = "1.25" }
 engine_assets.workspace = true
 engine_core.workspace = true
 # Aligned read buffers for mesh levels (unbuffered reads).

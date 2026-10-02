@@ -592,6 +592,15 @@ fn main() {
         full_bytes as f64 / MIB,
         settled.map_or(String::from("never"), |f| format!("at frame {f}")),
     );
+    if s.mesh_vertices > 0 {
+        println!(
+            "Mesh levels: {} vertices decoded and staged in {:.2} ms ({:.0} ns per vertex), at most {:.2} ms in a frame",
+            s.mesh_vertices,
+            s.mesh_upload_ms_sum,
+            s.mesh_upload_ms_sum * 1e6 / s.mesh_vertices as f64,
+            s.mesh_upload_ms_max,
+        );
+    }
     println!(
         "Worst GPU frame / median: {:.2}×",
         percentile(&gpu_frame, 1.0) / percentile(&gpu_frame, 0.5).max(1e-9)

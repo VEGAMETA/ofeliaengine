@@ -21,7 +21,7 @@
 //! into the geometry pool. Call [`SceneStreamer::update`] once per frame before the frame's
 //! graph, then the budget's [`GpuBudget::update`].
 
-use engine_assets::pack::{PackError, PackStreamer, StreamThread, Streamed};
+use engine_assets::pack::{Entry, EntryKind, PackError, PackStreamer, StreamThread, Streamed};
 use engine_assets::{
     AlphaMode as CookedAlpha, CookedMaterial, SceneLayout, TextureFormat as Stored, TextureSlot,
     TextureWrap, open_scene_streamed, read_mesh_level_entry,
@@ -33,7 +33,10 @@ use engine_render::budget::GpuBudget;
 use engine_render::feedback::TextureFeedback;
 use engine_render::material::MaterialTable;
 use engine_render::material::{AlphaMode, MaterialDesc, TextureRef};
-use engine_render::mesh::{GeometryPool, LodIndices, MeshData, MeshError, MeshId, StreamedLevel};
+use engine_render::mesh::{
+    GeometryPool, LodIndices, MeshData, MeshError, MeshId, StreamedLevel, VertexAttributes,
+    encode_attributes,
+};
 use engine_render::streaming::{
     LevelRequest, LodView, MeshLevelRequest, MeshStreamer, MeshStreamerStats, StreamerSettings,
     StreamerStats, TextureStreamer, first_tail_level,
@@ -150,19 +153,68 @@ pub struct SceneStreamSettings {
     pub workers: usize,
     /// The texture and mesh streamers' policy.
     pub textures: StreamerSettings,
+    /// Vertices of mesh levels decoded and staged on the frame's thread per frame (at
+    /// least one level each frame): a level that arrives beyond waits for the next frame.
+    pub mesh_vertices_per_frame: u32,
 }
 
 impl Default for SceneStreamSettings {
     /// 16 reads in flight, 64 entries requested, 2 decompression threads, the default
-    /// policy.
+    /// policy, 64k mesh vertices per frame (decoded on the streaming thread, a mesh level
+    /// is a copy on the frame's thread).
     fn default() -> Self {
         Self {
             depth: 16,
             capacity: 64,
             workers: 2,
             textures: StreamerSettings::default(),
+            mesh_vertices_per_frame: 64 << 10,
         }
     }
+}
+
+/// Bytes a mesh level entry takes once decoded in place ([`decode_mesh_level`]): a
+/// 16-byte header, positions, encoded attributes, indices.
+fn decoded_mesh_level_bytes(entry: &Entry) -> usize {
+    let (vertices, indices) = (entry.meta[2] as usize, entry.meta[3] as usize);
+    16 + vertices * (12 + 16) + indices * 4
+}
+
+/// Runs on the streaming thread on every entry it read: a mesh level entry is decoded and
+/// its vertices encoded as the geometry pool stores them, in place (`[vertices, indices,
+/// first vertex, level]`, positions, attributes, indices), so the frame's thread only
+/// copies it.
+fn decode_mesh_level(entry: &Entry, bytes: &mut [u8]) -> Result<(), PackError> {
+    if entry.kind() != EntryKind::MeshLevel {
+        return Ok(());
+    }
+    let invalid = |what: &str| PackError::Io(std::io::Error::other(what.to_owned()));
+    let raw = bytes
+        .get(..entry.bytes as usize)
+        .ok_or_else(|| invalid("mesh level entry truncated"))?;
+    let level = read_mesh_level_entry(entry.meta, raw)?;
+    let mut attributes = Vec::with_capacity(level.positions.len());
+    encode_attributes(
+        &MeshData {
+            positions: &level.positions,
+            normals: &level.normals,
+            tangents: &level.tangents,
+            uvs: &level.uvs,
+            indices: &level.indices,
+        },
+        &mut attributes,
+    );
+    let (n, i) = (level.positions.len(), level.indices.len());
+    let needed = 16 + n * 28 + i * 4;
+    let out = bytes
+        .get_mut(..needed)
+        .ok_or_else(|| invalid("mesh level target too small"))?;
+    let header = [n as u32, i as u32, level.first_vertex, level.level];
+    out[..16].copy_from_slice(bytemuck::cast_slice(&header));
+    out[16..16 + n * 12].copy_from_slice(bytemuck::cast_slice(&level.positions));
+    out[16 + n * 12..16 + n * 28].copy_from_slice(bytemuck::cast_slice(&attributes));
+    out[16 + n * 28..].copy_from_slice(bytemuck::cast_slice(&level.indices));
+    Ok(())
 }
 
 /// When a request was made: the frame and the time.
@@ -197,6 +249,13 @@ pub struct SceneStreamStats {
     pub arrived: u64,
     /// Mesh levels among them.
     pub mesh_levels: u64,
+    /// Vertices of mesh levels decoded and staged so far.
+    pub mesh_vertices: u64,
+    /// Time spent decoding and staging mesh levels on the frame's thread: in all, and the
+    /// most in one frame (ms).
+    pub mesh_upload_ms_sum: f64,
+    /// The most in one frame.
+    pub mesh_upload_ms_max: f64,
     /// Bytes read so far.
     pub bytes: u64,
     /// Requests waiting for room (staging or the streaming thread).
@@ -240,6 +299,9 @@ pub struct SceneStreamer {
     requests: Vec<LevelRequest>,
     mesh_requests: Vec<MeshLevelRequest>,
     finished: Vec<Streamed>,
+    /// Mesh levels read and not yet uploaded (within the frame's vertices).
+    meshes_read: VecDeque<(AlignedBuffer, MeshLevelRequest, u32, Made)>,
+    mesh_vertices_per_frame: u32,
     stats: SceneStreamStats,
 }
 
@@ -350,8 +412,13 @@ impl SceneStreamer {
                 )
             })
             .collect();
-        let thread =
-            StreamThread::spawn(pack, settings.depth, settings.capacity, settings.workers)?;
+        let thread = StreamThread::spawn_with(
+            pack,
+            settings.depth,
+            settings.capacity,
+            settings.workers,
+            Some(Box::new(decode_mesh_level)),
+        )?;
         Ok(Self {
             thread,
             layout,
@@ -369,6 +436,8 @@ impl SceneStreamer {
             requests: Vec::new(),
             mesh_requests: Vec::new(),
             finished: Vec::new(),
+            meshes_read: VecDeque::new(),
+            mesh_vertices_per_frame: settings.mesh_vertices_per_frame,
             stats: SceneStreamStats::default(),
         })
     }
@@ -406,9 +475,9 @@ impl SceneStreamer {
         self.stats
     }
 
-    /// Whether nothing is waiting or being read.
+    /// Whether nothing is waiting, being read or waiting for upload.
     pub fn idle(&self) -> bool {
-        self.waiting.is_empty() && self.thread.pending() == 0
+        self.waiting.is_empty() && self.thread.pending() == 0 && self.meshes_read.is_empty()
     }
 
     fn tag(&mut self) -> u32 {
@@ -479,7 +548,8 @@ impl SceneStreamer {
                 self.fail(&waiting);
                 continue;
             };
-            let bytes = PackStreamer::target_bytes(&self.thread.entries()[entry as usize]);
+            let e = self.thread.entries()[entry as usize];
+            let bytes = PackStreamer::target_bytes(&e);
             let target = match waiting {
                 Waiting::Texture(r) => match pool.staging(allocator, bytes as u64) {
                     Ok(Some(span)) => Target::Texture(span, r),
@@ -492,6 +562,8 @@ impl SceneStreamer {
                     }
                 },
                 Waiting::Mesh(r) => {
+                    // Room for the level decoded in place too.
+                    let bytes = bytes.max(decoded_mesh_level_bytes(&e));
                     let buffer = match self.buffers.iter().position(|b| b.len() >= bytes) {
                         Some(k) => self.buffers.swap_remove(k),
                         None => AlignedBuffer::new(bytes),
@@ -553,15 +625,14 @@ impl SceneStreamer {
                     ok
                 }
                 Target::Mesh(buffer, r, entry) => {
-                    let ok = done.result.is_ok() && self.upload_mesh(geometry, &buffer, r, entry);
-                    self.buffers.push(buffer);
-                    if ok {
-                        self.mesh_streamer.arrived(r.mesh, r.level);
-                        self.stats.mesh_levels += 1;
-                    } else {
-                        self.mesh_streamer.failed(r.mesh, r.level);
+                    if done.result.is_ok() {
+                        // Uploaded below, within the frame's vertices.
+                        self.meshes_read.push_back((buffer, r, entry, made));
+                        continue;
                     }
-                    ok
+                    self.buffers.push(buffer);
+                    self.mesh_streamer.failed(r.mesh, r.level);
+                    false
                 }
             };
             if uploaded {
@@ -579,6 +650,40 @@ impl SceneStreamer {
         }
         self.finished = finished;
         self.finished.clear();
+        // Mesh levels read: decoded and staged within the frame's vertices.
+        let mesh_start = std::time::Instant::now();
+        let mut vertices = 0u32;
+        while let Some((buffer, r, entry, made)) = self.meshes_read.pop_front() {
+            let count = self
+                .thread
+                .entries()
+                .get(entry as usize)
+                .map_or(0, |e| e.meta[2]);
+            if vertices > 0 && vertices + count > self.mesh_vertices_per_frame {
+                self.meshes_read.push_front((buffer, r, entry, made));
+                break;
+            }
+            vertices += count;
+            let ok = self.upload_mesh(geometry, &buffer, r, entry);
+            self.buffers.push(buffer);
+            if ok {
+                self.mesh_streamer.arrived(r.mesh, r.level);
+                self.stats.mesh_levels += 1;
+                self.stats.arrived += 1;
+                let ms = made.at.elapsed().as_secs_f64() * 1e3;
+                self.stats.latency_ms_sum += ms;
+                self.stats.worst_latency_ms = self.stats.worst_latency_ms.max(ms);
+            } else {
+                self.mesh_streamer.failed(r.mesh, r.level);
+                self.stats.failed += 1;
+            }
+        }
+        if vertices > 0 {
+            let ms = mesh_start.elapsed().as_secs_f64() * 1e3;
+            self.stats.mesh_upload_ms_max = self.stats.mesh_upload_ms_max.max(ms);
+            self.stats.mesh_vertices += u64::from(vertices);
+            self.stats.mesh_upload_ms_sum += ms;
+        }
         self.stats.textures = self.streamer.stats();
         self.stats.meshes = self.mesh_streamer.stats();
         self.stats.waiting = self.waiting.len();
@@ -592,7 +697,8 @@ impl SceneStreamer {
         self.stats.failed += 1;
     }
 
-    /// A mesh level read into `buffer` from `entry`, into the geometry pool.
+    /// A mesh level read and decoded into `buffer` (by [`decode_mesh_level`]), into the
+    /// geometry pool: a copy.
     fn upload_mesh(
         &self,
         geometry: &mut GeometryPool,
@@ -603,24 +709,22 @@ impl SceneStreamer {
         let Some(e) = self.thread.entries().get(entry as usize) else {
             return false;
         };
-        let Some(bytes) = buffer.as_slice().get(..e.bytes as usize) else {
+        let bytes = buffer.as_slice();
+        let needed = decoded_mesh_level_bytes(e);
+        let Some(bytes) = bytes.get(..needed) else {
             return false;
         };
-        let Ok(level) = read_mesh_level_entry(e.meta, bytes) else {
+        let header: &[u32] = bytemuck::cast_slice(&bytes[..16]);
+        let (n, i) = (header[0] as usize, header[1] as usize);
+        if header[3] != request.level || 16 + n * 28 + i * 4 != needed {
             return false;
-        };
+        }
+        let positions: &[[f32; 3]] = bytemuck::cast_slice(&bytes[16..16 + n * 12]);
+        let attributes: &[VertexAttributes] =
+            bytemuck::cast_slice(&bytes[16 + n * 12..16 + n * 28]);
+        let indices: &[u32] = bytemuck::cast_slice(&bytes[16 + n * 28..]);
         geometry
-            .upload_mesh_level(
-                request.mesh,
-                request.level,
-                &MeshData {
-                    positions: &level.positions,
-                    normals: &level.normals,
-                    tangents: &level.tangents,
-                    uvs: &level.uvs,
-                    indices: &level.indices,
-                },
-            )
+            .upload_mesh_level_encoded(request.mesh, request.level, positions, attributes, indices)
             .is_ok()
     }
 

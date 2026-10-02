@@ -40,7 +40,7 @@ use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Device, MemoryLocation, Range, RangeAllocator, RhiError};
 
 /// Vertex attributes besides the position, as the shaders read them (16 bytes).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub struct VertexAttributes {
     /// Unit normal, [`encode_octahedral`].
@@ -162,6 +162,24 @@ pub fn decode_octahedral(bits: u32) -> [f32; 3] {
 pub fn encode_tangent(t: [f32; 4]) -> u32 {
     let bits = encode_octahedral([t[0], t[1], t[2]]) & !(1 << 16);
     bits | (u32::from(t[3] < 0.0) << 16)
+}
+
+/// Appends the encoded attributes of `data`'s vertices (normals, tangents or tangents
+/// made up from the normals, texture coordinates) as the pool stores them.
+pub fn encode_attributes(data: &MeshData<'_>, out: &mut Vec<VertexAttributes>) {
+    out.extend((0..data.positions.len()).map(|v| {
+        let normal = data.normals.get(v).copied().unwrap_or([0.0, 0.0, 1.0]);
+        let tangent = data
+            .tangents
+            .get(v)
+            .copied()
+            .unwrap_or_else(|| any_tangent(Vec3::from(normal)).extend(1.0).to_array());
+        VertexAttributes {
+            normal: encode_octahedral(normal),
+            tangent: encode_tangent(tangent),
+            uv: data.uvs.get(v).copied().unwrap_or([0.0; 2]),
+        }
+    }));
 }
 
 /// The tangent and bitangent sign of [`encode_tangent`].
@@ -760,31 +778,39 @@ impl GeometryPool {
     /// Stages vertices `data` (positions and attributes) and `indices` for upload to
     /// `first_vertex` and `first_index`.
     fn stage(&mut self, data: &MeshData<'_>, first_vertex: u32, first_index: u32) {
-        let vertex_count = data.positions.len() as u32;
         self.uploads.push(Upload {
             first_vertex,
-            vertex_count,
+            vertex_count: data.positions.len() as u32,
             first_index,
             index_count: data.indices.len() as u32,
             staged_vertex: self.staged_positions.len() as u32,
             staged_index: self.staged_indices.len() as u32,
         });
         self.staged_positions.extend_from_slice(data.positions);
-        self.staged_attributes
-            .extend((0..vertex_count as usize).map(|v| {
-                let normal = data.normals.get(v).copied().unwrap_or([0.0, 0.0, 1.0]);
-                let tangent = data
-                    .tangents
-                    .get(v)
-                    .copied()
-                    .unwrap_or_else(|| any_tangent(Vec3::from(normal)).extend(1.0).to_array());
-                VertexAttributes {
-                    normal: encode_octahedral(normal),
-                    tangent: encode_tangent(tangent),
-                    uv: data.uvs.get(v).copied().unwrap_or([0.0; 2]),
-                }
-            }));
+        encode_attributes(data, &mut self.staged_attributes);
         self.staged_indices.extend_from_slice(data.indices);
+    }
+
+    /// Stages vertices already encoded (positions, [`VertexAttributes`]) and indices.
+    fn stage_encoded(
+        &mut self,
+        positions: &[[f32; 3]],
+        attributes: &[VertexAttributes],
+        indices: &[u32],
+        first_vertex: u32,
+        first_index: u32,
+    ) {
+        self.uploads.push(Upload {
+            first_vertex,
+            vertex_count: positions.len() as u32,
+            first_index,
+            index_count: indices.len() as u32,
+            staged_vertex: self.staged_positions.len() as u32,
+            staged_index: self.staged_indices.len() as u32,
+        });
+        self.staged_positions.extend_from_slice(positions);
+        self.staged_attributes.extend_from_slice(attributes);
+        self.staged_indices.extend_from_slice(indices);
     }
 
     /// Adds a mesh streamed by detail level (ADR 0076) with its coarsest level resident:
@@ -908,6 +934,44 @@ impl GeometryPool {
         level: u32,
         data: &MeshData<'_>,
     ) -> Result<(), MeshError> {
+        if data.normals.len() != data.positions.len() {
+            return Err(MeshError::MismatchedLengths);
+        }
+        let first_vertex = self.grow_level(id, level, data.positions.len() as u32, data.indices)?;
+        self.stage(data, first_vertex.0, first_vertex.1);
+        Ok(())
+    }
+
+    /// [`Self::upload_mesh_level`] with the vertices already encoded as the pool stores
+    /// them ([`encode_attributes`]): a copy on the frame's thread, the encoding done where
+    /// the data was read (the streaming thread, ADR 0076).
+    pub fn upload_mesh_level_encoded(
+        &mut self,
+        id: MeshId,
+        level: u32,
+        positions: &[[f32; 3]],
+        attributes: &[VertexAttributes],
+        indices: &[u32],
+    ) -> Result<(), MeshError> {
+        if attributes.len() != positions.len() {
+            return Err(MeshError::MismatchedLengths);
+        }
+        let (first_vertex, first_index) =
+            self.grow_level(id, level, positions.len() as u32, indices)?;
+        self.stage_encoded(positions, attributes, indices, first_vertex, first_index);
+        Ok(())
+    }
+
+    /// Makes room for level `level` of a streamed mesh adding `added` vertices and
+    /// `indices`: a new vertex range (the old prefix moved into it in `begin_frame`) and
+    /// an index range. Returns where the new vertices and the indices go.
+    fn grow_level(
+        &mut self,
+        id: MeshId,
+        level: u32,
+        added: u32,
+        indices: &[u32],
+    ) -> Result<(u32, u32), MeshError> {
         let Some(slot) = self.slots.get_mut(id.index as usize) else {
             return Err(MeshError::BadLevel);
         };
@@ -929,22 +993,17 @@ impl GeometryPool {
         }
         let old = s.levels[s.resident as usize].vertices;
         let new = s.levels[level as usize].vertices;
-        let added = data.positions.len() as u32;
-        let wanted = &s.levels[level as usize];
-        if old + added != new
-            || data.indices.len() as u32 != wanted.index_count
-            || data.normals.len() != added as usize
-        {
+        if old + added != new || indices.len() as u32 != s.levels[level as usize].index_count {
             return Err(MeshError::MismatchedLengths);
         }
-        if let Some(&index) = data.indices.iter().find(|&&i| i >= new) {
+        if let Some(&index) = indices.iter().find(|&&i| i >= new) {
             return Err(MeshError::IndexOutOfRange {
                 index,
                 vertex_count: new,
             });
         }
         let vertices = reserve(&mut self.vertex_ranges, u64::from(new))?;
-        let indices = match reserve(&mut self.index_ranges, data.indices.len() as u64) {
+        let index_range = match reserve(&mut self.index_ranges, indices.len() as u64) {
             Ok(range) => range,
             Err(e) => {
                 self.vertex_ranges.free(vertices);
@@ -963,7 +1022,7 @@ impl GeometryPool {
             count: old,
         });
         m.vertices = vertices;
-        s.ranges[level as usize] = Some(indices);
+        s.ranges[level as usize] = Some(index_range);
         s.resident = level;
         m.info.first_vertex = vertices.offset() as u32;
         m.info.vertex_count = new;
@@ -971,14 +1030,9 @@ impl GeometryPool {
         m.info.revision = m.info.revision.wrapping_add(1);
         m.pending = true;
         self.streamed_bytes += u64::from(added) * (POSITION_BYTES + ATTRIBUTE_BYTES)
-            + data.indices.len() as u64 * INDEX_BYTES;
+            + indices.len() as u64 * INDEX_BYTES;
         self.pending_slots.push(id.index);
-        self.stage(
-            data,
-            vertices.offset() as u32 + old,
-            indices.offset() as u32,
-        );
-        Ok(())
+        Ok((vertices.offset() as u32 + old, index_range.offset() as u32))
     }
 
     /// Drops the levels of a streamed mesh finer than `first`: their indices, and the

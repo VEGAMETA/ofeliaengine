@@ -565,6 +565,7 @@ dependencies = [
 name = "engine_streaming"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "engine_assets",
  "engine_core",
  "engine_platform",
