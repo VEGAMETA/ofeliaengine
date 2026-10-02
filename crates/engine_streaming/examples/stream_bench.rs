@@ -35,8 +35,9 @@ use engine_render::forward::{
 };
 use engine_render::graph::{Access, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialId, MaterialTable};
-use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId};
 use engine_render::post::HDR_FORMAT;
+use engine_render::streaming::LodView;
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -214,10 +215,13 @@ fn main() {
     // 32 MiB of texture traffic per frame on the GPU.
     let mut textures = TexturePool::new(&device, 32 << 20, 1);
     let opened = Instant::now();
+    let mut geometry =
+        GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mut streamer = SceneStreamer::open(
         &path,
         &jobs,
         &mut textures,
+        &mut geometry,
         &mut allocator,
         &mut budget,
         SceneStreamSettings::default(),
@@ -229,34 +233,7 @@ fn main() {
 
     // Meshes, materials, draws.
     let scene = streamer.layout().scene.clone();
-    let mut geometry =
-        GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
-    let meshes: Vec<MeshId> = scene
-        .meshes
-        .iter()
-        .map(|m| {
-            let levels: Vec<LodIndices<'_>> = m
-                .lods
-                .iter()
-                .map(|l| LodIndices {
-                    indices: &l.indices,
-                    error: l.error,
-                })
-                .collect();
-            geometry
-                .add_mesh_with_lods(
-                    &MeshData {
-                        positions: &m.positions,
-                        normals: &m.normals,
-                        tangents: &m.tangents,
-                        uvs: &m.uvs,
-                        indices: &m.indices,
-                    },
-                    &levels,
-                )
-                .unwrap()
-        })
-        .collect();
+    let meshes: Vec<MeshId> = streamer.meshes().to_vec();
     let mut materials = MaterialTable::new(1);
     let ids = streamer.textures().to_vec();
     let material_ids: Vec<MaterialId> = scene
@@ -419,11 +396,14 @@ fn main() {
             position: eye,
         };
         let t = Instant::now();
+        let lod_view = LodView::new(&camera.clip_from_world, eye, HEIGHT, 1.0);
         streamer.update(
             &mut textures,
+            &mut geometry,
             &mut allocator,
             &mut budget,
             feedback.as_mut(),
+            Some(&lod_view),
             &materials,
             frame_number,
         );
@@ -554,7 +534,10 @@ fn main() {
         if frame % 120 == 0 || frame + 1 == total {
             let s = streamer.stats();
             println!(
-                "frame {frame:4}: textures {:6.1} MiB (grant {:6.1}, pool {:7.1}, demand {:6.1}), visible {:3}, bias {}, arrived {:5}, waiting {:3}, latency {:5.1} ms",
+                "frame {frame:4}: meshes {:5.2} MiB (grant {:7.1}, bias {}), textures {:6.1} MiB (grant {:6.1}, pool {:7.1}, demand {:6.1}), visible {:3}, bias {}, arrived {:5}, waiting {:3}, latency {:5.1} ms",
+                s.meshes.resident as f64 / MIB,
+                s.meshes.grant as f64 / MIB,
+                s.meshes.pressure_bias,
                 resident as f64 / MIB,
                 grant as f64 / MIB,
                 b.pool as f64 / MIB,
@@ -594,8 +577,9 @@ fn main() {
     }
     println!();
     println!(
-        "Arrived {} levels ({:.1} MiB read), failed {}; latency request→uploaded: mean {:.1} ms, worst {:.1} ms ({} frames)",
+        "Arrived {} levels ({} of meshes; {:.1} MiB read), failed {}; latency request→uploaded: mean {:.1} ms, worst {:.1} ms ({} frames)",
         s.arrived,
+        s.mesh_levels,
         s.bytes as f64 / MIB,
         s.failed,
         s.latency_ms_sum / s.arrived.max(1) as f64,

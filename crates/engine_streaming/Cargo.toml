@@ -13,9 +13,8 @@ workspace = true
 [dependencies]
 engine_assets.workspace = true
 engine_core.workspace = true
+# Aligned read buffers for mesh levels (unbuffered reads).
+engine_platform.workspace = true
 engine_profiler.workspace = true
 engine_render.workspace = true
 engine_rhi.workspace = true
-
-[dev-dependencies]
-engine_platform.workspace = true
