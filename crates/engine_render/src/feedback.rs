@@ -255,21 +255,15 @@ impl TextureFeedback {
         if self.latest_frame.is_some_and(|f| f >= written) {
             return None;
         }
-        let Some(r) = self
+        let r = self
             .readbacks
             .iter_mut()
-            .find(|r| r.written == Some((written, count)))
-        else {
-            return None;
-        };
-        let Some(ptr) = r
+            .find(|r| r.written == Some((written, count)))?;
+        let ptr = r
             .buffer
             .allocation
             .as_ref()
-            .and_then(Allocation::mapped_ptr)
-        else {
-            return None;
-        };
+            .and_then(Allocation::mapped_ptr)?;
         self.latest.clear();
         // SAFETY: the frame that wrote it has finished (its graph made the copy visible to
         // the host); the mapping holds `capacity ≥ count` pairs.
@@ -334,7 +328,7 @@ impl TextureFeedback {
         let Some(draws) = passes.draws else {
             return Ok(());
         };
-        if (self.frames - 1) % u64::from(self.settings.interval) != 0 {
+        if !(self.frames - 1).is_multiple_of(u64::from(self.settings.interval)) {
             return Ok(());
         }
         // A readback this frame may write: one not holding unread results (the ring has

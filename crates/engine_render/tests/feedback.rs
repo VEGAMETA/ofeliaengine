@@ -64,8 +64,11 @@ const DISTANCE: f32 = 4.0;
 const REPEATS: [f32; 4] = [0.612_372_4, 1.224_744_9, 2.449_489_7, 4.898_979_5];
 const FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
+/// Positions, normals, texture coordinates and indices of a mesh.
+type Quad = (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>);
+
 /// A unit quad in the xy plane facing +z, its texture coordinates spanning `repeats`.
-fn quad(repeats: f32) -> (Vec<[f32; 3]>, Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<u32>) {
+fn quad(repeats: f32) -> Quad {
     let positions = vec![
         [-0.5, -0.5, 0.0],
         [0.5, -0.5, 0.0],
@@ -92,7 +95,7 @@ fn feedback_reports_the_levels_the_sampler_uses() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let depth_format = vk::Format::D32_SFLOAT;
-    let mut renderer = ForwardRenderer::new(
+    let renderer = ForwardRenderer::new(
         &device,
         &bindless,
         FORMAT,
