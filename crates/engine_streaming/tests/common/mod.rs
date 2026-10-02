@@ -149,7 +149,7 @@ pub fn synthetic_pack(count: usize) -> PathBuf {
             positions.push([
                 fx * 2.0 - 1.0,
                 fy * 2.0 - 1.0,
-                0.05 * (fx * 9.0).sin() * (fy * 7.0).cos(),
+                0.2 * (fx * 9.0).sin() * (fy * 7.0).cos(),
             ]);
         }
     }
@@ -170,8 +170,8 @@ pub fn synthetic_pack(count: usize) -> PathBuf {
         positions,
         indices,
         lods,
-        min: [-1.0, -1.0, -0.05],
-        max: [1.0, 1.0, 0.05],
+        min: [-1.0, -1.0, -0.2],
+        max: [1.0, 1.0, 0.2],
         ..CookedMesh::default()
     };
     order_for_streaming(&mut mesh);
