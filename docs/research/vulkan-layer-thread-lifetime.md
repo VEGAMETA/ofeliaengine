@@ -46,6 +46,11 @@ on that.
 | with the faulting thread's stack captured (vectored exception handler, local only) | 30 + 60 | 4 + 8 |
 | layers and drivers pinned (loaded once per process), instances still created on the test threads | 60 | 4 |
 | instances created on the loader thread (the fix), with the stack capture, 8 busy CPU threads | 100 | **0** |
+| the fix, final binary (no capture), 8 busy CPU threads | 60 | **0** |
+| the fix, final binary, Radeon iGPU (`ENGINE_ADAPTER=radeon`), 8 busy CPU threads | 20 | **0** (3 runs had an image mismatch: the iGPU's LDS fault under CPU load, `radeon-igpu-lds-faults.md`) |
+
+Before the fix 19 of 180 runs crashed (10.6 %); after it 0 of 180. With p = 0.106 the chance
+of 160 clean NVIDIA runs in a row is 0.894¹⁶⁰ ≈ 2·10⁻⁸.
 
 All 21 crashes faulted at the same instruction. **The faulting thread's stack**
 (symbolized with the SDK's `VkLayer_khronos_validation.pdb` and `llvm-symbolizer`; 16
