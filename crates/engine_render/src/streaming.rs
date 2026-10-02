@@ -311,10 +311,7 @@ impl TextureStreamer {
                 // Finer at once; coarser only once the finer level has not been asked for
                 // in `hold_frames` (levels flickering across a boundary would otherwise be
                 // evicted and read again over and over under pressure).
-                if e.wanted <= e.level {
-                    e.level = e.wanted;
-                    e.held_since = frame;
-                } else if frame.saturating_sub(e.held_since) >= hold {
+                if e.wanted <= e.level || frame.saturating_sub(e.held_since) >= hold {
                     e.level = e.wanted;
                     e.held_since = frame;
                 }
