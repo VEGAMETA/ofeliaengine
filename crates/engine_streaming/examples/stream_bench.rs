@@ -49,6 +49,9 @@ use std::time::{Duration, Instant};
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 const MIB: f64 = (1u64 << 20) as f64;
+/// A frame: its number, GPU and CPU ms, texture traffic (MiB), its longest pass and µs.
+type FrameLog = (usize, f64, f64, f64, (&'static str, f64));
+
 /// Frames left out of the statistics at the start.
 const WARMUP: usize = 10;
 
@@ -372,7 +375,7 @@ fn main() {
         Duration::ZERO
     };
     let mut gpu_frame = Vec::new();
-    let mut frame_log: Vec<(usize, f64, f64, f64, (&'static str, f64))> = Vec::new();
+    let mut frame_log: Vec<FrameLog> = Vec::new();
     let mut cpu_frame = Vec::new();
     let mut stream_cpu = Vec::new();
     let mut feedback_gpu = Vec::new();
