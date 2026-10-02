@@ -108,7 +108,11 @@ tooling included) about **50 %**.
      the gate before every merge.
 1. GPU particles and GPU radix sort.
 2. Clustered decals.
-3. GI: probe volumes, then DDGI-like.
+3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
+   medallions on the curtains (roughness 0.28, metallic 0.74) must read gold when seen from
+   above in shade. Today they look dark brown there. The material and the shading are
+   right (seen from below they are gold), but the shaded floor they reflect has no bounced
+   light (2026-10-02).
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
    visibility bits (patent, ADR 0035 note).
 5. Virtual shadow maps.
@@ -127,7 +131,14 @@ tooling included) about **50 %**.
   - reflections on transparent surfaces;
   - GTSO;
   - probe shadow-map caching;
-  - XeSS.
+  - XeSS;
+  - ambient light inconsistent indoors: diffuse ambient comes from the sky's irradiance
+    (barely occluded), specular from reflection probes that see the real, darker interior.
+    In shade, dielectrics therefore look too bright next to metals. Irradiance from the
+    probes (SH of their captures) would make them agree until GI lands;
+  - cloth shading (sheen) and anisotropy are missing from the material model;
+  - FSR 4: ML, RDNA4-only, shipped as a DLL (DX12 at first). Check Vulkan availability and
+    license; it needs an RDNA4 GPU to test.
 - **Patents avoided on purpose** (don't build without a new decision): static/dynamic
   split of cached shadows (Warner Bros US 11,908,062 / 12,315,068); dual-quaternion
   skinning variants (US9613456B2); motion matching variants; Burley's diffusion profile.
