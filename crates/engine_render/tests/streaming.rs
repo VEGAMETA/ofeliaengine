@@ -153,6 +153,11 @@ impl Harness {
 
     /// One frame: the pool's uploads, and with `read`, every level of `read` copied back.
     fn frame(&mut self, read: Option<TextureId>) -> Option<Vec<u8>> {
+        self.frame_from(read.map(|id| (id, 0)))
+    }
+
+    /// One frame; with `read`, the levels from `base` (the first its image holds) on.
+    fn frame_from(&mut self, read: Option<(TextureId, u32)>) -> Option<Vec<u8>> {
         let Self {
             device,
             allocator,
@@ -183,7 +188,7 @@ impl Harness {
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
             pool.begin_frame(&mut fg, allocator, bindless, *frame_number)
                 .unwrap();
-            if let Some(id) = read {
+            if let Some((id, base)) = read {
                 let image = pool.image(id).unwrap();
                 let out = fg.import_buffer(
                     "readback",
@@ -201,7 +206,7 @@ impl Harness {
                         let range = vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             base_mip_level: 0,
-                            level_count: LEVELS,
+                            level_count: LEVELS - base,
                             base_array_layer: 0,
                             layer_count: 1,
                         };
@@ -219,13 +224,13 @@ impl Harness {
                                 .subresource_range(range)
                         };
                         let mut offset = 0;
-                        let regions: Vec<_> = (0..LEVELS)
+                        let regions: Vec<_> = (base..LEVELS)
                             .map(|k| {
                                 let region = vk::BufferImageCopy {
                                     buffer_offset: offset,
                                     image_subresource: vk::ImageSubresourceLayers {
                                         aspect_mask: vk::ImageAspectFlags::COLOR,
-                                        mip_level: k,
+                                        mip_level: k - base,
                                         base_array_layer: 0,
                                         layer_count: 1,
                                     },
@@ -285,11 +290,13 @@ impl Harness {
             .unwrap();
             device.wait_idle().unwrap();
         }
-        read.map(|_| {
+        read.map(|(_, base)| {
             let ptr = readback_memory.as_ref().unwrap().mapped_ptr().unwrap();
+            let bytes: u64 = (base..LEVELS)
+                .map(|k| u64::from(level_side(k).pow(2) * 4))
+                .sum();
             // SAFETY: the GPU is idle; the mapping covers every level.
-            unsafe { core::slice::from_raw_parts(ptr.as_ptr(), all_levels_bytes() as usize) }
-                .to_vec()
+            unsafe { core::slice::from_raw_parts(ptr.as_ptr(), bytes as usize) }.to_vec()
         })
     }
 
@@ -428,5 +435,129 @@ fn the_staging_ring_is_reused_once_its_copies_are_done() {
     let again = h.span(4 * STAGING_ALIGN);
     assert!(again.is_some());
     h.pool.cancel_staging(again.unwrap());
+    h.finish();
+}
+
+#[test]
+fn residency_grows_and_shrinks_by_copying_into_images_of_another_size() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let mut h = Harness::new(instance, device, 16 * STAGING_ALIGN);
+    // The image holds levels 3-5 only.
+    let id = h
+        .pool
+        .add_streamed(
+            &mut h.allocator,
+            SIZE,
+            SIZE,
+            TextureFormat::Rgba8Unorm,
+            LEVELS,
+            3,
+        )
+        .unwrap();
+    // Levels below the image's first are refused.
+    let early = h.filled(&packed(1, 1));
+    assert!(matches!(
+        h.pool.upload_levels(id, 1, 1, early),
+        Err(TextureError::BadLevels)
+    ));
+    let tail = h.filled(&packed(3, 3));
+    h.pool.upload_levels(id, 3, 3, tail).unwrap();
+    h.frame(None);
+    assert_eq!(h.pool.resident_level(id), Some(3));
+    let small = h.pool.info(id).unwrap().bytes;
+    let tail_index = h.pool.index(id).unwrap();
+
+    // Grow to level 1: a new image; the tail is copied over and stays resident (with a new
+    // view and index); levels 1 and 2 arrive into it.
+    h.pool.set_base(id, 1).unwrap();
+    assert_eq!(h.pool.info(id).unwrap().planned_base, 1);
+    let one_two = h.filled(&packed(1, 2));
+    h.pool.upload_levels(id, 1, 2, one_two).unwrap();
+    h.frame(None);
+    let info = h.pool.info(id).unwrap();
+    assert_eq!((info.base, info.resident), (1, 1));
+    assert!(info.bytes > small);
+    assert_ne!(h.pool.index(id), Some(tail_index));
+    assert!(h.pool.moved_bytes() > 0);
+    // Both images exist until the frames that used the old one have finished.
+    let (live, retiring) = h.pool.memory();
+    assert_eq!(live, info.bytes);
+    assert_eq!(retiring, small);
+    let read = h.frame_from(Some((id, 1))).unwrap();
+    let expected: Vec<u8> = (1..LEVELS).flat_map(level).collect();
+    assert_eq!(read, expected);
+    h.frame(None);
+    assert_eq!(h.pool.memory().1, 0, "the old image is freed");
+
+    // Shrink to level 4: the finest levels are evicted, their memory returned; the rest
+    // is what was uploaded.
+    h.pool.set_base(id, 4).unwrap();
+    h.frame(None);
+    let info = h.pool.info(id).unwrap();
+    assert_eq!((info.base, info.resident), (4, 4));
+    assert!(info.bytes < small);
+    let read = h.frame_from(Some((id, 4))).unwrap();
+    let expected: Vec<u8> = (4..LEVELS).flat_map(level).collect();
+    assert_eq!(read, expected);
+    let gone = h.filled(&packed(2, 1));
+    assert!(matches!(
+        h.pool.upload_levels(id, 2, 1, gone),
+        Err(TextureError::BadLevels)
+    ));
+
+    // An upload queued before an eviction that drops its level is not made.
+    h.pool.set_base(id, 0).unwrap();
+    let zero_to_three = h.filled(&packed(0, 4));
+    h.pool.upload_levels(id, 0, 4, zero_to_three).unwrap();
+    h.pool.set_base(id, 2).unwrap();
+    h.frame(None);
+    let info = h.pool.info(id).unwrap();
+    assert_eq!((info.base, info.resident), (2, 4));
+    assert_eq!(h.pool.pending(), (0, 0));
+    h.frame(None);
+    h.frame(None);
+    h.finish();
+}
+
+#[test]
+fn reallocations_share_the_frame_budget_with_uploads() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let mut h = Harness::new(instance, device, 16 * STAGING_ALIGN);
+    let ids: Vec<TextureId> = (0..3)
+        .map(|_| {
+            h.pool
+                .add_streamed(
+                    &mut h.allocator,
+                    SIZE,
+                    SIZE,
+                    TextureFormat::Rgba8Unorm,
+                    LEVELS,
+                    1,
+                )
+                .unwrap()
+        })
+        .collect();
+    for &id in &ids {
+        let levels = h.filled(&packed(1, 5));
+        h.pool.upload_levels(id, 1, 5, levels).unwrap();
+    }
+    h.frame(None);
+    // Moving a texture to level 0 copies levels 1-5 (1,364 bytes); with a budget of
+    // 2,000 bytes a frame makes one move.
+    h.pool.set_frame_budget(2000);
+    for &id in &ids {
+        h.pool.set_base(id, 0).unwrap();
+    }
+    for frame in 1..=3 {
+        h.frame(None);
+        assert_eq!(h.pool.pending_moves(), 3 - frame);
+        assert!(h.pool.last_frame_bytes() <= 2000);
+    }
+    assert!(ids.iter().all(|&id| h.pool.info(id).unwrap().base == 0));
+    h.frame(None);
     h.finish();
 }
