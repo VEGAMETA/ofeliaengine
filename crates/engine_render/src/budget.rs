@@ -16,8 +16,9 @@
 //! - **Grants.** The pool is handed out class by class across the clients: every client's
 //!   required bytes first (even beyond the pool: nothing visible may disappear), then the
 //!   visible demands (scaled down together when they do not fit), then the cached ones.
-//!   A client keeps its resident bytes within its [`GpuBudget::grant`] by dropping its
-//!   least important data first (textures their finest levels).
+//!   What remains is split evenly, so a client whose demand grows can plan against it in
+//!   the same frame. A client keeps its resident bytes within its [`GpuBudget::grant`] by
+//!   dropping its least important data first (textures their finest levels).
 //! - **Between queries** the OS usage is estimated as the last reading plus what the
 //!   allocator's own bytes did since (VMA does the same), so the driver call runs every
 //!   [`BudgetSettings::query_interval`] frames.
@@ -236,8 +237,10 @@ impl GpuBudget {
         self.distribute(local);
     }
 
-    /// Hands out the grants for a reading of the device-local heaps.
-    fn distribute(&mut self, local: HeapBudget) {
+    /// Hands out the grants for a reading of the device-local heaps (what
+    /// [`Self::update`] does with the allocator's): for tests and tools that simulate a
+    /// budget.
+    pub fn distribute(&mut self, local: HeapBudget) {
         let s = self.settings;
         let share = (local.budget as f64 * f64::from(s.share.clamp(0.0, 1.0))) as u64;
         let total = s.cap.map_or(share, |cap| share.min(cap));
@@ -255,6 +258,10 @@ impl GpuBudget {
         let visible_part = left.min(visible);
         left -= visible_part;
         let cached_part = left.min(cached);
+        left -= cached_part;
+        // What nobody asked for yet is split evenly: a client whose demand grows this frame
+        // plans against it at once, instead of a frame later.
+        let spare = left / clients.len().max(1) as u64;
         let scale = |part: u64, of: u64, x: u64| {
             if of == 0 {
                 0
@@ -265,7 +272,8 @@ impl GpuBudget {
         for c in clients.iter_mut() {
             c.grant = c.demand.required
                 + scale(visible_part, visible, c.demand.visible)
-                + scale(cached_part, cached, c.demand.cached);
+                + scale(cached_part, cached, c.demand.cached)
+                + spare;
         }
         self.stats = BudgetStats {
             device_local: local,
@@ -330,10 +338,11 @@ mod tests {
         // 400 − 30 required = 370 for 400 of visible demand: scaled by 370/400.
         assert_eq!(b.grant(textures), 20 * MIB + 300 * MIB * 370 / 400);
         assert_eq!(b.grant(meshes), 10 * MIB + 100 * MIB * 370 / 400);
-        // Plenty: everything, cached included.
+        // Plenty (a 1,900 MiB pool): everything, cached included, and the 1,420 MiB nobody
+        // asked for split evenly.
         b.distribute(heap(4000 * MIB, 250 * MIB));
-        assert_eq!(b.grant(textures), 370 * MIB);
-        assert_eq!(b.grant(meshes), 110 * MIB);
+        assert_eq!(b.grant(textures), 370 * MIB + 710 * MIB);
+        assert_eq!(b.grant(meshes), 110 * MIB + 710 * MIB);
     }
 
     #[test]

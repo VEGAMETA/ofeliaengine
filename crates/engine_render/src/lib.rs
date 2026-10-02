@@ -30,6 +30,8 @@
 //! - [`upload`]: per-frame GPU data (camera, lights, draw lists) in a ring per frame slot.
 //! - [`post`]: post-processing (tonemapping from the HDR target).
 //! - [`png`]: a small PNG encoder for screenshots and golden-image tests.
+//! - [`streaming`]: texture streaming: levels resident by GPU feedback within the GPU
+//!   memory budget (ADR 0076).
 //! - [`texture`]: textures that live across frames, uploaded through the ring.
 //! - [`viewport`]: viewports: render targets with their own size, update rate and
 //!   placement; nesting, split screen, pixel-perfect scaling (ADR 0016).
@@ -56,6 +58,7 @@ pub mod postfx;
 pub mod reflections;
 pub mod shadow;
 pub mod skinning;
+pub mod streaming;
 pub mod subsurface;
 pub mod texture;
 pub mod texture_pool;
