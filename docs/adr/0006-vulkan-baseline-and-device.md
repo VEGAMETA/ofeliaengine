@@ -108,3 +108,43 @@ the floor and 1.4 used opportunistically.
 - Missing ash definitions for new extensions are added locally in `engine_rhi` when used.
 - The memory allocator (gpu-allocator or our own) is decided in the ADR that introduces
   buffers and textures. The offscreen test allocates dedicated memory directly.
+
+## Addendum (2026-10-02): where instances are created, and how long Vulkan's DLLs live
+
+Test processes died with access violations (the golden tests in about one run in eight).
+The validation layer of the Vulkan SDK 1.4.350 links mimalloc 3.3.2, which frees its main
+thread's heap when the thread that loaded the layer exits and then hands that dead heap to
+any new thread whose TEB lands at the same address (`docs/research/vulkan-layer-thread-lifetime.md`).
+Tests create every instance on a thread that exits. Options:
+
+1. **Create instances on one thread that lives as long as the process** (chosen): any
+   library the loader loads for an instance is initialized on a thread that never exits.
+   Costs one channel hand-off per instance creation (measured below), nothing per frame.
+2. Create the first instance on the process's main thread: a library cannot reach it, and
+   test harnesses never run tests there.
+3. Serialize tests or run each in a process: hides the bug for tests only; an editor or
+   tool that creates a device from a worker thread would still crash.
+4. Disable validation in multi-threaded tests: loses the check the tests exist for.
+
+Also decided: `vulkan-1.dll` is loaded once per process (`ash::Entry` in a static), and the
+modules that appear while an instance is created (layers, drivers) are pinned, like
+Streamline's DLLs (ADR 0063), instead of being unloaded with the process's last instance
+and loaded again with the next.
+
+Measured on ref-1 (RTX 4060 Ti, dev profile, implicit layers of the machine enabled), median
+of 40 `Instance::new` calls one after another, two runs each:
+
+| | without validation | with validation |
+|---|---|---|
+| on the calling thread, nothing pinned (before) | 23.9 / 23.7 ms | 25.5 / 23.7 ms |
+| on the calling thread, pinned | 18.9 / 18.9 ms | 19.8 / 19.8 ms |
+| on the loader thread, pinned (now) | 18.5 / 19.7 ms | 20.0 / 19.9 ms |
+
+The hand-off is within the noise; pinning saves 4–6 ms per instance after the first,
+because the layers and the driver are not loaded and initialized again. The golden test
+binary with parallel threads: 19 of 180 runs crashed before, 0 of 100 after (with 8 busy
+CPU threads), plus the clean runs in the research note.
+
+Consequences: `Instance::new`/`with_extensions` run on the `vulkan-loader` thread; nothing
+about an `Instance` is tied to that thread afterwards. Layers and drivers stay loaded until
+the process exits; a process cannot unload a driver by dropping its instances.
