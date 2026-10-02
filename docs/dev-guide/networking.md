@@ -173,3 +173,151 @@ direction or one player.
 - No allocation per network step.
 
 See `docs/perf/history.md` and ADR 0070 for the full measurements.
+
+## 7. Making a game co-op: replication, prediction, lag compensation
+
+`engine_net` ([ADR 0074](../adr/0074-replication-prediction-lag-compensation.md)) turns
+an ECS game into a networked one. The server is authoritative and runs at a fixed tick;
+clients predict their own player with **the same systems** and see everything else
+slightly in the past, smoothly. A complete example is `crates/engine_net/examples/coop`
+(two players, Jolt characters, a button that opens a door, a lag-compensated gun);
+`cargo run -p engine_net --release --example coop` runs it over UDP on this machine.
+
+### 7.1 Mark what travels
+
+State is plain-data components with reflection; the attributes say how precise:
+
+```rust
+#[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
+#[repr(C)]
+struct Player {
+    #[reflect(net_quantum = 0.001)] pos: Vec3,   // millimetres
+    #[reflect(net_quantum = 0.001)] vel: Vec3,
+    #[reflect(net_quantum = 0.0001)] yaw: f32,
+    grounded: u8, cooldown: u8, health: u8, _pad: u8, // exact
+}
+reflect_component!(pod Player);
+
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct DoorOpened { tick: u32 }                  // a one-shot event
+
+fn schema() -> NetSchema {                       // the same on host and clients
+    NetSchema::new(MY_PROTOCOL)
+        .replicate::<Player>()
+        .replicate::<Door>()
+        .event::<DoorOpened>()
+}
+```
+
+- `net_quantum = q`: the float travels as a whole number of `q` (small changes cost a few
+  bits). Without it a float is sent exactly (32 bits).
+- `Quat` fields go as "smallest three" at 15 bits per component.
+- `net_skip` (or `skip`): stays local.
+- Engine types you cannot annotate: `replicate_with::<Transform>(FieldHints::new()
+  .quantum("translation", 0.001).skip("scale"))`.
+- **Events are for things that happen once** (a door opened, a hit for effects), never for
+  state: state is replicated, and a late joiner gets it.
+- **Player actions are input**, not events: put them in the input type with a `SubTick`
+  for when they happened inside the tick.
+
+### 7.2 The input and the shared systems
+
+```rust
+#[derive(Clone, Copy, Default, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct PlayerInput { move_x: f32, move_z: f32, yaw: f32, jump: u8, fire: u8, _pad: [u8; 2] }
+
+fn simulate(world: &mut World, players: &mut QueryState<(&NetInput<PlayerInput>, &mut Player)>, dt: f32) {
+    players.for_each(world, |(input, p)| { /* move p from input.input */ });
+}
+```
+
+`NetInput<I>` exists on every player's pawn on the server and only on its own pawn on a
+client, so this system runs for exactly the entities each side simulates. **Rule for
+exact prediction:** the system reads its state only from replicated components (and
+resets anything derived from them, e.g. `set_character_transform` from `Player.pos`
+before `move_character`). The engine rounds values to their quanta on both sides, so the
+client's prediction then matches the server bit for bit and nothing is re-simulated.
+
+### 7.3 The host (listen server)
+
+```rust
+let mut server = Server::<PlayerInput, _>::new(endpoint, schema(), ServerSettings::default(), &mut world);
+let door = world.spawn((Replicated::new(), Door::default()));
+let me = world.spawn((Replicated::new(), Player::default(), Transform::IDENTITY, HitCapsule::upright(1.8, 0.3)));
+
+// every tick:
+server.update(&mut world, now);                       // guests' inputs land in their pawns
+while let Some(e) = server.poll_event() {
+    if let ServerEvent::ClientConnected(id) = e {
+        let pawn = world.spawn((Replicated::new(), Player::default(), Transform::IDENTITY, HitCapsule::upright(1.8, 0.3)));
+        server.set_owner(&mut world, pawn, Some(id)); // this guest predicts it
+    }
+}
+server.set_local_input(&mut world, me, my_input);     // the host plays directly
+simulate(&mut world, &mut players, server.dt());
+rules(&mut world, &mut server);                       // server-only: doors, damage
+server.send(&mut world, now);                         // snapshots out
+```
+
+Despawning a `Replicated` entity removes it on every client. A dedicated server is the
+same without `set_local_input`.
+
+### 7.4 A guest
+
+```rust
+let mut client = Client::<PlayerInput, _>::new(endpoint, schema(), ClientSettings::default(), &mut world);
+// every rendered frame, with the input sampled for it:
+client.frame(&mut world, now, input, |w, dt| simulate(w, &mut players, dt));
+while let Some(e) = client.poll_event() {
+    match e {
+        ClientEvent::Spawned { entity, predicted, .. } => { /* add a mesh, a Jolt character */ }
+        ClientEvent::Despawned { entity, .. } => { /* free what you attached */ }
+        _ => {}
+    }
+}
+client.read_events::<DoorOpened>(|tick, _| play_sound());
+```
+
+`frame` receives, corrects mispredictions (re-running your `simulate`), predicts the due
+ticks, sends inputs and writes remote entities' components interpolated. After it, draw:
+your own pawn is current, the others are ~2–3 ticks in the past and smooth.
+`client.correction::<Player>(pawn)` gives the before/after of a correction if you want to
+blend it out visually.
+
+### 7.5 Hits on what the shooter saw
+
+The server records every entity with a `HitCapsule` and a `Transform` each tick. A shot
+from input is checked at the instant the player saw:
+
+```rust
+let time = input.header.view_time(SubTick(fire_subtick));     // ticks, fractional
+if let Some(hit) = server.lag().raycast(eye, dir, wall_distance, time, Some(shooter)) { /* damage hit.entity */ }
+```
+
+Walls do not move: test them in the live physics world and pass the distance as `max`.
+History is one second (`ServerSettings::max_rewind`).
+
+### 7.6 Tuning and diagnostics
+
+- `ServerSettings`: tick rate (64), `max_snapshot_bytes` per client per tick (1,100: one
+  packet), owner priority, rewind. The transport's `send_rate` caps bytes per second.
+- `NetRelevance { radius, priority }` on an entity plus `server.set_view(client, pos)`:
+  far entities are not sent (and are removed on that client).
+- `ServerStats` (bytes, records, losses, missing inputs, input lead) and `ClientStats`
+  (mispredictions, re-simulated ticks, interpolation delay, extrapolations) belong in a
+  debug overlay. Mispredictions in steady walking mean your systems read state that is
+  not replicated.
+- Test under bad conditions with `MemoryNetwork` (§5); `crates/engine_net/tests` shows a
+  whole harness on a virtual clock.
+
+### 7.7 Numbers (ref-1, release)
+
+- Bits per moving entity per tick: ~40 (positions in mm, rotation, velocity), against 352
+  raw.
+- Server: 100 moving entities and 8 clients ~50 µs per tick; 1,000 and 32 clients
+  0.93 ms (0.34 ms with packing in parallel, `send_with`).
+- Client: own pawn 1.5 µs per frame, a rollback adds ~0.12 µs per re-simulated tick plus
+  your systems; 1,000 interpolated entities ~65 µs.
+- No allocation per tick on either side.
