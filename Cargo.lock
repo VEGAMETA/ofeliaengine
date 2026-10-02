@@ -360,6 +360,7 @@ dependencies = [
  "engine_render",
  "engine_rhi",
  "engine_runtime",
+ "engine_streaming",
  "png",
 ]
 
