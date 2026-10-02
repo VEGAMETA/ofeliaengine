@@ -68,6 +68,7 @@ Decisions change only via an ADR backed by measurements.
   engine_audio_vst3      VST3 host (scanning, isolation, PDC, state)
   engine_ecs             ECS / scene model
   engine_assets          import, cook, DDC (derived data cache), streaming
+  engine_streaming       a cooked scene streamed within the GPU memory budget (ADR 0076)
   engine_script          Luau: VM, bindings, .d.luau generation, hot reload, DAP debugger
   engine_anim            skeletal animation, blending, IK
   engine_nav             navigation
@@ -595,7 +596,7 @@ makes a game developer's day easier. In this order:
 
 1. ✔ Transparency (ADR 0054).
 2. ✔ Shader and pipeline cache and warm-up (ADR 0055).
-3. ✔ Assets and streaming (ADRs 0056, 0057; texture streaming step 2 pending).
+3. ✔ Assets and streaming (ADRs 0056, 0057; step 2 with the GPU memory budget: ADR 0076).
 4. ✔ Ambient occlusion (GTAO, ADR 0058) and subsurface scattering (ADR 0059).
 5. ✔ FSR 3.1 (ADR 0060) and DLSS (Streamline, ADR 0063); XeSS later.
 6. Review what else the core lacks: done 2026-10-01 (a core audit); its queue, in order:
@@ -605,8 +606,8 @@ makes a game developer's day easier. In this order:
      skeletal animation and skinning (ADR 0068); atmosphere and fog (ADR 0069);
    - networking (§13): ✔ transport and NAT traversal (ADR 0070); ✔ replication, prediction,
      lag compensation (ADR 0074);
-   - next: GPU memory budget and texture streaming
-     step 2, local-light and contact shadows, local reflections, GPU particles, clustered
+   - ✔ GPU memory budget, texture streaming by feedback, mesh level streaming (ADR 0076);
+   - next: local-light and contact shadows, local reflections, GPU particles, clustered
      decals, GI, visibility buffer/meshlets, virtual shadow maps, remaining post effects
      (motion blur only on cinematic views, ADR 0067).
 7. Only then: editor tools, Luau bindings and debugger, other tooling.
