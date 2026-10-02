@@ -139,3 +139,73 @@ sponza_streamed	texture feedback	150.0
 sponza_streamed	texture feedback clear	0.4
 sponza_streamed	texture feedback readback	0.6
 sponza_streamed	tonemap	753.6
+sponza_fsr1_67	(frame total)	15384.4
+sponza_fsr1_67	(gpu frame)	15410.6
+sponza_fsr1_67	bloom downsample	647.0
+sponza_fsr1_67	bloom upsample	477.0
+sponza_fsr1_67	cull	3.4
+sponza_fsr1_67	cull setup	0.8
+sponza_fsr1_67	easu	4075.5
+sponza_fsr1_67	forward	6324.8
+sponza_fsr1_67	rcas	801.0
+sponza_fsr1_67	shadow	2284.2
+sponza_fsr1_67	shadow cull	4.2
+sponza_fsr1_67	sky	13.6
+sponza_fsr1_67	tonemap	752.4
+sponza_fxaa	(frame total)	18323.9
+sponza_fxaa	(gpu frame)	18354.9
+sponza_fxaa	bloom downsample	636.4
+sponza_fxaa	bloom upsample	477.9
+sponza_fxaa	cull	3.4
+sponza_fxaa	cull setup	0.8
+sponza_fxaa	forward	12194.7
+sponza_fxaa	fxaa	1846.3
+sponza_fxaa	shadow	2284.8
+sponza_fxaa	shadow cull	4.1
+sponza_fxaa	sky	32.7
+sponza_fxaa	tonemap	841.1
+sponza_msaa4	(frame total)	18133.0
+sponza_msaa4	(gpu frame)	18279.6
+sponza_msaa4	bloom downsample	656.8
+sponza_msaa4	bloom upsample	478.9
+sponza_msaa4	cull	3.4
+sponza_msaa4	cull setup	0.8
+sponza_msaa4	depth prepass	2656.8
+sponza_msaa4	forward	10419.7
+sponza_msaa4	msaa resolve	826.1
+sponza_msaa4	shadow	2295.8
+sponza_msaa4	shadow cull	4.2
+sponza_msaa4	sky	33.1
+sponza_msaa4	tonemap	755.4
+sponza_smaa	(frame total)	19468.7
+sponza_smaa	(gpu frame)	19498.7
+sponza_smaa	bloom downsample	637.0
+sponza_smaa	bloom upsample	478.9
+sponza_smaa	cull	3.4
+sponza_smaa	cull setup	0.8
+sponza_smaa	forward	12194.5
+sponza_smaa	shadow	2285.3
+sponza_smaa	shadow cull	4.2
+sponza_smaa	sky	32.7
+sponza_smaa	smaa blend	672.2
+sponza_smaa	smaa edges	639.7
+sponza_smaa	smaa weights	1679.7
+sponza_smaa	tonemap	838.9
+sponza_smaa_t2x	(frame total)	22620.0
+sponza_smaa_t2x	(gpu frame)	22626.7
+sponza_smaa_t2x	bloom downsample	637.0
+sponza_smaa_t2x	bloom upsample	475.8
+sponza_smaa_t2x	cull	3.5
+sponza_smaa_t2x	cull setup	0.8
+sponza_smaa_t2x	forward	14337.4
+sponza_smaa_t2x	motion background	32.3
+sponza_smaa_t2x	remember instances	31.6
+sponza_smaa_t2x	shadow	2281.8
+sponza_smaa_t2x	shadow cull	4.3
+sponza_smaa_t2x	sky	32.6
+sponza_smaa_t2x	smaa blend	775.9
+sponza_smaa_t2x	smaa edges	639.7
+sponza_smaa_t2x	smaa history	224.5
+sponza_smaa_t2x	smaa resolve	618.1
+sponza_smaa_t2x	smaa weights	1683.9
+sponza_smaa_t2x	tonemap	840.2

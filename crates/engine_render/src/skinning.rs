@@ -323,6 +323,11 @@ pub struct Skinning {
     skin4: ComputeShader<SkinPush>,
     skin8: ComputeShader<SkinPush>,
     motion: Pipeline,
+    /// The motion pass into multisampled targets (MSAA, ADR 0075) of 2, 4, 8 samples, made
+    /// by [`Self::set_motion_samples`].
+    motion_ms: [Option<Box<Pipeline>>; 3],
+    /// The depth format the motion pass tests against.
+    depth_format: vk::Format,
     skins: Vec<Skin>,
     free_skins: Vec<u32>,
     instances: Vec<Skinned>,
@@ -406,7 +411,77 @@ fn reserve(ranges: &mut RangeAllocator, size: u64) -> Option<Range> {
     ranges.allocate(size.max(1), 1)
 }
 
+/// The skinned motion pass's pipeline for depth targets of `depth_format` with `samples`.
+fn motion_pipeline(
+    device: &Device,
+    bindless: &Bindless,
+    depth_format: vk::Format,
+    samples: vk::SampleCountFlags,
+) -> Result<Pipeline, RhiError> {
+    let invalid = || RhiError::ShaderInterface("skinned motion: not SPIR-V".into());
+    let vertex = spirv_words(MOTION_VERTEX).ok_or_else(invalid)?;
+    let fragment = spirv_words(MOTION_FRAGMENT).ok_or_else(invalid)?;
+    let formats = [crate::forward::MOTION_FORMAT];
+    let desc = GraphicsPipelineDesc {
+        color_formats: &formats,
+        depth_format,
+        cull_mode: vk::CullModeFlags::NONE,
+        depth_write: false,
+        depth_compare: vk::CompareOp::EQUAL,
+        samples,
+        ..GraphicsPipelineDesc::new(
+            ShaderStageDesc {
+                spirv: &vertex,
+                entry: c"skinnedMotionVertex",
+            },
+            Some(ShaderStageDesc {
+                spirv: &fragment,
+                entry: c"skinnedMotionFragment",
+            }),
+        )
+    };
+    Pipeline::create_many(
+        device,
+        bindless.pipeline_layout(),
+        &[PipelineDesc::Graphics(desc)],
+    )?
+    .pop()
+    .ok_or_else(invalid)
+}
+
+/// The slot of a sample count in `Skinning::motion_ms`.
+fn ms_slot(samples: vk::SampleCountFlags) -> Option<usize> {
+    match samples {
+        vk::SampleCountFlags::TYPE_2 => Some(0),
+        vk::SampleCountFlags::TYPE_4 => Some(1),
+        vk::SampleCountFlags::TYPE_8 => Some(2),
+        _ => None,
+    }
+}
+
 impl Skinning {
+    /// Makes the motion pass's pipeline for multisampled views of `samples` (MSAA, ADR
+    /// 0075; the frame renderer calls it when a view with skinned meshes turns MSAA on).
+    /// One sample makes nothing.
+    pub fn set_motion_samples(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        samples: vk::SampleCountFlags,
+    ) -> Result<(), RhiError> {
+        if let Some(k) = ms_slot(samples)
+            && self.motion_ms[k].is_none()
+        {
+            self.motion_ms[k] = Some(Box::new(motion_pipeline(
+                device,
+                bindless,
+                self.depth_format,
+                samples,
+            )?));
+        }
+        Ok(())
+    }
+
     /// The skinning shaders and the motion pass's pipeline (for depth targets of
     /// `depth_format`), with room for `capacity_vertices` source and instance vertices to
     /// start (both grow).
@@ -418,39 +493,14 @@ impl Skinning {
         capacity_vertices: u32,
         frames_in_flight: usize,
     ) -> Result<Self, RhiError> {
-        let invalid = || RhiError::ShaderInterface("skinned motion: not SPIR-V".into());
-        let vertex = spirv_words(MOTION_VERTEX).ok_or_else(invalid)?;
-        let fragment = spirv_words(MOTION_FRAGMENT).ok_or_else(invalid)?;
-        let formats = [crate::forward::MOTION_FORMAT];
-        let desc = GraphicsPipelineDesc {
-            color_formats: &formats,
-            depth_format,
-            cull_mode: vk::CullModeFlags::NONE,
-            depth_write: false,
-            depth_compare: vk::CompareOp::EQUAL,
-            ..GraphicsPipelineDesc::new(
-                ShaderStageDesc {
-                    spirv: &vertex,
-                    entry: c"skinnedMotionVertex",
-                },
-                Some(ShaderStageDesc {
-                    spirv: &fragment,
-                    entry: c"skinnedMotionFragment",
-                }),
-            )
-        };
-        let motion = Pipeline::create_many(
-            device,
-            bindless.pipeline_layout(),
-            &[PipelineDesc::Graphics(desc)],
-        )?
-        .pop()
-        .ok_or_else(invalid)?;
+        let motion = motion_pipeline(device, bindless, depth_format, vk::SampleCountFlags::TYPE_1)?;
         let vertices = u64::from(capacity_vertices.max(64));
         Ok(Self {
             skin4: ComputeShader::new(device, bindless, SKIN4, c"skin4")?,
             skin8: ComputeShader::new(device, bindless, SKIN8, c"skin8")?,
             motion,
+            motion_ms: [None, None, None],
+            depth_format,
             skins: Vec::new(),
             free_skins: Vec::new(),
             instances: Vec::new(),
@@ -1119,7 +1169,13 @@ impl<'g> SkinningFrame<'g> {
         };
         let geometry = *geometry;
         let draws = &skinning.motion_draws;
-        let pipeline = &skinning.motion;
+        let pipeline = match ms_slot(desc.samples) {
+            Some(k) => skinning.motion_ms[k].as_deref().ok_or(RhiError::Vulkan {
+                call: "skinned motion: no pipeline for this sample count (set_motion_samples)",
+                result: vk::Result::ERROR_INITIALIZATION_FAILED,
+            })?,
+            None => &skinning.motion,
+        };
         fg.add_pass("skinned motion")
             .color(motion.velocity, LoadOp::Load, StoreOp::Store)
             .depth_read_only(depth)

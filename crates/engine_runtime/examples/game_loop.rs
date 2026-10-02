@@ -128,7 +128,7 @@ mod windowed {
         let mut allocator = Allocator::new(&device);
         let bindless = Bindless::new(&device).unwrap();
         let depth_format = vk::Format::D32_SFLOAT;
-        let frame_renderer = FrameRenderer::new(
+        let mut frame_renderer = FrameRenderer::new(
             &device,
             &bindless,
             swapchain.format(),
@@ -140,7 +140,7 @@ mod windowed {
         // The device class's measured defaults (ADR 0072), unless the command line says.
         let defaults = RenderDefaults::for_device(&device);
         let antialiasing = match option("--aa") {
-            Some("off") => Antialiasing::Off,
+            Some("off") => Antialiasing::OFF,
             Some("taau") => Antialiasing::TAAU,
             Some("fsr") => Antialiasing::FSR,
             _ => defaults.antialiasing,
@@ -341,6 +341,7 @@ mod windowed {
                         bindless: &bindless,
                         materials: &mut materials,
                         frame_number: frame.number,
+                        skinning: None,
                     },
                 )
                 .unwrap();
@@ -473,7 +474,7 @@ mod windowed {
         println!("| scene upload (CPU) | {:.1} |", median(&mut upload));
         println!(
             "| frame renderer: prepare + add_view (CPU, {}) | {:.1} |",
-            antialiasing.name(),
+            antialiasing,
             median(&mut composer)
         );
         println!("| record + submit + present | {:.1} |", median(&mut record));
@@ -486,6 +487,7 @@ mod windowed {
 
         // SAFETY: the device is idle.
         unsafe {
+            frame_renderer.destroy(&device, &mut allocator, &bindless);
             view.destroy(&mut allocator, &bindless);
             scene.destroy(&mut allocator);
             graph.destroy(&mut allocator, Some(&bindless));

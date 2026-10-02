@@ -181,6 +181,33 @@ struct AttachmentRecord {
     read_only: bool,
     load: LoadOp,
     store: StoreOp,
+    /// The single-sampled texture it is resolved into at the end of the pass, and how.
+    resolve: Option<(u32, vk::ResolveModeFlags)>,
+}
+
+/// How a multisampled attachment is resolved into a single-sampled one at the end of its
+/// pass ([`PassBuilder::resolve`]; ADR 0075).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolveMode {
+    /// The samples' average (color attachments of float and normalized formats).
+    Average,
+    /// Sample 0 (any format; depth always supports it).
+    SampleZero,
+    /// The smallest sample (depth: the nearest surface), where the device supports it.
+    Min,
+    /// The largest sample (depth: the farthest), where the device supports it.
+    Max,
+}
+
+impl ResolveMode {
+    fn flags(self) -> vk::ResolveModeFlags {
+        match self {
+            Self::Average => vk::ResolveModeFlags::AVERAGE,
+            Self::SampleZero => vk::ResolveModeFlags::SAMPLE_ZERO,
+            Self::Min => vk::ResolveModeFlags::MIN,
+            Self::Max => vk::ResolveModeFlags::MAX,
+        }
+    }
 }
 
 /// Counts from the last executed frame.
@@ -1103,6 +1130,7 @@ impl<'g> PassBuilder<'_, 'g> {
             read_only,
             load,
             store,
+            resolve: None,
         });
         if let Some(pass) = graph.records.passes.last_mut() {
             pass.attachments.end = graph.attachments.len() as u32;
@@ -1133,6 +1161,22 @@ impl<'g> PassBuilder<'_, 'g> {
     pub fn depth_read_only(mut self, texture: Texture) -> Self {
         self.access(texture.0, AccessInfo::depth_attachment(true, false));
         self.attachment(texture, true, true, LoadOp::Load, StoreOp::Store);
+        self
+    }
+
+    /// Resolves the attachment declared last (multisampled) into `target` (single-sampled,
+    /// the same size and format) at the end of the pass, with `mode` (ADR 0075). The
+    /// device must support the mode for the format (`Adapter::depth_resolve_modes` for
+    /// depth).
+    pub fn resolve(mut self, target: Texture, mode: ResolveMode) -> Self {
+        let graph = &mut *self.frame.graph;
+        let Some(source) = graph.attachments.last_mut() else {
+            return self;
+        };
+        source.resolve = Some((target.0, mode.flags()));
+        let (resource, depth) = (source.resource, source.depth);
+        self.access(resource, AccessInfo::resolve_source());
+        self.access(target.0, AccessInfo::resolve_target(depth));
         self
     }
 
@@ -1557,7 +1601,7 @@ fn begin_rendering(
                 color: vk::ClearColorValue { float32: clear },
             }
         };
-        let info = vk::RenderingAttachmentInfo::default()
+        let mut info = vk::RenderingAttachmentInfo::default()
             .image_view(physical[a.resource as usize].view)
             .image_layout(if a.read_only {
                 vk::ImageLayout::READ_ONLY_OPTIMAL
@@ -1567,6 +1611,12 @@ fn begin_rendering(
             .load_op(load)
             .store_op(store)
             .clear_value(clear_value);
+        if let Some((target, mode)) = a.resolve {
+            info = info
+                .resolve_mode(mode)
+                .resolve_image_view(physical[target as usize].view)
+                .resolve_image_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL);
+        }
         if a.depth {
             depth = Some(info);
         } else {

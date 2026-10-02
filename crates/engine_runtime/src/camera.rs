@@ -5,7 +5,10 @@ use engine_core::math::Quat;
 use engine_ecs::{
     Entity, GlobalTransform, Parent, QueryState, Transform, World, bytemuck, pod_component,
 };
-use engine_frame::{Antialiasing, Exposure, Quality, UpscalerKind, ViewCamera, ViewSettings};
+use engine_frame::{
+    Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, SmaaQuality, Upscale, UpscalerKind,
+    ViewCamera, ViewSettings,
+};
 use engine_render::postfx::ExposureSettings;
 
 /// A camera that renders: its projection, exposure and antialiasing. Put it on an entity
@@ -29,8 +32,10 @@ pub struct Camera {
     pub exposure: f32,
     /// Nonzero: the exposure adapts to the image (ADR 0047).
     pub auto_exposure: u32,
-    /// [`Antialiasing`] as stored: 0 off, 1 TAAU, 2 FSR 3.1, 3 DLSS
-    /// ([`Self::antialiasing`]).
+    /// [`Antialiasing`] as stored ([`Self::antialiasing`]): bits 0-3 the upscale (0
+    /// bilinear, 1 TAAU, 2 FSR 3.1, 3 DLSS, 4 nearest, 5 integer, 6 FSR 1, 7 SMAA T2x),
+    /// bits 4-5 log2 of the samples, bits 8-10 the post filter (0 off, 1 FXAA, 2 MLAA,
+    /// 3-6 SMAA low to ultra). 0 is off, 1 TAAU.
     pub antialiasing: u32,
     /// [`Quality`] as stored: its index in [`Quality::ALL`] ([`Self::quality`]).
     pub quality: u32,
@@ -74,14 +79,9 @@ impl Camera {
         self
     }
 
-    /// The antialiasing (unknown values read as TAAU).
+    /// The antialiasing (an unknown upscale reads as TAAU, unknown parts as off).
     pub fn antialiasing(&self) -> Antialiasing {
-        match self.antialiasing {
-            0 => Antialiasing::Off,
-            2 => Antialiasing::FSR,
-            3 => Antialiasing::DLSS,
-            _ => Antialiasing::TAAU,
-        }
+        decode_antialiasing(self.antialiasing)
     }
 
     /// The render size relative to the output.
@@ -108,12 +108,51 @@ impl Camera {
     }
 }
 
+const UPSCALES: [Upscale; 8] = [
+    Upscale::Bilinear,
+    Upscale::Temporal(UpscalerKind::Taau),
+    Upscale::Temporal(UpscalerKind::Fsr),
+    Upscale::Temporal(UpscalerKind::Dlss),
+    Upscale::Nearest,
+    Upscale::Integer,
+    Upscale::Fsr1,
+    Upscale::SmaaT2x,
+];
+
+const POSTS: [PostAntialiasing; 7] = [
+    PostAntialiasing::Off,
+    PostAntialiasing::Fxaa,
+    PostAntialiasing::Mlaa,
+    PostAntialiasing::Smaa(SmaaQuality::Low),
+    PostAntialiasing::Smaa(SmaaQuality::Medium),
+    PostAntialiasing::Smaa(SmaaQuality::High),
+    PostAntialiasing::Smaa(SmaaQuality::Ultra),
+];
+
 fn encode_antialiasing(antialiasing: Antialiasing) -> u32 {
-    match antialiasing {
-        Antialiasing::Off => 0,
-        Antialiasing::Temporal(UpscalerKind::Taau) => 1,
-        Antialiasing::Temporal(UpscalerKind::Fsr) => 2,
-        Antialiasing::Temporal(UpscalerKind::Dlss) => 3,
+    let upscale = UPSCALES
+        .iter()
+        .position(|&u| u == antialiasing.upscale)
+        .unwrap_or(1) as u32;
+    let samples = antialiasing.samples.count().trailing_zeros();
+    let post = POSTS
+        .iter()
+        .position(|&p| p == antialiasing.post)
+        .unwrap_or(0) as u32;
+    upscale | samples << 4 | post << 8
+}
+
+fn decode_antialiasing(bits: u32) -> Antialiasing {
+    Antialiasing {
+        samples: Msaa::ALL[((bits >> 4) & 3) as usize],
+        upscale: UPSCALES
+            .get((bits & 15) as usize)
+            .copied()
+            .unwrap_or(Upscale::Temporal(UpscalerKind::Taau)),
+        post: POSTS
+            .get(((bits >> 8) & 7) as usize)
+            .copied()
+            .unwrap_or_default(),
     }
 }
 

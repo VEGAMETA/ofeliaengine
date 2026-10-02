@@ -1,6 +1,10 @@
 //! The frame renderer: one view's frame, declared into the render graph in order.
 
-use crate::settings::{Antialiasing, Exposure, ViewSettings};
+use crate::antialiasing::{
+    Antialiasing, AntialiasingSupport, InvalidAntialiasing, Msaa, PostAntialiasing, SmaaQuality,
+    Upscale,
+};
+use crate::settings::{Exposure, ViewSettings};
 use crate::view::{HistoryImage, Prepared, Retired, View};
 use core::fmt;
 use engine_core::math::{Mat4, Quat, Vec3, vulkan_perspective};
@@ -9,6 +13,7 @@ use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer, ForwardView, LocalLight,
     MotionOutput, Occlusion, ShadowSettings, Temporal,
 };
+use engine_render::fsr1::{Fsr1, Fsr1Exposure};
 use engine_render::gpu_scene::SceneFrame;
 use engine_render::graph::{
     Access, Buffer, FrameGraph, ImportedTexture, LoadOp, ShaderStages, Texture, TextureDesc,
@@ -16,9 +21,15 @@ use engine_render::graph::{
 };
 use engine_render::material::{MaterialFrame, MaterialTable};
 use engine_render::mesh::GeometryFrame;
-use engine_render::post::{Composite, HDR_FORMAT, Tonemap};
+use engine_render::msaa::{MsaaInput, MsaaResolve};
+use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, Tonemap};
+use engine_render::postaa::{
+    Decode, PERCEPTUAL_FORMAT, PostAa, PostFilter, PostTarget, SmaaInput, SmaaPreset, SmaaTemporal,
+    smaa_jitter,
+};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings};
 use engine_render::reflections::{ReflectionProbes, Reflections, ScreenSpaceReflections};
+use engine_render::skinning::Skinning;
 use engine_render::skinning::SkinningFrame;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -39,6 +50,9 @@ pub enum FrameError {
     RingFull,
     /// [`FrameRenderer::add_view`] before [`FrameRenderer::prepare`].
     NotPrepared,
+    /// The view's antialiasing cannot run (ADR 0075): an invalid combination, or one
+    /// this GPU does not support ([`FrameRenderer::check`]).
+    Antialiasing(InvalidAntialiasing),
 }
 
 impl fmt::Display for FrameError {
@@ -48,6 +62,7 @@ impl fmt::Display for FrameError {
             Self::Upscale(e) => write!(f, "{e}"),
             Self::RingFull => f.write_str("the upload ring is full"),
             Self::NotPrepared => f.write_str("the view was not prepared"),
+            Self::Antialiasing(e) => write!(f, "{e}"),
         }
     }
 }
@@ -57,6 +72,12 @@ impl std::error::Error for FrameError {}
 impl From<RhiError> for FrameError {
     fn from(e: RhiError) -> Self {
         Self::Rhi(e)
+    }
+}
+
+impl From<InvalidAntialiasing> for FrameError {
+    fn from(e: InvalidAntialiasing) -> Self {
+        Self::Antialiasing(e)
     }
 }
 
@@ -199,6 +220,9 @@ pub struct PrepareContext<'a> {
     pub materials: &'a mut MaterialTable,
     /// The number of the frame about to be declared.
     pub frame_number: u64,
+    /// The scene's skinning, when it has skinned meshes: with MSAA its motion pass needs
+    /// the sample count's pipeline (`Skinning::set_motion_samples`).
+    pub skinning: Option<&'a mut Skinning>,
 }
 
 impl fmt::Debug for PrepareContext<'_> {
@@ -261,6 +285,16 @@ pub struct FrameRenderer {
     bloom: Bloom,
     depth_format: vk::Format,
     frames_in_flight: u64,
+    /// Sample counts the scene's targets support, by [`Msaa`].
+    msaa_support: [bool; 4],
+    /// The resolve of multisampled scenes (ADR 0075), made per sample count.
+    msaa: Box<MsaaResolve>,
+    /// The filters after tone mapping (ADR 0075), made as views ask for them.
+    post: Box<PostAa>,
+    /// The tone mapper into their perceptual image, made with the first filter.
+    perceptual: Option<Box<Tonemap>>,
+    /// FSR 1 (ADR 0075), made with the first view that uses it.
+    fsr1: Option<Box<Fsr1>>,
     #[cfg(feature = "dlss")]
     streamline: Option<engine_dlss::Streamline>,
 }
@@ -348,6 +382,124 @@ fn scaled(output: (u32, u32), scale: f32) -> (u32, u32) {
     )
 }
 
+/// The filter after tone mapping of `post`.
+fn post_filter(post: PostAntialiasing) -> Option<PostFilter> {
+    match post {
+        PostAntialiasing::Off => None,
+        PostAntialiasing::Fxaa => Some(PostFilter::Fxaa),
+        PostAntialiasing::Mlaa => Some(PostFilter::Smaa(SmaaPreset::Mlaa)),
+        PostAntialiasing::Smaa(quality) => Some(PostFilter::Smaa(match quality {
+            SmaaQuality::Low => SmaaPreset::Low,
+            SmaaQuality::Medium => SmaaPreset::Medium,
+            SmaaQuality::High => SmaaPreset::High,
+            SmaaQuality::Ultra => SmaaPreset::Ultra,
+        })),
+    }
+}
+
+/// Whether step 4 brings the image to the output size (else the tone mapper scales it).
+fn resolves_to_output(upscale: Upscale) -> bool {
+    matches!(upscale, Upscale::Temporal(_) | Upscale::Fsr1)
+}
+
+/// The nominal render size (what `quality` gives: the LOD bias follows it), the render
+/// size this frame, and for integer scaling the factor and the scaled image's offset.
+#[allow(clippy::type_complexity)]
+fn render_sizes(
+    settings: &ViewSettings,
+    upscaler: Option<&dyn Upscaler>,
+    upscale: Upscale,
+    output: (u32, u32),
+) -> ((u32, u32), (u32, u32), Option<(u32, (u32, u32))>) {
+    let clamp = |(w, h): (u32, u32)| (w.clamp(1, output.0), h.clamp(1, output.1));
+    if upscale == Upscale::Integer {
+        let base = match settings.render_size {
+            Some(size) => clamp(size),
+            None => {
+                let factor = (settings
+                    .render_scale
+                    .map_or(settings.quality.ratio(), |s| 1.0 / s.clamp(0.05, 1.0)))
+                .round()
+                .max(1.0) as u32;
+                clamp((output.0 / factor, output.1 / factor))
+            }
+        };
+        let factor = (output.0 / base.0).min(output.1 / base.1).max(1);
+        let shown = (base.0 * factor, base.1 * factor);
+        let offset = (
+            (output.0.saturating_sub(shown.0)) / 2,
+            (output.1.saturating_sub(shown.1)) / 2,
+        );
+        return (base, base, Some((factor, offset)));
+    }
+    if let Some(size) = settings.render_size {
+        let size = clamp(size);
+        return (size, size, None);
+    }
+    let nominal = match upscaler {
+        Some(upscaler) => upscaler.render_size(settings.quality, output),
+        None => settings.quality.render_size(output),
+    };
+    let render = settings
+        .render_scale
+        .map_or(nominal, |scale| scaled(output, scale));
+    (nominal, render, None)
+}
+
+/// The sample counts the scene's targets support on `device`: the framebuffer limits and
+/// every format a multisampled view renders into.
+fn msaa_support(device: &Device, depth_format: vk::Format) -> [bool; 4] {
+    let limits = &device.adapter().limits;
+    let mut counts = limits.framebuffer_color_sample_counts
+        & limits.framebuffer_depth_sample_counts
+        & limits.framebuffer_no_attachments_sample_counts;
+    let formats = [
+        (HDR_FORMAT, vk::ImageUsageFlags::COLOR_ATTACHMENT),
+        (
+            engine_render::forward::MOTION_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
+        (
+            engine_render::forward::REACTIVE_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
+        (
+            engine_render::reflections::NORMAL_ROUGHNESS_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
+        (
+            engine_render::reflections::WEIGHT_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
+        (
+            engine_render::subsurface::IRRADIANCE_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
+        (
+            engine_render::subsurface::ALBEDO_FORMAT,
+            vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        ),
+        (depth_format, vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT),
+    ];
+    for (format, usage) in formats {
+        // SAFETY: a query on the device's own physical device.
+        let properties = unsafe {
+            device
+                .instance_raw()
+                .get_physical_device_image_format_properties(
+                    device.physical(),
+                    format,
+                    vk::ImageType::TYPE_2D,
+                    vk::ImageTiling::OPTIMAL,
+                    usage | vk::ImageUsageFlags::SAMPLED,
+                    vk::ImageCreateFlags::empty(),
+                )
+        };
+        counts &= properties.map_or(vk::SampleCountFlags::TYPE_1, |p| p.sample_counts);
+    }
+    core::array::from_fn(|k| k == 0 || counts.contains(Msaa::ALL[k].flags()))
+}
+
 impl FrameRenderer {
     /// Creates the scene passes' and the post chain's pipelines for writing
     /// `output_format` (the swapchain's, or a viewport's) with a `depth_format` depth
@@ -366,9 +518,80 @@ impl FrameRenderer {
             bloom: Bloom::new(device, bindless, BloomSettings::default())?,
             depth_format,
             frames_in_flight: frames_in_flight.max(1) as u64,
+            msaa_support: msaa_support(device, depth_format),
+            msaa: Box::new(MsaaResolve::new()),
+            post: Box::new(PostAa::new(output_format)),
+            perceptual: None,
+            fsr1: None,
             #[cfg(feature = "dlss")]
             streamline: None,
         })
+    }
+
+    /// What this GPU offers for antialiasing (ADR 0075): the sample counts the scene's
+    /// targets support and the temporal upscalers that run here. Spatial scalers and the
+    /// post filters run everywhere.
+    pub fn antialiasing_support(&self) -> AntialiasingSupport {
+        AntialiasingSupport {
+            msaa: self.msaa_support,
+            upscalers: [
+                self.available(UpscalerKind::Taau),
+                self.available(UpscalerKind::Fsr),
+                self.available(UpscalerKind::Dlss),
+            ],
+        }
+    }
+
+    /// Whether `settings`' antialiasing can run on this GPU at an `output` size: the
+    /// error [`Self::prepare`] would refuse it with. A temporal upscaler that is not
+    /// available here is not an error (the view falls back to TAAU); ask
+    /// [`Self::available`] to leave it out of a menu.
+    pub fn check(
+        &self,
+        settings: &ViewSettings,
+        output: (u32, u32),
+    ) -> Result<(), InvalidAntialiasing> {
+        self.check_antialiasing(settings.antialiasing, settings, output)
+    }
+
+    fn check_antialiasing(
+        &self,
+        antialiasing: Antialiasing,
+        settings: &ViewSettings,
+        output: (u32, u32),
+    ) -> Result<(), InvalidAntialiasing> {
+        let output = (output.0.max(1), output.1.max(1));
+        let (_, render, _) = render_sizes(settings, None, antialiasing.upscale, output);
+        antialiasing.validate(render == output)?;
+        if !self
+            .antialiasing_support()
+            .supports_samples(antialiasing.samples)
+        {
+            return Err(InvalidAntialiasing::SamplesUnsupported(
+                antialiasing.samples,
+            ));
+        }
+        Ok(())
+    }
+
+    /// Frees what the renderer keeps in device memory: the scene passes' local shadow
+    /// atlases (ADR 0071) and SMAA's tables (ADR 0075). Views are freed apart
+    /// ([`View::destroy`]).
+    ///
+    /// # Safety
+    ///
+    /// The GPU no longer uses them (the device is idle).
+    pub unsafe fn destroy(
+        &mut self,
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+    ) {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            self.forward.destroy(device, allocator, bindless);
+            self.post.destroy(device, allocator, bindless);
+        }
     }
 
     /// The scene passes (ambient occlusion, subsurface scattering, the depth prepass,
@@ -443,7 +666,7 @@ impl FrameRenderer {
     ///
     /// When a resource cannot be created; the view keeps its previous state.
     pub fn prepare(
-        &self,
+        &mut self,
         view: &mut View,
         settings: &ViewSettings,
         output: (u32, u32),
@@ -456,6 +679,7 @@ impl FrameRenderer {
             bindless,
             materials,
             frame_number,
+            skinning,
         } = ctx;
         let completed = frame_number.saturating_sub(self.frames_in_flight);
         if !view.retired.is_empty() {
@@ -463,16 +687,21 @@ impl FrameRenderer {
         }
         let output = (output.0.max(1), output.1.max(1));
         let previous = view.prepared;
-        let mut antialiasing = match settings.antialiasing {
-            Antialiasing::Temporal(kind) if !self.available(kind) => Antialiasing::TAAU,
-            other => other,
+        // What was asked must be valid (as `check` says), whatever it falls back to.
+        self.check_antialiasing(settings.antialiasing, settings, output)?;
+        let mut antialiasing = match settings.antialiasing.upscale {
+            Upscale::Temporal(kind) if !self.available(kind) => Antialiasing {
+                upscale: Upscale::Temporal(UpscalerKind::Taau),
+                ..settings.antialiasing
+            },
+            _ => settings.antialiasing,
         };
-        if previous.is_none_or(|p| p.antialiasing != antialiasing) {
+        if previous.is_none_or(|p| p.antialiasing.upscale != antialiasing.upscale) {
             let upscaler = match antialiasing.upscaler() {
                 Some(kind) => match self.create_upscaler(kind, device, bindless)? {
                     Some(upscaler) => Some(upscaler),
                     None => {
-                        antialiasing = Antialiasing::TAAU;
+                        antialiasing.upscale = Upscale::Temporal(UpscalerKind::Taau);
                         self.create_upscaler(UpscalerKind::Taau, device, bindless)?
                     }
                 },
@@ -521,22 +750,76 @@ impl FrameRenderer {
             }
         }
 
-        let nominal_render = match &view.upscaler {
-            Some(upscaler) => upscaler.render_size(settings.quality, output),
-            None => settings.quality.render_size(output),
+        let (nominal_render, render, integer) = render_sizes(
+            settings,
+            view.upscaler.as_deref(),
+            antialiasing.upscale,
+            output,
+        );
+        let pattern = if antialiasing.upscale == Upscale::SmaaT2x {
+            smaa_jitter(antialiasing.samples.count() as usize)
+        } else {
+            &[]
         };
-        let render = settings
-            .render_scale
-            .map_or(nominal_render, |scale| scaled(output, scale));
         let (jitter_phases, lod_bias) = match &view.upscaler {
             Some(upscaler) => (
                 upscaler.jitter_phases(render, output),
                 upscaler.texture_lod_bias(nominal_render, output),
             ),
-            None => (0, 0.0),
+            None => (pattern.len() as u32, 0.0),
         };
         if let Some(temporal) = &view.temporal {
             temporal.set_jitter_phases(jitter_phases);
+            temporal.set_jitter_pattern(pattern);
+        }
+
+        // MSAA: the scene passes' pipelines for the sample count, the resolve's, the
+        // skinned motion pass's.
+        if antialiasing.samples != Msaa::X1 {
+            let flags = antialiasing.samples.flags();
+            self.forward.set_samples(device, bindless, flags)?;
+            self.msaa
+                .ensure(device, bindless, flags, antialiasing.smaa_s2x())?;
+            if let Some(skinning) = skinning {
+                skinning.set_motion_samples(device, bindless, flags)?;
+            }
+        }
+        if antialiasing.upscale == Upscale::Fsr1 && self.fsr1.is_none() {
+            self.fsr1 = Some(Box::new(Fsr1::new(device, bindless)?));
+        }
+
+        // Filters after tone mapping: their pipelines, and SMAA T2x's last frame.
+        if let Some(filter) = post_filter(antialiasing.post) {
+            if self.perceptual.is_none() {
+                self.perceptual = Some(Box::new(Tonemap::new_perceptual(device, bindless)?));
+            }
+            let temporal = antialiasing.upscale == Upscale::SmaaT2x;
+            self.post.ensure(
+                device,
+                allocator,
+                bindless,
+                filter,
+                temporal,
+                antialiasing.smaa_s2x(),
+            )?;
+        }
+        let keep_post = antialiasing.upscale == Upscale::SmaaT2x;
+        if view
+            .post_history
+            .as_ref()
+            .is_some_and(|h| !keep_post || h.size != output)
+            && let Some(old) = view.post_history.take()
+        {
+            view.retire(frame_number, Retired::History(old));
+        }
+        if keep_post && view.post_history.is_none() {
+            view.post_history = Some(HistoryImage::new(
+                device,
+                allocator,
+                bindless,
+                PERCEPTUAL_FORMAT,
+                output,
+            )?);
         }
         if materials.texture_lod_bias() != lod_bias {
             materials.set_texture_lod_bias(bindless, lod_bias)?;
@@ -544,10 +827,10 @@ impl FrameRenderer {
 
         // The previous antialiased color: at the output size, or the render size without
         // an upscaler (nothing brings the image to the output size before the post chain).
-        let history_size = if antialiasing == Antialiasing::Off {
-            render
-        } else {
+        let history_size = if resolves_to_output(antialiasing.upscale) {
             output
+        } else {
+            render
         };
         let keep = settings.previous_color;
         if view
@@ -605,6 +888,7 @@ impl FrameRenderer {
             nominal_render,
             jitter_phases,
             lod_bias,
+            integer,
         };
         view.prepared = Some(prepared);
         Ok(prepared)
@@ -659,6 +943,7 @@ impl FrameRenderer {
             exposure,
             history,
             reflections,
+            post_history,
             resets,
             reset_pending,
             ..
@@ -684,6 +969,9 @@ impl FrameRenderer {
             if let Some(history) = history.as_mut() {
                 history.valid = false;
             }
+            if let Some(history) = post_history.as_mut() {
+                history.valid = false;
+            }
             if let Some(ssr) = reflections.as_ref() {
                 ssr.reset();
             }
@@ -694,14 +982,23 @@ impl FrameRenderer {
         let exposure: Option<&'g AutoExposure> = exposure.as_ref();
         let (render, output) = (prepared.render, prepared.output);
 
-        // 1. The scene at render resolution, jittered, with motion vectors when temporal.
-        let color = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, render.0, render.1));
-        let depth = fg.create_texture(
-            "depth",
-            TextureDesc::new_2d(self.depth_format, render.0, render.1),
-        );
+        // 1. The scene at render resolution, jittered, with motion vectors when temporal;
+        // multisampled with MSAA (resolved after the skinned motion pass, below).
+        let samples = prepared.antialiasing.samples.flags();
+        let scene_desc = |format| TextureDesc {
+            samples,
+            ..TextureDesc::new_2d(format, render.0, render.1)
+        };
+        let color = fg.create_texture("hdr", scene_desc(HDR_FORMAT));
+        let depth = fg.create_texture("depth", scene_desc(self.depth_format));
+        // The projection's aspect is the shown image's: the output's, or with integer
+        // scaling the render size's (its scaled rectangle keeps it, black around).
+        let aspect = match prepared.integer {
+            Some(_) => render.0 as f32 / render.1 as f32,
+            None => output.0 as f32 / output.1 as f32,
+        };
         let scene_camera = Camera {
-            clip_from_world: camera.clip_from_world(output.0 as f32 / output.1 as f32),
+            clip_from_world: camera.clip_from_world(aspect),
             position: camera.position,
         };
         let forward_view = ForwardView {
@@ -719,7 +1016,7 @@ impl FrameRenderer {
                 ssr: reflections.as_ref(),
             },
         };
-        let passes = match scene.draws {
+        let mut passes = match scene.draws {
             SceneDraws::List(draws) => self.forward.add_passes(
                 fg,
                 ctx.ring,
@@ -743,6 +1040,35 @@ impl FrameRenderer {
         if let (Some(skinning), Some(motion)) = (scene.skinning, &passes.motion) {
             skinning.add_motion_pass(fg, ctx.ring, ctx.bindless, scene.geometry, depth, motion)?;
         }
+        // MSAA: the samples resolved (color weighted by luminance, motion vectors of the
+        // nearest sample, depth by the forward renderer); with SMAA S2x also half the two
+        // samples' difference. Everything after reads one value per pixel.
+        let mut difference = None;
+        let (color, depth) = match passes.resolved_depth {
+            Some(resolved_depth) => {
+                let resolved = self
+                    .msaa
+                    .add_pass(
+                        fg,
+                        ctx.bindless,
+                        MsaaInput {
+                            color,
+                            depth,
+                            motion: passes.motion.map(|m| m.velocity),
+                            split: prepared.antialiasing.smaa_s2x(),
+                        },
+                    )
+                    .ok_or(FrameError::Antialiasing(
+                        InvalidAntialiasing::SamplesUnsupported(prepared.antialiasing.samples),
+                    ))?;
+                if let (Some(motion), Some(velocity)) = (passes.motion.as_mut(), resolved.motion) {
+                    motion.velocity = velocity;
+                }
+                difference = resolved.difference;
+                (resolved.color, resolved_depth)
+            }
+            None => (color, depth),
+        };
 
         // The previous antialiased color, kept for screen-space effects.
         let kept = history.as_mut().map(|h| {
@@ -790,8 +1116,8 @@ impl FrameRenderer {
         };
 
         // 4. Antialiasing / upscaling to the output size.
-        let resolved = match (prepared.antialiasing, upscaler, passes.motion) {
-            (Antialiasing::Temporal(_), Some(upscaler), Some(motion)) => {
+        let resolved = match (prepared.antialiasing.upscale, upscaler, passes.motion) {
+            (Upscale::Temporal(_), Some(upscaler), Some(motion)) => {
                 let upscaler: &'g mut dyn Upscaler = &mut **upscaler;
                 // FSR and DLSS take the exposure the tone mapper applies (their own
                 // measurement otherwise sees another picture than the player); TAAU
@@ -822,6 +1148,21 @@ impl FrameRenderer {
                     ctx.frame_number,
                 )?
             }
+            (Upscale::Fsr1, ..) => match &self.fsr1 {
+                Some(fsr1) => fsr1.add_passes(
+                    fg,
+                    ctx.bindless,
+                    color,
+                    render,
+                    output,
+                    Fsr1Exposure {
+                        value: exposure_value,
+                        auto: auto_exposure,
+                    },
+                    settings.sharpness,
+                ),
+                None => color,
+            },
             _ => color,
         };
         if let Some((kept, _, size)) = kept {
@@ -863,24 +1204,159 @@ impl FrameRenderer {
         let bloom = settings
             .bloom
             .then(|| self.bloom.add_passes(fg, ctx.bindless, resolved));
-        self.tonemap.add_composite_pass(
-            fg,
-            ctx.bindless,
-            resolved,
-            target.texture,
-            Composite {
-                rect: target.rect,
-                sampler: SamplerKind::LinearClamp,
-                exposure: exposure_value,
-                tonemap: true,
-                curve: settings.curve,
-                peak: settings.peak,
-                encoding: settings.encoding,
-                load: target.load,
-                bloom,
-                auto_exposure,
+        // With a filter after tone mapping, the tone mapper writes its perceptual image
+        // at the output size, and the filter writes the view's target.
+        let filter = post_filter(prepared.antialiasing.post);
+        // SMAA S2x: each sample's image (the resolved color plus or minus half their
+        // difference) is tone mapped and antialiased on its own.
+        let sources = match (difference, filter) {
+            (Some(difference), Some(PostFilter::Smaa(_))) => {
+                match self
+                    .post
+                    .add_split(fg, ctx.bindless, resolved, difference, render)
+                {
+                    Some([a, b]) => [a, b],
+                    None => [resolved, resolved],
+                }
+            }
+            _ => [resolved, resolved],
+        };
+        let two = sources[0] != sources[1];
+        let perceptual = filter.and(self.perceptual.as_deref()).map(|tonemap| {
+            let desc = TextureDesc::new_2d(PERCEPTUAL_FORMAT, output.0, output.1);
+            let image = fg.create_texture("perceptual", desc);
+            let second = two.then(|| fg.create_texture("perceptual", desc));
+            (tonemap, image, second)
+        });
+        let whole = |offset: vk::Offset2D| vk::Rect2D {
+            offset,
+            extent: vk::Extent2D {
+                width: output.0,
+                height: output.1,
             },
-        );
+        };
+        let (tonemap, tonemapped, area, load) = match perceptual {
+            Some((tonemap, image, _)) => (
+                tonemap,
+                image,
+                whole(vk::Offset2D::default()),
+                LoadOp::DontCare,
+            ),
+            None => (
+                &self.tonemap,
+                target.texture,
+                target
+                    .rect
+                    .unwrap_or_else(|| whole(vk::Offset2D::default())),
+                target.load,
+            ),
+        };
+        // Nearest and integer scaling sample the scene's pixels as they are; integer
+        // scaling draws them at a whole factor, centered, black around.
+        let (rect, letterbox) = match prepared.integer {
+            Some((factor, (x, y))) => (
+                Some(vk::Rect2D {
+                    offset: vk::Offset2D {
+                        x: area.offset.x + x as i32,
+                        y: area.offset.y + y as i32,
+                    },
+                    extent: vk::Extent2D {
+                        width: render.0 * factor,
+                        height: render.1 * factor,
+                    },
+                }),
+                (x > 0 || y > 0).then_some(area),
+            ),
+            None if perceptual.is_some() => (None, None),
+            None => (target.rect, None),
+        };
+        let sampler = match prepared.antialiasing.upscale {
+            Upscale::Nearest | Upscale::Integer => SamplerKind::NearestClamp,
+            _ => SamplerKind::LinearClamp,
+        };
+        let composite = Composite {
+            rect,
+            sampler,
+            exposure: exposure_value,
+            tonemap: true,
+            curve: settings.curve,
+            peak: settings.peak,
+            encoding: settings.encoding,
+            load,
+            bloom,
+            auto_exposure,
+            letterbox,
+        };
+        tonemap.add_composite_pass(fg, ctx.bindless, sources[0], tonemapped, composite);
+        let second = perceptual.and_then(|(_, _, second)| second);
+        if let Some(second) = second {
+            tonemap.add_composite_pass(fg, ctx.bindless, sources[1], second, composite);
+        }
+
+        // 6. The filter after tone mapping, into the view's target.
+        if let (Some(filter), Some((_, image, _))) = (filter, perceptual) {
+            let post_target = PostTarget {
+                texture: target.texture,
+                rect: target.rect,
+                load: target.load,
+                decode: match settings.encoding {
+                    OutputEncoding::Linear { white } => Decode::Srgb {
+                        scale: white * settings.peak,
+                    },
+                    OutputEncoding::Pq { .. } => Decode::None,
+                },
+            };
+            match filter {
+                PostFilter::Fxaa => {
+                    self.post
+                        .add_fxaa(fg, ctx.bindless, image, output, post_target)
+                }
+                PostFilter::Smaa(preset) => {
+                    // SMAA T2x: this frame's jitter phase, last frame's result.
+                    let temporal = match (prepared.antialiasing.upscale, passes.motion) {
+                        (Upscale::SmaaT2x, Some(motion)) => post_history.as_mut().map(|h| {
+                            let history = fg.import_texture(
+                                "smaa history",
+                                ImportedTexture {
+                                    image: h.image,
+                                    view: h.view,
+                                    desc: TextureDesc::new_2d(h.format, h.size.0, h.size.1),
+                                    initial: h.state,
+                                    final_state: Some(TextureState::shader_read(
+                                        ShaderStages::FRAGMENT,
+                                    )),
+                                    sampled_index: Some(h.sampled),
+                                    storage_index: None,
+                                },
+                            );
+                            h.state = TextureState::shader_read(ShaderStages::FRAGMENT);
+                            let valid = core::mem::replace(&mut h.valid, true);
+                            SmaaTemporal {
+                                velocity: motion.velocity,
+                                previous: valid.then_some(history),
+                                history,
+                                phase: usize::from(motion.jitter[0] > 0.0),
+                            }
+                        }),
+                        _ => None,
+                    };
+                    self.post
+                        .add_smaa(
+                            fg,
+                            ctx.bindless,
+                            ctx.ring,
+                            &SmaaInput {
+                                images: [Some(image), second],
+                                size: output,
+                                preset,
+                                temporal,
+                            },
+                            post_target,
+                        )
+                        .ok_or(FrameError::RingFull)?;
+                }
+            }
+        }
         Ok(ViewFrame {
             antialiasing: prepared.antialiasing,
             render,
@@ -895,6 +1371,7 @@ impl FrameRenderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use engine_upscale::Quality;
 
     #[test]
     fn render_scale_stays_within_the_output() {
@@ -902,6 +1379,51 @@ mod tests {
         assert_eq!(scaled((1920, 1080), 2.0), (1920, 1080));
         assert_eq!(scaled((1920, 1080), 0.0), (96, 54));
         assert_eq!(scaled((3, 3), 0.1), (1, 1));
+    }
+
+    #[test]
+    fn integer_scaling_fits_whole_multiples() {
+        let fixed = |size| ViewSettings {
+            render_size: Some(size),
+            ..ViewSettings::default()
+        };
+        // 320 × 180 fills 1920 × 1080 six times over, and 2560 × 1440 eight times.
+        assert_eq!(
+            render_sizes(&fixed((320, 180)), None, Upscale::Integer, (1920, 1080)),
+            ((320, 180), (320, 180), Some((6, (0, 0))))
+        );
+        assert_eq!(
+            render_sizes(&fixed((320, 180)), None, Upscale::Integer, (2560, 1440)).2,
+            Some((8, (0, 0)))
+        );
+        // 1366 × 768: four times (1280 × 720), black bars around.
+        assert_eq!(
+            render_sizes(&fixed((320, 180)), None, Upscale::Integer, (1366, 768)).2,
+            Some((4, (43, 24)))
+        );
+        // Without a fixed size: the factor nearest to the quality's ratio.
+        let half = ViewSettings {
+            quality: Quality::Performance,
+            ..ViewSettings::default()
+        };
+        assert_eq!(
+            render_sizes(&half, None, Upscale::Integer, (1920, 1080)),
+            ((960, 540), (960, 540), Some((2, (0, 0))))
+        );
+        // Larger than the output: clamped, shown once.
+        assert_eq!(
+            render_sizes(&fixed((4000, 100)), None, Upscale::Integer, (1920, 1080)),
+            ((1920, 100), (1920, 100), Some((1, (0, 490))))
+        );
+        // Other modes keep the quality's size, or the fixed one.
+        assert_eq!(
+            render_sizes(&half, None, Upscale::Nearest, (1920, 1080)).1,
+            (960, 540)
+        );
+        assert_eq!(
+            render_sizes(&fixed((320, 180)), None, Upscale::Fsr1, (1920, 1080)),
+            ((320, 180), (320, 180), None)
+        );
     }
 
     #[test]

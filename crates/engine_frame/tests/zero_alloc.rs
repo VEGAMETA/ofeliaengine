@@ -10,7 +10,9 @@ mod common;
 
 use common::{Bed, camera};
 use engine_core::math::Vec3;
-use engine_frame::{Antialiasing, Exposure, Quality, View, ViewSettings};
+use engine_frame::{
+    Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, Upscale, View, ViewSettings,
+};
 use engine_render::postfx::ExposureSettings;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -53,10 +55,27 @@ fn steady_state_frames_do_not_allocate() {
         bed.cube_at(grey, Vec3::new(10.0, 0.2, 10.0), Vec3::new(0.0, -0.1, 0.0)),
         bed.cube_at(glow, Vec3::splat(1.0), Vec3::new(0.0, 0.5, 0.0)),
     ];
-    for antialiasing in [Antialiasing::Off, Antialiasing::TAAU, Antialiasing::FSR] {
+    // Every kind of path (ADR 0075): spatial, temporal, MSAA, filters after tone mapping.
+    for (antialiasing, quality) in [
+        (Antialiasing::OFF, Quality::Quality),
+        (Antialiasing::TAAU, Quality::Quality),
+        (Antialiasing::FSR, Quality::Quality),
+        (Antialiasing::spatial(Upscale::Fsr1), Quality::Quality),
+        (
+            Antialiasing::spatial(Upscale::Integer),
+            Quality::Performance,
+        ),
+        (Antialiasing::FXAA, Quality::Native),
+        (
+            Antialiasing::msaa(Msaa::X4).with_post(PostAntialiasing::SMAA),
+            Quality::Native,
+        ),
+        (Antialiasing::SMAA_4X, Quality::Native),
+        (Antialiasing::TAAU.with_samples(Msaa::X2), Quality::Quality),
+    ] {
         let settings = ViewSettings {
             antialiasing,
-            quality: Quality::Quality,
+            quality,
             exposure: Exposure::Auto(ExposureSettings::default()),
             previous_color: true,
             occlusion_culling: true,
@@ -85,9 +104,9 @@ fn steady_state_frames_do_not_allocate() {
         let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
         println!(
             "{}: 100 frames, {allocations} heap allocations",
-            antialiasing.name()
+            antialiasing
         );
-        assert_eq!(allocations, 0, "{}", antialiasing.name());
+        assert_eq!(allocations, 0, "{}", antialiasing);
         // SAFETY: the bed's device is idle after `render`.
         unsafe { view.destroy(&mut bed.allocator, &bed.bindless) };
     }

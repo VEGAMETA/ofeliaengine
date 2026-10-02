@@ -11,6 +11,7 @@
 //!   bytes per frame (ADR 0040).
 //! - [`forward`]: forward PBR with a directional light and a shadow map (ADR 0014), drawn
 //!   GPU-driven: GPU frustum culling and indirect instanced draws (ADR 0034).
+//! - [`fsr1`]: AMD FSR 1, spatial upscaling and sharpening (ADR 0075).
 //! - [`contact`]: contact shadows of the sun from the depth buffer (ADR 0071).
 //! - [`local_shadows`]: shadows of point and spot lights in a cached atlas (ADR 0071).
 //! - [`skinning`]: skinned meshes skinned by a compute pass into the geometry pool, and
@@ -28,7 +29,9 @@
 //!   buffers, only changes uploaded each frame (ADR 0064).
 //! - [`cull`]: frustum and bounding-box tests shared by CPU code and the GPU culling pass.
 //! - [`upload`]: per-frame GPU data (camera, lights, draw lists) in a ring per frame slot.
+//! - [`msaa`]: the resolve of multisampled scenes (MSAA, ADR 0075).
 //! - [`post`]: post-processing (tonemapping from the HDR target).
+//! - [`postaa`]: antialiasing filters after tone mapping: FXAA, MLAA, SMAA (ADR 0075).
 //! - [`png`]: a small PNG encoder for screenshots and golden-image tests.
 //! - [`streaming`]: texture streaming: levels resident by GPU feedback within the GPU
 //!   memory budget (ADR 0076).
@@ -45,6 +48,7 @@ pub mod cull;
 pub mod environment;
 pub mod feedback;
 pub mod forward;
+pub mod fsr1;
 pub mod gpu_scene;
 pub mod graph;
 pub mod hiz;
@@ -52,8 +56,10 @@ pub mod lights;
 pub mod local_shadows;
 pub mod material;
 pub mod mesh;
+pub mod msaa;
 pub mod png;
 pub mod post;
+pub mod postaa;
 pub mod postfx;
 pub mod reflections;
 pub mod shadow;

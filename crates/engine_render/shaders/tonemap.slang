@@ -212,3 +212,54 @@ float4 fragmentMain(VertexOut input) : SV_Target
         color = pq_encode(mul(BT2020_FROM_BT709, color));
     return float4(color, 1.0);
 }
+
+// `fragmentMain`'s color, for `fragmentPerceptual` (`fragmentMain` keeps its own copy:
+// its compiled code stays as it was).
+float3 tonemapped(VertexOut input)
+{
+    SamplerState s = g_samplers[push.sampler];
+    float3 color = g_textures[NonUniformResourceIndex(push.source)].SampleLevel(s, input.uv, 0).rgb;
+    // Bloom replaces its share of the image: energy is kept.
+    if ((push.flags & FLAG_BLOOM) != 0)
+    {
+        float3 bloom = g_textures[NonUniformResourceIndex(push.bloom)].SampleLevel(s, input.uv, 0).rgb;
+        color = lerp(color, bloom, push.bloom_intensity);
+    }
+    float exposure = push.exposure;
+    if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
+        exposure *= push.auto_exposure[0].x;
+    color *= exposure;
+    if ((push.flags & FLAG_PASS_THROUGH) == 0)
+    {
+        if ((push.flags & FLAG_PBR_NEUTRAL) != 0)
+            color = pbr_neutral(color, push.peak);
+        else if ((push.flags & FLAG_AGX) != 0)
+            color = agx(color);
+        else if ((push.flags & FLAG_ACES) != 0)
+            color = aces(color);
+        else
+            color = gt3(color, push.peak);
+    }
+    color *= push.white;
+    if ((push.flags & FLAG_ENCODE_PQ) != 0)
+        color = pq_encode(mul(BT2020_FROM_BT709, color));
+    return color;
+}
+
+// sRGB's encoding (IEC 61966-2-1).
+float3 srgb_oetf(float3 c)
+{
+    return select(c <= 0.0031308, c * 12.92, 1.055 * pow(c, 1.0 / 2.4) - 0.055);
+}
+
+// For the antialiasing filters after tone mapping (ADR 0075, `postaa_common.hlsli`): a
+// perceptual image. PQ outputs are perceptual already; linear ones are sRGB-encoded over
+// their brightest value (`peak` × `white`).
+[shader("fragment")]
+float4 fragmentPerceptual(VertexOut input) : SV_Target
+{
+    float3 color = tonemapped(input);
+    if ((push.flags & FLAG_ENCODE_PQ) == 0)
+        color = srgb_oetf(saturate(color / (push.peak * push.white)));
+    return float4(color, 1.0);
+}

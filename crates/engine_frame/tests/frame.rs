@@ -9,7 +9,10 @@ mod common;
 
 use common::{Bed, camera};
 use engine_core::math::Vec3;
-use engine_frame::{Antialiasing, Quality, View, ViewSettings};
+use engine_frame::{
+    Antialiasing, FrameError, InvalidAntialiasing, Msaa, PostAntialiasing, PrepareContext, Quality,
+    Upscale, UpscalerKind, View, ViewSettings,
+};
 use engine_render::material::{MaterialDesc, TextureRef};
 use engine_render::texture_pool::{TextureFormat, TextureLevels};
 
@@ -150,7 +153,7 @@ fn the_upscalers_lod_bias_is_applied() {
         unsafe { view.destroy(&mut bed.allocator, &bed.bindless) };
         (prepared, sum)
     };
-    let (off, off_sum) = dominant(Antialiasing::Off);
+    let (off, off_sum) = dominant(Antialiasing::OFF);
     let (taau, taau_sum) = dominant(Antialiasing::TAAU);
     println!(
         "off: bias {} rgb {off_sum:?}; TAAU: bias {} rgb {taau_sum:?}",
@@ -221,7 +224,7 @@ fn settings_changes_and_fallbacks() {
         "a smaller render size keeps the history"
     );
 
-    settings.antialiasing = Antialiasing::Off;
+    settings.antialiasing = Antialiasing::OFF;
     let (p, _) = bed.render(&mut view, &settings, &draws, &cam, false, |t| {
         assert!(
             t.motion.is_none(),
@@ -243,7 +246,7 @@ fn the_previous_color_reaches_the_hook() {
     let grey = bed.solid([0.5, 0.5, 0.5], [0.0; 3]);
     let draws = vec![bed.cube_at(grey, Vec3::splat(1.0), Vec3::ZERO)];
     let cam = camera(Vec3::new(1.0, 1.5, 3.0), Vec3::ZERO, false);
-    for antialiasing in [Antialiasing::Off, Antialiasing::TAAU] {
+    for antialiasing in [Antialiasing::OFF, Antialiasing::TAAU] {
         let settings = ViewSettings {
             antialiasing,
             quality: Quality::Quality,
@@ -266,9 +269,114 @@ fn the_previous_color_reaches_the_hook() {
                 },
             );
         }
-        assert_eq!(seen, [false, true, false, true], "{}", antialiasing.name());
+        assert_eq!(seen, [false, true, false, true], "{}", antialiasing);
         // SAFETY: the bed's device is idle after `render`.
         unsafe { view.destroy(&mut bed.allocator, &bed.bindless) };
     }
     bed.finish(&mut []);
+}
+
+/// Invalid combinations (ADR 0075) are refused by `check` and `prepare` with the same
+/// error, and the view keeps working with valid ones; switching between MSAA, filters
+/// and spatial or temporal modes frame to frame renders every time.
+#[test]
+fn antialiasing_is_validated_and_modes_switch() {
+    let Some(mut bed) = Bed::new((96, 64), true) else {
+        return;
+    };
+    let grey = bed.solid([0.5, 0.5, 0.5], [0.0; 3]);
+    let draws = vec![bed.cube_at(grey, Vec3::splat(1.0), Vec3::ZERO)];
+    let support = bed.frame.antialiasing_support();
+    assert!(support.supports_samples(Msaa::X1));
+    assert!(support.supports_upscaler(UpscalerKind::Taau));
+    println!("MSAA support: {:?}", support.msaa);
+    let invalid = [
+        (
+            Antialiasing::SMAA_T2X,
+            Quality::Quality,
+            InvalidAntialiasing::SmaaT2xScaled,
+        ),
+        (
+            Antialiasing {
+                post: PostAntialiasing::Off,
+                ..Antialiasing::SMAA_T2X
+            },
+            Quality::Native,
+            InvalidAntialiasing::SmaaT2xWithoutSmaa,
+        ),
+        (
+            Antialiasing::FSR.with_samples(Msaa::X4),
+            Quality::Quality,
+            InvalidAntialiasing::MsaaIntoUpscaler(UpscalerKind::Fsr),
+        ),
+    ];
+    let mut view = View::new(&bed.device, 16);
+    for (antialiasing, quality, error) in invalid {
+        let settings = ViewSettings {
+            antialiasing,
+            quality,
+            ..ViewSettings::default()
+        };
+        assert_eq!(bed.frame.check(&settings, bed.size), Err(error));
+        let result = bed.frame.prepare(
+            &mut view,
+            &settings,
+            bed.size,
+            PrepareContext {
+                device: &bed.device,
+                allocator: &mut bed.allocator,
+                bindless: &bed.bindless,
+                materials: &mut bed.materials,
+                frame_number: bed.frame_number + 1,
+                skinning: None,
+            },
+        );
+        assert!(
+            matches!(result, Err(FrameError::Antialiasing(e)) if e == error),
+            "{antialiasing}: {result:?}"
+        );
+    }
+    let modes = [
+        (Antialiasing::msaa(Msaa::X4), Quality::Native),
+        (Antialiasing::SMAA_4X, Quality::Native),
+        (
+            Antialiasing::spatial(Upscale::Integer),
+            Quality::Performance,
+        ),
+        (Antialiasing::TAAU, Quality::Quality),
+        (Antialiasing::FXAA, Quality::Native),
+        (Antialiasing::OFF, Quality::Native),
+        (
+            Antialiasing::msaa(Msaa::X2).with_post(PostAntialiasing::Mlaa),
+            Quality::Native,
+        ),
+    ];
+    let eye = Vec3::new(1.5, 1.5, 3.0);
+    for (antialiasing, quality) in modes.into_iter().chain(modes) {
+        let settings = ViewSettings {
+            antialiasing,
+            quality,
+            bloom: false,
+            ..ViewSettings::default()
+        };
+        if bed.frame.check(&settings, bed.size).is_err() {
+            continue;
+        }
+        let (prepared, pixels) = bed.render(
+            &mut view,
+            &settings,
+            &draws,
+            &camera(eye, Vec3::ZERO, false),
+            true,
+            |_| {},
+        );
+        assert_eq!(prepared.antialiasing, antialiasing);
+        let pixels = pixels.unwrap();
+        let lit = pixels.chunks(4).filter(|p| p[0] > 60).count();
+        assert!(
+            lit > 100,
+            "{antialiasing}: the cube is missing ({lit} pixels)"
+        );
+    }
+    bed.finish(&mut [&mut view]);
 }

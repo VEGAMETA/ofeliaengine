@@ -792,6 +792,20 @@ void shadowFragmentMasked(ShadowOut input)
         discard;
 }
 
+// The depth prepass of masked materials with MSAA (ADR 0075): alpha to coverage instead
+// of the alpha test. The alpha is sharpened around the cutoff to about a pixel's width
+// (Golus, "Anti-aliased Alpha Test", 2017), so the edge stays where the alpha test puts it
+// and only its pixel-wide transition becomes coverage. The pipeline has no color target:
+// only alpha at location 0 matters.
+[shader("fragment")]
+float4 prepassCoverage(ShadowOut input) : SV_Target0
+{
+    Material m = push.materials[input.material];
+    float alpha = sample_material(m.base_color_texture, input.uv).a * m.base_color.a;
+    alpha = (alpha - m.alpha_cutoff) / max(fwidth(alpha), 1e-4) + 0.5;
+    return float4(0.0, 0.0, 0.0, alpha);
+}
+
 // Texture feedback (feedback.rs, ADR 0076): drawn with `depthVertexMasked` into a small
 // depth target (the view's size over a divisor), after the view's culling, with the same
 // commands. Each fragment works out the finest level a texture of its material would be
@@ -1688,6 +1702,86 @@ float4 scatterFragment(float4 position : SV_Position) : SV_Target0
     Texture2D irradiance = g_textures[push.texture];
     float4 center = irradiance.Load(int3(pixel, 0));
     float4 albedo = g_textures[push.phase].Load(int3(pixel, 0));
+    uint index = min(uint(albedo.a * 255.0 + 0.5), max(frame.subsurface_count, 1u) - 1u);
+    SubsurfaceProfile* stored = frame.subsurface + index;
+    float depth = center.a;
+    // World units per pixel here, and half of it: the pixel's own footprint.
+    float pixels_per_unit = frame.scatter_pixels_per_unit / max(frame.scatter_w_scale * depth + frame.scatter_w_offset, 1e-6);
+    float inside = 0.5 / pixels_per_unit;
+    uint budget = frame.scatter_budget;
+    if (stored.radii[budget] <= inside)
+        return float4(albedo.rgb * center.rgb, 0.0);
+    // Fewer samples where a smaller budget already has one per PIXELS_PER_SAMPLE pixels.
+    while (budget > 0)
+    {
+        float reach = stored.radii[budget - 1] * pixels_per_unit;
+        if (float(BUDGET_SAMPLES[budget - 1]) * PIXELS_PER_SAMPLE < 3.14159265 * reach * reach)
+            break;
+        budget--;
+    }
+
+    float3 weights = profile_cdf(stored, inside);
+    float3 sum = weights * center.rgb;
+    float3 falloff = stored.falloff;
+    // The spiral turned by the pixel's angle, scaled to pixels.
+    float angle = 6.28318531 * gradient_noise(position.xy + 5.588238 * float(frame.scatter_frame & 63u));
+    float2 turn = float2(cos(angle), sin(angle)) * pixels_per_unit;
+    float inside2 = inside * inside;
+    int2 last = int2(frame.depth_size) - 1;
+    uint first = BUDGET_FIRST[budget];
+    uint samples = BUDGET_SAMPLES[budget];
+    for (uint k = 0; k < samples; k++)
+    {
+        uint4 entry = stored.kernel[first + k];
+        float2 xy = asfloat(entry.xy);
+        if (dot(xy, xy) <= inside2)
+            continue;
+        float2 offset = float2(xy.x * turn.x - xy.y * turn.y, xy.x * turn.y + xy.y * turn.x);
+        int2 at = pixel + int2(round(offset));
+        if (any(at < int2(0, 0)) || any(at > last))
+            continue;
+        float4 s = irradiance.Load(int3(at, 0));
+        if (s.a <= 0.0)
+            continue;
+        float dz = s.a - depth;
+        float3 w = float3(unpack_halves(entry.z), unpack_halves(entry.w).x) * exp2(falloff * (dz * dz));
+        sum += w * s.rgb;
+        weights += w;
+    }
+    return float4(albedo.rgb * sum / max(weights, 1e-30), 0.0);
+}
+
+// `scatterFragment` with MSAA (ADR 0075): the center is this fragment's own samples'
+// (`push.ao` the multisampled light, `push.phase` the multisampled albedo); the
+// neighbours come from the nearest-sample resolve (`push.texture`). The far
+// side of a silhouette between two subsurface surfaces keeps its own light, depth and
+// profile.
+[[vk::binding(0, 0)]] Texture2DMS<float4> g_ms_textures[];
+
+[shader("fragment")]
+float4 scatterFragmentMs(float4 position : SV_Position, uint coverage : SV_Coverage) : SV_Target0
+{
+    Frame* frame = push.frame;
+    int2 pixel = int2(position.xy);
+    Texture2D irradiance = g_textures[push.texture];
+    // Of the samples the triangle covers, the one this surface lit: subsurface, at this
+    // fragment's own view depth (others may hold a nearer surface the depth test hides).
+    float own_depth = 1.0 / position.w;
+    uint own = firstbitlow(coverage);
+    float closest = 3.0e38;
+    for (uint mask = coverage; mask != 0; mask &= mask - 1)
+    {
+        uint s = firstbitlow(mask);
+        float a = g_ms_textures[push.ao].Load(pixel, s).a;
+        float distance = abs(a - own_depth);
+        if (a > 0.0 && distance < closest)
+        {
+            closest = distance;
+            own = s;
+        }
+    }
+    float4 center = g_ms_textures[push.ao].Load(pixel, own);
+    float4 albedo = g_ms_textures[push.phase].Load(pixel, own);
     uint index = min(uint(albedo.a * 255.0 + 0.5), max(frame.subsurface_count, 1u) - 1u);
     SubsurfaceProfile* stored = frame.subsurface + index;
     float depth = center.a;

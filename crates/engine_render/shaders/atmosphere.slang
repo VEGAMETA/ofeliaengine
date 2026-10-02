@@ -34,6 +34,8 @@
 [[vk::binding(1, 0)]] [vk::image_format("rgba16f")] RWTexture2DArray<float4> g_cube_faces[];
 [[vk::binding(1, 0)]] [vk::image_format("rgba16f")] RWTexture3D<float4> g_volume_images[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
+// Multisampled depth targets (MSAA, ADR 0075), the same bindless slots.
+[[vk::binding(0, 0)]] Texture2DMS<float> g_depth_ms[];
 
 #include "atmosphere_common.slang"
 
@@ -547,6 +549,63 @@ float4 compositeFragment(Composite input) : SV_Target0
     float2 uv = input.position.xy / float2(a.size);
     float2 ndc = uv * 2.0 - 1.0;
     float depth = g_textures[push.depth].Load(int3(int2(input.position.xy), 0)).r;
+    float3 d;
+    float distance;
+    if (a.ray_y.w != 0.0)
+    {
+        // Perspective: the ray to view depth 1, scaled by the pixel's view depth.
+        float3 ray = a.ray_base.xyz + ndc.x * a.ray_x.xyz + ndc.y * a.ray_y.xyz;
+        float inv_length = rsqrt(dot(ray, ray));
+        d = ray * inv_length;
+        distance = a.ray_x.w / (depth + a.ray_base.w) / inv_length;
+    }
+    else
+    {
+        float4 near = mul(a.world_from_clip, float4(ndc, 0.0, 1.0));
+        float3 near_point = near.xyz / near.w;
+        float4 far = mul(a.world_from_clip, float4(ndc, depth >= 1.0 ? 0.5 : depth, 1.0));
+        float3 far_point = far.xyz / far.w;
+        d = normalize(far_point - near_point);
+        distance = length(far_point - a.camera_world.xyz);
+    }
+    float3 light = 0.0;
+    float transmittance = 1.0;
+    if (depth >= 1.0)
+    {
+        light = background(a, d);
+        transmittance = 0.0;
+        distance = 1e9;
+    }
+    else if ((a.flags & ATMOSPHERE_SKY) != 0)
+    {
+        float4 ap = aerial_perspective(a, uv, distance);
+        light = ap.rgb;
+        transmittance = 1.0 - ap.a;
+    }
+    if ((a.flags & ATMOSPHERE_FOG) != 0)
+    {
+        float4 fog = height_fog(a, d, distance);
+        light = light * fog.a + fog.rgb;
+        transmittance *= fog.a;
+    }
+    // Nothing visible to add (the near surfaces of small scenes): no blending, no color
+    // traffic. Below these limits the change is under 0.1% of any pixel brighter than
+    // 0.01, under half a code of an 8-bit sRGB output.
+    if (transmittance >= 0.999 && max(light.r, max(light.g, light.b)) <= 1e-5)
+        discard;
+    return float4(light, 1.0 - transmittance);
+}
+
+// `compositeFragment` with MSAA (ADR 0075): per sample, from the sample's own depth, so
+// fog and aerial perspective follow each sample's surface at edges (no halo of the far
+// side's fog over the near side). The sample index makes it run at sample rate.
+[shader("fragment")]
+float4 compositeFragmentMs(Composite input, uint sample : SV_SampleIndex) : SV_Target0
+{
+    AtmosphereFrame* a = push.frame;
+    float2 uv = input.position.xy / float2(a.size);
+    float2 ndc = uv * 2.0 - 1.0;
+    float depth = g_depth_ms[push.depth].Load(int2(input.position.xy), sample).r;
     float3 d;
     float distance;
     if (a.ray_y.w != 0.0)

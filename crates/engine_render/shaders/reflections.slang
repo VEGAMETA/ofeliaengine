@@ -37,6 +37,8 @@
 [[vk::binding(1, 0)]] [vk::image_format("r16f")] RWTexture2D<float> g_scalars[];
 [[vk::binding(1, 0)]] [vk::image_format("rg16f")] RWTexture2D<float2> g_scalars2[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
+// Multisampled depth (MSAA, ADR 0075), the same bindless slots.
+[[vk::binding(0, 0)]] Texture2DMS<float> g_depth_ms[];
 
 static const float PI = 3.14159265;
 
@@ -295,6 +297,70 @@ float4 compositeSsr(Composite input) : SV_Target0
 float4 compositeProbesSsr(Composite input) : SV_Target0
 {
     return composite(input, true, true);
+}
+
+// With MSAA (ADR 0075): the inputs are the nearest sample's (`t0` its depth), and the
+// change is added only to the samples of that surface (`t4`: the multisampled depth,
+// `t5`: the sample count), so it does not spill over the other side of a silhouette. A
+// sample belongs to the surface when its view depth is within the surface's own change
+// across a pixel (the smaller of each axis' one-sided differences: at a silhouette the
+// side on the surface), plus 0.2 %. One invocation per pixel, as without MSAA.
+uint nearest_samples(Composite input, uint nearest_depth)
+{
+    ReflectFrame* f = push.frame;
+    int2 pixel = int2(input.position.xy);
+    int2 hi = int2(f.size.xy) - 1;
+    Texture2D depths = g_textures[nearest_depth];
+    float nearest = view_depth_of(f, depths.Load(int3(pixel, 0)).r);
+    float left = view_depth_of(f, depths.Load(int3(max(pixel - int2(1, 0), 0), 0)).r);
+    float right = view_depth_of(f, depths.Load(int3(min(pixel + int2(1, 0), hi), 0)).r);
+    float up = view_depth_of(f, depths.Load(int3(max(pixel - int2(0, 1), 0), 0)).r);
+    float down = view_depth_of(f, depths.Load(int3(min(pixel + int2(0, 1), hi), 0)).r);
+    float slope = min(abs(left - nearest), abs(right - nearest)) + min(abs(up - nearest), abs(down - nearest));
+    float tolerance = slope + 0.002 * nearest;
+    uint mask = 0;
+    for (uint s = 0; s < push.t5; s++)
+    {
+        float d = view_depth_of(f, g_depth_ms[push.t4].Load(pixel, s));
+        if (d - nearest <= tolerance)
+            mask |= 1u << s;
+    }
+    return mask;
+}
+
+[shader("fragment")]
+float4 compositeProbesMs(Composite input, out uint coverage : SV_Coverage) : SV_Target0
+{
+    coverage = nearest_samples(input, push.t0);
+    return composite(input, true, false);
+}
+
+[shader("fragment")]
+float4 compositeSsrMs(Composite input, out uint coverage : SV_Coverage) : SV_Target0
+{
+    coverage = nearest_samples(input, push.t0);
+    return composite(input, false, true);
+}
+
+[shader("fragment")]
+float4 compositeProbesSsrMs(Composite input, out uint coverage : SV_Coverage) : SV_Target0
+{
+    coverage = nearest_samples(input, push.t0);
+    return composite(input, true, true);
+}
+
+// The other side of a silhouette (MSAA): the samples behind the nearest surface get the
+// probes' reflection of the farthest sample's surface (`t0`: its depth, `t1`, `t2`: its
+// inputs; `read`: the nearest depth). Inside surfaces every sample is the nearest's: the
+// pass stops there.
+[shader("fragment")]
+float4 compositeProbesFarMs(Composite input, out uint coverage : SV_Coverage) : SV_Target0
+{
+    uint all = (1u << push.t5) - 1u;
+    coverage = all & ~nearest_samples(input, push.read);
+    if (coverage == 0)
+        discard;
+    return composite(input, true, false);
 }
 
 // --- Screen-space reflections -------------------------------------------------------

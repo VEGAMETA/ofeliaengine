@@ -68,6 +68,38 @@ const COMPOSITE_VERTEX: &[u8] = include_bytes!("../shaders/reflections.composite
 const COMPOSITE_PROBES: &[u8] = include_bytes!("../shaders/reflections.compositeProbes.spv");
 const COMPOSITE_SSR: &[u8] = include_bytes!("../shaders/reflections.compositeSsr.spv");
 const COMPOSITE_PROBES_SSR: &[u8] = include_bytes!("../shaders/reflections.compositeProbesSsr.spv");
+/// The composite into multisampled targets (MSAA, ADR 0075): on the nearest surface's
+/// samples only.
+const COMPOSITE_MS: [(&[u8], &core::ffi::CStr); 4] = [
+    (
+        include_bytes!("../shaders/reflections.compositeProbesMs.spv"),
+        c"compositeProbesMs",
+    ),
+    (
+        include_bytes!("../shaders/reflections.compositeSsrMs.spv"),
+        c"compositeSsrMs",
+    ),
+    (
+        include_bytes!("../shaders/reflections.compositeProbesSsrMs.spv"),
+        c"compositeProbesSsrMs",
+    ),
+    (
+        include_bytes!("../shaders/reflections.compositeProbesFarMs.spv"),
+        c"compositeProbesFarMs",
+    ),
+];
+
+/// A multisampled view's composite (MSAA, ADR 0075): the pipelines
+/// ([`composite_pipelines`]), the multisampled depth, the sample count, and the farthest
+/// sample's depth, normal and roughness and weight (for the probes' second draw, on the
+/// samples behind the nearest surface).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MsComposite<'g> {
+    pub pipelines: &'g [Pipeline; 4],
+    pub depth: Texture,
+    pub samples: u32,
+    pub far: [Texture; 3],
+}
 const SSR_DEPTH: &[u8] = include_bytes!("../shaders/reflections.ssrDepth.spv");
 const SSR_TRACE: &[u8] = include_bytes!("../shaders/reflections.ssrTrace.spv");
 const SSR_SPATIAL: &[u8] = include_bytes!("../shaders/reflections.ssrSpatial.spv");
@@ -1282,7 +1314,10 @@ pub struct ReflectionOutput {
 /// What a view's reflection passes read and write.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ViewInputs {
+    /// The composite's target (multisampled with MSAA).
     pub color: Texture,
+    /// The lit image screen-space reflections trace (`color`, or its resolve with MSAA).
+    pub lit: Texture,
     pub depth: Texture,
     pub normal_roughness: Texture,
     pub weight: Texture,
@@ -1306,6 +1341,56 @@ fn pyramid_layout(width: u32, height: u32) -> (u32, [u32; 16], u32) {
         }
     }
     (levels, offsets, floats)
+}
+
+/// The composite's pipelines (probes, screen-space reflections, both; then probes on the
+/// samples behind the nearest surface) into a multisampled `color_format` target of
+/// `samples` (MSAA, ADR 0075): run per pixel from the nearest (or farthest) sample's
+/// inputs, adding to that surface's samples only (`SV_Coverage`).
+pub(crate) fn composite_pipelines(
+    device: &Device,
+    bindless: &Bindless,
+    color_format: vk::Format,
+    samples: vk::SampleCountFlags,
+) -> Result<[Pipeline; 4], RhiError> {
+    let invalid = || RhiError::Vulkan {
+        call: "embedded SPIR-V",
+        result: vk::Result::ERROR_INVALID_SHADER_NV,
+    };
+    let vertex = spirv_words(COMPOSITE_VERTEX).ok_or_else(invalid)?;
+    let fragments = COMPOSITE_MS
+        .iter()
+        .map(|&(bytes, entry)| Ok((spirv_words(bytes).ok_or_else(invalid)?, entry)))
+        .collect::<Result<Vec<_>, RhiError>>()?;
+    let formats = [color_format];
+    let descs: Vec<PipelineDesc<'_>> = fragments
+        .iter()
+        .map(|(fragment, entry)| {
+            PipelineDesc::Graphics(GraphicsPipelineDesc {
+                color_formats: &formats,
+                cull_mode: vk::CullModeFlags::NONE,
+                depth_test: false,
+                depth_write: false,
+                blend: Blend::Additive,
+                samples,
+                ..GraphicsPipelineDesc::new(
+                    ShaderStageDesc {
+                        spirv: &vertex,
+                        entry: c"compositeVertex",
+                    },
+                    Some(ShaderStageDesc {
+                        spirv: fragment,
+                        entry,
+                    }),
+                )
+            })
+        })
+        .collect();
+    let pipelines = Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?;
+    pipelines.try_into().map_err(|_| RhiError::Vulkan {
+        call: "reflection composite pipelines (fewer than described)",
+        result: vk::Result::ERROR_UNKNOWN,
+    })
 }
 
 impl ReflectionPasses {
@@ -1488,12 +1573,16 @@ impl ReflectionPasses {
     /// Declares a view's reflection passes after its opaque passes: screen-space
     /// reflections (the nearest-depth pyramid, the trace, the spatial and temporal
     /// filters) when they run, and the composite into `inputs.color`.
+    /// `msaa`: for a multisampled target (MSAA, ADR 0075), the composite's pipelines
+    /// ([`composite_pipelines`]), the multisampled depth and the sample count; `None` for
+    /// this one's.
     pub(crate) fn add_view_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
         bindless: &'g Bindless,
         prepared: &Prepared<'g>,
         inputs: &ViewInputs,
+        msaa: Option<MsComposite<'g>>,
     ) -> Option<Texture> {
         engine_profiler::zone!("render::reflections::add_view_passes");
         let ssr = prepared
@@ -1522,10 +1611,22 @@ impl ReflectionPasses {
         if let Some(textures) = probes {
             pass = pass.read(textures.array, Access::Sampled(ShaderStages::FRAGMENT));
         }
+        let composite = msaa.map_or(&self.composite[..], |m| &m.pipelines[..3]);
+        let samples = msaa.map(|m| (m.depth, m.samples));
+        if let Some(m) = msaa {
+            pass = pass.read(m.depth, Access::Sampled(ShaderStages::FRAGMENT));
+            for t in m.far {
+                pass = pass.read(t, Access::Sampled(ShaderStages::FRAGMENT));
+            }
+        }
+        // The samples behind the nearest surface, with probes.
+        let far = msaa
+            .filter(|_| probes.is_some())
+            .map(|m| (&m.pipelines[3], m.far));
         let pipeline = match (probes.is_some(), ssr.is_some()) {
-            (true, false) => &self.composite[0],
-            (false, true) => &self.composite[1],
-            _ => &self.composite[2],
+            (true, false) => &composite[0],
+            (false, true) => &composite[1],
+            _ => &composite[2],
         };
         pass.execute(move |ctx| {
             let (Some(t0), Some(t1), Some(t2)) = (
@@ -1536,9 +1637,12 @@ impl ReflectionPasses {
                 return;
             };
             let t3 = ssr.and_then(|r| ctx.sampled_index(r)).unwrap_or(0);
+            let (t4, t5) = samples.map_or((0, 0), |(depth, n)| {
+                (ctx.sampled_index(depth).unwrap_or(0), n)
+            });
             let push = Push {
                 frame: frame_address,
-                t: [t0, t1, t2, t3, 0, 0],
+                t: [t0, t1, t2, t3, t4, t5],
                 ..Push::default()
             };
             let area = ctx.render_area();
@@ -1562,6 +1666,26 @@ impl ReflectionPasses {
                 ctx.device.cmd_set_scissor(ctx.cmd, 0, &[area]);
                 bindless.push_constants(ctx.cmd, bytemuck::bytes_of(&push));
                 ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+            }
+            if let Some((pipeline, [far_depth, far_nr, far_weight])) = far {
+                let (Some(f0), Some(f1), Some(f2)) = (
+                    ctx.sampled_index(far_depth),
+                    ctx.sampled_index(far_nr),
+                    ctx.sampled_index(far_weight),
+                ) else {
+                    return;
+                };
+                let push = Push {
+                    t: [f0, f1, f2, 0, t4, t5],
+                    read: t0,
+                    ..push
+                };
+                // SAFETY: as above.
+                unsafe {
+                    pipeline.bind(ctx.cmd);
+                    bindless.push_constants(ctx.cmd, bytemuck::bytes_of(&push));
+                    ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+                }
             }
         });
         ssr
@@ -1622,7 +1746,7 @@ impl ReflectionPasses {
             "ssr trace distance",
             TextureDesc::new_2d(SSR_DISTANCE_FORMAT, trace_size[0], trace_size[1]),
         );
-        let (nr, weight, color) = (inputs.normal_roughness, inputs.weight, inputs.color);
+        let (nr, weight, color) = (inputs.normal_roughness, inputs.weight, inputs.lit);
         fg.add_compute("ssr trace", bindless)
             .read(depth, Access::Sampled(ShaderStages::COMPUTE))
             .read(nr, Access::Sampled(ShaderStages::COMPUTE))

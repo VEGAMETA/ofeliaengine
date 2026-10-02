@@ -16,6 +16,7 @@ use engine_rhi::{
 
 const VERTEX: &[u8] = include_bytes!("../shaders/tonemap.vertexMain.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/tonemap.fragmentMain.spv");
+const FRAGMENT_PERCEPTUAL: &[u8] = include_bytes!("../shaders/tonemap.fragmentPerceptual.spv");
 
 /// The HDR format scenes render into before tonemapping.
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -351,6 +352,9 @@ pub struct Composite {
     /// An exposure measured on the GPU ([`crate::postfx::AutoExposure`]), multiplied
     /// with `exposure` (which then acts as compensation).
     pub auto_exposure: Option<Buffer>,
+    /// A rectangle cleared to black before the source is drawn into `rect` (integer
+    /// scaling's letterbox: the view's whole rectangle around the scaled image).
+    pub letterbox: Option<vk::Rect2D>,
 }
 
 impl Default for Composite {
@@ -366,6 +370,7 @@ impl Default for Composite {
             load: LoadOp::DontCare,
             bloom: None,
             auto_exposure: None,
+            letterbox: None,
         }
     }
 }
@@ -383,12 +388,36 @@ impl Tonemap {
         bindless: &Bindless,
         output_format: vk::Format,
     ) -> Result<Self, RhiError> {
+        Self::with_fragment(device, bindless, output_format, FRAGMENT, c"fragmentMain")
+    }
+
+    /// A tone mapper for the antialiasing filters after it (ADR 0075,
+    /// [`crate::postaa`]): it writes [`crate::postaa::PERCEPTUAL_FORMAT`] in a perceptual
+    /// encoding (sRGB over the output's brightest value, or PQ as it is), which they
+    /// decode into the output's.
+    pub fn new_perceptual(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
+        Self::with_fragment(
+            device,
+            bindless,
+            crate::postaa::PERCEPTUAL_FORMAT,
+            FRAGMENT_PERCEPTUAL,
+            c"fragmentPerceptual",
+        )
+    }
+
+    fn with_fragment(
+        device: &Device,
+        bindless: &Bindless,
+        output_format: vk::Format,
+        fragment: &[u8],
+        entry: &core::ffi::CStr,
+    ) -> Result<Self, RhiError> {
         let invalid = || RhiError::Vulkan {
             call: "embedded SPIR-V",
             result: vk::Result::ERROR_INVALID_SHADER_NV,
         };
         let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
-        let fragment = spirv_words(FRAGMENT).ok_or_else(invalid)?;
+        let fragment = spirv_words(fragment).ok_or_else(invalid)?;
         let formats = [output_format];
         let pipeline = Pipeline::graphics(
             device,
@@ -405,7 +434,7 @@ impl Tonemap {
                     },
                     Some(ShaderStageDesc {
                         spirv: &fragment,
-                        entry: c"fragmentMain",
+                        entry,
                     }),
                 )
             },
@@ -524,6 +553,29 @@ impl Tonemap {
                 };
                 let area = ctx.render_area();
                 let rect = composite.rect.unwrap_or(area);
+                if let Some(letterbox) = composite.letterbox {
+                    // SAFETY: recording inside the pass's rendering scope; the rectangle
+                    // lies within the render area (the target's).
+                    unsafe {
+                        ctx.device.cmd_clear_attachments(
+                            ctx.cmd,
+                            &[vk::ClearAttachment {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                color_attachment: 0,
+                                clear_value: vk::ClearValue {
+                                    color: vk::ClearColorValue {
+                                        float32: [0.0, 0.0, 0.0, 1.0],
+                                    },
+                                },
+                            }],
+                            &[vk::ClearRect {
+                                rect: letterbox,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            }],
+                        );
+                    }
+                }
                 // SAFETY: recording inside the pass's rendering scope.
                 unsafe {
                     pipeline.bind(ctx.cmd);

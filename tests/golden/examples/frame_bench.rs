@@ -104,8 +104,8 @@ fn antialiasing() {
     println!("Adapter: {}\n", reference.adapter);
     let reference = downsample(&reference);
     let modes: [(&str, Antialiasing, Quality); 11] = [
-        ("off", Antialiasing::Off, Quality::Native),
-        ("off, 67 % (stretched)", Antialiasing::Off, Quality::Quality),
+        ("off", Antialiasing::OFF, Quality::Native),
+        ("off, 67 % (stretched)", Antialiasing::OFF, Quality::Quality),
         ("TAA", Antialiasing::TAAU, Quality::Native),
         ("TAAU 67 %", Antialiasing::TAAU, Quality::Quality),
         ("TAAU 59 %", Antialiasing::TAAU, Quality::Balanced),
@@ -202,7 +202,7 @@ fn main() {
         antialiasing();
     }
     if !only_aa {
-        ambient_occlusion(Antialiasing::Off, Quality::Native, "no antialiasing, 1080p");
+        ambient_occlusion(Antialiasing::OFF, Quality::Native, "no antialiasing, 1080p");
         ambient_occlusion(Antialiasing::TAAU, Quality::Quality, "TAAU from 67 %");
     }
 }

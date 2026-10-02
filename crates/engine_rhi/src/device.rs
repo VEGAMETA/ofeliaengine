@@ -204,7 +204,8 @@ impl Device {
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
             .image_cube_array(true)
-            .shader_int16(adapter.caps.shader_float16);
+            .shader_int16(adapter.caps.shader_float16)
+            .sample_rate_shading(adapter.caps.sample_rate_shading);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .features(features)
             .push_next(&mut f11)

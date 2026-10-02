@@ -1,15 +1,16 @@
 //! The frame renderer (ADR 0072): one object that composes a view's whole frame into the
-//! render graph, in the right order, with the right antialiasing.
+//! render graph, in the right order, with the right antialiasing (ADR 0075).
 //!
 //! ```text
-//!  scene passes, render size          antialiasing             post chain, output size
-//!  ─────────────────────────────      ────────────────         ─────────────────────────
-//!  cull → shadows → (prepass, AO)  →  TAAU / FSR / DLSS   →   bloom → exposure → tonemap
-//!  → forward → (SSS) → (reflections)  (or nothing: Off)        → the view's target
-//!  → sky/fog
-//!  → transparent (+ reactive mask)
-//!  → skinned motion (ADR 0068)
-//!  jitter + motion vectors            history per view
+//!  scene passes, render size         step 4: render → output     post chain, output size
+//!  ─────────────────────────────     ───────────────────────     ────────────────────────
+//!  cull → shadows → (prepass, AO) →  TAAU / FSR / DLSS, or    →  bloom → exposure →
+//!  → forward → (SSS) → (reflections) FSR 1, or nearest /          tonemap → FXAA / MLAA /
+//!  → sky/fog → transparent           bilinear / integer in the    SMAA (S2x, T2x, 4x)
+//!  → skinned motion (ADR 0068)       tone mapper                  → the view's target
+//!  (multisampled with MSAA, then
+//!  resolved; jitter + motion
+//!  vectors when temporal)            history per view
 //! ```
 //!
 //! - [`FrameRenderer`] owns the scene passes (`ForwardRenderer`: culling, shadows, ambient
@@ -25,9 +26,13 @@
 //!   the opaque surfaces and before the atmosphere and the transparent ones, which the
 //!   hook of [`FrameRenderer::add_view_with`] comes after; the hook gets their inputs
 //!   and result in `SceneTargets::passes.reflections`.
-//! - [`ViewSettings`] says what a view wants: [`Antialiasing`] (`Off`, or a temporal
-//!   upscaler: the engine's TAAU, FSR 3.1, DLSS), the render size (`Quality`, or a
-//!   dynamic `render_scale`), exposure, tone curve, bloom.
+//! - [`ViewSettings`] says what a view wants: [`Antialiasing`] (raster samples ([`Msaa`]),
+//!   how the render size reaches the output ([`Upscale`]: nearest, bilinear, integer,
+//!   FSR 1, the temporal upscalers, SMAA T2x), a filter after tone mapping
+//!   ([`PostAntialiasing`]); [`FrameRenderer::check`] says whether a combination runs
+//!   here, [`FrameRenderer::antialiasing_support`] what the GPU offers), the render size
+//!   (`Quality`, a dynamic `render_scale`, or a fixed `render_size`), exposure, tone
+//!   curve, bloom.
 //!
 //! Scene-level work runs once per frame before the views: the pools' and tables'
 //! `begin_frame` (geometry, textures, materials), the GPU scene's `add_passes` and the
@@ -52,15 +57,21 @@
 //! [`RenderDefaults`] gives measured defaults per [`DeviceClass`] (discrete or small
 //! integrated GPU): ambient occlusion quality, antialiasing and render size.
 
+mod antialiasing;
 mod renderer;
 mod settings;
 mod view;
+
+pub use antialiasing::{
+    Antialiasing, AntialiasingSupport, InvalidAntialiasing, Msaa, PostAntialiasing, SmaaQuality,
+    Upscale,
+};
 
 pub use renderer::{
     FrameContext, FrameError, FrameRenderer, PrepareContext, SceneDraws, SceneInput, SceneTargets,
     ViewCamera, ViewFrame, ViewTarget,
 };
-pub use settings::{Antialiasing, DeviceClass, Exposure, RenderDefaults, ViewSettings};
+pub use settings::{DeviceClass, Exposure, RenderDefaults, ViewSettings};
 pub use view::{Prepared, Resets, View};
 
 pub use engine_upscale::{Quality, UpscalerKind};

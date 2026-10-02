@@ -151,6 +151,39 @@ impl AccessInfo {
         }
     }
 
+    /// A single-sampled attachment a multisampled one is resolved into at the end of a
+    /// pass (ADR 0075). Resolves run in the color attachment output stage and write with
+    /// color attachment writes, depth ones too (Vulkan's render pass synchronization).
+    pub(crate) fn resolve_target(depth: bool) -> Self {
+        Self {
+            discards: true,
+            image_usage: if depth {
+                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+            } else {
+                vk::ImageUsageFlags::COLOR_ATTACHMENT
+            },
+            ..Self::new(
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                vk::ImageLayout::ATTACHMENT_OPTIMAL,
+                false,
+                true,
+            )
+        }
+    }
+
+    /// The resolve's read of the multisampled attachment, merged into its attachment
+    /// access.
+    pub(crate) fn resolve_source() -> Self {
+        Self::new(
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::COLOR_ATTACHMENT_READ,
+            vk::ImageLayout::ATTACHMENT_OPTIMAL,
+            true,
+            false,
+        )
+    }
+
     pub(crate) fn of(access: Access) -> Self {
         use vk::AccessFlags2 as A;
         use vk::BufferUsageFlags as B;
