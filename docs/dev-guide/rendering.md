@@ -724,6 +724,82 @@ let upscaled = upscaler.add_pass(&mut fg,
 `UpscalerKind::name()` gives the menu text ("TAAU", "FSR 3.1", "DLSS"). Offer DLSS only
 when `Streamline::load`, `check_adapter` and `attach` succeeded.
 
+### Choosing antialiasing: every mode, what it costs, what it gives
+
+The engine implements every common antialiasing and scaling method (ADR 0075) so that
+**you** decide what your players may choose. A view's `ViewSettings::antialiasing` is made
+of three independent parts:
+
+```rust
+use engine_frame::{Antialiasing, Msaa, PostAntialiasing, SmaaQuality, Upscale, UpscalerKind};
+
+let aa = Antialiasing {
+    samples: Msaa::X4,                       // raster samples: X1, X2, X4, X8 (MSAA)
+    upscale: Upscale::Bilinear,              // render size → output (below)
+    post: PostAntialiasing::Smaa(SmaaQuality::High), // after tone mapping, before UI
+};
+```
+
+- **`samples`** — MSAA. Geometry edges get 2/4/8 coverage samples; shading still runs
+  once per pixel. Masked (alpha-tested) materials turn their alpha into coverage (alpha
+  to coverage). Views with MSAA always draw the depth prepass. Ambient occlusion, contact
+  shadows, reflections, subsurface scattering, the atmosphere and fog all work with it
+  (each is resolved so it keeps its edges; AO and contact shadows stay one value per
+  pixel, which you may see as a faint darkening on the far side of a silhouette).
+- **`upscale`** — how the render size (`quality`, `render_scale` or `render_size`)
+  reaches the output:
+  - `Bilinear`: the soft stretch (nothing at the output size: plain rendering);
+  - `Nearest`: blocky, no blur;
+  - `Integer`: pixel art. Set `ViewSettings::render_size = Some((320, 180))`; the image is
+    shown at the largest whole multiple that fits the output (×6 at 1080p, ×8 at 1440p),
+    centered, black around. Every scene pixel is a square of screen pixels;
+  - `Fsr1`: AMD FSR 1, edge-adaptive upscaling plus sharpening (`ViewSettings::sharpness`,
+    in stops: 0 the strongest, AMD's default 0.2). At the output size it only sharpens;
+  - `Temporal(UpscalerKind::Taau | Fsr | Dlss)`: TAA/TAAU, FSR 3.1, DLSS (sections above);
+  - `SmaaT2x`: SMAA's two-frame temporal mode (needs `post: Smaa(..)` and the output size).
+- **`post`** — a filter on the tone-mapped image: `Fxaa`, `Mlaa`, `Smaa(Low | Medium |
+  High | Ultra)`. With `Msaa::X2` SMAA runs on each sample (SMAA S2x); with `SmaaT2x`
+  too, that is SMAA 4x.
+
+Named constants cover the usual modes: `Antialiasing::OFF`, `TAAU`, `FSR`, `DLSS`,
+`FXAA`, `MLAA`, `SMAA_1X`, `SMAA_T2X`, `SMAA_S2X`, `SMAA_4X`, `Antialiasing::msaa(Msaa::X4)`,
+`Antialiasing::spatial(Upscale::Fsr1)`, and `.with_samples(..)` / `.with_post(..)` to
+combine.
+
+**Building a menu.** Offer what *your* game wants, filtered by what the player's GPU runs:
+
+```rust
+let support = frame.antialiasing_support();   // MSAA sample counts, available upscalers
+let mut menu = Vec::new();
+for (label, aa) in my_whitelist() {
+    let candidate = ViewSettings { antialiasing: aa, ..settings };
+    if frame.check(&candidate, output_size).is_ok() {
+        menu.push(label);   // `check`'s error says why a mode cannot run
+    }
+}
+```
+
+`prepare` refuses the same combinations with `FrameError::Antialiasing`: SMAA T2x without
+SMAA or below the output size, MSAA under FSR 3.1 or DLSS (both want aliased input), a
+sample count the GPU lacks. A temporal upscaler that is not installed (DLSS without
+Streamline) is not an error: the view falls back to TAAU. A mode a view does not use
+costs nothing: no passes, no pipelines (they are made the first time a view asks), no
+shader registers.
+
+**What each mode costs and gives** (ref-1, Sponza 1920 × 1080 with every feature on:
+atmosphere, fog, GTAO High, contact shadows, local lights with shadows, reflection
+probes, SSR, bloom). Passes: the GPU time of the whole frame; FLIP and PSNR against a
+4 × 4 supersampled frame (lower FLIP, higher PSNR are better), still and with the camera
+strafing slowly; flicker: how much the image jumps from frame to frame beyond what the
+supersampled image does, with every feature on and on a plain sun-and-sky Sponza (lower
+is better).
+
+{TABLES}
+
+How to read it:
+
+{READING}
+
 ## 8. Shadows of the sun: cascaded shadow maps
 
 The directional light casts through up to four cascades (ADR 0044):

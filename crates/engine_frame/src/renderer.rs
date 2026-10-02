@@ -687,6 +687,8 @@ impl FrameRenderer {
         }
         let output = (output.0.max(1), output.1.max(1));
         let previous = view.prepared;
+        // What was asked must be valid (as `check` says), whatever it falls back to.
+        self.check_antialiasing(settings.antialiasing, settings, output)?;
         let mut antialiasing = match settings.antialiasing.upscale {
             Upscale::Temporal(kind) if !self.available(kind) => Antialiasing {
                 upscale: Upscale::Temporal(UpscalerKind::Taau),
@@ -694,7 +696,6 @@ impl FrameRenderer {
             },
             _ => settings.antialiasing,
         };
-        self.check_antialiasing(antialiasing, settings, output)?;
         if previous.is_none_or(|p| p.antialiasing.upscale != antialiasing.upscale) {
             let upscaler = match antialiasing.upscaler() {
                 Some(kind) => match self.create_upscaler(kind, device, bindless)? {
