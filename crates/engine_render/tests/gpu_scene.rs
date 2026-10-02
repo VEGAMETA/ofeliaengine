@@ -469,6 +469,28 @@ fn differing(a: &[u8], b: &[u8]) -> usize {
         .count()
 }
 
+/// The first differing pixels of two `width`-wide RGBA8 images, for assertion messages.
+/// A mismatch only on the Radeon iGPU of ref-1 while the CPU is busy is a hardware fault
+/// first (its groupshared memory flips bits): run the `gpu_selfcheck` test before looking
+/// for an engine bug.
+fn explain(a: &[u8], b: &[u8], width: usize) -> String {
+    let pixels: Vec<String> = a
+        .chunks_exact(4)
+        .zip(b.chunks_exact(4))
+        .enumerate()
+        .filter(|(_, (a, b))| a != b)
+        .take(8)
+        .map(|(i, (a, b))| format!("({}, {}) {a:?} vs {b:?}", i % width, i / width))
+        .collect();
+    let hint = "on the Radeon iGPU under CPU load, run the gpu_selfcheck test first \
+                (docs/research/radeon-igpu-lds-faults.md)";
+    format!(
+        "{} pixels differ, first: {}; {hint}",
+        differing(a, b),
+        pixels.join(", ")
+    )
+}
+
 /// A perspective camera at `eye` looking at the origin.
 fn perspective_camera(eye: Vec3) -> Camera {
     Camera {
@@ -607,10 +629,10 @@ fn a_scene_draws_what_the_same_draw_list_draws() {
             let shot = bed.frame(Draw::Scene(&mut scene), camera, os, Some(&temporal_scene));
             let label =
                 format!("prepass {prepass}, occlusion {occlusion}, atmosphere {atmosphere}, t {t}");
-            assert_eq!(
-                differing(&list.image, &shot.image),
-                0,
-                "{label}: the scene's image differs from the draw list's"
+            assert!(
+                differing(&list.image, &shot.image) == 0,
+                "{label}: the scene's image differs from the draw list's: {}",
+                explain(&list.image, &shot.image, 128)
             );
             assert!(
                 list.motion == shot.motion,
@@ -717,7 +739,11 @@ fn full_uploads_draw_what_the_draw_list_draws() {
         let stats = b.scene.unwrap();
         println!("step {k}: {stats:?}");
         assert_eq!(stats.full, full, "step {k}");
-        assert_eq!(differing(&a.image, &b.image), 0, "step {k}: image");
+        assert!(
+            differing(&a.image, &b.image) == 0,
+            "step {k}: image: {}",
+            explain(&a.image, &b.image, 128)
+        );
         assert!(a.motion == b.motion, "step {k}: motion vectors");
         if k == 0 || k == 3 {
             assert!(stats.grew, "step {k}");
