@@ -64,11 +64,11 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
   lower its clocks by 3–8 %). If the gate still shows a uniform shift on passes you didn't
   touch, A/B against main back to back (main's `perf_gate` in its own target dir) before
   concluding.
-- **Radeon image mismatches under load are a hardware fault of ref-1** (an LDS bit flip,
-  `docs/research/radeon-igpu-lds-faults.md`): before chasing an exact-image difference that
-  shows up only on the Radeon and only while the CPU is busy, run
-  `ENGINE_ADAPTER=radeon ENGINE_REQUIRE_GPU=1 cargo test -p engine_render --test gpu_selfcheck -- --ignored --nocapture`.
-  If it fails, the machine is the cause; rerun your comparison on a quiet CPU.
+- **The Radeon once flipped LDS bits under CPU load** (fixed 2026-10-02 with the SoC voltage,
+  `docs/research/radeon-igpu-lds-faults.md`); `check.ps1 -Gpu` runs a self-check for it first.
+  A Radeon-only exact-image difference is now a real bug unless that self-check fails
+  (`ENGINE_ADAPTER=radeon ENGINE_REQUIRE_GPU=1 cargo test -p engine_render --test gpu_selfcheck -- --ignored --nocapture`);
+  if it does, the machine's settings regressed: tell the coordinator.
 - **Shader registers (hard rule, learned the hard way):** a feature must add no code to the
   shaders of views/materials that don't use it. On the AMD driver even dead code under a
   specialization constant costs VGPRs (forward shading sits at exactly 64; 72 made it 9–13 %
