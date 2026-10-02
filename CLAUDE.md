@@ -72,6 +72,7 @@ Decisions change only via an ADR backed by measurements.
   engine_anim            skeletal animation, blending, IK
   engine_nav             navigation
   engine_net_transport   encrypted UDP connections, channels, network simulator, NAT traversal (ADR 0070)
+  engine_net             replication, client prediction, lag compensation over the transport (ADR 0074)
   engine_text            shaping, rasterization (MSDF), layout
   engine_ui              in-game UI (runtime)
   engine_profiler        Tracy integration + built-in panels
@@ -499,6 +500,10 @@ physics and navigation visualizers, 2D editor (tilemaps, sprites), viewport mana
   (listen servers) traverse NAT: UPnP IGD → NAT-PMP/PCP → STUN hole punching → relay, one UDP
   port mapped per session and removed on exit. The transport: ADR 0070 (`engine_net_transport`;
   no I/O thread, connect tokens, AES-256-GCM through CNG, no default third-party servers).
+  Replication (ADR 0074, `engine_net`): `NetSchema::replicate::<T>()` per component, precision
+  from reflection; per-entity deltas against acknowledged (and extrapolated) states under a
+  priority accumulator and per-client byte budget; prediction re-runs the game's systems on
+  the predicted entities only; lag compensation queries a ring of hit capsules.
 
 ---
 
@@ -598,7 +603,8 @@ makes a game developer's day easier. In this order:
    - ✔ async compute (ADR 0065); ✔ the physics API: queries, characters, rollback (ADR 0066);
    - in progress: persistent GPU scene, ECS extraction and the runtime frame loop (ADR 0064);
      skeletal animation and skinning (ADR 0068); atmosphere and fog (ADR 0069);
-   - networking (§13): ✔ transport and NAT traversal (ADR 0070); replication next;
+   - networking (§13): ✔ transport and NAT traversal (ADR 0070); ✔ replication, prediction,
+     lag compensation (ADR 0074);
    - next: GPU memory budget and texture streaming
      step 2, local-light and contact shadows, local reflections, GPU particles, clustered
      decals, GI, visibility buffer/meshlets, virtual shadow maps, remaining post effects
