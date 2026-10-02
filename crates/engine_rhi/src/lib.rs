@@ -31,6 +31,7 @@ mod fault;
 mod frames;
 mod instance;
 mod memory;
+mod modules;
 mod pipeline;
 mod pipeline_cache;
 pub mod spirv;

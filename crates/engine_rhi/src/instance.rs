@@ -164,9 +164,10 @@ impl Instance {
     /// [`Self::extra_extension_enabled`] tells which were enabled.
     pub fn with_extensions(desc: &InstanceDesc, extra: &[&CStr]) -> Result<Self, RhiError> {
         engine_profiler::zone!("rhi::Instance::new");
-        // SAFETY: loads `vulkan-1.dll` / `libvulkan.so.1`; the entry points are only used
-        // while `entry` lives (it is stored in the shared state).
-        let entry = unsafe { ash::Entry::load() }.map_err(|e| RhiError::Loader(e.to_string()))?;
+        // The layers and drivers loaded for this instance stay loaded for the process
+        // (`modules.rs`: unloading and reloading them crashes).
+        let pinning = crate::modules::Pinning::start();
+        let entry = crate::modules::entry()?;
         // SAFETY: global command with no preconditions.
         let version = unsafe { entry.try_enumerate_instance_version() }
             .map_err(RhiError::vk("vkEnumerateInstanceVersion"))?
@@ -285,6 +286,7 @@ impl Instance {
         // SAFETY: all pointers in `create_info` refer to locals that outlive the call.
         let raw = unsafe { entry.create_instance(&create_info, None) }
             .map_err(RhiError::vk("vkCreateInstance"))?;
+        pinning.finish();
 
         let messenger = if debug_state.is_some() {
             let utils = ext::debug_utils::Instance::new(&entry, &raw);

@@ -22,6 +22,16 @@ engine_profiler.workspace = true
 engine_log.workspace = true
 log = "0.4"
 
+# Keeping the Vulkan loader's layers and drivers loaded for the process (`modules.rs`):
+# already in the tree (engine_platform, engine_dlss…), MIT OR Apache-2.0.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
+
 [dev-dependencies]
 # Benchmark reference only (ADR 0010): MIT OR Apache-2.0; not linked into the engine.
 gpu-allocator = { version = "0.28", default-features = false, features = ["std", "vulkan"] }
