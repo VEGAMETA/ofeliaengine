@@ -104,7 +104,17 @@ fn feedback_reports_the_levels_the_sampler_uses() {
     )
     .unwrap();
     let mut feedback =
-        TextureFeedback::new(&device, &bindless, FeedbackSettings::default(), 1).unwrap();
+        // Every command in each pass (the default spreads them over four).
+        TextureFeedback::new(
+            &device,
+            &bindless,
+            FeedbackSettings {
+                slices: 1,
+                ..FeedbackSettings::default()
+            },
+            1,
+        )
+        .unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
     let mut textures = TexturePool::new(&device, 64 << 20, 1);
