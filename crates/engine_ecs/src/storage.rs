@@ -272,8 +272,9 @@ impl Archetype {
             .map(|v| v.load(Ordering::Relaxed))
     }
 
+    /// Index of `id`'s column in this archetype, if it has the component.
     #[inline]
-    pub(crate) fn column_index(&self, id: ComponentId) -> Option<usize> {
+    pub fn column_index(&self, id: ComponentId) -> Option<usize> {
         // Archetypes have few components: a linear scan beats binary search below ~16.
         if self.ids.len() <= 16 {
             self.ids.iter().position(|&c| c == id)
@@ -282,13 +283,46 @@ impl Archetype {
         }
     }
 
+    /// Rows in use in the chunk at `chunk` (every chunk but the last is full).
     #[inline]
-    pub(crate) fn chunk_len(&self, chunk: usize) -> usize {
+    pub fn chunk_len(&self, chunk: usize) -> usize {
         if chunk + 1 < self.chunks.len() {
             self.capacities[class_of(chunk)] as usize
         } else {
             (self.len - self.full_rows) as usize
         }
+    }
+
+    /// The entities of the chunk at `chunk`, in row order.
+    ///
+    /// # Panics
+    ///
+    /// If `chunk` is not below [`Self::chunk_count`].
+    #[inline]
+    pub fn chunk_entities(&self, chunk: usize) -> &[Entity] {
+        let len = self.chunk_len(chunk);
+        // SAFETY: the entity array starts the chunk and its first `len` rows are
+        // initialized; `&self` keeps the archetype from changing while borrowed.
+        unsafe { core::slice::from_raw_parts(self.entity_ptr(chunk, 0), len) }
+    }
+
+    /// The bytes of a plain-data column in one chunk (`chunk_len × size` bytes, row
+    /// order): for code that reads components by layout (replication, serialization).
+    /// `None` if the column is not plain data.
+    ///
+    /// # Panics
+    ///
+    /// If `chunk` or `column` is out of range.
+    #[inline]
+    pub fn pod_column(&self, chunk: usize, column: usize) -> Option<&[u8]> {
+        let c = self.columns[column];
+        if !c.pod {
+            return None;
+        }
+        let len = self.chunk_len(chunk) * c.size as usize;
+        // SAFETY: the chunk's column holds `chunk_len` initialized plain-data values, any
+        // byte of which may be read; `&self` keeps them from changing while borrowed.
+        Some(unsafe { core::slice::from_raw_parts(self.column_ptr(chunk, column), len) })
     }
 
     #[inline]

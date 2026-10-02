@@ -216,8 +216,6 @@ struct Context {
 /// the view's history.
 pub struct Fsr {
     handles: Handles,
-    modules: Vec<*const u8>,
-    module_sizes: Vec<u32>,
     context: Option<Context>,
     /// Contexts replaced by a resize, destroyed once their frames are done.
     retired: Vec<(u64, NonNull<ffi::Context>)>,
@@ -228,8 +226,30 @@ pub struct Fsr {
 }
 
 // SAFETY: the SDK context is not tied to the thread that created it; `Fsr` is used from one
-// thread at a time (`&mut self`), and the module pointers refer to static data.
+// thread at a time (`&mut self`).
 unsafe impl Send for Fsr {}
+
+/// The SPIR-V modules' addresses and sizes, as the shim takes them. Process-wide: the shim
+/// keeps one pointer to them for every context (`engine_fsr_set_modules`), so they must
+/// outlive every `Fsr` (they were per `Fsr`, and a context created on one thread could read
+/// the arrays of an `Fsr` another thread had just dropped).
+struct ModuleTable {
+    data: [*const u8; blobs::MODULES.len()],
+    sizes: [u32; blobs::MODULES.len()],
+}
+
+// SAFETY: the pointers refer to immutable static data.
+unsafe impl Sync for ModuleTable {}
+// SAFETY: as above.
+unsafe impl Send for ModuleTable {}
+
+fn module_table() -> &'static ModuleTable {
+    static TABLE: std::sync::OnceLock<ModuleTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| ModuleTable {
+        data: blobs::MODULES.map(<[u8]>::as_ptr),
+        sizes: blobs::MODULES.map(|m| m.len() as u32),
+    })
+}
 
 impl fmt::Debug for Fsr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -258,8 +278,6 @@ impl Fsr {
                 get_device_proc_addr: instance.fp_v1_0().get_device_proc_addr,
                 fp16: device.shader_float16_enabled(),
             },
-            modules: blobs::MODULES.iter().map(|m| m.as_ptr()).collect(),
-            module_sizes: blobs::MODULES.iter().map(|m| m.len() as u32).collect(),
             context: None,
             retired: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
@@ -509,14 +527,14 @@ impl Fsr {
             upscale_height: output.1,
             flags,
             fp16: u32::from(h.fp16),
-            modules: self.modules.as_ptr(),
-            module_sizes: self.module_sizes.as_ptr(),
-            module_count: self.modules.len() as u32,
+            modules: module_table().data.as_ptr(),
+            module_sizes: module_table().sizes.as_ptr(),
+            module_count: blobs::MODULES.len() as u32,
             message: Some(message),
         };
         let mut raw = core::ptr::null_mut();
         // SAFETY: the handles are the engine's live instance and device; the module arrays
-        // outlive the call and point to static SPIR-V.
+        // are static and point to static SPIR-V.
         let code = unsafe { ffi::engine_fsr_create(&desc, &mut raw) };
         match NonNull::new(raw) {
             Some(raw) if code == 0 => Ok(Context {
@@ -719,5 +737,70 @@ pub mod sdk {
     pub fn upscale_ratio(mode: super::QualityMode) -> f32 {
         // SAFETY: a pure function.
         unsafe { super::ffi::engine_fsr_upscale_ratio(mode.ffx()) }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use engine_rhi::{AdapterPreference, Instance, InstanceDesc};
+
+    /// Contexts are created on several devices at once, as tests do (each renders on its
+    /// own thread with its own instance and device): every context must get its own
+    /// device's functions and `VkDeviceContext`, and the module tables must outlive every
+    /// `Fsr`. The validation layer catches a context built on another thread's device.
+    #[test]
+    fn contexts_are_created_on_several_devices_at_once() {
+        let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
+        let threads: Vec<_> = (0..4)
+            .map(|thread| {
+                std::thread::spawn(move || {
+                    let gpu = || -> Result<(Instance, Device), engine_rhi::RhiError> {
+                        let instance = Instance::new(&InstanceDesc {
+                            app_name: String::from("engine_fsr contexts"),
+                            validation: true,
+                            debug_utils: true,
+                            surface: false,
+                            headless_surface: false,
+                            sync_validation: false,
+                        })?;
+                        let preference = AdapterPreference::from_env()
+                            .unwrap_or(AdapterPreference::HighPerformance);
+                        let adapter = instance.select_adapter(&preference)?;
+                        let device = Device::new(&instance, &adapter)?;
+                        Ok((instance, device))
+                    };
+                    let (instance, device) = match gpu() {
+                        Ok(pair) => pair,
+                        Err(e) if !required => return Some(e.to_string()),
+                        Err(e) => panic!("GPU required but unavailable: {e}"),
+                    };
+                    for round in 0..6u32 {
+                        // A new `Fsr` every round: another thread may be creating a
+                        // context while this one's `Fsr` is dropped.
+                        let fsr = Fsr::new(&device, 1);
+                        let render = (64 + 8 * thread + round, 64);
+                        let context = fsr
+                            .create_context(render, (128, 128), round % 2 == 0)
+                            .unwrap();
+                        // SAFETY: the context was never used on the GPU.
+                        unsafe { ffi::engine_fsr_destroy(context.raw.as_ptr()) };
+                    }
+                    drop(device);
+                    let report = instance.validation_report();
+                    assert_eq!(
+                        report.errors, 0,
+                        "validation errors: {:#?}",
+                        report.first_errors
+                    );
+                    None
+                })
+            })
+            .collect();
+        for thread in threads {
+            if let Some(skipped) = thread.join().unwrap() {
+                println!("skipping GPU test: {skipped}");
+            }
+        }
     }
 }
