@@ -1,0 +1,21 @@
+[package]
+name = "engine_streaming"
+description = "Streaming a cooked scene within the GPU memory budget: texture levels from GPU feedback and mesh detail levels by screen size, read from its pack through the I/O ring (ADR 0076)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+engine_assets.workspace = true
+engine_core.workspace = true
+engine_profiler.workspace = true
+engine_render.workspace = true
+engine_rhi.workspace = true
+
+[dev-dependencies]
+engine_platform.workspace = true

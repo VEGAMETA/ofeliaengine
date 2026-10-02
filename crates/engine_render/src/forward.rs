@@ -5161,9 +5161,49 @@ impl States {
         offset: u64,
         area: vk::Rect2D,
     ) {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            self.draw_slice(
+                ctx,
+                bindless,
+                geometry,
+                pipelines,
+                push,
+                shadow,
+                mask,
+                buffer,
+                offset,
+                area,
+                (0, 1),
+            );
+        }
+    }
+
+    /// [`Self::draw`] for one slice of the commands: with `(k, n)`, every `n`-th command of
+    /// each state from its `k`-th (texture feedback spreads its draws over `n` frames).
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::draw`].
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn draw_slice(
+        &self,
+        ctx: &crate::graph::PassContext<'_>,
+        bindless: &Bindless,
+        geometry: &GeometryFrame<'_>,
+        pipelines: [&Pipeline; 2],
+        push: &Push,
+        shadow: bool,
+        mask: u32,
+        buffer: vk::Buffer,
+        offset: u64,
+        area: vk::Rect2D,
+        (slice, slices): (u32, u32),
+    ) {
+        let slices = slices.max(1);
         let mut bound = None;
         for state in 0..STATES {
-            let count = self.counts[state];
+            let count = self.counts[state].saturating_sub(slice).div_ceil(slices);
             if count == 0 || mask & (1 << state) == 0 {
                 continue;
             }
@@ -5198,9 +5238,9 @@ impl States {
                 ctx.device.cmd_draw_indexed_indirect(
                     ctx.cmd,
                     buffer,
-                    offset + u64::from(self.starts[state]) * COMMAND_BYTES,
+                    offset + u64::from(self.starts[state] + slice) * COMMAND_BYTES,
                     count,
-                    COMMAND_BYTES as u32,
+                    COMMAND_BYTES as u32 * slices,
                 );
             }
         }

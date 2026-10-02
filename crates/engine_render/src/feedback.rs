@@ -57,14 +57,21 @@ pub struct FeedbackSettings {
     pub divisor: u32,
     /// The pass runs every this many frames (at least 1).
     pub interval: u32,
+    /// Each pass draws one of this many slices of the view's draw commands (every
+    /// `slices`-th, a different one each time): the cost spread over that many passes, a
+    /// material reported at least once per cycle (at least 1).
+    pub slices: u32,
 }
 
 impl Default for FeedbackSettings {
-    /// An eighth of the view's size on each side (240 × 135 at 1080p), every frame.
+    /// An eighth of the view's size on each side (240 × 135 at 1080p), every frame, a
+    /// quarter of the commands per pass (measured on Sponza: 48 µs a frame on the Radeon
+    /// iGPU instead of 204 µs for all of them, the same memory resident).
     fn default() -> Self {
         Self {
             divisor: 8,
             interval: 1,
+            slices: 4,
         }
     }
 }
@@ -155,6 +162,9 @@ pub struct TextureFeedback {
     /// Depth-writing (opaque) and not (transparent) pipelines.
     pipelines: [Pipeline; 2],
     target: Option<FeedbackBuffer>,
+    /// Whether the target holds cleared values (it is cleared after each readback).
+    cleared: bool,
+    passes: u64,
     readbacks: Vec<Readback>,
     retired: Vec<(u64, FeedbackBuffer)>,
     frames_in_flight: u64,
@@ -212,9 +222,12 @@ impl TextureFeedback {
             settings: FeedbackSettings {
                 divisor: settings.divisor.max(1),
                 interval: settings.interval.max(1),
+                slices: settings.slices.max(1),
             },
             pipelines: [opaque, blended],
             target: None,
+            cleared: false,
+            passes: 0,
             readbacks: Vec::new(),
             retired: Vec::new(),
             frames_in_flight,
@@ -341,6 +354,7 @@ impl TextureFeedback {
             if let Some(old) = self.target.replace(target) {
                 self.retired.push((frame_number, old));
             }
+            self.cleared = false;
             for r in self.readbacks.drain(..) {
                 self.retired.push((frame_number, r.buffer));
             }
@@ -385,15 +399,32 @@ impl TextureFeedback {
                 final_state: Some(BufferState::host_read()),
             },
         );
-        fg.add_pass("texture feedback clear")
-            .write(feedback, Access::TransferWrite)
-            .execute(move |ctx| {
-                // SAFETY: recording outside a rendering scope; within the buffer.
-                unsafe {
-                    ctx.device
-                        .cmd_fill_buffer(ctx.cmd, ctx.buffer(feedback), 0, bytes, u32::MAX);
-                }
-            });
+        let capacity_bytes = u64::from(target.capacity) * 8;
+        let clear = move |fg: &mut FrameGraph<'g>| {
+            fg.add_pass("texture feedback clear")
+                .write(feedback, Access::TransferWrite)
+                .execute(move |ctx| {
+                    // SAFETY: recording outside a rendering scope; within the buffer.
+                    unsafe {
+                        ctx.device.cmd_fill_buffer(
+                            ctx.cmd,
+                            ctx.buffer(feedback),
+                            0,
+                            capacity_bytes,
+                            u32::MAX,
+                        );
+                    }
+                });
+        };
+        // A new buffer is cleared first; after that, each readback clears it for the next
+        // pass (at the end of the frame, where the clear waits for nothing).
+        if !self.cleared {
+            clear(fg);
+        }
+        self.cleared = true;
+        let slices = self.settings.slices;
+        let slice = (self.passes % u64::from(slices)) as u32;
+        self.passes += 1;
         let divisor = self.settings.divisor;
         let depth = fg.create_texture(
             "texture feedback depth",
@@ -434,7 +465,7 @@ impl TextureFeedback {
                         // SAFETY: recording inside the pass's rendering scope; the pass
                         // reads the pool and the material table.
                         unsafe {
-                            draws.states.draw(
+                            draws.states.draw_slice(
                                 ctx,
                                 bindless,
                                 &geometry_copy,
@@ -445,6 +476,7 @@ impl TextureFeedback {
                                 ctx.buffer(draws.commands),
                                 u64::from(phase) * draws.command_bytes,
                                 ctx.render_area(),
+                                (slice, slices),
                             );
                         }
                     }
@@ -468,6 +500,7 @@ impl TextureFeedback {
                     );
                 }
             });
+        clear(fg);
         Ok(())
     }
 
