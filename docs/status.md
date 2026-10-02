@@ -32,9 +32,9 @@ decisions). In short:
 
 - **Roles.** One coordinator session plans, writes agent briefs, gates and merges, and
   reports to the owner in Russian.
-- **Agents.** At most **2** agents at a time, all on Opus. Each works on one task in its own
-  worktree under `H:\Desktop\ofeliaengine-wt\<name>`, with its own `<name>-target`, and
-  ends with a PR.
+- **Agents.** None until the owner allows them again (see §7). After that, at most **2**
+  agents at a time, all on Opus. Each works on one task in its own worktree under
+  `H:\Desktop\ofeliaengine-wt\<name>`, with its own `<name>-target`, and ends with a PR.
 - **Gate.**
   - The coordinator merges after its own `tools/check.ps1 -Gpu -Perf`, plus `-Deny` when
     dependencies change.
@@ -125,6 +125,11 @@ tooling included) about **50 %**.
   `scene_bench` is wired by hand, outside `engine_frame`.
 
 ## 7. First task of a new coordinator session: a fresh-eyes technical review
+
+**Owner's instruction (2026-10-02): do this review yourself, and start no agents** (no
+`Agent` tool, no subagents, no background workers) until the owner explicitly says agents
+may run again. Read, measure and write on your own; ask the owner if something needs
+another pair of hands.
 
 Before taking the next item from the queue, review the core again with fresh eyes. The
 first audit (2026-10-01) produced most of the work above, so a second look now pays. Work
