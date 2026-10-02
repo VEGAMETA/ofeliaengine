@@ -79,7 +79,10 @@ $steps = [ordered]@{
 if ($Gpu) {
     # `radeon:` runs the command with ENGINE_ADAPTER=radeon (the AMD iGPU of ref-1).
     $gpuTests = 'test --locked -p engine_rhi -p engine_render -p engine_render2d -p engine_text -p engine_upscale -p engine_fsr -p engine_dlss -p engine_frame -p engine_golden -- --test-threads=1'
-    $steps['gpu'] = @($gpuTests, "radeon:$gpuTests")
+    # The Radeon's platform self-check first (docs/research/radeon-igpu-lds-faults.md): if it
+    # fails, the machine, not the change, would make the image comparisons flaky.
+    $selfcheck = 'test --locked -p engine_render --test gpu_selfcheck -- --ignored --nocapture'
+    $steps['gpu'] = @("radeon:$selfcheck", $gpuTests, "radeon:$gpuTests")
     $prebuild['gpu'] = $gpuTests -replace ' -- ', ' --no-run -- '
     $steps['slang'] = @('test --locked -p engine_shader -- --test-threads=1')
 }

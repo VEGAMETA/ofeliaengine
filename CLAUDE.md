@@ -590,27 +590,23 @@ Written together with the feature, not after. At minimum:
 
 ## 17. Work order (initial, adjusted by the team)
 
-**Current priorities (team decision 2026-09-30).** The engine's technical core comes first:
-internals that are thought through and fast, measured on both reference GPUs, before what
-makes a game developer's day easier. In this order:
+**Current priorities (team decision 2026-09-30, kept since).** The engine's technical core
+comes first: internals that are thought through and fast, measured on both reference GPUs,
+before what makes a game developer's day easier. Editor tools, Luau bindings and debugger
+and other tooling come only after the core.
 
-1. ✔ Transparency (ADR 0054).
-2. ✔ Shader and pipeline cache and warm-up (ADR 0055).
-3. ✔ Assets and streaming (ADRs 0056, 0057; step 2 with the GPU memory budget: ADR 0076).
-4. ✔ Ambient occlusion (GTAO, ADR 0058) and subsurface scattering (ADR 0059).
-5. ✔ FSR 3.1 (ADR 0060) and DLSS (Streamline, ADR 0063); XeSS later.
-6. Review what else the core lacks: done 2026-10-01 (a core audit); its queue, in order:
-   - ✔ crash, GPU-fault and logging basics (ADR 0061); ✔ golden images and the perf gate (ADR 0062);
-   - ✔ async compute (ADR 0065); ✔ the physics API: queries, characters, rollback (ADR 0066);
-   - in progress: persistent GPU scene, ECS extraction and the runtime frame loop (ADR 0064);
-     skeletal animation and skinning (ADR 0068); atmosphere and fog (ADR 0069);
-   - networking (§13): ✔ transport and NAT traversal (ADR 0070); ✔ replication, prediction,
-     lag compensation (ADR 0074);
-   - ✔ GPU memory budget, texture streaming by feedback, mesh level streaming (ADR 0076);
-   - next: local-light and contact shadows, local reflections, GPU particles, clustered
-     decals, GI, visibility buffer/meshlets, virtual shadow maps, remaining post effects
-     (motion blur only on cinematic views, ADR 0067).
-7. Only then: editor tools, Luau bindings and debugger, other tooling.
+**Where things stand, what is in flight, the queue, the known gaps and how the work is
+run: `docs/status.md`.** Read it at the start of every session and keep it current when
+merging. A new coordinator session starts with the fresh-eyes technical review described
+there (§7) before taking the next queue item.
+
+Done so far, in the order taken: transparency (0054), pipeline cache (0055), assets and
+streaming (0056, 0057), GTAO and SSS (0058, 0059), FSR and DLSS (0060, 0063), crash and
+GPU-fault reports (0061), golden images and the perf gate (0062), the persistent GPU scene
+and runtime loop (0064), async compute (0065), the physics API (0066), skeletal animation
+(0068), atmosphere and fog (0069), the network transport (0070), local-light and contact
+shadows (0071), the frame renderer (0072), reflections (0073), replication and lag
+compensation (0074), the GPU memory budget with texture and mesh streaming (0076).
 
 The initial order below is kept for reference; its remaining items follow these.
 

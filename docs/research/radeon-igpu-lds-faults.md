@@ -7,7 +7,30 @@ now and then on the Radeon only. Measured on ref-1 (`docs/perf/reference-hw.md`)
 25.10.36 (Vulkan 1.4.315, "AMD proprietary shader compiler"), Windows 11 24H2, RAM at
 6000 MT/s (its SPD speed is 4800: an EXPO profile).
 
-## Conclusion
+## Resolution (2026-10-02): the SoC voltage
+
+The owner ran the self-check through BIOS changes (ten runs). The total of wrong threads,
+not the count of wrong dispatches (which saturates), tells the settings apart:
+
+| Setting | Wrong threads per run |
+|---|---|
+| As found: XMP 6000, FCLK 2000 | 174 |
+| Memory and fabric at defaults (4800, FCLK auto, UCLK auto), "everything auto" | 20,173 |
+| 4800 with FCLK 1600 / 1800 / 2100 | 450 – 4,600 (10× spread between runs of one setting) |
+| XMP 6000 and FCLK 2000 again, after "everything auto" | 13,393 – 23,157 |
+| **VDDCR_SOC raised to 1.25 V** (and the PBO "performance" preset, Tjmax 80 °C) | **0, in every run** |
+
+Memory speed and fabric clock made no consistent difference. Resetting everything to auto
+made it 100× worse and restoring the memory profile did not undo that, so the setting that
+mattered was another one reset with it: the SoC voltage, which feeds the I/O die the iGPU
+sits on. At its automatic value it sagged under CPU load until LDS reads failed; at 1.25 V
+(within AMD's 1.30 V limit for AM5) the check is clean. The PBO preset changed in the same
+step lowers CPU power, which could also reduce the sag; the two were not separated.
+
+`tools/check.ps1 -Gpu` now runs the self-check on the Radeon first, so a platform change
+that brings the fault back shows up as a failed step instead of flaky image comparisons.
+
+## Conclusion of the investigation (before the resolution)
 
 **The fault is in the GPU (or the platform it runs on), not in the engine.** While the CPU
 is busy, reads of groupshared memory (LDS) on the iGPU sometimes return wrong data: almost
