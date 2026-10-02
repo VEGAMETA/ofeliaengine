@@ -990,8 +990,14 @@ impl FrameRenderer {
         };
         let color = fg.create_texture("hdr", scene_desc(HDR_FORMAT));
         let depth = fg.create_texture("depth", scene_desc(self.depth_format));
+        // The projection's aspect is the shown image's: the output's, or with integer
+        // scaling the render size's (its scaled rectangle keeps it, black around).
+        let aspect = match prepared.integer {
+            Some(_) => render.0 as f32 / render.1 as f32,
+            None => output.0 as f32 / output.1 as f32,
+        };
         let scene_camera = Camera {
-            clip_from_world: camera.clip_from_world(output.0 as f32 / output.1 as f32),
+            clip_from_world: camera.clip_from_world(aspect),
             position: camera.position,
         };
         let forward_view = ForwardView {

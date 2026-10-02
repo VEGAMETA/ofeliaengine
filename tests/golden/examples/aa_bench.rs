@@ -10,15 +10,15 @@
 //!   4 × 4 the size without antialiasing, averaged 4 × 4 in linear light;
 //! - **moving**: the same for the last of `SEQUENCE` frames of a camera strafing slowly
 //!   (temporal modes accumulate while it moves), against the reference at that position;
-//! - **shimmer**: how much the image changes from frame to frame beyond what the
-//!   reference changes: the mean over the sequence and the pixels of
-//!   |(F[t] − F[t−1]) − (R[t] − R[t−1])| in display-encoded luma (0–255). Aliased edges
-//!   crawl and flicker as the camera moves (high), temporal modes are stable but may lag
-//!   (ghosting raises it too); the reference's own change is subtracted. With every
-//!   feature on, the effects' own per-frame noise (ambient occlusion's and reflections'
-//!   noise changes every frame under temporal modes, for them to average) counts too;
-//!   **shimmer, plain** measures the same on Sponza lit by the sun and the sky alone,
-//!   where only edges and textures can crawl.
+//! - **shimmer**: flicker under the moving camera: the mean over the sequence and the
+//!   pixels of |Δ²F − Δ²R|, Δ²X = X[t+1] − 2 X[t] + X[t−1] in display-encoded luma
+//!   (0–255), F the mode's frames, R the reference's. At a constant camera speed a
+//!   correct image changes smoothly; crawling edges, popping texels and per-frame noise
+//!   do not (blur and lag show in the moving FLIP instead). With every feature on the
+//!   effects' own per-frame noise counts too (ambient occlusion's and reflections' noise
+//!   changes every frame under temporal modes, for them to average); **shimmer, plain**
+//!   measures it on Sponza lit by the sun and the sky alone, where only edges and
+//!   textures can flicker.
 //!
 //! `cargo run -p engine_golden --release --example aa_bench [-- --quick] [-- --only <label>]`
 //! (`ENGINE_ADAPTER=radeon` for the iGPU; `VK_LOADER_LAYERS_DISABLE=~implicit~`). `--quick`
@@ -205,14 +205,19 @@ fn luma(frame: &[[f32; 3]]) -> Vec<f32> {
         .collect()
 }
 
-/// The mean of |(F[t] − F[t−1]) − (R[t] − R[t−1])| over the sequence.
+/// Flicker: the mean over the sequence and the pixels of |Δ²F − Δ²R|, with
+/// Δ²X = X[t+1] − 2 X[t] + X[t−1] (display-encoded luma, 0–255). Under a camera moving at a
+/// constant speed a correct image changes smoothly (its second difference is small and
+/// the reference's); edges that step from pixel to pixel, popping texels and noise that
+/// changes every frame do not. Blur and lag change the first difference, hardly the
+/// second: they show in the moving FLIP and PSNR instead.
 fn shimmer(reference: &[Vec<f32>], test: &[Vec<f32>]) -> f64 {
     let mut sum = 0.0f64;
     let mut n = 0usize;
-    for t in 1..reference.len().min(test.len()) {
+    for t in 1..reference.len().min(test.len()).saturating_sub(1) {
         for i in 0..reference[t].len() {
-            let dr = reference[t][i] - reference[t - 1][i];
-            let df = test[t][i] - test[t - 1][i];
+            let dr = reference[t + 1][i] - 2.0 * reference[t][i] + reference[t - 1][i];
+            let df = test[t + 1][i] - 2.0 * test[t][i] + test[t - 1][i];
             sum += f64::from((df - dr).abs());
             n += 1;
         }
