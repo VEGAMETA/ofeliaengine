@@ -44,8 +44,10 @@ pub const MAGIC: [u8; 4] = *b"OFPK";
 /// Version of the layout: the newest this engine writes and reads. A pack is written as
 /// version 1 unless it holds entries of a later version (skins and clips: version 2,
 /// ADR 0068), so packs without them stay readable by engines that only know version 1;
-/// those refuse a version 2 pack instead of misreading it.
-pub const VERSION: u32 = 2;
+/// those refuse a version 2 pack instead of misreading it. Version 3 (ADR 0076) adds
+/// meshes stored for streaming: the coarsest detail level in the mesh entry, each finer
+/// level's extra vertices and indices in a mesh level entry.
+pub const VERSION: u32 = 3;
 /// Oldest version this engine reads.
 pub const MIN_VERSION: u32 = 1;
 /// Largest entry a pack accepts (raw bytes): 4 GiB.
@@ -100,6 +102,9 @@ pub enum EntryKind {
     Skin,
     /// A compressed animation clip of a skin's skeleton (version 2).
     Clip,
+    /// A finer detail level of a mesh stored for streaming: the vertices it adds to the
+    /// coarser levels' and its indices (version 3, ADR 0076).
+    MeshLevel,
 }
 
 impl EntryKind {
@@ -110,6 +115,7 @@ impl EntryKind {
             Self::Scene => 3,
             Self::Skin => 4,
             Self::Clip => 5,
+            Self::MeshLevel => 6,
         }
     }
 
@@ -118,6 +124,7 @@ impl EntryKind {
         match self {
             Self::TextureLevels | Self::Mesh | Self::Scene => 1,
             Self::Skin | Self::Clip => 2,
+            Self::MeshLevel => 3,
         }
     }
 
@@ -128,6 +135,7 @@ impl EntryKind {
             3 => Some(Self::Scene),
             4 => Some(Self::Skin),
             5 => Some(Self::Clip),
+            6 => Some(Self::MeshLevel),
             _ => None,
         }
     }

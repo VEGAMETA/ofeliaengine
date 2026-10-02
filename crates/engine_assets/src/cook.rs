@@ -9,6 +9,15 @@
 //! - **mesh:** `[vertices, indices, detail levels, attributes (1 normals, 2 uvs, 4
 //!   tangents)]`; positions, the attributes present, the bounds, the indices, then per
 //!   level its index count and error, then the levels' indices. Sections padded to 16.
+//! - **mesh stored for streaming** (version 3, ADR 0076): a mesh with detail levels whose
+//!   vertices are ordered coarsest level first ([`order_for_streaming`]), so each level
+//!   uses a prefix of them. Its mesh entry has `meta[6] = 1` and `meta[5]` the vertices of
+//!   the coarsest level: positions and attributes of those, the bounds, a table of
+//!   `[index count, error bits, vertices used]` for every level from the full mesh to the
+//!   coarsest, then the coarsest level's indices. Each finer level is a **mesh level**
+//!   entry, `[level, first vertex, vertices, indices, attributes]`: the vertices it adds
+//!   (positions, then attributes) and its indices. The scene entry's mesh records
+//!   (`meta[3]`) name each mesh's entries.
 //! - **texture levels:** `[format code, width, height, levels, first level, level count]`
 //!   (width and height of level 0); the levels, each padded to 16 bytes. A texture's
 //!   levels of at most [`TAIL_SIZE`] texels share one entry (its tail, written with the
@@ -358,7 +367,7 @@ pub fn cook_scene(
             } else {
                 Vec::new()
             };
-            let _ = meshes[k].set(CookedMesh {
+            let mut mesh = CookedMesh {
                 positions: p.positions.clone(),
                 normals: p.normals.clone(),
                 uvs: p.uvs.clone(),
@@ -369,7 +378,13 @@ pub fn cook_scene(
                 max: p.max,
                 joints: p.joints.clone(),
                 weights: normalized_weights(&p.weights, p.influence_sets()),
-            });
+            };
+            // Levels stream from the coarsest up (ADR 0076): each uses a prefix of the
+            // vertices. Skinned meshes are not streamed.
+            if !mesh.lods.is_empty() && mesh.joints.is_empty() {
+                order_for_streaming(&mut mesh);
+            }
+            let _ = meshes[k].set(mesh);
         }
     });
     cooked.meshes = meshes
@@ -678,6 +693,276 @@ fn mesh_entry(m: &CookedMesh, level: i32) -> PreparedEntry {
     PreparedEntry::new(EntryKind::Mesh, meta, &data, level, DEFAULT_CHUNK_SHIFT)
 }
 
+/// Orders a mesh's vertices for streaming its detail levels (ADR 0076): by first use in
+/// the levels from the coarsest to the full mesh (meshoptimizer's advice for levels that
+/// share a vertex buffer), so every level uses a prefix of the vertices and a coarser
+/// level a shorter one. The triangles are the same; only the vertices' numbering moves.
+/// Vertices no level uses go last.
+pub fn order_for_streaming(mesh: &mut CookedMesh) {
+    let n = mesh.positions.len();
+    let mut remap = vec![u32::MAX; n];
+    let mut next = 0u32;
+    let levels = mesh
+        .lods
+        .iter()
+        .rev()
+        .map(|l| l.indices.as_slice())
+        .chain(core::iter::once(mesh.indices.as_slice()));
+    for indices in levels {
+        for &i in indices {
+            if let Some(r) = remap.get_mut(i as usize)
+                && *r == u32::MAX
+            {
+                *r = next;
+                next += 1;
+            }
+        }
+    }
+    for r in &mut remap {
+        if *r == u32::MAX {
+            *r = next;
+            next += 1;
+        }
+    }
+    fn permute<T: Copy + Default>(values: &mut Vec<T>, remap: &[u32], per_vertex: usize) {
+        if values.is_empty() {
+            return;
+        }
+        let mut out = vec![T::default(); values.len()];
+        for (old, &new) in remap.iter().enumerate() {
+            for k in 0..per_vertex {
+                if let (Some(&v), Some(slot)) = (
+                    values.get(old * per_vertex + k),
+                    out.get_mut(new as usize * per_vertex + k),
+                ) {
+                    *slot = v;
+                }
+            }
+        }
+        *values = out;
+    }
+    let sets = mesh.joints.len() / n.max(1);
+    permute(&mut mesh.positions, &remap, 1);
+    permute(&mut mesh.normals, &remap, 1);
+    permute(&mut mesh.uvs, &remap, 1);
+    permute(&mut mesh.tangents, &remap, 1);
+    permute(&mut mesh.joints, &remap, sets.max(1));
+    permute(&mut mesh.weights, &remap, sets.max(1));
+    for i in mesh
+        .indices
+        .iter_mut()
+        .chain(mesh.lods.iter_mut().flat_map(|l| l.indices.iter_mut()))
+    {
+        *i = remap.get(*i as usize).copied().unwrap_or(*i);
+    }
+}
+
+/// The vertices each level of a mesh uses, from the full mesh to the coarsest: one more
+/// than the largest index of that level and the coarser ones, when the vertices are
+/// ordered for streaming (each level then uses exactly that prefix); `None` when they are
+/// not, or the mesh has no levels or is skinned (skinned meshes are not streamed).
+pub fn streamed_vertex_counts(mesh: &CookedMesh) -> Option<Vec<u32>> {
+    if mesh.lods.is_empty() || !mesh.joints.is_empty() {
+        return None;
+    }
+    let levels: Vec<&[u32]> = core::iter::once(mesh.indices.as_slice())
+        .chain(mesh.lods.iter().map(|l| l.indices.as_slice()))
+        .collect();
+    let mut counts = vec![0u32; levels.len()];
+    let mut seen = vec![false; mesh.positions.len()];
+    let (mut largest, mut distinct) = (0u32, 0u32);
+    for k in (0..levels.len()).rev() {
+        for &i in levels[k] {
+            let slot = seen.get_mut(i as usize)?;
+            if !*slot {
+                *slot = true;
+                distinct += 1;
+            }
+            largest = largest.max(i + 1);
+        }
+        // A prefix: every vertex below the largest is used.
+        if largest != distinct {
+            return None;
+        }
+        counts[k] = largest;
+    }
+    Some(counts)
+}
+
+/// Appends the attribute sections of vertices `range` of `m` (positions, then the
+/// attributes present); returns the attribute bits.
+fn vertex_sections(data: &mut Vec<u8>, m: &CookedMesh, range: core::ops::Range<usize>) -> u32 {
+    let mut attributes = 0;
+    section(data, bytemuck::cast_slice(&m.positions[range.clone()]));
+    if !m.normals.is_empty() {
+        attributes |= 1;
+        section(data, bytemuck::cast_slice(&m.normals[range.clone()]));
+    }
+    if !m.uvs.is_empty() {
+        attributes |= 2;
+        section(data, bytemuck::cast_slice(&m.uvs[range.clone()]));
+    }
+    if !m.tangents.is_empty() {
+        attributes |= 4;
+        section(data, bytemuck::cast_slice(&m.tangents[range]));
+    }
+    attributes
+}
+
+/// The entry of a mesh stored for streaming: its coarsest level (see the module
+/// documentation).
+fn streamed_mesh_entry(m: &CookedMesh, counts: &[u32], level: i32) -> PreparedEntry {
+    let coarsest = counts.len() - 1;
+    let vertices = counts[coarsest] as usize;
+    let mut data = Vec::new();
+    let attributes = vertex_sections(&mut data, m, 0..vertices);
+    section(&mut data, bytemuck::cast_slice(&[m.min, m.max]));
+    let table: Vec<u32> = core::iter::once((m.indices.len(), 0.0f32))
+        .chain(m.lods.iter().map(|l| (l.indices.len(), l.error)))
+        .zip(counts)
+        .flat_map(|((count, error), &v)| [count as u32, error.to_bits(), v])
+        .collect();
+    section(&mut data, bytemuck::cast_slice(&table));
+    section(
+        &mut data,
+        bytemuck::cast_slice(&m.lods[coarsest - 1].indices),
+    );
+    let meta = [
+        m.positions.len() as u32,
+        m.indices.len() as u32,
+        m.lods.len() as u32,
+        attributes,
+        0,
+        vertices as u32,
+        1,
+    ];
+    PreparedEntry::new(EntryKind::Mesh, meta, &data, level, DEFAULT_CHUNK_SHIFT)
+}
+
+/// The entry of a finer level `k` (0: the full mesh) of a mesh stored for streaming.
+fn mesh_level_entry(m: &CookedMesh, counts: &[u32], k: usize, level: i32) -> PreparedEntry {
+    let (first, end) = (counts[k + 1] as usize, counts[k] as usize);
+    let indices = if k == 0 {
+        &m.indices
+    } else {
+        &m.lods[k - 1].indices
+    };
+    let mut data = Vec::new();
+    let attributes = vertex_sections(&mut data, m, first..end);
+    section(&mut data, bytemuck::cast_slice(indices));
+    let meta = [
+        k as u32,
+        first as u32,
+        (end - first) as u32,
+        indices.len() as u32,
+        attributes,
+        0,
+        0,
+    ];
+    PreparedEntry::new(
+        EntryKind::MeshLevel,
+        meta,
+        &data,
+        level,
+        DEFAULT_CHUNK_SHIFT,
+    )
+}
+
+/// A finer detail level of a mesh stored for streaming, as its entry holds it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MeshLevelData {
+    /// The level (0: the full mesh).
+    pub level: u32,
+    /// Its first new vertex: the coarser levels use the vertices before.
+    pub first_vertex: u32,
+    /// Positions of the new vertices.
+    pub positions: Vec<[f32; 3]>,
+    /// Their normals (or none).
+    pub normals: Vec<[f32; 3]>,
+    /// Their texture coordinates (or none).
+    pub uvs: Vec<[f32; 2]>,
+    /// Their tangents (or none).
+    pub tangents: Vec<[f32; 4]>,
+    /// The level's triangles, over every vertex up to the new ones.
+    pub indices: Vec<u32>,
+}
+
+/// Reads a mesh level entry ([`EntryKind::MeshLevel`]) from its meta and raw bytes.
+pub fn read_mesh_level_entry(meta: [u32; 7], data: &[u8]) -> Result<MeshLevelData, PackError> {
+    let [level, first, vertices, index_count, attributes, ..] = meta;
+    let n = vertices as usize;
+    let mut s = Sections { data, at: 0 };
+    let positions = s.next::<[f32; 3]>(n)?;
+    let normals = if attributes & 1 != 0 {
+        s.next(n)?
+    } else {
+        Vec::new()
+    };
+    let uvs = if attributes & 2 != 0 {
+        s.next(n)?
+    } else {
+        Vec::new()
+    };
+    let tangents = if attributes & 4 != 0 {
+        s.next(n)?
+    } else {
+        Vec::new()
+    };
+    let indices = s.next::<u32>(index_count as usize)?;
+    let end = first
+        .checked_add(vertices)
+        .ok_or_else(|| invalid("mesh level vertices out of range"))?;
+    if indices.iter().any(|&i| i >= end) {
+        return Err(invalid("mesh level index out of range"));
+    }
+    Ok(MeshLevelData {
+        level,
+        first_vertex: first,
+        positions,
+        normals,
+        uvs,
+        tangents,
+        indices,
+    })
+}
+
+/// Where a mesh stored for streaming keeps each of its levels.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MeshLevelRecord {
+    /// The entry holding the level's new vertices and indices (the coarsest level is in
+    /// the mesh's own entry).
+    pub entry: u32,
+    /// Its indices.
+    pub index_count: u32,
+    /// Its error in object units (0 for the full mesh).
+    pub error: f32,
+    /// The vertices it uses (a prefix).
+    pub vertices: u32,
+}
+
+/// A mesh stored for streaming (ADR 0076): its levels from the full mesh to the coarsest.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct StreamedMesh {
+    /// Every level, the full mesh first; the last is the coarsest, held by the mesh
+    /// itself in [`SceneLayout::scene`].
+    pub levels: Vec<MeshLevelRecord>,
+}
+
+/// Records of a scene's meshes in its scene entry: each mesh's entry and the entries of
+/// its finer levels when stored for streaming (`u32::MAX`: none).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct MeshRecord {
+    /// The mesh entry.
+    pub entry: u32,
+    /// The entries of levels 0..3 (the full mesh first) stored apart.
+    pub levels: [u32; 4],
+    /// 0.
+    pub reserved: [u32; 3],
+}
+
+const _: () = assert!(size_of::<MeshRecord>() == 32);
+
 fn skin_entry(skin: &CookedSkin, level: i32) -> PreparedEntry {
     let skeleton = skin.skeleton.to_bytes();
     let mut data = Vec::new();
@@ -706,6 +991,8 @@ fn clip_entry(skin: u32, clip: &CompressedClip, level: i32) -> PreparedEntry {
 #[derive(Debug, Clone, Copy)]
 enum Piece {
     Mesh(usize),
+    /// Mesh, finer level (stored for streaming).
+    MeshLevel(usize, u32),
     Skin(usize),
     /// Skin, clip.
     Clip(usize, usize),
@@ -723,6 +1010,8 @@ pub fn write_pack(
     level: i32,
 ) -> Result<PackStats, PackError> {
     engine_profiler::zone!("assets::write_pack");
+    // Meshes whose vertices are ordered for streaming are stored by level (version 3).
+    let streamed: Vec<Option<Vec<u32>>> = scene.meshes.iter().map(streamed_vertex_counts).collect();
     let mut pieces: Vec<Piece> = (0..scene.meshes.len()).map(Piece::Mesh).collect();
     for (k, skin) in scene.skins.iter().enumerate() {
         pieces.push(Piece::Skin(k));
@@ -735,8 +1024,21 @@ pub fn write_pack(
         pieces.push(Piece::Levels(t, tail, levels - tail));
         large.extend((0..tail).map(|k| Piece::Levels(t, k, 1)));
     }
+    for (m, counts) in streamed.iter().enumerate() {
+        if let Some(counts) = counts {
+            large.extend((0..counts.len() as u32 - 1).map(|k| Piece::MeshLevel(m, k)));
+        }
+    }
     let bytes = |p: &Piece| match *p {
         Piece::Levels(t, k, _) => scene.textures[t].levels[k as usize].len(),
+        Piece::MeshLevel(m, k) => streamed[m].as_ref().map_or(0, |c| {
+            let indices = if k == 0 {
+                scene.meshes[m].indices.len()
+            } else {
+                scene.meshes[m].lods[k as usize - 1].indices.len()
+            };
+            (c[k as usize] - c[k as usize + 1]) as usize * 60 + indices * 4
+        }),
         Piece::Mesh(_) | Piece::Skin(_) | Piece::Clip(..) => 0,
     };
     large.sort_by_key(bytes);
@@ -747,7 +1049,14 @@ pub fn write_pack(
     jobs.parallel_for(pieces.len(), 1, |_, range| {
         for k in range {
             let entry = match pieces[k] {
-                Piece::Mesh(m) => mesh_entry(&scene.meshes[m], level),
+                Piece::Mesh(m) => match &streamed[m] {
+                    Some(counts) => streamed_mesh_entry(&scene.meshes[m], counts, level),
+                    None => mesh_entry(&scene.meshes[m], level),
+                },
+                Piece::MeshLevel(m, k) => match &streamed[m] {
+                    Some(counts) => mesh_level_entry(&scene.meshes[m], counts, k as usize, level),
+                    None => mesh_entry(&scene.meshes[m], level),
+                },
                 Piece::Skin(k) => skin_entry(&scene.skins[k], level),
                 Piece::Clip(k, c) => clip_entry(k as u32, &scene.skins[k].clips[c], level),
                 Piece::Levels(t, first, count) => {
@@ -759,6 +1068,7 @@ pub fn write_pack(
     });
     let mut writer = PackWriter::create(path, DEFAULT_CHUNK_SHIFT)?;
     let mut mesh_entries = vec![NONE; scene.meshes.len()];
+    let mut mesh_levels = vec![[NONE; 4]; scene.meshes.len()];
     let mut records: Vec<TextureRecord> = scene
         .textures
         .iter()
@@ -777,6 +1087,11 @@ pub fn write_pack(
         let index = writer.add(&entry)?;
         match *piece {
             Piece::Mesh(m) => mesh_entries[m] = index,
+            Piece::MeshLevel(m, k) => {
+                if let Some(slot) = mesh_levels[m].get_mut(k as usize) {
+                    *slot = index;
+                }
+            }
             Piece::Skin(_) | Piece::Clip(..) => {}
             Piece::Levels(t, first, count) => {
                 for k in first..first + count {
@@ -835,15 +1150,30 @@ pub fn write_pack(
             world_from_object: i.world_from_object,
         })
         .collect();
+    // Mesh records, when a mesh is stored for streaming (version 3).
+    let mesh_records: Vec<MeshRecord> = if streamed.iter().any(Option::is_some) {
+        mesh_entries
+            .iter()
+            .zip(&mesh_levels)
+            .map(|(&entry, &levels)| MeshRecord {
+                entry,
+                levels,
+                reserved: [0; 3],
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
     let mut data = Vec::new();
     section(&mut data, bytemuck::cast_slice(&records));
     section(&mut data, bytemuck::cast_slice(&materials));
     section(&mut data, bytemuck::cast_slice(&instances));
+    section(&mut data, bytemuck::cast_slice(&mesh_records));
     let meta = [
         records.len() as u32,
         materials.len() as u32,
         instances.len() as u32,
-        0,
+        mesh_records.len() as u32,
         0,
         0,
         0,
@@ -923,6 +1253,125 @@ fn read_levels_entry(meta: [u32; 7], data: &[u8]) -> Result<Vec<Vec<u8>>, PackEr
             sections.slice(bytes).map(<[u8]>::to_vec)
         })
         .collect()
+}
+
+/// A mesh entry: the whole mesh, or for a mesh stored for streaming its coarsest level
+/// (the mesh's vertices that level uses and its indices, no `lods`) with every level's
+/// record (entries not filled in).
+fn read_mesh_entry_parts(
+    meta: [u32; 7],
+    data: &[u8],
+) -> Result<(CookedMesh, Option<StreamedMesh>), PackError> {
+    if meta[6] != 1 {
+        return read_mesh_entry(meta, data).map(|m| (m, None));
+    }
+    let [total, _, lod_count, attributes, _, coarse, _] = meta.map(|m| m as usize);
+    if lod_count == 0 || lod_count > 3 || coarse > total {
+        return Err(invalid("bad streamed mesh"));
+    }
+    let mut s = Sections { data, at: 0 };
+    let positions = s.next::<[f32; 3]>(coarse)?;
+    let normals = if attributes & 1 != 0 {
+        s.next(coarse)?
+    } else {
+        Vec::new()
+    };
+    let uvs = if attributes & 2 != 0 {
+        s.next(coarse)?
+    } else {
+        Vec::new()
+    };
+    let tangents = if attributes & 4 != 0 {
+        s.next(coarse)?
+    } else {
+        Vec::new()
+    };
+    let bounds = s.next::<[f32; 3]>(2)?;
+    let table = s.next::<[u32; 3]>(lod_count + 1)?;
+    let indices = s.next::<u32>(table[lod_count][0] as usize)?;
+    if indices.iter().any(|&i| i as usize >= coarse)
+        || table[lod_count][2] as usize != coarse
+        || table[0][2] as usize != total
+        || table.windows(2).any(|w| w[1][2] > w[0][2])
+    {
+        return Err(invalid("bad streamed mesh levels"));
+    }
+    let levels = table
+        .iter()
+        .map(|&[index_count, error, vertices]| MeshLevelRecord {
+            entry: NONE,
+            index_count,
+            error: f32::from_bits(error),
+            vertices,
+        })
+        .collect();
+    Ok((
+        CookedMesh {
+            positions,
+            normals,
+            uvs,
+            tangents,
+            indices,
+            lods: Vec::new(),
+            min: bounds[0],
+            max: bounds[1],
+            joints: Vec::new(),
+            weights: Vec::new(),
+        },
+        Some(StreamedMesh { levels }),
+    ))
+}
+
+/// A whole mesh from its coarsest level and its finer levels' entries (every one).
+fn assemble_mesh(
+    coarse: CookedMesh,
+    streamed: &StreamedMesh,
+    finer: &[MeshLevelData],
+) -> Result<CookedMesh, PackError> {
+    let coarse_indices = coarse.indices.clone();
+    let mut mesh = CookedMesh {
+        indices: Vec::new(),
+        ..coarse
+    };
+    let coarsest = streamed.levels.len() - 1;
+    let mut lods: Vec<Lod> = Vec::new();
+    // Vertices from the coarsest level's up to the full mesh's.
+    for k in (0..coarsest).rev() {
+        let level = finer
+            .iter()
+            .find(|l| l.level == k as u32)
+            .ok_or_else(|| invalid("mesh level missing"))?;
+        if level.first_vertex as usize != mesh.positions.len()
+            || level.first_vertex + level.positions.len() as u32 != streamed.levels[k].vertices
+        {
+            return Err(invalid("mesh level vertices do not follow"));
+        }
+        mesh.positions.extend_from_slice(&level.positions);
+        mesh.normals.extend_from_slice(&level.normals);
+        mesh.uvs.extend_from_slice(&level.uvs);
+        mesh.tangents.extend_from_slice(&level.tangents);
+    }
+    for (k, record) in streamed.levels.iter().enumerate() {
+        let indices = if k == coarsest {
+            coarse_indices.clone()
+        } else {
+            finer
+                .iter()
+                .find(|l| l.level == k as u32)
+                .map(|l| l.indices.clone())
+                .ok_or_else(|| invalid("mesh level missing"))?
+        };
+        if k == 0 {
+            mesh.indices = indices;
+        } else {
+            lods.push(Lod {
+                indices,
+                error: record.error,
+            });
+        }
+    }
+    mesh.lods = lods;
+    Ok(mesh)
 }
 
 fn read_mesh_entry(meta: [u32; 7], data: &[u8]) -> Result<CookedMesh, PackError> {
@@ -1038,14 +1487,24 @@ pub struct SceneLayout {
     /// Every texture entry, in file order: the textures' tails first, then their larger
     /// levels from the smallest (the order to stream them in).
     pub texture_entries: Vec<TextureEntry>,
+    /// Per mesh of [`Self::scene`]: its levels' entries when it is stored for streaming
+    /// and was opened by [`open_scene_streamed`] (the mesh then holds its coarsest level
+    /// only), `None` otherwise.
+    pub mesh_streams: Vec<Option<StreamedMesh>>,
 }
 
 /// An entry decoded by kind.
 enum Decoded {
-    Mesh(CookedMesh),
+    Mesh(CookedMesh, Option<StreamedMesh>),
+    MeshLevel(MeshLevelData),
     Skin(CookedSkin),
     Clip(u32, CompressedClip),
-    Scene(Vec<TextureRecord>, Vec<MaterialRecord>, Vec<InstanceRecord>),
+    Scene(
+        Vec<TextureRecord>,
+        Vec<MaterialRecord>,
+        Vec<InstanceRecord>,
+        Vec<MeshRecord>,
+    ),
 }
 
 fn add_stats(total: &mut LoadStats, more: LoadStats) {
@@ -1065,22 +1524,51 @@ pub fn open_scene(
     jobs: &ThreadPool,
     depth: usize,
 ) -> Result<(Pack, SceneLayout, LoadStats), PackError> {
+    open_scene_with(path, jobs, depth, false)
+}
+
+/// [`open_scene`], but meshes stored for streaming (version 3, ADR 0076) are loaded with
+/// their coarsest level only; [`SceneLayout::mesh_streams`] says where their finer
+/// levels are ([`read_mesh_level_entry`] reads them).
+pub fn open_scene_streamed(
+    path: &Path,
+    jobs: &ThreadPool,
+    depth: usize,
+) -> Result<(Pack, SceneLayout, LoadStats), PackError> {
+    open_scene_with(path, jobs, depth, true)
+}
+
+fn open_scene_with(
+    path: &Path,
+    jobs: &ThreadPool,
+    depth: usize,
+    stream_meshes: bool,
+) -> Result<(Pack, SceneLayout, LoadStats), PackError> {
     engine_profiler::zone!("assets::open_scene");
     let pack = Pack::open(path)?;
     let entries = pack.entries();
     let decoded: Vec<Mutex<Option<Decoded>>> = entries.iter().map(|_| Mutex::new(None)).collect();
     let indices: Vec<u32> = (0..entries.len() as u32)
-        .filter(|&i| entries[i as usize].kind() != EntryKind::TextureLevels)
+        .filter(|&i| match entries[i as usize].kind() {
+            EntryKind::TextureLevels => false,
+            EntryKind::MeshLevel => !stream_meshes,
+            _ => true,
+        })
         .collect();
     let stats = pack.load(&indices, jobs, depth, |index, e, data: EntryData| {
         let value = match e.kind() {
-            EntryKind::Mesh => Decoded::Mesh(read_mesh_entry(e.meta, &data)?),
+            EntryKind::Mesh => {
+                let (mesh, streamed) = read_mesh_entry_parts(e.meta, &data)?;
+                Decoded::Mesh(mesh, streamed)
+            }
+            EntryKind::MeshLevel => Decoded::MeshLevel(read_mesh_level_entry(e.meta, &data)?),
             EntryKind::Scene => {
                 let mut s = Sections { data: &data, at: 0 };
                 let textures = s.next::<TextureRecord>(e.meta[0] as usize)?;
                 let materials = s.next::<MaterialRecord>(e.meta[1] as usize)?;
                 let instances = s.next::<InstanceRecord>(e.meta[2] as usize)?;
-                Decoded::Scene(textures, materials, instances)
+                let meshes = s.next::<MeshRecord>(e.meta[3] as usize)?;
+                Decoded::Scene(textures, materials, instances, meshes)
             }
             EntryKind::Skin => Decoded::Skin(read_skin_entry(e.meta, &data)?),
             EntryKind::Clip => {
@@ -1101,16 +1589,21 @@ pub fn open_scene(
     let mut mesh_of = vec![NONE; entries.len()];
     let mut records = None;
     let mut clips = Vec::new();
+    // Finer levels of meshes stored for streaming, by entry.
+    let mut levels: Vec<Option<MeshLevelData>> = (0..entries.len()).map(|_| None).collect();
     for (i, slot) in decoded.into_iter().enumerate() {
         match slot.into_inner().ok().flatten() {
-            Some(Decoded::Mesh(m)) => {
+            Some(Decoded::Mesh(m, streamed)) => {
                 mesh_of[i] = layout.scene.meshes.len() as u32;
                 layout.scene.meshes.push(m);
+                layout.mesh_streams.push(streamed);
             }
+            Some(Decoded::MeshLevel(level)) => levels[i] = Some(level),
+            None if entries[i].kind() == EntryKind::MeshLevel && stream_meshes => {}
             Some(Decoded::Skin(skin)) => layout.scene.skins.push(skin),
             Some(Decoded::Clip(skin, clip)) => clips.push((skin, clip)),
-            Some(Decoded::Scene(t, m, inst)) => {
-                if records.replace((t, m, inst)).is_some() {
+            Some(Decoded::Scene(t, m, inst, meshes)) => {
+                if records.replace((t, m, inst, meshes)).is_some() {
                     return Err(invalid("more than one scene"));
                 }
             }
@@ -1118,9 +1611,48 @@ pub fn open_scene(
             None => return Err(invalid(format!("entry {i} not loaded"))),
         }
     }
-    let Some((textures, materials, instances)) = records else {
+    let Some((textures, materials, instances, mesh_records)) = records else {
         return Err(invalid("no scene"));
     };
+    // Meshes stored for streaming: their levels' entries, then whole meshes unless they
+    // stream.
+    for record in &mesh_records {
+        let Some(&m) = mesh_of.get(record.entry as usize).filter(|&&m| m != NONE) else {
+            return Err(invalid("mesh record of a missing mesh"));
+        };
+        let Some(streamed) = layout.mesh_streams[m as usize].as_mut() else {
+            continue;
+        };
+        let coarsest = streamed.levels.len() - 1;
+        for k in 0..coarsest {
+            let entry = record.levels.get(k).copied().unwrap_or(NONE);
+            let fits = entries
+                .get(entry as usize)
+                .is_some_and(|e| e.kind() == EntryKind::MeshLevel && e.meta[0] == k as u32);
+            if !fits {
+                return Err(invalid("mesh level in a missing entry"));
+            }
+            streamed.levels[k].entry = entry;
+        }
+    }
+    if !stream_meshes {
+        for (m, streamed) in layout.mesh_streams.iter_mut().enumerate() {
+            let Some(s) = streamed.take() else {
+                continue;
+            };
+            let finer: Vec<MeshLevelData> = s.levels[..s.levels.len() - 1]
+                .iter()
+                .map(|l| {
+                    levels
+                        .get_mut(l.entry as usize)
+                        .and_then(Option::take)
+                        .ok_or_else(|| invalid("mesh level not loaded"))
+                })
+                .collect::<Result<_, _>>()?;
+            let coarse = core::mem::take(&mut layout.scene.meshes[m]);
+            layout.scene.meshes[m] = assemble_mesh(coarse, &s, &finer)?;
+        }
+    }
     for (skin, clip) in clips {
         let skin = layout
             .scene
@@ -1455,9 +1987,10 @@ mod tests {
         for level in [0, 19] {
             let scene = sample();
             let stats = write_pack(&path, &scene, &jobs, level).unwrap();
-            // Meshes 2; textures: 512² has 2 large levels + a tail, 2×2 a tail, 256×64
-            // 1 large level + a tail; the scene.
-            assert_eq!(stats.entries, 2 + 3 + 1 + 2 + 1);
+            // Meshes 2 and the full level of the first (stored for streaming); textures:
+            // 512² has 2 large levels + a tail, 2×2 a tail, 256×64 1 large level + a
+            // tail; the scene.
+            assert_eq!(stats.entries, 3 + 3 + 1 + 2 + 1);
             let (loaded, load) = load_pack(&path, &jobs, 4).unwrap();
             assert_eq!(loaded, scene);
             assert_eq!(load.read_bytes, stats.stored_bytes);
@@ -1469,9 +2002,19 @@ mod tests {
                 .map(|e| (e.kind(), e.meta[4]))
                 .collect();
             assert_eq!(kinds[..2], [(EntryKind::Mesh, 0), (EntryKind::Mesh, 0)]);
-            let large: Vec<u64> = pack.entries()[5..8].iter().map(|e| e.bytes).collect();
+            let large: Vec<u64> = pack.entries()[5..9]
+                .iter()
+                .filter(|e| e.kind() == EntryKind::TextureLevels)
+                .map(|e| e.bytes)
+                .collect();
+            assert_eq!(large.len(), 3);
             assert!(large.is_sorted(), "{large:?}");
-            assert_eq!(kinds[8].0, EntryKind::Scene);
+            assert!(
+                pack.entries()[5..9]
+                    .iter()
+                    .any(|e| e.kind() == EntryKind::MeshLevel)
+            );
+            assert_eq!(kinds[9].0, EntryKind::Scene);
         }
         let _ = std::fs::remove_file(path);
     }
@@ -1481,7 +2024,10 @@ mod tests {
         let jobs = ThreadPool::builder().workers(2).build().unwrap();
         let path =
             std::env::temp_dir().join(format!("engine_assets_skinned_{}.pack", std::process::id()));
-        let scene = skinned_sample();
+        // Without meshes stored for streaming (version 3): the level does not use a
+        // prefix of the vertices.
+        let mut scene = skinned_sample();
+        scene.meshes[0].lods[0].indices = vec![0, 2, 3];
         write_pack(&path, &scene, &jobs, 3).unwrap();
         let header = std::fs::read(&path).unwrap();
         assert_eq!(
@@ -1490,8 +2036,11 @@ mod tests {
         );
         let (loaded, _) = load_pack(&path, &jobs, 4).unwrap();
         assert_eq!(loaded, scene);
-        // Without skins a pack stays version 1 (engines that only read 1 can open it).
-        write_pack(&path, &sample(), &jobs, 3).unwrap();
+        // Without skins and meshes stored for streaming a pack stays version 1 (engines
+        // that only read 1 can open it).
+        let mut plain = sample();
+        plain.meshes[0].lods[0].indices = vec![0, 2, 3];
+        write_pack(&path, &plain, &jobs, 3).unwrap();
         let header = std::fs::read(&path).unwrap();
         assert_eq!(
             u32::from_le_bytes([header[4], header[5], header[6], header[7]]),
@@ -1532,6 +2081,90 @@ mod tests {
             .map(|t| (t.texture, t.first_level))
             .collect();
         assert_eq!(large, [(2, 0), (0, 1), (0, 0)]);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn meshes_stream_by_level_from_their_pack() {
+        // A grid of 32 × 32 quads with three levels from the simplifier.
+        let n = 33u32;
+        let mut positions = Vec::new();
+        for y in 0..n {
+            for x in 0..n {
+                let (fx, fy) = (x as f32 / 32.0, y as f32 / 32.0);
+                positions.push([fx, fy, 0.1 * (fx * 7.0).sin() * (fy * 5.0).cos()]);
+            }
+        }
+        let mut indices = Vec::new();
+        for y in 0..n - 1 {
+            for x in 0..n - 1 {
+                let a = y * n + x;
+                indices.extend_from_slice(&[a, a + 1, a + n, a + 1, a + n + 1, a + n]);
+            }
+        }
+        let lods = generate_lods(&positions, &indices, &LodSettings::default());
+        assert!(lods.len() >= 2, "{}", lods.len());
+        let mut mesh = CookedMesh {
+            uvs: positions.iter().map(|p| [p[0], p[1]]).collect(),
+            normals: vec![[0.0, 0.0, 1.0]; positions.len()],
+            positions,
+            indices,
+            lods,
+            max: [1.0, 1.0, 0.1],
+            ..CookedMesh::default()
+        };
+        // Not ordered yet: no prefixes.
+        assert!(streamed_vertex_counts(&mesh).is_none());
+        let before = mesh.clone();
+        order_for_streaming(&mut mesh);
+        let counts = streamed_vertex_counts(&mesh).unwrap();
+        assert_eq!(counts[0] as usize, mesh.positions.len());
+        assert!(counts.windows(2).all(|w| w[1] < w[0]), "{counts:?}");
+        // The same triangles over the same vertex data.
+        let corners = |m: &CookedMesh, list: &[u32]| -> Vec<[u32; 3]> {
+            list.iter()
+                .map(|&i| m.positions[i as usize].map(f32::to_bits))
+                .collect()
+        };
+        assert_eq!(
+            corners(&mesh, &mesh.indices),
+            corners(&before, &before.indices)
+        );
+        for (a, b) in mesh.lods.iter().zip(&before.lods) {
+            assert_eq!(corners(&mesh, &a.indices), corners(&before, &b.indices));
+        }
+
+        let mut scene = sample();
+        scene.meshes = vec![mesh.clone()];
+        scene.instances.truncate(1);
+        scene.instances[0].mesh = 0;
+        let jobs = ThreadPool::builder().workers(2).build().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("engine_assets_meshes_{}.pack", std::process::id()));
+        write_pack(&path, &scene, &jobs, 3).unwrap();
+        // Whole, as before.
+        let (loaded, _) = load_pack(&path, &jobs, 4).unwrap();
+        assert_eq!(loaded.meshes[0], mesh);
+        // Streamed: the coarsest level, then each finer one from its entry.
+        let (pack, layout, _) = open_scene_streamed(&path, &jobs, 4).unwrap();
+        let streamed = layout.mesh_streams[0].clone().unwrap();
+        let coarse = &layout.scene.meshes[0];
+        let coarsest = streamed.levels.len() - 1;
+        assert_eq!(coarse.positions.len() as u32, counts[coarsest]);
+        assert_eq!(coarse.indices, mesh.lods[coarsest - 1].indices);
+        let mut finer = Vec::new();
+        for record in &streamed.levels[..coarsest] {
+            let data = Mutex::new(Vec::new());
+            pack.load(&[record.entry], &jobs, 1, |_, e, bytes: EntryData| {
+                let level = read_mesh_level_entry(e.meta, &bytes)?;
+                data.lock().unwrap().push(level);
+                Ok(())
+            })
+            .unwrap();
+            finer.extend(data.into_inner().unwrap());
+        }
+        let whole = assemble_mesh(coarse.clone(), &streamed, &finer).unwrap();
+        assert_eq!(whole, mesh);
         let _ = std::fs::remove_file(path);
     }
 
