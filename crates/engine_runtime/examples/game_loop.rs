@@ -486,6 +486,7 @@ mod windowed {
 
         // SAFETY: the device is idle.
         unsafe {
+            frame_renderer.destroy(&device, &mut allocator, &bindless);
             view.destroy(&mut allocator, &bindless);
             scene.destroy(&mut allocator);
             graph.destroy(&mut allocator, Some(&bindless));

@@ -116,9 +116,18 @@ pub struct Shot {
     pub antialiasing: Antialiasing,
     /// The render size relative to `size` (the upscaler's ratio for `quality`).
     pub quality: Quality,
+    /// A fixed render size (`ViewSettings::render_size`: pixel art, integer scaling).
+    pub render_size: Option<(u32, u32)>,
     /// Frames accumulated before the capture of a temporal shot (the history's state at
     /// the capture is then the same on every run).
     pub temporal_frames: u32,
+    /// Frames captured, one after the other (temporal stability is measured on
+    /// sequences); [`Rendered::rgba8`] is the last, [`Rendered::frames`] all.
+    pub captures: u32,
+    /// Frames from the first temporal frame to the first capture, overriding
+    /// `temporal_frames - 1` for temporal shots and 0 for the others: shots of different
+    /// antialiasing then capture the same camera positions.
+    pub capture_after: Option<u32>,
     /// The camera's motion per frame (eye and target move together), from the first
     /// temporal frame: ghosting and smearing show in the capture.
     pub camera_motion: Vec3,
@@ -170,7 +179,10 @@ impl Shot {
             contact_shadows: false,
             antialiasing: Antialiasing::OFF,
             quality: Quality::Native,
+            render_size: None,
             temporal_frames: 32,
+            captures: 1,
+            capture_after: None,
             camera_motion: Vec3::ZERO,
             runtime: false,
             rigid_camera: false,
@@ -204,6 +216,8 @@ pub struct Rendered {
     pub async_compute: bool,
     /// The antialiasing used (the shot's, or TAAU when its upscaler was unavailable).
     pub antialiasing: Antialiasing,
+    /// Every captured frame ([`Shot::captures`]), in order, as `rgba8`.
+    pub frames: Vec<Vec<u8>>,
 }
 
 /// How to run [`render`].
@@ -612,8 +626,10 @@ fn median(values: &mut [f64]) -> f64 {
 #[allow(clippy::too_many_lines)]
 pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let loaded = load(&shot.source, shot.subsurface, shot.glossy_floor)?;
-    let (instance, device, streamline) =
-        gpu(options.validation, shot.antialiasing == Antialiasing::DLSS)?;
+    let (instance, device, streamline) = gpu(
+        options.validation,
+        shot.antialiasing.upscaler() == Some(engine_frame::UpscalerKind::Dlss),
+    )?;
     let [width, height] = shot.size;
     let d = device.raw();
     let mut allocator = Allocator::new(&device);
@@ -837,23 +853,24 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let eye = shot.eye.unwrap_or(default_eye);
     let target = shot.target.unwrap_or(default_target);
     let extent = (max - min).length();
-    let temporal = shot.antialiasing != Antialiasing::OFF;
+    let temporal = shot.antialiasing.is_temporal();
     // Frames after residency before the capture: the sky's environment is built on the
     // first; a temporal shot then accumulates `temporal_frames` frames from a camera cut
     // at `TEMPORAL_START` (its history starts there), the last one captured.
     const TEMPORAL_START: usize = 2;
     const SSR_FRAMES: usize = 8;
     let capture_at = TEMPORAL_START
-        + if temporal {
-            shot.temporal_frames.max(1) as usize - 1
-        } else {
-            0
+        + match shot.capture_after {
+            Some(frames) => frames as usize,
+            None if temporal => shot.temporal_frames.max(1) as usize - 1,
+            None => 0,
         }
         // Screen-space reflections' own temporal filter converges over a few frames.
         + if shot.ssr.is_some() { SSR_FRAMES } else { 0 };
     let settings = ViewSettings {
         antialiasing: shot.antialiasing,
         quality: shot.quality,
+        render_size: shot.render_size,
         exposure: Exposure::Fixed(shot.exposure),
         curve: shot.curve,
         bloom: shot.bloom,
@@ -919,14 +936,17 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut frame_times = Vec::new();
     let mut frame_number = 0u64;
     let mut timed = 0;
-    let mut captured = false;
+    let mut captured = 0u32;
+    let captures = shot.captures.max(1);
+    let mut frames = Vec::with_capacity(captures as usize);
     let mut resident_frames = 0;
     let mut previous_faces = 0;
-    while timed < options.timed_frames || !captured {
+    while timed < options.timed_frames || captured < captures {
         let uploading = textures.pending().0 > 0;
         // With probes, once every probe was captured with the textures resident.
         let probes_ready = probes.as_ref().is_none_or(|p| p.stats().pending == 0);
-        let capture = !uploading && !captured && resident_frames >= capture_at && probes_ready;
+        let capture =
+            !uploading && captured < captures && resident_frames >= capture_at && probes_ready;
         // Frames since the cut that starts a temporal shot's history (the jitter sequence
         // runs from the first frame: the scene's upload takes the same frames every run).
         let accumulated = (!uploading && resident_frames >= TEMPORAL_START)
@@ -1160,8 +1180,14 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             p.refresh_all();
         }
         if capture {
-            captured = true;
-        } else if captured || resident_frames > 2 {
+            captured += 1;
+            let ptr = readback_mem.mapped_ptr().expect("mapped readback");
+            // SAFETY: the GPU is idle; the mapping covers the image.
+            frames.push(
+                unsafe { core::slice::from_raw_parts(ptr.as_ptr(), readback_size as usize) }
+                    .to_vec(),
+            );
+        } else if captured > 0 || resident_frames > 2 {
             // Times of the frame before this one's recording (the graph reads them when
             // its slot comes around): every frame after the scene is resident (and its
             // reflection probes captured: captures are not steady-state work).
@@ -1189,10 +1215,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         }
     }
 
-    let ptr = readback_mem.mapped_ptr().expect("mapped readback");
-    // SAFETY: the GPU is idle; the mapping covers the image.
-    let rgba8 =
-        unsafe { core::slice::from_raw_parts(ptr.as_ptr(), readback_size as usize) }.to_vec();
+    let rgba8 = frames.last().cloned().unwrap_or_default();
     let adapter = device.adapter().summary();
     let vendor_id = device.adapter().vendor_id;
     let pass_us = timings
@@ -1206,9 +1229,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // SAFETY: the device is idle; everything below was created above and is not used
     // again.
     unsafe {
-        frame
-            .forward_mut()
-            .destroy(&device, &mut allocator, &bindless);
+        frame.destroy(&device, &mut allocator, &bindless);
         view.destroy(&mut allocator, &bindless);
         if let Some(game) = game.as_mut() {
             game.scene.destroy(&mut allocator);
@@ -1256,5 +1277,6 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         frame_us,
         async_compute,
         antialiasing,
+        frames,
     })
 }

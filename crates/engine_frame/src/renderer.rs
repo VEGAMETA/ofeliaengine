@@ -1,6 +1,9 @@
 //! The frame renderer: one view's frame, declared into the render graph in order.
 
-use crate::antialiasing::{Antialiasing, AntialiasingSupport, InvalidAntialiasing, Msaa, Upscale};
+use crate::antialiasing::{
+    Antialiasing, AntialiasingSupport, InvalidAntialiasing, Msaa, PostAntialiasing, SmaaQuality,
+    Upscale,
+};
 use crate::settings::{Exposure, ViewSettings};
 use crate::view::{HistoryImage, Prepared, Retired, View};
 use core::fmt;
@@ -17,7 +20,11 @@ use engine_render::graph::{
 };
 use engine_render::material::{MaterialFrame, MaterialTable};
 use engine_render::mesh::GeometryFrame;
-use engine_render::post::{Composite, HDR_FORMAT, Tonemap};
+use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, Tonemap};
+use engine_render::postaa::{
+    Decode, PERCEPTUAL_FORMAT, PostAa, PostFilter, PostTarget, SmaaInput, SmaaPreset, SmaaTemporal,
+    smaa_jitter,
+};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings};
 use engine_render::reflections::{ReflectionProbes, Reflections, ScreenSpaceReflections};
 use engine_render::skinning::SkinningFrame;
@@ -274,6 +281,10 @@ pub struct FrameRenderer {
     frames_in_flight: u64,
     /// Sample counts the scene's targets support, by [`Msaa`].
     msaa: [bool; 4],
+    /// The filters after tone mapping (ADR 0075), made as views ask for them.
+    post: Box<PostAa>,
+    /// The tone mapper into their perceptual image, made with the first filter.
+    perceptual: Option<Tonemap>,
     #[cfg(feature = "dlss")]
     streamline: Option<engine_dlss::Streamline>,
 }
@@ -359,6 +370,21 @@ fn scaled(output: (u32, u32), scale: f32) -> (u32, u32) {
         ((output.0 as f32 * scale) as u32).clamp(1, output.0),
         ((output.1 as f32 * scale) as u32).clamp(1, output.1),
     )
+}
+
+/// The filter after tone mapping of `post`.
+fn post_filter(post: PostAntialiasing) -> Option<PostFilter> {
+    match post {
+        PostAntialiasing::Off => None,
+        PostAntialiasing::Fxaa => Some(PostFilter::Fxaa),
+        PostAntialiasing::Mlaa => Some(PostFilter::Smaa(SmaaPreset::Mlaa)),
+        PostAntialiasing::Smaa(quality) => Some(PostFilter::Smaa(match quality {
+            SmaaQuality::Low => SmaaPreset::Low,
+            SmaaQuality::Medium => SmaaPreset::Medium,
+            SmaaQuality::High => SmaaPreset::High,
+            SmaaQuality::Ultra => SmaaPreset::Ultra,
+        })),
+    }
 }
 
 /// Whether step 4 brings the image to the output size (else the tone mapper scales it).
@@ -483,6 +509,8 @@ impl FrameRenderer {
             depth_format,
             frames_in_flight: frames_in_flight.max(1) as u64,
             msaa: msaa_support(device, depth_format),
+            post: Box::new(PostAa::new(output_format)),
+            perceptual: None,
             #[cfg(feature = "dlss")]
             streamline: None,
         })
@@ -532,6 +560,26 @@ impl FrameRenderer {
             ));
         }
         Ok(())
+    }
+
+    /// Frees what the renderer keeps in device memory: the scene passes' local shadow
+    /// atlases (ADR 0071) and SMAA's tables (ADR 0075). Views are freed apart
+    /// ([`View::destroy`]).
+    ///
+    /// # Safety
+    ///
+    /// The GPU no longer uses them (the device is idle).
+    pub unsafe fn destroy(
+        &mut self,
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+    ) {
+        // SAFETY: guaranteed by the caller.
+        unsafe {
+            self.forward.destroy(device, allocator, bindless);
+            self.post.destroy(device, allocator, bindless);
+        }
     }
 
     /// The scene passes (ambient occlusion, subsurface scattering, the depth prepass,
@@ -694,15 +742,55 @@ impl FrameRenderer {
             antialiasing.upscale,
             output,
         );
+        let pattern = if antialiasing.upscale == Upscale::SmaaT2x {
+            smaa_jitter(antialiasing.samples.count() as usize)
+        } else {
+            &[]
+        };
         let (jitter_phases, lod_bias) = match &view.upscaler {
             Some(upscaler) => (
                 upscaler.jitter_phases(render, output),
                 upscaler.texture_lod_bias(nominal_render, output),
             ),
-            None => (0, 0.0),
+            None => (pattern.len() as u32, 0.0),
         };
         if let Some(temporal) = &view.temporal {
             temporal.set_jitter_phases(jitter_phases);
+            temporal.set_jitter_pattern(pattern);
+        }
+
+        // Filters after tone mapping: their pipelines, and SMAA T2x's last frame.
+        if let Some(filter) = post_filter(antialiasing.post) {
+            if self.perceptual.is_none() {
+                self.perceptual = Some(Tonemap::new_perceptual(device, bindless)?);
+            }
+            let temporal = antialiasing.upscale == Upscale::SmaaT2x;
+            self.post.ensure(
+                device,
+                allocator,
+                bindless,
+                filter,
+                temporal,
+                antialiasing.smaa_s2x(),
+            )?;
+        }
+        let keep_post = antialiasing.upscale == Upscale::SmaaT2x;
+        if view
+            .post_history
+            .as_ref()
+            .is_some_and(|h| !keep_post || h.size != output)
+            && let Some(old) = view.post_history.take()
+        {
+            view.retire(frame_number, Retired::History(old));
+        }
+        if keep_post && view.post_history.is_none() {
+            view.post_history = Some(HistoryImage::new(
+                device,
+                allocator,
+                bindless,
+                PERCEPTUAL_FORMAT,
+                output,
+            )?);
         }
         if materials.texture_lod_bias() != lod_bias {
             materials.set_texture_lod_bias(bindless, lod_bias)?;
@@ -826,6 +914,7 @@ impl FrameRenderer {
             exposure,
             history,
             reflections,
+            post_history,
             resets,
             reset_pending,
             ..
@@ -849,6 +938,9 @@ impl FrameRenderer {
                 upscaler.reset();
             }
             if let Some(history) = history.as_mut() {
+                history.valid = false;
+            }
+            if let Some(history) = post_history.as_mut() {
                 history.valid = false;
             }
             if let Some(ssr) = reflections.as_ref() {
@@ -1030,40 +1122,69 @@ impl FrameRenderer {
         let bloom = settings
             .bloom
             .then(|| self.bloom.add_passes(fg, ctx.bindless, resolved));
-        // Nearest and integer scaling sample the scene's pixels as they are; integer
-        // scaling draws them at a whole factor, centered, black around.
-        let target_rect = target.rect.unwrap_or(vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
+        // With a filter after tone mapping, the tone mapper writes its perceptual image
+        // at the output size, and the filter writes the view's target.
+        let filter = post_filter(prepared.antialiasing.post);
+        let perceptual = filter
+            .and(self.perceptual.as_ref())
+            .map(|tonemap| {
+                let image = fg.create_texture(
+                    "perceptual",
+                    TextureDesc::new_2d(PERCEPTUAL_FORMAT, output.0, output.1),
+                );
+                (tonemap, image)
+            });
+        let whole = |offset: vk::Offset2D| vk::Rect2D {
+            offset,
             extent: vk::Extent2D {
                 width: output.0,
                 height: output.1,
             },
-        });
+        };
+        let (tonemap, tonemapped, area, load) = match perceptual {
+            Some((tonemap, image)) => (
+                tonemap,
+                image,
+                whole(vk::Offset2D::default()),
+                LoadOp::DontCare,
+            ),
+            None => (
+                &self.tonemap,
+                target.texture,
+                target
+                    .rect
+                    .unwrap_or_else(|| whole(vk::Offset2D::default())),
+                target.load,
+            ),
+        };
+        // Nearest and integer scaling sample the scene's pixels as they are; integer
+        // scaling draws them at a whole factor, centered, black around.
         let (rect, letterbox) = match prepared.integer {
             Some((factor, (x, y))) => (
                 Some(vk::Rect2D {
                     offset: vk::Offset2D {
-                        x: target_rect.offset.x + x as i32,
-                        y: target_rect.offset.y + y as i32,
+                        x: area.offset.x + x as i32,
+                        y: area.offset.y + y as i32,
                     },
                     extent: vk::Extent2D {
                         width: render.0 * factor,
                         height: render.1 * factor,
                     },
                 }),
-                (x > 0 || y > 0).then_some(target_rect),
+                (x > 0 || y > 0).then_some(area),
             ),
+            None if perceptual.is_some() => (None, None),
             None => (target.rect, None),
         };
         let sampler = match prepared.antialiasing.upscale {
             Upscale::Nearest | Upscale::Integer => SamplerKind::NearestClamp,
             _ => SamplerKind::LinearClamp,
         };
-        self.tonemap.add_composite_pass(
+        tonemap.add_composite_pass(
             fg,
             ctx.bindless,
             resolved,
-            target.texture,
+            tonemapped,
             Composite {
                 rect,
                 sampler,
@@ -1072,12 +1193,77 @@ impl FrameRenderer {
                 curve: settings.curve,
                 peak: settings.peak,
                 encoding: settings.encoding,
-                load: target.load,
+                load,
                 bloom,
                 auto_exposure,
                 letterbox,
             },
         );
+
+        // 6. The filter after tone mapping, into the view's target.
+        if let (Some(filter), Some((_, image))) = (filter, perceptual) {
+            let post_target = PostTarget {
+                texture: target.texture,
+                rect: target.rect,
+                load: target.load,
+                decode: match settings.encoding {
+                    OutputEncoding::Linear { white } => Decode::Srgb {
+                        scale: white * settings.peak,
+                    },
+                    OutputEncoding::Pq { .. } => Decode::None,
+                },
+            };
+            match filter {
+                PostFilter::Fxaa => {
+                    self.post
+                        .add_fxaa(fg, ctx.bindless, image, output, post_target)
+                }
+                PostFilter::Smaa(preset) => {
+                    // SMAA T2x: this frame's jitter phase, last frame's result.
+                    let temporal = match (prepared.antialiasing.upscale, passes.motion) {
+                        (Upscale::SmaaT2x, Some(motion)) => post_history.as_mut().map(|h| {
+                            let history = fg.import_texture(
+                                "smaa history",
+                                ImportedTexture {
+                                    image: h.image,
+                                    view: h.view,
+                                    desc: TextureDesc::new_2d(h.format, h.size.0, h.size.1),
+                                    initial: h.state,
+                                    final_state: Some(TextureState::shader_read(
+                                        ShaderStages::FRAGMENT,
+                                    )),
+                                    sampled_index: Some(h.sampled),
+                                    storage_index: None,
+                                },
+                            );
+                            h.state = TextureState::shader_read(ShaderStages::FRAGMENT);
+                            let valid = core::mem::replace(&mut h.valid, true);
+                            SmaaTemporal {
+                                velocity: motion.velocity,
+                                previous: valid.then_some(history),
+                                history,
+                                phase: usize::from(motion.jitter[0] > 0.0),
+                            }
+                        }),
+                        _ => None,
+                    };
+                    self.post
+                        .add_smaa(
+                            fg,
+                            ctx.bindless,
+                            ctx.ring,
+                            &SmaaInput {
+                                images: [Some(image), None],
+                                size: output,
+                                preset,
+                                temporal,
+                            },
+                            post_target,
+                        )
+                        .ok_or(FrameError::RingFull)?;
+                }
+            }
+        }
         Ok(ViewFrame {
             antialiasing: prepared.antialiasing,
             render,

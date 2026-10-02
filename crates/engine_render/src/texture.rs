@@ -191,6 +191,11 @@ impl GpuTexture {
         self.desc
     }
 
+    /// Whether a whole-texture upload was recorded.
+    pub fn is_initialized(&self) -> bool {
+        self.initialized.load(core::sync::atomic::Ordering::Relaxed)
+    }
+
     /// The image.
     pub fn image(&self) -> vk::Image {
         self.image

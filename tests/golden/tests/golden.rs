@@ -9,7 +9,7 @@
 #![allow(clippy::print_stdout)]
 
 use engine_core::math::Vec3;
-use engine_frame::{Antialiasing, Quality};
+use engine_frame::{Antialiasing, Quality, Upscale};
 use engine_golden::golden::{Outcome, Tolerance, compare};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights,
@@ -407,6 +407,61 @@ fn sponza_with_dlss_quality() {
         Antialiasing::DLSS,
         Quality::Quality,
     ));
+}
+
+/// FXAA after tone mapping (ADR 0075): the plants' and columns' edges softened in one
+/// pass.
+#[test]
+fn sponza_with_fxaa() {
+    check(&sponza_antialiased(
+        "sponza_fxaa",
+        Antialiasing::FXAA,
+        Quality::Native,
+    ));
+}
+
+/// SMAA 1x (High) after tone mapping (ADR 0075).
+#[test]
+fn sponza_with_smaa() {
+    check(&sponza_antialiased(
+        "sponza_smaa",
+        Antialiasing::SMAA_1X,
+        Quality::Native,
+    ));
+}
+
+/// SMAA T2x (ADR 0075): two jitter positions resolved after SMAA 1x.
+#[test]
+fn sponza_with_smaa_t2x() {
+    check(&sponza_antialiased(
+        "sponza_smaa_t2x",
+        Antialiasing::SMAA_T2X,
+        Quality::Native,
+    ));
+}
+
+/// Nearest scaling from 50 % (ADR 0075): every scene pixel a 2 × 2 block, no blur.
+#[test]
+fn sponza_nearest_at_50_percent() {
+    check(&sponza_antialiased(
+        "sponza_nearest_50",
+        Antialiasing::spatial(Upscale::Nearest),
+        Quality::Performance,
+    ));
+}
+
+/// Integer scaling (ADR 0075): a 280 × 150 render shown 2× (560 × 300) in the middle of
+/// 640 × 360, black around.
+#[test]
+fn sponza_integer_scaled() {
+    check(&Shot {
+        render_size: Some((280, 150)),
+        ..sponza_antialiased(
+            "sponza_integer",
+            Antialiasing::spatial(Upscale::Integer),
+            Quality::Native,
+        )
+    });
 }
 
 /// TAAU at 67 % with the camera strafing slowly (1 cm per frame, 31 cm over the

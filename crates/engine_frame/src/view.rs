@@ -182,6 +182,8 @@ pub struct View {
     pub(crate) upscaler: Option<Box<dyn Upscaler>>,
     pub(crate) exposure: Option<AutoExposure>,
     pub(crate) history: Option<HistoryImage>,
+    /// SMAA T2x's last frame (ADR 0075), at the output size.
+    pub(crate) post_history: Option<HistoryImage>,
     /// Screen-space reflections' history (ADR 0073), at the render size.
     pub(crate) reflections: Option<ScreenSpaceReflections>,
     pub(crate) retired: Vec<(u64, Retired)>,
@@ -213,6 +215,7 @@ impl View {
             upscaler: None,
             exposure: None,
             history: None,
+            post_history: None,
             reflections: None,
             retired: Vec::new(),
             resets: Resets::default(),
@@ -287,6 +290,7 @@ impl View {
             self.occlusion.take().map(Retired::Occlusion),
             self.exposure.take().map(Retired::Exposure),
             self.history.take().map(Retired::History),
+            self.post_history.take().map(Retired::History),
             self.reflections.take().map(Retired::Reflections),
         ]
         .into_iter()

@@ -26,6 +26,7 @@
 //! - [`cull`]: frustum and bounding-box tests shared by CPU code and the GPU culling pass.
 //! - [`upload`]: per-frame GPU data (camera, lights, draw lists) in a ring per frame slot.
 //! - [`post`]: post-processing (tonemapping from the HDR target).
+//! - [`postaa`]: antialiasing filters after tone mapping: FXAA, MLAA, SMAA (ADR 0075).
 //! - [`png`]: a small PNG encoder for screenshots and golden-image tests.
 //! - [`texture`]: textures that live across frames, uploaded through the ring.
 //! - [`viewport`]: viewports: render targets with their own size, update rate and
@@ -47,6 +48,7 @@ pub mod material;
 pub mod mesh;
 pub mod png;
 pub mod post;
+pub mod postaa;
 pub mod postfx;
 pub mod reflections;
 pub mod shadow;

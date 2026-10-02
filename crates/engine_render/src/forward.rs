@@ -439,6 +439,9 @@ pub struct Temporal {
     frame: Cell<u64>,
     /// Jitter phases (0: no jitter).
     phases: Cell<u32>,
+    /// A fixed jitter sequence instead of Halton's (SMAA T2x's two positions); empty for
+    /// Halton.
+    pattern: Cell<&'static [[f32; 2]]>,
     reset: Cell<bool>,
     /// The state the graph left the buffer in.
     state: Cell<BufferState>,
@@ -514,6 +517,7 @@ impl Temporal {
             previous_clip_from_world: Cell::new(None),
             frame: Cell::new(0),
             phases: Cell::new(0),
+            pattern: Cell::new(&[]),
             reset: Cell::new(true),
             state: Cell::new(BufferState::idle()),
         })
@@ -525,8 +529,18 @@ impl Temporal {
         self.phases.set(phases);
     }
 
+    /// Jitters the projection through `pattern` (pixels, x right, y down) instead of the
+    /// Halton phases (SMAA T2x's two positions, ADR 0075); empty returns to Halton.
+    pub fn set_jitter_pattern(&self, pattern: &'static [[f32; 2]]) {
+        self.pattern.set(pattern);
+    }
+
     /// The jitter of the next frame, in pixels.
     pub fn next_jitter(&self) -> [f32; 2] {
+        let pattern = self.pattern.get();
+        if !pattern.is_empty() {
+            return pattern[(self.frame.get() % pattern.len() as u64) as usize];
+        }
         let phases = self.phases.get();
         if phases == 0 {
             return [0.0; 2];

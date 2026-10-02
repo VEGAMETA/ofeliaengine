@@ -319,6 +319,8 @@ impl Bed {
             for view in views {
                 view.destroy(&mut self.allocator, &self.bindless);
             }
+            self.frame
+                .destroy(&self.device, &mut self.allocator, &self.bindless);
             self.graph
                 .destroy(&mut self.allocator, Some(&self.bindless));
             self.ring.destroy(&mut self.allocator);

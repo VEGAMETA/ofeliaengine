@@ -35,6 +35,9 @@ pub enum Blend {
     /// Multiply with a premultiplied source: `src * dst + dst * (1 - src.a)` for color
     /// (`dst * lerp(1, color, a)`); destination alpha is kept.
     Multiply,
+    /// The average of source and destination, every channel: `(src + dst) / 2` (the
+    /// second of two images averaged in place, ADR 0075).
+    Half,
 }
 
 /// Depth bias for shadow maps: `constant` units plus `slope` × the polygon's depth slope,
@@ -82,6 +85,9 @@ pub struct GraphicsPipelineDesc<'a> {
     pub depth_bias: Option<DepthBias>,
     /// Samples per pixel.
     pub samples: vk::SampleCountFlags,
+    /// Alpha to coverage: the fragment's alpha at location 0 masks the samples it covers
+    /// (multisampled targets; ADR 0075).
+    pub alpha_to_coverage: bool,
     /// Specialization constants of every stage: value `i` is `constant_id` `i`. The driver
     /// compiles the pipeline with them, so branches on them cost nothing (and code behind
     /// a false one takes no registers).
@@ -106,6 +112,7 @@ impl<'a> GraphicsPipelineDesc<'a> {
             blend: Blend::Opaque,
             depth_bias: None,
             samples: vk::SampleCountFlags::TYPE_1,
+            alpha_to_coverage: false,
             specialization: &[],
         }
     }
@@ -406,8 +413,9 @@ impl Pipeline {
                 .depth_bias_slope_factor(bias.slope)
                 .depth_bias_clamp(bias.clamp);
         }
-        let multisample =
-            vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(desc.samples);
+        let multisample = vk::PipelineMultisampleStateCreateInfo::default()
+            .rasterization_samples(desc.samples)
+            .alpha_to_coverage_enable(desc.alpha_to_coverage);
         let depth = vk::PipelineDepthStencilStateCreateInfo::default()
             .depth_test_enable(desc.depth_test)
             .depth_write_enable(desc.depth_write)
@@ -446,10 +454,24 @@ impl Pipeline {
                 .src_alpha_blend_factor(vk::BlendFactor::ZERO)
                 .dst_alpha_blend_factor(vk::BlendFactor::ONE)
                 .alpha_blend_op(vk::BlendOp::ADD),
+            Blend::Half => vk::PipelineColorBlendAttachmentState::default()
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::CONSTANT_COLOR)
+                .dst_color_blend_factor(vk::BlendFactor::CONSTANT_COLOR)
+                .color_blend_op(vk::BlendOp::ADD)
+                .src_alpha_blend_factor(vk::BlendFactor::CONSTANT_ALPHA)
+                .dst_alpha_blend_factor(vk::BlendFactor::CONSTANT_ALPHA)
+                .alpha_blend_op(vk::BlendOp::ADD),
         }
         .color_write_mask(vk::ColorComponentFlags::RGBA);
         let attachments = vec![attachment; desc.color_formats.len()];
-        let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+        let blend = vk::PipelineColorBlendStateCreateInfo::default()
+            .attachments(&attachments)
+            .blend_constants(if desc.blend == Blend::Half {
+                [0.5; 4]
+            } else {
+                [0.0; 4]
+            });
         let dynamic_states = [
             vk::DynamicState::VIEWPORT,
             vk::DynamicState::SCISSOR,
