@@ -1,19 +1,69 @@
-//! The Vulkan loader and the modules it loads stay loaded for the rest of the process.
+//! Where and for how long the Vulkan loader, the layers and the drivers live.
 //!
-//! The loader loads the layers an instance enables and the drivers (ICDs) when the
-//! instance is created, and unloads them when it is destroyed; `ash::Entry` unloads
-//! `vulkan-1.dll` itself when it is dropped. A process that creates instances one after
-//! another (tests, tools, an editor reopening a device) therefore unloads and reloads the
-//! validation layer and the driver whenever its last instance goes away. That is not safe:
-//! the validation layer (Vulkan SDK 1.4.350) keeps its allocator's (mimalloc's) per-thread
-//! state across the unload, and the next copy's queue threads crash in `mi_thread_init`
-//! with an access violation on their first allocation; drivers start threads of their own.
-//! So the loader is loaded once ([`entry`]), and every module that appears while an
-//! instance is created is pinned ([`Pinning`]): loaded until the process exits, like
-//! Streamline's DLLs (ADR 0063). Nothing changes for a process with one instance.
+//! **Instances are created on one thread that lives as long as the process**
+//! ([`on_loader_thread`]). The loader loads an instance's layers and the drivers (ICDs) on
+//! the thread that creates the instance, and a library's initialization may remember that
+//! thread. The validation layer of the Vulkan SDK 1.4.350 links mimalloc 3.3.2 statically,
+//! which takes the thread that loads it for the process's main thread, identified by the
+//! address of its TEB. When that thread exits, mimalloc tears the main thread's heap down
+//! (`_mi_theap_free` nulls its `tld`); when Windows later places another thread's TEB at
+//! the same address, mimalloc takes that thread for the main thread too, and its first
+//! allocation in the layer dereferences the torn-down heap (`_mi_subproc`, reading
+//! address 0x18). Tests create every instance on a new thread, so the golden tests died
+//! with an access violation in about one run in eight. A thread that never exits keeps
+//! every library's idea of its main thread alive.
+//!
+//! **The loader is loaded once ([`entry`]) and every module that appears while an instance
+//! is created is pinned ([`Pinning`])**: the layers and drivers stay loaded until the
+//! process exits, like Streamline's DLLs (ADR 0063). Otherwise the loader unloads them with
+//! the process's last instance and initializes them again with the next one (a process
+//! that creates instances one after another: tests, tools, an editor reopening a device).
+//!
+//! Nothing changes for a game, which creates one instance, except that its creation runs
+//! on the loader thread (one hand-off, tens of microseconds, once).
 
 use crate::error::RhiError;
 use std::sync::OnceLock;
+use std::sync::mpsc;
+
+type Job = Box<dyn FnOnce() + Send>;
+
+/// Runs `f` on the process's loader thread and returns its result; a panic in `f` is
+/// resumed on the calling thread. Without a loader thread (it could not be started), on
+/// the calling thread.
+pub(crate) fn on_loader_thread<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> R {
+    static LOADER: OnceLock<Option<mpsc::Sender<Job>>> = OnceLock::new();
+    let loader = LOADER.get_or_init(|| {
+        let (jobs, receiver) = mpsc::channel::<Job>();
+        std::thread::Builder::new()
+            .name(String::from("vulkan-loader"))
+            .spawn(move || {
+                // Lives as long as the process: the sender is in a static.
+                while let Ok(job) = receiver.recv() {
+                    job();
+                }
+            })
+            .ok()
+            .map(|_| jobs)
+    });
+    let Some(jobs) = loader else {
+        return f();
+    };
+    let (done, result) = mpsc::sync_channel(1);
+    let job: Job = Box::new(move || {
+        let _ = done.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)));
+    });
+    if let Err(mpsc::SendError(job)) = jobs.send(job) {
+        // The loader thread is gone (it never exits on its own): run it here.
+        job();
+    }
+    match result.recv() {
+        Ok(Ok(value)) => value,
+        Ok(Err(panic)) => std::panic::resume_unwind(panic),
+        // Every job sends its result, panics included (they are caught).
+        Err(_) => unreachable!("a loader job ended without a result"),
+    }
+}
 
 /// The process's Vulkan loader, loaded on first use and never unloaded.
 pub(crate) fn entry() -> Result<ash::Entry, RhiError> {

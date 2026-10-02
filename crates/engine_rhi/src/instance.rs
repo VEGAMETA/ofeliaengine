@@ -162,10 +162,25 @@ impl Instance {
     /// Like [`Self::new`], also enabling `extra` instance extensions a library needs (the
     /// ones Streamline asks for DLSS, ADR 0063). Those the loader does not list are skipped:
     /// [`Self::extra_extension_enabled`] tells which were enabled.
+    ///
+    /// The instance is created on the process's Vulkan loader thread, which lives as long
+    /// as the process, and the layers and drivers loaded for it stay loaded until the
+    /// process exits (`modules.rs`: the validation layer's allocator crashes when the
+    /// thread that loaded it has exited).
     pub fn with_extensions(desc: &InstanceDesc, extra: &[&CStr]) -> Result<Self, RhiError> {
         engine_profiler::zone!("rhi::Instance::new");
+        let desc = desc.clone();
+        let extra: Vec<std::ffi::CString> = extra.iter().map(|&name| name.to_owned()).collect();
+        crate::modules::on_loader_thread(move || {
+            let extra: Vec<&CStr> = extra.iter().map(std::ffi::CString::as_c_str).collect();
+            Self::create(&desc, &extra)
+        })
+    }
+
+    fn create(desc: &InstanceDesc, extra: &[&CStr]) -> Result<Self, RhiError> {
+        engine_profiler::zone!("rhi::Instance::create");
         // The layers and drivers loaded for this instance stay loaded for the process
-        // (`modules.rs`: unloading and reloading them crashes).
+        // (`modules.rs`).
         let pinning = crate::modules::Pinning::start();
         let entry = crate::modules::entry()?;
         // SAFETY: global command with no preconditions.
