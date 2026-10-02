@@ -231,6 +231,7 @@ impl Bed {
                         },
                         lights: &[],
                         environment: None,
+                        reflection_probes: None,
                     },
                     camera,
                     ViewTarget {

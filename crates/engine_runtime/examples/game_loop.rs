@@ -409,6 +409,7 @@ mod windowed {
                             light,
                             lights: &[],
                             environment: None,
+                            reflection_probes: None,
                         },
                         &main.camera,
                         ViewTarget {

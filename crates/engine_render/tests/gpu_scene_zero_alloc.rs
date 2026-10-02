@@ -219,6 +219,7 @@ fn steady_state_scene_frames_do_not_allocate() {
                         temporal: Some(&temporal),
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

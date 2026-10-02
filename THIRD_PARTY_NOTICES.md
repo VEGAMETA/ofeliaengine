@@ -159,6 +159,7 @@ Constants and formulas taken into our own code (no files copied).
 | GTAO as structured by XeGTAO: the depth MIP filter, the main pass's slice and horizon math, the constants (radius × 1.457, falloff 0.615, MIP offset 3.3, the 0.03 floor, ÷ 1.5 before the blur), R2 + Hilbert noise, the edges and their 2-bit packing, the denoise weights | `engine_render/src/ao.rs`, `engine_render/shaders/ao.slang` | Intel XeGTAO, `XeGTAO.h`, `XeGTAO.hlsli` (after Jimenez et al., SIGGRAPH 2016) | MIT (Copyright (C) 2016-2021, Intel Corporation) |
 | Sky and atmosphere after Hillaire 2020: the transmittance, multiple scattering, sky-view and aerial perspective tables' parameterizations and sizes, the ray march with per-step analytic integration, the multiple scattering approximation (64 directions, L₂ / (1 − f_ms)), the Cornette-Shanks phase function, Earth's parameters | `engine_render/src/atmosphere.rs`, `engine_render/shaders/atmosphere.slang`, `atmosphere_common.slang`, `engine_render/tests/atmosphere.rs` | Sébastien Hillaire, `sebh/UnrealEngineSkyAtmosphere` (`RenderSkyCommon.hlsl`, `RenderSkyRayMarching.hlsl`, `SkyAtmosphereCommon.cpp`), commit 183ead5bdacc | MIT (Copyright (c) 2020 Epic Games, Inc., below) |
 | The transmittance table's parameterization and the atmosphere's parameters, which that reference takes from Bruneton's implementation | same | Eric Bruneton, `ebruneton/precomputed_atmospheric_scattering`, commit 34f14e745cff | BSD-3-Clause (Copyright (c) 2017 Eric Bruneton, below) |
+| The hierarchical screen-space traversal: the initial advance, the advance against a texel's boundaries and the surface's plane, the level stepping, the 0.005-texel offset, the low-occupancy exit for glossy rays | `engine_render/shaders/reflections.slang` (`initial_advance`, `advance`, `hierarchical_march`) | AMD FidelityFX SSSR, `GPUOpen-Effects/FidelityFX-SSSR`, `ffx-sssr/ffx_sssr.h` (`FFX_SSSR_InitialAdvanceRay`, `FFX_SSSR_AdvanceRay`, `FFX_SSSR_HierarchicalRaymarch`), master as of 2026-10-01 | MIT (Copyright (c) 2021 Advanced Micro Devices, Inc., below) |
 | LDR-FLIP: its constants, separable spatial and feature filters, colour transforms and error remapping, ported to Rust | `tests/golden/src/flip.rs` (test-only crate `engine_golden`) | NVIDIA `NVlabs/flip`, `src/cpp/FLIP.h` (Andersson et al., HPG 2020) | BSD-3-Clause (Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES) |
 | Bend Studio's screen-space shadows: the wavefront layout towards the light's screen point, the dispatch list around it, the shared-memory depth line with perspective correction, the hard / averaged / fading sample groups, the edge test and precision offset, the default tuning values (ported to Slang and Rust, modified: Vulkan's y-down clip space, edges ignored, a thicker default surface, the light's own pixel written lit) | `engine_render/shaders/contact.slang`, `engine_render/src/contact.rs` (`bend_dispatches`) | Sony Interactive Entertainment (Bend Studio), `bend_sss_gpu.h`, `bend_sss_cpu.h` (2023), from bendstudio.com/blog/inside-bend-screen-space-shadows | Apache-2.0 (Copyright 2023 Sony Interactive Entertainment, below) |
 
@@ -206,6 +207,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### MIT license (FidelityFX SSSR)
+
+```
+Copyright (c) 2021 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ### MIT license (XeGTAO)

@@ -313,6 +313,7 @@ impl Scene {
                         temporal: None,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

@@ -206,6 +206,7 @@ fn pbr_lighting_and_shadows() {
                         temporal: None,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 );
                 tonemap.add_pass(&mut fg, &bindless, scene, color, 1.0);
@@ -227,6 +228,7 @@ fn pbr_lighting_and_shadows() {
                         temporal: None,
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 );
             }

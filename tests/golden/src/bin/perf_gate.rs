@@ -33,6 +33,7 @@ use engine_golden::scene::{
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::reflections::SsrSettings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -100,6 +101,17 @@ fn shots() -> Vec<Shot> {
         antialiased("sponza_taa", Antialiasing::TAAU, Quality::Native),
         antialiased("sponza_taau_67", Antialiasing::TAAU, Quality::Quality),
         antialiased("sponza_fsr_quality", Antialiasing::FSR, Quality::Quality),
+        // Local reflections (ADR 0073): six cached probes over the atrium and screen-space
+        // reflections at half resolution (their passes every frame, no captures).
+        Shot {
+            size: [1920, 1080],
+            probe_grid: Some([3, 1, 2]),
+            ssr: Some(SsrSettings::default()),
+            ..Shot::new(
+                "sponza_reflections",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
     ]
 }
 

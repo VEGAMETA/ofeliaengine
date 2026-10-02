@@ -203,6 +203,7 @@ impl Device {
             .texture_compression_bc(true)
             .multi_draw_indirect(true)
             .draw_indirect_first_instance(true)
+            .image_cube_array(true)
             .shader_int16(adapter.caps.shader_float16);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .features(features)

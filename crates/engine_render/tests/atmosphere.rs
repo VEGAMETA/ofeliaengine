@@ -500,6 +500,7 @@ fn the_atmosphere_and_fog_match_the_cpu() {
                         temporal: None,
                         lights: &[],
                         environment: Some(environment),
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

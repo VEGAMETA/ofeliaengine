@@ -35,7 +35,11 @@
 //! textures while drawing (ADR 0057: tails first, then larger levels, through the texture
 //! pool's staging ring), `--async-compute on|off` to run the async passes (ambient occlusion)
 //! on the async compute queue or not (ADR 0065; default: the vendor's measured default or
-//! `ENGINE_ASYNC_COMPUTE`). The last column is the GPU frame time end to end (the graph's
+//! `ENGINE_ASYNC_COMPUTE`); `--probes <x,y,z>` for reflection probes over the scene's
+//! bounding box cut into that many boxes (ADR 0073; implies `--sky`), `--probe-faces <1-6>`
+//! for their capture budget per frame, `--probes-every-frame` to capture them again
+//! continuously (the cost of a capture), `--ssr full|half` for screen-space reflections
+//! (implies `--sky`); reflections' passes get a table of their own. The last column is the GPU frame time end to end (the graph's
 //! first pass to its last on the graphics queue), which async compute shortens while the
 //! overlapped passes themselves may read longer.
 
@@ -63,6 +67,10 @@ use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, 
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
+use engine_render::reflections::{
+    ProbeSettings, ReflectionProbe, ReflectionProbes, Reflections, ScreenSpaceReflections,
+    SsrSettings,
+};
 use engine_render::texture_pool::StagingSpan;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
@@ -279,6 +287,10 @@ fn main() {
     let mut ao: Option<AoSettings> = None;
     let mut stream = false;
     let mut async_compute: Option<bool> = None;
+    let mut probe_grid: Option<[u32; 3]> = None;
+    let mut probe_faces = 6u32;
+    let mut probes_every_frame = false;
+    let mut ssr: Option<bool> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -348,6 +360,22 @@ fn main() {
             "--pack" => pack = args.next(),
             "--stream" => stream = true,
             "--async-compute" => async_compute = args.next().map(|v| v == "on"),
+            "--probes" => {
+                let v: Vec<u32> = args
+                    .next()
+                    .unwrap_or_default()
+                    .split(',')
+                    .map(|x| x.trim().parse().unwrap())
+                    .collect();
+                probe_grid = Some(<[u32; 3]>::try_from(v).unwrap());
+                with_sky = true;
+            }
+            "--probe-faces" => probe_faces = args.next().unwrap().parse().unwrap(),
+            "--probes-every-frame" => probes_every_frame = true,
+            "--ssr" => {
+                ssr = Some(args.next().as_deref() == Some("half"));
+                with_sky = true;
+            }
             "--view" => {
                 let v: Vec<f32> = args
                     .next()
@@ -733,6 +761,49 @@ fn main() {
         .set_ambient_occlusion(&device, &bindless, ao)
         .unwrap();
     renderer.set_light_culling(light_culling);
+    renderer
+        .set_reflections(&device, &bindless, probe_grid.is_some() || ssr.is_some())
+        .unwrap();
+    let mut probes = probe_grid.map(|grid| {
+        let mut probes = ReflectionProbes::new(
+            &device,
+            &mut allocator,
+            &bindless,
+            ProbeSettings {
+                capacity: grid.iter().product::<u32>().max(1),
+                faces_per_frame: probe_faces,
+                ..ProbeSettings::default()
+            },
+        )
+        .unwrap();
+        let g = Vec3::new(grid[0] as f32, grid[1] as f32, grid[2] as f32).max(Vec3::ONE);
+        let cell = (max - min) / g;
+        for z in 0..grid[2].max(1) {
+            for y in 0..grid[1].max(1) {
+                for x in 0..grid[0].max(1) {
+                    let center = min + cell * (Vec3::new(x as f32, y as f32, z as f32) + 0.5);
+                    probes
+                        .add(ReflectionProbe::room(center, cell * 0.5))
+                        .unwrap();
+                }
+            }
+        }
+        probes
+    });
+    let mut screen_space = ssr.map(|half_resolution| {
+        ScreenSpaceReflections::new(
+            &device,
+            &mut allocator,
+            &bindless,
+            WIDTH,
+            HEIGHT,
+            SsrSettings {
+                half_resolution,
+                ..SsrSettings::default()
+            },
+        )
+        .unwrap()
+    });
     if shadowed_lights > 0 {
         renderer
             .set_local_shadows(&device, &mut allocator, &bindless, Some(local_shadows))
@@ -786,6 +857,23 @@ fn main() {
         }
         let names = ["lights with shadows", "lights with shadows + environment"];
         for (name, stats) in names.iter().zip(renderer.shadowed_statistics(&device)) {
+            if stats.is_empty() {
+                continue;
+            }
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
+        let names = [
+            "reflections shading",
+            "reflections shading + lights",
+            "reflections composite, probes",
+            "reflections composite, SSR",
+            "reflections composite, probes + SSR",
+        ];
+        for (name, stats) in names.iter().zip(renderer.reflection_statistics(&device)) {
             if stats.is_empty() {
                 continue;
             }
@@ -870,6 +958,7 @@ fn main() {
     );
 
     let mut frame_number = 0u64;
+    let mut reflection_rows: Vec<String> = Vec::new();
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
         for (&id, &desc) in material_ids.iter().zip(descs.iter()) {
             materials.set(id, desc);
@@ -887,6 +976,13 @@ fn main() {
         let (mut bloom_time, mut exposure_time, mut tonemap_time) =
             (Vec::new(), Vec::new(), Vec::new());
         let mut upload_frames = 0;
+        // Reflections (ADR 0073): probe captures (their views, copy, mips, prefilter),
+        // SSR passes, the composite.
+        let (mut probe_capture, mut prefilter) = (Vec::new(), Vec::new());
+        let (mut ssr_depth, mut ssr_trace, mut ssr_spatial, mut ssr_temporal) =
+            (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut reflect_composite = Vec::new();
+        let mut faces_drawn = Vec::new();
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
         while frame < WARMUP + FRAMES + usize::from(last) {
@@ -950,6 +1046,9 @@ fn main() {
                         .set_atmosphere(&device, &mut allocator, &bindless, Some(a))
                         .unwrap();
                 }
+                if probes_every_frame && let Some(p) = &probes {
+                    p.refresh_all();
+                }
                 if local_shadows_every_frame {
                     renderer.invalidate_local_shadows();
                 }
@@ -972,6 +1071,10 @@ fn main() {
                             temporal: temporal.as_ref(),
                             lights: &lights,
                             environment: environment.as_ref(),
+                            reflections: Reflections {
+                                probes: probes.as_ref(),
+                                ssr: screen_space.as_ref(),
+                            },
                         },
                     )
                     .unwrap();
@@ -1109,9 +1212,23 @@ fn main() {
                 let (mut sky_frame, mut rebuild_frame) = (0.0, 0.0);
                 let (mut tables_frame, mut aerial_frame, mut composite_frame) = (0.0, 0.0, 0.0);
                 let (mut bloom_frame, mut exposure_frame, mut tonemap_frame) = (0.0, 0.0, 0.0);
+                let (mut capture_frame, mut prefilter_frame) = (0.0, 0.0);
+                let mut ssr_frame = [0.0; 4];
+                let mut reflect_frame = 0.0;
                 let mut local_frame = 0.0;
                 let mut contact_frame = 0.0;
                 for time in graph.gpu_pass_times() {
+                    let us = f64::from(time.gpu_us);
+                    match time.name {
+                        "probe mips" | "probe prefilter" => prefilter_frame += us,
+                        "ssr depth" => ssr_frame[0] += us,
+                        "ssr trace" => ssr_frame[1] += us,
+                        "ssr spatial" => ssr_frame[2] += us,
+                        "ssr temporal" => ssr_frame[3] += us,
+                        "reflections" => reflect_frame += us,
+                        name if name.starts_with("probe ") => capture_frame += us,
+                        _ => {}
+                    }
                     match time.name {
                         "contact shadows" | "contact shadows clear" => {
                             contact_frame += f64::from(time.gpu_us);
@@ -1163,6 +1280,14 @@ fn main() {
                 exposure_time.push(exposure_frame);
                 tonemap_time.push(tonemap_frame);
                 ao_time.push(ao_frame);
+                probe_capture.push(capture_frame);
+                prefilter.push(prefilter_frame);
+                ssr_depth.push(ssr_frame[0]);
+                ssr_trace.push(ssr_frame[1]);
+                ssr_spatial.push(ssr_frame[2]);
+                ssr_temporal.push(ssr_frame[3]);
+                reflect_composite.push(reflect_frame);
+                faces_drawn.push(f64::from(probes.as_ref().map_or(0, |p| p.stats().faces)));
                 local_time.push(local_frame);
                 contact_time.push(contact_frame);
                 local_views.push(f64::from(renderer.local_shadow_stats().views_drawn));
@@ -1203,6 +1328,34 @@ fn main() {
             median(&mut local_views),
             median(&mut contact_time),
         );
+        if probes.is_some() || screen_space.is_some() {
+            reflection_rows.push(format!(
+                "| {mode} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} |",
+                median(&mut faces_drawn),
+                median(&mut probe_capture),
+                median(&mut prefilter),
+                median(&mut ssr_depth),
+                median(&mut ssr_trace),
+                median(&mut ssr_spatial),
+                median(&mut ssr_temporal),
+                median(&mut reflect_composite),
+            ));
+        }
+    }
+    if !reflection_rows.is_empty() {
+        println!();
+        if let Some(p) = &probes {
+            println!("Reflection probes: {:?}", p.stats());
+        }
+        println!(
+            "| materials | probe faces per frame | GPU probe capture µs | GPU probe mips + prefilter µs | \
+             GPU SSR depth µs | GPU SSR trace µs | GPU SSR spatial µs | GPU SSR temporal µs | \
+             GPU reflections composite µs |"
+        );
+        println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|");
+        for row in &reflection_rows {
+            println!("{row}");
+        }
     }
     println!();
     if let Some(s) = &streaming {
@@ -1251,6 +1404,12 @@ fn main() {
         }
         if let Some(mut temporal) = temporal {
             temporal.destroy(&mut allocator);
+        }
+        if let Some(p) = probes.as_mut() {
+            p.destroy(&mut allocator, &bindless);
+        }
+        if let Some(s) = screen_space.as_mut() {
+            s.destroy(&mut allocator, &bindless);
         }
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);

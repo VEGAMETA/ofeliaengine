@@ -267,6 +267,7 @@ fn steady_state_skinning_frames_do_not_allocate() {
                         temporal: Some(&temporal),
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

@@ -190,6 +190,7 @@ impl Bench {
                         temporal: (which != Which::None).then_some(&*temporal),
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

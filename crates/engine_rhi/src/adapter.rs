@@ -289,6 +289,8 @@ impl Adapter {
                 "drawIndirectFirstInstance",
                 base.draw_indirect_first_instance,
             ),
+            // Reflection probes in one cube array (ADR 0073): every desktop GPU.
+            ("imageCubeArray", base.image_cube_array),
         ] {
             if supported == vk::FALSE {
                 missing.push(name);

@@ -233,6 +233,7 @@ fn blended_layers_composite_back_to_front() {
                             temporal: temporal_state.then_some(&temporal),
                             lights: &[],
                             environment: None,
+                            reflections: Default::default(),
                         },
                     )
                     .unwrap();
