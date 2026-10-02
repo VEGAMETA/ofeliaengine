@@ -104,6 +104,23 @@ tooling included) about **50 %**.
    - **adopt cargo-nextest;**
    - **add an "affected crates" mode** for agents' intermediate runs. The full run stays
      the gate before every merge.
+0b. **No visible streaming pop-in on fast camera turns** (owner, 2026-10-02: in UE, models
+   and textures failed to load in time when the camera turned quickly). Our ADR 0076 has
+   the same risk:
+   - texture levels come only from the current view's feedback;
+   - mesh levels are asked only by instances in the frustum;
+   - request → upload takes about 0.35–0.5 s.
+
+   Plan:
+   - feedback over 360° (one face of a small cube around the camera per frame, besides the
+     main view); first check it stays clear of the Graphine prediction patents
+     (US10748241 family);
+   - mesh levels by a sphere around the camera, by distance, not by the frustum;
+   - lower latency: newly visible textures first, smaller reads, later GPU decompression.
+
+   Acceptance: a "fast turn" test (180° in 0.2 s) measures the pixels drawn below their
+   wanted level and for how long. The target is no visible pop-in at the default budget.
+   The test joins the perf gate.
 1. GPU particles and GPU radix sort.
 2. Clustered decals.
 3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
