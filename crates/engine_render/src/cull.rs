@@ -61,10 +61,108 @@ pub fn transform_box(world_from_object: &Mat4, center: Vec3, extents: Vec3) -> (
     (world_center, world_extents)
 }
 
+/// Pixels per unit at distance 1 over the detail-level threshold, for a view of `height`
+/// pixels (the culling pass's `lod_scale`, ADR 0053): the projection's vertical scale (the
+/// length of the clip matrix's y row, whatever the camera's rotation) times half the
+/// height. 0 (full meshes) for orthographic views and a threshold of 0.
+pub fn lod_scale(clip_from_world: &Mat4, height: u32, threshold: f32) -> f32 {
+    let (y_row, w_row) = (
+        clip_from_world.row(1).truncate(),
+        clip_from_world.row(3).truncate(),
+    );
+    if threshold > 0.0 && w_row.length() > 1e-6 {
+        y_row.length() * height as f32 * 0.5 / threshold
+    } else {
+        0.0
+    }
+}
+
+/// The detail level the culling pass draws an instance at (`choose_lod` in
+/// `forward.slang`, ADR 0053): the coarsest whose error (object units, `errors[0]` the full
+/// mesh's), times the instance's largest scale and `lod_scale`, stays within the distance
+/// from `eye` to the instance's world box (`center`, `extents`) at its nearest.
+pub fn choose_lod(
+    errors: &[f32],
+    world_from_object: &Mat4,
+    center: Vec3,
+    extents: Vec3,
+    eye: Vec3,
+    lod_scale: f32,
+) -> u32 {
+    if errors.len() <= 1 || lod_scale <= 0.0 {
+        return 0;
+    }
+    let m = world_from_object;
+    let scale = m
+        .x_axis
+        .truncate()
+        .length_squared()
+        .max(m.y_axis.truncate().length_squared())
+        .max(m.z_axis.truncate().length_squared())
+        .sqrt();
+    let distance = ((center - eye).length() - extents.length()).max(1e-3);
+    let allowed = distance / (scale * lod_scale);
+    let mut lod = 0;
+    for (k, &error) in errors.iter().enumerate().skip(1) {
+        if error <= allowed {
+            lod = k as u32;
+        }
+    }
+    lod
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use engine_core::math::{Quat, look_at, vulkan_orthographic, vulkan_perspective};
+
+    #[test]
+    fn detail_levels_follow_the_projected_error() {
+        // 90° vertical field of view, 1000 pixels high: 500 pixels per unit at distance 1.
+        let clip = vulkan_perspective(90f32.to_radians(), 1.0, 0.1, 1000.0)
+            * look_at(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+        let scale = lod_scale(&clip, 1000, 1.0);
+        assert!((scale - 500.0).abs() < 0.01, "{scale}");
+        assert_eq!(lod_scale(&clip, 1000, 0.0), 0.0);
+        let ortho = vulkan_orthographic(-1.0, 1.0, -1.0, 1.0, 0.0, 10.0);
+        assert_eq!(lod_scale(&ortho, 1000, 1.0), 0.0);
+        // Errors of 0.01, 0.1, 1 units: a pixel at 5, 50 and 500 units away.
+        let errors = [0.0, 0.01, 0.1, 1.0];
+        let at = |distance: f32, scale_up: f32| {
+            let world = Mat4::from_scale_rotation_translation(
+                Vec3::splat(scale_up),
+                Quat::IDENTITY,
+                Vec3::new(0.0, 0.0, -distance),
+            );
+            // A point-sized box, so the nearest distance is the center's.
+            choose_lod(
+                &errors,
+                &world,
+                Vec3::new(0.0, 0.0, -distance),
+                Vec3::ZERO,
+                Vec3::ZERO,
+                scale,
+            )
+        };
+        assert_eq!(at(2.0, 1.0), 0);
+        assert_eq!(at(6.0, 1.0), 1);
+        assert_eq!(at(60.0, 1.0), 2);
+        assert_eq!(at(600.0, 1.0), 3);
+        // Twice as large: twice as far for the same level.
+        assert_eq!(at(60.0, 2.0), 1);
+        assert_eq!(at(120.0, 2.0), 2);
+        // A box reaching towards the camera counts from its nearest point.
+        let world = Mat4::from_translation(Vec3::new(0.0, 0.0, -6.0));
+        let near = choose_lod(
+            &errors,
+            &world,
+            Vec3::new(0.0, 0.0, -6.0),
+            Vec3::new(0.0, 0.0, 2.0),
+            Vec3::ZERO,
+            scale,
+        );
+        assert_eq!(near, 0);
+    }
 
     fn camera() -> Mat4 {
         vulkan_perspective(60f32.to_radians(), 16.0 / 9.0, 0.5, 100.0)

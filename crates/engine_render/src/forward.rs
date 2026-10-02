@@ -3553,17 +3553,8 @@ impl ForwardRenderer {
             visibility_capacity: occlusion.map_or(0, Occlusion::capacity),
             hiz_levels: pyramid_layout.levels,
             depth_size: [depth_desc.width, depth_desc.height],
-            lod_scale: {
-                // Pixels per unit at distance 1: the projection's vertical scale (the length
-                // of the clip matrix's y row, whatever the camera's rotation) times half
-                // the height. Orthographic views (no perspective divide) draw full meshes.
-                let (y_row, w_row) = (unjittered.row(1).truncate(), unjittered.row(3).truncate());
-                if self.lod_threshold > 0.0 && w_row.length() > 1e-6 {
-                    y_row.length() * depth_desc.height as f32 * 0.5 / self.lod_threshold
-                } else {
-                    0.0
-                }
-            },
+            // Orthographic views (no perspective divide) draw full meshes.
+            lod_scale: crate::cull::lod_scale(&unjittered, depth_desc.height, self.lod_threshold),
             slot_count,
             hiz_offsets: pyramid_layout.offsets,
             previous_clip_from_world: previous_clip_from_world.to_cols_array(),

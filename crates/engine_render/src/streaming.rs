@@ -31,11 +31,14 @@
 //! once its scratch vectors have grown.
 
 use crate::budget::{ClientId, Demand, GpuBudget};
+use crate::cull::{Frustum, choose_lod, lod_scale, transform_box};
 use crate::feedback::MaterialFeedback;
 use crate::material::MaterialTable;
+use crate::mesh::{GeometryPool, MAX_LODS, MeshError, MeshId, StreamedLevel};
 use crate::texture_pool::{
     TextureError, TextureFormat, TextureId, TextureInfo, TexturePool, levels_bytes,
 };
+use engine_core::math::{Mat4, Vec3};
 
 /// What the streamer needs of a texture pool ([`TexturePool`]; tests use a pool of their
 /// own).
@@ -582,6 +585,569 @@ impl TextureStreamer {
 
 fn level_mask(first: u32, count: u32) -> u32 {
     (((1u64 << (first + count)) - (1u64 << first)) & u64::from(u32::MAX)) as u32
+}
+
+/// What a mesh streamer needs of a geometry pool ([`GeometryPool`]; tests use one of their
+/// own).
+pub trait StreamedGeometry {
+    /// [`GeometryPool::mesh_residency`].
+    fn mesh_residency(&self, id: MeshId) -> Option<(u32, u32)>;
+    /// [`GeometryPool::evict_mesh_levels`].
+    fn evict_mesh_levels(&mut self, id: MeshId, first: u32, frame: u64) -> Result<(), MeshError>;
+    /// [`GeometryPool::streamed_bytes`].
+    fn streamed_bytes(&self) -> u64;
+}
+
+impl StreamedGeometry for GeometryPool {
+    fn mesh_residency(&self, id: MeshId) -> Option<(u32, u32)> {
+        GeometryPool::mesh_residency(self, id)
+    }
+
+    fn evict_mesh_levels(&mut self, id: MeshId, first: u32, frame: u64) -> Result<(), MeshError> {
+        GeometryPool::evict_mesh_levels(self, id, first, frame)
+    }
+
+    fn streamed_bytes(&self) -> u64 {
+        GeometryPool::streamed_bytes(self)
+    }
+}
+
+/// The view meshes are streamed for: its camera, as the culling pass sees it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LodView {
+    /// The camera's position.
+    pub eye: Vec3,
+    /// Its frustum: instances outside it count as not seen.
+    pub frustum: Frustum,
+    /// [`crate::cull::lod_scale`] of the view.
+    pub lod_scale: f32,
+}
+
+impl LodView {
+    /// The view of a camera (`clip_from_world`, unjittered) drawn `height` pixels high
+    /// with the renderer's detail-level threshold (`ForwardRenderer::set_lod_threshold`,
+    /// 1 pixel by default).
+    pub fn new(clip_from_world: &Mat4, eye: Vec3, height: u32, threshold: f32) -> Self {
+        Self {
+            eye,
+            frustum: Frustum::from_clip_from_world(*clip_from_world),
+            lod_scale: lod_scale(clip_from_world, height, threshold),
+        }
+    }
+}
+
+/// A finer level of a mesh to read and upload ([`MeshStreamer::update`]); report it with
+/// [`MeshStreamer::arrived`] or [`MeshStreamer::failed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshLevelRequest {
+    /// The mesh.
+    pub mesh: MeshId,
+    /// The level (one finer than its finest resident level).
+    pub level: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct MeshEntry {
+    id: MeshId,
+    levels: [StreamedLevel; MAX_LODS],
+    errors: [f32; MAX_LODS],
+    count: u32,
+    /// Object-space box.
+    center: Vec3,
+    extents: Vec3,
+    /// Finest level the instances seen this frame need, and the level kept (hysteresis).
+    wanted: u32,
+    level: u32,
+    held_since: u64,
+    last_seen: Option<u64>,
+    /// A level asked for and not yet arrived.
+    requested: Option<u32>,
+    /// The plan this frame.
+    plan: u32,
+    /// Its finest resident level.
+    resident: u32,
+}
+
+impl MeshEntry {
+    /// Bytes resident from level `first`: the vertices it uses and the indices of it and
+    /// every coarser level.
+    fn bytes(&self, first: u32) -> u64 {
+        let first = first.min(self.count - 1) as usize;
+        u64::from(self.levels[first].vertices) * 28
+            + self.levels[first..self.count as usize]
+                .iter()
+                .map(|l| u64::from(l.index_count) * 4)
+                .sum::<u64>()
+    }
+}
+
+/// What a frame of [`MeshStreamer::update`] did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MeshStreamerStats {
+    /// Meshes tracked.
+    pub meshes: u32,
+    /// Meshes seen recently.
+    pub visible: u32,
+    /// The common bias (levels coarser) the plan needed to fit.
+    pub pressure_bias: u32,
+    /// Bytes resident, planned, granted.
+    pub resident: u64,
+    /// Bytes of the plan.
+    pub planned: u64,
+    /// The client's grant.
+    pub grant: u64,
+    /// Requests this frame.
+    pub requests: u32,
+    /// Meshes evicted to coarser levels this frame.
+    pub evictions: u32,
+}
+
+/// Mesh detail-level streaming policy (ADR 0076): each mesh keeps the levels its visible
+/// instances need by the culling pass's own rule ([`crate::cull::choose_lod`]: the
+/// projected error at the instance's nearest distance), coarsest first, within the budget.
+/// The rule is exact and cheap on the CPU (a box and a distance per instance), unlike a
+/// texture's sampled level, so no GPU feedback is needed. Instances outside the view's
+/// frustum do not ask; levels nobody asks for stay cached until room is needed.
+#[derive(Debug)]
+pub struct MeshStreamer {
+    settings: StreamerSettings,
+    entries: Vec<MeshEntry>,
+    by_slot: Vec<u32>,
+    client: ClientId,
+    order: Vec<u32>,
+    stats: MeshStreamerStats,
+}
+
+impl MeshStreamer {
+    /// A streamer registered with `budget` as its "meshes" client (`None` when the budget
+    /// has no room for another client). Its settings are the texture streamer's: visible
+    /// and hold windows, request bytes per frame.
+    pub fn new(budget: &mut GpuBudget, settings: StreamerSettings) -> Option<Self> {
+        Some(Self {
+            settings,
+            entries: Vec::new(),
+            by_slot: Vec::new(),
+            client: budget.register("meshes")?,
+            order: Vec::new(),
+            stats: MeshStreamerStats::default(),
+        })
+    }
+
+    /// Its budget client.
+    pub fn client(&self) -> ClientId {
+        self.client
+    }
+
+    /// The last frame's numbers.
+    pub fn stats(&self) -> MeshStreamerStats {
+        self.stats
+    }
+
+    /// Streams a mesh added with [`GeometryPool::add_streamed_mesh`] with these levels
+    /// (the full mesh first) and object-space box.
+    pub fn track(&mut self, id: MeshId, levels: &[StreamedLevel], min: Vec3, max: Vec3) {
+        let count = levels.len().clamp(1, MAX_LODS);
+        let mut entry = MeshEntry {
+            id,
+            levels: [StreamedLevel::default(); MAX_LODS],
+            errors: [0.0; MAX_LODS],
+            count: count as u32,
+            center: (min + max) * 0.5,
+            extents: (max - min) * 0.5,
+            wanted: count as u32 - 1,
+            level: count as u32 - 1,
+            held_since: 0,
+            last_seen: None,
+            requested: None,
+            plan: count as u32 - 1,
+            resident: count as u32 - 1,
+        };
+        entry.levels[..count].copy_from_slice(&levels[..count]);
+        for (e, l) in entry.errors.iter_mut().zip(&levels[..count]) {
+            *e = l.error;
+        }
+        let slot = id.slot() as usize;
+        if self.by_slot.len() <= slot {
+            self.by_slot.resize(slot + 1, u32::MAX);
+        }
+        self.by_slot[slot] = self.entries.len() as u32;
+        self.entries.push(entry);
+    }
+
+    fn entry_mut(&mut self, id: MeshId) -> Option<&mut MeshEntry> {
+        let e = *self.by_slot.get(id.slot() as usize)? as usize;
+        self.entries.get_mut(e).filter(|e| e.id == id)
+    }
+
+    /// An instance of a tracked mesh in this frame's view: asks for the level the culling
+    /// pass would draw it at, when its box is in the view's frustum.
+    pub fn observe(&mut self, view: &LodView, mesh: MeshId, world_from_object: &Mat4, frame: u64) {
+        let Some(e) = self.entry_mut(mesh) else {
+            return;
+        };
+        let (center, extents) = transform_box(world_from_object, e.center, e.extents);
+        if !view.frustum.intersects_box(center, extents) {
+            return;
+        }
+        let level = choose_lod(
+            &e.errors[..e.count as usize],
+            world_from_object,
+            center,
+            extents,
+            view.eye,
+            view.lod_scale,
+        );
+        if e.last_seen != Some(frame) {
+            e.last_seen = Some(frame);
+            e.wanted = level;
+        } else {
+            e.wanted = e.wanted.min(level);
+        }
+    }
+
+    /// A level that arrived (uploaded with [`GeometryPool::upload_mesh_level`]).
+    pub fn arrived(&mut self, mesh: MeshId, level: u32) {
+        if let Some(e) = self.entry_mut(mesh)
+            && e.requested == Some(level)
+        {
+            e.requested = None;
+        }
+    }
+
+    /// A level that could not be read or uploaded: asked for again later.
+    pub fn failed(&mut self, mesh: MeshId, level: u32) {
+        self.arrived(mesh, level);
+    }
+
+    /// Plans this frame after the instances were observed: reports demand to the budget
+    /// (call [`GpuBudget::update`] after), fits the plan into the grant, evicts levels
+    /// beyond it under pressure, and appends the next level of each mesh that wants more to
+    /// `requests` (one at a time per mesh: each level grows the previous one's vertices).
+    pub fn update(
+        &mut self,
+        geometry: &mut impl StreamedGeometry,
+        budget: &mut GpuBudget,
+        frame: u64,
+        requests: &mut Vec<MeshLevelRequest>,
+    ) {
+        engine_profiler::zone!("render::MeshStreamer::update");
+        let visible_frames = u64::from(self.settings.visible_frames);
+        let hold = u64::from(self.settings.hold_frames);
+        let is_visible = |e: &MeshEntry| {
+            e.last_seen
+                .is_some_and(|f| frame.saturating_sub(f) < visible_frames)
+        };
+        let (mut required, mut visible_extra, mut cached, mut visible) = (0, 0, 0, 0);
+        for e in &mut self.entries {
+            e.resident = geometry
+                .mesh_residency(e.id)
+                .map_or(e.count - 1, |(resident, _)| resident);
+            // Finer at once; coarser once the finer level was not asked for in a while.
+            if e.last_seen == Some(frame)
+                && (e.wanted <= e.level || frame.saturating_sub(e.held_since) >= hold)
+            {
+                e.level = e.wanted;
+                e.held_since = frame;
+            }
+            let coarsest = e.count - 1;
+            required += e.bytes(coarsest);
+            if is_visible(e) {
+                visible += 1;
+                visible_extra += e.bytes(e.level) - e.bytes(coarsest);
+                cached += e.bytes(e.resident).saturating_sub(e.bytes(e.level));
+            } else {
+                cached += e.bytes(e.resident) - e.bytes(coarsest);
+            }
+        }
+        let resident = geometry.streamed_bytes();
+        budget.report(
+            self.client,
+            resident,
+            Demand {
+                required,
+                visible: visible_extra,
+                cached,
+            },
+        );
+        let grant = budget.grant(self.client);
+        // Plan: wanted levels, a common bias while they do not fit.
+        let planned_with = |entries: &[MeshEntry], bias: u32| -> u64 {
+            entries
+                .iter()
+                .map(|e| {
+                    if is_visible(e) {
+                        e.bytes(e.level + bias)
+                    } else {
+                        e.bytes(e.count - 1)
+                    }
+                })
+                .sum()
+        };
+        let mut bias = 0;
+        let mut planned = planned_with(&self.entries, 0);
+        while planned > grant && bias < MAX_LODS as u32 {
+            bias += 1;
+            planned = planned_with(&self.entries, bias);
+        }
+        for e in &mut self.entries {
+            e.plan = if is_visible(e) {
+                (e.level + bias).min(e.count - 1)
+            } else {
+                e.count - 1
+            };
+        }
+        // Levels resident beyond the plan stay while there is room, most recently seen
+        // first; the rest are evicted.
+        let mut committed: u64 = self
+            .entries
+            .iter()
+            .map(|e| e.bytes(e.plan.max(e.resident)))
+            .sum();
+        self.order.clear();
+        self.order
+            .extend((0..self.entries.len() as u32).filter(|&k| {
+                let e = &self.entries[k as usize];
+                e.resident < e.plan
+            }));
+        let entries = &self.entries;
+        self.order.sort_unstable_by_key(|&k| {
+            core::cmp::Reverse(entries[k as usize].last_seen.map_or(0, |f| f + 1))
+        });
+        let mut evictions = 0;
+        for &k in &self.order {
+            let e = &mut self.entries[k as usize];
+            let extra = e.bytes(e.resident) - e.bytes(e.plan);
+            if committed + extra <= grant {
+                committed += extra;
+                e.plan = e.resident;
+            } else if geometry.evict_mesh_levels(e.id, e.plan, frame).is_ok() {
+                evictions += 1;
+            } else {
+                // Busy: kept this frame.
+                e.plan = e.resident;
+            }
+        }
+        // Requests: the next level of every mesh short of its plan, while the grant has
+        // room for it and within the frame's bytes; nearest-to-done first is not tracked,
+        // the meshes seen most recently go first.
+        self.order.clear();
+        self.order
+            .extend((0..self.entries.len() as u32).filter(|&k| {
+                let e = &self.entries[k as usize];
+                e.plan < e.resident && e.requested.is_none()
+            }));
+        let entries = &self.entries;
+        self.order.sort_unstable_by_key(|&k| {
+            core::cmp::Reverse(entries[k as usize].last_seen.map_or(0, |f| f + 1))
+        });
+        let (mut bytes, mut count) = (0u64, 0u32);
+        for &k in &self.order {
+            let e = &mut self.entries[k as usize];
+            let next = e.resident - 1;
+            let more = e.bytes(next) - e.bytes(e.resident);
+            if committed + more > grant
+                || (bytes > 0 && bytes + more > self.settings.request_bytes_per_frame)
+            {
+                continue;
+            }
+            committed += more;
+            bytes += more;
+            count += 1;
+            e.requested = Some(next);
+            requests.push(MeshLevelRequest {
+                mesh: e.id,
+                level: next,
+            });
+        }
+        self.stats = MeshStreamerStats {
+            meshes: self.entries.len() as u32,
+            visible,
+            pressure_bias: bias,
+            resident,
+            planned: committed,
+            grant,
+            requests: count,
+            evictions,
+        };
+    }
+}
+
+#[cfg(test)]
+mod mesh_tests {
+    use super::*;
+    use crate::budget::BudgetSettings;
+    use engine_core::math::{look_at, vulkan_perspective};
+    use engine_rhi::HeapBudget;
+
+    /// A pool of streamed meshes that makes uploads and evictions at once.
+    #[derive(Default)]
+    struct FakeGeometry {
+        meshes: Vec<(u32, [StreamedLevel; MAX_LODS], u32)>,
+    }
+
+    impl StreamedGeometry for FakeGeometry {
+        fn mesh_residency(&self, id: MeshId) -> Option<(u32, u32)> {
+            let m = self.meshes.get(id.slot() as usize)?;
+            Some((m.0, m.2))
+        }
+
+        fn evict_mesh_levels(&mut self, id: MeshId, first: u32, _: u64) -> Result<(), MeshError> {
+            self.meshes[id.slot() as usize].0 = first;
+            Ok(())
+        }
+
+        fn streamed_bytes(&self) -> u64 {
+            self.meshes
+                .iter()
+                .map(|(resident, levels, count)| {
+                    u64::from(levels[*resident as usize].vertices) * 28
+                        + levels[*resident as usize..*count as usize]
+                            .iter()
+                            .map(|l| u64::from(l.index_count) * 4)
+                            .sum::<u64>()
+                })
+                .sum()
+        }
+    }
+
+    /// Levels of a mesh: 4,000 vertices and 24,000 indices halving per level, errors
+    /// 0, 0.01, 0.02, 0.04.
+    fn levels() -> [StreamedLevel; 4] {
+        core::array::from_fn(|k| StreamedLevel {
+            index_count: 24_000 >> k,
+            error: if k == 0 {
+                0.0
+            } else {
+                0.01 * (1 << (k - 1)) as f32
+            },
+            vertices: 4_000 >> k,
+        })
+    }
+
+    struct World {
+        geometry: FakeGeometry,
+        budget: GpuBudget,
+        streamer: MeshStreamer,
+        ids: Vec<MeshId>,
+        frame: u64,
+        requests: Vec<MeshLevelRequest>,
+    }
+
+    impl World {
+        fn new(count: usize, limit: u64) -> Self {
+            let mut budget = GpuBudget::with_settings(BudgetSettings {
+                streaming_limit: Some(limit),
+                ..BudgetSettings::default()
+            });
+            let mut streamer = MeshStreamer::new(&mut budget, StreamerSettings::default()).unwrap();
+            let mut geometry = FakeGeometry::default();
+            let mut ids = Vec::new();
+            for k in 0..count {
+                let id = MeshId::from_parts(k as u32, 0);
+                let mut l = [StreamedLevel::default(); MAX_LODS];
+                l.copy_from_slice(&levels());
+                geometry.meshes.push((3, l, 4));
+                streamer.track(id, &levels(), Vec3::splat(-0.5), Vec3::splat(0.5));
+                ids.push(id);
+            }
+            Self {
+                geometry,
+                budget,
+                streamer,
+                ids,
+                frame: 0,
+                requests: Vec::new(),
+            }
+        }
+
+        /// A frame with one instance of each mesh at `distances` (along −z), seen from the
+        /// origin, 1000 pixels high, 90° field of view (500 pixels per unit at 1).
+        fn frame(&mut self, distances: &[f32]) {
+            self.frame += 1;
+            let clip = vulkan_perspective(90f32.to_radians(), 1.0, 0.1, 1000.0)
+                * look_at(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
+            let view = LodView::new(&clip, Vec3::ZERO, 1000, 1.0);
+            for (k, &d) in distances.iter().enumerate() {
+                let world = Mat4::from_translation(Vec3::new(0.0, 0.0, -d));
+                self.streamer
+                    .observe(&view, self.ids[k], &world, self.frame);
+            }
+            self.requests.clear();
+            self.streamer.update(
+                &mut self.geometry,
+                &mut self.budget,
+                self.frame,
+                &mut self.requests,
+            );
+            self.budget.distribute(HeapBudget {
+                size: 1 << 40,
+                device_local: true,
+                budget: 1 << 40,
+                usage: 0,
+                allocated: 0,
+            });
+            for r in &self.requests {
+                self.geometry.meshes[r.mesh.slot() as usize].0 = r.level;
+                self.streamer.arrived(r.mesh, r.level);
+            }
+        }
+
+        fn resident(&self) -> Vec<u32> {
+            self.geometry.meshes.iter().map(|m| m.0).collect()
+        }
+    }
+
+    #[test]
+    fn levels_follow_the_screen_size_one_at_a_time() {
+        let mut w = World::new(3, 1 << 30);
+        // A pixel of error: level 3 (0.04) from 20.5 units, 2 (0.02) from 10.5, 1 (0.01)
+        // from 5.5 (the box reaches 0.87 units closer).
+        let distances = [3.0, 8.0, 15.0];
+        // The first frame's grant comes from the budget's first update.
+        w.frame(&distances);
+        assert_eq!(w.resident(), [3, 3, 3]);
+        w.frame(&distances);
+        assert_eq!(w.resident(), [2, 2, 2], "one level per mesh per frame");
+        w.frame(&distances);
+        assert_eq!(w.resident(), [1, 1, 2]);
+        w.frame(&distances);
+        assert_eq!(w.resident(), [0, 1, 2]);
+        w.frame(&distances);
+        assert!(w.requests.is_empty());
+        // Out of the frustum: kept (cached), nothing evicted without pressure.
+        for _ in 0..100 {
+            w.frame(&[-5.0, -5.0, -5.0]);
+        }
+        assert_eq!(w.resident(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn pressure_makes_every_visible_mesh_coarser_and_unseen_ones_go_first() {
+        let mut w = World::new(3, 1 << 30);
+        for _ in 0..4 {
+            w.frame(&[3.0, 3.0, 3.0]);
+        }
+        assert_eq!(w.resident(), [0, 0, 0]);
+        // Room for everything one level coarser.
+        let one_coarser = 3 * levels_bytes_of(1);
+        w.budget.set_settings(BudgetSettings {
+            streaming_limit: Some(one_coarser),
+            ..w.budget.settings()
+        });
+        w.frame(&[3.0, 3.0, 3.0]);
+        w.frame(&[3.0, 3.0, 3.0]);
+        assert_eq!(w.resident(), [1, 1, 1]);
+        assert_eq!(w.streamer.stats().pressure_bias, 1);
+    }
+
+    fn levels_bytes_of(first: usize) -> u64 {
+        let l = levels();
+        u64::from(l[first].vertices) * 28
+            + l[first..]
+                .iter()
+                .map(|l| u64::from(l.index_count) * 4)
+                .sum::<u64>()
+    }
 }
 
 #[cfg(test)]

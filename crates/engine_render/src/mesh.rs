@@ -344,6 +344,22 @@ pub struct MeshId {
     generation: u32,
 }
 
+impl MeshId {
+    /// Its slot in the pool: stable while the mesh lives, reused after it is removed.
+    pub fn slot(self) -> u32 {
+        self.index
+    }
+
+    /// An id from a slot and generation, for tests of code that keys off ids.
+    #[doc(hidden)]
+    pub fn from_parts(slot: u32, generation: u32) -> Self {
+        Self {
+            index: slot,
+            generation,
+        }
+    }
+}
+
 /// Where a mesh lives in the pool, and its bounds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MeshInfo {
