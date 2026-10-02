@@ -139,6 +139,7 @@ fn main() {
     let mut feedback_settings = FeedbackSettings::default();
     let mut use_feedback = true;
     let mut still = false;
+    let mut verbose = false;
     let mut synthetic_scene: Option<(usize, u32)> = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -151,6 +152,7 @@ fn main() {
             "--slices" => feedback_settings.slices = args.next().unwrap().parse().unwrap(),
             "--no-feedback" => use_feedback = false,
             "--still" => still = true,
+            "--verbose" => verbose = true,
             "--synthetic" => {
                 let v = args.next().unwrap();
                 let (n, s) = v.split_once(',').unwrap();
@@ -531,10 +533,10 @@ fn main() {
                 break;
             }
         }
-        if frame % 120 == 0 || frame + 1 == total {
+        if frame % 120 == 0 || frame + 1 == total || verbose {
             let s = streamer.stats();
             println!(
-                "frame {frame:4}: meshes {:5.2} MiB (grant {:7.1}, bias {}), textures {:6.1} MiB (grant {:6.1}, pool {:7.1}, demand {:6.1}), visible {:3}, bias {}, arrived {:5}, waiting {:3}, latency {:5.1} ms",
+                "frame {frame:4}: meshes {:5.2} MiB (grant {:7.1}, bias {}), textures {:6.1} MiB (grant {:6.1}, pool {:7.1}, demand {:6.1}), visible {:3}, bias {}, planned {:.2} of {:.2}, evictions {}, arrived {:5}, waiting {:3}, latency {:5.1} ms",
                 s.meshes.resident as f64 / MIB,
                 s.meshes.grant as f64 / MIB,
                 s.meshes.pressure_bias,
@@ -544,6 +546,9 @@ fn main() {
                 b.demand as f64 / MIB,
                 s.textures.visible,
                 s.textures.pressure_bias,
+                s.textures.planned as f64 / MIB,
+                s.textures.grant as f64 / MIB,
+                s.textures.evictions,
                 s.arrived,
                 s.waiting,
                 s.latency_ms,

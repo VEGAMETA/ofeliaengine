@@ -360,7 +360,8 @@ impl TextureStreamer {
         for e in &self.entries {
             let info = pool.info(e.id);
             let base = info.map_or(e.tail, |i| i.planned_base);
-            estimated_live += e.bytes(base);
+            // The real bytes are the images made so far (not the reallocations pending).
+            estimated_live += e.bytes(info.map_or(e.tail, |i| i.base));
             required += e.bytes(e.tail);
             if is_visible(e) {
                 visible += 1;
@@ -388,6 +389,7 @@ impl TextureStreamer {
         // The grant, in estimated bytes; retiring images still hold memory.
         let grant = ((budget.grant(self.client) as f64 / scale) as u64)
             .saturating_sub((retiring as f64 / scale) as u64);
+        let margin = grant / 32;
 
         // Plan the visible textures: a common bias until they fit, then a level back for
         // some, by pixels.
@@ -444,7 +446,11 @@ impl TextureStreamer {
                         continue;
                     }
                     let more = e.bytes(e.plan - 1) - e.bytes(e.plan);
-                    if planned + more <= grant {
+                    // A level to read must fit with a margin: the grant moves a little
+                    // from frame to frame, and a level read at its edge would be evicted
+                    // and read again.
+                    let limit = if held { grant } else { grant - margin };
+                    if planned + more <= limit {
                         planned += more;
                         e.plan -= 1;
                     }
@@ -461,7 +467,8 @@ impl TextureStreamer {
             .iter()
             .map(|e| e.bytes(e.plan.max(e.base)))
             .sum();
-        let mut room = grant.saturating_sub(committed);
+        // Growth reads levels: within the margin (above).
+        let mut room = (grant - margin).saturating_sub(committed);
         let mut evictions = 0u32;
         for &k in &self.order {
             let e = &mut self.entries[k as usize];
@@ -492,6 +499,8 @@ impl TextureStreamer {
         }
         self.extras
             .sort_unstable_by_key(|&(seen, _)| core::cmp::Reverse(seen));
+        // Held levels stay within the whole grant (no margin: nothing is read).
+        let mut room = grant.saturating_sub(committed);
         for &(_, k) in &self.extras {
             let e = &mut self.entries[k as usize];
             let extra = e.bytes(e.base) - e.bytes(e.plan);
