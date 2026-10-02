@@ -66,6 +66,7 @@ tooling included) about **50 %**.
 | Reflections: parallax-corrected probes, SSR (FidelityFX SSSR-based) | done | ADR 0073 |
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
 | Upscalers: TAAU, FSR 3.1, DLSS via Streamline (user-supplied DLLs) | done | ADRs 0060, 0063 |
+| Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
 | Physics API on Jolt/Box2D: queries, characters, rollback | done | ADR 0066 |
 | Networking: encrypted UDP transport with NAT traversal; replication, prediction, lag compensation, co-op example | done | ADRs 0070, 0074 |
@@ -76,9 +77,7 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-- **Every antialiasing and scaling mode** (`feat/aa-modes`, ADR 0075): MSAA 2/4/8× with
-  alpha-to-coverage, FXAA, MLAA, SMAA 1x/S2x/T2x, nearest/bilinear/integer/FSR 1. Each is
-  measured on both GPUs, and `available()` lists what the GPU supports.
+Nothing (2026-10-02).
 
 ## 5. Queue (in order)
 
@@ -121,6 +120,9 @@ tooling included) about **50 %**.
    Acceptance: a "fast turn" test (180° in 0.2 s) measures the pixels drawn below their
    wanted level and for how long. The target is no visible pop-in at the default budget.
    The test joins the perf gate.
+0c. Spatial upscales Lanczos-3 (with an anti-ringing clamp) and bicubic Catmull-Rom,
+   measured in ADR 0075's table. No Lanczos-2: FSR 1's EASU covers it (owner,
+   2026-10-02).
 1. GPU particles and GPU radix sort.
 2. Clustered decals.
 3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
@@ -169,6 +171,17 @@ tooling included) about **50 %**.
   feedback from several views, LOD crossfades and impostors, sparse residency. Screen-size
   prefetch is blocked: the Graphine texture-streaming prediction patents (US10748241 and
   family) claim combining prediction schemes, so feedback is the only source of wanted levels.
+- **Antialiasing (ADR 0075):**
+  - centroid interpolation under MSAA;
+  - per-sample or bilaterally upsampled AO and contact shadows under MSAA;
+  - dynamic resolution with MSAA;
+  - CMAA is not built (Intel patents).
+  - The discrete-GPU default stays TAA. The other candidate is MSAA 4× (+1.2 ms on the
+    RTX, sharpest in motion, more flicker); the owner decides.
+  - A Streamline `eErrorExceptionHandler` hang was seen once in `aa_bench`.
+  - `procedural_contact_shadows` (both vendors) and `procedural_local_shadows` (Radeon)
+    differ from their golden images by a few pixels on main too. They pass the FLIP
+    tolerance; find why and regenerate them.
 - **Runtime:** parallel ECS extraction and upload on the job system (100 % moving objects
   cost 2× the draw list's CPU).
 - **Reliability:** two silent process exits (`perf_gate` once, `frame_bench` once) were
