@@ -202,6 +202,7 @@ fn motion_vectors() {
                         temporal: Some(&temporal),
                         lights: &[],
                         environment: None,
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();

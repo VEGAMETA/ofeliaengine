@@ -4,6 +4,7 @@ use crate::settings::{Antialiasing, ViewSettings};
 use engine_render::forward::{Occlusion, Temporal};
 use engine_render::graph::TextureState;
 use engine_render::postfx::AutoExposure;
+use engine_render::reflections::ScreenSpaceReflections;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError};
 use engine_upscale::Upscaler;
@@ -154,6 +155,7 @@ pub(crate) enum Retired {
     Occlusion(Occlusion),
     Exposure(AutoExposure),
     History(HistoryImage),
+    Reflections(ScreenSpaceReflections),
 }
 
 /// One view's state across frames (UE's `FSceneViewState`): its temporal state (jitter,
@@ -176,6 +178,8 @@ pub struct View {
     pub(crate) upscaler: Option<Box<dyn Upscaler>>,
     pub(crate) exposure: Option<AutoExposure>,
     pub(crate) history: Option<HistoryImage>,
+    /// Screen-space reflections' history (ADR 0073), at the render size.
+    pub(crate) reflections: Option<ScreenSpaceReflections>,
     pub(crate) retired: Vec<(u64, Retired)>,
     pub(crate) resets: Resets,
     /// The next frame starts its history anew (a change found by `prepare`).
@@ -205,6 +209,7 @@ impl View {
             upscaler: None,
             exposure: None,
             history: None,
+            reflections: None,
             retired: Vec::new(),
             resets: Resets::default(),
             reset_pending: false,
@@ -278,6 +283,7 @@ impl View {
             self.occlusion.take().map(Retired::Occlusion),
             self.exposure.take().map(Retired::Exposure),
             self.history.take().map(Retired::History),
+            self.reflections.take().map(Retired::Reflections),
         ]
         .into_iter()
         .flatten()
@@ -307,6 +313,7 @@ unsafe fn free(
             Retired::Occlusion(mut occlusion) => occlusion.destroy(allocator),
             Retired::Exposure(mut exposure) => exposure.destroy(allocator),
             Retired::History(image) => image.destroy(device, allocator, bindless, frame),
+            Retired::Reflections(mut ssr) => ssr.destroy(allocator, bindless),
         }
     }
 }

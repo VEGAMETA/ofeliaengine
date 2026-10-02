@@ -81,6 +81,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0071](0071-local-light-and-contact-shadows.md) | Shadows of point and spot lights in a cached atlas (screen-size resolution, redrawn on change within a budget, GPU-driven per view, separate shading entry points) and Bend Studio's screen-space contact shadows of the sun | Accepted |
 | [0072](0072-frame-renderer.md) | The frame renderer: one object composes a view's frame (scene passes, temporal antialiasing or upscaling, bloom, exposure, tone mapping), per-view state, the engine's exposure for FSR and DLSS, camera entities, measured defaults per device class | Accepted |
 | [0074](0074-replication-prediction-lag-compensation.md) | Replication, prediction and lag compensation: reflected components in per-tick quantized frames, per-entity deltas against acknowledged (and extrapolated) states under a priority accumulator and byte budget, resend on loss notification; client prediction with the game's systems and rollback of predicted entities; time dilation; adaptive interpolation; a ring of hit capsules for lag compensation | Accepted |
+| [0073](0073-reflection-probes-and-screen-space-reflections.md) | Local reflections: probes captured by the forward renderer and prefiltered into a cube array, selected by screen cells and z-bins with parallax correction; Hi-Z stochastic screen-space reflections with spatial and temporal filters; one composite after the opaque surfaces, nothing in other views' shading | Accepted |
 
 ## Template
 

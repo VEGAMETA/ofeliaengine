@@ -1061,6 +1061,7 @@ mod windowed {
                                         temporal: None,
                                         lights: &[],
                                         environment: None,
+                                        reflections: Default::default(),
                                     },
                                 );
                             }

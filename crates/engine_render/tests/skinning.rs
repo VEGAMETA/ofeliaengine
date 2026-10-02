@@ -370,6 +370,7 @@ fn skinning() {
                 temporal: Some(&temporal),
                 lights: &[],
                 environment: None,
+                reflections: Default::default(),
             };
             let passes = match scene {
                 None => renderer

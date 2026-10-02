@@ -631,6 +631,7 @@ mod windowed {
                     temporal: None,
                     lights: &[],
                     environment: None,
+                    reflections: Default::default(),
                 };
                 if extract.is_some() {
                     let scene_frame = scene

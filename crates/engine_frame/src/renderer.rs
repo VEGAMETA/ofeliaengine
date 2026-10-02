@@ -18,6 +18,7 @@ use engine_render::material::{MaterialFrame, MaterialTable};
 use engine_render::mesh::GeometryFrame;
 use engine_render::post::{Composite, HDR_FORMAT, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings};
+use engine_render::reflections::{ReflectionProbes, Reflections, ScreenSpaceReflections};
 use engine_render::skinning::SkinningFrame;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -134,6 +135,10 @@ pub struct SceneInput<'a, 'g> {
     pub lights: &'g [LocalLight],
     /// Sky light, the sky, the atmosphere and fog, or `None` for the flat ambient color.
     pub environment: Option<&'g Environment>,
+    /// Reflection probes (ADR 0073; with an environment and reflections on in the forward
+    /// renderer): the scene's, shared by its views; the first view of a frame captures
+    /// what needs capturing.
+    pub reflection_probes: Option<&'g ReflectionProbes>,
 }
 
 impl fmt::Debug for SceneInput<'_, '_> {
@@ -563,6 +568,31 @@ impl FrameRenderer {
             )?);
         }
 
+        // Screen-space reflections' history, at the render size.
+        match settings.screen_space_reflections {
+            Some(ssr) => {
+                let size = [render.0, render.1];
+                if view.reflections.as_ref().is_some_and(|r| r.size() != size)
+                    && let Some(old) = view.reflections.take()
+                {
+                    view.retire(frame_number, Retired::Reflections(old));
+                }
+                match &view.reflections {
+                    Some(r) => r.set_settings(ssr),
+                    None => {
+                        view.reflections = Some(ScreenSpaceReflections::new(
+                            device, allocator, bindless, render.0, render.1, ssr,
+                        )?);
+                    }
+                }
+            }
+            None => {
+                if let Some(old) = view.reflections.take() {
+                    view.retire(frame_number, Retired::Reflections(old));
+                }
+            }
+        }
+
         if previous.is_some_and(|p| p.antialiasing != antialiasing || p.output != output) {
             view.reset_pending = true;
             view.resets.changes += 1;
@@ -628,6 +658,7 @@ impl FrameRenderer {
             upscaler,
             exposure,
             history,
+            reflections,
             resets,
             reset_pending,
             ..
@@ -652,6 +683,9 @@ impl FrameRenderer {
             }
             if let Some(history) = history.as_mut() {
                 history.valid = false;
+            }
+            if let Some(ssr) = reflections.as_ref() {
+                ssr.reset();
             }
         }
         let temporal: Option<&'g Temporal> = temporal.as_ref();
@@ -680,6 +714,10 @@ impl FrameRenderer {
             temporal,
             lights: scene.lights,
             environment: scene.environment,
+            reflections: Reflections {
+                probes: scene.reflection_probes,
+                ssr: reflections.as_ref(),
+            },
         };
         let passes = match scene.draws {
             SceneDraws::List(draws) => self.forward.add_passes(

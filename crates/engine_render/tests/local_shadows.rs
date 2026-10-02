@@ -262,6 +262,7 @@ impl Bed {
                 temporal: None,
                 lights,
                 environment: None,
+                reflections: Default::default(),
             };
             let passes = match scene {
                 Some(scene) => {

@@ -5,7 +5,8 @@
 //!  scene passes, render size          antialiasing             post chain, output size
 //!  ─────────────────────────────      ────────────────         ─────────────────────────
 //!  cull → shadows → (prepass, AO)  →  TAAU / FSR / DLSS   →   bloom → exposure → tonemap
-//!  → forward → (SSS) → sky/fog        (or nothing: Off)        → the view's target
+//!  → forward → (SSS) → (reflections)  (or nothing: Off)        → the view's target
+//!  → sky/fog
 //!  → transparent (+ reactive mask)
 //!  → skinned motion (ADR 0068)
 //!  jitter + motion vectors            history per view
@@ -18,6 +19,12 @@
 //!   jitter and last frame's camera for motion vectors, its upscaler and history, its
 //!   occlusion-culling state, its adapted exposure, its previous color. One per view:
 //!   the main camera, each split-screen player, each render target.
+//! - Reflections (ADR 0073) are part of the scene passes: probes come with the scene
+//!   ([`SceneInput::reflection_probes`]), screen-space reflections are a view setting
+//!   (`ViewSettings::screen_space_reflections`, history in the [`View`]). They run after
+//!   the opaque surfaces and before the atmosphere and the transparent ones, which the
+//!   hook of [`FrameRenderer::add_view_with`] comes after; the hook gets their inputs
+//!   and result in `SceneTargets::passes.reflections`.
 //! - [`ViewSettings`] says what a view wants: [`Antialiasing`] (`Off`, or a temporal
 //!   upscaler: the engine's TAAU, FSR 3.1, DLSS), the render size (`Quality`, or a
 //!   dynamic `render_scale`), exposure, tone curve, bloom.

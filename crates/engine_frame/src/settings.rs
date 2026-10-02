@@ -3,6 +3,7 @@
 use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::post::{OutputEncoding, ToneCurve};
 use engine_render::postfx::ExposureSettings;
+use engine_render::reflections::SsrSettings;
 use engine_rhi::{AdapterKind, Device};
 use engine_upscale::{Quality, UpscalerKind};
 
@@ -97,6 +98,11 @@ pub struct ViewSettings {
     /// A non-interactive view (cutscene, sequence; ADR 0067): the only kind that may have
     /// camera motion blur once it exists. Gameplay views never get it.
     pub cinematic: bool,
+    /// Screen-space reflections (ADR 0073), traced at the render size against the
+    /// scene's own lit image, over the scene's reflection probes and the sky. They need
+    /// the scene's environment and `ForwardRenderer::set_reflections` (through
+    /// `FrameRenderer::forward_mut`); the view keeps their history.
+    pub screen_space_reflections: Option<SsrSettings>,
 }
 
 impl Default for ViewSettings {
@@ -115,6 +121,7 @@ impl Default for ViewSettings {
             motion_vectors: false,
             previous_color: false,
             cinematic: false,
+            screen_space_reflections: None,
         }
     }
 }

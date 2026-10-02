@@ -291,6 +291,82 @@ pub fn fit_cascades(
     fit
 }
 
+/// One cascade holding the sphere at `center` of `radius` (a reflection probe's
+/// surroundings, ADR 0073: its six faces share it), for a light shining along `direction`
+/// over a scene within `scene_min`..`scene_max`, snapped to whole texels as
+/// [`fit_cascades`]' cascades are.
+pub fn fit_sphere(
+    center: Vec3,
+    radius: f32,
+    direction: Vec3,
+    scene_min: Vec3,
+    scene_max: Vec3,
+    settings: &ShadowSettings,
+) -> CascadeFit {
+    let direction = direction.normalize_or(Vec3::NEG_Y);
+    let up = if direction.y.abs() > 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let light_from_world = look_at(Vec3::ZERO, direction, up);
+    let empty = Cascade {
+        center: Vec2::ZERO,
+        radius: 0.0,
+        near: 0.0,
+        far: 1.0,
+        limit: 1.0,
+        texel: 0.0,
+        split: 0.0,
+    };
+    let mut fit = CascadeFit {
+        light_from_world,
+        cascades: [empty; MAX_CASCADES],
+        count: 0,
+        fade: false,
+    };
+    let radius = radius.min(settings.distance);
+    if radius.is_nan() || radius <= 0.0 {
+        return fit;
+    }
+    let (mut light_near, mut light_far) = (f32::MAX, f32::MIN);
+    for k in 0..8 {
+        let c = Vec3::new(
+            if k & 1 == 0 { scene_min.x } else { scene_max.x },
+            if k & 2 == 0 { scene_min.y } else { scene_max.y },
+            if k & 4 == 0 { scene_min.z } else { scene_max.z },
+        );
+        let depth = -light_from_world.transform_point3(c).z;
+        light_near = light_near.min(depth);
+        light_far = light_far.max(depth);
+    }
+    let resolution = settings.resolution.max(1) as f32;
+    let limit = Cascade::limit_for(settings.resolution);
+    let mut radius = radius * (1.0 + 1.0 / resolution) / limit;
+    let step = 2f32.powi(radius.max(1e-6).log2().floor() as i32 - 6);
+    radius = (radius / step).ceil() * step;
+    let texel = 2.0 * radius / resolution;
+    let light = light_from_world.transform_point3(center);
+    let snapped = Vec2::new(
+        (light.x / texel).round() * texel,
+        (light.y / texel).round() * texel,
+    );
+    let near = light_near - texel;
+    let far = (-light.z + radius).min(light_far) + texel;
+    fit.cascades[0] = Cascade {
+        center: snapped,
+        radius,
+        near,
+        far: far.max(near + texel),
+        limit,
+        texel,
+        split: radius,
+    };
+    fit.count = 1;
+    fit.fade = settings.distance < radius;
+    fit
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

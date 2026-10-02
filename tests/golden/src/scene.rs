@@ -27,6 +27,7 @@ use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGr
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
 use engine_render::post::ToneCurve;
+use engine_render::reflections::{ProbeSettings, ReflectionProbe, ReflectionProbes, SsrSettings};
 use engine_render::skinning::{SkinnedMeshData, Skinning};
 use engine_render::subsurface::SubsurfaceProfile;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
@@ -128,6 +129,13 @@ pub struct Shot {
     /// The camera as a rotation and a position (a camera entity's transform) instead of
     /// `look_at`'s matrix: what the runtime path renders with.
     pub rigid_camera: bool,
+    /// Reflection probes (ADR 0073; with `sky`): the scene's bounding box cut into this
+    /// many boxes per axis, a probe in each.
+    pub probe_grid: Option<[u32; 3]>,
+    /// Screen-space reflections (ADR 0073; with `sky`).
+    pub ssr: Option<SsrSettings>,
+    /// The procedural scene's floor as polished metal (reflections show on it).
+    pub glossy_floor: bool,
 }
 
 impl Shot {
@@ -166,6 +174,9 @@ impl Shot {
             camera_motion: Vec3::ZERO,
             runtime: false,
             rigid_camera: false,
+            probe_grid: None,
+            ssr: None,
+            glossy_floor: false,
         }
     }
 }
@@ -328,16 +339,21 @@ pub fn sphere(rings: u32, segments: u32) -> OwnedMeshData {
 
 /// The procedural scene: spheres of graded roughness (top row metal, bottom row
 /// dielectric), a glass cube, a glowing cube, a floor and a wall.
-fn procedural(subsurface: bool) -> Vec<(OwnedMeshData, MaterialDesc, Mat4)> {
+fn procedural(subsurface: bool, glossy_floor: bool) -> Vec<(OwnedMeshData, MaterialDesc, Mat4)> {
     let ball = sphere(24, 48);
     let block = cube();
+    let floor = if glossy_floor {
+        MaterialDesc::solid([0.75, 0.75, 0.78], 1.0, 0.12)
+    } else {
+        MaterialDesc::solid([0.5, 0.5, 0.5], 0.0, 0.8)
+    };
     let mut items = vec![
         (
             block.clone(),
             MaterialDesc {
                 // Shadow edges show scattering best: a red fringe (red travels furthest).
                 subsurface: subsurface.then(Subsurface::default),
-                ..MaterialDesc::solid([0.5, 0.5, 0.5], 0.0, 0.8)
+                ..floor
             },
             Mat4::from_scale_rotation_translation(
                 Vec3::new(14.0, 0.2, 10.0),
@@ -506,11 +522,11 @@ fn gpu(validation: bool, dlss: bool) -> Result<(Instance, Device, Dlss), Skip> {
     }
 }
 
-fn load(source: &Source, subsurface: bool) -> Result<Loaded, Skip> {
+fn load(source: &Source, subsurface: bool, glossy_floor: bool) -> Result<Loaded, Skip> {
     match source {
         Source::Procedural => Ok(Loaded {
             cooked: None,
-            procedural: procedural(subsurface),
+            procedural: procedural(subsurface, glossy_floor),
         }),
         Source::Gltf(path) => {
             let path = test_assets().join(path);
@@ -538,6 +554,23 @@ fn load(source: &Source, subsurface: bool) -> Result<Loaded, Skip> {
             })
         }
     }
+}
+
+/// Probes over the scene's bounding box `min`..`max` cut into `grid` boxes: each
+/// captured from its centre, reflecting and correcting parallax with its box.
+pub fn probe_grid(min: Vec3, max: Vec3, grid: [u32; 3]) -> Vec<ReflectionProbe> {
+    let g = Vec3::new(grid[0] as f32, grid[1] as f32, grid[2] as f32).max(Vec3::ONE);
+    let cell = (max - min) / g;
+    let mut probes = Vec::new();
+    for z in 0..grid[2].max(1) {
+        for y in 0..grid[1].max(1) {
+            for x in 0..grid[0].max(1) {
+                let center = min + cell * (Vec3::new(x as f32, y as f32, z as f32) + 0.5);
+                probes.push(ReflectionProbe::room(center, cell * 0.5));
+            }
+        }
+    }
+    probes
 }
 
 /// A camera like `scene_bench`'s default: down the longest horizontal axis of a wide
@@ -578,7 +611,7 @@ fn median(values: &mut [f64]) -> f64 {
 /// On Vulkan errors and, with validation, on validation errors.
 #[allow(clippy::too_many_lines)]
 pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
-    let loaded = load(&shot.source, shot.subsurface)?;
+    let loaded = load(&shot.source, shot.subsurface, shot.glossy_floor)?;
     let (instance, device, streamline) =
         gpu(options.validation, shot.antialiasing == Antialiasing::DLSS)?;
     let [width, height] = shot.size;
@@ -638,6 +671,24 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             .expect("atmosphere");
         environment.set_fog(shot.fog);
         environment
+    });
+    let reflecting = shot.sky && (shot.probe_grid.is_some() || shot.ssr.is_some());
+    frame
+        .forward_mut()
+        .set_reflections(&device, &bindless, reflecting)
+        .expect("reflections");
+    let mut probes = shot.probe_grid.filter(|_| shot.sky).map(|grid| {
+        let capacity = grid.iter().product::<u32>().max(1);
+        ReflectionProbes::new(
+            &device,
+            &mut allocator,
+            &bindless,
+            ProbeSettings {
+                capacity,
+                ..ProbeSettings::default()
+            },
+        )
+        .expect("reflection probes")
     });
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 64 << 20).expect("ring");
     let mut graph = RenderGraph::new(&device, 1);
@@ -777,6 +828,11 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         grow(*world, [-0.5; 3], [0.5; 3]);
     }
 
+    if let (Some(probes), Some(grid)) = (probes.as_mut(), shot.probe_grid) {
+        for probe in probe_grid(min, max, grid) {
+            probes.add(probe).expect("probe capacity");
+        }
+    }
     let (default_eye, default_target) = default_view(min, max);
     let eye = shot.eye.unwrap_or(default_eye);
     let target = shot.target.unwrap_or(default_target);
@@ -786,12 +842,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // first; a temporal shot then accumulates `temporal_frames` frames from a camera cut
     // at `TEMPORAL_START` (its history starts there), the last one captured.
     const TEMPORAL_START: usize = 2;
+    const SSR_FRAMES: usize = 8;
     let capture_at = TEMPORAL_START
         + if temporal {
             shot.temporal_frames.max(1) as usize - 1
         } else {
             0
-        };
+        }
+        // Screen-space reflections' own temporal filter converges over a few frames.
+        + if shot.ssr.is_some() { SSR_FRAMES } else { 0 };
     let settings = ViewSettings {
         antialiasing: shot.antialiasing,
         quality: shot.quality,
@@ -799,6 +858,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         curve: shot.curve,
         bloom: shot.bloom,
         clear: Some([0.02, 0.02, 0.05, 1.0]),
+        screen_space_reflections: shot.ssr.filter(|_| shot.sky),
         ..ViewSettings::default()
     };
     let mut view = View::new(&device, draws.len() as u32);
@@ -861,9 +921,12 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut timed = 0;
     let mut captured = false;
     let mut resident_frames = 0;
+    let mut previous_faces = 0;
     while timed < options.timed_frames || !captured {
         let uploading = textures.pending().0 > 0;
-        let capture = !uploading && !captured && resident_frames >= capture_at;
+        // With probes, once every probe was captured with the textures resident.
+        let probes_ready = probes.as_ref().is_none_or(|p| p.stats().pending == 0);
+        let capture = !uploading && !captured && resident_frames >= capture_at && probes_ready;
         // Frames since the cut that starts a temporal shot's history (the jitter sequence
         // runs from the first frame: the scene's upload takes the same frames every run).
         let accumulated = (!uploading && resident_frames >= TEMPORAL_START)
@@ -1015,6 +1078,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         light: shot.sun,
                         lights: &lights,
                         environment: environment.as_ref(),
+                        reflection_probes: probes.as_ref(),
                     },
                     &camera,
                     ViewTarget {
@@ -1089,12 +1153,22 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             continue;
         }
         resident_frames += 1;
+        if resident_frames == 1
+            && let Some(p) = probes.as_ref()
+        {
+            // Captures made while textures streamed in: again, with all of them.
+            p.refresh_all();
+        }
         if capture {
             captured = true;
         } else if captured || resident_frames > 2 {
             // Times of the frame before this one's recording (the graph reads them when
-            // its slot comes around): every frame after the scene is resident.
-            if resident_frames > 3 {
+            // its slot comes around): every frame after the scene is resident (and its
+            // reflection probes captured: captures are not steady-state work).
+            let faces = probes.as_ref().map_or(0, |p| p.stats().faces);
+            let capturing = faces > 0 || previous_faces > 0;
+            previous_faces = faces;
+            if resident_frames > 3 && !capturing {
                 let mut frame: BTreeMap<&'static str, f64> = BTreeMap::new();
                 // The test bed's own passes are not the renderer's.
                 for time in graph
@@ -1148,6 +1222,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         if let Some(environment) = environment.as_mut() {
             environment.destroy(&mut allocator, &bindless);
         }
+        if let Some(probes) = probes.as_mut() {
+            probes.destroy(&mut allocator, &bindless);
+        }
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);
     }
@@ -1159,6 +1236,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         skinning,
         streamline,
         environment,
+        probes,
         bindless,
         allocator,
     ));

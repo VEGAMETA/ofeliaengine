@@ -109,6 +109,9 @@ pub(crate) enum ImageKind {
     Cube,
     /// A 3D image of this depth.
     Volume(u32),
+    /// This many cubes (six faces each), sampled as a cube array (reflection probes,
+    /// ADR 0073).
+    CubeArray(u32),
 }
 
 /// An image owned by the environment (or its atmosphere): sampled through one view,
@@ -139,8 +142,12 @@ impl Image {
         levels: u32,
         kind: ImageKind,
     ) -> Result<Self, RhiError> {
-        let cube = kind == ImageKind::Cube;
-        let layers = if cube { 6 } else { 1 };
+        let cube = matches!(kind, ImageKind::Cube | ImageKind::CubeArray(_));
+        let layers = match kind {
+            ImageKind::Cube => 6,
+            ImageKind::CubeArray(count) => 6 * count.max(1),
+            _ => 1,
+        };
         let (image_type, depth) = match kind {
             ImageKind::Volume(depth) => (vk::ImageType::TYPE_3D, depth),
             _ => (vk::ImageType::TYPE_2D, 1),
@@ -211,6 +218,10 @@ impl Image {
         };
         let (sampled_kind, storage_kind) = match kind {
             ImageKind::Cube => (vk::ImageViewType::CUBE, vk::ImageViewType::TYPE_2D_ARRAY),
+            ImageKind::CubeArray(_) => (
+                vk::ImageViewType::CUBE_ARRAY,
+                vk::ImageViewType::TYPE_2D_ARRAY,
+            ),
             ImageKind::Flat => (vk::ImageViewType::TYPE_2D, vk::ImageViewType::TYPE_2D),
             ImageKind::Volume(_) => (vk::ImageViewType::TYPE_3D, vk::ImageViewType::TYPE_3D),
         };
@@ -253,6 +264,17 @@ impl Image {
         );
         self.state.set(final_state);
         texture
+    }
+
+    /// The state the next import starts from.
+    pub(crate) fn state(&self) -> TextureState {
+        self.state.get()
+    }
+
+    /// Sets the state the next import starts from: what it was before an import whose
+    /// frame did not use the image (the graph leaves an unused import as it was).
+    pub(crate) fn set_state(&self, state: TextureState) {
+        self.state.set(state);
     }
 
     /// # Safety
@@ -310,6 +332,9 @@ pub(crate) struct EnvironmentFrame {
     pub atmosphere: Option<AtmosphereFrame>,
     /// The directional light's color this frame when the atmosphere drives it.
     pub sun_color: Option<Vec3>,
+    /// Whether this frame rebuilt the image-based light (the sky changed): reflection
+    /// probes capture it (ADR 0073).
+    pub rebuilt: bool,
 }
 
 /// Image-based lighting from a sky (see the module documentation). Rebuilding after
@@ -710,6 +735,7 @@ impl Environment {
             intensity: self.intensity.get(),
             atmosphere,
             sun_color: sun_color.filter(|_| physical.is_some_and(|(a, _)| a.drives_sun)),
+            rebuilt: rebuild,
         })
     }
 

@@ -209,6 +209,7 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
                         temporal: Some(&temporal),
                         lights: &[],
                         environment: Some(&environment),
+                        reflections: Default::default(),
                     },
                 )
                 .unwrap();
