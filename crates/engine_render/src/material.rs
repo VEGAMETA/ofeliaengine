@@ -414,6 +414,30 @@ impl MaterialTable {
         slot.desc.as_ref()
     }
 
+    /// The textures of the material in table slot `slot` (what [`crate::feedback`]
+    /// reports per slot): base color, metallic-roughness, normal, occlusion, emission and
+    /// subsurface thickness; `None` for missing ones and for free slots.
+    pub fn slot_textures(&self, slot: u32) -> [Option<TextureId>; 6] {
+        let Some(desc) = self.slots.get(slot as usize).and_then(|s| s.desc) else {
+            return [None; 6];
+        };
+        [
+            desc.base_color_texture,
+            desc.metallic_roughness_texture,
+            desc.normal_texture,
+            desc.occlusion_texture,
+            desc.emissive_texture,
+            desc.subsurface.and_then(|s| s.thickness_texture),
+        ]
+        .map(|t| t.map(|t| t.texture))
+    }
+
+    /// The slot of a material in the table (what [`crate::feedback`] reports), `None` for
+    /// stale ids.
+    pub fn slot_of(&self, id: MaterialId) -> Option<u32> {
+        self.get(id).map(|_| id.index)
+    }
+
     /// The default material (slot 0).
     pub fn default_material(&self) -> MaterialId {
         MaterialId {
@@ -716,6 +740,12 @@ impl MaterialFrame<'_> {
             }
             _ => (0, self.table.slots[0].kind),
         }
+    }
+
+    /// Material slots the table's buffer holds (slots index it; every live material's is
+    /// below this).
+    pub fn capacity(&self) -> u32 {
+        self.table.table.as_ref().map_or(0, |t| t.capacity)
     }
 
     /// The table's [`MaterialTable::revision`].
