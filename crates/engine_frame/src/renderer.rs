@@ -288,13 +288,13 @@ pub struct FrameRenderer {
     /// Sample counts the scene's targets support, by [`Msaa`].
     msaa_support: [bool; 4],
     /// The resolve of multisampled scenes (ADR 0075), made per sample count.
-    msaa: MsaaResolve,
+    msaa: Box<MsaaResolve>,
     /// The filters after tone mapping (ADR 0075), made as views ask for them.
     post: Box<PostAa>,
     /// The tone mapper into their perceptual image, made with the first filter.
-    perceptual: Option<Tonemap>,
+    perceptual: Option<Box<Tonemap>>,
     /// FSR 1 (ADR 0075), made with the first view that uses it.
-    fsr1: Option<Fsr1>,
+    fsr1: Option<Box<Fsr1>>,
     #[cfg(feature = "dlss")]
     streamline: Option<engine_dlss::Streamline>,
 }
@@ -519,7 +519,7 @@ impl FrameRenderer {
             depth_format,
             frames_in_flight: frames_in_flight.max(1) as u64,
             msaa_support: msaa_support(device, depth_format),
-            msaa: MsaaResolve::new(),
+            msaa: Box::new(MsaaResolve::new()),
             post: Box::new(PostAa::new(output_format)),
             perceptual: None,
             fsr1: None,
@@ -785,13 +785,13 @@ impl FrameRenderer {
             }
         }
         if antialiasing.upscale == Upscale::Fsr1 && self.fsr1.is_none() {
-            self.fsr1 = Some(Fsr1::new(device, bindless)?);
+            self.fsr1 = Some(Box::new(Fsr1::new(device, bindless)?));
         }
 
         // Filters after tone mapping: their pipelines, and SMAA T2x's last frame.
         if let Some(filter) = post_filter(antialiasing.post) {
             if self.perceptual.is_none() {
-                self.perceptual = Some(Tonemap::new_perceptual(device, bindless)?);
+                self.perceptual = Some(Box::new(Tonemap::new_perceptual(device, bindless)?));
             }
             let temporal = antialiasing.upscale == Upscale::SmaaT2x;
             self.post.ensure(
@@ -1222,7 +1222,7 @@ impl FrameRenderer {
             _ => [resolved, resolved],
         };
         let two = sources[0] != sources[1];
-        let perceptual = filter.and(self.perceptual.as_ref()).map(|tonemap| {
+        let perceptual = filter.and(self.perceptual.as_deref()).map(|tonemap| {
             let desc = TextureDesc::new_2d(PERCEPTUAL_FORMAT, output.0, output.1);
             let image = fg.create_texture("perceptual", desc);
             let second = two.then(|| fg.create_texture("perceptual", desc));

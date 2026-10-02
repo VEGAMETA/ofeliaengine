@@ -325,7 +325,7 @@ pub struct Skinning {
     motion: Pipeline,
     /// The motion pass into multisampled targets (MSAA, ADR 0075) of 2, 4, 8 samples, made
     /// by [`Self::set_motion_samples`].
-    motion_ms: [Option<Pipeline>; 3],
+    motion_ms: [Option<Box<Pipeline>>; 3],
     /// The depth format the motion pass tests against.
     depth_format: vk::Format,
     skins: Vec<Skin>,
@@ -472,12 +472,12 @@ impl Skinning {
         if let Some(k) = ms_slot(samples)
             && self.motion_ms[k].is_none()
         {
-            self.motion_ms[k] = Some(motion_pipeline(
+            self.motion_ms[k] = Some(Box::new(motion_pipeline(
                 device,
                 bindless,
                 self.depth_format,
                 samples,
-            )?);
+            )?));
         }
         Ok(())
     }
@@ -1170,7 +1170,7 @@ impl<'g> SkinningFrame<'g> {
         let geometry = *geometry;
         let draws = &skinning.motion_draws;
         let pipeline = match ms_slot(desc.samples) {
-            Some(k) => skinning.motion_ms[k].as_ref().ok_or(RhiError::Vulkan {
+            Some(k) => skinning.motion_ms[k].as_deref().ok_or(RhiError::Vulkan {
                 call: "skinned motion: no pipeline for this sample count (set_motion_samples)",
                 result: vk::Result::ERROR_INITIALIZATION_FAILED,
             })?,
