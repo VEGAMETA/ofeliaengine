@@ -84,6 +84,28 @@ tooling included) about **50 %**.
 
 ## 5. Queue (in order)
 
+0. **Faster checks, first after the review** (owner, 2026-10-02). Today
+   `check.ps1 -Gpu -Perf` takes 10–25 min, and it grows with every crate and test. Per
+   step, from recent runs:
+
+   | Step | Minutes |
+   |---|---|
+   | test | 1–6.5 |
+   | tracy | 2–6.5 |
+   | gpu | 2–7 |
+   | perf | 2.5–4 |
+   | clippy (cold) | up to 5 |
+
+   Measure every step before and after each change, then:
+   - **remove duplicates:** the tracy step reruns the whole test suite (build with Tracy
+     and run only the profiler's tests instead); the test step reruns GPU tests that the
+     gpu step runs on both GPUs;
+   - **link faster:** lld-link (closes ADR 0001), `line-tables-only` debug info for tests,
+     fewer integration-test binaries per crate;
+   - **share compiled dependencies across worktrees** with sccache (Apache-2.0);
+   - **adopt cargo-nextest;**
+   - **add an "affected crates" mode** for agents' intermediate runs. The full run stays
+     the gate before every merge.
 1. GPU particles and GPU radix sort.
 2. Clustered decals.
 3. GI: probe volumes, then DDGI-like.
