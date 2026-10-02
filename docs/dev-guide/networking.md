@@ -1,10 +1,12 @@
-# Networking: hosting, joining, NAT
+# Networking: hosting, joining, NAT, making a game co-op
 
 The engine's multiplayer model is an authoritative server at a fixed tick with snapshot
-replication and client prediction ([ADR 0019](../adr/0019-networking-model.md)). This
-page covers the layer under it, `engine_net_transport` ([ADR 0070](../adr/0070-network-transport.md)):
+replication and client prediction ([ADR 0019](../adr/0019-networking-model.md)). §1–6
+cover the transport, `engine_net_transport` ([ADR 0070](../adr/0070-network-transport.md)):
 connections, channels, security, and how a player's PC becomes reachable when it hosts a
-co-op game. Singleplayer uses none of it (no loopback server).
+co-op game. §7 is what most games use directly: `engine_net`, replication, prediction and
+lag compensation ([ADR 0074](../adr/0074-replication-prediction-lag-compensation.md)).
+Singleplayer uses none of it (no loopback server).
 
 ## 1. The pieces
 
