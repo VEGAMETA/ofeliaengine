@@ -514,6 +514,7 @@ dependencies = [
  "engine_profiler",
  "gpu-allocator",
  "log",
+ "windows-sys",
 ]
 
 [[package]]

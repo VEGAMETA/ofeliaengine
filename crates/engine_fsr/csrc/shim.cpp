@@ -16,6 +16,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <mutex>
 #include <new>
 
 extern "C" void engine_fsr_set_modules(const uint8_t* const* data, const uint32_t* sizes, uint32_t count);
@@ -34,11 +35,14 @@ struct VulkanFunctions {
     bool fp16;
 };
 
-// Set when a context is created, before the backend calls any of them. Contexts are
-// created on one thread (the render thread) and every context of the process uses the
-// same instance and device (the engine has one of each).
+// Set when a context is created, before the backend calls any of them: the backend calls
+// them only while it creates a context (capabilities, pipelines, resources). A process can
+// have several devices (tests render on many threads at once, each with its own instance
+// and device), so contexts are created one at a time, under `g_createMutex`, each with its
+// own device's functions.
 std::atomic<const VulkanFunctions*> g_vulkan{nullptr};
 VulkanFunctions g_vulkanStorage;
+std::mutex g_createMutex;
 
 const VulkanFunctions& vulkan()
 {
@@ -196,6 +200,9 @@ constexpr uint32_t kSharedCount = 3;
 struct EngineFsr {
     FfxFsr3UpscalerContext context;
     FfxInterface backend;
+    /// The backend's `FfxDevice`: what `ffxGetDeviceVK` would return, but per context
+    /// (`ffxGetDeviceVK` copies it into one static of the SDK and returns its address).
+    VkDeviceContext deviceContext;
     void* scratch;
     FfxResourceInternal shared[kSharedCount];
     uint32_t sharedCreated;
@@ -218,6 +225,7 @@ static void destroy(EngineFsr* fsr)
 int32_t engine_fsr_create(const EngineFsrCreateDesc* desc, EngineFsr** out)
 {
     *out = nullptr;
+    const std::lock_guard<std::mutex> creating(g_createMutex);
     VulkanFunctions& f = g_vulkanStorage;
     auto get = [&](const char* name) { return desc->getInstanceProcAddr(desc->instance, name); };
     f.getProperties = reinterpret_cast<PFN_vkGetPhysicalDeviceProperties>(get("vkGetPhysicalDeviceProperties"));
@@ -246,9 +254,8 @@ int32_t engine_fsr_create(const EngineFsrCreateDesc* desc, EngineFsr** out)
         return FFX_ERROR_OUT_OF_MEMORY;
     }
     std::memset(fsr->scratch, 0, scratchSize);
-    // ffxGetDeviceVK copies the structure.
-    VkDeviceContext deviceContext = {desc->device, desc->physicalDevice, engineGetDeviceProcAddr};
-    FfxErrorCode error = ffxGetInterfaceVK(&fsr->backend, ffxGetDeviceVK(&deviceContext), fsr->scratch, scratchSize, 1);
+    fsr->deviceContext = {desc->device, desc->physicalDevice, engineGetDeviceProcAddr};
+    FfxErrorCode error = ffxGetInterfaceVK(&fsr->backend, reinterpret_cast<FfxDevice>(&fsr->deviceContext), fsr->scratch, scratchSize, 1);
     if (error == FFX_OK)
     {
         FfxFsr3UpscalerContextDescription contextDesc = {};
