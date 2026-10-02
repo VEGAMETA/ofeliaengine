@@ -65,9 +65,14 @@ unsafe { view.destroy(&mut allocator, &bindless) };
   - `Antialiasing::DLSS`: NVIDIA DLSS (DLAA at `Native`), once you hand the frame renderer
     Streamline (`frame.set_streamline(Some(streamline))`, see below). Without it, the view
     falls back to TAAU; `prepare` returns what is used.
+  - and every other mode — MSAA, FXAA, MLAA, SMAA (1x, S2x, T2x, 4x), nearest, bilinear,
+    integer scaling, FSR 1 — and their combinations: see
+    [Choosing antialiasing](#choosing-antialiasing-every-mode-what-it-costs-what-it-gives)
+    (ADR 0075).
 - **Render size** (`ViewSettings::quality`): `Native` (100 %), `Quality` (67 %), `Balanced`
   (59 %), `Performance` (50 %), `UltraPerformance` (33 %) per axis. With `Off`, a smaller
-  size is stretched bilinearly.
+  size is stretched bilinearly. `ViewSettings::render_size` fixes it in pixels instead
+  (pixel art).
 - **Dynamic resolution:** set `ViewSettings::render_scale = Some(0.8)` frame by frame
   (from your GPU-time controller). The texture LOD bias stays the one of `quality`; keep
   the scale at or below it and change it in coarse steps.

@@ -2650,6 +2650,24 @@ impl ForwardRenderer {
         core::array::from_fn(|k| self.shading[k].main[0].statistics(device))
     }
 
+    /// The driver's statistics of the multisampled shading pipelines for `samples` (ADR
+    /// 0075; made by [`Self::set_samples`]), per shading variant as
+    /// [`Self::shading_statistics`], after the prepass without motion vectors, then the
+    /// atmosphere's per-sample pass. Empty when not made or not captured.
+    pub fn msaa_statistics(
+        &self,
+        device: &Device,
+        samples: vk::SampleCountFlags,
+    ) -> [Vec<engine_rhi::PipelineStatistic>; 5] {
+        match self.msaa_pipelines(samples) {
+            Some(m) => core::array::from_fn(|k| match k {
+                0..4 => m.shading[k].shade[0].statistics(device),
+                _ => m.composite.statistics(device),
+            }),
+            None => Default::default(),
+        }
+    }
+
     /// The driver's statistics of the atmosphere's pipelines (ADR 0069): the full-screen
     /// pass, then transparent surfaces under an atmosphere or fog without and with local
     /// lights. Empty unless the device captures statistics.

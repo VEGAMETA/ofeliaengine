@@ -437,10 +437,7 @@ fn bench() {
                 .collect();
             engine_golden::golden::write_png(&path, w, h, &rgb).unwrap();
             let encode8 = |c: f32| (encode(c) * 255.0).round() as u8;
-            let moving_rgb: Vec<u8> = moving_image
-                .iter()
-                .flat_map(|c| c.map(encode8))
-                .collect();
+            let moving_rgb: Vec<u8> = moving_image.iter().flat_map(|c| c.map(encode8)).collect();
             let path = path.with_extension("moving.png");
             engine_golden::golden::write_png(&path, w, h, &moving_rgb).unwrap();
         }

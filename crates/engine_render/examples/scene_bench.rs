@@ -280,6 +280,7 @@ fn main() {
     let mut sun_elevation: Option<f32> = None;
     let mut lods = false;
     let mut pipeline_stats = false;
+    let mut msaa_stats: u32 = 0;
     let mut post = false;
     let mut curve = ToneCurve::Gt;
     let mut ddc = String::from("test-assets/.ddc");
@@ -337,6 +338,8 @@ fn main() {
             "--sky" => with_sky = true,
             "--lods" => lods = true,
             "--pipeline-stats" => pipeline_stats = true,
+            // With --pipeline-stats: also the multisampled shading's (ADR 0075).
+            "--msaa" => msaa_stats = args.next().unwrap().parse().unwrap(),
             "--post" => post = true,
             "--curve" => {
                 curve = match args.next().as_deref() {
@@ -826,6 +829,27 @@ fn main() {
                 .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
                 .collect();
             println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
+        if msaa_stats > 1 {
+            let samples = vk::SampleCountFlags::from_raw(msaa_stats);
+            renderer.set_samples(&device, &bindless, samples).unwrap();
+            let names = [
+                "plain",
+                "local lights",
+                "environment",
+                "lights + environment",
+                "atmosphere pass per sample",
+            ];
+            for (name, stats) in names.iter().zip(renderer.msaa_statistics(&device, samples)) {
+                let line: Vec<String> = stats
+                    .iter()
+                    .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                    .collect();
+                println!(
+                    "Pipeline statistics, MSAA {msaa_stats}x, {name}: {}",
+                    line.join("; ")
+                );
+            }
         }
         let names = [
             "atmosphere pass",
