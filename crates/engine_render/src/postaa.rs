@@ -296,6 +296,20 @@ impl PostAa {
         temporal: bool,
         split: bool,
     ) -> Result<(), RhiError> {
+        let ready = (!split || self.split.is_some())
+            && match filter {
+                PostFilter::Fxaa => self.fxaa.is_some(),
+                PostFilter::Smaa(preset) => {
+                    self.presets[preset.index()].is_some()
+                        && self.blend.is_some()
+                        && (!temporal || self.temporal.is_some())
+                        && self.tables.is_some()
+                }
+            };
+        if ready {
+            // Every frame: nothing to make (and nothing allocated).
+            return Ok(());
+        }
         let layout = bindless.pipeline_layout();
         let output = [self.output_format];
         let perceptual = [PERCEPTUAL_FORMAT];

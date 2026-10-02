@@ -67,8 +67,8 @@ use crate::local_shadows::{
 use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::reflections::{
-    NORMAL_ROUGHNESS_FORMAT, ProbeTextures, ReflectionPasses, ReflectionProbes, ViewInputs,
-    ViewSetup, WEIGHT_FORMAT,
+    MsComposite, NORMAL_ROUGHNESS_FORMAT, ProbeTextures, ReflectionPasses, ReflectionProbes,
+    ViewInputs, ViewSetup, WEIGHT_FORMAT,
 };
 use crate::shadow::{self, CascadeFit, MAX_CASCADES};
 use crate::subsurface::{
@@ -4182,13 +4182,16 @@ impl ForwardRenderer {
             lit: (reflecting && view.reflections.ssr.is_some())
                 .then(|| fg.create_texture("lit resolved", single(self.color_format))),
             reflect: targets.reflect.map(|_| {
-                (
+                [
                     fg.create_texture(
                         "reflection normals resolved",
                         single(NORMAL_ROUGHNESS_FORMAT),
                     ),
                     fg.create_texture("reflection weights resolved", single(WEIGHT_FORMAT)),
-                )
+                    fg.create_texture("reflection far normals", single(NORMAL_ROUGHNESS_FORMAT)),
+                    fg.create_texture("reflection far weights", single(WEIGHT_FORMAT)),
+                    fg.create_texture("reflection far depth", single(msaa::FAR_DEPTH_FORMAT)),
+                ]
             }),
         });
         targets.resolves = ms_resolves.map(|r| MsResolves {
@@ -4628,7 +4631,7 @@ impl ForwardRenderer {
                 resolves: None,
                 ..targets
             };
-            let mut pass = shading_pass(
+            shading_pass(
                 fg,
                 names.forward_subsurface,
                 &geometry,
@@ -4642,15 +4645,9 @@ impl ForwardRenderer {
                 DepthUse::ReadOnly,
                 scene_instances,
             )
-            .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store);
-            if let Some((irradiance, _)) = resolved {
-                pass = pass.resolve(irradiance, ResolveMode::Average);
-            }
-            pass = pass.color(albedo, LoadOp::DontCare, StoreOp::Store);
-            if let Some((_, albedo)) = resolved {
-                pass = pass.resolve(albedo, ResolveMode::Average);
-            }
-            pass.execute(move |ctx| {
+            .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+            .color(albedo, LoadOp::DontCare, StoreOp::Store)
+            .execute(move |ctx| {
                 let pipelines = [pipeline, pipeline];
                 if two_phases {
                     draw_phase(
@@ -4680,12 +4677,30 @@ impl ForwardRenderer {
                     );
                 }
             });
+            // With MSAA: their nearest sample's light and albedo (depth and profile in
+            // alpha must stay one sample's).
+            if let (Some(m), Some((irradiance_1x, albedo_1x))) = (ms_subsurface, resolved) {
+                msaa::add_nearest_resolve(
+                    fg,
+                    bindless,
+                    "subsurface resolve",
+                    &m.2,
+                    [irradiance, albedo],
+                    None,
+                    &[irradiance_1x, albedo_1x],
+                );
+            }
             // The scatter pass: the same batches, adding where their depth is.
             let scatter = match ms_subsurface {
-                Some((_, scatter)) => scatter,
+                Some((_, scatter, _)) => scatter,
                 None => &pipelines.scatter,
             };
-            let (irradiance, albedo) = resolved.unwrap_or((irradiance, albedo));
+            // With MSAA the neighbours' light comes from the resolve, the fragment's own
+            // light and albedo from its samples (`scatterFragmentMs`).
+            let (light, albedo, own_light) = match resolved {
+                Some((light, _)) => (light, albedo, Some(irradiance)),
+                None => (irradiance, albedo, None),
+            };
             let lit = ms_resolves.and_then(|r| r.lit);
             let mut pass = forward_pass(
                 fg,
@@ -4697,15 +4712,18 @@ impl ForwardRenderer {
                 visible,
                 scene_instances,
             )
-            .read(irradiance, Access::Sampled(ShaderStages::FRAGMENT))
+            .read(light, Access::Sampled(ShaderStages::FRAGMENT))
             .read(albedo, Access::Sampled(ShaderStages::FRAGMENT))
             .color(color, LoadOp::Load, StoreOp::Store);
+            if let Some(own) = own_light {
+                pass = pass.read(own, Access::Sampled(ShaderStages::FRAGMENT));
+            }
             if let Some(lit) = lit {
                 pass = pass.resolve(lit, ResolveMode::Average);
             }
             pass.depth_read_only(depth).execute(move |ctx| {
                 let (Some(light), Some(albedo)) =
-                    (ctx.sampled_index(irradiance), ctx.sampled_index(albedo))
+                    (ctx.sampled_index(light), ctx.sampled_index(albedo))
                 else {
                     return;
                 };
@@ -4713,6 +4731,9 @@ impl ForwardRenderer {
                     visible: ctx.address(visible),
                     texture: light,
                     phase: albedo,
+                    ao: own_light
+                        .and_then(|t| ctx.sampled_index(t))
+                        .unwrap_or(base.ao),
                     ..base
                 };
                 let phases: &[u32] = if two_phases {
@@ -4750,13 +4771,39 @@ impl ForwardRenderer {
             if let Some((probes, _)) = imported.probes.filter(|_| prepared.probes > 0) {
                 probes.mark_used(true, false);
             }
-            // With MSAA: the resolved inputs, the multisampled color as the composite's
-            // target.
-            let (normal_roughness, weight) = ms_resolves
-                .and_then(|r| r.reflect)
-                .unwrap_or((normal_roughness, weight));
+            // With MSAA: the nearest sample's inputs, the multisampled color as the
+            // composite's target.
+            let (normal_roughness, weight) = match (
+                ms_resolves.and_then(|r| r.reflect),
+                ms.and_then(|m| m.reflect.as_deref()),
+            ) {
+                (Some(resolved), Some(r)) => {
+                    msaa::add_nearest_resolve(
+                        fg,
+                        bindless,
+                        "reflection inputs resolve",
+                        &r.2,
+                        [normal_roughness, weight],
+                        Some(depth),
+                        &resolved,
+                    );
+                    (resolved[0], resolved[1])
+                }
+                _ => (normal_roughness, weight),
+            };
             let lit = ms_resolves.and_then(|r| r.lit).unwrap_or(color);
-            let composite = ms.and_then(|m| m.reflect.as_deref()).map(|(_, c)| c);
+            let composite = ms
+                .and_then(|m| m.reflect.as_deref())
+                .zip(ms_resolves)
+                .and_then(|(r, resolves)| {
+                    let [_, _, far_nr, far_weight, far_depth] = resolves.reflect?;
+                    Some(MsComposite {
+                        pipelines: &r.1,
+                        depth,
+                        samples: samples.as_raw(),
+                        far: [far_depth, far_nr, far_weight],
+                    })
+                });
             let ssr = r.passes.add_view_passes(
                 fg,
                 bindless,
@@ -5146,8 +5193,9 @@ struct Targets {
 struct MsResolves {
     /// The lit image, for screen-space reflections.
     lit: Option<Texture>,
-    /// Reflections' inputs: normal and roughness, specular weight.
-    reflect: Option<(Texture, Texture)>,
+    /// Reflections' inputs: normal and roughness, specular weight (the nearest
+    /// sample's), and the farthest sample's with its depth.
+    reflect: Option<[Texture; 5]>,
 }
 
 /// How a shading pass uses the depth target.
@@ -5208,15 +5256,9 @@ fn shading_pass<'a, 'g>(
         } else {
             LoadOp::Load
         };
-        pass = pass.color(normal_roughness, load, StoreOp::Store);
-        let resolved = resolves.and_then(|r| r.reflect);
-        if let Some((normal_roughness, _)) = resolved {
-            pass = pass.resolve(normal_roughness, ResolveMode::Average);
-        }
-        pass = pass.color(weight, load, StoreOp::Store);
-        if let Some((_, weight)) = resolved {
-            pass = pass.resolve(weight, ResolveMode::Average);
-        }
+        pass =
+            pass.color(normal_roughness, load, StoreOp::Store)
+                .color(weight, load, StoreOp::Store);
     }
     if let Some(previous) = targets.previous {
         pass = pass.read(previous, Access::StorageRead(ShaderStages::VERTEX));

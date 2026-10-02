@@ -144,6 +144,9 @@ impl MsaaResolve {
         let Some(k) = slot(samples) else {
             return Ok(());
         };
+        if self.resolves[k].is_some() && (!split || self.splits.is_some()) {
+            return Ok(());
+        }
         let invalid = || RhiError::Vulkan {
             call: "embedded SPIR-V",
             result: vk::Result::ERROR_INVALID_SHADER_NV,

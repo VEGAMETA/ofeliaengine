@@ -222,6 +222,10 @@ fn run() -> ExitCode {
                     eprintln!("{}: skipped, {} missing", shot.name, path.display());
                     break;
                 }
+                Err(Skip::Unsupported(e)) => {
+                    eprintln!("{}: skipped, {e}", shot.name);
+                    break;
+                }
                 Err(Skip::NoDlss(e)) => {
                     eprintln!("{}: skipped, no DLSS ({e})", shot.name);
                     break;

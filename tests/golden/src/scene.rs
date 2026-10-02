@@ -118,6 +118,8 @@ pub struct Shot {
     pub quality: Quality,
     /// A fixed render size (`ViewSettings::render_size`: pixel art, integer scaling).
     pub render_size: Option<(u32, u32)>,
+    /// Two-phase occlusion culling (ADR 0035).
+    pub occlusion_culling: bool,
     /// Frames accumulated before the capture of a temporal shot (the history's state at
     /// the capture is then the same on every run).
     pub temporal_frames: u32,
@@ -180,6 +182,7 @@ impl Shot {
             antialiasing: Antialiasing::OFF,
             quality: Quality::Native,
             render_size: None,
+            occlusion_culling: false,
             temporal_frames: 32,
             captures: 1,
             capture_after: None,
@@ -239,6 +242,9 @@ pub enum Skip {
     /// The shot needs DLSS, which is not available here (no Streamline DLLs in
     /// `ENGINE_STREAMLINE_DIR`, or not an NVIDIA RTX GPU).
     NoDlss(String),
+    /// The shot's antialiasing cannot run on this GPU (`FrameRenderer::check`: an MSAA
+    /// sample count it does not support).
+    Unsupported(String),
 }
 
 /// The test scenes: `ENGINE_TEST_ASSETS`, or `test-assets/` in the repository (a git
@@ -646,6 +652,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     )
     .expect("frame renderer");
     frame.set_streamline(streamline.clone());
+    let wanted = ViewSettings {
+        antialiasing: shot.antialiasing,
+        quality: shot.quality,
+        render_size: shot.render_size,
+        ..ViewSettings::default()
+    };
+    if let Err(e) = frame.check(&wanted, (width, height)) {
+        return Err(Skip::Unsupported(e.to_string()));
+    }
     let renderer = frame.forward_mut();
     renderer.set_depth_prepass(shot.prepass);
     renderer
@@ -871,6 +886,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         antialiasing: shot.antialiasing,
         quality: shot.quality,
         render_size: shot.render_size,
+        occlusion_culling: shot.occlusion_culling,
         exposure: Exposure::Fixed(shot.exposure),
         curve: shot.curve,
         bloom: shot.bloom,

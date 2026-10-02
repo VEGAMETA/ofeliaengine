@@ -21,10 +21,11 @@ use super::{
     FRAGMENT_MOTION_CONTACT, FRAGMENT_MOTION_CONTACT_SHADOWED, FRAGMENT_MOTION_SHADOWED,
     FRAGMENT_SHADOWED, FRAGMENT_SUBSURFACE, FRAGMENT_SUBSURFACE_MOTION,
     FRAGMENT_SUBSURFACE_MOTION_SHADOWED, FRAGMENT_SUBSURFACE_SHADOWED, MOTION_FORMAT,
-    REACTIVE_FORMAT, REFLECT_FRAGMENTS, ReflectShadingTable, SCATTER_FRAGMENT, SKY_FRAGMENT,
-    VARIANTS, VERTEX, shading_desc,
+    REACTIVE_FORMAT, REFLECT_FRAGMENTS, ReflectShadingTable, SKY_FRAGMENT, VARIANTS, VERTEX,
+    shading_desc,
 };
 use crate::atmosphere::{COMPOSITE_FRAGMENT_MS, COMPOSITE_VERTEX};
+use crate::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
 use crate::reflections::{NORMAL_ROUGHNESS_FORMAT, WEIGHT_FORMAT, composite_pipelines};
 use crate::subsurface::{ALBEDO_FORMAT, IRRADIANCE_FORMAT};
 use core::ffi::CStr;
@@ -35,6 +36,135 @@ use engine_rhi::{
 };
 
 const PREPASS_COVERAGE: &[u8] = include_bytes!("../shaders/forward.prepassCoverage.spv");
+const SCATTER_FRAGMENT_MS: &[u8] = include_bytes!("../shaders/forward.scatterFragmentMs.spv");
+const RESOLVE_VERTEX: &[u8] = include_bytes!("../shaders/msaa.resolveVertex.spv");
+/// The nearest sample's reflection inputs, by sample count (2, 4, 8).
+const RESOLVE_REFLECT: [(&[u8], &CStr); 3] = [
+    (
+        include_bytes!("../shaders/msaa.resolveReflect2.spv"),
+        c"resolveReflect2",
+    ),
+    (
+        include_bytes!("../shaders/msaa.resolveReflect4.spv"),
+        c"resolveReflect4",
+    ),
+    (
+        include_bytes!("../shaders/msaa.resolveReflect8.spv"),
+        c"resolveReflect8",
+    ),
+];
+/// The nearest subsurface sample's light and albedo, by sample count.
+const RESOLVE_SUBSURFACE: [(&[u8], &CStr); 3] = [
+    (
+        include_bytes!("../shaders/msaa.resolveSubsurface2.spv"),
+        c"resolveSubsurface2",
+    ),
+    (
+        include_bytes!("../shaders/msaa.resolveSubsurface4.spv"),
+        c"resolveSubsurface4",
+    ),
+    (
+        include_bytes!("../shaders/msaa.resolveSubsurface8.spv"),
+        c"resolveSubsurface8",
+    ),
+];
+
+/// `Push` in `msaa.slang`.
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct ResolvePush {
+    color: u32,
+    motion: u32,
+    depth: u32,
+    _pad: u32,
+}
+
+/// A single-sampled full-screen pipeline writing `formats` from one of `entries` (by the
+/// sample count).
+fn nearest_resolve(
+    device: &Device,
+    bindless: &Bindless,
+    samples: vk::SampleCountFlags,
+    entries: [(&[u8], &CStr); 3],
+    formats: &[vk::Format],
+) -> Result<Pipeline, RhiError> {
+    let k = match samples {
+        vk::SampleCountFlags::TYPE_2 => 0,
+        vk::SampleCountFlags::TYPE_4 => 1,
+        _ => 2,
+    };
+    let vertex = words(RESOLVE_VERTEX)?;
+    let fragment = words(entries[k].0)?;
+    let desc = PipelineDesc::Graphics(GraphicsPipelineDesc {
+        color_formats: formats,
+        cull_mode: vk::CullModeFlags::NONE,
+        depth_test: false,
+        depth_write: false,
+        ..GraphicsPipelineDesc::new(
+            ShaderStageDesc {
+                spirv: &vertex,
+                entry: c"resolveVertex",
+            },
+            Some(ShaderStageDesc {
+                spirv: &fragment,
+                entry: entries[k].1,
+            }),
+        )
+    });
+    Pipeline::create_many(device, bindless.pipeline_layout(), &[desc])?
+        .pop()
+        .ok_or_else(short)
+}
+
+/// The farthest sample's depth, written by the reflection inputs' resolve.
+pub(super) const FAR_DEPTH_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
+
+/// Declares a resolve of two multisampled images into `outputs` that keeps one sample per
+/// pixel (the nearest by `depth`, or the subsurface one's own depth in alpha).
+pub(super) fn add_nearest_resolve<'g>(
+    fg: &mut FrameGraph<'g>,
+    bindless: &'g Bindless,
+    name: &'static str,
+    pipeline: &'g Pipeline,
+    inputs: [Texture; 2],
+    depth: Option<Texture>,
+    outputs: &[Texture],
+) {
+    let mut pass = fg
+        .add_pass(name)
+        .read(inputs[0], Access::Sampled(ShaderStages::FRAGMENT))
+        .read(inputs[1], Access::Sampled(ShaderStages::FRAGMENT));
+    for &output in outputs {
+        pass = pass.color(output, LoadOp::DontCare, StoreOp::Store);
+    }
+    if let Some(depth) = depth {
+        pass = pass.read(depth, Access::Sampled(ShaderStages::FRAGMENT));
+    }
+    pass.execute(move |ctx| {
+        let (Some(color), Some(motion)) =
+            (ctx.sampled_index(inputs[0]), ctx.sampled_index(inputs[1]))
+        else {
+            return;
+        };
+        let depth = depth.and_then(|d| ctx.sampled_index(d)).unwrap_or(0);
+        let push = ResolvePush {
+            color,
+            motion,
+            depth,
+            _pad: 0,
+        };
+        let area = ctx.render_area();
+        // SAFETY: recording inside the pass's rendering scope; the pass reads what it
+        // declared.
+        unsafe {
+            pipeline.bind(ctx.cmd);
+            bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+            bindless.push_constants(ctx.cmd, bytemuck::bytes_of(&push));
+            super::set_viewport(ctx.device, ctx.cmd, area);
+            ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+        }
+    });
+}
 
 /// The opaque and transparent shading of one variant.
 #[derive(Debug)]
@@ -92,13 +222,14 @@ pub(super) struct MsaaPipelines {
     /// reactive mask.
     pub(super) blended_atmosphere: [[Pipeline; 2]; 2],
     pub(super) ao: Option<[[Pipeline; 2]; 4]>,
-    /// Subsurface materials' shading per variant (without and with motion vectors), and
-    /// the scatter pass.
-    pub(super) subsurface: Option<([[Pipeline; 2]; 4], Pipeline)>,
+    /// Subsurface materials' shading per variant (without and with motion vectors), the
+    /// scatter pass, and the resolve of their light and albedo (the nearest sample's).
+    pub(super) subsurface: Option<([[Pipeline; 2]; 4], Pipeline, Pipeline)>,
     pub(super) shadowed: Option<MsaaShadowed>,
     pub(super) contact: Option<MsaaContact>,
-    /// Reflections' shading and composite.
-    pub(super) reflect: Option<Box<(ReflectShadingTable, [Pipeline; 3])>>,
+    /// Reflections' shading, composite, and the resolve of their inputs (the nearest
+    /// sample's).
+    pub(super) reflect: Option<Box<(ReflectShadingTable, [Pipeline; 4], Pipeline)>>,
 }
 
 fn invalid() -> RhiError {
@@ -385,6 +516,25 @@ impl MsaaPipelines {
         depth: vk::Format,
         features: Features,
     ) -> Result<(), RhiError> {
+        let shadowed_ready = self.shadowed.as_ref().is_none_or(|s| {
+            (!features.ao || s.ao.is_some()) && (!features.subsurface || s.subsurface.is_some())
+        });
+        let contact_ready = !features.contact
+            || self.contact.as_ref().is_some_and(|c| {
+                (!features.ao || c.ao.is_some())
+                    && (!features.shadowed || c.shadowed.is_some())
+                    && (!(features.ao && features.shadowed) || c.shadowed_ao.is_some())
+            });
+        if (!features.ao || self.ao.is_some())
+            && (!features.subsurface || self.subsurface.is_some())
+            && (!features.shadowed || self.shadowed.is_some())
+            && shadowed_ready
+            && contact_ready
+            && (!features.reflect || self.reflect.is_some())
+        {
+            // Every frame: nothing to make (and nothing allocated).
+            return Ok(());
+        }
         let samples = self.samples;
         let vertex = words(VERTEX)?;
         let batch = Batch {
@@ -418,7 +568,7 @@ impl MsaaPipelines {
         if features.subsurface && self.subsurface.is_none() {
             let still = words(FRAGMENT_SUBSURFACE)?;
             let moving = words(FRAGMENT_SUBSURFACE_MOTION)?;
-            let scatter = words(SCATTER_FRAGMENT)?;
+            let scatter = words(SCATTER_FRAGMENT_MS)?;
             let depth_vertex = words(DEPTH_VERTEX)?;
             let mut descs = Vec::with_capacity(9);
             pairs(
@@ -445,13 +595,21 @@ impl MsaaPipelines {
                     },
                     Some(ShaderStageDesc {
                         spirv: &scatter,
-                        entry: c"scatterFragment",
+                        entry: c"scatterFragmentMs",
                     }),
                 )
             }));
             let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
             let shading = take_pairs(&mut p)?;
-            self.subsurface = Some((shading, p.next().ok_or_else(short)?));
+            let scatter = p.next().ok_or_else(short)?;
+            let resolve = nearest_resolve(
+                device,
+                bindless,
+                samples,
+                RESOLVE_SUBSURFACE,
+                &[IRRADIANCE_FORMAT, ALBEDO_FORMAT],
+            )?;
+            self.subsurface = Some((shading, scatter, resolve));
         }
 
         if features.shadowed && self.shadowed.is_none() {
@@ -653,7 +811,20 @@ impl MsaaPipelines {
                 table[lights][k >> 3][(k >> 2) & 1][(k >> 1) & 1][k & 1] = Some(pipeline);
             }
             let composite = composite_pipelines(device, bindless, color, samples)?;
-            self.reflect = Some(Box::new((table, composite)));
+            let resolve = nearest_resolve(
+                device,
+                bindless,
+                samples,
+                RESOLVE_REFLECT,
+                &[
+                    NORMAL_ROUGHNESS_FORMAT,
+                    WEIGHT_FORMAT,
+                    NORMAL_ROUGHNESS_FORMAT,
+                    WEIGHT_FORMAT,
+                    FAR_DEPTH_FORMAT,
+                ],
+            )?;
+            self.reflect = Some(Box::new((table, composite, resolve)));
         }
         Ok(())
     }
@@ -667,7 +838,7 @@ impl MsaaPipelines {
         contact: bool,
         shadowed: bool,
     ) -> Option<&Pipeline> {
-        let (table, _) = self.reflect.as_deref()?;
+        let (table, _, _) = self.reflect.as_deref()?;
         table[usize::from(lights)][usize::from(motion)][usize::from(ao)][usize::from(contact)]
             [usize::from(shadowed && lights)]
         .as_ref()

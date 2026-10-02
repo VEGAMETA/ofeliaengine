@@ -35,6 +35,10 @@ fn check(shot: &Shot) {
             println!("{}: skipped, no GPU ({e})", shot.name);
             return;
         }
+        Err(Skip::Unsupported(e)) => {
+            println!("{}: skipped, {e}", shot.name);
+            return;
+        }
         Err(Skip::NoScene(path)) => {
             assert!(
                 !require_golden(),
@@ -232,6 +236,9 @@ fn async_compute_renders_the_same_bytes_as_one_queue() {
         }
         (Err(Skip::NoDlss(e)), _) | (_, Err(Skip::NoDlss(e))) => {
             panic!("the shot does not use DLSS: {e}")
+        }
+        (Err(Skip::Unsupported(e)), _) | (_, Err(Skip::Unsupported(e))) => {
+            panic!("the shot has no antialiasing: {e}")
         }
     };
     println!(
