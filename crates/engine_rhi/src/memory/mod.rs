@@ -930,6 +930,32 @@ impl Allocator {
         stats
     }
 
+    /// Bytes of `VkDeviceMemory` this allocator holds in device-local heaps (blocks and
+    /// dedicated allocations), without asking the OS: what [`Self::budget`]'s `allocated`
+    /// adds up to over those heaps.
+    pub fn device_local_bytes(&self) -> u64 {
+        let local = |heap: usize| {
+            self.properties.memory_heaps[heap]
+                .flags
+                .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+        };
+        let blocks: u64 = self
+            .pools
+            .iter()
+            .filter(|p| local(self.heap_of(p.memory_type)))
+            .flat_map(|p| p.blocks.iter().flatten())
+            .map(|b| b.tlsf.capacity())
+            .sum();
+        let dedicated: u64 = self
+            .dedicated
+            .iter()
+            .enumerate()
+            .filter(|(heap, _)| local(*heap))
+            .map(|(_, d)| d.0)
+            .sum();
+        blocks + dedicated
+    }
+
     /// Every heap's budget and usage (`VK_EXT_memory_budget` when enabled) with this
     /// allocator's own bytes. Allocates nothing; the driver call behind it is cheap enough
     /// for once a frame (VMA queries it every frame too).

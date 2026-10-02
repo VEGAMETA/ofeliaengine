@@ -21,6 +21,7 @@
 //!   (ADR 0073).
 //! - [`subsurface`]: screen-space subsurface scattering: diffusion profiles, transmission
 //!   and the scatter pass (ADR 0059).
+//! - [`budget`]: the GPU memory budget every streaming system asks (ADR 0076).
 //! - [`gpu_scene`]: the persistent GPU scene: instances in stable slots in device
 //!   buffers, only changes uploaded each frame (ADR 0064).
 //! - [`cull`]: frustum and bounding-box tests shared by CPU code and the GPU culling pass.
@@ -33,6 +34,7 @@
 
 pub mod ao;
 pub mod atmosphere;
+pub mod budget;
 pub mod compute;
 pub mod contact;
 pub mod cull;
