@@ -450,6 +450,16 @@ fn sponza_nearest_at_50_percent() {
     ));
 }
 
+/// FSR 1 from 67 % (ADR 0075): EASU's edge-adaptive upscaling, RCAS's sharpening.
+#[test]
+fn sponza_with_fsr1() {
+    check(&sponza_antialiased(
+        "sponza_fsr1_67",
+        Antialiasing::spatial(Upscale::Fsr1),
+        Quality::Quality,
+    ));
+}
+
 /// Integer scaling (ADR 0075): a 280 × 150 render shown 2× (560 × 300) in the middle of
 /// 640 × 360, black around.
 #[test]

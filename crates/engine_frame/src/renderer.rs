@@ -13,6 +13,7 @@ use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer, ForwardView, LocalLight,
     MotionOutput, Occlusion, ShadowSettings, Temporal,
 };
+use engine_render::fsr1::{Fsr1, Fsr1Exposure};
 use engine_render::gpu_scene::SceneFrame;
 use engine_render::graph::{
     Access, Buffer, FrameGraph, ImportedTexture, LoadOp, ShaderStages, Texture, TextureDesc,
@@ -285,6 +286,8 @@ pub struct FrameRenderer {
     post: Box<PostAa>,
     /// The tone mapper into their perceptual image, made with the first filter.
     perceptual: Option<Tonemap>,
+    /// FSR 1 (ADR 0075), made with the first view that uses it.
+    fsr1: Option<Fsr1>,
     #[cfg(feature = "dlss")]
     streamline: Option<engine_dlss::Streamline>,
 }
@@ -511,6 +514,7 @@ impl FrameRenderer {
             msaa: msaa_support(device, depth_format),
             post: Box::new(PostAa::new(output_format)),
             perceptual: None,
+            fsr1: None,
             #[cfg(feature = "dlss")]
             streamline: None,
         })
@@ -757,6 +761,10 @@ impl FrameRenderer {
         if let Some(temporal) = &view.temporal {
             temporal.set_jitter_phases(jitter_phases);
             temporal.set_jitter_pattern(pattern);
+        }
+
+        if antialiasing.upscale == Upscale::Fsr1 && self.fsr1.is_none() {
+            self.fsr1 = Some(Fsr1::new(device, bindless)?);
         }
 
         // Filters after tone mapping: their pipelines, and SMAA T2x's last frame.
@@ -1081,6 +1089,21 @@ impl FrameRenderer {
                     ctx.frame_number,
                 )?
             }
+            (Upscale::Fsr1, ..) => match &self.fsr1 {
+                Some(fsr1) => fsr1.add_passes(
+                    fg,
+                    ctx.bindless,
+                    color,
+                    render,
+                    output,
+                    Fsr1Exposure {
+                        value: exposure_value,
+                        auto: auto_exposure,
+                    },
+                    settings.sharpness,
+                ),
+                None => color,
+            },
             _ => color,
         };
         if let Some((kept, _, size)) = kept {
@@ -1125,15 +1148,13 @@ impl FrameRenderer {
         // With a filter after tone mapping, the tone mapper writes its perceptual image
         // at the output size, and the filter writes the view's target.
         let filter = post_filter(prepared.antialiasing.post);
-        let perceptual = filter
-            .and(self.perceptual.as_ref())
-            .map(|tonemap| {
-                let image = fg.create_texture(
-                    "perceptual",
-                    TextureDesc::new_2d(PERCEPTUAL_FORMAT, output.0, output.1),
-                );
-                (tonemap, image)
-            });
+        let perceptual = filter.and(self.perceptual.as_ref()).map(|tonemap| {
+            let image = fg.create_texture(
+                "perceptual",
+                TextureDesc::new_2d(PERCEPTUAL_FORMAT, output.0, output.1),
+            );
+            (tonemap, image)
+        });
         let whole = |offset: vk::Offset2D| vk::Rect2D {
             offset,
             extent: vk::Extent2D {
