@@ -83,13 +83,18 @@ pub struct StreamerSettings {
     pub request_bytes_per_frame: u64,
     /// Levels added to every wanted level (positive: blurrier, less memory).
     pub bias: f32,
+    /// A texture's wanted level gets coarser only after this many frames without the
+    /// finer one being asked for (it gets finer at once).
+    pub hold_frames: u32,
 }
 
 impl Default for StreamerSettings {
-    /// Visible for 60 frames (a second at 60 Hz), 32 MiB of requests per frame, no bias.
+    /// Visible for 60 frames (a second at 60 Hz), 32 MiB of requests per frame, no bias,
+    /// coarser levels after 30 frames.
     fn default() -> Self {
         Self {
             visible_frames: 60,
+            hold_frames: 30,
             request_bytes_per_frame: 32 << 20,
             bias: 0.0,
         }
@@ -121,12 +126,16 @@ struct Entry {
     wanted: u32,
     /// Its level while visible.
     level: u32,
+    /// When `level` last got finer (or was confirmed).
+    held_since: u64,
     last_seen: Option<u64>,
     pixels: u32,
     /// Levels asked for and not yet arrived (one bit each).
     requested: u32,
     /// The planned first level this frame.
     plan: u32,
+    /// The first level the pool's image holds (or will, once a reallocation is made).
+    base: u32,
 }
 
 impl Entry {
@@ -244,10 +253,12 @@ impl TextureStreamer {
             tail,
             wanted: info.levels,
             level: tail,
+            held_since: 0,
             last_seen: None,
             pixels: 0,
             requested: 0,
             plan: tail,
+            base: tail,
         });
     }
 
@@ -281,6 +292,7 @@ impl TextureStreamer {
         frame: u64,
     ) {
         let bias = self.settings.bias;
+        let hold = u64::from(self.settings.hold_frames);
         for r in results {
             for id in materials.slot_textures(r.slot).into_iter().flatten() {
                 let Some(e) = self.entry_mut(id) else {
@@ -296,7 +308,16 @@ impl TextureStreamer {
                     e.wanted = e.wanted.min(level);
                     e.pixels = e.pixels.saturating_add(r.pixels);
                 }
-                e.level = e.wanted;
+                // Finer at once; coarser only once the finer level has not been asked for
+                // in `hold_frames` (levels flickering across a boundary would otherwise be
+                // evicted and read again over and over under pressure).
+                if e.wanted <= e.level {
+                    e.level = e.wanted;
+                    e.held_since = frame;
+                } else if frame.saturating_sub(e.held_since) >= hold {
+                    e.level = e.wanted;
+                    e.held_since = frame;
+                }
             }
         }
     }
@@ -368,8 +389,11 @@ impl TextureStreamer {
         let grant = ((budget.grant(self.client) as f64 / scale) as u64)
             .saturating_sub((retiring as f64 / scale) as u64);
 
-        // Plan the visible textures: a common bias until they fit, then levels back by
-        // pixels.
+        // Plan the visible textures: a common bias until they fit, then a level back for
+        // some, by pixels.
+        for e in &mut self.entries {
+            e.base = pool.info(e.id).map_or(e.tail, |i| i.planned_base);
+        }
         let mut bias = 0u32;
         let planned_with = |entries: &[Entry], bias: u32| -> u64 {
             entries
@@ -407,46 +431,81 @@ impl TextureStreamer {
             )
         });
         if bias > 0 {
-            for &k in &self.order {
-                let e = &mut self.entries[k as usize];
-                if !is_visible(e) || e.plan == 0 || e.plan <= e.level {
-                    continue;
-                }
-                let more = e.bytes(e.plan - 1) - e.bytes(e.plan);
-                if planned + more <= grant {
-                    planned += more;
-                    e.plan -= 1;
+            // Textures that already hold the finer level keep it first: the levels given
+            // back do not move between textures from frame to frame as pixel counts
+            // change (each move would be an eviction and a read).
+            for held in [true, false] {
+                for &k in &self.order {
+                    let e = &mut self.entries[k as usize];
+                    if !is_visible(e) || e.plan == 0 || e.plan <= e.level {
+                        continue;
+                    }
+                    if (e.base < e.plan) != held {
+                        continue;
+                    }
+                    let more = e.bytes(e.plan - 1) - e.bytes(e.plan);
+                    if planned + more <= grant {
+                        planned += more;
+                        e.plan -= 1;
+                    }
                 }
             }
         }
 
-        // Extras (resident beyond the plan): kept while room remains, most recently seen
-        // first; the rest evicted.
+        // What the textures will hold: at least the plan or what they hold, whichever is
+        // coarser; growth towards the plan (visible) first, then levels held beyond it
+        // (cached, most recently seen first), while the grant has room. Everything else
+        // beyond the plan is evicted.
+        let mut committed: u64 = self
+            .entries
+            .iter()
+            .map(|e| e.bytes(e.plan.max(e.base)))
+            .sum();
+        let mut room = grant.saturating_sub(committed);
         let mut evictions = 0u32;
+        for &k in &self.order {
+            let e = &mut self.entries[k as usize];
+            if e.plan >= e.base {
+                continue;
+            }
+            // Grow as far towards the plan as the room allows. While the copy is made the
+            // old image lives on for the frames using it: the new one must fit whole.
+            let Some(target) = (e.plan..e.base).find(|&l| e.bytes(l) <= room) else {
+                e.plan = e.base;
+                continue;
+            };
+            let cost = e.bytes(target) - e.bytes(e.base);
+            if pool.set_base(e.id, target).is_ok() {
+                room -= cost;
+                committed += cost;
+                e.plan = target;
+            } else {
+                e.plan = e.base;
+            }
+        }
         self.extras.clear();
         for (k, e) in self.entries.iter().enumerate() {
-            let base = pool.info(e.id).map_or(e.tail, |i| i.planned_base);
-            if base < e.plan {
+            if e.base < e.plan {
                 self.extras
                     .push((e.last_seen.map_or(0, |f| f + 1), k as u32));
             }
         }
         self.extras
             .sort_unstable_by_key(|&(seen, _)| core::cmp::Reverse(seen));
-        let mut room = grant.saturating_sub(planned);
         for &(_, k) in &self.extras {
             let e = &mut self.entries[k as usize];
-            let base = pool.info(e.id).map_or(e.tail, |i| i.planned_base);
-            let extra = e.bytes(base) - e.bytes(e.plan);
+            let extra = e.bytes(e.base) - e.bytes(e.plan);
             if extra <= room {
                 room -= extra;
+                committed += extra;
                 // Kept: the plan is what is there.
-                e.plan = base;
+                e.plan = e.base;
             } else if pool.set_base(e.id, e.plan).is_ok() {
                 evictions += 1;
                 e.requested &= level_mask(e.plan, e.levels - e.plan);
             }
         }
+        let planned = committed;
 
         // Requests: tails first, then visible textures by priority, the next missing level
         // of each per round, within the frame's request bytes.
@@ -484,11 +543,8 @@ impl TextureStreamer {
                 let Some(info) = pool.info(e.id) else {
                     continue;
                 };
-                if e.plan >= e.tail {
-                    continue;
-                }
-                // Reserve the image for the plan.
-                if info.planned_base > e.plan && pool.set_base(e.id, e.plan).is_err() {
+                // Levels of the plan only (reserved above).
+                if e.plan >= e.tail || info.planned_base > e.plan {
                     continue;
                 }
                 // The next level down from what is uploaded or asked for.
