@@ -351,6 +351,9 @@ pub struct Composite {
     /// An exposure measured on the GPU ([`crate::postfx::AutoExposure`]), multiplied
     /// with `exposure` (which then acts as compensation).
     pub auto_exposure: Option<Buffer>,
+    /// A rectangle cleared to black before the source is drawn into `rect` (integer
+    /// scaling's letterbox: the view's whole rectangle around the scaled image).
+    pub letterbox: Option<vk::Rect2D>,
 }
 
 impl Default for Composite {
@@ -366,6 +369,7 @@ impl Default for Composite {
             load: LoadOp::DontCare,
             bloom: None,
             auto_exposure: None,
+            letterbox: None,
         }
     }
 }
@@ -524,6 +528,29 @@ impl Tonemap {
                 };
                 let area = ctx.render_area();
                 let rect = composite.rect.unwrap_or(area);
+                if let Some(letterbox) = composite.letterbox {
+                    // SAFETY: recording inside the pass's rendering scope; the rectangle
+                    // lies within the render area (the target's).
+                    unsafe {
+                        ctx.device.cmd_clear_attachments(
+                            ctx.cmd,
+                            &[vk::ClearAttachment {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                color_attachment: 0,
+                                clear_value: vk::ClearValue {
+                                    color: vk::ClearColorValue {
+                                        float32: [0.0, 0.0, 0.0, 1.0],
+                                    },
+                                },
+                            }],
+                            &[vk::ClearRect {
+                                rect: letterbox,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            }],
+                        );
+                    }
+                }
                 // SAFETY: recording inside the pass's rendering scope.
                 unsafe {
                     pipeline.bind(ctx.cmd);

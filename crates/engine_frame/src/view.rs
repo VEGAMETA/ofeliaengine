@@ -1,6 +1,7 @@
 //! Per-view state kept across frames.
 
-use crate::settings::{Antialiasing, ViewSettings};
+use crate::antialiasing::Antialiasing;
+use crate::settings::ViewSettings;
 use engine_render::forward::{Occlusion, Temporal};
 use engine_render::graph::TextureState;
 use engine_render::postfx::AutoExposure;
@@ -27,6 +28,9 @@ pub struct Prepared {
     pub jitter_phases: u32,
     /// The texture LOD bias for this view.
     pub lod_bias: f32,
+    /// With [`crate::Upscale::Integer`]: the whole factor each scene pixel is shown at,
+    /// and where the scaled image starts in the output (the rest is black).
+    pub integer: Option<(u32, (u32, u32))>,
 }
 
 /// Why a view's history started over in its last frame (for tests and debugging).

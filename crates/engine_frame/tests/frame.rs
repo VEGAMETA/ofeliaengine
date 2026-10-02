@@ -150,7 +150,7 @@ fn the_upscalers_lod_bias_is_applied() {
         unsafe { view.destroy(&mut bed.allocator, &bed.bindless) };
         (prepared, sum)
     };
-    let (off, off_sum) = dominant(Antialiasing::Off);
+    let (off, off_sum) = dominant(Antialiasing::OFF);
     let (taau, taau_sum) = dominant(Antialiasing::TAAU);
     println!(
         "off: bias {} rgb {off_sum:?}; TAAU: bias {} rgb {taau_sum:?}",
@@ -221,7 +221,7 @@ fn settings_changes_and_fallbacks() {
         "a smaller render size keeps the history"
     );
 
-    settings.antialiasing = Antialiasing::Off;
+    settings.antialiasing = Antialiasing::OFF;
     let (p, _) = bed.render(&mut view, &settings, &draws, &cam, false, |t| {
         assert!(
             t.motion.is_none(),
@@ -243,7 +243,7 @@ fn the_previous_color_reaches_the_hook() {
     let grey = bed.solid([0.5, 0.5, 0.5], [0.0; 3]);
     let draws = vec![bed.cube_at(grey, Vec3::splat(1.0), Vec3::ZERO)];
     let cam = camera(Vec3::new(1.0, 1.5, 3.0), Vec3::ZERO, false);
-    for antialiasing in [Antialiasing::Off, Antialiasing::TAAU] {
+    for antialiasing in [Antialiasing::OFF, Antialiasing::TAAU] {
         let settings = ViewSettings {
             antialiasing,
             quality: Quality::Quality,
@@ -266,7 +266,7 @@ fn the_previous_color_reaches_the_hook() {
                 },
             );
         }
-        assert_eq!(seen, [false, true, false, true], "{}", antialiasing.name());
+        assert_eq!(seen, [false, true, false, true], "{}", antialiasing);
         // SAFETY: the bed's device is idle after `render`.
         unsafe { view.destroy(&mut bed.allocator, &bed.bindless) };
     }

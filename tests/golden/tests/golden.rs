@@ -462,7 +462,7 @@ fn the_runtime_renders_what_the_test_bed_renders() {
         validation: true,
         timed_frames: 0,
     };
-    for antialiasing in [Antialiasing::Off, Antialiasing::TAAU] {
+    for antialiasing in [Antialiasing::OFF, Antialiasing::TAAU] {
         let reference = Shot {
             rigid_camera: true,
             antialiasing,
@@ -490,8 +490,7 @@ fn the_runtime_renders_what_the_test_bed_renders() {
             .count();
         println!(
             "{}: antialiasing {}: {differing} pixels differ",
-            one.adapter,
-            antialiasing.name()
+            one.adapter, antialiasing
         );
         assert_eq!(differing, 0, "the runtime path drew another picture");
     }

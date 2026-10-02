@@ -168,7 +168,7 @@ impl Shot {
             fog: None,
             local_shadows: false,
             contact_shadows: false,
-            antialiasing: Antialiasing::Off,
+            antialiasing: Antialiasing::OFF,
             quality: Quality::Native,
             temporal_frames: 32,
             camera_motion: Vec3::ZERO,
@@ -837,7 +837,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let eye = shot.eye.unwrap_or(default_eye);
     let target = shot.target.unwrap_or(default_target);
     let extent = (max - min).length();
-    let temporal = shot.antialiasing != Antialiasing::Off;
+    let temporal = shot.antialiasing != Antialiasing::OFF;
     // Frames after residency before the capture: the sky's environment is built on the
     // first; a temporal shot then accumulates `temporal_frames` frames from a camera cut
     // at `TEMPORAL_START` (its history starts there), the last one captured.
@@ -862,7 +862,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         ..ViewSettings::default()
     };
     let mut view = View::new(&device, draws.len() as u32);
-    let mut antialiasing = Antialiasing::Off;
+    let mut antialiasing = Antialiasing::OFF;
     let (near, far) = (extent * 0.001, extent * 2.0);
     let rotation = look_rotation(eye, target, Vec3::Y);
     let mut game = shot.runtime.then(|| {

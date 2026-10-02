@@ -58,7 +58,7 @@ unsafe { view.destroy(&mut allocator, &bindless) };
 ```
 
 - **Antialiasing** (`ViewSettings::antialiasing`):
-  - `Antialiasing::Off`: no jitter, no motion vectors, no history: the cheapest, and
+  - `Antialiasing::OFF`: no jitter, no motion vectors, no history: the cheapest, and
     aliased;
   - `Antialiasing::TAAU`: the engine's own; at `Quality::Native` this is plain TAA;
   - `Antialiasing::FSR`: AMD FSR 3.1, on any GPU (built in);

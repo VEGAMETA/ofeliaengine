@@ -52,15 +52,21 @@
 //! [`RenderDefaults`] gives measured defaults per [`DeviceClass`] (discrete or small
 //! integrated GPU): ambient occlusion quality, antialiasing and render size.
 
+mod antialiasing;
 mod renderer;
 mod settings;
 mod view;
+
+pub use antialiasing::{
+    Antialiasing, AntialiasingSupport, InvalidAntialiasing, Msaa, PostAntialiasing, SmaaQuality,
+    Upscale,
+};
 
 pub use renderer::{
     FrameContext, FrameError, FrameRenderer, PrepareContext, SceneDraws, SceneInput, SceneTargets,
     ViewCamera, ViewFrame, ViewTarget,
 };
-pub use settings::{Antialiasing, DeviceClass, Exposure, RenderDefaults, ViewSettings};
+pub use settings::{DeviceClass, Exposure, RenderDefaults, ViewSettings};
 pub use view::{Prepared, Resets, View};
 
 pub use engine_upscale::{Quality, UpscalerKind};

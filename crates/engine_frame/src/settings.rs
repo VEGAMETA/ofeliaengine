@@ -1,49 +1,12 @@
 //! What a view asks of its frame: antialiasing, render size, exposure, post-processing.
 
+use crate::antialiasing::Antialiasing;
 use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::post::{OutputEncoding, ToneCurve};
 use engine_render::postfx::ExposureSettings;
 use engine_render::reflections::SsrSettings;
 use engine_rhi::{AdapterKind, Device};
-use engine_upscale::{Quality, UpscalerKind};
-
-/// How a view is antialiased.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Antialiasing {
-    /// None: no jitter, no motion vectors, no history. A render size below the output
-    /// ([`ViewSettings::quality`]) is stretched bilinearly by the tone mapper.
-    Off,
-    /// A temporal upscaler accumulates jittered frames into the output: TAA when the view
-    /// renders at the output size ([`Quality::Native`]; FSR's Native AA, NVIDIA's DLAA),
-    /// upscaling below it. An upscaler that is not available on this machine
-    /// ([`crate::FrameRenderer::available`]) falls back to the engine's TAAU.
-    Temporal(UpscalerKind),
-}
-
-impl Antialiasing {
-    /// The engine's TAAU (at [`Quality::Native`]: plain TAA).
-    pub const TAAU: Self = Self::Temporal(UpscalerKind::Taau);
-    /// FSR 3.1.
-    pub const FSR: Self = Self::Temporal(UpscalerKind::Fsr);
-    /// DLSS.
-    pub const DLSS: Self = Self::Temporal(UpscalerKind::Dlss);
-
-    /// The upscaler, if temporal.
-    pub fn upscaler(self) -> Option<UpscalerKind> {
-        match self {
-            Self::Off => None,
-            Self::Temporal(kind) => Some(kind),
-        }
-    }
-
-    /// A short name for menus and logs.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Off => "off",
-            Self::Temporal(kind) => kind.name(),
-        }
-    }
-}
+use engine_upscale::Quality;
 
 /// The exposure the tone mapper applies.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -60,17 +23,26 @@ pub enum Exposure {
 /// anew; other changes cost nothing).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewSettings {
-    /// Antialiasing (default: the engine's TAAU).
+    /// Antialiasing and scaling (ADR 0075; default: the engine's TAAU): raster samples,
+    /// how the render size reaches the output, a filter after tone mapping.
     pub antialiasing: Antialiasing,
     /// The render size relative to the output, as each upscaler maps it
     /// (`Upscaler::render_size`): [`Quality::Native`] renders at the output size.
     pub quality: Quality,
+    /// FSR 1's sharpening (RCAS, [`crate::Upscale::Fsr1`]), in stops: 0 is the
+    /// strongest, each stop halves it (AMD's default 0.2).
+    pub sharpness: f32,
     /// Dynamic resolution: the render size per axis as a share of the output, `(0, 1]`,
     /// overriding `quality` frame by frame (a GPU-time controller sets it). The texture
     /// LOD bias stays that of `quality` (changing it rewrites every material); keep the
     /// scale at or below `quality`'s and step it coarsely (each new size makes new
     /// transient images).
     pub render_scale: Option<f32>,
+    /// A fixed render size in pixels (pixel art, a retro resolution), overriding
+    /// `quality` and `render_scale`; clamped to the output. With
+    /// [`crate::Upscale::Integer`] the image is shown at the largest whole multiple that
+    /// fits the output.
+    pub render_size: Option<(u32, u32)>,
     /// Exposure (default fixed 1).
     pub exposure: Exposure,
     /// Tone curve.
@@ -110,7 +82,9 @@ impl Default for ViewSettings {
         Self {
             antialiasing: Antialiasing::TAAU,
             quality: Quality::Native,
+            sharpness: 0.2,
             render_scale: None,
+            render_size: None,
             exposure: Exposure::Fixed(1.0),
             curve: ToneCurve::Gt,
             peak: 1.0,
@@ -129,7 +103,7 @@ impl Default for ViewSettings {
 impl ViewSettings {
     /// Whether the scene passes write motion vectors.
     pub fn wants_motion(&self) -> bool {
-        self.antialiasing != Antialiasing::Off || self.motion_vectors || self.previous_color
+        self.antialiasing.is_temporal() || self.motion_vectors || self.previous_color
     }
 }
 
@@ -206,7 +180,7 @@ mod tests {
     #[test]
     fn motion_vectors_only_when_something_uses_them() {
         let off = ViewSettings {
-            antialiasing: Antialiasing::Off,
+            antialiasing: Antialiasing::OFF,
             ..ViewSettings::default()
         };
         assert!(!off.wants_motion());

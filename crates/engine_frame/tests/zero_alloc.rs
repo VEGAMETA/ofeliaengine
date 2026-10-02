@@ -53,7 +53,7 @@ fn steady_state_frames_do_not_allocate() {
         bed.cube_at(grey, Vec3::new(10.0, 0.2, 10.0), Vec3::new(0.0, -0.1, 0.0)),
         bed.cube_at(glow, Vec3::splat(1.0), Vec3::new(0.0, 0.5, 0.0)),
     ];
-    for antialiasing in [Antialiasing::Off, Antialiasing::TAAU, Antialiasing::FSR] {
+    for antialiasing in [Antialiasing::OFF, Antialiasing::TAAU, Antialiasing::FSR] {
         let settings = ViewSettings {
             antialiasing,
             quality: Quality::Quality,
@@ -85,9 +85,9 @@ fn steady_state_frames_do_not_allocate() {
         let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
         println!(
             "{}: 100 frames, {allocations} heap allocations",
-            antialiasing.name()
+            antialiasing
         );
-        assert_eq!(allocations, 0, "{}", antialiasing.name());
+        assert_eq!(allocations, 0, "{}", antialiasing);
         // SAFETY: the bed's device is idle after `render`.
         unsafe { view.destroy(&mut bed.allocator, &bed.bindless) };
     }

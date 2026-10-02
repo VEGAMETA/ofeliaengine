@@ -5,7 +5,9 @@
 
 use engine_core::math::{Quat, Vec3, look_at};
 use engine_ecs::{GlobalTransform, Transform, World};
-use engine_frame::{Antialiasing, Exposure, Quality, ViewSettings};
+use engine_frame::{
+    Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, Upscale, ViewSettings,
+};
 use engine_runtime::{Camera, CameraView, look_rotation};
 
 fn close(a: &engine_core::math::Mat4, b: &engine_core::math::Mat4) -> bool {
@@ -18,10 +20,15 @@ fn close(a: &engine_core::math::Mat4, b: &engine_core::math::Mat4) -> bool {
 #[test]
 fn camera_settings_round_trip() {
     for antialiasing in [
-        Antialiasing::Off,
+        Antialiasing::OFF,
         Antialiasing::TAAU,
         Antialiasing::FSR,
         Antialiasing::DLSS,
+        Antialiasing::SMAA_4X,
+        Antialiasing::msaa(Msaa::X8).with_post(PostAntialiasing::Mlaa),
+        Antialiasing::spatial(Upscale::Integer).with_post(PostAntialiasing::Fxaa),
+        Antialiasing::spatial(Upscale::Fsr1).with_samples(Msaa::X4),
+        Antialiasing::spatial(Upscale::Nearest),
     ] {
         for quality in Quality::ALL {
             let camera =
