@@ -300,6 +300,58 @@ pub struct HeapStats {
     pub usage: Option<u64>,
 }
 
+/// One memory heap's budget, as [`Allocator::budget`] reports it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HeapBudget {
+    /// The heap's size.
+    pub size: u64,
+    /// Whether the heap is device-local (`VK_MEMORY_HEAP_DEVICE_LOCAL_BIT`).
+    pub device_local: bool,
+    /// How much of the heap this process may use before allocations start failing or the
+    /// OS starts moving memory out (`VK_EXT_memory_budget`'s `heapBudget`); without the
+    /// extension, 80% of the heap (VMA's estimate).
+    pub budget: u64,
+    /// The process's usage as the OS sees it: every allocator, the swapchain, the
+    /// driver's own (`heapUsage`); without the extension, [`Self::allocated`].
+    pub usage: u64,
+    /// Bytes of `VkDeviceMemory` this allocator holds in the heap: blocks (used or not)
+    /// and dedicated allocations.
+    pub allocated: u64,
+}
+
+/// Every heap's [`HeapBudget`] at one moment (a fixed array: querying it allocates
+/// nothing, so it can run every frame).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryBudget {
+    heaps: [HeapBudget; vk::MAX_MEMORY_HEAPS],
+    count: usize,
+    /// Whether the numbers come from the OS (`VK_EXT_memory_budget`).
+    pub from_os: bool,
+}
+
+impl MemoryBudget {
+    /// The heaps, in Vulkan's order.
+    pub fn heaps(&self) -> &[HeapBudget] {
+        &self.heaps[..self.count]
+    }
+
+    /// The device-local heaps added together: where textures and meshes live. On an
+    /// integrated GPU this includes what the driver exposes of system memory as
+    /// device-local (most of it on ref-1's Radeon).
+    pub fn device_local(&self) -> HeapBudget {
+        self.heaps()
+            .iter()
+            .filter(|h| h.device_local)
+            .fold(HeapBudget::default(), |a, h| HeapBudget {
+                size: a.size + h.size,
+                device_local: true,
+                budget: a.budget + h.budget,
+                usage: a.usage + h.usage,
+                allocated: a.allocated + h.allocated,
+            })
+    }
+}
+
 /// Block sizes and thresholds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AllocatorConfig {
@@ -876,6 +928,52 @@ impl Allocator {
             }
         }
         stats
+    }
+
+    /// Every heap's budget and usage (`VK_EXT_memory_budget` when enabled) with this
+    /// allocator's own bytes. Allocates nothing; the driver call behind it is cheap enough
+    /// for once a frame (VMA queries it every frame too).
+    pub fn budget(&self) -> MemoryBudget {
+        let count = (self.properties.memory_heap_count as usize).min(vk::MAX_MEMORY_HEAPS);
+        let mut out = MemoryBudget {
+            heaps: [HeapBudget::default(); vk::MAX_MEMORY_HEAPS],
+            count,
+            from_os: self.budget_available,
+        };
+        for (i, h) in out.heaps[..count].iter_mut().enumerate() {
+            let heap = self.properties.memory_heaps[i];
+            h.size = heap.size;
+            h.device_local = heap.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL);
+            h.allocated = self.dedicated.get(i).map_or(0, |d| d.0);
+        }
+        for pool in &self.pools {
+            let heap = self.heap_of(pool.memory_type);
+            if heap < count {
+                for block in pool.blocks.iter().flatten() {
+                    out.heaps[heap].allocated += block.tlsf.capacity();
+                }
+            }
+        }
+        if self.budget_available {
+            let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+            let mut properties =
+                vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut budget);
+            // SAFETY: the extension is enabled on the device; the chain is valid.
+            unsafe {
+                self.instance
+                    .get_physical_device_memory_properties2(self.physical, &mut properties);
+            }
+            for (i, h) in out.heaps[..count].iter_mut().enumerate() {
+                h.budget = budget.heap_budget[i];
+                h.usage = budget.heap_usage[i];
+            }
+        } else {
+            for h in &mut out.heaps[..count] {
+                h.budget = h.size / 5 * 4;
+                h.usage = h.allocated;
+            }
+        }
+        out
     }
 }
 
