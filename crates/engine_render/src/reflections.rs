@@ -1282,7 +1282,10 @@ pub struct ReflectionOutput {
 /// What a view's reflection passes read and write.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct ViewInputs {
+    /// The composite's target (multisampled with MSAA).
     pub color: Texture,
+    /// The lit image screen-space reflections trace (`color`, or its resolve with MSAA).
+    pub lit: Texture,
     pub depth: Texture,
     pub normal_roughness: Texture,
     pub weight: Texture,
@@ -1306,6 +1309,66 @@ fn pyramid_layout(width: u32, height: u32) -> (u32, [u32; 16], u32) {
         }
     }
     (levels, offsets, floats)
+}
+
+/// The composite's pipelines (probes, screen-space reflections, both) into a
+/// multisampled `color_format` target of `samples` (MSAA, ADR 0075): the same shaders, run
+/// per pixel; the composite adds, so every sample gets the pixel's change and the resolve
+/// averages it back.
+pub(crate) fn composite_pipelines(
+    device: &Device,
+    bindless: &Bindless,
+    color_format: vk::Format,
+    samples: vk::SampleCountFlags,
+) -> Result<[Pipeline; 3], RhiError> {
+    let invalid = || RhiError::Vulkan {
+        call: "embedded SPIR-V",
+        result: vk::Result::ERROR_INVALID_SHADER_NV,
+    };
+    let vertex = spirv_words(COMPOSITE_VERTEX).ok_or_else(invalid)?;
+    let fragments = [
+        (
+            spirv_words(COMPOSITE_PROBES).ok_or_else(invalid)?,
+            c"compositeProbes",
+        ),
+        (
+            spirv_words(COMPOSITE_SSR).ok_or_else(invalid)?,
+            c"compositeSsr",
+        ),
+        (
+            spirv_words(COMPOSITE_PROBES_SSR).ok_or_else(invalid)?,
+            c"compositeProbesSsr",
+        ),
+    ];
+    let formats = [color_format];
+    let descs: Vec<PipelineDesc<'_>> = fragments
+        .iter()
+        .map(|(fragment, entry)| {
+            PipelineDesc::Graphics(GraphicsPipelineDesc {
+                color_formats: &formats,
+                cull_mode: vk::CullModeFlags::NONE,
+                depth_test: false,
+                depth_write: false,
+                blend: Blend::Additive,
+                samples,
+                ..GraphicsPipelineDesc::new(
+                    ShaderStageDesc {
+                        spirv: &vertex,
+                        entry: c"compositeVertex",
+                    },
+                    Some(ShaderStageDesc {
+                        spirv: fragment,
+                        entry,
+                    }),
+                )
+            })
+        })
+        .collect();
+    let pipelines = Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?;
+    pipelines.try_into().map_err(|_| RhiError::Vulkan {
+        call: "reflection composite pipelines (fewer than described)",
+        result: vk::Result::ERROR_UNKNOWN,
+    })
 }
 
 impl ReflectionPasses {
@@ -1488,12 +1551,15 @@ impl ReflectionPasses {
     /// Declares a view's reflection passes after its opaque passes: screen-space
     /// reflections (the nearest-depth pyramid, the trace, the spatial and temporal
     /// filters) when they run, and the composite into `inputs.color`.
+    /// `composite`: the composite's pipelines for a multisampled target (MSAA, ADR 0075;
+    /// [`composite_pipelines`]), or `None` for this one's.
     pub(crate) fn add_view_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
         bindless: &'g Bindless,
         prepared: &Prepared<'g>,
         inputs: &ViewInputs,
+        composite: Option<&'g [Pipeline; 3]>,
     ) -> Option<Texture> {
         engine_profiler::zone!("render::reflections::add_view_passes");
         let ssr = prepared
@@ -1522,10 +1588,11 @@ impl ReflectionPasses {
         if let Some(textures) = probes {
             pass = pass.read(textures.array, Access::Sampled(ShaderStages::FRAGMENT));
         }
+        let composite = composite.unwrap_or(&self.composite);
         let pipeline = match (probes.is_some(), ssr.is_some()) {
-            (true, false) => &self.composite[0],
-            (false, true) => &self.composite[1],
-            _ => &self.composite[2],
+            (true, false) => &composite[0],
+            (false, true) => &composite[1],
+            _ => &composite[2],
         };
         pass.execute(move |ctx| {
             let (Some(t0), Some(t1), Some(t2)) = (
@@ -1622,7 +1689,7 @@ impl ReflectionPasses {
             "ssr trace distance",
             TextureDesc::new_2d(SSR_DISTANCE_FORMAT, trace_size[0], trace_size[1]),
         );
-        let (nr, weight, color) = (inputs.normal_roughness, inputs.weight, inputs.color);
+        let (nr, weight, color) = (inputs.normal_roughness, inputs.weight, inputs.lit);
         fg.add_compute("ssr trace", bindless)
             .read(depth, Access::Sampled(ShaderStages::COMPUTE))
             .read(nr, Access::Sampled(ShaderStages::COMPUTE))

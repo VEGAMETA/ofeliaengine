@@ -341,6 +341,7 @@ mod windowed {
                         bindless: &bindless,
                         materials: &mut materials,
                         frame_number: frame.number,
+                        skinning: None,
                     },
                 )
                 .unwrap();

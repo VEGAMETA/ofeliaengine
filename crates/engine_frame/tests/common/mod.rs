@@ -166,6 +166,7 @@ impl Bed {
                     bindless: &self.bindless,
                     materials: &mut self.materials,
                     frame_number,
+                    skinning: None,
                 },
             )
             .unwrap();

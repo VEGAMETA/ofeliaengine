@@ -1012,6 +1012,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     bindless: &bindless,
                     materials: &mut materials,
                     frame_number,
+                    skinning: Some(&mut skinning),
                 },
             )
             .expect("prepare");

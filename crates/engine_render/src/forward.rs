@@ -55,7 +55,7 @@ use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
 use crate::gpu_scene::SceneFrame;
 use crate::graph::{
     Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, LoadOp, PassBuilder,
-    ShaderStages, StoreOp, Texture, TextureDesc,
+    ResolveMode, ShaderStages, StoreOp, Texture, TextureDesc,
 };
 use crate::hiz::{self, DepthPyramid, PyramidLayout};
 use crate::lights::{
@@ -145,6 +145,9 @@ const FRAGMENT_AO_CONTACT_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentMainAoContactShadowed.spv");
 const FRAGMENT_MOTION_AO_CONTACT_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentMainMotionAoContactShadowed.spv");
+
+#[path = "forward_msaa.rs"]
+mod msaa;
 
 pub use crate::contact::ContactShadowSettings;
 pub use crate::lights::{LocalLight, Spot};
@@ -834,6 +837,11 @@ pub struct ForwardPasses {
     /// The view's reflection inputs and screen-space reflections (ADR 0073), when it has
     /// reflections: for effects of your own after the scene passes.
     pub reflections: Option<crate::reflections::ReflectionOutput>,
+    /// With multisampled targets (MSAA, ADR 0075): the depth resolved to one value per
+    /// pixel, the nearest sample's (what ambient occlusion, contact shadows, reflections
+    /// and culling read). The color and the motion vectors stay multisampled: the caller
+    /// resolves them (`engine_render::msaa`), after its own passes on them.
+    pub resolved_depth: Option<Texture>,
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -1893,7 +1901,24 @@ pub struct ForwardRenderer {
     /// Boxed: 24 pipelines and the passes' would make every renderer large on the stack.
     reflections: Option<Box<ReflectionShading>>,
     reflections_on: bool,
+    /// Pipelines for multisampled targets (MSAA, ADR 0075): 2, 4, 8 samples, made by
+    /// [`Self::set_samples`].
+    msaa: [Option<Box<msaa::MsaaPipelines>>; 3],
+    /// How a multisampled depth is resolved for what reads it by pixel (the nearest
+    /// sample), and for culling's pyramid (the farthest: conservative); sample 0 where
+    /// the device has no min / max resolve.
+    depth_resolves: [ResolveMode; 2],
     scratch: RefCell<Scratch>,
+}
+
+/// The slot of a sample count in `ForwardRenderer::msaa`: 2, 4, 8 samples.
+fn msaa_slot(samples: vk::SampleCountFlags) -> Option<usize> {
+    match samples {
+        vk::SampleCountFlags::TYPE_2 => Some(0),
+        vk::SampleCountFlags::TYPE_4 => Some(1),
+        vk::SampleCountFlags::TYPE_8 => Some(2),
+        _ => None,
+    }
 }
 
 fn push_bytes(push: &Push) -> &[u8] {
@@ -2163,8 +2188,71 @@ impl ForwardRenderer {
             retired_atlases: Vec::new(),
             reflections: None,
             reflections_on: false,
+            msaa: [None, None, None],
+            depth_resolves: {
+                let modes = device.adapter().depth_resolve_modes;
+                let pick = |flag, mode| {
+                    if modes.contains(flag) {
+                        mode
+                    } else {
+                        ResolveMode::SampleZero
+                    }
+                };
+                [
+                    pick(vk::ResolveModeFlags::MIN, ResolveMode::Min),
+                    pick(vk::ResolveModeFlags::MAX, ResolveMode::Max),
+                ]
+            },
             scratch: RefCell::new(Scratch::default()),
         })
+    }
+
+    /// Makes the pipelines for drawing into multisampled targets of `samples` (2, 4 or 8;
+    /// MSAA, ADR 0075), with the features turned on now (those turned on later follow).
+    /// A view draws multisampled when its `color` and `depth` are; it then always draws
+    /// the depth prepass, masked materials turn alpha into coverage, and the passes that
+    /// read the scene by pixel read single-sampled resolves (see
+    /// [`ForwardPasses::resolved_depth`]). One sample makes nothing.
+    pub fn set_samples(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        samples: vk::SampleCountFlags,
+    ) -> Result<(), RhiError> {
+        let Some(slot) = msaa_slot(samples) else {
+            return Ok(());
+        };
+        if self.msaa[slot].is_none() {
+            self.msaa[slot] = Some(Box::new(msaa::MsaaPipelines::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+                samples,
+            )?));
+        }
+        self.ensure_msaa(device, bindless)
+    }
+
+    /// The multisampled pipelines of the features turned on, for every sample count made.
+    fn ensure_msaa(&mut self, device: &Device, bindless: &Bindless) -> Result<(), RhiError> {
+        let features = msaa::Features {
+            ao: self.ao.is_some(),
+            subsurface: self.subsurface_pipelines.is_some(),
+            shadowed: self.local_shadows.is_some(),
+            contact: self.contact.is_some(),
+            reflect: self.reflections.is_some(),
+        };
+        let (color, depth) = (self.color_format, self.depth_format);
+        for set in self.msaa.iter_mut().flatten() {
+            set.ensure(device, bindless, color, depth, features)?;
+        }
+        Ok(())
+    }
+
+    /// The multisampled pipelines for `samples`, when made.
+    fn msaa_pipelines(&self, samples: vk::SampleCountFlags) -> Option<&msaa::MsaaPipelines> {
+        self.msaa[msaa_slot(samples)?].as_deref()
     }
 
     /// Turns GPU culling on (the default) or off. Off, every instance counts as visible,
@@ -2217,7 +2305,8 @@ impl ForwardRenderer {
             )?);
         }
         self.ao_settings = settings;
-        self.ensure_shadowed_extras(device, bindless)
+        self.ensure_shadowed_extras(device, bindless)?;
+        self.ensure_msaa(device, bindless)
     }
 
     /// Local shadows' shading for ambient occlusion and subsurface materials, once both
@@ -2263,6 +2352,7 @@ impl ForwardRenderer {
                 self.depth_format,
             )?);
             self.ensure_shadowed_extras(device, bindless)?;
+            self.ensure_msaa(device, bindless)?;
         }
         self.contact_settings = settings;
         Ok(())
@@ -2298,6 +2388,7 @@ impl ForwardRenderer {
                 self.color_format,
                 self.depth_format,
             )?));
+            self.ensure_msaa(device, bindless)?;
         }
         self.reflections_on = enabled;
         Ok(())
@@ -2370,7 +2461,8 @@ impl ForwardRenderer {
                 .take(subsurface::MAX_PROFILES)
                 .map(SubsurfaceProfile::gpu),
         );
-        self.ensure_shadowed_extras(device, bindless)
+        self.ensure_shadowed_extras(device, bindless)?;
+        self.ensure_msaa(device, bindless)
     }
 
     /// Turns shadows of point and spot lights on with `settings`, or off (`None`, the
@@ -2477,7 +2569,8 @@ impl ForwardRenderer {
             }
         }
         self.local_shadows_on = true;
-        self.ensure_shadowed_extras(device, bindless)
+        self.ensure_shadowed_extras(device, bindless)?;
+        self.ensure_msaa(device, bindless)
     }
 
     /// The local shadow settings, when they are on.
@@ -3345,6 +3438,25 @@ impl ForwardRenderer {
             capture,
         } = *setup;
         let occlusion = view.occlusion.filter(|_| phases == 2);
+        // MSAA (ADR 0075): multisampled targets draw with their sample count's pipelines,
+        // always after a depth prepass, and what reads the scene by pixel (ambient
+        // occlusion, contact shadows, culling, reflections, subsurface scattering) reads
+        // single-sampled resolves.
+        let samples = depth_desc.samples;
+        let ms = if samples == vk::SampleCountFlags::TYPE_1 {
+            None
+        } else {
+            Some(self.msaa_pipelines(samples)?)
+        };
+        let single = |format| TextureDesc::new_2d(format, depth_desc.width, depth_desc.height);
+        let multi = |format| TextureDesc {
+            samples,
+            ..single(format)
+        };
+        let resolved_depth =
+            ms.map(|_| fg.create_texture("depth resolved", single(self.depth_format)));
+        let read_depth = resolved_depth.unwrap_or(depth);
+        let [nearest, farthest] = self.depth_resolves;
         let Layout {
             instance_count,
             instances,
@@ -3953,12 +4065,7 @@ impl ForwardRenderer {
         }
         // Motion vectors: a second target, last frame's transforms read by the vertex
         // shader, and this frame's copied for the next one afterwards.
-        let velocity = temporal.map(|_| {
-            fg.create_texture(
-                "motion vectors",
-                TextureDesc::new_2d(MOTION_FORMAT, depth_desc.width, depth_desc.height),
-            )
-        });
+        let velocity = temporal.map(|_| fg.create_texture("motion vectors", multi(MOTION_FORMAT)));
         const COPIED: BufferState = BufferState {
             stages: vk::PipelineStageFlags2::COPY,
             access: vk::AccessFlags2::TRANSFER_WRITE,
@@ -4030,6 +4137,7 @@ impl ForwardRenderer {
             local_atlas: local_frame.atlas.filter(|_| local_frame.shadowed),
             contact: None,
             reflect: None,
+            resolves: None,
         };
 
         // Ambient occlusion needs the whole depth before shading: the prepass draws it.
@@ -4062,18 +4170,42 @@ impl ForwardRenderer {
         // Reflections need it too (ADR 0073): their inputs are written by the shading
         // after it.
         targets.reflect = reflecting.then(|| {
-            let desc = |format| TextureDesc::new_2d(format, depth_desc.width, depth_desc.height);
             (
-                fg.create_texture("reflection normals", desc(NORMAL_ROUGHNESS_FORMAT)),
-                fg.create_texture("reflection weights", desc(WEIGHT_FORMAT)),
+                fg.create_texture("reflection normals", multi(NORMAL_ROUGHNESS_FORMAT)),
+                fg.create_texture("reflection weights", multi(WEIGHT_FORMAT)),
             )
         });
-        let prepass = self.depth_prepass
+        // With MSAA: the lit image screen-space reflections trace (resolved by the last
+        // pass that writes the color before them), and their inputs, resolved.
+        let scattering = subsurface.is_some() && subsurface_draws;
+        let ms_resolves = ms.map(|_| MsResolves {
+            lit: (reflecting && view.reflections.ssr.is_some())
+                .then(|| fg.create_texture("lit resolved", single(self.color_format))),
+            reflect: targets.reflect.map(|_| {
+                (
+                    fg.create_texture(
+                        "reflection normals resolved",
+                        single(NORMAL_ROUGHNESS_FORMAT),
+                    ),
+                    fg.create_texture("reflection weights resolved", single(WEIGHT_FORMAT)),
+                )
+            }),
+        });
+        targets.resolves = ms_resolves.map(|r| MsResolves {
+            // The scatter pass resolves the lit image when subsurface materials draw.
+            lit: r.lit.filter(|_| !scattering),
+            ..r
+        });
+        let prepass = ms.is_some()
+            || self.depth_prepass
             || ao.is_some()
             || subsurface_draws
             || contact.is_some()
             || reflecting;
-        let prepass_pipelines = [&self.prepass[0], &self.prepass[1]];
+        let prepass_pipelines = match ms {
+            Some(m) => [&m.prepass[0], &m.prepass[1]],
+            None => [&self.prepass[0], &self.prepass[1]],
+        };
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
         let variant = usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1;
@@ -4110,22 +4242,56 @@ impl ForwardRenderer {
                 shadowed.is_some(),
             )
         });
-        let main_pipelines = match (contact_shading, prepass, velocity.is_some()) {
-            _ if reflect_shading.is_some() => {
-                let p = reflect_shading?;
-                [p, p]
+        let main_pipelines = if let Some(m) = ms {
+            let motion = usize::from(velocity.is_some());
+            let k = shadowed_index(variant);
+            let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
+            let p: &Pipeline = if reflect_shading.is_some() {
+                m.reflect_pipeline(
+                    variant & 1 != 0,
+                    velocity.is_some(),
+                    ao.is_some(),
+                    contact.is_some(),
+                    shadowed.is_some(),
+                )?
+            } else if contact.is_some() {
+                let c = m.contact.as_ref()?;
+                match (ao.is_some(), shadowed.is_some()) {
+                    (false, false) => &c.shading[variant][motion],
+                    (true, false) => &c.ao.as_ref()?[variant][motion],
+                    (false, true) => &c.shadowed.as_ref()?[k][motion],
+                    (true, true) => &c.shadowed_ao.as_ref()?[k][motion],
+                }
+            } else if ao.is_some() {
+                match ms_shadowed {
+                    Some(s) => &s.ao.as_ref()?[k][motion],
+                    None => &m.ao.as_ref()?[variant][motion],
+                }
+            } else {
+                match ms_shadowed {
+                    Some(s) => &s.shading[k].shade[motion],
+                    None => &m.shading[variant].shade[motion],
+                }
+            };
+            [p, p]
+        } else {
+            match (contact_shading, prepass, velocity.is_some()) {
+                _ if reflect_shading.is_some() => {
+                    let p = reflect_shading?;
+                    [p, p]
+                }
+                (Some(p), _, _) => [p, p],
+                (None, true, false) => match ao_shading {
+                    Some(p) => [&p[0], &p[0]],
+                    None => [&shading.shade, &shading.shade],
+                },
+                (None, true, true) => match ao_shading {
+                    Some(p) => [&p[1], &p[1]],
+                    None => [&shading.shade_motion, &shading.shade_motion],
+                },
+                (None, false, false) => [&shading.main[0], &shading.main[1]],
+                (None, false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
             }
-            (Some(p), _, _) => [p, p],
-            (None, true, false) => match ao_shading {
-                Some(p) => [&p[0], &p[0]],
-                None => [&shading.shade, &shading.shade],
-            },
-            (None, true, true) => match ao_shading {
-                Some(p) => [&p[1], &p[1]],
-                None => [&shading.shade_motion, &shading.shade_motion],
-            },
-            (None, false, false) => [&shading.main[0], &shading.main[1]],
-            (None, false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
         };
         // `contact`: the sun's contact shadows, whose mask's index the shading that reads
         // it takes in `phase` (ADR 0071).
@@ -4169,180 +4335,41 @@ impl ForwardRenderer {
         } else {
             StoreOp::DontCare
         };
-        let mut passes = match flag_buffer {
-            None => {
-                let depth_use = if prepass {
-                    prepass_pass(
-                        fg,
-                        names.depth_prepass,
-                        &geometry,
-                        &materials,
-                        culled,
-                        visible,
-                        scene_instances,
-                    )
-                    .depth(depth, depth_clear, StoreOp::Store)
-                    .execute(move |ctx| {
-                        draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None, None)
-                    });
-                    DepthUse::ReadOnly
-                } else {
-                    DepthUse::Write(depth_clear, depth_store)
-                };
-                if let Some(((settings, view_space), passes)) = &ao {
-                    targets.ao = Some(
-                        passes
-                            .passes
-                            .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
-                    );
-                }
-                if let Some(((settings, _), state)) = contact {
-                    targets.contact = Some(state.passes.add_passes(
-                        fg,
-                        bindless,
-                        depth,
-                        &contact_view,
-                        &settings,
-                    ));
-                }
-                let ao_texture = targets.ao;
-                let contact_texture = targets.contact;
-                shading_pass(
-                    fg,
-                    names.forward,
-                    &geometry,
-                    &materials,
-                    shadow_map,
-                    culled,
-                    visible,
-                    targets,
-                    true,
-                    depth,
-                    depth_use,
-                    scene_instances,
-                )
-                .execute(move |ctx| {
-                    draw_phase(
-                        ctx,
-                        main_pipelines,
-                        PHASE_ALL,
-                        PLAIN_STATES,
-                        ao_texture,
-                        contact_texture,
-                    )
-                });
-                ForwardPasses {
-                    instances: instance_count,
-                    batches: batch_count,
-                    draw_commands: drawn_commands,
-                    list_commands: command_count,
-                    occlusion: false,
-                    commands: Some(culled),
-                    motion: None,
-                    ao: targets.ao,
-                    atmosphere: atmosphere.and_then(|a| a.textures),
-                    contact_shadows: targets.contact,
-                    reflections: None,
-                }
-            }
-            Some(flags) => {
-                // Two phases: draw what was visible, build the pyramid from its depth, then
-                // test everything against it and draw what the first phase missed. With the
-                // prepass the phases draw depth only, and the forward pass shades both
-                // lists once.
-                if prepass {
-                    prepass_pass(
-                        fg,
-                        "depth prepass early",
-                        &geometry,
-                        &materials,
-                        culled,
-                        visible,
-                        scene_instances,
-                    )
-                    .depth(depth, depth_clear, StoreOp::Store)
-                    .execute(move |ctx| {
-                        draw_phase(
-                            ctx,
-                            prepass_pipelines,
-                            PHASE_EARLY,
-                            DEPTH_STATES,
-                            None,
-                            None,
+        let mut passes =
+            match flag_buffer {
+                None => {
+                    let depth_use = if prepass {
+                        let mut pass = prepass_pass(
+                            fg,
+                            names.depth_prepass,
+                            &geometry,
+                            &materials,
+                            culled,
+                            visible,
+                            scene_instances,
                         )
-                    });
-                } else {
-                    shading_pass(
-                        fg,
-                        "forward early",
-                        &geometry,
-                        &materials,
-                        shadow_map,
-                        culled,
-                        visible,
-                        targets,
-                        true,
-                        depth,
-                        DepthUse::Write(depth_clear, StoreOp::Store),
-                        scene_instances,
-                    )
-                    .execute(move |ctx| {
-                        draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, None, None)
-                    });
-                }
-                let pyramid = fg.create_buffer(
-                    "depth pyramid",
-                    BufferDesc {
-                        size: pyramid_layout.bytes(),
-                    },
-                );
-                self.pyramid.add_pass(fg, bindless, depth, pyramid);
-                cull_pass(
-                    fg,
-                    bindless,
-                    "cull late",
-                    culled,
-                    visible,
-                    Some(flags),
-                    PHASE_LATE,
-                    scene_instances,
-                )
-                .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
-                .dispatch(cull, cull_threads, move |ctx| {
-                    Some(Push {
-                        visible: ctx.address(visible) + visible_bytes,
-                        commands: ctx.address(culled) + command_bytes,
-                        pyramid: ctx.address(pyramid),
-                        phase: PHASE_LATE,
-                        ..base
-                    })
-                });
-                if prepass {
-                    prepass_pass(
-                        fg,
-                        "depth prepass late",
-                        &geometry,
-                        &materials,
-                        culled,
-                        visible,
-                        scene_instances,
-                    )
-                    .depth(depth, LoadOp::Load, StoreOp::Store)
-                    .execute(move |ctx| {
-                        draw_phase(ctx, prepass_pipelines, PHASE_LATE, DEPTH_STATES, None, None)
-                    });
+                        .depth(depth, depth_clear, StoreOp::Store);
+                        if let Some(resolved) = resolved_depth {
+                            pass = pass.resolve(resolved, nearest);
+                        }
+                        pass.execute(move |ctx| {
+                            draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None, None)
+                        });
+                        DepthUse::ReadOnly
+                    } else {
+                        DepthUse::Write(depth_clear, depth_store)
+                    };
                     if let Some(((settings, view_space), passes)) = &ao {
-                        targets.ao = Some(
-                            passes
-                                .passes
-                                .add_passes(fg, bindless, depth, view_space, settings, ao_frame),
-                        );
+                        targets.ao =
+                            Some(passes.passes.add_passes(
+                                fg, bindless, read_depth, view_space, settings, ao_frame,
+                            ));
                     }
                     if let Some(((settings, _), state)) = contact {
                         targets.contact = Some(state.passes.add_passes(
                             fg,
                             bindless,
-                            depth,
+                            read_depth,
                             &contact_view,
                             &settings,
                         ));
@@ -4360,77 +4387,237 @@ impl ForwardRenderer {
                         targets,
                         true,
                         depth,
-                        DepthUse::ReadOnly,
+                        depth_use,
                         scene_instances,
                     )
                     .execute(move |ctx| {
                         draw_phase(
                             ctx,
                             main_pipelines,
-                            PHASE_EARLY,
+                            PHASE_ALL,
                             PLAIN_STATES,
                             ao_texture,
                             contact_texture,
-                        );
-                        draw_phase(
-                            ctx,
-                            main_pipelines,
-                            PHASE_LATE,
-                            PLAIN_STATES,
-                            ao_texture,
-                            contact_texture,
-                        );
+                        )
                     });
-                } else {
-                    shading_pass(
+                    ForwardPasses {
+                        instances: instance_count,
+                        batches: batch_count,
+                        draw_commands: drawn_commands,
+                        list_commands: command_count,
+                        occlusion: false,
+                        commands: Some(culled),
+                        motion: None,
+                        ao: targets.ao,
+                        atmosphere: atmosphere.and_then(|a| a.textures),
+                        contact_shadows: targets.contact,
+                        reflections: None,
+                        resolved_depth,
+                    }
+                }
+                Some(flags) => {
+                    // Two phases: draw what was visible, build the pyramid from its depth, then
+                    // test everything against it and draw what the first phase missed. With the
+                    // prepass the phases draw depth only, and the forward pass shades both
+                    // lists once.
+                    if prepass {
+                        let mut pass = prepass_pass(
+                            fg,
+                            "depth prepass early",
+                            &geometry,
+                            &materials,
+                            culled,
+                            visible,
+                            scene_instances,
+                        )
+                        .depth(depth, depth_clear, StoreOp::Store);
+                        // The pyramid keeps the farthest depth: conservative for culling.
+                        if let Some(resolved) = resolved_depth {
+                            pass = pass.resolve(resolved, farthest);
+                        }
+                        pass.execute(move |ctx| {
+                            draw_phase(
+                                ctx,
+                                prepass_pipelines,
+                                PHASE_EARLY,
+                                DEPTH_STATES,
+                                None,
+                                None,
+                            )
+                        });
+                    } else {
+                        shading_pass(
+                            fg,
+                            "forward early",
+                            &geometry,
+                            &materials,
+                            shadow_map,
+                            culled,
+                            visible,
+                            targets,
+                            true,
+                            depth,
+                            DepthUse::Write(depth_clear, StoreOp::Store),
+                            scene_instances,
+                        )
+                        .execute(move |ctx| {
+                            draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, None, None)
+                        });
+                    }
+                    let pyramid = fg.create_buffer(
+                        "depth pyramid",
+                        BufferDesc {
+                            size: pyramid_layout.bytes(),
+                        },
+                    );
+                    self.pyramid.add_pass(fg, bindless, read_depth, pyramid);
+                    cull_pass(
                         fg,
-                        "forward late",
-                        &geometry,
-                        &materials,
-                        shadow_map,
+                        bindless,
+                        "cull late",
                         culled,
                         visible,
-                        targets,
-                        false,
-                        depth,
-                        DepthUse::Write(LoadOp::Load, depth_store),
+                        Some(flags),
+                        PHASE_LATE,
                         scene_instances,
                     )
-                    .execute(move |ctx| {
-                        draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, None, None)
+                    .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
+                    .dispatch(cull, cull_threads, move |ctx| {
+                        Some(Push {
+                            visible: ctx.address(visible) + visible_bytes,
+                            commands: ctx.address(culled) + command_bytes,
+                            pyramid: ctx.address(pyramid),
+                            phase: PHASE_LATE,
+                            ..base
+                        })
                     });
+                    if prepass {
+                        let mut pass = prepass_pass(
+                            fg,
+                            "depth prepass late",
+                            &geometry,
+                            &materials,
+                            culled,
+                            visible,
+                            scene_instances,
+                        )
+                        .depth(depth, LoadOp::Load, StoreOp::Store);
+                        if let Some(resolved) = resolved_depth {
+                            pass = pass.resolve(resolved, nearest);
+                        }
+                        pass.execute(move |ctx| {
+                            draw_phase(ctx, prepass_pipelines, PHASE_LATE, DEPTH_STATES, None, None)
+                        });
+                        if let Some(((settings, view_space), passes)) = &ao {
+                            targets.ao = Some(passes.passes.add_passes(
+                                fg, bindless, read_depth, view_space, settings, ao_frame,
+                            ));
+                        }
+                        if let Some(((settings, _), state)) = contact {
+                            targets.contact = Some(state.passes.add_passes(
+                                fg,
+                                bindless,
+                                read_depth,
+                                &contact_view,
+                                &settings,
+                            ));
+                        }
+                        let ao_texture = targets.ao;
+                        let contact_texture = targets.contact;
+                        shading_pass(
+                            fg,
+                            names.forward,
+                            &geometry,
+                            &materials,
+                            shadow_map,
+                            culled,
+                            visible,
+                            targets,
+                            true,
+                            depth,
+                            DepthUse::ReadOnly,
+                            scene_instances,
+                        )
+                        .execute(move |ctx| {
+                            draw_phase(
+                                ctx,
+                                main_pipelines,
+                                PHASE_EARLY,
+                                PLAIN_STATES,
+                                ao_texture,
+                                contact_texture,
+                            );
+                            draw_phase(
+                                ctx,
+                                main_pipelines,
+                                PHASE_LATE,
+                                PLAIN_STATES,
+                                ao_texture,
+                                contact_texture,
+                            );
+                        });
+                    } else {
+                        shading_pass(
+                            fg,
+                            "forward late",
+                            &geometry,
+                            &materials,
+                            shadow_map,
+                            culled,
+                            visible,
+                            targets,
+                            false,
+                            depth,
+                            DepthUse::Write(LoadOp::Load, depth_store),
+                            scene_instances,
+                        )
+                        .execute(move |ctx| {
+                            draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, None, None)
+                        });
+                    }
+                    ForwardPasses {
+                        instances: instance_count,
+                        batches: batch_count,
+                        draw_commands: drawn_commands,
+                        list_commands: command_count,
+                        occlusion: true,
+                        commands: Some(culled),
+                        motion: None,
+                        ao: targets.ao,
+                        atmosphere: atmosphere.and_then(|a| a.textures),
+                        contact_shadows: targets.contact,
+                        reflections: None,
+                        resolved_depth,
+                    }
                 }
-                ForwardPasses {
-                    instances: instance_count,
-                    batches: batch_count,
-                    draw_commands: drawn_commands,
-                    list_commands: command_count,
-                    occlusion: true,
-                    commands: Some(culled),
-                    motion: None,
-                    ao: targets.ao,
-                    atmosphere: atmosphere.and_then(|a| a.textures),
-                    contact_shadows: targets.contact,
-                    reflections: None,
-                }
-            }
-        };
+            };
         // Subsurface materials (ADR 0059): shaded after the others, also writing their
         // diffuse light and albedo, then scattered into the color target.
         if let Some(pipelines) = subsurface.filter(|_| subsurface_draws) {
             let variant =
                 usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1;
-            let irradiance = fg.create_texture(
-                "subsurface irradiance",
-                TextureDesc::new_2d(IRRADIANCE_FORMAT, depth_desc.width, depth_desc.height),
-            );
-            let albedo = fg.create_texture(
-                "subsurface albedo",
-                TextureDesc::new_2d(ALBEDO_FORMAT, depth_desc.width, depth_desc.height),
-            );
-            let pipeline = match shadowed.and_then(|p| p.subsurface.as_ref()) {
-                Some(p) => &p[shadowed_index(variant)][usize::from(velocity.is_some())],
-                None => &pipelines.shading[variant][usize::from(velocity.is_some())],
+            let irradiance = fg.create_texture("subsurface irradiance", multi(IRRADIANCE_FORMAT));
+            let albedo = fg.create_texture("subsurface albedo", multi(ALBEDO_FORMAT));
+            // With MSAA the scatter pass reads them resolved (averaged).
+            let resolved = ms.map(|_| {
+                (
+                    fg.create_texture("subsurface irradiance resolved", single(IRRADIANCE_FORMAT)),
+                    fg.create_texture("subsurface albedo resolved", single(ALBEDO_FORMAT)),
+                )
+            });
+            let motion = usize::from(velocity.is_some());
+            let ms_subsurface = ms.and_then(|m| m.subsurface.as_ref());
+            let ms_shadowed = ms
+                .and_then(|m| m.shadowed.as_ref())
+                .filter(|_| shadowed.is_some())
+                .and_then(|p| p.subsurface.as_ref());
+            let pipeline = match (ms, shadowed.and_then(|p| p.subsurface.as_ref())) {
+                (Some(_), _) => match ms_shadowed {
+                    Some(p) => &p[shadowed_index(variant)][motion],
+                    None => &ms_subsurface?.0[variant][motion],
+                },
+                (None, Some(p)) => &p[shadowed_index(variant)][motion],
+                (None, None) => &pipelines.shading[variant][motion],
             };
             let two_phases = flag_buffer.is_some();
             // Their diffuse light is occluded by the view's ambient occlusion too.
@@ -4438,9 +4625,10 @@ impl ForwardRenderer {
             // They keep the sky's reflections (their pass writes no reflection inputs).
             let targets = Targets {
                 reflect: None,
+                resolves: None,
                 ..targets
             };
-            shading_pass(
+            let mut pass = shading_pass(
                 fg,
                 names.forward_subsurface,
                 &geometry,
@@ -4454,9 +4642,15 @@ impl ForwardRenderer {
                 DepthUse::ReadOnly,
                 scene_instances,
             )
-            .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
-            .color(albedo, LoadOp::DontCare, StoreOp::Store)
-            .execute(move |ctx| {
+            .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store);
+            if let Some((irradiance, _)) = resolved {
+                pass = pass.resolve(irradiance, ResolveMode::Average);
+            }
+            pass = pass.color(albedo, LoadOp::DontCare, StoreOp::Store);
+            if let Some((_, albedo)) = resolved {
+                pass = pass.resolve(albedo, ResolveMode::Average);
+            }
+            pass.execute(move |ctx| {
                 let pipelines = [pipeline, pipeline];
                 if two_phases {
                     draw_phase(
@@ -4487,8 +4681,13 @@ impl ForwardRenderer {
                 }
             });
             // The scatter pass: the same batches, adding where their depth is.
-            let scatter = &pipelines.scatter;
-            forward_pass(
+            let scatter = match ms_subsurface {
+                Some((_, scatter)) => scatter,
+                None => &pipelines.scatter,
+            };
+            let (irradiance, albedo) = resolved.unwrap_or((irradiance, albedo));
+            let lit = ms_resolves.and_then(|r| r.lit);
+            let mut pass = forward_pass(
                 fg,
                 names.subsurface_scatter,
                 &geometry,
@@ -4500,9 +4699,11 @@ impl ForwardRenderer {
             )
             .read(irradiance, Access::Sampled(ShaderStages::FRAGMENT))
             .read(albedo, Access::Sampled(ShaderStages::FRAGMENT))
-            .color(color, LoadOp::Load, StoreOp::Store)
-            .depth_read_only(depth)
-            .execute(move |ctx| {
+            .color(color, LoadOp::Load, StoreOp::Store);
+            if let Some(lit) = lit {
+                pass = pass.resolve(lit, ResolveMode::Average);
+            }
+            pass.depth_read_only(depth).execute(move |ctx| {
                 let (Some(light), Some(albedo)) =
                     (ctx.sampled_index(irradiance), ctx.sampled_index(albedo))
                 else {
@@ -4549,18 +4750,27 @@ impl ForwardRenderer {
             if let Some((probes, _)) = imported.probes.filter(|_| prepared.probes > 0) {
                 probes.mark_used(true, false);
             }
+            // With MSAA: the resolved inputs, the multisampled color as the composite's
+            // target.
+            let (normal_roughness, weight) = ms_resolves
+                .and_then(|r| r.reflect)
+                .unwrap_or((normal_roughness, weight));
+            let lit = ms_resolves.and_then(|r| r.lit).unwrap_or(color);
+            let composite = ms.and_then(|m| m.reflect.as_deref()).map(|(_, c)| c);
             let ssr = r.passes.add_view_passes(
                 fg,
                 bindless,
                 &prepared,
                 &ViewInputs {
                     color,
-                    depth,
+                    lit,
+                    depth: read_depth,
                     normal_roughness,
                     weight,
                     environment: env,
                     probes: imported.probes.map(|(_, t)| t),
                 },
+                composite,
             );
             passes.reflections = Some(crate::reflections::ReflectionOutput {
                 normal_roughness,
@@ -4572,10 +4782,11 @@ impl ForwardRenderer {
         // image (ADR 0069). A probe's capture fills its sky in its face copy instead.
         if capture {
         } else if let (Some(env), Some(atmosphere)) = (environment, atmosphere) {
+            // With MSAA per sample, from each sample's depth.
             crate::atmosphere::add_composite_pass(
                 fg,
                 bindless,
-                &self.composite,
+                ms.map_or(&self.composite, |m| &m.composite),
                 color,
                 depth,
                 &env,
@@ -4583,7 +4794,7 @@ impl ForwardRenderer {
             );
         } else if let Some(env) = environment {
             // The sky where no geometry was drawn (depth still 1).
-            let sky = &self.sky;
+            let sky = ms.map_or(&self.sky, |m| &m.sky);
             fg.add_pass("sky")
                 .color(color, LoadOp::Load, StoreOp::Store)
                 .depth_read_only(depth)
@@ -4607,19 +4818,30 @@ impl ForwardRenderer {
             .filter(|s| s & BLENDED != 0)
             .map(|s| states.counts[s])
             .sum();
-        let reactive = (blended_commands > 0 && velocity.is_some()).then(|| {
-            fg.create_texture(
-                "reactive mask",
-                TextureDesc::new_2d(REACTIVE_FORMAT, depth_desc.width, depth_desc.height),
-            )
+        let reactive = (blended_commands > 0 && velocity.is_some())
+            .then(|| fg.create_texture("reactive mask", multi(REACTIVE_FORMAT)));
+        // With MSAA, resolved (averaged) for the temporal resolve.
+        let reactive_resolved = reactive.and_then(|_| {
+            ms.map(|_| fg.create_texture("reactive resolved", single(REACTIVE_FORMAT)))
         });
         if blended_commands > 0 {
             let reactive_index = usize::from(reactive.is_some());
-            let pipelines = match (atmosphere, shadowed) {
+            let pipelines = match (ms, atmosphere, shadowed) {
+                (Some(m), _, _) => {
+                    let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
+                    match (atmosphere, ms_shadowed) {
+                        (Some(_), Some(p)) => &p.blended_atmosphere[reactive_index],
+                        (Some(_), None) => &m.blended_atmosphere[variant & 1][reactive_index],
+                        (None, Some(p)) => {
+                            &p.shading[shadowed_index(variant)].blended[reactive_index]
+                        }
+                        (None, None) => &m.shading[variant].blended[reactive_index],
+                    }
+                }
                 // Under an atmosphere or fog (the environment variants).
-                (Some(_), Some(p)) => &p.blended_atmosphere[reactive_index],
-                (Some(_), None) => &self.blended_atmosphere[variant & 1][reactive_index],
-                (None, _) => &shading.blended[reactive_index],
+                (None, Some(_), Some(p)) => &p.blended_atmosphere[reactive_index],
+                (None, Some(_), None) => &self.blended_atmosphere[variant & 1][reactive_index],
+                (None, None, _) => &shading.blended[reactive_index],
             };
             let mut pass = forward_pass(
                 fg,
@@ -4634,6 +4856,9 @@ impl ForwardRenderer {
             .color(color, LoadOp::Load, StoreOp::Store);
             if let Some(reactive) = reactive {
                 pass = pass.color(reactive, LoadOp::Clear([0.0; 4]), StoreOp::Store);
+                if let Some(resolved) = reactive_resolved {
+                    pass = pass.resolve(resolved, ResolveMode::Average);
+                }
             }
             if let Some(tiles) = light_tiles {
                 pass = pass.read(tiles, Access::StorageRead(ShaderStages::FRAGMENT));
@@ -4682,7 +4907,7 @@ impl ForwardRenderer {
         };
 
         // Where no geometry was drawn (depth still 1), the camera's motion.
-        let background = &self.background;
+        let background = ms.map_or(&self.background, |m| &m.background);
         fg.add_pass("motion background")
             .color(velocity, LoadOp::Load, StoreOp::Store)
             .depth_read_only(depth)
@@ -4734,7 +4959,7 @@ impl ForwardRenderer {
                 velocity,
                 jitter,
                 reset,
-                reactive,
+                reactive: reactive_resolved.or(reactive),
                 clip_from_world,
                 previous_clip_from_world,
             }),
@@ -4825,11 +5050,21 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
     let load = view.clear.map_or(LoadOp::Load, LoadOp::Clear);
     let depth_clear = LoadOp::Clear([1.0, 0.0, 0.0, 0.0]);
     let temporal = view.temporal;
+    let depth_desc = fg.texture_desc(depth);
     let velocity = temporal.map(|_| {
-        let desc = fg.texture_desc(depth);
         fg.create_texture(
             "motion vectors",
-            TextureDesc::new_2d(MOTION_FORMAT, desc.width, desc.height),
+            TextureDesc {
+                samples: depth_desc.samples,
+                ..TextureDesc::new_2d(MOTION_FORMAT, depth_desc.width, depth_desc.height)
+            },
+        )
+    });
+    // MSAA (ADR 0075): the cleared depth, resolved.
+    let resolved_depth = (depth_desc.samples != vk::SampleCountFlags::TYPE_1).then(|| {
+        fg.create_texture(
+            "depth resolved",
+            TextureDesc::new_2d(depth_desc.format, depth_desc.width, depth_desc.height),
         )
     });
     let mut pass = fg.add_pass("forward").color(color, load, StoreOp::Store);
@@ -4841,7 +5076,11 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
     } else {
         StoreOp::DontCare
     };
-    pass.depth(depth, depth_clear, depth_store).execute(|_| {});
+    let mut pass = pass.depth(depth, depth_clear, depth_store);
+    if let Some(resolved) = resolved_depth {
+        pass = pass.resolve(resolved, ResolveMode::SampleZero);
+    }
+    pass.execute(|_| {});
     let motion = temporal.zip(velocity).map(|(t, velocity)| {
         let jitter = t.next_jitter();
         let reset = t.reset.replace(false);
@@ -4872,6 +5111,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         atmosphere: None,
         contact_shadows: None,
         reflections: None,
+        resolved_depth,
     }
 }
 
@@ -4896,6 +5136,17 @@ struct Targets {
     /// The sun's contact shadows (ADR 0071), computed after the depth prepass.
     contact: Option<Texture>,
     /// Reflections' inputs (ADR 0073): normal and roughness, specular weight.
+    reflect: Option<(Texture, Texture)>,
+    /// With MSAA (ADR 0075): what the shading pass resolves its targets into.
+    resolves: Option<MsResolves>,
+}
+
+/// The single-sampled textures a multisampled view's shading resolves into (ADR 0075).
+#[derive(Debug, Clone, Copy)]
+struct MsResolves {
+    /// The lit image, for screen-space reflections.
+    lit: Option<Texture>,
+    /// Reflections' inputs: normal and roughness, specular weight.
     reflect: Option<(Texture, Texture)>,
 }
 
@@ -4937,6 +5188,10 @@ fn shading_pass<'a, 'g>(
         },
         StoreOp::Store,
     );
+    let resolves = targets.resolves;
+    if let Some(lit) = resolves.and_then(|r| r.lit) {
+        pass = pass.resolve(lit, ResolveMode::Average);
+    }
     if let Some(velocity) = targets.velocity {
         let load = if first {
             LoadOp::Clear([0.0; 4])
@@ -4953,9 +5208,15 @@ fn shading_pass<'a, 'g>(
         } else {
             LoadOp::Load
         };
-        pass =
-            pass.color(normal_roughness, load, StoreOp::Store)
-                .color(weight, load, StoreOp::Store);
+        pass = pass.color(normal_roughness, load, StoreOp::Store);
+        let resolved = resolves.and_then(|r| r.reflect);
+        if let Some((normal_roughness, _)) = resolved {
+            pass = pass.resolve(normal_roughness, ResolveMode::Average);
+        }
+        pass = pass.color(weight, load, StoreOp::Store);
+        if let Some((_, weight)) = resolved {
+            pass = pass.resolve(weight, ResolveMode::Average);
+        }
     }
     if let Some(previous) = targets.previous {
         pass = pass.read(previous, Access::StorageRead(ShaderStages::VERTEX));

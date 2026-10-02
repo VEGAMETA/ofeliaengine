@@ -26,6 +26,7 @@
 //!   buffers, only changes uploaded each frame (ADR 0064).
 //! - [`cull`]: frustum and bounding-box tests shared by CPU code and the GPU culling pass.
 //! - [`upload`]: per-frame GPU data (camera, lights, draw lists) in a ring per frame slot.
+//! - [`msaa`]: the resolve of multisampled scenes (MSAA, ADR 0075).
 //! - [`post`]: post-processing (tonemapping from the HDR target).
 //! - [`postaa`]: antialiasing filters after tone mapping: FXAA, MLAA, SMAA (ADR 0075).
 //! - [`png`]: a small PNG encoder for screenshots and golden-image tests.
@@ -48,6 +49,7 @@ pub mod lights;
 pub mod local_shadows;
 pub mod material;
 pub mod mesh;
+pub mod msaa;
 pub mod png;
 pub mod post;
 pub mod postaa;

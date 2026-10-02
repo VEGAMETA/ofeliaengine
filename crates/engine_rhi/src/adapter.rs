@@ -103,6 +103,9 @@ pub struct OptionalCaps {
     /// `shaderFloat16` and `shaderInt16`: 16-bit arithmetic in shaders (the FSR 3.1
     /// upscaler's faster variants, ADR 0060).
     pub shader_float16: bool,
+    /// `sampleRateShading`: fragment shaders that run per sample (MSAA's per-sample
+    /// passes, ADR 0075); enabled when present.
+    pub sample_rate_shading: bool,
 }
 
 impl OptionalCaps {
@@ -131,6 +134,7 @@ impl OptionalCaps {
             (self.index_type_uint8, "uint8 indices"),
             (self.hdr_metadata, "HDR metadata"),
             (self.shader_float16, "16-bit shader math"),
+            (self.sample_rate_shading, "sample rate shading"),
         ]
         .into_iter()
         .filter_map(|(present, name)| present.then_some(name))
@@ -164,6 +168,9 @@ pub struct Adapter {
     pub memory: vk::PhysicalDeviceMemoryProperties,
     /// Device limits (alignments, granularities, counts).
     pub limits: vk::PhysicalDeviceLimits,
+    /// How multisampled depth can be resolved in a render pass (Vulkan 1.2's
+    /// `supportedDepthResolveModes`; `SAMPLE_ZERO` always).
+    pub depth_resolve_modes: vk::ResolveModeFlags,
     pub(crate) queue_families: Vec<vk::QueueFamilyProperties>,
     missing: Vec<&'static str>,
     /// Optional capabilities.
@@ -175,9 +182,11 @@ impl Adapter {
         let raw = instance.raw();
         let mut driver_props = vk::PhysicalDeviceDriverProperties::default();
         let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
+        let mut resolve = vk::PhysicalDeviceDepthStencilResolveProperties::default();
         let mut props2 = vk::PhysicalDeviceProperties2::default()
             .push_next(&mut driver_props)
-            .push_next(&mut subgroup);
+            .push_next(&mut subgroup)
+            .push_next(&mut resolve);
         // SAFETY: `physical` came from this instance; the output chain is valid.
         unsafe { raw.get_physical_device_properties2(physical, &mut props2) };
         let props = props2.properties;
@@ -341,6 +350,7 @@ impl Adapter {
             index_type_uint8: has(c"VK_KHR_index_type_uint8") || has(c"VK_EXT_index_type_uint8"),
             hdr_metadata: has(c"VK_EXT_hdr_metadata"),
             shader_float16: f12.shader_float16 == vk::TRUE && base.shader_int16 == vk::TRUE,
+            sample_rate_shading: base.sample_rate_shading == vk::TRUE,
         };
 
         let kind = match props.device_type {
@@ -376,6 +386,7 @@ impl Adapter {
             device_local_bytes,
             memory,
             limits: props.limits,
+            depth_resolve_modes: resolve.supported_depth_resolve_modes,
             queue_families,
             missing,
             caps,

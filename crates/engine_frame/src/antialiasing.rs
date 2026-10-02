@@ -300,9 +300,13 @@ impl Antialiasing {
         self.upscale.is_temporal()
     }
 
-    /// Whether SMAA runs on each of two samples (S2x).
+    /// Whether SMAA runs on each of two samples (S2x): two samples and SMAA, unless step 4
+    /// resamples the image (FSR 1, a temporal upscaler other than SMAA T2x), which needs
+    /// one image: then SMAA 1x runs on the resolved one.
     pub fn smaa_s2x(self) -> bool {
-        self.samples == Msaa::X2 && matches!(self.post, PostAntialiasing::Smaa(_))
+        self.samples == Msaa::X2
+            && matches!(self.post, PostAntialiasing::Smaa(_))
+            && !matches!(self.upscale, Upscale::Fsr1 | Upscale::Temporal(_))
     }
 
     /// The checks that do not depend on the GPU (see [`InvalidAntialiasing`]):

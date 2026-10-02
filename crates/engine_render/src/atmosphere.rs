@@ -51,6 +51,9 @@ pub(crate) const COMPOSITE_VERTEX: &[u8] =
     include_bytes!("../shaders/atmosphere.compositeVertex.spv");
 pub(crate) const COMPOSITE_FRAGMENT: &[u8] =
     include_bytes!("../shaders/atmosphere.compositeFragment.spv");
+/// The full-screen pass per sample, for multisampled targets (MSAA, ADR 0075).
+pub(crate) const COMPOSITE_FRAGMENT_MS: &[u8] =
+    include_bytes!("../shaders/atmosphere.compositeFragmentMs.spv");
 
 /// Size of the transmittance table (cos zenith × altitude).
 pub const TRANSMITTANCE_SIZE: [u32; 2] = [256, 64];

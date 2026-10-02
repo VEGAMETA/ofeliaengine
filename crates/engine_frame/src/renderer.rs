@@ -21,6 +21,7 @@ use engine_render::graph::{
 };
 use engine_render::material::{MaterialFrame, MaterialTable};
 use engine_render::mesh::GeometryFrame;
+use engine_render::msaa::{MsaaInput, MsaaResolve};
 use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, Tonemap};
 use engine_render::postaa::{
     Decode, PERCEPTUAL_FORMAT, PostAa, PostFilter, PostTarget, SmaaInput, SmaaPreset, SmaaTemporal,
@@ -28,6 +29,7 @@ use engine_render::postaa::{
 };
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings};
 use engine_render::reflections::{ReflectionProbes, Reflections, ScreenSpaceReflections};
+use engine_render::skinning::Skinning;
 use engine_render::skinning::SkinningFrame;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -218,6 +220,9 @@ pub struct PrepareContext<'a> {
     pub materials: &'a mut MaterialTable,
     /// The number of the frame about to be declared.
     pub frame_number: u64,
+    /// The scene's skinning, when it has skinned meshes: with MSAA its motion pass needs
+    /// the sample count's pipeline (`Skinning::set_motion_samples`).
+    pub skinning: Option<&'a mut Skinning>,
 }
 
 impl fmt::Debug for PrepareContext<'_> {
@@ -281,7 +286,9 @@ pub struct FrameRenderer {
     depth_format: vk::Format,
     frames_in_flight: u64,
     /// Sample counts the scene's targets support, by [`Msaa`].
-    msaa: [bool; 4],
+    msaa_support: [bool; 4],
+    /// The resolve of multisampled scenes (ADR 0075), made per sample count.
+    msaa: MsaaResolve,
     /// The filters after tone mapping (ADR 0075), made as views ask for them.
     post: Box<PostAa>,
     /// The tone mapper into their perceptual image, made with the first filter.
@@ -511,7 +518,8 @@ impl FrameRenderer {
             bloom: Bloom::new(device, bindless, BloomSettings::default())?,
             depth_format,
             frames_in_flight: frames_in_flight.max(1) as u64,
-            msaa: msaa_support(device, depth_format),
+            msaa_support: msaa_support(device, depth_format),
+            msaa: MsaaResolve::new(),
             post: Box::new(PostAa::new(output_format)),
             perceptual: None,
             fsr1: None,
@@ -525,7 +533,7 @@ impl FrameRenderer {
     /// post filters run everywhere.
     pub fn antialiasing_support(&self) -> AntialiasingSupport {
         AntialiasingSupport {
-            msaa: self.msaa,
+            msaa: self.msaa_support,
             upscalers: [
                 self.available(UpscalerKind::Taau),
                 self.available(UpscalerKind::Fsr),
@@ -671,6 +679,7 @@ impl FrameRenderer {
             bindless,
             materials,
             frame_number,
+            skinning,
         } = ctx;
         let completed = frame_number.saturating_sub(self.frames_in_flight);
         if !view.retired.is_empty() {
@@ -763,6 +772,17 @@ impl FrameRenderer {
             temporal.set_jitter_pattern(pattern);
         }
 
+        // MSAA: the scene passes' pipelines for the sample count, the resolve's, the
+        // skinned motion pass's.
+        if antialiasing.samples != Msaa::X1 {
+            let flags = antialiasing.samples.flags();
+            self.forward.set_samples(device, bindless, flags)?;
+            self.msaa
+                .ensure(device, bindless, flags, antialiasing.smaa_s2x())?;
+            if let Some(skinning) = skinning {
+                skinning.set_motion_samples(device, bindless, flags)?;
+            }
+        }
         if antialiasing.upscale == Upscale::Fsr1 && self.fsr1.is_none() {
             self.fsr1 = Some(Fsr1::new(device, bindless)?);
         }
@@ -961,12 +981,15 @@ impl FrameRenderer {
         let exposure: Option<&'g AutoExposure> = exposure.as_ref();
         let (render, output) = (prepared.render, prepared.output);
 
-        // 1. The scene at render resolution, jittered, with motion vectors when temporal.
-        let color = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, render.0, render.1));
-        let depth = fg.create_texture(
-            "depth",
-            TextureDesc::new_2d(self.depth_format, render.0, render.1),
-        );
+        // 1. The scene at render resolution, jittered, with motion vectors when temporal;
+        // multisampled with MSAA (resolved after the skinned motion pass, below).
+        let samples = prepared.antialiasing.samples.flags();
+        let scene_desc = |format| TextureDesc {
+            samples,
+            ..TextureDesc::new_2d(format, render.0, render.1)
+        };
+        let color = fg.create_texture("hdr", scene_desc(HDR_FORMAT));
+        let depth = fg.create_texture("depth", scene_desc(self.depth_format));
         let scene_camera = Camera {
             clip_from_world: camera.clip_from_world(output.0 as f32 / output.1 as f32),
             position: camera.position,
@@ -986,7 +1009,7 @@ impl FrameRenderer {
                 ssr: reflections.as_ref(),
             },
         };
-        let passes = match scene.draws {
+        let mut passes = match scene.draws {
             SceneDraws::List(draws) => self.forward.add_passes(
                 fg,
                 ctx.ring,
@@ -1010,6 +1033,35 @@ impl FrameRenderer {
         if let (Some(skinning), Some(motion)) = (scene.skinning, &passes.motion) {
             skinning.add_motion_pass(fg, ctx.ring, ctx.bindless, scene.geometry, depth, motion)?;
         }
+        // MSAA: the samples resolved (color weighted by luminance, motion vectors of the
+        // nearest sample, depth by the forward renderer); with SMAA S2x also half the two
+        // samples' difference. Everything after reads one value per pixel.
+        let mut difference = None;
+        let (color, depth) = match passes.resolved_depth {
+            Some(resolved_depth) => {
+                let resolved = self
+                    .msaa
+                    .add_pass(
+                        fg,
+                        ctx.bindless,
+                        MsaaInput {
+                            color,
+                            depth,
+                            motion: passes.motion.map(|m| m.velocity),
+                            split: prepared.antialiasing.smaa_s2x(),
+                        },
+                    )
+                    .ok_or(FrameError::Antialiasing(
+                        InvalidAntialiasing::SamplesUnsupported(prepared.antialiasing.samples),
+                    ))?;
+                if let (Some(motion), Some(velocity)) = (passes.motion.as_mut(), resolved.motion) {
+                    motion.velocity = velocity;
+                }
+                difference = resolved.difference;
+                (resolved.color, resolved_depth)
+            }
+            None => (color, depth),
+        };
 
         // The previous antialiased color, kept for screen-space effects.
         let kept = history.as_mut().map(|h| {
@@ -1148,12 +1200,26 @@ impl FrameRenderer {
         // With a filter after tone mapping, the tone mapper writes its perceptual image
         // at the output size, and the filter writes the view's target.
         let filter = post_filter(prepared.antialiasing.post);
+        // SMAA S2x: each sample's image (the resolved color plus or minus half their
+        // difference) is tone mapped and antialiased on its own.
+        let sources = match (difference, filter) {
+            (Some(difference), Some(PostFilter::Smaa(_))) => {
+                match self
+                    .post
+                    .add_split(fg, ctx.bindless, resolved, difference, render)
+                {
+                    Some([a, b]) => [a, b],
+                    None => [resolved, resolved],
+                }
+            }
+            _ => [resolved, resolved],
+        };
+        let two = sources[0] != sources[1];
         let perceptual = filter.and(self.perceptual.as_ref()).map(|tonemap| {
-            let image = fg.create_texture(
-                "perceptual",
-                TextureDesc::new_2d(PERCEPTUAL_FORMAT, output.0, output.1),
-            );
-            (tonemap, image)
+            let desc = TextureDesc::new_2d(PERCEPTUAL_FORMAT, output.0, output.1);
+            let image = fg.create_texture("perceptual", desc);
+            let second = two.then(|| fg.create_texture("perceptual", desc));
+            (tonemap, image, second)
         });
         let whole = |offset: vk::Offset2D| vk::Rect2D {
             offset,
@@ -1163,7 +1229,7 @@ impl FrameRenderer {
             },
         };
         let (tonemap, tonemapped, area, load) = match perceptual {
-            Some((tonemap, image)) => (
+            Some((tonemap, image, _)) => (
                 tonemap,
                 image,
                 whole(vk::Offset2D::default()),
@@ -1201,28 +1267,27 @@ impl FrameRenderer {
             Upscale::Nearest | Upscale::Integer => SamplerKind::NearestClamp,
             _ => SamplerKind::LinearClamp,
         };
-        tonemap.add_composite_pass(
-            fg,
-            ctx.bindless,
-            resolved,
-            tonemapped,
-            Composite {
-                rect,
-                sampler,
-                exposure: exposure_value,
-                tonemap: true,
-                curve: settings.curve,
-                peak: settings.peak,
-                encoding: settings.encoding,
-                load,
-                bloom,
-                auto_exposure,
-                letterbox,
-            },
-        );
+        let composite = Composite {
+            rect,
+            sampler,
+            exposure: exposure_value,
+            tonemap: true,
+            curve: settings.curve,
+            peak: settings.peak,
+            encoding: settings.encoding,
+            load,
+            bloom,
+            auto_exposure,
+            letterbox,
+        };
+        tonemap.add_composite_pass(fg, ctx.bindless, sources[0], tonemapped, composite);
+        let second = perceptual.and_then(|(_, _, second)| second);
+        if let Some(second) = second {
+            tonemap.add_composite_pass(fg, ctx.bindless, sources[1], second, composite);
+        }
 
         // 6. The filter after tone mapping, into the view's target.
-        if let (Some(filter), Some((_, image))) = (filter, perceptual) {
+        if let (Some(filter), Some((_, image, _))) = (filter, perceptual) {
             let post_target = PostTarget {
                 texture: target.texture,
                 rect: target.rect,
@@ -1274,7 +1339,7 @@ impl FrameRenderer {
                             ctx.bindless,
                             ctx.ring,
                             &SmaaInput {
-                                images: [Some(image), None],
+                                images: [Some(image), second],
                                 size: output,
                                 preset,
                                 temporal,

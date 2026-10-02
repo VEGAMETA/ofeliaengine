@@ -792,6 +792,20 @@ void shadowFragmentMasked(ShadowOut input)
         discard;
 }
 
+// The depth prepass of masked materials with MSAA (ADR 0075): alpha to coverage instead
+// of the alpha test. The alpha is sharpened around the cutoff to about a pixel's width
+// (Golus, "Anti-aliased Alpha Test", 2017), so the edge stays where the alpha test puts it
+// and only its pixel-wide transition becomes coverage. The pipeline has no color target:
+// only alpha at location 0 matters.
+[shader("fragment")]
+float4 prepassCoverage(ShadowOut input) : SV_Target0
+{
+    Material m = push.materials[input.material];
+    float alpha = sample_material(m.base_color_texture, input.uv).a * m.base_color.a;
+    alpha = (alpha - m.alpha_cutoff) / max(fwidth(alpha), 1e-4) + 0.5;
+    return float4(0.0, 0.0, 0.0, alpha);
+}
+
 static const float PI = 3.14159265;
 
 float distribution_ggx(float n_dot_h, float a)

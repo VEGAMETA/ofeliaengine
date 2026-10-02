@@ -9,7 +9,7 @@
 #![allow(clippy::print_stdout)]
 
 use engine_core::math::Vec3;
-use engine_frame::{Antialiasing, Quality, Upscale};
+use engine_frame::{Antialiasing, Msaa, PostAntialiasing, Quality, Upscale};
 use engine_golden::golden::{Outcome, Tolerance, compare};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights,
@@ -447,6 +447,28 @@ fn sponza_nearest_at_50_percent() {
         "sponza_nearest_50",
         Antialiasing::spatial(Upscale::Nearest),
         Quality::Performance,
+    ));
+}
+
+/// MSAA 4× (ADR 0075): the columns' and arches' silhouettes from four samples, the
+/// plants' alpha-tested leaves through alpha to coverage, the depth prepass.
+#[test]
+fn sponza_with_msaa_4x() {
+    check(&sponza_antialiased(
+        "sponza_msaa4",
+        Antialiasing::msaa(Msaa::X4),
+        Quality::Native,
+    ));
+}
+
+/// MSAA 4× and SMAA (ADR 0075): the samples resolve the geometry's edges, SMAA what is
+/// left (shading, alpha).
+#[test]
+fn sponza_with_msaa_4x_and_smaa() {
+    check(&sponza_antialiased(
+        "sponza_msaa4_smaa",
+        Antialiasing::msaa(Msaa::X4).with_post(PostAntialiasing::SMAA),
+        Quality::Native,
     ));
 }
 
