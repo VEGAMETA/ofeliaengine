@@ -4,7 +4,7 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-02.
+Last updated: 2026-10-10.
 
 ## 1. What matters most
 
@@ -77,10 +77,25 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-Nothing (2026-10-02).
+- The second core review (2026-10-10, `docs/research/core-audit-2.md`), with the
+  `flight` harness (`engine_runtime/examples/flight.rs`): waiting for the owner's answers
+  on the new queue below (the review's §6).
 
 ## 5. Queue (in order)
 
+Proposed by the second review (`docs/research/core-audit-2.md` §5); the order of the P0
+items against "faster checks" is the owner's call (the review's question 1).
+
+P0. **Small fixes the rest depends on** (the review's §3.1 and §3.3):
+   - `engine_rhi::Pipeline` without its copy of the device's function table (1,504 bytes
+     per pipeline: the renderers' construction overflows Windows' 1 MiB main thread on
+     the Radeon, so `game_loop` crashes on start), the renderers' large state off the
+     stack, and a test that builds the frame renderer with every feature on a 1 MiB thread
+     on both GPUs; then drop the 16–64 MiB thread workarounds in `perf_gate`, `aa_bench`
+     and `flight`;
+   - GPU pass times without overlap (exclusive times, or a serialized mode for the gate)
+     and the gate's baselines re-checked with them: today a pass after a long one without
+     a barrier absorbs its tail (feedback measured 2.4 ms, really 49 µs).
 0. **Faster checks, first after the review** (owner, 2026-10-02). Today
    `check.ps1 -Gpu -Perf` takes 10–25 min, and it grows with every crate and test. Per
    step, from recent runs:
@@ -120,9 +135,34 @@ Nothing (2026-10-02).
    Acceptance: a "fast turn" test (180° in 0.2 s) measures the pixels drawn below their
    wanted level and for how long. The target is no visible pop-in at the default budget.
    The test joins the perf gate.
+   The review adds: the geometry pool grows on the frame thread when streamed mesh levels
+   arrive (4–8 ms on the Radeon at the first fast turn): reserve it from the pack's totals
+   and grow ahead off the frame thread; give the upload ring growth and a high-water mark
+   (today a full ring drops the view).
 0c. Spatial upscales Lanczos-3 (with an anti-ringing clamp) and bicubic Catmull-Rom,
    measured in ADR 0075's table. No Lanczos-2: FSR 1's EASU covers it (owner,
    2026-10-02).
+0d. **Motion vectors out of the forward shading** (review §3.2). With motion vectors (every
+   default antialiasing) the lit forward shader takes 77–89 VGPRs instead of 64 and the
+   vertex stage 78 instead of 49: Sponza's forward +22–27 % on the Radeon, +5–11 % on the
+   RTX. Write them in the depth prepass (always drawn with the default AO), or reconstruct
+   camera motion from depth and draw object motion for movers only; extend the register
+   rule to the default variants (`scene_bench --pipeline-stats` prints them now).
+0e. **The present path on the iGPU** (review §3.4): the tone mapper writing the swapchain
+   image costs the Radeon 1.1 ms of frame against writing an offscreen image and copying
+   it. Offscreen + copy where measured faster, find the cause, a windowed scene in the gate.
+0f. **Moving instances** (review §3.5): ~70 ns each per frame on one thread (60,000 make
+   the RTX CPU-bound at 5.2 ms). Propagation, extraction, interpolation and upload in
+   parallel on the job system; interpolation on the GPU so movers upload per tick, not per
+   frame.
+0g. **A player crate** (`engine_app`, review §3.7; the owner decides its place, question
+   2): device, swapchain, latency provider, process setup (power throttling, MMCSS, CPU
+   sets), pipeline cache and the frame loop in one place; ECS components for lights,
+   skinned meshes and probes; features per view instead of per renderer;
+   `RenderDefaults` applied whole. The benches and the test bed move onto it.
+0h. Start-up overlap (device creation beside the pack's reading and cooking) and pipeline
+   variants created on first use (review §3.8): first frame 450–590 ms warm, 1.2–1.4 s
+   with the pipeline cache missing.
 1. GPU particles and GPU radix sort.
 2. Clustered decals.
 3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
@@ -136,6 +176,16 @@ Nothing (2026-10-02).
 6. Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
    (ADR 0067), frame generation. For frame generation, both DLSS FG and FSR 3.1 FG, off by
    default, with latency measured.
+6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms, bloom 1.6 ms (a single-pass
+   downsampler), local shadows redrawn every frame when casters move (a per-frame redraw
+   budget; never the patented static/dynamic split).
+6c. Memory (review §3.9): one transient heap for both frame slots where no transient
+   crosses queues (66 / 41 MiB), the global allocator decision (mimalloc, CLAUDE.md §5,
+   never made), CPU memory accounting (0.9–1.1 GiB private bytes unexplained).
+6d. Jolt's jobs on `engine_core::jobs` through JoltC's callback job system (review §3.10).
+6e. `forward.rs` (5,695 lines) split by feature (review §3.12).
+6f. Custom 3D materials and shaders (review §4; ADR first: it decides permutations and
+   pipeline management for the whole renderer; the owner decides when, question 3).
 7. Then: editor tools, Luau bindings and debugger, other tooling.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
@@ -187,9 +237,19 @@ Nothing (2026-10-02).
 - **Reliability:** two silent process exits (`perf_gate` once, `frame_bench` once) were
   never reproduced or explained. Watch for a recurrence and get a stack.
 - **Housekeeping:** ADR 0001 is still "Proposed" (needs measurements on a quiet machine).
-  `scene_bench` is wired by hand, outside `engine_frame`.
+  `scene_bench` is wired by hand, outside `engine_frame`. From the second review:
+  - 118 pairs of `*_got.png` / `*_ref.png` in `H:\` (2026-10-01, from a test no longer
+    in the tree);
+  - `game_loop`'s "input → camera" counts a stale window event (637 ms);
+  - `scene_bench --ao` takes the next argument as the AO quality even when it is a flag;
+  - CLAUDE.md §5 (mimalloc) and §2 ("engine_runtime: game executable") describe things
+    that do not exist yet.
 
 ## 7. First task of a new coordinator session: a fresh-eyes technical review
+
+The second review was done on 2026-10-10: `docs/research/core-audit-2.md`. Its harness
+`engine_runtime/examples/flight.rs` measures a game's frame end to end; rerun it in later
+reviews to compare.
 
 **Owner's instruction (2026-10-02): do this review yourself, and start no agents** (no
 `Agent` tool, no subagents, no background workers) until the owner explicitly says agents

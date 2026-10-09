@@ -830,6 +830,21 @@ fn main() {
                 .collect();
             println!("Pipeline statistics, {name}: {}", line.join("; "));
         }
+        // With motion vectors (temporal antialiasing), without and after the prepass, and
+        // after it with ambient occlusion (with `--ao`): the default settings' shading.
+        let kinds = ["motion", "motion after prepass", "motion + AO"];
+        for (name, per_kind) in names.iter().zip(renderer.motion_statistics(&device)) {
+            for (kind, stats) in kinds.iter().zip(per_kind) {
+                if stats.is_empty() {
+                    continue;
+                }
+                let line: Vec<String> = stats
+                    .iter()
+                    .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                    .collect();
+                println!("Pipeline statistics, {name}, {kind}: {}", line.join("; "));
+            }
+        }
         if msaa_stats > 1 {
             let samples = vk::SampleCountFlags::from_raw(msaa_stats);
             renderer.set_samples(&device, &bindless, samples).unwrap();

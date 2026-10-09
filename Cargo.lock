@@ -523,6 +523,8 @@ name = "engine_runtime"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
+ "engine_anim",
+ "engine_assets",
  "engine_core",
  "engine_ecs",
  "engine_frame",
@@ -531,6 +533,7 @@ dependencies = [
  "engine_profiler",
  "engine_render",
  "engine_rhi",
+ "engine_streaming",
 ]
 
 [[package]]
