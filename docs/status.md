@@ -249,9 +249,10 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    makes them on first use or on the device's warm-up thread; the device is created
    beside the window and the Fox's cook, the swapchain beside the renderers and the
    scene.
-1. GPU particles and GPU radix sort. The sort is done (2026-10-11, ADR 0080: 1 M keys
-   with a payload in 0.59 ms on the RTX, 9.9 ms on the Radeon; 16 K 16-bit keys in 50 /
-   163 µs); the particles are next.
+1. ~~GPU particles and GPU radix sort.~~ Done 2026-10-11: the sort (ADR 0080: 1 M keys
+   with a payload in 0.59 ms on the RTX, 9.9 ms on the Radeon) and the particles (ADR
+   0081: a GPU pool with GPU-only counts, deterministic, sorted by depth, drawn soft; 16 K
+   sparks in 0.13 / 0.65 ms, a golden shot on both GPUs).
 2. Clustered decals.
 2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity): `.hdr` (own
    decoder) and OpenEXR (the `exr` crate, BSD-3-Clause, or own) cooked from equirectangular
@@ -381,6 +382,11 @@ grown, divide and conquer); the old labels stay in parentheses.
     less.
 - **Presentation:** test 0e's choice with a monitor on the iGPU (the owner can connect one;
   later, owner 2026-10-10).
+- **Particles (ADR 0081):** lighting and shadows on them, depth-buffer collisions, trails
+  and mesh particles, user simulation code, large particles drawn at a lower resolution
+  (overdraw on the iGPU: 256 smoke puffs cost 1.6 ms there), a one-workgroup sort for small
+  counts (the sort is most of 16 K particles' cost), ECS components, a reactive mask (and
+  motion) for views that have none, orthographic views.
 - **Start-up (ADR 0079):**
   - acquiring the swapchain image late would let the Radeon's first frame record beside its
     swapchain (it waits 140 ms for it now);

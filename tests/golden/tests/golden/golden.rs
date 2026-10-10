@@ -108,6 +108,19 @@ fn procedural_scene() {
     check(&procedural("procedural"));
 }
 
+/// GPU particles (ADR 0081) over the procedural scene: sparks added and smoke blended,
+/// sorted back to front, the smoke fading where it meets the floor; 90 steps of 1/60 s
+/// before the capture.
+#[test]
+fn procedural_scene_with_particles() {
+    check(&Shot {
+        particles: true,
+        // 1.5 s of particles before the capture.
+        capture_after: Some(90),
+        ..procedural("procedural_particles")
+    });
+}
+
 /// The same without sky light, with the depth prepass: the other shading permutations.
 #[test]
 fn procedural_scene_without_sky() {

@@ -88,6 +88,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0078](0078-mip-fade.md) | Mip fade: streamed texture levels sharpen in over a short fade (the view's fractional minimum level, `VK_EXT_image_view_min_lod`; no shader change) | Accepted |
 | [0079](0079-pipelines-on-first-use.md) | Shading variants described up front and made on first use or by the device's warm-up thread, whichever comes first (`LazyPipeline`, a layout kept alive by what may still be made with it); start-up phases overlapped (the device beside the window, the swapchain beside the renderers and the scene) | Accepted |
 | [0080](0080-gpu-radix-sort.md) | GPU radix sort: reduce-then-scan over 4-bit digits (FidelityFX Parallel Sort's structure; no decoupled look-back, which NVIDIA patents), keys with a payload, counts written by the GPU, subgroup arithmetic required | Accepted |
+| [0081](0081-gpu-particles.md) | GPU particles: a pool with a dead list and two alive lists, counts and indirect arguments on the GPU only, emitters described per frame, deterministic random numbers, sorted by depth (ADR 0080), drawn soft and premultiplied in the frame renderer's hook | Accepted |
 
 ## Template
 

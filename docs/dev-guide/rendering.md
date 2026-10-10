@@ -1508,3 +1508,62 @@ ssr: Some(&ssr) }, .. }`, with a `ScreenSpaceReflections` per view at the view's
   renderer does it on `ViewCamera::cut`).
 - **Debugging:** `probes.stats()` (captured, waiting, faces drawn last frame, visible);
   `ForwardPasses::reflections` gives the normals, weights and SSR result to look at.
+
+## 17. Particles
+
+Sparks, smoke, dust, magic: GPU particles (ADR 0081). The pool lives on the GPU, and so
+do the counts: the CPU says what each emitter spawns, and never waits for the GPU.
+
+```rust
+use engine_render::particles::{ParticleEmitter, ParticleSystem, ParticleTarget};
+
+let mut particles = ParticleSystem::new(&device, &mut allocator, &bindless, 65_536, HDR_FORMAT)?;
+let torch = particles.add_emitter(ParticleEmitter {
+    transform: Affine3A::from_translation(torch_position),
+    rate: 400.0,                       // particles per second
+    lifetime: [0.4, 0.8],              // seconds, at random between the two
+    direction: Vec3::Y,
+    spread: 0.4,                       // the cone's half angle, radians
+    speed: [1.0, 2.0],
+    acceleration: Vec3::new(0.0, 2.0, 0.0), // heat rises
+    size: [0.15, 0.05],                // at birth, at death
+    color: [Vec4::new(4.0, 1.5, 0.3, 1.0), Vec4::new(1.0, 0.2, 0.0, 0.0)],
+    additive: 1.0,                     // fire adds light; smoke: 0
+    ..ParticleEmitter::default()
+});
+
+// Each frame, before the view (the emitters go up with the frame's ring):
+particles.emitter_mut(torch).unwrap().transform = torch_transform;
+let frame = particles.prepare(&mut ring, dt, camera.position, camera_forward, camera.far);
+// In `add_view_with`'s hook: simulate, sort, draw over the scene.
+frame_renderer.add_view_with(fg, ctx, view, scene, &camera, target, |fg, targets| {
+    if let Some(frame) = frame {
+        particles.add_passes(fg, &bindless, &frame, &ParticleTarget {
+            color: targets.color,
+            depth: targets.depth,
+            reactive: targets.motion.and_then(|m| m.reactive),
+            clip_from_world: targets.motion.map_or(targets.camera.clip_from_world, |m| m.clip_from_world),
+            camera: targets.camera,
+        });
+    }
+})?;
+```
+
+- **What an emitter does:** it spawns `rate` per second (the fractions add up) and
+  `burst(id, n)` more at once (an explosion). Particles start in a ball of `radius` and
+  move into a cone at a speed between the two. They accelerate (gravity, heat), slow
+  with `drag`, spin, and go from the birth size and color to the death ones.
+  `remove_emitter` kills its particles; to let them finish, set `rate` to 0 first.
+- **How they look:** unlit, from a bindless `texture` or a soft disc, blended over the
+  scene back to front (sorted on the GPU) or added (`additive`). They fade over
+  `soft_distance` before the geometry behind them, so smoke does not cut into the floor.
+- **The same every time:** a particle's random numbers depend on its birth order and the
+  emitter's `seed`, not on timing: replays and tests see the same particles.
+- **What it costs** (1080p): 16 K small sparks take about 0.13 ms on an RTX 4060 Ti and
+  0.65 ms on a two-CU integrated Radeon, mostly the sort; 64 K take 0.22 and 2.4 ms. Large
+  particles cost their overdraw: 256 smoke puffs filling much of the screen take 0.1 ms on
+  the RTX and 1.6 ms on the integrated GPU. Keep big particles few, or small.
+- **Not yet:** lighting and shadows on particles, collisions, trails, mesh particles,
+  your own simulation code, ECS components (a system you drive yourself today), particles
+  in orthographic views. Under temporal antialiasing particles may ghost in a view without
+  other transparent surfaces (no reactive mask there yet).
