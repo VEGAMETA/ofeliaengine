@@ -19,7 +19,7 @@ use engine_render::graph::{Access, RenderGraph, TextureDesc};
 use engine_render::material::MaterialTable;
 use engine_render::mesh::{GeometryCapacity, GeometryPool};
 use engine_render::streaming::LodView;
-use engine_render::texture_pool::TexturePool;
+use engine_render::texture_pool::{MipFade, TexturePool};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc};
@@ -230,6 +230,9 @@ impl Bed {
         let mut geometry =
             GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
         let mut textures = TexturePool::new(&device, FRAME_BUDGET, 1);
+        // Levels fade in (ADR 0078) by frames, not by the wall clock: a test's frames
+        // take far less than a game's.
+        textures.set_mip_fade(Some(MipFade::Frames(4)));
         let mut materials = MaterialTable::new(1);
         let mut budget = GpuBudget::with_settings(BudgetSettings {
             streaming_limit: Some(limit),
@@ -469,14 +472,15 @@ impl Bed {
     }
 
     /// Frames until the streamer and the pools have nothing left to do (at most `limit`),
-    /// and a few more: the frame count.
+    /// and a few more: the frame count. Levels still fading in (ADR 0078) count as work.
     pub fn settle(&mut self, camera: Camera, limit: usize) -> usize {
         let mut quiet = 0;
         for frame in 0..limit {
             self.frame(camera);
             let idle = self.streamer.as_ref().is_some_and(SceneStreamer::idle)
                 && self.textures.pending().0 == 0
-                && self.textures.pending_moves() == 0;
+                && self.textures.pending_moves() == 0
+                && self.textures.fading() == 0;
             quiet = if idle { quiet + 1 } else { 0 };
             // Feedback is a few frames behind, and a coarser level waits for its hold.
             if quiet >= 70 {

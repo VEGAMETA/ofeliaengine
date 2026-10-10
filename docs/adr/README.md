@@ -85,6 +85,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0075](0075-antialiasing-and-scaling-modes.md) | Every antialiasing and scaling mode as three parts (raster samples, how the render size reaches the output, a filter after tone mapping), validated per GPU: MSAA 2/4/8 with alpha to coverage and every screen-space effect, FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest, bilinear, integer and FSR 1 scaling; nothing costs a view that does not use it | Accepted |
 | [0076](0076-gpu-memory-budget-and-streaming.md) | A GPU memory budget owner (the OS budget, a share for the game, grants class by class), texture levels from a separate low-resolution feedback pass within it (images reallocated by copy), mesh detail levels stored and streamed as vertex prefixes, pack version 3, `engine_streaming` | Accepted |
 | [0077](0077-faster-checks.md) | Faster checks: one workspace build per check, tests under cargo-nextest filtered per step (GPU crates on both GPUs, Tracy only for allocation tests, in its own target directory), doc tests and formatting for what the branch changed, and a workspace-hack crate that unifies dependency features so builds of a few packages reuse the workspace's | Accepted |
+| [0078](0078-mip-fade.md) | Mip fade: streamed texture levels sharpen in over a short fade (the view's fractional minimum level, `VK_EXT_image_view_min_lod`; no shader change) | Accepted |
 
 ## Template
 

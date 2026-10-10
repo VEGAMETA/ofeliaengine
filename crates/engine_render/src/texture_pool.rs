@@ -34,6 +34,7 @@ use crate::graph::{Access, BufferState, FrameGraph, ImportedBuffer};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError};
 use std::collections::VecDeque;
+use std::time::{Duration, Instant};
 
 /// A texture in a [`TexturePool`]. Ids of removed textures are stale.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -289,6 +290,11 @@ struct PoolTexture {
     pending: u32,
     /// First level of the view: the resident levels are `resident..levels`.
     resident: u32,
+    /// The level the picture shows from: `resident`, or a coarser fractional level while
+    /// a new level fades in; `levels` before anything was shown.
+    shown: f32,
+    /// The first level the view lets the sampler read (`shown` rounded up to a fade step).
+    view_lod: f32,
     /// View over the resident levels.
     view: Option<vk::ImageView>,
     /// Its bindless index.
@@ -319,6 +325,33 @@ impl PoolTexture {
     fn bytes(&self) -> u64 {
         self.allocation.as_ref().map_or(0, Allocation::size)
     }
+}
+
+/// How streamed textures show a level that arrived ([`TexturePool::set_mip_fade`],
+/// ADR 0078): not at once, but from a view that starts a step coarser and moves finer a
+/// quarter of a level at a time, so the picture sharpens instead of popping. Needs
+/// `VK_EXT_image_view_min_lod` ([`Device::image_view_min_lod`]); without it levels show
+/// at once.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MipFade {
+    /// Each level over this long, by the wall clock (games).
+    Time(Duration),
+    /// Each level over this many frames (deterministic: tests and captures).
+    Frames(u32),
+}
+
+impl MipFade {
+    /// A level in 100 ms (four steps of 25 ms): one to three levels arrive together, so
+    /// a fade takes 0.1-0.3 s, about as long as the levels took to arrive.
+    pub const DEFAULT: Self = Self::Time(Duration::from_millis(100));
+}
+
+/// Steps per level of a fade: each one a new view and bindless index.
+const FADE_STEPS: f32 = 4.0;
+
+/// `level` rounded up to a fade step: a view never starts finer than the fade has come.
+fn fade_step(level: f32) -> f32 {
+    (level * FADE_STEPS).ceil() / FADE_STEPS
 }
 
 /// A texture's numbers ([`TexturePool::info`]).
@@ -424,6 +457,14 @@ pub struct TexturePool {
     retiring_bytes: u64,
     ring: Option<StagingRing>,
     ring_bytes: u64,
+    /// How levels that arrive are shown; `min_lod`: whether the device can fade them.
+    fade: Option<MipFade>,
+    min_lod: bool,
+    /// Textures whose new levels are fading in, and when the last frame began.
+    fading: Vec<TextureId>,
+    fade_clock: Option<Instant>,
+    /// Views made by fade steps so far.
+    fade_views: u64,
 }
 
 impl core::fmt::Debug for TexturePool {
@@ -435,6 +476,7 @@ impl core::fmt::Debug for TexturePool {
             .field("uploaded_bytes", &self.uploaded_bytes)
             .field("live_bytes", &self.live_bytes)
             .field("staging_ring", &self.ring.as_ref().map(|r| r.spans.size))
+            .field("fading", &self.fading.len())
             .finish()
     }
 }
@@ -460,7 +502,42 @@ impl TexturePool {
             retiring_bytes: 0,
             ring: None,
             ring_bytes: DEFAULT_STAGING_BYTES,
+            fade: Some(MipFade::DEFAULT),
+            min_lod: device.image_view_min_lod(),
+            fading: Vec::new(),
+            fade_clock: None,
+            fade_views: 0,
         }
+    }
+
+    /// How levels that arrive are shown ([`MipFade::DEFAULT`] unless set; `None`: at once,
+    /// as test beds that capture frames want). Fades under way finish at the next frame
+    /// when turned off.
+    pub fn set_mip_fade(&mut self, fade: Option<MipFade>) {
+        self.fade = fade;
+    }
+
+    /// How levels that arrive are shown ([`Self::set_mip_fade`]).
+    pub fn mip_fade(&self) -> Option<MipFade> {
+        self.fade
+    }
+
+    /// Textures whose new levels are still fading in.
+    pub fn fading(&self) -> usize {
+        self.fading.len()
+    }
+
+    /// Views (and bindless indices) made by fade steps so far: what fading costs beyond
+    /// showing levels at once.
+    pub fn fade_views(&self) -> u64 {
+        self.fade_views
+    }
+
+    /// The level a texture's picture shows from: its largest resident level, or a coarser
+    /// fractional one while a new level fades in; `None` before any of it is resident.
+    pub fn shown_level(&self, id: TextureId) -> Option<f32> {
+        let t = self.texture(id)?;
+        (t.resident < t.levels).then_some(t.shown)
     }
 
     /// The staging ring's size, for streaming ([`DEFAULT_STAGING_BYTES`] by default):
@@ -560,6 +637,8 @@ impl TexturePool {
             uploaded: 0,
             pending: 0,
             resident: levels,
+            shown: levels as f32,
+            view_lod: levels as f32,
             view: None,
             bindless: None,
         };
@@ -822,8 +901,8 @@ impl TexturePool {
     /// Frees what finished frames no longer use, makes pending reallocations and records
     /// queued uploads, oldest first, up to the budget (reallocations first: their copies
     /// count as their bytes). Uploaded levels are readable (and textures have bindless
-    /// indices) in every pass declared after this call. Allocates only on frames that
-    /// upload or reallocate.
+    /// indices) in every pass declared after this call. Fades of levels that arrived move
+    /// on ([`MipFade`]). Allocates only on frames that upload, reallocate or step a fade.
     pub fn begin_frame(
         &mut self,
         fg: &mut FrameGraph<'_>,
@@ -833,6 +912,7 @@ impl TexturePool {
     ) -> Result<(), RhiError> {
         engine_profiler::zone!("render::TexturePool::begin_frame");
         self.collect_retired(allocator, frame_number);
+        self.advance_fades(bindless, frame_number)?;
         self.frame_bytes = 0;
         if self.moves.is_empty() && self.queue.is_empty() {
             return Ok(());
@@ -1215,14 +1295,15 @@ impl TexturePool {
     }
 
     /// Gives a texture a view over its resident levels (the uploaded run from its smallest
-    /// level up) and a new bindless index when they changed.
+    /// level up) and a new bindless index when they changed. Levels joining a picture
+    /// already shown fade in ([`MipFade`]): the view starts at the level shown.
     fn refresh_view(
         &mut self,
         id: TextureId,
         bindless: &Bindless,
         frame_number: u64,
     ) -> Result<(), RhiError> {
-        let device = self.device.clone();
+        let fade = self.fade.is_some() && self.min_lod;
         let Some(t) = self.texture_mut(id) else {
             return Ok(());
         };
@@ -1233,35 +1314,121 @@ impl TexturePool {
         if resident == t.resident && t.view.is_some() {
             return Ok(());
         }
-        let mut retired_view = None;
-        if resident < t.levels {
-            // SAFETY: a view of the pool's image over levels it holds and has uploaded.
-            let view = unsafe {
-                device.create_image_view(
-                    &vk::ImageViewCreateInfo::default()
-                        .image(t.image)
-                        .view_type(vk::ImageViewType::TYPE_2D)
-                        .format(t.format.vk())
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: resident - t.base,
-                            level_count: t.levels - resident,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        }),
-                    None,
-                )
-            };
-            let view = view.map_err(RhiError::vk("vkCreateImageView"))?;
-            if let Some(old) = t.bindless.take() {
-                bindless.remove_sampled_image(old, frame_number);
-            }
-            retired_view = t.view.replace(view);
-            t.bindless = bindless.add_sampled_image(view);
-        }
+        let finer = (resident as f32) < t.shown && t.shown < t.levels as f32;
+        t.shown = if fade && finer {
+            t.shown
+        } else {
+            resident as f32
+        };
+        let lod = fade_step(t.shown).max(resident as f32);
         t.resident = resident;
+        if resident < t.levels {
+            self.install_view(id, lod, bindless, frame_number)?;
+        }
+        if lod > resident as f32 && !self.fading.contains(&id) {
+            self.fading.push(id);
+        }
+        Ok(())
+    }
+
+    /// Gives a texture a new view over its resident levels that lets the sampler read from
+    /// `lod` on (its first resident level, or a coarser fractional one while a level fades
+    /// in) and a new bindless index; the old view is freed once the frames that used it
+    /// have finished.
+    fn install_view(
+        &mut self,
+        id: TextureId,
+        lod: f32,
+        bindless: &Bindless,
+        frame_number: u64,
+    ) -> Result<(), RhiError> {
+        let device = self.device.clone();
+        let Some(t) = self.texture_mut(id) else {
+            return Ok(());
+        };
+        let resident = t.resident;
+        // The image's mip `i` is the texture's level `base + i`: so is the view's minimum.
+        let mut min_lod = vk::ImageViewMinLodCreateInfoEXT::default().min_lod(lod - t.base as f32);
+        let mut info = vk::ImageViewCreateInfo::default()
+            .image(t.image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(t.format.vk())
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: resident - t.base,
+                level_count: t.levels - resident,
+                base_array_layer: 0,
+                layer_count: 1,
+            });
+        if lod > resident as f32 {
+            info = info.push_next(&mut min_lod);
+        }
+        // SAFETY: a view of the pool's image over levels it holds and has uploaded; a
+        // minimum level above the first one only while fading, which `refresh_view` and
+        // `advance_fades` start only on a device with the `minLod` feature.
+        let view = unsafe { device.create_image_view(&info, None) }
+            .map_err(RhiError::vk("vkCreateImageView"))?;
+        if let Some(old) = t.bindless.take() {
+            bindless.remove_sampled_image(old, frame_number);
+        }
+        let retired_view = t.view.replace(view);
+        t.bindless = bindless.add_sampled_image(view);
+        t.view_lod = lod;
         if let Some(old) = retired_view {
             self.retired.push((frame_number, Retired::View(old)));
+        }
+        Ok(())
+    }
+
+    /// Moves every fade on by the time since the last frame ([`MipFade`]): a texture's
+    /// view starts a fade step finer each time the fade passes one, until it shows every
+    /// resident level. Allocates only when a step retires a view.
+    fn advance_fades(&mut self, bindless: &Bindless, frame_number: u64) -> Result<(), RhiError> {
+        let now = Instant::now();
+        let since = self
+            .fade_clock
+            .replace(now)
+            .map_or(Duration::ZERO, |then| now - then);
+        if self.fading.is_empty() {
+            return Ok(());
+        }
+        let step = match self.fade.filter(|_| self.min_lod) {
+            // Turned off: what fades shows at once.
+            None => f32::INFINITY,
+            // A long frame (a hitch) does not jump a fade to its end.
+            Some(MipFade::Time(per_level)) => {
+                since.min(Duration::from_millis(100)).as_secs_f32()
+                    / per_level.as_secs_f32().max(1e-6)
+            }
+            Some(MipFade::Frames(frames)) => 1.0 / frames.max(1) as f32,
+        };
+        let mut changed = false;
+        let mut i = 0;
+        while i < self.fading.len() {
+            let id = self.fading[i];
+            let Some(t) = self.texture_mut(id) else {
+                self.fading.swap_remove(i);
+                continue;
+            };
+            let resident = t.resident as f32;
+            t.shown = (t.shown - step).max(resident);
+            let lod = fade_step(t.shown).max(resident);
+            // A reallocated texture gets its view (from `shown`) once its copy is made.
+            let refresh = lod < t.view_lod && t.view.is_some();
+            let done = t.shown <= resident;
+            if refresh {
+                self.install_view(id, lod, bindless, frame_number)?;
+                self.fade_views += 1;
+                changed = true;
+            }
+            if done {
+                self.fading.swap_remove(i);
+            } else {
+                i += 1;
+            }
+        }
+        if changed {
+            self.generation += 1;
         }
         Ok(())
     }

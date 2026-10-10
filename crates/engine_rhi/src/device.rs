@@ -73,6 +73,8 @@ pub struct Device {
     latency: LatencyExtensions,
     /// `VK_EXT_hdr_metadata` is enabled.
     hdr_metadata: bool,
+    /// `VK_EXT_image_view_min_lod` and its `minLod` feature are enabled.
+    image_view_min_lod: bool,
     /// `shaderFloat16` and `shaderInt16` are enabled.
     shader_float16: bool,
     /// Pipelines capture the driver's statistics (`ENGINE_PIPELINE_STATS=1`).
@@ -229,6 +231,25 @@ impl Device {
             extensions.push(ash::ext::hdr_metadata::NAME.as_ptr());
         }
 
+        // A fractional first level per image view: streamed textures fade new levels in
+        // (ADR 0078). The feature is queried: the extension alone does not promise it.
+        let mut q_min_lod = vk::PhysicalDeviceImageViewMinLodFeaturesEXT::default();
+        if adapter.caps.image_view_min_lod {
+            let mut query = vk::PhysicalDeviceFeatures2::default().push_next(&mut q_min_lod);
+            // SAFETY: the chain holds the structure of an extension the device lists.
+            unsafe {
+                instance
+                    .raw()
+                    .get_physical_device_features2(adapter.physical, &mut query);
+            }
+        }
+        let image_view_min_lod = q_min_lod.min_lod == vk::TRUE;
+        let mut e_min_lod = vk::PhysicalDeviceImageViewMinLodFeaturesEXT::default().min_lod(true);
+        if image_view_min_lod {
+            extensions.push(c"VK_EXT_image_view_min_lod".as_ptr());
+            features2 = features2.push_next(&mut e_min_lod);
+        }
+
         // The driver's statistics of compiled pipelines, on request: measuring shaders.
         let pipeline_statistics = adapter.caps.pipeline_executable_info
             && std::env::var("ENGINE_PIPELINE_STATS").is_ok_and(|v| v == "1");
@@ -374,6 +395,7 @@ impl Device {
             adapter: adapter.clone(),
             latency,
             hdr_metadata,
+            image_view_min_lod,
             shader_float16: adapter.caps.shader_float16,
             pipeline_statistics,
             extra_extensions,
@@ -411,6 +433,12 @@ impl Device {
     /// Which latency extensions are enabled.
     pub fn latency_extensions(&self) -> LatencyExtensions {
         self.latency
+    }
+
+    /// Whether image views can start at a fractional level (`VK_EXT_image_view_min_lod`
+    /// with its `minLod` feature): streamed textures fade new levels in (ADR 0078).
+    pub fn image_view_min_lod(&self) -> bool {
+        self.image_view_min_lod
     }
 
     /// Whether `VK_EXT_hdr_metadata` is enabled ([`Swapchain::set_hdr_metadata`]).

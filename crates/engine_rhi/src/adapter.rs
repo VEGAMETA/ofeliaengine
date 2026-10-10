@@ -100,6 +100,10 @@ pub struct OptionalCaps {
     pub index_type_uint8: bool,
     /// `VK_EXT_hdr_metadata` (mastering metadata for HDR swapchains).
     pub hdr_metadata: bool,
+    /// `VK_EXT_image_view_min_lod` (a fractional first level per image view: streamed
+    /// textures fade their new levels in, ADR 0078); its `minLod` feature is checked when
+    /// the device is made.
+    pub image_view_min_lod: bool,
     /// `shaderFloat16` and `shaderInt16`: 16-bit arithmetic in shaders (the FSR 3.1
     /// upscaler's faster variants, ADR 0060).
     pub shader_float16: bool,
@@ -349,6 +353,7 @@ impl Adapter {
                 || has(c"VK_EXT_line_rasterization"),
             index_type_uint8: has(c"VK_KHR_index_type_uint8") || has(c"VK_EXT_index_type_uint8"),
             hdr_metadata: has(c"VK_EXT_hdr_metadata"),
+            image_view_min_lod: has(c"VK_EXT_image_view_min_lod"),
             shader_float16: f12.shader_float16 == vk::TRUE && base.shader_int16 == vk::TRUE,
             sample_rate_shading: base.sample_rate_shading == vk::TRUE,
         };
