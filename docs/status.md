@@ -34,7 +34,9 @@ decisions). In short:
   reports to the owner in Russian.
 - **Agents.** None until the owner allows them again (see §7). After that, at most **2**
   agents at a time, all on Opus. Each works on one task in its own worktree under
-  `H:\Desktop\ofeliaengine-wt\<name>`, with its own `<name>-target`, and ends with a PR.
+  `H:\Desktop\ofeliaengine-wt\<name>`, building in its own `C:\cargo-target\<name>` (the NVMe
+  drive, ADR 0077), and ends with a PR. The main checkout builds in `C:\cargo-target\ofeliaengine`
+  (`.cargo/config.toml`).
 - **Gate.**
   - The coordinator merges after its own `tools/check.ps1 -Gpu -Perf`, plus `-Deny` when
     dependencies change.
@@ -79,9 +81,12 @@ tooling included) about **50 %**.
 
 - Faster checks (queue item 0), by the coordinator, after the second core review
   (2026-10-10, `docs/research/core-audit-2.md`; the owner answered its questions the same
-  day, see §5). First part: ADR 0077 (cargo-nextest, one build per check, unified
-  dependency features, doc tests and formatting for what changed, `-Affected`): a check
-  with nothing changed 632 → 168 s.
+  day, see §5). Merged: ADR 0077 and its two addenda (cargo-nextest, one build per check,
+  unified dependency features, doc tests and formatting for what changed, `-Affected`, one
+  test binary per crate, line tables, builds on the NVMe drive): a check with nothing
+  changed 632 → 141 s, the gate `-Gpu -Perf` 10–25 → 15 min. Half of it is now the perf
+  step's waits for a quiet CPU (289 + 152 s of 749 s): next, the perf step's waits and
+  variance (item 0).
 
 ## 5. Queue (in order)
 
@@ -115,9 +120,15 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    Done (ADR 0077 and its addendum): duplicates removed, one build per check, nextest,
    `-Affected`, doc tests, docs and formatting for what changed, one test binary per crate
    (100 → 45), test builds with line tables only, ADR 0001 accepted (rust-lld measured
-   ~12 % faster than link.exe): 632 → 144 s with nothing changed. Left: sccache for agents'
-   worktrees; the target directory on an NVMe drive (`C:`, owner 2026-10-10: measure after
-   the test changes); the perf step's 3 runs × 200 frames per scene (a variance study first).
+   ~12 % faster than link.exe), the build directory on the NVMe drive
+   (`C:\cargo-target\ofeliaengine`: rebuilding every test after a change in engine_core
+   40-58 s → 11-15 s): 632 → 144 s with nothing changed. Left: sccache for agents' worktrees
+   (when agents run again); the perf step's 3 runs × 200 frames per scene (a variance study
+   first).
+   For that study: `sponza_streamed` on the Radeon reads +10 to +23 % against its baseline
+   from run to run while `sponza` stays within 0.5 % (2026-10-10; the same with and without
+   PR #120's streaming fix): which levels are resident when the timed frames start depends
+   on timing. Make the scene settle to a deterministic residency before timing.
 0a. **The review's P0 fixes** (§3.1 and §3.3):
    - `engine_rhi::Pipeline` without its copy of the device's function table (1,504 bytes
      per pipeline: the renderers' construction overflows Windows' 1 MiB main thread on
@@ -170,6 +181,12 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    with the pipeline cache missing.
 1. GPU particles and GPU radix sort.
 2. Clustered decals.
+2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity): `.hdr` (own
+   decoder) and OpenEXR (the `exr` crate, BSD-3-Clause, or own) cooked from equirectangular
+   into BC6H cube maps with mips (DDC, pack); a background cube larger than the lighting
+   cube's 128² faces; prefiltering that stays clean under a bright sun in the map (filtered
+   importance sampling); optionally the sun extracted into the directional light for its
+   shadows; a golden shot with a CC0 HDRI (Poly Haven) on both GPUs. About 3-5 days.
 3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
    medallions on the curtains (roughness 0.28, metallic 0.74) must read gold when seen from
    above in shade. Today they look dark brown there. The material and the shading are
@@ -178,6 +195,10 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
 3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
    first: it decides permutations and pipeline management for the whole renderer (§9
    material graph and hand-written Slang).
+3c. **Directional GTAO and GTSO** (owner, 2026-10-10: after GI): bent normals (XeGTAO's
+   directional term, about +25 % of the AO pass) for ambient light along the unoccluded
+   direction and cone-based specular occlusion; fixes dielectrics looking too bright next
+   to metals in shade indoors (§6). Own entry points, only in views with AO (register rule).
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
    visibility bits (patent, ADR 0035 note).
 5. Virtual shadow maps.
@@ -206,6 +227,8 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
   - froxel volumetric fog;
   - per-pixel local-shadow mask (the shadowed forward shading costs +10–12 % on the iGPU);
   - softer shadow filters;
+  - contact shadows of local lights (owner, 2026-10-10: on request): Bend's pass per light,
+    for the brightest one or two; today only the sun has them;
   - reflections on transparent surfaces;
   - GTSO;
   - probe shadow-map caching;

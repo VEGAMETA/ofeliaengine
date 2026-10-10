@@ -1,3 +1,9 @@
+[build]
+# The build on the NVMe drive: rebuilding every test after a change in engine_core takes
+# 11-15 s there, 40-58 s on the SATA HDD that holds the repository (ref-1, ADR 0077).
+# CARGO_TARGET_DIR overrides it: agents' worktrees build in C:/cargo-target/<task>.
+target-dir = "C:/cargo-target/ofeliaengine"
+
 [target.x86_64-pc-windows-msvc]
 # `rust-lld` ships with rustup; for the MSVC target rustc drives it in `lld-link` flavor.
 # No separate LLVM install is needed (ADR 0001).

@@ -35,7 +35,8 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
   checkout's working tree**; work in your own worktree:
   `git -C H:/Desktop/ofeliaengine fetch && git -C H:/Desktop/ofeliaengine worktree add H:/Desktop/ofeliaengine-wt/<task> -b feat/<task> origin/main`
 - **Your own target dir**, never shared (cargo keys workspace crates by relative path; parallel
-  builds from other worktrees corrupt each other): `export CARGO_TARGET_DIR=H:/Desktop/ofeliaengine-wt/<task>-target`.
+  builds from other worktrees corrupt each other), on the NVMe drive (ADR 0077: 4× faster rebuilds than
+  the HDD the repository is on): `export CARGO_TARGET_DIR=C:/cargo-target/<task>`.
 - Test scenes: a worktree has no `test-assets/`; set
   `export ENGINE_TEST_ASSETS='H:\Desktop\ofeliaengine\test-assets'` (golden tests, perf gate) and
   pass absolute paths to examples (`H:/Desktop/ofeliaengine/test-assets/Sponza/Sponza.gltf`).

@@ -26,6 +26,9 @@ cargo install cargo-nextest --locked
   test file as a module (`mod forward;` for `tests/<crate>/forward.rs`); tests that count
   allocations share `tests/zero_alloc/main.rs` and its counting allocator. A new test file
   is a new module there, not a new binary (each binary links the whole engine).
+- **Builds go to `C:\cargo-target\ofeliaengine`** (`.cargo/config.toml`): the NVMe drive
+  rebuilds four times faster than the HDD the repository is on. Set `CARGO_TARGET_DIR` to
+  build elsewhere; an agent's worktree builds in `C:\cargo-target\<task>`.
 - **Test builds carry line tables only** (`[profile.test]`): file and line in panics and
   backtraces. To see variables in a debugger, build the test with
   `CARGO_PROFILE_TEST_DEBUG=full`.
