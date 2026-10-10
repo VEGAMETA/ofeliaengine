@@ -213,3 +213,16 @@ gone (only inside `cargo-target`, never `ofeliaengine` or one in use). Logs, gol
 renders and the shader cache stay in the repository's `target\` (small files people read).
 A machine without that drive layout overrides the directory with `CARGO_TARGET_DIR`.
 
+
+## Addendum (2026-10-11): dependencies built for the host
+
+Proc macros and build scripts get their dependencies built for the host, and Cargo
+resolves those features apart from the target's: the hack crate's `[dependencies]` do not
+reach them. `half` (ADR 0083) brought zerocopy-derive, which builds `syn` 2 with `full`
+in every build that has engine_assets and without it in the others (engine_crash,
+engine_editor), so each switch rebuilt `syn` and every proc macro and crate above it. The
+hack crate now has an empty build script and `syn` with `full` in its
+`[build-dependencies]`, which Cargo unifies with the host's. `tools/feature-drift.ps1` keys
+features by name and version (`cargo tree --format "{p}|{f}"`): `syn` 3 (bytemuck's
+derive, engine_reflect_derive) has features of its own, and by name alone the check
+reported 32 false pairs for it.

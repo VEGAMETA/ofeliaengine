@@ -90,7 +90,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0080](0080-gpu-radix-sort.md) | GPU radix sort: reduce-then-scan over 4-bit digits (FidelityFX Parallel Sort's structure; no decoupled look-back, which NVIDIA patents), keys with a payload, counts written by the GPU, subgroup arithmetic required | Accepted |
 | [0081](0081-gpu-particles.md) | GPU particles: a pool with a dead list and two alive lists, counts and indirect arguments on the GPU only, emitters described per frame, deterministic random numbers, sorted by depth (ADR 0080), drawn soft and premultiplied in the frame renderer's hook | Accepted |
 | [0082](0082-decals.md) | Decals: clustered in the forward shading (DOOM 2016, Godot 4, Bevy; doubles the shading entry points) or a decal buffer before lighting (needs the prepass, opaque only) | Proposed |
-| [0083](0083-hdri-environments.md) | HDRI environments: `.hdr` panoramas kept as RGBE and decoded on the GPU, a background cube of their own, the sun found and taken out into a directional light (lighting cube without its spike; shadows); BC6H cooking next | Accepted |
+| [0083](0083-hdri-environments.md) | HDRI environments: `.hdr` panoramas kept as RGBE and decoded on the GPU, a background cube of their own turned when sampled, the sun found and taken out into a directional light (lighting cube without its spike; shadows); cooked into BC6H cubes for the DDC and packs (version 4) | Accepted |
 
 ## Template
 

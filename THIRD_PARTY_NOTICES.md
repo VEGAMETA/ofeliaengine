@@ -19,7 +19,8 @@ the dependency.
 | gltf 1.4.1 + gltf-json + gltf-derive (+ serde, serde_json, byteorder, lazy_static, inflections, itoa, memchr, zmij) | MIT OR Apache-2.0 (byteorder and memchr Unlicense OR MIT; inflections, zmij MIT) | glTF 2.0 parsing in `engine_assets` (ADR 0033) |
 | png 0.18.1 (+ fdeflate 0.3, flate2 1.1, miniz_oxide 0.8 and 0.9, crc32fast 1.5, simd-adler32 0.3, adler2 2) | MIT OR Apache-2.0 (miniz_oxide MIT OR Zlib OR Apache-2.0; simd-adler32 MIT; adler2 0BSD OR MIT OR Apache-2.0) | PNG decoding of textures in `engine_assets` (ADR 0040) |
 | zune-jpeg 0.5.15 (+ zune-core 0.5) | MIT OR Apache-2.0 OR Zlib | JPEG decoding of textures in `engine_assets` (ADR 0040) |
-| block_compression 0.10.0 (© Nils Hasenbanck; a port of Intel's ISPC Texture Compressor, © Intel Corporation) | MIT | BC7 and BC5 texture compression in `engine_assets` (ADR 0041) |
+| block_compression 0.10.0 (© Nils Hasenbanck; a port of Intel's ISPC Texture Compressor, © Intel Corporation) | MIT | BC7 and BC5 texture compression in `engine_assets` (ADR 0041), BC6H for HDR panoramas (ADR 0083) |
+| half 2.7.1 (+ zerocopy 0.8.62) | MIT OR Apache-2.0 (zerocopy BSD-2-Clause OR Apache-2.0 OR MIT) | half floats for BC6H compression (block_compression's `bc6h` feature) in `engine_assets` (ADR 0083) |
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
@@ -94,6 +95,7 @@ condition of this section (ADR 0036). License texts are next to each font.
 |---|---|---|
 | bytemuck_derive 1.12 (+ proc-macro2, quote, syn 3, unicode-ident) | Zlib OR Apache-2.0 OR MIT (the others MIT OR Apache-2.0; unicode-ident also Unicode-3.0) | `#[derive(Pod, Zeroable)]` with compile-time padding checks (ADR 0017) |
 | num-derive 0.4, smart-default 0.7, serde_derive, thiserror-impl 2 (+ syn 2) | MIT OR Apache-2.0 (smart-default MIT) | derives inside minidump-writer (ADR 0061) |
+| zerocopy-derive 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT | derives inside zerocopy (through half, ADR 0083) |
 
 ## Rust crates (dev-dependencies only, not shipped)
 

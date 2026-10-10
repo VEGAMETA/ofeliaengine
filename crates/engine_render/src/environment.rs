@@ -138,6 +138,7 @@ pub(crate) struct Image {
 }
 
 impl Image {
+    /// An image written by compute shaders (a storage view per mip) and sampled.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         device: &Device,
@@ -148,6 +149,52 @@ impl Image {
         height: u32,
         levels: u32,
         kind: ImageKind,
+    ) -> Result<Self, RhiError> {
+        Self::with_storage(
+            device,
+            allocator,
+            bindless,
+            format,
+            (width, height),
+            levels,
+            kind,
+            true,
+        )
+    }
+
+    /// An image filled by copies (block-compressed formats, which cannot be storage
+    /// images) and sampled: no storage views.
+    pub(crate) fn sampled(
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        format: vk::Format,
+        (width, height): (u32, u32),
+        levels: u32,
+        kind: ImageKind,
+    ) -> Result<Self, RhiError> {
+        Self::with_storage(
+            device,
+            allocator,
+            bindless,
+            format,
+            (width, height),
+            levels,
+            kind,
+            false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn with_storage(
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        format: vk::Format,
+        (width, height): (u32, u32),
+        levels: u32,
+        kind: ImageKind,
+        storage: bool,
     ) -> Result<Self, RhiError> {
         let cube = matches!(kind, ImageKind::Cube | ImageKind::CubeArray(_));
         let layers = match kind {
@@ -177,11 +224,13 @@ impl Image {
                 .array_layers(layers)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .tiling(vk::ImageTiling::OPTIMAL)
-                .usage(
+                .usage(if storage {
                     vk::ImageUsageFlags::SAMPLED
                         | vk::ImageUsageFlags::STORAGE
-                        | vk::ImageUsageFlags::TRANSFER_SRC,
-                )
+                        | vk::ImageUsageFlags::TRANSFER_SRC
+                } else {
+                    vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST
+                })
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             MemoryLocation::Device,
         )?;
@@ -236,7 +285,7 @@ impl Image {
         let result = (|| -> Result<(), RhiError> {
             this.view = view(sampled_kind, 0, levels)?;
             this.sampled = bindless.add_sampled_image(this.view).ok_or_else(full)?;
-            for level in 0..levels {
+            for level in (0..levels).filter(|_| storage) {
                 let v = view(storage_kind, level, 1)?;
                 this.mip_views.push(v);
                 this.storage
@@ -326,6 +375,9 @@ pub(crate) struct EnvironmentFrame {
     pub source: Texture,
     /// The cube drawn behind the scene: a panorama's background cube, or the radiance cube.
     pub background: Texture,
+    /// Sine and cosine of the background cube's turn about +Y: readers turn their
+    /// directions back (`turned_back` in `cube_common.slang`) before sampling it.
+    pub background_turn: [f32; 2],
     /// The prefiltered cube (specular).
     pub prefiltered: Texture,
     /// The DFG table.
@@ -647,17 +699,36 @@ impl Environment {
             }
         }
         let sun_color = physical.map(|(a, t)| t.sun_color(&a, view));
-        // The panorama, unless the physical sky or the debugging sky replaces it: its
-        // background cube is made, and the lighting rebuilt, after it was set or turned.
-        let panorama = self
+        // The panorama, unless the physical sky or the debugging sky replaces it. Its
+        // background cube is made (or a cooked one uploaded) first, and the lighting rebuilt
+        // once it is ready, and when it turned. While a cooked cube is still uploading, the
+        // previous sky stays: the rebuild that setting it asked for waits.
+        let wanted = self
             .panorama
             .as_ref()
             .filter(|_| physical.is_none() && !debug);
-        if panorama.is_some_and(|p| !p.converted.get()) {
+        let prepared = wanted.and_then(|p| {
+            p.prepare(fg, bindless, ring, downsample, |target, read, size| Push {
+                target,
+                read,
+                size,
+                ..Push::default()
+            })
+            .map(|(texture, fresh)| (p, texture, fresh))
+        });
+        if wanted.is_some() && prepared.is_none() && rebuild {
+            self.dirty.set(true);
+            rebuild = false;
+        }
+        if prepared.is_some_and(|(p, _, fresh)| fresh | p.turned.replace(false)) {
             rebuild = true;
         }
-        let background =
-            panorama.map_or(source, |p| p.background.import(fg, "panorama background"));
+        let panorama = prepared.map(|(p, _, _)| p);
+        let background_turn = panorama.map_or([0.0, 1.0], |p| {
+            let (sin, cos) = p.rotation().sin_cos();
+            [sin, cos]
+        });
+        let background = prepared.map_or(source, |(_, texture, _)| texture);
         let background_index = panorama.map_or(self.source.sampled, |p| p.background.sampled);
         let atmosphere = if physical.is_some() || fog.is_some() {
             let mut constants = crate::atmosphere::constants(
@@ -675,6 +746,7 @@ impl Environment {
             }
             if panorama.is_some() {
                 constants.hide_sun_disk();
+                constants.set_sky_turn(background_turn);
             }
             let address = ring.push(&[constants])?;
             let textures = physical.map(|(a, t)| {
@@ -711,25 +783,9 @@ impl Environment {
             } else {
                 Access::StorageWrite(ShaderStages::COMPUTE)
             };
-            // With a panorama, mip 0 comes from its background cube (made first if it is
-            // new or turned), the sun's cone left out.
-            let light = panorama.map(|p| {
-                if !p.converted.replace(true) {
-                    p.add_background_pass(
-                        fg,
-                        bindless,
-                        background,
-                        downsample,
-                        move |target, read, size| Push {
-                            target,
-                            read,
-                            size,
-                            ..base
-                        },
-                    );
-                }
-                p.light_push(storage[0], SOURCE_SIZE)
-            });
+            // With a panorama, mip 0 comes from its background cube (made or uploaded
+            // above), the sun's cone left out.
+            let light = panorama.map(|p| p.light_push(storage[0], SOURCE_SIZE));
             fg.add_compute("environment sky", bindless)
                 .async_compute()
                 .maybe_read(
@@ -811,6 +867,7 @@ impl Environment {
             sh,
             source_index: self.source.sampled,
             background_index,
+            background_turn,
             prefiltered_index: self.prefiltered.sampled,
             dfg_index: self.dfg.sampled,
             sh_address: self.sh_address,

@@ -1550,7 +1550,8 @@ fn open_scene_with(
     let decoded: Vec<Mutex<Option<Decoded>>> = entries.iter().map(|_| Mutex::new(None)).collect();
     let indices: Vec<u32> = (0..entries.len() as u32)
         .filter(|&i| match entries[i as usize].kind() {
-            EntryKind::TextureLevels => false,
+            // Panoramas are read on their own (`crate::panorama::load_panorama_pack`).
+            EntryKind::TextureLevels | EntryKind::Panorama => false,
             EntryKind::MeshLevel => !stream_meshes,
             _ => true,
         })
@@ -1579,6 +1580,7 @@ fn open_scene_with(
                 Decoded::Clip(e.meta[0], clip)
             }
             EntryKind::TextureLevels => return Err(invalid("texture levels loaded early")),
+            EntryKind::Panorama => return Err(invalid("a panorama loaded as a scene's entry")),
         };
         if let Ok(mut slot) = decoded[index as usize].lock() {
             *slot = Some(value);

@@ -734,3 +734,145 @@ fn hdr_panoramas_light_and_surround_the_scene() {
     assert!(turned.dot(Quat::from_rotation_y(0.7) * found.direction) > 0.999_99);
     h.finish(environment);
 }
+
+/// Cooked panoramas (ADR 0083, phase 2): BC6H cubes uploaded through the ring over the first
+/// frames show and light like panoramas made on the GPU: the right direction along every
+/// axis and turned, a white furnace, the sun left out of the lighting.
+#[test]
+fn cooked_panoramas_show_and_light_like_made_ones() {
+    use engine_assets::panorama::{PanoramaCookSettings, cook_panorama};
+    use engine_render::panorama::CookedPanoramaDesc;
+    let Some(mut h) = Harness::new() else {
+        return;
+    };
+    let mut environment =
+        Environment::new(&h.device, &mut h.allocator, &h.bindless, Sky::default()).unwrap();
+    let jobs = engine_core::jobs::ThreadPool::builder()
+        .workers(4)
+        .build()
+        .unwrap();
+    let hidden = [DrawItem {
+        world_from_object: Mat4::from_translation(Vec3::new(0.0, -1000.0, 0.0)),
+        ..h.draws[0]
+    }];
+    // Cooks `pixels` (2048 × 1024: faces of 512², 2 MiB of BC6H) and sets the result, then
+    // draws until its cube has arrived; returns the frames that took.
+    let set = |h: &mut Harness, environment: &mut Environment, pixels: Vec<[u8; 4]>, sun: bool| {
+        let image = HdrImage {
+            width: 2048,
+            height: 1024,
+            pixels,
+        };
+        let settings = PanoramaCookSettings {
+            sun: sun.then(SunSearch::default),
+            ..PanoramaCookSettings::default()
+        };
+        let cooked = cook_panorama(&image, &settings, Some(&jobs));
+        let panorama = Panorama::from_cooked(
+            &h.device,
+            &mut h.allocator,
+            &h.bindless,
+            &CookedPanoramaDesc {
+                size: cooked.size,
+                levels: &cooked.levels,
+                sun: cooked.sun.map(|s| PanoramaSun {
+                    direction: s.direction,
+                    illuminance: s.illuminance,
+                    cone: s.cone,
+                    sky: s.sky,
+                }),
+            },
+        )
+        .unwrap();
+        assert!(panorama.is_cooked() && !panorama.is_ready());
+        // Every level of six 512² faces down to 1 × 1, in whole 4 × 4 blocks of 16 bytes.
+        assert_eq!(panorama.memory(), 6 * 349_552);
+        if let Some(mut old) = environment.set_panorama(Some(panorama)) {
+            // SAFETY: the device is idle between frames here.
+            unsafe { old.destroy(&mut h.allocator, &h.bindless) };
+        }
+        let mut frames = 0;
+        while !environment.panorama().unwrap().is_ready() {
+            h.render(environment, looking(Vec3::NEG_Z, Vec3::Y), Some(&hidden));
+            frames += 1;
+            assert!(frames < 20, "the cooked cube never arrived");
+        }
+        frames
+    };
+
+    // 1. Color is direction: along every axis, and turned a quarter.
+    let frames = set(
+        &mut h,
+        &mut environment,
+        panorama_pixels(2048, 1024, |d| d * 0.5 + 0.5),
+        false,
+    );
+    println!("a cooked 512² cube arrived in {frames} frames");
+    for (dir, up) in AXES {
+        let image = h.render(&environment, looking(dir, up), Some(&hidden));
+        let expected = dir * 0.5 + 0.5;
+        println!("cooked panorama along {dir}: {}", center(&image));
+        assert!(
+            (center(&image) - expected).abs().max_element() < 0.03,
+            "{dir}: {} vs {expected}",
+            center(&image)
+        );
+    }
+    environment.panorama().unwrap().set_rotation(PI / 2.0);
+    for (dir, shown) in [(Vec3::NEG_X, Vec3::NEG_Z), (Vec3::Z, Vec3::NEG_X)] {
+        let image = h.render(&environment, looking(dir, Vec3::Y), Some(&hidden));
+        let expected = shown * 0.5 + 0.5;
+        assert!(
+            (center(&image) - expected).abs().max_element() < 0.03,
+            "turned, {dir}: {} vs {expected}",
+            center(&image)
+        );
+    }
+
+    // 2. A white furnace.
+    let one = rgbe_to_linear(linear_to_rgbe([1.0; 3]))[0];
+    set(
+        &mut h,
+        &mut environment,
+        panorama_pixels(2048, 1024, |_| Vec3::ONE),
+        false,
+    );
+    let front = h.render(&environment, ortho(Vec3::NEG_Z, Vec3::Y), None);
+    let at = |k: usize| front_pixel(&front, k as f32 * 2.0 - 4.0, 0.0)[0];
+    let expected = furnace_expected(one);
+    println!(
+        "cooked furnace: {:?} expected {expected:?}",
+        (0..5).map(at).collect::<Vec<_>>()
+    );
+    for (k, e) in expected.iter().enumerate() {
+        assert!(
+            (at(k) - e).abs() < e * 0.02,
+            "material {k}: {} vs {e}",
+            at(k)
+        );
+    }
+
+    // 3. The sun found while cooking is left out of the lighting.
+    let toward = Vec3::new(0.3, 0.8, -0.5).normalize();
+    let disk = 0.5f32.to_radians();
+    let sun_radiance = 0.5 + 3.0 / (2.0 * PI * (1.0 - disk.cos()));
+    let sunny = panorama_pixels(2048, 1024, |d| {
+        Vec3::splat(if d.dot(toward) > disk.cos() {
+            sun_radiance
+        } else {
+            0.5
+        })
+    });
+    set(&mut h, &mut environment, sunny, true);
+    let sun = environment.panorama().unwrap().sun().unwrap();
+    assert!(sun.direction.dot(toward) > 0.9999, "{sun:?}");
+    let top = h.render(&environment, ortho(Vec3::NEG_Y, Vec3::NEG_Z), None);
+    let diffuse = (top_pixel(&top, -4.0) - top_pixel(&top, -2.0)).x;
+    let sky_only = 0.5 / PI * (PI * 0.5);
+    println!("cooked, sun left out: diffuse up {diffuse} (sky only: {sky_only})");
+    assert!(
+        (diffuse - sky_only).abs() < sky_only * 0.03,
+        "{diffuse} vs {sky_only}"
+    );
+    h.finish(environment);
+}

@@ -314,7 +314,7 @@ impl HeightFog {
     }
 }
 
-/// `AtmosphereFrame` in `atmosphere_common.slang` (464 bytes).
+/// `AtmosphereFrame` in `atmosphere_common.slang` (480 bytes).
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub(crate) struct AtmosphereConstants {
@@ -348,9 +348,11 @@ pub(crate) struct AtmosphereConstants {
     flags: u32,
     _pad: u32,
     size: [u32; 2],
+    /// Sine and cosine of the sky cube's turn about +Y (an HDR panorama's, ADR 0083).
+    sky_turn: [f32; 4],
 }
 
-const _: () = assert!(core::mem::size_of::<AtmosphereConstants>() == 464);
+const _: () = assert!(core::mem::size_of::<AtmosphereConstants>() == 480);
 
 impl AtmosphereConstants {
     /// The cos sun zenith the sky-view table is made for.
@@ -367,6 +369,12 @@ impl AtmosphereConstants {
     /// own sun (ADR 0083).
     pub(crate) fn hide_sun_disk(&mut self) {
         self.planet[3] = 2.0;
+    }
+
+    /// The sky cube is turned about +Y by an angle of sine and cosine `turn` (an HDR
+    /// panorama's, ADR 0083).
+    pub(crate) fn set_sky_turn(&mut self, turn: [f32; 2]) {
+        self.sky_turn = [turn[0], turn[1], 0.0, 0.0];
     }
 }
 
@@ -820,6 +828,7 @@ pub(crate) fn constants(
         sky_cube,
         sampler: Bindless::sampler(engine_rhi::SamplerKind::LinearClamp),
         size: view.size,
+        sky_turn: [0.0, 1.0, 0.0, 0.0],
         ..AtmosphereConstants::default()
     };
     // A perspective camera's rays, affine in the pixel's position: the world direction to

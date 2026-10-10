@@ -9,10 +9,11 @@
 $ErrorActionPreference = 'Continue'
 Set-Location (Split-Path -Parent $PSScriptRoot)
 
-# Every `<dependency> feature "<feature>"` line of `cargo tree` for a selection of packages,
-# normal, build and dev edges (what `cargo test` builds).
+# Every `<dependency>@<version> <feature>` that `cargo tree` resolves for a selection of
+# packages, normal, build and dev edges (what `cargo test` builds). Keyed by version: two
+# major versions of a crate (syn 2 and 3) have features of their own.
 function Get-Features([string]$selection) {
-    $lines = cmd /c "cargo tree --offline --locked $selection -e features,normal,build,dev --prefix none 2>&1"
+    $lines = cmd /c "cargo tree --offline --locked $selection -e normal,build,dev --prefix none --format `"{p}|{f}`" 2>&1"
     if ($LASTEXITCODE -ne 0) {
         Write-Output "cargo tree $selection failed:"
         $lines | Select-Object -Last 5 | ForEach-Object { Write-Output "        $_" }
@@ -20,7 +21,12 @@ function Get-Features([string]$selection) {
     }
     $set = @{}
     foreach ($line in $lines) {
-        if ($line -match '^([A-Za-z0-9_-]+) feature "([^"]+)"') { $set["$($Matches[1]) $($Matches[2])"] = $true }
+        if ($line -match '^([A-Za-z0-9_-]+) v(\S+)[^|]*\|(.*)$') {
+            $package = "$($Matches[1])@$($Matches[2])"
+            foreach ($feature in ($Matches[3] -replace ' \(\*\)$', '').Split(',')) {
+                if ($feature) { $set["$package $feature"] = $true }
+            }
+        }
     }
     $set
 }

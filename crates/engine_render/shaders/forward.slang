@@ -182,7 +182,7 @@ struct Frame
     float bin_scale;         // z-bins per unit of depth along the view
     uint light_culling;      // 0: every light for every pixel (the reference)
     uint scatter_frame;      // noise index of the scatter pass
-    uint2 _pad4;
+    float2 sky_turn;         // the sky pass: sine and cosine of the sky cube's turn about +Y (an HDR panorama's)
     float4x4 world_from_clip; // inverse of clip_from_world (jittered): the sky's rays
     uint environment;        // 1: ambient light and background from the environment
     uint sky_cube;           // bindless: the environment's radiance cube
@@ -2062,7 +2062,7 @@ float4 skyFragment(Background input) : SV_Target0
     float4 mid = mul(read_matrix(&push.frame.world_from_clip), float4(ndc, 0.5, 1.0));
     float3 d = normalize(mid.xyz / mid.w - near.xyz / near.w);
     SamplerState s = g_samplers[push.frame.linear_sampler];
-    float3 color = g_cubes[push.frame.sky_cube].SampleLevel(s, d, 0.0).rgb * push.frame.env_intensity;
+    float3 color = g_cubes[push.frame.sky_cube].SampleLevel(s, turned_back(d, loadAligned<8>(&push.frame.sky_turn)), 0.0).rgb * push.frame.env_intensity;
     float cos_sun = push.frame.sun_disk;
     if (dot(d, read_float4(&push.frame.to_light).xyz) > cos_sun)
         color += read_float4(&push.frame.light_color).rgb / (2.0 * PI * (1.0 - cos_sun));
