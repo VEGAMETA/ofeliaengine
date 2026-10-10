@@ -15,6 +15,7 @@
 //!                            and slices of the draw commands per pass
 //!     [--no-feedback]        no feedback pass (tails only): its cost by difference
 //!     [--still]              no flight: the first view until everything settles
+//!     [--no-fade]            levels show at once instead of fading in (ADR 0078)
 //!     [--turn <ms>]          no flight: at the scene's centre until everything settles,
 //!                            then four turns of 180° in <ms> each, 2 s apart; per turn,
 //!                            the share of the feedback's pixels drawn from a coarser
@@ -153,6 +154,7 @@ fn main() {
     let mut use_feedback = true;
     let mut still = false;
     let mut turn_ms: Option<f64> = None;
+    let mut fade = true;
     let mut verbose = false;
     let mut synthetic_scene: Option<(usize, u32)> = None;
     let mut args = std::env::args().skip(1);
@@ -167,6 +169,7 @@ fn main() {
             "--no-feedback" => use_feedback = false,
             "--still" => still = true,
             "--turn" => turn_ms = args.next().map(|v| v.parse().unwrap()),
+            "--no-fade" => fade = false,
             "--verbose" => verbose = true,
             "--synthetic" => {
                 let v = args.next().unwrap();
@@ -231,6 +234,9 @@ fn main() {
     }
     // 32 MiB of texture traffic per frame on the GPU.
     let mut textures = TexturePool::new(&device, 32 << 20, 1);
+    if !fade {
+        textures.set_mip_fade(None);
+    }
     let opened = Instant::now();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
@@ -678,6 +684,14 @@ fn main() {
         peak_resident as f64 / MIB,
         full_bytes as f64 / MIB,
         settled.map_or(String::from("never"), |f| format!("at frame {f}")),
+    );
+    println!(
+        "Mip fade: {} ({} views made by its steps)",
+        match textures.mip_fade() {
+            Some(f) => format!("{f:?} per level"),
+            None => String::from("off"),
+        },
+        textures.fade_views()
     );
     if s.mesh_vertices > 0 {
         println!(

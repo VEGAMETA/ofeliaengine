@@ -87,7 +87,11 @@ tooling included) about **50 %**.
   perf limits (PR #126, owner's decision). Item 0b started: the Graphine patents read
   (`docs/research/streaming-fast-turns.md`: 360° views besides the main view are out),
   fast turns measured (`stream_bench --turn`: a few percent of the pixels coarser for
-  0.08–0.15 s on first sight); next, mip fade (owner, 2026-10-10).
+  0.08–0.15 s on first sight), mip fade (ADR 0078: arriving levels sharpen over 100 ms,
+  no shader change). The other safe measures were in place already (cached levels kept,
+  coarsest levels and most pixels first, tails up to 128 texels resident); one feedback
+  pass with a wider field of view stays an option if larger scenes show pop-in. Next: the
+  rest of 0b (the geometry pool's growth off the frame thread, the upload ring's growth).
 
 ## 5. Queue (in order)
 
@@ -165,16 +169,18 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    - mesh levels are asked only by instances in the frustum;
    - request → upload takes about 0.35–0.5 s.
 
-   Plan:
-   - feedback over 360° (one face of a small cube around the camera per frame, besides the
-     main view); first check it stays clear of the Graphine prediction patents
-     (US10748241 family);
-   - mesh levels by a sphere around the camera, by distance, not by the frustum;
-   - lower latency: newly visible textures first, smaller reads, later GPU decompression.
-
-   Acceptance: a "fast turn" test (180° in 0.2 s) measures the pixels drawn below their
-   wanted level and for how long. The target is no visible pop-in at the default budget.
-   The test joins the perf gate.
+   Done (2026-10-10): the Graphine patents read (`docs/research/streaming-fast-turns.md`:
+   360° feedback views besides the main view read on US11195250 and are out, as is
+   distance prediction combined with feedback); the fast-turn test (`stream_bench --turn`,
+   `TextureStreamer::sharpness`): on first sight a few percent of the pixels wait
+   0.08–0.15 s, later turns 0 %, tight budgets blurry all the time rather than after turns;
+   mip fade (ADR 0078). Left:
+   - mesh levels by a sphere around the camera instead of the frustum (one source, not
+     both);
+   - the fast-turn test in the perf gate, and a larger scene than Sponza (its pack fits the
+     disk's cache);
+   - one feedback pass with a wider field of view instead of the main view's, if a larger
+     scene shows pop-in.
    The review adds: the geometry pool grows on the frame thread when streamed mesh levels
    arrive (4–8 ms on the Radeon at the first fast turn): reserve it from the pack's totals
    and grow ahead off the frame thread; give the upload ring growth and a high-water mark

@@ -771,6 +771,8 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut skinned = Vec::new();
     let mut skins = Vec::new();
     let mut textures = TexturePool::new(&device, 256 << 20, 1);
+    // A captured frame shows the levels resident then, not a fade of them (ADR 0078).
+    textures.set_mip_fade(None);
     let mut materials = MaterialTable::new(1);
     let mut draws: Vec<DrawItem> = Vec::new();
     let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));

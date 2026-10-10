@@ -8,7 +8,8 @@
 
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph};
 use engine_render::texture_pool::{
-    LEVEL_ALIGN, STAGING_ALIGN, StagingSpan, TextureError, TextureFormat, TextureId, TexturePool,
+    LEVEL_ALIGN, MipFade, STAGING_ALIGN, StagingSpan, TextureError, TextureFormat, TextureId,
+    TexturePool,
 };
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -96,6 +97,9 @@ impl Harness {
         let bindless = Bindless::new(&device).unwrap();
         let mut pool = TexturePool::new(&device, 1 << 20, 1);
         pool.set_staging_size(staging);
+        // Uploads and copies are what these tests check: levels show at once (a fade
+        // would change the bindless index on the wall clock's time).
+        pool.set_mip_fade(None);
         let graph = RenderGraph::new(&device, 1);
         let (readback, readback_memory) = allocator
             .create_buffer(
@@ -659,5 +663,67 @@ fn reallocations_share_the_frame_budget_with_uploads() {
     }
     assert!(ids.iter().all(|&id| h.pool.info(id).unwrap().base == 0));
     h.frame(None);
+    h.finish();
+}
+
+/// A level that joins a texture already shown fades in (ADR 0078): the view starts at the
+/// level shown and moves a quarter of a level finer at each step, with a new bindless index
+/// each time, until it reaches the new level. With fades off, a level shows at once.
+#[test]
+fn a_new_level_fades_in_a_quarter_level_at_a_time() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let fades = device.image_view_min_lod();
+    let mut h = Harness::new(instance, device, 16 * STAGING_ALIGN);
+    // Four frames a level: a step each frame.
+    h.pool.set_mip_fade(Some(MipFade::Frames(4)));
+    let id = h
+        .pool
+        .add_empty(
+            &mut h.allocator,
+            SIZE,
+            SIZE,
+            TextureFormat::Rgba8Unorm,
+            LEVELS,
+        )
+        .unwrap();
+    let tail = h.filled(&packed(3, 3));
+    h.pool.upload_levels(id, 3, 3, tail).unwrap();
+    h.frame(None);
+    // The first levels show at once: nothing was shown before them.
+    assert_eq!(h.pool.shown_level(id), Some(3.0));
+    assert_eq!(h.pool.fading(), 0);
+    let two = h.filled(&packed(2, 1));
+    h.pool.upload_levels(id, 2, 1, two).unwrap();
+    h.frame(None);
+    assert_eq!(h.pool.resident_level(id), Some(2));
+    if !fades {
+        println!("no VK_EXT_image_view_min_lod: levels show at once");
+        assert_eq!(h.pool.shown_level(id), Some(2.0));
+        h.finish();
+        return;
+    }
+    // Arrived this frame: still shown from level 3, then a quarter of a level a frame.
+    let mut shown = vec![h.pool.shown_level(id).unwrap()];
+    let mut indices = vec![h.pool.index(id).unwrap()];
+    for _ in 0..5 {
+        h.frame(None);
+        shown.push(h.pool.shown_level(id).unwrap());
+        indices.push(h.pool.index(id).unwrap());
+    }
+    assert_eq!(shown, [3.0, 2.75, 2.5, 2.25, 2.0, 2.0]);
+    assert!(
+        indices.windows(2).take(4).all(|w| w[0] != w[1]),
+        "{indices:?}"
+    );
+    assert_eq!(indices[4], indices[5]);
+    assert_eq!(h.pool.fading(), 0);
+    // Turned off: the next level shows at once.
+    h.pool.set_mip_fade(None);
+    let one = h.filled(&packed(1, 1));
+    h.pool.upload_levels(id, 1, 1, one).unwrap();
+    h.frame(None);
+    assert_eq!(h.pool.shown_level(id), Some(1.0));
     h.finish();
 }

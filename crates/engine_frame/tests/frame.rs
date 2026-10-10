@@ -2,7 +2,7 @@
 //! cut (no ghost of the previous view), the texture LOD bias the upscaler asks for is
 //! applied, settings changes start the history anew, an unavailable upscaler falls back
 //! to TAAU, and the previous color reaches the scene hook; and every feature and mode fits
-//! a main thread's 1 MiB stack.
+//! a main thread's 1 MiB stack; a streamed level fades in on screen.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -19,7 +19,7 @@ use engine_render::forward::LocalShadowSettings;
 use engine_render::material::{MaterialDesc, TextureRef};
 use engine_render::reflections::SsrSettings;
 use engine_render::subsurface::SubsurfaceProfile;
-use engine_render::texture_pool::{TextureFormat, TextureLevels};
+use engine_render::texture_pool::{MipFade, TextureFormat, TextureLevels};
 
 fn differing(a: &[u8], b: &[u8]) -> usize {
     a.chunks(4).zip(b.chunks(4)).filter(|(x, y)| x != y).count()
@@ -480,5 +480,97 @@ fn every_feature_and_mode() {
             );
         }
     }
+    bed.finish(&mut [&mut view]);
+}
+
+/// A streamed level fades in (ADR 0078): the texture's view starts at the level shown and
+/// steps finer by fractional levels, and the sampler blends the two levels between, so the
+/// picture moves from the old level's colour to the new one's over the fade, not at once.
+/// Level 0 is red and level 1 green; the face is sampled at about level 0.
+#[test]
+fn a_streamed_level_fades_in_on_screen() {
+    let Some(mut bed) = Bed::new((256, 256), true) else {
+        return;
+    };
+    if !bed.device.image_view_min_lod() {
+        println!("no VK_EXT_image_view_min_lod: levels show at once");
+        bed.finish(&mut []);
+        return;
+    }
+    bed.textures.set_mip_fade(Some(MipFade::Frames(4)));
+    let colors = |k: u32| match k {
+        0 => [255u8, 0, 0, 255],
+        1 => [0, 255, 0, 255],
+        _ => [0, 0, 255, 255],
+    };
+    let texture = bed
+        .textures
+        .add_empty(&mut bed.allocator, 256, 256, TextureFormat::Rgba8Unorm, 9)
+        .unwrap();
+    let upload = |bed: &mut Bed, k: u32| {
+        let side = (256 >> k) as usize;
+        let data = colors(k).repeat(side * side);
+        let mut span = bed
+            .textures
+            .staging(&mut bed.allocator, data.len() as u64)
+            .unwrap()
+            .unwrap();
+        span.bytes_mut()[..data.len()].copy_from_slice(&data);
+        bed.textures.upload_levels(texture, k, 1, span).unwrap();
+    };
+    for k in (1..9).rev() {
+        upload(&mut bed, k);
+    }
+    let material = bed.materials.add(MaterialDesc {
+        base_color_texture: Some(TextureRef::new(texture)),
+        ..MaterialDesc::solid([1.0; 3], 0.0, 1.0)
+    });
+    // A 4 × 4 face across the 256 × 256 view: a texel a pixel, level 0 where resident.
+    let draws = vec![bed.cube_at(material, Vec3::new(4.0, 4.0, 0.2), Vec3::ZERO)];
+    let distance = 2.0 / (0.45f32).tan();
+    let view_camera = camera(Vec3::new(0.0, 0.0, 0.1 + distance), Vec3::ZERO, false);
+    let settings = ViewSettings {
+        antialiasing: Antialiasing::OFF,
+        quality: Quality::Native,
+        bloom: false,
+        ..ViewSettings::default()
+    };
+    let mut view = View::new(&bed.device, 4);
+    // Red's share of red and green over the middle of the view.
+    let red_share = |bed: &mut Bed, view: &mut View| {
+        let (_, pixels) = bed.render(view, &settings, &draws, &view_camera, true, |_| {});
+        let pixels = pixels.unwrap();
+        let (mut red, mut green) = (0u64, 0u64);
+        for y in 64..192 {
+            for x in 64..192 {
+                let p = &pixels[(y * 256 + x) * 4..][..4];
+                red += u64::from(p[0]);
+                green += u64::from(p[1]);
+            }
+        }
+        red as f64 / (red + green).max(1) as f64
+    };
+    // Levels 1-8 resident and shown: green.
+    for _ in 0..3 {
+        red_share(&mut bed, &mut view);
+    }
+    let before = red_share(&mut bed, &mut view);
+    upload(&mut bed, 0);
+    let shares: Vec<f64> = (0..6).map(|_| red_share(&mut bed, &mut view)).collect();
+    println!("red share before {before:.3}, then {shares:.3?}");
+    assert!(before < 0.05, "level 1 shown: {before}");
+    // The frame level 0 arrives in still shows level 1; then a step a frame, never
+    // greener than the last, with frames between the two levels before the fade ends.
+    // The RTX blends the view's fractional first level in quarters (0.23, 0.50, 0.77 of
+    // red); the Radeon's driver in halves (0, 0.5, 1: 2026-10-10, ADR 0078).
+    assert!(shares[0] < 0.05, "{shares:?}");
+    for w in shares.windows(2) {
+        assert!(w[1] >= w[0] - 0.02, "{shares:?}");
+    }
+    assert!(
+        shares[1..4].iter().any(|&s| s > 0.05 && s < 0.95),
+        "{shares:?}"
+    );
+    assert!(shares[4] > 0.95 && shares[5] > 0.95, "{shares:?}");
     bed.finish(&mut [&mut view]);
 }

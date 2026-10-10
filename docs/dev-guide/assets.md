@@ -191,6 +191,12 @@ feedback.add_pass(&mut fg, &device, &mut allocator, &bindless, &geo, &mats, &pas
 - **No hitches by design:** reads and decompression run on the streaming thread (mesh
   levels are decoded there too); the GPU copies at most the texture pool's frame budget
   (`TexturePool::set_frame_budget`) per frame.
+- **Levels fade in** (ADR 0078): a finer level that arrives for a texture already on
+  screen sharpens over 100 ms instead of popping (`MipFade::DEFAULT`; the view's first
+  level steps finer a quarter of a level at a time). `textures.set_mip_fade(None)` shows
+  levels at once (captures, comparisons); `MipFade::Frames(n)` fades by frames (tests).
+  It needs `VK_EXT_image_view_min_lod` (both reference GPUs; without it, levels show at
+  once) and costs no shader time.
 - **Packs:** cook again (`ofeliaengine cook`) to get meshes stored by detail level (pack
   version 3). Older packs still load; their meshes are whole and not streamed.
 - **Overlay numbers:** `scene.stats()` (levels arrived, latency, failures), `budget.stats()`
