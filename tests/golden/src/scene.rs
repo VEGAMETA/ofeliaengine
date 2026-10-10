@@ -156,7 +156,9 @@ pub struct Shot {
     /// captured once streaming has settled.
     pub texture_budget: Option<u64>,
     /// GPU particles (ADR 0081): sparks added over the scene and smoke blended into it,
-    /// from the floor's middle, simulated from the first frame in steps of 1/60 s.
+    /// from the floor's middle, simulated from the first frame in steps of 1/60 s; with
+    /// temporal antialiasing they mark a reactive mask
+    /// (`ForwardRenderer::set_reactive_effects`).
     pub particles: bool,
 }
 
@@ -962,6 +964,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         ..ViewSettings::default()
     };
     let mut view = View::new(&device, draws.len() as u32);
+    if shot.particles {
+        frame.forward_mut().set_reactive_effects(true);
+    }
     let mut particles = shot.particles.then(|| {
         let mut system =
             ParticleSystem::new(&device, &mut allocator, &bindless, 16_384, HDR_FORMAT)

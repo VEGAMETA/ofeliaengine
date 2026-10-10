@@ -388,8 +388,8 @@ grown, divide and conquer); the old labels stay in parentheses.
 - **Particles (ADR 0081):** lighting and shadows on them, depth-buffer collisions, trails
   and mesh particles, user simulation code, large particles drawn at a lower resolution
   (overdraw on the iGPU: 256 smoke puffs cost 1.6 ms there), a one-workgroup sort for small
-  counts (the sort is most of 16 K particles' cost), ECS components, a reactive mask (and
-  motion) for views that have none, orthographic views.
+  counts (the sort is most of 16 K particles' cost), ECS components, motion vectors for
+  particles, orthographic views.
 - **Start-up (ADR 0079):**
   - acquiring the swapchain image late would let the Radeon's first frame record beside its
     swapchain (it waits 140 ms for it now);

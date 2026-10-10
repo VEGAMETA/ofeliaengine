@@ -121,6 +121,20 @@ fn procedural_scene_with_particles() {
     });
 }
 
+/// The particles under TAA (ADR 0081): with no transparent surface in the scene, they make
+/// the view's reactive mask themselves, so the resolve does not smear them.
+#[test]
+fn procedural_scene_with_particles_under_taa() {
+    check(&Shot {
+        particles: true,
+        // TAA: the temporal upscaler at the native size.
+        antialiasing: Antialiasing::TAAU,
+        quality: Quality::Native,
+        temporal_frames: 90,
+        ..procedural("procedural_particles_taa")
+    });
+}
+
 /// The same without sky light, with the depth prepass: the other shading permutations.
 #[test]
 fn procedural_scene_without_sky() {
