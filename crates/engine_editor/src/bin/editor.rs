@@ -71,10 +71,11 @@ mod windowed {
         Camera, DirectionalLight, ForwardRenderer, ForwardView, ShadowSettings,
     };
     use engine_render::gpu_scene::{GpuScene, SceneInstance};
-    use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
+    use engine_render::graph::{LoadOp, RenderGraph, TextureDesc};
     use engine_render::material::{MaterialDesc, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
     use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, OutputLevels, Tonemap};
+    use engine_render::present::PresentTarget;
     use engine_render::texture_pool::TexturePool;
     use engine_render::upload::UploadRing;
     use engine_render::viewport::{UpdateMode, ViewportDesc, ViewportSize, Viewports};
@@ -1092,18 +1093,10 @@ mod windowed {
                 canvas.prepare();
                 stats.paint += paint_start.elapsed();
 
-                let backbuffer = fg.import_texture(
-                    "backbuffer",
-                    ImportedTexture {
-                        image: swapchain.images()[index],
-                        view: swapchain.views()[index],
-                        desc: TextureDesc::new_2d(swapchain.format(), extent.width, extent.height),
-                        initial: TextureState::acquired_swapchain_image(),
-                        final_state: Some(TextureState::present()),
-                        sampled_index: None,
-                        storage_index: None,
-                    },
-                );
+                // Straight into the swapchain image, or apart and copied when it presents
+                // across adapters (`engine_render::present`).
+                let present = PresentTarget::import(&mut fg, &swapchain, index as u32);
+                let backbuffer = present.texture;
                 // HDR10 composes in linear light first: blending PQ values is not.
                 let ui_target = if output.encode.is_some() {
                     fg.create_texture(
@@ -1136,6 +1129,7 @@ mod windowed {
                         },
                     );
                 }
+                present.finish(&mut fg);
                 fg.execute_with_bindless(&mut allocator, Some(&bindless))?;
             }
             stats.record += record_start.elapsed();

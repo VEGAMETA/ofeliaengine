@@ -14,7 +14,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0004](0004-platform-bindings-and-timing.md) | Platform bindings, timers and thread placement | Accepted |
 | [0005](0005-window-and-input-threads.md) | Window thread and raw input thread | Accepted |
 | [0006](0006-vulkan-baseline-and-device.md) | Vulkan baseline, bindings and device selection | Accepted |
-| [0007](0007-presentation-and-frames.md) | Presentation and frames in flight | Accepted |
+| [0007](0007-presentation-and-frames.md) | Presentation and frames in flight (addendum 2026-10-10: a frame for a monitor on another GPU is drawn apart and copied) | Accepted |
 | [0008](0008-shader-compilation.md) | Shader compilation: in-process Slang with a content-addressed cache | Accepted |
 | [0009](0009-shader-hot-reload.md) | Shader hot reload and "Compile All Shaders" | Accepted |
 | [0010](0010-gpu-memory-allocator.md) | GPU memory allocator | Accepted |

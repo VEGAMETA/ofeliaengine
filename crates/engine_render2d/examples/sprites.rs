@@ -21,7 +21,8 @@ fn main() {
     use engine_core::math::{Vec2, Vec4};
     use engine_platform::time::HighResTimer;
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
-    use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
+    use engine_render::graph::RenderGraph;
+    use engine_render::present::PresentTarget;
     use engine_render::texture::GpuTexture;
     use engine_render::upload::UploadRing;
     use engine_render2d::{
@@ -266,19 +267,10 @@ fn main() {
         overlay.prepare();
         {
             let mut fg = graph.begin(&frame);
-            let desc = TextureDesc::new_2d(swapchain.format(), extent.width, extent.height);
-            let backbuffer = fg.import_texture(
-                "backbuffer",
-                ImportedTexture {
-                    image: swapchain.images()[index],
-                    view: swapchain.views()[index],
-                    desc,
-                    initial: TextureState::acquired_swapchain_image(),
-                    final_state: Some(TextureState::present()),
-                    sampled_index: None,
-                    storage_index: None,
-                },
-            );
+            // Straight into the swapchain image, or apart and copied when it presents
+            // across adapters (`engine_render::present`).
+            let present = PresentTarget::import(&mut fg, &swapchain, index as u32);
+            let backbuffer = present.texture;
             ring.begin(&frame);
             if !uploaded {
                 for (texture, data) in textures.iter().zip(&pixels) {
@@ -313,6 +305,7 @@ fn main() {
                     None,
                 )
                 .unwrap();
+            present.finish(&mut fg);
             fg.execute_with_bindless(&mut allocator, Some(&bindless))
                 .unwrap();
         }

@@ -44,19 +44,30 @@ frame.prepare(&mut view, &settings, (width, height), PrepareContext {
     device: &device, allocator: &mut allocator, bindless: &bindless,
     materials: &mut materials, frame_number: frame_number })?;
 // In the frame's graph, after the pools' begin_frame (and GpuScene::add_passes,
-// Skinning::begin_frame):
+// Skinning::begin_frame). The target: the acquired swapchain image, or an image of its own
+// when the window's monitor is on another GPU (engine_render::present, below):
+let present = PresentTarget::import(&mut fg, &swapchain, acquired.index);
 frame.add_view(&mut fg, &mut FrameContext { device: &device, allocator: &mut allocator,
         bindless: &bindless, ring: &mut ring, frame_number, dt },
     &mut view,
     &SceneInput { geometry: &geo, materials: &mats, draws: SceneDraws::Scene(&scene_frame),
         skinning: Some(&skinned), light: sun, lights: &lights, environment: Some(&sky) },
     &ViewCamera { view_from_world, position, fov_y, near, far, cut: false },
-    ViewTarget { texture: backbuffer, rect: None, load: LoadOp::DontCare })?;
+    ViewTarget { texture: present.texture, rect: None, load: LoadOp::DontCare })?;
+// ... your UI into present.texture ...
+present.finish(&mut fg);   // copies into the swapchain image when drawn apart
 
 // At shutdown, with the device idle:
 unsafe { view.destroy(&mut allocator, &bindless) };
 ```
 
+- **Presenting** (`engine_render::present::PresentTarget`): when the window's monitor is
+  driven by another GPU than the one rendering (a desktop's integrated GPU behind a monitor
+  on the discrete one, a hybrid laptop's discrete GPU behind its integrated one;
+  `Swapchain::presents_across_adapters`), drawing straight into the swapchain image is slow
+  (ref-1's Radeon: the tone mapper 2.56 ms against 0.82 ms plus a 0.62 ms copy), so the
+  frame is drawn into an image of its own and copied; otherwise straight into the
+  swapchain image. Call `finish` after everything that draws the frame.
 - **Antialiasing** (`ViewSettings::antialiasing`):
   - `Antialiasing::OFF`: no jitter, no motion vectors, no history: the cheapest, and
     aliased;

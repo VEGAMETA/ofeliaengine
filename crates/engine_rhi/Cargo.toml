@@ -26,7 +26,9 @@ log = "0.4"
 # already in the tree (engine_platform, engine_dlss…), MIT OR Apache-2.0.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
+    "Wdk_Graphics_Direct3D",
     "Win32_Foundation",
+    "Win32_Graphics_Gdi",
     "Win32_System_LibraryLoader",
     "Win32_System_ProcessStatus",
     "Win32_System_Threading",
