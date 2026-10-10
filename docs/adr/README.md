@@ -86,6 +86,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0076](0076-gpu-memory-budget-and-streaming.md) | A GPU memory budget owner (the OS budget, a share for the game, grants class by class), texture levels from a separate low-resolution feedback pass within it (images reallocated by copy), mesh detail levels stored and streamed as vertex prefixes, pack version 3, `engine_streaming` | Accepted |
 | [0077](0077-faster-checks.md) | Faster checks: one workspace build per check, tests under cargo-nextest filtered per step (GPU crates on both GPUs, Tracy only for allocation tests, in its own target directory), doc tests and formatting for what the branch changed, and a workspace-hack crate that unifies dependency features so builds of a few packages reuse the workspace's | Accepted |
 | [0078](0078-mip-fade.md) | Mip fade: streamed texture levels sharpen in over a short fade (the view's fractional minimum level, `VK_EXT_image_view_min_lod`; no shader change) | Accepted |
+| [0079](0079-pipelines-on-first-use.md) | Shading variants described up front and made on first use or by the device's warm-up thread, whichever comes first (`LazyPipeline`, a layout kept alive by what may still be made with it); start-up phases overlapped (the device beside the window, the swapchain beside the renderers and the scene) | Accepted |
 
 ## Template
 

@@ -286,3 +286,34 @@ device.save_pipeline_cache(&cache)?;
   - recording pipelines as they are used, which the material graph will need;
   - `VK_KHR_pipeline_binary`;
   - fast linking for pipelines created while drawing.
+
+**Variants made on first use (ADR 0079).** A renderer has many variants, and a game draws
+with few of them: in the Sponza test flight, one of the forward renderer's 62 shading
+variants. So the engine describes them when a renderer is made, and makes each one the
+first time a frame draws with it, or earlier on the device's warm-up thread, which makes
+every described pipeline in the background, below normal priority. Your first frame
+waits only for what it draws with: 260 ms after `main` instead of 324 on the RTX, and
+504 instead of 796 after a driver update. Your own variants work the same way:
+
+```rust
+use engine_rhi::LazyPipeline;
+
+// When your renderer is made: descriptions, no compile.
+let variants = LazyPipeline::describe_many(&device, bindless.shared_pipeline_layout(), &descs);
+// When a frame draws with one: made now if nobody made it yet.
+let pipeline = variants[k].get_or_create()?;
+// A frame that needs several new ones at once: made in parallel.
+LazyPipeline::create_all(&[&variants[0], &variants[2]])?;
+```
+
+- Tests that count allocations, and benchmarks that time frames, call
+  `device.wait_for_pipeline_warm_up()` before they start: the warm-up thread allocates
+  and takes CPU (on an integrated GPU, also the GPU's power) while it works.
+- `device.pipelines_warming_up()` counts what is left, for a progress bar;
+  `device.set_pipeline_warm_up(false)` turns the thread off for what is described after.
+- **Start-up overlap:** create the Vulkan device on a thread while your window opens and
+  your CPU-only loading runs. Create the swapchain on a thread while your renderers and
+  scene load: `Swapchain::format_for(&device, &surface, &desc)` gives the format the
+  renderers draw into before the swapchain exists. The `flight` example
+  (`engine_runtime`) does both. On an integrated GPU that presents through another
+  adapter, the swapchain alone takes 170 ms.

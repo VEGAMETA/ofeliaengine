@@ -79,6 +79,10 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
   leave a single 4-byte value read by a dynamic index a plain access (as a 16-byte load and a
   select inside a loop it made SSR's trace 7.5 % slower). `spirv-dis` shows any vector access
   left `Aligned 4`; never declare more alignment than the data has.
+- **Pipeline variants** (ADR 0079): describe a renderer's variants with
+  `LazyPipeline::describe_many` (made on first use or by the device's warm-up thread), and
+  make at once only what nearly every frame draws with. A test that counts allocations or
+  a benchmark that times frames calls `device.wait_for_pipeline_warm_up()` first.
 - **Shader registers (hard rule, learned the hard way):** a feature must add no code to the
   shaders of views/materials that don't use it. On the AMD driver even dead code under a
   specialization constant costs VGPRs (forward shading sits at exactly 64; 72 made it 9–13 %

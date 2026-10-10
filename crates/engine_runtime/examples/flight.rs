@@ -37,6 +37,8 @@
 //!                                swapchain image, or straight into it (default: apart
 //!                                only when presenting across adapters)
 //!     [--pipeline-cache <dir>]   load and save the pipeline cache there (default: none)
+//!     [--no-warm-up]        shading variants made on first use only, not also on the
+//!                           device's warm-up thread (ADR 0079)
 //! ```
 //!
 //! Cook the pack with `ofeliaengine cook test-assets/Sponza/Sponza.gltf -o sponza.pack`.
@@ -394,9 +396,42 @@ mod windowed {
         let present_apart = option("--present").map(|v| v == "apart");
         let vsync = flag("--vsync");
         let cache_dir = option("--pipeline-cache").map(PathBuf::from);
+        let warm_up = !flag("--no-warm-up");
 
-        // Start-up, phase by phase.
+        // Start-up, phase by phase. What does not depend on each other overlaps (queue
+        // item 0g): the Vulkan instance and device (the drivers' own start-up) on a thread
+        // beside the window, and the swapchain on a thread beside the renderer, the pack
+        // and the scene (on the Radeon iGPU, presenting across adapters, it takes 170 ms).
+        // Each phase reports its own time; the first frame's time since `main` is what
+        // the overlap shortens.
         let mut startup: Vec<(&str, f64)> = Vec::new();
+        let gpu = std::thread::Builder::new()
+            .name(String::from("vulkan start-up"))
+            .spawn(move || {
+                let phase = Instant::now();
+                let instance = Instance::new(&InstanceDesc::default()).unwrap();
+                let preference =
+                    AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);
+                let adapter = instance.select_adapter(&preference).unwrap();
+                let adapter_name = adapter.summary();
+                let mut device = Device::new(&instance, &adapter).unwrap();
+                device.set_pipeline_warm_up(warm_up);
+                let cache_path = cache_dir
+                    .as_deref()
+                    .map(|dir| dir.join(device.pipeline_cache_file_name()));
+                let cache_load = cache_path
+                    .as_deref()
+                    .map(|path| device.load_pipeline_cache(path));
+                (
+                    instance,
+                    adapter_name,
+                    device,
+                    cache_path,
+                    cache_load,
+                    ms(phase),
+                )
+            })
+            .unwrap();
         let phase = Instant::now();
         let mut windows = WindowSystem::start(4096).unwrap();
         let window = windows
@@ -408,44 +443,63 @@ mod windowed {
                 visible: true,
             })
             .unwrap();
-        startup.push(("window", ms(phase)));
+        startup.push(("window (beside the device)", ms(phase)));
+        // Work that needs no device, beside it too: the job pool, and the glTF Fox
+        // imported and cooked through the derived data cache.
         let phase = Instant::now();
-        let instance = Instance::new(&InstanceDesc::default()).unwrap();
-        let preference =
-            AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);
-        let adapter = instance.select_adapter(&preference).unwrap();
-        let adapter_name = adapter.summary();
-        let mut device = Device::new(&instance, &adapter).unwrap();
-        let cache_path = cache_dir
-            .as_deref()
-            .map(|dir| dir.join(device.pipeline_cache_file_name()));
-        let cache_load = cache_path
-            .as_deref()
-            .map(|path| device.load_pipeline_cache(path));
+        let jobs = Arc::new(ThreadPool::builder().build().unwrap());
+        let fox = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets/Fox/Fox.gltf")
+            .canonicalize()
+            .ok()
+            .filter(|_| character_count > 0)
+            .map(|path| {
+                let bytes = std::fs::read(&path).unwrap();
+                let dir = path.parent();
+                let scene = import_gltf(&bytes, dir).unwrap();
+                let cache = DerivedDataCache::new(path.parent().unwrap().join("../.ddc")).unwrap();
+                cook_scene(&scene, dir, Some(&cache), &jobs, &CookSettings::default())
+                    .unwrap()
+                    .0
+            });
         startup.push((
-            "Vulkan instance + device (+ pipeline cache file)",
+            "job pool + Fox cooked from the cache (beside the device)",
             ms(phase),
         ));
-        let phase = Instant::now();
-        let surface = Surface::from_win32(&instance, window.hinstance, window.hwnd).unwrap();
-        let mut swapchain = Swapchain::new(
-            &device,
-            &surface,
-            &SwapchainDesc {
-                width: WIDTH,
-                height: HEIGHT,
-                present_mode: if vsync {
-                    PresentMode::Fifo
-                } else {
-                    PresentMode::Immediate
-                },
-                srgb: true,
-                color: OutputColor::Sdr,
-                low_latency: false,
+        let (instance, adapter_name, device, cache_path, cache_load, device_ms) =
+            gpu.join().unwrap();
+        startup.push((
+            "Vulkan instance + device (+ pipeline cache file)",
+            device_ms,
+        ));
+        let surface =
+            Arc::new(Surface::from_win32(&instance, window.hinstance, window.hwnd).unwrap());
+        let swapchain_desc = SwapchainDesc {
+            width: WIDTH,
+            height: HEIGHT,
+            present_mode: if vsync {
+                PresentMode::Fifo
+            } else {
+                PresentMode::Immediate
             },
-        )
-        .unwrap();
-        startup.push(("surface + swapchain", ms(phase)));
+            srgb: true,
+            color: OutputColor::Sdr,
+            low_latency: false,
+        };
+        // The renderer draws into the format the swapchain will have.
+        let swapchain_format = Swapchain::format_for(&device, &surface, &swapchain_desc).unwrap();
+        let device = Arc::new(device);
+        let pending_swapchain = {
+            let (device, surface) = (Arc::clone(&device), Arc::clone(&surface));
+            std::thread::Builder::new()
+                .name(String::from("swapchain"))
+                .spawn(move || {
+                    let phase = Instant::now();
+                    let swapchain = Swapchain::new(&device, &surface, &swapchain_desc).unwrap();
+                    (swapchain, ms(phase))
+                })
+                .unwrap()
+        };
 
         let phase = Instant::now();
         let pipelines_before = engine_rhi::creation_stats();
@@ -474,7 +528,7 @@ mod windowed {
         let mut frame_renderer = FrameRenderer::new(
             &device,
             &bindless,
-            swapchain.format(),
+            swapchain_format,
             depth_format,
             ShadowSettings::default(),
             IN_FLIGHT,
@@ -514,7 +568,6 @@ mod windowed {
 
         // The scene from its pack, streamed.
         let phase = Instant::now();
-        let jobs = Arc::new(ThreadPool::builder().build().unwrap());
         let mut budget = GpuBudget::new(&device);
         let mut textures = TexturePool::new(&device, 32 << 20, IN_FLIGHT);
         let mut geometry = GeometryPool::new(
@@ -616,22 +669,10 @@ mod windowed {
             }
         }
 
-        // Skinned characters: the glTF Fox, cooked through the derived data cache.
-        let fox_path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets/Fox/Fox.gltf")
-            .canonicalize()
-            .ok();
+        // Skinned characters: the Fox cooked above.
         let mut characters: Vec<Character> = Vec::new();
         let mut fox_skin = None;
-        if character_count > 0
-            && let Some(path) = fox_path
-        {
-            let bytes = std::fs::read(&path).unwrap();
-            let dir = path.parent();
-            let scene = import_gltf(&bytes, dir).unwrap();
-            let cache = DerivedDataCache::new(path.parent().unwrap().join("../.ddc")).unwrap();
-            let (mut cooked, _) =
-                cook_scene(&scene, dir, Some(&cache), &jobs, &CookSettings::default()).unwrap();
+        if let Some(mut cooked) = fox {
             let ids: Vec<TextureId> = std::mem::take(&mut cooked.textures)
                 .into_iter()
                 .map(|t| {
@@ -700,7 +741,7 @@ mod windowed {
                 .collect();
             fox_skin = Some((skin, inverse_bind));
         }
-        startup.push(("movers + characters (Fox cooked from the cache)", ms(phase)));
+        startup.push(("movers + characters", ms(phase)));
 
         // The player's camera.
         let (eye, rotation) = camera_at(0.0, min, max);
@@ -732,6 +773,15 @@ mod windowed {
             color: Vec3::splat(3.0),
             ambient: Vec3::splat(0.08),
         };
+
+        // The swapchain, made beside all of the above.
+        let wait = Instant::now();
+        let (mut swapchain, swapchain_ms) = pending_swapchain.join().unwrap();
+        startup.push((
+            "surface + swapchain (beside the renderer and the scene)",
+            swapchain_ms,
+        ));
+        startup.push(("waiting for the swapchain", ms(wait)));
 
         let mut log: Vec<Stages> = Vec::with_capacity(frames_to_run);
         let mut passes: std::collections::BTreeMap<&'static str, Vec<f64>> =

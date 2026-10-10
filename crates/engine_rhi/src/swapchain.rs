@@ -757,6 +757,23 @@ impl Swapchain {
             .collect())
     }
 
+    /// The image format [`Swapchain::new`] picks for `desc` on `surface`, without making
+    /// the swapchain: what draws into its images can be made while it is (on the Radeon
+    /// iGPU, presenting across adapters, making one takes 170 ms; ADR 0079).
+    pub fn format_for(
+        device: &Device,
+        surface: &Surface,
+        desc: &SwapchainDesc,
+    ) -> Result<vk::Format, RhiError> {
+        let formats = Self::surface_formats(device, surface)?;
+        choose_format(desc.color, desc.srgb, &formats)
+            .map(|(_, format)| format.format)
+            .ok_or(RhiError::Vulkan {
+                call: "surface has no formats",
+                result: vk::Result::ERROR_FORMAT_NOT_SUPPORTED,
+            })
+    }
+
     /// Every format and color space the surface offers, for diagnostics.
     pub fn surface_formats(
         device: &Device,

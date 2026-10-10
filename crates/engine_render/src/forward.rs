@@ -80,7 +80,7 @@ use core::cell::{Cell, RefCell};
 use engine_core::math::{Mat4, Vec3, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    Allocation, Allocator, Bindless, Blend, DepthBias, Device, GraphicsPipelineDesc,
+    Allocation, Allocator, Bindless, Blend, DepthBias, Device, GraphicsPipelineDesc, LazyPipeline,
     MemoryLocation, Pipeline, PipelineDesc, RhiError, SamplerKind, ShaderStageDesc, spirv_words,
 };
 
@@ -871,20 +871,36 @@ struct Scratch {
     lights: crate::lights::LightScratch,
 }
 
-/// The shading pipelines, compiled with or without local lights.
+/// The shading pipelines, compiled with or without local lights. Like every shading
+/// variant, made when a frame first draws with them or by the device's warm-up before
+/// that (ADR 0079).
 #[derive(Debug)]
 struct Shading {
     /// Forward shading: opaque, masked.
-    main: [Pipeline; 2],
+    main: [LazyPipeline; 2],
     /// Forward shading after the depth prepass: depth tested for equality, not written;
     /// no alpha test (the prepass did it).
-    shade: Pipeline,
+    shade: LazyPipeline,
     /// Forward shading that also writes motion vectors, for views without the depth
     /// prepass (after it the prepass writes them): opaque, masked.
-    main_motion: [Pipeline; 2],
+    main_motion: [LazyPipeline; 2],
     /// Transparent surfaces: premultiplied blending, depth tested but not written; without
     /// and with the reactive mask.
-    blended: [Pipeline; 2],
+    blended: [LazyPipeline; 2],
+}
+
+/// A pipeline a frame draws with, made now if this is its first use (ADR 0079). `None`,
+/// the view not drawn, when the driver could not make it (`engine_rhi` logs why).
+fn ready(pipeline: &LazyPipeline) -> Option<&Pipeline> {
+    pipeline.get_or_create().ok()
+}
+
+/// The driver's statistics of a shading pipeline, made now if no frame has drawn with it.
+fn lazy_statistics(pipeline: &LazyPipeline, device: &Device) -> Vec<engine_rhi::PipelineStatistic> {
+    pipeline
+        .get_or_create()
+        .map(|p| p.statistics(device))
+        .unwrap_or_default()
 }
 
 /// Ambient occlusion (ADR 0058): its passes, and the shading that reads it after the depth
@@ -893,7 +909,7 @@ struct Shading {
 #[derive(Debug)]
 struct AoPasses {
     passes: AmbientOcclusion,
-    shading: [Pipeline; 4],
+    shading: [LazyPipeline; 4],
 }
 
 /// The specialization constants of each shading variant: `LOCAL_LIGHTS`, `ENVIRONMENT`
@@ -959,7 +975,8 @@ impl AoPasses {
             .map(|v| PipelineDesc::Graphics(shade(&fragment, c"fragmentMainAo", &formats[..], v)))
             .collect();
         let mut pipelines =
-            Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &descs)
+                .into_iter();
         let mut next = || {
             pipelines.next().ok_or(RhiError::Vulkan {
                 call: "ambient occlusion pipelines (fewer than described)",
@@ -979,9 +996,9 @@ impl AoPasses {
 struct SubsurfacePipelines {
     /// Per shading variant, their shading after the prepass (also writing their diffuse
     /// light and albedo).
-    shading: [Pipeline; 4],
+    shading: [LazyPipeline; 4],
     /// The scatter pass: the subsurface batches again, adding where their depth is.
-    scatter: Pipeline,
+    scatter: LazyPipeline,
 }
 
 impl SubsurfacePipelines {
@@ -1050,7 +1067,8 @@ impl SubsurfacePipelines {
             )
         }));
         let mut pipelines =
-            Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &descs)
+                .into_iter();
         let mut next = || {
             pipelines.next().ok_or(RhiError::Vulkan {
                 call: "subsurface pipelines (fewer than described)",
@@ -1071,11 +1089,11 @@ impl SubsurfacePipelines {
 struct ShadowedPipelines {
     shading: [Shading; 2],
     /// Transparent surfaces under an atmosphere or fog: without and with the reactive mask.
-    blended_atmosphere: [Pipeline; 2],
+    blended_atmosphere: [LazyPipeline; 2],
     /// With ambient occlusion, per environment bit.
-    ao: Option<[Pipeline; 2]>,
+    ao: Option<[LazyPipeline; 2]>,
     /// Subsurface materials, per environment bit.
-    subsurface: Option<[Pipeline; 2]>,
+    subsurface: Option<[LazyPipeline; 2]>,
     /// The shadow views: opaque (depth only), masked.
     depth: [Pipeline; 2],
     cull: ComputeShader<Push>,
@@ -1202,24 +1220,34 @@ impl ShadowedPipelines {
             depth_bias: Some(settings.depth_bias),
             ..GraphicsPipelineDesc::new(ShaderStageDesc { spirv, entry }, fragment)
         };
-        descs.push(shadow(&shadow_vertex, c"localShadowVertex", None));
-        descs.push(shadow(
-            &shadow_vertex_masked,
-            c"localShadowVertexMasked",
-            Some(masked_depth),
-        ));
+        // The shadow views' and their culling now; the shading when first drawn with.
         let cull = ComputeSource::<Push>::new(CULL_SHADOW_VIEWS, c"cullShadowViews", &[])?;
-        let mut all: Vec<PipelineDesc<'_>> =
-            descs.iter().copied().map(PipelineDesc::Graphics).collect();
-        all.push(cull.desc());
+        let now = [
+            PipelineDesc::Graphics(shadow(&shadow_vertex, c"localShadowVertex", None)),
+            PipelineDesc::Graphics(shadow(
+                &shadow_vertex_masked,
+                c"localShadowVertexMasked",
+                Some(masked_depth),
+            )),
+            cull.desc(),
+        ];
         let mut pipelines =
-            Pipeline::create_many(device, bindless.pipeline_layout(), &all)?.into_iter();
-        let mut next = || {
-            pipelines.next().ok_or(RhiError::Vulkan {
-                call: "local shadow pipelines (fewer than described)",
-                result: vk::Result::ERROR_UNKNOWN,
-            })
+            Pipeline::create_many(device, bindless.pipeline_layout(), &now)?.into_iter();
+        let fewer = || RhiError::Vulkan {
+            call: "local shadow pipelines (fewer than described)",
+            result: vk::Result::ERROR_UNKNOWN,
         };
+        let depth = [
+            pipelines.next().ok_or_else(fewer)?,
+            pipelines.next().ok_or_else(fewer)?,
+        ];
+        let cull = cull.finish(pipelines.next().ok_or_else(fewer)?);
+        let lazy: Vec<PipelineDesc<'_>> =
+            descs.iter().copied().map(PipelineDesc::Graphics).collect();
+        let mut described =
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &lazy)
+                .into_iter();
+        let mut next = || described.next().ok_or_else(fewer);
         let mut shading = || -> Result<Shading, RhiError> {
             Ok(Shading {
                 main: [next()?, next()?],
@@ -1230,8 +1258,6 @@ impl ShadowedPipelines {
         };
         let shading = [shading()?, shading()?];
         let blended_atmosphere = [next()?, next()?];
-        let depth = [next()?, next()?];
-        let cull = cull.finish(next()?);
         Ok(Self {
             shading,
             blended_atmosphere,
@@ -1304,7 +1330,8 @@ impl ShadowedPipelines {
             }
         }
         let mut pipelines =
-            Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &descs)
+                .into_iter();
         let mut next = || {
             pipelines.next().ok_or(RhiError::Vulkan {
                 call: "local shadow pipelines (fewer than described)",
@@ -1338,11 +1365,11 @@ impl ShadowedPipelines {
 struct ContactState {
     passes: ContactShadows,
     /// Per shading variant.
-    shading: [Pipeline; 4],
-    ao: Option<[Pipeline; 4]>,
+    shading: [LazyPipeline; 4],
+    ao: Option<[LazyPipeline; 4]>,
     /// With local lights' shadows, per environment bit (the local-light variants).
-    shadowed: Option<[Pipeline; 2]>,
-    shadowed_ao: Option<[Pipeline; 2]>,
+    shadowed: Option<[LazyPipeline; 2]>,
+    shadowed_ao: Option<[LazyPipeline; 2]>,
 }
 
 /// Shading pipelines after the depth prepass (depth tested for equality, not written) of
@@ -1354,7 +1381,7 @@ fn prepass_shading(
     depth_format: vk::Format,
     fragment: (&[u8], &core::ffi::CStr),
     variants: &[usize],
-) -> Result<Vec<Pipeline>, RhiError> {
+) -> Result<Vec<LazyPipeline>, RhiError> {
     let invalid = || RhiError::Vulkan {
         call: "embedded SPIR-V",
         result: vk::Result::ERROR_INVALID_SHADER_NV,
@@ -1379,11 +1406,15 @@ fn prepass_shading(
             })
         })
         .collect();
-    Pipeline::create_many(device, bindless.pipeline_layout(), &descs)
+    Ok(LazyPipeline::describe_many(
+        device,
+        bindless.shared_pipeline_layout(),
+        &descs,
+    ))
 }
 
 /// The first four (or two) of `pipelines` as an array.
-fn array_of<const N: usize>(pipelines: Vec<Pipeline>) -> Result<[Pipeline; N], RhiError> {
+fn array_of<T, const N: usize>(pipelines: Vec<T>) -> Result<[T; N], RhiError> {
     pipelines.try_into().map_err(|_| RhiError::Vulkan {
         call: "contact shadow pipelines (fewer than described)",
         result: vk::Result::ERROR_UNKNOWN,
@@ -1589,7 +1620,7 @@ struct ReflectionShading {
 }
 
 /// [`ReflectionShading::shading`]'s table.
-type ReflectShadingTable = [[[[Option<Pipeline>; 2]; 2]; 2]; 2];
+type ReflectShadingTable = [[[[Option<LazyPipeline>; 2]; 2]; 2]; 2];
 
 impl ReflectionShading {
     fn new(
@@ -1633,7 +1664,8 @@ impl ReflectionShading {
                 slots.push((lights, k));
             }
         }
-        let pipelines = Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?;
+        let pipelines =
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &descs);
         let mut shading: ReflectShadingTable = Default::default();
         for ((lights, k), pipeline) in slots.into_iter().zip(pipelines) {
             shading[lights][k >> 2][(k >> 1) & 1][k & 1] = Some(pipeline);
@@ -1646,7 +1678,13 @@ impl ReflectionShading {
 
     /// The shading for a view: with local lights (`lights`), ambient occlusion, the sun's
     /// contact shadows, local lights' shadows.
-    fn pipeline(&self, lights: bool, ao: bool, contact: bool, shadowed: bool) -> Option<&Pipeline> {
+    fn pipeline(
+        &self,
+        lights: bool,
+        ao: bool,
+        contact: bool,
+        shadowed: bool,
+    ) -> Option<&LazyPipeline> {
         self.shading[usize::from(lights)][usize::from(ao)][usize::from(contact)]
             [usize::from(shadowed && lights)]
         .as_ref()
@@ -1744,10 +1782,10 @@ pub struct ForwardRenderer {
     sky: Pipeline,
     /// With an atmosphere or height fog (ADR 0069): the sky, aerial perspective and fog
     /// in one full-screen pass after the opaque surfaces.
-    composite: Pipeline,
+    composite: LazyPipeline,
     /// Transparent surfaces under an atmosphere or fog (the environment variants, without
     /// and with local lights): without and with the reactive mask.
-    blended_atmosphere: [[Pipeline; 2]; 2],
+    blended_atmosphere: [[LazyPipeline; 2]; 2],
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
     cull: ComputeShader<Push>,
@@ -1879,9 +1917,11 @@ impl ForwardRenderer {
                 &VARIANTS[variant],
             )
         };
-        let mut descs = Vec::with_capacity(7 * VARIANTS.len() + 13);
+        // The shading variants are described (made on first use, ADR 0079), the rest made.
+        let mut lazy_descs = Vec::with_capacity(7 * VARIANTS.len() + 5);
+        let mut descs = Vec::with_capacity(8);
         for lit in 0..VARIANTS.len() {
-            descs.extend([
+            lazy_descs.extend([
                 main(&fragment, c"fragmentMain", &formats, false, lit),
                 main(&fragment_masked, c"fragmentMasked", &formats, false, lit),
                 main(&fragment, c"fragmentMain", &formats, true, lit),
@@ -1998,7 +2038,7 @@ impl ForwardRenderer {
         // the environment variants only.
         let composite_vertex = spirv_words(COMPOSITE_VERTEX).ok_or_else(invalid)?;
         let composite_fragment = spirv_words(COMPOSITE_FRAGMENT).ok_or_else(invalid)?;
-        descs.push(GraphicsPipelineDesc {
+        lazy_descs.push(GraphicsPipelineDesc {
             color_formats: &formats,
             cull_mode: vk::CullModeFlags::NONE,
             depth_test: false,
@@ -2020,13 +2060,13 @@ impl ForwardRenderer {
         let fragment_blended_atmosphere_reactive =
             spirv_words(FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE).ok_or_else(invalid)?;
         for lit in [2, 3] {
-            descs.push(blended(
+            lazy_descs.push(blended(
                 &fragment_blended_atmosphere,
                 c"fragmentBlendedAtmosphere",
                 &formats,
                 lit,
             ));
-            descs.push(blended(
+            lazy_descs.push(blended(
                 &fragment_blended_atmosphere_reactive,
                 c"fragmentBlendedAtmosphereReactive",
                 &reactive_formats,
@@ -2048,6 +2088,28 @@ impl ForwardRenderer {
                 result: vk::Result::ERROR_UNKNOWN,
             })
         };
+        let background = next()?;
+        let sky = next()?;
+        let prepass = [next()?, next()?];
+        let prepass_motion = [next()?, next()?];
+        let shadow = [next()?, next()?];
+        let cull = cull.finish(next()?);
+        let light_tiles = light_tiles.finish(next()?);
+        let pyramid = DepthPyramid::from_source(&reduce, next()?);
+        let lazy: Vec<PipelineDesc<'_>> = lazy_descs
+            .iter()
+            .copied()
+            .map(PipelineDesc::Graphics)
+            .collect();
+        let mut described =
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &lazy)
+                .into_iter();
+        let mut next = || {
+            described.next().ok_or(RhiError::Vulkan {
+                call: "forward shading (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
         let mut shading = || -> Result<Shading, RhiError> {
             Ok(Shading {
                 main: [next()?, next()?],
@@ -2057,11 +2119,6 @@ impl ForwardRenderer {
             })
         };
         let shading = [shading()?, shading()?, shading()?, shading()?];
-        let background = next()?;
-        let sky = next()?;
-        let prepass = [next()?, next()?];
-        let prepass_motion = [next()?, next()?];
-        let shadow = [next()?, next()?];
         let composite = next()?;
         let blended_atmosphere = [[next()?, next()?], [next()?, next()?]];
         Ok(Self {
@@ -2073,9 +2130,9 @@ impl ForwardRenderer {
             composite,
             blended_atmosphere,
             shadow,
-            cull: cull.finish(next()?),
-            light_tiles: light_tiles.finish(next()?),
-            pyramid: DepthPyramid::from_source(&reduce, next()?),
+            cull,
+            light_tiles,
+            pyramid,
             shadow_settings,
             frustum_culling: true,
             light_culling: true,
@@ -2320,7 +2377,7 @@ impl ForwardRenderer {
                 let [a, b, c] = r.passes.composite_statistics(device);
                 let stats = |lights| {
                     r.pipeline(lights, false, false, false)
-                        .map(|p| p.statistics(device))
+                        .map(|p| lazy_statistics(p, device))
                         .unwrap_or_default()
                 };
                 [stats(false), stats(true), a, b, c]
@@ -2511,7 +2568,9 @@ impl ForwardRenderer {
     /// and the device captures statistics.
     pub fn shadowed_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 2] {
         match &self.local_shadows {
-            Some(s) => core::array::from_fn(|k| s.pipelines.shading[k].main[0].statistics(device)),
+            Some(s) => {
+                core::array::from_fn(|k| lazy_statistics(&s.pipelines.shading[k].main[0], device))
+            }
             None => [Vec::new(), Vec::new()],
         }
     }
@@ -2521,7 +2580,7 @@ impl ForwardRenderer {
     /// turned on and the device captures statistics.
     pub fn contact_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
         match &self.contact {
-            Some(c) => core::array::from_fn(|k| c.shading[k].statistics(device)),
+            Some(c) => core::array::from_fn(|k| lazy_statistics(&c.shading[k], device)),
             None => Default::default(),
         }
     }
@@ -2555,7 +2614,7 @@ impl ForwardRenderer {
     /// environment. Empty unless the device captures statistics
     /// ([`Device::pipeline_statistics_enabled`]).
     pub fn shading_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
-        core::array::from_fn(|k| self.shading[k].main[0].statistics(device))
+        core::array::from_fn(|k| lazy_statistics(&self.shading[k].main[0], device))
     }
 
     /// The driver's statistics of what a view with motion vectors (temporal antialiasing
@@ -2569,10 +2628,10 @@ impl ForwardRenderer {
     ) -> [[Vec<engine_rhi::PipelineStatistic>; 2]; 4] {
         core::array::from_fn(|k| {
             [
-                self.shading[k].main_motion[0].statistics(device),
+                lazy_statistics(&self.shading[k].main_motion[0], device),
                 self.ao
                     .as_ref()
-                    .map(|ao| ao.shading[k].statistics(device))
+                    .map(|ao| lazy_statistics(&ao.shading[k], device))
                     .unwrap_or_default(),
             ]
         })
@@ -2598,8 +2657,8 @@ impl ForwardRenderer {
     ) -> [Vec<engine_rhi::PipelineStatistic>; 5] {
         match self.msaa_pipelines(samples) {
             Some(m) => core::array::from_fn(|k| match k {
-                0..4 => m.shading[k].shade.statistics(device),
-                _ => m.composite.statistics(device),
+                0..4 => lazy_statistics(&m.shading[k].shade, device),
+                _ => lazy_statistics(&m.composite, device),
             }),
             None => Default::default(),
         }
@@ -2613,9 +2672,9 @@ impl ForwardRenderer {
         device: &Device,
     ) -> [Vec<engine_rhi::PipelineStatistic>; 3] {
         [
-            self.composite.statistics(device),
-            self.blended_atmosphere[0][0].statistics(device),
-            self.blended_atmosphere[1][0].statistics(device),
+            lazy_statistics(&self.composite, device),
+            lazy_statistics(&self.blended_atmosphere[0][0], device),
+            lazy_statistics(&self.blended_atmosphere[1][0], device),
         ]
     }
 
@@ -4208,7 +4267,7 @@ impl ForwardRenderer {
         let main_pipelines = if let Some(m) = ms {
             let k = shadowed_index(variant);
             let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
-            let p: &Pipeline = if reflect_shading.is_some() {
+            let p: &LazyPipeline = if reflect_shading.is_some() {
                 m.reflect_pipeline(
                     variant & 1 != 0,
                     ao.is_some(),
@@ -4251,6 +4310,8 @@ impl ForwardRenderer {
                 (None, false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
             }
         };
+        // Made now if this is their first frame (ADR 0079).
+        let main_pipelines = [ready(main_pipelines[0])?, ready(main_pipelines[1])?];
         // `contact`: the sun's contact shadows, whose mask's index the shading that reads
         // it takes in `phase` (ADR 0071).
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
@@ -4603,6 +4664,7 @@ impl ForwardRenderer {
                 (None, Some(p)) => &p[shadowed_index(variant)],
                 (None, None) => &pipelines.shading[variant],
             };
+            let pipeline = ready(pipeline)?;
             let two_phases = flag_buffer.is_some();
             // Their diffuse light is occluded by the view's ambient occlusion too.
             let ao_texture = targets.ao;
@@ -4672,10 +4734,10 @@ impl ForwardRenderer {
                 );
             }
             // The scatter pass: the same batches, adding where their depth is.
-            let scatter = match ms_subsurface {
+            let scatter = ready(match ms_subsurface {
                 Some((_, scatter, _)) => scatter,
                 None => &pipelines.scatter,
-            };
+            })?;
             // With MSAA the neighbours' light comes from the resolve, the fragment's own
             // light and albedo from its samples (`scatterFragmentMs`).
             let (light, albedo, own_light) = match resolved {
@@ -4814,7 +4876,7 @@ impl ForwardRenderer {
             crate::atmosphere::add_composite_pass(
                 fg,
                 bindless,
-                ms.map_or(&self.composite, |m| &m.composite),
+                ready(ms.map_or(&self.composite, |m| &m.composite))?,
                 color,
                 depth,
                 &env,
@@ -4871,6 +4933,7 @@ impl ForwardRenderer {
                 (None, Some(_), None) => &self.blended_atmosphere[variant & 1][reactive_index],
                 (None, None, _) => &shading.blended[reactive_index],
             };
+            let pipelines = ready(pipelines)?;
             let mut pass = forward_pass(
                 fg,
                 names.transparent,

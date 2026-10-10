@@ -1046,6 +1046,11 @@ fn main() {
                 textures.pending().0 > 0 || streaming.as_ref().is_some_and(Streaming::busy);
             upload_frames += usize::from(uploading);
             let capture = last && frame == WARMUP + FRAMES;
+            if frame == WARMUP {
+                // Shading variants no frame drew with are made on the device's warm-up
+                // thread (ADR 0079): the timed frames do not share the CPU with it.
+                device.wait_for_pipeline_warm_up();
+            }
             // SAFETY: the previous frame finished (waited below).
             unsafe {
                 d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())

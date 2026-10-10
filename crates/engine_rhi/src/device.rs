@@ -6,11 +6,11 @@ use crate::instance::{Instance, InstanceShared};
 use crate::pipeline_cache::{self, CacheIdentity, PipelineCacheLoad, PipelineCacheSave};
 use ash::vk;
 use core::ffi::CStr;
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, Ordering};
 use engine_core::hash::state_hash64;
 use engine_core::jobs::ThreadPool;
 use std::path::Path;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 /// A device queue and its family.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +97,11 @@ pub struct Device {
     /// Creates pipelines in parallel ([`Self::create_parallel`]); without it, threads of
     /// its own.
     jobs: Option<Arc<ThreadPool>>,
+    /// The thread that creates described pipelines in the background (ADR 0079), started
+    /// with the first one; `None` inside when it could not start.
+    warm_up: std::sync::OnceLock<Option<crate::lazy_pipeline::PipelineWarmUp>>,
+    /// Pipelines described from now on are queued for the warm-up.
+    warm_up_enabled: bool,
     // Keeps the instance alive until the device is destroyed.
     instance: Arc<InstanceShared>,
 }
@@ -388,6 +393,8 @@ impl Device {
             diagnostics: Some(diagnostics),
             saved_cache: AtomicU64::new(state_hash64(&[])),
             jobs: None,
+            warm_up: std::sync::OnceLock::new(),
+            warm_up_enabled: true,
             graphics: queue(graphics_family),
             async_compute: compute_family.map(queue),
             transfer: transfer_family.map(queue),
@@ -451,12 +458,6 @@ impl Device {
     /// The ash device, for calls this layer does not wrap yet.
     pub fn raw(&self) -> &ash::Device {
         &self.raw
-    }
-
-    /// The ash device to keep in objects that call it later (a pointer, not the 1.5 KB
-    /// function table).
-    pub(crate) fn raw_shared(&self) -> Arc<ash::Device> {
-        Arc::clone(&self.raw)
     }
 
     /// The adapter the device was created on.
@@ -612,56 +613,65 @@ impl Device {
         T: Send + Sync,
         F: Fn(usize) -> Result<T, RhiError> + Sync,
     {
-        engine_profiler::zone!("rhi::Device::create_parallel");
-        if count <= 1 {
-            return (0..count).map(create).collect();
+        crate::pipeline::create_parallel(self.jobs.as_deref(), count, create)
+    }
+
+    /// Whether pipelines described from now on ([`crate::LazyPipeline::describe_many`])
+    /// are created in the background by the device's warm-up thread, besides on first use
+    /// (on by default; ADR 0079). Off, a variant a frame first needs is compiled while
+    /// drawing: for measuring that, and tests that must not see the thread's work.
+    pub fn set_pipeline_warm_up(&mut self, enabled: bool) {
+        self.warm_up_enabled = enabled;
+    }
+
+    /// The warm-up thread, started with the first pipeline described, when it is on.
+    pub(crate) fn pipeline_warm_up(&self) -> Option<&crate::lazy_pipeline::PipelineWarmUp> {
+        if !self.warm_up_enabled {
+            return None;
         }
-        let slots: Vec<OnceLock<Result<T, RhiError>>> =
-            (0..count).map(|_| OnceLock::new()).collect();
-        let run = |i: usize| {
-            let _ = slots[i].set(create(i));
-        };
-        match &self.jobs {
-            Some(pool) => pool.parallel_for(count, 1, |_, range| range.for_each(run)),
-            None => {
-                let next = AtomicUsize::new(0);
-                let work = || {
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        if i >= count {
-                            break;
-                        }
-                        run(i);
-                    }
-                };
-                let threads = std::thread::available_parallelism()
-                    .map_or(4, |n| n.get())
-                    .min(count);
-                std::thread::scope(|scope| {
-                    for _ in 1..threads {
-                        // A thread that cannot start leaves its share to the others.
-                        let _ = std::thread::Builder::new()
-                            .name(String::from("engine-pipelines"))
-                            .spawn_scoped(scope, work);
-                    }
-                    work();
-                });
-            }
-        }
-        slots
-            .into_iter()
-            .map(|slot| {
-                slot.into_inner().unwrap_or(Err(RhiError::Vulkan {
-                    call: "parallel creation (a job did not run)",
-                    result: vk::Result::ERROR_UNKNOWN,
-                }))
+        self.warm_up
+            .get_or_init(|| {
+                crate::lazy_pipeline::PipelineWarmUp::start()
+                    .map_err(|e| log::warn!("pipelines are created on first use only: {e}"))
+                    .ok()
             })
-            .collect()
+            .as_ref()
+    }
+
+    /// Pipelines the warm-up thread has queued and not created yet.
+    pub fn pipelines_warming_up(&self) -> usize {
+        self.warm_up
+            .get()
+            .and_then(Option::as_ref)
+            .map_or(0, crate::lazy_pipeline::PipelineWarmUp::pending)
+    }
+
+    /// Waits until the warm-up thread has created every pipeline queued so far: for
+    /// measurements and tests that must not see its work (its allocations, the driver's
+    /// compiles).
+    pub fn wait_for_pipeline_warm_up(&self) {
+        if let Some(warm_up) = self.warm_up.get().and_then(Option::as_ref) {
+            warm_up.wait();
+        }
+    }
+
+    /// What creating pipelines needs from this device, to create them elsewhere: on first
+    /// use while drawing, or on a warm-up thread ([`crate::LazyPipeline`], ADR 0079).
+    pub fn pipeline_context(&self) -> crate::pipeline::PipelineContext {
+        crate::pipeline::PipelineContext {
+            device: Arc::clone(&self.raw),
+            cache: self.pipeline_cache,
+            statistics: self.pipeline_statistics,
+            jobs: self.jobs.clone(),
+        }
     }
 }
 
 impl Drop for Device {
     fn drop(&mut self) {
+        // The warm-up thread creates pipelines through the cache and the device destroyed
+        // below: it stops first, after the pipeline it is creating.
+        drop(self.warm_up.take());
         // SAFETY: all objects created from the device are owned by values that borrow or
         // outlive-check against it; waiting for idle first makes destruction safe for
         // in-flight work.

@@ -251,6 +251,9 @@ fn steady_state_reflection_frames_do_not_allocate() {
             frame(i, refresh);
         }
         let mut faces = 0;
+        // Shading variants the frames have not drawn with are made on the device's
+        // warm-up thread (ADR 0079), which allocates: done before counting.
+        device.wait_for_pipeline_warm_up();
         let before = ALLOCATIONS.load(Ordering::Relaxed);
         for i in 30..130 {
             faces += frame(i, refresh);

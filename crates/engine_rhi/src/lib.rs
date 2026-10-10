@@ -30,6 +30,7 @@ mod error;
 mod fault;
 mod frames;
 mod instance;
+mod lazy_pipeline;
 mod memory;
 mod modules;
 mod pipeline;
@@ -46,13 +47,15 @@ pub use error::RhiError;
 pub use fault::{AddressFault, DeviceFault, GpuFaultReport, VendorFault, last_gpu_fault};
 pub use frames::{Frame, Frames};
 pub use instance::{Instance, InstanceDesc, ValidationReport};
+pub use lazy_pipeline::LazyPipeline;
 pub use memory::{
     Allocation, AllocationRequest, Allocator, AllocatorConfig, DedicatedTo, HeapBudget, HeapStats,
     MemoryBudget, MemoryLocation, Range, RangeAllocator, ResourceKind,
 };
 pub use pipeline::{
-    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineCreationStats, PipelineDesc,
-    PipelineStatistic, ShaderStageDesc, creation_stats, spirv_words,
+    Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineContext, PipelineCreationStats,
+    PipelineDesc, PipelineStatistic, ShaderStageDesc, SharedPipelineLayout, creation_stats,
+    spirv_words,
 };
 pub use pipeline_cache::{PipelineCacheLoad, PipelineCacheSave};
 pub use swapchain::{

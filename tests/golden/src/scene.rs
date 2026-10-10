@@ -1288,6 +1288,12 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             continue;
         }
         resident_frames += 1;
+        if resident_frames == 1 {
+            // Shading variants no frame drew with yet are made on the device's warm-up
+            // thread (ADR 0079): timed frames do not share the CPU (and the iGPU's power)
+            // with it.
+            device.wait_for_pipeline_warm_up();
+        }
         if resident_frames == 1
             && let Some(p) = probes.as_ref()
         {
