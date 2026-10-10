@@ -184,3 +184,6 @@ measured again included, and the whole check `-Gpu -Perf` 400 s instead of 901 (
 RTX, 10 s on the Radeon); a regression has to show in both sets of runs. The work on the
 CPU during the Radeon's runs still counts: a build started meanwhile slows them, and the
 uniform-shift rule names it.
+
+Later the same day the pass times became each pass's own time on its queue, without the
+previous pass's tail (ADR 0011 addendum); both baselines were re-measured with them.

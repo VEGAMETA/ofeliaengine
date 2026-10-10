@@ -143,3 +143,44 @@ record, steady state, empty callbacks.
   4. Reads of imported resources that other queues or frames write.
 - Pass names must be `&'static str` (no allocation). Names longer than 63 bytes are cut
   in debug labels.
+
+## Addendum (2026-10-10): a pass's GPU time is its own
+
+The second core review (`docs/research/core-audit-2.md`) found pass times that held other
+passes' work: on the Radeon the texture feedback pass read 2.4 ms after the tone mapper
+into the swapchain, and 49 µs after an offscreen one. Each pass is opened by a timestamp at
+the top of the pipe, which the GPU writes as soon as it reaches the command: when the
+previous pass is still running (no barrier between them, or one that only blocks later
+stages), the span to the pass's closing timestamp holds that pass's tail. Measured on
+ref-1 with the new test `a_pass_after_a_long_one_is_timed_alone` (a 256 MiB fill, then a
+256-byte fill into another buffer, nothing between them):
+
+| | long fill | short fill, its span | short fill, its own time |
+|---|---:|---:|---:|
+| RTX 4060 Ti | 929–983 µs | 1.5–2.0 µs | 1.5–2.0 µs |
+| Radeon iGPU | 4,731–4,758 µs | 4,731–4,749 µs | 0.24–0.28 µs |
+
+The NVIDIA driver does not start the next command before the timestamp; AMD's does.
+
+Options:
+
+1. **A pass's own time on its queue** (chosen): from its opening timestamp or from the
+   previous pass's closing timestamp on the same queue, whichever is later, to its
+   closing timestamp. The times then partition each queue's busy time; overlap is
+   counted once, on the earlier pass. Free, always on, right for the profiler and the
+   perf gate alike.
+2. **A serialized mode for the gate** (a barrier before every opening timestamp): it
+   measures another frame than the one players run, costs GPU time, and the profiler
+   stays wrong.
+3. **Opening timestamps at `ALL_COMMANDS`**: they wait for the previous work, which is
+   option 2 in all frames.
+
+Decision: `PassTime::gpu_us` is the pass's own time (option 1); `PassTime::span_us` keeps
+the span between its two timestamps. Tracy's GPU zones keep the raw timestamps (they show
+the overlap). Work on another queue (async compute) still overlaps: each queue's times
+are its own, and `RenderGraph::gpu_frame_time` gives the frame end to end.
+
+Effect on ref-1's Radeon: in `flight`, texture feedback 2,430 → 88 µs and light tiles
+~100 → 7.5 µs; in the perf gate the culling passes read 0.3–1.6 µs instead of 4–76, the
+depth prepass 12 % less in two scenes. Both perf baselines were re-measured; the RTX's
+moved within a few µs.

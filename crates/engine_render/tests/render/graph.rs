@@ -335,3 +335,146 @@ fn passes_culling_aliasing_and_barriers_are_hazard_free() {
     );
     assert_eq!(report.errors, 0, "{:#?}", report.first_errors);
 }
+
+/// A pass that follows a long one with no barrier between them (they share nothing) has
+/// its opening timestamp written while the long one still runs: its time must be its own,
+/// not the long pass's tail (core review 2: a 49 µs pass read 2.4 ms). The passes' times
+/// add up to no more than the frame.
+#[test]
+fn a_pass_after_a_long_one_is_timed_alone() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let d = device.raw();
+    let mut allocator = Allocator::new(&device);
+    let mut graph = RenderGraph::new(&device, 1);
+    const LONG: u64 = 256 << 20;
+    const SHORT: u64 = 256;
+    let buffer = |allocator: &mut Allocator, size| {
+        allocator
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(size)
+                    .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                MemoryLocation::Device,
+            )
+            .unwrap()
+    };
+    // Imported, so that the graph neither culls the passes nor lets the buffers share
+    // memory (which would put a barrier between them).
+    let (long, long_mem) = buffer(&mut allocator, LONG);
+    let (short, short_mem) = buffer(&mut allocator, SHORT);
+    // SAFETY: plain object creation on a live device.
+    let (pool, cmd) = unsafe {
+        let pool = d
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(device.graphics.family),
+                None,
+            )
+            .unwrap();
+        let cmd = d
+            .allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .command_buffer_count(1),
+            )
+            .unwrap()[0];
+        (pool, cmd)
+    };
+    for frame in 0..3u32 {
+        // SAFETY: the device is idle between frames in this test.
+        unsafe {
+            d.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .unwrap();
+        }
+        {
+            // SAFETY: the previous submission completed (wait_idle below).
+            let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            let import = |fg: &mut engine_render::graph::FrameGraph<'_>, name, buffer, size| {
+                fg.import_buffer(
+                    name,
+                    ImportedBuffer {
+                        buffer,
+                        size,
+                        address: 0,
+                        initial: BufferState::idle(),
+                        final_state: None,
+                    },
+                )
+            };
+            let long = import(&mut fg, "long", long, LONG);
+            let short = import(&mut fg, "short", short, SHORT);
+            fg.add_pass("long fill")
+                .write(long, Access::TransferWrite)
+                .execute(move |ctx| {
+                    // SAFETY: recording; the buffer holds `LONG` bytes.
+                    unsafe {
+                        ctx.device
+                            .cmd_fill_buffer(ctx.cmd, ctx.buffer(long), 0, LONG, 1);
+                    }
+                });
+            fg.add_pass("short fill")
+                .write(short, Access::TransferWrite)
+                .execute(move |ctx| {
+                    // SAFETY: recording; the buffer holds `SHORT` bytes.
+                    unsafe {
+                        ctx.device
+                            .cmd_fill_buffer(ctx.cmd, ctx.buffer(short), 0, SHORT, 2);
+                    }
+                });
+            fg.execute(&mut allocator).unwrap();
+        }
+        // SAFETY: one-shot submission, then wait for idle.
+        unsafe {
+            d.end_command_buffer(cmd).unwrap();
+            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            d.queue_submit2(
+                device.graphics.raw,
+                &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
+                vk::Fence::null(),
+            )
+            .unwrap();
+            device.wait_idle().unwrap();
+        }
+        if frame == 0 {
+            continue;
+        }
+        // The previous frame's times.
+        let times = graph.gpu_pass_times();
+        println!("GPU µs: {times:?}, frame {:?}", graph.gpu_frame_time());
+        let names: Vec<&str> = times.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["long fill", "short fill"]);
+        let (long, short) = (times[0], times[1]);
+        assert!(times.iter().all(|t| t.gpu_us <= t.span_us + 0.01));
+        assert!(
+            short.gpu_us < long.gpu_us / 4.0,
+            "the short fill read {} µs (span {}) after a {} µs fill",
+            short.gpu_us,
+            short.span_us,
+            long.gpu_us
+        );
+        if let Some(frame_us) = graph.gpu_frame_time() {
+            let sum: f32 = times.iter().map(|t| t.gpu_us).sum();
+            assert!(
+                sum <= frame_us + 1.0,
+                "passes {sum} µs, frame {frame_us} µs"
+            );
+        }
+    }
+    // SAFETY: the device is idle.
+    unsafe {
+        graph.destroy(&mut allocator, None);
+        allocator.destroy_buffer(long, long_mem);
+        allocator.destroy_buffer(short, short_mem);
+        d.destroy_command_pool(pool, None);
+    }
+    drop(allocator);
+    let report = instance.validation_report();
+    assert_eq!(report.errors, 0, "{:#?}", report.first_errors);
+}

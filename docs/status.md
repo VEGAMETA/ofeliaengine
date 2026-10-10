@@ -82,8 +82,9 @@ tooling included) about **50 %**.
 - The review's P0 fixes (queue item 0a), by the coordinator, after the faster checks
   (item 0, done on 2026-10-10 but for sccache: ADR 0077 and its two addenda, ADR 0062's
   addendum): a check with nothing changed 632 → 141 s, the gate `-Gpu -Perf` 10–25 min →
-  400 s (its perf step 749 → 237 s). First fix (the pipelines' size, the 1 MiB stack):
-  branch `fix/pipeline-size`; next, GPU pass times without overlap.
+  400 s (its perf step 749 → 237 s). Both P0 fixes done the same day: the pipelines'
+  size and the 1 MiB stack (PR #124), each pass's own GPU time (`fix/pass-times`). Next:
+  item 0b.
 
 ## 5. Queue (in order)
 
@@ -144,9 +145,10 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
      feature and antialiasing mode on a 1 MiB thread on both GPUs (it overflowed before;
      it fits 256 KB now); `game_loop` runs on the Radeon; the 16–64 MiB threads in
      `perf_gate`, `aa_bench` and `flight` are gone;
-   - GPU pass times without overlap (exclusive times, or a serialized mode for the gate)
-     and the gate's baselines re-checked with them: today a pass after a long one without
-     a barrier absorbs its tail (feedback measured 2.4 ms, really 49 µs).
+   - ~~GPU pass times without overlap~~ done 2026-10-10 (ADR 0011 addendum): a pass's
+     time starts at the previous pass's end on its queue when that came later; the
+     Radeon's texture feedback reads 88 µs instead of 2.4 ms, its culling passes
+     0.3–1.6 µs instead of 4–76; both perf baselines re-measured.
 0b. **No visible streaming pop-in on fast camera turns** (owner, 2026-10-02: in UE, models
    and textures failed to load in time when the camera turned quickly). Our ADR 0076 has
    the same risk:
