@@ -36,6 +36,7 @@ use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError, SamplerKind};
 
 const RESOLVE: &[u8] = include_bytes!("../shaders/taau.resolve.spv");
+const RESOLVE_CATMULL_ROM: &[u8] = include_bytes!("../shaders/taau.resolveCatmullRom.spv");
 
 /// Format of the history and of the resolved image (HDR, accumulated weight in alpha).
 pub const HISTORY_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -104,11 +105,14 @@ struct History {
 /// How [`Taau`] fetches last frame's result (ADR 0043).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HistoryFilter {
-    /// One bilinear fetch: the fastest (the resolve about 15% cheaper), a little softer in
-    /// motion (about 1.2 dB lower PSNR on a moving camera).
+    /// One bilinear fetch: the fastest (the resolve a third cheaper on the RTX 4060 Ti, a
+    /// fifth on the Radeon iGPU), a little softer in motion (about 1.2 dB lower PSNR on a
+    /// moving camera).
     #[default]
     Bilinear,
-    /// A 5-tap Catmull-Rom filter (5 bilinear fetches): keeps moving images sharper.
+    /// Catmull-Rom over the 12 texels of the 4 × 4 around the sample without its corners,
+    /// each read on its own (not merged into bilinear fetches: ATI's US 8,675,007 B2):
+    /// keeps moving images sharper.
     CatmullRom,
 }
 
@@ -149,8 +153,8 @@ impl Taau {
             device,
             bindless,
             [
-                ComputeSource::new(RESOLVE, c"resolve", &[0])?,
-                ComputeSource::new(RESOLVE, c"resolve", &[1])?,
+                ComputeSource::new(RESOLVE, c"resolve", &[])?,
+                ComputeSource::new(RESOLVE_CATMULL_ROM, c"resolveCatmullRom", &[])?,
             ],
         )?;
         Ok(Self {

@@ -90,7 +90,9 @@ contract, so game developers can build effects on it:
    - the current frame reconstructed from its 3 × 3 jittered samples with a
      Blackman-Harris approximation;
    - nearest-depth motion;
-   - a 5-tap Catmull-Rom history;
+   - a 5-tap Catmull-Rom history (since 2026-10-10 an option, its 12 texels read one by
+     one: merging them into bilinear fetches is claimed by ATI's US 8,675,007 B2, see
+     `docs/research/antialiasing.md`);
    - 3 × 3 variance clipping in YCoCg on reversibly tonemapped colors;
    - the accumulated weight kept in history alpha and capped (more for static pixels);
    - history reset off screen and on camera cuts.

@@ -523,8 +523,8 @@ temporal.reset();
   was at `uv − motion` last frame. Pixels without geometry carry the camera's motion. Use
   it for motion blur or your own temporal effects.
 - **History filter:** bilinear by default (the fastest). For sharper images in motion,
-  `taau.set_history_filter(HistoryFilter::CatmullRom)`: 10-15% more resolve time (about
-  1 dB better on a panning camera).
+  `taau.set_history_filter(HistoryFilter::CatmullRom)`: about 50 % more resolve time on
+  the RTX 4060 Ti, 24 % on the Radeon iGPU (about 1 dB better on a panning camera).
 - **Texture LOD bias while upsampling:** textures are sampled for the render size unless
   you bias them towards the output size:
   `materials.set_texture_lod_bias(&bindless, engine_upscale::texture_lod_bias(render_size, output_size))?`
@@ -548,7 +548,7 @@ What it costs (ref-1, 1080p):
   `scene_bench -- --motion` (add `--ao high` or `--prepass`).
 - **The resolve:**
   - RTX 4060 Ti: 0.14 ms for TAA, 0.12 ms from 720p (bilinear history);
-  - Radeon iGPU: 3.9 ms either way (4.5 ms with the Catmull-Rom history).
+  - Radeon iGPU: 3.9-4.2 ms either way (5.3 ms with the Catmull-Rom history).
   - Pass `-- --catmull-rom` to the benchmark for the other filter.
   - Measure with `cargo run -p engine_upscale --release --example taau_bench`.
 - **Upsampling from 720p** is cheaper than native 1080p with TAA on both GPUs:

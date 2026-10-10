@@ -84,8 +84,9 @@ ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 
 review's P0 fixes: PRs #124, #125; the Radeon's perf limits, PR #126), 0b (fast turns:
 PRs #127–#130; left optional: the fast-turn test in the perf gate, one wider feedback
 pass if a larger scene shows pop-in), 0c (Catmull-Rom and Lanczos-3, ADR 0075's
-addendum), 0d (motion vectors from the depth prepass, ADR 0043's addendum). Next: TAAU's
-Catmull-Rom history with point reads (owner, 2026-10-10), then 0e.
+addendum), 0d (motion vectors from the depth prepass, ADR 0043's addendum), TAAU's
+Catmull-Rom history with point reads (owner, 2026-10-10; ADR 0043's second amendment).
+Next: 0e.
 
 ## 5. Queue (in order)
 
@@ -293,9 +294,10 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
   - per-sample or bilaterally upsampled AO and contact shadows under MSAA;
   - dynamic resolution with MSAA;
   - CMAA is not built (Intel patents).
-  - TAAU's optional Catmull-Rom history (`HistoryFilter::CatmullRom`, ADR 0043, off by
-    default) merges bilinear fetches as ATI's US 8,675,007 B2 claims: owner's decision
-    (2026-10-10): rewrite it with point reads, as the 0c filters (next).
+  - TAAU's optional Catmull-Rom history reads its 12 texels one by one since 2026-10-10
+    (owner's decision; it merged bilinear fetches as ATI's US 8,675,007 B2 claims): RTX
+    resolve 162 → 206 µs at 1080p, Radeon 4.96 → 5.28 ms; the default bilinear one is
+    unchanged.
   - Ambient occlusion: the discrete default stays High (owner, 2026-10-10), although it
     is 28 % of the RTX's default GPU frame (481 µs; Medium 0.40 ms, FLIP 0.096 vs 0.070).
   - The discrete-GPU default stays TAA. The other candidate is MSAA 4× (+1.2 ms on the
