@@ -280,7 +280,10 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    medallions on the curtains (roughness 0.28, metallic 0.74) must read gold when seen from
    above in shade. Today they look dark brown there. The material and the shading are
    right (seen from below they are gold), but the shaded floor they reflect has no bounced
-   light (2026-10-02).
+   light (2026-10-02). Researched 2026-10-11 (ADR 0084, Proposed): DDGI probes traced with
+   ray queries (NVIDIA's patent application on DDGI was abandoned; both reference GPUs have
+   ray queries; acceleration structures needed) or AMD's Brixelizer GI (MIT, compute, any
+   GPU). Waiting for the owner's choice.
 3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
    first: it decides permutations and pipeline management for the whole renderer (§9
    material graph and hand-written Slang).
@@ -339,7 +342,8 @@ grown, divide and conquer); the old labels stay in parentheses.
   - half-resolution aerial perspective and fog on the iGPU (about 1–2 ms there);
   - froxel volumetric fog;
   - per-pixel local-shadow mask (the shadowed forward shading costs +10–12 % on the iGPU);
-  - softer shadow filters;
+  - softer shadow filters; an HDR panorama's sun is a point light today: its angular size
+    (ADR 0083's sun search can measure it) for soft shadows;
   - contact shadows of local lights (owner, 2026-10-10: on request): Bend's pass per light,
     for the brightest one or two; today only the sun has them;
   - reflections on transparent surfaces;
