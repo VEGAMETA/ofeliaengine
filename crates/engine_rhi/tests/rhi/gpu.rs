@@ -8,7 +8,7 @@
 // Test helpers outside `#[test]` functions print diagnostics and unwrap freely.
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
-mod common;
+use crate::common;
 
 use common::{TrianglePipeline, assert_no_validation_errors, find_memory, gpu};
 use engine_rhi::ash::vk;

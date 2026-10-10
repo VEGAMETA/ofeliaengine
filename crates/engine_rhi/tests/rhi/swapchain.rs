@@ -4,7 +4,7 @@
 
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
-mod common;
+use crate::common;
 
 use common::{TrianglePipeline, assert_no_validation_errors, gpu};
 use engine_rhi::ash::vk;

@@ -1,6 +1,8 @@
-//! CLAUDE.md §5: zero heap allocations per frame in steady state, for the persistent GPU
-//! scene (ADR 0064) and the forward passes that draw it: moves, removals and insertions
-//! every frame, uploaded and declared, culled and drawn, recorded.
+//! CLAUDE.md §5: zero heap allocations per frame in steady state, for local lights'
+//! shadows (ADR 0071): casters moving near shadowed lights every frame (shadows redrawn
+//! within the budget), a moving light, lights entering and leaving the view, and the sun's
+//! contact shadows, through the persistent GPU scene and a draw list, uploaded and
+//! declared, culled and drawn, recorded.
 //!
 //! A counting global allocator observes the process while frames are declared and
 //! recorded after a warm-up (driver allocations happen in C and are not counted). One
@@ -11,7 +13,8 @@
 
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, ForwardRenderer, ForwardView, Occlusion, ShadowSettings, Temporal,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
+    LocalShadowSettings, Occlusion, ShadowSettings, Spot, Temporal,
 };
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{RenderGraph, TextureDesc};
@@ -23,42 +26,17 @@ use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance as VkInstance, InstanceDesc,
 };
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
-struct CountingAllocator;
-
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-// SAFETY: forwards to the system allocator; only adds a counter.
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: same contract as the caller's.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: same contract as the caller's.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: same contract as the caller's.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
+use crate::ALLOCATIONS;
 
 #[test]
-fn steady_state_scene_frames_do_not_allocate() {
+fn steady_state_local_shadow_frames_do_not_allocate() {
+    let _alone = crate::alone();
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
     let setup = || -> Result<(VkInstance, Device), engine_rhi::RhiError> {
         let instance = VkInstance::new(&InstanceDesc {
-            app_name: String::from("engine_render gpu scene zero-alloc test"),
+            app_name: String::from("engine_render local shadows zero-alloc test"),
             validation: false,
             debug_utils: true,
             surface: false,
@@ -81,7 +59,7 @@ fn steady_state_scene_frames_do_not_allocate() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let (color_format, depth_format) = (vk::Format::R16G16B16A16_SFLOAT, vk::Format::D32_SFLOAT);
-    let renderer = ForwardRenderer::new(
+    let mut renderer = ForwardRenderer::new(
         &device,
         &bindless,
         color_format,
@@ -89,6 +67,20 @@ fn steady_state_scene_frames_do_not_allocate() {
         ShadowSettings::default(),
     )
     .unwrap();
+    renderer
+        .set_local_shadows(
+            &device,
+            &mut allocator,
+            &bindless,
+            Some(LocalShadowSettings {
+                updates_per_frame: 8,
+                ..LocalShadowSettings::default()
+            }),
+        )
+        .unwrap();
+    renderer
+        .set_contact_shadows(&device, &bindless, Some(Default::default()))
+        .unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 2).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
@@ -99,6 +91,9 @@ fn steady_state_scene_frames_do_not_allocate() {
         .collect();
     let mut ring = UploadRing::new(&device, &mut allocator, 2, 4 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 2);
+    // Nothing here is submitted: with async compute (the contact shadows' pass) the graph
+    // would submit the earlier segments itself, waiting on work that never runs.
+    graph.set_async_compute(false);
     let occlusion = Occlusion::new(&device, &mut allocator, 4096).unwrap();
     let temporal = Temporal::new(&device, &mut allocator, 16).unwrap();
     let mut scene = GpuScene::new(&device, &bindless, 4096, 2).unwrap();
@@ -148,8 +143,34 @@ fn steady_state_scene_frames_do_not_allocate() {
         color: Vec3::splat(2.0),
         ambient: Vec3::splat(0.1),
     };
+    // Shadowed point and spot lights over the field; one of them moves.
+    let mut lights: Vec<LocalLight> = (0..12)
+        .map(|k| LocalLight {
+            position: Vec3::new(k as f32 * 4.0 - 22.0, 3.0, (k % 3) as f32 * 8.0 - 12.0),
+            range: 6.0,
+            color: Vec3::splat(4.0),
+            spot: (k % 2 == 0).then_some(Spot {
+                direction: Vec3::NEG_Y,
+                inner: 0.4,
+                outer: 0.8,
+            }),
+            shadow: true,
+        })
+        .collect();
+    let mut draws: Vec<DrawItem> = (0..500)
+        .map(|i| DrawItem {
+            mesh,
+            material: palette[i % palette.len()],
+            world_from_object: place(i, 0.0),
+        })
+        .collect();
     let mut frame_number = 0u64;
-    let mut frame = |i: usize| {
+    let mut frame = |i: usize, use_scene: bool| {
+        lights[3].position.x = (i as f32 * 0.1).sin() * 3.0 - 10.0;
+        for k in 0..5 {
+            let index = (i * 31 + k * 97) % draws.len();
+            draws[index].world_from_object = place(index, i as f32);
+        }
         // 1 % moves, 10 instances removed and inserted again (churn).
         for k in 0..20 {
             let index = (i * 37 + k * 101) % ids.len();
@@ -201,29 +222,32 @@ fn steady_state_scene_frames_do_not_allocate() {
                 .unwrap();
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, 640, 360));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, 640, 360));
-            let passes = renderer
-                .add_scene_passes(
+            let view = ForwardView {
+                camera,
+                light,
+                color,
+                depth,
+                clear: Some([0.0; 4]),
+                occlusion: Some(&occlusion),
+                temporal: Some(&temporal),
+                lights: &lights,
+                environment: None,
+                reflections: Default::default(),
+            };
+            let passes = if use_scene {
+                renderer.add_scene_passes(
                     &mut fg,
                     &mut ring,
                     &bindless,
                     &geo,
                     &mats,
                     &scene_frame,
-                    &ForwardView {
-                        camera,
-                        light,
-                        color,
-                        depth,
-                        clear: Some([0.0; 4]),
-                        occlusion: Some(&occlusion),
-                        temporal: Some(&temporal),
-                        lights: &[],
-                        environment: None,
-                        reflections: Default::default(),
-                    },
+                    &view,
                 )
-                .unwrap();
-            std::hint::black_box(passes);
+            } else {
+                renderer.add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view)
+            };
+            std::hint::black_box(passes.unwrap());
             fg.add_pass("present stand-in")
                 .read(color, engine_render::graph::Access::TransferRead)
                 .side_effects()
@@ -235,24 +259,29 @@ fn steady_state_scene_frames_do_not_allocate() {
         unsafe { d.end_command_buffer(cmd).unwrap() };
     };
 
-    for i in 0..30 {
-        frame(i);
+    for use_scene in [true, false] {
+        for i in 0..40 {
+            frame(i, use_scene);
+        }
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        for i in 40..140 {
+            frame(i, use_scene);
+        }
+        let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
+        let stats = renderer.local_shadow_stats();
+        println!(
+            "100 frames ({}): {allocations} heap allocations; {stats:?}",
+            if use_scene { "GPU scene" } else { "draw list" }
+        );
+        assert!(stats.views_drawn > 0, "shadows are redrawn: {stats:?}");
+        assert_eq!(allocations, 0);
     }
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    for i in 30..130 {
-        frame(i);
-    }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
-    println!(
-        "100 frames: {allocations} heap allocations; {:?}",
-        scene.stats()
-    );
-    assert_eq!(allocations, 0);
 
     device.wait_idle().unwrap();
     let (mut occlusion, mut temporal) = (occlusion, temporal);
     // SAFETY: nothing is in use.
     unsafe {
+        renderer.destroy(&device, &mut allocator, &bindless);
         scene.destroy(&mut allocator);
         occlusion.destroy(&mut allocator);
         temporal.destroy(&mut allocator);

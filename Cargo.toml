@@ -80,6 +80,13 @@ opt-level = 1
 [profile.dev.package."*"]
 opt-level = 3
 
+# What `cargo test` and cargo-nextest build: line tables only (file and line in panics and
+# backtraces, no variables in a debugger). A third of the debug info to write: rebuilding
+# every test after a change in engine_core went 84 -> 56 s on ref-1 (ADR 0077). Debug a test
+# with variables: CARGO_PROFILE_TEST_DEBUG=full.
+[profile.test]
+debug = "line-tables-only"
+
 [profile.release]
 opt-level = 3
 debug = false

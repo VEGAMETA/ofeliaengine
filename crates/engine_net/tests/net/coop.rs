@@ -3,7 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, missing_docs)]
 
-#[path = "../examples/coop/game.rs"]
+#[path = "../../examples/coop/game.rs"]
 mod game;
 
 use engine_net_transport::memory::{LinkConditions, MemoryNetwork};

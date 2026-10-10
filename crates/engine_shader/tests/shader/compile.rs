@@ -2,7 +2,7 @@
 
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
-mod common;
+use crate::common;
 
 use common::{slang, temp_dir};
 

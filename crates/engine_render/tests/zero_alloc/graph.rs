@@ -13,38 +13,13 @@ use engine_render::graph::{
 };
 use engine_rhi::ash::vk;
 use engine_rhi::{AdapterPreference, Allocator, Device, Instance, InstanceDesc};
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
-struct CountingAllocator;
-
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-// SAFETY: forwards to the system allocator; only adds a counter.
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: same contract as the caller's.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: same contract as the caller's.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: same contract as the caller's.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
+use crate::ALLOCATIONS;
 
 #[test]
 fn steady_state_frames_do_not_allocate() {
+    let _alone = crate::alone();
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
     let setup = || -> Result<(Instance, Device), engine_rhi::RhiError> {
         let instance = Instance::new(&InstanceDesc {

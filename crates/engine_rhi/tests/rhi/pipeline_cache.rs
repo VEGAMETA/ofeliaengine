@@ -6,7 +6,7 @@
 
 #![allow(clippy::print_stdout, clippy::unwrap_used)]
 
-mod common;
+use crate::common;
 
 use common::{assert_no_validation_errors, gpu};
 use engine_core::jobs::ThreadPool;
@@ -18,8 +18,8 @@ use engine_rhi::{
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const VERTEX: &[u8] = include_bytes!("../shaders/triangle.vert.spv");
-const FRAGMENT: &[u8] = include_bytes!("../shaders/triangle.frag.spv");
+const VERTEX: &[u8] = include_bytes!("../../shaders/triangle.vert.spv");
+const FRAGMENT: &[u8] = include_bytes!("../../shaders/triangle.frag.spv");
 
 /// A directory of this test's own, emptied.
 fn scratch_dir(name: &str) -> PathBuf {

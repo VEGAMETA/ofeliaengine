@@ -22,6 +22,13 @@ cargo install cargo-nextest --locked
   which). The full run gates the merge.
 - **Doc tests and formatting** follow the branch's changes in every run: unchanged code
   passed them on main.
+- **A crate's integration tests are one binary**: `tests/<crate>/main.rs` declares each
+  test file as a module (`mod forward;` for `tests/<crate>/forward.rs`); tests that count
+  allocations share `tests/zero_alloc/main.rs` and its counting allocator. A new test file
+  is a new module there, not a new binary (each binary links the whole engine).
+- **Test builds carry line tables only** (`[profile.test]`): file and line in panics and
+  backtraces. To see variables in a debugger, build the test with
+  `CARGO_PROFILE_TEST_DEBUG=full`.
 - **New crates depend on `engine_workspace_hack`** (directly, or through `engine_core`).
   It gives the shared dependencies one set of features in every build, so `cargo test -p`
   a crate reuses what the full check built instead of rebuilding it. When `-Deny` reports
@@ -34,8 +41,8 @@ image of the GPU's vendor (`tests/golden/images/nvidia/`, `amd/`) through FLIP, 
 perceptual difference:
 
 ```
-cargo test -p engine_golden --test golden -- --nocapture
-set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden
+cargo test -p engine_golden --test golden -- --nocapture golden::
+set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden -- golden::
 ```
 
 - **A test fails** when the mean FLIP exceeds 0.01 or the 99.9th percentile pixel 0.25.
@@ -48,8 +55,8 @@ set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden
 
   ```
   set ENGINE_GOLDEN_UPDATE=1
-  cargo test -p engine_golden --test golden
-  set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden
+  cargo test -p engine_golden --test golden -- golden::
+  set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden -- golden::
   ```
 
 - **Add a shot** for a new feature: a `Shot` in `golden.rs` that turns it on (see

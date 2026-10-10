@@ -1,7 +1,8 @@
-//! CLAUDE.md §5: zero heap allocations per frame in steady state, for the atmosphere and
-//! height fog (ADR 0069): a sun that moves every frame (the sky-view table rebuilt each
-//! frame, the image-based light every few), the aerial perspective, the full-screen pass
-//! and transparent surfaces under fog, declared and recorded.
+//! CLAUDE.md §5: zero heap allocations per frame in steady state, for local reflections
+//! (ADR 0073): reflection probes (one captured again every few frames, its faces over
+//! several frames: the capture views, the face copies, mips and prefilter), screen-space
+//! reflections at half resolution with their filters and history, the composite, under
+//! TAA's jitter, declared and recorded.
 //!
 //! A counting global allocator observes the process while frames are declared and
 //! recorded after a warm-up (driver allocations happen in C and are not counted). One
@@ -12,7 +13,6 @@
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
-use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
@@ -20,48 +20,27 @@ use engine_render::forward::{
 use engine_render::graph::{RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
+use engine_render::reflections::{
+    ProbeSettings, ReflectionProbe, ReflectionProbes, Reflections, ScreenSpaceReflections,
+    SsrSettings,
+};
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance as VkInstance, InstanceDesc,
 };
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 
-struct CountingAllocator;
-
-static ALLOCATIONS: AtomicUsize = AtomicUsize::new(0);
-
-// SAFETY: forwards to the system allocator; only adds a counter.
-unsafe impl GlobalAlloc for CountingAllocator {
-    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: same contract as the caller's.
-        unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-        // SAFETY: same contract as the caller's.
-        unsafe { System.dealloc(ptr, layout) }
-    }
-
-    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
-        ALLOCATIONS.fetch_add(1, Ordering::Relaxed);
-        // SAFETY: same contract as the caller's.
-        unsafe { System.realloc(ptr, layout, new_size) }
-    }
-}
-
-#[global_allocator]
-static GLOBAL: CountingAllocator = CountingAllocator;
+use crate::ALLOCATIONS;
 
 #[test]
-fn steady_state_atmosphere_frames_do_not_allocate() {
+fn steady_state_reflection_frames_do_not_allocate() {
+    let _alone = crate::alone();
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
     let setup = || -> Result<(VkInstance, Device), engine_rhi::RhiError> {
         let instance = VkInstance::new(&InstanceDesc {
-            app_name: String::from("engine_render atmosphere zero-alloc test"),
+            app_name: String::from("engine_render reflections zero-alloc test"),
             validation: false,
             debug_utils: true,
             surface: false,
@@ -84,7 +63,7 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let (color_format, depth_format) = (vk::Format::R16G16B16A16_SFLOAT, vk::Format::D32_SFLOAT);
-    let renderer = ForwardRenderer::new(
+    let mut renderer = ForwardRenderer::new(
         &device,
         &bindless,
         color_format,
@@ -92,6 +71,7 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
         ShadowSettings::default(),
     )
     .unwrap();
+    renderer.set_reflections(&device, &bindless, true).unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 2).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
@@ -119,15 +99,39 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
     let temporal = Temporal::new(&device, &mut allocator, 64).unwrap();
     let mut environment =
         Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap();
-    environment
-        .set_atmosphere(
-            &device,
-            &mut allocator,
-            &bindless,
-            Some(Atmosphere::earth()),
-        )
+    // Two probes, two faces a frame.
+    let mut probes = ReflectionProbes::new(
+        &device,
+        &mut allocator,
+        &bindless,
+        ProbeSettings {
+            capacity: 2,
+            faces_per_frame: 2,
+            ..ProbeSettings::default()
+        },
+    )
+    .unwrap();
+    let probe = probes
+        .add(ReflectionProbe::room(
+            Vec3::new(-4.0, 2.0, -6.0),
+            Vec3::new(4.0, 2.0, 8.0),
+        ))
         .unwrap();
-    environment.set_fog(Some(HeightFog::default()));
+    probes
+        .add(ReflectionProbe::room(
+            Vec3::new(4.0, 2.0, -6.0),
+            Vec3::new(4.0, 2.0, 8.0),
+        ))
+        .unwrap();
+    let mut ssr = ScreenSpaceReflections::new(
+        &device,
+        &mut allocator,
+        &bindless,
+        640,
+        360,
+        SsrSettings::default(),
+    )
+    .unwrap();
     // SAFETY: plain object creation.
     let (pool, cmd) = unsafe {
         let pool = d
@@ -154,19 +158,16 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
         position: eye,
     };
     let mut frame_number = 0u64;
-    let mut frame = |i: usize| {
-        // The sun climbs 0.05° a frame: a new sky-view table every frame, new image-based
-        // light every other.
-        let elevation = (10.0 + 0.05 * i as f32).to_radians();
+    // `refresh`: the probe is captured again continuously (every frame draws faces).
+    let mut frame = |i: usize, refresh: bool| {
         let light = DirectionalLight {
-            direction: -Vec3::new(
-                elevation.cos() * 0.6,
-                elevation.sin(),
-                elevation.cos() * 0.8,
-            ),
+            direction: Vec3::new(-0.3, -1.0, -0.2),
             color: Vec3::splat(3.0),
             ambient: Vec3::ZERO,
         };
+        if refresh {
+            probes.refresh(probe);
+        }
         frame_number += 1;
         let slot = (frame_number % 2) as usize;
         // SAFETY: the previous frame finished (waited below).
@@ -209,11 +210,13 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
                         temporal: Some(&temporal),
                         lights: &[],
                         environment: Some(&environment),
-                        reflections: Default::default(),
+                        reflections: Reflections {
+                            probes: Some(&probes),
+                            ssr: Some(&ssr),
+                        },
                     },
                 )
                 .unwrap();
-            assert!(passes.atmosphere.is_some());
             std::hint::black_box(passes);
             fg.add_pass("present stand-in")
                 .read(color, engine_render::graph::Access::TransferRead)
@@ -235,24 +238,36 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
             .unwrap();
             device.wait_idle().unwrap();
         }
+        std::hint::black_box(i);
+        probes.stats().faces
     };
 
-    for i in 0..30 {
-        frame(i);
+    // Captures every frame (the probe always waits for a new one), then a static scene
+    // (cached probes). A capture now and then also allocates: the render graph frees the
+    // transient images a frame did not use, and the next capture makes them again (see
+    // ADR 0073).
+    for (name, refresh) in [("capturing every frame", true), ("cached probes", false)] {
+        for i in 0..30 {
+            frame(i, refresh);
+        }
+        let mut faces = 0;
+        let before = ALLOCATIONS.load(Ordering::Relaxed);
+        for i in 30..130 {
+            faces += frame(i, refresh);
+        }
+        let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
+        println!("{name}, 100 frames: {allocations} heap allocations ({faces} probe faces drawn)");
+        assert_eq!(allocations, 0, "{name}");
+        assert_eq!(faces > 0, refresh, "{name}: {faces} faces drawn");
     }
-    let before = ALLOCATIONS.load(Ordering::Relaxed);
-    for i in 30..130 {
-        frame(i);
-    }
-    let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
-    println!("100 frames: {allocations} heap allocations");
-    assert_eq!(allocations, 0);
 
     device.wait_idle().unwrap();
     let mut temporal = temporal;
     // SAFETY: nothing is in use.
     unsafe {
         environment.destroy(&mut allocator, &bindless);
+        probes.destroy(&mut allocator, &bindless);
+        ssr.destroy(&mut allocator, &bindless);
         temporal.destroy(&mut allocator);
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);

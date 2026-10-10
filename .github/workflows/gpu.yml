@@ -84,7 +84,7 @@ jobs:
           cargo test -p engine_render --locked -- --nocapture --test-threads=1 >> render.md 2>&1
           set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=radeon
-          cargo test -p engine_render --locked --test graph --test geometry --test forward --test materials --test culling --test occlusion --test hiz --test tonemap --test motion --test shadows --test lights --test environment --test post -- --nocapture >> render.md 2>&1
+          cargo test -p engine_render --locked --test render -- --nocapture graph:: geometry:: forward:: materials:: culling:: occlusion:: hiz:: tonemap:: motion:: shadows:: lights:: environment:: post:: >> render.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=
           echo ```>> render.md
@@ -105,7 +105,7 @@ jobs:
           cargo test -p engine_dlss --locked -- --nocapture --test-threads=1 >> upscale.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=radeon
-          cargo test -p engine_upscale --locked --test taa -- --nocapture >> upscale.md 2>&1
+          cargo test -p engine_upscale --locked --test upscale -- --nocapture taa:: >> upscale.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           cargo test -p engine_fsr --locked --test fsr -- --nocapture --test-threads=1 >> upscale.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
@@ -159,7 +159,7 @@ jobs:
           cargo test -p engine_render2d --locked -- --nocapture --test-threads=1 >> render2d.md 2>&1
           set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=radeon
-          cargo test -p engine_render2d --locked --test render2d --test viewports -- --nocapture >> render2d.md 2>&1
+          cargo test -p engine_render2d --locked --test render2d -- --nocapture render2d:: viewports:: >> render2d.md 2>&1
           if %rc% equ 0 set rc=%ERRORLEVEL%
           set ENGINE_ADAPTER=
           cargo run -p engine_render2d --example sprites --locked -- fifo 20000 300 >> render2d.md 2>&1
