@@ -1,5 +1,7 @@
 # 0075. Every antialiasing and scaling mode: MSAA, FXAA, MLAA, SMAA, nearest, bilinear, integer, FSR 1
 
+(Catmull-Rom and Lanczos-3 scaling were added on 2026-10-10: see the addendum at the end.)
+
 - Status: Accepted
 - Date: 2026-10-02
 - Builds on: [ADR 0072](0072-frame-renderer.md) (the frame renderer and its order),
@@ -147,6 +149,10 @@ stochastic effect).
 | DLSS Quality (67 %) | 2.36 | +0.08 | 0.95 | 0.0222 | 41.03 | 0.0263 | 39.12 | 0.50 | 0.74 |
 | bilinear 67 % | 1.29 | -0.99 | – | 0.0370 | 34.50 | 0.0365 | 34.58 | 1.17 | 1.78 |
 | bilinear 50 % | 0.90 | -1.37 | – | 0.0512 | 31.97 | 0.0506 | 31.99 | 1.28 | 1.80 |
+| Catmull-Rom 67 % ¹ | 1.34 | -0.92 | 0.04 | 0.0350 | 34.65 | 0.0346 | 34.68 | 1.56 | 2.55 |
+| Catmull-Rom 50 % ¹ | 0.94 | -1.31 | 0.04 | 0.0489 | 32.11 | 0.0484 | 32.14 | 1.68 | 2.47 |
+| Lanczos-3 67 % ¹ | 1.35 | -0.90 | 0.07 | 0.0351 | 34.65 | 0.0347 | 34.68 | 1.62 | 2.70 |
+| Lanczos-3 50 % ¹ | 0.96 | -1.29 | 0.06 | 0.0491 | 32.08 | 0.0485 | 32.11 | 1.75 | 2.62 |
 | nearest 67 % | 1.29 | -0.98 | – | 0.0418 | 32.65 | 0.0413 | 32.66 | 2.25 | 4.30 |
 | nearest 50 % | 0.90 | -1.37 | – | 0.0489 | 31.35 | 0.0483 | 31.43 | 2.00 | 3.13 |
 | integer 50 % | 0.90 | -1.37 | – | 0.0489 | 31.35 | 0.0483 | 31.43 | 2.00 | 3.13 |
@@ -182,6 +188,10 @@ stochastic effect).
 | FSR 3.1 Quality (67 %) | 43.06 | -15.11 | 12.37 | 0.0327 | 37.53 | 0.0297 | 37.34 | 0.50 | 0.69 |
 | bilinear 67 % | 29.59 | -28.59 | – | 0.0356 | 34.77 | 0.0353 | 34.82 | 1.21 | 1.90 |
 | bilinear 50 % | 19.71 | -38.47 | – | 0.0500 | 32.09 | 0.0493 | 32.10 | 1.33 | 1.91 |
+| Catmull-Rom 67 % ¹ | 34.48 | -35.76 | 0.93 | 0.0336 | 34.93 | 0.0333 | 34.92 | 1.64 | 2.81 |
+| Catmull-Rom 50 % ¹ | 23.62 | -46.62 | 0.96 | 0.0477 | 32.23 | 0.0471 | 32.25 | 1.77 | 2.71 |
+| Lanczos-3 67 % ¹ | 35.73 | -34.51 | 2.16 | 0.0338 | 34.93 | 0.0336 | 34.91 | 1.72 | 3.01 |
+| Lanczos-3 50 % ¹ | 24.43 | -45.81 | 1.87 | 0.0479 | 32.20 | 0.0473 | 32.21 | 1.84 | 2.91 |
 | nearest 67 % | 29.62 | -28.56 | – | 0.0412 | 32.75 | 0.0408 | 32.75 | 2.51 | 5.18 |
 | nearest 50 % | 19.72 | -38.45 | – | 0.0476 | 31.44 | 0.0470 | 31.53 | 2.14 | 3.66 |
 | integer 50 % | 19.68 | -38.49 | – | 0.0476 | 31.44 | 0.0470 | 31.53 | 2.14 | 3.66 |
@@ -193,8 +203,11 @@ stochastic effect).
 
 (Rows from runs on one afternoon with a quiet CPU; "vs off" against the "off" of the same
 run, `own passes` the mode's own passes: MSAA's other cost is in the scene passes. The
-spatial rows on the RTX and DLSS Quality are from a second run. Measure your own scenes
-with `cargo run -p engine_golden --release --example aa_bench`.)
+spatial rows on the RTX and DLSS Quality are from a second run. ¹ From a run on
+2026-10-10 (the addendum), against that run's "off": 2.25 ms on the RTX, 70.24 ms on the
+Radeon, whose frame was slower that day as a whole (bilinear 67 % 33.55 ms); their own
+passes are the tone mapper's time beyond the plain tone mapper's, and Lanczos-3's rows.
+Measure your own scenes with `cargo run -p engine_golden --release --example aa_bench`.)
 
 **MSAA's edges with every screen-space effect** (`tests/golden/tests/aa_modes.rs`,
 procedural scene 320 × 180, edge pixels of the scene's silhouettes, error against 4 × 4
@@ -311,3 +324,104 @@ FXAA, MSAA 4× + SMAA, SMAA 4x, MSAA 2× + TAAU (`engine_frame/tests/zero_alloc.
 - Follow-ups: dynamic resolution with MSAA (each size makes new multisampled
   transients), a bilateral AO read for MSAA if a game shows a halo, FSR 1 after tone
   mapping as an option, `aa_bench` in the perf history when modes change.
+
+## Addendum (2026-10-10): Catmull-Rom and Lanczos-3 scaling
+
+The owner asked for two more spatial scalers (2026-10-02): bicubic Catmull-Rom, and
+Lanczos-3 with an anti-ringing clamp, measured in the table above; no Lanczos-2 (FSR 1's
+EASU approximates it). Research: `docs/research/antialiasing.md`, "Catmull-Rom and
+Lanczos-3".
+
+### Options
+
+- **Where.** (1) In the tone mapper, which already reads the render-size image at every
+  output pixel (nearest and bilinear scale there): no pass, no image. (2) A pass at step 4
+  into an output-size HDR image, like FSR 1: a pass and an image of 16 MB at 1080p for
+  nothing the tone mapper cannot do. (3) After tone mapping on display-encoded colors
+  (Unreal, Unity): bloom and tone mapping would run at the render size, another frame
+  order. Chosen: (1), as entry points of their own (`fragmentCatmullRom`,
+  `fragmentLanczos3`, and `fragmentPerceptualCatmullRom` / `fragmentPerceptualLanczos3`
+  for the filters after tone mapping): `fragmentMain`'s and `fragmentPerceptual`'s SPIR-V
+  are unchanged, the register rule holds, and every existing golden image is untouched.
+- **Ringing in HDR.** The tone mapper scales the HDR scene, where a negative lobe's
+  undershoot grows with the contrast: next to a highlight of 1000 a texel of 1 would get
+  -73 (Catmull-Rom) or -117 (Lanczos-3), black rings once clipped. (1) A reversible tone
+  map per texel (as FSR 1 at step 4): softens the undershoot, does not remove it. (2) The
+  anti-ringing clamp: the result limited to the range of the 2 x 2 texels around the
+  sample (FSR 1's EASU, libplacebo's `antiringing`): no overshoot whatever the contrast.
+  Chosen: (2), for both kernels.
+- **Reading the texels.** (1) Bilinear fetches merging same-sign weights (Catmull-Rom in
+  9 fetches): claimed by ATI's US 8,675,007 B2 (in force until 2032; the research note's
+  patent table). (2) Each texel with `Load`: 16 for Catmull-Rom, 36 for Lanczos-3. (3)
+  Gathers of each channel per 2 x 2 quad: 12 and 27 instructions. Measured (3) slower
+  than (2) on both GPUs (RTX Catmull-Rom 0.04 -> 0.06 ms, Lanczos-3 0.10 -> 0.16 ms;
+  Radeon 0.91 -> 1.06 and 3.13 -> 3.32 ms). Chosen: (2).
+- **Lanczos-3 in one pass or two.** 36 loads of RGBA16F at every output pixel cost the
+  Radeon 3.1 ms (bound by its texture cache). It is separable: the rows into an image of
+  the output's width and the render height (`lanczos3Across`, the "resample rows" pass,
+  11 MB at 1080p from 67 %), then the columns in the tone mapper: 6 + 6 reads. Each pass
+  clamps to its two texels nearest the sample, so the result stays in the 2 x 2 range.
+  Measured 1.8-2.2 ms on the Radeon and 0.07 ms on the RTX (from 0.10 ms); the per-pass
+  clamp is a little stricter (RTX still FLIP 0.0351 instead of 0.0347, PSNR 34.65 instead
+  of 34.61 dB, flicker 1.62 instead of 1.76 %). Chosen: two passes. Catmull-Rom stays in
+  one pass: its 16 loads cost less than a pass and an image would.
+
+### Measurements
+
+ref-1, `aa_bench` as above (Sponza 1920 x 1080, every feature), one run per GPU with the
+modes to compare (the rows marked ¹ in the tables):
+
+| mode | RTX own ms | Radeon own ms | still FLIP (RTX / Radeon) | still PSNR dB | flicker % | flicker %, plain |
+|---|---:|---:|---|---|---|---|
+| bilinear 67 % | 0 | 0 | 0.0370 / 0.0356 | 34.50 / 34.77 | 1.17 / 1.21 | 1.78 / 1.90 |
+| Catmull-Rom 67 % | 0.04 | 0.93 | 0.0350 / 0.0336 | 34.65 / 34.93 | 1.56 / 1.64 | 2.55 / 2.81 |
+| Lanczos-3 67 % | 0.07 | 2.16 | 0.0351 / 0.0338 | 34.65 / 34.93 | 1.62 / 1.72 | 2.70 / 3.01 |
+| FSR 1 67 % | 0.19 | 5.87 | 0.0364 / 0.0364 | 33.87 / 33.90 | 4.86 / 6.07 | 7.82 / 10.31 |
+| no antialiasing, 100 % | – | – | 0.0240 / 0.0233 | 37.39 / 37.64 | 1.85 / 1.91 | 3.36 / 3.48 |
+
+(The Radeon's own times move from run to run: Catmull-Rom 0.91-1.06 ms, Lanczos-3
+1.54-2.16 ms over the day's runs.) The perf gate's plain Sponza from 67 %: the tone mapper
+72 µs with Catmull-Rom against about 30 µs plain on the RTX, 2.05 ms against 0.85-1.0 ms
+on the Radeon; Lanczos-3's rows 32 µs + 59 µs and 1.20 + 1.75 ms.
+
+Correctness (`engine_render` test `resampling_kernels_match_the_reference_and_do_not_ring`,
+both GPUs under synchronization validation): an HDR test image with a highlight of 1000,
+noise and a flat band, scaled 2.5x, 1.42x across and 1:1, matches a CPU reference of
+each kernel and its clamps (within 1e-3 of the largest texel under the kernel; Lanczos-3's
+rows are half floats); every output pixel lies within its four nearest texels' range,
+while the unclamped kernels ring more than 1 below it; flat areas stay flat; 1:1 gives
+the texels back. Zero heap allocations per frame in steady state (`engine_frame`
+`zero_alloc`: Catmull-Rom, Lanczos-3 with FXAA).
+
+### Decision
+
+- `Upscale::CatmullRom` and `Upscale::Lanczos3` (in `Upscale::ALL`; the runtime's
+  `Camera` stores them as 8 and 9). Like bilinear, they scale in the tone mapper and do
+  nothing at the output size (the plain tone mapper runs there).
+- `engine_render::post::Resample` (`Sampler`, `CatmullRom`, `Lanczos3`) and
+  `Tonemap::with_resample(device, bindless, output_format, resample)` (`None`: the
+  perceptual image); a Lanczos-3 tone mapper adds its rows pass inside
+  `add_composite_pass`. The frame renderer makes the four pipelines (two kernels, into
+  the output or the perceptual image) when a view first asks.
+- Each texel is read with `Load`; the result is clamped to the four nearest texels'
+  range (Lanczos-3: per pass). No bilinear fetches are combined.
+- `perf_gate --update --scene NAME` writes those scenes' rows into the baseline and
+  keeps the others (a new scene's first baseline without measuring every scene again).
+
+### Consequences
+
+- Catmull-Rom is the spatial scaler to offer when temporal upscaling is not wanted: on
+  both GPUs sharper than bilinear (still FLIP -5 %, PSNR +0.15 dB), better than FSR 1 in
+  every metric here at a fifth to a sixth of its cost, flicker between bilinear's and no
+  antialiasing's (sharper filters keep more of the render size's aliasing). Lanczos-3
+  scores the same with the per-pass clamp, flickers a little more and costs about twice
+  as much on the Radeon; it is there for games that want its look. On integrated GPUs
+  TAAU from 67 % still gives far less flicker per millisecond.
+- Golden shots `sponza_catmull_rom_67` and `sponza_lanczos3_67` on both GPUs;
+  `aa_modes` renders both under validation with every feature, with MSAA 2x + SMAA and
+  with FXAA; the perf gate measures both (`sponza_catmull_rom_67`, `sponza_lanczos3_67`).
+- A view with Lanczos-3 holds one more transient image while it renders (the rows: the
+  output's width x the render height, RGBA16F), aliased with the frame's others.
+- TAAU's optional Catmull-Rom history (`HistoryFilter::CatmullRom`, ADR 0043; off by
+  default) merges bilinear fetches as US 8,675,007 B2 claims: a question for the team
+  (rewrite it with loads, measured, or remove it).

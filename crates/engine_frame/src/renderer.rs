@@ -22,7 +22,7 @@ use engine_render::graph::{
 use engine_render::material::{MaterialFrame, MaterialTable};
 use engine_render::mesh::GeometryFrame;
 use engine_render::msaa::{MsaaInput, MsaaResolve};
-use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, Tonemap};
+use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, Resample, Tonemap};
 use engine_render::postaa::{
     Decode, PERCEPTUAL_FORMAT, PostAa, PostFilter, PostTarget, SmaaInput, SmaaPreset, SmaaTemporal,
     smaa_jitter,
@@ -282,6 +282,7 @@ pub struct ViewFrame {
 pub struct FrameRenderer {
     forward: ForwardRenderer,
     tonemap: Tonemap,
+    output_format: vk::Format,
     bloom: Bloom,
     depth_format: vk::Format,
     frames_in_flight: u64,
@@ -293,6 +294,10 @@ pub struct FrameRenderer {
     post: Box<PostAa>,
     /// The tone mapper into their perceptual image, made with the first filter.
     perceptual: Option<Box<Tonemap>>,
+    /// Tone mappers that resample a smaller scene (Catmull-Rom, Lanczos-3; ADR 0075),
+    /// into the output and into the perceptual image ([`resampling_slot`]), made with the
+    /// first view that asks.
+    resampling: [Option<Box<Tonemap>>; 4],
     /// FSR 1 (ADR 0075), made with the first view that uses it.
     fsr1: Option<Box<Fsr1>>,
     #[cfg(feature = "dlss")]
@@ -400,6 +405,23 @@ fn post_filter(post: PostAntialiasing) -> Option<PostFilter> {
 /// Whether step 4 brings the image to the output size (else the tone mapper scales it).
 fn resolves_to_output(upscale: Upscale) -> bool {
     matches!(upscale, Upscale::Temporal(_) | Upscale::Fsr1)
+}
+
+/// The tone mapper's kernel for `upscale`, when it resamples (a scene smaller than the
+/// output: at the output size both kernels give the scene's pixels back).
+fn resample(upscale: Upscale, render: (u32, u32), output: (u32, u32)) -> Option<Resample> {
+    match upscale {
+        _ if render == output => None,
+        Upscale::CatmullRom => Some(Resample::CatmullRom),
+        Upscale::Lanczos3 => Some(Resample::Lanczos3),
+        _ => None,
+    }
+}
+
+/// Where [`FrameRenderer`] keeps the resampling tone mapper of `resample`, into the
+/// output or into the perceptual image.
+fn resampling_slot(resample: Resample, perceptual: bool) -> usize {
+    usize::from(resample == Resample::Lanczos3) * 2 + usize::from(perceptual)
 }
 
 /// The nominal render size (what `quality` gives: the LOD bias follows it), the render
@@ -515,6 +537,7 @@ impl FrameRenderer {
         Ok(Self {
             forward: ForwardRenderer::new(device, bindless, HDR_FORMAT, depth_format, shadows)?,
             tonemap: Tonemap::new(device, bindless, output_format)?,
+            output_format,
             bloom: Bloom::new(device, bindless, BloomSettings::default())?,
             depth_format,
             frames_in_flight: frames_in_flight.max(1) as u64,
@@ -522,6 +545,7 @@ impl FrameRenderer {
             msaa: Box::new(MsaaResolve::new()),
             post: Box::new(PostAa::new(output_format)),
             perceptual: None,
+            resampling: Default::default(),
             fsr1: None,
             #[cfg(feature = "dlss")]
             streamline: None,
@@ -787,10 +811,23 @@ impl FrameRenderer {
         if antialiasing.upscale == Upscale::Fsr1 && self.fsr1.is_none() {
             self.fsr1 = Some(Box::new(Fsr1::new(device, bindless)?));
         }
+        // Catmull-Rom and Lanczos-3: the tone mapper with their kernel.
+        if let Some(kernel) = resample(antialiasing.upscale, render, output) {
+            let perceptual = post_filter(antialiasing.post).is_some();
+            let slot = &mut self.resampling[resampling_slot(kernel, perceptual)];
+            if slot.is_none() {
+                let format = (!perceptual).then_some(self.output_format);
+                *slot = Some(Box::new(Tonemap::with_resample(
+                    device, bindless, format, kernel,
+                )?));
+            }
+        }
 
         // Filters after tone mapping: their pipelines, and SMAA T2x's last frame.
         if let Some(filter) = post_filter(antialiasing.post) {
-            if self.perceptual.is_none() {
+            // (Catmull-Rom and Lanczos-3 have their own, above.)
+            let kernel = resample(antialiasing.upscale, render, output);
+            if self.perceptual.is_none() && kernel.is_none() {
                 self.perceptual = Some(Box::new(Tonemap::new_perceptual(device, bindless)?));
             }
             let temporal = antialiasing.upscale == Upscale::SmaaT2x;
@@ -1226,7 +1263,13 @@ impl FrameRenderer {
             _ => [resolved, resolved],
         };
         let two = sources[0] != sources[1];
-        let perceptual = filter.and(self.perceptual.as_deref()).map(|tonemap| {
+        // Catmull-Rom and Lanczos-3 resample in the tone mapper (made by `prepare`).
+        let kernel = resample(prepared.antialiasing.upscale, render, output);
+        let resampling = |perceptual: bool| {
+            kernel.and_then(|k| self.resampling[resampling_slot(k, perceptual)].as_deref())
+        };
+        let perceptual_tonemap = resampling(true).or(self.perceptual.as_deref());
+        let perceptual = filter.and(perceptual_tonemap).map(|tonemap| {
             let desc = TextureDesc::new_2d(PERCEPTUAL_FORMAT, output.0, output.1);
             let image = fg.create_texture("perceptual", desc);
             let second = two.then(|| fg.create_texture("perceptual", desc));
@@ -1247,7 +1290,7 @@ impl FrameRenderer {
                 LoadOp::DontCare,
             ),
             None => (
-                &self.tonemap,
+                resampling(false).unwrap_or(&self.tonemap),
                 target.texture,
                 target
                     .rect

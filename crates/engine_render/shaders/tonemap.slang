@@ -263,3 +263,216 @@ float4 fragmentPerceptual(VertexOut input) : SV_Target
         color = srgb_oetf(saturate(color / (push.peak * push.white)));
     return float4(color, 1.0);
 }
+
+// Resampling a smaller source to the output size (ADR 0075's addendum): Catmull-Rom and
+// Lanczos-3 entry points, so the tone mapper above keeps its code. Each texel of the
+// kernel is read on its own (`Load`, clamped to the image's edge) and weighted; no
+// bilinear fetches are combined (ATI's US 8,675,007 B2 claims that,
+// docs/research/antialiasing.md). The result is limited to the range of the four texels
+// around the sample (the anti-ringing clamp): a negative lobe's undershoot grows with the
+// contrast, and before tone mapping a highlight of 1000 next to 1 would ring far below 0.
+
+// `tonemapped`'s steps after the source is read: bloom, exposure, the curve, the output's
+// encoding.
+float3 tonemap_color(float3 color, float2 uv)
+{
+    SamplerState s = g_samplers[push.sampler];
+    // Bloom replaces its share of the image: energy is kept.
+    if ((push.flags & FLAG_BLOOM) != 0)
+    {
+        float3 bloom = g_textures[NonUniformResourceIndex(push.bloom)].SampleLevel(s, uv, 0).rgb;
+        color = lerp(color, bloom, push.bloom_intensity);
+    }
+    float exposure = push.exposure;
+    if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
+        exposure *= push.auto_exposure[0].x;
+    color *= exposure;
+    if ((push.flags & FLAG_PASS_THROUGH) == 0)
+    {
+        if ((push.flags & FLAG_PBR_NEUTRAL) != 0)
+            color = pbr_neutral(color, push.peak);
+        else if ((push.flags & FLAG_AGX) != 0)
+            color = agx(color);
+        else if ((push.flags & FLAG_ACES) != 0)
+            color = aces(color);
+        else
+            color = gt3(color, push.peak);
+    }
+    color *= push.white;
+    if ((push.flags & FLAG_ENCODE_PQ) != 0)
+        color = pq_encode(mul(BT2020_FROM_BT709, color));
+    return color;
+}
+
+// `fragmentPerceptual`'s encoding of a tone-mapped color.
+float3 perceptual(float3 color)
+{
+    if ((push.flags & FLAG_ENCODE_PQ) == 0)
+        color = srgb_oetf(saturate(color / (push.peak * push.white)));
+    return color;
+}
+
+// The source's texel at `p`, clamped to its edge.
+float3 texel(Texture2D source, int2 p, int2 last)
+{
+    return source.Load(int3(clamp(p, int2(0, 0), last), 0)).rgb;
+}
+
+// Catmull-Rom's weights (Keys's cubic convolution with a = -0.5) of the four texels around
+// a sample at fraction `f` past the second one. They sum to 1.
+float4 catmull_rom_weights(float f)
+{
+    float f2 = f * f;
+    float f3 = f2 * f;
+    return float4(
+        -0.5 * f + f2 - 0.5 * f3,
+        1.0 - 2.5 * f2 + 1.5 * f3,
+        0.5 * f + 2.0 * f2 - 1.5 * f3,
+        -0.5 * f2 + 0.5 * f3);
+}
+
+// The source at `uv` through Catmull-Rom: 4 × 4 texels, clamped to the middle 2 × 2.
+float3 catmull_rom(float2 uv)
+{
+    Texture2D source = g_textures[NonUniformResourceIndex(push.source)];
+    uint width, height;
+    source.GetDimensions(width, height);
+    float2 position = uv * float2(width, height) - 0.5;
+    float2 base = floor(position);
+    float2 f = position - base;
+    float4 wx = catmull_rom_weights(f.x);
+    float4 wy = catmull_rom_weights(f.y);
+    int2 origin = int2(base) - 1;
+    int2 last = int2(width, height) - 1;
+    float3 sum = 0.0;
+    float3 lo = 65504.0;
+    float3 hi = -65504.0;
+    [unroll]
+    for (int y = 0; y < 4; y++)
+    {
+        float3 row = 0.0;
+        [unroll]
+        for (int x = 0; x < 4; x++)
+        {
+            float3 c = texel(source, origin + int2(x, y), last);
+            row += c * wx[x];
+            if ((x == 1 || x == 2) && (y == 1 || y == 2))
+            {
+                lo = min(lo, c);
+                hi = max(hi, c);
+            }
+        }
+        sum += row * wy[y];
+    }
+    return clamp(sum, lo, hi);
+}
+
+// Lanczos-3's weights, sinc(d) sinc(d / 3), of the six texels around a sample at fraction
+// `f` past the third one, normalized (between texels they do not sum to 1).
+void lanczos3_weights(float f, out float w[6])
+{
+    const float pi = 3.14159265;
+    float total = 0.0;
+    [unroll]
+    for (int i = 0; i < 6; i++)
+    {
+        // The texel's distance from the sample, kept off 0 (where the kernel is 1).
+        float x = pi * max(abs(f - float(i - 2)), 1e-5);
+        w[i] = 3.0 * sin(x) * sin(x / 3.0) / (x * x);
+        total += w[i];
+    }
+    [unroll]
+    for (int i = 0; i < 6; i++)
+        w[i] /= total;
+}
+
+// Lanczos-3 is separable and runs in two passes (6 + 6 reads for each output pixel instead
+// of 36): `lanczos3Across` resamples the source's rows to the output's width, into an
+// image of the output's width and the source's height; the tone mapper's
+// `fragmentLanczos3` resamples its columns to the output's height. Each pass clamps to the
+// two texels nearest its sample, so the result stays within the four nearest texels'
+// range.
+[shader("fragment")]
+float4 lanczos3Across(VertexOut input) : SV_Target
+{
+    Texture2D source = g_textures[NonUniformResourceIndex(push.source)];
+    uint width, height;
+    source.GetDimensions(width, height);
+    float position = input.uv.x * float(width) - 0.5;
+    float base = floor(position);
+    float w[6];
+    lanczos3_weights(position - base, w);
+    int row = min(int(input.uv.y * float(height)), int(height) - 1);
+    int origin = int(base) - 2;
+    int last = int(width) - 1;
+    float3 sum = 0.0;
+    float3 lo = 65504.0;
+    float3 hi = -65504.0;
+    [unroll]
+    for (int i = 0; i < 6; i++)
+    {
+        float3 c = source.Load(int3(clamp(origin + i, 0, last), row, 0)).rgb;
+        sum += c * w[i];
+        if (i == 2 || i == 3)
+        {
+            lo = min(lo, c);
+            hi = max(hi, c);
+        }
+    }
+    return float4(clamp(sum, lo, hi), 1.0);
+}
+
+// The source (`lanczos3Across`'s image, the output's width) at `uv` through Lanczos-3 down
+// its columns.
+float3 lanczos3_down(float2 uv)
+{
+    Texture2D source = g_textures[NonUniformResourceIndex(push.source)];
+    uint width, height;
+    source.GetDimensions(width, height);
+    int column = min(int(uv.x * float(width)), int(width) - 1);
+    float position = uv.y * float(height) - 0.5;
+    float base = floor(position);
+    float w[6];
+    lanczos3_weights(position - base, w);
+    int origin = int(base) - 2;
+    int last = int(height) - 1;
+    float3 sum = 0.0;
+    float3 lo = 65504.0;
+    float3 hi = -65504.0;
+    [unroll]
+    for (int i = 0; i < 6; i++)
+    {
+        float3 c = source.Load(int3(column, clamp(origin + i, 0, last), 0)).rgb;
+        sum += c * w[i];
+        if (i == 2 || i == 3)
+        {
+            lo = min(lo, c);
+            hi = max(hi, c);
+        }
+    }
+    return clamp(sum, lo, hi);
+}
+
+[shader("fragment")]
+float4 fragmentCatmullRom(VertexOut input) : SV_Target
+{
+    return float4(tonemap_color(catmull_rom(input.uv), input.uv), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentLanczos3(VertexOut input) : SV_Target
+{
+    return float4(tonemap_color(lanczos3_down(input.uv), input.uv), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentPerceptualCatmullRom(VertexOut input) : SV_Target
+{
+    return float4(perceptual(tonemap_color(catmull_rom(input.uv), input.uv)), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentPerceptualLanczos3(VertexOut input) : SV_Target
+{
+    return float4(perceptual(tonemap_color(lanczos3_down(input.uv), input.uv)), 1.0);
+}

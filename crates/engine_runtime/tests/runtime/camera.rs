@@ -29,6 +29,8 @@ fn camera_settings_round_trip() {
         Antialiasing::spatial(Upscale::Integer).with_post(PostAntialiasing::Fxaa),
         Antialiasing::spatial(Upscale::Fsr1).with_samples(Msaa::X4),
         Antialiasing::spatial(Upscale::Nearest),
+        Antialiasing::spatial(Upscale::CatmullRom),
+        Antialiasing::spatial(Upscale::Lanczos3).with_post(PostAntialiasing::SMAA),
     ] {
         for quality in Quality::ALL {
             let camera =

@@ -355,6 +355,14 @@ fn antialiasing_is_validated_and_modes_switch() {
             Antialiasing::msaa(Msaa::X2).with_post(PostAntialiasing::Mlaa),
             Quality::Native,
         ),
+        (
+            Antialiasing::spatial(Upscale::Lanczos3),
+            Quality::Performance,
+        ),
+        (
+            Antialiasing::spatial(Upscale::CatmullRom).with_post(PostAntialiasing::Fxaa),
+            Quality::Quality,
+        ),
     ];
     let eye = Vec3::new(1.5, 1.5, 3.0);
     for (antialiasing, quality) in modes.into_iter().chain(modes) {
@@ -442,6 +450,11 @@ fn every_feature_and_mode() {
         (
             Antialiasing::spatial(Upscale::Nearest),
             Quality::Performance,
+        ),
+        (Antialiasing::spatial(Upscale::CatmullRom), Quality::Quality),
+        (
+            Antialiasing::spatial(Upscale::Lanczos3).with_post(PostAntialiasing::SMAA),
+            Quality::Quality,
         ),
         (Antialiasing::TAAU, Quality::Native),
         (Antialiasing::TAAU, Quality::Quality),

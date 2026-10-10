@@ -5,9 +5,10 @@
 //!  scene at render size           step 4: render size → output        after tone mapping
 //!  ─────────────────────          ────────────────────────────        ──────────────────
 //!  samples: 1 / 2 / 4 / 8   →     upscale: spatial (nearest,     →    post: FXAA, MLAA,
-//!  (MSAA, alpha to coverage)      bilinear, integer, FSR 1) or        SMAA (SMAA T2x's
-//!                                 temporal (TAAU, FSR, DLSS,          temporal resolve
-//!                                 SMAA T2x's jitter)                  runs here)
+//!  (MSAA, alpha to coverage)      bilinear, Catmull-Rom,              SMAA (SMAA T2x's
+//!                                 Lanczos-3, integer, FSR 1) or       temporal resolve
+//!                                 temporal (TAAU, FSR, DLSS,          runs here)
+//!                                 SMAA T2x's jitter)
 //! ```
 //!
 //! [`crate::FrameRenderer::check`] says whether a combination runs on this GPU (the error
@@ -76,6 +77,15 @@ pub enum Upscale {
     /// Bilinear stretch by the tone mapper (no pass of its own). At the output size
     /// nothing happens: plain rendering.
     Bilinear,
+    /// Bicubic stretch by the tone mapper with Catmull-Rom's kernel (4 × 4 scene pixels
+    /// for each output pixel, no pass of its own): sharper than bilinear, limited to the
+    /// four nearest scene pixels' range (no ringing around highlights). At the output size
+    /// nothing happens.
+    CatmullRom,
+    /// Lanczos-3 stretch by the tone mapper (6 × 6 scene pixels for each output pixel, no
+    /// pass of its own): the sharpest spatial filter, limited like
+    /// [`Self::CatmullRom`]. At the output size nothing happens.
+    Lanczos3,
     /// Pixel art: the largest whole multiple of the render size that fits the output,
     /// nearest-sampled and centered, the rest black (letterboxed). The render size is
     /// the output divided by the factor that `Quality` asks for (rounded to a whole
@@ -95,9 +105,11 @@ pub enum Upscale {
 
 impl Upscale {
     /// Every mode (temporal upscalers in [`UpscalerKind`]'s order).
-    pub const ALL: [Self; 8] = [
+    pub const ALL: [Self; 10] = [
         Self::Nearest,
         Self::Bilinear,
+        Self::CatmullRom,
+        Self::Lanczos3,
         Self::Integer,
         Self::Fsr1,
         Self::Temporal(UpscalerKind::Taau),
@@ -124,6 +136,8 @@ impl Upscale {
         match self {
             Self::Nearest => "nearest",
             Self::Bilinear => "bilinear",
+            Self::CatmullRom => "Catmull-Rom",
+            Self::Lanczos3 => "Lanczos-3",
             Self::Integer => "integer",
             Self::Fsr1 => "FSR 1",
             Self::Temporal(kind) => kind.name(),

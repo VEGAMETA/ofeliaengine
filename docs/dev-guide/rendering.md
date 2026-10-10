@@ -66,7 +66,7 @@ unsafe { view.destroy(&mut allocator, &bindless) };
     Streamline (`frame.set_streamline(Some(streamline))`, see below). Without it, the view
     falls back to TAAU; `prepare` returns what is used.
   - and every other mode — MSAA, FXAA, MLAA, SMAA (1x, S2x, T2x, 4x), nearest, bilinear,
-    integer scaling, FSR 1 — and their combinations: see
+    Catmull-Rom, Lanczos-3, integer scaling, FSR 1 — and their combinations: see
     [Choosing antialiasing](#choosing-antialiasing-every-mode-what-it-costs-what-it-gives)
     (ADR 0075).
 - **Render size** (`ViewSettings::quality`): `Native` (100 %), `Quality` (67 %), `Balanced`
@@ -754,6 +754,11 @@ let aa = Antialiasing {
 - **`upscale`** — how the render size (`quality`, `render_scale` or `render_size`)
   reaches the output:
   - `Bilinear`: the soft stretch (nothing at the output size: plain rendering);
+  - `CatmullRom`: a bicubic stretch, sharper than bilinear, for about the same cost on a
+    discrete GPU (+0.04 ms at 1080p; about +1 ms on an integrated one);
+  - `Lanczos3`: a Lanczos-3 stretch, in two passes (+0.07 ms; about +2 ms integrated).
+    Both keep highlights clean: each output pixel stays within the range of the four
+    scene pixels around it, so a bright sun never rings dark around its edge;
   - `Nearest`: blocky, no blur;
   - `Integer`: pixel art. Set `ViewSettings::render_size = Some((320, 180))`; the image is
     shown at the largest whole multiple that fits the output (×6 at 1080p, ×8 at 1440p),
@@ -827,6 +832,10 @@ is better).
 | DLSS Quality (67 %) | 2.36 | +0.08 | 0.95 | 0.0222 | 41.03 | 0.0263 | 39.12 | 0.50 | 0.74 |
 | bilinear 67 % | 1.29 | -0.99 | – | 0.0370 | 34.50 | 0.0365 | 34.58 | 1.17 | 1.78 |
 | bilinear 50 % | 0.90 | -1.37 | – | 0.0512 | 31.97 | 0.0506 | 31.99 | 1.28 | 1.80 |
+| Catmull-Rom 67 % ¹ | 1.34 | -0.92 | 0.04 | 0.0350 | 34.65 | 0.0346 | 34.68 | 1.56 | 2.55 |
+| Catmull-Rom 50 % ¹ | 0.94 | -1.31 | 0.04 | 0.0489 | 32.11 | 0.0484 | 32.14 | 1.68 | 2.47 |
+| Lanczos-3 67 % ¹ | 1.35 | -0.90 | 0.07 | 0.0351 | 34.65 | 0.0347 | 34.68 | 1.62 | 2.70 |
+| Lanczos-3 50 % ¹ | 0.96 | -1.29 | 0.06 | 0.0491 | 32.08 | 0.0485 | 32.11 | 1.75 | 2.62 |
 | nearest 67 % | 1.29 | -0.98 | – | 0.0418 | 32.65 | 0.0413 | 32.66 | 2.25 | 4.30 |
 | nearest 50 % | 0.90 | -1.37 | – | 0.0489 | 31.35 | 0.0483 | 31.43 | 2.00 | 3.13 |
 | integer 50 % | 0.90 | -1.37 | – | 0.0489 | 31.35 | 0.0483 | 31.43 | 2.00 | 3.13 |
@@ -862,6 +871,10 @@ is better).
 | FSR 3.1 Quality (67 %) | 43.06 | -15.11 | 12.37 | 0.0327 | 37.53 | 0.0297 | 37.34 | 0.50 | 0.69 |
 | bilinear 67 % | 29.59 | -28.59 | – | 0.0356 | 34.77 | 0.0353 | 34.82 | 1.21 | 1.90 |
 | bilinear 50 % | 19.71 | -38.47 | – | 0.0500 | 32.09 | 0.0493 | 32.10 | 1.33 | 1.91 |
+| Catmull-Rom 67 % ¹ | 34.48 | -35.76 | 0.93 | 0.0336 | 34.93 | 0.0333 | 34.92 | 1.64 | 2.81 |
+| Catmull-Rom 50 % ¹ | 23.62 | -46.62 | 0.96 | 0.0477 | 32.23 | 0.0471 | 32.25 | 1.77 | 2.71 |
+| Lanczos-3 67 % ¹ | 35.73 | -34.51 | 2.16 | 0.0338 | 34.93 | 0.0336 | 34.91 | 1.72 | 3.01 |
+| Lanczos-3 50 % ¹ | 24.43 | -45.81 | 1.87 | 0.0479 | 32.20 | 0.0473 | 32.21 | 1.84 | 2.91 |
 | nearest 67 % | 29.62 | -28.56 | – | 0.0412 | 32.75 | 0.0408 | 32.75 | 2.51 | 5.18 |
 | nearest 50 % | 19.72 | -38.45 | – | 0.0476 | 31.44 | 0.0470 | 31.53 | 2.14 | 3.66 |
 | integer 50 % | 19.68 | -38.49 | – | 0.0476 | 31.44 | 0.0470 | 31.53 | 2.14 | 3.66 |
@@ -873,8 +886,11 @@ is better).
 
 (Rows from runs on one afternoon with a quiet CPU; "vs off" against the "off" of the same
 run, `own passes` the mode's own passes: MSAA's other cost is in the scene passes. The
-spatial rows on the RTX and DLSS Quality are from a second run. Measure your own scenes
-with `cargo run -p engine_golden --release --example aa_bench`.)
+spatial rows on the RTX and DLSS Quality are from a second run. ¹ From a later run,
+against its own "off": 2.25 ms on the RTX, 70.24 ms on the Radeon, which ran slower that
+day as a whole (bilinear 67 % 33.55 ms); own passes: the tone mapper's time beyond the
+plain one's. Measure your own scenes with
+`cargo run -p engine_golden --release --example aa_bench`.)
 
 How to read it:
 
@@ -904,6 +920,12 @@ How to read it:
   keep pixels square; integer scaling is the pixel-art mode (identical to nearest at a
   whole factor, letterboxed otherwise). Bilinear is the softest and flickers least of
   the spatial modes.
+- **Sharper spatial scaling:** Catmull-Rom is the one to offer when you do not want
+  temporal upscaling: sharper than bilinear (still FLIP 5 % better, +0.15 dB), better
+  than FSR 1 in every column at a fifth of its cost, with a little more flicker than
+  bilinear (a sharper filter keeps more of the smaller image's aliasing). Lanczos-3
+  scores the same here and costs about twice as much on an integrated GPU; offer it if
+  your players like its look.
 - **FSR 1** (0.2 / 4.9 ms) sharpens: against a smooth supersampled reference it scores
   below bilinear in PSNR, slightly better in FLIP, and its sharpening amplifies aliasing
   (flicker 4.9 % at 67 %, 17 % with RCAS alone at 100 %). AMD asks for an antialiased
