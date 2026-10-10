@@ -1,211 +1,211 @@
 # GPU µs per pass (median of 3 runs' medians over 100 frames, a round at a time), AMD Radeon(TM) Graphics (integrated, Vulkan 1.4.315, 21.2 GiB, AMD proprietary driver 26.8.1 (AMD proprietary shader compiler))
 # scene	pass	µs
-procedural	(frame total)	13907.8
-procedural	(gpu frame)	13925.3
-procedural	bloom downsample	668.3
-procedural	bloom upsample	477.5
+procedural	(frame total)	13840.2
+procedural	(gpu frame)	13853.7
+procedural	bloom downsample	657.2
+procedural	bloom upsample	476.7
 procedural	cull	3.2
 procedural	cull setup	0.8
-procedural	forward	11434.5
-procedural	light tiles	11.0
+procedural	forward	11377.7
+procedural	light tiles	10.9
 procedural	light tiles clear	0.3
-procedural	shadow	177.0
+procedural	shadow	174.2
 procedural	shadow cull	1.4
-procedural	sky	67.0
-procedural	tonemap	773.7
-procedural	transparent	302.1
-sponza	(frame total)	21793.0
-sponza	(gpu frame)	22100.4
-sponza	bloom downsample	1301.8
-sponza	bloom upsample	700.2
+procedural	sky	76.1
+procedural	tonemap	762.6
+procedural	transparent	298.2
+sponza	(frame total)	22857.7
+sponza	(gpu frame)	22905.4
+sponza	bloom downsample	1503.2
+sponza	bloom upsample	749.9
 sponza	cull	3.7
 sponza	cull setup	0.9
-sponza	forward	16342.6
-sponza	shadow	2489.2
+sponza	forward	17213.7
+sponza	shadow	2445.5
 sponza	shadow cull	1.2
-sponza	sky	44.4
-sponza	tonemap	873.0
-sponza_ao	(frame total)	35075.4
-sponza_ao	(gpu frame)	35048.7
-sponza_ao	ao	12008.9
-sponza_ao	ao denoise	926.2
-sponza_ao	ao depths	1262.4
-sponza_ao	bloom downsample	1424.5
-sponza_ao	bloom upsample	755.3
-sponza_ao	cull	4.7
-sponza_ao	cull setup	2.0
-sponza_ao	depth prepass	1082.3
-sponza_ao	forward	13824.0
-sponza_ao	shadow	3081.2
+sponza	sky	44.5
+sponza	tonemap	885.9
+sponza_ao	(frame total)	34503.5
+sponza_ao	(gpu frame)	34548.8
+sponza_ao	ao	11659.4
+sponza_ao	ao denoise	839.9
+sponza_ao	ao depths	674.3
+sponza_ao	bloom downsample	1512.6
+sponza_ao	bloom upsample	751.9
+sponza_ao	cull	3.7
+sponza_ao	cull setup	0.9
+sponza_ao	depth prepass	1061.3
+sponza_ao	forward	14572.3
+sponza_ao	shadow	2482.1
 sponza_ao	shadow cull	1.2
-sponza_ao	sky	40.5
+sponza_ao	sky	36.2
 sponza_ao	tonemap	903.0
-sponza_atmosphere	(frame total)	24517.4
-sponza_atmosphere	(gpu frame)	24590.3
-sponza_atmosphere	atmosphere	2461.7
-sponza_atmosphere	atmosphere aerial perspective	69.6
-sponza_atmosphere	bloom downsample	1441.7
-sponza_atmosphere	bloom upsample	711.1
+sponza_atmosphere	(frame total)	25287.3
+sponza_atmosphere	(gpu frame)	25352.2
+sponza_atmosphere	atmosphere	2529.6
+sponza_atmosphere	atmosphere aerial perspective	69.4
+sponza_atmosphere	bloom downsample	1466.4
+sponza_atmosphere	bloom upsample	742.9
 sponza_atmosphere	cull	1.3
 sponza_atmosphere	cull setup	0.3
-sponza_atmosphere	forward	16402.9
-sponza_atmosphere	shadow	2564.3
+sponza_atmosphere	forward	17181.6
+sponza_atmosphere	shadow	2447.2
 sponza_atmosphere	shadow cull	1.7
-sponza_atmosphere	tonemap	852.9
-sponza_fsr1_67	(frame total)	18229.9
-sponza_fsr1_67	(gpu frame)	18226.6
-sponza_fsr1_67	bloom downsample	703.8
-sponza_fsr1_67	bloom upsample	489.4
+sponza_atmosphere	tonemap	848.7
+sponza_fsr1_67	(frame total)	18445.2
+sponza_fsr1_67	(gpu frame)	18433.6
+sponza_fsr1_67	bloom downsample	711.8
+sponza_fsr1_67	bloom upsample	489.2
 sponza_fsr1_67	cull	3.7
 sponza_fsr1_67	cull setup	0.9
-sponza_fsr1_67	easu	4972.0
-sponza_fsr1_67	forward	7594.2
-sponza_fsr1_67	rcas	1198.6
-sponza_fsr1_67	shadow	2449.1
+sponza_fsr1_67	easu	5077.6
+sponza_fsr1_67	forward	7685.2
+sponza_fsr1_67	rcas	1306.9
+sponza_fsr1_67	shadow	2374.0
 sponza_fsr1_67	shadow cull	1.2
-sponza_fsr1_67	sky	15.0
-sponza_fsr1_67	tonemap	781.2
-sponza_fsr_quality	(frame total)	32856.3
-sponza_fsr_quality	(gpu frame)	32891.6
-sponza_fsr_quality	bloom downsample	735.0
-sponza_fsr_quality	bloom upsample	998.1
-sponza_fsr_quality	cull	4.7
-sponza_fsr_quality	cull setup	1.9
+sponza_fsr1_67	sky	14.6
+sponza_fsr1_67	tonemap	779.8
+sponza_fsr_quality	(frame total)	34156.4
+sponza_fsr_quality	(gpu frame)	34173.5
+sponza_fsr_quality	bloom downsample	738.5
+sponza_fsr_quality	bloom upsample	1108.9
+sponza_fsr_quality	cull	4.9
+sponza_fsr_quality	cull setup	1.8
 sponza_fsr_quality	exposure value	6.2
-sponza_fsr_quality	forward	10276.2
-sponza_fsr_quality	fsr	16806.4
-sponza_fsr_quality	motion background	19.0
+sponza_fsr_quality	forward	10948.3
+sponza_fsr_quality	fsr	17361.2
+sponza_fsr_quality	motion background	19.1
 sponza_fsr_quality	remember instances	0.3
-sponza_fsr_quality	shadow	3200.2
+sponza_fsr_quality	shadow	3132.6
 sponza_fsr_quality	shadow cull	1.2
 sponza_fsr_quality	sky	19.4
-sponza_fsr_quality	tonemap	814.2
-sponza_fxaa	(frame total)	24711.2
-sponza_fxaa	(gpu frame)	24674.3
-sponza_fxaa	bloom downsample	1498.8
-sponza_fxaa	bloom upsample	638.1
-sponza_fxaa	cull	3.7
-sponza_fxaa	cull setup	1.0
-sponza_fxaa	forward	16610.9
-sponza_fxaa	fxaa	2093.3
-sponza_fxaa	shadow	2509.4
+sponza_fsr_quality	tonemap	818.8
+sponza_fxaa	(frame total)	24937.4
+sponza_fxaa	(gpu frame)	24979.8
+sponza_fxaa	bloom downsample	1499.4
+sponza_fxaa	bloom upsample	738.8
+sponza_fxaa	cull	3.6
+sponza_fxaa	cull setup	0.9
+sponza_fxaa	forward	17212.0
+sponza_fxaa	fxaa	2075.9
+sponza_fxaa	shadow	2395.8
 sponza_fxaa	shadow cull	1.2
-sponza_fxaa	sky	44.5
-sponza_fxaa	tonemap	982.5
-sponza_local_shadows	(frame total)	41520.6
-sponza_local_shadows	(gpu frame)	41601.9
-sponza_local_shadows	bloom downsample	789.8
-sponza_local_shadows	bloom upsample	622.1
-sponza_local_shadows	cull	4.9
-sponza_local_shadows	cull setup	3.0
-sponza_local_shadows	forward	36244.8
-sponza_local_shadows	light tiles	21.6
+sponza_fxaa	sky	44.4
+sponza_fxaa	tonemap	994.8
+sponza_local_shadows	(frame total)	39751.9
+sponza_local_shadows	(gpu frame)	40067.4
+sponza_local_shadows	bloom downsample	665.1
+sponza_local_shadows	bloom upsample	476.9
+sponza_local_shadows	cull	3.9
+sponza_local_shadows	cull setup	6.4
+sponza_local_shadows	forward	35332.2
+sponza_local_shadows	light tiles	25.4
 sponza_local_shadows	light tiles clear	0.7
-sponza_local_shadows	shadow	2993.1
+sponza_local_shadows	shadow	2429.8
 sponza_local_shadows	shadow cull	1.2
-sponza_local_shadows	sky	35.3
-sponza_local_shadows	tonemap	804.0
-sponza_msaa4	(frame total)	31702.7
-sponza_msaa4	(gpu frame)	32255.8
-sponza_msaa4	bloom downsample	1346.2
-sponza_msaa4	bloom upsample	992.2
-sponza_msaa4	cull	4.3
-sponza_msaa4	cull setup	2.1
-sponza_msaa4	depth prepass	4125.8
-sponza_msaa4	forward	19182.3
-sponza_msaa4	msaa resolve	1600.5
-sponza_msaa4	shadow	3156.3
+sponza_local_shadows	sky	34.9
+sponza_local_shadows	tonemap	775.6
+sponza_msaa4	(frame total)	34808.1
+sponza_msaa4	(gpu frame)	35309.1
+sponza_msaa4	bloom downsample	1623.4
+sponza_msaa4	bloom upsample	1344.5
+sponza_msaa4	cull	4.6
+sponza_msaa4	cull setup	1.7
+sponza_msaa4	depth prepass	4165.0
+sponza_msaa4	forward	21282.6
+sponza_msaa4	msaa resolve	1614.9
+sponza_msaa4	shadow	3209.0
 sponza_msaa4	shadow cull	1.2
-sponza_msaa4	sky	60.8
-sponza_msaa4	tonemap	1308.9
-sponza_reflections	(frame total)	37031.6
-sponza_reflections	(gpu frame)	37348.5
-sponza_reflections	bloom downsample	659.4
-sponza_reflections	bloom upsample	558.8
-sponza_reflections	cull	4.7
-sponza_reflections	cull setup	1.9
-sponza_reflections	depth prepass	1158.9
-sponza_reflections	forward	12656.7
-sponza_reflections	reflections	8719.9
-sponza_reflections	shadow	3012.3
+sponza_msaa4	sky	62.2
+sponza_msaa4	tonemap	1548.2
+sponza_reflections	(frame total)	39844.9
+sponza_reflections	(gpu frame)	39928.0
+sponza_reflections	bloom downsample	663.0
+sponza_reflections	bloom upsample	553.8
+sponza_reflections	cull	4.8
+sponza_reflections	cull setup	1.7
+sponza_reflections	depth prepass	1171.4
+sponza_reflections	forward	13328.2
+sponza_reflections	reflections	9985.0
+sponza_reflections	shadow	3119.6
 sponza_reflections	shadow cull	1.2
-sponza_reflections	sky	40.4
-sponza_reflections	ssr depth	487.8
-sponza_reflections	ssr spatial	1873.2
-sponza_reflections	ssr temporal	3594.1
-sponza_reflections	ssr trace	3396.8
-sponza_reflections	tonemap	786.8
-sponza_smaa	(frame total)	25604.8
-sponza_smaa	(gpu frame)	25700.2
-sponza_smaa	bloom downsample	1276.1
-sponza_smaa	bloom upsample	634.5
-sponza_smaa	cull	3.8
-sponza_smaa	cull setup	1.0
-sponza_smaa	forward	16451.1
-sponza_smaa	shadow	2445.8
+sponza_reflections	sky	44.9
+sponza_reflections	ssr depth	547.3
+sponza_reflections	ssr spatial	1980.5
+sponza_reflections	ssr temporal	4012.7
+sponza_reflections	ssr trace	3628.0
+sponza_reflections	tonemap	782.4
+sponza_smaa	(frame total)	26122.3
+sponza_smaa	(gpu frame)	26168.8
+sponza_smaa	bloom downsample	1503.5
+sponza_smaa	bloom upsample	743.4
+sponza_smaa	cull	3.7
+sponza_smaa	cull setup	0.9
+sponza_smaa	forward	17227.2
+sponza_smaa	shadow	2386.5
 sponza_smaa	shadow cull	1.2
-sponza_smaa	sky	44.2
-sponza_smaa	smaa blend	709.0
-sponza_smaa	smaa edges	664.5
-sponza_smaa	smaa weights	1886.3
-sponza_smaa	tonemap	990.6
-sponza_smaa_t2x	(frame total)	30128.0
-sponza_smaa_t2x	(gpu frame)	30197.1
-sponza_smaa_t2x	bloom downsample	962.7
-sponza_smaa_t2x	bloom upsample	765.2
-sponza_smaa_t2x	cull	4.7
-sponza_smaa_t2x	cull setup	1.9
-sponza_smaa_t2x	forward	19453.6
-sponza_smaa_t2x	motion background	39.3
+sponza_smaa	sky	44.3
+sponza_smaa	smaa blend	697.3
+sponza_smaa	smaa edges	664.6
+sponza_smaa	smaa weights	1859.2
+sponza_smaa	tonemap	997.6
+sponza_smaa_t2x	(frame total)	29782.2
+sponza_smaa_t2x	(gpu frame)	29769.0
+sponza_smaa_t2x	bloom downsample	965.8
+sponza_smaa_t2x	bloom upsample	754.7
+sponza_smaa_t2x	cull	3.8
+sponza_smaa_t2x	cull setup	1.0
+sponza_smaa_t2x	forward	19563.6
+sponza_smaa_t2x	motion background	34.4
 sponza_smaa_t2x	remember instances	0.3
-sponza_smaa_t2x	shadow	3026.4
+sponza_smaa_t2x	shadow	2412.1
 sponza_smaa_t2x	shadow cull	1.2
-sponza_smaa_t2x	sky	41.0
-sponza_smaa_t2x	smaa blend	895.9
-sponza_smaa_t2x	smaa edges	674.7
-sponza_smaa_t2x	smaa history	247.3
-sponza_smaa_t2x	smaa resolve	1308.3
-sponza_smaa_t2x	smaa weights	1869.0
-sponza_smaa_t2x	tonemap	974.2
-sponza_streamed	(frame total)	19787.7
-sponza_streamed	(gpu frame)	19921.2
-sponza_streamed	bloom downsample	1267.8
-sponza_streamed	bloom upsample	845.7
-sponza_streamed	cull	3.8
-sponza_streamed	cull setup	1.0
-sponza_streamed	forward	14095.9
-sponza_streamed	shadow	2516.2
+sponza_smaa_t2x	sky	40.1
+sponza_smaa_t2x	smaa blend	874.8
+sponza_smaa_t2x	smaa edges	664.8
+sponza_smaa_t2x	smaa history	236.5
+sponza_smaa_t2x	smaa resolve	1349.9
+sponza_smaa_t2x	smaa weights	1857.4
+sponza_smaa_t2x	tonemap	974.4
+sponza_streamed	(frame total)	19930.5
+sponza_streamed	(gpu frame)	19902.8
+sponza_streamed	bloom downsample	1402.0
+sponza_streamed	bloom upsample	912.2
+sponza_streamed	cull	3.6
+sponza_streamed	cull setup	0.9
+sponza_streamed	forward	14071.3
+sponza_streamed	shadow	2457.9
 sponza_streamed	shadow cull	1.2
-sponza_streamed	sky	35.4
-sponza_streamed	texture feedback	161.0
+sponza_streamed	sky	34.9
+sponza_streamed	texture feedback	161.3
 sponza_streamed	texture feedback clear	0.5
 sponza_streamed	texture feedback readback	5.8
-sponza_streamed	tonemap	867.3
-sponza_taa	(frame total)	31395.6
-sponza_taa	(gpu frame)	31567.7
-sponza_taa	bloom downsample	1228.2
-sponza_taa	bloom upsample	873.6
-sponza_taa	cull	4.6
-sponza_taa	cull setup	1.8
-sponza_taa	forward	19108.7
-sponza_taa	motion background	39.2
+sponza_streamed	tonemap	878.9
+sponza_taa	(frame total)	32120.3
+sponza_taa	(gpu frame)	32220.1
+sponza_taa	bloom downsample	1428.5
+sponza_taa	bloom upsample	885.5
+sponza_taa	cull	4.9
+sponza_taa	cull setup	0.9
+sponza_taa	forward	19743.7
+sponza_taa	motion background	34.3
 sponza_taa	remember instances	0.3
-sponza_taa	shadow	2968.2
+sponza_taa	shadow	2448.6
 sponza_taa	shadow cull	1.2
-sponza_taa	sky	41.2
-sponza_taa	taau	6291.9
-sponza_taa	tonemap	894.4
-sponza_taau_67	(frame total)	21017.4
-sponza_taau_67	(gpu frame)	20999.6
-sponza_taau_67	bloom downsample	1327.3
-sponza_taau_67	bloom upsample	649.4
+sponza_taa	sky	43.4
+sponza_taa	taau	6615.9
+sponza_taa	tonemap	892.2
+sponza_taau_67	(frame total)	21789.3
+sponza_taau_67	(gpu frame)	21691.4
+sponza_taau_67	bloom downsample	1383.1
+sponza_taau_67	bloom upsample	895.8
 sponza_taau_67	cull	3.7
 sponza_taau_67	cull setup	0.9
-sponza_taau_67	forward	10013.8
-sponza_taau_67	motion background	14.2
+sponza_taau_67	forward	10283.6
+sponza_taau_67	motion background	14.1
 sponza_taau_67	remember instances	0.3
-sponza_taau_67	shadow	2482.3
+sponza_taau_67	shadow	2450.9
 sponza_taau_67	shadow cull	1.2
-sponza_taau_67	sky	15.0
-sponza_taau_67	taau	5652.5
-sponza_taau_67	tonemap	892.8
+sponza_taau_67	sky	14.8
+sponza_taau_67	taau	5859.5
+sponza_taau_67	tonemap	893.9
