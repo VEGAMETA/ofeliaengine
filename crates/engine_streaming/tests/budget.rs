@@ -2,7 +2,8 @@
 //! streamed from its pack in a streaming pool too small for its textures renders with
 //! coarser levels, within the pool, without validation errors, and gets every level it
 //! samples back once the pool grows; no frame records more texture traffic than the
-//! pool's frame budget (or its largest single level).
+//! pool's frame budget (or its largest single level). A fast turn finds the mesh levels
+//! around the camera loaded and the textures it brings into view catch up.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -80,4 +81,82 @@ fn sponza_in_a_tight_budget_streams_coarser_levels_and_recovers() {
     let errors = bed.finish();
     assert_eq!(errors, 0);
     let _ = std::fs::remove_file(pack);
+}
+
+/// A fast turn (queue item 0b): with mesh levels asked for by distance in every direction
+/// (`LodView::around`), a 180° turn after the scene settled loads no mesh level, where the
+/// frustum's view loads some; the textures the turn brings into view reach their wanted
+/// levels within a bounded number of frames.
+#[test]
+fn a_fast_turn_finds_the_meshes_loaded_and_the_textures_catch_up() {
+    let Some(pack) = sponza_pack() else {
+        assert!(
+            !std::env::var("ENGINE_REQUIRE_GOLDEN").is_ok_and(|v| v == "1"),
+            "Sponza missing (tools/fetch-test-assets.ps1, or ENGINE_TEST_ASSETS)"
+        );
+        println!("skipped: Sponza missing");
+        return;
+    };
+    let mut loaded_by_turn = [0u64; 2];
+    for (k, around) in [false, true].into_iter().enumerate() {
+        let Some((instance, device)) = gpu(false, false) else {
+            return;
+        };
+        let mut bed = Bed::new(instance, device, &pack, 4096 * MIB);
+        bed.around = around;
+        // At the nave's centre, looking down it; then 180° in 6 frames.
+        let (min, max) = (bed.min, bed.max);
+        let size = max - min;
+        let center = (min + max) * 0.5;
+        let eye = Vec3::new(center.x, min.y + size.y * 0.2, center.z);
+        let look = |yaw: f32| {
+            let dir = Vec3::new(yaw.cos(), -0.15, yaw.sin());
+            bed.camera(eye, eye + dir)
+        };
+        let ahead = look(0.0);
+        let turn: Vec<_> = (1..=6)
+            .map(|i| look(core::f32::consts::PI * i as f32 / 6.0))
+            .collect();
+        let back = look(core::f32::consts::PI);
+        let frames = bed.settle(ahead, 1500);
+        assert!(frames < 1500, "streaming did not settle");
+        let before = bed.streamer.as_ref().unwrap().stats().mesh_levels;
+        for camera in turn {
+            bed.frame(camera);
+        }
+        // Frames until under 1 % of the pixels the feedback saw over its cycle are drawn
+        // coarser than wanted.
+        let window = u64::from(bed.feedback.settings().slices * bed.feedback.settings().interval);
+        let mut catch_up = None;
+        for f in 1..=600 {
+            bed.frame(back);
+            let s = bed
+                .streamer
+                .as_mut()
+                .unwrap()
+                .texture_streamer()
+                .sharpness(&bed.textures, window);
+            if s.pixels > 0 && s.short * 100 < s.pixels {
+                catch_up = Some(f);
+                break;
+            }
+        }
+        let after = bed.streamer.as_ref().unwrap().stats().mesh_levels;
+        loaded_by_turn[k] = after - before;
+        println!(
+            "{}: settled in {frames} frames; the turn loaded {} mesh levels; textures sharp after {catch_up:?} frames",
+            if around { "around" } else { "frustum" },
+            after - before
+        );
+        assert!(catch_up.is_some(), "the textures never caught up");
+        assert_eq!(bed.finish(), 0);
+    }
+    assert!(
+        loaded_by_turn[0] > 0,
+        "the frustum's view loads levels on a turn"
+    );
+    assert_eq!(
+        loaded_by_turn[1], 0,
+        "around the camera, the turn found them loaded"
+    );
 }
