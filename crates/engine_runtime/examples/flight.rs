@@ -25,6 +25,8 @@
 //! ```text
 //! cargo run -p engine_runtime --release --example flight -- <scene.pack>
 //!     [--frames <n>]        frames of flight (default 1800: 30 s of game time)
+//!     [--fps <n>]           game time per frame, 1/n s (default 60: the 64 Hz
+//!                           simulation ticks in most frames; 240 about one in four)
 //!     [--movers <n>]        moving cubes (default 2000)
 //!     [--characters <n>]    skinned characters (default 64; needs test-assets/Fox)
 //!     [--no-lights]         no local lights
@@ -95,13 +97,12 @@ mod windowed {
     use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
     use engine_streaming::{SceneStreamSettings, SceneStreamer, material_desc, texture_format};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Instant;
 
     const WIDTH: u32 = 1920;
     const HEIGHT: u32 = 1080;
     const IN_FLIGHT: usize = 2;
-    /// Game time per frame: the same flight on every GPU, whatever the frame rate.
-    const DT: f64 = 1.0 / 60.0;
     /// Frames left out of the statistics at the start (first uploads, first captures).
     const WARMUP: usize = 120;
     const MIB: f64 = (1u64 << 20) as f64;
@@ -380,6 +381,10 @@ mod windowed {
             return;
         };
         let frames_to_run = number("--frames", 1800);
+        // Game time per frame (the same flight on every GPU, whatever the frame rate):
+        // 1/60 s ticks the 64 Hz simulation in most frames; 1/240 s about one frame in
+        // four, as a game at 240 FPS.
+        let dt = 1.0 / number("--fps", 60).max(1) as f64;
         let movers = number("--movers", 2000);
         let character_count = number("--characters", 64);
         let lights_on = !flag("--no-lights");
@@ -509,7 +514,7 @@ mod windowed {
 
         // The scene from its pack, streamed.
         let phase = Instant::now();
-        let jobs = ThreadPool::builder().build().unwrap();
+        let jobs = Arc::new(ThreadPool::builder().build().unwrap());
         let mut budget = GpuBudget::new(&device);
         let mut textures = TexturePool::new(&device, 32 << 20, IN_FLIGHT);
         let mut geometry = GeometryPool::new(
@@ -708,8 +713,10 @@ mod windowed {
         let mut cameras = CameraView::new(&mut world, defaults.view_settings());
         let entities = world.len() as u32;
         let mut scene = GpuScene::new(&device, &bindless, entities + 16, IN_FLIGHT).unwrap();
+        scene.set_jobs(jobs.clone());
         let mut view = View::new(&device, entities + 16);
         let mut runtime = Runtime::<InstanceId>::new(world, 64.0);
+        runtime.set_jobs(jobs.clone());
         let mut spins = QueryState::<(&mut Transform, &Spin)>::new(&mut runtime.world);
         let mut walkers = QueryState::<(&mut Transform, &mut Walk)>::new(&mut runtime.world);
         let mut ring = UploadRing::new(&device, &mut allocator, IN_FLIGHT, 32 << 20).unwrap();
@@ -774,13 +781,13 @@ mod windowed {
                 Err(e) => panic!("{e}"),
             };
             s.acquire = us(t);
-            game_time += DT;
+            game_time += dt;
             let time = game_time as f32;
             let (eye, rotation) = camera_at(time, min, max);
 
             // Ticks, the per-frame camera, interpolation.
             let stages = runtime.frame(
-                DT,
+                dt,
                 &(),
                 &mut scene,
                 |world, (), dt| {
@@ -814,7 +821,7 @@ mod windowed {
                 let clip = &skin.clips[1 % skin.clips.len()];
                 let duration = clip.duration().max(1e-3);
                 for_each_parallel(&jobs, &mut characters, 4, |c| {
-                    c.time = (c.time + DT as f32) % duration;
+                    c.time = (c.time + dt as f32) % duration;
                     clip.sample(c.time, skin.skeleton.rest(), &mut c.pose);
                     local_to_model(&skin.skeleton, &c.pose, &Affine3A::IDENTITY, &mut c.model);
                     skinning_matrices(&c.model, &skin.joints, inverse_bind, &mut c.palette);
@@ -938,7 +945,7 @@ mod windowed {
                             bindless: &bindless,
                             ring: &mut ring,
                             frame_number: frame.number,
-                            dt: DT as f32,
+                            dt: dt as f32,
                         },
                         &mut view,
                         &SceneInput {

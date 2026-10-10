@@ -2723,8 +2723,9 @@ impl ForwardRenderer {
         let imported = self.import(fg, ring, bindless, view, &setup)?;
         if let Some((probes, textures)) = imported.probes {
             // What moved, appeared or went away in the scene asks the probes that see it
-            // for a new capture.
+            // for a new capture; instances moving between ticks move in every frame.
             probes.note_changes(scene.changes());
+            probes.note_changes(scene.moving_boxes());
             self.add_captures(
                 fg,
                 ring,
@@ -2959,6 +2960,8 @@ impl ForwardRenderer {
                     Continuity::Next => cache.invalidate(scene.changes(), false),
                     Continuity::Broken => cache.invalidate(&[], true),
                 }
+                // Instances moving between ticks move in every frame (on the GPU).
+                cache.invalidate(scene.moving_boxes(), false);
             }
         }
         let mut plan = state.plan.borrow_mut();

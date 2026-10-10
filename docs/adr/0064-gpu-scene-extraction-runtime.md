@@ -281,3 +281,108 @@ frame is 0.12 ms on the RTX; pipelining would hide nothing yet and adds a frame 
   - one view drawing a scene and a per-frame list together;
   - pipelined simulation/rendering when simulation cost warrants it;
   - a presentation offset for the locally controlled character (outside the tick).
+
+## Addendum (2026-10-10): moving instances placed on the GPU, the tick stages on the job system
+
+**Context.** The second core review (`docs/research/core-audit-2.md` §3.5) measured about
+70 ns per moving instance per frame on one thread across four stages (propagation,
+extraction, interpolation, scene upload): 60,000 movers made the RTX CPU-bound at 5.2 ms.
+The CPU blend and the whole-array upload ran every frame although the simulation moves
+things 64 times a second, and the tick's stages ran on one thread.
+
+**Options.**
+1. *The CPU blend, in parallel:* the blend and the upload of every moving instance stay per
+   frame (3.8 MB at 60,000), only spread over threads.
+2. *Blend on the GPU, the tick's stages in parallel (chosen):* each tick uploads a mover's
+   new transform once; every frame a compute pass places it. The per-frame CPU follows the
+   tick rate, not the frame rate.
+3. *Blend in the vertex shaders:* no pass, but every draw of every view (prepass, shadows,
+   local shadows, forward) reads two transforms and blends per vertex.
+
+**Design.**
+- `GpuScene::step_motion(id, to)` gives a tick's transform (the GPU holds the one before),
+  `set_motion(id, from, to)` both; `set_alpha` the frame's factor. `set_affine`, `teleport`
+  and `remove` stop the motion. `RenderExtract` uses them when its sink interpolates
+  (`SceneSink::interpolates`; other sinks keep the CPU blend).
+- Per slot, the two transforms as six planes of 16-byte rows by slot and a word saying
+  which is the last tick's: a tick writes only the new one, over the older (`sceneStep`:
+  52 bytes uploaded per mover); `sceneMotion` writes both for a start, two ticks between
+  uploads, or a new or teleported instance; `sceneInterpolate` places every moving instance
+  each frame. Loads and stores through buffer addresses are declared 16-byte aligned
+  (`loadAligned<16>`; Slang declares plain pointer accesses 4-byte aligned).
+- The two instance buffers swap roles every frame (before: only for whole-array copies):
+  last frame's placements are the previous ones without a copy, so the placement pass
+  writes one buffer. A slot changed last frame and not this one carries its values forward
+  (16 bytes); holes are written to both buffers.
+- A handedness flip between ticks (a mirroring scale crossing zero) is not blended through
+  the flat, inside-out transforms between, which its batch's culling would draw from the
+  back (`SNAP`: both transforms are the new one). The instance changes batch, and culling
+  reads the batch from the instance data: the batch word is patched in place
+  (`vkCmdUpdateBuffer`, 16 bytes), since the ring's room is counted before anyone knows.
+- The boxes of moving instances over their whole move invalidate cached local shadows and
+  probes every frame (`SceneFrame::moving_boxes`).
+- The tick's stages spread over a pool, with the same results as on one thread:
+  `TransformPropagation::run_parallel` (changed roots in jobs of 128 rows, each with the
+  subtrees below it: disjoint, a child has one parent; column versions are atomic);
+  `RenderExtract::sync_on` (the changed chunks' entities compared in runs of 1,024 rows;
+  additions and edits told to the scene on the calling thread in the runs' order; the moves
+  through `SceneSink::step_motions`, unsafe: no instance twice, which a `GpuScene` spreads
+  over its pool); and `GpuScene::add_passes` (slots whose only change is their motion
+  applied in parallel: their box, moving box and record; bounds merged per job; slots that
+  change batch take the full path). `Runtime::set_jobs` and `GpuScene::set_jobs` take the
+  pool. Each job's state sits on cache lines of its own (`CachePadded`), and propagation
+  marks a chunk's column once per run of writes into it: every mark stores the same tick,
+  and per value, 16 threads fought over the version's cache line.
+
+**Measurements** (ref-1, `flight` with the Sponza pack, 60,000 movers in spinning
+hierarchies of 10 and 64 skinned characters, 900 frames of 1/60 s (`--fps 60`) or 1/240 s
+(`--fps 240`) of game time; ms):
+
+| | main | GPU placement only | and the tick's stages on the pool |
+|---|---:|---:|---:|
+| RTX, 60 fps: CPU frame median / p99 | 4.94 / 6.99 | 3.99 / 6.72 | 1.53 / 2.70 |
+| RTX, 60 fps: frame interval median / p99 | 4.96 / 7.00 | 4.01 / 6.74 | 2.19 / 3.60 |
+| RTX, 240 fps: CPU frame median / p99 | 2.90 / 5.29 | 0.49 / 4.30 | 0.46 / 1.85 |
+| RTX, 240 fps: interval median / p99 / worst | 2.92 / 5.30 / 5.63 | 2.05 / 6.20 / 6.88 | 2.14 / 3.85 / 4.17 |
+| Radeon, 60 fps: CPU frame median / p99 | 6.43 / 8.78 | 5.92 / 9.32 | 2.83 / 3.99 |
+| Radeon, 60 fps: interval median (GPU-bound) | 41.09 | 41.05 | 41.50 |
+| Radeon, 240 fps: CPU frame median / p99 | 3.71 / 6.49 | 1.28 / 5.89 | 1.33 / 2.99 |
+| Radeon, 240 fps: interval median / p99 | 41.24 / 53.04 | 41.54 / 54.84 | 41.40 / 53.10 |
+
+(The Radeon's main and last columns were measured back to back; its runs differ by about
+0.3 ms between sessions, which the middle column shows.)
+
+With the GPU placement alone, the RTX's tick frames got worse at 240 fps: the frames
+between ticks became GPU-bound, the CPU ran ahead, and a tick's 3.9 ms of single-threaded
+work landed on top of the wait (worst frame 3.4× the median; CLAUDE.md's budget is 2×). On
+the pool the tick's stages cost (RTX, 240 fps, p99 µs): propagation 1,374 → 162 (341
+before the cache-line padding and the marks once per chunk run), extraction 1,251 → 645,
+scene upload 1,296 → 569. The worst frame is 1.95× the median (main 1.93×), p99 1.80×.
+
+GPU passes (µs): the RTX places 60,000 movers in 30–42 per frame and steps them in 5 per
+tick; the Radeon in 453–529 and 177–260; main's whole-array copy took 13.5 and 145–152. The
+first layout (a 144-byte record per slot, a tick rewriting both transforms) took the Radeon
+570 and 950, the RTX about 140 and 107: per-slot records leave lines partly written, which
+the iGPU's shared memory pays for (its CPU propagation ran 0.66 ms slower beside them). On
+the Radeon, writing whole 64-byte instances (the material and batch word with them) would
+save another 85 µs per frame (measured 425 → 344 with the word left out).
+
+**Decision.** Option 2: GPU placement, with the tick's stages on the job system.
+
+**Consequences.**
+- The per-frame CPU of moving instances no longer grows with them; a tick's grows, spread
+  over the pool. On the GPU-bound Radeon the frame is 1 % longer at 60,000 movers (GPU
+  +0.5 ms: placement and steps against the copy), its CPU frame 2.3× shorter; at the
+  default 2,000 movers the passes cost about 20 µs.
+- Culling reads an instance's batch from its data on the GPU: whatever changes a slot's
+  batch must reach the GPU in the same frame. A stale word dropped instances, or another
+  batch's (an overflowing range), at random; `moving_instances_apply_the_same_on_one_thread_and_on_a_pool`
+  checks the per-batch counts after culling.
+- Propagation of non-root candidates (children whose own transforms change) stays on one
+  thread, by depth.
+- The fully dynamic sets of the original consequences need no per-frame draw list any more.
+- Revisit:
+  - whole-line instance writes on the iGPU (the material and batch word beside the planes,
+    kept by every writer of that word);
+  - the remaining serial passes over the dirty list (classification, about 0.1 ms at
+    60,000 on the RTX) if tick frames need it.

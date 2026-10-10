@@ -1,9 +1,11 @@
 //! One frame of the game: input, ticks, presentation, interpolation.
 
 use crate::extract::{RenderExtract, SceneSink};
+use engine_core::jobs::ThreadPool;
 use engine_ecs::{TransformPropagation, World};
 use engine_physics::ecs::FixedStep;
 use engine_render::gpu_scene::InstanceId;
+use std::sync::Arc;
 use std::time::Instant;
 
 /// Where one [`Runtime::frame`] spent its time, in microseconds.
@@ -66,6 +68,8 @@ pub struct Runtime<Id = InstanceId> {
     pub clock: FixedStep,
     propagation: TransformPropagation,
     extract: RenderExtract<Id>,
+    /// Workers for each tick's propagation ([`Self::set_jobs`]).
+    jobs: Option<Arc<ThreadPool>>,
 }
 
 impl<Id> core::fmt::Debug for Runtime<Id> {
@@ -82,7 +86,7 @@ fn us(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1e6
 }
 
-impl<Id: Copy + Eq> Runtime<Id> {
+impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
     /// Runs `world` at `hz` ticks per second (at most 4 per frame: a longer hitch slows
     /// the game down instead of piling up ticks), interpolating rendered motion between
     /// ticks.
@@ -96,7 +100,15 @@ impl<Id: Copy + Eq> Runtime<Id> {
             clock,
             propagation,
             extract,
+            jobs: None,
         }
+    }
+
+    /// Spreads each tick's transform propagation and extraction over `jobs`' workers when
+    /// many transforms changed (`TransformPropagation::run_parallel`,
+    /// [`RenderExtract::sync_on`]: the same results as on one thread).
+    pub fn set_jobs(&mut self, jobs: Arc<ThreadPool>) {
+        self.jobs = Some(jobs);
     }
 
     /// The extraction state (instances of entities, last sync's statistics).
@@ -141,10 +153,14 @@ impl<Id: Copy + Eq> Runtime<Id> {
             self.world.advance_sim_tick();
             stages.simulate_us += us(start);
             let start = Instant::now();
-            self.propagation.run(&mut self.world);
+            match &self.jobs {
+                Some(jobs) => self.propagation.run_parallel(&mut self.world, jobs),
+                None => self.propagation.run(&mut self.world),
+            };
             stages.propagate_us += us(start);
             let start = Instant::now();
-            self.extract.sync(&mut self.world, scene);
+            self.extract
+                .sync_on(&mut self.world, scene, self.jobs.as_deref());
             stages.extract_us += us(start);
         }
         let start = Instant::now();

@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
-use engine_core::math::{Mat4, Quat, Vec3};
+use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
 use engine_ecs::{
     Entity, GlobalTransform, Snapshot, Transform, TransformPropagation, World, bytemuck,
     pod_component,
@@ -417,4 +417,270 @@ fn camera_moves_with_input_without_ticks() {
     );
     assert_eq!(stages.ticks, 0);
     assert_eq!(camera, Vec3::X);
+}
+
+/// A sink that places moving instances itself, as a `GpuScene` does on the GPU: it gets
+/// each moving instance's two ticks once per tick and only the factor every frame.
+#[derive(Default)]
+struct Interpolating {
+    inner: Recorder,
+    motion: HashMap<u32, (Mat4, Mat4)>,
+    alpha: f32,
+    motions: u32,
+    alphas: u32,
+}
+
+impl SceneSink for Interpolating {
+    type Id = u32;
+    fn insert(&mut self, instance: SceneInstance) -> u32 {
+        self.inner.insert(instance)
+    }
+    fn remove(&mut self, id: u32) -> bool {
+        self.motion.remove(&id);
+        self.inner.remove(id)
+    }
+    fn set_transform(&mut self, id: u32, world_from_object: &Mat4) -> bool {
+        // A move stops the motion, as `GpuScene::set_affine` does.
+        let was_moving = self.motion.remove(&id).is_some();
+        self.inner.set_transform(id, world_from_object) || was_moving
+    }
+    fn set_mesh(&mut self, id: u32, mesh: MeshId) {
+        self.inner.set_mesh(id, mesh);
+    }
+    fn set_material(&mut self, id: u32, material: MaterialId) {
+        self.inner.set_material(id, material);
+    }
+    fn interpolates(&self) -> bool {
+        true
+    }
+    fn set_motion(&mut self, id: u32, from: &Affine3A, to: &Affine3A) -> bool {
+        self.motions += 1;
+        self.motion.insert(id, (Mat4::from(*from), Mat4::from(*to)));
+        true
+    }
+    fn step_motion(&mut self, id: u32, to: &Affine3A) -> bool {
+        // From what it was last given, as `GpuScene::step_motion`.
+        let from = match self.motion.get(&id) {
+            Some((_, last)) => *last,
+            None => self.inner.live[&id].world_from_object,
+        };
+        self.motions += 1;
+        self.motion.insert(id, (from, Mat4::from(*to)));
+        true
+    }
+    fn set_alpha(&mut self, alpha: f32) {
+        self.alphas += 1;
+        self.alpha = alpha;
+    }
+}
+
+impl Interpolating {
+    /// Where it shows instance `id` (the GPU's blend).
+    fn shown(&self, id: u32) -> Mat4 {
+        match self.motion.get(&id) {
+            Some((from, to)) => {
+                let (a, b) = (from.to_cols_array(), to.to_cols_array());
+                Mat4::from_cols_array(&core::array::from_fn(|i| a[i] + (b[i] - a[i]) * self.alpha))
+            }
+            None => self.inner.live[&id].world_from_object,
+        }
+    }
+}
+
+#[test]
+fn a_sink_that_interpolates_gets_motion_once_per_tick_and_shows_what_the_cpu_blend_shows() {
+    // Two identical worlds: one extracted into the CPU blend, one into the interpolating
+    // sink.
+    let build = || {
+        let mut w = World::new();
+        let movers = [renderable(&mut w, 0.0), renderable(&mut w, 5.0)];
+        renderable(&mut w, 10.0);
+        let p = TransformPropagation::new(&mut w);
+        (w, p, movers)
+    };
+    let (mut wc, mut pc, mc) = build();
+    let (mut wg, mut pg, mg) = build();
+    let mut xc = RenderExtract::<u32>::new(&mut wc, true);
+    let mut xg = RenderExtract::<u32>::new(&mut wg, true);
+    let mut cpu = Recorder::default();
+    let mut gpu = Interpolating::default();
+    // The first sync adds the instances.
+    pc.run(&mut wc);
+    pg.run(&mut wg);
+    xc.sync(&mut wc, &mut cpu);
+    xg.sync(&mut wg, &mut gpu);
+    for tick in 0..6 {
+        for (w, p, m) in [(&mut wc, &mut pc, &mc), (&mut wg, &mut pg, &mg)] {
+            // The first moves every tick (and turns), the second only in tick 1.
+            let t = &mut *w.get_mut::<Transform>(m[0]).unwrap();
+            t.translation.x += 1.0;
+            t.rotation *= Quat::from_rotation_y(0.2);
+            if tick == 1 {
+                w.get_mut::<Transform>(m[1]).unwrap().translation.y += 2.0;
+            }
+            p.run(w);
+        }
+        xc.sync(&mut wc, &mut cpu);
+        let motions = gpu.motions;
+        xg.sync(&mut wg, &mut gpu);
+        let moved = if tick == 1 { 2 } else { 1 };
+        assert_eq!(
+            gpu.motions - motions,
+            moved,
+            "tick {tick}: one motion per mover"
+        );
+        // Frames at a few factors: the same placements, nothing per mover.
+        for alpha in [0.0, 0.3, 0.9] {
+            xc.interpolate(&mut cpu, alpha);
+            let (moves, alphas) = (gpu.inner.moves, gpu.alphas);
+            xg.interpolate(&mut gpu, alpha);
+            assert_eq!(gpu.inner.moves, moves, "no move per frame");
+            assert_eq!(gpu.alphas, alphas + 1);
+            for (ec, eg) in mc.iter().zip(&mg).chain([(&mc[0], &mg[0])]) {
+                let c = cpu.live[&xc.instance(*ec).unwrap()].world_from_object;
+                let g = gpu.shown(xg.instance(*eg).unwrap());
+                assert!(
+                    c.abs_diff_eq(g, 1e-5),
+                    "tick {tick}, alpha {alpha}: {c:?} vs {g:?}"
+                );
+            }
+        }
+    }
+}
+
+/// Every call extraction makes, in order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Call {
+    Insert(u32, SceneInstance),
+    Remove(u32),
+    Transform(u32, Mat4),
+    Affine(u32, Affine3A),
+    Mesh(u32, MeshId),
+    Material(u32, MaterialId),
+    Step(u32, Affine3A),
+    Alpha(f32),
+}
+
+/// Logs the calls; interpolates between ticks itself (as a `GpuScene`) or not.
+struct Logger {
+    interpolates: bool,
+    next: u32,
+    calls: Vec<Call>,
+}
+
+impl SceneSink for Logger {
+    type Id = u32;
+    fn insert(&mut self, instance: SceneInstance) -> u32 {
+        self.next += 1;
+        self.calls.push(Call::Insert(self.next, instance));
+        self.next
+    }
+    fn remove(&mut self, id: u32) -> bool {
+        self.calls.push(Call::Remove(id));
+        true
+    }
+    fn set_transform(&mut self, id: u32, world_from_object: &Mat4) -> bool {
+        self.calls.push(Call::Transform(id, *world_from_object));
+        true
+    }
+    fn set_affine(&mut self, id: u32, world_from_object: &Affine3A) -> bool {
+        self.calls.push(Call::Affine(id, *world_from_object));
+        true
+    }
+    fn set_mesh(&mut self, id: u32, mesh: MeshId) {
+        self.calls.push(Call::Mesh(id, mesh));
+    }
+    fn set_material(&mut self, id: u32, material: MaterialId) {
+        self.calls.push(Call::Material(id, material));
+    }
+    fn interpolates(&self) -> bool {
+        self.interpolates
+    }
+    fn step_motion(&mut self, id: u32, to: &Affine3A) -> bool {
+        self.calls.push(Call::Step(id, *to));
+        true
+    }
+    fn set_alpha(&mut self, alpha: f32) {
+        self.calls.push(Call::Alpha(alpha));
+    }
+}
+
+/// Extraction with its comparisons on a thread pool (`RenderExtract::sync_on`) tells the
+/// scene the same things in the same order as on one thread: with GPU and CPU
+/// interpolation and without, through moves, mesh and material edits, hiding, despawns
+/// and spawns, over enough entities for the pool's path.
+#[test]
+fn extraction_on_a_pool_makes_the_same_calls_as_on_one_thread() {
+    let pool = engine_core::jobs::ThreadPool::builder()
+        .workers(4)
+        .build()
+        .unwrap();
+    for (interpolation, gpu) in [(true, true), (true, false), (false, false)] {
+        let mut worlds = [World::new(), World::new()];
+        let mut entities = Vec::new();
+        for w in &mut worlds {
+            entities = (0..12_000).map(|i| renderable(w, i as f32)).collect();
+        }
+        let [a, b] = &mut worlds;
+        let mut propagation = [TransformPropagation::new(a), TransformPropagation::new(b)];
+        let mut extracts = [
+            RenderExtract::<u32>::new(a, interpolation),
+            RenderExtract::<u32>::new(b, interpolation),
+        ];
+        let mut sinks = [false, true].map(|_| Logger {
+            interpolates: gpu,
+            next: 0,
+            calls: Vec::new(),
+        });
+        let mut visited = 0;
+        for tick in 0..6u32 {
+            for w in &mut worlds {
+                for (k, &e) in entities.iter().enumerate() {
+                    match (k % 97, tick) {
+                        (1, 2) => w.get_mut::<MeshRenderer>(e).unwrap().mesh = mesh(2),
+                        (2, 3) => w.get_mut::<MeshRenderer>(e).unwrap().material = material(2),
+                        (3, 2) => w.get_mut::<MeshRenderer>(e).unwrap().visible = 0,
+                        (3, 4) => w.get_mut::<MeshRenderer>(e).unwrap().visible = 1,
+                        (4, 3) => {
+                            w.despawn(e);
+                        }
+                        _ if k % 3 != 0 => {
+                            if let Some(t) = w.get_mut::<Transform>(e) {
+                                t.translation.y = (tick as usize * k) as f32 * 0.01;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if tick == 4 {
+                    for i in 0..300 {
+                        renderable(w, -(i as f32));
+                    }
+                }
+            }
+            let [a, b] = &mut worlds;
+            let [sa, sb] = &mut sinks;
+            propagation[0].run(a);
+            propagation[1].run_parallel(b, &pool);
+            extracts[0].sync(a, sa);
+            extracts[1].sync_on(b, sb, Some(&pool));
+            if interpolation {
+                extracts[0].interpolate(sa, 0.5);
+                extracts[1].interpolate(sb, 0.5);
+            }
+            let (x, y) = (extracts[0].stats(), extracts[1].stats());
+            assert_eq!(x, y, "tick {tick}");
+            visited = visited.max(x.visited);
+            let first = sa.calls.iter().zip(&sb.calls).position(|(p, q)| p != q);
+            assert!(
+                first.is_none() && sa.calls.len() == sb.calls.len(),
+                "tick {tick}, interpolation {interpolation}, gpu {gpu}: calls differ at {first:?}                  ({} and {} calls)",
+                sa.calls.len(),
+                sb.calls.len()
+            );
+            sa.calls.clear();
+            sb.calls.clear();
+        }
+        assert!(visited >= 8000, "the pool's path: {visited} visited");
+    }
 }
