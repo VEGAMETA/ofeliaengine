@@ -1,6 +1,8 @@
 # 0055. Pipeline cache and warm-up: a validated VkPipelineCache on disk, cache lookups first, compiles in parallel
 
-- Status: Accepted
+- Status: Accepted; in part superseded by [ADR 0079](0079-pipelines-on-first-use.md)
+  (2026-10-10): shading variants are made on first use or by the device's warm-up
+  thread, so a frame can make a pipeline
 - Date: 2026-09-30
 - Research: [docs/research/pipeline-cache.md](../research/pipeline-cache.md)
 - Related: [ADR 0009](0009-shader-hot-reload.md) (shader builds),

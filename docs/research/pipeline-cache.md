@@ -67,3 +67,43 @@ at run time.
 ## Measured
 
 See ADR 0055 for the table: cold 270–324 ms, warm 6–7 ms, 12–49 ms with only our file.
+
+## Creating pipelines on first use (2026-10-10)
+
+Research for queue item 0g (core review §3.8): the renderers made every pipeline at
+start-up, most of which a game never draws with. Decision:
+[ADR 0079](../adr/0079-pipelines-on-first-use.md).
+
+### What flight showed (ref-1, Sponza pack, the device class's defaults)
+
+- 85 pipelines were made before the first frame; the first frame bound 28 of them and 600
+  frames of flight 31. Of the forward renderer's about 62 shading variants it used one
+  (`fragmentMainAoShadowed`, local lights and an environment): the base set, the sets
+  without ambient occlusion or without shadows, transparent and masked variants waited
+  for content the scene does not have.
+- Start-up ran one phase after another: window 14 ms, instance and device 155-190,
+  swapchain 11 (RTX) and 174 (Radeon, which presents across adapters), pipelines 13-30
+  warm and 490-580 with the drivers cold, the pack 13, the scene 30.
+
+### Engines (checked 2026-10-10)
+
+| Source | License | How | What we take |
+|---|---|---|---|
+| Godot 4.4, "Ubershaders and pipeline pre-compilation" ([PR #90400](https://github.com/godotengine/godot/pull/90400), [release notes](https://godotengine.org/releases/4.4/)) | MIT | Pipelines a mesh's materials will need are compiled in the background when it loads; an "ubershader" per shader (every specialization read at run time) is compiled at load and draws an object whose specialized pipeline is not ready, instead of a stall | Background compilation of what may be drawn; not the ubershader: its code would cost every view registers (ADR 0058's rule), and our variants are few |
+| Unreal Engine 5, PSO precaching ([docs](https://dev.epicgames.com/documentation/en-us/unreal-engine/pso-precaching-for-unreal-engine)) | product docs | PSOs precached in background tasks when components are created; with `r.PSOPrecache.ProxyCreationWhenPSOReady=1` (the default) a primitive whose PSO is not ready is not drawn, or drawn with the default material, until it is; bundled PSO caches from playtests | Background creation; not skipping draws (objects popping in) |
+| Bevy, `PipelineCache` (latest on docs.rs) ([docs](https://docs.rs/bevy/latest/bevy/render/render_resource/struct.PipelineCache.html)) | MIT / Apache-2.0 | `queue_render_pipeline` returns an id; a task creates the pipeline (`CachedPipelineState::Queued`, `Creating(Task)`, `Ok`, `Err`); draws of a pipeline not ready are skipped | The state machine (ours is a `OnceLock`: made, failed, or not yet) |
+
+All three avoid the stall by drawing something else (an ubershader, a default material,
+nothing) while a pipeline compiles. Ours are a renderer's own, known when it is made, and
+tens rather than thousands: the first frame waits for the ones it draws with, a thread
+makes the rest before they are needed, and nothing draws wrong meanwhile.
+
+### Measured with the decision
+
+See ADR 0079. A shading variant compiled on its first use costs a frame about 35 ms on
+the RTX and 26 ms on the Radeon with the drivers cold, once; the warm-up thread makes all
+of them within 1.1-1.4 s of the renderer's creation in that case, and within 2-45 ms
+from our cache file. On NVIDIA a lookup of these large shaders takes about 1.1 ms. Each
+lookup also creates the shader modules from their SPIR-V; whether that is the cost was
+not measured. `VK_EXT_shader_module_identifier` would let a lookup skip the SPIR-V
+(next step).

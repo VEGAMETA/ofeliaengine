@@ -88,7 +88,9 @@ addendum), 0d (motion vectors from the depth prepass, ADR 0043's addendum), TAAU
 Catmull-Rom history with point reads (owner, 2026-10-10; ADR 0043's second amendment), 0e
 (presenting across adapters, ADR 0007's addendum), 0f (moving instances placed on the
 GPU, the tick's stages on the job system: ADR 0064's addendum), 0f2 (16-byte aligned
-accesses through buffer addresses in every shader: ADR 0013's addendum). Next: 0g.
+accesses through buffer addresses in every shader: ADR 0013's addendum), 0g (shading
+variants made on first use and by the device's warm-up thread, start-up phases
+overlapped: ADR 0079). Next: 1 (GPU particles and GPU radix sort).
 
 ## 5. Queue (in order)
 
@@ -239,9 +241,14 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    with atmosphere, probes and SSR 1,478 → 1,445; Radeon: the SSR depth pyramid 413 → 308,
    registers unchanged. A 4-byte value read by a dynamic index stays scalar (as a 16-byte
    load it made the SSR trace 7.5 % slower).
-0g. Start-up overlap (device creation beside the pack's reading and cooking) and pipeline
+0g. ~~Start-up overlap (device creation beside the pack's reading and cooking) and pipeline
    variants created on first use (review §3.8): first frame 450–590 ms warm, 1.2–1.4 s
-   with the pipeline cache missing.
+   with the pipeline cache missing.~~ Done 2026-10-10 (ADR 0079): `flight`'s first frame
+   with the cache 324 → 261 ms (RTX), 433 → 367 (Radeon); with the drivers cold 796 → 504,
+   1,028 → 547. The forward renderer describes its shading variants (`LazyPipeline`) and
+   makes them on first use or on the device's warm-up thread; the device is created
+   beside the window and the Fox's cook, the swapchain beside the renderers and the
+   scene.
 1. GPU particles and GPU radix sort.
 2. Clustered decals.
 2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity): `.hdr` (own
@@ -366,6 +373,15 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
     less.
 - **Presentation:** test 0e's choice with a monitor on the iGPU (the owner can connect one;
   later, owner 2026-10-10).
+- **Start-up (ADR 0079):**
+  - acquiring the swapchain image late would let the Radeon's first frame record beside its
+    swapchain (it waits 140 ms for it now);
+  - `VK_EXT_shader_module_identifier` lookups: a large shader's lookup takes 1.1 ms on
+    NVIDIA;
+  - a record of the variants a game draws with, so the warm-up makes them first (with the
+    material graph);
+  - the other renderers' pipelines (TAA and upscalers, post, AO's and local shadows'
+    passes, skinning) are still made at start-up.
 - **Reliability:** two silent process exits (`perf_gate` once, `frame_bench` once) were
   never reproduced or explained. Watch for a recurrence and get a stack.
 - **Housekeeping:** `scene_bench` is wired by hand, outside `engine_frame`. From the second review:
