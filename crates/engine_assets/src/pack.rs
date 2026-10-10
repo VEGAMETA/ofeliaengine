@@ -46,8 +46,9 @@ pub const MAGIC: [u8; 4] = *b"OFPK";
 /// ADR 0068), so packs without them stay readable by engines that only know version 1;
 /// those refuse a version 2 pack instead of misreading it. Version 3 (ADR 0076) adds
 /// meshes stored for streaming: the coarsest detail level in the mesh entry, each finer
-/// level's extra vertices and indices in a mesh level entry.
-pub const VERSION: u32 = 3;
+/// level's extra vertices and indices in a mesh level entry. Version 4 (ADR 0083) adds
+/// cooked HDR panoramas (`crate::panorama`).
+pub const VERSION: u32 = 4;
 /// Oldest version this engine reads.
 pub const MIN_VERSION: u32 = 1;
 /// Largest entry a pack accepts (raw bytes): 4 GiB.
@@ -105,6 +106,9 @@ pub enum EntryKind {
     /// A finer detail level of a mesh stored for streaming: the vertices it adds to the
     /// coarser levels' and its indices (version 3, ADR 0076).
     MeshLevel,
+    /// A cooked HDR panorama: a BC6H cube with mips and its sun (version 4, ADR 0083;
+    /// `crate::panorama`).
+    Panorama,
 }
 
 impl EntryKind {
@@ -116,6 +120,7 @@ impl EntryKind {
             Self::Skin => 4,
             Self::Clip => 5,
             Self::MeshLevel => 6,
+            Self::Panorama => 7,
         }
     }
 
@@ -125,6 +130,7 @@ impl EntryKind {
             Self::TextureLevels | Self::Mesh | Self::Scene => 1,
             Self::Skin | Self::Clip => 2,
             Self::MeshLevel => 3,
+            Self::Panorama => 4,
         }
     }
 
@@ -136,6 +142,7 @@ impl EntryKind {
             4 => Some(Self::Skin),
             5 => Some(Self::Clip),
             6 => Some(Self::MeshLevel),
+            7 => Some(Self::Panorama),
             _ => None,
         }
     }

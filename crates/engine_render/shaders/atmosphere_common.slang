@@ -40,7 +40,10 @@ struct AtmosphereFrame
     uint flags;                      // ATMOSPHERE_* bits
     uint _pad;
     uint2 size;                      // the color target's size in pixels
+    float4 sky_turn;                 // xy: sine and cosine of the sky cube's turn about +Y (an HDR panorama's, ADR 0083)
 };
+
+#include "cube_common.slang"
 
 // Reads of the frame, laid out 16-byte aligned, declare it: a plain pointer access is
 // declared 4-byte aligned (Slang's default for pointers), and a driver may split a 16-byte

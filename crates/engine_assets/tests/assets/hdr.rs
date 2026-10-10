@@ -288,3 +288,34 @@ fn the_sun_of_the_test_panorama_is_found() {
     assert!((4.0..4.6).contains(&luminance), "luminance {luminance}");
     assert!(sun.cone.to_degrees() < 2.0);
 }
+
+#[test]
+fn the_test_panorama_cooks_into_a_bc6h_cube() {
+    use engine_assets::panorama::{CookedPanorama, PanoramaCookSettings, cook_panorama};
+    let path = assets().join("HDRI/kloofendal_48d_partly_cloudy_puresky_2k.hdr");
+    let Ok(bytes) = std::fs::read(&path) else {
+        println!("skipped: {} missing", path.display());
+        return;
+    };
+    let image = decode_hdr(&bytes).unwrap();
+    let jobs = engine_core::jobs::ThreadPool::builder().build().unwrap();
+    let start = std::time::Instant::now();
+    let cooked = cook_panorama(&image, &PanoramaCookSettings::default(), Some(&jobs));
+    let took = start.elapsed();
+    println!(
+        "{} × {} cooked in {took:?} on {} workers: {}² faces, {} levels, {:.1} MiB of BC6H",
+        image.width,
+        image.height,
+        jobs.num_workers(),
+        cooked.size,
+        cooked.levels.len(),
+        cooked.bytes() as f64 / f64::from(1 << 20)
+    );
+    assert_eq!(cooked.size, 512);
+    assert_eq!(cooked.levels.len(), 10);
+    assert_eq!(
+        cooked.levels[0].len(),
+        6 * CookedPanorama::face_bytes(512, 0)
+    );
+    assert_eq!(cooked.sun, find_sun(&image, &SunSearch::default()));
+}

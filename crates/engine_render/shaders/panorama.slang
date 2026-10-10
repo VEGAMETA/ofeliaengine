@@ -2,11 +2,13 @@
 //
 // - `panoramaCube` turns an equirectangular panorama, its RGBE texels in a buffer as `.hdr`
 //   files hold them, into the faces of a background cube (mip 0; `downsample` in
-//   environment.slang fills the rest);
-// - `panoramaLight` fills the environment's lighting cube (mip 0) from the background
-//   cube, the sun's cone filled with the sky around it: the sun lights the scene as a
-//   directional light then, and the lighting cube keeps no spike for its filtering to
-//   smear.
+//   environment.slang fills the rest), in the panorama's own frame: whoever reads the cube
+//   turns their directions back (`turned_back`), so turning the panorama remakes nothing
+//   but the lighting;
+// - `panoramaLight` fills the environment's lighting cube (mip 0, in the world's frame)
+//   from the background cube, the sun's cone filled with the sky around it: the sun lights
+//   the scene as a directional light then, and the lighting cube keeps no spike for its
+//   filtering to smear.
 //
 // No code was copied; see docs/research/hdri-environments.md.
 
@@ -21,7 +23,7 @@ struct PanoramaPush
     uint* texels;            // `panoramaCube`: width × height RGBE pixels, rows from the top (+Y)
     uint width;
     uint height;
-    float2 turn;             // `panoramaCube`: sine and cosine of the panorama's turn about +Y
+    float2 turn;             // `panoramaLight`: sine and cosine of the panorama's turn about +Y
     uint target;             // storage image being written (mip 0)
     uint size;               // its face size
     float4 sun;              // `panoramaLight`: xyz towards the sun, w the cosine of its cone (2: none)
@@ -48,15 +50,12 @@ float3 rgbe(uint p)
     return m * exp2(float(e) - 136.0);
 }
 
-// The panorama's radiance along world direction `d`: its texels filtered bilinearly,
-// wrapping around in u, clamped at the poles. Direction p in the panorama's frame (the
-// world turned back by its turn) falls at u = 0.5 + atan2(p.x, −p.z) / 2π (the middle faces
-// −Z) and v = acos(p.y) / π (the top row faces +Y).
-float3 panorama(float3 d)
+// The panorama's radiance along direction `p` in its own frame: its texels filtered
+// bilinearly, wrapping around in u, clamped at the poles. `p` falls at
+// u = 0.5 + atan2(p.x, −p.z) / 2π (the middle faces −Z) and v = acos(p.y) / π (the top row
+// faces +Y).
+float3 panorama(float3 p)
 {
-    float s = push.turn.x;
-    float c = push.turn.y;
-    float3 p = float3(c * d.x - s * d.z, d.y, s * d.x + c * d.z);
     float2 uv = float2(0.5 + atan2(p.x, -p.z) / (2.0 * PI), acos(clamp(p.y, -1.0, 1.0)) / PI);
     float2 xy = uv * float2(push.width, push.height) - 0.5;
     float2 base = floor(xy);
@@ -93,7 +92,8 @@ void panoramaCube(uint3 id : SV_DispatchThreadID)
 }
 
 // Mip 0 of the environment's lighting cube: samples² samples of the background cube's mip
-// `level` per texel, those within the sun's cone replaced by the sky around it.
+// `level` per texel (the panorama turned by `turn`), those within the sun's cone (in the
+// world) replaced by the sky around it.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void panoramaLight(uint3 id : SV_DispatchThreadID)
@@ -111,7 +111,7 @@ void panoramaLight(uint3 id : SV_DispatchThreadID)
         if (dot(d, push.sun.xyz) > push.sun.w)
             sum += push.sun_sky.rgb;
         else
-            sum += background.SampleLevel(s, d, push.level).rgb;
+            sum += background.SampleLevel(s, turned_back(d, push.turn), push.level).rgb;
     }
     g_cube_faces[push.target][id] = float4(sum / float(n * n), 1.0);
 }

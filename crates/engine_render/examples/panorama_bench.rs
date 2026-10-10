@@ -1,17 +1,27 @@
-//! HDR panoramas' cost (ADR 0083): on the CPU, reading a `.hdr` file, decoding it, finding
-//! its sun and making the `Panorama` (its texels written for the GPU, its cube and
-//! pipelines); on the GPU, making the background cube and rebuilding the image-based light
-//! from it (each timed frame turns the panorama, so both run every frame), and drawing the
-//! background at 1920 × 1080 behind a cube, against the gradient sky's. Median of the timed
-//! frames, µs.
+//! HDR panoramas' cost (ADR 0083).
+//!
+//! - **CPU:** reading a `.hdr` file, decoding it, finding its sun; cooking it into a BC6H
+//!   cube (`engine_assets::panorama`) on the job system; writing and reading its pack;
+//!   making the `Panorama` (texels written for the GPU, or a cooked cube's levels kept).
+//! - **GPU,** at 1920 × 1080 behind a cube, everything on the graphics queue (an async
+//!   compute pass's time would include the work it overlaps), median of the timed frames,
+//!   µs: the gradient sky
+//!   changing every frame; a panorama turned every frame (the lighting only); a panorama
+//!   made from its texels every frame (its background cube and the lighting); a cooked
+//!   panorama set every frame (its upload through the ring, over as many frames as it takes,
+//!   and the lighting).
 //!
 //! `cargo run -p engine_render --release --example panorama_bench [-- <file.hdr>]`
 //! (`ENGINE_ADAPTER=radeon` for the integrated GPU; the default file is the test panorama of
-//! `tools/fetch-test-assets.ps1`). Prints a Markdown table.
+//! `tools/fetch-test-assets.ps1`). Prints Markdown.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
 use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
+use engine_assets::panorama::{
+    PanoramaCookSettings, cook_panorama, load_panorama_pack, write_panorama_pack,
+};
+use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
@@ -20,7 +30,7 @@ use engine_render::forward::{
 use engine_render::graph::{Access, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
-use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
+use engine_render::panorama::{CookedPanoramaDesc, Panorama, PanoramaDesc, PanoramaSun};
 use engine_render::post::HDR_FORMAT;
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
@@ -33,6 +43,15 @@ const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 const TIMED: usize = 30;
 const DEPTH: vk::Format = vk::Format::D32_SFLOAT;
+/// Passes timed, in the table's order.
+const PASSES: [&str; 6] = [
+    "panorama background",
+    "panorama upload",
+    "environment sky",
+    "environment prefilter",
+    "environment irradiance",
+    "sky",
+];
 
 fn median(mut v: Vec<f64>) -> f64 {
     if v.is_empty() {
@@ -40,6 +59,19 @@ fn median(mut v: Vec<f64>) -> f64 {
     }
     v.sort_by(f64::total_cmp);
     v[v.len() / 2]
+}
+
+fn ms(t: std::time::Duration) -> f64 {
+    t.as_secs_f64() * 1e3
+}
+
+/// What each timed frame does.
+#[derive(Clone, Copy, PartialEq)]
+enum Case {
+    Gradient,
+    Turned,
+    Made,
+    Cooked,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -61,6 +93,19 @@ fn main() {
     let start = Instant::now();
     let found = find_sun(&image, &SunSearch::default());
     let searched = start.elapsed();
+    let jobs = ThreadPool::builder().build().unwrap();
+    let start = Instant::now();
+    let cooked = cook_panorama(&image, &PanoramaCookSettings::default(), Some(&jobs));
+    let cook_time = start.elapsed();
+    let pack = std::env::temp_dir().join(format!("panorama_bench_{}.pack", std::process::id()));
+    let start = Instant::now();
+    let stats = write_panorama_pack(&pack, &cooked, 3).unwrap();
+    let pack_written = start.elapsed();
+    let start = Instant::now();
+    let loaded = load_panorama_pack(&pack, &jobs).unwrap();
+    let pack_read = start.elapsed();
+    assert_eq!(loaded, cooked);
+    let _ = std::fs::remove_file(&pack);
 
     let instance = Instance::new(&InstanceDesc {
         app_name: String::from("panorama_bench"),
@@ -99,6 +144,8 @@ fn main() {
     }];
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 4 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
+    // One queue: an async pass's time would include the graphics work it overlaps.
+    graph.set_async_compute(false);
     // SAFETY: plain object creation.
     let (pool, cmd) = unsafe {
         let pool = d
@@ -120,26 +167,58 @@ fn main() {
     };
     let mut environment =
         Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap();
-    let start = Instant::now();
-    let panorama = Panorama::new(
-        &device,
-        &mut allocator,
-        &bindless,
-        &PanoramaDesc {
-            width: image.width,
-            height: image.height,
-            pixels: &image.pixels,
-            sun: found.map(|s| PanoramaSun {
-                direction: s.direction,
-                illuminance: s.illuminance,
-                cone: s.cone,
-                sky: s.sky,
-            }),
-            background_size: 0,
-        },
-    )
-    .unwrap();
-    let made = start.elapsed();
+    let sun = found.map(|s| PanoramaSun {
+        direction: s.direction,
+        illuminance: s.illuminance,
+        cone: s.cone,
+        sky: s.sky,
+    });
+    let mut made_time = std::time::Duration::ZERO;
+    let mut make = |allocator: &mut Allocator| {
+        let start = Instant::now();
+        let p = Panorama::new(
+            &device,
+            allocator,
+            &bindless,
+            &PanoramaDesc {
+                width: image.width,
+                height: image.height,
+                pixels: &image.pixels,
+                sun,
+                background_size: 0,
+            },
+        )
+        .unwrap();
+        made_time = start.elapsed();
+        p
+    };
+    let mut cooked_time = std::time::Duration::ZERO;
+    let mut from_cooked = |allocator: &mut Allocator| {
+        let start = Instant::now();
+        let p = Panorama::from_cooked(
+            &device,
+            allocator,
+            &bindless,
+            &CookedPanoramaDesc {
+                size: cooked.size,
+                levels: &cooked.levels,
+                sun,
+            },
+        )
+        .unwrap();
+        cooked_time = start.elapsed();
+        p
+    };
+    let first = make(&mut allocator);
+    let made_memory = first.memory();
+    let made_size = first.background_size();
+    let cooked_memory = {
+        let mut p = from_cooked(&mut allocator);
+        let memory = p.memory();
+        // SAFETY: never used by the GPU.
+        unsafe { p.destroy(&mut allocator, &bindless) };
+        memory
+    };
     let eye = Vec3::new(0.0, 1.0, 4.0);
     let camera = Camera {
         clip_from_world: vulkan_perspective(1.0, WIDTH as f32 / HEIGHT as f32, 0.1, 100.0)
@@ -157,43 +236,71 @@ fn main() {
     println!("Device: {}", device.adapter().summary());
     println!();
     println!(
-        "{} ({} × {}, {:.1} MB): read {:.1} ms, decoded {:.1} ms, sun found in {:.1} ms ({}), \
-         `Panorama::new` {:.1} ms; background {}², {:.1} MiB on the GPU with the texels",
+        "{} ({} × {}, {:.1} MB): read {:.1} ms, decoded {:.1} ms, sun found in {:.1} ms ({}); \
+         cooked into a {}² BC6H cube in {:.0} ms on {} workers ({:.2} MiB; its pack {:.2} MiB, \
+         written in {:.1} ms, read in {:.1} ms)",
         path.file_name().unwrap().to_string_lossy(),
         image.width,
         image.height,
         bytes.len() as f64 / 1e6,
-        read.as_secs_f64() * 1e3,
-        decoded.as_secs_f64() * 1e3,
-        searched.as_secs_f64() * 1e3,
+        ms(read),
+        ms(decoded),
+        ms(searched),
         found.map_or(String::from("none"), |s| format!(
             "{:.2}° up, cone {:.2}°",
             s.direction.y.asin().to_degrees(),
             s.cone.to_degrees()
         )),
-        made.as_secs_f64() * 1e3,
-        panorama.background_size(),
-        panorama.memory() as f64 / f64::from(1 << 20),
+        cooked.size,
+        ms(cook_time),
+        jobs.num_workers(),
+        cooked.bytes() as f64 / f64::from(1 << 20),
+        stats.stored_bytes as f64 / f64::from(1 << 20),
+        ms(pack_written),
+        ms(pack_read),
     );
     println!();
     println!(
-        "| sky | background cube µs | lighting cube µs | prefilter µs | irradiance µs | sky pass µs |"
+        "| sky | background cube µs | upload µs (frames) | lighting cube µs | prefilter µs | irradiance µs | sky pass µs |"
     );
-    println!("|---|---:|---:|---:|---:|---:|");
-    let mut panorama = Some(panorama);
-    for with_panorama in [false, true] {
-        if with_panorama {
-            environment.set_panorama(panorama.take());
-        }
-        let mut times: [Vec<f64>; 5] = Default::default();
-        for frame in 0..TIMED + 2 {
-            // Every frame rebuilds: the gradient changes, the panorama turns.
-            match environment.panorama() {
-                Some(p) => p.set_rotation(frame as f32 * 0.1),
-                None => environment.set_sky(Sky {
+    println!("|---|---:|---:|---:|---:|---:|---:|");
+    let mut current = Some(first);
+    for case in [Case::Gradient, Case::Turned, Case::Made, Case::Cooked] {
+        let mut times: [Vec<f64>; 6] = Default::default();
+        let mut upload_frames = Vec::new();
+        let mut frame = 0usize;
+        let mut sample = 0usize;
+        while sample < TIMED + 2 {
+            // What this frame changes.
+            let mut fresh = false;
+            match case {
+                Case::Gradient => environment.set_sky(Sky {
                     zenith: Vec3::new(0.1, 0.2, 0.5 + frame as f32 * 1e-3),
                     ..Sky::default()
                 }),
+                Case::Turned => {
+                    if environment.panorama().is_none() {
+                        environment.set_panorama(current.take());
+                    }
+                    environment
+                        .panorama()
+                        .unwrap()
+                        .set_rotation(frame as f32 * 0.1);
+                }
+                Case::Made | Case::Cooked => {
+                    if environment.panorama().is_none_or(Panorama::is_ready) {
+                        let next = if case == Case::Made {
+                            make(&mut allocator)
+                        } else {
+                            from_cooked(&mut allocator)
+                        };
+                        if let Some(mut old) = environment.set_panorama(Some(next)) {
+                            // SAFETY: the device is idle between frames here.
+                            unsafe { old.destroy(&mut allocator, &bindless) };
+                        }
+                        fresh = true;
+                    }
+                }
             }
             ring.begin_slot(0);
             // SAFETY: one frame at a time.
@@ -207,23 +314,18 @@ fn main() {
                 )
                 .unwrap();
             }
+            let number = frame as u64 + 1;
             {
                 // SAFETY: the previous frame finished.
                 let mut fg = unsafe { graph.begin_slot(0, cmd) };
                 textures
-                    .begin_frame(&mut fg, &mut allocator, &bindless, frame as u64 + 1)
+                    .begin_frame(&mut fg, &mut allocator, &bindless, number)
                     .unwrap();
                 let mats = materials
-                    .begin_frame(
-                        &mut fg,
-                        &device,
-                        &mut allocator,
-                        &textures,
-                        frame as u64 + 1,
-                    )
+                    .begin_frame(&mut fg, &device, &mut allocator, &textures, number)
                     .unwrap();
                 let geo = geometry
-                    .begin_frame(&mut fg, &device, &mut allocator, frame as u64 + 1)
+                    .begin_frame(&mut fg, &device, &mut allocator, number)
                     .unwrap();
                 let color =
                     fg.create_texture("color", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
@@ -269,21 +371,36 @@ fn main() {
                 .unwrap();
                 device.wait_idle().unwrap();
             }
-            if frame >= 2 {
-                for time in graph.gpu_pass_times() {
-                    let slot = match time.name {
-                        "panorama background" => 0,
-                        "environment sky" => 1,
-                        "environment prefilter" => 2,
-                        "environment irradiance" => 3,
-                        "sky" => 4,
-                        _ => continue,
-                    };
+            frame += 1;
+            if fresh && case == Case::Cooked {
+                upload_frames.push(0);
+            }
+            let mut upload_us = 0.0;
+            for time in graph.gpu_pass_times() {
+                let Some(slot) = PASSES.iter().position(|&p| p == time.name) else {
+                    continue;
+                };
+                if slot == 1 {
+                    upload_us += f64::from(time.gpu_us);
+                } else if sample >= 2 {
                     times[slot].push(f64::from(time.gpu_us));
                 }
             }
+            if upload_us > 0.0 {
+                if let Some(n) = upload_frames.last_mut() {
+                    *n += 1;
+                }
+                if sample >= 2 {
+                    times[1].push(upload_us);
+                }
+            }
+            // A cooked panorama's sample is the frames until it is ready, together.
+            let ready = environment.panorama().is_none_or(Panorama::is_ready);
+            if case != Case::Cooked || ready {
+                sample += 1;
+            }
         }
-        let [background, light, prefilter, irradiance, sky] = times.map(median);
+        let [background, upload, light, prefilter, irradiance, sky] = times.map(median);
         let cell = |v: f64| {
             if v.is_nan() {
                 String::from("–")
@@ -291,20 +408,39 @@ fn main() {
                 format!("{v:.1}")
             }
         };
+        let upload = if upload.is_nan() {
+            String::from("–")
+        } else {
+            format!(
+                "{upload:.1} per frame ({} frames)",
+                median(upload_frames.iter().map(|&n| f64::from(n)).collect())
+            )
+        };
         println!(
-            "| {} | {} | {} | {} | {} | {} |",
-            if with_panorama {
-                "panorama"
-            } else {
-                "gradient"
+            "| {} | {} | {} | {} | {} | {} | {} |",
+            match case {
+                Case::Gradient => "gradient, changed",
+                Case::Turned => "panorama, turned",
+                Case::Made => "panorama, made from texels",
+                Case::Cooked => "panorama, cooked and uploaded",
             },
             cell(background),
+            upload,
             cell(light),
             cell(prefilter),
             cell(irradiance),
             cell(sky)
         );
     }
+    println!();
+    println!(
+        "`Panorama::new` {:.1} ms ({made_size}² RGBA16F background with its texels: {:.1} MiB); \
+         `Panorama::from_cooked` {:.1} ms ({:.1} MiB)",
+        ms(made_time),
+        made_memory as f64 / f64::from(1 << 20),
+        ms(cooked_time),
+        cooked_memory as f64 / f64::from(1 << 20),
+    );
 
     // SAFETY: the device is idle.
     unsafe {

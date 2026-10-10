@@ -5,7 +5,8 @@
 //! skeletons and compressed clips (`animation`, ADR 0068). Scenes are cooked into packs, the runtime
 //! format, and loaded through an I/O ring with zstd per entry (`cook`, `pack`; ADR 0056).
 //! HDR panoramas (`.hdr`) are read, and their sun found, for HDRI environments (`hdr`, ADR
-//! 0083).
+//! 0083), and cooked into BC6H cube maps for the derived data cache and packs
+//! (`panorama`).
 
 pub mod animation;
 pub mod cook;
@@ -14,6 +15,7 @@ mod gltf_import;
 pub mod hdr;
 mod lod;
 pub mod pack;
+pub mod panorama;
 mod texture_compress;
 mod texture_import;
 

@@ -409,23 +409,6 @@ float3 sky_luminance(AtmosphereFrame* a, float3 d)
     return g_textures[a.sky_view].SampleLevel(g_samplers[a.sampler], uv, 0.0).rgb;
 }
 
-// The direction through the center of texel `xy` of cube face `face` (as environment.slang).
-float3 face_direction(uint2 xy, uint face, uint size)
-{
-    float2 uv = (float2(xy) + 0.5) / float(size) * 2.0 - 1.0;
-    float3 d;
-    switch (face)
-    {
-    case 0: d = float3(1.0, -uv.y, -uv.x); break;
-    case 1: d = float3(-1.0, -uv.y, uv.x); break;
-    case 2: d = float3(uv.x, 1.0, uv.y); break;
-    case 3: d = float3(uv.x, -1.0, -uv.y); break;
-    case 4: d = float3(uv.x, -uv.y, 1.0); break;
-    default: d = float3(-uv.x, -uv.y, -1.0); break;
-    }
-    return normalize(d);
-}
-
 // The sky (without the sun's disk) into mip 0 of the environment's radiance cube, in the
 // light's units.
 [shader("compute")]
@@ -532,7 +515,7 @@ float3 background(AtmosphereFrame* a, float3 d)
     if ((a.flags & ATMOSPHERE_SKY) != 0)
         color = sky_luminance(a, d) * atmosphere_read4(&a.sun_illuminance).rgb * atmosphere_read4(&a.view).y;
     else
-        color = g_cubes[a.sky_cube].SampleLevel(g_samplers[a.sampler], d, 0.0).rgb * atmosphere_read4(&a.view).y;
+        color = g_cubes[a.sky_cube].SampleLevel(g_samplers[a.sampler], turned_back(d, atmosphere_read4(&a.sky_turn).xy), 0.0).rgb * atmosphere_read4(&a.view).y;
     float cos_sun = atmosphere_read4(&a.planet).w;
     if (dot(d, atmosphere_read4(&a.sun_direction).xyz) > cos_sun)
         color += atmosphere_read4(&a.sun_color).rgb / (2.0 * PI * (1.0 - cos_sun));

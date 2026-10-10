@@ -1228,8 +1228,30 @@ if let Some(sun) = environment.panorama().and_then(|p| p.sun()) {
     light.color = sun.illuminance * environment.intensity();
 }
 
-// Turning the sky (the sun turns with it): the next frame remakes it.
+// Turning the sky (the sun turns with it): the next frame remakes the lighting.
 environment.panorama().unwrap().set_rotation(0.5);
+```
+
+**Cooked panoramas** load faster and take an eighth of the memory: the cooker makes the
+cube on the CPU and compresses it as BC6H, once, kept in the derived data cache and
+written to a pack of its own.
+
+```rust
+use engine_assets::panorama::{PanoramaCookSettings, import_panorama, write_panorama_pack, load_panorama_pack};
+use engine_render::panorama::CookedPanoramaDesc;
+
+// At cook time (0.3 s for a 2K panorama on 16 threads; from the cache the next time).
+let (cooked, _) = import_panorama(&std::fs::read("sky.hdr")?, &PanoramaCookSettings::default(), Some(&ddc), Some(&jobs))?;
+write_panorama_pack(Path::new("sky.pack"), &cooked, 3)?;
+
+// In the game (the pack read in 3 ms).
+let cooked = load_panorama_pack(Path::new("sky.pack"), &jobs)?;
+let panorama = Panorama::from_cooked(&device, &mut allocator, &bindless, &CookedPanoramaDesc {
+    size: cooked.size,
+    levels: &cooked.levels,
+    sun: cooked.sun.map(|s| PanoramaSun { direction: s.direction, illuminance: s.illuminance, cone: s.cone, sky: s.sky }),
+})?;
+environment.set_panorama(Some(panorama));
 ```
 
 - **Which way it faces.** The middle of the image is straight ahead of the default camera
@@ -1245,14 +1267,19 @@ environment.panorama().unwrap().set_rotation(0.5);
 - **Units.** The panorama's values are radiance in its own units; Poly Haven's skies come
   out near the engine's defaults (a sky around 0.7, a sun around 4). Scale both with
   `set_intensity`.
-- **What it costs.** Setting or turning a panorama makes its background cube and the
-  lighting once: 0.3 ms on an RTX 4060 Ti, 7.3 ms on the Radeon iGPU for a 2K panorama.
-  Per frame, nothing more than the gradient sky (the sky pass reads a larger cube: 38
-  against 37 µs at 1080p on the RTX). Memory: the panorama's pixels (8 MiB at 2K) and
-  the background cube (16 MiB at 512², 64 MiB at 1,024²).
+- **What it costs** (a 2K panorama, RTX 4060 Ti / Radeon iGPU):
+  - setting one made from its pixels builds its background cube once (0.23 / 6.7 ms);
+    a cooked one uploads through the frame's upload ring instead (2 frames of 0.04 /
+    0.06 ms; the previous sky shows until it has arrived);
+  - then, and whenever it turns, the lighting is rebuilt as for any change of the sky
+    (0.06 / 0.82 ms);
+  - per frame, nothing more than the gradient sky (the sky pass: 38 µs / 0.75 ms at
+    1080p either way).
+- **Memory:** a panorama made from its pixels keeps them (8 MiB at 2K) and a 16-bit
+  background cube (16 MiB at 512², 64 MiB at 1,024²); a cooked one only its BC6H cube
+  (2 MiB at 512², 8 MiB at 1,024²).
 - **The physical atmosphere, when on, replaces the panorama**, as it does the gradient.
-- **Not yet:** OpenEXR files, cooking panoramas into compressed cubes (BC6H, 8 times
-  smaller) in packs, soft shadows sized by the sun.
+- **Not yet:** OpenEXR files, soft shadows sized by the sun.
 
 ## 11. Bloom and automatic exposure
 

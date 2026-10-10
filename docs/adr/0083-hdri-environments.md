@@ -1,6 +1,7 @@
 # 0083. HDRI environments: RGBE panoramas decoded on the GPU, a background cube, the sun as a directional light
 
-- Status: Accepted (phase 1; phase 2, cooking, below)
+- Status: Accepted (phase 1; phase 2, cooking and turning at sampling time: amendment
+  below)
 - Date: 2026-10-11
 - Research: [docs/research/hdri-environments.md](../research/hdri-environments.md)
 - Related: [ADR 0046](0046-image-based-lighting.md) (the image-based lighting it feeds),
@@ -102,3 +103,37 @@ from run to run.
   (DDC, pack; the background 8 times smaller), OpenEXR input, the sun's angular size for
   soft shadows. A panorama without a sun in it (overcast) keeps all of its light in the
   lighting cube, as before.
+
+## Amendment (2026-10-11): cooked panoramas, and turning when sampling
+
+- **Turning when sampling.** The background cube stays in the panorama's own frame; the
+  sky pass, the atmosphere's composite and the lighting cube's fill turn the directions
+  they sample it with (`turned_back` in `cube_common.slang`: a sine and cosine in their
+  constants). Turning a panorama now rebuilds only the lighting, and cooked cubes turn
+  too.
+- **Cooked panoramas** (`engine_assets::panorama`): the cube made on the CPU (the same
+  2 × 2 bilinear samples per texel as `panoramaCube`), box-filtered mips, BC6H unsigned
+  (block_compression's `bc6h` feature, "basic"), the sun found while cooking; kept in the
+  derived data cache (`import_panorama`) and in packs of their own (`write_panorama_pack`,
+  `load_panorama_pack`: a `Panorama` entry, pack version 4). `Panorama::from_cooked`
+  uploads the levels face by face through the frame's upload ring, as many as fit in half
+  its free space a frame (no staging buffer to free later); the previous sky shows until
+  the cube has arrived.
+- **The lighting cube's fill** reads 2 × 2 samples of the background's mip twice as fine
+  as the lighting cube instead of 4 × 4 of the next finer one: the mips are box-filtered,
+  so the result is the same (the golden shot moved by a mean FLIP of 0.003), at a quarter
+  of the reads. A turned panorama's reads cross the background's tiles: at 4 × 4 the fill
+  took 2.18 ms on the Radeon iGPU when turned, 0.14 ms now.
+
+| 2K panorama, release, ref-1 | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| cooking into a 512² BC6H cube (16 threads) | 288 ms | 295 ms |
+| its pack: written, read (1.94 MiB) | 10.2, 2.7 ms | 10.6, 2.5 ms |
+| upload of the cooked cube | 2 frames × 39 µs | 2 frames × 61 µs |
+| lighting cube: gradient / turned / made / cooked | 15 / 19 / 15 / 18 µs | 46 / 141 / 118 / 118 µs |
+| GPU memory: made (texels + RGBA16F) / cooked (BC6H) | 24.0 / 2.0 MiB | 24.0 / 2.0 MiB |
+
+New dependencies: `half` 2.7 (MIT OR Apache-2.0) and `zerocopy` 0.8 (BSD-2-Clause OR
+Apache-2.0 OR MIT), through block_compression's `bc6h` feature. block_compression 0.10's
+BC6H decoder to floats is broken (it writes three floats per pixel into rows of four):
+the cooked cube is checked on the GPU instead.

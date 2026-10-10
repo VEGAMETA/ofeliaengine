@@ -672,7 +672,8 @@ struct FrameData {
     light_culling: u32,
     /// The scatter pass's noise index.
     scatter_frame: u32,
-    _pad4: [u32; 2],
+    /// The sky pass: sine and cosine of the sky cube's turn about +Y (an HDR panorama's).
+    sky_turn: [f32; 2],
     world_from_clip: [f32; 16],
     environment: u32,
     sky_cube: u32,
@@ -3729,7 +3730,7 @@ impl ForwardRenderer {
             light_culling: u32::from(self.light_culling),
             // New noise every frame only when a temporal resolve averages it.
             scatter_frame: temporal.map_or(0, |t| t.frame.get() as u32),
-            _pad4: [0; 2],
+            sky_turn: environment.map_or([0.0, 1.0], |e| e.background_turn),
             world_from_clip: world_from_clip.to_cols_array(),
             environment: u32::from(environment.is_some()),
             sky_cube: environment.map_or(0, |e| e.background_index),
