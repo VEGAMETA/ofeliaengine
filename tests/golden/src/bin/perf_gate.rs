@@ -322,17 +322,6 @@ fn judge(measured: &Times, baseline: &Times, threshold: f64) -> Verdict {
 }
 
 fn main() -> ExitCode {
-    // The test bed's frame (`scene::render`) keeps large state on the stack; Windows gives
-    // the main thread 1 MiB.
-    std::thread::Builder::new()
-        .stack_size(16 << 20)
-        .spawn(run)
-        .ok()
-        .and_then(|t| t.join().ok())
-        .unwrap_or(ExitCode::FAILURE)
-}
-
-fn run() -> ExitCode {
     let mut update = false;
     let mut strict = false;
     let mut runs = 3usize;

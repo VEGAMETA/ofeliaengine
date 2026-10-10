@@ -10,6 +10,7 @@ use crate::error::RhiError;
 use ash::vk;
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 /// A SPIR-V entry point.
 #[derive(Debug, Clone, Copy)]
@@ -213,7 +214,7 @@ fn statistics_flags(device: &Device) -> vk::PipelineCreateFlags {
 /// A pipeline and the device that owns it. Destroyed on drop (the GPU must be done
 /// with it).
 pub struct Pipeline {
-    device: ash::Device,
+    device: Arc<ash::Device>,
     raw: vk::Pipeline,
     bind_point: vk::PipelineBindPoint,
 }
@@ -516,7 +517,7 @@ impl Pipeline {
         };
         count_creation(start, true, cached_only);
         Ok(Some(Self {
-            device: d.clone(),
+            device: device.raw_shared(),
             raw,
             bind_point: vk::PipelineBindPoint::GRAPHICS,
         }))
@@ -654,7 +655,7 @@ impl Pipeline {
         };
         count_creation(start, true, cached_only);
         Ok(Some(Self {
-            device: d.clone(),
+            device: device.raw_shared(),
             raw,
             bind_point: vk::PipelineBindPoint::COMPUTE,
         }))

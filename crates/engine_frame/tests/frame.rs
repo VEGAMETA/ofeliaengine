@@ -1,7 +1,8 @@
 //! The frame renderer (ADR 0072) under the validation layer: history dropped on a camera
 //! cut (no ghost of the previous view), the texture LOD bias the upscaler asks for is
 //! applied, settings changes start the history anew, an unavailable upscaler falls back
-//! to TAAU, and the previous color reaches the scene hook.
+//! to TAAU, and the previous color reaches the scene hook; and every feature and mode fits
+//! a main thread's 1 MiB stack.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -13,7 +14,11 @@ use engine_frame::{
     Antialiasing, FrameError, InvalidAntialiasing, Msaa, PostAntialiasing, PrepareContext, Quality,
     Upscale, UpscalerKind, View, ViewSettings,
 };
+use engine_render::ao::AoSettings;
+use engine_render::forward::LocalShadowSettings;
 use engine_render::material::{MaterialDesc, TextureRef};
+use engine_render::reflections::SsrSettings;
+use engine_render::subsurface::SubsurfaceProfile;
 use engine_render::texture_pool::{TextureFormat, TextureLevels};
 
 fn differing(a: &[u8], b: &[u8]) -> usize {
@@ -377,6 +382,103 @@ fn antialiasing_is_validated_and_modes_switch() {
             lit > 100,
             "{antialiasing}: the cube is missing ({lit} pixels)"
         );
+    }
+    bed.finish(&mut [&mut view]);
+}
+
+/// A game builds the frame renderer on its main thread, which Windows gives 1 MiB of
+/// stack. With every feature on, and through every antialiasing mode this GPU runs,
+/// building and rendering must fit in it: renderers whose pipelines each held a copy of
+/// the device's function table needed stack frames of up to 372 KB and overflowed it on
+/// the Radeon (core review 2, §3.1).
+#[test]
+fn every_feature_fits_a_main_threads_stack() {
+    std::thread::Builder::new()
+        .stack_size(1 << 20)
+        .spawn(every_feature_and_mode)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn every_feature_and_mode() {
+    let Some(mut bed) = Bed::new((96, 64), false) else {
+        return;
+    };
+    let renderer = bed.frame.forward_mut();
+    renderer.set_depth_prepass(true);
+    renderer
+        .set_ambient_occlusion(&bed.device, &bed.bindless, Some(AoSettings::default()))
+        .unwrap();
+    renderer
+        .set_subsurface_profiles(
+            &bed.device,
+            &bed.bindless,
+            &[SubsurfaceProfile::from_radius([0.3, 0.12, 0.06])],
+        )
+        .unwrap();
+    renderer
+        .set_local_shadows(
+            &bed.device,
+            &mut bed.allocator,
+            &bed.bindless,
+            Some(LocalShadowSettings::default()),
+        )
+        .unwrap();
+    renderer
+        .set_contact_shadows(&bed.device, &bed.bindless, Some(Default::default()))
+        .unwrap();
+    renderer
+        .set_reflections(&bed.device, &bed.bindless, true)
+        .unwrap();
+    let support = bed.frame.antialiasing_support();
+    let mut modes = vec![
+        (Antialiasing::OFF, Quality::Native),
+        (Antialiasing::FXAA, Quality::Native),
+        (Antialiasing::MLAA, Quality::Native),
+        (Antialiasing::SMAA_1X, Quality::Native),
+        (Antialiasing::SMAA_T2X, Quality::Native),
+        (Antialiasing::spatial(Upscale::Fsr1), Quality::Quality),
+        (
+            Antialiasing::spatial(Upscale::Nearest),
+            Quality::Performance,
+        ),
+        (Antialiasing::TAAU, Quality::Native),
+        (Antialiasing::TAAU, Quality::Quality),
+    ];
+    if support.supports_upscaler(UpscalerKind::Fsr) {
+        modes.push((Antialiasing::FSR, Quality::Quality));
+    }
+    for samples in [Msaa::X2, Msaa::X4, Msaa::X8] {
+        if support.supports_samples(samples) {
+            modes.push((Antialiasing::msaa(samples), Quality::Native));
+        }
+    }
+    if support.supports_samples(Msaa::X2) {
+        modes.push((Antialiasing::SMAA_S2X, Quality::Native));
+        modes.push((Antialiasing::SMAA_4X, Quality::Native));
+    }
+    let grey = bed.solid([0.5, 0.5, 0.5], [0.0; 3]);
+    let draws = vec![bed.cube_at(grey, Vec3::splat(1.0), Vec3::ZERO)];
+    let mut view = View::new(&bed.device, 16);
+    let eye = Vec3::new(1.5, 1.5, 3.0);
+    for (antialiasing, quality) in modes {
+        let settings = ViewSettings {
+            antialiasing,
+            quality,
+            screen_space_reflections: Some(SsrSettings::default()),
+            ..ViewSettings::default()
+        };
+        for _ in 0..2 {
+            bed.render(
+                &mut view,
+                &settings,
+                &draws,
+                &camera(eye, Vec3::ZERO, false),
+                false,
+                |_| {},
+            );
+        }
     }
     bed.finish(&mut [&mut view]);
 }

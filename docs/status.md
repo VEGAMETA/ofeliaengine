@@ -79,10 +79,11 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-- The review's P0 fixes (queue item 0a), by the coordinator, next after the faster checks
+- The review's P0 fixes (queue item 0a), by the coordinator, after the faster checks
   (item 0, done on 2026-10-10 but for sccache: ADR 0077 and its two addenda, ADR 0062's
   addendum): a check with nothing changed 632 → 141 s, the gate `-Gpu -Perf` 10–25 min →
-  400 s (its perf step 749 → 237 s).
+  400 s (its perf step 749 → 237 s). First fix (the pipelines' size, the 1 MiB stack):
+  branch `fix/pipeline-size`; next, GPU pass times without overlap.
 
 ## 5. Queue (in order)
 
@@ -137,12 +138,12 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
      the timed frames start depends on timing. Make the scene settle to a deterministic
      residency before timing.
 0a. **The review's P0 fixes** (§3.1 and §3.3):
-   - `engine_rhi::Pipeline` without its copy of the device's function table (1,504 bytes
-     per pipeline: the renderers' construction overflows Windows' 1 MiB main thread on
-     the Radeon, so `game_loop` crashes on start), the renderers' large state off the
-     stack, and a test that builds the frame renderer with every feature on a 1 MiB thread
-     on both GPUs; then drop the 16–64 MiB thread workarounds in `perf_gate`, `aa_bench`
-     and `flight`;
+   - ~~`engine_rhi::Pipeline` without its copy of the device's function table~~ done
+     2026-10-10: `Pipeline` 1,504 → 24 bytes (an `Arc` of the device), the renderers
+     181/186 KB → 4 KB, no boxing needed; `engine_frame`'s test builds and renders every
+     feature and antialiasing mode on a 1 MiB thread on both GPUs (it overflowed before;
+     it fits 256 KB now); `game_loop` runs on the Radeon; the 16–64 MiB threads in
+     `perf_gate`, `aa_bench` and `flight` are gone;
    - GPU pass times without overlap (exclusive times, or a serialized mode for the gate)
      and the gate's baselines re-checked with them: today a pass after a long one without
      a barrier absorbs its tail (feedback measured 2.4 ms, really 49 µs).

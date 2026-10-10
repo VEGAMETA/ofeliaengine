@@ -346,16 +346,6 @@ fn modes() -> Vec<(&'static str, Antialiasing, Quality)> {
 }
 
 fn main() {
-    // The test bed's frame is large on the stack: more room than the main thread's 1 MiB.
-    std::thread::Builder::new()
-        .stack_size(64 << 20)
-        .spawn(bench)
-        .unwrap()
-        .join()
-        .unwrap();
-}
-
-fn bench() {
     let args: Vec<String> = std::env::args().collect();
     let quick = args.iter().any(|a| a == "--quick");
     let only: Vec<&str> = args

@@ -65,7 +65,10 @@ unsafe impl vk::ExtendsDeviceCreateInfo for AntiLagFeaturesAmd {}
 
 /// The logical device with the engine's required features enabled.
 pub struct Device {
-    raw: ash::Device,
+    /// Shared with every [`crate::Pipeline`]: ash's device is its function table, 1.5 KB,
+    /// too large to copy into each (the renderers hold hundreds, on the stack while they
+    /// are built).
+    raw: Arc<ash::Device>,
     adapter: Adapter,
     latency: LatencyExtensions,
     /// `VK_EXT_hdr_metadata` is enabled.
@@ -367,7 +370,7 @@ impl Device {
             graphics: queue(graphics_family),
             async_compute: compute_family.map(queue),
             transfer: transfer_family.map(queue),
-            raw,
+            raw: Arc::new(raw),
             adapter: adapter.clone(),
             latency,
             hdr_metadata,
@@ -420,6 +423,12 @@ impl Device {
     /// The ash device, for calls this layer does not wrap yet.
     pub fn raw(&self) -> &ash::Device {
         &self.raw
+    }
+
+    /// The ash device to keep in objects that call it later (a pointer, not the 1.5 KB
+    /// function table).
+    pub(crate) fn raw_shared(&self) -> Arc<ash::Device> {
+        Arc::clone(&self.raw)
     }
 
     /// The adapter the device was created on.
