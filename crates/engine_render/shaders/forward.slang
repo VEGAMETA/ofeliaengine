@@ -453,7 +453,7 @@ uint hiz_offset(uint level)
 // Size of pyramid level `level`: every texel covers 2^level × 2^level pixels.
 uint2 hiz_size(uint level)
 {
-    return ((push.frame.depth_size - 1) >> level) + 1;
+    return ((loadAligned<8>(&push.frame.depth_size) - 1) >> level) + 1;
 }
 
 // Whether a world-space box is hidden: its nearest point is farther than the farthest
@@ -483,7 +483,7 @@ bool occluded(float3 center, float3 extents)
     }
     if (nearest <= 0.0)
         return false;
-    float2 size = float2(push.frame.depth_size);
+    float2 size = float2(loadAligned<8>(&push.frame.depth_size));
     uint2 lo_px = uint2(clamp((lo * 0.5 + 0.5) * size, 0.0, size - 1.0));
     uint2 hi_px = uint2(clamp((hi * 0.5 + 0.5) * size, 0.0, size - 1.0));
     uint span = max(hi_px.x - lo_px.x, hi_px.y - lo_px.y) + 1;
@@ -1255,7 +1255,7 @@ float3 profile_transmission(SubsurfaceProfile* p, float d)
     uint count = p.count;
     for (uint i = 0; i < count; i++)
     {
-        float4 g = p.gaussians[i];
+        float4 g = read_float4(&p.gaussians[i]);
         t += g.rgb * (PI_LOG2E / -g.w) * exp2(g.w * d * d);
     }
     return t;
@@ -1465,7 +1465,7 @@ float4 fragmentBlended(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 float4 fragmentBlendedAtmosphere(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     float4 c = shade(input, front, false, false);
-    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
     float alpha = saturate(c.a);
     return float4(c.rgb * alpha, alpha);
 }
@@ -1493,7 +1493,7 @@ BlendedReactive fragmentBlendedReactive(VertexOut input, bool front : SV_IsFront
 BlendedReactive fragmentBlendedAtmosphereReactive(VertexOut input, bool front : SV_IsFrontFace)
 {
     float4 c = shade(input, front, false, false);
-    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
     float alpha = saturate(c.a);
     BlendedReactive o;
     o.color = float4(c.rgb * alpha, alpha);
@@ -1738,7 +1738,7 @@ float3 profile_cdf(SubsurfaceProfile* p, float r)
     uint count = p.count;
     for (uint i = 0; i < count; i++)
     {
-        float4 g = p.gaussians[i];
+        float4 g = read_float4(&p.gaussians[i]);
         c += g.rgb * (PI_LOG2E / -g.w) * (1.0 - exp2(g.w * r * r));
     }
     return c;
@@ -1772,17 +1772,17 @@ float4 scatterFragment(float4 position : SV_Position) : SV_Target0
 
     float3 weights = profile_cdf(stored, inside);
     float3 sum = weights * center.rgb;
-    float3 falloff = stored.falloff;
+    float3 falloff = loadAligned<16>(&stored.falloff);
     // The spiral turned by the pixel's angle, scaled to pixels.
     float angle = 6.28318531 * gradient_noise(position.xy + 5.588238 * float(frame.scatter_frame & 63u));
     float2 turn = float2(cos(angle), sin(angle)) * pixels_per_unit;
     float inside2 = inside * inside;
-    int2 last = int2(frame.depth_size) - 1;
+    int2 last = int2(loadAligned<8>(&frame.depth_size)) - 1;
     uint first = BUDGET_FIRST[budget];
     uint samples = BUDGET_SAMPLES[budget];
     for (uint k = 0; k < samples; k++)
     {
-        uint4 entry = stored.kernel[first + k];
+        uint4 entry = loadAligned<16>(&stored.kernel[first + k]);
         float2 xy = asfloat(entry.xy);
         if (dot(xy, xy) <= inside2)
             continue;
@@ -1852,17 +1852,17 @@ float4 scatterFragmentMs(float4 position : SV_Position, uint coverage : SV_Cover
 
     float3 weights = profile_cdf(stored, inside);
     float3 sum = weights * center.rgb;
-    float3 falloff = stored.falloff;
+    float3 falloff = loadAligned<16>(&stored.falloff);
     // The spiral turned by the pixel's angle, scaled to pixels.
     float angle = 6.28318531 * gradient_noise(position.xy + 5.588238 * float(frame.scatter_frame & 63u));
     float2 turn = float2(cos(angle), sin(angle)) * pixels_per_unit;
     float inside2 = inside * inside;
-    int2 last = int2(frame.depth_size) - 1;
+    int2 last = int2(loadAligned<8>(&frame.depth_size)) - 1;
     uint first = BUDGET_FIRST[budget];
     uint samples = BUDGET_SAMPLES[budget];
     for (uint k = 0; k < samples; k++)
     {
-        uint4 entry = stored.kernel[first + k];
+        uint4 entry = loadAligned<16>(&stored.kernel[first + k]);
         float2 xy = asfloat(entry.xy);
         if (dot(xy, xy) <= inside2)
             continue;
@@ -1934,7 +1934,7 @@ float4 fragmentBlendedShadowed(VertexOut input, bool front : SV_IsFrontFace) : S
 float4 fragmentBlendedAtmosphereShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     float4 c = shade(input, front, false, false, true);
-    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
     float alpha = saturate(c.a);
     return float4(c.rgb * alpha, alpha);
 }
@@ -1954,7 +1954,7 @@ BlendedReactive fragmentBlendedReactiveShadowed(VertexOut input, bool front : SV
 BlendedReactive fragmentBlendedAtmosphereReactiveShadowed(VertexOut input, bool front : SV_IsFrontFace)
 {
     float4 c = shade(input, front, false, false, true);
-    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
     float alpha = saturate(c.a);
     BlendedReactive o;
     o.color = float4(c.rgb * alpha, alpha);
@@ -2054,7 +2054,7 @@ float2 backgroundMotion(Background input) : SV_Target0
 [shader("fragment")]
 float4 skyFragment(Background input) : SV_Target0
 {
-    float2 ndc = input.position.xy / float2(push.frame.depth_size) * 2.0 - 1.0;
+    float2 ndc = input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)) * 2.0 - 1.0;
     // Two points of the ray: the near plane and halfway in depth (finite with an infinite
     // far plane too).
     float4 near = mul(read_matrix(&push.frame.world_from_clip), float4(ndc, 0.0, 1.0));

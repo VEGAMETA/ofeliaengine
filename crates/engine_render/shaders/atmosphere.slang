@@ -92,8 +92,8 @@ float ray_sphere(float3 o, float3 d, float r)
 // The transmittance table's texel → altitude (as a radius) and cos zenith (Bruneton 2017).
 void transmittance_params(AtmosphereFrame* a, float2 uv, out float radius, out float mu)
 {
-    float bottom = a.planet.x;
-    float top = a.planet.y;
+    float bottom = atmosphere_read4(&a.planet).x;
+    float top = atmosphere_read4(&a.planet).y;
     float h = sqrt(top * top - bottom * bottom);
     float rho = h * uv.y;
     radius = sqrt(rho * rho + bottom * bottom);
@@ -106,8 +106,8 @@ void transmittance_params(AtmosphereFrame* a, float2 uv, out float radius, out f
 
 float2 transmittance_uv(AtmosphereFrame* a, float radius, float mu)
 {
-    float bottom = a.planet.x;
-    float top = a.planet.y;
+    float bottom = atmosphere_read4(&a.planet).x;
+    float top = atmosphere_read4(&a.planet).y;
     float h = sqrt(max(0.0, top * top - bottom * bottom));
     float rho = sqrt(max(0.0, radius * radius - bottom * bottom));
     float discriminant = radius * radius * (mu * mu - 1.0) + top * top;
@@ -124,7 +124,7 @@ float3 transmittance_to_top(AtmosphereFrame* a, float radius, float mu)
 
 float3 multiple_scattering(AtmosphereFrame* a, float radius, float mu_sun)
 {
-    float2 uv = saturate(float2(mu_sun * 0.5 + 0.5, (radius - a.planet.x) / (a.planet.y - a.planet.x)));
+    float2 uv = saturate(float2(mu_sun * 0.5 + 0.5, (radius - atmosphere_read4(&a.planet).x) / (atmosphere_read4(&a.planet).y - atmosphere_read4(&a.planet).x)));
     uv = float2(from_unit_to_sub_uv(uv.x, MULTIPLE_SCATTERING_SIZE), from_unit_to_sub_uv(uv.y, MULTIPLE_SCATTERING_SIZE));
     return g_textures[a.multiple_scattering].SampleLevel(g_samplers[a.sampler], uv, 0.0).rgb;
 }
@@ -134,7 +134,7 @@ float3 multiple_scattering(AtmosphereFrame* a, float radius, float mu_sun)
 void sky_view_params(AtmosphereFrame* a, float2 uv, float radius, out float mu, out float cos_azimuth)
 {
     uv = float2(from_sub_uv_to_unit(uv.x, SKY_VIEW_WIDTH), from_sub_uv_to_unit(uv.y, SKY_VIEW_HEIGHT));
-    float horizon = sqrt(max(radius * radius - a.planet.x * a.planet.x, 0.0));
+    float horizon = sqrt(max(radius * radius - atmosphere_read4(&a.planet).x * atmosphere_read4(&a.planet).x, 0.0));
     float beta = acos(horizon / radius);
     float zenith_horizon = PI - beta;
     if (uv.y < 0.5)
@@ -154,7 +154,7 @@ void sky_view_params(AtmosphereFrame* a, float2 uv, float radius, out float mu, 
 
 float2 sky_view_uv(AtmosphereFrame* a, bool ground, float mu, float cos_azimuth, float radius)
 {
-    float horizon = sqrt(max(radius * radius - a.planet.x * a.planet.x, 0.0));
+    float horizon = sqrt(max(radius * radius - atmosphere_read4(&a.planet).x * atmosphere_read4(&a.planet).x, 0.0));
     float beta = acos(horizon / radius);
     float zenith_horizon = PI - beta;
     float2 uv;
@@ -182,15 +182,15 @@ struct Medium
 
 Medium medium(AtmosphereFrame* a, float3 p)
 {
-    float altitude = max(length(p) - a.planet.x, 0.0);
-    float rayleigh = exp(a.rayleigh.w * altitude);
-    float mie = exp(a.mie_scattering.w * altitude);
-    float ozone = max(0.0, 1.0 - abs(altitude - a.ozone.w) / a.ground_albedo.w);
+    float altitude = max(length(p) - atmosphere_read4(&a.planet).x, 0.0);
+    float rayleigh = exp(atmosphere_read4(&a.rayleigh).w * altitude);
+    float mie = exp(atmosphere_read4(&a.mie_scattering).w * altitude);
+    float ozone = max(0.0, 1.0 - abs(altitude - atmosphere_read4(&a.ozone).w) / atmosphere_read4(&a.ground_albedo).w);
     Medium m;
-    m.rayleigh = rayleigh * a.rayleigh.rgb;
-    m.mie = mie * a.mie_scattering.rgb;
+    m.rayleigh = rayleigh * atmosphere_read4(&a.rayleigh).rgb;
+    m.mie = mie * atmosphere_read4(&a.mie_scattering).rgb;
     m.scattering = m.rayleigh + m.mie;
-    m.extinction = m.rayleigh + mie * a.mie_extinction.rgb + ozone * a.ozone.rgb;
+    m.extinction = m.rayleigh + mie * atmosphere_read4(&a.mie_extinction).rgb + ozone * atmosphere_read4(&a.ozone).rgb;
     return m;
 }
 
@@ -224,8 +224,8 @@ Scattering integrate(AtmosphereFrame* a, float3 o, float3 d, float3 sun, float s
 {
     Scattering result = (Scattering)0;
     result.transmittance = 1.0;
-    float t_bottom = ray_sphere(o, d, a.planet.x);
-    float t_top = ray_sphere(o, d, a.planet.y);
+    float t_bottom = ray_sphere(o, d, atmosphere_read4(&a.planet).x);
+    float t_top = ray_sphere(o, d, atmosphere_read4(&a.planet).y);
     float t_max;
     if (t_bottom < 0.0)
     {
@@ -247,7 +247,7 @@ Scattering integrate(AtmosphereFrame* a, float3 o, float3 d, float3 sun, float s
         t_max_floor = t_max * count_floor / count;
     }
     float c = dot(sun, d);
-    float mie_value = mie_phase(a.mie_extinction.w, c);
+    float mie_value = mie_phase(atmosphere_read4(&a.mie_extinction).w, c);
     float rayleigh_value = rayleigh_phase(c);
     const float uniform_phase = 1.0 / (4.0 * PI);
 
@@ -281,8 +281,8 @@ Scattering integrate(AtmosphereFrame* a, float3 o, float3 d, float3 sun, float s
         float3 to_sun = transmittance_to_top(a, radius, mu_sun);
         float3 phase_scattering = phases ? m.mie * mie_value + m.rayleigh * rayleigh_value : m.scattering * uniform_phase;
         // The planet's shadow.
-        float shadow = ray_sphere(p, sun, a.planet.x + PLANET_OFFSET) >= 0.0 ? 0.0 : 1.0;
-        float3 ms = multiple ? multiple_scattering(a, radius, mu_sun) * a.planet.z : 0.0;
+        float shadow = ray_sphere(p, sun, atmosphere_read4(&a.planet).x + PLANET_OFFSET) >= 0.0 ? 0.0 : 1.0;
+        float3 ms = multiple ? multiple_scattering(a, radius, mu_sun) * atmosphere_read4(&a.planet).z : 0.0;
         float3 source = shadow * to_sun * phase_scattering + ms * m.scattering;
 
         // Each term integrated over the step against its transmittance (Hillaire 2015,
@@ -299,7 +299,7 @@ Scattering integrate(AtmosphereFrame* a, float3 o, float3 d, float3 sun, float s
         float radius = length(p);
         float3 up = p / radius;
         float mu_sun = dot(sun, up);
-        result.luminance += transmittance_to_top(a, radius, mu_sun) * throughput * saturate(mu_sun) * a.ground_albedo.rgb / PI;
+        result.luminance += transmittance_to_top(a, radius, mu_sun) * throughput * saturate(mu_sun) * atmosphere_read4(&a.ground_albedo).rgb / PI;
     }
     result.transmittance = throughput;
     return result;
@@ -318,8 +318,8 @@ void transmittanceLut(uint3 id : SV_DispatchThreadID)
     float3 o = float3(0.0, radius, 0.0);
     float3 d = float3(sqrt(1.0 - mu * mu), mu, 0.0);
     // Optical depth only: 40 even steps to the top (or the ground).
-    float t_bottom = ray_sphere(o, d, a.planet.x);
-    float t_top = ray_sphere(o, d, a.planet.y);
+    float t_bottom = ray_sphere(o, d, atmosphere_read4(&a.planet).x);
+    float t_top = ray_sphere(o, d, atmosphere_read4(&a.planet).y);
     float t_max = t_bottom >= 0.0 && t_top >= 0.0 ? min(t_top, t_bottom) : max(t_top, 0.0);
     float3 depth = 0.0;
     const float steps = 40.0;
@@ -342,7 +342,7 @@ void multipleScatteringLut(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     uv = float2(from_sub_uv_to_unit(uv.x, MULTIPLE_SCATTERING_SIZE), from_sub_uv_to_unit(uv.y, MULTIPLE_SCATTERING_SIZE));
     float mu_sun = uv.x * 2.0 - 1.0;
     float3 sun = float3(0.0, mu_sun, sqrt(saturate(1.0 - mu_sun * mu_sun)));
-    float radius = a.planet.x + saturate(uv.y + PLANET_OFFSET) * (a.planet.y - a.planet.x - PLANET_OFFSET);
+    float radius = atmosphere_read4(&a.planet).x + saturate(uv.y + PLANET_OFFSET) * (atmosphere_read4(&a.planet).y - atmosphere_read4(&a.planet).x - PLANET_OFFSET);
     float3 o = float3(0.0, radius, 0.0);
 
     float i = 0.5 + float(local / 8);
@@ -381,10 +381,10 @@ void skyViewLut(uint3 id : SV_DispatchThreadID)
         return;
     AtmosphereFrame* a = push.frame;
     float2 uv = (float2(id.xy) + 0.5) / float2(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT);
-    float radius = a.camera_planet.w;
+    float radius = atmosphere_read4(&a.camera_planet).w;
     float mu, cos_azimuth;
     sky_view_params(a, uv, radius, mu, cos_azimuth);
-    float mu_sun = a.sun_direction.w;
+    float mu_sun = atmosphere_read4(&a.sun_direction).w;
     float3 sun = float3(sqrt(saturate(1.0 - mu_sun * mu_sun)), mu_sun, 0.0);
     float sin_zenith = sqrt(saturate(1.0 - mu * mu));
     float3 d = float3(sin_zenith * cos_azimuth, mu, sin_zenith * sqrt(saturate(1.0 - cos_azimuth * cos_azimuth)));
@@ -396,15 +396,15 @@ void skyViewLut(uint3 id : SV_DispatchThreadID)
 // The sky along world direction `d`, per unit sun illuminance, from the sky-view table.
 float3 sky_luminance(AtmosphereFrame* a, float3 d)
 {
-    float radius = a.camera_planet.w;
+    float radius = atmosphere_read4(&a.camera_planet).w;
     float mu = d.y;
     // Azimuth from the sun: both projected on the horizontal plane.
     float2 view_h = d.xz;
-    float2 sun_h = a.sun_direction.xz;
+    float2 sun_h = atmosphere_read4(&a.sun_direction).xz;
     float lv = dot(view_h, view_h);
     float ls = dot(sun_h, sun_h);
     float cos_azimuth = lv > 1e-12 && ls > 1e-12 ? dot(view_h, sun_h) * rsqrt(lv * ls) : 1.0;
-    bool ground = ray_sphere(float3(0.0, radius, 0.0), d, a.planet.x) >= 0.0;
+    bool ground = ray_sphere(float3(0.0, radius, 0.0), d, atmosphere_read4(&a.planet).x) >= 0.0;
     float2 uv = sky_view_uv(a, ground, mu, clamp(cos_azimuth, -1.0, 1.0), radius);
     return g_textures[a.sky_view].SampleLevel(g_samplers[a.sampler], uv, 0.0).rgb;
 }
@@ -436,7 +436,7 @@ void atmosphereCube(uint3 id : SV_DispatchThreadID)
         return;
     AtmosphereFrame* a = push.frame;
     float3 d = face_direction(id.xy, id.z, push.size);
-    g_cube_faces[push.target][id] = float4(sky_luminance(a, d) * a.sun_illuminance.rgb, 1.0);
+    g_cube_faces[push.target][id] = float4(sky_luminance(a, d) * atmosphere_read4(&a.sun_illuminance).rgb, 1.0);
 }
 
 groupshared float3 g_light[64];
@@ -457,13 +457,13 @@ void aerialPerspective(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThr
     uint lane = local.y * 32 + slice;
     uint2 column = uint2(id.y % uint(AERIAL_SLICES), id.y / uint(AERIAL_SLICES));
     float2 ndc = (float2(column) + 0.5) / AERIAL_SLICES * 2.0 - 1.0;
-    float4 near = mul(a.aerial_world_from_clip, float4(ndc, 0.0, 1.0));
-    float4 mid = mul(a.aerial_world_from_clip, float4(ndc, 0.5, 1.0));
+    float4 near = mul(atmosphere_read44(&a.aerial_world_from_clip), float4(ndc, 0.0, 1.0));
+    float4 mid = mul(atmosphere_read44(&a.aerial_world_from_clip), float4(ndc, 0.5, 1.0));
     float3 d = normalize(mid.xyz / mid.w - near.xyz / near.w);
-    float3 o = a.camera_planet.xyz;
-    float3 sun = a.sun_direction.xyz;
+    float3 o = atmosphere_read4(&a.camera_planet).xyz;
+    float3 sun = atmosphere_read4(&a.sun_direction).xyz;
     float c = dot(sun, d);
-    float mie_value = mie_phase(a.mie_extinction.w, c);
+    float mie_value = mie_phase(atmosphere_read4(&a.mie_extinction).w, c);
     float rayleigh_value = rayleigh_phase(c);
 
     // This slice's segment: from the previous slice's depth to its own.
@@ -478,15 +478,15 @@ void aerialPerspective(uint3 id : SV_DispatchThreadID, uint3 local : SV_GroupThr
     {
         float3 p = o + (start + (float(k) + 0.5) * dt) * d;
         // Below the ground (a camera under the world's origin), the air at the ground.
-        float radius = max(length(p), a.planet.x + PLANET_OFFSET);
+        float radius = max(length(p), atmosphere_read4(&a.planet).x + PLANET_OFFSET);
         float3 up = normalize(p);
         p = up * radius;
         Medium m = medium(a, p);
         float3 step_transmittance = exp(-m.extinction * dt);
         float mu_sun = dot(sun, up);
         float3 to_sun = transmittance_to_top(a, radius, mu_sun);
-        float shadow = ray_sphere(p, sun, a.planet.x + PLANET_OFFSET) >= 0.0 ? 0.0 : 1.0;
-        float3 ms = multiple_scattering(a, radius, mu_sun) * a.planet.z;
+        float shadow = ray_sphere(p, sun, atmosphere_read4(&a.planet).x + PLANET_OFFSET) >= 0.0 ? 0.0 : 1.0;
+        float3 ms = multiple_scattering(a, radius, mu_sun) * atmosphere_read4(&a.planet).z;
         float3 source = shadow * to_sun * (m.mie * mie_value + m.rayleigh * rayleigh_value) + ms * m.scattering;
         light += through * (source - source * step_transmittance) / max(m.extinction, 1e-8);
         through *= step_transmittance;
@@ -530,12 +530,12 @@ float3 background(AtmosphereFrame* a, float3 d)
 {
     float3 color;
     if ((a.flags & ATMOSPHERE_SKY) != 0)
-        color = sky_luminance(a, d) * a.sun_illuminance.rgb * a.view.y;
+        color = sky_luminance(a, d) * atmosphere_read4(&a.sun_illuminance).rgb * atmosphere_read4(&a.view).y;
     else
-        color = g_cubes[a.sky_cube].SampleLevel(g_samplers[a.sampler], d, 0.0).rgb * a.view.y;
-    float cos_sun = a.planet.w;
-    if (dot(d, a.sun_direction.xyz) > cos_sun)
-        color += a.sun_color.rgb / (2.0 * PI * (1.0 - cos_sun));
+        color = g_cubes[a.sky_cube].SampleLevel(g_samplers[a.sampler], d, 0.0).rgb * atmosphere_read4(&a.view).y;
+    float cos_sun = atmosphere_read4(&a.planet).w;
+    if (dot(d, atmosphere_read4(&a.sun_direction).xyz) > cos_sun)
+        color += atmosphere_read4(&a.sun_color).rgb / (2.0 * PI * (1.0 - cos_sun));
     return color;
 }
 
@@ -546,27 +546,27 @@ float3 background(AtmosphereFrame* a, float3 d)
 float4 compositeFragment(Composite input) : SV_Target0
 {
     AtmosphereFrame* a = push.frame;
-    float2 uv = input.position.xy / float2(a.size);
+    float2 uv = input.position.xy / float2(loadAligned<8>(&a.size));
     float2 ndc = uv * 2.0 - 1.0;
     float depth = g_textures[push.depth].Load(int3(int2(input.position.xy), 0)).r;
     float3 d;
     float distance;
-    if (a.ray_y.w != 0.0)
+    if (atmosphere_read4(&a.ray_y).w != 0.0)
     {
         // Perspective: the ray to view depth 1, scaled by the pixel's view depth.
-        float3 ray = a.ray_base.xyz + ndc.x * a.ray_x.xyz + ndc.y * a.ray_y.xyz;
+        float3 ray = atmosphere_read4(&a.ray_base).xyz + ndc.x * atmosphere_read4(&a.ray_x).xyz + ndc.y * atmosphere_read4(&a.ray_y).xyz;
         float inv_length = rsqrt(dot(ray, ray));
         d = ray * inv_length;
-        distance = a.ray_x.w / (depth + a.ray_base.w) / inv_length;
+        distance = atmosphere_read4(&a.ray_x).w / (depth + atmosphere_read4(&a.ray_base).w) / inv_length;
     }
     else
     {
-        float4 near = mul(a.world_from_clip, float4(ndc, 0.0, 1.0));
+        float4 near = mul(atmosphere_read44(&a.world_from_clip), float4(ndc, 0.0, 1.0));
         float3 near_point = near.xyz / near.w;
-        float4 far = mul(a.world_from_clip, float4(ndc, depth >= 1.0 ? 0.5 : depth, 1.0));
+        float4 far = mul(atmosphere_read44(&a.world_from_clip), float4(ndc, depth >= 1.0 ? 0.5 : depth, 1.0));
         float3 far_point = far.xyz / far.w;
         d = normalize(far_point - near_point);
-        distance = length(far_point - a.camera_world.xyz);
+        distance = length(far_point - atmosphere_read4(&a.camera_world).xyz);
     }
     float3 light = 0.0;
     float transmittance = 1.0;
@@ -603,27 +603,27 @@ float4 compositeFragment(Composite input) : SV_Target0
 float4 compositeFragmentMs(Composite input, uint sample : SV_SampleIndex) : SV_Target0
 {
     AtmosphereFrame* a = push.frame;
-    float2 uv = input.position.xy / float2(a.size);
+    float2 uv = input.position.xy / float2(loadAligned<8>(&a.size));
     float2 ndc = uv * 2.0 - 1.0;
     float depth = g_depth_ms[push.depth].Load(int2(input.position.xy), sample).r;
     float3 d;
     float distance;
-    if (a.ray_y.w != 0.0)
+    if (atmosphere_read4(&a.ray_y).w != 0.0)
     {
         // Perspective: the ray to view depth 1, scaled by the pixel's view depth.
-        float3 ray = a.ray_base.xyz + ndc.x * a.ray_x.xyz + ndc.y * a.ray_y.xyz;
+        float3 ray = atmosphere_read4(&a.ray_base).xyz + ndc.x * atmosphere_read4(&a.ray_x).xyz + ndc.y * atmosphere_read4(&a.ray_y).xyz;
         float inv_length = rsqrt(dot(ray, ray));
         d = ray * inv_length;
-        distance = a.ray_x.w / (depth + a.ray_base.w) / inv_length;
+        distance = atmosphere_read4(&a.ray_x).w / (depth + atmosphere_read4(&a.ray_base).w) / inv_length;
     }
     else
     {
-        float4 near = mul(a.world_from_clip, float4(ndc, 0.0, 1.0));
+        float4 near = mul(atmosphere_read44(&a.world_from_clip), float4(ndc, 0.0, 1.0));
         float3 near_point = near.xyz / near.w;
-        float4 far = mul(a.world_from_clip, float4(ndc, depth >= 1.0 ? 0.5 : depth, 1.0));
+        float4 far = mul(atmosphere_read44(&a.world_from_clip), float4(ndc, depth >= 1.0 ? 0.5 : depth, 1.0));
         float3 far_point = far.xyz / far.w;
         d = normalize(far_point - near_point);
-        distance = length(far_point - a.camera_world.xyz);
+        distance = length(far_point - atmosphere_read4(&a.camera_world).xyz);
     }
     float3 light = 0.0;
     float transmittance = 1.0;

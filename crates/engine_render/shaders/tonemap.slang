@@ -194,7 +194,7 @@ float4 fragmentMain(VertexOut input) : SV_Target
     }
     float exposure = push.exposure;
     if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
-        exposure *= push.auto_exposure[0].x;
+        exposure *= loadAligned<16>(push.auto_exposure).x;
     color *= exposure;
     if ((push.flags & FLAG_PASS_THROUGH) == 0)
     {
@@ -227,7 +227,7 @@ float3 tonemapped(VertexOut input)
     }
     float exposure = push.exposure;
     if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
-        exposure *= push.auto_exposure[0].x;
+        exposure *= loadAligned<16>(push.auto_exposure).x;
     color *= exposure;
     if ((push.flags & FLAG_PASS_THROUGH) == 0)
     {
@@ -285,7 +285,7 @@ float3 tonemap_color(float3 color, float2 uv)
     }
     float exposure = push.exposure;
     if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
-        exposure *= push.auto_exposure[0].x;
+        exposure *= loadAligned<16>(push.auto_exposure).x;
     color *= exposure;
     if ((push.flags & FLAG_PASS_THROUGH) == 0)
     {

@@ -266,10 +266,10 @@ float4 composite(Composite input, bool probes, bool ssr)
     float roughness = nr.z;
     float view_depth;
     float3 world = world_position(f, input.position.xy, depth, view_depth);
-    float3 v = normalize(f.camera.xyz - world);
+    float3 v = normalize(read4(&f.camera).xyz - world);
     float3 r = reflect(-v, n);
-    float lod = roughness * float(f.env.y - 1);
-    float3 sky = g_cubes[f.env.x].SampleLevel(g_samplers[f.env.z], r, lod).rgb * f.params.x;
+    float lod = roughness * float(read4u(&f.env).y - 1);
+    float3 sky = g_cubes[read4u(&f.env).x].SampleLevel(g_samplers[read4u(&f.env).z], r, lod).rgb * read4(&f.params).x;
     float3 reflection = sky;
     if (probes)
         reflection = probe_radiance(f, world, r, lod, input.position.xy, view_depth, sky);
@@ -309,7 +309,7 @@ uint nearest_samples(Composite input, uint nearest_depth)
 {
     ReflectFrame* f = push.frame;
     int2 pixel = int2(input.position.xy);
-    int2 hi = int2(f.size.xy) - 1;
+    int2 hi = int2(read4u(&f.size).xy) - 1;
     Texture2D depths = g_textures[nearest_depth];
     float nearest = view_depth_of(f, depths.Load(int3(pixel, 0)).r);
     float left = view_depth_of(f, depths.Load(int3(max(pixel - int2(1, 0), 0), 0)).r);
@@ -367,12 +367,20 @@ float4 compositeProbesFarMs(Composite input, out uint coverage : SV_Coverage) : 
 
 uint2 level_size(uint level)
 {
-    return ((push.frame.size.xy - 1) >> level) + 1;
+    return ((read4u(&push.frame.size).xy - 1) >> level) + 1;
 }
 
 uint pyramid_offset(uint level)
 {
     return push.frame.pyramid_offsets[(level - 1) >> 2][(level - 1) & 3];
+}
+
+// `pyramid_offset` where every thread reads the same level (the depth pass): one 16-byte
+// load of the row, measured faster than the 4-byte one there on the Radeon (the trace's
+// levels vary per thread and per step, where the 4-byte load is faster).
+uint pyramid_offset_uniform(uint level)
+{
+    return loadAligned<16>(&push.frame.pyramid_offsets[(level - 1) >> 2])[(level - 1) & 3];
 }
 
 // Level `level` of the nearest-depth pyramid (≥ 1) from the level below (`t0`: the depth
@@ -397,11 +405,11 @@ void ssrDepth(uint3 id : SV_DispatchThreadID)
     }
     else
     {
-        uint o = pyramid_offset(level - 1);
+        uint o = pyramid_offset_uniform(level - 1);
         d = min(min(asfloat(push.buffer[o + p.y * below.x + p.x]), asfloat(push.buffer[o + p.y * below.x + q.x])),
                 min(asfloat(push.buffer[o + q.y * below.x + p.x]), asfloat(push.buffer[o + q.y * below.x + q.x])));
     }
-    push.buffer[pyramid_offset(level) + id.y * size.x + id.x] = asuint(d);
+    push.buffer[pyramid_offset_uniform(level) + id.y * size.x + id.x] = asuint(d);
 }
 
 // The nearest depth over texel `texel` of `level` (0: the depth target, `t0`).
@@ -521,12 +529,12 @@ static const float LOBE_TRIM = 0.25;
 // turning every frame.
 int2 trace_pixel(ReflectFrame* f, uint2 t)
 {
-    uint scale = f.ssr.y;
+    uint scale = read4u(&f.ssr).y;
     if (scale == 1)
         return int2(t);
-    uint k = f.probe_info.w & 3u;
+    uint k = read4u(&f.probe_info).w & 3u;
     uint2 offset = uint2(k & 1u, k >> 1);
-    return int2(min(t * 2 + offset, f.size.xy - 1));
+    return int2(min(t * 2 + offset, read4u(&f.size).xy - 1));
 }
 
 // One ray per trace texel. `t0`: depth, `t1`: normal and roughness, `t2`: weight, `t3`:
@@ -537,10 +545,10 @@ int2 trace_pixel(ReflectFrame* f, uint2 t)
 void ssrTrace(uint3 id : SV_DispatchThreadID)
 {
     ReflectFrame* f = push.frame;
-    if (any(id.xy >= f.size.zw))
+    if (any(id.xy >= read4u(&f.size).zw))
         return;
     int2 pixel = trace_pixel(f, id.xy);
-    float max_roughness = f.params.y;
+    float max_roughness = read4(&f.params).y;
     float3 weight = g_textures[push.t2].Load(int3(pixel, 0)).rgb;
     float4 nr = g_textures[push.t1].Load(int3(pixel, 0));
     float roughness = nr.z;
@@ -555,11 +563,11 @@ void ssrTrace(uint3 id : SV_DispatchThreadID)
     float view_depth;
     float3 world = world_position(f, center, depth, view_depth);
     float3 n = decode_normal(nr.xy);
-    float3 v = normalize(f.camera.xyz - world);
+    float3 v = normalize(read4(&f.camera).xyz - world);
     float3 r = reflect(-v, n);
     if (roughness >= MIRROR_ROUGHNESS)
     {
-        uint seed = pcg(uint(pixel.x) + pcg(uint(pixel.y) + pcg(f.probe_info.w)));
+        uint seed = pcg(uint(pixel.x) + pcg(uint(pixel.y) + pcg(read4u(&f.probe_info).w)));
         float2 u = float2(float(seed & 0xFFFFu), float(seed >> 16)) / 65536.0;
         u.x *= 1.0 - LOBE_TRIM;
         float3 t, b;
@@ -573,24 +581,24 @@ void ssrTrace(uint3 id : SV_DispatchThreadID)
     }
     // The ray in screen space: (uv, depth) is a projective image of the world, so the
     // ray stays straight there. Its second point stays in front of the near plane.
-    float toward = dot(r, f.forward.xyz);
+    float toward = dot(r, read4(&f.forward).xyz);
     float reach = view_depth;
     if (toward < 0.0)
-        reach = min(reach, (view_depth - f.forward.w * 1.01) / -toward);
+        reach = min(reach, (view_depth - read4(&f.forward).w * 1.01) / -toward);
     float3 far_point = world + r * max(reach, 1e-4);
-    float4 clip = mul(f.clip_from_world, float4(far_point, 1.0));
-    float2 screen = float2(f.size.xy);
+    float4 clip = mul(read44(&f.clip_from_world), float4(far_point, 1.0));
+    float2 screen = float2(read4u(&f.size).xy);
     float3 origin = float3(center / screen, depth);
     float3 end = float3(clip.xy / clip.w * 0.5 + 0.5, clip.z / clip.w);
     float3 direction = end - origin;
     bool valid;
-    float3 hit = hierarchical_march(origin, direction, screen, f.ssr.x, f.ssr.w, roughness >= MIRROR_ROUGHNESS, valid);
+    float3 hit = hierarchical_march(origin, direction, screen, read4u(&f.ssr).x, read4u(&f.ssr).w, roughness >= MIRROR_ROUGHNESS, valid);
     float confidence = 0.0;
     float3 color = 0.0;
     float distance = 0.0;
     if (valid && all(hit.xy >= 0.0) && all(hit.xy <= 1.0))
     {
-        int2 hit_pixel = clamp(int2(hit.xy * screen), int2(0, 0), int2(f.size.xy) - 1);
+        int2 hit_pixel = clamp(int2(hit.xy * screen), int2(0, 0), int2(read4u(&f.size).xy) - 1);
         float surface = g_textures[push.t0].Load(int3(hit_pixel, 0)).r;
         // Not the sky, not right next to the origin, not the back of a surface.
         float2 moved = abs(hit.xy - origin.xy) * screen;
@@ -603,12 +611,12 @@ void ssrTrace(uint3 id : SV_DispatchThreadID)
             float surface_depth = view_depth_of(f, surface);
             // Hits behind the surface by more than the thickness are behind an object.
             float behind = abs(hit_depth - surface_depth);
-            float thickness = 1.0 - smoothstep(0.0, f.params.z, behind);
+            float thickness = 1.0 - smoothstep(0.0, read4(&f.params).z, behind);
             float2 edge = 0.05 * float2(screen.y / screen.x, 1.0);
             float2 border = smoothstep(0.0, edge, hit.xy) * (1.0 - smoothstep(1.0 - edge, 1.0, hit.xy));
             float fade = saturate((max_roughness - roughness) / (0.2 * max_roughness));
             confidence = thickness * thickness * border.x * border.y * fade;
-            color = g_textures[push.t3].SampleLevel(g_samplers[f.env.z], hit.xy, 0.0).rgb;
+            color = g_textures[push.t3].SampleLevel(g_samplers[read4u(&f.env).z], hit.xy, 0.0).rgb;
             distance = length(hit_world - world);
         }
     }
@@ -634,7 +642,7 @@ groupshared float2 g_distance_depth[SPATIAL_TILE * SPATIAL_TILE];
 void ssrSpatial(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint index : SV_GroupIndex)
 {
     ReflectFrame* f = push.frame;
-    int2 last = int2(f.size.zw) - 1;
+    int2 last = int2(read4u(&f.size).zw) - 1;
     int2 origin = int2(group.xy * 8) - SPATIAL_RADIUS;
     for (uint i = index; i < uint(SPATIAL_TILE * SPATIAL_TILE); i += 64)
     {
@@ -647,14 +655,14 @@ void ssrSpatial(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint i
     }
     GroupMemoryBarrierWithGroupSync();
     uint2 id = group.xy * 8 + local.xy;
-    if (any(id >= f.size.zw))
+    if (any(id >= read4u(&f.size).zw))
         return;
     uint center = (local.y + SPATIAL_RADIUS) * SPATIAL_TILE + local.x + SPATIAL_RADIUS;
     float4 own = g_value[center];
     float4 nr = g_normal_roughness[center];
     float depth = g_distance_depth[center].y;
     float roughness = nr.w;
-    if (roughness >= f.params.y)
+    if (roughness >= read4(&f.params).y)
     {
         g_images[push.target][id] = 0.0;
         g_scalars2[push.read][id] = float2(0.0, depth);
@@ -705,13 +713,13 @@ void ssrSpatial(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint i
 void ssrTemporal(uint3 id : SV_DispatchThreadID)
 {
     ReflectFrame* f = push.frame;
-    if (any(id.xy >= f.size.xy))
+    if (any(id.xy >= read4u(&f.size).xy))
         return;
     int2 pixel = int2(id.xy);
     float3 weight = g_textures[push.t2].Load(int3(pixel, 0)).rgb;
     float4 nr = g_textures[push.t1].Load(int3(pixel, 0));
     float roughness = nr.z;
-    if (max(weight.r, max(weight.g, weight.b)) <= 0.0 || roughness >= f.params.y)
+    if (max(weight.r, max(weight.g, weight.b)) <= 0.0 || roughness >= read4(&f.params).y)
     {
         g_images[push.target][id.xy] = 0.0;
         return;
@@ -721,8 +729,8 @@ void ssrTemporal(uint3 id : SV_DispatchThreadID)
     float3 world = world_position(f, float2(pixel) + 0.5, depth, view_depth);
     Texture2D current = g_textures[push.t3];
     Texture2D distances = g_textures[push.t4];
-    int2 last = int2(f.size.zw) - 1;
-    float scale = float(f.ssr.y);
+    int2 last = int2(read4u(&f.size).zw) - 1;
+    float scale = float(read4u(&f.ssr).y);
     float2 tc = (float2(pixel) + 0.5) / scale - 0.5;
     int2 t0 = int2(floor(tc));
     float2 fraction = tc - float2(t0);
@@ -743,10 +751,10 @@ void ssrTemporal(uint3 id : SV_DispatchThreadID)
     value /= total;
     distance /= total;
     float4 result = value;
-    if (f.ssr.z != 0)
+    if (read4u(&f.ssr).z != 0)
     {
-        float3 virtual_point = world + normalize(world - f.camera.xyz) * distance;
-        float4 previous = mul(f.previous_clip_from_world, float4(virtual_point, 1.0));
+        float3 virtual_point = world + normalize(world - read4(&f.camera).xyz) * distance;
+        float4 previous = mul(read44(&f.previous_clip_from_world), float4(virtual_point, 1.0));
         float2 uv = previous.xy / previous.w * 0.5 + 0.5;
         if (previous.w > 1e-6 && all(uv >= 0.0) && all(uv <= 1.0))
         {
@@ -765,10 +773,10 @@ void ssrTemporal(uint3 id : SV_DispatchThreadID)
             }
             m1 /= 9.0;
             float4 sigma = sqrt(max(m2 / 9.0 - m1 * m1, 0.0));
-            float4 history = g_textures[push.t5].SampleLevel(g_samplers[f.env.z], uv, 0.0);
+            float4 history = g_textures[push.t5].SampleLevel(g_samplers[read4u(&f.env).z], uv, 0.0);
             history = clamp(history, m1 - 1.25 * sigma, m1 + 1.25 * sigma);
             // Mirror rays carry no noise: follow the current frame more closely.
-            float blend = lerp(0.5, f.params.w, saturate(roughness / (2.0 * MIRROR_ROUGHNESS)));
+            float blend = lerp(0.5, read4(&f.params).w, saturate(roughness / (2.0 * MIRROR_ROUGHNESS)));
             result = lerp(history, value, blend);
         }
     }

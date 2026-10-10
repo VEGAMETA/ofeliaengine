@@ -94,3 +94,56 @@ graph → pipeline → descriptors → shader → pixels.
   memory with `DEVICE_ADDRESS` (ADR 0010).
 - Next: indexed meshes with glTF import (§13), PBR materials, shadow maps, and a
   pipeline cache with warm-up (§9).
+
+## Addendum (2026-10-10): aligned accesses through buffer addresses
+
+**Context.** Shaders read buffers through device addresses (`T*` in Slang), and Slang
+declares every such access with the pointee's scalar alignment: an `OpLoad` of a `float4`
+or of a 64-byte struct is `Aligned 4`. A driver may then split a 16-byte access into four
+4-byte ones. Every vector load of the engine's shaders was so declared (the forward
+pass's vertex and fragment shaders, culling, shadows, reflections, the atmosphere,
+skinning, the scene's scatter), although the engine lays these buffers out 16-byte
+aligned (ring allocations, buffer bases, 16-byte multiples per element). The scene's
+motion passes of queue item 0f were the first to declare it.
+
+**Options.**
+1. *Leave it to the drivers:* the AMD driver already emits 16-byte loads (no change
+   measured on the Radeon); NVIDIA's does not.
+2. *A layout with 16-byte aligned vectors* (std430-like) for pointer types: changes every
+   struct with a `float3` member (CPU and GPU layouts would have to change together).
+3. *Declare it at the accesses (chosen):* `loadAligned<16>(p + i)` / `storeAligned<16>`
+   for data laid out 16-byte aligned, whole structs or vector members; a single 4-byte
+   value read by a dynamic index stays a plain (scalar) access, whose natural alignment
+   is 4.
+
+**Measurements** (ref-1, `scene_bench` Sponza 1920 × 1080, 64 lights of which 4 shadowed,
+motion vectors, the depth prepass; main and branch builds in turns, three rounds, µs):
+
+| | main | aligned |
+|---|---:|---:|
+| RTX: forward (sky) | 336 | 321 |
+| RTX: GPU frame (sky) | 626 | 610 |
+| RTX: atmosphere pass (atmosphere, fog, probes, SSR) | 56.3 | 44.0 |
+| RTX: reflections composite | 128 | 118 |
+| RTX: SSR temporal | 61 | 57 |
+| RTX: GPU frame (atmosphere, fog, probes, SSR) | 1,478 | 1,445 |
+| Radeon: SSR depth pyramid | 413 | 308 |
+
+The other passes (shadows, prepass, skinning, local shadows) did not change, and nothing
+else on the Radeon, whose registers stayed the same in every forward pipeline. Turning
+the SSR trace's one 4-byte read of a pyramid offset (by a dynamic index, every step) into
+a 16-byte load and a component select made the trace 7.5 % slower on both GPUs; the depth
+pass, where every thread reads the same offset, is 25 % faster with it on the Radeon. Both
+are kept as measured.
+
+**Decision.** Option 3. The engine's shaders declare 16-byte alignment on every access to
+such data (`read_*` helpers in `forward.slang`, `read4` and friends in
+`reflections_common.slang`, `atmosphere_read4` in `atmosphere_common.slang`); a vector
+member of 8 bytes (`uint2`) declares 8.
+
+**Consequences.**
+- A new shader reading through buffer addresses declares the alignment the data has
+  (`docs/agent-rules.md`, `docs/dev-guide/shaders.md`); `spirv-dis` shows any vector access
+  left `Aligned 4`.
+- Declaring more alignment than the data has is undefined behaviour: only data laid out
+  16-byte aligned may be read so (not packed `float3` positions).

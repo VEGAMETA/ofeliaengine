@@ -42,6 +42,19 @@ struct AtmosphereFrame
     uint2 size;                      // the color target's size in pixels
 };
 
+// Reads of the frame, laid out 16-byte aligned, declare it: a plain pointer access is
+// declared 4-byte aligned (Slang's default for pointers), and a driver may split a 16-byte
+// load in four.
+float4 atmosphere_read4(float4* v)
+{
+    return loadAligned<16>(v);
+}
+
+float4x4 atmosphere_read44(float4x4* m)
+{
+    return loadAligned<16>(m);
+}
+
 static const uint ATMOSPHERE_SKY = 1u;   // the physical atmosphere (else the gradient's cube)
 static const uint ATMOSPHERE_FOG = 2u;   // exponential height fog
 
@@ -62,9 +75,9 @@ float henyey_greenstein(float g, float c)
 // pixel at `uv`: in-scattered light (rgb) and opacity (a, 1 − mean transmittance).
 float4 aerial_perspective(AtmosphereFrame* a, float2 uv, float distance)
 {
-    if (distance <= a.view.z)
+    if (distance <= atmosphere_read4(&a.view).z)
         return float4(0.0, 0.0, 0.0, 0.0);
-    float slice = distance * a.camera_world.w * a.view.x / AERIAL_KM_PER_SLICE;
+    float slice = distance * atmosphere_read4(&a.camera_world).w * atmosphere_read4(&a.view).x / AERIAL_KM_PER_SLICE;
     float weight = 1.0;
     if (slice < 0.5)
     {
@@ -74,7 +87,7 @@ float4 aerial_perspective(AtmosphereFrame* a, float2 uv, float distance)
     }
     float w = sqrt(slice / AERIAL_SLICES);
     float4 ap = g_volumes[a.aerial].SampleLevel(g_samplers[a.sampler], float3(uv, w), 0.0) * weight;
-    return float4(ap.rgb * a.sun_illuminance.rgb * a.view.y, ap.a);
+    return float4(ap.rgb * atmosphere_read4(&a.sun_illuminance).rgb * atmosphere_read4(&a.view).y, ap.a);
 }
 
 // Optical depth of the height fog from the camera along unit `d` over `distance` world
@@ -82,10 +95,10 @@ float4 aerial_perspective(AtmosphereFrame* a, float2 uv, float distance)
 // the camera's height comes with the constants.
 float fog_optical_depth(AtmosphereFrame* a, float3 d, float distance)
 {
-    float start = a.fog.z;
+    float start = atmosphere_read4(&a.fog).z;
     float len = distance - start;
-    float k = a.fog.y;
-    float density = a.fog_phase.y;
+    float k = atmosphere_read4(&a.fog).y;
+    float density = atmosphere_read4(&a.fog_phase).y;
     if (start > 0.0)
         density *= exp(clamp(-k * d.y * start, -80.0, 80.0));
     float x = max(k * d.y * len, -80.0);
@@ -100,19 +113,19 @@ float fog_optical_depth(AtmosphereFrame* a, float3 d, float distance)
 float4 height_fog(AtmosphereFrame* a, float3 d, float distance)
 {
     float t = exp(-fog_optical_depth(a, d, distance));
-    t = max(t, 1.0 - a.fog.w);
+    t = max(t, 1.0 - atmosphere_read4(&a.fog).w);
     // Average radiance of the sky: the irradiance harmonics' band 0 (π · Y00 · ∫L Y00) ×
     // Y00 / π.
-    float3 ambient = a.sh[0].rgb * (0.282095 / ATMOSPHERE_PI) * a.view.y;
-    float3 sun = a.sun_color.rgb * henyey_greenstein(a.fog_phase.x, dot(d, a.sun_direction.xyz));
-    return float4((1.0 - t) * a.fog_albedo.rgb * (ambient + sun), t);
+    float3 ambient = atmosphere_read4(a.sh + 0).rgb * (0.282095 / ATMOSPHERE_PI) * atmosphere_read4(&a.view).y;
+    float3 sun = atmosphere_read4(&a.sun_color).rgb * henyey_greenstein(atmosphere_read4(&a.fog_phase).x, dot(d, atmosphere_read4(&a.sun_direction).xyz));
+    return float4((1.0 - t) * atmosphere_read4(&a.fog_albedo).rgb * (ambient + sun), t);
 }
 
 // A surface's color seen through the aerial perspective and the fog: `world` is its
 // position, `uv` its pixel's place on the target.
 float3 atmosphere_apply(AtmosphereFrame* a, float3 color, float3 world, float2 uv)
 {
-    float3 to = world - a.camera_world.xyz;
+    float3 to = world - atmosphere_read4(&a.camera_world).xyz;
     float distance = length(to);
     if ((a.flags & ATMOSPHERE_SKY) != 0)
     {

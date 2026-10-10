@@ -87,7 +87,8 @@ pass if a larger scene shows pop-in), 0c (Catmull-Rom and Lanczos-3, ADR 0075's
 addendum), 0d (motion vectors from the depth prepass, ADR 0043's addendum), TAAU's
 Catmull-Rom history with point reads (owner, 2026-10-10; ADR 0043's second amendment), 0e
 (presenting across adapters, ADR 0007's addendum), 0f (moving instances placed on the
-GPU, the tick's stages on the job system: ADR 0064's addendum). Next: 0f2, then 0g.
+GPU, the tick's stages on the job system: ADR 0064's addendum), 0f2 (16-byte aligned
+accesses through buffer addresses in every shader: ADR 0013's addendum). Next: 0g.
 
 ## 5. Queue (in order)
 
@@ -223,7 +224,7 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    ms against the copy's 0.15). Found and fixed on the way: an instance that changed
    batch between ticks kept its old batch word on the GPU, and culling dropped it or
    another batch's instance.
-0f2. **Aligned pointer accesses in shaders** (owner, 2026-10-10: a serious topic): loads
+0f2. ~~**Aligned pointer accesses in shaders** (owner, 2026-10-10: a serious topic): loads
    and stores through buffer device addresses are declared 4-byte aligned (Slang's default
    for pointers), so a driver may split 16-byte accesses; every vector load of the forward,
    culling and shadow shaders is (vertexMain 19, depthVertex 7, shadowVertex 9, cullMain 21
@@ -231,7 +232,13 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    (`loadAligned<16>`) only where the data is so aligned (instance rows, batches; not packed
    `float3` vertices), and measure each pass on both GPUs with the register rule; golden
    images must stay byte-identical. The scene's motion passes already do (no change on the
-   Radeon; on the RTX it came with their new layout, not measured alone).
+   Radeon; on the RTX it came with their new layout, not measured alone).~~ Done 2026-10-10
+   (ADR 0013's addendum): every vector access through a buffer address in the engine's
+   shaders declares its alignment. RTX: forward 336 → 321 µs, the atmosphere pass 56 → 44,
+   the reflections composite 128 → 118, the SSR history 61 → 57, the GPU frame of Sponza
+   with atmosphere, probes and SSR 1,478 → 1,445; Radeon: the SSR depth pyramid 413 → 308,
+   registers unchanged. A 4-byte value read by a dynamic index stays scalar (as a 16-byte
+   load it made the SSR trace 7.5 % slower).
 0g. Start-up overlap (device creation beside the pack's reading and cooking) and pipeline
    variants created on first use (review §3.8): first frame 450–590 ms warm, 1.2–1.4 s
    with the pipeline cache missing.
@@ -286,6 +293,12 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    (BSD-2-Clause) on worker threads where it is missing; WebM / Matroska demuxed by our
    own code; Opus sound through the existing decoder, synchronized to the audio clock;
    cost per frame measured on both GPUs.
+6h. **Colliders made automatically** (owner, 2026-10-10: after the rendering queue, like
+   6f and 6g): collision shapes from meshes at import and cook, into the pack ("one button"):
+   static level geometry as triangle meshes (simplified where it pays), props as a fitted
+   box, sphere or capsule or a convex hull, concave ones split into convex parts (CoACD,
+   MIT, or V-HACD, BSD-3: compare), and colliders authored in the source taken as they are
+   (`UCX_` names, a glTF physics extension). Today shapes are only made in code.
 7. Then: editor tools, Luau bindings and debugger, other tooling.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
