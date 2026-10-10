@@ -352,9 +352,11 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
   - The discrete-GPU default stays TAA. The other candidate is MSAA 4× (+1.2 ms on the
     RTX, sharpest in motion, more flicker); the owner decides.
   - A Streamline `eErrorExceptionHandler` hang was seen once in `aa_bench`.
-  - `procedural_contact_shadows` (both vendors) and `procedural_local_shadows` (Radeon)
-    differ from their golden images by a few pixels on main too. They pass the FLIP
-    tolerance; find why and regenerate them.
+  - `procedural_contact_shadows` renders a few pixels differently from run to run on both
+    vendors (4–13 pixels between runs of one build, up to 25 levels: a race?), and on main
+    `sponza` (52 pixels on the RTX, 155 on the Radeon, 2 levels at most) and
+    `procedural_local_shadows` (Radeon, 97 pixels, 20 levels) differ from their golden
+    images. They pass the FLIP tolerance (seen 2026-10-10); find why and regenerate them.
 - **Runtime:**
   - transform propagation of non-root candidates (children whose own transforms change
     every tick) stays on one thread, by depth;
