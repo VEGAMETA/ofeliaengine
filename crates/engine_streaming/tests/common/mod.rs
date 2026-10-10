@@ -208,6 +208,8 @@ pub struct Bed {
     pub frame_number: u64,
     /// The largest texture traffic of a frame so far, and the largest single level.
     pub worst_frame_bytes: u64,
+    /// Mesh levels by distance in every direction (`LodView::around`).
+    pub around: bool,
 }
 
 impl Bed {
@@ -322,6 +324,7 @@ impl Bed {
             cmd,
             frame_number: 0,
             worst_frame_bytes: 0,
+            around: false,
         }
     }
 
@@ -353,6 +356,7 @@ impl Bed {
         self.frame_number += 1;
         let frame_number = self.frame_number;
         let view = LodView::new(&camera.clip_from_world, camera.position, HEIGHT, 1.0);
+        let view = if self.around { view.around() } else { view };
         if let Some(s) = self.streamer.as_mut() {
             s.update(
                 &mut self.textures,

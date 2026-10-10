@@ -16,6 +16,8 @@
 //!     [--no-feedback]        no feedback pass (tails only): its cost by difference
 //!     [--still]              no flight: the first view until everything settles
 //!     [--no-fade]            levels show at once instead of fading in (ADR 0078)
+//!     [--around]             mesh levels by distance in every direction, not only in
+//!                            the frustum (`LodView::around`)
 //!     [--turn <ms>]          no flight: at the scene's centre until everything settles,
 //!                            then four turns of 180° in <ms> each, 2 s apart; per turn,
 //!                            the share of the feedback's pixels drawn from a coarser
@@ -155,6 +157,7 @@ fn main() {
     let mut still = false;
     let mut turn_ms: Option<f64> = None;
     let mut fade = true;
+    let mut around = false;
     let mut verbose = false;
     let mut synthetic_scene: Option<(usize, u32)> = None;
     let mut args = std::env::args().skip(1);
@@ -170,6 +173,7 @@ fn main() {
             "--still" => still = true,
             "--turn" => turn_ms = args.next().map(|v| v.parse().unwrap()),
             "--no-fade" => fade = false,
+            "--around" => around = true,
             "--verbose" => verbose = true,
             "--synthetic" => {
                 let v = args.next().unwrap();
@@ -411,6 +415,8 @@ fn main() {
     let cycle = turn_frames + hold_frames;
     let mut turn_start: Option<usize> = None;
     let mut sharpness: Vec<Sharpness> = Vec::new();
+    // Mesh levels arrived so far, each frame from the first turn on.
+    let mut mesh_arrived: Vec<u64> = Vec::new();
     let total = if turn_ms.is_some() {
         TURN_SETTLE_MAX + TURNS * cycle
     } else if still {
@@ -454,6 +460,7 @@ fn main() {
         };
         let t = Instant::now();
         let lod_view = LodView::new(&camera.clip_from_world, eye, HEIGHT, 1.0);
+        let lod_view = if around { lod_view.around() } else { lod_view };
         streamer.update(
             &mut textures,
             &mut geometry,
@@ -613,6 +620,7 @@ fn main() {
             } else if let Some(start) = turn_start {
                 let window = u64::from(feedback_settings.slices * feedback_settings.interval);
                 sharpness.push(streamer.texture_streamer().sharpness(&textures, window));
+                mesh_arrived.push(streamer.stats().mesh_levels);
                 if frame + 1 >= start + TURNS * cycle {
                     break;
                 }
@@ -641,7 +649,7 @@ fn main() {
         }
     }
     if turn_ms.is_some() {
-        turn_report(&sharpness, turn_frames, cycle, rate);
+        turn_report(&sharpness, &mesh_arrived, turn_frames, cycle, rate);
     }
     let s = streamer.stats();
     println!();
@@ -750,7 +758,13 @@ fn main() {
 /// `--turn`'s report: for each turn, the share of the feedback's pixels drawn from a
 /// coarser level than wanted (short) and than planned (arriving) since the turn started:
 /// its peak, and from when it stays under 1 %.
-fn turn_report(sharpness: &[Sharpness], turn_frames: usize, cycle: usize, rate: f64) {
+fn turn_report(
+    sharpness: &[Sharpness],
+    mesh_arrived: &[u64],
+    turn_frames: usize,
+    cycle: usize,
+    rate: f64,
+) {
     let ms = |frames: usize| frames as f64 * 1000.0 / rate;
     let pct = |part: u64, of: u64| {
         if of == 0 {
@@ -768,15 +782,19 @@ fn turn_report(sharpness: &[Sharpness], turn_frames: usize, cycle: usize, rate: 
         ms(cycle) / 1000.0
     );
     println!(
-        "| turn | blurrier than wanted, peak | under 1 % after | still arriving, peak | under 1 % after | levels short × pixels |"
+        "| turn | blurrier than wanted, peak | under 1 % after | still arriving, peak | under 1 % after | levels short × pixels | mesh levels arrived |"
     );
-    println!("|---|---:|---:|---:|---:|---:|");
+    println!("|---|---:|---:|---:|---:|---:|---:|");
     for (i, turn) in sharpness.chunks(cycle).enumerate() {
         let short: Vec<f64> = turn.iter().map(|s| pct(s.short, s.pixels)).collect();
         let arriving: Vec<f64> = turn.iter().map(|s| pct(s.arriving, s.pixels)).collect();
         let levels: u64 = turn.iter().map(|s| s.short_levels).sum();
+        let meshes = mesh_arrived
+            .chunks(cycle)
+            .nth(i)
+            .map_or(0, |m| m.last().unwrap_or(&0) - m.first().unwrap_or(&0));
         println!(
-            "| {} | {:.1} % | {:.0} ms | {:.1} % | {:.0} ms | {levels} |",
+            "| {} | {:.1} % | {:.0} ms | {:.1} % | {:.0} ms | {levels} | {meshes} |",
             i + 1,
             short.iter().copied().fold(0.0, f64::max),
             ms(calm(&short)),

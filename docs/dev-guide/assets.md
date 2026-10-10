@@ -162,8 +162,9 @@ let mut scene = SceneStreamer::open("packs/level1.pack".as_ref(), &jobs, &mut te
 let mut feedback = TextureFeedback::new(&device, &bindless, FeedbackSettings::default(), frames_in_flight)?;
 // Materials and draws from scene.layout().scene, with scene.textures() and scene.meshes().
 
-// Every frame, before the pools' begin_frame:
-let view = LodView::new(&camera.clip_from_world, camera.position, height, 1.0);
+// Every frame, before the pools' begin_frame (`around`: mesh levels by distance in every
+// direction, so that a fast turn finds them loaded; without it, only what is in view):
+let view = LodView::new(&camera.clip_from_world, camera.position, height, 1.0).around();
 scene.update(&mut textures, &mut geometry, &mut allocator, &mut budget,
     Some(&mut feedback), Some(&view), &materials, frame_number);
 budget.update(&allocator);
@@ -178,7 +179,9 @@ feedback.add_pass(&mut fg, &device, &mut allocator, &bindless, &geo, &mats, &pas
   samples: a small pass (1/8 of the view per side) draws the visible instances again and
   reports, per material, the finest level sampled; the textures of the materials on
   screen get their levels, nearest-to-full-detail first. Finer mesh levels follow the
-  level the culling pass will draw each instance at.
+  level the culling pass will draw each instance at; with `LodView::around` also for
+  instances behind the camera (on Sponza: no mesh level left to load after a fast turn,
+  instead of 41, for 0.4–0.8 MiB more).
 - **The budget.** By default 90 % of the device-local memory the OS grants the process on
   a discrete GPU, half on an integrated one (its "video memory" is system memory the game
   needs too); render targets and everything else the process holds come off it, the rest
