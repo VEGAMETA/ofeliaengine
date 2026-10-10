@@ -1127,7 +1127,9 @@ impl TexturePool {
                         ctx.cmd,
                         &vk::DependencyInfo::default().image_memory_barriers(&to_copy),
                     );
-                    for m in &moves {
+                    // A texture reallocated before any of its levels arrived (they may wait in
+                    // the queue) has nothing to copy: a copy of no regions is invalid.
+                    for m in moves.iter().filter(|m| m.count > 0) {
                         let regions: Vec<vk::ImageCopy> = m.levels[..m.count as usize]
                             .iter()
                             .map(|&(old, new, w, h)| vk::ImageCopy {
