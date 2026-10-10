@@ -368,6 +368,53 @@ impl<'x> ComputeRecorder<'_, 'x> {
         }
     }
 
+    /// Dispatches `shader` with the workgroup counts at `offset` in `args` (three `u32`,
+    /// written by an earlier dispatch or pass: declare the buffer [`Access::Indirect`] and
+    /// put [`Self::barrier_for_indirect`] after a dispatch of this pass that writes them).
+    pub fn dispatch_indirect<P: bytemuck::Pod>(
+        &mut self,
+        shader: &ComputeShader<P>,
+        args: vk::Buffer,
+        offset: u64,
+        push: &P,
+    ) {
+        let ctx = self.ctx;
+        // SAFETY: as `dispatch`; `args` holds the counts at `offset` (the caller's
+        // declaration), and zero counts dispatch nothing.
+        unsafe {
+            shader.pipeline.bind(ctx.cmd);
+            if !self.bound {
+                self.bindless.bind(ctx.cmd, vk::PipelineBindPoint::COMPUTE);
+                self.bound = true;
+            }
+            self.bindless
+                .push_constants(ctx.cmd, bytemuck::bytes_of(push));
+            ctx.device.cmd_dispatch_indirect(ctx.cmd, args, offset);
+        }
+    }
+
+    /// As [`Self::barrier`], and also for indirect arguments the dispatches so far wrote.
+    pub fn barrier_for_indirect(&mut self) {
+        let barrier = vk::MemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::COMPUTE_SHADER)
+            .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
+            .dst_stage_mask(
+                vk::PipelineStageFlags2::COMPUTE_SHADER | vk::PipelineStageFlags2::DRAW_INDIRECT,
+            )
+            .dst_access_mask(
+                vk::AccessFlags2::SHADER_STORAGE_READ
+                    | vk::AccessFlags2::SHADER_STORAGE_WRITE
+                    | vk::AccessFlags2::INDIRECT_COMMAND_READ,
+            );
+        // SAFETY: recording outside a rendering scope (a compute pass).
+        unsafe {
+            self.ctx.device.cmd_pipeline_barrier2(
+                self.ctx.cmd,
+                &vk::DependencyInfo::default().memory_barriers(&[barrier]),
+            );
+        }
+    }
+
     /// Makes the storage writes of the dispatches so far visible to the ones after (for
     /// passes that feed one dispatch into the next, as a mip chain does).
     pub fn barrier(&mut self) {

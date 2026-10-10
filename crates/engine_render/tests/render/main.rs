@@ -25,6 +25,7 @@ mod reflections;
 mod shaders;
 mod shadows;
 mod skinning;
+mod sort;
 mod streaming;
 mod subsurface;
 mod tonemap;

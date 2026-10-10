@@ -315,16 +315,18 @@ impl Adapter {
                 missing.push(name);
             }
         }
-        // Wave-level aggregation in compute (GPU culling, ADR 0034).
+        // Wave-level aggregation in compute (GPU culling, ADR 0034); wave sums and
+        // prefix sums (the GPU sort, ADR 0080). Every Vulkan 1.3 desktop GPU has them.
         let subgroup_ops = vk::SubgroupFeatureFlags::BASIC
             | vk::SubgroupFeatureFlags::VOTE
-            | vk::SubgroupFeatureFlags::BALLOT;
+            | vk::SubgroupFeatureFlags::BALLOT
+            | vk::SubgroupFeatureFlags::ARITHMETIC;
         if !subgroup
             .supported_stages
             .contains(vk::ShaderStageFlags::COMPUTE)
             || !subgroup.supported_operations.contains(subgroup_ops)
         {
-            missing.push("subgroup basic/vote/ballot operations in compute");
+            missing.push("subgroup basic/vote/ballot/arithmetic operations in compute");
         }
 
         let caps = OptionalCaps {
