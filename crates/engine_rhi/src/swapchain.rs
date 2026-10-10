@@ -11,6 +11,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub struct Surface {
     pub(crate) raw: vk::SurfaceKHR,
     pub(crate) loader: khr::surface::Instance,
+    /// The window's `HWND` (0 for a headless surface).
+    hwnd: isize,
     _instance: Arc<InstanceShared>,
 }
 
@@ -46,8 +48,70 @@ impl Surface {
         Ok(Self {
             raw,
             loader: khr::surface::Instance::new(instance.entry(), instance.raw()),
+            hwnd,
             _instance: instance.shared.clone(),
         })
+    }
+
+    /// The LUID of the display adapter that drives the monitor showing (most of) this
+    /// surface's window, low part first as [`crate::Adapter::luid`]; `None` for a headless
+    /// surface or when Windows cannot tell.
+    pub fn display_adapter_luid(&self) -> Option<[u8; 8]> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Wdk::Graphics::Direct3D::{
+                D3DKMT_CLOSEADAPTER, D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME, D3DKMTCloseAdapter,
+                D3DKMTOpenAdapterFromGdiDisplayName,
+            };
+            use windows_sys::Win32::Graphics::Gdi::{
+                GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFOEXW, MonitorFromWindow,
+            };
+            if self.hwnd == 0 {
+                return None;
+            }
+            // SAFETY: plain Win32 calls about the window this surface was created for (a
+            // stale handle only makes them fail); the structures are sized and zeroed as
+            // the calls require, and the adapter opened is closed again.
+            unsafe {
+                let monitor = MonitorFromWindow(self.hwnd as _, MONITOR_DEFAULTTONEAREST);
+                if monitor.is_null() {
+                    return None;
+                }
+                let mut info = MONITORINFOEXW::default();
+                info.monitorInfo.cbSize = size_of::<MONITORINFOEXW>() as u32;
+                if GetMonitorInfoW(monitor, (&raw mut info).cast()) == 0 {
+                    return None;
+                }
+                let mut open = D3DKMT_OPENADAPTERFROMGDIDISPLAYNAME {
+                    DeviceName: info.szDevice,
+                    ..Default::default()
+                };
+                if D3DKMTOpenAdapterFromGdiDisplayName(&mut open) != 0 {
+                    return None;
+                }
+                D3DKMTCloseAdapter(&D3DKMT_CLOSEADAPTER {
+                    hAdapter: open.hAdapter,
+                });
+                let mut luid = [0u8; 8];
+                luid[..4].copy_from_slice(&open.AdapterLuid.LowPart.to_le_bytes());
+                luid[4..].copy_from_slice(&open.AdapterLuid.HighPart.to_le_bytes());
+                Some(luid)
+            }
+        }
+        #[cfg(not(windows))]
+        None
+    }
+
+    /// Whether `adapter` presents to this surface across adapters: its window's monitor is
+    /// driven by another GPU (a desktop's integrated GPU behind a monitor on the discrete
+    /// one, a laptop's discrete GPU behind its integrated one). Swapchain images are then
+    /// shared with that GPU, and drawing into them is slow ([`Swapchain::presents_across_adapters`]).
+    /// `false` when either side cannot tell.
+    pub fn presents_across_adapters(&self, adapter: &crate::Adapter) -> bool {
+        match (self.display_adapter_luid(), adapter.luid) {
+            (Some(display), Some(own)) => display != own,
+            _ => false,
+        }
     }
 
     /// Creates a headless surface (`VK_EXT_headless_surface`; enable it with
@@ -69,6 +133,7 @@ impl Surface {
         Ok(Self {
             raw,
             loader: khr::surface::Instance::new(instance.entry(), instance.raw()),
+            hwnd: 0,
             _instance: instance.shared.clone(),
         })
     }
@@ -257,6 +322,9 @@ pub struct Swapchain {
     extent: vk::Extent2D,
     present_mode: PresentMode,
     desc: SwapchainDesc,
+    /// Whether the device presents across adapters ([`Surface::presents_across_adapters`]),
+    /// as of the last (re)creation.
+    across_adapters: bool,
     /// `VK_EXT_hdr_metadata`, and the metadata last set (stated again for every new
     /// swapchain object).
     hdr_metadata: Option<(ash::ext::hdr_metadata::Device, Option<HdrMetadata>)>,
@@ -298,6 +366,7 @@ impl Swapchain {
             extent: vk::Extent2D::default(),
             present_mode: desc.present_mode,
             desc: *desc,
+            across_adapters: false,
             hdr_metadata: device.hdr_metadata_enabled().then(|| {
                 (
                     ash::ext::hdr_metadata::Device::new(device.instance_raw(), device.raw()),
@@ -469,6 +538,7 @@ impl Swapchain {
         self.color = color;
         self.extent = extent;
         self.present_mode = present_mode;
+        self.across_adapters = surface.presents_across_adapters(device.adapter());
         if let Some((_, Some(metadata))) = self.hdr_metadata {
             self.set_hdr_metadata(&metadata);
         }
@@ -660,6 +730,17 @@ impl Swapchain {
     /// Present mode actually in use.
     pub fn present_mode(&self) -> PresentMode {
         self.present_mode
+    }
+
+    /// Whether the device presents across adapters (the window's monitor is driven by
+    /// another GPU), as of the last (re)creation: draw the frame into an image of its own
+    /// and copy it into the swapchain image then (`engine_render::present::PresentTarget`
+    /// does). On ref-1's Radeon iGPU behind a monitor on the RTX, the tone mapper took
+    /// 2.56 ms into the swapchain image, 0.82 ms into an image of its own plus 0.62 ms for
+    /// the copy; where the monitor is the GPU's own, a copy only costs (19.5 µs on the
+    /// RTX).
+    pub fn presents_across_adapters(&self) -> bool {
+        self.across_adapters
     }
 
     /// Outputs this surface offers, for the settings menu. HDR ones need

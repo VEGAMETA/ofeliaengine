@@ -44,9 +44,10 @@ mod windowed {
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::forward::{DirectionalLight, ShadowSettings};
     use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
-    use engine_render::graph::{ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState};
+    use engine_render::graph::{LoadOp, RenderGraph};
     use engine_render::material::{MaterialDesc, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
+    use engine_render::present::PresentTarget;
     use engine_render::texture_pool::TexturePool;
     use engine_render::upload::UploadRing;
     use engine_rhi::ash::vk;
@@ -373,18 +374,10 @@ mod windowed {
                     .unwrap()
                     .unwrap();
                 upload.push(t.elapsed().as_secs_f64() * 1e6);
-                let backbuffer = fg.import_texture(
-                    "backbuffer",
-                    ImportedTexture {
-                        image: swapchain.images()[acquired.index as usize],
-                        view: swapchain.views()[acquired.index as usize],
-                        desc: TextureDesc::new_2d(swapchain.format(), extent.width, extent.height),
-                        initial: TextureState::acquired_swapchain_image(),
-                        final_state: Some(TextureState::present()),
-                        sampled_index: None,
-                        storage_index: None,
-                    },
-                );
+                // Straight into the swapchain image, or apart and copied when it presents
+                // across adapters (`engine_render::present`).
+                let present = PresentTarget::import(&mut fg, &swapchain, acquired.index);
+                let backbuffer = present.texture;
                 // The camera is written for the GPU here: input → here is the latency.
                 if let Some(at) = input.at.filter(|_| fresh) {
                     latency.push(at.elapsed().as_secs_f64() * 1e6);
@@ -421,6 +414,7 @@ mod windowed {
                     )
                     .unwrap();
                 composed += t.elapsed().as_secs_f64() * 1e6;
+                present.finish(&mut fg);
                 fg.execute_with_bindless(&mut allocator, Some(&bindless))
                     .unwrap();
             }

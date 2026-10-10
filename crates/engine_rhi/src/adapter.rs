@@ -164,6 +164,10 @@ pub struct Adapter {
     /// Identifies the driver's pipeline cache format: caches from another UUID are
     /// unusable (another driver build).
     pub pipeline_cache_uuid: [u8; 16],
+    /// The adapter's locally unique identifier (`deviceLUID`: Windows' `LUID`, low part
+    /// first), when the driver gives one: what [`crate::Surface::display_adapter_luid`]
+    /// is compared with.
+    pub luid: Option<[u8; 8]>,
     /// Driver name and version string (`driverName driverInfo`).
     pub driver: String,
     /// Total size of device-local memory heaps in bytes.
@@ -187,10 +191,12 @@ impl Adapter {
         let mut driver_props = vk::PhysicalDeviceDriverProperties::default();
         let mut subgroup = vk::PhysicalDeviceSubgroupProperties::default();
         let mut resolve = vk::PhysicalDeviceDepthStencilResolveProperties::default();
+        let mut ids = vk::PhysicalDeviceIDProperties::default();
         let mut props2 = vk::PhysicalDeviceProperties2::default()
             .push_next(&mut driver_props)
             .push_next(&mut subgroup)
-            .push_next(&mut resolve);
+            .push_next(&mut resolve)
+            .push_next(&mut ids);
         // SAFETY: `physical` came from this instance; the output chain is valid.
         unsafe { raw.get_physical_device_properties2(physical, &mut props2) };
         let props = props2.properties;
@@ -387,6 +393,7 @@ impl Adapter {
             api_version: props.api_version,
             driver_version: props.driver_version,
             pipeline_cache_uuid: props.pipeline_cache_uuid,
+            luid: (ids.device_luid_valid == vk::TRUE).then_some(ids.device_luid),
             driver: format!("{driver_name} {driver_info}").trim().to_owned(),
             device_local_bytes,
             memory,

@@ -61,6 +61,7 @@ pub mod png;
 pub mod post;
 pub mod postaa;
 pub mod postfx;
+pub mod present;
 pub mod reflections;
 pub mod shadow;
 pub mod skinning;

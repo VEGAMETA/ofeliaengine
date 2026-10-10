@@ -31,6 +31,9 @@
 //!     [--no-ao]             no ambient occlusion
 //!     [--aa off|taau|fsr]   [--quality native|quality|balanced|performance]
 //!     [--vsync]
+//!     [--present apart|direct]   the frame into an image of its own copied into the
+//!                                swapchain image, or straight into it (default: apart
+//!                                only when presenting across adapters)
 //!     [--pipeline-cache <dir>]   load and save the pipeline cache there (default: none)
 //! ```
 //!
@@ -76,11 +79,10 @@ mod windowed {
         DirectionalLight, LocalLight, LocalShadowSettings, ShadowSettings, Spot,
     };
     use engine_render::gpu_scene::{GpuScene, InstanceId};
-    use engine_render::graph::{
-        Access, ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState,
-    };
+    use engine_render::graph::{LoadOp, RenderGraph};
     use engine_render::material::{MaterialDesc, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, cube};
+    use engine_render::present::PresentTarget;
     use engine_render::skinning::{SkinnedId, SkinnedMeshData, Skinning};
     use engine_render::streaming::LodView;
     use engine_render::texture_pool::{TextureId, TextureLevels, TexturePool};
@@ -382,7 +384,9 @@ mod windowed {
         let character_count = number("--characters", 64);
         let lights_on = !flag("--no-lights");
         let feedback_on = !flag("--no-feedback");
-        let offscreen_on = flag("--offscreen");
+        // Where the frame is drawn (`engine_render::present`): `--present apart|direct`,
+        // by default apart only when the swapchain presents across adapters.
+        let present_apart = option("--present").map(|v| v == "apart");
         let vsync = flag("--vsync");
         let cache_dir = option("--pipeline-cache").map(PathBuf::from);
 
@@ -918,25 +922,12 @@ mod windowed {
                     .unwrap()
                     .unwrap();
                 s.upload = us(t);
-                let backbuffer = fg.import_texture(
-                    "backbuffer",
-                    ImportedTexture {
-                        image: swapchain.images()[acquired.index as usize],
-                        view: swapchain.views()[acquired.index as usize],
-                        desc: TextureDesc::new_2d(swapchain.format(), extent.width, extent.height),
-                        initial: TextureState::acquired_swapchain_image(),
-                        final_state: Some(TextureState::present()),
-                        sampled_index: None,
-                        storage_index: None,
-                    },
+                let present = PresentTarget::import_with(
+                    &mut fg,
+                    &swapchain,
+                    acquired.index,
+                    present_apart.unwrap_or_else(|| swapchain.presents_across_adapters()),
                 );
-                // `--offscreen`: the frame into an image of the swapchain's format, copied.
-                let offscreen = offscreen_on.then(|| {
-                    fg.create_texture(
-                        "ldr",
-                        TextureDesc::new_2d(swapchain.format(), extent.width, extent.height),
-                    )
-                });
                 let t = Instant::now();
                 let view_frame = frame_renderer
                     .add_view(
@@ -962,47 +953,13 @@ mod windowed {
                         },
                         &main.camera,
                         ViewTarget {
-                            texture: offscreen.unwrap_or(backbuffer),
+                            texture: present.texture,
                             rect: None,
                             load: LoadOp::DontCare,
                         },
                     )
                     .unwrap();
-                if let Some(ldr) = offscreen {
-                    let (w, h) = (extent.width, extent.height);
-                    fg.add_pass("copy to swapchain")
-                        .read(ldr, Access::TransferRead)
-                        .write(backbuffer, Access::TransferWrite)
-                        .execute(move |ctx| {
-                            let layers = vk::ImageSubresourceLayers {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                mip_level: 0,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            };
-                            let region = vk::ImageCopy {
-                                src_subresource: layers,
-                                dst_subresource: layers,
-                                extent: vk::Extent3D {
-                                    width: w,
-                                    height: h,
-                                    depth: 1,
-                                },
-                                ..Default::default()
-                            };
-                            // SAFETY: recording; the graph arranged both layouts.
-                            unsafe {
-                                ctx.device.cmd_copy_image(
-                                    ctx.cmd,
-                                    ctx.image(ldr),
-                                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                                    ctx.image(backbuffer),
-                                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                                    &[region],
-                                );
-                            }
-                        });
-                }
+                present.finish(&mut fg);
                 if feedback_on {
                     feedback
                         .add_pass(
@@ -1072,9 +1029,18 @@ mod windowed {
             lights.len()
         );
         println!(
-            "Adapter: {adapter_name}; {WIDTH}×{HEIGHT}, {antialiasing} at {quality:?}, AO {:?}; present mode {:?}; {drawn} frames ({WARMUP} warm-up frames left out)\n",
+            "Adapter: {adapter_name}; {WIDTH}×{HEIGHT}, {antialiasing} at {quality:?}, AO {:?}; present mode {:?}, {}; {drawn} frames ({WARMUP} warm-up frames left out)\n",
             ambient_occlusion.map(|a| a.quality),
-            swapchain.present_mode()
+            swapchain.present_mode(),
+            match (
+                present_apart.unwrap_or_else(|| swapchain.presents_across_adapters()),
+                swapchain.presents_across_adapters(),
+            ) {
+                (true, true) => "drawn apart and copied (the monitor is on another GPU)",
+                (true, false) => "drawn apart and copied",
+                (false, true) => "drawn into the swapchain image (the monitor is on another GPU)",
+                (false, false) => "drawn into the swapchain image",
+            }
         );
         println!("**Start-up** (ms):\n");
         println!("| phase | ms |\n|---|---:|");

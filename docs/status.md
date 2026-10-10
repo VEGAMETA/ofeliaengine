@@ -85,8 +85,8 @@ review's P0 fixes: PRs #124, #125; the Radeon's perf limits, PR #126), 0b (fast 
 PRs #127–#130; left optional: the fast-turn test in the perf gate, one wider feedback
 pass if a larger scene shows pop-in), 0c (Catmull-Rom and Lanczos-3, ADR 0075's
 addendum), 0d (motion vectors from the depth prepass, ADR 0043's addendum), TAAU's
-Catmull-Rom history with point reads (owner, 2026-10-10; ADR 0043's second amendment).
-Next: 0e.
+Catmull-Rom history with point reads (owner, 2026-10-10; ADR 0043's second amendment), 0e
+(presenting across adapters, ADR 0007's addendum). Next: 0f.
 
 ## 5. Queue (in order)
 
@@ -201,9 +201,15 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    golden images byte-identical; 16 entry points and ~40 pipelines fewer; the perf gate
    measures the default settings (`sponza_taa_ao`). Left: still geometry's motion from
    depth (the prepass now pays +0.5 ms on the Radeon for writing it).
-0e. **The present path on the iGPU** (review §3.4): the tone mapper writing the swapchain
+0e. ~~**The present path on the iGPU** (review §3.4): the tone mapper writing the swapchain
    image costs the Radeon 1.1 ms of frame against writing an offscreen image and copying
-   it. Offscreen + copy where measured faster, find the cause, a windowed scene in the gate.
+   it. Offscreen + copy where measured faster, find the cause, a windowed scene in the gate.~~
+   Done 2026-10-10 (ADR 0007's addendum). The cause: ref-1's monitor is on the RTX, so the
+   Radeon presents across adapters (shared, row-major swapchain images). The window's
+   monitor adapter (D3DKMT) is compared with Vulkan's `deviceLUID`; across adapters the
+   frame is drawn apart and copied (`engine_render::present::PresentTarget`): Radeon GPU
+   frame 27.1 → 26.3 ms in `flight`, the RTX unchanged (direct). Left: a windowed present
+   scene in the perf gate, with the player crate (6f).
 0f. **Moving instances** (review §3.5): ~70 ns each per frame on one thread (60,000 make
    the RTX CPU-bound at 5.2 ms). Propagation, extraction, interpolation and upload in
    parallel on the job system; interpolation on the GPU so movers upload per tick, not per

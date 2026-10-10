@@ -38,6 +38,7 @@ serde_json = { version = "1", features = ["raw_value"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Wdk_Foundation",
+    "Wdk_Graphics_Direct3D",
     "Wdk_Storage_FileSystem",
     "Win32_Devices_Display",
     "Win32_Foundation",

@@ -95,3 +95,62 @@ fn headless_present_loop_with_resize() {
     drop(device);
     assert_no_validation_errors(&instance);
 }
+
+/// A window's monitor is driven by one of the system's adapters
+/// (`Surface::display_adapter_luid`, matched against Vulkan's `deviceLUID`), and every
+/// other adapter presents to it across adapters: what `engine_render::present` draws the
+/// frame apart for. Needs a desktop (skips without one).
+#[cfg(windows)]
+#[test]
+fn the_monitor_belongs_to_one_adapter_and_the_others_present_across() {
+    use engine_platform::window::{WindowDesc, WindowSystem};
+    use engine_rhi::{Instance, InstanceDesc};
+    let Ok(windows) = WindowSystem::start(64) else {
+        println!("skipping: no window system");
+        return;
+    };
+    let Ok(window) = windows.create_window(&WindowDesc {
+        title: String::from("engine_rhi monitor test"),
+        width: 64,
+        height: 64,
+        resizable: false,
+        visible: false,
+    }) else {
+        println!("skipping: no window");
+        return;
+    };
+    let Ok(instance) = Instance::new(&InstanceDesc {
+        app_name: String::from("engine_rhi monitor test"),
+        surface: true,
+        ..InstanceDesc::default()
+    }) else {
+        println!("skipping: no Vulkan");
+        return;
+    };
+    let surface = Surface::from_win32(&instance, window.hinstance, window.hwnd).unwrap();
+    let Some(display) = surface.display_adapter_luid() else {
+        println!("skipping: Windows did not name the monitor's adapter");
+        return;
+    };
+    let adapters = instance.adapters().unwrap();
+    let mut owners = 0;
+    for adapter in &adapters {
+        let across = surface.presents_across_adapters(adapter);
+        println!(
+            "{}: LUID {:?}, presents across adapters: {across}",
+            adapter.summary(),
+            adapter.luid
+        );
+        if adapter.luid == Some(display) {
+            owners += 1;
+            assert!(!across, "the monitor's own adapter presents directly");
+        } else if adapter.luid.is_some() {
+            assert!(across, "another adapter presents across");
+        }
+    }
+    // A software rasterizer or a display-only adapter may be missing from Vulkan's list.
+    assert!(owners <= 1, "one adapter drives the monitor: {display:?}");
+    if owners == 0 {
+        println!("the monitor's adapter ({display:?}) is not a Vulkan adapter here");
+    }
+}
