@@ -57,6 +57,29 @@ pub trait SceneSink {
     fn set_mesh(&mut self, id: Self::Id, mesh: MeshId);
     /// Changes its material (unchanged: nothing).
     fn set_material(&mut self, id: Self::Id, material: MaterialId);
+    /// Whether the sink places moving instances between ticks itself
+    /// ([`Self::set_motion`], [`Self::set_alpha`]): a [`GpuScene`] does it on the GPU, so
+    /// the CPU's work per frame does not grow with the moving instances. Otherwise
+    /// [`RenderExtract::interpolate`] blends them on the CPU every frame.
+    fn interpolates(&self) -> bool {
+        false
+    }
+    /// Moves one between two ticks, from its transform at the tick before to the last
+    /// tick's (called when [`Self::interpolates`]; [`Self::set_affine`] stops it).
+    fn set_motion(&mut self, id: Self::Id, from: &Affine3A, to: &Affine3A) -> bool {
+        let _ = from;
+        self.set_affine(id, to)
+    }
+    /// [`Self::set_motion`] from the transform it was last given (called when
+    /// [`Self::interpolates`]: extraction gives every move, so that is the last tick's).
+    fn step_motion(&mut self, id: Self::Id, to: &Affine3A) -> bool {
+        self.set_affine(id, to)
+    }
+    /// Where between the last two ticks the next frame places moving instances (called
+    /// when [`Self::interpolates`]).
+    fn set_alpha(&mut self, alpha: f32) {
+        let _ = alpha;
+    }
 }
 
 impl SceneSink for GpuScene {
@@ -78,6 +101,18 @@ impl SceneSink for GpuScene {
     }
     fn set_material(&mut self, id: InstanceId, material: MaterialId) {
         GpuScene::set_material(self, id, material);
+    }
+    fn interpolates(&self) -> bool {
+        true
+    }
+    fn set_motion(&mut self, id: InstanceId, from: &Affine3A, to: &Affine3A) -> bool {
+        GpuScene::set_motion(self, id, from, to)
+    }
+    fn step_motion(&mut self, id: InstanceId, to: &Affine3A) -> bool {
+        GpuScene::step_motion(self, id, to)
+    }
+    fn set_alpha(&mut self, alpha: f32) {
+        GpuScene::set_alpha(self, alpha);
     }
 }
 
@@ -126,7 +161,9 @@ type Changes = QueryState<
 /// removals from the world's removal log ([`World::track_removals`]), so a static world
 /// costs a scan of chunk versions. [`Self::interpolate`] runs once per render frame and
 /// places the instances that moved in the last tick between their last two transforms,
-/// so motion stays smooth whatever the tick rate.
+/// so motion stays smooth whatever the tick rate. With a [`GpuScene`] the GPU places
+/// them ([`SceneSink::interpolates`]): `sync` gives each moving instance its two ticks'
+/// transforms once per tick, and `interpolate` only the frame's factor.
 ///
 /// Extraction only reads the world: the simulation stays deterministic, and its state
 /// hash is unaffected.
@@ -240,6 +277,7 @@ impl<Id: Copy + Eq> RenderExtract<Id> {
         // Additions and edits: the chunks where a world transform or a renderer changed.
         let tick = self.tick;
         let interpolation = self.interpolation;
+        let gpu_motion = interpolation && scene.interpolates();
         let entries = &mut self.entries;
         let moving_next = &mut self.moving_next;
         moving_next.clear();
@@ -282,6 +320,10 @@ impl<Id: Copy + Eq> RenderExtract<Id> {
                         } else if !same(&global.0, &entry.current) {
                             stats.moved += 1;
                             moving_next.push((entity, entry.current));
+                            if gpu_motion {
+                                // From what the scene was last given: `entry.current`.
+                                scene.step_motion(entry.id, &global.0);
+                            }
                             entry.current = global.0;
                             entry.moved_tick = tick;
                         }
@@ -321,10 +363,16 @@ impl<Id: Copy + Eq> RenderExtract<Id> {
 
     /// Places the instances that moved in the last tick at `alpha` between their last
     /// two transforms ([`crate::FixedStep::alpha`]). Call it once per render frame, after the
-    /// frame's ticks and before rendering. Costs one blend per moving instance.
+    /// frame's ticks and before rendering. Costs one blend per moving instance, or nothing
+    /// when the sink places them itself ([`SceneSink::interpolates`]).
     pub fn interpolate<S: SceneSink<Id = Id>>(&mut self, scene: &mut S, alpha: f32) {
         engine_profiler::zone!("runtime::RenderExtract::interpolate");
         if !self.interpolation {
+            return;
+        }
+        if scene.interpolates() {
+            // The sink places them (a `GpuScene`: on the GPU).
+            scene.set_alpha(alpha);
             return;
         }
         for &(entity, previous) in &self.moving {

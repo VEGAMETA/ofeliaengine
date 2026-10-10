@@ -1137,3 +1137,141 @@ fn occlusion_culling_keys_off_slots_whatever_the_spawn_order() {
     }
     bed.finish(vec![scene], (vec![occlusion], Vec::new()));
 }
+
+/// Motion between ticks on the GPU (ADR 0064 addendum): an instance given its two ticks'
+/// transforms once per tick (`set_motion`) is drawn at each frame's interpolation factor
+/// (`set_alpha`) with nothing uploaded in between, and its motion vectors follow the
+/// frames' placements; stopping, teleporting and removing it end the motion.
+#[test]
+fn instances_move_between_ticks_on_the_gpu() {
+    use engine_core::math::Affine3A;
+    const SIZE: u32 = 64;
+    // The orthographic view spans 8 units: one unit is 8 pixels.
+    let Some(mut bed) = Bed::new(SIZE) else {
+        return;
+    };
+    let mesh = bed.geometry.add_mesh(&cube().as_data()).unwrap();
+    let material = bed.materials.default_material();
+    let eye = Vec3::new(0.0, 0.0, 10.0);
+    let camera = Camera {
+        clip_from_world: vulkan_orthographic(-4.0, 4.0, -4.0, 4.0, 0.1, 50.0)
+            * look_at(eye, Vec3::ZERO, Vec3::Y),
+        position: eye,
+    };
+    let at = |x: f32, y: f32| {
+        Affine3A::from_scale_rotation_translation(
+            Vec3::splat(1.5),
+            Quat::IDENTITY,
+            Vec3::new(x, y, 0.0),
+        )
+    };
+    let temporal = Temporal::new(&bed.device, &mut bed.allocator, 16).unwrap();
+    let mut scene = bed.scene(16);
+    let index = |x: f32, y: f32| {
+        let (px, py) = ((32.0 + x * 8.0) as u32, (32.0 - y * 8.0) as u32);
+        (py * SIZE + px) as usize
+    };
+    let motion = |shot: &Shot, x: f32, y: f32| shot.motion[index(x, y)];
+    // Drawn there: its pixel differs from the background's (a corner).
+    let covered = |shot: &Shot, x: f32, y: f32| {
+        let i = index(x, y) * 4;
+        shot.image[i..i + 3] != shot.image[0..3]
+    };
+    let near = |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
+
+    let a = scene.insert(SceneInstance {
+        mesh,
+        material,
+        world_from_object: Mat4::from(at(-2.0, 1.5)),
+    });
+    bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+
+    // A tick moved it 1 unit right; the frame is a quarter into the next tick: -1.75,
+    // 2 px from where it was.
+    assert!(scene.set_motion(a, &at(-2.0, 1.5), &at(-1.0, 1.5)));
+    scene.set_alpha(0.25);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    let stats = shot.scene.unwrap();
+    assert_eq!((stats.moving, stats.motion_updates), (1, 1));
+    let m = motion(&shot, -1.75, 1.5);
+    assert!(near(m, [2.0, 0.0]), "a quarter in: {m:?}");
+    assert!(covered(&shot, -1.75, 1.5) && !covered(&shot, -2.9, 1.5));
+
+    // Three quarters in, nothing uploaded: 4 px more.
+    scene.set_alpha(0.75);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    let stats = shot.scene.unwrap();
+    assert_eq!(
+        (stats.moving, stats.motion_updates, stats.uploaded),
+        (1, 0, 0)
+    );
+    let m = motion(&shot, -1.25, 1.5);
+    assert!(near(m, [4.0, 0.0]), "three quarters in: {m:?}");
+
+    // The next tick, from -1 to 0, a quarter in: -0.75, 4 px from -1.25.
+    assert!(scene.set_motion(a, &at(-1.0, 1.5), &at(0.0, 1.5)));
+    scene.set_alpha(0.25);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    let m = motion(&shot, -0.75, 1.5);
+    assert!(near(m, [4.0, 0.0]), "next tick: {m:?}");
+
+    // It stops at its last tick's transform: 6 px from -0.75, then still.
+    assert!(scene.set_affine(a, &at(0.0, 1.5)));
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    assert_eq!(shot.scene.unwrap().moving, 0);
+    let m = motion(&shot, 0.0, 1.5);
+    assert!(near(m, [6.0, 0.0]), "stopped: {m:?}");
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    assert!(near(motion(&shot, 0.0, 1.5), [0.0; 2]), "settled");
+
+    // A new instance moving from its first frame: halfway, without motion.
+    let b = scene.insert(SceneInstance {
+        mesh,
+        material,
+        world_from_object: Mat4::from(at(2.0, -1.5)),
+    });
+    assert!(scene.set_motion(b, &at(2.0, -1.5), &at(2.0, -0.5)));
+    scene.set_alpha(0.5);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    assert!(covered(&shot, 2.0, -1.0));
+    let m = motion(&shot, 2.0, -1.0);
+    assert!(near(m, [0.0; 2]), "new: {m:?}");
+
+    // Teleported while moving: no motion where it lands, and no longer moving.
+    scene.teleport(b, &Mat4::from(at(-2.0, -1.5)));
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    assert_eq!(shot.scene.unwrap().moving, 0);
+    assert!(covered(&shot, -2.0, -1.5));
+    assert!(near(motion(&shot, -2.0, -1.5), [0.0; 2]), "teleported");
+
+    // `step_motion` goes from the transform the instance was last given; two ticks before
+    // an upload move it over the last one only (from -1 to 0, halfway: -0.5).
+    assert!(scene.step_motion(a, &at(-1.0, 1.5)));
+    assert!(scene.step_motion(a, &at(0.0, 1.5)));
+    scene.set_alpha(0.5);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    assert!(covered(&shot, -0.5, 1.5) && !covered(&shot, 0.9, 1.5));
+    // Since last frame (at 0) it moved back 4 px: the first frame of a motion starts
+    // from what the instance showed.
+    let m = motion(&shot, -0.5, 1.5);
+    assert!(near(m, [-4.0, 0.0]), "two ticks: {m:?}");
+    // The next tick steps on from 0 to 1, a quarter in: 0.25, 6 px on.
+    assert!(scene.step_motion(a, &at(1.0, 1.5)));
+    scene.set_alpha(0.25);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    let m = motion(&shot, 0.25, 1.5);
+    assert!(near(m, [6.0, 0.0]), "stepped: {m:?}");
+    assert!(scene.set_affine(a, &at(1.0, 1.5)));
+
+    // Removed while moving: gone.
+    assert!(scene.set_motion(b, &at(-2.0, -1.5), &at(-1.0, -1.5)));
+    scene.set_alpha(0.5);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    assert_eq!(shot.scene.unwrap().moving, 1);
+    assert!(covered(&shot, -1.5, -1.5));
+    scene.remove(b);
+    let shot = bed.frame(Draw::Scene(&mut scene), camera, None, Some(&temporal));
+    assert_eq!(shot.scene.unwrap().moving, 0);
+    assert!(!covered(&shot, -1.5, -1.5), "removed");
+    bed.finish(vec![scene], (Vec::new(), vec![temporal]));
+}
