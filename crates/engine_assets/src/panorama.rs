@@ -13,7 +13,7 @@
 //!   sun's light, taken out by [`find_sun`], is not lost.
 
 use crate::ddc::{CacheOutcome, DerivedDataCache};
-use crate::hdr::{HdrError, HdrImage, PanoramaSun, SunSearch, decode_hdr, find_sun};
+use crate::hdr::{HdrError, HdrImage, PanoramaSun, SunSearch, decode_panorama, find_sun};
 use crate::pack::{EntryKind, Pack, PackError, PackStats, PackWriter, PreparedEntry, invalid};
 use block_compression::encode::compress_rgba16;
 use block_compression::half::f16;
@@ -342,7 +342,7 @@ fn compress_level(level: &[Vec3], size: u32, jobs: Option<&ThreadPool>) -> Vec<u
     out
 }
 
-/// The cache key of an `.hdr` file's bytes cooked with `settings`.
+/// The cache key of a panorama file's bytes (`.hdr` or OpenEXR) cooked with `settings`.
 pub fn panorama_key(encoded: &[u8], settings: &PanoramaCookSettings) -> u128 {
     let mut h = StableHasher::new();
     h.write_str("engine panorama 1");
@@ -365,12 +365,13 @@ pub fn panorama_key(encoded: &[u8], settings: &PanoramaCookSettings) -> u128 {
 /// Entry kind of cooked panoramas in the derived data cache.
 const PANORAMA_KIND: &str = "panorama";
 
-/// Imports an `.hdr` file as a cooked panorama: decoded and cooked, or loaded from `cache`
-/// when an earlier import of the same bytes with the same settings stored it.
+/// Imports a panorama file (`.hdr` or OpenEXR, [`decode_panorama`]) as a cooked panorama:
+/// decoded and cooked, or loaded from `cache` when an earlier import of the same bytes with
+/// the same settings stored it.
 ///
 /// # Errors
 ///
-/// If the bytes are not a Radiance HDR file this crate reads.
+/// If the bytes are not a panorama this crate reads.
 pub fn import_panorama(
     encoded: &[u8],
     settings: &PanoramaCookSettings,
@@ -386,7 +387,7 @@ pub fn import_panorama(
     {
         return Ok((panorama, CacheOutcome::Hit));
     }
-    let panorama = cook_panorama(&decode_hdr(encoded)?, settings, jobs);
+    let panorama = cook_panorama(&decode_panorama(encoded)?, settings, jobs);
     if let (Some(cache), Some(key)) = (cache, key) {
         // A cache that cannot write only costs the next import its time.
         let _ = cache.put(key, PANORAMA_KIND, &panorama.to_bytes());

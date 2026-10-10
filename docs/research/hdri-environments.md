@@ -61,9 +61,10 @@ Not taken: luminance compression (Filament's `--clamp`) loses the sun's energy a
 no shadow; with the sun out, windowing the harmonics is not needed; sampling the panorama
 directly in the sky pass (Godot) would need a panorama variant of every reader of the sky.
 
-**Phase 2** (ADR 0083's amendment): panoramas cooked into BC6H cubes with mips (the DDC
-and packs), the background 8 times smaller; the cube turned when sampled. Still to do:
-OpenEXR; the sun's angular size for soft shadows.
+**Phase 2** (ADR 0083's amendments): panoramas cooked into BC6H cubes with mips (the DDC
+and packs), the background 8 times smaller; the cube turned when sampled; OpenEXR through
+the `exr` crate (Poly Haven's EXRs are PIZ compressed, float). Still to do: the sun's
+angular size for soft shadows.
 
 ## Patents
 

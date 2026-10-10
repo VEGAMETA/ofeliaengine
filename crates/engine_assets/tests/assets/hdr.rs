@@ -319,3 +319,89 @@ fn the_test_panorama_cooks_into_a_bc6h_cube() {
     );
     assert_eq!(cooked.sun, find_sun(&image, &SunSearch::default()));
 }
+
+#[test]
+fn exr_files_decode_into_rgbe_rows_top_down() {
+    use engine_assets::hdr::{decode_exr, decode_panorama};
+    // Written by the exr crate itself: 64 × 32, red by column, green by row, blue a large
+    // value (a sun's).
+    let path = std::env::temp_dir().join(format!("engine_exr_test_{}.exr", std::process::id()));
+    let color = |x: usize, y: usize| (x as f32 / 64.0, y as f32 / 32.0, 30_000.0f32);
+    exr::prelude::write_rgb_file(&path, 64, 32, color).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let _ = std::fs::remove_file(&path);
+    let image = decode_panorama(&bytes).unwrap();
+    assert_eq!((image.width, image.height), (64, 32));
+    for (x, y) in [(0, 0), (63, 0), (5, 31), (40, 17)] {
+        let (r, g, b) = color(x as usize, y as usize);
+        let got = image.radiance(x, y);
+        // Within half a step of the largest channel's mantissa (blue).
+        for (have, want) in [(got.x, r), (got.y, g), (got.z, b)] {
+            assert!(
+                (have - want).abs() <= b / 256.0,
+                "({x}, {y}): {got} vs ({r}, {g}, {b})"
+            );
+        }
+    }
+    assert!(matches!(decode_exr(b"not an exr"), Err(HdrError::Exr(_))));
+    assert!(matches!(
+        decode_panorama(b"GIF89a"),
+        Err(HdrError::Signature)
+    ));
+}
+
+#[test]
+fn the_exr_and_hdr_of_one_panorama_agree() {
+    use engine_assets::hdr::decode_panorama;
+    let dir = assets().join("HDRI");
+    let (Ok(hdr), Ok(exr)) = (
+        std::fs::read(dir.join("kloofendal_48d_partly_cloudy_puresky_1k.hdr")),
+        std::fs::read(dir.join("kloofendal_48d_partly_cloudy_puresky_1k.exr")),
+    ) else {
+        assert!(
+            !std::env::var("ENGINE_REQUIRE_GOLDEN").is_ok_and(|v| v == "1"),
+            "the 1K panoramas are missing (tools/fetch-test-assets.ps1)"
+        );
+        println!("skipped: the 1K panoramas are missing");
+        return;
+    };
+    let start = std::time::Instant::now();
+    let from_exr = decode_panorama(&exr).unwrap();
+    let took = start.elapsed();
+    let from_hdr = decode_panorama(&hdr).unwrap();
+    assert_eq!(
+        (from_exr.width, from_exr.height),
+        (from_hdr.width, from_hdr.height)
+    );
+    // Pixel by pixel, luminance within RGBE's steps; the brightest pixel in the same place.
+    let luminance = |c: Vec3| c.dot(Vec3::new(0.2126, 0.7152, 0.0722));
+    let (mut worst, mut sum) = (0.0f32, 0.0f64);
+    let (mut brightest, mut where_exr, mut where_hdr) = ((0.0f32, 0.0f32), 0, 0);
+    for i in 0..from_exr.pixels.len() {
+        let (x, y) = (i as u32 % from_exr.width, i as u32 / from_exr.width);
+        let (a, b) = (
+            luminance(from_exr.radiance(x, y)),
+            luminance(from_hdr.radiance(x, y)),
+        );
+        let error = (a - b).abs() / a.max(b).max(1e-3);
+        worst = worst.max(error);
+        sum += f64::from(error);
+        if a > brightest.0 {
+            (brightest.0, where_exr) = (a, i);
+        }
+        if b > brightest.1 {
+            (brightest.1, where_hdr) = (b, i);
+        }
+    }
+    let mean = sum / from_exr.pixels.len() as f64;
+    println!(
+        "1K EXR decoded in {took:?}; against the HDR: mean relative error {mean:.5}, worst {worst:.4}, \
+         peaks {} / {}",
+        brightest.0, brightest.1
+    );
+    assert!(mean < 0.01, "mean {mean}");
+    assert_eq!(where_exr, where_hdr);
+    let sun_exr = find_sun(&from_exr, &SunSearch::default()).unwrap();
+    let sun_hdr = find_sun(&from_hdr, &SunSearch::default()).unwrap();
+    assert!(sun_exr.direction.dot(sun_hdr.direction) > 0.99999);
+}

@@ -35,6 +35,14 @@ $panoramas = @(
     , @('kloofendal_48d_partly_cloudy_puresky_2k.hdr',
       'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kloofendal_48d_partly_cloudy_puresky_2k.hdr',
       '2eba3a4d7eeb23cbfbeca364c97e7980', 'CC0 (Poly Haven; Greg Zaal, sky edits Jarod Guest)')
+    # The same panorama at 1K as Radiance HDR and as OpenEXR (PIZ, 32-bit floats): the
+    # OpenEXR decoder is checked against the HDR one.
+    , @('kloofendal_48d_partly_cloudy_puresky_1k.hdr',
+      'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/1k/kloofendal_48d_partly_cloudy_puresky_1k.hdr',
+      'c69498687e876bf68d2a8b8a62234eb9', 'CC0 (Poly Haven; Greg Zaal, sky edits Jarod Guest)')
+    , @('kloofendal_48d_partly_cloudy_puresky_1k.exr',
+      'https://dl.polyhaven.org/file/ph-assets/HDRIs/exr/1k/kloofendal_48d_partly_cloudy_puresky_1k.exr',
+      'ca0c1317a4b22bb25e826cb3640ee833', 'CC0 (Poly Haven; Greg Zaal, sky edits Jarod Guest)')
 )
 
 function Fetch($url, $path) {

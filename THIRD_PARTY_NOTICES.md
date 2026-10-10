@@ -21,6 +21,7 @@ the dependency.
 | zune-jpeg 0.5.15 (+ zune-core 0.5) | MIT OR Apache-2.0 OR Zlib | JPEG decoding of textures in `engine_assets` (ADR 0040) |
 | block_compression 0.10.0 (© Nils Hasenbanck; a port of Intel's ISPC Texture Compressor, © Intel Corporation) | MIT | BC7 and BC5 texture compression in `engine_assets` (ADR 0041), BC6H for HDR panoramas (ADR 0083) |
 | half 2.7.1 (+ zerocopy 0.8.62) | MIT OR Apache-2.0 (zerocopy BSD-2-Clause OR Apache-2.0 OR MIT) | half floats for BC6H compression (block_compression's `bc6h` feature) in `engine_assets` (ADR 0083) |
+| exr 1.74.0 (+ bit_field 0.10, lebe 0.5, zune-inflate 0.2) | BSD-3-Clause (lebe BSD-3-Clause; bit_field MIT OR Apache-2.0; zune-inflate MIT OR Apache-2.0 OR Zlib) | OpenEXR panoramas in `engine_assets` (ADR 0083) |
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |

@@ -1197,15 +1197,15 @@ let view = ForwardView { light, environment: Some(&environment), ..view };
 ### HDRI skies: an HDR panorama as the sky
 
 An environment can take its sky from an HDR panorama (ADR 0083): an equirectangular `.hdr`
-image, like the ones on Poly Haven. It is drawn behind the scene and lights it; its sun,
-found in the image, becomes your directional light, so it casts shadows.
+or OpenEXR image, like the ones on Poly Haven. It is drawn behind the scene and lights it;
+its sun, found in the image, becomes your directional light, so it casts shadows.
 
 ```rust
-use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
+use engine_assets::hdr::{SunSearch, decode_panorama, find_sun};
 use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
 
-// Once (a 2K panorama: decoded in 6 ms, its sun found in 5 ms).
-let image = decode_hdr(&std::fs::read("sky.hdr")?)?;
+// Once (a 2K `.hdr`: decoded in 6 ms, its sun found in 5 ms; OpenEXR files decode too).
+let image = decode_panorama(&std::fs::read("sky.hdr")?)?;
 let sun = find_sun(&image, &SunSearch::default());
 let panorama = Panorama::new(&device, &mut allocator, &bindless, &PanoramaDesc {
     width: image.width,
@@ -1279,7 +1279,10 @@ environment.set_panorama(Some(panorama));
   background cube (16 MiB at 512², 64 MiB at 1,024²); a cooked one only its BC6H cube
   (2 MiB at 512², 8 MiB at 1,024²).
 - **The physical atmosphere, when on, replaces the panorama**, as it does the gradient.
-- **Not yet:** OpenEXR files, soft shadows sized by the sun.
+- **OpenEXR** files (half or float channels; every compression but the lossy DWAA and
+  DWAB) decode into the same RGBE pixels; Poly Haven's 1K EXR matches its `.hdr` exactly.
+  A layer needs channels named R, G and B.
+- **Not yet:** soft shadows sized by the sun.
 
 ## 11. Bloom and automatic exposure
 

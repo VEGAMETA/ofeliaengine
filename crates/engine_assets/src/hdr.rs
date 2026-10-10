@@ -1,6 +1,8 @@
-//! Radiance HDR panoramas (`.hdr`, RGBE; ADR 0083), the format most HDRI environments come
-//! in: our own decoder and encoder, and the search for the sun in a panorama, so that a
-//! directional light can replace it (its shadows, and a lighting cube without its spike).
+//! HDR panoramas (ADR 0083): Radiance `.hdr` files (RGBE), the format most HDRI
+//! environments come in, by our own decoder and encoder; OpenEXR files through the `exr`
+//! crate ([`decode_exr`]; Poly Haven's and Blender's are PIZ compressed), turned into RGBE;
+//! and the search for the sun in a panorama, so that a directional light can replace it
+//! (its shadows, and a lighting cube without its spike).
 //!
 //! - **Header:** a `#?` signature line (`#?RADIANCE`, `#?RGBE`), lines of `KEY=value`
 //!   (`FORMAT=32-bit_rle_rgbe`; `EXPOSURE`, `GAMMA` and the rest are read past), an empty
@@ -48,10 +50,11 @@ impl HdrImage {
     }
 }
 
-/// Why an `.hdr` file could not be read.
+/// Why a panorama could not be read.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HdrError {
-    /// No `#?` signature line.
+    /// No `#?` signature line ([`decode_panorama`]: neither a Radiance nor an OpenEXR
+    /// signature).
     Signature,
     /// A pixel format other than `32-bit_rle_rgbe`.
     Format(String),
@@ -62,6 +65,9 @@ pub enum HdrError {
     Truncated,
     /// A run-length encoded scanline is malformed (its row).
     Scanline(u32),
+    /// The OpenEXR decoder failed, or the file has no layer with red, green and blue
+    /// channels.
+    Exr(String),
 }
 
 impl core::fmt::Display for HdrError {
@@ -80,6 +86,7 @@ impl core::fmt::Display for HdrError {
             ),
             Self::Truncated => write!(f, "the file ends early"),
             Self::Scanline(row) => write!(f, "malformed run-length encoded scanline (row {row})"),
+            Self::Exr(e) => write!(f, "OpenEXR decoding failed: {e}"),
         }
     }
 }
@@ -96,6 +103,9 @@ const MAX_PIXELS: u64 = 1 << 28;
 /// If the bytes are not an RGBE Radiance file this decoder reads ([`HdrError`]).
 pub fn decode_hdr(bytes: &[u8]) -> Result<HdrImage, HdrError> {
     engine_profiler::zone!("assets::decode_hdr");
+    if !bytes.starts_with(b"#?") {
+        return Err(HdrError::Signature);
+    }
     let mut at = 0;
     let mut line = || -> Result<&[u8], HdrError> {
         let rest = &bytes[at..];
@@ -150,6 +160,76 @@ pub fn decode_hdr(bytes: &[u8]) -> Result<HdrImage, HdrError> {
     Ok(HdrImage {
         width,
         height,
+        pixels,
+    })
+}
+
+/// The first bytes of an OpenEXR file.
+const EXR_MAGIC: [u8; 4] = [0x76, 0x2f, 0x31, 0x01];
+
+/// Decodes a panorama: a Radiance HDR file ([`decode_hdr`]) or an OpenEXR file
+/// ([`decode_exr`]), told apart by their signatures.
+///
+/// # Errors
+///
+/// If the bytes are neither, or cannot be decoded ([`HdrError`]).
+pub fn decode_panorama(bytes: &[u8]) -> Result<HdrImage, HdrError> {
+    if bytes.starts_with(&EXR_MAGIC) {
+        decode_exr(bytes)
+    } else {
+        decode_hdr(bytes)
+    }
+}
+
+/// Decodes an OpenEXR file: the first layer with red, green and blue channels (any pixel
+/// type, any compression the `exr` crate reads), at its largest resolution, rows top to
+/// bottom, its pixels turned into RGBE ([`linear_to_rgbe`]).
+///
+/// # Errors
+///
+/// If the decoder fails, no layer has the three channels, or the image is empty or above
+/// 2^28 pixels.
+pub fn decode_exr(bytes: &[u8]) -> Result<HdrImage, HdrError> {
+    use exr::prelude::{ReadChannels, ReadLayers, ReadSpecificChannel, Vec2, read};
+    engine_profiler::zone!("assets::decode_exr");
+    let failed = |e: exr::error::Error| HdrError::Exr(e.to_string());
+    // The header first: no memory is reserved for what a damaged one claims.
+    let meta = exr::meta::MetaData::read_from_buffered(std::io::Cursor::new(bytes), false)
+        .map_err(failed)?;
+    for header in &meta.headers {
+        let count = header.layer_size.area() as u64;
+        if count == 0 || count > MAX_PIXELS {
+            let size = header.layer_size;
+            return Err(HdrError::Resolution(format!(
+                "{} × {}",
+                size.width(),
+                size.height()
+            )));
+        }
+    }
+    let image = read()
+        .no_deep_data()
+        .largest_resolution_level()
+        .specific_channels()
+        .required("R")
+        .required("G")
+        .required("B")
+        .collect_pixels(
+            |size: Vec2<usize>, _| (size, vec![[0u8; 4]; size.area()]),
+            |(size, pixels): &mut (Vec2<usize>, Vec<[u8; 4]>),
+             at: Vec2<usize>,
+             (r, g, b): (f32, f32, f32)| {
+                pixels[at.y() * size.width() + at.x()] = linear_to_rgbe([r, g, b]);
+            },
+        )
+        .first_valid_layer()
+        .all_attributes()
+        .from_buffered(std::io::Cursor::new(bytes))
+        .map_err(failed)?;
+    let (size, pixels) = image.layer_data.channel_data.pixels;
+    Ok(HdrImage {
+        width: size.width() as u32,
+        height: size.height() as u32,
         pixels,
     })
 }
