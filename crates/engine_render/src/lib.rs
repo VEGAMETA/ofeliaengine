@@ -57,6 +57,7 @@ pub mod local_shadows;
 pub mod material;
 pub mod mesh;
 pub mod msaa;
+pub mod particles;
 pub mod png;
 pub mod post;
 pub mod postaa;

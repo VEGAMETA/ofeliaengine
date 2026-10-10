@@ -20,6 +20,7 @@ mod materials;
 mod mesh_streaming;
 mod motion;
 mod occlusion;
+mod particles;
 mod post;
 mod reflections;
 mod shaders;

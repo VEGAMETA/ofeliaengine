@@ -28,7 +28,8 @@ use engine_render::gpu_scene::GpuScene;
 use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
-use engine_render::post::ToneCurve;
+use engine_render::particles::{ParticleEmitter, ParticleSystem, ParticleTarget};
+use engine_render::post::{HDR_FORMAT, ToneCurve};
 use engine_render::reflections::{ProbeSettings, ReflectionProbe, ReflectionProbes, SsrSettings};
 use engine_render::skinning::{SkinnedMeshData, Skinning};
 use engine_render::subsurface::SubsurfaceProfile;
@@ -154,6 +155,9 @@ pub struct Shot {
     /// pool of this many bytes (ADR 0076); `None`: every level uploaded. The shot is
     /// captured once streaming has settled.
     pub texture_budget: Option<u64>,
+    /// GPU particles (ADR 0081): sparks added over the scene and smoke blended into it,
+    /// from the floor's middle, simulated from the first frame in steps of 1/60 s.
+    pub particles: bool,
 }
 
 impl Shot {
@@ -200,6 +204,7 @@ impl Shot {
             ssr: None,
             glossy_floor: false,
             texture_budget: None,
+            particles: false,
         }
     }
 }
@@ -957,6 +962,54 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         ..ViewSettings::default()
     };
     let mut view = View::new(&device, draws.len() as u32);
+    let mut particles = shot.particles.then(|| {
+        let mut system =
+            ParticleSystem::new(&device, &mut allocator, &bindless, 16_384, HDR_FORMAT)
+                .expect("particles");
+        // Sparks: fast, added (they glow), falling back.
+        system.add_emitter(ParticleEmitter {
+            transform: engine_core::math::Affine3A::from_translation(Vec3::new(0.0, 0.05, 0.0)),
+            rate: 1_500.0,
+            lifetime: [0.6, 1.2],
+            radius: 0.05,
+            direction: Vec3::Y,
+            spread: 0.35,
+            speed: [3.0, 5.0],
+            acceleration: Vec3::new(0.0, -9.81, 0.0),
+            drag: 0.2,
+            size: [0.05, 0.02],
+            color: [
+                engine_core::math::Vec4::new(8.0, 3.0, 0.8, 1.0),
+                engine_core::math::Vec4::new(2.0, 0.3, 0.05, 0.0),
+            ],
+            additive: 1.0,
+            seed: 1,
+            ..ParticleEmitter::default()
+        });
+        // Smoke: slow, blended, growing.
+        system.add_emitter(ParticleEmitter {
+            transform: engine_core::math::Affine3A::from_translation(Vec3::new(0.0, 0.2, 0.0)),
+            rate: 120.0,
+            lifetime: [2.0, 3.0],
+            radius: 0.2,
+            direction: Vec3::Y,
+            spread: 0.5,
+            speed: [0.4, 0.8],
+            acceleration: Vec3::new(0.1, 0.3, 0.0),
+            drag: 0.3,
+            size: [0.3, 1.2],
+            color: [
+                engine_core::math::Vec4::new(0.4, 0.4, 0.42, 0.5),
+                engine_core::math::Vec4::new(0.5, 0.5, 0.5, 0.0),
+            ],
+            additive: 0.0,
+            spin: [-0.5, 0.5],
+            soft_distance: 0.5,
+            seed: 2,
+            ..ParticleEmitter::default()
+        });
+        system
+    });
     let mut antialiasing = Antialiasing::OFF;
     let (near, far) = (extent * 0.001, extent * 2.0);
     let rotation = look_rotation(eye, target, Vec3::Y);
@@ -1134,6 +1187,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             .expect("begin");
         }
         ring.begin_slot(0);
+        let particle_frame = particles.as_mut().and_then(|p| {
+            p.prepare(
+                &mut ring,
+                1.0 / 60.0,
+                camera.position,
+                -camera.view_from_world.row(2).truncate(),
+                camera.far,
+            )
+        });
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
@@ -1174,8 +1236,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 None => None,
             };
             let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
+            let particles = particles.as_ref();
             let view_frame = frame
-                .add_view(
+                .add_view_with(
                     &mut fg,
                     &mut FrameContext {
                         device: &device,
@@ -1204,6 +1267,26 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         texture: ldr,
                         rect: None,
                         load: LoadOp::DontCare,
+                    },
+                    |fg, targets| {
+                        if let (Some(particles), Some(step)) = (particles, particle_frame) {
+                            particles.add_passes(
+                                fg,
+                                &bindless,
+                                &step,
+                                &ParticleTarget {
+                                    color: targets.color,
+                                    depth: targets.depth,
+                                    reactive: targets.motion.and_then(|m| m.reactive),
+                                    clip_from_world: targets
+                                        .motion
+                                        .map_or(targets.camera.clip_from_world, |m| {
+                                            m.clip_from_world
+                                        }),
+                                    camera: targets.camera,
+                                },
+                            );
+                        }
                     },
                 )
                 .expect("frame");
@@ -1359,6 +1442,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         }
         frame.destroy(&device, &mut allocator, &bindless);
         view.destroy(&mut allocator, &bindless);
+        if let Some(particles) = particles.as_mut() {
+            particles.destroy(&mut allocator);
+        }
         if let Some(game) = game.as_mut() {
             game.scene.destroy(&mut allocator);
         }
