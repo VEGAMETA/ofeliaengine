@@ -35,7 +35,7 @@ float exposure()
 {
     float e = push.exposure;
     if (push.has_auto != 0)
-        e *= push.auto_exposure[0].x;
+        e *= loadAligned<16>(push.auto_exposure).x;
     return e;
 }
 

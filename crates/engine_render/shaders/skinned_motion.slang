@@ -52,7 +52,8 @@ struct MotionOut
 [shader("vertex")]
 MotionOut skinnedMotionVertex(uint vertex : SV_VulkanVertexID, uint instance : SV_VulkanInstanceID)
 {
-    MotionInstance i = push.instances[instance];
+    // (16-byte aligned reads: a plain pointer access is declared 4-byte aligned.)
+    MotionInstance i = loadAligned<16>(push.instances + instance);
     float* pp = push.positions + vertex * 3;
     float3 p = float3(pp[0], pp[1], pp[2]);
     // `clip_position` of forward.slang, operation for operation.
@@ -60,7 +61,7 @@ MotionOut skinnedMotionVertex(uint vertex : SV_VulkanVertexID, uint instance : S
         i.row0.x * p.x + i.row0.y * p.y + i.row0.z * p.z + i.row0.w,
         i.row1.x * p.x + i.row1.y * p.y + i.row1.z * p.z + i.row1.w,
         i.row2.x * p.x + i.row2.y * p.y + i.row2.z * p.z + i.row2.w);
-    float4x4 m = transpose(push.view.clip_from_world);
+    float4x4 m = transpose(loadAligned<16>(&push.view.clip_from_world));
     precise float4 clip = m[0] * world.x + m[1] * world.y + m[2] * world.z + m[3];
     uint local = vertex - i.first_vertex;
     float3 q = float3(i.previous[local * 3], i.previous[local * 3 + 1], i.previous[local * 3 + 2]);
@@ -70,7 +71,7 @@ MotionOut skinnedMotionVertex(uint vertex : SV_VulkanVertexID, uint instance : S
         dot(i.previous2.xyz, q) + i.previous2.w);
     MotionOut o;
     o.position = clip;
-    o.previous_clip = mul(push.view.previous_clip_from_world, float4(before, 1.0));
+    o.previous_clip = mul(loadAligned<16>(&push.view.previous_clip_from_world), float4(before, 1.0));
     return o;
 }
 
@@ -79,7 +80,7 @@ MotionOut skinnedMotionVertex(uint vertex : SV_VulkanVertexID, uint instance : S
 [shader("fragment")]
 float2 skinnedMotionFragment(MotionOut input) : SV_Target0
 {
-    MotionView view = push.view[0];
+    MotionView view = loadAligned<16>(push.view);
     float2 uv = input.position.xy / float2(view.size) - view.jitter.xy * 0.5;
     if (input.previous_clip.w <= 1e-6)
         return float2(0.0, 0.0);

@@ -72,7 +72,8 @@ void skin(uint3 id, uint sets)
     uint v = id.x;
     if (v >= push.vertex_count || id.y >= push.instance_count)
         return;
-    SkinInstance inst = push.instances[id.y];
+    // (16-byte aligned reads: a plain pointer access is declared 4-byte aligned.)
+    SkinInstance inst = loadAligned<16>(push.instances + id.y);
     uint* s = push.source + v * push.stride;
     float3 p = asfloat(uint3(s[0], s[1], s[2]));
     // The blended matrix, as three rows.
@@ -91,9 +92,9 @@ void skin(uint3 id, uint sets)
             if (w[i] > 0.0)
             {
                 float4* m = inst.palette + j[i] * 3;
-                r0 += m[0] * w[i];
-                r1 += m[1] * w[i];
-                r2 += m[2] * w[i];
+                r0 += loadAligned<16>(m) * w[i];
+                r1 += loadAligned<16>(m + 1) * w[i];
+                r2 += loadAligned<16>(m + 2) * w[i];
                 total += w[i];
             }
         }

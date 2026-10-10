@@ -198,8 +198,8 @@ void exposureAverage(uint b : SV_GroupIndex)
         return;
     float average = g_sum[0].y > 0.0 ? g_sum[0].x / g_sum[0].y : push.min_log;
     float target = clamp(log2(push.key) - average, push.min_exposure, push.max_exposure);
-    float current = push.reset != 0 ? target : push.exposure[0].y;
+    float current = push.reset != 0 ? target : loadAligned<16>(push.exposure).y;
     float rate = target > current ? push.rate_up : push.rate_down;
     current += (target - current) * rate;
-    push.exposure[0] = float4(exp2(current), current, target, 1.0);
+    storeAligned<16>(push.exposure, float4(exp2(current), current, target, 1.0));
 }

@@ -54,10 +54,11 @@ void sceneScatter(uint3 id : SV_DispatchThreadID)
     if (id.x >= push.count)
         return;
     Update u = push.updates[id.x];
+    // (16-byte aligned copies: a plain pointer access is declared 4-byte aligned.)
     if (u.current == SETTLE)
-        push.instances[u.slot] = push.previous[u.slot];
+        storeAligned<16>(push.instances + u.slot, loadAligned<16>(push.previous + u.slot));
     else if (u.current != KEEP)
-        push.instances[u.slot] = push.data[u.current];
+        storeAligned<16>(push.instances + u.slot, loadAligned<16>(push.data + u.current));
     if (u.previous != KEEP)
-        push.previous[u.slot] = push.data[u.previous];
+        storeAligned<16>(push.previous + u.slot, loadAligned<16>(push.data + u.previous));
 }

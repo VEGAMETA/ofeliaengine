@@ -242,7 +242,7 @@ uint choose_lod(Instance inst, Batch batch, float3 center, float3 extents)
     float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
     float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
     float scale = sqrt(max(dot(c0, c0), max(dot(c1, c1), dot(c2, c2))));
-    float distance = max(length(center - push.frame.camera_position.xyz) - length(extents), 1e-3);
+    float distance = max(length(center - read_float4(&push.frame.camera_position).xyz) - length(extents), 1e-3);
     float allowed = distance / (scale * push.frame.lod_scale);
     uint lod = 0;
     for (uint k = 1; k < lods; k++)
@@ -329,6 +329,55 @@ static const float OCCLUSION_MARGIN = 1e-5;
 [[vk::push_constant]]
 ConstantBuffer<Push> push;
 
+// Reads of data the engine lays out 16-byte aligned (every element a multiple of 16 bytes
+// from a 16-byte aligned base: instances, batches, attributes, materials, lights, shadow
+// views, the frame's matrices) declare it. A plain pointer access is declared 4-byte
+// aligned (Slang's default for pointers), and a driver may split a 16-byte load in four.
+Instance read_instance(Instance* instances, uint index)
+{
+    return loadAligned<16>(instances + index);
+}
+
+Batch read_batch(uint index)
+{
+    return loadAligned<16>(push.batches + index);
+}
+
+Attributes read_attributes(uint vertex)
+{
+    return loadAligned<16>(push.attributes + vertex);
+}
+
+Material read_material(uint index)
+{
+    return loadAligned<16>(push.materials + index);
+}
+
+Light read_light(uint index)
+{
+    return loadAligned<16>(push.frame.lights + index);
+}
+
+ShadowView read_shadow_view(ShadowView* views, uint index)
+{
+    return loadAligned<16>(views + index);
+}
+
+float4x4 read_matrix(float4x4* m)
+{
+    return loadAligned<16>(m);
+}
+
+float4 read_float4(float4* v)
+{
+    return loadAligned<16>(v);
+}
+
+Cascade read_cascade(uint index)
+{
+    return loadAligned<16>(&push.frame.cascades[index]);
+}
+
 float3 load_position(uint vertex)
 {
     uint i = vertex * 3;
@@ -367,7 +416,7 @@ Placed clip_position(Instance i, float3 p)
         i.row2.x * p.x + i.row2.y * p.y + i.row2.z * p.z + i.row2.w);
     // Columns of clip_from_world, weighted: mul() stays one instruction that cannot be
     // marked NoContraction.
-    float4x4 m = transpose(push.frame.clip_from_world);
+    float4x4 m = transpose(read_matrix(&push.frame.clip_from_world));
     precise float4 clip = m[0] * world.x + m[1] * world.y + m[2] * world.z + m[3];
     Placed placed;
     placed.world = world;
@@ -404,7 +453,7 @@ uint hiz_offset(uint level)
 // Size of pyramid level `level`: every texel covers 2^level × 2^level pixels.
 uint2 hiz_size(uint level)
 {
-    return ((push.frame.depth_size - 1) >> level) + 1;
+    return ((loadAligned<8>(&push.frame.depth_size) - 1) >> level) + 1;
 }
 
 // Whether a world-space box is hidden: its nearest point is farther than the farthest
@@ -412,7 +461,7 @@ uint2 hiz_size(uint level)
 // level where that rectangle fits).
 bool occluded(float3 center, float3 extents)
 {
-    float4x4 m = push.frame.clip_from_world;
+    float4x4 m = read_matrix(&push.frame.clip_from_world);
     float4 c = mul(m, float4(center, 1.0));
     float4 x = mul(m, float4(extents.x, 0.0, 0.0, 0.0));
     float4 y = mul(m, float4(0.0, extents.y, 0.0, 0.0));
@@ -434,7 +483,7 @@ bool occluded(float3 center, float3 extents)
     }
     if (nearest <= 0.0)
         return false;
-    float2 size = float2(push.frame.depth_size);
+    float2 size = float2(loadAligned<8>(&push.frame.depth_size));
     uint2 lo_px = uint2(clamp((lo * 0.5 + 0.5) * size, 0.0, size - 1.0));
     uint2 hi_px = uint2(clamp((hi * 0.5 + 0.5) * size, 0.0, size - 1.0));
     uint span = max(hi_px.x - lo_px.x, hi_px.y - lo_px.y) + 1;
@@ -491,8 +540,8 @@ void cullMain(uint3 id : SV_DispatchThreadID)
     uint index = id.x;
     if (index >= push.instance_count)
         return;
-    Instance inst = push.instances[index];
-    Batch batch = push.batches[inst.batch];
+    Instance inst = read_instance(push.instances, index);
+    Batch batch = read_batch(inst.batch);
     // The world-space box around the transformed object box (Arvo): the center goes
     // through the transform, the extents through the absolute linear part.
     float3 center = transform_point(inst, batch.center.xyz);
@@ -508,13 +557,13 @@ void cullMain(uint3 id : SV_DispatchThreadID)
     if (push.phase == PHASE_SHADOW)
     {
         // The box in light view space (Arvo again: the light view is a rotation).
-        float4x4 light = push.frame.light_from_world;
+        float4x4 light = read_matrix(&push.frame.light_from_world);
         float3 c = mul(light, float4(center, 1.0)).xyz;
         float3 e = float3(dot(abs(light[0].xyz), extents), dot(abs(light[1].xyz), extents), dot(abs(light[2].xyz), extents));
         uint cascades = push.frame.cascade_count;
         for (uint k = 0; k < cascades; k++)
         {
-            float4 b = push.frame.cascades[k].bounds;
+            float4 b = read_float4(&push.frame.cascades[k].bounds);
             // Inside the cascade's square, and not wholly beyond its far depth: anything
             // between the light and the slice casts into it.
             bool caster = !blended && (!cull || (all(abs(c.xy - b.xy) <= b.z + e.xy) && -(c.z + e.z) <= b.w));
@@ -528,7 +577,7 @@ void cullMain(uint3 id : SV_DispatchThreadID)
         [unroll]
         for (int i = 0; i < 6; i++)
         {
-            float4 plane = push.frame.planes[i];
+            float4 plane = read_float4(&push.frame.planes[i]);
             // Outside when the box's most inward corner is behind the plane.
             visible = visible && dot(plane.xyz, center) + dot(abs(plane.xyz), extents) + plane.w >= 0.0;
         }
@@ -595,12 +644,12 @@ void cullShadowViews(uint3 id : SV_DispatchThreadID)
     uint view = id.y;
     if (index >= push.instance_count)
         return;
-    Instance inst = push.instances[index];
-    Batch batch = push.batches[inst.batch];
+    Instance inst = read_instance(push.instances, index);
+    Batch batch = read_batch(inst.batch);
     float3 center = transform_point(inst, batch.center.xyz);
     float3 e = batch.extents.xyz;
     float3 extents = float3(dot(abs(inst.row0.xyz), e), dot(abs(inst.row1.xyz), e), dot(abs(inst.row2.xyz), e));
-    ShadowView v = push.frame.shadow_draws[view];
+    ShadowView v = read_shadow_view(push.frame.shadow_draws, view);
     // Rows of the view's matrix (the planes are sums and differences of them).
     float4x4 m = v.clip_from_world;
     float4 r0 = m[0];
@@ -667,8 +716,8 @@ struct VertexOut
 VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     uint index = push.visible[slot];
-    Instance inst = push.instances[index];
-    Attributes a = push.attributes[vertex];
+    Instance inst = read_instance(push.instances, index);
+    Attributes a = read_attributes(vertex);
     float3 p = load_position(vertex);
     Placed placed = clip_position(inst, p);
     float4 world = float4(placed.world, 1.0);
@@ -683,12 +732,12 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInsta
     o.tangent = float4(normalize(transform_vector(inst, decode_octahedral(a.tangent))), sign * mirror_sign(inst));
     o.uv = a.uv;
     // Shadows look up in light view space; transforming here keeps it off every pixel.
-    float4x4 light = push.frame.light_from_world;
+    float4x4 light = read_matrix(&push.frame.light_from_world);
     o.light_position = mul(light, world).xyz;
     o.light_normal = mul((float3x3)light, o.normal);
     // Without a previous transform the instance counts as still.
-    Instance previous = index < push.frame.previous_count ? push.previous_instances[index] : inst;
-    o.previous_clip = mul(push.frame.previous_clip_from_world, float4(transform_point(previous, p), 1.0));
+    Instance previous = index < push.frame.previous_count ? read_instance(push.previous_instances, index) : inst;
+    o.previous_clip = mul(read_matrix(&push.frame.previous_clip_from_world), float4(transform_point(previous, p), 1.0));
     o.material = inst.material;
     return o;
 }
@@ -696,8 +745,8 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInsta
 // A world position in the clip space of cascade `push.phase`.
 float4 shadow_clip(float3 world)
 {
-    Cascade k = push.frame.cascades[push.phase];
-    float3 light = mul(push.frame.light_from_world, float4(world, 1.0)).xyz;
+    Cascade k = read_cascade(push.phase);
+    float3 light = mul(read_matrix(&push.frame.light_from_world), float4(world, 1.0)).xyz;
     return float4(light * k.scale.xyz + k.offset.xyz, 1.0);
 }
 
@@ -706,7 +755,7 @@ float4 shadow_clip(float3 world)
 [shader("vertex")]
 float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
 {
-    Instance inst = push.instances[push.visible[slot]];
+    Instance inst = read_instance(push.instances, push.visible[slot]);
     return shadow_clip(transform_point(inst, load_position(vertex)));
 }
 
@@ -714,16 +763,16 @@ float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstan
 [shader("vertex")]
 float4 localShadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
 {
-    Instance inst = push.instances[push.visible[slot]];
+    Instance inst = read_instance(push.instances, push.visible[slot]);
     float3 world = transform_point(inst, load_position(vertex));
-    return mul(push.frame.shadow_draws[push.phase].clip_from_world, float4(world, 1.0));
+    return mul(read_matrix(&push.frame.shadow_draws[push.phase].clip_from_world), float4(world, 1.0));
 }
 
 // The depth prepass: the visible instances' depth, positions only.
 [shader("vertex")]
 float4 depthVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
 {
-    Instance inst = push.instances[push.visible[slot]];
+    Instance inst = read_instance(push.instances, push.visible[slot]);
     return clip_position(inst, load_position(vertex)).clip;
 }
 
@@ -738,10 +787,10 @@ struct ShadowOut
 [shader("vertex")]
 ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    Instance inst = push.instances[push.visible[slot]];
+    Instance inst = read_instance(push.instances, push.visible[slot]);
     ShadowOut o;
     o.position = shadow_clip(transform_point(inst, load_position(vertex)));
-    o.uv = push.attributes[vertex].uv;
+    o.uv = read_attributes(vertex).uv;
     o.material = inst.material;
     return o;
 }
@@ -750,11 +799,11 @@ ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_Vul
 [shader("vertex")]
 ShadowOut localShadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    Instance inst = push.instances[push.visible[slot]];
+    Instance inst = read_instance(push.instances, push.visible[slot]);
     ShadowOut o;
     float3 world = transform_point(inst, load_position(vertex));
-    o.position = mul(push.frame.shadow_draws[push.phase].clip_from_world, float4(world, 1.0));
-    o.uv = push.attributes[vertex].uv;
+    o.position = mul(read_matrix(&push.frame.shadow_draws[push.phase].clip_from_world), float4(world, 1.0));
+    o.uv = read_attributes(vertex).uv;
     o.material = inst.material;
     return o;
 }
@@ -764,10 +813,10 @@ ShadowOut localShadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : S
 [shader("vertex")]
 ShadowOut depthVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    Instance inst = push.instances[push.visible[slot]];
+    Instance inst = read_instance(push.instances, push.visible[slot]);
     ShadowOut o;
     o.position = clip_position(inst, load_position(vertex)).clip;
-    o.uv = push.attributes[vertex].uv;
+    o.uv = read_attributes(vertex).uv;
     o.material = inst.material;
     return o;
 }
@@ -789,7 +838,7 @@ float4 sample_material(uint packed, float2 uv)
 [shader("fragment")]
 void shadowFragmentMasked(ShadowOut input)
 {
-    Material m = push.materials[input.material];
+    Material m = read_material(input.material);
     if (sample_material(m.base_color_texture, input.uv).a * m.base_color.a < m.alpha_cutoff)
         discard;
 }
@@ -802,7 +851,7 @@ void shadowFragmentMasked(ShadowOut input)
 [shader("fragment")]
 float4 prepassCoverage(ShadowOut input) : SV_Target0
 {
-    Material m = push.materials[input.material];
+    Material m = read_material(input.material);
     float alpha = sample_material(m.base_color_texture, input.uv).a * m.base_color.a;
     alpha = (alpha - m.alpha_cutoff) / max(fwidth(alpha), 1e-4) + 0.5;
     return float4(0.0, 0.0, 0.0, alpha);
@@ -906,7 +955,7 @@ float widen_roughness(float perceptual, float kernel)
 // position `light` of a receiver with light-view normal `normal` (pushed along it first).
 float cascade_shadow(uint c, float3 light, float3 normal)
 {
-    Cascade k = push.frame.cascades[c];
+    Cascade k = read_cascade(c);
     float3 ndc = (light + normal * (push.frame.normal_bias * k.scale.w)) * k.scale.xyz + k.offset.xyz;
     if (ndc.z > 1.0)
         return 1.0;
@@ -930,8 +979,8 @@ float cascade_shadow(uint c, float3 light, float3 normal)
 // for the filter below its limit (`Cascade::holds` in shadow.rs).
 float cascade_edge(uint c, float3 light)
 {
-    float4 scale = push.frame.cascades[c].scale;
-    float4 offset = push.frame.cascades[c].offset;
+    float4 scale = read_float4(&push.frame.cascades[c].scale);
+    float4 offset = read_float4(&push.frame.cascades[c].offset);
     float3 ndc = light * scale.xyz + offset.xyz;
     return ndc.z < 0.0 || ndc.z > 1.0 ? 2.0 : max(abs(ndc.x), abs(ndc.y));
 }
@@ -956,15 +1005,15 @@ float shadow(float3 light, float3 n, float2 pixel)
     for (uint c = 0; c < count; c++)
     {
         float edge = cascade_edge(c, light);
-        float limit = push.frame.cascades[c].offset.w;
+        float limit = read_float4(&push.frame.cascades[c].offset).w;
         if (edge >= limit)
             continue;
         uint chosen = c;
         float t = saturate((edge - (limit - band)) / band);
         // The jitter (in NDC, a few thousandths) shifts the pattern every TAA frame.
-        if (t > 0.0 && gradient_noise(pixel + push.frame.jitter.xy * 4096.0) < t)
+        if (t > 0.0 && gradient_noise(pixel + read_float4(&push.frame.jitter).xy * 4096.0) < t)
         {
-            if (c + 1 < count && cascade_edge(c + 1, light) < push.frame.cascades[c + 1].offset.w)
+            if (c + 1 < count && cascade_edge(c + 1, light) < read_float4(&push.frame.cascades[c + 1].offset).w)
                 chosen = c + 1;
             else if (c + 1 == count && push.frame.fade_last != 0)
                 return 1.0;
@@ -1002,7 +1051,7 @@ float local_shadow(uint first, Light light, float3 p, float3 n)
 {
     float3 position = light.position_range.xyz;
     // World size of a texel per unit of depth, times the normal bias.
-    float bias = push.frame.shadow_views[first].eye_bias.w;
+    float bias = read_float4(&push.frame.shadow_views[first].eye_bias).w;
     float3 d = p - position;
     float3 ndc;
     float4 atlas;
@@ -1020,15 +1069,15 @@ float local_shadow(uint first, Light light, float3 p, float3 n)
         float v = y_major ? -q.z : -q.y;
         uint face = (x_major ? 0u : (y_major ? 2u : 4u)) + (along < 0.0 ? 1u : 0u);
         // x: 1 / tan(half angle); y, z: depth A + B / major.
-        float4 terms = push.frame.shadow_views[first].tile;
+        float4 terms = read_float4(&push.frame.shadow_views[first].tile);
         float inverse = 1.0 / max(abs(along), 1e-6);
         ndc = float3(float2(u, v) * (terms.x * inverse), terms.y + terms.z * inverse);
-        atlas = push.frame.shadow_views[first + face].atlas;
+        atlas = read_float4(&push.frame.shadow_views[first + face].atlas);
     }
     else
     {
         float3 q = p + n * (bias * max(dot(d, light.direction_offset.xyz), 0.0));
-        ShadowView s = push.frame.shadow_views[first];
+        ShadowView s = read_shadow_view(push.frame.shadow_views, first);
         float4 c = mul(s.clip_from_world, float4(q, 1.0));
         if (c.w <= 0.0)
             return 1.0;
@@ -1097,10 +1146,10 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
     if (push.frame.light_culling == 0)
     {
         for (uint i = 0; i < count; i++)
-            sum += local_light(push.frame.lights[i], p, n, v, diffuse, f0, a, irradiance, shadows, i);
+            sum += local_light(read_light(i), p, n, v, diffuse, f0, a, irradiance, shadows, i);
         return sum;
     }
-    float depth = dot(p, push.frame.view_axis.xyz) + push.frame.view_axis.w;
+    float depth = dot(p, read_float4(&push.frame.view_axis).xyz) + read_float4(&push.frame.view_axis).w;
     uint bin = uint(clamp(depth * push.frame.bin_scale, 0.0, float(Z_BINS - 1)));
     uint range = push.frame.zbins[bin];
     uint lo = range & 0xFFFFu;
@@ -1120,7 +1169,7 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
             uint bit = firstbitlow(merged);
             merged &= merged - 1u;
             if ((mask >> bit) & 1u)
-                sum += local_light(push.frame.lights[w * 32 + bit], p, n, v, diffuse, f0, a, irradiance, shadows, w * 32 + bit);
+                sum += local_light(read_light(w * 32 + bit), p, n, v, diffuse, f0, a, irradiance, shadows, w * 32 + bit);
         }
     }
     return sum;
@@ -1148,14 +1197,14 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
         ? multibounce(occlusion, dot(albedo, float3(0.2126, 0.7152, 0.0722)))
         : occlusion;
     if (ENVIRONMENT == 0 || push.frame.environment == 0)
-        return push.frame.ambient.rgb * albedo * diffuse_occlusion;
+        return read_float4(&push.frame.ambient).rgb * albedo * diffuse_occlusion;
     float n_dot_v = max(dot(n, v), 1e-4);
     float4* sh = push.frame.sh;
-    float3 irradiance = sh[0].rgb * 0.282095
-        + sh[1].rgb * (0.488603 * n.y) + sh[2].rgb * (0.488603 * n.z) + sh[3].rgb * (0.488603 * n.x)
-        + sh[4].rgb * (1.092548 * n.x * n.y) + sh[5].rgb * (1.092548 * n.y * n.z)
-        + sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + sh[7].rgb * (1.092548 * n.x * n.z)
-        + sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    float3 irradiance = read_float4(sh + 0).rgb * 0.282095
+        + read_float4(sh + 1).rgb * (0.488603 * n.y) + read_float4(sh + 2).rgb * (0.488603 * n.z) + read_float4(sh + 3).rgb * (0.488603 * n.x)
+        + read_float4(sh + 4).rgb * (1.092548 * n.x * n.y) + read_float4(sh + 5).rgb * (1.092548 * n.y * n.z)
+        + read_float4(sh + 6).rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + read_float4(sh + 7).rgb * (1.092548 * n.x * n.z)
+        + read_float4(sh + 8).rgb * (0.546274 * (n.x * n.x - n.y * n.y));
     irradiance = max(irradiance, 0.0);
     SamplerState s = g_samplers[push.frame.linear_sampler];
     float3 r = reflect(-v, n);
@@ -1178,11 +1227,11 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
 float3 sky_irradiance(float3 n)
 {
     float4* sh = push.frame.sh;
-    float3 irradiance = sh[0].rgb * 0.282095
-        + sh[1].rgb * (0.488603 * n.y) + sh[2].rgb * (0.488603 * n.z) + sh[3].rgb * (0.488603 * n.x)
-        + sh[4].rgb * (1.092548 * n.x * n.y) + sh[5].rgb * (1.092548 * n.y * n.z)
-        + sh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + sh[7].rgb * (1.092548 * n.x * n.z)
-        + sh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+    float3 irradiance = read_float4(sh + 0).rgb * 0.282095
+        + read_float4(sh + 1).rgb * (0.488603 * n.y) + read_float4(sh + 2).rgb * (0.488603 * n.z) + read_float4(sh + 3).rgb * (0.488603 * n.x)
+        + read_float4(sh + 4).rgb * (1.092548 * n.x * n.y) + read_float4(sh + 5).rgb * (1.092548 * n.y * n.z)
+        + read_float4(sh + 6).rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + read_float4(sh + 7).rgb * (1.092548 * n.x * n.z)
+        + read_float4(sh + 8).rgb * (0.546274 * (n.x * n.x - n.y * n.y));
     return max(irradiance, 0.0);
 }
 
@@ -1191,7 +1240,7 @@ float3 sky_irradiance(float3 n)
 float3 ambient_diffuse(float3 n, float occlusion, float kd)
 {
     if (ENVIRONMENT == 0 || push.frame.environment == 0)
-        return push.frame.ambient.rgb * occlusion;
+        return read_float4(&push.frame.ambient).rgb * occlusion;
     return kd * sky_irradiance(n) * occlusion * push.frame.env_intensity;
 }
 
@@ -1206,7 +1255,7 @@ float3 profile_transmission(SubsurfaceProfile* p, float d)
     uint count = p.count;
     for (uint i = 0; i < count; i++)
     {
-        float4 g = p.gaussians[i];
+        float4 g = read_float4(&p.gaussians[i]);
         t += g.rgb * (PI_LOG2E / -g.w) * exp2(g.w * d * d);
     }
     return t;
@@ -1221,9 +1270,9 @@ float shadow_distance(float3 light, float3 normal)
     uint count = push.frame.cascade_count;
     for (uint c = 0; c < count; c++)
     {
-        if (cascade_edge(c, light) >= push.frame.cascades[c].offset.w)
+        if (cascade_edge(c, light) >= read_float4(&push.frame.cascades[c].offset).w)
             continue;
-        Cascade k = push.frame.cascades[c];
+        Cascade k = read_cascade(c);
         float3 ndc = (light - normal * (push.frame.normal_bias * k.scale.w)) * k.scale.xyz + k.offset.xyz;
         float2 uv = ndc.xy * k.atlas.xy + k.atlas.zw;
         Texture2D map = g_textures[NonUniformResourceIndex(push.texture)];
@@ -1269,8 +1318,8 @@ struct ReflectOut
 // own; without ambient occlusion `push.ao` skips the read).
 float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false)
 {
-    Frame frame = push.frame[0];
-    Material m = push.materials[input.material];
+    Frame frame = loadAligned<16>(push.frame);
+    Material m = read_material(input.material);
     // The back of a double-sided surface is lit from its own side: the whole tangent
     // frame flips (as in Khronos' glTF sample viewer).
     float side = front ? 1.0 : -1.0;
@@ -1416,7 +1465,7 @@ float4 fragmentBlended(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 float4 fragmentBlendedAtmosphere(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     float4 c = shade(input, front, false, false);
-    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
     float alpha = saturate(c.a);
     return float4(c.rgb * alpha, alpha);
 }
@@ -1444,7 +1493,7 @@ BlendedReactive fragmentBlendedReactive(VertexOut input, bool front : SV_IsFront
 BlendedReactive fragmentBlendedAtmosphereReactive(VertexOut input, bool front : SV_IsFrontFace)
 {
     float4 c = shade(input, front, false, false);
-    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
     float alpha = saturate(c.a);
     BlendedReactive o;
     o.color = float4(c.rgb * alpha, alpha);
@@ -1456,7 +1505,7 @@ BlendedReactive fragmentBlendedAtmosphereReactive(VertexOut input, bool front : 
 // removed) minus where it was last frame, in texture coordinates.
 float2 motion(float4 pixel, float4 previous_clip)
 {
-    Frame frame = push.frame[0];
+    Frame frame = loadAligned<16>(push.frame);
     float2 uv = pixel.xy / float2(frame.depth_size) - frame.jitter.xy * 0.5;
     if (previous_clip.w <= 1e-6)
         return float2(0.0, 0.0);
@@ -1485,13 +1534,13 @@ struct DepthMotionOut
 DepthMotionOut depthVertexMotion(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     uint index = push.visible[slot];
-    Instance inst = push.instances[index];
+    Instance inst = read_instance(push.instances, index);
     float3 p = load_position(vertex);
     DepthMotionOut o;
     o.position = clip_position(inst, p).clip;
     // Without a previous transform the instance counts as still.
-    Instance previous = index < push.frame.previous_count ? push.previous_instances[index] : inst;
-    o.previous_clip = mul(push.frame.previous_clip_from_world, float4(transform_point(previous, p), 1.0));
+    Instance previous = index < push.frame.previous_count ? read_instance(push.previous_instances, index) : inst;
+    o.previous_clip = mul(read_matrix(&push.frame.previous_clip_from_world), float4(transform_point(previous, p), 1.0));
     return o;
 }
 
@@ -1514,13 +1563,13 @@ struct DepthMaskedMotionOut
 DepthMaskedMotionOut depthVertexMaskedMotion(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     uint index = push.visible[slot];
-    Instance inst = push.instances[index];
+    Instance inst = read_instance(push.instances, index);
     float3 p = load_position(vertex);
     DepthMaskedMotionOut o;
     o.position = clip_position(inst, p).clip;
-    o.uv = push.attributes[vertex].uv;
-    Instance previous = index < push.frame.previous_count ? push.previous_instances[index] : inst;
-    o.previous_clip = mul(push.frame.previous_clip_from_world, float4(transform_point(previous, p), 1.0));
+    o.uv = read_attributes(vertex).uv;
+    Instance previous = index < push.frame.previous_count ? read_instance(push.previous_instances, index) : inst;
+    o.previous_clip = mul(read_matrix(&push.frame.previous_clip_from_world), float4(transform_point(previous, p), 1.0));
     o.material = inst.material;
     return o;
 }
@@ -1528,7 +1577,7 @@ DepthMaskedMotionOut depthVertexMaskedMotion(uint vertex : SV_VulkanVertexID, ui
 [shader("fragment")]
 float2 prepassMaskedMotion(DepthMaskedMotionOut input) : SV_Target0
 {
-    Material m = push.materials[input.material];
+    Material m = read_material(input.material);
     if (sample_material(m.base_color_texture, input.uv).a * m.base_color.a < m.alpha_cutoff)
         discard;
     return motion(input.position, input.previous_clip);
@@ -1540,7 +1589,7 @@ float2 prepassMaskedMotion(DepthMaskedMotionOut input) : SV_Target0
 [shader("fragment")]
 float4 prepassCoverageMotion(DepthMaskedMotionOut input) : SV_Target0
 {
-    Material m = push.materials[input.material];
+    Material m = read_material(input.material);
     float alpha = sample_material(m.base_color_texture, input.uv).a * m.base_color.a;
     alpha = (alpha - m.alpha_cutoff) / max(fwidth(alpha), 1e-4) + 0.5;
     return float4(motion(input.position, input.previous_clip), 0.0, alpha);
@@ -1689,7 +1738,7 @@ float3 profile_cdf(SubsurfaceProfile* p, float r)
     uint count = p.count;
     for (uint i = 0; i < count; i++)
     {
-        float4 g = p.gaussians[i];
+        float4 g = read_float4(&p.gaussians[i]);
         c += g.rgb * (PI_LOG2E / -g.w) * (1.0 - exp2(g.w * r * r));
     }
     return c;
@@ -1723,17 +1772,17 @@ float4 scatterFragment(float4 position : SV_Position) : SV_Target0
 
     float3 weights = profile_cdf(stored, inside);
     float3 sum = weights * center.rgb;
-    float3 falloff = stored.falloff;
+    float3 falloff = loadAligned<16>(&stored.falloff);
     // The spiral turned by the pixel's angle, scaled to pixels.
     float angle = 6.28318531 * gradient_noise(position.xy + 5.588238 * float(frame.scatter_frame & 63u));
     float2 turn = float2(cos(angle), sin(angle)) * pixels_per_unit;
     float inside2 = inside * inside;
-    int2 last = int2(frame.depth_size) - 1;
+    int2 last = int2(loadAligned<8>(&frame.depth_size)) - 1;
     uint first = BUDGET_FIRST[budget];
     uint samples = BUDGET_SAMPLES[budget];
     for (uint k = 0; k < samples; k++)
     {
-        uint4 entry = stored.kernel[first + k];
+        uint4 entry = loadAligned<16>(&stored.kernel[first + k]);
         float2 xy = asfloat(entry.xy);
         if (dot(xy, xy) <= inside2)
             continue;
@@ -1803,17 +1852,17 @@ float4 scatterFragmentMs(float4 position : SV_Position, uint coverage : SV_Cover
 
     float3 weights = profile_cdf(stored, inside);
     float3 sum = weights * center.rgb;
-    float3 falloff = stored.falloff;
+    float3 falloff = loadAligned<16>(&stored.falloff);
     // The spiral turned by the pixel's angle, scaled to pixels.
     float angle = 6.28318531 * gradient_noise(position.xy + 5.588238 * float(frame.scatter_frame & 63u));
     float2 turn = float2(cos(angle), sin(angle)) * pixels_per_unit;
     float inside2 = inside * inside;
-    int2 last = int2(frame.depth_size) - 1;
+    int2 last = int2(loadAligned<8>(&frame.depth_size)) - 1;
     uint first = BUDGET_FIRST[budget];
     uint samples = BUDGET_SAMPLES[budget];
     for (uint k = 0; k < samples; k++)
     {
-        uint4 entry = stored.kernel[first + k];
+        uint4 entry = loadAligned<16>(&stored.kernel[first + k]);
         float2 xy = asfloat(entry.xy);
         if (dot(xy, xy) <= inside2)
             continue;
@@ -1885,7 +1934,7 @@ float4 fragmentBlendedShadowed(VertexOut input, bool front : SV_IsFrontFace) : S
 float4 fragmentBlendedAtmosphereShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     float4 c = shade(input, front, false, false, true);
-    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
     float alpha = saturate(c.a);
     return float4(c.rgb * alpha, alpha);
 }
@@ -1905,7 +1954,7 @@ BlendedReactive fragmentBlendedReactiveShadowed(VertexOut input, bool front : SV
 BlendedReactive fragmentBlendedAtmosphereReactiveShadowed(VertexOut input, bool front : SV_IsFrontFace)
 {
     float4 c = shade(input, front, false, false, true);
-    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(push.frame.depth_size));
+    c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
     float alpha = saturate(c.a);
     BlendedReactive o;
     o.color = float4(c.rgb * alpha, alpha);
@@ -1992,7 +2041,7 @@ Background backgroundVertex(uint vertex : SV_VulkanVertexID)
 [shader("fragment")]
 float2 backgroundMotion(Background input) : SV_Target0
 {
-    Frame frame = push.frame[0];
+    Frame frame = loadAligned<16>(push.frame);
     float4 previous = mul(frame.previous_clip_from_clip, float4(input.position.xy / float2(frame.depth_size) * 2.0 - 1.0 - frame.jitter.xy, 1.0, 1.0));
     float2 uv = input.position.xy / float2(frame.depth_size) - frame.jitter.xy * 0.5;
     if (abs(previous.w) <= 1e-6)
@@ -2005,16 +2054,16 @@ float2 backgroundMotion(Background input) : SV_Target0
 [shader("fragment")]
 float4 skyFragment(Background input) : SV_Target0
 {
-    float2 ndc = input.position.xy / float2(push.frame.depth_size) * 2.0 - 1.0;
+    float2 ndc = input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)) * 2.0 - 1.0;
     // Two points of the ray: the near plane and halfway in depth (finite with an infinite
     // far plane too).
-    float4 near = mul(push.frame.world_from_clip, float4(ndc, 0.0, 1.0));
-    float4 mid = mul(push.frame.world_from_clip, float4(ndc, 0.5, 1.0));
+    float4 near = mul(read_matrix(&push.frame.world_from_clip), float4(ndc, 0.0, 1.0));
+    float4 mid = mul(read_matrix(&push.frame.world_from_clip), float4(ndc, 0.5, 1.0));
     float3 d = normalize(mid.xyz / mid.w - near.xyz / near.w);
     SamplerState s = g_samplers[push.frame.linear_sampler];
     float3 color = g_cubes[push.frame.sky_cube].SampleLevel(s, d, 0.0).rgb * push.frame.env_intensity;
     const float cos_sun = 0.99998889;
-    if (dot(d, push.frame.to_light.xyz) > cos_sun)
-        color += push.frame.light_color.rgb / (2.0 * PI * (1.0 - cos_sun));
+    if (dot(d, read_float4(&push.frame.to_light).xyz) > cos_sun)
+        color += read_float4(&push.frame.light_color).rgb / (2.0 * PI * (1.0 - cos_sun));
     return float4(color, 1.0);
 }

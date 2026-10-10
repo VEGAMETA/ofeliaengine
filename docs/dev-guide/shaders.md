@@ -136,6 +136,14 @@ void blur(uint3 id : SV_DispatchThreadID)
 }
 ```
 
+**Reading through buffer addresses.** A buffer passed as an address is a pointer
+(`float4* data`), and Slang declares a plain access `data[i]` only 4-byte aligned: some
+drivers then split a 16-byte load into four. When the data is 16-byte aligned (its buffer
+or ring allocation, and every element a multiple of 16 bytes), say so:
+`float4 v = loadAligned<16>(push.data + i);` (`storeAligned<16>` to write). A single
+4-byte value (`uint`, `float`) needs nothing. On the reference RTX this made the engine's
+atmosphere pass 22 % faster (ADR 0013's addendum).
+
 **The push constants in Rust**, field for field, `#[repr(C)]`, with `bytemuck` doing the
 byte conversion (its derive refuses structs with hidden padding, so pad by hand):
 

@@ -10,11 +10,29 @@ static const uint PROBE_CELLS_X = 16;
 static const uint PROBE_CELLS_Y = 16;
 static const uint PROBE_BINS = 64;
 
+// Reads of the frame and the probes, laid out 16-byte aligned, declare it: a plain
+// pointer access is declared 4-byte aligned (Slang's default for pointers), and a driver
+// may split a 16-byte load in four.
+float4 read4(float4* v)
+{
+    return loadAligned<16>(v);
+}
+
+uint4 read4u(uint4* v)
+{
+    return loadAligned<16>(v);
+}
+
+float4x4 read44(float4x4* m)
+{
+    return loadAligned<16>(m);
+}
+
 // The candidate probes at `pixel`, `view_depth` along the view.
 uint probe_mask(ReflectFrame* f, float2 pixel, float view_depth)
 {
-    uint2 cell = min(uint2(pixel * (float2(PROBE_CELLS_X, PROBE_CELLS_Y) / float2(f.size.xy))), uint2(PROBE_CELLS_X - 1, PROBE_CELLS_Y - 1));
-    uint bin = min(uint(view_depth * asfloat(f.probe_info.y)), PROBE_BINS - 1);
+    uint2 cell = min(uint2(pixel * (float2(PROBE_CELLS_X, PROBE_CELLS_Y) / float2(read4u(&f.size).xy))), uint2(PROBE_CELLS_X - 1, PROBE_CELLS_Y - 1));
+    uint bin = min(uint(view_depth * asfloat(read4u(&f.probe_info).y)), PROBE_BINS - 1);
     uint c = cell.y * PROBE_CELLS_X + cell.x;
     return f.probe_cells[c >> 2][c & 3] & f.probe_bins[bin >> 2][bin & 3];
 }
@@ -70,15 +88,15 @@ float3 decode_normal(float2 e)
 // view depth.
 float3 world_position(ReflectFrame* f, float2 pixel, float depth, out float view_depth)
 {
-    float2 ndc = pixel / float2(f.size.xy) * 2.0 - 1.0;
-    float3 ray = f.ray_base.xyz + ndc.x * f.ray_x.xyz + ndc.y * f.ray_y.xyz;
-    view_depth = f.ray_x.w / (depth + f.ray_base.w);
-    return f.camera.xyz + ray * view_depth;
+    float2 ndc = pixel / float2(read4u(&f.size).xy) * 2.0 - 1.0;
+    float3 ray = read4(&f.ray_base).xyz + ndc.x * read4(&f.ray_x).xyz + ndc.y * read4(&f.ray_y).xyz;
+    view_depth = read4(&f.ray_x).w / (depth + read4(&f.ray_base).w);
+    return read4(&f.camera).xyz + ray * view_depth;
 }
 
 float view_depth_of(ReflectFrame* f, float depth)
 {
-    return f.ray_x.w / (depth + f.ray_base.w);
+    return read4(&f.ray_x).w / (depth + read4(&f.ray_base).w);
 }
 
 // Probe `p`'s rows of `Probe` (float4 each): 0-2 influence, 3 extents, 4-6 parallax, 7
@@ -90,10 +108,10 @@ static const uint PROBE_FLOAT4S = 9;
 // distance, falling to 0 at the box.
 float probe_influence(float4* p, float3 world)
 {
-    float4 r0 = p[0];
-    float4 r1 = p[1];
-    float4 r2 = p[2];
-    float4 e = p[3];
+    float4 r0 = read4(p + 0);
+    float4 r1 = read4(p + 1);
+    float4 r2 = read4(p + 2);
+    float4 e = read4(p + 3);
     float3 local = float3(dot(r0.xyz, world) + r0.w, dot(r1.xyz, world) + r1.w, dot(r2.xyz, world) + r2.w);
     float3 inside = (1.0 - abs(local)) * e.xyz;
     return saturate(min(inside.x, min(inside.y, inside.z)) * e.w);
@@ -105,17 +123,17 @@ float probe_influence(float4* p, float3 world)
 // either side by rounding).
 float3 probe_direction(float4* p, float3 world, float3 r)
 {
-    float4 r0 = p[4];
-    float4 r1 = p[5];
-    float4 r2 = p[6];
-    float3 e = p[7].xyz;
+    float4 r0 = read4(p + 4);
+    float4 r1 = read4(p + 5);
+    float4 r2 = read4(p + 6);
+    float3 e = read4(p + 7).xyz;
     float3 o = clamp(float3(dot(r0.xyz, world) + r0.w, dot(r1.xyz, world) + r1.w, dot(r2.xyz, world) + r2.w), -e, e);
     float3 d = float3(dot(r0.xyz, r), dot(r1.xyz, r), dot(r2.xyz, r));
     // The exit through the face each axis heads for.
     float3 t = (float3(d.x >= 0.0 ? e.x : -e.x, d.y >= 0.0 ? e.y : -e.y, d.z >= 0.0 ? e.z : -e.z) - o) / (abs(d) > 1e-8 ? d : 1e-8);
     float distance = min(t.x, min(t.y, t.z));
     // From the capture point (`position` holds it in the box's frame), back to world axes.
-    float3 local = o + d * distance - p[8].xyz;
+    float3 local = o + d * distance - read4(p + 8).xyz;
     return local.x * r0.xyz + local.y * r1.xyz + local.z * r2.xyz;
 }
 
@@ -127,7 +145,7 @@ float3 probe_direction(float4* p, float3 world, float3 r)
 // keeps only indices and weights; the two cube reads follow it, issued together.
 float3 probe_radiance(ReflectFrame* f, float3 world, float3 r, float lod, float2 pixel, float view_depth, float3 sky)
 {
-    if (f.probe_info.x == 0)
+    if (read4u(&f.probe_info).x == 0)
         return sky;
     uint mask = probe_mask(f, pixel, view_depth);
     uint first = 0;
@@ -154,20 +172,20 @@ float3 probe_radiance(ReflectFrame* f, float3 world, float3 r, float lod, float2
             }
         }
     }
-    TextureCubeArray cubes = g_cube_arrays[f.env.w];
-    SamplerState s = g_samplers[f.env.z];
+    TextureCubeArray cubes = g_cube_arrays[read4u(&f.env).w];
+    SamplerState s = g_samplers[read4u(&f.env).z];
     float share0 = w0;
     float share1 = (1.0 - w0) * w1;
     float3 sum = (1.0 - share0 - share1) * sky;
     if (w0 > 0.0)
     {
         float4* p = f.probes + first * PROBE_FLOAT4S;
-        sum += share0 * p[8].w * cubes.SampleLevel(s, float4(probe_direction(p, world, r), p[7].w), lod).rgb;
+        sum += share0 * read4(p + 8).w * cubes.SampleLevel(s, float4(probe_direction(p, world, r), read4(p + 7).w), lod).rgb;
     }
     if (w1 > 0.0)
     {
         float4* p = f.probes + second * PROBE_FLOAT4S;
-        sum += share1 * p[8].w * cubes.SampleLevel(s, float4(probe_direction(p, world, r), p[7].w), lod).rgb;
+        sum += share1 * read4(p + 8).w * cubes.SampleLevel(s, float4(probe_direction(p, world, r), read4(p + 7).w), lod).rgb;
     }
     return sum;
 }

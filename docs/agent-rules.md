@@ -73,6 +73,12 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
   A Radeon-only exact-image difference is now a real bug unless that self-check fails
   (`ENGINE_ADAPTER=radeon ENGINE_REQUIRE_GPU=1 cargo test -p engine_render --test gpu_selfcheck -- --ignored --nocapture`);
   if it does, the machine's settings regressed: tell the coordinator.
+- **Accesses through buffer addresses** (ADR 0013's addendum): Slang declares a plain pointer
+  access 4-byte aligned, and NVIDIA's driver then splits 16-byte loads. Read and write data
+  laid out 16-byte aligned with `loadAligned<16>` / `storeAligned<16>` (the `read_*` helpers);
+  leave a single 4-byte value read by a dynamic index a plain access (as a 16-byte load and a
+  select inside a loop it made SSR's trace 7.5 % slower). `spirv-dis` shows any vector access
+  left `Aligned 4`; never declare more alignment than the data has.
 - **Shader registers (hard rule, learned the hard way):** a feature must add no code to the
   shaders of views/materials that don't use it. On the AMD driver even dead code under a
   specialization constant costs VGPRs (forward shading sits at exactly 64; 72 made it 9–13 %
