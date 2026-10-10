@@ -137,3 +137,19 @@ New dependencies: `half` 2.7 (MIT OR Apache-2.0) and `zerocopy` 0.8 (BSD-2-Claus
 Apache-2.0 OR MIT), through block_compression's `bc6h` feature. block_compression 0.10's
 BC6H decoder to floats is broken (it writes three floats per pixel into rows of four):
 the cooked cube is checked on the GPU instead.
+
+## Amendment (2026-10-11): OpenEXR
+
+Poly Haven's and Blender's OpenEXR panoramas are PIZ compressed (wavelets and Huffman
+coding) with 32-bit float channels: not an hour's work, so the `exr` crate reads them
+(1.74.2, BSD-3-Clause, without its rayon feature). `engine_assets::hdr::decode_exr` takes
+the first layer with red, green and blue channels at its largest resolution (its size
+checked from the header before anything is allocated) into RGBE; `decode_panorama` tells
+the formats apart by their signatures, and `import_panorama` cooks either. Poly Haven's
+1K OpenEXR of the test panorama decodes to exactly the pixels of its 1K `.hdr` (mean
+relative error 0, peak 60,578 in both), in 94 ms.
+
+It brings 11 crates (bit_field, lebe, libm, num-complex, paste, pulp,
+pulp-wasm-simd-flag, raw-cpuid, reborrow, version_check, zune-inflate; MIT, Apache-2.0,
+BSD-3-Clause or Zlib), about 10 s to an incremental build of engine_assets; num-traits'
+features are unified in the workspace hack (ADR 0077).
