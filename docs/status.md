@@ -92,7 +92,8 @@ tooling included) about **50 %**.
   coarsest levels and most pixels first, tails up to 128 texels resident); one feedback
   pass with a wider field of view stays an option if larger scenes show pop-in; the
   geometry pool reserved as a scene opens and the upload ring grown ahead (the review's
-  §3.6). Left in 0b: mesh levels by distance, the fast-turn test in the perf gate.
+  §3.6), mesh levels by distance in every direction (`LodView::around`). Left in 0b: the
+  fast-turn test in the perf gate.
 
 ## 5. Queue (in order)
 
@@ -176,8 +177,9 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    `TextureStreamer::sharpness`): on first sight a few percent of the pixels wait
    0.08–0.15 s, later turns 0 %, tight budgets blurry all the time rather than after turns;
    mip fade (ADR 0078). Left:
-   - mesh levels by a sphere around the camera instead of the frustum (one source, not
-     both);
+   - ~~mesh levels by a sphere around the camera~~ done 2026-10-10: `LodView::around`
+     (distance in every direction; after a fast turn on Sponza no mesh level is left to
+     load, instead of 41, for 0.4–0.8 MiB more; the reference `flight` uses it);
    - the fast-turn test in the perf gate, and a larger scene than Sponza (its pack fits the
      disk's cache);
    - one feedback pass with a wider field of view instead of the main view's, if a larger

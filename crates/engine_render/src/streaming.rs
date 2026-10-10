@@ -681,8 +681,9 @@ impl StreamedGeometry for GeometryPool {
 pub struct LodView {
     /// The camera's position.
     pub eye: Vec3,
-    /// Its frustum: instances outside it count as not seen.
-    pub frustum: Frustum,
+    /// Its frustum: instances outside it count as not seen. `None` ([`Self::around`]):
+    /// every instance counts by its distance, whichever way the camera looks.
+    pub frustum: Option<Frustum>,
     /// [`crate::cull::lod_scale`] of the view.
     pub lod_scale: f32,
 }
@@ -694,8 +695,20 @@ impl LodView {
     pub fn new(clip_from_world: &Mat4, eye: Vec3, height: u32, threshold: f32) -> Self {
         Self {
             eye,
-            frustum: Frustum::from_clip_from_world(*clip_from_world),
+            frustum: Some(Frustum::from_clip_from_world(*clip_from_world)),
             lod_scale: lod_scale(clip_from_world, height, threshold),
+        }
+    }
+
+    /// The same view in every direction: instances ask for the level their distance
+    /// calls for even behind the camera, so that a fast turn finds them loaded (queue
+    /// item 0b), for the memory those levels take. One source of levels, as before (the
+    /// distance): not combined with the frustum's (`docs/research/streaming-fast-turns.md`).
+    #[must_use]
+    pub fn around(self) -> Self {
+        Self {
+            frustum: None,
+            ..self
         }
     }
 }
@@ -850,7 +863,11 @@ impl MeshStreamer {
             return;
         };
         let (center, extents) = transform_box(world_from_object, e.center, e.extents);
-        if !view.frustum.intersects_box(center, extents) {
+        if view
+            .frustum
+            .as_ref()
+            .is_some_and(|f| !f.intersects_box(center, extents))
+        {
             return;
         }
         let level = choose_lod(
@@ -1095,6 +1112,8 @@ mod mesh_tests {
         ids: Vec<MeshId>,
         frame: u64,
         requests: Vec<MeshLevelRequest>,
+        /// `LodView::around`: every direction.
+        around: bool,
     }
 
     impl World {
@@ -1121,6 +1140,7 @@ mod mesh_tests {
                 ids,
                 frame: 0,
                 requests: Vec::new(),
+                around: false,
             }
         }
 
@@ -1131,6 +1151,7 @@ mod mesh_tests {
             let clip = vulkan_perspective(90f32.to_radians(), 1.0, 0.1, 1000.0)
                 * look_at(Vec3::ZERO, Vec3::NEG_Z, Vec3::Y);
             let view = LodView::new(&clip, Vec3::ZERO, 1000, 1.0);
+            let view = if self.around { view.around() } else { view };
             for (k, &d) in distances.iter().enumerate() {
                 let world = Mat4::from_translation(Vec3::new(0.0, 0.0, -d));
                 self.streamer
@@ -1183,6 +1204,23 @@ mod mesh_tests {
             w.frame(&[-5.0, -5.0, -5.0]);
         }
         assert_eq!(w.resident(), [0, 1, 2]);
+    }
+
+    #[test]
+    fn around_the_camera_levels_follow_the_distance_behind_it_too() {
+        // 3 units behind the camera: the frustum's view asks for nothing finer.
+        let mut w = World::new(1, 1 << 30);
+        for _ in 0..6 {
+            w.frame(&[-3.0]);
+        }
+        assert_eq!(w.resident(), [3]);
+        // In every direction: as in front of it, level 0.
+        let mut w = World::new(1, 1 << 30);
+        w.around = true;
+        for _ in 0..6 {
+            w.frame(&[-3.0]);
+        }
+        assert_eq!(w.resident(), [0]);
     }
 
     #[test]

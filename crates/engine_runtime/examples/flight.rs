@@ -830,7 +830,8 @@ mod windowed {
             let main = cameras.resolve(&runtime.world).unwrap();
             let clip_from_world = main.camera.clip_from_world(WIDTH as f32 / HEIGHT as f32);
             let t = Instant::now();
-            let lod_view = LodView::new(&clip_from_world, eye, HEIGHT, 1.0);
+            // Mesh levels by distance in every direction: a fast turn finds them loaded.
+            let lod_view = LodView::new(&clip_from_world, eye, HEIGHT, 1.0).around();
             let arrived_before = streamer.stats();
             streamer.update(
                 &mut textures,
