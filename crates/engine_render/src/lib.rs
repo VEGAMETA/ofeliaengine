@@ -65,6 +65,7 @@ pub mod present;
 pub mod reflections;
 pub mod shadow;
 pub mod skinning;
+pub mod sort;
 pub mod streaming;
 pub mod subsurface;
 pub mod texture;

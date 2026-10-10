@@ -249,7 +249,9 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    makes them on first use or on the device's warm-up thread; the device is created
    beside the window and the Fox's cook, the swapchain beside the renderers and the
    scene.
-1. GPU particles and GPU radix sort.
+1. GPU particles and GPU radix sort. The sort is done (2026-10-11, ADR 0080: 1 M keys
+   with a payload in 0.59 ms on the RTX, 9.9 ms on the Radeon; 16 K 16-bit keys in 50 /
+   163 µs); the particles are next.
 2. Clustered decals.
 2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity): `.hdr` (own
    decoder) and OpenEXR (the `exr` crate, BSD-3-Clause, or own) cooked from equirectangular
