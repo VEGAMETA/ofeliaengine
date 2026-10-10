@@ -1,0 +1,68 @@
+[package]
+name = "engine_workspace_hack"
+description = "Feature unification (ADR 0077): every build resolves the shared dependencies that differed (bytemuck, windows-sys, serde, parking_lot) with the same features, so a build of some packages reuses the whole workspace's instead of overwriting it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+# Cargo keys a compiled unit by its own features, not its dependencies': when a build of a
+# few packages (`-p`) resolves a shared dependency with fewer features than the whole
+# workspace does, every crate above it is rebuilt into the same files, and the next
+# workspace build rebuilds them back. The dependencies below were the ones that differed
+# (2026-10-10, `cargo tree -e features`): bytemuck under everything (glam, engine_ecs),
+# windows-sys under everything from engine_platform up, serde, serde_json, parking_lot and
+# lock_api under the crash reporter, glTF import and the editor. Every engine crate but the
+# proc macros depends on this one, so every package resolves them with the union of what
+# the workspace enables. `tools/feature-drift.ps1` lists dependencies that differ again
+# (run by `tools/check.ps1 -Deny`, the check for dependency changes): add them here.
+
+[dependencies]
+bytemuck = { version = "1.25", features = [
+    "aarch64_simd",
+    "derive",
+    "extern_crate_alloc",
+    "min_const_generics",
+    "wasm_simd",
+] }
+
+lock_api = { version = "0.4", features = ["arc_lock", "atomic_usize"] }
+parking_lot = { version = "0.12", features = ["arc_lock"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["raw_value"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Wdk_Foundation",
+    "Wdk_Storage_FileSystem",
+    "Win32_Devices_Display",
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Media_Audio",
+    "Win32_Media_KernelStreaming",
+    "Win32_Media_Multimedia",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security_Cryptography_Catalog",
+    "Win32_Security_Cryptography_Sip",
+    "Win32_Security_WinTrust",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_System_WindowsProgramming",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Input_XboxController",
+    "Win32_UI_WindowsAndMessaging",
+] }

@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
 engine_profiler.workspace = true
 engine_rhi.workspace = true
 

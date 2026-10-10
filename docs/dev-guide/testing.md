@@ -3,6 +3,30 @@
 Two checks guard rendering (ADR 0062): golden images catch a changed picture, the
 performance gate catches a slower pass. Both run on each GPU of the reference machine.
 
+## The checks before a merge
+
+`tools\check.ps1` runs everything a change must pass (ADR 0037, ADR 0077); `-Gpu` adds the
+tests of every crate that links the RHI on both GPUs, `-Perf` the performance gate, `-Deny`
+the dependency checks. Tests run under [cargo-nextest](https://nexte.st), once per machine:
+
+```
+cargo install cargo-nextest --locked
+```
+
+- **One build per check.** Every test step filters the same workspace build; a test runs
+  in its own process, all binaries in parallel. Run one test with
+  `cargo nextest run -E 'test(name)'`, a crate's with `-E 'package(engine_render)'`, or use
+  `cargo test` as always.
+- **Between commits**, `tools\check.ps1 -Gpu -Affected` runs only the tests of the packages
+  your branch changed and of those that depend on them (`affected:` in the first line says
+  which). The full run gates the merge.
+- **Doc tests and formatting** follow the branch's changes in every run: unchanged code
+  passed them on main.
+- **New crates depend on `engine_workspace_hack`** (directly, or through `engine_core`).
+  It gives the shared dependencies one set of features in every build, so `cargo test -p`
+  a crate reuses what the full check built instead of rebuilding it. When `-Deny` reports
+  feature drift after a dependency change, add the dependency it names there.
+
 ## Golden images
 
 `tests/golden/tests/golden.rs` renders fixed shots and compares each with the golden

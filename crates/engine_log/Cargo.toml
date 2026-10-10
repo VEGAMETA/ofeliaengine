@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
 # The logging facade most Rust crates log through (MIT OR Apache-2.0, no dependencies;
 # already in the tree through other crates). ADR 0061.
 log = "0.4"

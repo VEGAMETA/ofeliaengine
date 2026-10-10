@@ -3,6 +3,7 @@
 - Status: Accepted (team decision, 2026-09-27)
 - Date: 2026-09-27
 - Changes: the CI part of [ADR 0001](0001-workspace-and-build.md) and CLAUDE.md §15 "CI"
+- Amended by: [ADR 0077](0077-faster-checks.md) (how `tools/check.ps1` runs its steps)
 
 ## Context
 

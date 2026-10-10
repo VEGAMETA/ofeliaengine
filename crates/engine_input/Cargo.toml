@@ -10,6 +10,10 @@ license.workspace = true
 [lints]
 workspace = true
 
+[dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
+
 # The action logic is platform-independent (and tested in Linux containers); the device
 # layer (raw input conversion, XInput) is Windows-only.
 [target.'cfg(windows)'.dependencies]

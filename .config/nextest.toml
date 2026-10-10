@@ -1,0 +1,30 @@
+# cargo-nextest configuration (ADR 0077): how tools/check.ps1 runs the tests.
+#
+# Every test runs in its own process, so tests that count the process's allocations can
+# share a binary, and the test binaries of the whole workspace run in parallel instead of
+# one after another.
+
+[store]
+dir = "target/nextest"
+
+[profile.default]
+# Report every failure, not the first.
+fail-fast = false
+# A test that runs past a minute is reported; the GPU suites' longest (antialiasing modes
+# under synchronization validation) take about 35 s.
+slow-timeout = { period = "60s", terminate-after = 10 }
+# Windows: show the output of failing tests only.
+failure-output = "immediate-final"
+success-output = "never"
+status-level = "fail"
+final-status-level = "slow"
+
+[test-groups]
+# Tests of the crates that link the RHI may create a device. They run a few at a time, so
+# the GPU and its memory are not oversubscribed (more on the discrete GPU: tools/check.ps1
+# passes --test-threads for its GPU step).
+gpu = { max-threads = 4 }
+
+[[profile.default.overrides]]
+filter = 'rdeps(engine_rhi)'
+test-group = 'gpu'

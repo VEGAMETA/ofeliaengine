@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
 # Embark's crash handling (MIT OR Apache-2.0, ADR 0061): `crash-handler` hooks the
 # process's crash paths, `minidumper` runs the monitor process that writes minidumps
 # (through `minidump-writer`, MIT) over a local socket.

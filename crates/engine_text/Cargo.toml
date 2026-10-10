@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
 harfrust = "=0.13.3"
 skrifa = "=0.46.0"
 unicode-linebreak = "=0.1.5"

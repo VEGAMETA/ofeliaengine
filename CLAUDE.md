@@ -568,9 +568,12 @@ documentation build. Everything on Windows x64.
 
 Every change is checked before merging on the reference machine with `tools/check.ps1`,
 with the switches the change calls for (`-Gpu`, `-Deny`, `-Loom`, `-Profiles`; `-Full` for
-all). GitHub Actions run the same workflows on demand only (by hand, or the `ci` / `bench`
-labels): the self-hosted runner is the same machine (ADR 0037). Benchmarks run there by
-hand when a change can move them, into `docs/perf/history.md`.
+all); `-Affected` runs only what a branch touches, between commits. Tests run under
+cargo-nextest from one workspace build; every crate depends on `engine_workspace_hack`,
+which keeps dependency features the same in every build (ADR 0077). GitHub Actions run
+the same workflows on demand only (by hand, or the `ci` / `bench` labels): the self-hosted
+runner is the same machine (ADR 0037). Benchmarks run there by hand when a change can move
+them, into `docs/perf/history.md`.
 
 ---
 
