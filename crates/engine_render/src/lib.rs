@@ -18,6 +18,8 @@
 //!   their motion vectors (ADR 0068).
 //! - [`atmosphere`]: a physically based sky and atmosphere, aerial perspective and
 //!   exponential height fog (ADR 0069).
+//! - [`panorama`]: HDR panoramas as an environment's sky: a background cube, and the sun
+//!   left to a directional light (ADR 0083).
 //! - [`reflections`]: local reflections: reflection probes and screen-space reflections
 //!   (ADR 0073).
 //! - [`subsurface`]: screen-space subsurface scattering: diffusion profiles, transmission
@@ -57,6 +59,7 @@ pub mod local_shadows;
 pub mod material;
 pub mod mesh;
 pub mod msaa;
+pub mod panorama;
 pub mod particles;
 pub mod png;
 pub mod post;

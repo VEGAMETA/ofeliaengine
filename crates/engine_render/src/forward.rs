@@ -689,7 +689,8 @@ struct FrameData {
     atmosphere: u64,
     /// Local lights' shadows (ADR 0071): the atlas's bindless index, ...
     local_shadow_atlas: u32,
-    _pad5: u32,
+    /// The sky pass: the cosine of the light's disk (above 1: none, a panorama's sky).
+    sun_disk: f32,
     /// ... per sorted light its first view (or `NO_SHADOW`), the views, the drawn views
     /// and their count, and one texel of the atlas in uv.
     light_shadows: u64,
@@ -3731,7 +3732,7 @@ impl ForwardRenderer {
             _pad4: [0; 2],
             world_from_clip: world_from_clip.to_cols_array(),
             environment: u32::from(environment.is_some()),
-            sky_cube: environment.map_or(0, |e| e.source_index),
+            sky_cube: environment.map_or(0, |e| e.background_index),
             prefiltered: environment.map_or(0, |e| e.prefiltered_index),
             dfg_lut: environment.map_or(0, |e| e.dfg_index),
             env_levels: PREFILTERED_LEVELS,
@@ -3746,7 +3747,11 @@ impl ForwardRenderer {
             subsurface: profiles,
             atmosphere: atmosphere.map_or(0, |a| a.constants),
             local_shadow_atlas: local.map_or(0, |s| s.atlas.sampled),
-            _pad5: 0,
+            sun_disk: if environment.is_some_and(|e| !e.sun_disk) {
+                2.0
+            } else {
+                crate::environment::SUN_DISK_COS
+            },
             light_shadows: local_frame.light_shadows,
             shadow_views: local_frame.views,
             shadow_draws: local_frame.draws,
@@ -4906,7 +4911,7 @@ impl ForwardRenderer {
             fg.add_pass("sky")
                 .color(color, LoadOp::Load, StoreOp::Store)
                 .depth_read_only(depth)
-                .read(env.source, Access::Sampled(ShaderStages::FRAGMENT))
+                .read(env.background, Access::Sampled(ShaderStages::FRAGMENT))
                 .execute(move |ctx| {
                     let area = ctx.render_area();
                     // SAFETY: recording inside the pass's rendering scope; the frame

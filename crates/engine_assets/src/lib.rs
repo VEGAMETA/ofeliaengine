@@ -4,11 +4,14 @@
 //! detail levels from meshoptimizer (ADR 0053). Skins and animations become `engine_anim`
 //! skeletons and compressed clips (`animation`, ADR 0068). Scenes are cooked into packs, the runtime
 //! format, and loaded through an I/O ring with zstd per entry (`cook`, `pack`; ADR 0056).
+//! HDR panoramas (`.hdr`) are read, and their sun found, for HDRI environments (`hdr`, ADR
+//! 0083).
 
 pub mod animation;
 pub mod cook;
 mod ddc;
 mod gltf_import;
+pub mod hdr;
 mod lod;
 pub mod pack;
 mod texture_compress;

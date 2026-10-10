@@ -362,6 +362,12 @@ impl AtmosphereConstants {
     pub(crate) fn set_sky_view_sun(&mut self, mu: f32) {
         self.sun_direction[3] = mu;
     }
+
+    /// The background draws no disk for the directional light: an HDR panorama shows its
+    /// own sun (ADR 0083).
+    pub(crate) fn hide_sun_disk(&mut self) {
+        self.planet[3] = 2.0;
+    }
 }
 
 /// `Push` in `atmosphere.slang` (24 bytes).
@@ -866,7 +872,7 @@ pub(crate) fn constants(
         c.view[2] = aerial_skip_distance(a, view.light * intensity) / (km * scale).max(1e-12);
     } else {
         // The disk of the gradient sky (as the forward renderer's sky pass).
-        c.planet[3] = 0.999_988_9;
+        c.planet[3] = crate::environment::SUN_DISK_COS;
     }
     if let Some(f) = fog {
         c.flags |= FLAG_FOG;
@@ -902,7 +908,10 @@ pub(crate) fn add_composite_pass<'g>(
         .add_pass("atmosphere")
         .color(color, LoadOp::Load, StoreOp::Store)
         .read(depth, Access::Sampled(ShaderStages::FRAGMENT))
-        .read(environment.source, Access::Sampled(ShaderStages::FRAGMENT))
+        .read(
+            environment.background,
+            Access::Sampled(ShaderStages::FRAGMENT),
+        )
         .read(environment.sh, Access::StorageRead(ShaderStages::FRAGMENT));
     if let Some(t) = atmosphere.textures {
         pass = pass

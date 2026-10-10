@@ -109,6 +109,7 @@ Checked 2026-09-27. Sources at the end. No code was copied from any of them.
 | Fox (Khronos; model by PixelMannen, rig and animations by tomkranis, glTF by @AsoboStudio and @scurest) | model CC0; rig, animations and conversion CC-BY 4.0 | skinning and animation (ADR 0068); golden image `animated_fox` (published images carry the attribution) |
 | CesiumMan, RiggedFigure, RiggedSimple (Khronos, Cesium) | CC-BY 4.0 | skinning and animation tests |
 | SimpleSkin (Khronos) | CC0 | skinning and animation tests |
+| Kloofendal 48d Partly Cloudy (Pure Sky), 2K `.hdr` (Poly Haven; Greg Zaal, sky edits Jarod Guest) | CC0 | HDRI environments (ADR 0083): the sun search, golden image `procedural_hdri` |
 
 ## Conclusions
 

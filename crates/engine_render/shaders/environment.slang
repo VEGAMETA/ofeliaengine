@@ -45,23 +45,7 @@ ConstantBuffer<Push> push;
 
 static const float PI = 3.14159265;
 
-// The direction through the center of texel `xy` of cube face `face` at size `size`
-// (Vulkan's cube map convention: faces +X, −X, +Y, −Y, +Z, −Z; v grows downwards).
-float3 face_direction(uint2 xy, uint face, uint size)
-{
-    float2 uv = (float2(xy) + 0.5) / float(size) * 2.0 - 1.0;
-    float3 d;
-    switch (face)
-    {
-    case 0: d = float3(1.0, -uv.y, -uv.x); break;
-    case 1: d = float3(-1.0, -uv.y, uv.x); break;
-    case 2: d = float3(uv.x, 1.0, uv.y); break;
-    case 3: d = float3(uv.x, -1.0, -uv.y); break;
-    case 4: d = float3(uv.x, -uv.y, 1.0); break;
-    default: d = float3(-uv.x, -uv.y, -1.0); break;
-    }
-    return normalize(d);
-}
+#include "cube_common.slang"
 
 // The sky's radiance along `d` (+Y up): zenith to horizon above, horizon to ground below.
 float3 sky(float3 d)

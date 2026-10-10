@@ -1194,6 +1194,66 @@ let view = ForwardView { light, environment: Some(&environment), ..view };
   sky pass; the forward pass does not change. Views without an atmosphere or fog pay
   nothing.
 
+### HDRI skies: an HDR panorama as the sky
+
+An environment can take its sky from an HDR panorama (ADR 0083): an equirectangular `.hdr`
+image, like the ones on Poly Haven. It is drawn behind the scene and lights it; its sun,
+found in the image, becomes your directional light, so it casts shadows.
+
+```rust
+use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
+use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
+
+// Once (a 2K panorama: decoded in 6 ms, its sun found in 5 ms).
+let image = decode_hdr(&std::fs::read("sky.hdr")?)?;
+let sun = find_sun(&image, &SunSearch::default());
+let panorama = Panorama::new(&device, &mut allocator, &bindless, &PanoramaDesc {
+    width: image.width,
+    height: image.height,
+    pixels: &image.pixels,
+    sun: sun.map(|s| PanoramaSun {
+        direction: s.direction,
+        illuminance: s.illuminance,
+        cone: s.cone,
+        sky: s.sky,
+    }),
+    background_size: 0, // a quarter of the width, at most 1,024
+})?;
+// The previous panorama comes back: destroy it once the frames that drew it are done.
+let old = environment.set_panorama(Some(panorama));
+
+// The sun is now your directional light (with its shadows).
+if let Some(sun) = environment.panorama().and_then(|p| p.sun()) {
+    light.direction = -sun.direction;
+    light.color = sun.illuminance * environment.intensity();
+}
+
+// Turning the sky (the sun turns with it): the next frame remakes it.
+environment.panorama().unwrap().set_rotation(0.5);
+```
+
+- **Which way it faces.** The middle of the image is straight ahead of the default camera
+  (−Z), three quarters of the way across is +X, the top row is straight up.
+  `set_rotation` turns it about +Y, counter-clockwise seen from above.
+- **The sun leaves the sky light.** A sun 10⁵ times brighter than the sky, kept in the
+  128² lighting cube, would sparkle in reflections and smear the diffuse light. The
+  lighting cube fills the sun's cone with the sky around it; the light's highlight and
+  shadows take its place. Without a sun (`sun: None`, or an overcast sky where
+  `find_sun` finds none) all of the panorama lights the scene.
+- **The sky's disk is not drawn** from the directional light over a panorama: the
+  panorama shows its own sun.
+- **Units.** The panorama's values are radiance in its own units; Poly Haven's skies come
+  out near the engine's defaults (a sky around 0.7, a sun around 4). Scale both with
+  `set_intensity`.
+- **What it costs.** Setting or turning a panorama makes its background cube and the
+  lighting once: 0.3 ms on an RTX 4060 Ti, 7.3 ms on the Radeon iGPU for a 2K panorama.
+  Per frame, nothing more than the gradient sky (the sky pass reads a larger cube: 38
+  against 37 µs at 1080p on the RTX). Memory: the panorama's pixels (8 MiB at 2K) and
+  the background cube (16 MiB at 512², 64 MiB at 1,024²).
+- **The physical atmosphere, when on, replaces the panorama**, as it does the gradient.
+- **Not yet:** OpenEXR files, cooking panoramas into compressed cubes (BC6H, 8 times
+  smaller) in packs, soft shadows sized by the sun.
+
 ## 11. Bloom and automatic exposure
 
 Before tone mapping, two passes make HDR frames read like photographs (ADR 0047):

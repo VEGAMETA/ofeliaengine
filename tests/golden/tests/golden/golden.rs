@@ -121,6 +121,17 @@ fn procedural_scene_with_particles() {
     });
 }
 
+/// An HDR panorama as the sky (ADR 0083): Poly Haven's Kloofendal 48d Partly Cloudy (Pure
+/// Sky, CC0) at 2K behind the scene and in its image-based light, its sun found in it and
+/// lighting the scene as the directional light, with its shadows.
+#[test]
+fn procedural_scene_under_an_hdri() {
+    check(&Shot {
+        panorama: Some("HDRI/kloofendal_48d_partly_cloudy_puresky_2k.hdr"),
+        ..procedural("procedural_hdri")
+    });
+}
+
 /// The particles under TAA (ADR 0081): with no transparent surface in the scene, they make
 /// the view's reactive mask themselves, so the resolve does not smear them.
 #[test]

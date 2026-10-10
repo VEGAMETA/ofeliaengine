@@ -12,6 +12,12 @@
 //! They are rebuilt on the GPU only when the sky changes ([`Environment::set_sky`]), in
 //! compute passes of that frame's graph. The forward renderer reads them when a view has an
 //! environment ([`crate::forward::ForwardView::environment`]).
+//!
+//! The sky is a three-color gradient ([`Sky`]), the physical atmosphere
+//! ([`Environment::set_atmosphere`], ADR 0069) or an HDR panorama
+//! ([`Environment::set_panorama`], ADR 0083): a panorama's background cube is drawn behind
+//! the scene, and the radiance cube is filled from it at 128², its sun left out for a
+//! directional light.
 
 use crate::atmosphere::{Atmosphere, AtmosphereFrame, AtmosphereTables, AtmosphereView, HeightFog};
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
@@ -19,6 +25,7 @@ use crate::graph::{
     Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, ShaderStages,
     Texture, TextureDesc, TextureState,
 };
+use crate::panorama::Panorama;
 use crate::upload::UploadRing;
 use core::cell::Cell;
 use engine_core::math::Vec3;
@@ -308,11 +315,17 @@ impl Image {
     }
 }
 
+/// The cosine of the sun disk's angular radius (0.27°) that the background draws from the
+/// directional light (none over a panorama: it shows its own sun).
+pub(crate) const SUN_DISK_COS: f32 = 0.999_988_9;
+
 /// What a frame's shading reads from its environment.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct EnvironmentFrame {
-    /// The radiance cube (the background).
+    /// The radiance cube (the lighting's source, and the sky of reflection probes).
     pub source: Texture,
+    /// The cube drawn behind the scene: a panorama's background cube, or the radiance cube.
+    pub background: Texture,
     /// The prefiltered cube (specular).
     pub prefiltered: Texture,
     /// The DFG table.
@@ -321,6 +334,7 @@ pub(crate) struct EnvironmentFrame {
     pub sh: Buffer,
     /// Bindless indices of the three textures, and the harmonics' address.
     pub source_index: u32,
+    pub background_index: u32,
     pub prefiltered_index: u32,
     pub dfg_index: u32,
     pub sh_address: u64,
@@ -335,6 +349,9 @@ pub(crate) struct EnvironmentFrame {
     /// Whether this frame rebuilt the image-based light (the sky changed): reflection
     /// probes capture it (ADR 0073).
     pub rebuilt: bool,
+    /// Whether the background draws the directional light's disk (not over a panorama,
+    /// which shows its own sun).
+    pub sun_disk: bool,
 }
 
 /// Image-based lighting from a sky (see the module documentation). Rebuilding after
@@ -361,6 +378,8 @@ pub struct Environment {
     atmosphere: Cell<Option<Atmosphere>>,
     tables: Option<AtmosphereTables>,
     fog: Cell<Option<HeightFog>>,
+    /// The HDR panorama, when it is the sky (ADR 0083).
+    panorama: Option<Panorama>,
 }
 
 impl core::fmt::Debug for Environment {
@@ -370,6 +389,7 @@ impl core::fmt::Debug for Environment {
             .field("intensity", &self.intensity.get())
             .field("atmosphere", &self.atmosphere.get())
             .field("fog", &self.fog.get())
+            .field("panorama", &self.panorama)
             .finish_non_exhaustive()
     }
 }
@@ -457,6 +477,7 @@ impl Environment {
             atmosphere: Cell::new(None),
             tables: None,
             fog: Cell::new(None),
+            panorama: None,
         })
     }
 
@@ -502,6 +523,25 @@ impl Environment {
     /// The physical sky's parameters, when it is on.
     pub fn atmosphere(&self) -> Option<Atmosphere> {
         self.atmosphere.get()
+    }
+
+    /// Makes an HDR panorama the sky (ADR 0083), or the gradient [`Sky`] again (`None`).
+    /// The next frame that draws the environment makes the panorama's background cube
+    /// (the first time, or after [`Panorama::set_rotation`]) and rebuilds the image-based
+    /// light from it. A panorama with a sun leaves it out of that light: light the scene
+    /// with a directional light from [`Panorama::sun`] instead, for its shadows. The
+    /// physical atmosphere, when on, replaces the panorama as it does the gradient.
+    ///
+    /// Returns the previous panorama: destroy it ([`Panorama::destroy`]) once the frames
+    /// that drew it have finished, or keep it to set it again.
+    pub fn set_panorama(&mut self, panorama: Option<Panorama>) -> Option<Panorama> {
+        self.dirty.set(true);
+        core::mem::replace(&mut self.panorama, panorama)
+    }
+
+    /// The HDR panorama, when it is the sky.
+    pub fn panorama(&self) -> Option<&Panorama> {
+        self.panorama.as_ref()
     }
 
     /// Turns exponential height fog on with `fog`, or off (`None`, the default). It is lit
@@ -607,6 +647,18 @@ impl Environment {
             }
         }
         let sun_color = physical.map(|(a, t)| t.sun_color(&a, view));
+        // The panorama, unless the physical sky or the debugging sky replaces it: its
+        // background cube is made, and the lighting rebuilt, after it was set or turned.
+        let panorama = self
+            .panorama
+            .as_ref()
+            .filter(|_| physical.is_none() && !debug);
+        if panorama.is_some_and(|p| !p.converted.get()) {
+            rebuild = true;
+        }
+        let background =
+            panorama.map_or(source, |p| p.background.import(fg, "panorama background"));
+        let background_index = panorama.map_or(self.source.sampled, |p| p.background.sampled);
         let atmosphere = if physical.is_some() || fog.is_some() {
             let mut constants = crate::atmosphere::constants(
                 physical.as_ref().map(|(a, _)| a),
@@ -614,12 +666,15 @@ impl Environment {
                 view,
                 sun_color.unwrap_or(view.light),
                 self.sh_address,
-                self.source.sampled,
+                background_index,
                 self.intensity.get(),
                 physical.map_or([0; 4], |(_, t)| t.indices()),
             );
             if let Some((_, t)) = physical {
                 constants.set_sky_view_sun(t.sky_view_sun(constants.sky_view_sun()));
+            }
+            if panorama.is_some() {
+                constants.hide_sun_disk();
             }
             let address = ring.push(&[constants])?;
             let textures = physical.map(|(a, t)| {
@@ -656,11 +711,36 @@ impl Environment {
             } else {
                 Access::StorageWrite(ShaderStages::COMPUTE)
             };
+            // With a panorama, mip 0 comes from its background cube (made first if it is
+            // new or turned), the sun's cone left out.
+            let light = panorama.map(|p| {
+                if !p.converted.replace(true) {
+                    p.add_background_pass(
+                        fg,
+                        bindless,
+                        background,
+                        downsample,
+                        move |target, read, size| Push {
+                            target,
+                            read,
+                            size,
+                            ..base
+                        },
+                    );
+                }
+                p.light_push(storage[0], SOURCE_SIZE)
+            });
             fg.add_compute("environment sky", bindless)
                 .async_compute()
+                .maybe_read(
+                    light.as_ref().map(|_| background),
+                    Access::Sampled(ShaderStages::COMPUTE),
+                )
                 .write(source, access)
                 .record(move |rec| {
-                    if !cube_from_atmosphere {
+                    if let Some(light) = &light {
+                        light.dispatch(rec);
+                    } else if !cube_from_atmosphere {
                         let push = Push {
                             target: storage[0],
                             size: SOURCE_SIZE,
@@ -725,10 +805,12 @@ impl Environment {
         }
         Some(EnvironmentFrame {
             source,
+            background,
             prefiltered,
             dfg,
             sh,
             source_index: self.source.sampled,
+            background_index,
             prefiltered_index: self.prefiltered.sampled,
             dfg_index: self.dfg.sampled,
             sh_address: self.sh_address,
@@ -736,10 +818,11 @@ impl Environment {
             atmosphere,
             sun_color: sun_color.filter(|_| physical.is_some_and(|(a, _)| a.drives_sun)),
             rebuilt: rebuild,
+            sun_disk: panorama.is_none(),
         })
     }
 
-    /// Frees the images and the buffer.
+    /// Frees the images and the buffer, and the panorama's.
     ///
     /// # Safety
     ///
@@ -747,6 +830,9 @@ impl Environment {
     pub unsafe fn destroy(&mut self, allocator: &mut Allocator, bindless: &Bindless) {
         // SAFETY: guaranteed by the caller.
         unsafe {
+            if let Some(panorama) = self.panorama.as_mut() {
+                panorama.destroy(allocator, bindless);
+            }
             self.source.destroy(&self.device, allocator, bindless, 0);
             self.prefiltered
                 .destroy(&self.device, allocator, bindless, 0);
