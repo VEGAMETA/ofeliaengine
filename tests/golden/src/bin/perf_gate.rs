@@ -1,11 +1,16 @@
-//! `perf_gate [--update] [--strict] [--runs N] [--threshold PCT] [--scene NAME]...`: GPU
-//! time of every pass
-//! of fixed scenes at 1920 × 1080, against this GPU vendor's baseline in
-//! `tests/golden/perf/<vendor>.tsv` (ADR 0062, CLAUDE.md §5).
+//! `perf_gate [--update] [--strict] [--runs N] [--frames N] [--threshold PCT]
+//! [--scene NAME]...`: GPU time of every pass of fixed scenes at 1920 × 1080, against this
+//! GPU vendor's baseline in `tests/golden/perf/<vendor>.tsv` (ADR 0062, CLAUDE.md §5).
 //!
-//! - Each scene is rendered `--runs` times (3) from a fresh device, 200 timed frames each;
-//!   a pass's time is the smallest of its per-run medians (interference from other work
-//!   on the machine, and clocks that did not ramp up, only add time).
+//! - Each scene is rendered `--runs` times (3) from a fresh device, `--frames` timed
+//!   frames each (100: the same medians as 200 within the runs' noise, in half the
+//!   Radeon's time); a pass's time is the smallest of its per-run medians (interference
+//!   from other work on the machine, and clocks that did not ramp up, only add time). The
+//!   runs go a round at a time, the first of every scene, then the second: a slow spell
+//!   of the machine (work on the CPU next to the Radeon iGPU, other work on a GPU) then
+//!   slows one run of a few scenes instead of every run of one.
+//! - A scene with a pass over the threshold is measured again, `--runs` more runs, and
+//!   judged by those: a slow spell has passed by then, a regression has not.
 //! - A pass regresses when it is slower than its baseline by more than `--threshold`
 //!   percent (3) and by more than 5 µs or 0.5 % of its scene's frame, whichever is more
 //!   (small passes are noisy, and a few µs of a 12 ms frame matter to nobody); the
@@ -38,6 +43,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Instant;
 
 const TOTAL: &str = "(frame total)";
 /// The frame end to end on the GPU (ADR 0065): with async compute, passes overlap and
@@ -172,129 +178,111 @@ fn read_baseline(path: &Path) -> BTreeMap<(String, String), f64> {
         .collect()
 }
 
-fn main() -> ExitCode {
-    // The test bed's frame (`scene::render`) keeps large state on the stack; Windows gives
-    // the main thread 1 MiB.
-    std::thread::Builder::new()
-        .stack_size(16 << 20)
-        .spawn(run)
-        .ok()
-        .and_then(|t| t.join().ok())
-        .unwrap_or(ExitCode::FAILURE)
+/// µs per (scene, pass).
+type Times = BTreeMap<(String, String), f64>;
+
+/// One run of a scene: each pass's median over the timed frames, their sum and the frame
+/// end to end.
+type Run = BTreeMap<String, f64>;
+
+/// The adapter the runs measured, and how many runs there were.
+#[derive(Default)]
+struct Measured {
+    vendor: Option<String>,
+    adapter: String,
+    runs: usize,
 }
 
-fn run() -> ExitCode {
-    let mut update = false;
-    let mut strict = false;
-    let mut runs = 3usize;
-    let mut threshold = 3.0f64;
-    let mut only: Vec<String> = Vec::new();
-    let mut args = std::env::args().skip(1);
-    while let Some(arg) = args.next() {
-        match arg.as_str() {
-            "--update" => update = true,
-            "--strict" => strict = true,
-            "--runs" => runs = args.next().and_then(|v| v.parse().ok()).unwrap_or(runs),
-            "--scene" => only.extend(args.next()),
-            "--threshold" => {
-                threshold = args
-                    .next()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(threshold);
+/// Renders `shots`, `runs` times each from a fresh device, a round at a time (the
+/// module's documentation says why). Returns each shot's runs, none for a skipped shot;
+/// `None` without a GPU.
+fn measure(
+    shots: &[&Shot],
+    runs: usize,
+    options: RenderOptions,
+    out: &mut Measured,
+) -> Option<Vec<Vec<Run>>> {
+    let mut per_shot: Vec<Vec<Run>> = vec![Vec::new(); shots.len()];
+    let mut skipped = vec![false; shots.len()];
+    for _ in 0..runs.max(1) {
+        for (i, shot) in shots.iter().enumerate() {
+            if skipped[i] {
+                continue;
             }
-            other => {
-                eprintln!("unknown argument {other}");
-                return ExitCode::from(2);
-            }
-        }
-    }
-    let options = RenderOptions {
-        validation: false,
-        timed_frames: 200,
-    };
-    let mut measured: BTreeMap<(String, String), f64> = BTreeMap::new();
-    let mut vendor = None;
-    let mut adapter = String::new();
-    if update && !only.is_empty() {
-        eprintln!("--update writes the whole baseline: measure every scene");
-        return ExitCode::from(2);
-    }
-    for shot in shots()
-        .into_iter()
-        .filter(|s| only.is_empty() || only.iter().any(|n| n == s.name))
-    {
-        let mut per_pass: BTreeMap<String, Vec<f64>> = BTreeMap::new();
-        for _ in 0..runs.max(1) {
-            match render(&shot, options) {
+            let why = match render(shot, options) {
                 Ok(r) => {
-                    vendor = Some(vendor_name(r.vendor_id));
-                    adapter.clone_from(&r.adapter);
-                    let total: f64 = r.pass_us.values().sum();
-                    for (name, us) in r.pass_us {
-                        per_pass.entry(name.to_owned()).or_default().push(us);
-                    }
-                    per_pass.entry(TOTAL.to_owned()).or_default().push(total);
+                    out.vendor = Some(vendor_name(r.vendor_id));
+                    out.adapter.clone_from(&r.adapter);
+                    out.runs += 1;
+                    let mut run: Run = r
+                        .pass_us
+                        .into_iter()
+                        .map(|(name, us)| (name.to_owned(), us))
+                        .collect();
+                    let total: f64 = run.values().sum();
+                    run.insert(TOTAL.to_owned(), total);
                     if r.frame_us > 0.0 {
-                        per_pass
-                            .entry(FRAME.to_owned())
-                            .or_default()
-                            .push(r.frame_us);
+                        run.insert(FRAME.to_owned(), r.frame_us);
                     }
+                    per_shot[i].push(run);
+                    continue;
                 }
                 Err(Skip::NoGpu(e)) => {
                     eprintln!("no GPU: {e}");
-                    return ExitCode::FAILURE;
+                    return None;
                 }
-                Err(Skip::NoScene(path)) => {
-                    eprintln!("{}: skipped, {} missing", shot.name, path.display());
-                    break;
-                }
-                Err(Skip::Unsupported(e)) => {
-                    eprintln!("{}: skipped, {e}", shot.name);
-                    break;
-                }
-                Err(Skip::NoDlss(e)) => {
-                    eprintln!("{}: skipped, no DLSS ({e})", shot.name);
-                    break;
-                }
-            }
-        }
-        for (pass, values) in per_pass {
-            let fastest = values.iter().copied().fold(f64::INFINITY, f64::min);
-            measured.insert((shot.name.to_owned(), pass), fastest);
+                Err(Skip::NoScene(path)) => format!("{} missing", path.display()),
+                Err(Skip::Unsupported(e)) => e,
+                Err(Skip::NoDlss(e)) => format!("no DLSS ({e})"),
+            };
+            eprintln!("{}: skipped, {why}", shot.name);
+            skipped[i] = true;
         }
     }
-    let Some(vendor) = vendor else {
-        eprintln!("nothing measured");
-        return ExitCode::FAILURE;
-    };
-    let path = baseline_path(&vendor);
-    println!("{adapter}; baseline {}", path.display());
-    if update {
-        let mut text = format!(
-            "# GPU µs per pass (fastest of the runs' medians), {adapter}\n# scene\tpass\tµs\n"
-        );
-        for ((scene, pass), us) in &measured {
-            let _ = writeln!(text, "{scene}\t{pass}\t{us:.1}");
+    Some(per_shot)
+}
+
+/// Each pass's fastest time over `runs` of `scene`, into `times`.
+fn fastest(scene: &str, runs: &[Run], times: &mut Times) {
+    for run in runs {
+        for (pass, &us) in run {
+            let t = times
+                .entry((scene.to_owned(), pass.clone()))
+                .or_insert(f64::INFINITY);
+            *t = t.min(us);
         }
-        if let Err(e) = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))
-            .and_then(|()| std::fs::write(&path, text))
-        {
-            eprintln!("{}: {e}", path.display());
-            return ExitCode::FAILURE;
-        }
-        println!("baseline written ({} passes)", measured.len());
-        return ExitCode::SUCCESS;
     }
-    let baseline = read_baseline(&path);
+}
+
+/// What a measurement says against the baseline.
+struct Verdict {
+    /// Passes slower than their baseline by more than the threshold and the floor.
+    slower: BTreeSet<(String, String)>,
+    /// Scenes whose every large pass moved by about the same percentage as the frame:
+    /// the GPU ran at other clocks, or shared with other work, rather than a pass
+    /// regressing.
+    uniform: BTreeSet<String>,
+}
+
+fn judge(measured: &Times, baseline: &Times, threshold: f64) -> Verdict {
     let change_of = |key: &(String, String)| -> Option<f64> {
         let before = *baseline.get(key)?;
         let now = *measured.get(key)?;
         (before > 0.0).then(|| (now / before - 1.0) * 100.0)
     };
-    // Scenes whose every large pass moved by about the same percentage as the frame: the
-    // GPU ran at other clocks, or shared with other work, rather than a pass regressing.
-    let uniform: BTreeSet<String> = measured
+    let slower = measured
+        .iter()
+        .filter(|&(key, &now)| {
+            let frame = baseline
+                .get(&(key.0.clone(), TOTAL.to_owned()))
+                .copied()
+                .unwrap_or(0.0);
+            change_of(key).is_some_and(|change| change > threshold)
+                && now - baseline[key] > FLOOR_US.max(frame * FLOOR_OF_FRAME)
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    let uniform = measured
         .keys()
         .map(|(scene, _)| scene.clone())
         .collect::<BTreeSet<_>>()
@@ -320,11 +308,137 @@ fn run() -> ExitCode {
                     .all(|c| (c - frame_change).abs() <= UNIFORM_SPREAD)
         })
         .collect();
+    Verdict { slower, uniform }
+}
+
+fn main() -> ExitCode {
+    // The test bed's frame (`scene::render`) keeps large state on the stack; Windows gives
+    // the main thread 1 MiB.
+    std::thread::Builder::new()
+        .stack_size(16 << 20)
+        .spawn(run)
+        .ok()
+        .and_then(|t| t.join().ok())
+        .unwrap_or(ExitCode::FAILURE)
+}
+
+fn run() -> ExitCode {
+    let mut update = false;
+    let mut strict = false;
+    let mut runs = 3usize;
+    let mut frames = 100usize;
+    let mut threshold = 3.0f64;
+    let mut only: Vec<String> = Vec::new();
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--update" => update = true,
+            "--strict" => strict = true,
+            "--runs" => runs = args.next().and_then(|v| v.parse().ok()).unwrap_or(runs),
+            "--frames" => frames = args.next().and_then(|v| v.parse().ok()).unwrap_or(frames),
+            "--scene" => only.extend(args.next()),
+            "--threshold" => {
+                threshold = args
+                    .next()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(threshold);
+            }
+            other => {
+                eprintln!("unknown argument {other}");
+                return ExitCode::from(2);
+            }
+        }
+    }
+    if update && !only.is_empty() {
+        eprintln!("--update writes the whole baseline: measure every scene");
+        return ExitCode::from(2);
+    }
+    let options = RenderOptions {
+        validation: false,
+        timed_frames: frames,
+    };
+    let started = Instant::now();
+    let all = shots();
+    let shots: Vec<&Shot> = all
+        .iter()
+        .filter(|s| only.is_empty() || only.iter().any(|n| n == s.name))
+        .collect();
+    let mut gpu = Measured::default();
+    let Some(runs_of) = measure(&shots, runs, options, &mut gpu) else {
+        return ExitCode::FAILURE;
+    };
+    let mut measured = Times::new();
+    for (shot, shot_runs) in shots.iter().zip(&runs_of) {
+        fastest(shot.name, shot_runs, &mut measured);
+    }
+    let Some(vendor) = gpu.vendor.clone() else {
+        eprintln!("nothing measured");
+        return ExitCode::FAILURE;
+    };
+    let path = baseline_path(&vendor);
+    println!("{}; baseline {}", gpu.adapter, path.display());
+    if update {
+        let mut text = format!(
+            "# GPU µs per pass (fastest of {runs} runs' medians over {frames} frames, a round \
+             at a time), {}\n# scene\tpass\tµs\n",
+            gpu.adapter
+        );
+        for ((scene, pass), us) in &measured {
+            let _ = writeln!(text, "{scene}\t{pass}\t{us:.1}");
+        }
+        if let Err(e) = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))
+            .and_then(|()| std::fs::write(&path, text))
+        {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+        println!(
+            "baseline written ({} passes; {} runs in {:.0} s)",
+            measured.len(),
+            gpu.runs,
+            started.elapsed().as_secs_f64()
+        );
+        return ExitCode::SUCCESS;
+    }
+    let baseline = read_baseline(&path);
+    let mut verdict = judge(&measured, &baseline, threshold);
+    // A scene with a slower pass is measured again and judged by its new runs (see the
+    // module's documentation).
+    let again: Vec<&Shot> = shots
+        .iter()
+        .copied()
+        .filter(|s| verdict.slower.iter().any(|(scene, _)| scene == s.name))
+        .collect();
+    if !again.is_empty() {
+        for key in &verdict.slower {
+            println!(
+                "first runs: {} | {} {:+.1} %",
+                key.0,
+                key.1,
+                (measured[key] / baseline[key] - 1.0) * 100.0
+            );
+        }
+        let Some(runs_again) = measure(&again, runs, options, &mut gpu) else {
+            return ExitCode::FAILURE;
+        };
+        for (shot, shot_runs) in again.iter().zip(&runs_again) {
+            if !shot_runs.is_empty() {
+                measured.retain(|(scene, _), _| scene != shot.name);
+                fastest(shot.name, shot_runs, &mut measured);
+            }
+        }
+        verdict = judge(&measured, &baseline, threshold);
+        println!(
+            "measured again, judged by the new runs: {}\n",
+            again.iter().map(|s| s.name).collect::<Vec<_>>().join(", ")
+        );
+    }
     let mut regressions = 0;
     println!("| scene | pass | baseline µs | now µs | change |");
     println!("|---|---|---:|---:|---:|");
-    for ((scene, pass), &now) in &measured {
-        let Some(&before) = baseline.get(&(scene.clone(), pass.clone())) else {
+    for (key, &now) in &measured {
+        let (scene, pass) = key;
+        let Some(&before) = baseline.get(key) else {
             println!("| {scene} | {pass} | — | {now:.1} | new |");
             continue;
         };
@@ -333,13 +447,8 @@ fn run() -> ExitCode {
         } else {
             0.0
         };
-        let frame = baseline
-            .get(&(scene.clone(), TOTAL.to_owned()))
-            .copied()
-            .unwrap_or(0.0);
-        let regressed = change > threshold
-            && now - before > FLOOR_US.max(frame * FLOOR_OF_FRAME)
-            && (strict || !uniform.contains(scene));
+        let regressed =
+            verdict.slower.contains(key) && (strict || !verdict.uniform.contains(scene));
         regressions += usize::from(regressed);
         println!(
             "| {scene} | {pass} | {before:.1} | {now:.1} | {change:+.1} %{} |",
@@ -355,12 +464,17 @@ fn run() -> ExitCode {
             baseline[&(scene.clone(), pass.clone())]
         );
     }
-    for scene in &uniform {
+    for scene in &verdict.uniform {
         println!(
             "\n{scene}: every large pass moved by about the frame's change: other clocks or \
              other work on the GPU, not a pass; measure again on an idle machine"
         );
     }
+    println!(
+        "\n{} runs in {:.0} s",
+        gpu.runs,
+        started.elapsed().as_secs_f64()
+    );
     if regressions > 0 {
         println!(
             "\n{regressions} pass(es) slower than the baseline by more than {threshold} % \

@@ -72,9 +72,9 @@ set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden -- golden:
 
 ## GPU time per pass
 
-`perf_gate` renders the procedural scene and Sponza at 1920 × 1080 (three runs of 200
-frames) and compares every pass's GPU time with the baseline of the GPU's vendor
-(`tests/golden/perf/<vendor>.tsv`):
+`perf_gate` renders the procedural scene and Sponza with each feature and antialiasing mode
+at 1920 × 1080 (three runs of 100 frames per scene) and compares every pass's GPU time with
+the baseline of the GPU's vendor (`tests/golden/perf/<vendor>.tsv`):
 
 ```
 set VK_LOADER_LAYERS_DISABLE=~implicit~
@@ -83,9 +83,19 @@ cargo run -p engine_golden --release --bin perf_gate
 
 - A pass is **slower** when it takes 3 % more than its baseline and more than 5 µs or 0.5 %
   of the frame (small passes are noisy). The table marks it; `--strict` makes it an error.
+- **Each scene runs three times from a fresh device, a round at a time** (the first run of
+  every scene, then the second, then the third), and a pass counts its fastest run: a
+  moment of other work on the machine slows one run of a few scenes, not every run of one.
+- **A scene with a slower pass is measured again** (three more runs) and judged by the new
+  runs: a passing slowdown is gone by then, a regression is not. The output lists the
+  first runs' numbers and the scenes measured again.
 - **Everything slower by the same few percent** is reported as a uniform shift: the GPU ran
   at other clocks or shared with other work (a build, another test). Measure again with
   the machine idle.
+- **The Radeon iGPU shares its die, power and memory with the CPU:** while every core
+  works it renders about 10 % slower, and it is back to normal seconds after the load
+  stops. Keep the CPU idle while it measures; `tools\check.ps1 -Perf` waits for ~12 quiet
+  seconds before each GPU.
 - **Overlays change timing:** keep `VK_LOADER_LAYERS_DISABLE=~implicit~` (OBS, RivaTuner and
   Steam hook into every Vulkan process) and close other GPU work.
 - **A change made a pass faster or slower on purpose:** `--update` writes the new baseline;

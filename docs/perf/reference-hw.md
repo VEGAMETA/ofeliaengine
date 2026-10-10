@@ -15,7 +15,7 @@ Collected 2026-09-25 by `Runner info` (commit a103582, run 36193238273).
 | RAM | 64 GB, 6000 MT/s |
 | Storage | 2x Apacer AS2280Q4 1 TB NVMe SSD, WD10EZEX 1 TB SATA HDD |
 | GPU0 (discrete) | NVIDIA GeForce RTX 4060 Ti (Ada, `10de:2805`), driver 616.92, Vulkan 1.4.351, conformance 1.4.3.3 |
-| GPU1 (integrated) | AMD Radeon Graphics (Raphael, RDNA2, 2 CU, `1002:164e`), driver 25.10.36, Vulkan 1.4.315 |
+| GPU1 (integrated) | AMD Radeon Graphics (Raphael, RDNA2, 2 CU, `1002:164e`), driver 26.8.1 (since 2026-10-10; 25.10.36 before), Vulkan 1.4.315, clock 2,000 MHz (see below) |
 | Displays | 1920x1080 @ 239 Hz on the NVIDIA GPU; 1920x1080 @ 60 Hz on the iGPU |
 | Vulkan SDK | 1.4.350.0 (`D:\SDKs\Vulkan1.4.350.0`) |
 
@@ -44,6 +44,16 @@ wrong bits under CPU load (lane 24 of a wave, mostly bit 9), and exact image com
 on the Radeon failed with no engine bug behind them. `check.ps1 -Gpu` runs
 `cargo test -p engine_render --test gpu_selfcheck -- --ignored` on the Radeon first;
 details: `docs/research/radeon-igpu-lds-faults.md`.
+**Since 2026-10-10** (owner): VDDCR_SOC 1.28 V and the iGPU clock lowered from 2,200 to
+2,000 MHz; at 1.25 V the wrong results still came now and then, at this setting they
+stopped. The iGPU sits on the I/O die with the memory controller and runs on the SoC
+rail; AMD caps VDDCR_SOC at 1.30 V (after the 2023 failures), so the next step, if the
+faults return, is a lower memory speed rather than more voltage. The Radeon's perf
+baselines were re-measured at this setting (`docs/perf/history.md`, 2026-10-10).
+While every CPU core is busy, the Radeon renders Sponza ~10 % slower (25.1 against
+22.9 ms; shared die, power and memory) and is back within 0.5 % seconds after the load
+stops: what matters for its measurements is a quiet CPU during them, not a cool-down
+before them.
 
 What it does **not** cover:
 
