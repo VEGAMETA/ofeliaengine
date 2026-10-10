@@ -382,6 +382,22 @@ impl SceneStreamer {
             };
             meshes.push(id);
         }
+        // Room for every streamed mesh at full detail, so that the pool's buffers are made
+        // once, now, instead of growing on the frame's thread as finer levels arrive (core
+        // review 2 §3.6). A finer level's vertices go to a new range before the old one is
+        // freed: twice the finest vertices, and every level's indices.
+        let (mut vertices, mut indices) = (0u64, 0u64);
+        for streamed in layout.mesh_streams.iter().flatten() {
+            if let Some(finest) = streamed.levels.first() {
+                vertices += 2 * u64::from(finest.vertices);
+            }
+            indices += streamed
+                .levels
+                .iter()
+                .map(|l| u64::from(l.index_count))
+                .sum::<u64>();
+        }
+        geometry.reserve(vertices, indices);
         let slots = |ids: &[u32]| {
             let mut by_slot = Vec::new();
             for (k, &slot) in ids.iter().enumerate() {

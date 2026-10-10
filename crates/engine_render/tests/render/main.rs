@@ -29,3 +29,4 @@ mod streaming;
 mod subsurface;
 mod tonemap;
 mod transparency;
+mod upload;
