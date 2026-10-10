@@ -287,6 +287,31 @@ device.save_pipeline_cache(&cache)?;
   - `VK_KHR_pipeline_binary`;
   - fast linking for pipelines created while drawing.
 
+**Sorting on the GPU (ADR 0080).** `engine_render::sort::GpuSort` sorts `u32` keys,
+with a `u32` payload each (an index into what they stand for), in one compute pass,
+ascending and stable. The number of keys can be one an earlier pass wrote, so nothing
+waits for the CPU:
+
+```rust
+use engine_render::sort::{GpuSort, SortCount, SortJob};
+
+let sort = GpuSort::new(&device, &bindless)?;
+// Each frame, after the pass that writes the keys and their count:
+sort.add_pass(fg, &bindless, "sort particles", SortJob {
+    keys,                    // u32 per key, sorted in place
+    values: Some(indices),   // moved with them
+    capacity,                // how many the buffers hold
+    count: SortCount::Gpu { buffer: counters, offset: 0 },
+    key_bits: 16,            // only the low 16 bits differ: half the passes
+});
+```
+
+- Keys sort as unsigned integers. A depth from the camera sorts back to front as
+  `0xFFFF - quantized depth`. A float that may be negative sorts as its bits with the
+  sign bit flipped for positive values, and all bits flipped for negative ones.
+- What it costs: 16 K keys with 16 bits and a payload take 50 µs on an RTX 4060 Ti and
+  160 µs on a two-CU integrated Radeon; 1 M keys with 32 bits 0.6 ms and 10 ms.
+
 **Variants made on first use (ADR 0079).** A renderer has many variants, and a game draws
 with few of them: in the Sponza test flight, one of the forward renderer's 62 shading
 variants. So the engine describes them when a renderer is made, and makes each one the

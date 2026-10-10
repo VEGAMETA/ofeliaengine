@@ -162,6 +162,7 @@ Constants and formulas taken into our own code (no files copied).
 | The transmittance table's parameterization and the atmosphere's parameters, which that reference takes from Bruneton's implementation | same | Eric Bruneton, `ebruneton/precomputed_atmospheric_scattering`, commit 34f14e745cff | BSD-3-Clause (Copyright (c) 2017 Eric Bruneton, below) |
 | The hierarchical screen-space traversal: the initial advance, the advance against a texel's boundaries and the surface's plane, the level stepping, the 0.005-texel offset, the low-occupancy exit for glossy rays | `engine_render/shaders/reflections.slang` (`initial_advance`, `advance`, `hierarchical_march`) | AMD FidelityFX SSSR, `GPUOpen-Effects/FidelityFX-SSSR`, `ffx-sssr/ffx_sssr.h` (`FFX_SSSR_InitialAdvanceRay`, `FFX_SSSR_AdvanceRay`, `FFX_SSSR_HierarchicalRaymarch`), master as of 2026-10-01 | MIT (Copyright (c) 2021 Advanced Micro Devices, Inc., below) |
 | FSR 1: EASU (`ffxFsrEasuFloat`, `fsrEasuSetFloat`, `fsrEasuTapFloat`, `ffxFsrPopulateEasuConstants`) and RCAS (`FsrRcasF`, `FsrRcasCon`, `FSR_RCAS_LIMIT`), their 32-bit paths and the approximate reciprocals they use, ported to Slang and Rust | `engine_render/shaders/fsr1.slang`, `engine_render/src/fsr1.rs` | AMD FidelityFX SDK v1.1.4, `sdk/include/FidelityFX/gpu/fsr1/ffx_fsr1.h`, `ffx_core_gpu_common.h` (vendored) | MIT (Copyright (C) 2024 Advanced Micro Devices, Inc., `third_party/FidelityFX-SDK/LICENSE.txt`) |
+| The GPU radix sort's structure: per digit a count (a histogram column per thread), a chunked reduce, a one-workgroup scan, a scan add and a scatter whose local sort of 128 keys takes two 2-bit splits on packed 8-bit counters; 128 threads × 4 keys per block, at most 800 workgroups, the indirect setup (rewritten in Slang with buffer addresses) | `engine_render/shaders/sort.slang`, `engine_render/src/sort.rs` | AMD FidelityFX Parallel Sort, `GPUOpen-Effects/FidelityFX-ParallelSort`, `ffx-parallelsort/FFX_ParallelSort.h`, master as of 2026-10-10 | MIT (Copyright (c) 2020 Advanced Micro Devices, Inc., below) |
 | LDR-FLIP: its constants, separable spatial and feature filters, colour transforms and error remapping, ported to Rust | `tests/golden/src/flip.rs` (test-only crate `engine_golden`) | NVIDIA `NVlabs/flip`, `src/cpp/FLIP.h` (Andersson et al., HPG 2020) | BSD-3-Clause (Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES) |
 | Bend Studio's screen-space shadows: the wavefront layout towards the light's screen point, the dispatch list around it, the shared-memory depth line with perspective correction, the hard / averaged / fading sample groups, the edge test and precision offset, the default tuning values (ported to Slang and Rust, modified: Vulkan's y-down clip space, edges ignored, a thicker default surface, the light's own pixel written lit) | `engine_render/shaders/contact.slang`, `engine_render/src/contact.rs` (`bend_dispatches`) | Sony Interactive Entertainment (Bend Studio), `bend_sss_gpu.h`, `bend_sss_cpu.h` (2023), from bendstudio.com/blog/inside-bend-screen-space-shadows | Apache-2.0 (Copyright 2023 Sony Interactive Entertainment, below) |
 
@@ -209,6 +210,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+### MIT license (FidelityFX Parallel Sort)
+
+```
+Copyright (c) 2020 Advanced Micro Devices, Inc. All rights reserved.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+THE SOFTWARE.
 ```
 
 ### MIT license (FidelityFX SSSR)
