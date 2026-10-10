@@ -1017,6 +1017,70 @@ mod transforms {
     }
 
     #[test]
+    fn parallel_propagation_equals_serial_propagation() {
+        let pool = engine_core::jobs::ThreadPool::builder()
+            .workers(4)
+            .build()
+            .unwrap();
+        for seed in 1..=4u64 {
+            let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+            let mut a = World::new();
+            let mut b = World::new();
+            let mut serial = TransformPropagation::new(&mut a);
+            let mut parallel = TransformPropagation::new(&mut b);
+            let mut entities: Vec<Entity> = Vec::new();
+            let mut roots: Vec<Entity> = Vec::new();
+            // Enough roots for the parallel path, with subtrees of any depth; then every
+            // step moves every root and edits the world at random.
+            for k in 0..9000 {
+                let (op, parent) = if k < 3000 {
+                    (0, Entity::NULL)
+                } else {
+                    (2, entities[rng.below(entities.len())])
+                };
+                let t = rng.transform();
+                let spawned = apply(&mut a, op, parent, Entity::NULL, t);
+                assert_eq!(spawned, apply(&mut b, op, parent, Entity::NULL, t));
+                if k < 3000 {
+                    roots.extend(spawned);
+                }
+                entities.extend(spawned);
+            }
+            for step in 0..12 {
+                for &root in &roots {
+                    let t = rng.transform();
+                    for w in [&mut a, &mut b] {
+                        if let Some(local) = w.get_mut::<Transform>(root) {
+                            *local = t;
+                        }
+                    }
+                }
+                for _ in 0..20 {
+                    let op = 2 + rng.below(13);
+                    let e = entities[rng.below(entities.len())];
+                    let other = entities[rng.below(entities.len())];
+                    let t = rng.transform();
+                    let spawned = apply(&mut a, op, e, other, t);
+                    assert_eq!(spawned, apply(&mut b, op, e, other, t));
+                    entities.extend(spawned);
+                }
+                serial.run(&mut a);
+                parallel.run_parallel(&mut b, &pool);
+                assert_eq!(serial.stats(), parallel.stats(), "seed {seed}, step {step}");
+                for &e in &entities {
+                    let (ga, gb) = (a.get::<GlobalTransform>(e), b.get::<GlobalTransform>(e));
+                    assert_eq!(
+                        ga.map(bytemuck::bytes_of),
+                        gb.map(bytemuck::bytes_of),
+                        "seed {seed}, step {step}, entity {e:?}"
+                    );
+                }
+                assert_eq!(a.state_hash(), b.state_hash(), "seed {seed}, step {step}");
+            }
+        }
+    }
+
+    #[test]
     fn unchanged_world_transforms_are_not_marked() {
         let mut w = World::new();
         let mut p = TransformPropagation::new(&mut w);

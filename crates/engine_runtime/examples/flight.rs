@@ -97,6 +97,7 @@ mod windowed {
     use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
     use engine_streaming::{SceneStreamSettings, SceneStreamer, material_desc, texture_format};
     use std::path::{Path, PathBuf};
+    use std::sync::Arc;
     use std::time::Instant;
 
     const WIDTH: u32 = 1920;
@@ -513,7 +514,7 @@ mod windowed {
 
         // The scene from its pack, streamed.
         let phase = Instant::now();
-        let jobs = ThreadPool::builder().build().unwrap();
+        let jobs = Arc::new(ThreadPool::builder().build().unwrap());
         let mut budget = GpuBudget::new(&device);
         let mut textures = TexturePool::new(&device, 32 << 20, IN_FLIGHT);
         let mut geometry = GeometryPool::new(
@@ -712,8 +713,10 @@ mod windowed {
         let mut cameras = CameraView::new(&mut world, defaults.view_settings());
         let entities = world.len() as u32;
         let mut scene = GpuScene::new(&device, &bindless, entities + 16, IN_FLIGHT).unwrap();
+        scene.set_jobs(jobs.clone());
         let mut view = View::new(&device, entities + 16);
         let mut runtime = Runtime::<InstanceId>::new(world, 64.0);
+        runtime.set_jobs(jobs.clone());
         let mut spins = QueryState::<(&mut Transform, &Spin)>::new(&mut runtime.world);
         let mut walkers = QueryState::<(&mut Transform, &mut Walk)>::new(&mut runtime.world);
         let mut ring = UploadRing::new(&device, &mut allocator, IN_FLIGHT, 32 << 20).unwrap();

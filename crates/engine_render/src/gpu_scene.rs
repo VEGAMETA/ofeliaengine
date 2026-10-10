@@ -53,10 +53,12 @@ use crate::upload::UploadRing;
 use core::cmp::Reverse;
 use core::hash::{BuildHasherDefault, Hasher};
 use core::mem::MaybeUninit;
+use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Vec3, Vec4};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError};
 use std::collections::{BinaryHeap, HashMap};
+use std::sync::Arc;
 
 const SCATTER: &[u8] = include_bytes!("../shaders/scene.sceneScatter.spv");
 const MOTION: &[u8] = include_bytes!("../shaders/scene_motion.sceneMotion.spv");
@@ -76,6 +78,12 @@ const UPDATE_BYTES: u64 = size_of::<Update>() as u64;
 
 /// Fewer slots than this always upload by scatter (a full copy saves nothing there).
 const FULL_MIN_SLOTS: usize = 4096;
+
+/// Slots whose only change is their motion between ticks, per job of the parallel apply
+/// ([`GpuScene::set_jobs`]), and the fewest worth spreading over the pool (also for
+/// [`GpuScene::step_motions`]).
+const MOTION_GRAIN: usize = 1024;
+const PARALLEL_MIN_MOTIONS: usize = 4096;
 
 /// What the scene's buffers are left in after a frame: read and written by compute and
 /// vertex shaders and copies.
@@ -166,6 +174,8 @@ struct Slot {
     moving: u32,
     /// Its pending motion starts from `SlotMotion::from`, not the last upload's `to`.
     explicit_from: bool,
+    /// Its motion record's position among this upload's updates or steps.
+    record: u32,
 }
 
 /// A batch: instances sharing a mesh and a pipeline state.
@@ -268,6 +278,11 @@ const NOT_MOVING: u32 = u32::MAX;
 const TO_SECOND: u32 = 1 << 31;
 /// In an update's slot word: the instance is new or teleported (no motion in this frame).
 const STILL: u32 = 1 << 30;
+/// In a record's slot word: its handedness differs from the tick before's (a mirroring
+/// that flips). It is not blended through the flat, inside-out transforms between (drawn
+/// with its batch's culling they would show their back faces): both transforms are `to`,
+/// and it jumps there.
+const SNAP: u32 = 1 << 29;
 
 /// Rows of a motion update (`from`'s, then `to`'s) and of a step (`to`'s).
 const UPDATE_ROWS: usize = 6;
@@ -532,6 +547,16 @@ pub struct GpuScene {
     alpha: f32,
     /// This upload's motion records' slot words (the updates', then the steps').
     motion_words: Vec<u32>,
+    /// Instances whose only change is their motion and whose batch changed: their
+    /// material and batch words, patched in place after the scatter.
+    patches: Vec<(u32, [u32; 4])>,
+    /// Workers for the parallel apply ([`Self::set_jobs`]), its slots and its jobs'
+    /// bounds, and [`Self::step_motions`]' runs.
+    jobs: Option<Arc<ThreadPool>>,
+    fast: Vec<u32>,
+    slow: Vec<u32>,
+    partials: Vec<Partial>,
+    step_runs: Vec<StepRun>,
     motion_gpu: Option<MotionGpu>,
     /// Motion buffers replaced by growth, freed once their frames are done.
     retired_motion: Vec<(u64, SceneBuffer)>,
@@ -612,8 +637,6 @@ struct Room<'a> {
     updates: usize,
     steps: usize,
     next_data: usize,
-    next_update: usize,
-    next_step: usize,
 }
 
 impl Room<'_> {
@@ -654,6 +677,18 @@ impl Room<'_> {
         }
     }
 
+    /// Where the records' rows go, for the parallel apply.
+    fn records(&mut self) -> Records {
+        let rows = self.rows_base();
+        Records {
+            units: self.units.as_mut_ptr(),
+            update_rows: rows,
+            step_rows: rows + UPDATE_ROWS * self.updates,
+            updates: self.updates,
+            steps: self.steps,
+        }
+    }
+
     /// The records' slot words.
     fn words(&mut self, words: &[u32]) {
         let base = self.words_base();
@@ -663,6 +698,209 @@ impl Room<'_> {
             self.units[base + k].write(unit);
         }
     }
+}
+
+/// A room's motion records, for jobs that write them at their own positions.
+#[derive(Clone, Copy)]
+struct Records {
+    units: *mut MaybeUninit<[u32; 4]>,
+    update_rows: usize,
+    step_rows: usize,
+    updates: usize,
+    steps: usize,
+}
+
+/// Bounds of the boxes a job of the parallel apply wrote, whether a box it moved lay on
+/// the scene's bounds (which may shrink), and the slots it left for the full apply.
+#[derive(Debug)]
+struct Partial {
+    lo: Vec3,
+    hi: Vec3,
+    stale: bool,
+    deferred: Vec<u32>,
+}
+
+impl Default for Partial {
+    fn default() -> Self {
+        Self {
+            lo: Vec3::splat(f32::MAX),
+            hi: Vec3::splat(f32::MIN),
+            stale: false,
+            deferred: Vec::new(),
+        }
+    }
+}
+
+/// What the parallel apply of the slots whose only change is their motion
+/// ([`GpuScene::apply_motions`]) writes, shared by its jobs. Each slot is in the list
+/// once (the dirty list holds a slot once), and its moving index and record position
+/// are its own, so no two jobs touch the same element.
+struct MotionTargets {
+    slots: *mut Slot,
+    data: *const InstanceData,
+    motion: *mut SlotMotion,
+    lo: [*mut f32; 3],
+    hi: [*mut f32; 3],
+    moving_boxes: *mut [Vec3; 2],
+    words: *mut u32,
+    records: Records,
+    /// The scene's bounds before this apply, when kept incrementally.
+    bounds: Option<(Vec3, Vec3)>,
+    partials: *mut Partial,
+}
+
+// SAFETY: the jobs write disjoint elements (see the type).
+unsafe impl Sync for MotionTargets {}
+
+/// Applies slot `index`, whose only change is its motion between ticks, to the CPU state
+/// and writes its record (see [`GpuScene::apply_motions`]), or leaves it, flags and all,
+/// for the full path when its mirroring flipped (it changes batch).
+///
+/// # Safety
+///
+/// `t`'s pointers are valid for the slot, its moving index and its record position, and
+/// no other call touches them at the same time; `part` is the calling job's.
+unsafe fn apply_motion(t: &MotionTargets, index: u32, part: &mut Partial) {
+    let i = index as usize;
+    // SAFETY: guaranteed by the caller.
+    let (slot, motion, rows) = unsafe {
+        (
+            &mut *t.slots.add(i),
+            &mut *t.motion.add(i),
+            (*t.data.add(i)).rows,
+        )
+    };
+    let world_from_object = matrix_of(&rows);
+    if mirrored(&world_from_object) != (slot.state as usize & MIRRORED != 0) {
+        part.deferred.push(index);
+        return;
+    }
+    slot.flags = 0;
+    // As `GpuScene::apply`: the box over the whole move between the two ticks.
+    let (center, extents) =
+        transform_box(&world_from_object, slot.local_center, slot.local_extents);
+    let mut new_box = [center - extents, center + extents];
+    let explicit_from = core::mem::replace(&mut slot.explicit_from, false);
+    let from_box = if explicit_from {
+        let (c, e) = transform_box(
+            &matrix_of(&motion.from),
+            slot.local_center,
+            slot.local_extents,
+        );
+        [c - e, c + e]
+    } else {
+        motion.to_box
+    };
+    motion.to_box = new_box;
+    new_box[0] = new_box[0].min(from_box[0]);
+    new_box[1] = new_box[1].max(from_box[1]);
+    // SAFETY: the slot's own moving box and box (see the type).
+    unsafe {
+        t.moving_boxes.add(slot.moving as usize).write(new_box);
+        if let Some(bounds) = t.bounds {
+            let old = [
+                Vec3::new(*t.lo[0].add(i), *t.lo[1].add(i), *t.lo[2].add(i)),
+                Vec3::new(*t.hi[0].add(i), *t.hi[1].add(i), *t.hi[2].add(i)),
+            ];
+            part.stale |= on_bounds(old, bounds);
+            part.lo = part.lo.min(new_box[0]);
+            part.hi = part.hi.max(new_box[1]);
+        }
+        for (k, (lo, hi)) in t.lo.iter().zip(&t.hi).enumerate() {
+            lo.add(i).write(new_box[0][k]);
+            hi.add(i).write(new_box[1][k]);
+        }
+    }
+    // Its record, over the older of its two transforms on the GPU.
+    let second = !motion.second;
+    motion.second = second;
+    let mut word = index | if second { TO_SECOND } else { 0 };
+    let r = t.records;
+    let k = slot.record as usize;
+    // SAFETY: the slot's own record position (see the type).
+    unsafe {
+        if explicit_from {
+            // (A step's handedness cannot flip here: such a slot takes the full path.)
+            if mirrored(&matrix_of(&motion.from)) != (slot.state as usize & MIRRORED != 0) {
+                word |= SNAP;
+            }
+            t.words.add(k).write(word);
+            for (row, values) in motion.from.iter().chain(&rows).enumerate() {
+                (*r.units.add(r.update_rows + row * r.updates + k)).write(values.map(f32::to_bits));
+            }
+        } else {
+            t.words.add(r.updates + k).write(word);
+            for (row, values) in rows.iter().enumerate() {
+                (*r.units.add(r.step_rows + row * r.steps + k)).write(values.map(f32::to_bits));
+            }
+        }
+    }
+}
+
+/// What a run of [`GpuScene::step_motions`] left for its serial part: the slots it queued
+/// and those that started moving, in its order.
+#[derive(Debug, Default)]
+struct StepRun {
+    queued: Vec<u32>,
+    started: Vec<u32>,
+}
+
+/// What the parallel part of [`GpuScene::step_motions`] writes, shared by its jobs: each
+/// instance is in the runs once, so no two jobs touch the same slot; run `k`'s
+/// [`StepRun`] is the call for run `k`'s.
+struct StepTargets {
+    slots: *mut Slot,
+    slot_count: usize,
+    data: *mut InstanceData,
+    motion: *mut SlotMotion,
+    runs: *mut StepRun,
+}
+
+// SAFETY: the jobs write disjoint elements (see the type).
+unsafe impl Sync for StepTargets {}
+
+/// [`GpuScene::step_motion`] for one instance, leaving the shared lists' pushes to the
+/// caller's serial part.
+///
+/// # Safety
+///
+/// No other call touches the instance's slot at the same time; the pointers in `t` are
+/// valid for `t.slot_count` slots.
+unsafe fn step_one(t: &StepTargets, id: InstanceId, to: &Affine3A, run: &mut StepRun) {
+    let i = id.index as usize;
+    if i >= t.slot_count {
+        return;
+    }
+    // SAFETY: guaranteed by the caller.
+    let (slot, data, motion) = unsafe {
+        (
+            &mut *t.slots.add(i),
+            &mut *t.data.add(i),
+            &mut *t.motion.add(i),
+        )
+    };
+    if !slot.alive || slot.generation != id.generation {
+        return;
+    }
+    let moving = slot.moving != NOT_MOVING;
+    if !moving || slot.flags & flag::MOTION != 0 {
+        // It starts moving, or ticks again before an upload: from what it holds.
+        motion.from = data.rows;
+        slot.explicit_from = true;
+    }
+    data.rows = rows_of_affine(to);
+    if !moving {
+        run.started.push(id.index);
+    }
+    if slot.flags & flag::QUEUED == 0 {
+        run.queued.push(id.index);
+    }
+    slot.flags |= flag::MOTION | flag::QUEUED;
+}
+
+/// Whether box `b` lies on `bounds` (moving it inward or removing it can shrink them).
+fn on_bounds(b: [Vec3; 2], (lo, hi): (Vec3, Vec3)) -> bool {
+    b[0].cmple(lo).any() || b[1].cmpge(hi).any()
 }
 
 /// What a written slot's previous transform becomes.
@@ -720,6 +958,12 @@ impl GpuScene {
             moving_changed: false,
             alpha: 1.0,
             motion_words: Vec::new(),
+            patches: Vec::new(),
+            jobs: None,
+            fast: Vec::new(),
+            slow: Vec::new(),
+            partials: Vec::new(),
+            step_runs: Vec::new(),
             motion_gpu: None,
             retired_motion: Vec::new(),
             motion_state: BufferState::idle(),
@@ -795,6 +1039,7 @@ impl GpuScene {
                     center: Vec3::ZERO,
                     moving: NOT_MOVING,
                     explicit_from: false,
+                    record: 0,
                 });
                 self.data.push(HOLE);
                 self.boxes.push(NO_BOX);
@@ -940,6 +1185,67 @@ impl GpuScene {
         true
     }
 
+    /// [`Self::step_motion`] for many instances: `run(k)` lists run `k`'s (instance, new
+    /// transform) pairs, for `k` below `runs`. Spread over the scene's pool
+    /// ([`Self::set_jobs`]) when there are many; the same results as one call per pair, in
+    /// order.
+    ///
+    /// # Safety
+    ///
+    /// No instance appears twice across the runs, and every transform pointer is valid
+    /// for reads during the call.
+    pub unsafe fn step_motions<'r>(
+        &mut self,
+        runs: usize,
+        run: &(dyn Fn(usize) -> &'r [(InstanceId, *const Affine3A)] + Sync),
+    ) {
+        let total: usize = (0..runs).map(|k| run(k).len()).sum();
+        let pool = match self.jobs.as_deref() {
+            Some(pool) if total >= PARALLEL_MIN_MOTIONS => pool,
+            _ => {
+                for k in 0..runs {
+                    for &(id, to) in run(k) {
+                        // SAFETY: guaranteed by the caller.
+                        self.step_motion(id, unsafe { &*to });
+                    }
+                }
+                return;
+            }
+        };
+        if self.step_runs.len() < runs {
+            self.step_runs.resize_with(runs, StepRun::default);
+        }
+        let targets = StepTargets {
+            slots: self.slots.as_mut_ptr(),
+            slot_count: self.slots.len(),
+            data: self.data.as_mut_ptr(),
+            motion: self.motion.as_mut_ptr(),
+            runs: self.step_runs.as_mut_ptr(),
+        };
+        pool.parallel_for(runs, 1, |k, _| {
+            // SAFETY: one call per run index, and there are `runs` step runs.
+            let out = unsafe { &mut *targets.runs.add(k) };
+            out.queued.clear();
+            out.started.clear();
+            for &(id, to) in run(k) {
+                // SAFETY: an instance is in the runs once (the caller's guarantee), so this
+                // call is the only one touching its slot; the transform is valid.
+                unsafe { step_one(&targets, id, &*to, out) };
+            }
+        });
+        // The shared lists, in the runs' order (as one call per pair would leave them).
+        for k in 0..runs {
+            let out = &self.step_runs[k];
+            self.dirty.extend_from_slice(&out.queued);
+            for &index in &out.started {
+                self.slots[index as usize].moving = self.moving.len() as u32;
+                self.moving.push(index);
+                self.moving_boxes.push(NO_BOX);
+                self.moving_changed = true;
+            }
+        }
+    }
+
     /// The interpolation factor between the last two ticks that the next
     /// [`Self::add_passes`] places moving instances at (`FixedStep::alpha`: 0 at the tick
     /// before, 1 at the last tick).
@@ -950,6 +1256,13 @@ impl GpuScene {
     /// Instances moving between ticks ([`Self::set_motion`]).
     pub fn moving(&self) -> usize {
         self.moving.len()
+    }
+
+    /// Spreads [`Self::add_passes`]' work for the instances whose only change is their
+    /// motion between ticks over `jobs`' workers when there are many (the same results as
+    /// on one thread).
+    pub fn set_jobs(&mut self, jobs: Arc<ThreadPool>) {
+        self.jobs = Some(jobs);
     }
 
     /// Takes slot `index` out of the moving instances (if it is one).
@@ -1084,8 +1397,72 @@ impl GpuScene {
     /// Whether a box lies on the bounds (moving it inward or removing it can shrink
     /// them).
     fn on_boundary(&self, b: [Vec3; 2]) -> bool {
-        let (lo, hi) = self.bounds;
-        b[0].cmple(lo).any() || b[1].cmpge(hi).any()
+        on_bounds(b, self.bounds)
+    }
+
+    /// Applies the slots in `self.fast` (their only change is their motion between ticks):
+    /// their boxes and records, on the pool's workers when there are many. A slot whose
+    /// mirroring flipped keeps its flags for [`Self::apply`] (it changes batch): the first
+    /// returned partials list them, in order.
+    fn apply_motions(&mut self, room: &mut Room<'_>, incremental_bounds: bool) -> usize {
+        let n = self.fast.len();
+        if n == 0 {
+            return 0;
+        }
+        let jobs = match self.jobs.as_deref() {
+            Some(pool) if n >= PARALLEL_MIN_MOTIONS => Some(pool),
+            _ => None,
+        };
+        let chunks = if jobs.is_some() {
+            n.div_ceil(MOTION_GRAIN)
+        } else {
+            1
+        };
+        if self.partials.len() < chunks {
+            self.partials.resize_with(chunks, Partial::default);
+        }
+        for part in &mut self.partials[..chunks] {
+            part.lo = Vec3::splat(f32::MAX);
+            part.hi = Vec3::splat(f32::MIN);
+            part.stale = false;
+            part.deferred.clear();
+        }
+        let [lo0, lo1, lo2] = &mut self.boxes.lo;
+        let [hi0, hi1, hi2] = &mut self.boxes.hi;
+        let targets = MotionTargets {
+            slots: self.slots.as_mut_ptr(),
+            data: self.data.as_ptr(),
+            motion: self.motion.as_mut_ptr(),
+            lo: [lo0.as_mut_ptr(), lo1.as_mut_ptr(), lo2.as_mut_ptr()],
+            hi: [hi0.as_mut_ptr(), hi1.as_mut_ptr(), hi2.as_mut_ptr()],
+            moving_boxes: self.moving_boxes.as_mut_ptr(),
+            words: self.motion_words.as_mut_ptr(),
+            records: room.records(),
+            bounds: incremental_bounds.then_some(self.bounds),
+            partials: self.partials.as_mut_ptr(),
+        };
+        let fast = &self.fast;
+        let run = |chunk: usize, range: core::ops::Range<usize>| {
+            // SAFETY: one call per chunk index, and there are `chunks` partials.
+            let part = unsafe { &mut *targets.partials.add(chunk) };
+            for &index in &fast[range] {
+                // SAFETY: the targets cover every slot, moving index and record position
+                // of the list, each slot is in it once, and each chunk of it goes to one
+                // call.
+                unsafe { apply_motion(&targets, index, part) };
+            }
+        };
+        match jobs {
+            Some(pool) => pool.parallel_for(n, MOTION_GRAIN, run),
+            None => run(0, 0..n),
+        }
+        if incremental_bounds {
+            for part in &self.partials[..chunks] {
+                self.bounds_stale |= part.stale;
+                self.bounds = (self.bounds.0.min(part.lo), self.bounds.1.max(part.hi));
+            }
+        }
+        chunks
     }
 
     /// Applies a slot's pending changes to the CPU state, and writes its update, its data
@@ -1146,8 +1523,13 @@ impl GpuScene {
             s.local_extents = local_extents;
         }
         let slot = &self.slots[i];
-        let (kind_state, mesh, batch_id, old_center) =
-            (slot.kind_state, slot.mesh, slot.batch, slot.center);
+        let (kind_state, mesh, batch_id, old_center, old_state) = (
+            slot.kind_state,
+            slot.mesh,
+            slot.batch,
+            slot.center,
+            slot.state,
+        );
         let state_bits = kind_state
             | if mirrored(&world_from_object) {
                 MIRRORED as u8
@@ -1223,15 +1605,21 @@ impl GpuScene {
             // Each record writes its `to` over the older of the slot's two transforms.
             let second = !self.motion[i].second;
             self.motion[i].second = second;
-            let word = index | if second { TO_SECOND } else { 0 };
+            let mut word = index | if second { TO_SECOND } else { 0 };
+            let k = self.slots[i].record as usize;
+            // A mirroring that flips: no blend (see `SNAP`). A step goes from the last
+            // upload's `to`, whose handedness the slot's state had.
+            let mirrored_to = state_bits as usize & MIRRORED != 0;
             if explicit_from || still {
-                let k = room.next_update;
-                room.next_update += 1;
+                if mirrored(&matrix_of(&self.motion[i].from)) != mirrored_to {
+                    word |= SNAP;
+                }
                 self.motion_words[k] = word | if still { STILL } else { 0 };
                 room.update(k, &self.motion[i].from, &to);
             } else {
-                let k = room.next_step;
-                room.next_step += 1;
+                if (old_state as usize & MIRRORED != 0) != mirrored_to {
+                    word |= SNAP;
+                }
                 self.motion_words[room.updates + k] = word;
                 room.step(k, &to);
             }
@@ -1239,6 +1627,18 @@ impl GpuScene {
         // Only the motion changed: the interpolation pass writes the slot's transforms (a
         // slot changed last frame still settles).
         if motion_only {
+            if self.slots[i].batch != batch_id {
+                // Its batch changed (a mirroring that flipped), which culling reads from
+                // the instance data: that word is patched in place (the ring's room was
+                // counted before anyone knew), and settles in the next frame.
+                self.slots[i].written = self.serial;
+                self.written.push(index);
+                if !room.full {
+                    let d = &self.data[i];
+                    self.patches
+                        .push((index, [d.material, d.batch, d._pad[0], d._pad[1]]));
+                }
+            }
             return;
         }
         self.slots[i].written = self.serial;
@@ -1319,19 +1719,30 @@ impl GpuScene {
         // none: the interpolation pass places it), and the motion records: an update for a
         // slot that starts moving, ticked twice since the last upload, or is new or
         // teleported; a step for one that keeps moving.
+        // Slots whose only change is their motion (and not blended: such a batch follows
+        // its instance's center) take the parallel apply (`fast`); the others, in order,
+        // the full one (`slow`).
         let (mut data_touched, mut motion_updates, mut motion_steps) = (0, 0, 0);
+        self.fast.clear();
+        self.slow.clear();
         for &index in &self.dirty {
-            let slot = &self.slots[index as usize];
-            if slot.flags & !(flag::QUEUED | flag::MOTION) != 0 {
-                data_touched += 1;
-            }
+            let slot = &mut self.slots[index as usize];
+            let data = slot.flags & !(flag::QUEUED | flag::MOTION) != 0;
+            data_touched += usize::from(data);
             if slot.moving != NOT_MOVING && slot.flags & flag::MOTION != 0 {
                 if slot.explicit_from || slot.flags & (flag::NEW | flag::TELEPORT) != 0 {
+                    slot.record = motion_updates as u32;
                     motion_updates += 1;
                 } else {
+                    slot.record = motion_steps as u32;
                     motion_steps += 1;
                 }
+                if !data && slot.state as usize & BLENDED == 0 {
+                    self.fast.push(index);
+                    continue;
+                }
             }
+            self.slow.push(index);
         }
         let full = slot_total >= FULL_MIN_SLOTS && 2 * data_touched >= slot_total;
         let scattered = if full { 0 } else { data_touched };
@@ -1384,8 +1795,6 @@ impl GpuScene {
             updates: motion_updates,
             steps: motion_steps,
             next_data: 0,
-            next_update: 0,
-            next_step: 0,
         };
         self.moving_changed = false;
         self.serial += 1;
@@ -1394,19 +1803,33 @@ impl GpuScene {
         self.updates.clear();
         self.changes.clear();
         self.motion_words.clear();
-        self.motion_words.resize(motion_updates + motion_steps, 0);
+        self.patches.clear();
+        // (No real word is all ones: slots stay below `SNAP`.)
+        self.motion_words
+            .resize(motion_updates + motion_steps, u32::MAX);
         // Bounds: kept incrementally for a few changes, recomputed for many.
         let incremental_bounds = 8 * touched < slot_total;
         if !incremental_bounds {
             self.bounds_stale = true;
         }
-        for k in 0..touched {
-            let index = self.dirty[k];
+        // The slots whose only change is their motion first, on the pool's workers when
+        // there are many (they touch no shared state but the bounds, merged in order);
+        // then the others in the dirty list's order, and those the first left.
+        let chunks = self.apply_motions(&mut room, incremental_bounds);
+        for k in 0..self.slow.len() {
+            let index = self.slow[k];
             self.apply(index, geometry, materials, &mut room, incremental_bounds);
         }
-        debug_assert_eq!(
-            (room.next_data, room.next_update, room.next_step),
-            (scattered, motion_updates, motion_steps)
+        for c in 0..chunks {
+            for k in 0..self.partials[c].deferred.len() {
+                let index = self.partials[c].deferred[k];
+                self.apply(index, geometry, materials, &mut room, incremental_bounds);
+            }
+        }
+        debug_assert_eq!(room.next_data, scattered);
+        debug_assert!(
+            !self.motion_words.contains(&u32::MAX),
+            "a motion record was left unwritten"
         );
         room.words(&self.motion_words);
         let uploaded = data_touched as u32;
@@ -1691,6 +2114,25 @@ impl GpuScene {
                 .read(previous, Access::StorageReadWrite(ShaderStages::COMPUTE))
                 .dispatch(&this.scatter, Dispatch::Threads([count, 1, 1]), move |_| {
                     Some(push)
+                });
+        }
+        if !this.patches.is_empty() {
+            let patches = &this.patches;
+            fg.add_pass("scene batch patches")
+                .write(current, Access::TransferWrite)
+                .execute(move |ctx| {
+                    for (slot, words) in patches {
+                        // SAFETY: recording outside a rendering scope; the material and batch
+                        // words of a slot the buffer holds (16 bytes, 4-byte aligned).
+                        unsafe {
+                            ctx.device.cmd_update_buffer(
+                                ctx.cmd,
+                                ctx.buffer(current),
+                                u64::from(*slot) * INSTANCE_BYTES + 48,
+                                bytemuck::cast_slice(words),
+                            );
+                        }
+                    }
                 });
         }
         // Motion between ticks, after the frame's other writes: the ticks' transforms,

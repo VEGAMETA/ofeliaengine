@@ -1275,3 +1275,167 @@ fn instances_move_between_ticks_on_the_gpu() {
     assert!(!covered(&shot, -1.5, -1.5), "removed");
     bed.finish(vec![scene], (Vec::new(), vec![temporal]));
 }
+
+/// (Instance, transform) pairs for `GpuScene::step_motions`, and runs of them.
+struct Pairs(Vec<(InstanceId, *const engine_core::math::Affine3A)>);
+struct Runs<'a>(Vec<&'a [(InstanceId, *const engine_core::math::Affine3A)]>);
+// SAFETY: the pointers are only read, while the transforms they point at live.
+unsafe impl Sync for Runs<'_> {}
+
+impl<'a> Runs<'a> {
+    fn run(&self, k: usize) -> &'a [(InstanceId, *const engine_core::math::Affine3A)] {
+        self.0[k]
+    }
+}
+
+/// The work of instances whose only change is their motion between ticks, spread over a
+/// thread pool (`GpuScene::set_jobs`), gives the same frames as on one thread: pixels,
+/// motion vectors, statistics and bounds, with explicit starts, two ticks before an
+/// upload, mirroring that flips (another batch, which culling reads from the instance
+/// data: every instance is counted in its batch), material edits while moving, and stops.
+#[test]
+fn moving_instances_apply_the_same_on_one_thread_and_on_a_pool() {
+    use engine_core::jobs::ThreadPool;
+    use engine_core::math::Affine3A;
+    use std::sync::Arc;
+    const N: usize = 6000;
+    let Some(mut bed) = Bed::new(128) else {
+        return;
+    };
+    let mesh = bed.geometry.add_mesh(&cube().as_data()).unwrap();
+    let paint = [
+        bed.materials.default_material(),
+        bed.materials
+            .add(MaterialDesc::solid([0.9, 0.3, 0.2], 0.0, 0.5)),
+    ];
+    let eye = Vec3::new(0.0, 0.0, 10.0);
+    let camera = Camera {
+        clip_from_world: vulkan_orthographic(-4.0, 4.0, -4.0, 4.0, 0.1, 50.0)
+            * look_at(eye, Vec3::ZERO, Vec3::Y),
+        position: eye,
+    };
+    // A grid of small cubes turning and swaying, apart (where they overlapped at one
+    // depth, the order the culling appends them in would pick the pixel); every 97th
+    // mirrors at odd ticks.
+    let place = |i: usize, tick: u32| {
+        let (column, row) = ((i % 80) as f32, (i / 80) as f32);
+        let a = tick as f32 * 0.3 + i as f32 * 0.01;
+        let x = if i.is_multiple_of(97) && tick % 2 == 1 {
+            -0.03
+        } else {
+            0.03
+        };
+        Affine3A::from_scale_rotation_translation(
+            Vec3::new(x, 0.03, 0.03),
+            Quat::from_rotation_z(a),
+            Vec3::new(
+                -3.95 + column * 0.1 + 0.005 * a.sin(),
+                -3.75 + row * 0.1,
+                0.0,
+            ),
+        )
+    };
+    let mut scenes = [bed.scene(N as u32), bed.scene(N as u32)];
+    scenes[1].set_jobs(Arc::new(ThreadPool::builder().workers(4).build().unwrap()));
+    let temporal = [
+        Temporal::new(&bed.device, &mut bed.allocator, 8192).unwrap(),
+        Temporal::new(&bed.device, &mut bed.allocator, 8192).unwrap(),
+    ];
+    let mut ids: [Vec<InstanceId>; 2] = [Vec::new(), Vec::new()];
+    for (scene, ids) in scenes.iter_mut().zip(&mut ids) {
+        for i in 0..N {
+            ids.push(scene.insert(SceneInstance {
+                mesh,
+                material: paint[0],
+                world_from_object: Mat4::from(place(i, 0)),
+            }));
+        }
+    }
+    // The tick whose transform each instance was last given.
+    let mut given = vec![0u32; N];
+    for tick in 1..8u32 {
+        for (i, given) in given.iter_mut().enumerate() {
+            *given = match (i % 211, tick) {
+                (2, 4) => 4,
+                (3..=9, 5) => 6,
+                _ => tick,
+            };
+        }
+        // Drawn in the mirrored batch: every instance in the batch its handedness says
+        // (one left with a stale batch on the GPU would be counted in the other).
+        let mirrored = (0..N)
+            .filter(|&i| place(i, given[i]).matrix3.determinant() < 0.0)
+            .count() as u32;
+        for (k, (scene, ids)) in scenes.iter_mut().zip(&ids).enumerate() {
+            // The plain steps last: one by one on one thread, at once (in runs) on the pool.
+            let mut steps = Vec::new();
+            for (i, &id) in ids.iter().enumerate() {
+                match (i % 211, tick) {
+                    // Both ticks given: an explicit start.
+                    (0, _) => assert!(scene.set_motion(id, &place(i, tick - 1), &place(i, tick))),
+                    // A material edit while it moves.
+                    (1, 3) => {
+                        scene.set_material(id, paint[1]);
+                        steps.push((id, place(i, tick)));
+                    }
+                    // Stopped at a tick, moving again from the next.
+                    (2, 4) => assert!(scene.set_affine(id, &place(i, tick))),
+                    // Two ticks before an upload.
+                    (3..=9, 5) => {
+                        assert!(scene.step_motion(id, &place(i, tick)));
+                        steps.push((id, place(i, tick + 1)));
+                    }
+                    _ => steps.push((id, place(i, tick))),
+                }
+            }
+            if k == 0 {
+                for (id, to) in &steps {
+                    assert!(scene.step_motion(*id, to));
+                }
+            } else {
+                let pairs = Pairs(
+                    steps
+                        .iter()
+                        .map(|(id, to)| (*id, to as *const Affine3A))
+                        .collect(),
+                );
+                let runs: Vec<_> = pairs.0.chunks(997).collect();
+                let runs = Runs(runs);
+                // SAFETY: every instance once; the transforms live in `steps`.
+                unsafe { scene.step_motions(runs.0.len(), &|k| runs.run(k)) };
+            }
+        }
+        for alpha in [0.25, 0.75] {
+            let mut shots = Vec::new();
+            for (scene, temporal) in scenes.iter_mut().zip(&temporal) {
+                scene.set_alpha(alpha);
+                shots.push(bed.frame(Draw::Scene(scene), camera, None, Some(temporal)));
+            }
+            let (a, b) = (&shots[0], &shots[1]);
+            let expected: &[u32] = if mirrored > 0 {
+                &[N as u32 - mirrored, mirrored]
+            } else {
+                &[N as u32]
+            };
+            for shot in &shots {
+                assert_eq!(shot.drawn(0, expected.len()), N as u32, "tick {tick}");
+                assert_eq!(&shot.counts[..expected.len()], expected, "tick {tick}");
+            }
+            assert_eq!(a.scene, b.scene, "tick {tick}, alpha {alpha}");
+            assert!(a.scene.unwrap().moving > 5000, "{:?}", a.scene);
+            assert_eq!(scenes[0].bounds(), scenes[1].bounds(), "tick {tick}");
+            assert_eq!(
+                differing(&a.image, &b.image),
+                0,
+                "tick {tick}, alpha {alpha}"
+            );
+            assert!(
+                a.motion == b.motion,
+                "tick {tick}, alpha {alpha}: motion vectors"
+            );
+        }
+    }
+    let [a, b] = scenes;
+    let [t0, t1] = temporal;
+    bed.finish(vec![a, b], (Vec::new(), vec![t0, t1]));
+}

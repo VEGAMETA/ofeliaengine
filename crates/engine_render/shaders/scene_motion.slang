@@ -15,6 +15,9 @@
 //   transforms of a slot that starts moving, ticked more than once since the last upload,
 //   or is new or teleported (`STILL`: what it shows in this frame is also its previous
 //   transform, no motion).
+// - A record whose handedness differs from the tick before's (`SNAP`: a mirroring that
+//   flips) makes both transforms its `to`: blended, the instance would pass through flat,
+//   inside-out transforms drawn with its batch's culling.
 // - `sceneStep` (one thread per step): the next tick of a slot that keeps moving.
 // - `sceneInterpolate` (one thread per moving slot, last): this frame's placement. The
 //   scene's two instance buffers swap roles every frame (`scene.slang`), so last frame's
@@ -28,10 +31,11 @@ struct Instance
 };
 
 // In a record's slot word (`gpu_scene.rs`): its `to` goes to the second transform (the
-// first holds `from`), and the instance is new or teleported.
+// first holds `from`), the instance is new or teleported, and both transforms are `to`.
 static const uint TO_SECOND = 0x80000000u;
 static const uint STILL = 0x40000000u;
-static const uint SLOT_MASK = 0x3FFFFFFFu;
+static const uint SNAP = 0x20000000u;
+static const uint SLOT_MASK = 0x1FFFFFFFu;
 
 // `MotionPush` in gpu_scene.rs (64 bytes).
 struct MotionPush
@@ -73,11 +77,12 @@ void sceneMotion(uint3 id : SV_DispatchThreadID)
     uint word = push.words[id.x];
     uint slot = word & SLOT_MASK;
     uint to = (word & TO_SECOND) != 0 ? 1 : 0;
+    bool snap = (word & SNAP) != 0;
     [unroll]
     for (uint k = 0; k < 3; k++)
     {
-        float4 a = row(push.rows + k * push.count + id.x);
         float4 b = row(push.rows + (3 + k) * push.count + id.x);
+        float4 a = snap ? b : row(push.rows + k * push.count + id.x);
         storeAligned<16>(plane(1 - to, k, slot), a);
         storeAligned<16>(plane(to, k, slot), b);
         // As `sceneInterpolate` places it.
@@ -96,9 +101,15 @@ void sceneStep(uint3 id : SV_DispatchThreadID)
     uint word = push.words[id.x];
     uint slot = word & SLOT_MASK;
     uint to = (word & TO_SECOND) != 0 ? 1 : 0;
+    bool snap = (word & SNAP) != 0;
     [unroll]
     for (uint k = 0; k < 3; k++)
-        storeAligned<16>(plane(to, k, slot), row(push.rows + k * push.count + id.x));
+    {
+        float4 b = row(push.rows + k * push.count + id.x);
+        storeAligned<16>(plane(to, k, slot), b);
+        if (snap)
+            storeAligned<16>(plane(1 - to, k, slot), b);
+    }
     push.second[slot] = to;
 }
 

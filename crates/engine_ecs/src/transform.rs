@@ -19,6 +19,7 @@ use crate::hierarchy::{Children, Parent};
 use crate::query::{QueryState, With, Without};
 use crate::world::World;
 use crate::{bytemuck, pod_component, reflect_component};
+use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
 use engine_reflect::Reflect;
 
@@ -203,6 +204,35 @@ impl Cols {
     }
 }
 
+/// Changed root rows per job of [`TransformPropagation::run_parallel`], each with the
+/// subtrees below them.
+const ROOT_GRAIN: usize = 128;
+/// Fewer changed root rows than this are propagated on the calling thread.
+const PARALLEL_MIN_ROOTS: usize = 1024;
+
+/// A job of the roots' phase: rows `start..end` of a changed chunk of roots.
+#[derive(Debug, Clone, Copy)]
+struct RootJob {
+    tracked: u32,
+    chunk: u32,
+    start: u32,
+    end: u32,
+}
+
+/// A root job's walk stack and counts, kept across runs.
+#[derive(Debug, Default)]
+struct JobState {
+    stack: Vec<(Entity, u32, Affine3A, bool)>,
+    stats: PropagationStats,
+}
+
+/// The job states, shared with the pool's workers: job `k`'s state is used only by the
+/// call that runs job `k`.
+struct JobStates(*mut JobState);
+
+// SAFETY: every state is used by one thread at a time (see the type).
+unsafe impl Sync for JobStates {}
+
 /// Component ids the pass works with.
 #[derive(Debug, Clone, Copy)]
 struct Ids {
@@ -244,6 +274,11 @@ pub struct PropagationStats {
 /// assert_eq!(world.get::<GlobalTransform>(wheel).unwrap().translation().x, 11.0);
 /// ```
 ///
+/// **Parallel.** [`Self::run_parallel`] spreads the roots and the subtrees below them over
+/// a thread pool when many roots changed: every child has one parent, so the subtrees
+/// are disjoint and each world transform is written by one job. The results are the
+/// same bits whatever the number of threads.
+///
 /// **Incremental.** An entity is a *candidate* when its chunk's `Transform`, `Parent` or
 /// `GlobalTransform` column was written since the previous run (chunk granularity, as for
 /// [`Changed`](crate::Changed)). Candidates are recomputed from their parent's world transform, roots
@@ -268,6 +303,9 @@ pub struct TransformPropagation {
     /// Child lists still to visit (first child, count) with their parent's world
     /// transform, and whether to visit grandchildren even if a child does not change.
     stack: Vec<(Entity, u32, Affine3A, bool)>,
+    /// The changed roots, in jobs of rows, and each job's state.
+    root_jobs: Vec<RootJob>,
+    job_states: Vec<JobState>,
     stats: PropagationStats,
     // The full pass, kept as the reference.
     roots: QueryState<(&'static Transform, &'static mut GlobalTransform), Without<Parent>>,
@@ -303,6 +341,8 @@ impl TransformPropagation {
             last_run: 0,
             pending: Vec::new(),
             stack: Vec::new(),
+            root_jobs: Vec::new(),
+            job_states: Vec::new(),
             stats: PropagationStats::default(),
             roots: QueryState::new(world),
             parents: QueryState::new(world),
@@ -340,6 +380,17 @@ impl TransformPropagation {
     /// Updates the world transforms that changed since the previous run (see the type's
     /// documentation). Returns whether any world transform changed value.
     pub fn run(&mut self, world: &mut World) -> bool {
+        self.run_on(world, None)
+    }
+
+    /// [`Self::run`] with the changed roots and the subtrees below them spread over
+    /// `pool`'s workers when there are many (see the type's documentation). Allocates
+    /// only when more roots changed than ever before.
+    pub fn run_parallel(&mut self, world: &mut World, pool: &ThreadPool) -> bool {
+        self.run_on(world, Some(pool))
+    }
+
+    fn run_on(&mut self, world: &mut World, pool: Option<&ThreadPool>) -> bool {
         engine_profiler::zone!("ecs::TransformPropagation::run");
         self.update_archetypes(world);
         let tick = world.bump_change_tick();
@@ -347,7 +398,9 @@ impl TransformPropagation {
         let mut stats = PropagationStats::default();
         self.pending.clear();
         self.stack.clear();
-        // Candidates: roots now, the others by depth below.
+        self.root_jobs.clear();
+        let mut root_rows = 0;
+        // Candidates: roots in jobs of rows, the others by depth below.
         for t in 0..self.tracked.len() {
             let tracked = self.tracked[t];
             let chunk_count = world.archetypes[tracked.archetype as usize].chunks.len();
@@ -364,63 +417,66 @@ impl TransformPropagation {
                 }
                 stats.chunks += 1;
                 let len = arch.chunk_len(chunk);
+                if tracked.parent.is_none() {
+                    root_rows += len;
+                    for start in (0..len).step_by(ROOT_GRAIN) {
+                        self.root_jobs.push(RootJob {
+                            tracked: t as u32,
+                            chunk: chunk as u32,
+                            start: start as u32,
+                            end: (start + ROOT_GRAIN).min(len) as u32,
+                        });
+                    }
+                    continue;
+                }
+                // Children: only if a full pass reaches them, after their ancestors.
+                if tracked.local.is_none() {
+                    continue;
+                }
                 for row in 0..len {
                     let arch = &world.archetypes[tracked.archetype as usize];
                     // SAFETY: `row < len` rows of a live chunk are initialized.
                     let entity = unsafe { *arch.entity_ptr(chunk, row) };
-                    if tracked.parent.is_some() {
-                        // A child: only if a full pass reaches it, after its ancestors.
-                        if tracked.local.is_some()
-                            && let Some(depth) = reach_depth(world, &self.cols, entity)
-                        {
-                            self.pending.push((depth, entity));
-                        }
-                        continue;
-                    }
-                    // A root: its own transform, then its children.
-                    let (global, changed) = match tracked.local {
-                        Some(local) => {
-                            // SAFETY: the column holds an initialized `Transform` here.
-                            let local =
-                                unsafe { *arch.value_ptr(chunk, local, row).cast::<Transform>() };
-                            let global = local.to_affine();
-                            stats.recomputed += 1;
-                            let changed = store(
-                                world,
-                                tracked.archetype,
-                                tracked.global,
-                                chunk,
-                                row,
-                                global,
-                                tick,
-                            );
-                            stats.written += u32::from(changed);
-                            (global, changed)
-                        }
-                        // A root without a local transform keeps its world transform and
-                        // still passes it down.
-                        // SAFETY: the column holds an initialized `GlobalTransform` here.
-                        None => unsafe {
-                            let global = (*arch
-                                .value_ptr(chunk, tracked.global, row)
-                                .cast::<GlobalTransform>())
-                            .0;
-                            (global, false)
-                        },
-                    };
-                    if let Some(children) = tracked.children {
-                        let arch = &world.archetypes[tracked.archetype as usize];
-                        // SAFETY: the column holds an initialized `Children` here.
-                        let c = unsafe { *arch.value_ptr(chunk, children, row).cast::<Children>() };
-                        self.stack.push((c.first, c.count, global, changed));
+                    if let Some(depth) = reach_depth(world, &self.cols, entity) {
+                        self.pending.push((depth, entity));
                     }
                 }
             }
         }
-        // The candidates' direct children are recomputed whatever happened to the
-        // candidate (structural changes can reconnect stale subtrees), compared before
-        // they are written; below a change, a subtree is written without comparing.
-        walk(world, &self.cols, &mut self.stack, tick, &mut stats);
+        // The roots, then their subtrees. The candidates' direct children are recomputed
+        // whatever happened to the candidate (structural changes can reconnect stale
+        // subtrees), compared before they are written; below a change, a subtree is
+        // written without comparing.
+        let jobs = self.root_jobs.len();
+        if self.job_states.len() < jobs {
+            self.job_states.resize_with(jobs, JobState::default);
+        }
+        {
+            let world = &*world;
+            let (tracked, cols, root_jobs) = (&self.tracked, &self.cols, &self.root_jobs);
+            match pool {
+                Some(pool) if root_rows >= PARALLEL_MIN_ROOTS => {
+                    let states = JobStates(self.job_states.as_mut_ptr());
+                    let states = &states;
+                    pool.parallel_for(jobs, 1, |k, _| {
+                        // SAFETY: `parallel_for` makes one call per job index, and there
+                        // are at least `jobs` states.
+                        let state = unsafe { &mut *states.0.add(k) };
+                        run_roots(world, tracked, cols, root_jobs[k], tick, state);
+                    });
+                }
+                _ => {
+                    for (job, state) in root_jobs.iter().zip(&mut self.job_states) {
+                        run_roots(world, tracked, cols, *job, tick, state);
+                    }
+                }
+            }
+        }
+        for state in &mut self.job_states[..jobs] {
+            stats.recomputed += state.stats.recomputed;
+            stats.written += state.stats.written;
+            state.stats = PropagationStats::default();
+        }
         self.pending.sort_unstable_by_key(|&(depth, _)| depth);
         for k in 0..self.pending.len() {
             let entity = self.pending[k].1;
@@ -504,6 +560,49 @@ impl TransformPropagation {
     }
 }
 
+/// Recomputes the roots of `job` and walks the subtrees below them.
+fn run_roots(
+    world: &World,
+    tracked: &[Tracked],
+    cols: &[Cols],
+    job: RootJob,
+    tick: u64,
+    state: &mut JobState,
+) {
+    let t = tracked[job.tracked as usize];
+    let chunk = job.chunk as usize;
+    for row in job.start as usize..job.end as usize {
+        let arch = &world.archetypes[t.archetype as usize];
+        let (global, changed) = match t.local {
+            Some(local) => {
+                // SAFETY: the column holds an initialized `Transform` here.
+                let local = unsafe { *arch.value_ptr(chunk, local, row).cast::<Transform>() };
+                let global = local.to_affine();
+                state.stats.recomputed += 1;
+                let changed = store(world, t.archetype, t.global, chunk, row, global, tick);
+                state.stats.written += u32::from(changed);
+                (global, changed)
+            }
+            // A root without a local transform keeps its world transform and still passes
+            // it down.
+            // SAFETY: the column holds an initialized `GlobalTransform` here.
+            None => unsafe {
+                let global = (*arch
+                    .value_ptr(chunk, t.global, row)
+                    .cast::<GlobalTransform>())
+                .0;
+                (global, false)
+            },
+        };
+        if let Some(children) = t.children {
+            // SAFETY: the column holds an initialized `Children` here.
+            let c = unsafe { *arch.value_ptr(chunk, children, row).cast::<Children>() };
+            state.stack.push((c.first, c.count, global, changed));
+            walk(world, cols, &mut state.stack, tick, &mut state.stats);
+        }
+    }
+}
+
 /// Writes `value` into the `GlobalTransform` at (`chunk`, `row`) of archetype
 /// `archetype` (column `column`) if its bits differ, marking the column; returns whether
 /// it wrote.
@@ -525,7 +624,9 @@ fn store(
         return false;
     }
     // SAFETY: as above; the caller holds the world exclusively (`run` takes `&mut World`
-    // and only passes it on as a shared reference), so nothing else reads the value.
+    // and only passes it on as a shared reference) and one job writes each value (roots
+    // by their job, children by their root's: subtrees are disjoint), so nothing else
+    // reads or writes it. Column versions are atomic.
     unsafe { ptr.write(GlobalTransform(value)) };
     arch.mark_column(chunk, column, tick);
     true
