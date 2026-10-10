@@ -24,5 +24,9 @@ engine_profiler.workspace = true
 engine_render.workspace = true
 
 [dev-dependencies]
+# The flight example: a cooked scene streamed from its pack, skinned characters.
+engine_anim.workspace = true
+engine_assets.workspace = true
 engine_platform.workspace = true
 engine_rhi.workspace = true
+engine_streaming.workspace = true

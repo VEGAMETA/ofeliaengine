@@ -2671,6 +2671,27 @@ impl ForwardRenderer {
         core::array::from_fn(|k| self.shading[k].main[0].statistics(device))
     }
 
+    /// The driver's statistics of the shading that writes motion vectors (temporal
+    /// antialiasing and upscaling), per shading variant as [`Self::shading_statistics`]:
+    /// without the prepass, then after it (`shade_motion`), then after it with ambient
+    /// occlusion (`fragmentMainMotionAo`; empty until ambient occlusion was turned on).
+    /// The last is what a view with the default settings draws its opaque surfaces with.
+    pub fn motion_statistics(
+        &self,
+        device: &Device,
+    ) -> [[Vec<engine_rhi::PipelineStatistic>; 3]; 4] {
+        core::array::from_fn(|k| {
+            [
+                self.shading[k].main_motion[0].statistics(device),
+                self.shading[k].shade_motion.statistics(device),
+                self.ao
+                    .as_ref()
+                    .map(|ao| ao.shading[k][1].statistics(device))
+                    .unwrap_or_default(),
+            ]
+        })
+    }
+
     /// The driver's statistics of the multisampled shading pipelines for `samples` (ADR
     /// 0075; made by [`Self::set_samples`]), per shading variant as
     /// [`Self::shading_statistics`], after the prepass without motion vectors, then the

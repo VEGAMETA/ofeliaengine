@@ -1,0 +1,1257 @@
+//! A game's frame on the shipping path, measured end to end (`docs/research/core-audit-2.md`):
+//! what a frame costs on the CPU stage by stage, where its worst frames come from, how
+//! long the game takes to show its first frame, and how much memory it holds.
+//!
+//! The game:
+//! - a cooked scene from its pack, its textures and mesh levels streamed by GPU feedback
+//!   within the memory budget (ADR 0076);
+//! - its instances as ECS entities, mirrored into a persistent GPU scene by
+//!   `engine_runtime` (ADR 0064), with `movers` cubes in spinning hierarchies of 10;
+//! - `characters` skinned characters (glTF Fox) walking in circles, their poses sampled
+//!   on the job system every frame and skinned on the GPU (ADR 0068);
+//! - Sponza's seven local lights with cached shadows (ADR 0071), sky light (ADR 0046);
+//! - the frame renderer with the device class's defaults: ambient occlusion and the
+//!   antialiasing / render size (ADR 0072);
+//! - a window, presented without vsync (or with `--vsync`), two frames in flight.
+//!
+//! The camera flies through the nave for `frames` frames of 1/60 s of game time each (the
+//! same path on every GPU), turning 180° in 0.2 s every 5 s.
+//!
+//! Reports start-up phases, CPU per frame by stage (median, 99th percentile, worst), GPU
+//! frame and passes, the frames that took over twice the median with what they spent it
+//! on, pipelines created during the flight, and memory (device heaps, the OS budget,
+//! transient targets, the process).
+//!
+//! ```text
+//! cargo run -p engine_runtime --release --example flight -- <scene.pack>
+//!     [--frames <n>]        frames of flight (default 1800: 30 s of game time)
+//!     [--movers <n>]        moving cubes (default 2000)
+//!     [--characters <n>]    skinned characters (default 64; needs test-assets/Fox)
+//!     [--no-lights]         no local lights
+//!     [--no-ao]             no ambient occlusion
+//!     [--aa off|taau|fsr]   [--quality native|quality|balanced|performance]
+//!     [--vsync]
+//!     [--pipeline-cache <dir>]   load and save the pipeline cache there (default: none)
+//! ```
+//!
+//! Cook the pack with `ofeliaengine cook test-assets/Sponza/Sponza.gltf -o sponza.pack`.
+//! `ENGINE_ADAPTER=radeon` picks the integrated GPU.
+
+#![allow(
+    missing_docs,
+    clippy::print_stdout,
+    clippy::unwrap_used,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+
+#[cfg(not(windows))]
+fn main() {
+    println!("flight: Windows only");
+}
+
+#[cfg(windows)]
+fn main() {
+    // On a thread with a large stack: building the renderers takes more than the main
+    // thread's 1 MiB on the Radeon (every `engine_rhi::Pipeline` carries a copy of the
+    // device's function table, `docs/research/core-audit-2.md`).
+    std::thread::Builder::new()
+        .stack_size(64 << 20)
+        .spawn(windowed::run)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[cfg(windows)]
+mod windowed {
+    use engine_anim::{Pose, for_each_parallel, local_to_model, skinning_matrices};
+    use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf};
+    use engine_core::jobs::ThreadPool;
+    use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
+    use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, pod_component};
+    use engine_frame::{
+        Antialiasing, FrameContext, FrameRenderer, PrepareContext, Quality, RenderDefaults,
+        SceneDraws, SceneInput, View, ViewTarget,
+    };
+    use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
+    use engine_render::budget::GpuBudget;
+    use engine_render::environment::{Environment, Sky};
+    use engine_render::feedback::{FeedbackSettings, TextureFeedback};
+    use engine_render::forward::{
+        DirectionalLight, LocalLight, LocalShadowSettings, ShadowSettings, Spot,
+    };
+    use engine_render::gpu_scene::{GpuScene, InstanceId};
+    use engine_render::graph::{
+        Access, ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState,
+    };
+    use engine_render::material::{MaterialDesc, MaterialTable};
+    use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, cube};
+    use engine_render::skinning::{SkinnedId, SkinnedMeshData, Skinning};
+    use engine_render::streaming::LodView;
+    use engine_render::texture_pool::{TextureId, TextureLevels, TexturePool};
+    use engine_render::upload::UploadRing;
+    use engine_rhi::ash::vk;
+    use engine_rhi::{
+        AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
+        OutputColor, PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
+    };
+    use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
+    use engine_streaming::{SceneStreamSettings, SceneStreamer, material_desc, texture_format};
+    use std::path::{Path, PathBuf};
+    use std::time::Instant;
+
+    const WIDTH: u32 = 1920;
+    const HEIGHT: u32 = 1080;
+    const IN_FLIGHT: usize = 2;
+    /// Game time per frame: the same flight on every GPU, whatever the frame rate.
+    const DT: f64 = 1.0 / 60.0;
+    /// Frames left out of the statistics at the start (first uploads, first captures).
+    const WARMUP: usize = 120;
+    const MIB: f64 = (1u64 << 20) as f64;
+
+    /// Turns its entity about Y, radians per second.
+    #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    #[repr(C)]
+    struct Spin(f32);
+    pod_component!(Spin);
+
+    /// Walks its entity around a circle: center x, z, radius, angular speed.
+    #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+    #[repr(C)]
+    struct Walk {
+        x: f32,
+        z: f32,
+        radius: f32,
+        speed: f32,
+        angle: f32,
+    }
+    pod_component!(Walk);
+
+    /// A character's animation state, sampled on the job system.
+    struct Character {
+        entity: Entity,
+        skinned: SkinnedId,
+        time: f32,
+        pose: Pose,
+        model: Vec<Affine3A>,
+        palette: Vec<[f32; 12]>,
+    }
+
+    /// Where one frame's CPU time went, in microseconds.
+    #[derive(Debug, Clone, Copy, Default)]
+    struct Stages {
+        /// `Frames::begin`: waiting for the frame slot (the GPU two frames back).
+        wait: f64,
+        acquire: f64,
+        simulate: f64,
+        propagate: f64,
+        extract: f64,
+        interpolate: f64,
+        animate: f64,
+        streaming: f64,
+        /// The pools' `begin_frame`: textures, materials, geometry, skinning.
+        pools: f64,
+        /// Of which textures, materials, geometry.
+        pool_parts: [f64; 3],
+        upload: f64,
+        compose: f64,
+        execute: f64,
+        submit: f64,
+        present: f64,
+        /// From the end of `wait` to the end of `present`: the frame's own CPU work.
+        cpu: f64,
+        /// From this frame's start to the next one's: what the player sees.
+        interval: f64,
+        gpu: f64,
+        /// The longest pass of the GPU frame `gpu` measures.
+        top: (&'static str, f64),
+        pipelines: u64,
+        arrived: u64,
+    }
+
+    /// A column of the CPU table: its name and what it reads from a frame.
+    type Column = (&'static str, fn(&Stages) -> f64);
+
+    const COLUMNS: [Column; 16] = [
+        ("wait for frame slot", |s| s.wait),
+        ("acquire", |s| s.acquire),
+        ("tick systems", |s| s.simulate),
+        ("transform propagation", |s| s.propagate),
+        ("extraction", |s| s.extract),
+        ("interpolation", |s| s.interpolate),
+        ("animation (job system) + poses", |s| s.animate),
+        ("streaming update + budget", |s| s.streaming),
+        ("pools: textures, materials, geometry, skinning", |s| {
+            s.pools
+        }),
+        ("scene upload (CPU)", |s| s.upload),
+        ("frame renderer: prepare + declare", |s| s.compose),
+        ("graph compile + record", |s| s.execute),
+        ("submit", |s| s.submit),
+        ("present", |s| s.present),
+        ("**CPU frame (without the wait)**", |s| s.cpu),
+        ("**frame interval**", |s| s.interval),
+    ];
+
+    fn percentile(values: &[f64], p: f64) -> f64 {
+        if values.is_empty() {
+            return 0.0;
+        }
+        let mut v = values.to_vec();
+        v.sort_by(f64::total_cmp);
+        v[((v.len() - 1) as f64 * p).round() as usize]
+    }
+
+    fn us(start: Instant) -> f64 {
+        start.elapsed().as_secs_f64() * 1e6
+    }
+
+    fn ms(start: Instant) -> f64 {
+        start.elapsed().as_secs_f64() * 1e3
+    }
+
+    /// `PROCESS_MEMORY_COUNTERS_EX` (psapi.h).
+    #[repr(C)]
+    #[derive(Default)]
+    struct ProcessMemoryCounters {
+        cb: u32,
+        page_fault_count: u32,
+        peak_working_set_size: usize,
+        working_set_size: usize,
+        quota_peak_paged_pool_usage: usize,
+        quota_paged_pool_usage: usize,
+        quota_peak_non_paged_pool_usage: usize,
+        quota_non_paged_pool_usage: usize,
+        pagefile_usage: usize,
+        peak_pagefile_usage: usize,
+        private_usage: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetCurrentProcess() -> *mut core::ffi::c_void;
+        fn K32GetProcessMemoryInfo(
+            process: *mut core::ffi::c_void,
+            counters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+
+    /// The process's working set and private bytes, MiB.
+    fn process_memory() -> (f64, f64) {
+        let mut c = ProcessMemoryCounters {
+            cb: size_of::<ProcessMemoryCounters>() as u32,
+            ..ProcessMemoryCounters::default()
+        };
+        // SAFETY: `c` is a valid PROCESS_MEMORY_COUNTERS_EX with its size in `cb`; the
+        // pseudo handle of the current process needs no closing.
+        let ok = unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &raw mut c, c.cb) };
+        if ok == 0 {
+            return (0.0, 0.0);
+        }
+        (
+            c.working_set_size as f64 / MIB,
+            c.private_usage as f64 / MIB,
+        )
+    }
+
+    fn memory_report(label: &str, allocator: &Allocator, graph: &RenderGraph) {
+        let (working, private) = process_memory();
+        println!("**Memory, {label}:**\n");
+        println!(
+            "| heap | device-local | allocator blocks MiB | allocated MiB | dedicated MiB | OS usage MiB | OS budget MiB |"
+        );
+        println!("|---|---|---:|---:|---:|---:|---:|");
+        let budget = allocator.budget();
+        for (k, (stats, heap)) in allocator
+            .heap_stats()
+            .iter()
+            .zip(budget.heaps())
+            .enumerate()
+        {
+            if stats.block_bytes == 0 && stats.dedicated_bytes == 0 && heap.usage == 0 {
+                continue;
+            }
+            println!(
+                "| {k} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} |",
+                heap.device_local,
+                stats.block_bytes as f64 / MIB,
+                stats.allocated_bytes as f64 / MIB,
+                stats.dedicated_bytes as f64 / MIB,
+                heap.usage as f64 / MIB,
+                heap.budget as f64 / MIB,
+            );
+        }
+        let g = graph.stats();
+        println!(
+            "\nTransient targets: {:.1} MiB reserved in this slot's heaps ({:.1} placed, {:.1} without aliasing), {} resources, {} passes ({} culled). Process: working set {working:.0} MiB, private {private:.0} MiB.\n",
+            g.transient_heap_bytes as f64 / MIB,
+            g.transient_placed_bytes as f64 / MIB,
+            g.transient_unaliased_bytes as f64 / MIB,
+            g.transient_resources,
+            g.passes,
+            g.culled_passes,
+        );
+    }
+
+    /// Sponza's local lights, as the golden test bed places them (with shadows).
+    fn sponza_lights() -> Vec<LocalLight> {
+        let mut lights: Vec<LocalLight> = (0..5)
+            .map(|k| LocalLight {
+                position: Vec3::new(
+                    -6.0 + 4.0 * k as f32,
+                    1.4,
+                    if k % 2 == 0 { 2.2 } else { -2.2 },
+                ),
+                range: 8.0,
+                color: Vec3::new(24.0, 15.0, 8.0),
+                spot: None,
+                shadow: true,
+            })
+            .collect();
+        for x in [-2.0, 6.0] {
+            lights.push(LocalLight {
+                position: Vec3::new(x, 7.0, 0.0),
+                range: 12.0,
+                color: Vec3::new(90.0, 100.0, 140.0),
+                spot: Some(Spot {
+                    direction: Vec3::new(0.15, -1.0, 0.1).normalize(),
+                    inner: 0.4,
+                    outer: 0.65,
+                }),
+                shadow: true,
+            });
+        }
+        lights
+    }
+
+    /// The camera at game time `t`: along the nave and back every 30 s, swaying, turning
+    /// 180° in 0.2 s every 5 s.
+    fn camera_at(t: f32, min: Vec3, max: Vec3) -> (Vec3, Quat) {
+        let size = max - min;
+        let center = (min + max) * 0.5;
+        let phase = (t / 30.0).fract();
+        let leg = if phase < 0.5 {
+            phase * 2.0
+        } else {
+            2.0 - phase * 2.0
+        };
+        let eye = Vec3::new(
+            min.x + size.x * (0.15 + 0.7 * leg),
+            min.y + size.y * 0.14 + 0.6 * (t * 0.25).sin(),
+            center.z + size.z * 0.12 * (t * 0.4).sin(),
+        );
+        let forward = if phase < 0.5 {
+            0.0
+        } else {
+            core::f32::consts::PI
+        };
+        // Completed fast turns, smoothed over their 0.2 s.
+        let turns = (t / 5.0).floor() + {
+            let s = ((t % 5.0) / 0.2).min(1.0);
+            s * s * (3.0 - 2.0 * s)
+        } - 1.0;
+        let yaw = forward + 0.9 * (t * 0.6).sin() + core::f32::consts::PI * turns.max(0.0);
+        let pitch = -0.08 + 0.15 * (t * 0.3).sin();
+        let dir = Vec3::new(
+            yaw.cos() * pitch.cos(),
+            pitch.sin(),
+            yaw.sin() * pitch.cos(),
+        );
+        (eye, look_rotation(eye, eye + dir, Vec3::Y))
+    }
+
+    pub(crate) fn run() {
+        let t0 = Instant::now();
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let flag = |name: &str| args.iter().any(|a| a == name);
+        let option = |name: &str| {
+            args.iter()
+                .position(|a| a == name)
+                .and_then(|i| args.get(i + 1))
+                .map(String::as_str)
+        };
+        let number = |name: &str, default: usize| {
+            option(name).and_then(|v| v.parse().ok()).unwrap_or(default)
+        };
+        let Some(pack) = args
+            .first()
+            .filter(|a| !a.starts_with("--"))
+            .map(PathBuf::from)
+        else {
+            println!("usage: flight <scene.pack> [options] (see the example's documentation)");
+            return;
+        };
+        let frames_to_run = number("--frames", 1800);
+        let movers = number("--movers", 2000);
+        let character_count = number("--characters", 64);
+        let lights_on = !flag("--no-lights");
+        let feedback_on = !flag("--no-feedback");
+        let offscreen_on = flag("--offscreen");
+        let vsync = flag("--vsync");
+        let cache_dir = option("--pipeline-cache").map(PathBuf::from);
+
+        // Start-up, phase by phase.
+        let mut startup: Vec<(&str, f64)> = Vec::new();
+        let phase = Instant::now();
+        let mut windows = WindowSystem::start(4096).unwrap();
+        let window = windows
+            .create_window(&WindowDesc {
+                title: String::from("flight"),
+                width: WIDTH,
+                height: HEIGHT,
+                resizable: false,
+                visible: true,
+            })
+            .unwrap();
+        startup.push(("window", ms(phase)));
+        let phase = Instant::now();
+        let instance = Instance::new(&InstanceDesc::default()).unwrap();
+        let preference =
+            AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);
+        let adapter = instance.select_adapter(&preference).unwrap();
+        let adapter_name = adapter.summary();
+        let mut device = Device::new(&instance, &adapter).unwrap();
+        let cache_path = cache_dir
+            .as_deref()
+            .map(|dir| dir.join(device.pipeline_cache_file_name()));
+        let cache_load = cache_path
+            .as_deref()
+            .map(|path| device.load_pipeline_cache(path));
+        startup.push((
+            "Vulkan instance + device (+ pipeline cache file)",
+            ms(phase),
+        ));
+        let phase = Instant::now();
+        let surface = Surface::from_win32(&instance, window.hinstance, window.hwnd).unwrap();
+        let mut swapchain = Swapchain::new(
+            &device,
+            &surface,
+            &SwapchainDesc {
+                width: WIDTH,
+                height: HEIGHT,
+                present_mode: if vsync {
+                    PresentMode::Fifo
+                } else {
+                    PresentMode::Immediate
+                },
+                srgb: true,
+                color: OutputColor::Sdr,
+                low_latency: false,
+            },
+        )
+        .unwrap();
+        startup.push(("surface + swapchain", ms(phase)));
+
+        let phase = Instant::now();
+        let pipelines_before = engine_rhi::creation_stats();
+        let mut allocator = Allocator::new(&device);
+        let bindless = Bindless::new(&device).unwrap();
+        let depth_format = vk::Format::D32_SFLOAT;
+        let defaults = RenderDefaults::for_device(&device);
+        let antialiasing = match option("--aa") {
+            Some("off") => Antialiasing::OFF,
+            Some("taau") => Antialiasing::TAAU,
+            Some("fsr") => Antialiasing::FSR,
+            _ => defaults.antialiasing,
+        };
+        let quality = match option("--quality") {
+            Some("native") => Quality::Native,
+            Some("quality") => Quality::Quality,
+            Some("balanced") => Quality::Balanced,
+            Some("performance") => Quality::Performance,
+            _ => defaults.quality,
+        };
+        let ambient_occlusion = if flag("--no-ao") {
+            None
+        } else {
+            defaults.ambient_occlusion
+        };
+        let mut frame_renderer = FrameRenderer::new(
+            &device,
+            &bindless,
+            swapchain.format(),
+            depth_format,
+            ShadowSettings::default(),
+            IN_FLIGHT,
+        )
+        .unwrap();
+        frame_renderer
+            .forward_mut()
+            .set_ambient_occlusion(&device, &bindless, ambient_occlusion)
+            .unwrap();
+        if lights_on {
+            frame_renderer
+                .forward_mut()
+                .set_local_shadows(
+                    &device,
+                    &mut allocator,
+                    &bindless,
+                    Some(LocalShadowSettings::default()),
+                )
+                .unwrap();
+        }
+        let mut skinning = Skinning::new(
+            &device,
+            &mut allocator,
+            &bindless,
+            depth_format,
+            1 << 16,
+            IN_FLIGHT,
+        )
+        .unwrap();
+        let mut feedback =
+            TextureFeedback::new(&device, &bindless, FeedbackSettings::default(), IN_FLIGHT)
+                .unwrap();
+        let mut environment =
+            Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap();
+        let pipelines_after = engine_rhi::creation_stats();
+        startup.push(("renderer + features (pipelines)", ms(phase)));
+
+        // The scene from its pack, streamed.
+        let phase = Instant::now();
+        let jobs = ThreadPool::builder().build().unwrap();
+        let mut budget = GpuBudget::new(&device);
+        let mut textures = TexturePool::new(&device, 32 << 20, IN_FLIGHT);
+        let mut geometry = GeometryPool::new(
+            &device,
+            &mut allocator,
+            GeometryCapacity::default(),
+            IN_FLIGHT,
+        )
+        .unwrap();
+        let mut streamer = SceneStreamer::open(
+            &pack,
+            &jobs,
+            &mut textures,
+            &mut geometry,
+            &mut allocator,
+            &mut budget,
+            SceneStreamSettings::default(),
+        )
+        .unwrap();
+        let mut materials = MaterialTable::new(IN_FLIGHT);
+        let scene_layout = streamer.layout().scene.clone();
+        let texture_ids = streamer.textures().to_vec();
+        let material_ids: Vec<_> = scene_layout
+            .materials
+            .iter()
+            .map(|m| materials.add(material_desc(m, &texture_ids)))
+            .collect();
+        let fallback = materials.default_material();
+        let mut world = World::new();
+        let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        for instance in &scene_layout.instances {
+            let world_from_object = Mat4::from_cols_array(&instance.world_from_object);
+            let mesh = &scene_layout.meshes[instance.mesh as usize];
+            for corner in 0..8 {
+                let pick = |bit: usize, axis: usize| {
+                    if corner & bit != 0 {
+                        mesh.max[axis]
+                    } else {
+                        mesh.min[axis]
+                    }
+                };
+                let c = world_from_object.transform_point3(Vec3::new(
+                    pick(1, 0),
+                    pick(2, 1),
+                    pick(4, 2),
+                ));
+                min = min.min(c);
+                max = max.max(c);
+            }
+            world.spawn((
+                GlobalTransform(Affine3A::from_mat4(world_from_object)),
+                MeshRenderer::new(
+                    streamer.meshes()[instance.mesh as usize],
+                    instance
+                        .material
+                        .map_or(fallback, |i| material_ids[i as usize]),
+                ),
+            ));
+        }
+        startup.push(("scene opened from its pack (tails resident)", ms(phase)));
+
+        // Moving props: cubes in spinning hierarchies of 10 along the nave.
+        let phase = Instant::now();
+        let cube_mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+        let paints: Vec<_> = (0..16)
+            .map(|k| {
+                let h = k as f32 / 16.0;
+                materials.add(MaterialDesc::solid(
+                    [0.3 + 0.6 * h, 0.55, 0.9 - 0.6 * h],
+                    0.0,
+                    0.5,
+                ))
+            })
+            .collect();
+        let size = max - min;
+        let hierarchies = movers.div_ceil(10);
+        for s in 0..hierarchies {
+            let f = (s as f32 + 0.5) / hierarchies as f32;
+            let root = world.spawn((
+                Transform::from_xyz(
+                    min.x + size.x * (0.1 + 0.8 * f),
+                    min.y + size.y * (0.1 + 0.25 * ((s * 7) % 10) as f32 / 10.0),
+                    min.z + size.z * (0.3 + 0.4 * ((s * 3) % 10) as f32 / 10.0),
+                )
+                .with_scale(Vec3::splat(0.25)),
+                GlobalTransform::IDENTITY,
+                MeshRenderer::new(cube_mesh, paints[s % paints.len()]),
+                Spin(0.5 + (s % 5) as f32 * 0.3),
+            ));
+            for c in 0..9 {
+                let a = c as f32 * 0.7;
+                let child = world.spawn((
+                    Transform::from_xyz(a.cos() * 2.0, 0.6 * c as f32, a.sin() * 2.0)
+                        .with_scale(Vec3::splat(0.6)),
+                    GlobalTransform::IDENTITY,
+                    MeshRenderer::new(cube_mesh, paints[(s + c) % paints.len()]),
+                ));
+                world.set_parent(child, Some(root)).unwrap();
+            }
+        }
+
+        // Skinned characters: the glTF Fox, cooked through the derived data cache.
+        let fox_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../test-assets/Fox/Fox.gltf")
+            .canonicalize()
+            .ok();
+        let mut characters: Vec<Character> = Vec::new();
+        let mut fox_skin = None;
+        if character_count > 0
+            && let Some(path) = fox_path
+        {
+            let bytes = std::fs::read(&path).unwrap();
+            let dir = path.parent();
+            let scene = import_gltf(&bytes, dir).unwrap();
+            let cache = DerivedDataCache::new(path.parent().unwrap().join("../.ddc")).unwrap();
+            let (mut cooked, _) =
+                cook_scene(&scene, dir, Some(&cache), &jobs, &CookSettings::default()).unwrap();
+            let ids: Vec<TextureId> = std::mem::take(&mut cooked.textures)
+                .into_iter()
+                .map(|t| {
+                    textures
+                        .add(
+                            &device,
+                            &mut allocator,
+                            TextureLevels {
+                                width: t.width,
+                                height: t.height,
+                                format: texture_format(t.format),
+                                levels: t.levels,
+                            },
+                        )
+                        .unwrap()
+                })
+                .collect();
+            let fox_material = materials.add(material_desc(&cooked.materials[0], &ids));
+            let instance = cooked.instances.iter().find(|i| i.skin.is_some()).unwrap();
+            let mesh = &cooked.meshes[instance.mesh as usize];
+            let skin = cooked.skins.swap_remove(instance.skin.unwrap() as usize);
+            let source = skinning
+                .add_skin(&SkinnedMeshData {
+                    mesh: MeshData {
+                        positions: &mesh.positions,
+                        normals: &mesh.normals,
+                        tangents: &mesh.tangents,
+                        uvs: &mesh.uvs,
+                        indices: &mesh.indices,
+                    },
+                    joints: &mesh.joints,
+                    weights: &mesh.weights,
+                    joint_count: skin.joints.len() as u16,
+                })
+                .unwrap();
+            for k in 0..character_count {
+                let (skinned, drawn) = skinning.add_instance(source, &mut geometry).unwrap();
+                let f = (k as f32 + 0.5) / character_count as f32;
+                let walk = Walk {
+                    x: min.x + size.x * (0.15 + 0.7 * f),
+                    z: min.z + size.z * (0.35 + 0.3 * ((k * 5) % 7) as f32 / 7.0),
+                    radius: 0.8 + (k % 3) as f32 * 0.4,
+                    speed: 0.6 + (k % 4) as f32 * 0.15,
+                    angle: k as f32,
+                };
+                let entity = world.spawn((
+                    Transform::from_xyz(walk.x, min.y, walk.z).with_scale(Vec3::splat(0.012)),
+                    GlobalTransform::IDENTITY,
+                    MeshRenderer::new(drawn, fox_material),
+                    walk,
+                ));
+                let n = skin.skeleton.joint_count();
+                characters.push(Character {
+                    entity,
+                    skinned,
+                    time: k as f32 * 0.37,
+                    pose: skin.skeleton.rest().clone(),
+                    model: vec![Affine3A::IDENTITY; n],
+                    palette: vec![[0.0; 12]; skin.joints.len()],
+                });
+            }
+            let inverse_bind: Vec<Affine3A> = skin
+                .inverse_bind
+                .iter()
+                .map(|m| Affine3A::from_mat4(Mat4::from_cols_array(m)))
+                .collect();
+            fox_skin = Some((skin, inverse_bind));
+        }
+        startup.push(("movers + characters (Fox cooked from the cache)", ms(phase)));
+
+        // The player's camera.
+        let (eye, rotation) = camera_at(0.0, min, max);
+        let extent = size.length();
+        let camera = world.spawn((
+            Transform::from_translation(eye).with_rotation(rotation),
+            Camera::perspective(70f32.to_radians(), 0.05, extent * 2.0)
+                .with_antialiasing(antialiasing, quality),
+        ));
+        let mut cameras = CameraView::new(&mut world, defaults.view_settings());
+        let entities = world.len() as u32;
+        let mut scene = GpuScene::new(&device, &bindless, entities + 16, IN_FLIGHT).unwrap();
+        let mut view = View::new(&device, entities + 16);
+        let mut runtime = Runtime::<InstanceId>::new(world, 64.0);
+        let mut spins = QueryState::<(&mut Transform, &Spin)>::new(&mut runtime.world);
+        let mut walkers = QueryState::<(&mut Transform, &mut Walk)>::new(&mut runtime.world);
+        let mut ring = UploadRing::new(&device, &mut allocator, IN_FLIGHT, 32 << 20).unwrap();
+        let mut frames = Frames::new(&device, device.graphics.family, IN_FLIGHT).unwrap();
+        let mut graph = RenderGraph::new(&device, IN_FLIGHT);
+        let lights = if lights_on {
+            sponza_lights()
+        } else {
+            Vec::new()
+        };
+        let sun = DirectionalLight {
+            direction: Vec3::new(-0.3, -1.0, -0.2),
+            color: Vec3::splat(3.0),
+            ambient: Vec3::splat(0.08),
+        };
+
+        let mut log: Vec<Stages> = Vec::with_capacity(frames_to_run);
+        let mut passes: std::collections::BTreeMap<&'static str, Vec<f64>> =
+            std::collections::BTreeMap::new();
+        let mut first_present = None;
+        let mut first_idle = None;
+        let mut memory_logged = false;
+        let mut drawn = 0usize;
+        let mut previous_start: Option<Instant> = None;
+        let mut game_time = 0.0f64;
+        'main: loop {
+            let mut close = false;
+            windows.drain_events(|e| {
+                if matches!(e.kind, WindowEventKind::CloseRequested) {
+                    close = true;
+                }
+            });
+            if close || drawn >= frames_to_run {
+                break 'main;
+            }
+            let mut s = Stages::default();
+            let frame_start = Instant::now();
+            if let Some(p) = previous_start
+                && let Some(last) = log.last_mut()
+            {
+                last.interval = (frame_start - p).as_secs_f64() * 1e6;
+            }
+            previous_start = Some(frame_start);
+            let pipelines_at_start = engine_rhi::creation_stats().created;
+            let frame = frames.begin().unwrap();
+            s.wait = us(frame_start);
+            let work = Instant::now();
+            let t = Instant::now();
+            let acquired = match swapchain.acquire(frame.image_available, u64::MAX) {
+                Ok(a) => a,
+                Err(RhiError::Vulkan {
+                    result: vk::Result::ERROR_OUT_OF_DATE_KHR,
+                    ..
+                }) => {
+                    frames.wait_idle().unwrap();
+                    let e = swapchain.extent();
+                    swapchain
+                        .recreate(&device, &surface, e.width, e.height)
+                        .unwrap();
+                    continue;
+                }
+                Err(e) => panic!("{e}"),
+            };
+            s.acquire = us(t);
+            game_time += DT;
+            let time = game_time as f32;
+            let (eye, rotation) = camera_at(time, min, max);
+
+            // Ticks, the per-frame camera, interpolation.
+            let stages = runtime.frame(
+                DT,
+                &(),
+                &mut scene,
+                |world, (), dt| {
+                    spins.for_each(world, |(t, spin)| {
+                        t.rotation *= Quat::from_rotation_y(spin.0 * dt);
+                    });
+                    walkers.for_each(world, |(t, walk)| {
+                        walk.angle += walk.speed * dt;
+                        let (sin, cos) = walk.angle.sin_cos();
+                        t.translation.x = walk.x + walk.radius * cos;
+                        t.translation.z = walk.z + walk.radius * sin;
+                        t.rotation = Quat::from_rotation_y(-walk.angle);
+                    });
+                },
+                |world, (), _alpha| {
+                    if let Some(t) = world.get_mut::<Transform>(camera) {
+                        t.translation = eye;
+                        t.rotation = rotation;
+                    }
+                },
+            );
+            s.simulate = stages.simulate_us;
+            s.propagate = stages.propagate_us;
+            s.extract = stages.extract_us;
+            s.interpolate = stages.interpolate_us + stages.present_us;
+
+            // Animation: every character's pose on the job system, then its pose for the
+            // GPU with the scene instance's transform (bit for bit, for the motion pass).
+            let t = Instant::now();
+            if let Some((skin, inverse_bind)) = fox_skin.as_ref() {
+                let clip = &skin.clips[1 % skin.clips.len()];
+                let duration = clip.duration().max(1e-3);
+                for_each_parallel(&jobs, &mut characters, 4, |c| {
+                    c.time = (c.time + DT as f32) % duration;
+                    clip.sample(c.time, skin.skeleton.rest(), &mut c.pose);
+                    local_to_model(&skin.skeleton, &c.pose, &Affine3A::IDENTITY, &mut c.model);
+                    skinning_matrices(&c.model, &skin.joints, inverse_bind, &mut c.palette);
+                });
+                for c in &characters {
+                    if let Some(id) = runtime.extract().instance(c.entity)
+                        && let Some(instance) = scene.get(id)
+                    {
+                        skinning.set_scene_instance(c.skinned, Some(id));
+                        skinning.set_pose(c.skinned, &c.palette, &instance.world_from_object);
+                    }
+                }
+                skinning.update_bounds(&mut geometry, Some(&mut scene));
+            }
+            s.animate = us(t);
+
+            let main = cameras.resolve(&runtime.world).unwrap();
+            let clip_from_world = main.camera.clip_from_world(WIDTH as f32 / HEIGHT as f32);
+            let t = Instant::now();
+            let lod_view = LodView::new(&clip_from_world, eye, HEIGHT, 1.0);
+            let arrived_before = streamer.stats();
+            streamer.update(
+                &mut textures,
+                &mut geometry,
+                &mut allocator,
+                &mut budget,
+                feedback_on.then_some(&mut feedback),
+                Some(&lod_view),
+                &materials,
+                frame.number,
+            );
+            budget.update(&allocator);
+            s.arrived = streamer
+                .stats()
+                .arrived
+                .saturating_sub(arrived_before.arrived);
+            s.streaming = us(t);
+            if first_idle.is_none() && drawn > 0 && streamer.idle() {
+                first_idle = Some(ms(t0));
+            }
+
+            let extent = swapchain.extent();
+            let t = Instant::now();
+            frame_renderer
+                .prepare(
+                    &mut view,
+                    &main.settings,
+                    (extent.width, extent.height),
+                    PrepareContext {
+                        device: &device,
+                        allocator: &mut allocator,
+                        bindless: &bindless,
+                        materials: &mut materials,
+                        frame_number: frame.number,
+                        skinning: Some(&mut skinning),
+                    },
+                )
+                .unwrap();
+            s.compose = us(t);
+            let lod_bias = materials.texture_lod_bias();
+            {
+                let t = Instant::now();
+                let mut fg = graph.begin(&frame);
+                ring.begin(&frame);
+                let p = Instant::now();
+                textures
+                    .begin_frame(&mut fg, &mut allocator, &bindless, frame.number)
+                    .unwrap();
+                s.pool_parts[0] = us(p);
+                let p = Instant::now();
+                let mats = materials
+                    .begin_frame(&mut fg, &device, &mut allocator, &textures, frame.number)
+                    .unwrap();
+                s.pool_parts[1] = us(p);
+                let p = Instant::now();
+                let geo = geometry
+                    .begin_frame(&mut fg, &device, &mut allocator, frame.number)
+                    .unwrap();
+                s.pool_parts[2] = us(p);
+                let skinned_frame = skinning
+                    .begin_frame(
+                        &mut fg,
+                        &mut ring,
+                        &device,
+                        &mut allocator,
+                        &bindless,
+                        &geo,
+                        frame.number,
+                    )
+                    .unwrap();
+                s.pools = us(t);
+                let t = Instant::now();
+                let scene_frame = scene
+                    .add_passes(
+                        &mut fg,
+                        &device,
+                        &mut allocator,
+                        &mut ring,
+                        &bindless,
+                        &geo,
+                        &mats,
+                        frame.number,
+                    )
+                    .unwrap()
+                    .unwrap();
+                s.upload = us(t);
+                let backbuffer = fg.import_texture(
+                    "backbuffer",
+                    ImportedTexture {
+                        image: swapchain.images()[acquired.index as usize],
+                        view: swapchain.views()[acquired.index as usize],
+                        desc: TextureDesc::new_2d(swapchain.format(), extent.width, extent.height),
+                        initial: TextureState::acquired_swapchain_image(),
+                        final_state: Some(TextureState::present()),
+                        sampled_index: None,
+                        storage_index: None,
+                    },
+                );
+                // `--offscreen`: the frame into an image of the swapchain's format, copied.
+                let offscreen = offscreen_on.then(|| {
+                    fg.create_texture(
+                        "ldr",
+                        TextureDesc::new_2d(swapchain.format(), extent.width, extent.height),
+                    )
+                });
+                let t = Instant::now();
+                let view_frame = frame_renderer
+                    .add_view(
+                        &mut fg,
+                        &mut FrameContext {
+                            device: &device,
+                            allocator: &mut allocator,
+                            bindless: &bindless,
+                            ring: &mut ring,
+                            frame_number: frame.number,
+                            dt: DT as f32,
+                        },
+                        &mut view,
+                        &SceneInput {
+                            geometry: &geo,
+                            materials: &mats,
+                            draws: SceneDraws::Scene(&scene_frame),
+                            skinning: Some(&skinned_frame),
+                            light: sun,
+                            lights: &lights,
+                            environment: Some(&environment),
+                            reflection_probes: None,
+                        },
+                        &main.camera,
+                        ViewTarget {
+                            texture: offscreen.unwrap_or(backbuffer),
+                            rect: None,
+                            load: LoadOp::DontCare,
+                        },
+                    )
+                    .unwrap();
+                if let Some(ldr) = offscreen {
+                    let (w, h) = (extent.width, extent.height);
+                    fg.add_pass("copy to swapchain")
+                        .read(ldr, Access::TransferRead)
+                        .write(backbuffer, Access::TransferWrite)
+                        .execute(move |ctx| {
+                            let layers = vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            };
+                            let region = vk::ImageCopy {
+                                src_subresource: layers,
+                                dst_subresource: layers,
+                                extent: vk::Extent3D {
+                                    width: w,
+                                    height: h,
+                                    depth: 1,
+                                },
+                                ..Default::default()
+                            };
+                            // SAFETY: recording; the graph arranged both layouts.
+                            unsafe {
+                                ctx.device.cmd_copy_image(
+                                    ctx.cmd,
+                                    ctx.image(ldr),
+                                    vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                    ctx.image(backbuffer),
+                                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                    &[region],
+                                );
+                            }
+                        });
+                }
+                if feedback_on {
+                    feedback
+                        .add_pass(
+                            &mut fg,
+                            &device,
+                            &mut allocator,
+                            &bindless,
+                            &geo,
+                            &mats,
+                            &view_frame.passes,
+                            view_frame.render,
+                            lod_bias,
+                            frame.number,
+                        )
+                        .unwrap();
+                }
+                s.compose += us(t);
+                let t = Instant::now();
+                fg.execute_with_bindless(&mut allocator, Some(&bindless))
+                    .unwrap();
+                s.execute = us(t);
+            }
+            let t = Instant::now();
+            frames
+                .submit(
+                    device.graphics,
+                    frame,
+                    true,
+                    Some(swapchain.render_finished(acquired.index)),
+                )
+                .unwrap();
+            s.submit = us(t);
+            let t = Instant::now();
+            let _ = swapchain.present(device.graphics, acquired.index);
+            s.present = us(t);
+            s.cpu = us(work);
+            if first_present.is_none() {
+                first_present = Some(ms(t0));
+            }
+            s.gpu = f64::from(graph.gpu_frame_time().unwrap_or(0.0));
+            for p in graph.gpu_pass_times() {
+                if f64::from(p.gpu_us) > s.top.1 {
+                    s.top = (p.name, f64::from(p.gpu_us));
+                }
+            }
+            if drawn >= WARMUP {
+                for p in graph.gpu_pass_times() {
+                    passes.entry(p.name).or_default().push(f64::from(p.gpu_us));
+                }
+            }
+            s.pipelines = engine_rhi::creation_stats().created - pipelines_at_start;
+            log.push(s);
+            drawn += 1;
+            if drawn == WARMUP && !memory_logged {
+                memory_logged = true;
+                memory_report(&format!("after {WARMUP} frames"), &allocator, &graph);
+            }
+        }
+        frames.wait_idle().unwrap();
+
+        // The report.
+        println!(
+            "### Flight: {} ({} instances), {movers} movers, {} characters, {} local lights\n",
+            pack.display(),
+            scene_layout.instances.len(),
+            characters.len(),
+            lights.len()
+        );
+        println!(
+            "Adapter: {adapter_name}; {WIDTH}×{HEIGHT}, {antialiasing} at {quality:?}, AO {:?}; present mode {:?}; {drawn} frames ({WARMUP} warm-up frames left out)\n",
+            ambient_occlusion.map(|a| a.quality),
+            swapchain.present_mode()
+        );
+        println!("**Start-up** (ms):\n");
+        println!("| phase | ms |\n|---|---:|");
+        for (name, value) in &startup {
+            println!("| {name} | {value:.1} |");
+        }
+        println!(
+            "| **first frame presented (since `main`)** | **{:.1}** |",
+            first_present.unwrap_or(0.0)
+        );
+        println!(
+            "| streaming idle for the first time (since `main`) | {:.1} |",
+            first_idle.unwrap_or(f64::NAN)
+        );
+        println!(
+            "\nPipelines at start-up: {} created ({} from the pipeline cache, {} compiled), {:.1} ms in the driver summed over threads; cache file: {}\n",
+            pipelines_after.created - pipelines_before.created,
+            pipelines_after.cache_hits - pipelines_before.cache_hits,
+            pipelines_after.cache_misses - pipelines_before.cache_misses,
+            (pipelines_after.time - pipelines_before.time).as_secs_f64() * 1e3,
+            match &cache_load {
+                Some(load) => format!("{load:?}"),
+                None => String::from("not used"),
+            }
+        );
+
+        let timed: Vec<Stages> = log.iter().skip(WARMUP).copied().collect();
+        println!("**CPU per frame** (µs):\n");
+        println!("| stage | median | p99 | worst |\n|---|---:|---:|---:|");
+        for (name, f) in COLUMNS {
+            let v: Vec<f64> = timed.iter().map(f).collect();
+            println!(
+                "| {name} | {:.1} | {:.1} | {:.1} |",
+                percentile(&v, 0.5),
+                percentile(&v, 0.99),
+                percentile(&v, 1.0)
+            );
+        }
+        let gpu: Vec<f64> = timed.iter().map(|s| s.gpu).filter(|g| *g > 0.0).collect();
+        println!(
+            "| **GPU frame** | {:.1} | {:.1} | {:.1} |\n",
+            percentile(&gpu, 0.5),
+            percentile(&gpu, 0.99),
+            percentile(&gpu, 1.0)
+        );
+        println!(
+            "**GPU passes** (µs in the frames that ran them, median / p99; how many of the {} frames; mean over every frame), by their cost over the flight:\n",
+            timed.len()
+        );
+        let mut ranked: Vec<(&str, f64, f64, usize, f64)> = passes
+            .iter()
+            .map(|(name, v)| {
+                (
+                    *name,
+                    percentile(v, 0.5),
+                    percentile(v, 0.99),
+                    v.len(),
+                    v.iter().sum::<f64>() / timed.len().max(1) as f64,
+                )
+            })
+            .collect();
+        ranked.sort_by(|a, b| b.4.total_cmp(&a.4));
+        println!("| pass | median | p99 | frames | mean per frame |\n|---|---:|---:|---:|---:|");
+        for (name, median, p99, count, mean) in ranked.iter().take(20) {
+            println!("| {name} | {median:.1} | {p99:.1} | {count} | {mean:.1} |");
+        }
+
+        // Hitches: frames whose interval is over twice the median.
+        let intervals: Vec<f64> = timed.iter().map(|s| s.interval).collect();
+        let median_interval = percentile(&intervals, 0.5);
+        let hitches: Vec<(usize, &Stages)> = log
+            .iter()
+            .enumerate()
+            .skip(WARMUP)
+            .filter(|(_, s)| s.interval > 2.0 * median_interval)
+            .collect();
+        let created: u64 = timed.iter().map(|s| s.pipelines).sum();
+        println!(
+            "\n**Hitches:** {} of {} frames over twice the median interval ({median_interval:.0} µs); pipelines created during the flight: {created}\n",
+            hitches.len(),
+            timed.len()
+        );
+        if !hitches.is_empty() {
+            println!(
+                "| frame | interval µs | CPU µs | wait | streaming | compose | execute | present | GPU µs | longest pass µs | pipelines | levels arrived |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"
+            );
+            let mut worst = hitches.clone();
+            worst.sort_by(|a, b| b.1.interval.total_cmp(&a.1.interval));
+            for (k, s) in worst.iter().take(12) {
+                println!(
+                    "| {k} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {} {:.0} | {} | {} |",
+                    s.interval,
+                    s.cpu,
+                    s.wait,
+                    s.streaming,
+                    s.compose,
+                    s.execute,
+                    s.present,
+                    s.gpu,
+                    s.top.0,
+                    s.top.1,
+                    s.pipelines,
+                    s.arrived
+                );
+            }
+        }
+        let mut by_cpu: Vec<(usize, &Stages)> = log.iter().enumerate().skip(WARMUP).collect();
+        by_cpu.sort_by(|a, b| b.1.cpu.total_cmp(&a.1.cpu));
+        println!("\n**The 5 longest CPU frames** (µs):\n");
+        println!(
+            "| frame | CPU | animation | streaming | pools (textures / materials / geometry) | upload | compose | execute | submit | present | pipelines |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        );
+        for (k, s) in by_cpu.iter().take(5) {
+            println!(
+                "| {k} | {:.0} | {:.0} | {:.0} | {:.0} ({:.0} / {:.0} / {:.0}) | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {} |",
+                s.cpu,
+                s.animate,
+                s.streaming,
+                s.pools,
+                s.pool_parts[0],
+                s.pool_parts[1],
+                s.pool_parts[2],
+                s.upload,
+                s.compose,
+                s.execute,
+                s.submit,
+                s.present,
+                s.pipelines
+            );
+        }
+        println!();
+        memory_report("at the end", &allocator, &graph);
+        let stats = streamer.stats();
+        println!(
+            "Streaming: {} texture levels arrived ({:.1} MiB read), {} mesh levels; request to arrival {:.0} ms on average, {:.0} ms at worst ({} frames); textures planned {:.1} MiB of {:.1} MiB required, grant {:.1} MiB.\n",
+            stats.arrived,
+            stats.bytes as f64 / MIB,
+            stats.mesh_levels,
+            stats.latency_ms_sum / stats.arrived.max(1) as f64,
+            stats.worst_latency_ms,
+            stats.worst_latency_frames,
+            stats.textures.planned as f64 / MIB,
+            stats.textures.required as f64 / MIB,
+            stats.textures.grant as f64 / MIB,
+        );
+
+        if let Some(path) = cache_path.as_deref() {
+            let _ = device.save_pipeline_cache(path);
+        }
+        // SAFETY: the device is idle.
+        unsafe {
+            frame_renderer.destroy(&device, &mut allocator, &bindless);
+            view.destroy(&mut allocator, &bindless);
+            scene.destroy(&mut allocator);
+            skinning.destroy(&mut allocator);
+            feedback.destroy(&mut allocator);
+            environment.destroy(&mut allocator, &bindless);
+            graph.destroy(&mut allocator, Some(&bindless));
+            ring.destroy(&mut allocator);
+            geometry.destroy(&mut allocator);
+            materials.destroy(&mut allocator);
+            textures.destroy(&mut allocator, &bindless);
+        }
+        drop(streamer);
+        drop(frames);
+        drop(frame_renderer);
+        drop(bindless);
+        drop(allocator);
+        drop(swapchain);
+        drop(surface);
+        windows.destroy_window(window.id).unwrap();
+    }
+}

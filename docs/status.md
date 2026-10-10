@@ -4,7 +4,7 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-02.
+Last updated: 2026-10-10.
 
 ## 1. What matters most
 
@@ -77,11 +77,17 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-Nothing (2026-10-02).
+- Faster checks (queue item 0), by the coordinator, after the second core review
+  (2026-10-10, `docs/research/core-audit-2.md`; the owner answered its questions the same
+  day, see §5).
 
 ## 5. Queue (in order)
 
-0. **Faster checks, first after the review** (owner, 2026-10-02). Today
+Merged with the second review's findings (`docs/research/core-audit-2.md`). The owner's
+answers of 2026-10-10: faster checks first, then the review's P0 fixes; the player crate
+after the rendering queue; custom 3D materials after GI; the discrete AO default stays High.
+
+0. **Faster checks, first after the review** (owner, 2026-10-02, confirmed 2026-10-10). Today
    `check.ps1 -Gpu -Perf` takes 10–25 min, and it grows with every crate and test. Per
    step, from recent runs:
 
@@ -103,6 +109,16 @@ Nothing (2026-10-02).
    - **adopt cargo-nextest;**
    - **add an "affected crates" mode** for agents' intermediate runs. The full run stays
      the gate before every merge.
+0a. **The review's P0 fixes** (§3.1 and §3.3):
+   - `engine_rhi::Pipeline` without its copy of the device's function table (1,504 bytes
+     per pipeline: the renderers' construction overflows Windows' 1 MiB main thread on
+     the Radeon, so `game_loop` crashes on start), the renderers' large state off the
+     stack, and a test that builds the frame renderer with every feature on a 1 MiB thread
+     on both GPUs; then drop the 16–64 MiB thread workarounds in `perf_gate`, `aa_bench`
+     and `flight`;
+   - GPU pass times without overlap (exclusive times, or a serialized mode for the gate)
+     and the gate's baselines re-checked with them: today a pass after a long one without
+     a barrier absorbs its tail (feedback measured 2.4 ms, really 49 µs).
 0b. **No visible streaming pop-in on fast camera turns** (owner, 2026-10-02: in UE, models
    and textures failed to load in time when the camera turned quickly). Our ADR 0076 has
    the same risk:
@@ -120,9 +136,29 @@ Nothing (2026-10-02).
    Acceptance: a "fast turn" test (180° in 0.2 s) measures the pixels drawn below their
    wanted level and for how long. The target is no visible pop-in at the default budget.
    The test joins the perf gate.
+   The review adds: the geometry pool grows on the frame thread when streamed mesh levels
+   arrive (4–8 ms on the Radeon at the first fast turn): reserve it from the pack's totals
+   and grow ahead off the frame thread; give the upload ring growth and a high-water mark
+   (today a full ring drops the view).
 0c. Spatial upscales Lanczos-3 (with an anti-ringing clamp) and bicubic Catmull-Rom,
    measured in ADR 0075's table. No Lanczos-2: FSR 1's EASU covers it (owner,
    2026-10-02).
+0d. **Motion vectors out of the forward shading** (review §3.2). With motion vectors (every
+   default antialiasing) the lit forward shader takes 77–89 VGPRs instead of 64 and the
+   vertex stage 78 instead of 49: Sponza's forward +22–27 % on the Radeon, +5–11 % on the
+   RTX. Write them in the depth prepass (always drawn with the default AO), or reconstruct
+   camera motion from depth and draw object motion for movers only; extend the register
+   rule to the default variants (`scene_bench --pipeline-stats` prints them now).
+0e. **The present path on the iGPU** (review §3.4): the tone mapper writing the swapchain
+   image costs the Radeon 1.1 ms of frame against writing an offscreen image and copying
+   it. Offscreen + copy where measured faster, find the cause, a windowed scene in the gate.
+0f. **Moving instances** (review §3.5): ~70 ns each per frame on one thread (60,000 make
+   the RTX CPU-bound at 5.2 ms). Propagation, extraction, interpolation and upload in
+   parallel on the job system; interpolation on the GPU so movers upload per tick, not per
+   frame.
+0g. Start-up overlap (device creation beside the pack's reading and cooking) and pipeline
+   variants created on first use (review §3.8): first frame 450–590 ms warm, 1.2–1.4 s
+   with the pipeline cache missing.
 1. GPU particles and GPU radix sort.
 2. Clustered decals.
 3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
@@ -130,12 +166,28 @@ Nothing (2026-10-02).
    above in shade. Today they look dark brown there. The material and the shading are
    right (seen from below they are gold), but the shaded floor they reflect has no bounced
    light (2026-10-02).
+3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
+   first: it decides permutations and pipeline management for the whole renderer (§9
+   material graph and hand-written Slang).
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
    visibility bits (patent, ADR 0035 note).
 5. Virtual shadow maps.
 6. Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
    (ADR 0067), frame generation. For frame generation, both DLSS FG and FSR 3.1 FG, off by
    default, with latency measured.
+6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms, bloom 1.6 ms (a single-pass
+   downsampler), local shadows redrawn every frame when casters move (a per-frame redraw
+   budget; never the patented static/dynamic split).
+6c. Memory (review §3.9): one transient heap for both frame slots where no transient
+   crosses queues (66 / 41 MiB), the global allocator decision (mimalloc, CLAUDE.md §5,
+   never made), CPU memory accounting (0.9–1.1 GiB private bytes unexplained).
+6d. Jolt's jobs on `engine_core::jobs` through JoltC's callback job system (review §3.10).
+6e. `forward.rs` (5,695 lines) split by feature (review §3.12).
+6f. **A player crate** (`engine_app`, review §3.7; after the rendering queue: owner,
+   2026-10-10): device, swapchain, latency provider, process setup (power throttling,
+   MMCSS, CPU sets), pipeline cache and the frame loop in one place; ECS components for
+   lights, skinned meshes and probes; features per view instead of per renderer;
+   `RenderDefaults` applied whole. The benches and the test bed move onto it.
 7. Then: editor tools, Luau bindings and debugger, other tooling.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
@@ -176,6 +228,8 @@ Nothing (2026-10-02).
   - per-sample or bilaterally upsampled AO and contact shadows under MSAA;
   - dynamic resolution with MSAA;
   - CMAA is not built (Intel patents).
+  - Ambient occlusion: the discrete default stays High (owner, 2026-10-10), although it
+    is 28 % of the RTX's default GPU frame (481 µs; Medium 0.40 ms, FLIP 0.096 vs 0.070).
   - The discrete-GPU default stays TAA. The other candidate is MSAA 4× (+1.2 ms on the
     RTX, sharpest in motion, more flicker); the owner decides.
   - A Streamline `eErrorExceptionHandler` hang was seen once in `aa_bench`.
@@ -187,9 +241,17 @@ Nothing (2026-10-02).
 - **Reliability:** two silent process exits (`perf_gate` once, `frame_bench` once) were
   never reproduced or explained. Watch for a recurrence and get a stack.
 - **Housekeeping:** ADR 0001 is still "Proposed" (needs measurements on a quiet machine).
-  `scene_bench` is wired by hand, outside `engine_frame`.
+  `scene_bench` is wired by hand, outside `engine_frame`. From the second review:
+  - `game_loop`'s "input → camera" counts a stale window event (637 ms);
+  - `scene_bench --ao` takes the next argument as the AO quality even when it is a flag;
+  - CLAUDE.md §5 (mimalloc) and §2 ("engine_runtime: game executable") describe things
+    that do not exist yet.
 
 ## 7. First task of a new coordinator session: a fresh-eyes technical review
+
+The second review was done on 2026-10-10: `docs/research/core-audit-2.md`. Its harness
+`engine_runtime/examples/flight.rs` measures a game's frame end to end; rerun it in later
+reviews to compare.
 
 **Owner's instruction (2026-10-02): do this review yourself, and start no agents** (no
 `Agent` tool, no subagents, no background workers) until the owner explicitly says agents
