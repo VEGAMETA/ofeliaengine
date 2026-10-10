@@ -900,8 +900,9 @@ impl FrameRenderer {
     ///
     /// # Errors
     ///
-    /// [`FrameError::RingFull`] when the upload ring had no room (nothing was declared),
-    /// [`FrameError::Upscale`] when the upscaler refused its pass.
+    /// [`FrameError::RingFull`] when the upload ring had no room (nothing was declared; it
+    /// grows for the next frames), [`FrameError::Upscale`] when the upscaler refused its
+    /// pass.
     pub fn add_view<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -935,6 +936,9 @@ impl FrameRenderer {
         hook: impl FnOnce(&mut FrameGraph<'g>, &SceneTargets<'_>),
     ) -> Result<ViewFrame, FrameError> {
         engine_profiler::zone!("frame::FrameRenderer::add_view");
+        // The ring frees what it replaced and grows ahead when frames come close to its
+        // capacity (core review 2 §3.6): a full ring would drop the view.
+        ctx.ring.grow(ctx.device, ctx.allocator)?;
         let View {
             prepared,
             temporal,

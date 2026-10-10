@@ -1172,6 +1172,23 @@ impl GeometryPool {
         self.slots.len() - self.free_slots.len()
     }
 
+    /// Makes room for `vertices` and `indices` beyond what the pool holds now: its buffers
+    /// grow once, in the next [`Self::begin_frame`], instead of doubling on the frames that
+    /// add meshes or levels past them. Growing makes device memory and copies on the frame's
+    /// thread (4.1 ms on the Radeon iGPU for Sponza's levels, core review 2 §3.6): a streamed
+    /// scene reserves its full detail as it opens.
+    pub fn reserve(&mut self, vertices: u64, indices: u64) {
+        for (ranges, more) in [
+            (&mut self.vertex_ranges, vertices),
+            (&mut self.index_ranges, indices),
+        ] {
+            let needed = (ranges.used() + more).min(u64::from(u32::MAX));
+            if ranges.capacity() < needed {
+                ranges.grow(needed);
+            }
+        }
+    }
+
     /// Vertices and indices in use, and the pool's capacity in both.
     pub fn usage(&self) -> (u64, u64, u64, u64) {
         (

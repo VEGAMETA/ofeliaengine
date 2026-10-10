@@ -90,8 +90,9 @@ tooling included) about **50 %**.
   0.08–0.15 s on first sight), mip fade (ADR 0078: arriving levels sharpen over 100 ms,
   no shader change). The other safe measures were in place already (cached levels kept,
   coarsest levels and most pixels first, tails up to 128 texels resident); one feedback
-  pass with a wider field of view stays an option if larger scenes show pop-in. Next: the
-  rest of 0b (the geometry pool's growth off the frame thread, the upload ring's growth).
+  pass with a wider field of view stays an option if larger scenes show pop-in; the
+  geometry pool reserved as a scene opens and the upload ring grown ahead (the review's
+  §3.6). Left in 0b: mesh levels by distance, the fast-turn test in the perf gate.
 
 ## 5. Queue (in order)
 
@@ -181,10 +182,11 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
      disk's cache);
    - one feedback pass with a wider field of view instead of the main view's, if a larger
      scene shows pop-in.
-   The review adds: the geometry pool grows on the frame thread when streamed mesh levels
-   arrive (4–8 ms on the Radeon at the first fast turn): reserve it from the pack's totals
-   and grow ahead off the frame thread; give the upload ring growth and a high-water mark
-   (today a full ring drops the view).
+   The review's additions, done 2026-10-10: the geometry pool reserved from the pack's
+   totals as the scene opens (`GeometryPool::reserve`; the Radeon's worst frame at the
+   first fast turn 5.0 → 1.7 ms), the upload ring grows ahead (`UploadRing::grow` from the
+   frame renderer, `stats()`; a refused frame still drops its view once). Growth beyond a
+   reservation (scenes added while running) still happens on the frame thread.
 0c. Spatial upscales Lanczos-3 (with an anti-ringing clamp) and bicubic Catmull-Rom,
    measured in ADR 0075's table. No Lanczos-2: FSR 1's EASU covers it (owner,
    2026-10-02).
