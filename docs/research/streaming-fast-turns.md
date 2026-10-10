@@ -81,6 +81,36 @@ once). Next measurement: a fast-turn mode in `stream_bench` (180° in a fraction
 in a tight budget, the pack on the HDD and on the NVMe drive) counting the frames and the
 share of visible texels below their wanted level until it is resident.
 
+## Fast turns, measured
+
+`stream_bench --turn 300` (this note's branch): the camera stands at the centre of Sponza
+until everything it sees has arrived, then turns 180° in 300 ms, four times, 2.3 s apart.
+Each frame, `TextureStreamer::sharpness` counts the pixels the feedback saw over its last
+cycle (every material once) whose texture holds a coarser level than wanted, and than
+planned (still arriving). RTX, 60 fps paced; packs read unbuffered from the SATA disk
+(`H:`) or the NVMe drive (`C:`). 2026-10-10:
+
+| Setup | first turn: blurrier than wanted, peak | sharp again after |
+|---|---:|---:|
+| NVMe, feedback as default (4 slices) | 1.2 % (3 runs alike) | 83 ms |
+| HDD, 4 slices | 4.2–8.0 % | 133–150 ms |
+| NVMe or HDD, every draw each pass (1 slice) | 14.8 % | 100 ms |
+
+- Only the first look at a part of the scene shows it: with room for everything, the later
+  turns read 0 % (what was seen stays cached). A whole pass of feedback (1 slice) finds all
+  the new materials at once, so more pixels wait together; they are not sharp any sooner,
+  and the pass costs 3–4× more (208–259 against 55–74 µs median on the RTX).
+- In a tight budget the picture is blurrier all the time, not after turns: at 48 MiB
+  (Sponza is 90.7 MiB with every level) 46 % of the pixels sit below their wanted level
+  and at 32 MiB 85 %, while what was planned is in memory within a frame or two (still
+  arriving: 0–1 %, once 30.5 % for 133 ms). That is the budget's choice, not latency.
+- The 72 MB pack fits the disk's own 64 MB cache: the HDD and the NVMe drive read the same
+  in the tight-budget runs; a larger scene is needed to see the disk itself.
+
+So, on this scene, a fast turn shows coarser textures on a few percent of the screen for
+about a tenth of a second (NVMe) to a sixth (HDD). The owner asked for mip fade next
+(2026-10-10): the levels that arrive are shown over a short fade instead of at once.
+
 ## The owner's answer (2026-10-10)
 
 What the engine has does not fall under the family: one source per kind of object, a budget

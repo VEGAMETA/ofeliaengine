@@ -83,8 +83,11 @@ tooling included) about **50 %**.
   (item 0, done on 2026-10-10 but for sccache: ADR 0077 and its two addenda, ADR 0062's
   addendum): a check with nothing changed 632 → 141 s, the gate `-Gpu -Perf` 10–25 min →
   400 s (its perf step 749 → 237 s). Both P0 fixes done the same day: the pipelines'
-  size and the 1 MiB stack (PR #124), each pass's own GPU time (`fix/pass-times`). Next:
-  item 0b.
+  size and the 1 MiB stack (PR #124), each pass's own GPU time (PR #125); the Radeon's
+  perf limits (PR #126, owner's decision). Item 0b started: the Graphine patents read
+  (`docs/research/streaming-fast-turns.md`: 360° views besides the main view are out),
+  fast turns measured (`stream_bench --turn`: a few percent of the pixels coarser for
+  0.08–0.15 s on first sight); next, mip fade (owner, 2026-10-10).
 
 ## 5. Queue (in order)
 

@@ -182,11 +182,30 @@ pub struct StreamerStats {
     pub in_flight: u32,
 }
 
+/// How sharp the textures the feedback saw lately are now
+/// ([`TextureStreamer::sharpness`]): how fast streaming catches up when the view changes.
+/// A material's pixels (from its latest report) count once for each of its textures.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Sharpness {
+    /// Feedback pixels of the textures seen.
+    pub pixels: u64,
+    /// Pixels of textures that do not hold the level the feedback asked for: drawn
+    /// blurrier, for lack of time or of memory.
+    pub short: u64,
+    /// Pixels of textures that do not hold the level planned for them yet: still
+    /// arriving (the plan is coarser than the wanted level when memory is short).
+    pub arriving: u64,
+    /// The missing levels, weighted by pixels (`short` counted once per level short).
+    pub short_levels: u64,
+}
+
 /// Texture streaming policy (see the module documentation).
 #[derive(Debug)]
 pub struct TextureStreamer {
     settings: StreamerSettings,
     entries: Vec<Entry>,
+    /// The frame of the last feedback folded in.
+    last_fold: Option<u64>,
     /// Entry of each pool slot (`u32::MAX`: none).
     by_slot: Vec<u32>,
     client: ClientId,
@@ -207,6 +226,7 @@ impl TextureStreamer {
         Some(Self {
             settings,
             entries: Vec::new(),
+            last_fold: None,
             by_slot: Vec::new(),
             client: budget.register("textures")?,
             order: Vec::new(),
@@ -233,6 +253,38 @@ impl TextureStreamer {
     /// The last frame's numbers.
     pub fn stats(&self) -> StreamerStats {
         self.stats
+    }
+
+    /// How many of the pixels the feedback saw in its last `window` frames are drawn now
+    /// from a coarser level than wanted, or than planned ([`Sharpness`]). With a feedback
+    /// pass drawing one of several slices of the view, `window` is its slices times its
+    /// interval: every material reported once. Walks every texture: for tools and tests,
+    /// not every frame of a game.
+    pub fn sharpness(&self, pool: &impl StreamedPool, window: u64) -> Sharpness {
+        let mut s = Sharpness::default();
+        let Some(fold) = self.last_fold else {
+            return s;
+        };
+        let since = fold.saturating_sub(window.max(1) - 1);
+        for e in self
+            .entries
+            .iter()
+            .filter(|e| e.last_seen.is_some_and(|seen| seen >= since))
+        {
+            let Some(info) = pool.info(e.id) else {
+                continue;
+            };
+            let pixels = u64::from(e.pixels);
+            s.pixels += pixels;
+            if info.resident > e.wanted {
+                s.short += pixels;
+                s.short_levels += pixels * u64::from(info.resident - e.wanted);
+            }
+            if info.resident > e.plan {
+                s.arriving += pixels;
+            }
+        }
+        s
     }
 
     /// Streams a texture of the pool, made with [`TexturePool::add_streamed`] holding its
@@ -296,6 +348,7 @@ impl TextureStreamer {
     ) {
         let bias = self.settings.bias;
         let hold = u64::from(self.settings.hold_frames);
+        self.last_fold = Some(frame);
         for r in results {
             for id in materials.slot_textures(r.slot).into_iter().flatten() {
                 let Some(e) = self.entry_mut(id) else {
@@ -1197,6 +1250,16 @@ mod tests {
             if r.first >= t.planned_base {
                 t.uploaded |= level_mask(r.first, r.count);
             }
+            Self::settle(t);
+        }
+
+        /// The resident levels: the uploaded run from the smallest level (as the pool).
+        fn settle(t: &mut TextureInfo) {
+            let mut resident = t.levels;
+            while resident > t.base && t.uploaded & (1 << (resident - 1)) != 0 {
+                resident -= 1;
+            }
+            t.resident = resident;
         }
 
         fn base(&self, id: TextureId) -> u32 {
@@ -1215,6 +1278,7 @@ mod tests {
             t.planned_base = base;
             t.uploaded &= !((1u32 << base) - 1);
             t.bytes = levels_bytes(t.format, t.width, t.height, t.levels, base);
+            Self::settle(t);
             Ok(())
         }
 
@@ -1319,6 +1383,23 @@ mod tests {
         fn bases(&self) -> Vec<u32> {
             self.ids.iter().map(|&id| self.pool.base(id)).collect()
         }
+    }
+
+    #[test]
+    fn sharpness_counts_what_the_feedback_saw_lately_short_of_its_level() {
+        let mut w = World::new(2, 64 * MIB);
+        w.frame(&[]);
+        w.frame(&[(0, 0, 300)]);
+        w.frame(&[(1, 1, 100)]);
+        // Everything asked for arrived (an ample pool).
+        let all = w.streamer.sharpness(&w.pool, 2);
+        assert_eq!((all.pixels, all.short, all.arriving), (400, 0, 0));
+        // The last feedback alone saw texture 1.
+        assert_eq!(w.streamer.sharpness(&w.pool, 1).pixels, 100);
+        // Texture 0 holds level 2 at best: its two finer levels are still on their way.
+        w.pool.textures[0].resident = 2;
+        let s = w.streamer.sharpness(&w.pool, 2);
+        assert_eq!((s.short, s.arriving, s.short_levels), (300, 300, 600));
     }
 
     #[test]

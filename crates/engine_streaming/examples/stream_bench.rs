@@ -15,6 +15,10 @@
 //!                            and slices of the draw commands per pass
 //!     [--no-feedback]        no feedback pass (tails only): its cost by difference
 //!     [--still]              no flight: the first view until everything settles
+//!     [--turn <ms>]          no flight: at the scene's centre until everything settles,
+//!                            then four turns of 180° in <ms> each, 2 s apart; per turn,
+//!                            the share of the feedback's pixels drawn from a coarser
+//!                            level than wanted, over time (queue item 0b)
 //!     [--synthetic <n>,<size>]   instead of a pack: n quads with their own size² BC7
 //!                            texture each (a stress scene), cooked into a pack in the
 //!                            temp directory
@@ -37,7 +41,7 @@ use engine_render::graph::{Access, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialId, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId};
 use engine_render::post::HDR_FORMAT;
-use engine_render::streaming::LodView;
+use engine_render::streaming::{LodView, Sharpness};
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -54,6 +58,10 @@ type FrameLog = (usize, f64, f64, f64, (&'static str, f64));
 
 /// Frames left out of the statistics at the start.
 const WARMUP: usize = 10;
+/// `--turn`: turns, seconds between them, and the longest wait for the first view to settle.
+const TURNS: usize = 4;
+const TURN_HOLD_S: f64 = 2.0;
+const TURN_SETTLE_MAX: usize = 900;
 
 fn percentile(values: &[f64], p: f64) -> f64 {
     if values.is_empty() {
@@ -144,6 +152,7 @@ fn main() {
     let mut feedback_settings = FeedbackSettings::default();
     let mut use_feedback = true;
     let mut still = false;
+    let mut turn_ms: Option<f64> = None;
     let mut verbose = false;
     let mut synthetic_scene: Option<(usize, u32)> = None;
     let mut args = std::env::args().skip(1);
@@ -157,6 +166,7 @@ fn main() {
             "--slices" => feedback_settings.slices = args.next().unwrap().parse().unwrap(),
             "--no-feedback" => use_feedback = false,
             "--still" => still = true,
+            "--turn" => turn_ms = args.next().map(|v| v.parse().unwrap()),
             "--verbose" => verbose = true,
             "--synthetic" => {
                 let v = args.next().unwrap();
@@ -387,13 +397,46 @@ fn main() {
     let mut settled: Option<usize> = None;
     let mut sleeper = engine_platform::time::PreciseSleeper::new().unwrap();
     let started = Instant::now();
-    let total = if still { frames.max(1) } else { frames };
+    // Turns: frames per turn and per hold, the frame the first turn starts, and each
+    // frame's sharpness from then on.
+    let rate = if fps > 0.0 { fps } else { 60.0 };
+    let turn_frames = turn_ms.map_or(0, |ms| ((ms / 1000.0 * rate).round() as usize).max(1));
+    let hold_frames = (TURN_HOLD_S * rate).round() as usize;
+    let cycle = turn_frames + hold_frames;
+    let mut turn_start: Option<usize> = None;
+    let mut sharpness: Vec<Sharpness> = Vec::new();
+    let total = if turn_ms.is_some() {
+        TURN_SETTLE_MAX + TURNS * cycle
+    } else if still {
+        frames.max(1)
+    } else {
+        frames
+    };
     for frame in 0..total {
         let frame_number = frame as u64 + 1;
         let deadline = started + period * frame as u32;
         sleeper.sleep_until(deadline).unwrap();
         let frame_start = Instant::now();
-        let (eye, target) = camera_at(frame);
+        let (eye, target) = if turn_ms.is_some() {
+            // At the centre, looking down the long axis, then 180° more with each turn.
+            let yaw = turn_start.map_or(0.0, |start| {
+                let k = frame.saturating_sub(start);
+                let within = (k % cycle).min(turn_frames) as f32 / turn_frames as f32;
+                core::f32::consts::PI * ((k / cycle) as f32 + within)
+            });
+            let (eye, _) = camera_at(frames / 4);
+            let center = (min + max) * 0.5;
+            let eye = Vec3::new(center.x, eye.y, center.z);
+            let (c, s) = (yaw.cos(), yaw.sin());
+            let dir = if along_x {
+                Vec3::new(c, -0.15, s)
+            } else {
+                Vec3::new(s, -0.15, c)
+            };
+            (eye, eye + dir)
+        } else {
+            camera_at(frame)
+        };
         let camera = Camera {
             clip_from_world: vulkan_perspective(
                 60f32.to_radians(),
@@ -558,6 +601,17 @@ fn main() {
                 break;
             }
         }
+        if turn_ms.is_some() {
+            if turn_start.is_none() && (settled.is_some() || frame + 1 >= TURN_SETTLE_MAX) {
+                turn_start = Some(frame + 1);
+            } else if let Some(start) = turn_start {
+                let window = u64::from(feedback_settings.slices * feedback_settings.interval);
+                sharpness.push(streamer.texture_streamer().sharpness(&textures, window));
+                if frame + 1 >= start + TURNS * cycle {
+                    break;
+                }
+            }
+        }
         if frame % 120 == 0 || frame + 1 == total || verbose {
             let s = streamer.stats();
             println!(
@@ -579,6 +633,9 @@ fn main() {
                 s.latency_ms,
             );
         }
+    }
+    if turn_ms.is_some() {
+        turn_report(&sharpness, turn_frames, cycle, rate);
     }
     let s = streamer.stats();
     println!();
@@ -674,4 +731,53 @@ fn main() {
     }
     drop(feedback);
     drop(renderer);
+}
+
+/// `--turn`'s report: for each turn, the share of the feedback's pixels drawn from a
+/// coarser level than wanted (short) and than planned (arriving) since the turn started:
+/// its peak, and from when it stays under 1 %.
+fn turn_report(sharpness: &[Sharpness], turn_frames: usize, cycle: usize, rate: f64) {
+    let ms = |frames: usize| frames as f64 * 1000.0 / rate;
+    let pct = |part: u64, of: u64| {
+        if of == 0 {
+            0.0
+        } else {
+            part as f64 * 100.0 / of as f64
+        }
+    };
+    // Frames until the share stays under 1 % (0: never over it).
+    let calm = |v: &[f64]| v.iter().rposition(|&p| p >= 1.0).map_or(0, |k| k + 1);
+    println!();
+    println!(
+        "Turns of 180° in {:.0} ms ({turn_frames} frames), {:.1} s apart; the feedback trails the view by a few frames.",
+        ms(turn_frames),
+        ms(cycle) / 1000.0
+    );
+    println!(
+        "| turn | blurrier than wanted, peak | under 1 % after | still arriving, peak | under 1 % after | levels short × pixels |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|");
+    for (i, turn) in sharpness.chunks(cycle).enumerate() {
+        let short: Vec<f64> = turn.iter().map(|s| pct(s.short, s.pixels)).collect();
+        let arriving: Vec<f64> = turn.iter().map(|s| pct(s.arriving, s.pixels)).collect();
+        let levels: u64 = turn.iter().map(|s| s.short_levels).sum();
+        println!(
+            "| {} | {:.1} % | {:.0} ms | {:.1} % | {:.0} ms | {levels} |",
+            i + 1,
+            short.iter().copied().fold(0.0, f64::max),
+            ms(calm(&short)),
+            arriving.iter().copied().fold(0.0, f64::max),
+            ms(calm(&arriving)),
+        );
+    }
+    if let Some(first) = sharpness.chunks(cycle).next() {
+        let mut line = String::from("First turn, blurrier than wanted:");
+        for t in [0u32, 50, 100, 150, 200, 300, 400, 500, 750, 1000, 1500] {
+            let k = (f64::from(t) * rate / 1000.0).round() as usize;
+            if let Some(s) = first.get(k) {
+                line += &format!(" {t} ms {:.1} %;", pct(s.short, s.pixels));
+            }
+        }
+        println!("{line}");
+    }
 }
