@@ -2,6 +2,7 @@
 
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4};
+use engine_core::sync::CachePadded;
 use engine_ecs::{
     Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, pod_component,
 };
@@ -209,9 +210,10 @@ pub struct RenderExtract<Id = InstanceId> {
     moving_before: Vec<Affine3A>,
     moving_next: Vec<Entity>,
     moving_before_next: Vec<Affine3A>,
-    /// This sync's runs of rows of changed chunks, and what each left for the scene.
+    /// This sync's runs of rows of changed chunks, and what each left for the scene (on
+    /// cache lines of its own: a job pushes to it for every entity).
     runs: Vec<Run>,
-    works: Vec<RunWork<Id>>,
+    works: Vec<CachePadded<RunWork<Id>>>,
     removed: Vec<Entity>,
     epoch: Option<u64>,
     tick: u64,
@@ -284,7 +286,7 @@ impl<Id> Default for RunWork<Id> {
 struct Shared<Id> {
     entries: *mut Option<Entry<Id>>,
     entries_len: usize,
-    works: *mut RunWork<Id>,
+    works: *mut CachePadded<RunWork<Id>>,
 }
 
 // SAFETY: every element is used by one thread at a time (see the type); `Id` moves
@@ -481,7 +483,7 @@ impl<Id: Copy + Eq> RenderExtract<Id> {
             });
         let n = self.runs.len();
         if self.works.len() < n {
-            self.works.resize_with(n, RunWork::default);
+            self.works.resize_with(n, CachePadded::default);
         }
         // Each entity against its entry: on the pool's workers when there are many.
         {

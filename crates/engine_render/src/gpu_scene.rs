@@ -55,6 +55,7 @@ use core::hash::{BuildHasherDefault, Hasher};
 use core::mem::MaybeUninit;
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Vec3, Vec4};
+use engine_core::sync::CachePadded;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError};
 use std::collections::{BinaryHeap, HashMap};
@@ -555,8 +556,9 @@ pub struct GpuScene {
     jobs: Option<Arc<ThreadPool>>,
     fast: Vec<u32>,
     slow: Vec<u32>,
-    partials: Vec<Partial>,
-    step_runs: Vec<StepRun>,
+    /// (Each job's on cache lines of its own: a job updates it for every slot.)
+    partials: Vec<CachePadded<Partial>>,
+    step_runs: Vec<CachePadded<StepRun>>,
     motion_gpu: Option<MotionGpu>,
     /// Motion buffers replaced by growth, freed once their frames are done.
     retired_motion: Vec<(u64, SceneBuffer)>,
@@ -746,7 +748,7 @@ struct MotionTargets {
     records: Records,
     /// The scene's bounds before this apply, when kept incrementally.
     bounds: Option<(Vec3, Vec3)>,
-    partials: *mut Partial,
+    partials: *mut CachePadded<Partial>,
 }
 
 // SAFETY: the jobs write disjoint elements (see the type).
@@ -853,7 +855,7 @@ struct StepTargets {
     slot_count: usize,
     data: *mut InstanceData,
     motion: *mut SlotMotion,
-    runs: *mut StepRun,
+    runs: *mut CachePadded<StepRun>,
 }
 
 // SAFETY: the jobs write disjoint elements (see the type).
@@ -1213,7 +1215,7 @@ impl GpuScene {
             }
         };
         if self.step_runs.len() < runs {
-            self.step_runs.resize_with(runs, StepRun::default);
+            self.step_runs.resize_with(runs, CachePadded::default);
         }
         let targets = StepTargets {
             slots: self.slots.as_mut_ptr(),
@@ -1419,7 +1421,7 @@ impl GpuScene {
             1
         };
         if self.partials.len() < chunks {
-            self.partials.resize_with(chunks, Partial::default);
+            self.partials.resize_with(chunks, CachePadded::default);
         }
         for part in &mut self.partials[..chunks] {
             part.lo = Vec3::splat(f32::MAX);

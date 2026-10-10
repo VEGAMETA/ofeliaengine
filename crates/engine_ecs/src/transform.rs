@@ -21,6 +21,7 @@ use crate::world::World;
 use crate::{bytemuck, pod_component, reflect_component};
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
+use engine_core::sync::CachePadded;
 use engine_reflect::Reflect;
 
 /// Position, rotation and scale relative to the parent (or the world for a root).
@@ -224,14 +225,55 @@ struct RootJob {
 struct JobState {
     stack: Vec<(Entity, u32, Affine3A, bool)>,
     stats: PropagationStats,
+    marker: Marker,
 }
 
 /// The job states, shared with the pool's workers: job `k`'s state is used only by the
-/// call that runs job `k`.
-struct JobStates(*mut JobState);
+/// call that runs job `k` (each on cache lines of its own: a job updates it for every
+/// entity).
+struct JobStates(*mut CachePadded<JobState>);
 
 // SAFETY: every state is used by one thread at a time (see the type).
 unsafe impl Sync for JobStates {}
+
+/// Marks the world-transform columns a pass writes with its tick, once per run of writes
+/// into one chunk: every mark stores the same tick, and from several threads at once every
+/// store would fight over the version's cache line.
+#[derive(Debug, Clone, Copy)]
+struct Marker {
+    tick: u64,
+    last: (u32, usize, usize),
+}
+
+impl Default for Marker {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+impl Marker {
+    fn new(tick: u64) -> Self {
+        Self {
+            tick,
+            last: (u32::MAX, usize::MAX, usize::MAX),
+        }
+    }
+
+    /// Marks column `column` of chunk `chunk` of archetype `archetype` (`arch`).
+    #[inline]
+    fn mark(
+        &mut self,
+        arch: &crate::storage::Archetype,
+        archetype: u32,
+        chunk: usize,
+        column: usize,
+    ) {
+        if self.last != (archetype, chunk, column) {
+            arch.mark_column(chunk, column, self.tick);
+            self.last = (archetype, chunk, column);
+        }
+    }
+}
 
 /// Component ids the pass works with.
 #[derive(Debug, Clone, Copy)]
@@ -305,7 +347,7 @@ pub struct TransformPropagation {
     stack: Vec<(Entity, u32, Affine3A, bool)>,
     /// The changed roots, in jobs of rows, and each job's state.
     root_jobs: Vec<RootJob>,
-    job_states: Vec<JobState>,
+    job_states: Vec<CachePadded<JobState>>,
     stats: PropagationStats,
     // The full pass, kept as the reference.
     roots: QueryState<(&'static Transform, &'static mut GlobalTransform), Without<Parent>>,
@@ -449,7 +491,7 @@ impl TransformPropagation {
         // written without comparing.
         let jobs = self.root_jobs.len();
         if self.job_states.len() < jobs {
-            self.job_states.resize_with(jobs, JobState::default);
+            self.job_states.resize_with(jobs, CachePadded::default);
         }
         {
             let world = &*world;
@@ -478,6 +520,7 @@ impl TransformPropagation {
             state.stats = PropagationStats::default();
         }
         self.pending.sort_unstable_by_key(|&(depth, _)| depth);
+        let mut marker = Marker::new(tick);
         for k in 0..self.pending.len() {
             let entity = self.pending[k].1;
             // Its ancestors are final: any change above it was walked down already.
@@ -504,14 +547,14 @@ impl TransformPropagation {
             };
             let value = parent_global * local_value.to_affine();
             stats.recomputed += 1;
-            let changed = store(world, loc.archetype, global, chunk, row, value, tick);
+            let changed = store(world, loc.archetype, global, chunk, row, value, &mut marker);
             stats.written += u32::from(changed);
             let arch = &world.archetypes[loc.archetype as usize];
             if let Some(children) = cols.children() {
                 // SAFETY: the column holds an initialized `Children` here.
                 let c = unsafe { *arch.value_ptr(chunk, children, row).cast::<Children>() };
                 self.stack.push((c.first, c.count, value, changed));
-                walk(world, &self.cols, &mut self.stack, tick, &mut stats);
+                walk(world, &self.cols, &mut self.stack, &mut marker, &mut stats);
             }
         }
         self.stats = stats;
@@ -571,6 +614,7 @@ fn run_roots(
 ) {
     let t = tracked[job.tracked as usize];
     let chunk = job.chunk as usize;
+    state.marker = Marker::new(tick);
     for row in job.start as usize..job.end as usize {
         let arch = &world.archetypes[t.archetype as usize];
         let (global, changed) = match t.local {
@@ -579,7 +623,15 @@ fn run_roots(
                 let local = unsafe { *arch.value_ptr(chunk, local, row).cast::<Transform>() };
                 let global = local.to_affine();
                 state.stats.recomputed += 1;
-                let changed = store(world, t.archetype, t.global, chunk, row, global, tick);
+                let changed = store(
+                    world,
+                    t.archetype,
+                    t.global,
+                    chunk,
+                    row,
+                    global,
+                    &mut state.marker,
+                );
                 state.stats.written += u32::from(changed);
                 (global, changed)
             }
@@ -598,7 +650,13 @@ fn run_roots(
             // SAFETY: the column holds an initialized `Children` here.
             let c = unsafe { *arch.value_ptr(chunk, children, row).cast::<Children>() };
             state.stack.push((c.first, c.count, global, changed));
-            walk(world, cols, &mut state.stack, tick, &mut state.stats);
+            walk(
+                world,
+                cols,
+                &mut state.stack,
+                &mut state.marker,
+                &mut state.stats,
+            );
         }
     }
 }
@@ -614,7 +672,7 @@ fn store(
     chunk: usize,
     row: usize,
     value: Affine3A,
-    tick: u64,
+    marker: &mut Marker,
 ) -> bool {
     let arch = &world.archetypes[archetype as usize];
     let ptr = arch.value_ptr(chunk, column, row).cast::<GlobalTransform>();
@@ -628,7 +686,7 @@ fn store(
     // by their job, children by their root's: subtrees are disjoint), so nothing else
     // reads or writes it. Column versions are atomic.
     unsafe { ptr.write(GlobalTransform(value)) };
-    arch.mark_column(chunk, column, tick);
+    marker.mark(arch, archetype, chunk, column);
     true
 }
 
@@ -642,14 +700,14 @@ fn store_unchecked(
     chunk: usize,
     row: usize,
     value: Affine3A,
-    tick: u64,
+    marker: &mut Marker,
 ) {
     let arch = &world.archetypes[archetype as usize];
     let ptr = arch.value_ptr(chunk, column, row).cast::<GlobalTransform>();
     // SAFETY: the column holds an initialized `GlobalTransform` at this row; the caller
     // holds the world exclusively, as for `store`.
     unsafe { ptr.write(GlobalTransform(value)) };
-    arch.mark_column(chunk, column, tick);
+    marker.mark(arch, archetype, chunk, column);
 }
 
 /// The world transform of `entity`, if it has one.
@@ -716,7 +774,7 @@ fn walk(
     world: &World,
     cols: &[Cols],
     stack: &mut Vec<(Entity, u32, Affine3A, bool)>,
-    tick: u64,
+    marker: &mut Marker,
     stats: &mut PropagationStats,
 ) {
     while let Some((first, count, parent_global, parent_changed)) = stack.pop() {
@@ -745,10 +803,10 @@ fn walk(
                 // (a degenerate transform that maps both to the same value costs one
                 // needless mark, never a wrong value).
                 let wrote = if parent_changed {
-                    store_unchecked(world, loc.archetype, global, chunk, row, value, tick);
+                    store_unchecked(world, loc.archetype, global, chunk, row, value, marker);
                     true
                 } else {
-                    store(world, loc.archetype, global, chunk, row, value, tick)
+                    store(world, loc.archetype, global, chunk, row, value, marker)
                 };
                 if wrote {
                     stats.written += 1;
