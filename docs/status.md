@@ -86,7 +86,8 @@ PRs #127–#130; left optional: the fast-turn test in the perf gate, one wider f
 pass if a larger scene shows pop-in), 0c (Catmull-Rom and Lanczos-3, ADR 0075's
 addendum), 0d (motion vectors from the depth prepass, ADR 0043's addendum), TAAU's
 Catmull-Rom history with point reads (owner, 2026-10-10; ADR 0043's second amendment), 0e
-(presenting across adapters, ADR 0007's addendum). Next: 0f.
+(presenting across adapters, ADR 0007's addendum), 0f (moving instances placed on the
+GPU, the tick's stages on the job system: ADR 0064's addendum). Next: 0g.
 
 ## 5. Queue (in order)
 
@@ -210,10 +211,18 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    frame is drawn apart and copied (`engine_render::present::PresentTarget`): Radeon GPU
    frame 27.1 → 26.3 ms in `flight`, the RTX unchanged (direct). Left: a windowed present
    scene in the perf gate, with the player crate (6f).
-0f. **Moving instances** (review §3.5): ~70 ns each per frame on one thread (60,000 make
+0f. ~~**Moving instances** (review §3.5): ~70 ns each per frame on one thread (60,000 make
    the RTX CPU-bound at 5.2 ms). Propagation, extraction, interpolation and upload in
    parallel on the job system; interpolation on the GPU so movers upload per tick, not per
-   frame.
+   frame.~~ Done 2026-10-10 (ADR 0064's addendum). A mover's transform goes up once per tick
+   and a compute pass places it every frame; propagation, extraction and the scene's apply
+   run on the job system with the same results as on one thread (`Runtime::set_jobs`,
+   `GpuScene::set_jobs`). `flight`, 60,000 movers: RTX CPU frame 4.94 / 6.99 ms → 1.63 /
+   2.93 (median / p99, 60 fps), worst frame at 240 fps 1.92× the median (was 1.93×);
+   Radeon CPU frame 6.69 → 2.89 ms, its GPU-bound frame 1 % longer (placement 0.45–0.53
+   ms against the copy's 0.15). Found and fixed on the way: an instance that changed
+   batch between ticks kept its old batch word on the GPU, and culling dropped it or
+   another batch's instance.
 0g. Start-up overlap (device creation beside the pack's reading and cooking) and pipeline
    variants created on first use (review §3.8): first frame 450–590 ms warm, 1.2–1.4 s
    with the pipeline cache missing.
@@ -253,7 +262,11 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
 6e. `forward.rs` (5,695 lines) split by feature (review §3.12).
 6f. **A player crate** (`engine_app`, review §3.7; after the rendering queue: owner,
    2026-10-10): device, swapchain, latency provider, process setup (power throttling,
-   MMCSS, CPU sets), pipeline cache and the frame loop in one place; ECS components for
+   MMCSS, CPU sets), pipeline cache and the frame loop in one place; window modes:
+   windowed (placed on the monitor, not larger than its work area), borderless full screen
+   and exclusive full screen (`VK_EXT_full_screen_exclusive`), measured for latency with
+   PresentMon (owner, 2026-10-10: `flight`'s 1920 × 1080 window is larger than the
+   1080p screen and composed by DWM); ECS components for
    lights, skinned meshes and probes; features per view instead of per renderer;
    `RenderDefaults` applied whole. The benches and the test bed move onto it.
 7. Then: editor tools, Luau bindings and debugger, other tooling.
@@ -312,8 +325,20 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
   - `procedural_contact_shadows` (both vendors) and `procedural_local_shadows` (Radeon)
     differ from their golden images by a few pixels on main too. They pass the FLIP
     tolerance; find why and regenerate them.
-- **Runtime:** parallel ECS extraction and upload on the job system (100 % moving objects
-  cost 2× the draw list's CPU).
+- **Runtime:**
+  - transform propagation of non-root candidates (children whose own transforms change
+    every tick) stays on one thread, by depth;
+  - the GPU placement of moving instances costs the Radeon 0.45–0.53 ms per frame at
+    60,000 against the old copy's 0.15: whole 64-byte instance writes (the material and
+    batch word kept beside the motion planes by every writer of that word) measured 85 µs
+    less.
+- **Shaders:** loads and stores through buffer device addresses are declared 4-byte
+  aligned (Slang's default for pointers), so a driver may split 16-byte accesses. The
+  scene's motion passes declare 16 bytes (`loadAligned<16>`): no change on the Radeon; on
+  the RTX it came with their new layout (4–20× faster together), not measured alone.
+  Measure it on the instance and vertex reads of the forward, culling and shadow shaders.
+- **Presentation:** test 0e's choice with a monitor on the iGPU (the owner can connect one;
+  later, owner 2026-10-10).
 - **Reliability:** two silent process exits (`perf_gate` once, `frame_bench` once) were
   never reproduced or explained. Watch for a recurrence and get a stack.
 - **Housekeeping:** `scene_bench` is wired by hand, outside `engine_frame`. From the second review:

@@ -269,6 +269,24 @@ runtime.frame(seconds_since_last_frame, &input, &mut gpu_scene,
   extraction into the scene after each. Rendering interpolates moving objects between
   their last two ticks, so motion is smooth at any frame rate. Do not also call
   `PhysicsSync::interpolate`: bodies would be blended twice.
+- **Moving objects cost per tick, not per frame.** With a `GpuScene`, extraction gives a
+  moving object its new transform once per tick, and the GPU places it between its last two
+  ticks every frame (ADR 0064's addendum): with 60,000 moving cubes, a frame without a tick
+  spends 0.45 ms of CPU in all on the reference RTX machine. An object whose mirroring
+  flips between two ticks (a negative scale crossing zero) jumps at the tick instead of
+  passing through a flat, inside-out shape.
+- **Threads.** Give the runtime and the scene your job pool:
+
+  ```rust
+  let jobs = Arc::new(engine_core::jobs::ThreadPool::builder().build()?);
+  runtime.set_jobs(jobs.clone()); // propagation and extraction
+  gpu_scene.set_jobs(jobs);       // the scene's per-tick work
+  ```
+
+  When thousands of things move, a tick's transform propagation, extraction and scene
+  work are spread over it, with the same results as on one thread. With both, 60,000
+  movers cost the reference RTX machine 1.6 ms of CPU per frame at 60 fps (4.9 ms on one
+  thread with the CPU blend). Below a few thousand the work stays on the calling thread.
 - **The camera is not part of the tick.** The second closure runs every frame with the
   latest input, after the ticks and right before rendering. A camera driven by ticks and
   interpolated trails the mouse by 18 ms (median at 240 FPS and 64 Hz); this way input
