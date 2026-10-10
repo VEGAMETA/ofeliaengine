@@ -98,9 +98,10 @@ Option 3 with B, and A for the check's own steps:
   branch did not touch passed both when main was gated, and depends on nothing else.
 - **`-Affected`**: the test, tracy, gpu and slang steps narrowed to the same packages, for
   runs between commits. The full run stays the gate before every merge.
-- **The perf step waits for about 30 quiet seconds** (was 3): right after the check's
+- **The perf step waits for about 2 quiet minutes** (was 3 s): right after the check's
   builds the APU is still hot, and the Radeon read passes 5-30 % slower (CSM shadows
-  +28 %), back within 1.5 % when measured again a few minutes later.
+  +28 %), back within 1.5 % when measured again a few minutes later; 30 quiet seconds
+  were not enough after a cold release build.
 
 ## Numbers
 
@@ -189,3 +190,26 @@ Numbers (ref-1, `check.ps1 -Gpu`, HDD target):
 | `engine_render` touched | | | 225 s (test 45, tracy 25, docs 37, gpu 94; before the docs change) |
 | touch `engine_render`, build its tests | 7.6-15.8 s | | 2.1-2.5 s |
 | touch `engine_core`, build every test | 84 s | | 49-61 s |
+
+## Addendum (2026-10-10): the build directory on the NVMe drive
+
+The repository sits on ref-1's SATA HDD (`H:`); `C:` is an NVMe drive. The same scenarios
+with each, measured back to back with the check of the first addendum:
+
+| | HDD (`H:\Desktop\ofeliaengine	arget`) | NVMe (`C:\cargo-target\ofeliaengine`) |
+|---|---:|---:|
+| `check.ps1 -Gpu`, nothing changed | 143 s | 141 s |
+| `check.ps1 -Gpu`, `engine_render` touched | 203 s (test 43, tracy 19, docs 28) | 155 s (test 25, tracy 15, docs 6) |
+| `engine_core` touched, every test target rebuilt | 40 / 58 s | 10.9 / 14.5 s |
+
+With nothing to build the drive does not matter (the GPU tests take the time); the more a
+change rebuilds, the more the HDD costs: incremental caches and linking write many files.
+
+Decision: **`.cargo/config.toml` builds in `C:/cargo-target/ofeliaengine`** (cargo resolves
+`CARGO_TARGET_DIR` first: agents keep their own `C:/cargo-target/<task>`).
+`tools/check.ps1` takes the build directory from `cargo metadata` (its tracy and loom builds
+go in it), `tools/clean.ps1` cleans it and removes agents' directories whose worktree is
+gone (only inside `cargo-target`, never `ofeliaengine` or one in use). Logs, golden-image
+renders and the shader cache stay in the repository's `target\` (small files people read).
+A machine without that drive layout overrides the directory with `CARGO_TARGET_DIR`.
+

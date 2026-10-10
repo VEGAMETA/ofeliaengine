@@ -83,6 +83,33 @@ function Clean-Target([string]$target) {
 if ($Targets.Count -eq 0) {
     $Targets = @(Join-Path $root 'target')
     if ($env:CARGO_TARGET_DIR) { $Targets += $env:CARGO_TARGET_DIR }
+    # The repository's build directory as cargo resolves it (.cargo/config.toml: the NVMe
+    # drive on ref-1, ADR 0077).
+    $configured = (cmd /c "cargo metadata --format-version 1 --no-deps --offline 2>nul" | ConvertFrom-Json).target_directory
+    if ($configured) {
+        $configured = [IO.Path]::GetFullPath($configured)
+        $Targets += $configured
+    }
+    # Agents' build directories next to it (C:\cargo-target\<task>): removed whole when the
+    # worktree <task> is gone. Only inside a directory named cargo-target, and never the main
+    # checkout's (ofeliaengine) or one in use.
+    $wtRoot = Join-Path (Split-Path -Parent $root) 'ofeliaengine-wt'
+    $shared = if ($configured) { Split-Path -Parent $configured } else { $null }
+    if ($shared -and (Split-Path -Leaf $shared) -eq 'cargo-target' -and (Test-Path $shared)) {
+        $inUse = @($configured, $env:CARGO_TARGET_DIR) | Where-Object { $_ } |
+            ForEach-Object { [IO.Path]::GetFullPath($_).TrimEnd('\') }
+        foreach ($t in Get-ChildItem -LiteralPath $shared -Directory -Force) {
+            if ($t.Name -eq 'ofeliaengine' -or $inUse -contains $t.FullName.TrimEnd('\')) {
+                $Targets += $t.FullName
+                continue
+            }
+            if (Test-Path (Join-Path $wtRoot $t.Name)) { $Targets += $t.FullName }
+            else {
+                Write-Output "worktree gone, removing $($t.FullName)"
+                Remove-Entry $t
+            }
+        }
+    }
     # Agents' worktrees live next to the repository, each with `<name>-target`.
     $wt = Join-Path (Split-Path -Parent $root) 'ofeliaengine-wt'
     if (Test-Path $wt) {

@@ -52,6 +52,11 @@ $Only = @($Only | ForEach-Object { $_ -split ',' } | ForEach-Object { $_.Trim() 
 $root = Split-Path -Parent $PSScriptRoot
 Set-Location $root
 $logs = Join-Path $root 'target\check-logs'
+# Where cargo builds, as cargo resolves it: CARGO_TARGET_DIR when set (an agent's own
+# directory), else the repository's `.cargo/config.toml` (the NVMe drive on ref-1). The tracy
+# and loom builds go to directories in it.
+$targetRoot = (cmd /c "cargo metadata --format-version 1 --no-deps --offline 2>nul" | ConvertFrom-Json).target_directory
+if (-not $targetRoot) { $targetRoot = Join-Path $root 'target' }
 New-Item -ItemType Directory -Force $logs | Out-Null
 
 cmd /c "cargo nextest --version >nul 2>&1"
@@ -72,11 +77,12 @@ function Wait-QuietCpu([string]$log) {
     $calm = 0
     while ($true) {
         $load = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
-        # 30 calm samples (about 30 s) in a row: a compilation pausing between crates is not
+        # 120 calm samples (about 2 min) in a row: a compilation pausing between crates is not
         # quiet, and right after a long build the APU is still hot: its Radeon measured
-        # 5-30 % slower passes then, back within 1.5 % a few minutes later (2026-10-10).
+        # 5-30 % slower passes then, still after 30 quiet seconds following a cold release
+        # build, and back within 1.5 % a few minutes later (2026-10-10).
         if ($load -lt 20) { $calm++ } else { $calm = 0 }
-        if ($calm -ge 30) {
+        if ($calm -ge 120) {
             if ($watch.Elapsed.TotalSeconds -ge 1) { "CPU quiet ($load %) after $([int]$watch.Elapsed.TotalSeconds) s" | Out-File -Append -Encoding utf8 $log }
             return
         }
@@ -356,11 +362,11 @@ foreach ($name in $steps.Keys) {
             # No profiler connects to the tests: skip the Tracy client's symbol loading at
             # start (DbgHelp over every module, 4-15 s per test process).
             $env:TRACY_SYMBOL_OFFLINE_RESOLVE = '1'
-            $env:CARGO_TARGET_DIR = 'target\tracy'
+            $env:CARGO_TARGET_DIR = Join-Path $targetRoot 'tracy'
         }
         if ($name -eq 'loom') {
             $env:RUSTFLAGS = '--cfg loom'
-            $env:CARGO_TARGET_DIR = 'target\loom'
+            $env:CARGO_TARGET_DIR = Join-Path $targetRoot 'loom'
         }
         if ($command -eq 'drift:') {
             # Through cmd, as cargo's output: PowerShell's own `>>` would append UTF-16.
