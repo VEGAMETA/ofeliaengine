@@ -81,9 +81,12 @@ tooling included) about **50 %**.
 
 - Faster checks (queue item 0), by the coordinator, after the second core review
   (2026-10-10, `docs/research/core-audit-2.md`; the owner answered its questions the same
-  day, see §5). First part: ADR 0077 (cargo-nextest, one build per check, unified
-  dependency features, doc tests and formatting for what changed, `-Affected`): a check
-  with nothing changed 632 → 168 s.
+  day, see §5). Merged: ADR 0077 and its two addenda (cargo-nextest, one build per check,
+  unified dependency features, doc tests and formatting for what changed, `-Affected`, one
+  test binary per crate, line tables, builds on the NVMe drive): a check with nothing
+  changed 632 → 141 s, the gate `-Gpu -Perf` 10–25 → 15 min. Half of it is now the perf
+  step's waits for a quiet CPU (289 + 152 s of 749 s): next, the perf step's waits and
+  variance (item 0).
 
 ## 5. Queue (in order)
 
