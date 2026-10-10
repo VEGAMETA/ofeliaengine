@@ -30,8 +30,9 @@
 //! - `--update` writes the measured times as the new baseline, each pass's median run:
 //!   one lucky run (two queues overlapping favourably, a faster memory placement on the
 //!   Radeon) must not set the bar that a check's fastest run is held to.
-//! - `--scene NAME` (repeatable) measures only those scenes (comparisons, A/B runs; not
-//!   with `--update`).
+//! - `--scene NAME` (repeatable) measures only those scenes (comparisons, A/B runs; with
+//!   `--update` their rows replace theirs in the baseline and the others stay: a new
+//!   scene's first baseline).
 //!
 //! Run it in release with the implicit layers off (`VK_LOADER_LAYERS_DISABLE=~implicit~`,
 //! overlays change timing) and `ENGINE_ADAPTER=radeon` for the iGPU.
@@ -150,6 +151,18 @@ fn shots() -> Vec<Shot> {
         antialiased(
             "sponza_fsr1_67",
             Antialiasing::spatial(Upscale::Fsr1),
+            Quality::Quality,
+        ),
+        // Catmull-Rom and Lanczos-3 from 67 %: resampling in the tone mapper, Lanczos-3's
+        // rows in a pass of their own.
+        antialiased(
+            "sponza_catmull_rom_67",
+            Antialiasing::spatial(Upscale::CatmullRom),
+            Quality::Quality,
+        ),
+        antialiased(
+            "sponza_lanczos3_67",
+            Antialiasing::spatial(Upscale::Lanczos3),
             Quality::Quality,
         ),
         // Local reflections (ADR 0073): six cached probes over the atrium and screen-space
@@ -396,10 +409,6 @@ fn main() -> ExitCode {
             }
         }
     }
-    if update && !only.is_empty() {
-        eprintln!("--update writes the whole baseline: measure every scene");
-        return ExitCode::from(2);
-    }
     let options = RenderOptions {
         validation: false,
         timed_frames: frames,
@@ -435,12 +444,20 @@ fn main() -> ExitCode {
         limits.floor_of_frame * 100.0
     );
     if update {
+        // With `--scene`, the other scenes keep their rows.
+        let mut rows = if only.is_empty() {
+            Times::new()
+        } else {
+            read_baseline(&path)
+        };
+        rows.retain(|(scene, _), _| !shots.iter().any(|s| s.name == scene));
+        rows.extend(measured.iter().map(|(key, us)| (key.clone(), *us)));
         let mut text = format!(
             "# GPU µs per pass (median of {runs} runs' medians over {frames} frames, a round \
              at a time), {}\n# scene\tpass\tµs\n",
             gpu.adapter
         );
-        for ((scene, pass), us) in &measured {
+        for ((scene, pass), us) in &rows {
             let _ = writeln!(text, "{scene}\t{pass}\t{us:.1}");
         }
         if let Err(e) = std::fs::create_dir_all(path.parent().unwrap_or(Path::new(".")))
@@ -451,7 +468,7 @@ fn main() -> ExitCode {
         }
         println!(
             "baseline written ({} passes; {} runs in {:.0} s)",
-            measured.len(),
+            rows.len(),
             gpu.runs,
             started.elapsed().as_secs_f64()
         );

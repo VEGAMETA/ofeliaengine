@@ -33,9 +33,9 @@ pub struct Camera {
     /// Nonzero: the exposure adapts to the image (ADR 0047).
     pub auto_exposure: u32,
     /// [`Antialiasing`] as stored ([`Self::antialiasing`]): bits 0-3 the upscale (0
-    /// bilinear, 1 TAAU, 2 FSR 3.1, 3 DLSS, 4 nearest, 5 integer, 6 FSR 1, 7 SMAA T2x),
-    /// bits 4-5 log2 of the samples, bits 8-10 the post filter (0 off, 1 FXAA, 2 MLAA,
-    /// 3-6 SMAA low to ultra). 0 is off, 1 TAAU.
+    /// bilinear, 1 TAAU, 2 FSR 3.1, 3 DLSS, 4 nearest, 5 integer, 6 FSR 1, 7 SMAA T2x,
+    /// 8 Catmull-Rom, 9 Lanczos-3), bits 4-5 log2 of the samples, bits 8-10 the post
+    /// filter (0 off, 1 FXAA, 2 MLAA, 3-6 SMAA low to ultra). 0 is off, 1 TAAU.
     pub antialiasing: u32,
     /// [`Quality`] as stored: its index in [`Quality::ALL`] ([`Self::quality`]).
     pub quality: u32,
@@ -108,7 +108,7 @@ impl Camera {
     }
 }
 
-const UPSCALES: [Upscale; 8] = [
+const UPSCALES: [Upscale; 10] = [
     Upscale::Bilinear,
     Upscale::Temporal(UpscalerKind::Taau),
     Upscale::Temporal(UpscalerKind::Fsr),
@@ -117,6 +117,8 @@ const UPSCALES: [Upscale; 8] = [
     Upscale::Integer,
     Upscale::Fsr1,
     Upscale::SmaaT2x,
+    Upscale::CatmullRom,
+    Upscale::Lanczos3,
 ];
 
 const POSTS: [PostAntialiasing; 7] = [

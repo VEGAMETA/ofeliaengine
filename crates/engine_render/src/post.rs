@@ -6,7 +6,9 @@
 //! (SDR, scRGB or HDR10, the luminance of reference white and of the peak); the tone mapper
 //! rolls highlights off towards the display's peak and writes the swapchain's encoding.
 
-use crate::graph::{Access, Buffer, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
+use crate::graph::{
+    Access, Buffer, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture, TextureDesc,
+};
 use crate::postfx::BloomOutput;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -17,6 +19,13 @@ use engine_rhi::{
 const VERTEX: &[u8] = include_bytes!("../shaders/tonemap.vertexMain.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/tonemap.fragmentMain.spv");
 const FRAGMENT_PERCEPTUAL: &[u8] = include_bytes!("../shaders/tonemap.fragmentPerceptual.spv");
+const FRAGMENT_CATMULL_ROM: &[u8] = include_bytes!("../shaders/tonemap.fragmentCatmullRom.spv");
+const FRAGMENT_LANCZOS3: &[u8] = include_bytes!("../shaders/tonemap.fragmentLanczos3.spv");
+const FRAGMENT_PERCEPTUAL_CATMULL_ROM: &[u8] =
+    include_bytes!("../shaders/tonemap.fragmentPerceptualCatmullRom.spv");
+const FRAGMENT_PERCEPTUAL_LANCZOS3: &[u8] =
+    include_bytes!("../shaders/tonemap.fragmentPerceptualLanczos3.spv");
+const LANCZOS3_ACROSS: &[u8] = include_bytes!("../shaders/tonemap.lanczos3Across.spv");
 
 /// The HDR format scenes render into before tonemapping.
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -375,10 +384,32 @@ impl Default for Composite {
     }
 }
 
+/// How the tone mapper reads its source (ADR 0075): one tap through
+/// [`Composite::sampler`], or a wider kernel that resamples a smaller source to the
+/// output's size. The kernels read each texel on their own and limit the result to the
+/// range of the four texels around the sample (no ringing, however bright the source).
+/// Each is a pipeline of its own: a tone mapper that does not resample has none of their
+/// code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Resample {
+    /// One tap through the composite's sampler: nearest or bilinear.
+    #[default]
+    Sampler,
+    /// Catmull-Rom (Keys's cubic convolution, a = −0.5): 4 × 4 texels. Sharper than
+    /// bilinear; interpolates (texel centers keep their values).
+    CatmullRom,
+    /// Lanczos-3 (sinc windowed by sinc, 3 lobes): 6 × 6 texels, in two passes (it is
+    /// separable: the rows into an image of the output's width, then the columns in the
+    /// tone mapper; 12 reads for each output pixel instead of 36). The sharpest.
+    Lanczos3,
+}
+
 /// Tonemapping into one output format.
 #[derive(Debug)]
 pub struct Tonemap {
     pipeline: Pipeline,
+    /// A separable kernel's first pass (Lanczos-3's rows, into [`HDR_FORMAT`]).
+    across: Option<Pipeline>,
 }
 
 impl Tonemap {
@@ -403,6 +434,43 @@ impl Tonemap {
             FRAGMENT_PERCEPTUAL,
             c"fragmentPerceptual",
         )
+    }
+
+    /// A tone mapper that reads its source through `resample` ([`Resample`]), writing
+    /// `output_format`, or with `output_format` `None` the perceptual image of
+    /// [`Self::new_perceptual`].
+    pub fn with_resample(
+        device: &Device,
+        bindless: &Bindless,
+        output_format: Option<vk::Format>,
+        resample: Resample,
+    ) -> Result<Self, RhiError> {
+        let (fragment, entry) = match (resample, output_format.is_some()) {
+            (Resample::Sampler, true) => (FRAGMENT, c"fragmentMain"),
+            (Resample::Sampler, false) => (FRAGMENT_PERCEPTUAL, c"fragmentPerceptual"),
+            (Resample::CatmullRom, true) => (FRAGMENT_CATMULL_ROM, c"fragmentCatmullRom"),
+            (Resample::CatmullRom, false) => (
+                FRAGMENT_PERCEPTUAL_CATMULL_ROM,
+                c"fragmentPerceptualCatmullRom",
+            ),
+            (Resample::Lanczos3, true) => (FRAGMENT_LANCZOS3, c"fragmentLanczos3"),
+            (Resample::Lanczos3, false) => {
+                (FRAGMENT_PERCEPTUAL_LANCZOS3, c"fragmentPerceptualLanczos3")
+            }
+        };
+        let format = output_format.unwrap_or(crate::postaa::PERCEPTUAL_FORMAT);
+        let mut tonemap = Self::with_fragment(device, bindless, format, fragment, entry)?;
+        if resample == Resample::Lanczos3 {
+            let across = Self::with_fragment(
+                device,
+                bindless,
+                HDR_FORMAT,
+                LANCZOS3_ACROSS,
+                c"lanczos3Across",
+            )?;
+            tonemap.across = Some(across.pipeline);
+        }
+        Ok(tonemap)
     }
 
     fn with_fragment(
@@ -439,7 +507,10 @@ impl Tonemap {
                 )
             },
         )?;
-        Ok(Self { pipeline })
+        Ok(Self {
+            pipeline,
+            across: None,
+        })
     }
 
     /// Declares a pass that tonemaps `hdr` (scaled by `exposure`) into `output`, an SDR
@@ -467,7 +538,8 @@ impl Tonemap {
     }
 
     /// Declares a pass that writes `source` into `composite.rect` of `output`, tonemapped
-    /// or copied, scaled with the chosen sampler. Several composites into one output
+    /// or copied, scaled with the chosen sampler (or the tone mapper's [`Resample`]
+    /// kernel; bloom still goes through the sampler). Several composites into one output
     /// build split screens and picture-in-picture (the first clears, the others load).
     /// Without a rectangle it is a whole-target pass, named by what it does ("tonemap",
     /// "encode hdr10" or "copy") in captures and GPU timings.
@@ -485,7 +557,88 @@ impl Tonemap {
             (None, false, OutputEncoding::Pq { .. }) => "encode hdr10",
             (None, false, OutputEncoding::Linear { .. }) => "copy",
         };
+        // A separable kernel's rows first, at the output's width.
+        let source = match &self.across {
+            Some(across) => {
+                let width = composite
+                    .rect
+                    .map_or_else(|| fg.texture_desc(output).width, |r| r.extent.width);
+                let height = fg.texture_desc(source).height;
+                let rows = fg.create_texture(
+                    "resampled rows",
+                    TextureDesc::new_2d(HDR_FORMAT, width, height),
+                );
+                Self::declare_across(fg, bindless, across, source, rows);
+                rows
+            }
+            None => source,
+        };
         self.declare(fg, bindless, name, source, output, composite);
+    }
+
+    /// The pass of [`Self::across`]: `source`'s rows resampled into `rows` (the output's
+    /// width, the source's height).
+    fn declare_across<'g>(
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        pipeline: &'g Pipeline,
+        source: Texture,
+        rows: Texture,
+    ) {
+        let size = fg.texture_desc(rows);
+        fg.add_pass("resample rows")
+            .read(source, Access::Sampled(ShaderStages::FRAGMENT))
+            .color(rows, LoadOp::DontCare, StoreOp::Store)
+            .execute(move |ctx| {
+                let Some(index) = ctx.sampled_index(source) else {
+                    return;
+                };
+                let push = Push {
+                    source: index,
+                    sampler: Bindless::sampler(SamplerKind::LinearClamp),
+                    exposure: 1.0,
+                    flags: FLAG_PASS_THROUGH,
+                    peak: 1.0,
+                    white: 1.0,
+                    bloom: 0,
+                    bloom_intensity: 0.0,
+                    auto_exposure: 0,
+                };
+                // SAFETY: `Push` is plain `repr(C)` data without padding.
+                let bytes = unsafe {
+                    core::slice::from_raw_parts(
+                        (&raw const push).cast::<u8>(),
+                        core::mem::size_of::<Push>(),
+                    )
+                };
+                let rect = vk::Rect2D {
+                    offset: vk::Offset2D::default(),
+                    extent: vk::Extent2D {
+                        width: size.width,
+                        height: size.height,
+                    },
+                };
+                // SAFETY: recording inside the pass's rendering scope.
+                unsafe {
+                    pipeline.bind(ctx.cmd);
+                    bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                    bindless.push_constants(ctx.cmd, bytes);
+                    ctx.device.cmd_set_viewport(
+                        ctx.cmd,
+                        0,
+                        &[vk::Viewport {
+                            x: 0.0,
+                            y: 0.0,
+                            width: size.width as f32,
+                            height: size.height as f32,
+                            min_depth: 0.0,
+                            max_depth: 1.0,
+                        }],
+                    );
+                    ctx.device.cmd_set_scissor(ctx.cmd, 0, &[rect]);
+                    ctx.device.cmd_draw(ctx.cmd, 3, 1, 0, 0);
+                }
+            });
     }
 
     fn declare<'g>(

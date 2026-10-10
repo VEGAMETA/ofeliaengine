@@ -65,6 +65,11 @@ fn steady_state_frames_do_not_allocate() {
             Antialiasing::spatial(Upscale::Integer),
             Quality::Performance,
         ),
+        (Antialiasing::spatial(Upscale::CatmullRom), Quality::Quality),
+        (
+            Antialiasing::spatial(Upscale::Lanczos3).with_post(PostAntialiasing::Fxaa),
+            Quality::Quality,
+        ),
         (Antialiasing::FXAA, Quality::Native),
         (
             Antialiasing::msaa(Msaa::X4).with_post(PostAntialiasing::SMAA),

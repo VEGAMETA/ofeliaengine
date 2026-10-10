@@ -231,7 +231,7 @@ fn shimmer(reference: &[Vec<f32>], test: &[Vec<f32>]) -> f64 {
 /// The passes that are an antialiasing mode's own (MSAA's other cost is in the scene
 /// passes: compare the total with "off").
 fn aa_ms(r: &Rendered) -> f64 {
-    const NAMES: [&str; 13] = [
+    const NAMES: [&str; 14] = [
         "taau",
         "fsr",
         "dlss",
@@ -245,6 +245,7 @@ fn aa_ms(r: &Rendered) -> f64 {
         "reflection inputs resolve",
         "temporal",
         "perceptual",
+        "resample",
     ];
     r.pass_us
         .iter()
@@ -256,6 +257,17 @@ fn aa_ms(r: &Rendered) -> f64 {
 
 fn total(r: &Rendered) -> f64 {
     r.pass_us.values().sum::<f64>() / 1000.0
+}
+
+/// The tone mapper's passes: Catmull-Rom and Lanczos-3 resample inside it, so their cost
+/// is its time beyond the plain tone mapper's ("off").
+fn tonemap_ms(r: &Rendered) -> f64 {
+    r.pass_us
+        .iter()
+        .filter(|(name, _)| name.starts_with("tonemap"))
+        .map(|(_, us)| us)
+        .sum::<f64>()
+        / 1000.0
 }
 
 fn modes() -> Vec<(&'static str, Antialiasing, Quality)> {
@@ -306,6 +318,26 @@ fn modes() -> Vec<(&'static str, Antialiasing, Quality)> {
         ("DLSS Quality (67 %)", A::DLSS, Quality::Quality),
         ("bilinear 67 %", A::OFF, Quality::Quality),
         ("bilinear 50 %", A::OFF, Quality::Performance),
+        (
+            "Catmull-Rom 67 %",
+            A::spatial(Upscale::CatmullRom),
+            Quality::Quality,
+        ),
+        (
+            "Catmull-Rom 50 %",
+            A::spatial(Upscale::CatmullRom),
+            Quality::Performance,
+        ),
+        (
+            "Lanczos-3 67 %",
+            A::spatial(Upscale::Lanczos3),
+            Quality::Quality,
+        ),
+        (
+            "Lanczos-3 50 %",
+            A::spatial(Upscale::Lanczos3),
+            Quality::Performance,
+        ),
         (
             "nearest 67 %",
             A::spatial(Upscale::Nearest),
@@ -383,6 +415,7 @@ fn main() {
     );
     println!("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     let mut off_ms = None;
+    let mut off_tonemap = None;
     for (label, antialiasing, quality) in modes() {
         if !only.is_empty() && !only.contains(&label) {
             continue;
@@ -431,10 +464,17 @@ fn main() {
         let shimmer = shimmer(&moving_luma, &frames_luma);
         let passes = total(&timed);
         let off = *off_ms.get_or_insert(passes);
+        let plain_tonemap = *off_tonemap.get_or_insert(tonemap_ms(&timed));
+        let own = match antialiasing.upscale {
+            Upscale::CatmullRom | Upscale::Lanczos3 => {
+                aa_ms(&timed) + tonemap_ms(&timed) - plain_tonemap
+            }
+            // (+ 0.0: an empty sum is -0.0.)
+            _ => aa_ms(&timed) + 0.0,
+        };
         println!(
-            "| {label} | {passes:.2} | {:+.2} | {:.2} | {still_flip:.4} | {still_psnr:.2} | {moving_flip:.4} | {moving_psnr:.2} | {shimmer:.2} | {plain_shimmer:.2} |",
+            "| {label} | {passes:.2} | {:+.2} | {own:.2} | {still_flip:.4} | {still_psnr:.2} | {moving_flip:.4} | {moving_psnr:.2} | {shimmer:.2} | {plain_shimmer:.2} |",
             passes - off,
-            aa_ms(&timed),
         );
         if let Ok(dir) = std::env::var("ENGINE_AA_BENCH_DUMP") {
             let path = PathBuf::from(dir).join(format!(

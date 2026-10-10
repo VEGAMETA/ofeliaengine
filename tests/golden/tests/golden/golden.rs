@@ -512,6 +512,27 @@ fn sponza_with_fsr1() {
     ));
 }
 
+/// Catmull-Rom from 67 % (ADR 0075): bicubic in the tone mapper, sharper than bilinear,
+/// no ringing around the highlights.
+#[test]
+fn sponza_catmull_rom_at_67_percent() {
+    check(&sponza_antialiased(
+        "sponza_catmull_rom_67",
+        Antialiasing::spatial(Upscale::CatmullRom),
+        Quality::Quality,
+    ));
+}
+
+/// Lanczos-3 from 67 % (ADR 0075): the rows, then the columns in the tone mapper.
+#[test]
+fn sponza_lanczos3_at_67_percent() {
+    check(&sponza_antialiased(
+        "sponza_lanczos3_67",
+        Antialiasing::spatial(Upscale::Lanczos3),
+        Quality::Quality,
+    ));
+}
+
 /// Integer scaling (ADR 0075): a 280 × 150 render shown 2× (560 × 300) in the middle of
 /// 640 × 360, black around.
 #[test]

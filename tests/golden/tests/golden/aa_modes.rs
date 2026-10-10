@@ -96,6 +96,11 @@ fn every_mode_renders_with_every_feature() {
         ),
         (Antialiasing::spatial(Upscale::Fsr1), Quality::Quality),
         (Antialiasing::spatial(Upscale::Fsr1), Quality::Native),
+        (Antialiasing::spatial(Upscale::CatmullRom), Quality::Quality),
+        (
+            Antialiasing::spatial(Upscale::Lanczos3),
+            Quality::Performance,
+        ),
         (Antialiasing::TAAU, Quality::Native),
         (Antialiasing::TAAU, Quality::Quality),
         (Antialiasing::FSR, Quality::Quality),
@@ -137,6 +142,16 @@ fn every_mode_renders_with_every_feature() {
         (
             Antialiasing::spatial(Upscale::Integer).with_post(smaa),
             Quality::Performance,
+        ),
+        (
+            Antialiasing::spatial(Upscale::Lanczos3)
+                .with_samples(Msaa::X2)
+                .with_post(smaa),
+            Quality::Quality,
+        ),
+        (
+            Antialiasing::spatial(Upscale::CatmullRom).with_post(PostAntialiasing::Fxaa),
+            Quality::Quality,
         ),
         (
             Antialiasing::temporal(UpscalerKind::Taau).with_post(PostAntialiasing::Fxaa),

@@ -52,6 +52,17 @@ sponza_atmosphere	forward	397.9
 sponza_atmosphere	shadow	159.1
 sponza_atmosphere	shadow cull	3.1
 sponza_atmosphere	tonemap	27.6
+sponza_catmull_rom_67	(frame total)	550.5
+sponza_catmull_rom_67	(gpu frame)	567.2
+sponza_catmull_rom_67	bloom downsample	48.1
+sponza_catmull_rom_67	bloom upsample	22.5
+sponza_catmull_rom_67	cull	4.7
+sponza_catmull_rom_67	cull setup	0.7
+sponza_catmull_rom_67	forward	224.3
+sponza_catmull_rom_67	shadow	171.1
+sponza_catmull_rom_67	shadow cull	4.1
+sponza_catmull_rom_67	sky	3.1
+sponza_catmull_rom_67	tonemap	71.7
 sponza_fsr1_67	(frame total)	711.2
 sponza_fsr1_67	(gpu frame)	727.4
 sponza_fsr1_67	bloom downsample	85.0
@@ -92,6 +103,18 @@ sponza_fxaa	shadow	157.5
 sponza_fxaa	shadow cull	3.1
 sponza_fxaa	sky	3.1
 sponza_fxaa	tonemap	31.7
+sponza_lanczos3_67	(frame total)	542.4
+sponza_lanczos3_67	(gpu frame)	559.2
+sponza_lanczos3_67	bloom downsample	45.1
+sponza_lanczos3_67	bloom upsample	20.5
+sponza_lanczos3_67	cull	4.4
+sponza_lanczos3_67	cull setup	0.7
+sponza_lanczos3_67	forward	214.0
+sponza_lanczos3_67	resample rows	31.7
+sponza_lanczos3_67	shadow	160.4
+sponza_lanczos3_67	shadow cull	3.1
+sponza_lanczos3_67	sky	3.1
+sponza_lanczos3_67	tonemap	59.4
 sponza_local_shadows	(frame total)	1107.3
 sponza_local_shadows	(gpu frame)	1125.9
 sponza_local_shadows	bloom downsample	84.0

@@ -68,7 +68,7 @@ tooling included) about **50 %**.
 | Reflections: parallax-corrected probes, SSR (FidelityFX SSSR-based) | done | ADR 0073 |
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
 | Upscalers: TAAU, FSR 3.1, DLSS via Streamline (user-supplied DLLs) | done | ADRs 0060, 0063 |
-| Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
+| Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/Catmull-Rom/Lanczos-3/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
 | Physics API on Jolt/Box2D: queries, characters, rollback | done | ADR 0066 |
 | Networking: encrypted UDP transport with NAT traversal; replication, prediction, lag compensation, co-op example | done | ADRs 0070, 0074 |
@@ -79,21 +79,12 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-- The review's P0 fixes (queue item 0a), by the coordinator, after the faster checks
-  (item 0, done on 2026-10-10 but for sccache: ADR 0077 and its two addenda, ADR 0062's
-  addendum): a check with nothing changed 632 → 141 s, the gate `-Gpu -Perf` 10–25 min →
-  400 s (its perf step 749 → 237 s). Both P0 fixes done the same day: the pipelines'
-  size and the 1 MiB stack (PR #124), each pass's own GPU time (PR #125); the Radeon's
-  perf limits (PR #126, owner's decision). Item 0b started: the Graphine patents read
-  (`docs/research/streaming-fast-turns.md`: 360° views besides the main view are out),
-  fast turns measured (`stream_bench --turn`: a few percent of the pixels coarser for
-  0.08–0.15 s on first sight), mip fade (ADR 0078: arriving levels sharpen over 100 ms,
-  no shader change). The other safe measures were in place already (cached levels kept,
-  coarsest levels and most pixels first, tails up to 128 texels resident); one feedback
-  pass with a wider field of view stays an option if larger scenes show pop-in; the
-  geometry pool reserved as a scene opens and the upload ring grown ahead (the review's
-  §3.6), mesh levels by distance in every direction (`LodView::around`). Left in 0b: the
-  fast-turn test in the perf gate.
+Nothing. Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:
+ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 s), 0a (the
+review's P0 fixes: PRs #124, #125; the Radeon's perf limits, PR #126), 0b (fast turns:
+PRs #127–#130; left optional: the fast-turn test in the perf gate, one wider feedback
+pass if a larger scene shows pop-in), 0c (Catmull-Rom and Lanczos-3, ADR 0075's
+addendum). Next: 0d.
 
 ## 5. Queue (in order)
 
@@ -189,9 +180,13 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    first fast turn 5.0 → 1.7 ms), the upload ring grows ahead (`UploadRing::grow` from the
    frame renderer, `stats()`; a refused frame still drops its view once). Growth beyond a
    reservation (scenes added while running) still happens on the frame thread.
-0c. Spatial upscales Lanczos-3 (with an anti-ringing clamp) and bicubic Catmull-Rom,
+0c. ~~Spatial upscales Lanczos-3 (with an anti-ringing clamp) and bicubic Catmull-Rom,
    measured in ADR 0075's table. No Lanczos-2: FSR 1's EASU covers it (owner,
-   2026-10-02).
+   2026-10-02).~~ Done 2026-10-10 (ADR 0075's addendum): both in the tone mapper,
+   clamped to the four nearest texels (no dark rings around HDR highlights), each texel
+   read on its own (the bilinear-fetch trick is ATI's patent); Lanczos-3 in two passes.
+   Catmull-Rom 67 %: +0.04 ms RTX, about +1 ms Radeon, sharper than bilinear and better
+   than FSR 1 in every metric; Lanczos-3 the same quality for about +2 ms on the Radeon.
 0d. **Motion vectors out of the forward shading** (review §3.2). With motion vectors (every
    default antialiasing) the lit forward shader takes 77–89 VGPRs instead of 64 and the
    vertex stage 78 instead of 49: Sponza's forward +22–27 % on the Radeon, +5–11 % on the
@@ -271,7 +266,9 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
     license; it needs an RDNA4 GPU to test.
 - **Patents avoided on purpose** (don't build without a new decision): static/dynamic
   split of cached shadows (Warner Bros US 11,908,062 / 12,315,068); dual-quaternion
-  skinning variants (US9613456B2); motion matching variants; Burley's diffusion profile.
+  skinning variants (US9613456B2); motion matching variants; Burley's diffusion profile;
+  higher-order texture filters from combined bilinear fetches (ATI US 8,675,007 B2, in
+  force until 2032: Catmull-Rom in 9 or 5 fetches; read texels one by one instead).
 - **Animation:** morph targets, state machines and blend trees, retargeting, SIMD clip
   decoding (wins back 2× decode speed).
 - **Networking:**
@@ -289,6 +286,9 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
   - per-sample or bilaterally upsampled AO and contact shadows under MSAA;
   - dynamic resolution with MSAA;
   - CMAA is not built (Intel patents).
+  - **Question for the owner (2026-10-10):** TAAU's optional Catmull-Rom history
+    (`HistoryFilter::CatmullRom`, ADR 0043, off by default) merges bilinear fetches as
+    ATI's US 8,675,007 B2 claims. Rewrite it with loads (measure the cost) or remove it.
   - Ambient occlusion: the discrete default stays High (owner, 2026-10-10), although it
     is 28 % of the RTX's default GPU frame (481 µs; Medium 0.40 ms, FLIP 0.096 vs 0.070).
   - The discrete-GPU default stays TAA. The other candidate is MSAA 4× (+1.2 ms on the
