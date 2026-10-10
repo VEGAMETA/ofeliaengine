@@ -18,7 +18,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0008](0008-shader-compilation.md) | Shader compilation: in-process Slang with a content-addressed cache | Accepted |
 | [0009](0009-shader-hot-reload.md) | Shader hot reload and "Compile All Shaders" | Accepted |
 | [0010](0010-gpu-memory-allocator.md) | GPU memory allocator | Accepted |
-| [0011](0011-render-graph.md) | Render graph | Accepted |
+| [0011](0011-render-graph.md) | Render graph (addendum 2026-10-10: a pass's GPU time is its own on its queue, not the previous pass's tail) | Accepted |
 | [0012](0012-math-library.md) | Math library | Accepted |
 | [0013](0013-bindless-and-pipelines.md) | Bindless resources, pipelines and the first mesh path | Accepted |
 | [0014](0014-pbr-and-shadows.md) | Forward PBR, directional shadows, per-frame GPU data | Accepted |

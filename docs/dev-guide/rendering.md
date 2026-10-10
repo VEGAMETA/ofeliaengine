@@ -1391,8 +1391,11 @@ fg.add_compute("my blur", &bindless)
   `scene_bench --async-compute on` and `off` (or your own benchmark) on each GPU you
   target.
 - **Reading the times:**
-  - `graph.gpu_pass_times()` lists each pass with its `queue`; passes that overlap read
-    longer, because they share the GPU;
+  - `graph.gpu_pass_times()` lists each pass with its `queue`; passes on different
+    queues that overlap read longer, because they share the GPU. On one queue a pass's
+    `gpu_us` is its own time: it starts at the previous pass's end if that came later
+    than its own start (the GPU may begin a pass before the previous one has finished;
+    `span_us` keeps the raw span between its two timestamps);
   - `graph.gpu_frame_time()` is the frame from its first pass to its last: compare
     frames with this, not with the sum of the passes;
   - `graph.stats()` counts the async passes, the graph's own submissions and ownership

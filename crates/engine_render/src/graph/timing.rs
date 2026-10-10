@@ -7,6 +7,13 @@
 //! builds, uploaded to Tracy as GPU zones. On the graphics queue two more timestamps open
 //! and close the graph's frame: with async compute, passes overlap, and only the frame's
 //! own span tells what the overlap saved.
+//!
+//! A pass's opening timestamp is taken at the top of the pipe: with no barrier before the
+//! pass, the GPU writes it while the previous pass still runs, and the span to the closing
+//! timestamp holds that pass's tail (a 49 µs pass after the tone mapper read 2.4 ms on the
+//! Radeon, core review 2). A pass's time therefore starts at its opening timestamp or at
+//! the previous pass's closing one on the same queue, whichever is later: the times
+//! partition the queue's busy time, and overlap is counted once, on the earlier pass.
 
 use super::compile::QueueKind;
 use engine_rhi::ash::vk::Handle as _;
@@ -23,8 +30,13 @@ pub struct PassTime {
     /// The queue it ran on. Async compute passes overlap graphics work: their times do
     /// not add up to the frame's.
     pub queue: QueueKind,
-    /// Time between the pass's start and end timestamps, in microseconds.
+    /// The pass's own time on its queue, in microseconds: from its start timestamp, or
+    /// from the end of the pass before it on the queue if that came later, to its end
+    /// (see the module's documentation).
     pub gpu_us: f32,
+    /// Time between the pass's own start and end timestamps, in microseconds: includes
+    /// the tail of the pass before it when the two overlapped.
+    pub span_us: f32,
 }
 
 #[derive(Default)]
@@ -112,6 +124,13 @@ impl Timing {
         ((slot as u32 * capacity + query) & 0xFFFF) as u16
     }
 
+    /// Whether timestamp `a` comes after `b` (the counter may wrap within its valid bits;
+    /// one frame is far shorter than half its period).
+    fn later(&self, a: u64, b: u64) -> bool {
+        let ahead = (a & self.valid_mask).wrapping_sub(b & self.valid_mask) & self.valid_mask;
+        ahead != 0 && ahead <= self.valid_mask >> 1
+    }
+
     fn ticks_us(&self, start: u64, end: u64) -> f32 {
         let ticks = (end & self.valid_mask).wrapping_sub(start & self.valid_mask) & self.valid_mask;
         ticks as f32 * self.period_ns / 1000.0
@@ -142,16 +161,27 @@ impl Timing {
             };
             if read.is_ok() {
                 let state = &self.slots[slot];
+                // Passes in the order they were recorded on this queue.
+                let mut previous_end: Option<u64> = None;
                 for &(name, scope, first) in &state.pending {
-                    let gpu_us = self.ticks_us(
-                        self.results[first as usize],
-                        self.results[first as usize + 1],
-                    );
+                    let start = self.results[first as usize];
+                    let end = self.results[first as usize + 1];
+                    let from = previous_end
+                        .filter(|&p| self.later(p, start))
+                        .unwrap_or(start);
+                    let gpu_us = if self.later(from, end) {
+                        0.0
+                    } else {
+                        self.ticks_us(from, end)
+                    };
+                    previous_end =
+                        Some(previous_end.filter(|&p| self.later(p, end)).unwrap_or(end));
                     self.times.push(PassTime {
                         name,
                         scope,
                         queue: self.queue,
                         gpu_us,
+                        span_us: self.ticks_us(start, end),
                     });
                 }
                 if let [Some(begin), Some(end)] = state.frame {
