@@ -8,7 +8,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 
 | # | Title | Status |
 |---|---|---|
-| [0001](0001-workspace-and-build.md) | Workspace layout, toolchain and build profiles | Proposed |
+| [0001](0001-workspace-and-build.md) | Workspace layout, toolchain and build profiles | Accepted |
 | [0002](0002-job-system.md) | Job system | Accepted |
 | [0003](0003-profiling.md) | Profiling instrumentation (Tracy) | Accepted |
 | [0004](0004-platform-bindings-and-timing.md) | Platform bindings, timers and thread placement | Accepted |

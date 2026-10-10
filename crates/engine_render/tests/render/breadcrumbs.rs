@@ -9,7 +9,7 @@
 //! devices too), so the test is skipped unless asked for:
 //!
 //! ```text
-//! ENGINE_TEST_GPU_FAULT=hang cargo test -p engine_render --test breadcrumbs -- --nocapture deliberate
+//! ENGINE_TEST_GPU_FAULT=hang cargo test -p engine_render --test render -- --nocapture breadcrumbs::deliberate
 //! ```
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
@@ -215,10 +215,13 @@ fn deliberate_gpu_fault_is_reported() {
     let mode = std::env::var("ENGINE_TEST_GPU_FAULT").unwrap_or_default();
     let (spirv, entry): (&[u8], _) = match mode.as_str() {
         "page" => (
-            include_bytes!("shaders/fault.faultWrite.spv"),
+            include_bytes!("../shaders/fault.faultWrite.spv"),
             c"faultWrite",
         ),
-        "hang" => (include_bytes!("shaders/fault.faultHang.spv"), c"faultHang"),
+        "hang" => (
+            include_bytes!("../shaders/fault.faultHang.spv"),
+            c"faultHang",
+        ),
         _ => {
             println!("skipping: resets the GPU; set ENGINE_TEST_GPU_FAULT=page or hang to run it");
             return;

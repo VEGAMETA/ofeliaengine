@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, missing_docs)]
 
-mod common;
+use crate::common;
 
 use common::*;
 use engine_core::math::Vec3;

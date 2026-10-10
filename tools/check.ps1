@@ -133,6 +133,8 @@ function Get-AffectedPackages {
             $dependents[$dep.pkg] += $node.id
         }
     }
+    # The packages whose own files changed (the docs step builds theirs).
+    $script:changedPackages = @($packages | Where-Object { $changed.ContainsKey($_.Id) } | ForEach-Object { $_.Name } | Sort-Object)
     $reached = @{}
     $queue = [Collections.Generic.Queue[string]]::new()
     foreach ($id in $changed.Keys) { $reached[$id] = $true; $queue.Enqueue($id) }
@@ -154,7 +156,9 @@ if ($null -eq $affectedPackages) {
 }
 Write-Output "affected: $affectedNote"
 
-# A nextest filterset: the step's, narrowed to the affected packages with -Affected.
+# A nextest run of the test targets (`--tests`: clippy type-checks the examples and benches,
+# -Profiles builds them; building and linking ~36 examples per run bought nothing more),
+# with the step's filterset, narrowed to the affected packages with -Affected.
 function Nextest([string]$filter, [string]$extra = '') {
     $parts = @()
     if ($filter) { $parts += "($filter)" }
@@ -162,7 +166,7 @@ function Nextest([string]$filter, [string]$extra = '') {
         $parts += if ($affectedPackages.Count) { '(' + (($affectedPackages | ForEach-Object { "package($_)" }) -join ' | ') + ')' } else { 'none()' }
     }
     $expr = if ($parts.Count) { " -E `"$($parts -join ' & ')`"" } else { '' }
-    "nextest run --workspace --locked --no-fail-fast --no-tests=pass$expr $extra".TrimEnd()
+    "nextest run --workspace --tests --locked --no-fail-fast --no-tests=pass$expr $extra".TrimEnd()
 }
 # `-p` for each affected package (dependency features are unified across the workspace by
 # crates/engine_workspace_hack, so these builds reuse the workspace's; ADR 0077), or
@@ -211,18 +215,28 @@ if ($changesEverything) {
     }
 }
 
+# The documentation of the packages whose files changed: their dependents' compile errors
+# are clippy's to find, and rustdoc's own complaints (links) are in the changed docs.
+if ($Full -or $null -eq $affectedPackages) {
+    $docCommands = @('doc --workspace --no-deps --locked')
+} elseif ($script:changedPackages.Count) {
+    $docCommands = @('doc --no-deps --locked ' + (($script:changedPackages | ForEach-Object { "-p $_" }) -join ' '))
+} else {
+    $docCommands = @()
+}
+
 $steps = [ordered]@{
     rustfmt = $fmtCommands
     clippy  = @('clippy --workspace --all-targets --locked -- -D warnings')
     test    = $testCommands
     tracy   = $tracyCommands
-    docs    = @('doc --workspace --no-deps --locked')
+    docs    = $docCommands
 }
 if ($Gpu) {
     # `radeon:` runs the command with ENGINE_ADAPTER=radeon (the AMD iGPU of ref-1).
     # The Radeon's platform self-check first (docs/research/radeon-igpu-lds-faults.md): if it
     # fails, the machine, not the change, would make the image comparisons flaky.
-    $selfcheck = 'nextest run --workspace --locked --no-tests=fail --run-ignored only -E "binary(gpu_selfcheck)"'
+    $selfcheck = 'nextest run --workspace --tests --locked --no-tests=fail --run-ignored only -E "binary(gpu_selfcheck)"'
     $steps['gpu'] = @(
         "radeon:$selfcheck",
         (Nextest $gpuFilter '--test-threads 4'),
@@ -230,7 +244,7 @@ if ($Gpu) {
     )
     # The test step's build (one workspace build, filtered per step): nothing compiles while
     # the lock is held.
-    $prebuild['gpu'] = 'test --workspace --locked --no-run'
+    $prebuild['gpu'] = 'test --workspace --tests --locked --no-run'
     $steps['slang'] = @((Nextest $slangFilter))
 }
 if ($Perf) {

@@ -112,10 +112,10 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    - **add an "affected crates" mode** for agents' intermediate runs. The full run stays
      the gate before every merge.
 
-   Done (ADR 0077): duplicates removed, one build per check, nextest, `-Affected`, doc tests
-   and formatting for what changed (632 → 168 s with nothing changed). Left: fewer
-   integration-test binaries per crate (`engine_render`: 36 binaries for 52 tests); the
-   linker and `line-tables-only` measurements that close ADR 0001; sccache for agents'
+   Done (ADR 0077 and its addendum): duplicates removed, one build per check, nextest,
+   `-Affected`, doc tests, docs and formatting for what changed, one test binary per crate
+   (100 → 45), test builds with line tables only, ADR 0001 accepted (rust-lld measured
+   ~12 % faster than link.exe): 632 → 144 s with nothing changed. Left: sccache for agents'
    worktrees; the target directory on an NVMe drive (`C:`, owner 2026-10-10: measure after
    the test changes); the perf step's 3 runs × 200 frames per scene (a variance study first).
 0a. **The review's P0 fixes** (§3.1 and §3.3):
@@ -249,8 +249,7 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
   cost 2× the draw list's CPU).
 - **Reliability:** two silent process exits (`perf_gate` once, `frame_bench` once) were
   never reproduced or explained. Watch for a recurrence and get a stack.
-- **Housekeeping:** ADR 0001 is still "Proposed" (needs measurements on a quiet machine).
-  `scene_bench` is wired by hand, outside `engine_frame`. From the second review:
+- **Housekeeping:** `scene_bench` is wired by hand, outside `engine_frame`. From the second review:
   - `game_loop`'s "input → camera" counts a stale window event (637 ms);
   - `scene_bench --ao` takes the next argument as the AO quality even when it is a flag;
   - CLAUDE.md §5 (mimalloc) and §2 ("engine_runtime: game executable") describe things

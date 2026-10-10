@@ -1,7 +1,7 @@
 # 0001. Workspace layout, toolchain and build profiles
 
-- Status: Proposed. The linker choice and the dev profile must be confirmed by
-  measurements on the reference hardware (see "Measurements").
+- Status: Accepted (2026-10-10, measurements on ref-1 below: rust-lld stays; the test
+  profile writes line tables only, ADR 0077).
 - Date: 2026-09-25
 
 ## Context
@@ -62,6 +62,13 @@ not fixed and need a recorded decision:
     test binary) with `link.exe` and with `rust-lld`;
   - the same for `debug = "full"` vs `debug = "line-tables-only"` in the dev profile.
 - The toolchain pin is argued above (reproducible perf gate); it has no measurable cost.
+- **Measured on ref-1 (2026-10-10, target directory on the SATA HDD, `docs/perf/history.md`):**
+  - linker, rebuilding every test target after a change in `engine_core` (45 test binaries,
+    two runs each): `rust-lld` 49.4 / 61.4 s, MSVC `link.exe` (VS 18, 14.51) 55.5 / 69.4 s:
+    rust-lld about 12 % faster. Relinking one large example (`scene_bench`) after a change in
+    `engine_render`: 2.2-3.6 s either way, within the disk's noise;
+  - debug info, the same full test rebuild: `debug = "full"` 84 s (1,297 CPU-seconds, PDBs
+    of ~22 MB per test binary), `"line-tables-only"` 56 s (844 CPU-seconds, ~8 MB PDBs).
 - `x86-64-v2` is the documented Windows 11 24H2 minimum (§5). No measurement is needed to
   enable it; raising it further needs an ADR with numbers.
 
@@ -72,10 +79,14 @@ not fixed and need a recorded decision:
 `license = "MIT"` as a placeholder).
 - Toolchain: **A**, pinned to `1.94.1` with `rustfmt`, `clippy` and the
   `x86_64-pc-windows-msvc` target.
-- Linker: **C** (`rust-lld.exe`), provisionally, until the measurement above is done.
+- Linker: **C** (`rust-lld.exe`), confirmed by the measurement above.
 - CPU baseline: **A**.
 - Profiles (§15):
-  - `dev`: our crates at `opt-level = 1`, all dependencies at `opt-level = 3`;
+  - `dev`: our crates at `opt-level = 1`, all dependencies at `opt-level = 3`, full debug
+    info (debugging the engine and its examples);
+  - `test` (what `cargo test` and nextest build): `dev` with `debug = "line-tables-only"`
+    (ADR 0077): panics and backtraces keep file and line, a debugger shows no variables
+    (`CARGO_PROFILE_TEST_DEBUG=full` for that);
   - `release`: `opt-level = 3`, no debug info, non-incremental;
   - `profiling`: `release` + `debug = "full"` (Tracy callstacks, symbol resolution);
   - `shipping`: `release` + `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`.

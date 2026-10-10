@@ -141,6 +141,51 @@ ref-1, `check.ps1 -Gpu` (no perf), target directory on the HDD:
 - GPU tests now run side by side (4 on the RTX, 2 on the Radeon): a test that is not safe
   next to another GPU test fails here first. Revisit the numbers if one turns flaky for
   that reason rather than for a bug of its own.
-- Next steps (`docs/status.md`): fewer integration-test binaries per crate (`engine_render`
-  links 36 for 52 tests), the linker and debug-info measurements that close ADR 0001,
-  sccache for agents' worktrees, and the target directory on an NVMe drive.
+- Next steps (`docs/status.md`): fewer integration-test binaries per crate and the linker and
+  debug-info measurements that close ADR 0001 (both done, see the addendum); sccache for
+  agents' worktrees; the target directory on an NVMe drive; a variance study of the perf
+  step's 3 runs × 200 frames per scene.
+
+## Addendum (2026-10-10): fewer test binaries, test debug info, test targets only
+
+Measured after the first part, on the same HDD target directory:
+
+- **Each integration test file was a binary** that links the whole engine below it, with a
+  ~22 MB PDB. After a change in `engine_render` (a touch), relinking its 36 test binaries
+  took 7.6-15.8 s (median ~14 s). After a change in `engine_core`, the 98 integration-test
+  binaries were 60 % of the test build's CPU time (782 of 1,297 s).
+- **Debug info:** with `debug = "line-tables-only"` the PDBs shrink by two thirds (22.5 →
+  7.8 MB), and rebuilding every test after a change in `engine_core` went 84 → 56 s (CPU
+  1,297 → 844 s): on this HDD, writing debug info is a large part of the build.
+- **Examples:** `cargo test`, and nextest's build, also compiled and linked every example
+  (36), which clippy already type-checks and `-Profiles` builds.
+- **The docs step** rebuilt the documentation of every dependent of a changed crate:
+  36.6 s after a change in `engine_render`.
+
+Decision:
+
+- **One test binary per crate** for its plain tests (`tests/<crate>/main.rs`, the former
+  files as modules; `engine_render`'s are `tests/render/`), one more for the allocation tests
+  where a crate had several (`tests/zero_alloc/`: one counting allocator, the tests take
+  turns behind a lock, so plain `cargo test` keeps them alone too). The Radeon self-check
+  stays a binary of its own. 100 → 45 integration-test binaries. A new test is a module of
+  its crate's binary (`mod name;` in its `main.rs`).
+- **`[profile.test] debug = "line-tables-only"`**: what `cargo test` and nextest build.
+  Panics and backtraces keep file and line; a debugger shows no variables in a test binary
+  (`CARGO_PROFILE_TEST_DEBUG=full` for one session). The `dev` profile, used to debug the
+  engine and its examples, keeps full debug info.
+- **The test steps build the test targets only** (`--tests`).
+- **The docs step documents the packages whose files changed** (every package when a
+  manifest or the configuration changed, and with `-Full`): their dependents' compile errors
+  are clippy's to find, and rustdoc's own complaints are about the changed docs.
+- ADR 0001's linker is confirmed by measurement (rust-lld ~12 % faster than `link.exe` on
+  the full test rebuild) and ADR 0001 is accepted.
+
+Numbers (ref-1, `check.ps1 -Gpu`, HDD target):
+
+| | before ADR 0077 | first part | second part |
+|---|---:|---:|---:|
+| nothing changed | 632 s | 168 s | 144 s (gpu 114 → 93 s, tracy 17 → 14 s) |
+| `engine_render` touched | | | 225 s (test 45, tracy 25, docs 37, gpu 94; before the docs change) |
+| touch `engine_render`, build its tests | 7.6-15.8 s | | 2.1-2.5 s |
+| touch `engine_core`, build every test | 84 s | | 49-61 s |

@@ -3,7 +3,7 @@
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
-mod common;
+use crate::common;
 
 use common::{assert_no_validation_errors, gpu};
 use engine_rhi::ash::vk;
