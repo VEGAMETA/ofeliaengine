@@ -213,7 +213,7 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    monitor adapter (D3DKMT) is compared with Vulkan's `deviceLUID`; across adapters the
    frame is drawn apart and copied (`engine_render::present::PresentTarget`): Radeon GPU
    frame 27.1 → 26.3 ms in `flight`, the RTX unchanged (direct). Left: a windowed present
-   scene in the perf gate, with the player crate (6f).
+   scene in the perf gate, with the player crate (8a).
 0f. ~~**Moving instances** (review §3.5): ~70 ns each per frame on one thread (60,000 make
    the RTX CPU-bound at 5.2 ms). Propagation, extraction, interpolation and upload in
    parallel on the job system; interpolation on the GPU so movers upload per tick, not per
@@ -272,41 +272,47 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
    visibility bits (patent, ADR 0035 note).
 5. Virtual shadow maps.
-6. Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
+Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
+grown, divide and conquer); the old labels stay in parentheses.
+
+6. **Rendering leftovers.**
+6a (was 6). Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
    (ADR 0067), frame generation. For frame generation, both DLSS FG and FSR 3.1 FG, off by
    default, with latency measured.
 6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms, bloom 1.6 ms (a single-pass
    downsampler), local shadows redrawn every frame when casters move (a per-frame redraw
    budget; never the patented static/dynamic split).
-6c. Memory (review §3.9): one transient heap for both frame slots where no transient
-   crosses queues (66 / 41 MiB), the global allocator decision (mimalloc, CLAUDE.md §5,
-   never made), CPU memory accounting (0.9–1.1 GiB private bytes unexplained).
-6d. Jolt's jobs on `engine_core::jobs` through JoltC's callback job system (review §3.10).
-6e. `forward.rs` (5,695 lines) split by feature (review §3.12).
-6f. **A player crate** (`engine_app`, review §3.7; after the rendering queue: owner,
-   2026-10-10): device, swapchain, latency provider, process setup (power throttling,
-   MMCSS, CPU sets), pipeline cache and the frame loop in one place; window modes:
-   windowed (placed on the monitor, not larger than its work area), borderless full screen
-   and exclusive full screen (`VK_EXT_full_screen_exclusive`), measured for latency with
-   PresentMon (owner, 2026-10-10: `flight`'s 1920 × 1080 window is larger than the 1080p
-   screen and composed by DWM); ECS components for lights, skinned meshes and probes;
-   features per view instead of per renderer; `RenderDefaults` applied whole. The benches
-   and the test bed move onto it.
-6g. **Video playback** (owner, 2026-10-10: after the player crate; the engine plays no
-   video today): a video frame as an ordinary texture (UI, a screen in the world, a
-   viewport, cutscenes). To research and decide in an ADR: AV1 (royalty-free, unlike
-   H.264 / H.265) decoded by the GPU through Vulkan Video
-   (`VK_KHR_video_decode_av1`: check both reference GPUs' drivers) with dav1d
-   (BSD-2-Clause) on worker threads where it is missing; WebM / Matroska demuxed by our
-   own code; Opus sound through the existing decoder, synchronized to the audio clock;
-   cost per frame measured on both GPUs.
-6h. **Colliders made automatically** (owner, 2026-10-10: after the rendering queue, like
-   6f and 6g): collision shapes from meshes at import and cook, into the pack ("one button"):
-   static level geometry as triangle meshes (simplified where it pays), props as a fitted
-   box, sphere or capsule or a convex hull, concave ones split into convex parts (CoACD,
-   MIT, or V-HACD, BSD-3: compare), and colliders authored in the source taken as they are
-   (`UCX_` names, a glTF physics extension). Today shapes are only made in code.
-7. Then: editor tools, Luau bindings and debugger, other tooling.
+7. **The second review's core leftovers.**
+7a (was 6c). Memory (review §3.9): one transient heap for both frame slots where no
+   transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,
+   CLAUDE.md §5, never made), CPU memory accounting (0.9–1.1 GiB private bytes
+   unexplained).
+7b (was 6d). Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
+   (review §3.10).
+7c (was 6e). `forward.rs` (5,695 lines) split by feature (review §3.12).
+8. **The player and content** (owner, 2026-10-10: after the rendering queue).
+8a (was 6f). **A player crate** (`engine_app`, review §3.7): device, swapchain, latency
+   provider, process setup (power throttling, MMCSS, CPU sets), pipeline cache and the frame
+   loop in one place; window modes: windowed (placed on the monitor, not larger than its
+   work area), borderless full screen and exclusive full screen
+   (`VK_EXT_full_screen_exclusive`), measured for latency with PresentMon (owner,
+   2026-10-10: `flight`'s 1920 × 1080 window is larger than the 1080p screen and composed by
+   DWM); ECS components for lights, skinned meshes and probes; features per view instead of
+   per renderer; `RenderDefaults` applied whole. The benches and the test bed move onto it.
+8b (was 6g). **Video playback** (owner, 2026-10-10: after the player crate; the engine plays
+   no video today): a video frame as an ordinary texture (UI, a screen in the world, a
+   viewport, cutscenes). To research and decide in an ADR: AV1 (royalty-free, unlike H.264 /
+   H.265) decoded by the GPU through Vulkan Video (`VK_KHR_video_decode_av1`: check both
+   reference GPUs' drivers) with dav1d (BSD-2-Clause) on worker threads where it is missing;
+   WebM / Matroska demuxed by our own code; Opus sound through the existing decoder,
+   synchronized to the audio clock; cost per frame measured on both GPUs.
+8c (was 6h). **Colliders made automatically**: collision shapes from meshes at import and
+   cook, into the pack ("one button"): static level geometry as triangle meshes (simplified
+   where it pays), props as a fitted box, sphere or capsule or a convex hull, concave ones
+   split into convex parts (CoACD, MIT, or V-HACD, BSD-3: compare), and colliders authored
+   in the source taken as they are (`UCX_` names, a glTF physics extension). Today shapes
+   are only made in code.
+9. Then: editor tools, Luau bindings and debugger, other tooling.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
