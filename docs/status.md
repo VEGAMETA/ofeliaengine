@@ -79,14 +79,10 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-- Faster checks (queue item 0), by the coordinator, after the second core review
-  (2026-10-10, `docs/research/core-audit-2.md`; the owner answered its questions the same
-  day, see §5). Merged: ADR 0077 and its two addenda (cargo-nextest, one build per check,
-  unified dependency features, doc tests and formatting for what changed, `-Affected`, one
-  test binary per crate, line tables, builds on the NVMe drive): a check with nothing
-  changed 632 → 141 s, the gate `-Gpu -Perf` 10–25 → 15 min. Half of it is now the perf
-  step's waits for a quiet CPU (289 + 152 s of 749 s): next, the perf step's waits and
-  variance (item 0).
+- The review's P0 fixes (queue item 0a), by the coordinator, next after the faster checks
+  (item 0, done on 2026-10-10 but for sccache: ADR 0077 and its two addenda, ADR 0062's
+  addendum): a check with nothing changed 632 → 141 s, the gate `-Gpu -Perf` 10–25 min →
+  400 s (its perf step 749 → 237 s).
 
 ## 5. Queue (in order)
 
@@ -94,9 +90,9 @@ Merged with the second review's findings (`docs/research/core-audit-2.md`). The 
 answers of 2026-10-10: faster checks first, then the review's P0 fixes; the player crate
 after the rendering queue; custom 3D materials after GI; the discrete AO default stays High.
 
-0. **Faster checks, first after the review** (owner, 2026-10-02, confirmed 2026-10-10). Today
-   `check.ps1 -Gpu -Perf` takes 10–25 min, and it grows with every crate and test. Per
-   step, from recent runs:
+0. **Faster checks, first after the review** (owner, 2026-10-02, confirmed 2026-10-10). Then
+   `check.ps1 -Gpu -Perf` took 10–25 min, and it grew with every crate and test. Per
+   step, from the runs before 2026-10-10:
 
    | Step | Minutes |
    |---|---|
@@ -122,13 +118,24 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    (100 → 45), test builds with line tables only, ADR 0001 accepted (rust-lld measured
    ~12 % faster than link.exe), the build directory on the NVMe drive
    (`C:\cargo-target\ofeliaengine`: rebuilding every test after a change in engine_core
-   40-58 s → 11-15 s): 632 → 144 s with nothing changed. Left: sccache for agents' worktrees
-   (when agents run again); the perf step's 3 runs × 200 frames per scene (a variance study
-   first).
-   For that study: `sponza_streamed` on the Radeon reads +10 to +23 % against its baseline
-   from run to run while `sponza` stays within 0.5 % (2026-10-10; the same with and without
-   PR #120's streaming fix): which levels are resident when the timed frames start depends
-   on timing. Make the scene settle to a deterministic residency before timing.
+   40-58 s → 11-15 s): 632 → 141 s with nothing changed; the perf step (ADR 0062 addendum:
+   runs a round at a time, a scene with a slower pass measured again, 100 frames per run,
+   baselines from median runs, a 12 s wait for a quiet CPU instead of 2 × 2 min) 749 →
+   237 s: the gate `-Gpu -Perf` 901 → 400 s. Left: sccache for agents' worktrees (when
+   agents run again), and a study of the Radeon's variance:
+   - the shadow pass (and bloom) read 20–27 % slower in a few scenes for minutes at a time,
+     in every round, with the CPU quiet, then normal again (2026-10-10). Work on the CPU
+     is not it (it costs 10 % while every core spins and nothing seconds later). The slow
+     scenes followed scenes with large render targets in the gate's order (FXAA after
+     MSAA 4×, reflections after FSR 1 twice, FSR 1 after SMAA T2x), and the same scene
+     measured again after itself read normal: the first suspect is where the driver places
+     a new device's render targets in the iGPU's memory after the previous device freed
+     large ones;
+   - `sponza_streamed` read +10 to +23 % against its baseline from run to run in the
+     morning while `sponza` stayed within 0.5 % (the same with and without PR #120's
+     streaming fix; within 1 % in the afternoon's runs): which levels are resident when
+     the timed frames start depends on timing. Make the scene settle to a deterministic
+     residency before timing.
 0a. **The review's P0 fixes** (§3.1 and §3.3):
    - `engine_rhi::Pipeline` without its copy of the device's function table (1,504 bytes
      per pipeline: the renderers' construction overflows Windows' 1 MiB main thread on

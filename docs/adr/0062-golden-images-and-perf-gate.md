@@ -165,9 +165,21 @@ Decision:
   each under 20 %) before each GPU, long enough for a build or a test step to have ended,
   instead of 120.
 - **100 timed frames per run** (`--frames N` to change it).
+- **A baseline takes each pass's median run** (`--update`), a check its fastest run. The
+  first check of this procedure, against baselines made of the fastest runs, measured
+  `sponza_atmosphere`'s bloom downsample again and still read +23 %: its baseline,
+  1,184.8 µs, came from one run, against 1,436–1,466 µs in every other run that day (the
+  pass overlaps async compute). One lucky run must not set the bar.
 - Both baselines re-measured this way; the files' header says how they were measured.
 
-Consequences: the perf step takes about 3 minutes instead of 12 (numbers in
+The same check showed the Radeon's other kind of noise: in its first runs the shadow pass
+read 20–27 % slower in four scenes, in all three rounds (so for minutes, not seconds, with
+the CPU quiet at 1 %), and normal when those scenes were measured again. A bandwidth-heavy
+pass on the iGPU has a slow state that comes and goes; measuring again absorbs it, finding
+its cause is left to the variance study in `docs/status.md`.
+
+Consequences: the perf step took 237 s instead of 749 in the first check, four scenes
+measured again included, and the whole check `-Gpu -Perf` 400 s instead of 901 (numbers in
 `docs/perf/history.md`); a scene measured again costs three more runs (about 1 s on the
 RTX, 10 s on the Radeon); a regression has to show in both sets of runs. The work on the
 CPU during the Radeon's runs still counts: a build started meanwhile slows them, and the

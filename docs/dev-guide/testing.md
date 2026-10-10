@@ -98,6 +98,7 @@ cargo run -p engine_golden --release --bin perf_gate
   seconds before each GPU.
 - **Overlays change timing:** keep `VK_LOADER_LAYERS_DISABLE=~implicit~` (OBS, RivaTuner and
   Steam hook into every Vulkan process) and close other GPU work.
-- **A change made a pass faster or slower on purpose:** `--update` writes the new baseline;
-  commit it with the change and put the numbers in `docs/perf/history.md`.
+- **A change made a pass faster or slower on purpose:** `--update` writes the new baseline
+  (each pass's median run, so that one lucky run does not set the bar); commit it with the
+  change and put the numbers in `docs/perf/history.md`.
 - `tools\check.ps1 -Perf` runs it on both GPUs and lists slower passes.

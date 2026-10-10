@@ -4,8 +4,8 @@
 //!
 //! - Each scene is rendered `--runs` times (3) from a fresh device, `--frames` timed
 //!   frames each (100: the same medians as 200 within the runs' noise, in half the
-//!   Radeon's time); a pass's time is the smallest of its per-run medians (interference
-//!   from other work on the machine, and clocks that did not ramp up, only add time). The
+//!   Radeon's time); a check takes each pass's smallest per-run median (interference from
+//!   other work on the machine, and clocks that did not ramp up, only add time). The
 //!   runs go a round at a time, the first of every scene, then the second: a slow spell
 //!   of the machine (work on the CPU next to the Radeon iGPU, other work on a GPU) then
 //!   slows one run of a few scenes instead of every run of one.
@@ -22,7 +22,9 @@
 //!   `--strict`.
 //! - Without `--strict` regressions are reported, not fatal: ref-1 is not a dedicated
 //!   benchmark machine (docs/perf/reference-hw.md).
-//! - `--update` writes the measured times as the new baseline.
+//! - `--update` writes the measured times as the new baseline, each pass's median run:
+//!   one lucky run (two queues overlapping favourably, a faster memory placement on the
+//!   Radeon) must not set the bar that a check's fastest run is held to.
 //! - `--scene NAME` (repeatable) measures only those scenes (comparisons, A/B runs; not
 //!   with `--update`).
 //!
@@ -242,15 +244,23 @@ fn measure(
     Some(per_shot)
 }
 
-/// Each pass's fastest time over `runs` of `scene`, into `times`.
-fn fastest(scene: &str, runs: &[Run], times: &mut Times) {
+/// Each pass's time over `runs` of `scene`, into `times`: its fastest run, or with
+/// `typical` its median run (a baseline; see the module's documentation).
+fn summarize(scene: &str, runs: &[Run], typical: bool, times: &mut Times) {
+    let mut per_pass: BTreeMap<&str, Vec<f64>> = BTreeMap::new();
     for run in runs {
         for (pass, &us) in run {
-            let t = times
-                .entry((scene.to_owned(), pass.clone()))
-                .or_insert(f64::INFINITY);
-            *t = t.min(us);
+            per_pass.entry(pass).or_default().push(us);
         }
+    }
+    for (pass, mut values) in per_pass {
+        values.sort_by(f64::total_cmp);
+        let us = if typical {
+            values[(values.len() - 1) / 2]
+        } else {
+            values[0]
+        };
+        times.insert((scene.to_owned(), pass.to_owned()), us);
     }
 }
 
@@ -369,7 +379,7 @@ fn run() -> ExitCode {
     };
     let mut measured = Times::new();
     for (shot, shot_runs) in shots.iter().zip(&runs_of) {
-        fastest(shot.name, shot_runs, &mut measured);
+        summarize(shot.name, shot_runs, update, &mut measured);
     }
     let Some(vendor) = gpu.vendor.clone() else {
         eprintln!("nothing measured");
@@ -379,7 +389,7 @@ fn run() -> ExitCode {
     println!("{}; baseline {}", gpu.adapter, path.display());
     if update {
         let mut text = format!(
-            "# GPU µs per pass (fastest of {runs} runs' medians over {frames} frames, a round \
+            "# GPU µs per pass (median of {runs} runs' medians over {frames} frames, a round \
              at a time), {}\n# scene\tpass\tµs\n",
             gpu.adapter
         );
@@ -424,7 +434,7 @@ fn run() -> ExitCode {
         for (shot, shot_runs) in again.iter().zip(&runs_again) {
             if !shot_runs.is_empty() {
                 measured.retain(|(scene, _), _| scene != shot.name);
-                fastest(shot.name, shot_runs, &mut measured);
+                summarize(shot.name, shot_runs, false, &mut measured);
             }
         }
         verdict = judge(&measured, &baseline, threshold);
