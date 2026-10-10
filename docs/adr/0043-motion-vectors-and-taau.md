@@ -283,3 +283,26 @@ did.
   19.6 ms against 14.5 ms for prepass and forward; RTX 416 against 362 µs), but a scene
   with heavy geometry and little overdraw could lose; `ForwardRenderer::set_depth_prepass`
   stays the game's choice (ADR 0042).
+
+## Amendment (2026-10-10): the Catmull-Rom history reads its texels one by one
+
+The 5-tap filter merged pairs of texels into bilinear fetches at offsets computed from
+their weights, which ATI's US 8,675,007 B2 claims (in force until 2032-09-11;
+`docs/research/antialiasing.md`). The owner's decision (2026-10-10): read the texels on
+their own, as the spatial filters of ADR 0075's addendum do. `HistoryFilter::CatmullRom`
+now loads the 12 texels of the 4 × 4 around the sample without its corners (the same
+footprint) and weights them in the shader; the two filters are separate entry points
+(`resolve`, `resolveCatmullRom`) instead of a specialization constant, so the bilinear
+pipeline has none of the other's code. The bilinear resolve's images and times are
+unchanged (golden images byte-identical on both GPUs).
+
+| resolve, GPU µs (`taau_bench`, in turns with the old build) | bilinear | Catmull-Rom, 5 bilinear fetches | Catmull-Rom, 12 loads |
+|---|---:|---:|---:|
+| RTX, 1080p TAA | 136.7 | 162.2 | 206.4 |
+| RTX, 1080p from 720p | 119.2 | 137.2 | 176.9 |
+| Radeon, 1080p TAA | 4,242 | 4,960 | 5,280 |
+
+Panning a third of a pixel per frame (`tests/taa.rs`): 38.36 dB on the RTX and 38.45 dB on
+the Radeon with the loads (38.3 and 38.4 before). The filter is optional and off by
+default; its extra cost over bilinear grew from about 20 % to 50 % of the resolve on the
+RTX (17 % to 24 % on the Radeon).

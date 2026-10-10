@@ -10,8 +10,9 @@
 //    (variance clipping, Salvi 2016).
 // 3. The history is fetched where the surface was last frame, following the motion of
 //    the nearest surface in the neighbourhood (edges of moving objects keep their motion),
-//    bilinearly by default, or with a 5-tap Catmull-Rom filter (sharper in motion;
-//    Jimenez et al.) when specialized so, and clipped towards the box's center.
+//    bilinearly (`resolve`), or with Catmull-Rom over the 4 × 4 texels around it, corners
+//    left out (`resolveCatmullRom`: sharper in motion), and clipped towards the box's
+//    center.
 // 4. Current and history blend by their weights; the accumulated weight lives in history
 //    alpha, capped lower when the pixel moves (resampling blurs).
 //
@@ -39,11 +40,6 @@ struct Push
 
 [[vk::push_constant]]
 ConstantBuffer<Push> push;
-
-// 1: the history is fetched with the 5-tap Catmull-Rom filter; 0: one bilinear fetch
-// (`HistoryFilter` in lib.rs). A specialization constant, so each pipeline only has the
-// registers its filter needs.
-[vk::constant_id(0)] const uint CATMULL_ROM = 0;
 
 // Accumulated weight of a still pixel (1/16 of each new frame), and of a pixel that moves
 // by 2 output pixels or more.
@@ -77,41 +73,59 @@ float3 from_ycocg(float3 c)
     return float3(c.x + c.y - c.z, c.x + c.z, c.x - c.y - c.z);
 }
 
-// History at `uv` (output texture coordinates) with a 5-tap Catmull-Rom filter: the 4 × 4
-// kernel with its corners dropped, bilinear fetches combining pairs of taps. The
-// accumulated weight in alpha comes from the same taps.
-float4 sample_history(float2 uv)
+// Catmull-Rom's weights (Keys's cubic convolution, a = -1/2) of the four texels around a
+// sample at fraction `f` past the second one.
+float4 catmull_rom_weights(float f)
+{
+    float f2 = f * f;
+    float f3 = f2 * f;
+    return float4(
+        -0.5 * f + f2 - 0.5 * f3,
+        1.0 - 2.5 * f2 + 1.5 * f3,
+        0.5 * f + 2.0 * f2 - 1.5 * f3,
+        -0.5 * f2 + 0.5 * f3);
+}
+
+// History at `uv` (output texture coordinates): one bilinear fetch, or Catmull-Rom over
+// the 4 × 4 texels around it with the corners left out (their weights are the smallest,
+// as in Jimenez et al.'s 5-tap filter), each texel read on its own: merging pairs of them
+// into bilinear fetches is what ATI's US 8,675,007 B2 claims
+// (docs/research/antialiasing.md). The accumulated weight in alpha comes from the same
+// taps. `catmull_rom` is a literal: each entry point has only its own filter's code.
+float4 sample_history(float2 uv, bool catmull_rom)
 {
     Texture2D history = g_textures[push.history];
-    SamplerState s = g_samplers[push.linear_sampler];
-    if (CATMULL_ROM == 0)
-        return history.SampleLevel(s, uv, 0);
-    float2 size = float2(push.output_size);
-    float2 position = uv * size;
-    float2 center = floor(position - 0.5) + 0.5;
-    float2 f = position - center;
-    float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
-    float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
-    float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
-    float2 w3 = f * f * (-0.5 + 0.5 * f);
-    float2 w12 = w1 + w2;
-    float2 p0 = (center - 1.0) / size;
-    float2 p3 = (center + 2.0) / size;
-    float2 p12 = (center + w2 / w12) / size;
-    float4 sum = history.SampleLevel(s, float2(p12.x, p0.y), 0) * (w12.x * w0.y)
-        + history.SampleLevel(s, float2(p0.x, p12.y), 0) * (w0.x * w12.y)
-        + history.SampleLevel(s, p12, 0) * (w12.x * w12.y)
-        + history.SampleLevel(s, float2(p3.x, p12.y), 0) * (w3.x * w12.y)
-        + history.SampleLevel(s, float2(p12.x, p3.y), 0) * (w12.x * w3.y);
-    float total = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    if (!catmull_rom)
+        return history.SampleLevel(g_samplers[push.linear_sampler], uv, 0);
+    float2 position = uv * float2(push.output_size) - 0.5;
+    float2 base = floor(position);
+    float2 f = position - base;
+    float4 wx = catmull_rom_weights(f.x);
+    float4 wy = catmull_rom_weights(f.y);
+    int2 origin = int2(base) - 1;
+    int2 last = int2(push.output_size) - 1;
+    float4 sum = 0.0;
+    float total = 0.0;
+    [unroll]
+    for (int y = 0; y < 4; y++)
+    {
+        [unroll]
+        for (int x = 0; x < 4; x++)
+        {
+            if ((x == 0 || x == 3) && (y == 0 || y == 3))
+                continue;
+            float w = wx[x] * wy[y];
+            sum += history.Load(int3(clamp(origin + int2(x, y), int2(0, 0), last), 0)) * w;
+            total += w;
+        }
+    }
     // Catmull-Rom overshoots; negative colors would survive clipping in YCoCg, and the
     // weight must stay within what was stored.
     return clamp(sum / total, 0.0, float4(65504.0, 65504.0, 65504.0, MAX_WEIGHT));
 }
 
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void resolve(uint3 id : SV_DispatchThreadID)
+// The resolve of one output pixel, the history fetched by `sample_history`.
+void resolve_pixel(uint3 id, bool catmull_rom)
 {
     if (any(id.xy >= push.output_size))
         return;
@@ -167,7 +181,7 @@ void resolve(uint3 id : SV_DispatchThreadID)
     float2 motion = g_textures[push.velocity].Load(int3(closest_pixel, 0)).xy;
     float2 history_uv = uv - motion;
     bool valid = push.reset == 0 && all(history_uv >= 0.0) && all(history_uv <= 1.0);
-    float4 previous = valid ? sample_history(history_uv) : float4(0.0, 0.0, 0.0, 0.0);
+    float4 previous = valid ? sample_history(history_uv, catmull_rom) : float4(0.0, 0.0, 0.0, 0.0);
     float history_weight = previous.a;
     float3 blended = current;
     float new_weight = best_weight;
@@ -196,4 +210,20 @@ void resolve(uint3 id : SV_DispatchThreadID)
         new_weight = min(history_weight + best_weight, cap);
     }
     g_images[push.output][id.xy] = float4(untonemap(saturate(blended)), new_weight);
+}
+
+// The bilinear history (`HistoryFilter::Bilinear`, the default).
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void resolve(uint3 id : SV_DispatchThreadID)
+{
+    resolve_pixel(id, false);
+}
+
+// The Catmull-Rom history (`HistoryFilter::CatmullRom`).
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void resolveCatmullRom(uint3 id : SV_DispatchThreadID)
+{
+    resolve_pixel(id, true);
 }
