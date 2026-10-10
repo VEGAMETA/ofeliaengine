@@ -303,7 +303,10 @@ grown, divide and conquer); the old labels stay in parentheses.
    default, with latency measured.
 6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms, bloom 1.6 ms (a single-pass
    downsampler), local shadows redrawn every frame when casters move (a per-frame redraw
-   budget; never the patented static/dynamic split).
+   budget; never the patented static/dynamic split). Tried 2026-10-11: bloom levels in
+   R11G11B10F save the bloom passes 10 % on both GPUs, but on the Radeon the tone mapper
+   then takes as much longer (frame unchanged; perf history): fewer reads are needed (a
+   cheaper filter, or the 13 taps from shared memory), not smaller ones.
 7. **The second review's core leftovers.**
 7a (was 6c). Memory (review §3.9): one transient heap for both frame slots where no
    transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,
