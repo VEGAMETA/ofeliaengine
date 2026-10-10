@@ -81,6 +81,14 @@ once). Next measurement: a fast-turn mode in `stream_bench` (180° in a fraction
 in a tight budget, the pack on the HDD and on the NVMe drive) counting the frames and the
 share of visible texels below their wanted level until it is resident.
 
+## The owner's answer (2026-10-10)
+
+What the engine has does not fall under the family: one source per kind of object, a budget
+that only divides bytes (ADR 0076's question answered). Combining several schemes' sets for
+the same objects stays out, so 360° views besides the main view are not built. The wider
+field of view (one feedback pass that sees past the screen's edges, instead of the main
+view's) is a later step, decided by the fast-turn measurements.
+
 ## Proposal
 
 Build only what is outside the claims as read above: retention by last use, newly visible
