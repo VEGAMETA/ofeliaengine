@@ -96,6 +96,31 @@ function Wait-QuietCpu([string]$log) {
     }
 }
 
+# Other programs' work on a GPU slows the perf runs: the desktop redrawing animated windows
+# took up to 30 % of the RTX's time (dwm.exe) and its async-compute scenes read 14-41 %
+# slower (2026-10-10). Reported, not waited for: the desktop may never calm down.
+function Test-BusyGpu([string]$log) {
+    $samples = (Get-Counter '\GPU Engine(*engtype_3D)\Utilization Percentage' -SampleInterval 1 -MaxSamples 3 -ErrorAction SilentlyContinue).CounterSamples
+    if (-not $samples) { return }
+    $names = @{}
+    Get-Process | ForEach-Object { $names[$_.Id] = $_.Name }
+    $engines = foreach ($s in $samples) {
+        if ($s.InstanceName -match 'pid_(\d+)_luid_(0x[0-9a-f]+_0x[0-9a-f]+)') {
+            [pscustomobject]@{ Adapter = $Matches[2]; Name = $names[[int]$Matches[1]]; Pct = $s.CookedValue / 3 }
+        }
+    }
+    foreach ($adapter in $engines | Group-Object Adapter) {
+        $busy = ($adapter.Group | Measure-Object Pct -Sum).Sum
+        if ($busy -lt 10) { continue }
+        $top = $adapter.Group | Group-Object Name |
+            Sort-Object { ($_.Group | Measure-Object Pct -Sum).Sum } -Descending | Select-Object -First 2 |
+            ForEach-Object { '{0} {1:N0} %' -f $_.Name, ($_.Group | Measure-Object Pct -Sum).Sum }
+        $line = "a GPU was $([int]$busy) % busy before measuring ($($top -join ', ')): its numbers may read slower; minimize animated windows"
+        $line | Out-File -Append -Encoding utf8 $log
+        Write-Output "        $line"
+    }
+}
+
 # The files this branch changed: against its merge base with origin/main, plus uncommitted
 # and untracked files.
 function Get-ChangedFiles {
@@ -355,6 +380,7 @@ foreach ($name in $steps.Keys) {
         }
         if ($name -eq 'perf') {
             Wait-QuietCpu $log
+            Test-BusyGpu $log
             $env:ENGINE_REQUIRE_GPU = '1'
             $env:VK_LOADER_LAYERS_DISABLE = '~implicit~'
         }

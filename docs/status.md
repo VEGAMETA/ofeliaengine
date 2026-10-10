@@ -132,7 +132,13 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
      MSAA 4×, reflections after FSR 1 twice, FSR 1 after SMAA T2x), and the same scene
      measured again after itself read normal: the first suspect is where the driver places
      a new device's render targets in the iGPU's memory after the previous device freed
-     large ones;
+     large ones. Later the same day most scenes read slower for a whole check (frame
+     22.1–23.7 ms over the day, memory-bound passes +15–37 %) with the CPU at 0 % and the
+     RTX idle, and the same scene measured again after itself stayed slow: more likely the
+     SoC's memory or Data Fabric power states. The owner chose (2026-10-10) a 10 %
+     threshold for AMD and not counting scenes whose GPU ran slower as a whole (ADR 0062
+     addendum) over a BIOS experiment (DF C-states, JEDEC memory speed), which stays
+     possible;
    - `sponza_streamed` read +10 to +23 % against its baseline from run to run in the
      morning while `sponza` stayed within 0.5 % (the same with and without PR #120's
      streaming fix; within 1 % in the afternoon's runs): which levels are resident when

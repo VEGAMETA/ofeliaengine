@@ -187,3 +187,31 @@ uniform-shift rule names it.
 
 Later the same day the pass times became each pass's own time on its queue, without the
 previous pass's tail (ADR 0011 addendum); both baselines were re-measured with them.
+
+## Addendum (2026-10-10, owner's decision): the Radeon's threshold
+
+After the rounds and measuring again, the Radeon still reported most scenes slower in
+some checks, with the CPU at 0 % and the RTX idle: Sponza's frame read 22.1–23.7 ms over
+the day, and its memory-bound passes (shadows, bloom) 15–37 % slower for minutes at a
+time, then normal again. It is the machine, not the code: a `perf_gate` built before the
+day's changes read the same. A BIOS experiment (Data Fabric C-states, the memory at
+JEDEC speed) could remove the cause; the owner chose to raise the iGPU's threshold.
+
+- **The threshold depends on the vendor:** 3 % of the pass and 0.5 % of the frame on
+  NVIDIA (its frames repeat within ±1 %); 10 % of the pass and 2 % of the frame on AMD.
+  In the slow state the bloom passes read 10–37 % slower, which is 200–240 µs, about
+  1 % of the frame. `--threshold` still overrides the percentage; the output names both.
+- **A scene whose GPU ran slower as a whole is not counted** (without `--strict`): besides
+  the uniform shift, when its frame total is slower by more than half the threshold and
+  at least two thirds of its large passes (≥ 5 % of the frame, at least three) are too.
+  In the Radeon's slow state forward, shadows and bloom slow together; a code regression
+  mostly moves one pass (a forward pass 12 % slower moves the frame by ~9 % and no other
+  large pass). Such scenes are not measured again: the state lasts minutes.
+- **A busy GPU is reported before measuring:** `tools/check.ps1` samples each adapter's 3D
+  engine for 3 s before each GPU's run and names the programs when one is over 10 %. The
+  desktop redrawing animated windows took up to 30 % of the RTX's time (`dwm.exe`), and
+  its async-compute scenes then read 14–41 % slower; with the windows minimized, nothing.
+
+Consequences: on the Radeon only regressions of about 10 % or more are reported, which
+still covers the iGPU-specific ones the gate exists for (the 64 → 72 VGPR forward shader
+was 9–13 % slower); smaller ones show on the RTX unless they are AMD-only.

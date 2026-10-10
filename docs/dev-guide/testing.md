@@ -81,17 +81,23 @@ set VK_LOADER_LAYERS_DISABLE=~implicit~
 cargo run -p engine_golden --release --bin perf_gate
 ```
 
-- A pass is **slower** when it takes 3 % more than its baseline and more than 5 µs or 0.5 %
-  of the frame (small passes are noisy). The table marks it; `--strict` makes it an error.
+- A pass is **slower** when it takes more than 3 % over its baseline and more than 5 µs or
+  0.5 % of the frame on NVIDIA; 10 % and 2 % of the frame on AMD, whose iGPU's speed
+  moves by several percent on an idle machine (small passes are noisy everywhere). The
+  table marks it; `--strict` makes it an error.
 - **Each scene runs three times from a fresh device, a round at a time** (the first run of
   every scene, then the second, then the third), and a pass counts its fastest run: a
   moment of other work on the machine slows one run of a few scenes, not every run of one.
 - **A scene with a slower pass is measured again** (three more runs) and judged by the new
   runs: a passing slowdown is gone by then, a regression is not. The output lists the
   first runs' numbers and the scenes measured again.
-- **Everything slower by the same few percent** is reported as a uniform shift: the GPU ran
-  at other clocks or shared with other work (a build, another test). Measure again with
-  the machine idle.
+- **Everything slower by the same few percent** is reported as a uniform shift, and a frame
+  slower together with most of its large passes as a slower GPU: other clocks, the
+  iGPU's memory state, or other work (a build, another test). Neither is counted.
+  Measure again with the machine idle.
+- **Keep the desktop still:** animated windows make the compositor redraw at the
+  display's rate on its GPU (up to 30 % of the RTX's time), and the runs read slower.
+  `tools\check.ps1 -Perf` warns when a GPU is busy before it measures.
 - **The Radeon iGPU shares its die, power and memory with the CPU:** while every core
   works it renders about 10 % slower, and it is back to normal seconds after the load
   stops. Keep the CPU idle while it measures; `tools\check.ps1 -Perf` waits for ~12 quiet
