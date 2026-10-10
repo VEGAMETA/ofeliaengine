@@ -214,3 +214,72 @@ registers. `Pipeline::compute_specialized` was added to `engine_rhi` for it.
 Quality (`tests/taa.rs`, PSNR against 4×4 supersampling): still images are the same;
 panning a third of a pixel per frame gives 37.1 dB bilinear against 38.3 dB Catmull-Rom
 on the RTX (37.3 and 38.4 on the Radeon). The test checks both.
+
+## Addendum (2026-10-10): motion vectors from the depth prepass
+
+**Context.** The second core review (`docs/research/core-audit-2.md` §3.2) found the
+default view's shading over the register line: with motion vectors (every default
+antialiasing: TAA, TAAU, FSR, DLSS, SMAA T2x) the forward pass's vertex stage took 78
+VGPRs on the Radeon instead of 49, and its pixel stage 77-88 instead of 64-80; Sponza's
+forward pass ran +16-27 % slower there, +5-11 % on the RTX. The default path always draws
+the depth prepass (ambient occlusion needs it, ADR 0058; so do contact shadows,
+reflections, subsurface materials and MSAA).
+
+**Options.**
+1. *The prepass writes the motion vectors when it runs (chosen).* `depthVertexMotion`
+   (the prepass's clip position, the shading's previous one) and `prepassMotion` write
+   the motion target; the masked prepass tests alpha first (`prepassMaskedMotion`;
+   with MSAA `prepassCoverageMotion`, whose output's alpha still drives alpha to
+   coverage). The shading after the prepass draws its still variants. Views without a
+   prepass keep option 1 of this ADR (the shading writes them).
+2. Camera motion reconstructed from depth for still instances, object motion drawn for
+   movers only (this ADR's option 2): no motion work over still geometry at all, but a
+   "moved" list from culling, a full-screen pass and a movers pass. Not taken now: (1)
+   gets most of the gain with no new pass; (2) stays the next step if the prepass's
+   motion cost matters (below).
+3. Keep the shading writing them: the register cost above, in every default view.
+
+**Measurements** (ref-1; Sponza 1920 × 1080, `scene_bench`, two builds run in turns,
+four rounds each, prepass + forward µs):
+
+| | main | prepass writes motion |
+|---|---:|---:|
+| RTX, TAA + AO High: prepass / forward / both | 57 / 335 / 391 | 66 / 320 / 387 |
+| Radeon, TAA + AO High | 1,040 / 15,600 / 16,640 | 1,550 / 14,150 / 15,700 |
+| RTX, TAA + `--prepass` (no AO) | 57 / 314 / 371 | 67 / 295 / 362 |
+| Radeon, TAA + `--prepass` | 1,013 / 15,289 / 16,302 | 1,538 / 12,958 / 14,496 |
+
+The default path gains 0.9 ms of the Radeon's frame at 1080p (−5.6 % of prepass and
+forward; the forward pass −1.45 ms, the prepass +0.5 ms: it now writes the motion target
+under its overdraw), 1 % on the RTX. Registers (Radeon, `scene_bench --pipeline-stats
+--sky --ao high`): the shading after the prepass with AO takes a 49-VGPR vertex stage
+(was 78) and 48 / 63 / 72 / 80 pixel VGPRs (was 47 / 67 / 77 / 88); the prepass with
+motion 47 / 8 (the depth-only prepass 47 / 2). Every golden image is byte-identical on
+both GPUs (TAA, TAAU still and moving, FSR 3.1, SMAA T2x, the animated fox's skinned
+motion, MSAA): the prepass computes the same clip positions and motion as the shading
+did.
+
+**Decision.**
+- A view with a temporal state that draws the depth prepass (single-sampled or
+  multisampled) gets its motion vectors from the prepass, in both occlusion phases (the
+  early phase clears the target, the late one loads it); the shading after it reads
+  last frame's instances no more and writes no motion.
+- The shading variants that wrote motion after the prepass are gone: 16 entry points
+  (`fragmentMainMotionAo`, the contact, reflection and subsurface ones) and about 40
+  pipelines when every feature is on (one less of each after-prepass shading pipeline
+  for each sample count). Views without a prepass keep `fragmentMainMotion` and
+  `fragmentMaskedMotion` (and their shadowed twins).
+- `ForwardRenderer::prepass_statistics` and `motion_statistics` report what a temporal
+  view draws with; the perf gate measures the default discrete settings as
+  `sponza_taa_ao` (TAA with ambient occlusion), which no scene covered before.
+
+**Consequences.**
+- The skinned motion pass (ADR 0068) and the background's camera motion run after the
+  prepass as before and overwrite what they own.
+- The prepass costs more with motion (+0.5 ms on the Radeon at 1080p): option 2 would
+  move still geometry's motion to a full-screen pass from depth.
+- Views with motion vectors and no other reason for a prepass still shade with motion.
+  On Sponza the prepass would pay for itself there too (Radeon forward with motion
+  19.6 ms against 14.5 ms for prepass and forward; RTX 416 against 362 µs), but a scene
+  with heavy geometry and little overdraw could lose; `ForwardRenderer::set_depth_prepass`
+  stays the game's choice (ADR 0042).

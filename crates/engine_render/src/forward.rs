@@ -93,14 +93,11 @@ const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked
 const DEPTH_VERTEX: &[u8] = include_bytes!("../shaders/forward.depthVertex.spv");
 const FRAGMENT_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotion.spv");
 const FRAGMENT_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainAo.spv");
-const FRAGMENT_MOTION_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotionAo.spv");
 const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
 const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
 const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
 const SKY_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.skyFragment.spv");
 const FRAGMENT_SUBSURFACE: &[u8] = include_bytes!("../shaders/forward.fragmentSubsurface.spv");
-const FRAGMENT_SUBSURFACE_MOTION: &[u8] =
-    include_bytes!("../shaders/forward.fragmentSubsurfaceMotion.spv");
 const SCATTER_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.scatterFragment.spv");
 // Local lights' shadows (ADR 0071): culling and drawing the views, and the shading that
 // looks them up.
@@ -124,27 +121,15 @@ const FRAGMENT_BLENDED_ATMOSPHERE_SHADOWED: &[u8] =
 const FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentBlendedAtmosphereReactiveShadowed.spv");
 const FRAGMENT_AO_SHADOWED: &[u8] = include_bytes!("../shaders/forward.fragmentMainAoShadowed.spv");
-const FRAGMENT_MOTION_AO_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMainMotionAoShadowed.spv");
 const FRAGMENT_SUBSURFACE_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentSubsurfaceShadowed.spv");
-const FRAGMENT_SUBSURFACE_MOTION_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentSubsurfaceMotionShadowed.spv");
 // The sun's contact shadows (ADR 0071): shading after the prepass that reads their mask.
 const FRAGMENT_CONTACT: &[u8] = include_bytes!("../shaders/forward.fragmentMainContact.spv");
-const FRAGMENT_MOTION_CONTACT: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMainMotionContact.spv");
 const FRAGMENT_AO_CONTACT: &[u8] = include_bytes!("../shaders/forward.fragmentMainAoContact.spv");
-const FRAGMENT_MOTION_AO_CONTACT: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMainMotionAoContact.spv");
 const FRAGMENT_CONTACT_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentMainContactShadowed.spv");
-const FRAGMENT_MOTION_CONTACT_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMainMotionContactShadowed.spv");
 const FRAGMENT_AO_CONTACT_SHADOWED: &[u8] =
     include_bytes!("../shaders/forward.fragmentMainAoContactShadowed.spv");
-const FRAGMENT_MOTION_AO_CONTACT_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMainMotionAoContactShadowed.spv");
 
 #[path = "forward_msaa.rs"]
 mod msaa;
@@ -154,9 +139,10 @@ pub use crate::lights::{LocalLight, Spot};
 pub use crate::local_shadows::{LocalShadowSettings, LocalShadowStats};
 pub use crate::reflections::Reflections;
 
-// Reflections (ADR 0073): the shading of views with them, by
-// `((motion × 2 + ambient occlusion) × 2 + contact shadows) × 2 + local shadows`.
-const REFLECT_FRAGMENTS: [(&[u8], &core::ffi::CStr); 16] = [
+// Reflections (ADR 0073): the shading of views with them (always after the depth prepass,
+// which writes the motion vectors), by `(ambient occlusion × 2 + contact shadows) × 2 +
+// local shadows`.
+const REFLECT_FRAGMENTS: [(&[u8], &core::ffi::CStr); 8] = [
     (
         include_bytes!("../shaders/forward.fragmentReflect.spv"),
         c"fragmentReflect",
@@ -189,38 +175,6 @@ const REFLECT_FRAGMENTS: [(&[u8], &core::ffi::CStr); 16] = [
         include_bytes!("../shaders/forward.fragmentReflectAoContactShadowed.spv"),
         c"fragmentReflectAoContactShadowed",
     ),
-    (
-        include_bytes!("../shaders/forward.fragmentReflectMotion.spv"),
-        c"fragmentReflectMotion",
-    ),
-    (
-        include_bytes!("../shaders/forward.fragmentReflectMotionShadowed.spv"),
-        c"fragmentReflectMotionShadowed",
-    ),
-    (
-        include_bytes!("../shaders/forward.fragmentReflectMotionContact.spv"),
-        c"fragmentReflectMotionContact",
-    ),
-    (
-        include_bytes!("../shaders/forward.fragmentReflectMotionContactShadowed.spv"),
-        c"fragmentReflectMotionContactShadowed",
-    ),
-    (
-        include_bytes!("../shaders/forward.fragmentReflectMotionAo.spv"),
-        c"fragmentReflectMotionAo",
-    ),
-    (
-        include_bytes!("../shaders/forward.fragmentReflectMotionAoShadowed.spv"),
-        c"fragmentReflectMotionAoShadowed",
-    ),
-    (
-        include_bytes!("../shaders/forward.fragmentReflectMotionAoContact.spv"),
-        c"fragmentReflectMotionAoContact",
-    ),
-    (
-        include_bytes!("../shaders/forward.fragmentReflectMotionAoContactShadowed.spv"),
-        c"fragmentReflectMotionAoContactShadowed",
-    ),
 ];
 pub use crate::shadow::ShadowSettings;
 
@@ -228,6 +182,13 @@ pub use crate::shadow::ShadowSettings;
 pub const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 pub(crate) const DEPTH_VERTEX_MASKED: &[u8] =
     include_bytes!("../shaders/forward.depthVertexMasked.spv");
+/// The depth prepass that also writes motion vectors: opaque, masked (queue item 0d).
+pub(crate) const DEPTH_VERTEX_MOTION: &[u8] =
+    include_bytes!("../shaders/forward.depthVertexMotion.spv");
+pub(crate) const PREPASS_MOTION: &[u8] = include_bytes!("../shaders/forward.prepassMotion.spv");
+pub(crate) const DEPTH_VERTEX_MASKED_MOTION: &[u8] =
+    include_bytes!("../shaders/forward.depthVertexMaskedMotion.spv");
+const PREPASS_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.prepassMaskedMotion.spv");
 const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
 const FRAGMENT_BLENDED: &[u8] = include_bytes!("../shaders/forward.fragmentBlended.spv");
 const FRAGMENT_BLENDED_REACTIVE: &[u8] =
@@ -422,8 +383,9 @@ pub struct ForwardView<'a> {
 }
 
 /// Temporal state of one view, kept across frames (ADR 0043): last frame's camera and
-/// instance transforms, from which the forward pass writes motion vectors, and the
-/// sub-pixel jitter sequence of the projection.
+/// instance transforms, from which the depth prepass (or, in views without one, the
+/// forward shading) writes motion vectors, and the sub-pixel jitter sequence of the
+/// projection.
 ///
 /// Instances are known by their index in the draw list, as for [`Occlusion`]: keep the
 /// order stable. An instance whose index had no transform last frame counts as still for
@@ -917,23 +879,21 @@ struct Shading {
     /// Forward shading after the depth prepass: depth tested for equality, not written;
     /// no alpha test (the prepass did it).
     shade: Pipeline,
-    /// Forward shading that also writes motion vectors: opaque, masked, and after the
-    /// prepass.
+    /// Forward shading that also writes motion vectors, for views without the depth
+    /// prepass (after it the prepass writes them): opaque, masked.
     main_motion: [Pipeline; 2],
-    shade_motion: Pipeline,
     /// Transparent surfaces: premultiplied blending, depth tested but not written; without
     /// and with the reactive mask.
     blended: [Pipeline; 2],
 }
 
 /// Ambient occlusion (ADR 0058): its passes, and the shading that reads it after the depth
-/// prepass (`fragmentMainAo`, `fragmentMainMotionAo`), per shading variant: without and
-/// with motion vectors. The other entry points have no code for it (see `shade` in
-/// `forward.slang`).
+/// prepass (`fragmentMainAo`), per shading variant. The other entry points have no code
+/// for it (see `shade` in `forward.slang`).
 #[derive(Debug)]
 struct AoPasses {
     passes: AmbientOcclusion,
-    shading: [[Pipeline; 2]; 4],
+    shading: [Pipeline; 4],
 }
 
 /// The specialization constants of each shading variant: `LOCAL_LIGHTS`, `ENVIRONMENT`
@@ -981,9 +941,7 @@ impl AoPasses {
         };
         let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
         let fragment = spirv_words(FRAGMENT_AO).ok_or_else(invalid)?;
-        let fragment_motion = spirv_words(FRAGMENT_MOTION_AO).ok_or_else(invalid)?;
         let formats = [color_format];
-        let motion_formats = [color_format, MOTION_FORMAT];
         // After the depth prepass: tested for equality, not written.
         let shade = |fragment, entry, formats, variant: usize| GraphicsPipelineDesc {
             depth_write: false,
@@ -998,18 +956,7 @@ impl AoPasses {
             )
         };
         let descs: Vec<PipelineDesc<'_>> = (0..VARIANTS.len())
-            .flat_map(|v| {
-                [
-                    shade(&fragment, c"fragmentMainAo", &formats[..], v),
-                    shade(
-                        &fragment_motion,
-                        c"fragmentMainMotionAo",
-                        &motion_formats[..],
-                        v,
-                    ),
-                ]
-            })
-            .map(PipelineDesc::Graphics)
+            .map(|v| PipelineDesc::Graphics(shade(&fragment, c"fragmentMainAo", &formats[..], v)))
             .collect();
         let mut pipelines =
             Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
@@ -1019,8 +966,7 @@ impl AoPasses {
                 result: vk::Result::ERROR_UNKNOWN,
             })
         };
-        let mut pair = || -> Result<[Pipeline; 2], RhiError> { Ok([next()?, next()?]) };
-        let shading = [pair()?, pair()?, pair()?, pair()?];
+        let shading = [next()?, next()?, next()?, next()?];
         Ok(Self {
             passes: AmbientOcclusion::new(device, bindless)?,
             shading,
@@ -1032,8 +978,8 @@ impl AoPasses {
 #[derive(Debug)]
 struct SubsurfacePipelines {
     /// Per shading variant, their shading after the prepass (also writing their diffuse
-    /// light and albedo): without and with motion vectors.
-    shading: [[Pipeline; 2]; 4],
+    /// light and albedo).
+    shading: [Pipeline; 4],
     /// The scatter pass: the subsurface batches again, adding where their depth is.
     scatter: Pipeline,
 }
@@ -1052,15 +998,8 @@ impl SubsurfacePipelines {
         let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
         let depth_vertex = spirv_words(DEPTH_VERTEX).ok_or_else(invalid)?;
         let fragment = spirv_words(FRAGMENT_SUBSURFACE).ok_or_else(invalid)?;
-        let fragment_motion = spirv_words(FRAGMENT_SUBSURFACE_MOTION).ok_or_else(invalid)?;
         let scatter = spirv_words(SCATTER_FRAGMENT).ok_or_else(invalid)?;
         let formats = [color_format, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
-        let motion_formats = [
-            color_format,
-            MOTION_FORMAT,
-            IRRADIANCE_FORMAT,
-            ALBEDO_FORMAT,
-        ];
         // After the prepass, as `ForwardRenderer::shading`'s `shade`.
         let shade = |fragment, entry, color_formats, specialization| {
             PipelineDesc::Graphics(GraphicsPipelineDesc {
@@ -1082,18 +1021,12 @@ impl SubsurfacePipelines {
                 )
             })
         };
-        let mut descs = Vec::with_capacity(2 * VARIANTS.len() + 1);
+        let mut descs = Vec::with_capacity(VARIANTS.len() + 1);
         for variant in &VARIANTS {
             descs.push(shade(
                 &fragment,
                 c"fragmentSubsurface",
                 &formats[..],
-                variant,
-            ));
-            descs.push(shade(
-                &fragment_motion,
-                c"fragmentSubsurfaceMotion",
-                &motion_formats[..],
                 variant,
             ));
         }
@@ -1124,8 +1057,7 @@ impl SubsurfacePipelines {
                 result: vk::Result::ERROR_UNKNOWN,
             })
         };
-        let mut pair = || -> Result<[Pipeline; 2], RhiError> { Ok([next()?, next()?]) };
-        let shading = [pair()?, pair()?, pair()?, pair()?];
+        let shading = [next()?, next()?, next()?, next()?];
         Ok(Self {
             shading,
             scatter: next()?,
@@ -1140,10 +1072,10 @@ struct ShadowedPipelines {
     shading: [Shading; 2],
     /// Transparent surfaces under an atmosphere or fog: without and with the reactive mask.
     blended_atmosphere: [Pipeline; 2],
-    /// With ambient occlusion, per environment bit: without and with motion vectors.
-    ao: Option<[[Pipeline; 2]; 2]>,
-    /// Subsurface materials, per environment bit: without and with motion vectors.
-    subsurface: Option<[[Pipeline; 2]; 2]>,
+    /// With ambient occlusion, per environment bit.
+    ao: Option<[Pipeline; 2]>,
+    /// Subsurface materials, per environment bit.
+    subsurface: Option<[Pipeline; 2]>,
     /// The shadow views: opaque (depth only), masked.
     depth: [Pipeline; 2],
     cull: ComputeShader<Push>,
@@ -1234,13 +1166,6 @@ impl ShadowedPipelines {
                     false,
                     lit,
                 ),
-                main(
-                    &fragment_motion,
-                    c"fragmentMainMotionShadowed",
-                    &motion_formats[..],
-                    true,
-                    lit,
-                ),
                 blended(
                     &fragment_blended,
                     c"fragmentBlendedShadowed",
@@ -1300,7 +1225,6 @@ impl ShadowedPipelines {
                 main: [next()?, next()?],
                 shade: next()?,
                 main_motion: [next()?, next()?],
-                shade_motion: next()?,
                 blended: [next()?, next()?],
             })
         };
@@ -1342,18 +1266,9 @@ impl ShadowedPipelines {
         }
         let vertex = words(VERTEX)?;
         let fragment_ao = words(FRAGMENT_AO_SHADOWED)?;
-        let fragment_motion_ao = words(FRAGMENT_MOTION_AO_SHADOWED)?;
         let fragment_subsurface = words(FRAGMENT_SUBSURFACE_SHADOWED)?;
-        let fragment_subsurface_motion = words(FRAGMENT_SUBSURFACE_MOTION_SHADOWED)?;
         let formats = [color_format];
-        let motion_formats = [color_format, MOTION_FORMAT];
         let subsurface_formats = [color_format, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
-        let subsurface_motion_formats = [
-            color_format,
-            MOTION_FORMAT,
-            IRRADIANCE_FORMAT,
-            ALBEDO_FORMAT,
-        ];
         // After the depth prepass: tested for equality, not written.
         let shade = |fragment, entry, formats, variant: usize| {
             PipelineDesc::Graphics(GraphicsPipelineDesc {
@@ -1369,7 +1284,7 @@ impl ShadowedPipelines {
                 )
             })
         };
-        let mut descs = Vec::with_capacity(8);
+        let mut descs = Vec::with_capacity(4);
         for lit in [1, 3] {
             if make_ao {
                 descs.push(shade(
@@ -1378,24 +1293,12 @@ impl ShadowedPipelines {
                     &formats[..],
                     lit,
                 ));
-                descs.push(shade(
-                    &fragment_motion_ao,
-                    c"fragmentMainMotionAoShadowed",
-                    &motion_formats[..],
-                    lit,
-                ));
             }
             if make_subsurface {
                 descs.push(shade(
                     &fragment_subsurface,
                     c"fragmentSubsurfaceShadowed",
                     &subsurface_formats[..],
-                    lit,
-                ));
-                descs.push(shade(
-                    &fragment_subsurface_motion,
-                    c"fragmentSubsurfaceMotionShadowed",
-                    &subsurface_motion_formats[..],
                     lit,
                 ));
             }
@@ -1408,20 +1311,20 @@ impl ShadowedPipelines {
                 result: vk::Result::ERROR_UNKNOWN,
             })
         };
-        let mut ao_pairs = [None, None];
-        let mut subsurface_pairs = [None, None];
+        let mut ao = [None, None];
+        let mut subsurface = [None, None];
         for k in 0..2 {
             if make_ao {
-                ao_pairs[k] = Some([next()?, next()?]);
+                ao[k] = Some(next()?);
             }
             if make_subsurface {
-                subsurface_pairs[k] = Some([next()?, next()?]);
+                subsurface[k] = Some(next()?);
             }
         }
-        if let [Some(a), Some(b)] = ao_pairs {
+        if let [Some(a), Some(b)] = ao {
             self.ao = Some([a, b]);
         }
-        if let [Some(a), Some(b)] = subsurface_pairs {
+        if let [Some(a), Some(b)] = subsurface {
             self.subsurface = Some([a, b]);
         }
         Ok(())
@@ -1434,64 +1337,53 @@ impl ShadowedPipelines {
 #[derive(Debug)]
 struct ContactState {
     passes: ContactShadows,
-    /// Per shading variant: without and with motion vectors.
-    shading: [[Pipeline; 2]; 4],
-    ao: Option<[[Pipeline; 2]; 4]>,
+    /// Per shading variant.
+    shading: [Pipeline; 4],
+    ao: Option<[Pipeline; 4]>,
     /// With local lights' shadows, per environment bit (the local-light variants).
-    shadowed: Option<[[Pipeline; 2]; 2]>,
-    shadowed_ao: Option<[[Pipeline; 2]; 2]>,
+    shadowed: Option<[Pipeline; 2]>,
+    shadowed_ao: Option<[Pipeline; 2]>,
 }
 
 /// Shading pipelines after the depth prepass (depth tested for equality, not written) of
-/// `variants`, each without and with motion vectors.
+/// `variants`.
 fn prepass_shading(
     device: &Device,
     bindless: &Bindless,
     color_format: vk::Format,
     depth_format: vk::Format,
-    fragments: [(&[u8], &core::ffi::CStr); 2],
+    fragment: (&[u8], &core::ffi::CStr),
     variants: &[usize],
-) -> Result<Vec<[Pipeline; 2]>, RhiError> {
+) -> Result<Vec<Pipeline>, RhiError> {
     let invalid = || RhiError::Vulkan {
         call: "embedded SPIR-V",
         result: vk::Result::ERROR_INVALID_SHADER_NV,
     };
     let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
-    let still = spirv_words(fragments[0].0).ok_or_else(invalid)?;
-    let moving = spirv_words(fragments[1].0).ok_or_else(invalid)?;
+    let words = spirv_words(fragment.0).ok_or_else(invalid)?;
     let formats = [color_format];
-    let motion_formats = [color_format, MOTION_FORMAT];
-    let mut descs = Vec::with_capacity(2 * variants.len());
-    for &variant in variants {
-        for (fragment, entry, formats) in [
-            (&still, fragments[0].1, &formats[..]),
-            (&moving, fragments[1].1, &motion_formats[..]),
-        ] {
-            descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+    let descs: Vec<PipelineDesc<'_>> = variants
+        .iter()
+        .map(|&variant| {
+            PipelineDesc::Graphics(GraphicsPipelineDesc {
                 depth_write: false,
                 depth_compare: vk::CompareOp::EQUAL,
                 ..shading_desc(
                     &vertex,
-                    fragment,
-                    entry,
-                    formats,
+                    &words,
+                    fragment.1,
+                    &formats,
                     depth_format,
                     &VARIANTS[variant],
                 )
-            }));
-        }
-    }
-    let mut pipelines =
-        Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
-    let mut out = Vec::with_capacity(variants.len());
-    while let (Some(a), Some(b)) = (pipelines.next(), pipelines.next()) {
-        out.push([a, b]);
-    }
-    Ok(out)
+            })
+        })
+        .collect();
+    Pipeline::create_many(device, bindless.pipeline_layout(), &descs)
 }
 
 /// The first four (or two) of `pipelines` as an array.
-fn array_of<const N: usize>(pipelines: Vec<[Pipeline; 2]>) -> Result<[[Pipeline; 2]; N], RhiError> {
+fn array_of<const N: usize>(pipelines: Vec<Pipeline>) -> Result<[Pipeline; N], RhiError> {
     pipelines.try_into().map_err(|_| RhiError::Vulkan {
         call: "contact shadow pipelines (fewer than described)",
         result: vk::Result::ERROR_UNKNOWN,
@@ -1510,10 +1402,7 @@ impl ContactState {
             bindless,
             color_format,
             depth_format,
-            [
-                (FRAGMENT_CONTACT, c"fragmentMainContact"),
-                (FRAGMENT_MOTION_CONTACT, c"fragmentMainMotionContact"),
-            ],
+            (FRAGMENT_CONTACT, c"fragmentMainContact"),
             &[0, 1, 2, 3],
         )?;
         Ok(Self {
@@ -1542,10 +1431,7 @@ impl ContactState {
                 bindless,
                 color,
                 depth,
-                [
-                    (FRAGMENT_AO_CONTACT, c"fragmentMainAoContact"),
-                    (FRAGMENT_MOTION_AO_CONTACT, c"fragmentMainMotionAoContact"),
-                ],
+                (FRAGMENT_AO_CONTACT, c"fragmentMainAoContact"),
                 &[0, 1, 2, 3],
             )?)?);
         }
@@ -1555,13 +1441,7 @@ impl ContactState {
                 bindless,
                 color,
                 depth,
-                [
-                    (FRAGMENT_CONTACT_SHADOWED, c"fragmentMainContactShadowed"),
-                    (
-                        FRAGMENT_MOTION_CONTACT_SHADOWED,
-                        c"fragmentMainMotionContactShadowed",
-                    ),
-                ],
+                (FRAGMENT_CONTACT_SHADOWED, c"fragmentMainContactShadowed"),
                 &[1, 3],
             )?)?);
         }
@@ -1571,16 +1451,10 @@ impl ContactState {
                 bindless,
                 color,
                 depth,
-                [
-                    (
-                        FRAGMENT_AO_CONTACT_SHADOWED,
-                        c"fragmentMainAoContactShadowed",
-                    ),
-                    (
-                        FRAGMENT_MOTION_AO_CONTACT_SHADOWED,
-                        c"fragmentMainMotionAoContactShadowed",
-                    ),
-                ],
+                (
+                    FRAGMENT_AO_CONTACT_SHADOWED,
+                    c"fragmentMainAoContactShadowed",
+                ),
                 &[1, 3],
             )?)?);
         }
@@ -1706,8 +1580,8 @@ struct LocalShadowState {
 
 /// Reflections (ADR 0073): their passes, and the shading of views with them after the
 /// depth prepass, which also writes the normal, roughness and specular weight. By
-/// `[lights][motion][ambient occlusion][contact shadows][local shadows]` (local shadows
-/// only with local lights).
+/// `[lights][ambient occlusion][contact shadows][local shadows]` (local shadows only with
+/// local lights).
 #[derive(Debug)]
 struct ReflectionShading {
     passes: ReflectionPasses,
@@ -1715,7 +1589,7 @@ struct ReflectionShading {
 }
 
 /// [`ReflectionShading::shading`]'s table.
-type ReflectShadingTable = [[[[[Option<Pipeline>; 2]; 2]; 2]; 2]; 2];
+type ReflectShadingTable = [[[[Option<Pipeline>; 2]; 2]; 2]; 2];
 
 impl ReflectionShading {
     fn new(
@@ -1734,23 +1608,16 @@ impl ReflectionShading {
             .map(|&(bytes, entry)| Ok((spirv_words(bytes).ok_or_else(invalid)?, entry)))
             .collect::<Result<Vec<_>, RhiError>>()?;
         let formats = [color_format, NORMAL_ROUGHNESS_FORMAT, WEIGHT_FORMAT];
-        let motion_formats = [
-            color_format,
-            MOTION_FORMAT,
-            NORMAL_ROUGHNESS_FORMAT,
-            WEIGHT_FORMAT,
-        ];
         // The environment variants (2, 3): without and with local lights; after the
         // prepass, tested for equality.
-        let mut descs = Vec::with_capacity(24);
-        let mut slots = Vec::with_capacity(24);
+        let mut descs = Vec::with_capacity(12);
+        let mut slots = Vec::with_capacity(12);
         for (lights, variant) in [(0, 2), (1, 3)] {
             for (k, (fragment, entry)) in fragments.iter().enumerate() {
                 let shadowed = k & 1 != 0;
                 if shadowed && lights == 0 {
                     continue;
                 }
-                let color_formats: &[vk::Format] = if k >= 8 { &motion_formats } else { &formats };
                 descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
                     depth_write: false,
                     depth_compare: vk::CompareOp::EQUAL,
@@ -1758,7 +1625,7 @@ impl ReflectionShading {
                         &vertex,
                         fragment,
                         entry,
-                        color_formats,
+                        &formats,
                         depth_format,
                         &VARIANTS[variant],
                     )
@@ -1769,7 +1636,7 @@ impl ReflectionShading {
         let pipelines = Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?;
         let mut shading: ReflectShadingTable = Default::default();
         for ((lights, k), pipeline) in slots.into_iter().zip(pipelines) {
-            shading[lights][k >> 3][(k >> 2) & 1][(k >> 1) & 1][k & 1] = Some(pipeline);
+            shading[lights][k >> 2][(k >> 1) & 1][k & 1] = Some(pipeline);
         }
         Ok(Self {
             passes: ReflectionPasses::new(device, bindless, color_format)?,
@@ -1777,18 +1644,11 @@ impl ReflectionShading {
         })
     }
 
-    /// The shading for a view: with local lights (`lights`), motion vectors, ambient
-    /// occlusion, the sun's contact shadows, local lights' shadows.
-    fn pipeline(
-        &self,
-        lights: bool,
-        motion: bool,
-        ao: bool,
-        contact: bool,
-        shadowed: bool,
-    ) -> Option<&Pipeline> {
-        self.shading[usize::from(lights)][usize::from(motion)][usize::from(ao)]
-            [usize::from(contact)][usize::from(shadowed && lights)]
+    /// The shading for a view: with local lights (`lights`), ambient occlusion, the sun's
+    /// contact shadows, local lights' shadows.
+    fn pipeline(&self, lights: bool, ao: bool, contact: bool, shadowed: bool) -> Option<&Pipeline> {
+        self.shading[usize::from(lights)][usize::from(ao)][usize::from(contact)]
+            [usize::from(shadowed && lights)]
         .as_ref()
     }
 }
@@ -1875,6 +1735,9 @@ pub struct ForwardRenderer {
     shading: [Shading; 4],
     /// Depth prepass: opaque (depth only), masked.
     prepass: [Pipeline; 2],
+    /// Depth prepass that also writes motion vectors (views with a temporal state):
+    /// opaque, masked.
+    prepass_motion: [Pipeline; 2],
     /// Camera motion where no geometry was drawn.
     background: Pipeline,
     /// The environment's sky where no geometry was drawn.
@@ -1968,6 +1831,11 @@ impl ForwardRenderer {
         let fragment_masked = spirv_words(FRAGMENT_MASKED).ok_or_else(invalid)?;
         let depth_vertex = spirv_words(DEPTH_VERTEX).ok_or_else(invalid)?;
         let depth_vertex_masked = spirv_words(DEPTH_VERTEX_MASKED).ok_or_else(invalid)?;
+        let depth_vertex_motion = spirv_words(DEPTH_VERTEX_MOTION).ok_or_else(invalid)?;
+        let prepass_motion_fragment = spirv_words(PREPASS_MOTION).ok_or_else(invalid)?;
+        let depth_vertex_masked_motion =
+            spirv_words(DEPTH_VERTEX_MASKED_MOTION).ok_or_else(invalid)?;
+        let prepass_masked_motion = spirv_words(PREPASS_MASKED_MOTION).ok_or_else(invalid)?;
         let fragment_motion = spirv_words(FRAGMENT_MOTION).ok_or_else(invalid)?;
         let fragment_masked_motion = spirv_words(FRAGMENT_MASKED_MOTION).ok_or_else(invalid)?;
         let background_vertex = spirv_words(BACKGROUND_VERTEX).ok_or_else(invalid)?;
@@ -2011,7 +1879,7 @@ impl ForwardRenderer {
                 &VARIANTS[variant],
             )
         };
-        let mut descs = Vec::with_capacity(8 * VARIANTS.len() + 11);
+        let mut descs = Vec::with_capacity(7 * VARIANTS.len() + 13);
         for lit in 0..VARIANTS.len() {
             descs.extend([
                 main(&fragment, c"fragmentMain", &formats, false, lit),
@@ -2029,13 +1897,6 @@ impl ForwardRenderer {
                     c"fragmentMaskedMotion",
                     &motion_formats,
                     false,
-                    lit,
-                ),
-                main(
-                    &fragment_motion,
-                    c"fragmentMainMotion",
-                    &motion_formats,
-                    true,
                     lit,
                 ),
                 blended(&fragment_blended, c"fragmentBlended", &formats, lit),
@@ -2091,6 +1952,31 @@ impl ForwardRenderer {
             c"depthVertexMasked",
             Some(masked_depth),
         ));
+        // With motion vectors, which the prepass then writes (the shading after it draws
+        // without them).
+        let motion_only = [MOTION_FORMAT];
+        descs.push(GraphicsPipelineDesc {
+            color_formats: &motion_only,
+            ..prepass(
+                &depth_vertex_motion,
+                c"depthVertexMotion",
+                Some(ShaderStageDesc {
+                    spirv: &prepass_motion_fragment,
+                    entry: c"prepassMotion",
+                }),
+            )
+        });
+        descs.push(GraphicsPipelineDesc {
+            color_formats: &motion_only,
+            ..prepass(
+                &depth_vertex_masked_motion,
+                c"depthVertexMaskedMotion",
+                Some(ShaderStageDesc {
+                    spirv: &prepass_masked_motion,
+                    entry: c"prepassMaskedMotion",
+                }),
+            )
+        });
         let shadow = |spirv, entry, fragment| GraphicsPipelineDesc {
             depth_format: shadow_settings.format,
             dynamic_culling: true,
@@ -2167,7 +2053,6 @@ impl ForwardRenderer {
                 main: [next()?, next()?],
                 shade: next()?,
                 main_motion: [next()?, next()?],
-                shade_motion: next()?,
                 blended: [next()?, next()?],
             })
         };
@@ -2175,12 +2060,14 @@ impl ForwardRenderer {
         let background = next()?;
         let sky = next()?;
         let prepass = [next()?, next()?];
+        let prepass_motion = [next()?, next()?];
         let shadow = [next()?, next()?];
         let composite = next()?;
         let blended_atmosphere = [[next()?, next()?], [next()?, next()?]];
         Ok(Self {
             shading,
             prepass,
+            prepass_motion,
             background,
             sky,
             composite,
@@ -2432,7 +2319,7 @@ impl ForwardRenderer {
             Some(r) => {
                 let [a, b, c] = r.passes.composite_statistics(device);
                 let stats = |lights| {
-                    r.pipeline(lights, false, false, false, false)
+                    r.pipeline(lights, false, false, false)
                         .map(|p| p.statistics(device))
                         .unwrap_or_default()
                 };
@@ -2630,11 +2517,11 @@ impl ForwardRenderer {
     }
 
     /// The driver's statistics of the shading pipelines that read the sun's contact
-    /// shadows (after the prepass, without motion vectors), per shading variant. Empty
-    /// unless contact shadows were turned on and the device captures statistics.
+    /// shadows (after the prepass), per shading variant. Empty unless contact shadows were
+    /// turned on and the device captures statistics.
     pub fn contact_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
         match &self.contact {
-            Some(c) => core::array::from_fn(|k| c.shading[k][0].statistics(device)),
+            Some(c) => core::array::from_fn(|k| c.shading[k].statistics(device)),
             None => Default::default(),
         }
     }
@@ -2671,25 +2558,33 @@ impl ForwardRenderer {
         core::array::from_fn(|k| self.shading[k].main[0].statistics(device))
     }
 
-    /// The driver's statistics of the shading that writes motion vectors (temporal
-    /// antialiasing and upscaling), per shading variant as [`Self::shading_statistics`]:
-    /// without the prepass, then after it (`shade_motion`), then after it with ambient
-    /// occlusion (`fragmentMainMotionAo`; empty until ambient occlusion was turned on).
-    /// The last is what a view with the default settings draws its opaque surfaces with.
+    /// The driver's statistics of what a view with motion vectors (temporal antialiasing
+    /// and upscaling) shades with, per shading variant as [`Self::shading_statistics`]: the
+    /// shading that writes them (views without the depth prepass), then the shading after
+    /// the prepass with ambient occlusion (`fragmentMainAo`: the default settings, whose
+    /// prepass writes the motion vectors; empty until ambient occlusion was turned on).
     pub fn motion_statistics(
         &self,
         device: &Device,
-    ) -> [[Vec<engine_rhi::PipelineStatistic>; 3]; 4] {
+    ) -> [[Vec<engine_rhi::PipelineStatistic>; 2]; 4] {
         core::array::from_fn(|k| {
             [
                 self.shading[k].main_motion[0].statistics(device),
-                self.shading[k].shade_motion.statistics(device),
                 self.ao
                     .as_ref()
-                    .map(|ao| ao.shading[k][1].statistics(device))
+                    .map(|ao| ao.shading[k].statistics(device))
                     .unwrap_or_default(),
             ]
         })
+    }
+
+    /// The driver's statistics of the depth prepass of opaque materials: depth only, then
+    /// also writing motion vectors (views with a temporal state).
+    pub fn prepass_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 2] {
+        [
+            self.prepass[0].statistics(device),
+            self.prepass_motion[0].statistics(device),
+        ]
     }
 
     /// The driver's statistics of the multisampled shading pipelines for `samples` (ADR
@@ -2703,7 +2598,7 @@ impl ForwardRenderer {
     ) -> [Vec<engine_rhi::PipelineStatistic>; 5] {
         match self.msaa_pipelines(samples) {
             Some(m) => core::array::from_fn(|k| match k {
-                0..4 => m.shading[k].shade[0].statistics(device),
+                0..4 => m.shading[k].shade.statistics(device),
                 _ => m.composite.statistics(device),
             }),
             None => Default::default(),
@@ -4256,10 +4151,23 @@ impl ForwardRenderer {
             || subsurface_draws
             || contact.is_some()
             || reflecting;
-        let prepass_pipelines = match ms {
-            Some(m) => [&m.prepass[0], &m.prepass[1]],
-            None => [&self.prepass[0], &self.prepass[1]],
+        // With a prepass, the prepass writes the motion vectors and the shading after it
+        // draws without them (the still variants' registers: on the Radeon its vertex
+        // stage takes 49 VGPRs instead of 78).
+        let prepass_motion = prepass && velocity.is_some();
+        if prepass_motion {
+            targets.velocity = None;
+            targets.previous = None;
+        }
+        let prepass_pipelines = match (ms, prepass_motion) {
+            (Some(m), false) => [&m.prepass[0], &m.prepass[1]],
+            (Some(m), true) => [&m.prepass_motion[0], &m.prepass_motion[1]],
+            (None, false) => [&self.prepass[0], &self.prepass[1]],
+            (None, true) => [&self.prepass_motion[0], &self.prepass_motion[1]],
         };
+        // What the prepass phases attach for motion vectors: the target (cleared by the
+        // first phase) and last frame's instances.
+        let prepass_velocity = velocity.zip(previous).filter(|_| prepass_motion);
         // After the prepass every state shades with the equal-depth pipeline: masked
         // materials were alpha-tested there, and nothing is left to discard.
         let variant = usize::from(light_layout.count > 0) | usize::from(environment.is_some()) << 1;
@@ -4277,33 +4185,29 @@ impl ForwardRenderer {
         });
         // With contact shadows (the prepass is on then), the shading that reads their mask.
         let contact_shading = contact.and_then(|(_, c)| {
-            let m = usize::from(velocity.is_some());
             let k = shadowed_index(variant);
             match (ao.is_some(), shadowed.is_some()) {
-                (false, false) => Some(&c.shading[variant][m]),
-                (true, false) => c.ao.as_ref().map(|p| &p[variant][m]),
-                (false, true) => c.shadowed.as_ref().map(|p| &p[k][m]),
-                (true, true) => c.shadowed_ao.as_ref().map(|p| &p[k][m]),
+                (false, false) => Some(&c.shading[variant]),
+                (true, false) => c.ao.as_ref().map(|p| &p[variant]),
+                (false, true) => c.shadowed.as_ref().map(|p| &p[k]),
+                (true, true) => c.shadowed_ao.as_ref().map(|p| &p[k]),
             }
         });
         // With reflections, the shading that also writes their inputs.
         let reflect_shading = reflection_passes.filter(|_| reflecting).and_then(|r| {
             r.pipeline(
                 variant & 1 != 0,
-                velocity.is_some(),
                 ao.is_some(),
                 contact.is_some(),
                 shadowed.is_some(),
             )
         });
         let main_pipelines = if let Some(m) = ms {
-            let motion = usize::from(velocity.is_some());
             let k = shadowed_index(variant);
             let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
             let p: &Pipeline = if reflect_shading.is_some() {
                 m.reflect_pipeline(
                     variant & 1 != 0,
-                    velocity.is_some(),
                     ao.is_some(),
                     contact.is_some(),
                     shadowed.is_some(),
@@ -4311,20 +4215,20 @@ impl ForwardRenderer {
             } else if contact.is_some() {
                 let c = m.contact.as_ref()?;
                 match (ao.is_some(), shadowed.is_some()) {
-                    (false, false) => &c.shading[variant][motion],
-                    (true, false) => &c.ao.as_ref()?[variant][motion],
-                    (false, true) => &c.shadowed.as_ref()?[k][motion],
-                    (true, true) => &c.shadowed_ao.as_ref()?[k][motion],
+                    (false, false) => &c.shading[variant],
+                    (true, false) => &c.ao.as_ref()?[variant],
+                    (false, true) => &c.shadowed.as_ref()?[k],
+                    (true, true) => &c.shadowed_ao.as_ref()?[k],
                 }
             } else if ao.is_some() {
                 match ms_shadowed {
-                    Some(s) => &s.ao.as_ref()?[k][motion],
-                    None => &m.ao.as_ref()?[variant][motion],
+                    Some(s) => &s.ao.as_ref()?[k],
+                    None => &m.ao.as_ref()?[variant],
                 }
             } else {
                 match ms_shadowed {
-                    Some(s) => &s.shading[k].shade[motion],
-                    None => &m.shading[variant].shade[motion],
+                    Some(s) => &s.shading[k].shade,
+                    None => &m.shading[variant].shade,
                 }
             };
             [p, p]
@@ -4335,13 +4239,10 @@ impl ForwardRenderer {
                     [p, p]
                 }
                 (Some(p), _, _) => [p, p],
-                (None, true, false) => match ao_shading {
-                    Some(p) => [&p[0], &p[0]],
+                // After the prepass (which wrote the motion vectors).
+                (None, true, _) => match ao_shading {
+                    Some(p) => [p, p],
                     None => [&shading.shade, &shading.shade],
-                },
-                (None, true, true) => match ao_shading {
-                    Some(p) => [&p[1], &p[1]],
-                    None => [&shading.shade_motion, &shading.shade_motion],
                 },
                 (None, false, false) => [&shading.main[0], &shading.main[1]],
                 (None, false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
@@ -4414,6 +4315,11 @@ impl ForwardRenderer {
                         .depth(depth, depth_clear, StoreOp::Store);
                         if let Some(resolved) = resolved_depth {
                             pass = pass.resolve(resolved, nearest);
+                        }
+                        if let Some((velocity, previous)) = prepass_velocity {
+                            pass = pass
+                                .color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+                                .read(previous, Access::StorageRead(ShaderStages::VERTEX));
                         }
                         pass.execute(move |ctx| {
                             draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None, None)
@@ -4499,6 +4405,11 @@ impl ForwardRenderer {
                         if let Some(resolved) = resolved_depth {
                             pass = pass.resolve(resolved, farthest);
                         }
+                        if let Some((velocity, previous)) = prepass_velocity {
+                            pass = pass
+                                .color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+                                .read(previous, Access::StorageRead(ShaderStages::VERTEX));
+                        }
                         pass.execute(move |ctx| {
                             draw_phase(
                                 ctx,
@@ -4568,6 +4479,11 @@ impl ForwardRenderer {
                         .depth(depth, LoadOp::Load, StoreOp::Store);
                         if let Some(resolved) = resolved_depth {
                             pass = pass.resolve(resolved, nearest);
+                        }
+                        if let Some((velocity, previous)) = prepass_velocity {
+                            pass = pass
+                                .color(velocity, LoadOp::Load, StoreOp::Store)
+                                .read(previous, Access::StorageRead(ShaderStages::VERTEX));
                         }
                         pass.execute(move |ctx| {
                             draw_phase(ctx, prepass_pipelines, PHASE_LATE, DEPTH_STATES, None, None)
@@ -4670,7 +4586,7 @@ impl ForwardRenderer {
                     fg.create_texture("subsurface albedo resolved", single(ALBEDO_FORMAT)),
                 )
             });
-            let motion = usize::from(velocity.is_some());
+            // (After the prepass, which wrote their motion vectors.)
             let ms_subsurface = ms.and_then(|m| m.subsurface.as_ref());
             let ms_shadowed = ms
                 .and_then(|m| m.shadowed.as_ref())
@@ -4678,11 +4594,11 @@ impl ForwardRenderer {
                 .and_then(|p| p.subsurface.as_ref());
             let pipeline = match (ms, shadowed.and_then(|p| p.subsurface.as_ref())) {
                 (Some(_), _) => match ms_shadowed {
-                    Some(p) => &p[shadowed_index(variant)][motion],
-                    None => &ms_subsurface?.0[variant][motion],
+                    Some(p) => &p[shadowed_index(variant)],
+                    None => &ms_subsurface?.0[variant],
                 },
-                (None, Some(p)) => &p[shadowed_index(variant)][motion],
-                (None, None) => &pipelines.shading[variant][motion],
+                (None, Some(p)) => &p[shadowed_index(variant)],
+                (None, None) => &pipelines.shading[variant],
             };
             let two_phases = flag_buffer.is_some();
             // Their diffuse light is occluded by the view's ambient occlusion too.

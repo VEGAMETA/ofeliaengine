@@ -137,6 +137,13 @@ fn shots() -> Vec<Shot> {
         antialiased("sponza_taa", Antialiasing::TAAU, Quality::Native),
         antialiased("sponza_taau_67", Antialiasing::TAAU, Quality::Quality),
         antialiased("sponza_fsr_quality", Antialiasing::FSR, Quality::Quality),
+        // A discrete GPU's default settings: TAA with ambient occlusion, so the depth
+        // prepass draws and writes the motion vectors, and the shading after it draws
+        // without them.
+        Shot {
+            ao: Some(AoSettings::default()),
+            ..antialiased("sponza_taa_ao", Antialiasing::TAAU, Quality::Native)
+        },
         // The other antialiasing and scaling modes (ADR 0075): MSAA 4× (the depth prepass,
         // multisampled shading, the resolves), the filters after tone mapping (FXAA, SMAA
         // 1x, SMAA T2x with its temporal resolve), FSR 1 from 67 %.

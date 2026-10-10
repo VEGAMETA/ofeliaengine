@@ -78,7 +78,10 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
   specialization constant costs VGPRs (forward shading sits at exactly 64; 72 made it 9–13 %
   slower). Use separate entry points with literal arguments, lazily created pipelines, or keep the
   parameter outside the shader. Check with `ENGINE_PIPELINE_STATS=1 ENGINE_ADAPTER=radeon
-  scene_bench --sky --pipeline-stats` (ps numUsedVgprs per variant: 48/64/64/80 on main).
+  scene_bench --pipeline-stats --sky --ao high` (`--ao` before a flag eats it as its quality):
+  ps numUsedVgprs per variant 48/64/64/80 on main, and the default path's (after the prepass
+  with AO, which writes the motion vectors) 48/63/72/80 with a 49-VGPR vertex stage; the
+  prepass with motion vectors 47 (vertex) / 8 (pixel).
 - No per-frame heap allocations (tests exist; add one for new per-frame paths); `// SAFETY:` on
   every unsafe block; LF line endings (Python on Windows: `newline='\n'`; check `git ls-files --eol`);
   rustfmt, clippy `-D warnings`.

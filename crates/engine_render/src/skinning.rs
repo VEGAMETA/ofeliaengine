@@ -14,11 +14,12 @@
 //!   shading read them like any other vertices; their shaders are unchanged.
 //! - **Motion vectors.** Before overwriting a position, the skinning pass copies the old
 //!   one (last frame's skinned position) into the instance's range of a *previous
-//!   positions* buffer. The forward pass writes each pixel's motion from the instance's
-//!   rigid motion only; [`SkinningFrame::add_motion_pass`] then draws the skinned
-//!   instances once more with depth test *equal* (placement bit-identical to the forward
-//!   shaders') and overwrites their pixels' motion with each vertex's own. Views without
-//!   motion vectors, and frames without skinned meshes, pay nothing.
+//!   positions* buffer. The depth prepass (or, in views without one, the forward shading)
+//!   writes each pixel's motion from the instance's rigid motion only;
+//!   [`SkinningFrame::add_motion_pass`] then draws the skinned instances once more with
+//!   depth test *equal* (placement bit-identical to the forward shaders') and overwrites
+//!   their pixels' motion with each vertex's own. Views without motion vectors, and frames
+//!   without skinned meshes, pay nothing.
 //! - **Bounds.** At [`Skinning::add_skin`] each joint gets the bind-pose box of the
 //!   vertices it influences; [`Skinning::set_pose`] transforms those boxes by the joints'
 //!   matrices and takes their union, which contains every skinned vertex (a skinned
