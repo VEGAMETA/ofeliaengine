@@ -31,8 +31,10 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # decoded by the texture pipeline later. ADR 0033.
 gltf = { version = "1.4", default-features = false, features = ["utils", "names", "KHR_lights_punctual", "KHR_texture_transform", "KHR_materials_emissive_strength", "KHR_materials_volume"] }
 # OpenEXR panoramas (BSD-3-Clause; ADR 0083): Poly Haven's and Blender's EXRs are PIZ
-# compressed, which is not an hour's work. Without rayon (default feature).
-exr = { version = "1.74", default-features = false }
+# compressed, which is not an hour's work. Without rayon (default feature). 1.74.0 exactly:
+# 1.74.1 added lossy DWA compression through pulp, which brings the unmaintained paste
+# (RUSTSEC-2024-0436) and seven more crates.
+exr = { version = "=1.74.0", default-features = false }
 # PNG decoding (MIT OR Apache-2.0): image-rs' decoder, the fastest in Rust (ADR 0040).
 png = "0.18"
 # JPEG decoding (MIT OR Apache-2.0 OR Zlib): as fast as libjpeg-turbo, pure Rust.

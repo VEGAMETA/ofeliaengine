@@ -1279,9 +1279,9 @@ environment.set_panorama(Some(panorama));
   background cube (16 MiB at 512², 64 MiB at 1,024²); a cooked one only its BC6H cube
   (2 MiB at 512², 8 MiB at 1,024²).
 - **The physical atmosphere, when on, replaces the panorama**, as it does the gradient.
-- **OpenEXR** files (any compression, half or float channels) decode into the same
-  RGBE pixels; Poly Haven's 1K EXR matches its `.hdr` exactly. A layer needs channels
-  named R, G and B.
+- **OpenEXR** files (half or float channels; every compression but the lossy DWAA and
+  DWAB) decode into the same RGBE pixels; Poly Haven's 1K EXR matches its `.hdr` exactly.
+  A layer needs channels named R, G and B.
 - **Not yet:** soft shadows sized by the sun.
 
 ## 11. Bloom and automatic exposure

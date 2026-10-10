@@ -273,7 +273,8 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    BC6H cubes with mips (DDC; packs of their own, version 4; the background 8 times
    smaller, 2 frames of upload through the ring), the cube turned when sampled (turning
    rebuilds only the lighting: 0.14 ms for its fill on the Radeon); OpenEXR through the
-   `exr` crate (PIZ, float; Poly Haven's 1K EXR decodes to exactly its `.hdr`'s pixels).
+   `exr` crate (1.74.0: every compression but the lossy DWA; Poly Haven's 1K EXR, PIZ
+   and float, decodes to exactly its `.hdr`'s pixels).
    **Left** (§6): the sun's angular size for soft shadows.
 3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
    medallions on the curtains (roughness 0.28, metallic 0.74) must read gold when seen from

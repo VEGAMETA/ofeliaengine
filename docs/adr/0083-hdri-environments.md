@@ -142,14 +142,14 @@ the cooked cube is checked on the GPU instead.
 
 Poly Haven's and Blender's OpenEXR panoramas are PIZ compressed (wavelets and Huffman
 coding) with 32-bit float channels: not an hour's work, so the `exr` crate reads them
-(1.74.2, BSD-3-Clause, without its rayon feature). `engine_assets::hdr::decode_exr` takes
+(1.74.0 exactly, BSD-3-Clause, without its rayon feature: every compression but the lossy
+DWA, which 1.74.1 added through pulp, bringing the unmaintained paste, RUSTSEC-2024-0436,
+and seven more crates). `engine_assets::hdr::decode_exr` takes
 the first layer with red, green and blue channels at its largest resolution (its size
 checked from the header before anything is allocated) into RGBE; `decode_panorama` tells
 the formats apart by their signatures, and `import_panorama` cooks either. Poly Haven's
 1K OpenEXR of the test panorama decodes to exactly the pixels of its 1K `.hdr` (mean
 relative error 0, peak 60,578 in both), in 94 ms.
 
-It brings 11 crates (bit_field, lebe, libm, num-complex, paste, pulp,
-pulp-wasm-simd-flag, raw-cpuid, reborrow, version_check, zune-inflate; MIT, Apache-2.0,
-BSD-3-Clause or Zlib), about 10 s to an incremental build of engine_assets; num-traits'
-features are unified in the workspace hack (ADR 0077).
+It brings three small crates (bit_field, lebe, zune-inflate; MIT OR Apache-2.0,
+BSD-3-Clause, MIT OR Apache-2.0 OR Zlib).

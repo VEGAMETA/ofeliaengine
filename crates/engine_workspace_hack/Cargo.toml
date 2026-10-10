@@ -31,8 +31,6 @@ bytemuck = { version = "1.25", features = [
 ] }
 
 lock_api = { version = "0.4", features = ["arc_lock", "atomic_usize"] }
-# Default features from num-complex (through exr, ADR 0083), i128 from mlua.
-num-traits = { version = "0.2", features = ["i128"] }
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
