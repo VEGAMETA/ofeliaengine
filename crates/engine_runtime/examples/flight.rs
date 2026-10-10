@@ -54,15 +54,7 @@ fn main() {
 
 #[cfg(windows)]
 fn main() {
-    // On a thread with a large stack: building the renderers takes more than the main
-    // thread's 1 MiB on the Radeon (every `engine_rhi::Pipeline` carries a copy of the
-    // device's function table, `docs/research/core-audit-2.md`).
-    std::thread::Builder::new()
-        .stack_size(64 << 20)
-        .spawn(windowed::run)
-        .unwrap()
-        .join()
-        .unwrap();
+    windowed::run();
 }
 
 #[cfg(windows)]
