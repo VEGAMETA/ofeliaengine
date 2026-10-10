@@ -253,7 +253,10 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    with a payload in 0.59 ms on the RTX, 9.9 ms on the Radeon) and the particles (ADR
    0081: a GPU pool with GPU-only counts, deterministic, sorted by depth, drawn soft; 16 K
    sparks in 0.13 / 0.65 ms, a golden shot on both GPUs).
-2. Clustered decals.
+2. Clustered decals. Researched 2026-10-11 (ADR 0082, Proposed): clustered in the shading
+   doubles the 32 fragment entry points (best after the forward.rs split, 7c), a decal
+   buffer before lighting needs the prepass and skips transparent surfaces. Waiting for
+   the owner's choice; 2b meanwhile.
 2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity): `.hdr` (own
    decoder) and OpenEXR (the `exr` crate, BSD-3-Clause, or own) cooked from equirectangular
    into BC6H cube maps with mips (DDC, pack); a background cube larger than the lighting
