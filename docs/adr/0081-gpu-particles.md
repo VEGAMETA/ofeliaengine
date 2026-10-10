@@ -91,7 +91,16 @@ the pool filled.
   - drawing large particles at a lower resolution;
   - a one-workgroup sort for small counts;
   - ECS components and extraction;
-  - motion vectors and a reactive mask the view lacks: particles ghost under temporal
-    antialiasing in views without transparent surfaces;
+  - motion vectors (the reactive mask: see the amendment);
   - orthographic views (not drawn);
   - an emitter's search over hundreds of emitters (linear per spawn).
+
+## Amendment (2026-10-11): the reactive mask for effects
+
+`ForwardRenderer::set_reactive_effects(true)` gives every view with motion vectors a
+cleared, single-sampled reactive mask even when no transparent surface drew one. The
+particles mark it, so temporal antialiasing and the upscalers do not smear them. Before,
+a view without transparent surfaces of its own had no mask, and under TAA its sparks came
+out dimmer and smeared. The golden shot `procedural_particles_taa` (TAA, 90 frames) uses
+it, byte-identical from run to run on both GPUs. It costs a clear of an 8-bit mask at the
+render size, in views of a renderer that turned it on.

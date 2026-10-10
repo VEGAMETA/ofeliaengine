@@ -1518,6 +1518,8 @@ do the counts: the CPU says what each emitter spawns, and never waits for the GP
 use engine_render::particles::{ParticleEmitter, ParticleSystem, ParticleTarget};
 
 let mut particles = ParticleSystem::new(&device, &mut allocator, &bindless, 65_536, HDR_FORMAT)?;
+// Particles mark a reactive mask, so temporal antialiasing does not smear them.
+frame_renderer.forward_mut().set_reactive_effects(true);
 let torch = particles.add_emitter(ParticleEmitter {
     transform: Affine3A::from_translation(torch_position),
     rate: 400.0,                       // particles per second
@@ -1563,7 +1565,10 @@ frame_renderer.add_view_with(fg, ctx, view, scene, &camera, target, |fg, targets
   0.65 ms on a two-CU integrated Radeon, mostly the sort; 64 K take 0.22 and 2.4 ms. Large
   particles cost their overdraw: 256 smoke puffs filling much of the screen take 0.1 ms on
   the RTX and 1.6 ms on the integrated GPU. Keep big particles few, or small.
+- **Temporal antialiasing:** `set_reactive_effects(true)` on the forward renderer gives
+  every view with motion vectors a reactive mask, even without transparent surfaces of its
+  own (a cleared 8-bit mask at the render size). The particles mark it, and TAA and the
+  upscalers trust their history less there: without it, fast sparks smear and dim.
 - **Not yet:** lighting and shadows on particles, collisions, trails, mesh particles,
   your own simulation code, ECS components (a system you drive yourself today), particles
-  in orthographic views. Under temporal antialiasing particles may ghost in a view without
-  other transparent surfaces (no reactive mask there yet).
+  in orthographic views, motion vectors for particles.

@@ -1798,6 +1798,9 @@ pub struct ForwardRenderer {
     /// Screen-space error (pixels) a coarser detail level may have; 0 draws full meshes.
     lod_threshold: f32,
     depth_prepass: bool,
+    /// Views with motion vectors get a reactive mask even without transparent surfaces,
+    /// for transparent effects drawn after the scene ([`Self::set_reactive_effects`]).
+    reactive_effects: bool,
     color_format: vk::Format,
     depth_format: vk::Format,
     /// Ambient occlusion's passes and shading pipelines, made when it is first turned on.
@@ -2138,6 +2141,7 @@ impl ForwardRenderer {
             light_culling: true,
             lod_threshold: 1.0,
             depth_prepass: false,
+            reactive_effects: false,
             color_format,
             depth_format,
             ao: None,
@@ -2246,6 +2250,20 @@ impl ForwardRenderer {
     /// Whether the depth prepass is on.
     pub fn depth_prepass(&self) -> bool {
         self.depth_prepass
+    }
+
+    /// Turns on (or off, the default) a reactive mask for every view with motion vectors,
+    /// cleared, even when no transparent surface drew one: for transparent effects drawn
+    /// after the scene passes, such as particles (ADR 0081), which mark the pixels they
+    /// cover so that temporal antialiasing and upscaling trust their history less there
+    /// (without it the effects ghost). Costs a clear of an 8-bit mask at the render size.
+    pub fn set_reactive_effects(&mut self, enabled: bool) {
+        self.reactive_effects = enabled;
+    }
+
+    /// Whether views get a reactive mask for effects ([`Self::set_reactive_effects`]).
+    pub fn reactive_effects(&self) -> bool {
+        self.reactive_effects
     }
 
     /// Turns ambient occlusion (GTAO, ADR 0058) on with `settings`, or off (`None`, the
@@ -4914,6 +4932,17 @@ impl ForwardRenderer {
         let reactive_resolved = reactive.and_then(|_| {
             ms.map(|_| fg.create_texture("reactive resolved", single(REACTIVE_FORMAT)))
         });
+        // Transparent effects drawn after the scene (particles) mark the pixels they cover
+        // in a mask of their own when no transparent surface made one; they draw
+        // single-sampled (into the resolved color with MSAA).
+        let effects_reactive = (reactive.is_none() && self.reactive_effects && velocity.is_some())
+            .then(|| {
+                let mask = fg.create_texture("reactive mask (effects)", single(REACTIVE_FORMAT));
+                fg.add_pass("reactive clear")
+                    .color(mask, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+                    .execute(|_| {});
+                mask
+            });
         if blended_commands > 0 {
             let reactive_index = usize::from(reactive.is_some());
             let pipelines = match (ms, atmosphere, shadowed) {
@@ -5050,7 +5079,7 @@ impl ForwardRenderer {
                 velocity,
                 jitter,
                 reset,
-                reactive: reactive_resolved.or(reactive),
+                reactive: reactive_resolved.or(reactive).or(effects_reactive),
                 clip_from_world,
                 previous_clip_from_world,
             }),
