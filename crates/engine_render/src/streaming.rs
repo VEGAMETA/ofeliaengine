@@ -528,7 +528,9 @@ impl TextureStreamer {
                 continue;
             };
             let tail_mask = level_mask(e.tail, e.levels - e.tail);
-            if info.uploaded & tail_mask == tail_mask || e.requested & tail_mask != 0 {
+            // Uploaded, or queued in the pool (it arrived and waits for an upload budget).
+            let have = info.uploaded | info.pending;
+            if have & tail_mask == tail_mask || e.requested & tail_mask != 0 {
                 continue;
             }
             if request_bytes > 0 && request_bytes + e.bytes(e.tail) > limit {
@@ -556,8 +558,8 @@ impl TextureStreamer {
                 if e.plan >= e.tail || info.planned_base > e.plan {
                     continue;
                 }
-                // The next level down from what is uploaded or asked for.
-                let have = info.uploaded | e.requested;
+                // The next level down from what is uploaded, queued or asked for.
+                let have = info.uploaded | info.pending | e.requested;
                 let Some(next) = (e.plan..e.tail).rev().find(|&l| have & (1 << l) == 0) else {
                     continue;
                 };
@@ -1184,6 +1186,7 @@ mod tests {
                 planned_base: tail,
                 resident: levels,
                 uploaded: 0,
+                pending: 0,
                 bytes: levels_bytes(TextureFormat::Bc7Unorm, size, size, levels, tail),
             });
             TextureId::from_parts(self.textures.len() as u32 - 1, 0)

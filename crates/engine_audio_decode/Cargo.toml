@@ -12,6 +12,8 @@ links = "opus"
 workspace = true
 
 [dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
 engine_audio.workspace = true
 engine_profiler.workspace = true
 # Vorbis (MIT OR Apache-2.0), the Ogg container for Opus (BSD-3-Clause, the version

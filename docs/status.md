@@ -79,7 +79,9 @@ tooling included) about **50 %**.
 
 - Faster checks (queue item 0), by the coordinator, after the second core review
   (2026-10-10, `docs/research/core-audit-2.md`; the owner answered its questions the same
-  day, see §5).
+  day, see §5). First part: ADR 0077 (cargo-nextest, one build per check, unified
+  dependency features, doc tests and formatting for what changed, `-Affected`): a check
+  with nothing changed 632 → 168 s.
 
 ## 5. Queue (in order)
 
@@ -109,6 +111,13 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    - **adopt cargo-nextest;**
    - **add an "affected crates" mode** for agents' intermediate runs. The full run stays
      the gate before every merge.
+
+   Done (ADR 0077): duplicates removed, one build per check, nextest, `-Affected`, doc tests
+   and formatting for what changed (632 → 168 s with nothing changed). Left: fewer
+   integration-test binaries per crate (`engine_render`: 36 binaries for 52 tests); the
+   linker and `line-tables-only` measurements that close ADR 0001; sccache for agents'
+   worktrees; the target directory on an NVMe drive (`C:`, owner 2026-10-10: measure after
+   the test changes); the perf step's 3 runs × 200 frames per scene (a variance study first).
 0a. **The review's P0 fixes** (§3.1 and §3.3):
    - `engine_rhi::Pipeline` without its copy of the device's function table (1,504 bytes
      per pipeline: the renderers' construction overflows Windows' 1 MiB main thread on

@@ -24,6 +24,8 @@ tracy-ondemand = ["tracy", "tracy-client/ondemand"]
 tracy-base = ["dep:tracy-client"]
 
 [dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
 # Bundles the Tracy 0.14.1 client (BSD-3-Clause); use the Tracy 0.14.1 profiler GUI.
 # Default features are off: no crash handler (the engine has its own, engine_crash, ADR 0061).
 tracy-client = { version = "0.19", optional = true, default-features = false, features = [

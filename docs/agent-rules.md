@@ -49,6 +49,9 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
 
 ## Before the PR
 
+- Between commits, `tools/check.ps1 -Gpu -Affected` runs only what your branch touches
+  (ADR 0077); it needs cargo-nextest (`cargo install cargo-nextest --locked`). A new crate
+  depends on `engine_workspace_hack` (or on `engine_core`).
 - `powershell -NoProfile -ExecutionPolicy Bypass -File tools/check.ps1 -Gpu -Perf` (plus `-Deny`
   for dependency changes, `-Loom` for lock-free code) must be green, with your target dir and
   ENGINE_TEST_ASSETS set.

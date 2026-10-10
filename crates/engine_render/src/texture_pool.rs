@@ -120,6 +120,11 @@ pub const DEFAULT_STAGING_BYTES: u64 = 64 << 20;
 /// Most levels a texture may have (a 2^31-texel side).
 const MAX_LEVELS: u32 = 32;
 
+/// Levels `first..first + count`, one bit each.
+fn level_mask(first: u32, count: u32) -> u32 {
+    (((1u64 << (first + count)) - (1u64 << first)) & u64::from(u32::MAX)) as u32
+}
+
 /// Why a texture or an upload was not accepted.
 #[derive(Debug)]
 pub enum TextureError {
@@ -280,6 +285,8 @@ struct PoolTexture {
     target: Option<u32>,
     /// Levels uploaded (texture levels, one bit each; only `base..levels` can be).
     uploaded: u32,
+    /// Levels with an upload in the queue, waiting for a frame's budget.
+    pending: u32,
     /// First level of the view: the resident levels are `resident..levels`.
     resident: u32,
     /// View over the resident levels.
@@ -333,6 +340,9 @@ pub struct TextureInfo {
     pub resident: u32,
     /// Levels uploaded, one bit each.
     pub uploaded: u32,
+    /// Levels queued for upload (not in `uploaded` yet), one bit each: they arrive within
+    /// the next frames' upload budgets. Asking for them again would upload them twice.
+    pub pending: u32,
     /// The image's bytes in GPU memory.
     pub bytes: u64,
 }
@@ -493,6 +503,9 @@ impl TexturePool {
             bytes += expected.next_multiple_of(LEVEL_ALIGN);
         }
         let id = self.add_empty(allocator, width, height, texture.format, levels)?;
+        if let Some(t) = self.texture_mut(id) {
+            t.pending = level_mask(0, levels);
+        }
         self.queue.push_back(Upload {
             id,
             first: 0,
@@ -545,6 +558,7 @@ impl TexturePool {
             base,
             target: None,
             uploaded: 0,
+            pending: 0,
             resident: levels,
             view: None,
             bindless: None,
@@ -651,7 +665,8 @@ impl TexturePool {
     /// one another, each padded to [`LEVEL_ALIGN`] (the layout of a cooked pack's texture
     /// entry). The span comes back to the ring once the frame that copies it has finished.
     /// A stale id or levels outside the texture (or below the first level its image holds
-    /// or will hold, [`Self::set_base`]) give the span back and fail.
+    /// or will hold, [`Self::set_base`]) give the span back and fail. Levels that are all
+    /// uploaded or queued already give the span back and succeed: they are or will be there.
     pub fn upload_levels(
         &mut self,
         id: TextureId,
@@ -665,8 +680,20 @@ impl TexturePool {
                 && first.checked_add(count).is_some_and(|end| end <= t.levels);
             fits.then(|| t.staging_bytes(first, count))
         });
+        let mask = level_mask(first, count);
+        if bytes.is_some()
+            && self
+                .texture(id)
+                .is_some_and(|t| (t.uploaded | t.pending) & mask == mask)
+        {
+            self.cancel_staging(span);
+            return Ok(());
+        }
         match bytes {
             Some(bytes) if bytes <= span.len => {
+                if let Some(t) = self.texture_mut(id) {
+                    t.pending |= mask;
+                }
                 self.queue.push_back(Upload {
                     id,
                     first,
@@ -751,6 +778,7 @@ impl TexturePool {
             planned_base: t.planned_base(),
             resident: t.resident,
             uploaded: t.uploaded,
+            pending: t.pending,
             bytes: t.bytes(),
         })
     }
@@ -877,21 +905,35 @@ impl TexturePool {
                 ));
             }
         }
-        // This frame's uploads: the oldest within the budget.
-        let mut batch = Vec::new();
+        // This frame's uploads: the oldest within the budget, each with the levels it brings
+        // (`fresh`): a level is copied into an image once. Another upload of a level the
+        // image has, or that this frame copies already, would overwrite it while earlier
+        // frames may still sample it (and transition it twice in one barrier batch).
+        let mut batch: Vec<(Upload, u32)> = Vec::new();
+        let mut batched: Vec<(TextureId, u32)> = Vec::new();
         let mut owned_bytes = 0u64;
         while let Some(upload) = self.queue.front() {
-            let holds = self
+            let mask = level_mask(upload.first, upload.count);
+            let fresh = self
                 .texture(upload.id)
-                .is_some_and(|t| upload.first >= t.base);
-            if !holds {
-                // Removed before its upload, or its levels evicted since it was queued.
-                if let Some(Upload {
-                    source: Source::Span(span),
-                    ..
-                }) = self.queue.pop_front()
-                {
-                    self.cancel_staging(span);
+                .filter(|t| upload.first >= t.base)
+                .map(|t| {
+                    let in_batch = batched
+                        .iter()
+                        .find(|(id, _)| *id == upload.id)
+                        .map_or(0, |(_, m)| *m);
+                    mask & !t.uploaded & !in_batch
+                });
+            if fresh.unwrap_or(0) == 0 {
+                // Removed before its upload, its levels evicted since it was queued, or
+                // nothing it brings is missing.
+                if let Some(upload) = self.queue.pop_front() {
+                    if let Some(t) = self.texture_mut(upload.id) {
+                        t.pending &= !mask;
+                    }
+                    if let Source::Span(span) = upload.source {
+                        self.cancel_staging(span);
+                    }
                 }
                 continue;
             }
@@ -902,8 +944,13 @@ impl TexturePool {
             if matches!(upload.source, Source::Owned(_)) {
                 owned_bytes += upload.bytes;
             }
+            let fresh = fresh.unwrap_or(0);
+            match batched.iter_mut().find(|(id, _)| *id == upload.id) {
+                Some((_, m)) => *m |= fresh,
+                None => batched.push((upload.id, fresh)),
+            }
             if let Some(upload) = self.queue.pop_front() {
-                batch.push(upload);
+                batch.push((upload, fresh));
             }
         }
         self.frame_bytes = total;
@@ -927,7 +974,7 @@ impl TexturePool {
                 });
             };
             let mut offset = 0usize;
-            for upload in &batch {
+            for (upload, _) in &batch {
                 if let Source::Owned(levels) = &upload.source {
                     for level in levels {
                         target[offset..offset + level.len()].copy_from_slice(level);
@@ -954,7 +1001,7 @@ impl TexturePool {
         let ring_handle = self.ring.as_ref().and_then(|ring| {
             batch
                 .iter()
-                .any(|u| matches!(u.source, Source::Span(_)))
+                .any(|(u, _)| matches!(u.source, Source::Span(_)))
                 .then(|| {
                     fg.import_buffer(
                         "texture streaming ring",
@@ -968,11 +1015,12 @@ impl TexturePool {
                     )
                 })
         });
-        // Copies per upload: (image, first mip, count, from the ring?, regions).
-        let mut copies: Vec<(vk::Image, u32, u32, bool, Vec<vk::BufferImageCopy>)> =
+        // Copies per upload: (image, its mips written (one bit each), from the ring?,
+        // regions).
+        let mut copies: Vec<(vk::Image, u32, bool, Vec<vk::BufferImageCopy>)> =
             Vec::with_capacity(batch.len());
         let mut owned_offset = 0u64;
-        for upload in &batch {
+        for (upload, fresh) in &batch {
             let Some(t) = self.texture(upload.id) else {
                 continue;
             };
@@ -981,10 +1029,17 @@ impl TexturePool {
                 Source::Span(span) => (span.offset, true),
             };
             let mut regions = Vec::with_capacity(upload.count as usize);
+            let mut mips = 0u32;
             for k in upload.first..upload.first + upload.count {
                 let (w, h) = t.level_size(k);
+                let level_offset = offset;
+                offset += t.format.level_bytes(w, h).next_multiple_of(LEVEL_ALIGN);
+                if fresh & (1 << k) == 0 {
+                    continue;
+                }
+                mips |= 1 << (k - t.base);
                 regions.push(vk::BufferImageCopy {
-                    buffer_offset: offset,
+                    buffer_offset: level_offset,
                     image_subresource: vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: k - t.base,
@@ -998,12 +1053,11 @@ impl TexturePool {
                     },
                     ..Default::default()
                 });
-                offset += t.format.level_bytes(w, h).next_multiple_of(LEVEL_ALIGN);
             }
             if !ring {
                 owned_offset = offset;
             }
-            copies.push((t.image, upload.first - t.base, upload.count, ring, regions));
+            copies.push((t.image, mips, ring, regions));
         }
         let mut pass = fg.add_pass("texture pool upload");
         if let Some(handle) = owned_handle {
@@ -1045,22 +1099,26 @@ impl TexturePool {
                     copied.push(transition(m.new, new, 1, COPY_TARGET, READ));
                 }
             }
+            // One barrier per mip written: an upload's fresh levels need not be one run.
+            let written = |&(image, mips, _, _): &(vk::Image, u32, bool, _)| {
+                (0..MAX_LEVELS)
+                    .filter(move |m| mips & (1 << m) != 0)
+                    .map(move |m| (image, m))
+            };
             let to_transfer: Vec<_> = copies
                 .iter()
-                .map(|(image, first, count, _, _)| {
-                    transition(*image, *first, *count, UNDEFINED, COPY_TARGET)
-                })
+                .flat_map(written)
+                .map(|(image, mip)| transition(image, mip, 1, UNDEFINED, COPY_TARGET))
                 .collect();
             let to_read: Vec<_> = copies
                 .iter()
-                .map(|(image, first, count, _, _)| {
-                    transition(*image, *first, *count, COPY_TARGET, READ)
-                })
+                .flat_map(written)
+                .map(|(image, mip)| transition(image, mip, 1, COPY_TARGET, READ))
                 .collect();
             let owned = owned_handle.map(|h| ctx.buffer(h));
             let ring = ring_handle.map(|h| ctx.buffer(h));
             // SAFETY: recording outside a rendering scope. Uploaded levels are new (never
-            // used before these barriers: a level is uploaded once per image); copied
+            // used before these barriers: a level is uploaded once per image, `fresh`); copied
             // levels were uploaded in earlier frames (read-only since) into images the pool
             // owns, which it frees only after the frames that used them.
             unsafe {
@@ -1112,7 +1170,7 @@ impl TexturePool {
                         ctx.cmd,
                         &vk::DependencyInfo::default().image_memory_barriers(&to_transfer),
                     );
-                    for (image, _, _, from_ring, regions) in &copies {
+                    for (image, _, from_ring, regions) in &copies {
                         let source = if *from_ring { ring } else { owned };
                         if let Some(source) = source {
                             ctx.device.cmd_copy_buffer_to_image(
@@ -1132,14 +1190,14 @@ impl TexturePool {
             }
         });
         // Residency: views over the resident levels, a new bindless index when it grows.
-        for upload in batch {
-            let mask = ((1u64 << (upload.first + upload.count)) - (1u64 << upload.first)) as u32;
+        for (upload, fresh) in batch {
             if let Source::Span(span) = upload.source {
                 self.retired.push((frame_number, Retired::Span(span.start)));
             }
             self.uploaded_bytes += upload.bytes;
             if let Some(t) = self.texture_mut(upload.id) {
-                t.uploaded |= mask;
+                t.uploaded |= fresh;
+                t.pending &= !level_mask(upload.first, upload.count);
                 changed.push(upload.id);
             }
         }
