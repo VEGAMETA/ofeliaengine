@@ -395,6 +395,56 @@ fn levels_stream_in_and_the_texture_grows_from_its_tail() {
     h.finish();
 }
 
+/// A streamer can ask for a level again while its first upload still waits in the queue
+/// for a frame's budget (it arrived from the drive, but is not in `uploaded` yet): each
+/// level is copied into the image once. Copying it twice in one frame transitioned it
+/// twice in one barrier batch (a validation error seen in `engine_streaming`'s budget
+/// test, 2026-10-10); copying it again in a later frame would overwrite it while earlier
+/// frames may still sample it.
+#[test]
+fn a_level_asked_for_again_is_uploaded_once() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let mut h = Harness::new(instance, device, 16 * STAGING_ALIGN);
+    let id = h
+        .pool
+        .add_empty(
+            &mut h.allocator,
+            SIZE,
+            SIZE,
+            TextureFormat::Rgba8Unorm,
+            LEVELS,
+        )
+        .unwrap();
+
+    // The same levels queued twice before a frame: the second is not queued.
+    let tail = h.filled(&packed(3, 3));
+    h.pool.upload_levels(id, 3, 3, tail).unwrap();
+    assert_eq!(h.pool.info(id).unwrap().pending, 0b11_1000);
+    let again = h.filled(&packed(3, 3));
+    h.pool.upload_levels(id, 3, 3, again).unwrap();
+    // Overlapping runs in one frame: level 2 then levels 1-2; each level copied once.
+    let two = h.filled(&packed(2, 1));
+    h.pool.upload_levels(id, 2, 1, two).unwrap();
+    let one_two = h.filled(&packed(1, 2));
+    h.pool.upload_levels(id, 1, 2, one_two).unwrap();
+    h.frame(None);
+    let info = h.pool.info(id).unwrap();
+    assert_eq!((info.uploaded, info.pending), (0b11_1110, 0));
+    assert_eq!(h.pool.resident_level(id), Some(1));
+
+    // A run over a level the image has: only the missing one is copied.
+    let zero_one = h.filled(&packed(0, 2));
+    h.pool.upload_levels(id, 0, 2, zero_one).unwrap();
+    h.frame(None);
+    assert_eq!(h.pool.resident_level(id), Some(0));
+    let read = h.frame(Some(id)).unwrap();
+    let expected: Vec<u8> = (0..LEVELS).flat_map(level).collect();
+    assert_eq!(read, expected);
+    h.finish();
+}
+
 #[test]
 fn the_staging_ring_is_reused_once_its_copies_are_done() {
     let Some((instance, device)) = gpu() else {
