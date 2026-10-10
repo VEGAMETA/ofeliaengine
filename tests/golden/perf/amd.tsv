@@ -218,6 +218,24 @@ sponza_taa	shadow cull	1.2
 sponza_taa	sky	43.4
 sponza_taa	taau	6615.9
 sponza_taa	tonemap	892.2
+sponza_taa_ao	(frame total)	40848.0
+sponza_taa_ao	(gpu frame)	40812.9
+sponza_taa_ao	ao	11654.8
+sponza_taa_ao	ao denoise	934.5
+sponza_taa_ao	ao depths	735.9
+sponza_taa_ao	bloom downsample	1390.6
+sponza_taa_ao	bloom upsample	885.4
+sponza_taa_ao	cull	4.5
+sponza_taa_ao	cull setup	1.0
+sponza_taa_ao	depth prepass	1650.0
+sponza_taa_ao	forward	13503.1
+sponza_taa_ao	motion background	35.2
+sponza_taa_ao	remember instances	0.3
+sponza_taa_ao	shadow	2486.9
+sponza_taa_ao	shadow cull	1.2
+sponza_taa_ao	sky	41.7
+sponza_taa_ao	taau	6581.7
+sponza_taa_ao	tonemap	892.2
 sponza_taau_67	(frame total)	21789.3
 sponza_taau_67	(gpu frame)	21691.4
 sponza_taau_67	bloom downsample	1383.1

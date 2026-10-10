@@ -540,8 +540,12 @@ temporal.reset();
 
 What it costs (ref-1, 1080p):
 
-- **Motion vectors:** +8-23% on the forward pass (Sponza, FlightHelmet). Measure with
-  `scene_bench -- --motion`.
+- **Motion vectors:** written by the depth prepass when the view draws one (the
+  default: ambient occlusion needs it), so the shading after it draws without them: on
+  Sponza at 1080p with TAA and AO, the prepass +9 µs and the forward pass −15 µs on the
+  RTX 4060 Ti, +0.5 ms and −1.45 ms on the Radeon iGPU. Without a prepass the forward
+  shading writes them: +5-23 % on the forward pass (Sponza, FlightHelmet). Measure with
+  `scene_bench -- --motion` (add `--ao high` or `--prepass`).
 - **The resolve:**
   - RTX 4060 Ti: 0.14 ms for TAA, 0.12 ms from 720p (bilinear history);
   - Radeon iGPU: 3.9 ms either way (4.5 ms with the Catmull-Rom history).

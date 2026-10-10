@@ -25,9 +25,11 @@
 // operation carries NoContraction and the two passes produce the same bits.
 //
 // Motion vectors (ADR 0043): with a temporal state, the projection is jittered by a
-// sub-pixel offset every frame, and the `*Motion` fragment entry points also write each
-// pixel's motion, the texture-coordinate delta current − previous without jitter, into a
-// second target. The previous position comes from last frame's instance transforms
+// sub-pixel offset every frame, and each pixel's motion, the texture-coordinate delta
+// current − previous without jitter, goes into a target of its own: written by the depth
+// prepass (`depthVertexMotion`, `prepassMotion` and their masked twins) when the view
+// draws one, so the shading after it draws without; else by the shading's `*Motion`
+// entry points. The previous position comes from last frame's instance transforms
 // (`previous_instances`, by draw index) and camera. `backgroundMotion` fills the pixels
 // no geometry covered (depth still 1) with the camera's motion.
 //
@@ -1468,21 +1470,87 @@ struct ShadedMotion
     float2 motion : SV_Target1;
 };
 
+// Motion vectors from the depth prepass: a view that draws the prepass gets its motion
+// there, and its shading draws without (the shading's vertex stage keeps the still
+// variants' registers: on the Radeon 49 VGPRs instead of 78, the environment variants'
+// pixel stage 64 instead of 77-80). The clip position is `depthVertex`'s
+// (`clip_position`, the same bits as the shading's), the previous one `vertexMain`'s.
+struct DepthMotionOut
+{
+    float4 position : SV_Position;
+    float4 previous_clip : TEXCOORD2;
+};
+
+[shader("vertex")]
+DepthMotionOut depthVertexMotion(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    uint index = push.visible[slot];
+    Instance inst = push.instances[index];
+    float3 p = load_position(vertex);
+    DepthMotionOut o;
+    o.position = clip_position(inst, p).clip;
+    // Without a previous transform the instance counts as still.
+    Instance previous = index < push.frame.previous_count ? push.previous_instances[index] : inst;
+    o.previous_clip = mul(push.frame.previous_clip_from_world, float4(transform_point(previous, p), 1.0));
+    return o;
+}
+
+[shader("fragment")]
+float2 prepassMotion(DepthMotionOut input) : SV_Target0
+{
+    return motion(input.position, input.previous_clip);
+}
+
+// The prepass of masked materials with motion vectors: the alpha test, then the motion.
+struct DepthMaskedMotionOut
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    float4 previous_clip : TEXCOORD2;
+    nointerpolation uint material : MATERIAL;
+};
+
+[shader("vertex")]
+DepthMaskedMotionOut depthVertexMaskedMotion(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    uint index = push.visible[slot];
+    Instance inst = push.instances[index];
+    float3 p = load_position(vertex);
+    DepthMaskedMotionOut o;
+    o.position = clip_position(inst, p).clip;
+    o.uv = push.attributes[vertex].uv;
+    Instance previous = index < push.frame.previous_count ? push.previous_instances[index] : inst;
+    o.previous_clip = mul(push.frame.previous_clip_from_world, float4(transform_point(previous, p), 1.0));
+    o.material = inst.material;
+    return o;
+}
+
+[shader("fragment")]
+float2 prepassMaskedMotion(DepthMaskedMotionOut input) : SV_Target0
+{
+    Material m = push.materials[input.material];
+    if (sample_material(m.base_color_texture, input.uv).a * m.base_color.a < m.alpha_cutoff)
+        discard;
+    return motion(input.position, input.previous_clip);
+}
+
+// With MSAA (ADR 0075): `prepassCoverage`'s alpha to coverage, the motion in the same
+// output's first two components (alpha to coverage reads its alpha; the motion target
+// stores red and green).
+[shader("fragment")]
+float4 prepassCoverageMotion(DepthMaskedMotionOut input) : SV_Target0
+{
+    Material m = push.materials[input.material];
+    float alpha = sample_material(m.base_color_texture, input.uv).a * m.base_color.a;
+    alpha = (alpha - m.alpha_cutoff) / max(fwidth(alpha), 1e-4) + 0.5;
+    return float4(motion(input.position, input.previous_clip), 0.0, alpha);
+}
+
 [shader("fragment")]
 ShadedMotion fragmentMainMotion(VertexOut input, bool front : SV_IsFrontFace)
 {
     ShadedMotion o;
     o.color = float4(shade(input, front, false, false).rgb, 1.0);
-    o.motion = motion(input.position, input.previous_clip);
-    return o;
-}
-
-// With motion vectors, after the depth prepass of a view with ambient occlusion.
-[shader("fragment")]
-ShadedMotion fragmentMainMotionAo(VertexOut input, bool front : SV_IsFrontFace)
-{
-    ShadedMotion o;
-    o.color = float4(shade(input, front, false, true).rgb, 1.0);
     o.motion = motion(input.position, input.previous_clip);
     return o;
 }
@@ -1517,14 +1585,6 @@ struct Reflected
     float4 weight : SV_Target2;
 };
 
-struct ReflectedMotion
-{
-    float4 color : SV_Target0;
-    float2 motion : SV_Target1;
-    float4 normal_roughness : SV_Target2;
-    float4 weight : SV_Target3;
-};
-
 // `ao`, `shadows` (local lights', ADR 0071) and `contact` (the sun's, ADR 0071): literals,
 // as in `shade`.
 Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bool contact)
@@ -1535,17 +1595,6 @@ Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bo
     o.color = float4(shade_surface(input, front, false, ao, false, unused, refl, shadows, contact, true).rgb, 1.0);
     o.normal_roughness = float4(encode_octahedral(refl.normal), refl.roughness, 1.0);
     o.weight = float4(refl.weight, 1.0);
-    return o;
-}
-
-ReflectedMotion shade_reflected_motion(VertexOut input, bool front, bool ao, bool shadows, bool contact)
-{
-    Reflected r = shade_reflected(input, front, ao, shadows, contact);
-    ReflectedMotion o;
-    o.color = r.color;
-    o.motion = motion(input.position, input.previous_clip);
-    o.normal_roughness = r.normal_roughness;
-    o.weight = r.weight;
     return o;
 }
 
@@ -1595,54 +1644,6 @@ Reflected fragmentReflectAoContact(VertexOut input, bool front : SV_IsFrontFace)
 Reflected fragmentReflectAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
 {
     return shade_reflected(input, front, true, true, true);
-}
-
-[shader("fragment")]
-ReflectedMotion fragmentReflectMotion(VertexOut input, bool front : SV_IsFrontFace)
-{
-    return shade_reflected_motion(input, front, false, false, false);
-}
-
-[shader("fragment")]
-ReflectedMotion fragmentReflectMotionShadowed(VertexOut input, bool front : SV_IsFrontFace)
-{
-    return shade_reflected_motion(input, front, false, true, false);
-}
-
-[shader("fragment")]
-ReflectedMotion fragmentReflectMotionContact(VertexOut input, bool front : SV_IsFrontFace)
-{
-    return shade_reflected_motion(input, front, false, false, true);
-}
-
-[shader("fragment")]
-ReflectedMotion fragmentReflectMotionContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
-{
-    return shade_reflected_motion(input, front, false, true, true);
-}
-
-[shader("fragment")]
-ReflectedMotion fragmentReflectMotionAo(VertexOut input, bool front : SV_IsFrontFace)
-{
-    return shade_reflected_motion(input, front, true, false, false);
-}
-
-[shader("fragment")]
-ReflectedMotion fragmentReflectMotionAoShadowed(VertexOut input, bool front : SV_IsFrontFace)
-{
-    return shade_reflected_motion(input, front, true, true, false);
-}
-
-[shader("fragment")]
-ReflectedMotion fragmentReflectMotionAoContact(VertexOut input, bool front : SV_IsFrontFace)
-{
-    return shade_reflected_motion(input, front, true, false, true);
-}
-
-[shader("fragment")]
-ReflectedMotion fragmentReflectMotionAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
-{
-    return shade_reflected_motion(input, front, true, true, true);
 }
 
 // The scatter pass (ADR 0059). The forward subsurface pass left, at every pixel of a
@@ -1852,27 +1853,6 @@ SubsurfaceShaded fragmentSubsurface(VertexOut input, bool front : SV_IsFrontFace
     return o;
 }
 
-struct SubsurfaceShadedMotion
-{
-    float4 color : SV_Target0;
-    float2 motion : SV_Target1;
-    float4 irradiance : SV_Target2;
-    float4 albedo : SV_Target3;
-};
-
-[shader("fragment")]
-SubsurfaceShadedMotion fragmentSubsurfaceMotion(VertexOut input, bool front : SV_IsFrontFace)
-{
-    SubsurfaceOut sss;
-    SubsurfaceShadedMotion o;
-    ReflectOut unused;
-    o.color = float4(shade_surface(input, front, false, true, true, sss, unused).rgb, 1.0);
-    o.motion = motion(input.position, input.previous_clip);
-    o.irradiance = sss.irradiance;
-    o.albedo = sss.albedo;
-    return o;
-}
-
 // The entry points above with local lights' shadows (ADR 0071): drawn instead of them
 // while shadowed lights reach the view, so the others carry no code for it.
 [shader("fragment")]
@@ -1943,15 +1923,6 @@ ShadedMotion fragmentMainMotionShadowed(VertexOut input, bool front : SV_IsFront
 }
 
 [shader("fragment")]
-ShadedMotion fragmentMainMotionAoShadowed(VertexOut input, bool front : SV_IsFrontFace)
-{
-    ShadedMotion o;
-    o.color = float4(shade(input, front, false, true, true).rgb, 1.0);
-    o.motion = motion(input.position, input.previous_clip);
-    return o;
-}
-
-[shader("fragment")]
 ShadedMotion fragmentMaskedMotionShadowed(VertexOut input, bool front : SV_IsFrontFace)
 {
     ShadedMotion o;
@@ -1972,22 +1943,9 @@ SubsurfaceShaded fragmentSubsurfaceShadowed(VertexOut input, bool front : SV_IsF
     return o;
 }
 
-[shader("fragment")]
-SubsurfaceShadedMotion fragmentSubsurfaceMotionShadowed(VertexOut input, bool front : SV_IsFrontFace)
-{
-    SubsurfaceOut sss;
-    SubsurfaceShadedMotion o;
-    ReflectOut unused;
-    o.color = float4(shade_surface(input, front, false, true, true, sss, unused, true).rgb, 1.0);
-    o.motion = motion(input.position, input.previous_clip);
-    o.irradiance = sss.irradiance;
-    o.albedo = sss.albedo;
-    return o;
-}
-
 // After the depth prepass of a view with the sun's contact shadows (ADR 0071): the
-// shading entry points that read their mask, with and without motion vectors, ambient
-// occlusion and local lights' shadows.
+// shading entry points that read their mask, with and without ambient occlusion and local
+// lights' shadows (the prepass writes the motion vectors).
 [shader("fragment")]
 float4 fragmentMainContact(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
@@ -2010,42 +1968,6 @@ float4 fragmentMainContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
 float4 fragmentMainAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     return float4(shade(input, front, false, true, true, true).rgb, 1.0);
-}
-
-[shader("fragment")]
-ShadedMotion fragmentMainMotionContact(VertexOut input, bool front : SV_IsFrontFace)
-{
-    ShadedMotion o;
-    o.color = float4(shade(input, front, false, false, false, true).rgb, 1.0);
-    o.motion = motion(input.position, input.previous_clip);
-    return o;
-}
-
-[shader("fragment")]
-ShadedMotion fragmentMainMotionAoContact(VertexOut input, bool front : SV_IsFrontFace)
-{
-    ShadedMotion o;
-    o.color = float4(shade(input, front, false, true, false, true).rgb, 1.0);
-    o.motion = motion(input.position, input.previous_clip);
-    return o;
-}
-
-[shader("fragment")]
-ShadedMotion fragmentMainMotionContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
-{
-    ShadedMotion o;
-    o.color = float4(shade(input, front, false, false, true, true).rgb, 1.0);
-    o.motion = motion(input.position, input.previous_clip);
-    return o;
-}
-
-[shader("fragment")]
-ShadedMotion fragmentMainMotionAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
-{
-    ShadedMotion o;
-    o.color = float4(shade(input, front, false, true, true, true).rgb, 1.0);
-    o.motion = motion(input.position, input.previous_clip);
-    return o;
 }
 
 struct Background

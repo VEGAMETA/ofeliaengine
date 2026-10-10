@@ -84,7 +84,8 @@ ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 
 review's P0 fixes: PRs #124, #125; the Radeon's perf limits, PR #126), 0b (fast turns:
 PRs #127–#130; left optional: the fast-turn test in the perf gate, one wider feedback
 pass if a larger scene shows pop-in), 0c (Catmull-Rom and Lanczos-3, ADR 0075's
-addendum). Next: 0d.
+addendum), 0d (motion vectors from the depth prepass, ADR 0043's addendum). Next: TAAU's
+Catmull-Rom history with point reads (owner, 2026-10-10), then 0e.
 
 ## 5. Queue (in order)
 
@@ -187,12 +188,18 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    read on its own (the bilinear-fetch trick is ATI's patent); Lanczos-3 in two passes.
    Catmull-Rom 67 %: +0.04 ms RTX, about +1 ms Radeon, sharper than bilinear and better
    than FSR 1 in every metric; Lanczos-3 the same quality for about +2 ms on the Radeon.
-0d. **Motion vectors out of the forward shading** (review §3.2). With motion vectors (every
+0d. ~~**Motion vectors out of the forward shading** (review §3.2). With motion vectors (every
    default antialiasing) the lit forward shader takes 77–89 VGPRs instead of 64 and the
    vertex stage 78 instead of 49: Sponza's forward +22–27 % on the Radeon, +5–11 % on the
    RTX. Write them in the depth prepass (always drawn with the default AO), or reconstruct
    camera motion from depth and draw object motion for movers only; extend the register
-   rule to the default variants (`scene_bench --pipeline-stats` prints them now).
+   rule to the default variants (`scene_bench --pipeline-stats` prints them now).~~ Done
+   2026-10-10 (ADR 0043's addendum): the prepass writes them when it runs; the default
+   path's shading back at a 49-VGPR vertex stage (was 78) and 48/63/72/80 pixel VGPRs;
+   Sponza 1080p TAA + AO: Radeon prepass + forward 16.64 → 15.70 ms, RTX 391 → 387 µs;
+   golden images byte-identical; 16 entry points and ~40 pipelines fewer; the perf gate
+   measures the default settings (`sponza_taa_ao`). Left: still geometry's motion from
+   depth (the prepass now pays +0.5 ms on the Radeon for writing it).
 0e. **The present path on the iGPU** (review §3.4): the tone mapper writing the swapchain
    image costs the Radeon 1.1 ms of frame against writing an offscreen image and copying
    it. Offscreen + copy where measured faster, find the cause, a windowed scene in the gate.
@@ -286,9 +293,9 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
   - per-sample or bilaterally upsampled AO and contact shadows under MSAA;
   - dynamic resolution with MSAA;
   - CMAA is not built (Intel patents).
-  - **Question for the owner (2026-10-10):** TAAU's optional Catmull-Rom history
-    (`HistoryFilter::CatmullRom`, ADR 0043, off by default) merges bilinear fetches as
-    ATI's US 8,675,007 B2 claims. Rewrite it with loads (measure the cost) or remove it.
+  - TAAU's optional Catmull-Rom history (`HistoryFilter::CatmullRom`, ADR 0043, off by
+    default) merges bilinear fetches as ATI's US 8,675,007 B2 claims: owner's decision
+    (2026-10-10): rewrite it with point reads, as the 0c filters (next).
   - Ambient occlusion: the discrete default stays High (owner, 2026-10-10), although it
     is 28 % of the RTX's default GPU frame (481 µs; Medium 0.40 ms, FLIP 0.096 vs 0.070).
   - The discrete-GPU default stays TAA. The other candidate is MSAA 4× (+1.2 ms on the

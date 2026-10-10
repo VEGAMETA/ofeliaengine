@@ -6,23 +6,22 @@
 //! Multisampled views always draw the depth prepass, so the opaque shading only needs its
 //! after-the-prepass variants (depth tested for equality, per sample): each sample keeps
 //! the coverage the prepass gave it. Masked materials turn their alpha into coverage
-//! there (`prepassCoverage`, alpha to coverage) instead of the alpha test.
+//! there (`prepassCoverage`, alpha to coverage) instead of the alpha test. The prepass
+//! writes the motion vectors too, when the view has them (`prepassCoverageMotion` for
+//! masked materials), so no shading here writes them.
 //!
 //! [`ForwardRenderer::set_samples`]: super::ForwardRenderer::set_samples
 
 use super::{
-    BACKGROUND_MOTION, BACKGROUND_VERTEX, DEPTH_VERTEX, DEPTH_VERTEX_MASKED, FRAGMENT, FRAGMENT_AO,
-    FRAGMENT_AO_CONTACT, FRAGMENT_AO_CONTACT_SHADOWED, FRAGMENT_AO_SHADOWED, FRAGMENT_BLENDED,
+    BACKGROUND_MOTION, BACKGROUND_VERTEX, DEPTH_VERTEX, DEPTH_VERTEX_MASKED,
+    DEPTH_VERTEX_MASKED_MOTION, DEPTH_VERTEX_MOTION, FRAGMENT, FRAGMENT_AO, FRAGMENT_AO_CONTACT,
+    FRAGMENT_AO_CONTACT_SHADOWED, FRAGMENT_AO_SHADOWED, FRAGMENT_BLENDED,
     FRAGMENT_BLENDED_ATMOSPHERE, FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE,
     FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE_SHADOWED, FRAGMENT_BLENDED_ATMOSPHERE_SHADOWED,
     FRAGMENT_BLENDED_REACTIVE, FRAGMENT_BLENDED_REACTIVE_SHADOWED, FRAGMENT_BLENDED_SHADOWED,
-    FRAGMENT_CONTACT, FRAGMENT_CONTACT_SHADOWED, FRAGMENT_MOTION, FRAGMENT_MOTION_AO,
-    FRAGMENT_MOTION_AO_CONTACT, FRAGMENT_MOTION_AO_CONTACT_SHADOWED, FRAGMENT_MOTION_AO_SHADOWED,
-    FRAGMENT_MOTION_CONTACT, FRAGMENT_MOTION_CONTACT_SHADOWED, FRAGMENT_MOTION_SHADOWED,
-    FRAGMENT_SHADOWED, FRAGMENT_SUBSURFACE, FRAGMENT_SUBSURFACE_MOTION,
-    FRAGMENT_SUBSURFACE_MOTION_SHADOWED, FRAGMENT_SUBSURFACE_SHADOWED, MOTION_FORMAT,
-    REACTIVE_FORMAT, REFLECT_FRAGMENTS, ReflectShadingTable, SKY_FRAGMENT, VARIANTS, VERTEX,
-    shading_desc,
+    FRAGMENT_CONTACT, FRAGMENT_CONTACT_SHADOWED, FRAGMENT_SHADOWED, FRAGMENT_SUBSURFACE,
+    FRAGMENT_SUBSURFACE_SHADOWED, MOTION_FORMAT, PREPASS_MOTION, REACTIVE_FORMAT,
+    REFLECT_FRAGMENTS, ReflectShadingTable, SKY_FRAGMENT, VARIANTS, VERTEX, shading_desc,
 };
 use crate::atmosphere::{COMPOSITE_FRAGMENT_MS, COMPOSITE_VERTEX};
 use crate::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
@@ -36,6 +35,8 @@ use engine_rhi::{
 };
 
 const PREPASS_COVERAGE: &[u8] = include_bytes!("../shaders/forward.prepassCoverage.spv");
+const PREPASS_COVERAGE_MOTION: &[u8] =
+    include_bytes!("../shaders/forward.prepassCoverageMotion.spv");
 const SCATTER_FRAGMENT_MS: &[u8] = include_bytes!("../shaders/forward.scatterFragmentMs.spv");
 const RESOLVE_VERTEX: &[u8] = include_bytes!("../shaders/msaa.resolveVertex.spv");
 /// The nearest sample's reflection inputs, by sample count (2, 4, 8).
@@ -169,8 +170,8 @@ pub(super) fn add_nearest_resolve<'g>(
 /// The opaque and transparent shading of one variant.
 #[derive(Debug)]
 pub(super) struct MsaaShading {
-    /// After the prepass: without and with motion vectors.
-    pub(super) shade: [Pipeline; 2],
+    /// After the prepass.
+    pub(super) shade: Pipeline,
     /// Transparent surfaces: without and with the reactive mask.
     pub(super) blended: [Pipeline; 2],
 }
@@ -181,17 +182,17 @@ pub(super) struct MsaaShadowed {
     pub(super) shading: [MsaaShading; 2],
     /// Transparent surfaces under an atmosphere: without and with the reactive mask.
     pub(super) blended_atmosphere: [Pipeline; 2],
-    pub(super) ao: Option<[[Pipeline; 2]; 2]>,
-    pub(super) subsurface: Option<[[Pipeline; 2]; 2]>,
+    pub(super) ao: Option<[Pipeline; 2]>,
+    pub(super) subsurface: Option<[Pipeline; 2]>,
 }
 
 /// The sun's contact shadows' shading (ADR 0071), as `ContactState`'s.
 #[derive(Debug)]
 pub(super) struct MsaaContact {
-    pub(super) shading: [[Pipeline; 2]; 4],
-    pub(super) ao: Option<[[Pipeline; 2]; 4]>,
-    pub(super) shadowed: Option<[[Pipeline; 2]; 2]>,
-    pub(super) shadowed_ao: Option<[[Pipeline; 2]; 2]>,
+    pub(super) shading: [Pipeline; 4],
+    pub(super) ao: Option<[Pipeline; 4]>,
+    pub(super) shadowed: Option<[Pipeline; 2]>,
+    pub(super) shadowed_ao: Option<[Pipeline; 2]>,
 }
 
 /// Which of the renderer's features have pipelines (their multisampled ones follow).
@@ -210,6 +211,8 @@ pub(super) struct MsaaPipelines {
     pub(super) samples: vk::SampleCountFlags,
     /// Depth prepass: opaque (depth only), masked (alpha to coverage).
     pub(super) prepass: [Pipeline; 2],
+    /// The same, also writing motion vectors (views with a temporal state).
+    pub(super) prepass_motion: [Pipeline; 2],
     /// By shading variant (`VARIANTS`).
     pub(super) shading: [MsaaShading; 4],
     /// Camera motion where no geometry was drawn.
@@ -221,10 +224,10 @@ pub(super) struct MsaaPipelines {
     /// Transparent surfaces under an atmosphere, by local lights: without and with the
     /// reactive mask.
     pub(super) blended_atmosphere: [[Pipeline; 2]; 2],
-    pub(super) ao: Option<[[Pipeline; 2]; 4]>,
-    /// Subsurface materials' shading per variant (without and with motion vectors), the
-    /// scatter pass, and the resolve of their light and albedo (the nearest sample's).
-    pub(super) subsurface: Option<([[Pipeline; 2]; 4], Pipeline, Pipeline)>,
+    pub(super) ao: Option<[Pipeline; 4]>,
+    /// Subsurface materials' shading per variant, the scatter pass, and the resolve of
+    /// their light and albedo (the nearest sample's).
+    pub(super) subsurface: Option<([Pipeline; 4], Pipeline, Pipeline)>,
     pub(super) shadowed: Option<MsaaShadowed>,
     pub(super) contact: Option<MsaaContact>,
     /// Reflections' shading, composite, and the resolve of their inputs (the nearest
@@ -306,32 +309,25 @@ impl<'a> Batch<'a> {
     }
 }
 
-/// Without and with motion vectors, after the prepass, for each of `variants`.
-#[allow(clippy::too_many_arguments)]
-fn pairs<'a>(
+/// After the prepass, for each of `variants`.
+fn shades<'a>(
     batch: &Batch<'a>,
     descs: &mut Vec<PipelineDesc<'a>>,
-    still: (&'a [u32], &'a CStr),
-    moving: (&'a [u32], &'a CStr),
+    fragment: (&'a [u32], &'a CStr),
     formats: &'a [vk::Format],
-    motion_formats: &'a [vk::Format],
     variants: &[usize],
 ) {
     for &v in variants {
-        descs.push(batch.equal(still.0, still.1, formats, v));
-        descs.push(batch.equal(moving.0, moving.1, motion_formats, v));
+        descs.push(batch.equal(fragment.0, fragment.1, formats, v));
     }
 }
 
-fn take_pairs<const N: usize>(
+fn take<const N: usize>(
     pipelines: &mut impl Iterator<Item = Pipeline>,
-) -> Result<[[Pipeline; 2]; N], RhiError> {
+) -> Result<[Pipeline; N], RhiError> {
     let mut out = Vec::with_capacity(N);
     for _ in 0..N {
-        out.push([
-            pipelines.next().ok_or_else(short)?,
-            pipelines.next().ok_or_else(short)?,
-        ]);
+        out.push(pipelines.next().ok_or_else(short)?);
     }
     out.try_into().map_err(|_| short())
 }
@@ -348,7 +344,6 @@ impl MsaaPipelines {
     ) -> Result<Self, RhiError> {
         let vertex = words(VERTEX)?;
         let fragment = words(FRAGMENT)?;
-        let fragment_motion = words(FRAGMENT_MOTION)?;
         let fragment_blended = words(FRAGMENT_BLENDED)?;
         let fragment_blended_reactive = words(FRAGMENT_BLENDED_REACTIVE)?;
         let fragment_blended_atmosphere = words(FRAGMENT_BLENDED_ATMOSPHERE)?;
@@ -356,13 +351,16 @@ impl MsaaPipelines {
         let depth_vertex = words(DEPTH_VERTEX)?;
         let depth_vertex_masked = words(DEPTH_VERTEX_MASKED)?;
         let coverage = words(PREPASS_COVERAGE)?;
+        let depth_vertex_motion = words(DEPTH_VERTEX_MOTION)?;
+        let prepass_motion = words(PREPASS_MOTION)?;
+        let depth_vertex_masked_motion = words(DEPTH_VERTEX_MASKED_MOTION)?;
+        let coverage_motion = words(PREPASS_COVERAGE_MOTION)?;
         let background_vertex = words(BACKGROUND_VERTEX)?;
         let background_motion = words(BACKGROUND_MOTION)?;
         let sky_fragment = words(SKY_FRAGMENT)?;
         let composite_vertex = words(COMPOSITE_VERTEX)?;
         let composite_fragment = words(COMPOSITE_FRAGMENT_MS)?;
         let formats = [color];
-        let motion_formats = [color, MOTION_FORMAT];
         let reactive_formats = [color, REACTIVE_FORMAT];
         let background_formats = [MOTION_FORMAT];
         let batch = Batch {
@@ -370,10 +368,9 @@ impl MsaaPipelines {
             depth,
             samples,
         };
-        let mut descs = Vec::with_capacity(4 * 4 + 9);
+        let mut descs = Vec::with_capacity(3 * 4 + 11);
         for v in 0..VARIANTS.len() {
             descs.push(batch.equal(&fragment, c"fragmentMain", &formats, v));
-            descs.push(batch.equal(&fragment_motion, c"fragmentMainMotion", &motion_formats, v));
             descs.push(batch.blended(&fragment_blended, c"fragmentBlended", &formats, v));
             descs.push(batch.blended(
                 &fragment_blended_reactive,
@@ -409,6 +406,41 @@ impl MsaaPipelines {
                 Some(ShaderStageDesc {
                     spirv: &coverage,
                     entry: c"prepassCoverage",
+                }),
+            )
+        }));
+        // The same writing motion vectors (the masked one's alpha at location 0 still
+        // drives the coverage; the motion target keeps red and green).
+        descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+            color_formats: &background_formats,
+            depth_format: depth,
+            dynamic_culling: true,
+            samples,
+            ..GraphicsPipelineDesc::new(
+                ShaderStageDesc {
+                    spirv: &depth_vertex_motion,
+                    entry: c"depthVertexMotion",
+                },
+                Some(ShaderStageDesc {
+                    spirv: &prepass_motion,
+                    entry: c"prepassMotion",
+                }),
+            )
+        }));
+        descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+            color_formats: &background_formats,
+            depth_format: depth,
+            dynamic_culling: true,
+            samples,
+            alpha_to_coverage: true,
+            ..GraphicsPipelineDesc::new(
+                ShaderStageDesc {
+                    spirv: &depth_vertex_masked_motion,
+                    entry: c"depthVertexMaskedMotion",
+                },
+                Some(ShaderStageDesc {
+                    spirv: &coverage_motion,
+                    entry: c"prepassCoverageMotion",
                 }),
             )
         }));
@@ -480,12 +512,13 @@ impl MsaaPipelines {
         let mut next = || pipelines.next().ok_or_else(short);
         let mut shading = || -> Result<MsaaShading, RhiError> {
             Ok(MsaaShading {
-                shade: [next()?, next()?],
+                shade: next()?,
                 blended: [next()?, next()?],
             })
         };
         let shading = [shading()?, shading()?, shading()?, shading()?];
         let prepass = [next()?, next()?];
+        let prepass_motion = [next()?, next()?];
         let background = next()?;
         let sky = next()?;
         let composite = next()?;
@@ -493,6 +526,7 @@ impl MsaaPipelines {
         Ok(Self {
             samples,
             prepass,
+            prepass_motion,
             shading,
             background,
             sky,
@@ -543,41 +577,34 @@ impl MsaaPipelines {
             samples,
         };
         let formats = [color];
-        let motion_formats = [color, MOTION_FORMAT];
         let reactive_formats = [color, REACTIVE_FORMAT];
         let subsurface_formats = [color, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
-        let subsurface_motion_formats = [color, MOTION_FORMAT, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
         let layout = bindless.pipeline_layout();
 
         if features.ao && self.ao.is_none() {
-            let (still, moving) = (words(FRAGMENT_AO)?, words(FRAGMENT_MOTION_AO)?);
-            let mut descs = Vec::with_capacity(8);
-            pairs(
+            let fragment = words(FRAGMENT_AO)?;
+            let mut descs = Vec::with_capacity(4);
+            shades(
                 &batch,
                 &mut descs,
-                (&still, c"fragmentMainAo"),
-                (&moving, c"fragmentMainMotionAo"),
+                (&fragment, c"fragmentMainAo"),
                 &formats,
-                &motion_formats,
                 &[0, 1, 2, 3],
             );
             let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
-            self.ao = Some(take_pairs(&mut p)?);
+            self.ao = Some(take(&mut p)?);
         }
 
         if features.subsurface && self.subsurface.is_none() {
-            let still = words(FRAGMENT_SUBSURFACE)?;
-            let moving = words(FRAGMENT_SUBSURFACE_MOTION)?;
+            let fragment = words(FRAGMENT_SUBSURFACE)?;
             let scatter = words(SCATTER_FRAGMENT_MS)?;
             let depth_vertex = words(DEPTH_VERTEX)?;
-            let mut descs = Vec::with_capacity(9);
-            pairs(
+            let mut descs = Vec::with_capacity(5);
+            shades(
                 &batch,
                 &mut descs,
-                (&still, c"fragmentSubsurface"),
-                (&moving, c"fragmentSubsurfaceMotion"),
+                (&fragment, c"fragmentSubsurface"),
                 &subsurface_formats,
-                &subsurface_motion_formats,
                 &[0, 1, 2, 3],
             );
             descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
@@ -600,7 +627,7 @@ impl MsaaPipelines {
                 )
             }));
             let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
-            let shading = take_pairs(&mut p)?;
+            let shading = take(&mut p)?;
             let scatter = p.next().ok_or_else(short)?;
             let resolve = nearest_resolve(
                 device,
@@ -614,20 +641,13 @@ impl MsaaPipelines {
 
         if features.shadowed && self.shadowed.is_none() {
             let still = words(FRAGMENT_SHADOWED)?;
-            let moving = words(FRAGMENT_MOTION_SHADOWED)?;
             let blended = words(FRAGMENT_BLENDED_SHADOWED)?;
             let blended_reactive = words(FRAGMENT_BLENDED_REACTIVE_SHADOWED)?;
             let atmosphere = words(FRAGMENT_BLENDED_ATMOSPHERE_SHADOWED)?;
             let atmosphere_reactive = words(FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE_SHADOWED)?;
-            let mut descs = Vec::with_capacity(10);
+            let mut descs = Vec::with_capacity(8);
             for lit in [1, 3] {
                 descs.push(batch.equal(&still, c"fragmentMainShadowed", &formats, lit));
-                descs.push(batch.equal(
-                    &moving,
-                    c"fragmentMainMotionShadowed",
-                    &motion_formats,
-                    lit,
-                ));
                 descs.push(batch.blended(&blended, c"fragmentBlendedShadowed", &formats, lit));
                 descs.push(batch.blended(
                     &blended_reactive,
@@ -652,7 +672,7 @@ impl MsaaPipelines {
             let mut next = || p.next().ok_or_else(short);
             let mut shading = || -> Result<MsaaShading, RhiError> {
                 Ok(MsaaShading {
-                    shade: [next()?, next()?],
+                    shade: next()?,
                     blended: [next()?, next()?],
                 })
             };
@@ -668,76 +688,45 @@ impl MsaaPipelines {
 
         if let Some(shadowed) = self.shadowed.as_mut() {
             if features.ao && shadowed.ao.is_none() {
-                let (still, moving) = (
-                    words(FRAGMENT_AO_SHADOWED)?,
-                    words(FRAGMENT_MOTION_AO_SHADOWED)?,
-                );
-                let mut descs = Vec::with_capacity(4);
-                pairs(
+                let fragment = words(FRAGMENT_AO_SHADOWED)?;
+                let mut descs = Vec::with_capacity(2);
+                shades(
                     &batch,
                     &mut descs,
-                    (&still, c"fragmentMainAoShadowed"),
-                    (&moving, c"fragmentMainMotionAoShadowed"),
+                    (&fragment, c"fragmentMainAoShadowed"),
                     &formats,
-                    &motion_formats,
                     &[1, 3],
                 );
                 let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
-                shadowed.ao = Some(take_pairs(&mut p)?);
+                shadowed.ao = Some(take(&mut p)?);
             }
             if features.subsurface && shadowed.subsurface.is_none() {
-                let (still, moving) = (
-                    words(FRAGMENT_SUBSURFACE_SHADOWED)?,
-                    words(FRAGMENT_SUBSURFACE_MOTION_SHADOWED)?,
-                );
-                let mut descs = Vec::with_capacity(4);
-                pairs(
+                let fragment = words(FRAGMENT_SUBSURFACE_SHADOWED)?;
+                let mut descs = Vec::with_capacity(2);
+                shades(
                     &batch,
                     &mut descs,
-                    (&still, c"fragmentSubsurfaceShadowed"),
-                    (&moving, c"fragmentSubsurfaceMotionShadowed"),
+                    (&fragment, c"fragmentSubsurfaceShadowed"),
                     &subsurface_formats,
-                    &subsurface_motion_formats,
                     &[1, 3],
                 );
                 let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
-                shadowed.subsurface = Some(take_pairs(&mut p)?);
+                shadowed.subsurface = Some(take(&mut p)?);
             }
         }
 
         if features.contact {
-            let contact_set = |still: &[u8],
-                               still_entry: &'static CStr,
-                               moving: &[u8],
-                               moving_entry: &'static CStr,
+            let contact_set = |fragment: &[u8],
+                               entry: &'static CStr,
                                variants: &[usize]|
-             -> Result<Vec<[Pipeline; 2]>, RhiError> {
-                let (still, moving) = (words(still)?, words(moving)?);
-                let mut descs = Vec::with_capacity(2 * variants.len());
-                pairs(
-                    &batch,
-                    &mut descs,
-                    (&still, still_entry),
-                    (&moving, moving_entry),
-                    &formats,
-                    &motion_formats,
-                    variants,
-                );
-                let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
-                let mut out = Vec::with_capacity(variants.len());
-                for _ in variants {
-                    out.push([p.next().ok_or_else(short)?, p.next().ok_or_else(short)?]);
-                }
-                Ok(out)
+             -> Result<Vec<Pipeline>, RhiError> {
+                let fragment = words(fragment)?;
+                let mut descs = Vec::with_capacity(variants.len());
+                shades(&batch, &mut descs, (&fragment, entry), &formats, variants);
+                Pipeline::create_many(device, layout, &descs)
             };
             if self.contact.is_none() {
-                let shading = contact_set(
-                    FRAGMENT_CONTACT,
-                    c"fragmentMainContact",
-                    FRAGMENT_MOTION_CONTACT,
-                    c"fragmentMainMotionContact",
-                    &[0, 1, 2, 3],
-                )?;
+                let shading = contact_set(FRAGMENT_CONTACT, c"fragmentMainContact", &[0, 1, 2, 3])?;
                 self.contact = Some(MsaaContact {
                     shading: shading.try_into().map_err(|_| short())?,
                     ao: None,
@@ -747,21 +736,14 @@ impl MsaaPipelines {
             }
             if let Some(contact) = self.contact.as_mut() {
                 if features.ao && contact.ao.is_none() {
-                    let set = contact_set(
-                        FRAGMENT_AO_CONTACT,
-                        c"fragmentMainAoContact",
-                        FRAGMENT_MOTION_AO_CONTACT,
-                        c"fragmentMainMotionAoContact",
-                        &[0, 1, 2, 3],
-                    )?;
+                    let set =
+                        contact_set(FRAGMENT_AO_CONTACT, c"fragmentMainAoContact", &[0, 1, 2, 3])?;
                     contact.ao = Some(set.try_into().map_err(|_| short())?);
                 }
                 if features.shadowed && contact.shadowed.is_none() {
                     let set = contact_set(
                         FRAGMENT_CONTACT_SHADOWED,
                         c"fragmentMainContactShadowed",
-                        FRAGMENT_MOTION_CONTACT_SHADOWED,
-                        c"fragmentMainMotionContactShadowed",
                         &[1, 3],
                     )?;
                     contact.shadowed = Some(set.try_into().map_err(|_| short())?);
@@ -770,8 +752,6 @@ impl MsaaPipelines {
                     let set = contact_set(
                         FRAGMENT_AO_CONTACT_SHADOWED,
                         c"fragmentMainAoContactShadowed",
-                        FRAGMENT_MOTION_AO_CONTACT_SHADOWED,
-                        c"fragmentMainMotionAoContactShadowed",
                         &[1, 3],
                     )?;
                     contact.shadowed_ao = Some(set.try_into().map_err(|_| short())?);
@@ -785,30 +765,23 @@ impl MsaaPipelines {
                 .map(|&(bytes, entry)| Ok((words(bytes)?, entry)))
                 .collect::<Result<Vec<_>, RhiError>>()?;
             let reflect_formats = [color, NORMAL_ROUGHNESS_FORMAT, WEIGHT_FORMAT];
-            let reflect_motion_formats =
-                [color, MOTION_FORMAT, NORMAL_ROUGHNESS_FORMAT, WEIGHT_FORMAT];
             // As `ReflectionShading::new`: the environment variants, without and with
             // local lights.
-            let mut descs = Vec::with_capacity(24);
-            let mut slots = Vec::with_capacity(24);
+            let mut descs = Vec::with_capacity(12);
+            let mut slots = Vec::with_capacity(12);
             for (lights, variant) in [(0, 2), (1, 3)] {
                 for (k, (fragment, entry)) in fragments.iter().enumerate() {
                     if k & 1 != 0 && lights == 0 {
                         continue;
                     }
-                    let formats: &[vk::Format] = if k >= 8 {
-                        &reflect_motion_formats
-                    } else {
-                        &reflect_formats
-                    };
-                    descs.push(batch.equal(fragment, entry, formats, variant));
+                    descs.push(batch.equal(fragment, entry, &reflect_formats, variant));
                     slots.push((lights, k));
                 }
             }
             let pipelines = Pipeline::create_many(device, layout, &descs)?;
             let mut table: ReflectShadingTable = Default::default();
             for ((lights, k), pipeline) in slots.into_iter().zip(pipelines) {
-                table[lights][k >> 3][(k >> 2) & 1][(k >> 1) & 1][k & 1] = Some(pipeline);
+                table[lights][k >> 2][(k >> 1) & 1][k & 1] = Some(pipeline);
             }
             let composite = composite_pipelines(device, bindless, color, samples)?;
             let resolve = nearest_resolve(
@@ -833,13 +806,12 @@ impl MsaaPipelines {
     pub(super) fn reflect_pipeline(
         &self,
         lights: bool,
-        motion: bool,
         ao: bool,
         contact: bool,
         shadowed: bool,
     ) -> Option<&Pipeline> {
         let (table, _, _) = self.reflect.as_deref()?;
-        table[usize::from(lights)][usize::from(motion)][usize::from(ao)][usize::from(contact)]
+        table[usize::from(lights)][usize::from(ao)][usize::from(contact)]
             [usize::from(shadowed && lights)]
         .as_ref()
     }

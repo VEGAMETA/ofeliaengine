@@ -830,9 +830,10 @@ fn main() {
                 .collect();
             println!("Pipeline statistics, {name}: {}", line.join("; "));
         }
-        // With motion vectors (temporal antialiasing), without and after the prepass, and
-        // after it with ambient occlusion (with `--ao`): the default settings' shading.
-        let kinds = ["motion", "motion after prepass", "motion + AO"];
+        // With motion vectors (temporal antialiasing): the shading that writes them (no
+        // prepass), and the shading after the prepass with ambient occlusion (with `--ao`:
+        // the default settings; the prepass writes the motion then).
+        let kinds = ["motion, no prepass", "after the prepass with AO"];
         for (name, per_kind) in names.iter().zip(renderer.motion_statistics(&device)) {
             for (kind, stats) in kinds.iter().zip(per_kind) {
                 if stats.is_empty() {
@@ -844,6 +845,14 @@ fn main() {
                     .collect();
                 println!("Pipeline statistics, {name}, {kind}: {}", line.join("; "));
             }
+        }
+        let prepass = ["depth prepass", "depth prepass with motion"];
+        for (name, stats) in prepass.iter().zip(renderer.prepass_statistics(&device)) {
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
         }
         if msaa_stats > 1 {
             let samples = vk::SampleCountFlags::from_raw(msaa_stats);
