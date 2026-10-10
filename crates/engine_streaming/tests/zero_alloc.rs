@@ -62,6 +62,9 @@ fn settled_streaming_frames_do_not_allocate() {
         bed.textures.memory().0 as f64 / (1 << 20) as f64
     );
     assert!(stats.mesh_levels > 0, "mesh levels streamed");
+    // Shading variants the frames have not drawn with are made on the device's warm-up
+    // thread (ADR 0079), which allocates: done before counting.
+    bed.device.wait_for_pipeline_warm_up();
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     for _ in 0..60 {
         bed.frame(camera);
