@@ -142,6 +142,9 @@ pub struct Bindless {
     pool: vk::DescriptorPool,
     set: vk::DescriptorSet,
     pipeline_layout: vk::PipelineLayout,
+    /// Owns `pipeline_layout` once made: pipelines still to be created with it keep it
+    /// alive past the set (ADR 0079).
+    shared_layout: Option<crate::pipeline::SharedPipelineLayout>,
     samplers: Vec<vk::Sampler>,
     /// Material sampler sets with a LOD bias: the bias in 1/16 levels, the samplers.
     biased: RefCell<Vec<(i32, Vec<vk::Sampler>)>>,
@@ -223,6 +226,7 @@ impl Bindless {
             pool: vk::DescriptorPool::null(),
             set: vk::DescriptorSet::null(),
             pipeline_layout: vk::PipelineLayout::null(),
+            shared_layout: None,
             samplers: Vec::with_capacity(SAMPLER_KINDS.len()),
             biased: RefCell::new(Vec::new()),
             max_anisotropy: 16.0f32.min(limits.max_sampler_anisotropy),
@@ -279,6 +283,10 @@ impl Bindless {
                     None,
                 )
                 .map_err(RhiError::vk("vkCreatePipelineLayout"))?;
+            partial.shared_layout = Some(crate::pipeline::SharedPipelineLayout::new(
+                device,
+                partial.pipeline_layout,
+            ));
             for kind in SAMPLER_KINDS {
                 let (filter, mip, address) = match kind {
                     SamplerKind::LinearRepeat | SamplerKind::AnisotropicRepeat => (
@@ -358,6 +366,14 @@ impl Bindless {
     /// [`PUSH_CONSTANT_BYTES`] of push constants visible to all stages.
     pub fn pipeline_layout(&self) -> vk::PipelineLayout {
         self.pipeline_layout
+    }
+
+    /// The same layout, for pipelines described now and created later
+    /// ([`crate::LazyPipeline`], ADR 0079), which keep it alive until they are made.
+    pub fn shared_pipeline_layout(&self) -> &crate::pipeline::SharedPipelineLayout {
+        self.shared_layout
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("a made set has its layout"))
     }
 
     /// Capacity of binding 0 and 1.
@@ -583,7 +599,8 @@ impl Drop for Bindless {
                     self.device.destroy_sampler(sampler, None);
                 }
             }
-            if self.pipeline_layout != vk::PipelineLayout::null() {
+            // Once shared, its last holder destroys the layout.
+            if self.shared_layout.is_none() && self.pipeline_layout != vk::PipelineLayout::null() {
                 self.device
                     .destroy_pipeline_layout(self.pipeline_layout, None);
             }

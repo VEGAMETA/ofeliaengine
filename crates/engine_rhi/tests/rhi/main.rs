@@ -6,6 +6,7 @@ mod common;
 
 mod gpu;
 mod instance_lifetime;
+mod lazy_pipeline;
 mod memory;
 mod pipeline_cache;
 mod swapchain;

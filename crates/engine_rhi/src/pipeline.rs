@@ -9,8 +9,9 @@ use crate::device::Device;
 use crate::error::RhiError;
 use ash::vk;
 use core::ffi::CStr;
-use core::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use engine_core::jobs::ThreadPool;
+use std::sync::{Arc, OnceLock};
 
 /// A SPIR-V entry point.
 #[derive(Debug, Clone, Copy)]
@@ -202,13 +203,155 @@ fn cache_flags(cached_only: bool) -> vk::PipelineCreateFlags {
     }
 }
 
-/// Pipelines capture statistics when the device asks for them.
-fn statistics_flags(device: &Device) -> vk::PipelineCreateFlags {
-    if device.pipeline_statistics_enabled() {
-        vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR
-    } else {
-        vk::PipelineCreateFlags::empty()
+/// A pipeline layout destroyed with the last of its holders: a pipeline still to be
+/// created with it ([`crate::LazyPipeline`], ADR 0079) keeps it alive, so the device's
+/// warm-up thread never creates one with a destroyed layout.
+/// [`crate::Bindless::shared_pipeline_layout`] is the one every renderer uses.
+#[derive(Clone)]
+pub struct SharedPipelineLayout(Arc<LayoutOwner>);
+
+struct LayoutOwner {
+    device: Arc<ash::Device>,
+    raw: vk::PipelineLayout,
+}
+
+impl Drop for LayoutOwner {
+    fn drop(&mut self) {
+        // SAFETY: the last holder is gone: nothing creates a pipeline with it any more,
+        // and recording with it ended before (the holders' contract, as for any object).
+        unsafe { self.device.destroy_pipeline_layout(self.raw, None) };
     }
+}
+
+impl core::fmt::Debug for SharedPipelineLayout {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_tuple("SharedPipelineLayout")
+            .field(&self.0.raw)
+            .finish()
+    }
+}
+
+impl SharedPipelineLayout {
+    /// Takes over `raw`, a pipeline layout of `device`, to destroy it with the last holder.
+    ///
+    /// # Safety
+    ///
+    /// `raw` was created on `device`, and nothing else destroys it.
+    pub unsafe fn new(device: &Device, raw: vk::PipelineLayout) -> Self {
+        Self(Arc::new(LayoutOwner {
+            device: device.pipeline_context().device,
+            raw,
+        }))
+    }
+
+    /// The Vulkan pipeline layout.
+    pub fn raw(&self) -> vk::PipelineLayout {
+        self.0.raw
+    }
+}
+
+/// What creating pipelines needs from their device (ADR 0055, ADR 0079): the device, its
+/// pipeline cache, whether pipelines capture the driver's statistics, and the threads that
+/// create many at once ([`Device::pipeline_context`]). Cheap to clone and to send to
+/// another thread, so pipelines can be created while drawing or on a warm-up thread
+/// ([`crate::LazyPipeline`]). Valid while its device lives: whatever holds one is dropped
+/// before the device, like every object made from it.
+#[derive(Clone)]
+pub struct PipelineContext {
+    pub(crate) device: Arc<ash::Device>,
+    pub(crate) cache: vk::PipelineCache,
+    pub(crate) statistics: bool,
+    pub(crate) jobs: Option<Arc<ThreadPool>>,
+}
+
+impl core::fmt::Debug for PipelineContext {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PipelineContext")
+            .field("cache", &self.cache)
+            .field("statistics", &self.statistics)
+            .field("jobs", &self.jobs.is_some())
+            .finish()
+    }
+}
+
+impl PipelineContext {
+    /// Calls `create(i)` for every `i` in `0..count` in parallel, as
+    /// [`Device::create_parallel`] does.
+    pub fn create_parallel<T, F>(&self, count: usize, create: F) -> Result<Vec<T>, RhiError>
+    where
+        T: Send + Sync,
+        F: Fn(usize) -> Result<T, RhiError> + Sync,
+    {
+        create_parallel(self.jobs.as_deref(), count, create)
+    }
+
+    /// Creation flags: statistics when the device captures them, and `cached_only`'s.
+    fn flags(&self, cached_only: bool) -> vk::PipelineCreateFlags {
+        let statistics = if self.statistics {
+            vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR
+        } else {
+            vk::PipelineCreateFlags::empty()
+        };
+        statistics | cache_flags(cached_only)
+    }
+}
+
+/// Calls `create(i)` for every `i` in `0..count` in parallel and returns the results in
+/// index order, or the error of the lowest index that failed: on `jobs`, or else on up to
+/// one thread per core started for the call ([`Device::create_parallel`]).
+pub(crate) fn create_parallel<T, F>(
+    jobs: Option<&ThreadPool>,
+    count: usize,
+    create: F,
+) -> Result<Vec<T>, RhiError>
+where
+    T: Send + Sync,
+    F: Fn(usize) -> Result<T, RhiError> + Sync,
+{
+    engine_profiler::zone!("rhi::create_parallel");
+    if count <= 1 {
+        return (0..count).map(create).collect();
+    }
+    let slots: Vec<OnceLock<Result<T, RhiError>>> = (0..count).map(|_| OnceLock::new()).collect();
+    let run = |i: usize| {
+        let _ = slots[i].set(create(i));
+    };
+    match jobs {
+        Some(pool) => pool.parallel_for(count, 1, |_, range| range.for_each(run)),
+        None => {
+            let next = AtomicUsize::new(0);
+            let work = || {
+                loop {
+                    let i = next.fetch_add(1, Ordering::Relaxed);
+                    if i >= count {
+                        break;
+                    }
+                    run(i);
+                }
+            };
+            let threads = std::thread::available_parallelism()
+                .map_or(4, |n| n.get())
+                .min(count);
+            std::thread::scope(|scope| {
+                for _ in 1..threads {
+                    // A thread that cannot start leaves its share to the others.
+                    let _ = std::thread::Builder::new()
+                        .name(String::from("engine-pipelines"))
+                        .spawn_scoped(scope, work);
+                }
+                work();
+            });
+        }
+    }
+    slots
+        .into_iter()
+        .map(|slot| {
+            slot.into_inner().unwrap_or(Err(RhiError::Vulkan {
+                call: "parallel creation (a job did not run)",
+                result: vk::Result::ERROR_UNKNOWN,
+            }))
+        })
+        .collect()
 }
 
 /// A pipeline and the device that owns it. Destroyed on drop (the GPU must be done
@@ -304,10 +447,12 @@ impl Pipeline {
         layout: vk::PipelineLayout,
         desc: &GraphicsPipelineDesc<'_>,
     ) -> Result<Self, RhiError> {
-        Self::create_graphics(device, layout, desc, false)?.ok_or(RhiError::Vulkan {
-            call: "vkCreateGraphicsPipelines",
-            result: vk::Result::PIPELINE_COMPILE_REQUIRED,
-        })
+        Self::create_graphics(&device.pipeline_context(), layout, desc, false)?.ok_or(
+            RhiError::Vulkan {
+                call: "vkCreateGraphicsPipelines",
+                result: vk::Result::PIPELINE_COMPILE_REQUIRED,
+            },
+        )
     }
 
     /// Creates the pipelines of `descs`, in their order, as fast as the driver allows
@@ -323,16 +468,18 @@ impl Pipeline {
         layout: vk::PipelineLayout,
         descs: &[PipelineDesc<'_>],
     ) -> Result<Vec<Self>, RhiError> {
+        Self::create_many_in(&device.pipeline_context(), layout, descs)
+    }
+
+    /// [`Self::create_many`] through a [`PipelineContext`].
+    pub fn create_many_in(
+        context: &PipelineContext,
+        layout: vk::PipelineLayout,
+        descs: &[PipelineDesc<'_>],
+    ) -> Result<Vec<Self>, RhiError> {
         engine_profiler::zone!("rhi::Pipeline::create_many");
-        let create = |desc: &PipelineDesc<'_>, cached_only| match desc {
-            PipelineDesc::Graphics(desc) => {
-                Self::create_graphics(device, layout, desc, cached_only)
-            }
-            PipelineDesc::Compute {
-                stage,
-                specialization,
-            } => Self::create_compute(device, layout, *stage, specialization, cached_only),
-        };
+        let create =
+            |desc: &PipelineDesc<'_>, cached_only| Self::create(context, layout, desc, cached_only);
         let mut pipelines = Vec::with_capacity(descs.len());
         for desc in descs {
             pipelines.push(create(desc, true)?);
@@ -340,7 +487,7 @@ impl Pipeline {
         let missing: Vec<usize> = (0..descs.len())
             .filter(|&i| pipelines[i].is_none())
             .collect();
-        let compiled = device.create_parallel(missing.len(), |k| {
+        let compiled = context.create_parallel(missing.len(), |k| {
             create(&descs[missing[k]], false)?.ok_or(RhiError::Vulkan {
                 call: "vkCreate*Pipelines",
                 result: vk::Result::PIPELINE_COMPILE_REQUIRED,
@@ -352,16 +499,35 @@ impl Pipeline {
         Ok(pipelines.into_iter().flatten().collect())
     }
 
+    /// Creates the pipeline `desc` describes; with `cached_only`, only if the pipeline
+    /// cache holds it (`None` otherwise).
+    pub(crate) fn create(
+        context: &PipelineContext,
+        layout: vk::PipelineLayout,
+        desc: &PipelineDesc<'_>,
+        cached_only: bool,
+    ) -> Result<Option<Self>, RhiError> {
+        match desc {
+            PipelineDesc::Graphics(desc) => {
+                Self::create_graphics(context, layout, desc, cached_only)
+            }
+            PipelineDesc::Compute {
+                stage,
+                specialization,
+            } => Self::create_compute(context, layout, *stage, specialization, cached_only),
+        }
+    }
+
     /// Creates a graphics pipeline; with `cached_only`, only if the pipeline cache holds
     /// it (`None` otherwise).
     fn create_graphics(
-        device: &Device,
+        context: &PipelineContext,
         layout: vk::PipelineLayout,
         desc: &GraphicsPipelineDesc<'_>,
         cached_only: bool,
     ) -> Result<Option<Self>, RhiError> {
         engine_profiler::zone!("rhi::Pipeline::graphics");
-        let d = device.raw();
+        let d = &*context.device;
         let mut modules = Modules {
             device: d,
             list: [vk::ShaderModule::null(); 2],
@@ -496,12 +662,11 @@ impl Pipeline {
             .color_blend_state(&blend)
             .dynamic_state(&dynamic)
             .layout(layout)
-            .flags(statistics_flags(device) | cache_flags(cached_only))
+            .flags(context.flags(cached_only))
             .push_next(&mut rendering);
         let start = std::time::Instant::now();
         // SAFETY: every pointer in `info` refers to locals alive for the call.
-        let created =
-            unsafe { d.create_graphics_pipelines(device.pipeline_cache(), &[info], None) };
+        let created = unsafe { d.create_graphics_pipelines(context.cache, &[info], None) };
         let raw = match created {
             Ok(pipelines) => pipelines[0],
             Err((_, vk::Result::PIPELINE_COMPILE_REQUIRED)) if cached_only => {
@@ -517,7 +682,7 @@ impl Pipeline {
         };
         count_creation(start, true, cached_only);
         Ok(Some(Self {
-            device: device.raw_shared(),
+            device: Arc::clone(&context.device),
             raw,
             bind_point: vk::PipelineBindPoint::GRAPHICS,
         }))
@@ -598,25 +763,30 @@ impl Pipeline {
         stage: ShaderStageDesc<'_>,
         specialization: &[u32],
     ) -> Result<Self, RhiError> {
-        Self::create_compute(device, layout, stage, specialization, false)?.ok_or(
-            RhiError::Vulkan {
-                call: "vkCreateComputePipelines",
-                result: vk::Result::PIPELINE_COMPILE_REQUIRED,
-            },
-        )
+        Self::create_compute(
+            &device.pipeline_context(),
+            layout,
+            stage,
+            specialization,
+            false,
+        )?
+        .ok_or(RhiError::Vulkan {
+            call: "vkCreateComputePipelines",
+            result: vk::Result::PIPELINE_COMPILE_REQUIRED,
+        })
     }
 
     /// Creates a compute pipeline; with `cached_only`, only if the pipeline cache holds
     /// it (`None` otherwise).
     fn create_compute(
-        device: &Device,
+        context: &PipelineContext,
         layout: vk::PipelineLayout,
         stage: ShaderStageDesc<'_>,
         specialization: &[u32],
         cached_only: bool,
     ) -> Result<Option<Self>, RhiError> {
         engine_profiler::zone!("rhi::Pipeline::compute");
-        let d = device.raw();
+        let d = &*context.device;
         let mut modules = Modules {
             device: d,
             list: [vk::ShaderModule::null(); 2],
@@ -636,10 +806,10 @@ impl Pipeline {
         let info = vk::ComputePipelineCreateInfo::default()
             .stage(stage_info)
             .layout(layout)
-            .flags(statistics_flags(device) | cache_flags(cached_only));
+            .flags(context.flags(cached_only));
         let start = std::time::Instant::now();
         // SAFETY: as above.
-        let created = unsafe { d.create_compute_pipelines(device.pipeline_cache(), &[info], None) };
+        let created = unsafe { d.create_compute_pipelines(context.cache, &[info], None) };
         let raw = match created {
             Ok(pipelines) => pipelines[0],
             Err((_, vk::Result::PIPELINE_COMPILE_REQUIRED)) if cached_only => {
@@ -655,7 +825,7 @@ impl Pipeline {
         };
         count_creation(start, true, cached_only);
         Ok(Some(Self {
-            device: device.raw_shared(),
+            device: Arc::clone(&context.device),
             raw,
             bind_point: vk::PipelineBindPoint::COMPUTE,
         }))
