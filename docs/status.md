@@ -77,26 +77,17 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-- The second core review (2026-10-10, `docs/research/core-audit-2.md`), with the
-  `flight` harness (`engine_runtime/examples/flight.rs`): waiting for the owner's answers
-  on the new queue below (the review's §6).
+- Faster checks (queue item 0), by the coordinator, after the second core review
+  (2026-10-10, `docs/research/core-audit-2.md`; the owner answered its questions the same
+  day, see §5).
 
 ## 5. Queue (in order)
 
-Proposed by the second review (`docs/research/core-audit-2.md` §5); the order of the P0
-items against "faster checks" is the owner's call (the review's question 1).
+Merged with the second review's findings (`docs/research/core-audit-2.md`). The owner's
+answers of 2026-10-10: faster checks first, then the review's P0 fixes; the player crate
+after the rendering queue; custom 3D materials after GI; the discrete AO default stays High.
 
-P0. **Small fixes the rest depends on** (the review's §3.1 and §3.3):
-   - `engine_rhi::Pipeline` without its copy of the device's function table (1,504 bytes
-     per pipeline: the renderers' construction overflows Windows' 1 MiB main thread on
-     the Radeon, so `game_loop` crashes on start), the renderers' large state off the
-     stack, and a test that builds the frame renderer with every feature on a 1 MiB thread
-     on both GPUs; then drop the 16–64 MiB thread workarounds in `perf_gate`, `aa_bench`
-     and `flight`;
-   - GPU pass times without overlap (exclusive times, or a serialized mode for the gate)
-     and the gate's baselines re-checked with them: today a pass after a long one without
-     a barrier absorbs its tail (feedback measured 2.4 ms, really 49 µs).
-0. **Faster checks, first after the review** (owner, 2026-10-02). Today
+0. **Faster checks, first after the review** (owner, 2026-10-02, confirmed 2026-10-10). Today
    `check.ps1 -Gpu -Perf` takes 10–25 min, and it grows with every crate and test. Per
    step, from recent runs:
 
@@ -118,6 +109,16 @@ P0. **Small fixes the rest depends on** (the review's §3.1 and §3.3):
    - **adopt cargo-nextest;**
    - **add an "affected crates" mode** for agents' intermediate runs. The full run stays
      the gate before every merge.
+0a. **The review's P0 fixes** (§3.1 and §3.3):
+   - `engine_rhi::Pipeline` without its copy of the device's function table (1,504 bytes
+     per pipeline: the renderers' construction overflows Windows' 1 MiB main thread on
+     the Radeon, so `game_loop` crashes on start), the renderers' large state off the
+     stack, and a test that builds the frame renderer with every feature on a 1 MiB thread
+     on both GPUs; then drop the 16–64 MiB thread workarounds in `perf_gate`, `aa_bench`
+     and `flight`;
+   - GPU pass times without overlap (exclusive times, or a serialized mode for the gate)
+     and the gate's baselines re-checked with them: today a pass after a long one without
+     a barrier absorbs its tail (feedback measured 2.4 ms, really 49 µs).
 0b. **No visible streaming pop-in on fast camera turns** (owner, 2026-10-02: in UE, models
    and textures failed to load in time when the camera turned quickly). Our ADR 0076 has
    the same risk:
@@ -155,12 +156,7 @@ P0. **Small fixes the rest depends on** (the review's §3.1 and §3.3):
    the RTX CPU-bound at 5.2 ms). Propagation, extraction, interpolation and upload in
    parallel on the job system; interpolation on the GPU so movers upload per tick, not per
    frame.
-0g. **A player crate** (`engine_app`, review §3.7; the owner decides its place, question
-   2): device, swapchain, latency provider, process setup (power throttling, MMCSS, CPU
-   sets), pipeline cache and the frame loop in one place; ECS components for lights,
-   skinned meshes and probes; features per view instead of per renderer;
-   `RenderDefaults` applied whole. The benches and the test bed move onto it.
-0h. Start-up overlap (device creation beside the pack's reading and cooking) and pipeline
+0g. Start-up overlap (device creation beside the pack's reading and cooking) and pipeline
    variants created on first use (review §3.8): first frame 450–590 ms warm, 1.2–1.4 s
    with the pipeline cache missing.
 1. GPU particles and GPU radix sort.
@@ -170,6 +166,9 @@ P0. **Small fixes the rest depends on** (the review's §3.1 and §3.3):
    above in shade. Today they look dark brown there. The material and the shading are
    right (seen from below they are gold), but the shaded floor they reflect has no bounced
    light (2026-10-02).
+3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
+   first: it decides permutations and pipeline management for the whole renderer (§9
+   material graph and hand-written Slang).
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
    visibility bits (patent, ADR 0035 note).
 5. Virtual shadow maps.
@@ -184,8 +183,11 @@ P0. **Small fixes the rest depends on** (the review's §3.1 and §3.3):
    never made), CPU memory accounting (0.9–1.1 GiB private bytes unexplained).
 6d. Jolt's jobs on `engine_core::jobs` through JoltC's callback job system (review §3.10).
 6e. `forward.rs` (5,695 lines) split by feature (review §3.12).
-6f. Custom 3D materials and shaders (review §4; ADR first: it decides permutations and
-   pipeline management for the whole renderer; the owner decides when, question 3).
+6f. **A player crate** (`engine_app`, review §3.7; after the rendering queue: owner,
+   2026-10-10): device, swapchain, latency provider, process setup (power throttling,
+   MMCSS, CPU sets), pipeline cache and the frame loop in one place; ECS components for
+   lights, skinned meshes and probes; features per view instead of per renderer;
+   `RenderDefaults` applied whole. The benches and the test bed move onto it.
 7. Then: editor tools, Luau bindings and debugger, other tooling.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
@@ -226,6 +228,8 @@ P0. **Small fixes the rest depends on** (the review's §3.1 and §3.3):
   - per-sample or bilaterally upsampled AO and contact shadows under MSAA;
   - dynamic resolution with MSAA;
   - CMAA is not built (Intel patents).
+  - Ambient occlusion: the discrete default stays High (owner, 2026-10-10), although it
+    is 28 % of the RTX's default GPU frame (481 µs; Medium 0.40 ms, FLIP 0.096 vs 0.070).
   - The discrete-GPU default stays TAA. The other candidate is MSAA 4× (+1.2 ms on the
     RTX, sharpest in motion, more flicker); the owner decides.
   - A Streamline `eErrorExceptionHandler` hang was seen once in `aa_bench`.
@@ -238,8 +242,6 @@ P0. **Small fixes the rest depends on** (the review's §3.1 and §3.3):
   never reproduced or explained. Watch for a recurrence and get a stack.
 - **Housekeeping:** ADR 0001 is still "Proposed" (needs measurements on a quiet machine).
   `scene_bench` is wired by hand, outside `engine_frame`. From the second review:
-  - 118 pairs of `*_got.png` / `*_ref.png` in `H:\` (2026-10-01, from a test no longer
-    in the tree);
   - `game_loop`'s "input → camera" counts a stale window event (637 ms);
   - `scene_bench --ao` takes the next argument as the AO quality even when it is a flag;
   - CLAUDE.md §5 (mimalloc) and §2 ("engine_runtime: game executable") describe things

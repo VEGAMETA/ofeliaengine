@@ -283,7 +283,7 @@ with the shared layout in one place.
 ### 3.13 Housekeeping (low, S)
 
 - 118 pairs of `*_got.png` / `*_ref.png` in `H:\` (2026-10-01, from a test that no longer
-  exists in the tree): delete.
+  exists in the tree): moved to the Recycle Bin (owner, 2026-10-10).
 - `game_loop` reports "input → camera 637 ms": a stale window event counted as the frame's
   input.
 - `scene_bench --ao` swallows the next argument as the AO quality (`--ao --pipeline-stats`
@@ -318,8 +318,10 @@ during the flight (no first-use hitches from shaders).
 
 ## 5. The new queue
 
-Merged with `docs/status.md` §5 and §6. P0 items are small and fix a crash or wrong
-measurements that later work depends on.
+As proposed to the owner (P0 items are small and fix a crash or wrong measurements that
+later work depends on). The order decided on 2026-10-10 (§6) is in `docs/status.md` §5:
+faster checks first, then the P0 items; the player crate after the rendering queue; custom
+3D materials after GI.
 
 | # | Item | Why | Cost |
 |---|---|---|---|
@@ -343,13 +345,17 @@ measurements that later work depends on.
 
 The leftovers of `docs/status.md` §6 stay as they are.
 
-## 6. Questions for the owner
+## 6. Questions for the owner, and the answers (2026-10-10)
 
 1. P0 items 0 and 0a before "faster checks", or after it as decided on 2026-10-02? (They
-   are small; one is a crash on start on the iGPU.)
+   are small; one is a crash on start on the iGPU.) **Faster checks first.**
 2. Item 6 (a player crate) is architectural: build it before more features (it makes
    every feature cheaper to integrate and measure), or keep it after the rendering queue?
+   **After the rendering queue.**
 3. Item 14 (custom materials): its ADR decides how shader permutations work in the whole
-   renderer. When should it start?
+   renderer. When should it start? **After GI.**
 4. On the RTX, AO High is 28 % of the default GPU frame. Keep High as the discrete
-   default (ADR 0072), or Medium (0.40 vs 0.52 ms; FLIP 0.096 vs 0.070)?
+   default (ADR 0072), or Medium (0.40 vs 0.52 ms; FLIP 0.096 vs 0.070)? **High stays.**
+5. Delete the stray PNGs in `H:\`? **Yes, carefully:** the 236 files (all
+   `<digits>_got.png` / `<digits>_ref.png` of 2026-10-01, 128 × 128 debug renders of the
+   Radeon LDS investigation, 1.3 MB) went to the Recycle Bin.
