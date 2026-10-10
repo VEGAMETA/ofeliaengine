@@ -67,8 +67,8 @@ if ($LASTEXITCODE -ne 0) {
 
 # Steps that use the GPUs: built first, then run holding a lock shared by every check on the
 # machine, so parallel checks (several agents, ADR 0062) neither share the GPUs while one
-# measures nor compile while one runs. The Radeon is an APU: a compilation next to it lowers
-# its clocks by 3-8 %, so the perf step also waits (up to $quietLimit s) for the CPU to calm.
+# measures nor compile while one runs. The Radeon is an APU: work on the CPU next to it slows
+# it by up to 10 %, so the perf step also waits (up to $quietLimit s) for the CPU to calm.
 $prebuild = @{}
 $gpuLockName = 'Local\ofeliaengine-gpu-steps'
 $quietLimit = 600
@@ -77,12 +77,13 @@ function Wait-QuietCpu([string]$log) {
     $calm = 0
     while ($true) {
         $load = (Get-CimInstance Win32_PerfFormattedData_PerfOS_Processor -Filter "Name='_Total'").PercentProcessorTime
-        # 120 calm samples (about 2 min) in a row: a compilation pausing between crates is not
-        # quiet, and right after a long build the APU is still hot: its Radeon measured
-        # 5-30 % slower passes then, still after 30 quiet seconds following a cold release
-        # build, and back within 1.5 % a few minutes later (2026-10-10).
+        # 10 calm samples in a row (about 12 s): no build or test runs any more (a compilation
+        # pausing between crates is not quiet). The Radeon renders ~10 % slower while every
+        # CPU core works and is back within 0.5 % seconds after the load stops (2026-10-10,
+        # docs/perf/reference-hw.md): a quiet CPU during its runs matters, not a cool-down
+        # before them, and perf_gate's rounds and re-measuring absorb what runs meanwhile.
         if ($load -lt 20) { $calm++ } else { $calm = 0 }
-        if ($calm -ge 120) {
+        if ($calm -ge 10) {
             if ($watch.Elapsed.TotalSeconds -ge 1) { "CPU quiet ($load %) after $([int]$watch.Elapsed.TotalSeconds) s" | Out-File -Append -Encoding utf8 $log }
             return
         }
@@ -386,7 +387,7 @@ foreach ($name in $steps.Keys) {
     if ($ok) {
         Write-Output "ok      $time  $name"
         if ($name -eq 'perf') {
-            Select-String -Path $log -Pattern '\*\*slower\*\*' | Select-Object -First 15 |
+            Select-String -Path $log -Pattern '\*\*slower\*\*|^measured again' | Select-Object -First 15 |
                 ForEach-Object { Write-Output "        $($_.Line)" }
         }
     } else {

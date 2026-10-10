@@ -121,3 +121,66 @@ ref-1, `engine_golden`, 640 × 360 golden images (1920 × 1080 for the gate), re
 - The gate is advisory on ref-1; `--strict` in CI when a dedicated machine exists.
 - The test bed repeats part of `scene_bench`: `scene_bench` should move onto it when the
   parallel work touching it has landed.
+
+## Addendum (2026-10-10): rounds, measuring again, a short wait
+
+The gate has grown to 15 scenes. In the check of 2026-10-10 it took 749 of the check's
+901 s: 289 + 152 s waiting for 120 quiet CPU samples before each GPU (on the guess that
+the APU stays hot after a build), then 19 s measuring the RTX and 279 s the Radeon. Even
+so, the Radeon reported 5–28 % slower passes in a few scenes (shadows +27 % in two of
+them), while a run on a calm machine is within ±1.4 % of its baseline on every scene.
+Measured on ref-1 the same day:
+
+- `perf_gate` itself keeps the CPU at 7–8 % on average (RTX 19 s, Radeon 279 s with 200
+  frames): the scenes' loading is no load.
+- Radeon, Sponza, frame total: idle 22.85–23.05 ms; while all 16 CPU threads spin,
+  25.09–25.17 ms (+10 %); 4 s after they stop, 22.92 ms, and 22.84–23.00 ms for the next
+  80 s. There is no cool-down to wait for: what slows the iGPU is work on the CPU *during*
+  its runs (the die, power and memory are shared; `docs/perf/reference-hw.md`).
+- A scene's three runs went one after another, about 15 s on the Radeon: a few seconds of
+  other work slowed all three, and the fastest of them could not hide it.
+- 100 timed frames instead of 200, every scene on the Radeon: frame totals −1.8 … +1.4 %
+  against the 200-frame baseline (as the 200-frame run: −0.6 … +1.4 %), most passes
+  within 0.1 %; 149 s instead of 279. The passes that move more (bloom in `sponza_ao`, the
+  culling passes beside the atmosphere) overlap async compute and move as much with 200
+  frames: their timestamps include the other queue's work (the review's P0 item on pass
+  times, `docs/research/core-audit-2.md`).
+- RTX: the two scenes with async compute (`sponza_ao`, `sponza_atmosphere`) read 26–29 µs
+  longer end to end (`(gpu frame)`, +2.4 % and +3.6 %) than on 2026-10-02 with every pass
+  unchanged, the same with a `perf_gate` built before the day's changes. The renderer did
+  not change in between (one statistics function added), the machine did (AMD driver
+  26.8.1, the SoC voltage, the iGPU's clock): the time went between the passes, where the
+  queues hand work to each other.
+
+Decision:
+
+- **Rounds:** the runs go a round at a time, the first run of every scene, then the
+  second, then the third. A slow moment slows one run of a few scenes, and each scene's
+  fastest run stays clear of it.
+- **Measured again:** a scene with a pass over the threshold gets `--runs` more runs (a
+  round at a time again) and is judged by those alone, so that more runs cannot lower its
+  time below what its baseline's runs could reach. A slow moment has passed by then, a
+  regression has not; the first runs' numbers stay in the output.
+- **A short wait:** `tools/check.ps1 -Perf` waits for 10 calm CPU samples (about 12 s,
+  each under 20 %) before each GPU, long enough for a build or a test step to have ended,
+  instead of 120.
+- **100 timed frames per run** (`--frames N` to change it).
+- **A baseline takes each pass's median run** (`--update`), a check its fastest run. The
+  first check of this procedure, against baselines made of the fastest runs, measured
+  `sponza_atmosphere`'s bloom downsample again and still read +23 %: its baseline,
+  1,184.8 µs, came from one run, against 1,436–1,466 µs in every other run that day (the
+  pass overlaps async compute). One lucky run must not set the bar.
+- Both baselines re-measured this way; the files' header says how they were measured.
+
+The same check showed the Radeon's other kind of noise: in its first runs the shadow pass
+read 20–27 % slower in four scenes, in all three rounds (so for minutes, not seconds, with
+the CPU quiet at 1 %), and normal when those scenes were measured again. A bandwidth-heavy
+pass on the iGPU has a slow state that comes and goes; measuring again absorbs it, finding
+its cause is left to the variance study in `docs/status.md`.
+
+Consequences: the perf step took 237 s instead of 749 in the first check, four scenes
+measured again included, and the whole check `-Gpu -Perf` 400 s instead of 901 (numbers in
+`docs/perf/history.md`); a scene measured again costs three more runs (about 1 s on the
+RTX, 10 s on the Radeon); a regression has to show in both sets of runs. The work on the
+CPU during the Radeon's runs still counts: a build started meanwhile slows them, and the
+uniform-shift rule names it.

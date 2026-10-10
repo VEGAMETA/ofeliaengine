@@ -196,7 +196,7 @@ Numbers (ref-1, `check.ps1 -Gpu`, HDD target):
 The repository sits on ref-1's SATA HDD (`H:`); `C:` is an NVMe drive. The same scenarios
 with each, measured back to back with the check of the first addendum:
 
-| | HDD (`H:\Desktop\ofeliaengine	arget`) | NVMe (`C:\cargo-target\ofeliaengine`) |
+| | HDD (`H:\Desktop\ofeliaengine\target`) | NVMe (`C:\cargo-target\ofeliaengine`) |
 |---|---:|---:|
 | `check.ps1 -Gpu`, nothing changed | 143 s | 141 s |
 | `check.ps1 -Gpu`, `engine_render` touched | 203 s (test 43, tracy 19, docs 28) | 155 s (test 25, tracy 15, docs 6) |
