@@ -3,3 +3,4 @@
 
 mod animation;
 mod gltf;
+mod hdr;

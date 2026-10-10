@@ -5,6 +5,7 @@
 //! performance gate both use it (ADR 0062).
 
 use engine_anim::{local_to_model, skinning_matrices};
+use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
 use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
     TextureSlot, TextureWrap, cook_scene, import_gltf, write_pack,
@@ -28,6 +29,7 @@ use engine_render::gpu_scene::GpuScene;
 use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
+use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
 use engine_render::particles::{ParticleEmitter, ParticleSystem, ParticleTarget};
 use engine_render::post::{HDR_FORMAT, ToneCurve};
 use engine_render::reflections::{ProbeSettings, ReflectionProbe, ReflectionProbes, SsrSettings};
@@ -160,6 +162,10 @@ pub struct Shot {
     /// temporal antialiasing they mark a reactive mask
     /// (`ForwardRenderer::set_reactive_effects`).
     pub particles: bool,
+    /// An HDR panorama as the sky (ADR 0083; with `sky`): a `.hdr` file in the test
+    /// assets, behind the scene and in its image-based light. Its sun, found in it, is the
+    /// shot's sun (direction and color; `sun`'s ambient term stays).
+    pub panorama: Option<&'static str>,
 }
 
 impl Shot {
@@ -207,6 +213,7 @@ impl Shot {
             glossy_floor: false,
             texture_budget: None,
             particles: false,
+            panorama: None,
         }
     }
 }
@@ -647,6 +654,17 @@ fn median(values: &mut [f64]) -> f64 {
 #[allow(clippy::too_many_lines)]
 pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let loaded = load(&shot.source, shot.subsurface, shot.glossy_floor)?;
+    // The HDR panorama, read and its sun found before the GPU starts.
+    let panorama = match shot.panorama.filter(|_| shot.sky) {
+        Some(name) => {
+            let path = test_assets().join(name);
+            let bytes = std::fs::read(&path).map_err(|_| Skip::NoScene(path.clone()))?;
+            let image = decode_hdr(&bytes).map_err(|_| Skip::NoScene(path.clone()))?;
+            let sun = find_sun(&image, &SunSearch::default());
+            Some((image, sun))
+        }
+        None => None,
+    };
     let (instance, device, streamline) = gpu(
         options.validation,
         shot.antialiasing.upscaler() == Some(engine_frame::UpscalerKind::Dlss),
@@ -709,6 +727,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     for light in lights.iter_mut() {
         light.shadow = shot.local_shadows;
     }
+    let mut sun = shot.sun;
     let environment = shot.sky.then(|| {
         let mut environment =
             Environment::new(&device, &mut allocator, &bindless, Sky::default()).expect("sky");
@@ -716,6 +735,34 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             .set_atmosphere(&device, &mut allocator, &bindless, shot.atmosphere)
             .expect("atmosphere");
         environment.set_fog(shot.fog);
+        if let Some((image, found)) = &panorama {
+            let panorama = Panorama::new(
+                &device,
+                &mut allocator,
+                &bindless,
+                &PanoramaDesc {
+                    width: image.width,
+                    height: image.height,
+                    pixels: &image.pixels,
+                    sun: found.map(|s| PanoramaSun {
+                        direction: s.direction,
+                        illuminance: s.illuminance,
+                        cone: s.cone,
+                        sky: s.sky,
+                    }),
+                    background_size: 0,
+                },
+            )
+            .expect("panorama");
+            if let Some(s) = panorama.sun() {
+                sun = DirectionalLight {
+                    direction: -s.direction,
+                    color: s.illuminance,
+                    ambient: sun.ambient,
+                };
+            }
+            environment.set_panorama(Some(panorama));
+        }
         environment
     });
     let reflecting = shot.sky && (shot.probe_grid.is_some() || shot.ssr.is_some());
@@ -1262,7 +1309,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                             None => SceneDraws::List(&draws),
                         },
                         skinning: Some(&skinned_frame),
-                        light: shot.sun,
+                        light: sun,
                         lights: &lights,
                         environment: environment.as_ref(),
                         reflection_probes: probes.as_ref(),

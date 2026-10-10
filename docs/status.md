@@ -67,6 +67,8 @@ tooling included) about **50 %**.
 | Local-light shadows (cached atlas), contact shadows (Bend) | done | ADR 0071 |
 | Reflections: parallax-corrected probes, SSR (FidelityFX SSSR-based) | done | ADR 0073 |
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
+| HDRI environments: `.hdr` panoramas as the sky, their sun found and lit as the directional light | done (phase 1; BC6H cooking next) | ADR 0083 |
+| GPU particles and GPU radix sort | done | ADRs 0080, 0081 |
 | Upscalers: TAAU, FSR 3.1, DLSS via Streamline (user-supplied DLLs) | done | ADRs 0060, 0063 |
 | Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/Catmull-Rom/Lanczos-3/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
@@ -90,7 +92,10 @@ Catmull-Rom history with point reads (owner, 2026-10-10; ADR 0043's second amend
 GPU, the tick's stages on the job system: ADR 0064's addendum), 0f2 (16-byte aligned
 accesses through buffer addresses in every shader: ADR 0013's addendum), 0g (shading
 variants made on first use and by the device's warm-up thread, start-up phases
-overlapped: ADR 0079). Next: 1 (GPU particles and GPU radix sort).
+overlapped: ADR 0079). On 2026-10-11: 1 (GPU particles and GPU radix sort: ADRs 0080,
+0081; the reactive mask for effects, ADR 0081's amendment), 2 researched (decals, ADR 0082
+Proposed: the owner's choice), 2b phase 1 (HDRI environments, ADR 0083). Next: 2b phase 2,
+or 2 once the owner has chosen.
 
 ## 5. Queue (in order)
 
@@ -257,12 +262,16 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    doubles the 32 fragment entry points (best after the forward.rs split, 7c), a decal
    buffer before lighting needs the prepass and skips transparent surfaces. Waiting for
    the owner's choice; 2b meanwhile.
-2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity): `.hdr` (own
-   decoder) and OpenEXR (the `exr` crate, BSD-3-Clause, or own) cooked from equirectangular
-   into BC6H cube maps with mips (DDC, pack); a background cube larger than the lighting
-   cube's 128² faces; prefiltering that stays clean under a bright sun in the map (filtered
-   importance sampling); optionally the sun extracted into the directional light for its
-   shadows; a golden shot with a CC0 HDRI (Poly Haven) on both GPUs. About 3-5 days.
+2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity). ~~Phase 1~~ done
+   2026-10-11 (ADR 0083): our own `.hdr` decoder, RGBE kept and decoded on the GPU (an
+   unclipped sun exceeds half floats); a background cube of its own made on the GPU (a
+   quarter of the panorama's width, at most 1,024 by default: 0.23 ms on the RTX, 6.8 ms on
+   the Radeon for 512², once); the sun found in the panorama and taken out into the
+   directional light (shadows; the 128² lighting cube without its spike, so prefiltering
+   stays clean and the harmonics do not ring); turning; a golden shot with a CC0 Poly Haven
+   panorama on both GPUs. **Phase 2:** OpenEXR (the `exr` crate, BSD-3-Clause, or own) and
+   cooking into BC6H cube maps with mips (DDC, pack; the background 8 times smaller), the
+   sun's angular size for soft shadows. About 2 days.
 3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
    medallions on the curtains (roughness 0.28, metallic 0.74) must read gold when seen from
    above in shade. Today they look dark brown there. The material and the shading are

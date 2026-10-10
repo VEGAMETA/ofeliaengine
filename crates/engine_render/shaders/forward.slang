@@ -196,7 +196,7 @@ struct Frame
     SubsurfaceProfile* subsurface;
     AtmosphereFrame* atmosphere; // aerial perspective and fog (ADR 0069), for `fragmentBlendedAtmosphere*`
     uint local_shadow_atlas; // bindless: the local lights' shadow atlas (ADR 0071)
-    uint _pad5;
+    float sun_disk;          // the sky pass: the cosine of the light's disk (above 1: none, a panorama's sky)
     uint* light_shadows;     // per sorted light: its first view in `shadow_views`, or NO_SHADOW
     ShadowView* shadow_views; // the views of the shadowed lights in view
     ShadowView* shadow_draws; // the views drawn this frame (culling and drawing)
@@ -2050,7 +2050,8 @@ float2 backgroundMotion(Background input) : SV_Target0
 }
 
 // The environment's sky along this pixel's ray, and the sun's disk (0.27° in radius: the
-// light's illuminance spread over its solid angle).
+// light's illuminance spread over its solid angle; none over a panorama, which shows its
+// own sun).
 [shader("fragment")]
 float4 skyFragment(Background input) : SV_Target0
 {
@@ -2062,7 +2063,7 @@ float4 skyFragment(Background input) : SV_Target0
     float3 d = normalize(mid.xyz / mid.w - near.xyz / near.w);
     SamplerState s = g_samplers[push.frame.linear_sampler];
     float3 color = g_cubes[push.frame.sky_cube].SampleLevel(s, d, 0.0).rgb * push.frame.env_intensity;
-    const float cos_sun = 0.99998889;
+    float cos_sun = push.frame.sun_disk;
     if (dot(d, read_float4(&push.frame.to_light).xyz) > cos_sun)
         color += read_float4(&push.frame.light_color).rgb / (2.0 * PI * (1.0 - cos_sun));
     return float4(color, 1.0);

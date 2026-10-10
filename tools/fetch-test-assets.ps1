@@ -3,7 +3,9 @@
 #
 #   powershell -File tools\fetch-test-assets.ps1 [-Only name,name]
 #
-# Khronos glTF sample models are fetched file by file (the .gltf, its buffers and images).
+# Khronos glTF sample models are fetched file by file (the .gltf, its buffers and images);
+# HDR panoramas (ADR 0083, `-Only HDRI` for them alone) from Poly Haven, checked against
+# their MD5.
 param([string[]]$Only = @())
 
 $ErrorActionPreference = 'Stop'
@@ -25,6 +27,14 @@ $models = @(
     @('RiggedFigure', 'RiggedFigure/glTF/RiggedFigure.gltf', 'CC-BY 4.0 (Cesium)'),
     @('RiggedSimple', 'RiggedSimple/glTF/RiggedSimple.gltf', 'CC-BY 4.0 (Cesium)'),
     @('SimpleSkin', 'SimpleSkin/glTF/SimpleSkin.gltf', 'CC0')
+)
+
+# name, URL, MD5, license: HDR panoramas into test-assets\HDRI (the leading comma keeps a
+# list of one a list of lists).
+$panoramas = @(
+    , @('kloofendal_48d_partly_cloudy_puresky_2k.hdr',
+      'https://dl.polyhaven.org/file/ph-assets/HDRIs/hdr/2k/kloofendal_48d_partly_cloudy_puresky_2k.hdr',
+      '2eba3a4d7eeb23cbfbeca364c97e7980', 'CC0 (Poly Haven; Greg Zaal, sky edits Jarod Guest)')
 )
 
 function Fetch($url, $path) {
@@ -50,4 +60,17 @@ foreach ($m in $models) {
         Fetch "$base/$([uri]::EscapeDataString([uri]::UnescapeDataString($uri)).Replace('%2F', '/'))" (Join-Path $dir ([uri]::UnescapeDataString($uri)))
     }
     Write-Output "$name ($license): $((Get-ChildItem -Recurse $dir | Measure-Object Length -Sum).Sum / 1MB) MB in $dir"
+}
+
+foreach ($p in $panoramas) {
+    $name, $url, $md5, $license = $p
+    if ($Only.Count -and -not ($Only -contains 'HDRI') -and -not ($Only -contains $name)) { continue }
+    $path = Join-Path $root "HDRI\$name"
+    Fetch $url $path
+    $hash = (Get-FileHash -Algorithm MD5 $path).Hash.ToLowerInvariant()
+    if ($hash -ne $md5) {
+        Remove-Item $path
+        throw "${name}: MD5 $hash, expected $md5 (removed; run again)"
+    }
+    Write-Output "$name ($license): $([math]::Round((Get-Item $path).Length / 1MB, 1)) MB in $(Split-Path $path)"
 }
