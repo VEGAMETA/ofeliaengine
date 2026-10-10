@@ -225,5 +225,9 @@ runs. Settled streaming frames allocate nothing (`tests/zero_alloc.rs`). Pack: S
   sets of sub-regions into a working set. We use one source (GPU feedback) to stay clear
   and dropped the screen-size combination the brief asked for. Is that reading acceptable,
   or should counsel look at it before prefetching is added?
+  **Answered (owner, 2026-10-10):** the reading is acceptable; what the engine has (one
+  source per kind of object, a budget that only divides bytes) does not fall under the
+  family. Combining several schemes' sets for the same objects stays out (claims read in
+  `docs/research/streaming-fast-turns.md`).
 - Default budget share on integrated GPUs (50 % of a heap the driver makes mostly of system
   memory): fine as a default, or should games pick it per platform?
