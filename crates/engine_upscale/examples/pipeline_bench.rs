@@ -11,6 +11,8 @@
 //!   load `--cache`.
 //!
 //! Prints a Markdown table: per renderer, its pipelines and milliseconds, then the totals.
+//! The forward renderer's shading variants are described, not made: the device's warm-up
+//! thread makes them one after another (ADR 0079), and their rows time that thread.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -95,13 +97,17 @@ fn main() {
             .unwrap(),
         );
     });
+    row("forward: shading variants (warm-up thread)", &mut || {
+        device.wait_for_pipeline_warm_up();
+    });
     // Subsurface materials' pipelines come with the first profiles (ADR 0059).
-    row("subsurface (first profiles)", &mut || {
+    row("subsurface (first profiles; warm-up thread)", &mut || {
         if let Some(forward) = keep_forward.as_mut() {
             forward
                 .set_subsurface_profiles(&device, &bindless, &[SubsurfaceProfile::skin()])
                 .unwrap();
         }
+        device.wait_for_pipeline_warm_up();
     });
     let mut keep_tonemap = None;
     row("tone map", &mut || {

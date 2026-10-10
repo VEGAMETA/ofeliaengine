@@ -30,7 +30,7 @@ use crate::subsurface::{ALBEDO_FORMAT, IRRADIANCE_FORMAT};
 use core::ffi::CStr;
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    Bindless, Blend, Device, GraphicsPipelineDesc, Pipeline, PipelineDesc, RhiError,
+    Bindless, Blend, Device, GraphicsPipelineDesc, LazyPipeline, Pipeline, PipelineDesc, RhiError,
     ShaderStageDesc, spirv_words,
 };
 
@@ -171,9 +171,9 @@ pub(super) fn add_nearest_resolve<'g>(
 #[derive(Debug)]
 pub(super) struct MsaaShading {
     /// After the prepass.
-    pub(super) shade: Pipeline,
+    pub(super) shade: LazyPipeline,
     /// Transparent surfaces: without and with the reactive mask.
-    pub(super) blended: [Pipeline; 2],
+    pub(super) blended: [LazyPipeline; 2],
 }
 
 /// With local lights' shadows (ADR 0071), per environment bit.
@@ -181,18 +181,18 @@ pub(super) struct MsaaShading {
 pub(super) struct MsaaShadowed {
     pub(super) shading: [MsaaShading; 2],
     /// Transparent surfaces under an atmosphere: without and with the reactive mask.
-    pub(super) blended_atmosphere: [Pipeline; 2],
-    pub(super) ao: Option<[Pipeline; 2]>,
-    pub(super) subsurface: Option<[Pipeline; 2]>,
+    pub(super) blended_atmosphere: [LazyPipeline; 2],
+    pub(super) ao: Option<[LazyPipeline; 2]>,
+    pub(super) subsurface: Option<[LazyPipeline; 2]>,
 }
 
 /// The sun's contact shadows' shading (ADR 0071), as `ContactState`'s.
 #[derive(Debug)]
 pub(super) struct MsaaContact {
-    pub(super) shading: [Pipeline; 4],
-    pub(super) ao: Option<[Pipeline; 4]>,
-    pub(super) shadowed: Option<[Pipeline; 2]>,
-    pub(super) shadowed_ao: Option<[Pipeline; 2]>,
+    pub(super) shading: [LazyPipeline; 4],
+    pub(super) ao: Option<[LazyPipeline; 4]>,
+    pub(super) shadowed: Option<[LazyPipeline; 2]>,
+    pub(super) shadowed_ao: Option<[LazyPipeline; 2]>,
 }
 
 /// Which of the renderer's features have pipelines (their multisampled ones follow).
@@ -220,14 +220,14 @@ pub(super) struct MsaaPipelines {
     /// The environment's sky where no geometry was drawn.
     pub(super) sky: Pipeline,
     /// The atmosphere's full-screen pass, per sample.
-    pub(super) composite: Pipeline,
+    pub(super) composite: LazyPipeline,
     /// Transparent surfaces under an atmosphere, by local lights: without and with the
     /// reactive mask.
-    pub(super) blended_atmosphere: [[Pipeline; 2]; 2],
-    pub(super) ao: Option<[Pipeline; 4]>,
+    pub(super) blended_atmosphere: [[LazyPipeline; 2]; 2],
+    pub(super) ao: Option<[LazyPipeline; 4]>,
     /// Subsurface materials' shading per variant, the scatter pass, and the resolve of
     /// their light and albedo (the nearest sample's).
-    pub(super) subsurface: Option<([Pipeline; 4], Pipeline, Pipeline)>,
+    pub(super) subsurface: Option<([LazyPipeline; 4], LazyPipeline, Pipeline)>,
     pub(super) shadowed: Option<MsaaShadowed>,
     pub(super) contact: Option<MsaaContact>,
     /// Reflections' shading, composite, and the resolve of their inputs (the nearest
@@ -322,9 +322,7 @@ fn shades<'a>(
     }
 }
 
-fn take<const N: usize>(
-    pipelines: &mut impl Iterator<Item = Pipeline>,
-) -> Result<[Pipeline; N], RhiError> {
+fn take<T, const N: usize>(pipelines: &mut impl Iterator<Item = T>) -> Result<[T; N], RhiError> {
     let mut out = Vec::with_capacity(N);
     for _ in 0..N {
         out.push(pipelines.next().ok_or_else(short)?);
@@ -368,11 +366,13 @@ impl MsaaPipelines {
             depth,
             samples,
         };
-        let mut descs = Vec::with_capacity(3 * 4 + 11);
+        // The shading variants are described (made on first use, ADR 0079), the rest made.
+        let mut lazy_descs = Vec::with_capacity(3 * 4 + 5);
+        let mut descs = Vec::with_capacity(6);
         for v in 0..VARIANTS.len() {
-            descs.push(batch.equal(&fragment, c"fragmentMain", &formats, v));
-            descs.push(batch.blended(&fragment_blended, c"fragmentBlended", &formats, v));
-            descs.push(batch.blended(
+            lazy_descs.push(batch.equal(&fragment, c"fragmentMain", &formats, v));
+            lazy_descs.push(batch.blended(&fragment_blended, c"fragmentBlended", &formats, v));
+            lazy_descs.push(batch.blended(
                 &fragment_blended_reactive,
                 c"fragmentBlendedReactive",
                 &reactive_formats,
@@ -475,7 +475,7 @@ impl MsaaPipelines {
                 entry: c"skyFragment",
             },
         ));
-        descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+        lazy_descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
             color_formats: &formats,
             cull_mode: vk::CullModeFlags::NONE,
             depth_test: false,
@@ -494,13 +494,13 @@ impl MsaaPipelines {
             )
         }));
         for lit in [2, 3] {
-            descs.push(batch.blended(
+            lazy_descs.push(batch.blended(
                 &fragment_blended_atmosphere,
                 c"fragmentBlendedAtmosphere",
                 &formats,
                 lit,
             ));
-            descs.push(batch.blended(
+            lazy_descs.push(batch.blended(
                 &fragment_blended_atmosphere_reactive,
                 c"fragmentBlendedAtmosphereReactive",
                 &reactive_formats,
@@ -510,6 +510,14 @@ impl MsaaPipelines {
         let mut pipelines =
             Pipeline::create_many(device, bindless.pipeline_layout(), &descs)?.into_iter();
         let mut next = || pipelines.next().ok_or_else(short);
+        let prepass = [next()?, next()?];
+        let prepass_motion = [next()?, next()?];
+        let background = next()?;
+        let sky = next()?;
+        let mut described =
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &lazy_descs)
+                .into_iter();
+        let mut next = || described.next().ok_or_else(short);
         let mut shading = || -> Result<MsaaShading, RhiError> {
             Ok(MsaaShading {
                 shade: next()?,
@@ -517,10 +525,6 @@ impl MsaaPipelines {
             })
         };
         let shading = [shading()?, shading()?, shading()?, shading()?];
-        let prepass = [next()?, next()?];
-        let prepass_motion = [next()?, next()?];
-        let background = next()?;
-        let sky = next()?;
         let composite = next()?;
         let blended_atmosphere = [[next()?, next()?], [next()?, next()?]];
         Ok(Self {
@@ -579,7 +583,7 @@ impl MsaaPipelines {
         let formats = [color];
         let reactive_formats = [color, REACTIVE_FORMAT];
         let subsurface_formats = [color, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
-        let layout = bindless.pipeline_layout();
+        let layout = bindless.shared_pipeline_layout();
 
         if features.ao && self.ao.is_none() {
             let fragment = words(FRAGMENT_AO)?;
@@ -591,7 +595,7 @@ impl MsaaPipelines {
                 &formats,
                 &[0, 1, 2, 3],
             );
-            let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
+            let mut p = LazyPipeline::describe_many(device, layout, &descs).into_iter();
             self.ao = Some(take(&mut p)?);
         }
 
@@ -626,7 +630,7 @@ impl MsaaPipelines {
                     }),
                 )
             }));
-            let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
+            let mut p = LazyPipeline::describe_many(device, layout, &descs).into_iter();
             let shading = take(&mut p)?;
             let scatter = p.next().ok_or_else(short)?;
             let resolve = nearest_resolve(
@@ -668,7 +672,7 @@ impl MsaaPipelines {
                 &reactive_formats,
                 3,
             ));
-            let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
+            let mut p = LazyPipeline::describe_many(device, layout, &descs).into_iter();
             let mut next = || p.next().ok_or_else(short);
             let mut shading = || -> Result<MsaaShading, RhiError> {
                 Ok(MsaaShading {
@@ -697,7 +701,7 @@ impl MsaaPipelines {
                     &formats,
                     &[1, 3],
                 );
-                let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
+                let mut p = LazyPipeline::describe_many(device, layout, &descs).into_iter();
                 shadowed.ao = Some(take(&mut p)?);
             }
             if features.subsurface && shadowed.subsurface.is_none() {
@@ -710,7 +714,7 @@ impl MsaaPipelines {
                     &subsurface_formats,
                     &[1, 3],
                 );
-                let mut p = Pipeline::create_many(device, layout, &descs)?.into_iter();
+                let mut p = LazyPipeline::describe_many(device, layout, &descs).into_iter();
                 shadowed.subsurface = Some(take(&mut p)?);
             }
         }
@@ -719,11 +723,11 @@ impl MsaaPipelines {
             let contact_set = |fragment: &[u8],
                                entry: &'static CStr,
                                variants: &[usize]|
-             -> Result<Vec<Pipeline>, RhiError> {
+             -> Result<Vec<LazyPipeline>, RhiError> {
                 let fragment = words(fragment)?;
                 let mut descs = Vec::with_capacity(variants.len());
                 shades(&batch, &mut descs, (&fragment, entry), &formats, variants);
-                Pipeline::create_many(device, layout, &descs)
+                Ok(LazyPipeline::describe_many(device, layout, &descs))
             };
             if self.contact.is_none() {
                 let shading = contact_set(FRAGMENT_CONTACT, c"fragmentMainContact", &[0, 1, 2, 3])?;
@@ -778,7 +782,7 @@ impl MsaaPipelines {
                     slots.push((lights, k));
                 }
             }
-            let pipelines = Pipeline::create_many(device, layout, &descs)?;
+            let pipelines = LazyPipeline::describe_many(device, layout, &descs);
             let mut table: ReflectShadingTable = Default::default();
             for ((lights, k), pipeline) in slots.into_iter().zip(pipelines) {
                 table[lights][k >> 2][(k >> 1) & 1][k & 1] = Some(pipeline);
@@ -809,7 +813,7 @@ impl MsaaPipelines {
         ao: bool,
         contact: bool,
         shadowed: bool,
-    ) -> Option<&Pipeline> {
+    ) -> Option<&LazyPipeline> {
         let (table, _, _) = self.reflect.as_deref()?;
         table[usize::from(lights)][usize::from(ao)][usize::from(contact)]
             [usize::from(shadowed && lights)]

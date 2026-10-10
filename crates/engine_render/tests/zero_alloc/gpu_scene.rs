@@ -213,6 +213,9 @@ fn steady_state_scene_frames_do_not_allocate() {
     for i in 0..30 {
         frame(i);
     }
+    // Shading variants the frames have not drawn with are made on the device's
+    // warm-up thread (ADR 0079), which allocates: done before counting.
+    device.wait_for_pipeline_warm_up();
     let before = ALLOCATIONS.load(Ordering::Relaxed);
     for i in 30..130 {
         frame(i);

@@ -102,6 +102,9 @@ fn steady_state_frames_do_not_allocate() {
         for k in 0..20 {
             frame(&mut bed, &mut view, k);
         }
+        // Shading variants the frames have not drawn with are made on the device's
+        // warm-up thread (ADR 0079), which allocates: done before counting.
+        bed.device.wait_for_pipeline_warm_up();
         let before = ALLOCATIONS.load(Ordering::Relaxed);
         for k in 20..120 {
             frame(&mut bed, &mut view, k);
