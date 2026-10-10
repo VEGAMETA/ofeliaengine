@@ -285,7 +285,7 @@ runtime.frame(seconds_since_last_frame, &input, &mut gpu_scene,
 
   When thousands of things move, a tick's transform propagation, extraction and scene
   work are spread over it, with the same results as on one thread. With both, 60,000
-  movers cost the reference RTX machine 1.6 ms of CPU per frame at 60 fps (4.9 ms on one
+  movers cost the reference RTX machine 1.5 ms of CPU per frame at 60 fps (4.9 ms on one
   thread with the CPU blend). Below a few thousand the work stays on the calling thread.
 - **The camera is not part of the tick.** The second closure runs every frame with the
   latest input, after the ticks and right before rendering. A camera driven by ticks and

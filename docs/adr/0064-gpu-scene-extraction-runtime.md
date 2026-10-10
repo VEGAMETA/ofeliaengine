@@ -330,7 +330,9 @@ things 64 times a second, and the tick's stages ran on one thread.
   over its pool); and `GpuScene::add_passes` (slots whose only change is their motion
   applied in parallel: their box, moving box and record; bounds merged per job; slots that
   change batch take the full path). `Runtime::set_jobs` and `GpuScene::set_jobs` take the
-  pool.
+  pool. Each job's state sits on cache lines of its own (`CachePadded`), and propagation
+  marks a chunk's column once per run of writes into it: every mark stores the same tick,
+  and per value, 16 threads fought over the version's cache line.
 
 **Measurements** (ref-1, `flight` with the Sponza pack, 60,000 movers in spinning
 hierarchies of 10 and 64 skinned characters, 900 frames of 1/60 s (`--fps 60`) or 1/240 s
@@ -338,23 +340,27 @@ hierarchies of 10 and 64 skinned characters, 900 frames of 1/60 s (`--fps 60`) o
 
 | | main | GPU placement only | and the tick's stages on the pool |
 |---|---:|---:|---:|
-| RTX, 60 fps: CPU frame median / p99 | 4.94 / 6.99 | 3.99 / 6.72 | 1.63 / 2.93 |
-| RTX, 60 fps: frame interval median / p99 | 4.96 / 7.00 | 4.01 / 6.74 | 2.18 / 3.81 |
-| RTX, 240 fps: CPU frame median / p99 | 2.90 / 5.29 | 0.49 / 4.30 | 0.45 / 1.95 |
-| RTX, 240 fps: interval median / p99 / worst | 2.92 / 5.30 / 5.63 | 2.05 / 6.20 / 6.88 | 2.12 / 3.87 / 4.07 |
-| Radeon, 60 fps: CPU frame median / p99 | 6.69 / 8.96 | 5.92 / 9.32 | 2.89 / 4.36 |
-| Radeon, 60 fps: interval median (GPU-bound) | 40.97 | 41.05 | 41.39 |
-| Radeon, 240 fps: CPU frame median / p99 | 3.59 / 6.54 | 1.28 / 5.89 | 1.26 / 2.98 |
-| Radeon, 240 fps: interval median / p99 | 40.94 / 52.82 | 41.54 / 54.84 | 41.35 / 52.41 |
+| RTX, 60 fps: CPU frame median / p99 | 4.94 / 6.99 | 3.99 / 6.72 | 1.53 / 2.70 |
+| RTX, 60 fps: frame interval median / p99 | 4.96 / 7.00 | 4.01 / 6.74 | 2.19 / 3.60 |
+| RTX, 240 fps: CPU frame median / p99 | 2.90 / 5.29 | 0.49 / 4.30 | 0.46 / 1.85 |
+| RTX, 240 fps: interval median / p99 / worst | 2.92 / 5.30 / 5.63 | 2.05 / 6.20 / 6.88 | 2.14 / 3.85 / 4.17 |
+| Radeon, 60 fps: CPU frame median / p99 | 6.43 / 8.78 | 5.92 / 9.32 | 2.83 / 3.99 |
+| Radeon, 60 fps: interval median (GPU-bound) | 41.09 | 41.05 | 41.50 |
+| Radeon, 240 fps: CPU frame median / p99 | 3.71 / 6.49 | 1.28 / 5.89 | 1.33 / 2.99 |
+| Radeon, 240 fps: interval median / p99 | 41.24 / 53.04 | 41.54 / 54.84 | 41.40 / 53.10 |
+
+(The Radeon's main and last columns were measured back to back; its runs differ by about
+0.3 ms between sessions, which the middle column shows.)
 
 With the GPU placement alone, the RTX's tick frames got worse at 240 fps: the frames
 between ticks became GPU-bound, the CPU ran ahead, and a tick's 3.9 ms of single-threaded
 work landed on top of the wait (worst frame 3.4× the median; CLAUDE.md's budget is 2×). On
-the pool the tick's stages cost (RTX, 240 fps, p99 µs): propagation 1,374 → 341,
-extraction 1,251 → 578, scene upload 1,296 → 551.
+the pool the tick's stages cost (RTX, 240 fps, p99 µs): propagation 1,374 → 162 (341
+before the cache-line padding and the marks once per chunk run), extraction 1,251 → 645,
+scene upload 1,296 → 569. The worst frame is 1.95× the median (main 1.93×), p99 1.80×.
 
 GPU passes (µs): the RTX places 60,000 movers in 30–42 per frame and steps them in 5 per
-tick; the Radeon in 454–529 and 178–260; main's whole-array copy took 13.5 and 145–152. The
+tick; the Radeon in 453–529 and 177–260; main's whole-array copy took 13.5 and 145–152. The
 first layout (a 144-byte record per slot, a tick rewriting both transforms) took the Radeon
 570 and 950, the RTX about 140 and 107: per-slot records leave lines partly written, which
 the iGPU's shared memory pays for (its CPU propagation ran 0.66 ms slower beside them). On
