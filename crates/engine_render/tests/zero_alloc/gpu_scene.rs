@@ -2,7 +2,9 @@
 //! scene (ADR 0064) and the forward passes that draw it: moves, removals and insertions
 //! every frame, uploaded and declared, culled and drawn, recorded; with ray queries, its
 //! acceleration structures too (ADR 0087: the top level rebuilt every frame, as instances
-//! come and go; rays cast from the camera).
+//! come and go; rays cast from the camera) and probe GI (ADR 0088: frames that update the
+//! volume, then frames that only resolve and shade it; a frame whose passes differ from
+//! the last ones may create graph objects, as any change of a frame's layout).
 //!
 //! A counting global allocator observes the process while frames are declared and
 //! recorded after a warm-up (driver allocations happen in C and are not counted). One
@@ -14,7 +16,9 @@
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
     Camera, DirectionalLight, ForwardRenderer, ForwardView, Occlusion, ShadowSettings, Temporal,
+    ViewGi,
 };
+use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
@@ -59,7 +63,7 @@ fn steady_state_scene_frames_do_not_allocate() {
     let mut allocator = Allocator::new(&device);
     let bindless = Bindless::new(&device).unwrap();
     let (color_format, depth_format) = (vk::Format::R16G16B16A16_SFLOAT, vk::Format::D32_SFLOAT);
-    let renderer = ForwardRenderer::new(
+    let mut renderer = ForwardRenderer::new(
         &device,
         &bindless,
         color_format,
@@ -84,6 +88,25 @@ fn steady_state_scene_frames_do_not_allocate() {
         .ray_query()
         .is_some()
         .then(|| RayScene::new(&device, &bindless, RaySettings::default(), 2).unwrap());
+    let mut gi = rays.is_some().then(|| {
+        let grid = ProbeGrid::covering(
+            Vec3::new(-26.0, -2.0, -21.0),
+            Vec3::new(25.0, 3.0, 20.0),
+            2.0,
+            2048,
+        );
+        ProbeGi::new(
+            &device,
+            &mut allocator,
+            &bindless,
+            grid,
+            GiSettings::default(),
+        )
+        .unwrap()
+    });
+    renderer
+        .set_global_illumination(&device, &bindless, gi.is_some())
+        .unwrap();
     let place = |i: usize, t: f32| {
         Mat4::from_translation(Vec3::new(
             (i % 50) as f32 - 25.0,
@@ -148,6 +171,14 @@ fn steady_state_scene_frames_do_not_allocate() {
         }
         frame_number += 1;
         let slot = (frame_number % 2) as usize;
+        // The volume updates in every frame until the 80th (converged, it starts again),
+        // then converges and is only read.
+        if let Some(gi) = &gi
+            && i < 80
+            && gi.is_converged()
+        {
+            gi.refresh();
+        }
         // SAFETY: nothing recorded by this test is ever submitted.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -181,20 +212,21 @@ fn steady_state_scene_frames_do_not_allocate() {
                 )
                 .unwrap()
                 .unwrap();
-            if let Some(rays) = rays.as_mut() {
-                let ray_frame = rays
-                    .add_passes(
-                        &mut fg,
-                        &device,
-                        &mut allocator,
-                        &mut ring,
-                        &bindless,
-                        &geo,
-                        &scene_frame,
-                        frame_number,
-                    )
-                    .unwrap()
-                    .unwrap();
+            let ray_frame = rays.as_mut().map(|rays| {
+                rays.add_passes(
+                    &mut fg,
+                    &device,
+                    &mut allocator,
+                    &mut ring,
+                    &bindless,
+                    &geo,
+                    &scene_frame,
+                    frame_number,
+                )
+                .unwrap()
+                .unwrap()
+            });
+            if let Some(ray_frame) = ray_frame {
                 let world_from_clip = ring
                     .push(&[camera.clip_from_world.inverse().to_cols_array()])
                     .unwrap();
@@ -217,6 +249,10 @@ fn steady_state_scene_frames_do_not_allocate() {
                     .side_effects()
                     .execute(|_| {});
             }
+            let gi_view = gi.as_ref().map(|g| ViewGi {
+                volume: g.begin_frame(&mut fg),
+                rays: ray_frame,
+            });
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, 640, 360));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, 640, 360));
             let passes = renderer
@@ -239,6 +275,7 @@ fn steady_state_scene_frames_do_not_allocate() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: gi_view,
                     },
                 )
                 .unwrap();
@@ -266,9 +303,10 @@ fn steady_state_scene_frames_do_not_allocate() {
     }
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     println!(
-        "100 frames: {allocations} heap allocations; {:?}; {:?}",
+        "100 frames: {allocations} heap allocations; {:?}; {:?}; {:?}",
         scene.stats(),
-        rays.as_ref().map(RayScene::stats)
+        rays.as_ref().map(RayScene::stats),
+        gi
     );
     if let Some(rays) = &rays {
         assert!(
@@ -282,6 +320,9 @@ fn steady_state_scene_frames_do_not_allocate() {
     let (mut occlusion, mut temporal) = (occlusion, temporal);
     // SAFETY: nothing is in use.
     unsafe {
+        if let Some(gi) = gi.as_mut() {
+            gi.destroy(&device, &mut allocator, &bindless);
+        }
         if let Some(rays) = rays.as_mut() {
             rays.destroy(&device, &mut allocator);
         }

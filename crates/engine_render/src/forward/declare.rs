@@ -237,6 +237,24 @@ impl ForwardRenderer {
                 let prepared = d.passes.prepare(ring, view.decals, clip_from_world, size)?;
                 Some((d, prepared))
             });
+        // Probe GI (ADR 0088): a pass after the depth prepass writes each pixel's diffuse
+        // irradiance from the volume, which the GI shading reads. Not in multisampled
+        // views, nor before the volume's first update.
+        let gi_view = view
+            .gi
+            .filter(|g| self.gi_on && ms.is_none() && self.gi.is_some() && g.volume.has_light());
+        // The sky's irradiance harmonics outside the volume (the flat ambient as ones:
+        // radiance `ambient` everywhere is irradiance π × ambient).
+        let gi_sky = match (gi_view, environment) {
+            (None, _) => None,
+            (Some(_), Some(e)) => Some((e.sh_address, e.intensity)),
+            (Some(_), None) => {
+                let e = view.light.ambient * (core::f32::consts::PI / 0.282_095);
+                let mut sh = [[0.0f32; 4]; 9];
+                sh[0] = [e.x, e.y, e.z, 0.0];
+                Some((ring.push(&sh)?, 1.0))
+            }
+        };
         let fit = match capture_shadow {
             Some(c) => c.fit,
             None => shadow::fit_cascades(
@@ -332,6 +350,15 @@ impl ForwardRenderer {
             shadow_draws: local_frame.draws,
             shadow_draw_count: shadow_draws,
             shadow_texel: local.map_or(0.0, |s| 1.0 / s.atlas.desc.width.max(1) as f32),
+            gi_scale: gi_view.map_or(1.0, |g| g.volume.resolve_scale() as f32),
+            gi_samples: gi_view.map_or([0; 2], |g| {
+                let scale = g.volume.resolve_scale();
+                [
+                    depth_desc.width.div_ceil(scale),
+                    depth_desc.height.div_ceil(scale),
+                ]
+            }),
+            _gi_pad: 0,
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -358,6 +385,8 @@ impl ForwardRenderer {
             ao: NO_AO,
             decal_albedo: 0,
             decal_surface: 0,
+            gi: 0,
+            _pad: 0,
         };
 
         let command_bytes = u64::from(command_count) * COMMAND_BYTES;
@@ -745,6 +774,7 @@ impl ForwardRenderer {
             local_atlas: local_frame.atlas.filter(|_| local_frame.shadowed),
             contact: None,
             decals: None,
+            gi: None,
             reflect: None,
             resolves: None,
         };
@@ -814,7 +844,8 @@ impl ForwardRenderer {
             || subsurface_draws
             || contact.is_some()
             || reflecting
-            || decals.is_some();
+            || decals.is_some()
+            || gi_view.is_some();
         // With a prepass, the prepass writes the motion vectors and the shading after it
         // draws without them (the still variants' registers: on the Radeon its vertex
         // stage takes 49 VGPRs instead of 78).
@@ -878,6 +909,19 @@ impl ForwardRenderer {
             )
         });
         let decals = decals.filter(|_| decal_shading.is_some());
+        // With probe GI, the shading that reads its irradiance; without its pipeline (not
+        // described), the view draws with the sky's light.
+        let gi_shading = gi_view.and_then(|_| {
+            self.gi.as_deref()?.pipeline(
+                variant,
+                reflect_shading.is_some(),
+                decals.is_some(),
+                ao.is_some(),
+                contact.is_some(),
+                shadowed.is_some(),
+            )
+        });
+        let gi_view = gi_view.filter(|_| gi_shading.is_some());
         let main_pipelines = if let Some(m) = ms {
             let k = shadowed_index(variant);
             let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
@@ -910,6 +954,10 @@ impl ForwardRenderer {
             [p, p]
         } else {
             match (contact_shading, prepass, velocity.is_some()) {
+                _ if gi_shading.is_some() => {
+                    let p = gi_shading?;
+                    [p, p]
+                }
                 _ if decal_shading.is_some() => {
                     let p = decal_shading?;
                     [p, p]
@@ -938,7 +986,8 @@ impl ForwardRenderer {
                                mask: u32,
                                ao: Option<Texture>,
                                contact: Option<Texture>,
-                               decals: Option<DecalTargets>| {
+                               decals: Option<DecalTargets>,
+                               gi: Option<Texture>| {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
@@ -953,6 +1002,7 @@ impl ForwardRenderer {
                 decal_surface: decals
                     .and_then(|d| ctx.sampled_index(d.surface))
                     .unwrap_or(0),
+                gi: gi.and_then(|t| ctx.sampled_index(t)).unwrap_or(0),
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
@@ -1019,6 +1069,7 @@ impl ForwardRenderer {
                                 None,
                                 None,
                                 None,
+                                None,
                             )
                         });
                         DepthUse::ReadOnly
@@ -1044,9 +1095,26 @@ impl ForwardRenderer {
                         targets.decals =
                             Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
                     }
+                    if let (Some(g), Some((sh, intensity))) = (gi_view, gi_sky) {
+                        targets.gi = g
+                            .volume
+                            .add_resolve_pass(
+                                fg,
+                                ring,
+                                bindless,
+                                read_depth,
+                                [depth_desc.width, depth_desc.height],
+                                clip_from_world,
+                                view.camera.position,
+                                sh,
+                                intensity,
+                            )
+                            .ok();
+                    }
                     let ao_texture = targets.ao;
                     let contact_texture = targets.contact;
                     let decal_texture = targets.decals;
+                    let gi_texture = targets.gi;
                     shading_pass(
                         fg,
                         names.forward,
@@ -1070,6 +1138,7 @@ impl ForwardRenderer {
                             ao_texture,
                             contact_texture,
                             decal_texture,
+                            gi_texture,
                         )
                     });
                     ForwardPasses {
@@ -1084,6 +1153,7 @@ impl ForwardRenderer {
                         atmosphere: atmosphere.and_then(|a| a.textures),
                         contact_shadows: targets.contact,
                         decals: targets.decals,
+                        gi: targets.gi,
                         reflections: None,
                         resolved_depth,
                         draws: Some(draw_lists),
@@ -1123,6 +1193,7 @@ impl ForwardRenderer {
                                 None,
                                 None,
                                 None,
+                                None,
                             )
                         });
                     } else {
@@ -1146,6 +1217,7 @@ impl ForwardRenderer {
                                 main_pipelines,
                                 PHASE_EARLY,
                                 PLAIN_STATES,
+                                None,
                                 None,
                                 None,
                                 None,
@@ -1207,6 +1279,7 @@ impl ForwardRenderer {
                                 None,
                                 None,
                                 None,
+                                None,
                             )
                         });
                         if let Some(((settings, view_space), passes)) = &ao {
@@ -1227,9 +1300,26 @@ impl ForwardRenderer {
                             targets.decals =
                                 Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
                         }
+                        if let (Some(g), Some((sh, intensity))) = (gi_view, gi_sky) {
+                            targets.gi = g
+                                .volume
+                                .add_resolve_pass(
+                                    fg,
+                                    ring,
+                                    bindless,
+                                    read_depth,
+                                    [depth_desc.width, depth_desc.height],
+                                    clip_from_world,
+                                    view.camera.position,
+                                    sh,
+                                    intensity,
+                                )
+                                .ok();
+                        }
                         let ao_texture = targets.ao;
                         let contact_texture = targets.contact;
                         let decal_texture = targets.decals;
+                        let gi_texture = targets.gi;
                         shading_pass(
                             fg,
                             names.forward,
@@ -1253,6 +1343,7 @@ impl ForwardRenderer {
                                 ao_texture,
                                 contact_texture,
                                 decal_texture,
+                                gi_texture,
                             );
                             draw_phase(
                                 ctx,
@@ -1262,6 +1353,7 @@ impl ForwardRenderer {
                                 ao_texture,
                                 contact_texture,
                                 decal_texture,
+                                gi_texture,
                             );
                         });
                     } else {
@@ -1288,6 +1380,7 @@ impl ForwardRenderer {
                                 None,
                                 None,
                                 None,
+                                None,
                             )
                         });
                     }
@@ -1303,6 +1396,7 @@ impl ForwardRenderer {
                         atmosphere: atmosphere.and_then(|a| a.textures),
                         contact_shadows: targets.contact,
                         decals: targets.decals,
+                        gi: targets.gi,
                         reflections: None,
                         resolved_depth,
                         draws: Some(draw_lists),
@@ -1329,7 +1423,10 @@ impl ForwardRenderer {
                 .and_then(|m| m.shadowed.as_ref())
                 .filter(|_| shadowed.is_some())
                 .and_then(|p| p.subsurface.as_ref());
+            let gi_subsurface =
+                gi_view.and_then(|_| self.gi.as_deref()?.subsurface(variant, shadowed.is_some()));
             let pipeline = match (ms, shadowed.and_then(|p| p.subsurface.as_ref())) {
+                _ if gi_subsurface.is_some() => gi_subsurface?,
                 (Some(_), _) => match ms_shadowed {
                     Some(p) => &p[shadowed_index(variant)],
                     None => &ms_subsurface?.0[variant],
@@ -1339,8 +1436,10 @@ impl ForwardRenderer {
             };
             let pipeline = ready(pipeline)?;
             let two_phases = flag_buffer.is_some();
-            // Their diffuse light is occluded by the view's ambient occlusion too.
+            // Their diffuse light is occluded by the view's ambient occlusion too, and
+            // comes from the probe volume with GI.
             let ao_texture = targets.ao;
+            let gi_texture = targets.gi;
             // They keep the sky's reflections (their pass writes no reflection inputs).
             let targets = Targets {
                 reflect: None,
@@ -1375,6 +1474,7 @@ impl ForwardRenderer {
                         ao_texture,
                         None,
                         None,
+                        gi_texture,
                     );
                     draw_phase(
                         ctx,
@@ -1384,6 +1484,7 @@ impl ForwardRenderer {
                         ao_texture,
                         None,
                         None,
+                        gi_texture,
                     );
                 } else {
                     draw_phase(
@@ -1394,6 +1495,7 @@ impl ForwardRenderer {
                         ao_texture,
                         None,
                         None,
+                        gi_texture,
                     );
                 }
             });
@@ -1784,6 +1886,8 @@ struct Targets {
     contact: Option<Texture>,
     /// The decal buffer (ADR 0082), computed after the depth prepass.
     decals: Option<DecalTargets>,
+    /// The diffuse irradiance per pixel of probe GI (ADR 0088), after the depth prepass.
+    gi: Option<Texture>,
     /// Reflections' inputs (ADR 0073): normal and roughness, specular weight.
     reflect: Option<(Texture, Texture)>,
     /// With MSAA (ADR 0075): what the shading pass resolves its targets into.
@@ -1887,6 +1991,9 @@ fn shading_pass<'a, 'g>(
         pass = pass
             .read(decals.albedo, Access::Sampled(ShaderStages::FRAGMENT))
             .read(decals.surface, Access::Sampled(ShaderStages::FRAGMENT));
+    }
+    if let Some(gi) = targets.gi {
+        pass = pass.read(gi, Access::Sampled(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),

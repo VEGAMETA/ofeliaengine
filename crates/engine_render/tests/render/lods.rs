@@ -249,6 +249,7 @@ fn the_culling_pass_draws_the_level_the_distance_calls_for() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();

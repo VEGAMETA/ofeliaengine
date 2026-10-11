@@ -24,8 +24,9 @@ use engine_render::budget::{BudgetSettings, GpuBudget};
 use engine_render::environment::{Environment, Sky};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
 use engine_render::forward::{
-    DirectionalLight, DrawItem, LocalLight, LocalShadowSettings, ShadowSettings, Spot,
+    DirectionalLight, DrawItem, LocalLight, LocalShadowSettings, ShadowSettings, Spot, ViewGi,
 };
+use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::GpuScene;
 use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
@@ -33,6 +34,7 @@ use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, Owne
 use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
 use engine_render::particles::{ParticleEmitter, ParticleSystem, ParticleTarget};
 use engine_render::post::{HDR_FORMAT, ToneCurve};
+use engine_render::rays::{BlasDetail, RayScene, RaySettings};
 use engine_render::reflections::{ProbeSettings, ReflectionProbe, ReflectionProbes, SsrSettings};
 use engine_render::skinning::{SkinnedMeshData, Skinning};
 use engine_render::subsurface::SubsurfaceProfile;
@@ -171,6 +173,10 @@ pub struct Shot {
     /// scene: a scorch mark across the corner of the floor and the wall, a wet patch and
     /// a painted arrow on the floor, a ring around a sphere, a metal plate on the wall.
     pub decals: bool,
+    /// Global illumination from a volume of probes about this far apart over the scene
+    /// (ADR 0088; with `runtime`; skipped on GPUs without ray queries): converged from the
+    /// first frame with every texture resident, before the capture.
+    pub gi: Option<f32>,
 }
 
 impl Shot {
@@ -220,6 +226,7 @@ impl Shot {
             particles: false,
             panorama: None,
             decals: false,
+            gi: None,
         }
     }
 }
@@ -700,7 +707,20 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     if let Err(e) = frame.check(&wanted, (width, height)) {
         return Err(Skip::Unsupported(e.to_string()));
     }
+    if shot.gi.is_some() && device.ray_query().is_none() {
+        return Err(Skip::Unsupported(String::from(
+            "probe GI needs ray queries",
+        )));
+    }
+    assert!(
+        shot.gi.is_none() || shot.runtime,
+        "{}: probe GI traces the runtime's GPU scene",
+        shot.name
+    );
     let renderer = frame.forward_mut();
+    renderer
+        .set_global_illumination(&device, &bindless, shot.gi.is_some())
+        .expect("global illumination");
     renderer.set_depth_prepass(shot.prepass);
     renderer
         .set_ambient_occlusion(&device, &bindless, shot.ao)
@@ -1103,6 +1123,34 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             camera,
         }
     });
+    // Probe GI (ADR 0088): the GPU scene's coarsest levels for ray queries, every
+    // structure built in the first frame; the volume over the scene, converged in one
+    // frame.
+    let mut gi_rays = shot.gi.map(|_| {
+        RayScene::new(
+            &device,
+            &bindless,
+            RaySettings {
+                detail: BlasDetail::Coarsest,
+                ..RaySettings::default()
+            },
+            1,
+        )
+        .expect("ray scene")
+    });
+    let mut gi_volume = shot.gi.map(|spacing| {
+        ProbeGi::new(
+            &device,
+            &mut allocator,
+            &bindless,
+            ProbeGrid::covering(min, max, spacing, 16_384),
+            GiSettings {
+                updates_per_frame: 16,
+                ..GiSettings::for_device(&device)
+            },
+        )
+        .expect("probe GI")
+    });
 
     // The skins' skinning matrices at the shot's time plus `elapsed` clip seconds.
     let palettes_at = |elapsed: f32| -> Vec<Vec<[f32; 12]>> {
@@ -1160,8 +1208,13 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         let uploading = textures.pending().0 > 0 || (streaming.is_some() && quiet < 70);
         // With probes, once every probe was captured with the textures resident.
         let probes_ready = probes.as_ref().is_none_or(|p| p.stats().pending == 0);
-        let capture =
-            !uploading && captured < captures && resident_frames >= capture_at && probes_ready;
+        // With GI, once the volume converged.
+        let gi_ready = gi_volume.as_ref().is_none_or(ProbeGi::is_converged);
+        let capture = !uploading
+            && captured < captures
+            && resident_frames >= capture_at
+            && probes_ready
+            && gi_ready;
         // Frames since the cut that starts a temporal shot's history (the jitter sequence
         // runs from the first frame: the scene's upload takes the same frames every run).
         let accumulated = (!uploading && resident_frames >= TEMPORAL_START)
@@ -1301,6 +1354,26 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     .expect("scene"),
                 None => None,
             };
+            // The volume converges once every texture is resident (its rays see them).
+            let ray_frame = match (gi_rays.as_mut(), &scene_frame) {
+                (Some(rays), Some(scene)) => rays
+                    .add_passes(
+                        &mut fg,
+                        &device,
+                        &mut allocator,
+                        &mut ring,
+                        &bindless,
+                        &geo,
+                        scene,
+                        frame_number,
+                    )
+                    .expect("ray scene"),
+                _ => None,
+            };
+            let gi = gi_volume.as_ref().map(|volume| ViewGi {
+                volume: volume.begin_frame(&mut fg),
+                rays: ray_frame.filter(|_| !uploading),
+            });
             let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
             if let Some(set) = &decal_set {
                 set.upload(&mut fg, &mut ring);
@@ -1331,6 +1404,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         decals: decal_set.as_ref().map_or(&[], |s| s.decals.as_slice()),
                         environment: environment.as_ref(),
                         reflection_probes: probes.as_ref(),
+                        gi,
                     },
                     &camera,
                     ViewTarget {
@@ -1517,6 +1591,12 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         }
         if let Some(game) = game.as_mut() {
             game.scene.destroy(&mut allocator);
+        }
+        if let Some(rays) = gi_rays.as_mut() {
+            rays.destroy(&device, &mut allocator);
+        }
+        if let Some(volume) = gi_volume.as_mut() {
+            volume.destroy(&device, &mut allocator, &bindless);
         }
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);

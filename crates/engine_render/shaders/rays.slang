@@ -13,13 +13,19 @@ struct Instance
     uint2 _pad;
 };
 
-// `BatchRay` in rays.rs (16 bytes): the bottom-level structure of the batch's mesh (0:
-// none, the instance is inactive), the instance mask and flags.
+// `BatchRay` in rays.rs (32 bytes): the bottom-level structure of the batch's mesh (0:
+// none, the instance is inactive), the instance mask and flags; where the mesh's
+// vertices start, the first index of the level the structure holds and whether the
+// material is double-sided (for shading hits: `gi.slang`).
 struct BatchRay
 {
     uint2 blas;
     uint mask;
     uint flags;
+    uint first_vertex;
+    uint first_index;
+    uint double_sided;
+    uint _pad;
 };
 
 // `InstancePush` in rays.rs.

@@ -329,6 +329,7 @@ fn cascaded_shadows_match_analytic_shadows() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();

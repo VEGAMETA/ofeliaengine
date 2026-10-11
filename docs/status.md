@@ -70,6 +70,7 @@ tooling included) about **50 %**.
 | HDRI environments: `.hdr` and OpenEXR panoramas as the sky, their sun found and lit as the directional light, cooked into BC6H cubes (DDC, packs) | done | ADR 0083 |
 | GPU particles and GPU radix sort | done | ADRs 0080, 0081 |
 | Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
+| Global illumination, phase 1: a volume of probes traced with ray queries, converged at load, read at a reduced resolution (Sponza at 1080p: 0.12 / 1.8 ms per frame on the RTX / iGPU) | done | ADR 0088 |
 | Upscalers: TAAU, FSR 3.1, DLSS via Streamline (user-supplied DLLs) | done | ADRs 0060, 0063 |
 | Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/Catmull-Rom/Lanczos-3/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
@@ -102,7 +103,10 @@ first step, acceleration structures (ADR 0087), 4 researched (ADR 0085: meshlets
 forward renderer first), 7c (`forward.rs` split, PR #147), mimalloc as the global
 allocator (ADR 0086, PR #162), contact shadows made deterministic (PRs #159, #161); a
 bloom format experiment measured and rejected (6b), 3a (the ray scene's costs spread
-over frames: ADR 0087's addendum). Next: GI phase 1.
+over frames: ADR 0087's addendum), GI phase 1 (the probe volume converged at load:
+ADR 0088), the frame graph's fences (texture uploads ran after their readers under async
+compute: ADR 0065's addendum, PR #166). Next: GI phase 2 and the Brixelizer GI reference
+(item 3).
 
 ## 5. Queue (in order)
 
@@ -313,8 +317,18 @@ queue item (done 2026-10-10).
    (`SceneStats::restructured`); bottom-level builds under a per-frame budget
    (`RaySettings::for_device`: Sponza at most 0.8 ms per frame on the RTX; on the iGPU
    its largest mesh alone costs 11 ms, so rays there use the coarsest level); the async
-   compute queue not worth it after the refit (at most 40 µs to hide). **Next:** GI
-   phase 1 (the probe volume converged at load).
+   compute queue not worth it after the refit (at most 40 µs to hide). **Phase 1 done
+   2026-10-11** (ADR 0088, `engine_render::gi`): a volume of probes (octahedral
+   irradiance and distance moments, relocated and classified), converged at load
+   through 11 updates (Sponza's 8,680 probes: 15 ms on the RTX, 1.1 s on the iGPU, one
+   update per frame), read by a resolve pass at a reduced resolution (2 × 2 pixels per
+   sample on discrete GPUs, 4 × 4 on integrated ones) and 34 GI twins of the shading
+   entry points (variants without GI keep their registers): 0.12 / 1.8 ms per frame at
+   1080p; 12.8 MiB. The medallions read gold from above (golden shot
+   `sponza_gi_medallions`). **Next:** phase 2 (a ray budget per frame, rays allocated
+   where the light changes), then Brixelizer GI built as the reference, its cost and
+   memory against ours on both GPUs (ADR 0084's bar). Known limits: normals from the
+   depth facet low-poly curves; light frozen until `refresh()`.
 3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
    first: it decides permutations and pipeline management for the whole renderer (§9
    material graph and hand-written Slang).
@@ -429,10 +443,10 @@ grown, divide and conquer); the old labels stay in parentheses.
   - GTSO;
   - probe shadow-map caching;
   - XeSS;
-  - ambient light inconsistent indoors: diffuse ambient comes from the sky's irradiance
-    (barely occluded), specular from reflection probes that see the real, darker interior.
-    In shade, dielectrics therefore look too bright next to metals. Irradiance from the
-    probes (SH of their captures) would make them agree until GI lands;
+  - ambient light inconsistent indoors without GI: diffuse ambient comes from the sky's
+    irradiance (barely occluded), specular from reflection probes that see the real,
+    darker interior. With probe GI (ADR 0088) they agree; on GPUs without ray queries
+    irradiance from the reflection probes (SH of their captures) would still help;
   - cloth shading (sheen) and anisotropy are missing from the material model;
   - FSR 4: ML, RDNA4-only, shipped as a DLL (DX12 at first). Check Vulkan availability and
     license; it needs an RDNA4 GPU to test.

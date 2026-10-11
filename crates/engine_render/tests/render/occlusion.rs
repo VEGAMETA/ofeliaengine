@@ -256,6 +256,7 @@ fn hidden_instances_are_skipped_and_the_image_is_unchanged() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();

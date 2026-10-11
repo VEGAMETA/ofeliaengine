@@ -52,6 +52,7 @@ pub mod environment;
 pub mod feedback;
 pub mod forward;
 pub mod fsr1;
+pub mod gi;
 pub mod gpu_scene;
 pub mod graph;
 pub mod hiz;

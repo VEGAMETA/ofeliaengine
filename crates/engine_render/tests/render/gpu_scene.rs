@@ -263,6 +263,7 @@ impl Bed {
                 decals: &[],
                 environment: environment.as_ref(),
                 reflections: Default::default(),
+                gi: None,
             };
             let (passes, scene) = match draw {
                 Draw::List(draws) => (

@@ -235,6 +235,7 @@ fn blended_layers_composite_back_to_front() {
                             decals: &[],
                             environment: None,
                             reflections: Default::default(),
+                            gi: None,
                         },
                     )
                     .unwrap();

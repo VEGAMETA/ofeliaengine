@@ -258,6 +258,7 @@ fn culled_lights_match_every_light_for_every_pixel() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();

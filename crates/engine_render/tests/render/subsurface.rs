@@ -284,6 +284,7 @@ impl Scene {
                             decals: &[],
                             environment: frame.environment.then_some(&self.environment),
                             reflections: Default::default(),
+                            gi: None,
                         },
                     )
                     .unwrap();

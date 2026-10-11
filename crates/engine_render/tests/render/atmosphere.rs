@@ -502,6 +502,7 @@ fn the_atmosphere_and_fog_match_the_cpu() {
                         decals: &[],
                         environment: Some(environment),
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();

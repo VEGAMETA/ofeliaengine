@@ -205,6 +205,9 @@ struct Frame
     ShadowView* shadow_draws; // the views drawn this frame (culling and drawing)
     uint shadow_draw_count;
     float shadow_texel;      // 1 / atlas size
+    float gi_scale;          // probe GI (ADR 0088): pixels per resolved sample along each axis
+    uint2 gi_samples;        // and the samples' grid
+    uint _gi_pad;
 };
 
 struct Instance
@@ -315,6 +318,7 @@ struct Push
     uint ao;                 // bindless index: the view's ambient occlusion (NO_TEXTURE: none; ADR 0058)
     uint decal_albedo;       // bindless index: the decal buffer's albedo (decal entry points; ADR 0082)
     uint decal_surface;      // bindless index: its normal change, roughness and metalness
+    uint gi;                 // bindless index: the view's diffuse irradiance per pixel (GI entry points; ADR 0088)
 };
 
 static const uint PHASE_ALL = 0;    // frustum culling only
@@ -1190,10 +1194,57 @@ float multibounce(float visibility, float albedo)
     return max(visibility, ((visibility * a + b) * visibility + c) * visibility);
 }
 
+// Probe GI (ADR 0088): the diffuse irradiance at a pixel (`position` its surface's world
+// position) from the four resolved samples around it (`push.gi`: rgb, and a the distance
+// of the surface each was resolved at, 0 for the sky), weighted bilinearly and by how
+// close their distances are to its own (no light across depth edges); the nearest in
+// distance when none is close.
+float3 gi_irradiance(float2 pixel, float3 position)
+{
+    Frame* frame = push.frame;
+    float distance = length(read_float4(&frame.camera_position).xyz - position);
+    // Mostly the four lie on the pixel's surface: then their bilinear filtering, one read
+    // (its filtered distance within 1 % of the pixel's leaves any other surface's sample
+    // a weight of 1-2 % at most). The four reads below cost 0.5 ms more on a two-CU
+    // Radeon at 1080p.
+    float4 filtered = g_textures[push.gi].SampleLevel(g_samplers[frame.linear_sampler], pixel / (frame.gi_scale * float2(frame.gi_samples)), 0.0);
+    if (abs(filtered.a - distance) < 0.01 * distance)
+        return filtered.rgb;
+    float2 low = pixel / frame.gi_scale - 0.5;
+    int2 base = int2(floor(low));
+    float2 t = low - float2(base);
+    int2 last = int2(frame.gi_samples) - 1;
+    float3 sum = 0.0;
+    float total = 0.0;
+    float3 nearest = 0.0;
+    float nearest_gap = 1e30;
+    for (uint k = 0; k < 4; k++)
+    {
+        int2 o = int2(k & 1, k >> 1);
+        float4 sample = g_textures[push.gi].Load(int3(clamp(base + o, int2(0, 0), last), 0));
+        float gap = abs(sample.a - distance);
+        if (sample.a <= 0.0)
+            continue;
+        if (gap < nearest_gap)
+        {
+            nearest_gap = gap;
+            nearest = sample.rgb;
+        }
+        float2 b = lerp(1.0 - t, t, float2(o));
+        float w = b.x * b.y * exp(-gap / (0.05 * distance));
+        sum += sample.rgb * w;
+        total += w;
+    }
+    return total > 1e-4 ? sum / total : nearest;
+}
+
 // Light from the whole sky: the environment's harmonics (diffuse) and prefiltered cube
 // (specular), or the flat ambient color without an environment. `occlusion` is the
-// material's, times the view's ambient occlusion when `ao` (ADR 0058).
-float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao, bool reflective, inout float3 weight)
+// material's, times the view's ambient occlusion when `ao` (ADR 0058). With `gi` (a
+// literal, ADR 0088), the diffuse light is the view's irradiance at `pixel` from the
+// probe volume (the sky's harmonics outside it), absolute: the environment's intensity
+// is in it.
+float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao, bool reflective, inout float3 weight, bool gi = false, float2 pixel = 0.0, float3 position = 0.0)
 {
     // With the view's ambient occlusion, the fit of its bounces (for the albedo's
     // luminance: one value instead of three, fewer registers); without it, the material's
@@ -1201,11 +1252,13 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
     float diffuse_occlusion = ao && occlusion < 1.0
         ? multibounce(occlusion, dot(albedo, float3(0.2126, 0.7152, 0.0722)))
         : occlusion;
+    if (gi && (ENVIRONMENT == 0 || push.frame.environment == 0))
+        return gi_irradiance(pixel, position) * albedo / PI * diffuse_occlusion;
     if (ENVIRONMENT == 0 || push.frame.environment == 0)
         return read_float4(&push.frame.ambient).rgb * albedo * diffuse_occlusion;
     float n_dot_v = max(dot(n, v), 1e-4);
     float4* sh = push.frame.sh;
-    float3 irradiance = read_float4(sh + 0).rgb * 0.282095
+    float3 irradiance = gi ? 0.0 : read_float4(sh + 0).rgb * 0.282095
         + read_float4(sh + 1).rgb * (0.488603 * n.y) + read_float4(sh + 2).rgb * (0.488603 * n.z) + read_float4(sh + 3).rgb * (0.488603 * n.x)
         + read_float4(sh + 4).rgb * (1.092548 * n.x * n.y) + read_float4(sh + 5).rgb * (1.092548 * n.y * n.z)
         + read_float4(sh + 6).rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + read_float4(sh + 7).rgb * (1.092548 * n.x * n.z)
@@ -1225,6 +1278,8 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
     // composite to swap the sky's radiance for local probes and screen-space hits.
     if (reflective)
         weight = lerp(dfg.xxx, dfg.yyy, f0) * (1.0 + f0 * (1.0 / max(dfg.y, 1e-4) - 1.0)) * specular_occlusion;
+    if (gi)
+        return diffuse * gi_irradiance(pixel, position) * diffuse_occlusion + specular * specular_occlusion * push.frame.env_intensity;
     return (diffuse * irradiance * diffuse_occlusion + specular * specular_occlusion) * push.frame.env_intensity;
 }
 
@@ -1241,9 +1296,11 @@ float3 sky_irradiance(float3 n)
 }
 
 // The diffuse part of `ambient_light` per unit base color, for subsurface materials;
-// `kd` is (1 − metallic) / π.
-float3 ambient_diffuse(float3 n, float occlusion, float kd)
+// `kd` is (1 − metallic) / π; `gi` and `pixel` as there.
+float3 ambient_diffuse(float3 n, float occlusion, float kd, bool gi = false, float2 pixel = 0.0, float3 position = 0.0)
 {
+    if (gi)
+        return kd * gi_irradiance(pixel, position) * occlusion;
     if (ENVIRONMENT == 0 || push.frame.environment == 0)
         return read_float4(&push.frame.ambient).rgb * occlusion;
     return kd * sky_irradiance(n) * occlusion * push.frame.env_intensity;
@@ -1303,11 +1360,11 @@ struct SubsurfaceOut
 // removes the code of the other case, so shading without ambient occlusion or local
 // shadows spends no registers on them (on RDNA2 even dead code under a specialization
 // constant took the shading from 64 to 72 VGPRs, 9 to 13 % slower).
-float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = false, bool contact = false, bool decals = false)
+float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = false, bool contact = false, bool decals = false, bool gi = false)
 {
     SubsurfaceOut unused;
     ReflectOut unused_reflect;
-    return shade_surface(input, front, masked, ao, false, unused, unused_reflect, shadows, contact, false, decals);
+    return shade_surface(input, front, masked, ao, false, unused, unused_reflect, shadows, contact, false, decals, gi);
 }
 
 // What the reflection entry points write besides the color (ADR 0073).
@@ -1354,7 +1411,7 @@ void apply_decals(Frame frame, uint2 pixel, inout float3 albedo, inout float3 n,
 // instead of the color. Subsurface materials' pipelines always take `ao` (they are their
 // own; without ambient occlusion `push.ao` skips the read). `decals` blends the decal
 // buffer in (ADR 0082).
-float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false)
+float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false, bool gi = false)
 {
     Frame frame = loadAligned<16>(push.frame);
     Material m = read_material(input.material);
@@ -1421,7 +1478,7 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     float3 local_irradiance = 0.0;
     float3 reflect_weight = 0.0;
     float3 color = (surface_diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
-        + ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight)
+        + ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position)
         + emissive
         + local_lights(input.world_position, input.position.xy, n, v, surface_diffuse, f0, a, local_irradiance, shadows);
     sss = (SubsurfaceOut)0;
@@ -1439,7 +1496,7 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
         SubsurfaceProfile* profile = frame.subsurface + index;
         // Diffuse light per unit base color: sun, local lights, sky.
         float kd = (1.0 - metallic) / PI;
-        float3 lit = kd * (frame.light_color.rgb * n_dot_l * visible + local_irradiance) + ambient_diffuse(n, occlusion, kd);
+        float3 lit = kd * (frame.light_color.rgb * n_dot_l * visible + local_irradiance) + ambient_diffuse(n, occlusion, kd, gi, input.position.xy, input.world_position);
         // Light from behind, through the material (Jimenez et al. 2010): the profile's slab
         // integral over its thickness, or over the object's in the shadow map.
         uint transmission = (bits >> 16) & 3u;
@@ -1677,12 +1734,12 @@ struct Reflected
 
 // `ao`, `shadows` (local lights', ADR 0071), `contact` (the sun's, ADR 0071) and `decals`
 // (ADR 0082): literals, as in `shade`.
-Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bool contact, bool decals = false)
+Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bool contact, bool decals = false, bool gi = false)
 {
     SubsurfaceOut unused;
     ReflectOut refl;
     Reflected o;
-    o.color = float4(shade_surface(input, front, false, ao, false, unused, refl, shadows, contact, true, decals).rgb, 1.0);
+    o.color = float4(shade_surface(input, front, false, ao, false, unused, refl, shadows, contact, true, decals, gi).rgb, 1.0);
     o.normal_roughness = float4(encode_octahedral(refl.normal), refl.roughness, 1.0);
     o.weight = float4(refl.weight, 1.0);
     return o;
@@ -2208,4 +2265,228 @@ float4 skyFragment(Background input) : SV_Target0
     if (dot(d, read_float4(&push.frame.to_light).xyz) > cos_sun)
         color += read_float4(&push.frame.light_color).rgb / (2.0 * PI * (1.0 - cos_sun));
     return float4(color, 1.0);
+}
+
+
+// Probe-volume GI (ADR 0088): after the depth prepass of a view with a probe volume, the
+// shading, reflection and subsurface entry points above that take the diffuse ambient
+// light from the GI pass's irradiance per pixel (`push.gi`) instead of the sky's
+// harmonics, so the others carry no code for it (the register rule: under a
+// specialization constant the dead read still cost the environment shading 6 VGPRs on
+// the Radeon).
+
+[shader("fragment")]
+float4 fragmentMainGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, false, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainShadowedGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainContactGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, false, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainContactShadowedGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, false, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoShadowedGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContactGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, false, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContactShadowedGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, false, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainContactDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, false, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainContactShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, false, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContactDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, false, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContactShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, false, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectShadowedGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, true, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectContactGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, false, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectContactShadowedGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, true, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoShadowedGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoContactGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoContactShadowedGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, false, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, true, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectContactDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, false, true, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectContactShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, true, true, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoContactDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, true, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoContactShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, true, true, true);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    ReflectOut unused;
+    o.color = float4(shade_surface(input, front, false, true, true, sss, unused, false, false, false, false, true).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceShadowedGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    ReflectOut unused;
+    o.color = float4(shade_surface(input, front, false, true, true, sss, unused, true, false, false, false, true).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
 }

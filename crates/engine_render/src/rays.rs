@@ -25,7 +25,7 @@
 //!   nothing. Skinned meshes keep the shape of their first build for now.
 
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
-use crate::forward::{BLENDED, MASKED};
+use crate::forward::{BLENDED, DOUBLE_SIDED, MASKED};
 use crate::gpu_scene::SceneFrame;
 use crate::graph::{
     Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, ShaderStages,
@@ -158,14 +158,23 @@ pub struct RayStats {
     pub instances: u32,
 }
 
-/// `BatchRay` in `rays.slang`.
+/// `BatchRay` in `rays.slang` (32 bytes): a batch's bottom level, instance mask and
+/// flags; where its mesh's vertices start and the first index of the level the structure
+/// holds, and whether its material is double-sided (hits are shaded from them:
+/// `gi.slang`).
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct BatchRay {
     blas: u64,
     mask: u32,
     flags: u32,
+    first_vertex: u32,
+    first_index: u32,
+    double_sided: u32,
+    _pad: u32,
 }
+
+const _: () = assert!(size_of::<BatchRay>() == 32);
 
 /// `InstancePush` in `rays.slang`.
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
@@ -301,6 +310,9 @@ pub struct RayFrame<'g> {
     pub address: vk::DeviceAddress,
     /// Instances (the GPU scene's slots).
     pub instances: u32,
+    /// The batch table (`BatchRay` in `rays.slang`, 32 bytes a batch, in the upload
+    /// ring): a hit's instance's batch gives where its triangle's vertices are.
+    pub batches: vk::DeviceAddress,
 }
 
 impl<'g> RayFrame<'g> {
@@ -619,6 +631,10 @@ impl RayScene {
                 flags: (vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE
                     | vk::GeometryInstanceFlagsKHR::FORCE_OPAQUE)
                     .as_raw(),
+                first_vertex: geometry.mesh(b.mesh).map_or(0, |m| m.first_vertex),
+                first_index: blas.map_or(0, |blas| blas.level.0),
+                double_sided: u32::from(state & DOUBLE_SIDED != 0),
+                _pad: 0,
             });
         }
 
@@ -670,6 +686,10 @@ impl RayScene {
         self.stats.rebuilt = rebuild;
         self.stats.refitted = refit;
         self.update_stats();
+        let batch_table = ring.push(&self.batch_rays).ok_or(RhiError::Vulkan {
+            call: "the ray scene's batch table (upload ring full)",
+            result: vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+        })?;
         // The top level's state before this frame, and after it (read by shaders).
         let initial = core::mem::replace(&mut self.tlas_state, TLAS_READ);
 
@@ -735,12 +755,9 @@ impl RayScene {
                 tlas: handle,
                 address: tlas.accel.address(),
                 instances: count,
+                batches: batch_table,
             }));
         }
-        let batch_table = ring.push(&this.batch_rays).ok_or(RhiError::Vulkan {
-            call: "the ray scene's batch table (upload ring full)",
-            result: vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
-        })?;
         let instances = fg.create_buffer(
             "tlas instances",
             BufferDesc {
@@ -833,6 +850,7 @@ impl RayScene {
             tlas: handle,
             address: tlas.accel.address(),
             instances: count,
+            batches: batch_table,
         }))
     }
 

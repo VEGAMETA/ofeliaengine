@@ -472,6 +472,7 @@ fn main() {
                             decals: &[],
                             environment: None,
                             reflections: Default::default(),
+                            gi: None,
                         };
                         forward.add_passes(fg, ring, bindless, &geo, &mats, draws, &view);
                     },

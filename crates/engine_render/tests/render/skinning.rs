@@ -372,6 +372,7 @@ fn skinning() {
                 decals: &[],
                 environment: None,
                 reflections: Default::default(),
+                gi: None,
             };
             let passes = match scene {
                 None => renderer

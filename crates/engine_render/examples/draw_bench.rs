@@ -422,6 +422,7 @@ fn main() {
                                 decals: &[],
                                 environment: None,
                                 reflections: Default::default(),
+                                gi: None,
                             },
                         )
                         .unwrap();

@@ -1,8 +1,8 @@
 # Global illumination
 
-Research for queue item 3 (GI: "probe volumes, then DDGI-like"), 2026-10-11. Decision
-pending: [ADR 0084](../adr/0084-global-illumination.md) (Proposed, a choice for the
-owner).
+Research for queue item 3 (GI: "probe volumes, then DDGI-like"), 2026-10-11. Decision:
+[ADR 0084](../adr/0084-global-illumination.md) (our own probe GI, held to beat
+Brixelizer GI); phase 1: [ADR 0088](../adr/0088-probe-gi-volume.md).
 
 ## What is missing today
 
@@ -74,3 +74,30 @@ No code was copied from any source.
 - **Rasterized probe captures** need no ray tracing but cost six scene views per probe:
   only a frozen (baked) volume would be affordable, never "DDGI-like".
 - Per-pixel ReSTIR GI is beyond the iGPU.
+
+## Phase 1: what we took (2026-10-11)
+
+Wicked Engine's DDGI (MIT, commit `cee348b7135d4b6369f85a99ed5e9ed222b71bc7`:
+`ShaderInterop_DDGI.h`, `ddgi_raytraceCS.hlsl`, `ddgi_updateCS.hlsl`,
+`ddgi_rayallocationCS.hlsl`) was read for ideas next to the two DDGI papers; no code was
+copied.
+
+| | DDGI papers | Wicked Engine | Ours (ADR 0088) |
+|---|---|---|---|
+| Irradiance | 6² + border, per probe | 8², as spherical harmonics (no border) | 6² + border, RGBA16F |
+| Distances | 14² + border, mean and mean square | 16² + border | 14² + border, RG16F |
+| Rays | fixed count, random rotation | allocated per probe by the irradiance's inconsistency, a tenth outside the camera's view | fixed count (128), random rotation; converged at load |
+| Back faces | radiance 0, distance shortened (negative marks it) | the same | the same; double-sided materials shaded on both sides |
+| Relocation and classification | relocate out of geometry, turn off probes inside or far from surfaces | relocation (offsets stored as halves) | relocate during two updates, turn off what still sees mostly back faces in the third |
+| Shading weights | trilinear, wrapped facing, Chebyshev on distances, crushed faint weights | the same, a smooth back-face switch | the same |
+| Where it is read | per pixel, in the shading | per pixel | a resolve at a reduced resolution, upsampled by distance in the shading |
+
+- **For phase 2:** Wicked Engine's ray allocation (more rays where a probe's light
+  changed, fewer outside the view) fits a ray budget per frame. It needs the variance of
+  each texel's updates (its "inconsistency" buffer).
+- **Measured here, not in the sources:**
+  - the cost of reading the volume per pixel on a two-CU GPU (14.1 ms at 1080p), hence
+    the reduced resolution;
+  - the register cost of branching the shading on GI on AMD (runtime branch and
+    specialization constant both grow the variants without GI), hence entry points of
+    their own.

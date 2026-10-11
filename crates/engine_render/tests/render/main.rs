@@ -11,6 +11,7 @@ mod environment;
 mod feedback;
 mod forward;
 mod geometry;
+mod gi;
 mod gpu_scene;
 mod graph;
 mod hiz;
