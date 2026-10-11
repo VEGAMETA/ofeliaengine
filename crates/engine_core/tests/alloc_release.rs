@@ -82,8 +82,14 @@ fn memory_workers_allocated_goes_back_when_the_pool_is_asked() {
     spin_wait(50);
     let freed = private_mib();
     pool.release_memory();
-    spin_wait(200);
-    let released = private_mib();
+    // The workers collect when they wake: on a busy machine (the gate runs every test at
+    // once) that can take longer than on an idle one, so wait for it, within 5 s.
+    let start = Instant::now();
+    let mut released = private_mib();
+    while released - before >= 32.0 && start.elapsed() < Duration::from_secs(5) {
+        spin_wait(20);
+        released = private_mib();
+    }
     println!(
         "private MiB: before {before:.0}, loaded {loaded:.0}, freed on the main thread {freed:.0}, after release_memory {released:.0}"
     );
