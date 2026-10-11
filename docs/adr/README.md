@@ -92,6 +92,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0082](0082-decals.md) | Decals: clustered in the forward shading (DOOM 2016, Godot 4, Bevy; doubles the shading entry points) or a decal buffer before lighting (needs the prepass, opaque only) | Proposed |
 | [0083](0083-hdri-environments.md) | HDRI environments: `.hdr` panoramas kept as RGBE and decoded on the GPU, a background cube of their own turned when sampled, the sun found and taken out into a directional light (lighting cube without its spike; shadows); cooked into BC6H cubes for the DDC and packs (version 4); OpenEXR through the `exr` crate | Accepted |
 | [0084](0084-global-illumination.md) | Global illumination: DDGI probes traced with ray queries (a probe volume converged at load, then a ray budget per frame; acceleration structures) or AMD Brixelizer GI (compute, any GPU) | Proposed |
+| [0085](0085-visibility-buffer-and-meshlets.md) | Visibility buffer and meshlets: meshlets in the forward renderer first (cook-time clusters culled per view, compacted indices or mesh shaders), the visibility buffer decided with custom materials (item 3b) | Proposed |
 
 ## Template
 

@@ -295,7 +295,9 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    direction and cone-based specular occlusion; fixes dielectrics looking too bright next
    to metals in shade indoors (§6). Own entry points, only in views with AO (register rule).
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
-   visibility bits (patent, ADR 0035 note).
+   visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085, Proposed):
+   meshlets in the forward renderer first (both GPUs; the iGPU has no mesh shaders), the
+   visibility buffer decided together with custom materials (3b). The owner's choice.
 5. Virtual shadow maps.
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.
@@ -316,7 +318,11 @@ grown, divide and conquer); the old labels stay in parentheses.
    CLAUDE.md §5, never made), CPU memory accounting (0.9–1.1 GiB private bytes
    unexplained).
 7b (was 6d). Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
-   (review §3.10).
+   (review §3.10). Looked at 2026-10-11: Jolt queues jobs from its workers too (a finished
+   job queues its dependents), and `engine_core::jobs::Scope` takes spawns only from its
+   owner thread (it is not `Sync`): the pool needs a submission path from any thread first
+   (the injector, with a fixed pool of job records: no allocation per job), an ADR 0002
+   addendum and loom tests.
 7c (was 6e). ~~`forward.rs` (5,695 lines) split by feature (review §3.12).~~ Done
    2026-10-11 as files (code moved, nothing changed: golden images the same bytes):
    `forward/mod.rs` (the public types and the renderer's API, 2,421 lines), `declare.rs`
