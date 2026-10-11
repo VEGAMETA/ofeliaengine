@@ -34,38 +34,38 @@ use engine_rhi::{
     ShaderStageDesc, spirv_words,
 };
 
-const PREPASS_COVERAGE: &[u8] = include_bytes!("../shaders/forward.prepassCoverage.spv");
+const PREPASS_COVERAGE: &[u8] = include_bytes!("../../shaders/forward.prepassCoverage.spv");
 const PREPASS_COVERAGE_MOTION: &[u8] =
-    include_bytes!("../shaders/forward.prepassCoverageMotion.spv");
-const SCATTER_FRAGMENT_MS: &[u8] = include_bytes!("../shaders/forward.scatterFragmentMs.spv");
-const RESOLVE_VERTEX: &[u8] = include_bytes!("../shaders/msaa.resolveVertex.spv");
+    include_bytes!("../../shaders/forward.prepassCoverageMotion.spv");
+const SCATTER_FRAGMENT_MS: &[u8] = include_bytes!("../../shaders/forward.scatterFragmentMs.spv");
+const RESOLVE_VERTEX: &[u8] = include_bytes!("../../shaders/msaa.resolveVertex.spv");
 /// The nearest sample's reflection inputs, by sample count (2, 4, 8).
 const RESOLVE_REFLECT: [(&[u8], &CStr); 3] = [
     (
-        include_bytes!("../shaders/msaa.resolveReflect2.spv"),
+        include_bytes!("../../shaders/msaa.resolveReflect2.spv"),
         c"resolveReflect2",
     ),
     (
-        include_bytes!("../shaders/msaa.resolveReflect4.spv"),
+        include_bytes!("../../shaders/msaa.resolveReflect4.spv"),
         c"resolveReflect4",
     ),
     (
-        include_bytes!("../shaders/msaa.resolveReflect8.spv"),
+        include_bytes!("../../shaders/msaa.resolveReflect8.spv"),
         c"resolveReflect8",
     ),
 ];
 /// The nearest subsurface sample's light and albedo, by sample count.
 const RESOLVE_SUBSURFACE: [(&[u8], &CStr); 3] = [
     (
-        include_bytes!("../shaders/msaa.resolveSubsurface2.spv"),
+        include_bytes!("../../shaders/msaa.resolveSubsurface2.spv"),
         c"resolveSubsurface2",
     ),
     (
-        include_bytes!("../shaders/msaa.resolveSubsurface4.spv"),
+        include_bytes!("../../shaders/msaa.resolveSubsurface4.spv"),
         c"resolveSubsurface4",
     ),
     (
-        include_bytes!("../shaders/msaa.resolveSubsurface8.spv"),
+        include_bytes!("../../shaders/msaa.resolveSubsurface8.spv"),
         c"resolveSubsurface8",
     ),
 ];

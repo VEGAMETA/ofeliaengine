@@ -311,7 +311,13 @@ grown, divide and conquer); the old labels stay in parentheses.
    unexplained).
 7b (was 6d). Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
    (review §3.10).
-7c (was 6e). `forward.rs` (5,695 lines) split by feature (review §3.12).
+7c (was 6e). ~~`forward.rs` (5,695 lines) split by feature (review §3.12).~~ Done
+   2026-10-11 as files (code moved, nothing changed: golden images the same bytes):
+   `forward/mod.rs` (the public types and the renderer's API, 2,421 lines), `declare.rs`
+   (the frame's passes), `layout.rs` (batches and draw commands), `pipelines.rs` (a
+   pipeline set per feature), `shadow_atlas.rs`, `msaa.rs`. Left: `declare` is still one
+   1,650-line function; its passes per feature come with the next shading feature (decals
+   or GI).
 8. **The player and content** (owner, 2026-10-10: after the rendering queue).
 8a (was 6f). **A player crate** (`engine_app`, review §3.7): device, swapchain, latency
    provider, process setup (power throttling, MMCSS, CPU sets), pipeline cache and the frame
