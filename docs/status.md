@@ -335,10 +335,13 @@ grown, divide and conquer); the old labels stay in parentheses.
    driver mapped into the process (the engine's own mapped Vulkan memory 192 MiB of it),
    the process heap 56 MiB (Rust's allocations 37 MiB), the rest about 270 MiB (the
    driver's own and the threads'); the Radeon's 1,049 MiB alike (645 write-combined, 352
-   of it the engine's). Left: the allocator keeps empty host-visible blocks mapped (the
-   RTX's 64 MiB system-memory block holds nothing at the end of the flight, the Radeon's
-   288 MiB hold 64): give them back after a while; and find what the driver's other
-   write-combined pages are (about 300–400 MiB).
+   of it the engine's). Left: host-visible pools start with blocks of 32 MiB (an eighth
+   of the 256 MiB block, as VMA does) even for allocations of a few KiB, and every
+   host-visible block stays mapped: the RTX's 64 MiB of system-memory blocks hold a few
+   KiB at the end of the flight, the Radeon's 288 MiB hold 64 MiB. Freeing the empty
+   blocks would give back only 0 and 32 MiB (tried): smaller first blocks for
+   host-visible types would. Also left: what the driver's other write-combined pages
+   are (about 300–400 MiB).
 7b (was 6d). ~~Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
    (review §3.10).~~ Done 2026-10-11: `engine_core::jobs::ForeignJobs` (ADR 0002 addendum:
    jobs from any thread through the injector, in a fixed set of records, a loom-checked
