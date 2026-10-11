@@ -30,3 +30,6 @@ engine_assets.workspace = true
 engine_platform.workspace = true
 engine_rhi.workspace = true
 engine_streaming.workspace = true
+# The flight example's frame generation (ADR 0091): the paced presenter and the UI layer.
+engine_latency.workspace = true
+engine_render2d.workspace = true

@@ -33,7 +33,7 @@ use engine_core::spsc;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Device, MemoryLocation, Queue, RhiError, Swapchain};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -131,6 +131,11 @@ enum Message {
 
 struct Shared {
     stop: AtomicBool,
+    /// Copies the thread has submitted (each signals the copy count on the GPU). The frame
+    /// loop submits a wait for a count only once its signal is submitted: a wait submitted
+    /// before its signal can hold the driver's other submissions behind it, the thread's
+    /// presents included (it deadlocked NVIDIA's present on the second queue).
+    submitted: AtomicU64,
     /// The swapchain went out of date (or the surface was lost): stop and recreate it.
     out_of_date: AtomicBool,
 }
@@ -318,6 +323,7 @@ impl PacedPresenter {
         let (to_main, from_thread) = spsc::channel(4 * RING + 16);
         let shared = Arc::new(Shared {
             stop: AtomicBool::new(false),
+            submitted: AtomicU64::new(0),
             out_of_date: AtomicBool::new(false),
         });
         let swapchain_raw = swapchain.raw();
@@ -366,8 +372,17 @@ impl PacedPresenter {
         })
     }
 
-    /// The images to draw the next frame into.
+    /// The images to draw the next frame into. Returns once the thread has submitted the
+    /// copies of the frame that used them last (the frame two back: the thread takes it as
+    /// soon as its GPU work is done), so that the frame's submission never waits for a
+    /// count whose signal is not submitted yet.
     pub fn next_images(&self) -> PacedImages {
+        let needed = self.free_at[self.next];
+        while self.shared.submitted.load(Ordering::Acquire) < needed
+            && self.thread.as_ref().is_some_and(|t| !t.is_finished())
+        {
+            std::thread::yield_now();
+        }
         let [real, generated] = &self.images[self.next];
         PacedImages {
             real: real.present_image(),
@@ -708,6 +723,13 @@ impl Thread {
         let ready = Instant::now();
         let spacing = state.pacing.update(ready, frame.reset);
         let generate = frame.generated && !frame.reset;
+        // Both copies first: the frame loop waits for their submission before it submits
+        // the frame after next (`PacedPresenter::next_images`).
+        let generated_image = generate
+            .then(|| self.copy(swapchain, state, generated, frame, shared))
+            .flatten();
+        let real_image = self.copy(swapchain, state, real, frame, shared);
+        shared.submitted.store(state.copies, Ordering::Release);
         let mut report = |generated: bool, presented: Instant| {
             let _ = to_main.push(Presented {
                 frame: value,
@@ -717,43 +739,67 @@ impl Thread {
                 spacing,
             });
         };
-        if generate {
+        if let Some(index) = generated_image {
             let at = state
                 .last_present
                 .map_or(ready, |last| (last + spacing).max(ready));
-            if let Some(presented) = self.show(
-                swapchain, state, generated, frame, false, None, at, shared, sleep,
-            ) {
-                report(true, presented);
-            }
+            sleep(at);
+            report(
+                true,
+                self.present(swapchain, state, index, frame, false, None, shared),
+            );
         }
-        let at = match (generate, state.last_present) {
-            (true, Some(last)) => last + spacing,
-            _ => ready,
-        };
-        if let Some(presented) = self.show(
-            swapchain, state, real, frame, true, markers, at, shared, sleep,
-        ) {
-            report(false, presented);
+        if let Some(index) = real_image {
+            let at = match (generated_image, state.last_present) {
+                (Some(_), Some(last)) => last + spacing,
+                _ => ready,
+            };
+            sleep(at);
+            report(
+                false,
+                self.present(swapchain, state, index, frame, true, markers, shared),
+            );
         }
     }
 
-    /// Copies `source` into a swapchain image and presents it at `at` (a `real` frame with
-    /// its present id and markers); returns when it was presented, or `None` when no image
-    /// could be acquired (the copy count still grows).
+    /// Presents the acquired image `index` (a `real` frame with its present id and
+    /// markers) and returns when.
     #[allow(clippy::too_many_arguments)]
-    fn show(
+    fn present(
+        &self,
+        swapchain: &Swapchain,
+        state: &mut State,
+        index: u32,
+        frame: PacedFrame,
+        real: bool,
+        markers: Option<&PresentMarkers>,
+        shared: &Shared,
+    ) -> Instant {
+        if let (true, Some(markers), Some(id)) = (real, markers, frame.present_id) {
+            markers.before_present(id);
+        }
+        let presented = Instant::now();
+        let id = if real { frame.present_id } else { None };
+        if swapchain.present_with_id(self.queue, index, id).is_err() {
+            shared.out_of_date.store(true, Ordering::Release);
+        }
+        if let (true, Some(markers), Some(id)) = (real, markers, frame.present_id) {
+            markers.after_present(id);
+        }
+        state.last_present = Some(presented);
+        presented
+    }
+
+    /// Acquires a swapchain image and submits the copy of `source` into it; returns the
+    /// image, or `None` when none could be acquired (the copy count grows either way).
+    fn copy(
         &self,
         swapchain: &mut Swapchain,
         state: &mut State,
         source: vk::Image,
         frame: PacedFrame,
-        real: bool,
-        markers: Option<&PresentMarkers>,
-        at: Instant,
         shared: &Shared,
-        sleep: &mut dyn FnMut(Instant),
-    ) -> Option<Instant> {
+    ) -> Option<u32> {
         let acquire = self.acquires[state.acquire % ACQUIRES];
         state.acquire += 1;
         state.copies += 1;
@@ -772,6 +818,7 @@ impl Thread {
         let Some(acquired) = acquired else {
             // Count the copy anyway: the frame loop's submissions wait for it.
             self.signal_copy(copy, None);
+            shared.submitted.store(copy, Ordering::Release);
             return None;
         };
         let index = acquired.index;
@@ -851,21 +898,7 @@ impl Thread {
             copy,
             Some((cmd, acquire, frame.done, swapchain.render_finished(index))),
         );
-        sleep(at);
-        if let (true, Some(markers), Some(id)) = (real, markers, frame.present_id) {
-            markers.before_present(id);
-        }
-        let presented = Instant::now();
-        let id = if real { frame.present_id } else { None };
-        match swapchain.present_with_id(self.queue, index, id) {
-            Ok(_) => {}
-            Err(_) => shared.out_of_date.store(true, Ordering::Release),
-        }
-        if let (true, Some(markers), Some(id)) = (real, markers, frame.present_id) {
-            markers.after_present(id);
-        }
-        state.last_present = Some(presented);
-        Some(presented)
+        Some(index)
     }
 
     /// Submits the copy (or, without an image, nothing) that brings the copy count to

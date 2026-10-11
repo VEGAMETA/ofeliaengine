@@ -575,10 +575,12 @@ dependencies = [
  "engine_core",
  "engine_ecs",
  "engine_frame",
+ "engine_latency",
  "engine_physics",
  "engine_platform",
  "engine_profiler",
  "engine_render",
+ "engine_render2d",
  "engine_rhi",
  "engine_streaming",
 ]

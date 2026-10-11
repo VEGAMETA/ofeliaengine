@@ -40,6 +40,10 @@
 //!     [--pipeline-cache <dir>]   load and save the pipeline cache there (default: none)
 //!     [--no-warm-up]        shading variants made on first use only, not also on the
 //!                           device's warm-up thread (ADR 0079)
+//!     [--fg]                frame generation (FSR 3.1, ADR 0091): a paced presenter shows
+//!                           a generated frame before each real one; implies --ui
+//!     [--ui]                a UI layer drawn on every presented frame: a HUD, a panel on
+//!                           the nave's wall, a panel on the camera
 //! ```
 //!
 //! Cook the pack with `ofeliaengine cook test-assets/Sponza/Sponza.gltf -o sponza.pack`.
@@ -71,12 +75,14 @@ mod windowed {
     use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf};
     use engine_core::alloc::EngineAllocator;
     use engine_core::jobs::ThreadPool;
-    use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
+    use engine_core::math::{Affine3A, Mat4, Quat, Vec2, Vec3, Vec4};
     use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, pod_component};
     use engine_frame::{
-        Antialiasing, FrameContext, FrameRenderer, PrepareContext, Quality, RenderDefaults,
-        SceneDraws, SceneInput, View, ViewTarget,
+        Antialiasing, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget, Placement,
+        PrepareContext, Quality, RenderDefaults, SceneDraws, SceneInput, UiCanvas, UiRenderer,
+        View, ViewTarget,
     };
+    use engine_latency::{PacedFrame, PacedPresenter, PresentImage, Presented};
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::budget::GpuBudget;
     use engine_render::environment::{Environment, Sky};
@@ -85,7 +91,9 @@ mod windowed {
         DirectionalLight, LocalLight, LocalShadowSettings, ShadowSettings, Spot,
     };
     use engine_render::gpu_scene::{GpuScene, InstanceId};
-    use engine_render::graph::{LoadOp, RenderGraph};
+    use engine_render::graph::{
+        ImportedTexture, LoadOp, RenderGraph, Texture, TextureDesc, TextureState,
+    };
     use engine_render::material::{MaterialDesc, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, cube};
     use engine_render::present::PresentTarget;
@@ -93,6 +101,7 @@ mod windowed {
     use engine_render::streaming::LodView;
     use engine_render::texture_pool::{TextureId, TextureLevels, TexturePool};
     use engine_render::upload::UploadRing;
+    use engine_render2d::{Canvas, Quad};
     use engine_rhi::ash::vk;
     use engine_rhi::{
         AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
@@ -539,6 +548,65 @@ mod windowed {
         (eye, look_rotation(eye, eye + dir, Vec3::Y))
     }
 
+    /// What the paced presenter presented (ADR 0091): rates, and how evenly the generated
+    /// and real frames were spaced.
+    fn frame_generation_report(presented: &[Presented], generated_shown: usize, drawn: usize) {
+        let timed: Vec<&Presented> = presented
+            .iter()
+            .filter(|p| p.frame > WARMUP as u64)
+            .collect();
+        let (Some(first), Some(last)) = (timed.first(), timed.last()) else {
+            println!("**Frame generation:** nothing presented.\n");
+            return;
+        };
+        let seconds = (last.presented - first.presented).as_secs_f64().max(1e-9);
+        let generated = timed.iter().filter(|p| p.generated).count();
+        let real = timed.len() - generated;
+        let mut gaps = Vec::new();
+        let mut errors = Vec::new();
+        let mut spacings = Vec::new();
+        for pair in timed.windows(2) {
+            if pair[0].generated && !pair[1].generated && pair[0].frame == pair[1].frame {
+                let gap = (pair[1].presented - pair[0].presented).as_secs_f64() * 1e3;
+                let spacing = pair[1].spacing.as_secs_f64() * 1e3;
+                gaps.push(gap);
+                spacings.push(spacing);
+                errors.push((gap - spacing).abs());
+            }
+        }
+        // Every present to the next: the intervals the display gets.
+        let intervals: Vec<f64> = timed
+            .windows(2)
+            .map(|p| (p[1].presented - p[0].presented).as_secs_f64() * 1e3)
+            .collect();
+        println!(
+            "**Frame generation** (FSR 3.1, ADR 0091): {drawn} real frames drawn, {generated_shown} generated frames to show; after the warm-up {real} real and {generated} generated presented in {seconds:.2} s: {:.1} presented per second, {:.1} real.\n",
+            timed.len() as f64 / seconds,
+            real as f64 / seconds
+        );
+        println!("| ms | median | p1 | p99 |\n|---|---:|---:|---:|");
+        for (name, values) in [
+            ("generated → real present", &gaps),
+            (
+                "spacing (half the real interval, less the margins)",
+                &spacings,
+            ),
+            ("abs(gap − spacing)", &errors),
+            ("present → present", &intervals),
+        ] {
+            if values.is_empty() {
+                continue;
+            }
+            println!(
+                "| {name} | {:.3} | {:.3} | {:.3} |",
+                percentile(values, 0.5),
+                percentile(values, 0.01),
+                percentile(values, 0.99)
+            );
+        }
+        println!();
+    }
+
     pub(crate) fn run() {
         let t0 = Instant::now();
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -575,6 +643,8 @@ mod windowed {
         let vsync = flag("--vsync");
         let cache_dir = option("--pipeline-cache").map(PathBuf::from);
         let warm_up = !flag("--no-warm-up");
+        let frame_generation = flag("--fg");
+        let ui_on = frame_generation || flag("--ui");
 
         // Start-up, phase by phase. What does not depend on each other overlaps (queue
         // item 0g): the Vulkan instance and device (the drivers' own start-up) on a thread
@@ -954,12 +1024,109 @@ mod windowed {
 
         // The swapchain, made beside all of the above.
         let wait = Instant::now();
-        let (mut swapchain, swapchain_ms) = pending_swapchain.join().unwrap();
+        let (swapchain, swapchain_ms) = pending_swapchain.join().unwrap();
         startup.push((
             "surface + swapchain (beside the renderer and the scene)",
             swapchain_ms,
         ));
         startup.push(("waiting for the swapchain", ms(wait)));
+        let present_mode = swapchain.present_mode();
+        let across_adapters = swapchain.presents_across_adapters();
+        // With frame generation a paced presenter takes the swapchain (ADR 0091).
+        let mut swapchain = Some(swapchain);
+        let mut paced = None;
+        if frame_generation {
+            match PacedPresenter::start(&device, &mut allocator, swapchain.take().unwrap(), None) {
+                Ok(p) => paced = Some(p),
+                Err(failed) => {
+                    let (s, e) = *failed;
+                    println!("frame generation unavailable: {e}");
+                    swapchain = Some(s);
+                }
+            }
+        }
+        // The UI layer: a HUD (a crosshair, a bar, a frame for a map), a panel on the nave's
+        // wall, a panel on the camera (bottom left, as a helmet's display).
+        let ui = ui_on.then(|| {
+            UiRenderer::new(&device, &mut allocator, &bindless, swapchain_format).unwrap()
+        });
+        let mut hud = Canvas::new();
+        let (w, h) = (WIDTH as f32, HEIGHT as f32);
+        hud.draw(&Quad::solid(Vec2::new(w * 0.5, h * 0.5), Vec2::new(24.0, 2.0)).color(Vec4::ONE));
+        hud.draw(&Quad::solid(Vec2::new(w * 0.5, h * 0.5), Vec2::new(2.0, 24.0)).color(Vec4::ONE));
+        hud.draw(
+            &Quad::rounded_rect(Vec2::new(200.0, h - 60.0), Vec2::new(300.0, 24.0), 6.0)
+                .color(Vec4::new(0.1, 0.1, 0.1, 0.6)),
+        );
+        hud.draw(
+            &Quad::rounded_rect(Vec2::new(170.0, h - 60.0), Vec2::new(232.0, 16.0), 4.0)
+                .color(Vec4::new(0.85, 0.15, 0.1, 1.0)),
+        );
+        hud.draw(
+            &Quad::rounded_rect(Vec2::new(w - 140.0, 140.0), Vec2::new(220.0, 220.0), 10.0)
+                .outline(4.0)
+                .color(Vec4::new(0.9, 0.9, 0.9, 0.8)),
+        );
+        hud.prepare();
+        let mut wall_panel = Canvas::new();
+        wall_panel.draw(
+            &Quad::rounded_rect(Vec2::new(150.0, 75.0), Vec2::new(300.0, 150.0), 12.0)
+                .color(Vec4::new(0.05, 0.3, 0.6, 0.85)),
+        );
+        for row in 0..4 {
+            wall_panel.draw(
+                &Quad::solid(
+                    Vec2::new(150.0, 30.0 + 30.0 * row as f32),
+                    Vec2::new(240.0 - 40.0 * row as f32, 10.0),
+                )
+                .color(Vec4::new(0.9, 0.95, 1.0, 1.0)),
+            );
+        }
+        wall_panel.prepare();
+        let mut visor = Canvas::new();
+        visor.draw(
+            &Quad::rounded_rect(Vec2::new(50.0, 25.0), Vec2::new(100.0, 50.0), 6.0)
+                .color(Vec4::new(0.1, 0.8, 0.3, 0.7)),
+        );
+        visor.prepare();
+        let (wall_from_panel, view_from_visor) = {
+            let center = (min + max) * 0.5;
+            let size = max - min;
+            (
+                // 3 × 1.5 m on the wall side of the nave, a centimeter per canvas unit,
+                // canvas y down.
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.01, -0.01, 1.0),
+                    Quat::IDENTITY,
+                    Vec3::new(
+                        center.x - 1.5,
+                        min.y + size.y * 0.25,
+                        center.z + size.z * 0.3,
+                    ),
+                ),
+                Mat4::from_scale_rotation_translation(
+                    Vec3::new(0.0012, -0.0012, 1.0),
+                    Quat::IDENTITY,
+                    Vec3::new(-0.42, -0.2, -0.6),
+                ),
+            )
+        };
+        let layer = [
+            UiCanvas {
+                canvas: &hud,
+                placement: Placement::Screen,
+            },
+            UiCanvas {
+                canvas: &wall_panel,
+                placement: Placement::World(wall_from_panel),
+            },
+            UiCanvas {
+                canvas: &visor,
+                placement: Placement::Camera(view_from_visor),
+            },
+        ];
+        let mut presented: Vec<Presented> = Vec::with_capacity(2 * frames_to_run + 8);
+        let mut generated_shown = 0usize;
 
         let mut log: Vec<Stages> = Vec::with_capacity(frames_to_run);
         let mut passes: std::collections::BTreeMap<&'static str, Vec<f64>> =
@@ -993,21 +1160,25 @@ mod windowed {
             s.wait = us(frame_start);
             let work = Instant::now();
             let t = Instant::now();
-            let acquired = match swapchain.acquire(frame.image_available, u64::MAX) {
-                Ok(a) => a,
-                Err(RhiError::Vulkan {
-                    result: vk::Result::ERROR_OUT_OF_DATE_KHR,
-                    ..
-                }) => {
-                    frames.wait_idle().unwrap();
-                    let e = swapchain.extent();
-                    swapchain
-                        .recreate(&device, &surface, e.width, e.height)
-                        .unwrap();
-                    continue;
-                }
-                Err(e) => panic!("{e}"),
+            let acquired = match swapchain.as_mut() {
+                Some(swapchain) => match swapchain.acquire(frame.image_available, u64::MAX) {
+                    Ok(a) => Some(a),
+                    Err(RhiError::Vulkan {
+                        result: vk::Result::ERROR_OUT_OF_DATE_KHR,
+                        ..
+                    }) => {
+                        frames.wait_idle().unwrap();
+                        let e = swapchain.extent();
+                        swapchain
+                            .recreate(&device, &surface, e.width, e.height)
+                            .unwrap();
+                        continue;
+                    }
+                    Err(e) => panic!("{e}"),
+                },
+                None => None,
             };
+            let paced_images = paced.as_ref().map(PacedPresenter::next_images);
             s.acquire = us(t);
             game_time += dt;
             let time = game_time as f32;
@@ -1092,12 +1263,20 @@ mod windowed {
                 first_idle = Some(ms(t0));
             }
 
-            let extent = swapchain.extent();
+            let extent = match (&swapchain, &paced) {
+                (Some(swapchain), _) => swapchain.extent(),
+                (None, Some(paced)) => paced.extent(),
+                (None, None) => unreachable!("one of them presents"),
+            };
+            let mut settings = main.settings;
+            if paced.is_some() {
+                settings.frame_generation = FrameGeneration::Fsr;
+            }
             let t = Instant::now();
             frame_renderer
                 .prepare(
                     &mut view,
-                    &main.settings,
+                    &settings,
                     (extent.width, extent.height),
                     PrepareContext {
                         device: &device,
@@ -1111,6 +1290,7 @@ mod windowed {
                 .unwrap();
             s.compose = us(t);
             let lod_bias = materials.texture_lod_bias();
+            let shown;
             {
                 let t = Instant::now();
                 let mut fg = graph.begin(&frame);
@@ -1157,46 +1337,131 @@ mod windowed {
                     .unwrap()
                     .unwrap();
                 s.upload = us(t);
-                let present = PresentTarget::import_with(
-                    &mut fg,
-                    &swapchain,
-                    acquired.index,
-                    present_apart.unwrap_or_else(|| swapchain.presents_across_adapters()),
-                );
-                let t = Instant::now();
-                let view_frame = frame_renderer
-                    .add_view(
-                        &mut fg,
-                        &mut FrameContext {
-                            device: &device,
-                            allocator: &mut allocator,
-                            bindless: &bindless,
-                            ring: &mut ring,
-                            frame_number: frame.number,
-                            dt: dt as f32,
-                        },
-                        &mut view,
-                        &SceneInput {
-                            geometry: &geo,
-                            materials: &mats,
-                            draws: SceneDraws::Scene(&scene_frame),
-                            skinning: Some(&skinned_frame),
-                            light: sun,
-                            lights: &lights,
-                            decals: &[],
-                            environment: Some(&environment),
-                            reflection_probes: None,
-                            gi: None,
-                        },
-                        &main.camera,
-                        ViewTarget {
-                            texture: present.texture,
-                            rect: None,
-                            load: LoadOp::DontCare,
+                let import = |fg: &mut engine_render::graph::FrameGraph<'_>,
+                              name: &'static str,
+                              image: PresentImage|
+                 -> Texture {
+                    fg.import_texture(
+                        name,
+                        ImportedTexture {
+                            image: image.image,
+                            view: image.view,
+                            desc: TextureDesc::new_2d(image.format, extent.width, extent.height),
+                            initial: TextureState::undefined(),
+                            final_state: Some(TextureState::transfer_source()),
+                            sampled_index: None,
+                            storage_index: None,
                         },
                     )
+                };
+                let (present, generated) = match (&swapchain, paced_images) {
+                    (Some(swapchain), _) => (
+                        Some(PresentTarget::import_with(
+                            &mut fg,
+                            swapchain,
+                            acquired.unwrap().index,
+                            present_apart.unwrap_or_else(|| swapchain.presents_across_adapters()),
+                        )),
+                        None,
+                    ),
+                    (None, Some(images)) => (
+                        None,
+                        Some((
+                            import(&mut fg, "real frame", images.real),
+                            GeneratedTarget {
+                                texture: import(&mut fg, "generated frame", images.generated),
+                                format: images.generated.raw_format,
+                                source_format: images.real.raw_format,
+                            },
+                        )),
+                    ),
+                    (None, None) => unreachable!("one of them presents"),
+                };
+                let target = match (&present, &generated) {
+                    (Some(present), _) => present.texture,
+                    (None, Some((real, _))) => *real,
+                    (None, None) => unreachable!("one of them presents"),
+                };
+                let t = Instant::now();
+                let mut context = FrameContext {
+                    device: &device,
+                    allocator: &mut allocator,
+                    bindless: &bindless,
+                    ring: &mut ring,
+                    frame_number: frame.number,
+                    dt: dt as f32,
+                };
+                let scene_input = SceneInput {
+                    geometry: &geo,
+                    materials: &mats,
+                    draws: SceneDraws::Scene(&scene_frame),
+                    skinning: Some(&skinned_frame),
+                    light: sun,
+                    lights: &lights,
+                    decals: &[],
+                    environment: Some(&environment),
+                    reflection_probes: None,
+                    gi: None,
+                };
+                let view_target = ViewTarget {
+                    texture: target,
+                    rect: None,
+                    load: LoadOp::DontCare,
+                };
+                let view_frame = match generated {
+                    Some((_, generated_target)) => frame_renderer
+                        .add_view_generating(
+                            &mut fg,
+                            &mut context,
+                            &mut view,
+                            &scene_input,
+                            &main.camera,
+                            view_target,
+                            generated_target,
+                            |_, _| {},
+                        )
+                        .unwrap(),
+                    None => frame_renderer
+                        .add_view(
+                            &mut fg,
+                            &mut context,
+                            &mut view,
+                            &scene_input,
+                            &main.camera,
+                            view_target,
+                        )
+                        .unwrap(),
+                };
+                if let Some(ui) = &ui {
+                    ui.add_passes(
+                        &mut fg,
+                        &mut ring,
+                        &bindless,
+                        &layer,
+                        target,
+                        &main.camera,
+                        &view_frame,
+                    )
                     .unwrap();
-                present.finish(&mut fg);
+                    if let (Some((_, g)), Some(frame_g)) = (generated, view_frame.generated)
+                        && frame_g.shown
+                    {
+                        ui.add_passes(
+                            &mut fg,
+                            &mut ring,
+                            &bindless,
+                            &layer,
+                            g.texture,
+                            &frame_g.camera,
+                            &view_frame,
+                        )
+                        .unwrap();
+                    }
+                }
+                if let Some(present) = present {
+                    present.finish(&mut fg);
+                }
+                shown = view_frame.generated.is_some_and(|g| g.shown);
                 if feedback_on {
                     feedback
                         .add_pass(
@@ -1220,17 +1485,41 @@ mod windowed {
                 s.execute = us(t);
             }
             let t = Instant::now();
-            frames
-                .submit(
-                    device.graphics,
-                    frame,
-                    true,
-                    Some(swapchain.render_finished(acquired.index)),
-                )
-                .unwrap();
+            let number = frame.number;
+            match (&swapchain, paced_images) {
+                (Some(swapchain), _) => frames
+                    .submit(
+                        device.graphics,
+                        frame,
+                        true,
+                        Some(swapchain.render_finished(acquired.unwrap().index)),
+                    )
+                    .unwrap(),
+                (None, Some(images)) => frames
+                    .submit_waiting(device.graphics, frame, false, Some(images.wait), None, None)
+                    .unwrap(),
+                (None, None) => unreachable!("one of them presents"),
+            }
             s.submit = us(t);
             let t = Instant::now();
-            let _ = swapchain.present(device.graphics, acquired.index);
+            match (&swapchain, &mut paced) {
+                (Some(swapchain), _) => {
+                    let _ = swapchain.present(device.graphics, acquired.unwrap().index);
+                }
+                (None, Some(paced)) => {
+                    generated_shown += usize::from(shown);
+                    paced
+                        .present(PacedFrame {
+                            done: (frames.timeline(), number),
+                            generated: shown,
+                            present_id: None,
+                            reset: !shown,
+                        })
+                        .unwrap();
+                    paced.drain_presented(|p| presented.push(p));
+                }
+                (None, None) => unreachable!("one of them presents"),
+            }
             s.present = us(t);
             s.cpu = us(work);
             if first_present.is_none() {
@@ -1256,6 +1545,10 @@ mod windowed {
             }
         }
         frames.wait_idle().unwrap();
+        if let Some(mut p) = paced.take() {
+            p.drain_presented(|x| presented.push(x));
+            swapchain = Some(p.stop(&mut allocator).unwrap());
+        }
 
         // The report.
         println!(
@@ -1268,10 +1561,10 @@ mod windowed {
         println!(
             "Adapter: {adapter_name}; {WIDTH}×{HEIGHT}, {antialiasing} at {quality:?}, AO {:?}; present mode {:?}, {}; {drawn} frames ({WARMUP} warm-up frames left out)\n",
             ambient_occlusion.map(|a| a.quality),
-            swapchain.present_mode(),
+            present_mode,
             match (
-                present_apart.unwrap_or_else(|| swapchain.presents_across_adapters()),
-                swapchain.presents_across_adapters(),
+                present_apart.unwrap_or(across_adapters) || frame_generation,
+                across_adapters,
             ) {
                 (true, true) => "drawn apart and copied (the monitor is on another GPU)",
                 (true, false) => "drawn apart and copied",
@@ -1408,6 +1701,9 @@ mod windowed {
                 s.pipelines
             );
         }
+        if frame_generation {
+            frame_generation_report(&presented, generated_shown, drawn);
+        }
         println!();
         memory_report("at the end", &allocator, &graph);
         let stats = streamer.stats();
@@ -1429,6 +1725,9 @@ mod windowed {
         }
         // SAFETY: the device is idle.
         unsafe {
+            if let Some(mut ui) = ui {
+                ui.destroy(&mut allocator);
+            }
             frame_renderer.destroy(&device, &mut allocator, &bindless);
             view.destroy(&mut allocator, &bindless);
             scene.destroy(&mut allocator);
