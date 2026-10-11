@@ -54,8 +54,8 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate: the technical core is about **72 %** done, and the whole engine (editor, Luau and
-tooling included) about **50 %**.
+Estimate: the technical core is about **74 %** done (GI done and measured against AMD's,
+2026-10-11), and the whole engine (editor, Luau and tooling included) about **50 %**.
 
 | Area | State | Where |
 |---|---|---|
