@@ -242,6 +242,56 @@ fn blocks_are_shared_released_and_large_resources_get_their_own_memory() {
     assert_no_validation_errors(&instance);
 }
 
+/// A few KiB of staging or readback take a small block of mapped system memory, not an
+/// eighth of the preferred block: every byte of it counts as the process's private bytes.
+#[test]
+fn small_staging_takes_a_small_block_of_system_memory() {
+    let Some((instance, device)) = gpu(false) else {
+        return;
+    };
+    let mut allocator = Allocator::new(&device);
+    let mut made = Vec::new();
+    for location in [MemoryLocation::Upload, MemoryLocation::Readback] {
+        made.push(
+            allocator
+                .create_buffer(
+                    &buffer_info(4096, vk::BufferUsageFlags::TRANSFER_DST),
+                    location,
+                )
+                .unwrap(),
+        );
+    }
+    let local = |heap: usize| {
+        device.adapter().memory.memory_heaps[heap]
+            .flags
+            .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+    };
+    for (heap, stats) in allocator.heap_stats().iter().enumerate() {
+        println!(
+            "heap {heap} (device-local {}): {} bytes in {} blocks, {} mapped",
+            local(heap),
+            stats.block_bytes,
+            stats.blocks,
+            stats.mapped_bytes
+        );
+        if !local(heap) && stats.blocks > 0 {
+            assert!(
+                stats.block_bytes <= 2 * (4 << 20),
+                "{} bytes for two 4 KiB buffers",
+                stats.block_bytes
+            );
+        }
+    }
+    // SAFETY: nothing was submitted; each pair comes from one create call.
+    unsafe {
+        for (buffer, memory) in made {
+            allocator.destroy_buffer(buffer, memory);
+        }
+    }
+    drop(allocator);
+    assert_no_validation_errors(&instance);
+}
+
 /// The allocator's own count of device-local bytes follows the OS's usage
 /// (`VK_EXT_memory_budget`): what streaming budgets are computed from (ADR 0076).
 #[test]

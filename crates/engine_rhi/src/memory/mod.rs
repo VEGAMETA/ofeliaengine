@@ -575,10 +575,21 @@ impl Allocator {
             }
         }
 
-        // A new block: 1/8, 1/4, 1/2 of the preferred size while the pool is small.
+        // A new block: 1/8, 1/4, 1/2 of the preferred size while the pool is small. Mapped
+        // system memory (staging, readback) starts from 1/64: every byte of its blocks
+        // counts as the process's private bytes, and its pools hold little.
         let largest = self.pools[pool_index].largest_block();
+        let flags = self.properties.memory_types[memory_type as usize].property_flags;
+        let system = !self.properties.memory_heaps[self.heap_of(memory_type)]
+            .flags
+            .contains(vk::MemoryHeapFlags::DEVICE_LOCAL);
+        let halvings = if system && flags.contains(vk::MemoryPropertyFlags::HOST_VISIBLE) {
+            6
+        } else {
+            3
+        };
         let mut block_size = preferred;
-        for _ in 0..3 {
+        for _ in 0..halvings {
             let half = block_size / 2;
             if half > largest && half >= size.saturating_mul(2) {
                 block_size = half;
