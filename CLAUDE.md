@@ -59,7 +59,7 @@ Decisions change only via an ADR backed by measurements.
   engine_ffx             the FidelityFX SDK built from source as one library: FSR 3.1, Brixelizer, Brixelizer GI (C++ via `cc`; ADR 0090)
   engine_fsr             FSR 3.1 over engine_ffx (ADR 0060)
   engine_brixelizer      Brixelizer GI over engine_ffx: our GI's measured reference (ADR 0090)
-  engine_dlss            DLSS SR/DLAA through Streamline, user-supplied DLLs (ADR 0063)
+  engine_dlss            DLSS SR/DLAA and frame generation through Streamline, user-supplied DLLs (ADRs 0063, 0091)
   engine_frame           the frame renderer: composes a view's frame (scene, TAA/upscaling, post; ADR 0072)
   engine_latency         frame pacing, limiter, VK_NV_low_latency2, VK_AMD_anti_lag
   engine_physics         PhysicsBackend trait, shared types, test scenes

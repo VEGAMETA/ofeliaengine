@@ -34,6 +34,8 @@
 //!     [--no-ao]             no ambient occlusion
 //!     [--aa off|taau|fsr]   [--quality native|quality|balanced|performance]
 //!     [--vsync]
+//!     [--cap <fps>]         at most this many real frames per second (a game's limiter;
+//!                           frame generation shows twice as many)
 //!     [--present apart|direct]   the frame into an image of its own copied into the
 //!                                swapchain image, or straight into it (default: apart
 //!                                only when presenting across adapters)
@@ -42,6 +44,8 @@
 //!                           device's warm-up thread (ADR 0079)
 //!     [--fg]                frame generation (FSR 3.1, ADR 0091): a paced presenter shows
 //!                           a generated frame before each real one; implies --ui
+//!     [--fg dlss]           DLSS frame generation instead, through Streamline (the user's
+//!                           DLLs, an RTX 40 or newer): Streamline presents, Reflex paces
 //!     [--ui]                a UI layer drawn on every presented frame: a HUD, a panel on
 //!                           the nave's wall, a panel on the camera
 //! ```
@@ -76,13 +80,16 @@ mod windowed {
     use engine_core::alloc::EngineAllocator;
     use engine_core::jobs::ThreadPool;
     use engine_core::math::{Affine3A, Mat4, Quat, Vec2, Vec3, Vec4};
+    use engine_dlss::{DlssFrameGeneration, Streamline, StreamlineDesc};
     use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, pod_component};
     use engine_frame::{
         Antialiasing, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget, Placement,
         PrepareContext, Quality, RenderDefaults, SceneDraws, SceneInput, UiCanvas, UiRenderer,
         View, ViewTarget,
     };
-    use engine_latency::{PacedFrame, PacedPresenter, PresentImage, Presented};
+    use engine_latency::{
+        Latency, LatencySettings, Marker, PacedFrame, PacedPresenter, PresentImage, Presented,
+    };
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::budget::GpuBudget;
     use engine_render::environment::{Environment, Sky};
@@ -92,7 +99,7 @@ mod windowed {
     };
     use engine_render::gpu_scene::{GpuScene, InstanceId};
     use engine_render::graph::{
-        ImportedTexture, LoadOp, RenderGraph, Texture, TextureDesc, TextureState,
+        Access, ImportedTexture, LoadOp, RenderGraph, Texture, TextureDesc, TextureState,
     };
     use engine_render::material::{MaterialDesc, MaterialTable};
     use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, cube};
@@ -548,6 +555,68 @@ mod windowed {
         (eye, look_rotation(eye, eye + dir, Vec3::Y))
     }
 
+    /// What DLSS frame generation presented (ADR 0091 §7): Streamline counts the frames it
+    /// presented per real frame (`slDLSSGGetState`).
+    #[derive(Default)]
+    struct DlssReport {
+        /// After the warm-up: real frames, frames presented, and when the first and last
+        /// were presented.
+        real: usize,
+        presented: u64,
+        first: Option<Instant>,
+        last: Option<Instant>,
+        /// The last status that was not "ok", and how often.
+        failed: usize,
+        status: &'static str,
+        max_generated: u32,
+    }
+
+    impl DlssReport {
+        fn record(&mut self, generation: &DlssFrameGeneration, drawn: usize) {
+            let Ok(state) = generation.state() else {
+                self.failed += 1;
+                return;
+            };
+            self.max_generated = state.max_generated;
+            if state.status != 0 {
+                self.failed += 1;
+                self.status = state.status_text();
+            }
+            if drawn < WARMUP {
+                return;
+            }
+            let now = Instant::now();
+            self.first.get_or_insert(now);
+            self.last = Some(now);
+            self.real += 1;
+            self.presented += u64::from(state.presented);
+        }
+
+        fn report(&self, drawn: usize) {
+            let seconds = match (self.first, self.last) {
+                (Some(first), Some(last)) => (last - first).as_secs_f64().max(1e-9),
+                _ => {
+                    println!("**Frame generation** (DLSS): nothing presented.\n");
+                    return;
+                }
+            };
+            println!(
+                "**Frame generation** (DLSS through Streamline, ADR 0091): {drawn} real frames drawn; after the warm-up {} real frames and {} presented in {seconds:.2} s: {:.1} presented per second, {:.1} real ({:.2} presented per real frame; up to {} generated per real frame here). Status: {}.\n",
+                self.real,
+                self.presented,
+                self.presented as f64 / seconds,
+                self.real as f64 / seconds,
+                self.presented as f64 / self.real.max(1) as f64,
+                self.max_generated,
+                if self.failed == 0 {
+                    String::from("ok")
+                } else {
+                    format!("{} frames not ok, last: {}", self.failed, self.status)
+                }
+            );
+        }
+    }
+
     /// What the paced presenter presented (ADR 0091): rates, and how evenly the generated
     /// and real frames were spaced.
     fn frame_generation_report(presented: &[Presented], generated_shown: usize, drawn: usize) {
@@ -574,6 +643,13 @@ mod windowed {
                 errors.push((gap - spacing).abs());
             }
         }
+        // What frame generation adds to a real frame's latency: from its GPU work seen done
+        // to its present (half a real interval, the generated frame shown first).
+        let held: Vec<f64> = timed
+            .iter()
+            .filter(|p| !p.generated)
+            .map(|p| (p.presented - p.ready).as_secs_f64() * 1e3)
+            .collect();
         // Every present to the next: the intervals the display gets.
         let intervals: Vec<f64> = timed
             .windows(2)
@@ -592,6 +668,7 @@ mod windowed {
                 &spacings,
             ),
             ("abs(gap − spacing)", &errors),
+            ("real frame done → presented (latency added)", &held),
             ("present → present", &intervals),
         ] {
             if values.is_empty() {
@@ -643,8 +720,14 @@ mod windowed {
         let vsync = flag("--vsync");
         let cache_dir = option("--pipeline-cache").map(PathBuf::from);
         let warm_up = !flag("--no-warm-up");
-        let frame_generation = flag("--fg");
-        let ui_on = frame_generation || flag("--ui");
+        // `--fg`: FSR 3.1's, shown by a paced presenter; `--fg dlss`: DLSS's, through
+        // Streamline (ADR 0091).
+        let frame_generation = flag("--fg").then(|| match option("--fg") {
+            Some("dlss") => FrameGeneration::Dlss,
+            _ => FrameGeneration::Fsr,
+        });
+        let dlss_wanted = frame_generation == Some(FrameGeneration::Dlss);
+        let ui_on = frame_generation.is_some() || flag("--ui");
 
         // Start-up, phase by phase. What does not depend on each other overlaps (queue
         // item 0g): the Vulkan instance and device (the drivers' own start-up) on a thread
@@ -657,12 +740,59 @@ mod windowed {
             .name(String::from("vulkan start-up"))
             .spawn(move || {
                 let phase = Instant::now();
-                let instance = Instance::new(&InstanceDesc::default()).unwrap();
+                // DLSS frame generation: Streamline before the instance, its extensions and
+                // queues with the device (ADR 0091 §7).
+                let streamline = dlss_wanted
+                    .then(|| {
+                        Streamline::load(&StreamlineDesc {
+                            frame_generation: true,
+                            ..StreamlineDesc::default()
+                        })
+                        .map_err(|e| println!("DLSS frame generation unavailable: {e}"))
+                        .ok()
+                    })
+                    .flatten()
+                    .filter(Streamline::frame_generation);
+                let instance = Instance::with_extensions(
+                    &InstanceDesc::default(),
+                    &streamline
+                        .as_ref()
+                        .map(Streamline::instance_extensions)
+                        .unwrap_or_default(),
+                )
+                .unwrap();
                 let preference =
                     AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);
                 let adapter = instance.select_adapter(&preference).unwrap();
                 let adapter_name = adapter.summary();
-                let mut device = Device::new(&instance, &adapter).unwrap();
+                let streamline = streamline.filter(|s| {
+                    s.check_adapter(&instance, &adapter)
+                        .map_err(|e| println!("DLSS frame generation unsupported: {e}"))
+                        .is_ok()
+                });
+                let mut device = Device::with_extras(
+                    &instance,
+                    &adapter,
+                    &streamline
+                        .as_ref()
+                        .map(Streamline::device_extensions)
+                        .unwrap_or_default(),
+                    streamline
+                        .as_ref()
+                        .map(Streamline::extra_queues)
+                        .unwrap_or_default(),
+                )
+                .unwrap();
+                let streamline = streamline.filter(|s| {
+                    if let Err(e) = s.attach(&device) {
+                        println!("DLSS frame generation unavailable: {e}");
+                        return false;
+                    }
+                    if let Some(e) = s.frame_generation_error() {
+                        println!("DLSS frame generation unavailable: {e}");
+                    }
+                    s.frame_generation_supported()
+                });
                 device.set_pipeline_warm_up(warm_up);
                 let cache_path = cache_dir
                     .as_deref()
@@ -677,6 +807,7 @@ mod windowed {
                     cache_path,
                     cache_load,
                     ms(phase),
+                    streamline,
                 )
             })
             .unwrap();
@@ -714,14 +845,28 @@ mod windowed {
             "job pool + Fox cooked from the cache (beside the device)",
             ms(phase),
         ));
-        let (instance, adapter_name, device, cache_path, cache_load, device_ms) =
+        let (instance, adapter_name, device, cache_path, cache_load, device_ms, streamline) =
             gpu.join().unwrap();
+        if dlss_wanted && streamline.is_none() {
+            let log = Streamline::log();
+            println!(
+                "DLSS frame generation is off: the frame is presented as without --fg (Streamline: {} errors, {} warnings: {:?}).",
+                log.errors, log.warnings, log.first_errors
+            );
+        }
+        // With DLSS frame generation Streamline presents: the surface and the swapchain go
+        // through its hooks.
+        let hooks = streamline.as_ref().map(Streamline::vulkan_hooks);
         startup.push((
             "Vulkan instance + device (+ pipeline cache file)",
             device_ms,
         ));
-        let surface =
-            Arc::new(Surface::from_win32(&instance, window.hinstance, window.hwnd).unwrap());
+        let surface = Arc::new(match &hooks {
+            Some(hooks) => {
+                Surface::from_win32_hooked(&instance, window.hinstance, window.hwnd, hooks).unwrap()
+            }
+            None => Surface::from_win32(&instance, window.hinstance, window.hwnd).unwrap(),
+        });
         let swapchain_desc = SwapchainDesc {
             width: WIDTH,
             height: HEIGHT,
@@ -743,7 +888,13 @@ mod windowed {
                 .name(String::from("swapchain"))
                 .spawn(move || {
                     let phase = Instant::now();
-                    let swapchain = Swapchain::new(&device, &surface, &swapchain_desc).unwrap();
+                    let swapchain = match hooks {
+                        Some(hooks) => {
+                            Swapchain::new_hooked(&device, &surface, &swapchain_desc, &hooks)
+                        }
+                        None => Swapchain::new(&device, &surface, &swapchain_desc),
+                    }
+                    .unwrap();
                     (swapchain, ms(phase))
                 })
                 .unwrap()
@@ -1032,10 +1183,10 @@ mod windowed {
         startup.push(("waiting for the swapchain", ms(wait)));
         let present_mode = swapchain.present_mode();
         let across_adapters = swapchain.presents_across_adapters();
-        // With frame generation a paced presenter takes the swapchain (ADR 0091).
+        // With FSR's frame generation a paced presenter takes the swapchain (ADR 0091).
         let mut swapchain = Some(swapchain);
         let mut paced = None;
-        if frame_generation {
+        if frame_generation == Some(FrameGeneration::Fsr) {
             match PacedPresenter::start(&device, &mut allocator, swapchain.take().unwrap(), None) {
                 Ok(p) => paced = Some(p),
                 Err(failed) => {
@@ -1045,6 +1196,7 @@ mod windowed {
                 }
             }
         }
+        let paced_used = paced.is_some();
         // The UI layer: a HUD (a crosshair, a bar, a frame for a map), a panel on the nave's
         // wall, a panel on the camera (bottom left, as a helmet's display).
         let ui = ui_on.then(|| {
@@ -1127,6 +1279,23 @@ mod windowed {
         ];
         let mut presented: Vec<Presented> = Vec::with_capacity(2 * frames_to_run + 8);
         let mut generated_shown = 0usize;
+        // DLSS frame generation: on from the first frame, Streamline's Reflex pacing the
+        // real frames (ADR 0091 §6).
+        let dlss_generation = streamline.as_ref().map(|s| {
+            let mut generation = DlssFrameGeneration::new(s).unwrap();
+            generation.set_enabled(true).unwrap();
+            generation
+        });
+        let mut latency = dlss_generation.as_ref().map(|generation| {
+            Latency::with_external(
+                &device,
+                swapchain.as_ref().unwrap(),
+                LatencySettings::default(),
+                Box::new(generation.latency()),
+            )
+            .unwrap()
+        });
+        let mut dlss = DlssReport::default();
 
         let mut log: Vec<Stages> = Vec::with_capacity(frames_to_run);
         let mut passes: std::collections::BTreeMap<&'static str, Vec<f64>> =
@@ -1137,6 +1306,14 @@ mod windowed {
         let mut drawn = 0usize;
         let mut previous_start: Option<Instant> = None;
         let mut game_time = 0.0f64;
+        // `--cap`: real frames at most this often, as a game's limiter (ADR 0091: it caps
+        // real frames; frame generation shows twice as many).
+        let cap = option("--cap")
+            .and_then(|v| v.parse::<f64>().ok())
+            .filter(|fps| *fps > 0.0)
+            .map(|fps| std::time::Duration::from_secs_f64(1.0 / fps));
+        let mut cap_sleeper = cap.and_then(|_| engine_platform::time::PreciseSleeper::new().ok());
+        let mut next_due: Option<Instant> = None;
         'main: loop {
             let mut close = false;
             windows.drain_events(|e| {
@@ -1147,6 +1324,15 @@ mod windowed {
             if close || drawn >= frames_to_run {
                 break 'main;
             }
+            if let (Some(interval), Some(sleeper)) = (cap, cap_sleeper.as_mut()) {
+                let now = Instant::now();
+                let due = next_due.unwrap_or(now);
+                if due > now {
+                    let _ = sleeper.sleep_until(due);
+                }
+                // At most one frame of catching up after a stall.
+                next_due = Some(due.max(now) + interval);
+            }
             let mut s = Stages::default();
             let frame_start = Instant::now();
             if let Some(p) = previous_start
@@ -1156,6 +1342,13 @@ mod windowed {
             }
             previous_start = Some(frame_start);
             let pipelines_at_start = engine_rhi::creation_stats().created;
+            // Streamline's Reflex sleeps here with DLSS frame generation; the frame's id
+            // goes with its markers and its inputs.
+            let frame_id = latency.as_mut().map(|l| {
+                let id = l.begin_frame(swapchain.as_ref().unwrap(), &frames).unwrap();
+                l.mark(swapchain.as_ref().unwrap(), Marker::SimulationStart);
+                id
+            });
             let frame = frames.begin().unwrap();
             s.wait = us(frame_start);
             let work = Instant::now();
@@ -1272,6 +1465,11 @@ mod windowed {
             if paced.is_some() {
                 settings.frame_generation = FrameGeneration::Fsr;
             }
+            if let Some(l) = latency.as_mut() {
+                settings.frame_generation = FrameGeneration::Dlss;
+                l.mark(swapchain.as_ref().unwrap(), Marker::SimulationEnd);
+                l.mark(swapchain.as_ref().unwrap(), Marker::RenderSubmitStart);
+            }
             let t = Instant::now();
             frame_renderer
                 .prepare(
@@ -1356,11 +1554,15 @@ mod windowed {
                 };
                 let (present, generated) = match (&swapchain, paced_images) {
                     (Some(swapchain), _) => (
+                        // DLSS frame generation: the frame is drawn apart, kept without its UI
+                        // for Streamline, and copied to the swapchain image under the UI.
                         Some(PresentTarget::import_with(
                             &mut fg,
                             swapchain,
                             acquired.unwrap().index,
-                            present_apart.unwrap_or_else(|| swapchain.presents_across_adapters()),
+                            dlss_generation.is_some()
+                                || present_apart
+                                    .unwrap_or_else(|| swapchain.presents_across_adapters()),
                         )),
                         None,
                     ),
@@ -1432,13 +1634,44 @@ mod windowed {
                         )
                         .unwrap(),
                 };
+                // DLSS frame generation: the UI alone into a layer of its own, cleared to
+                // nothing (Streamline composites it over the frames it generates).
+                let ui_layer = (dlss_generation.is_some() && ui.is_some()).then(|| {
+                    let layer = fg.create_texture(
+                        "ui layer",
+                        TextureDesc::new_2d(swapchain_format, extent.width, extent.height),
+                    );
+                    fg.add_pass("ui layer clear")
+                        .write(layer, Access::TransferWrite)
+                        .execute(move |ctx| {
+                            let range = vk::ImageSubresourceRange {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                base_mip_level: 0,
+                                level_count: 1,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            };
+                            // SAFETY: recording; the graph made the layer a transfer
+                            // destination.
+                            unsafe {
+                                ctx.device.cmd_clear_color_image(
+                                    ctx.cmd,
+                                    ctx.image(layer),
+                                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                    &vk::ClearColorValue::default(),
+                                    &[range],
+                                );
+                            }
+                        });
+                    layer
+                });
                 if let Some(ui) = &ui {
                     ui.add_passes(
                         &mut fg,
                         &mut ring,
                         &bindless,
                         &layer,
-                        target,
+                        ui_layer.unwrap_or(target),
                         &main.camera,
                         &view_frame,
                     )
@@ -1458,8 +1691,29 @@ mod windowed {
                         .unwrap();
                     }
                 }
+                let backbuffer = present.as_ref().map(PresentTarget::swapchain_texture);
                 if let Some(present) = present {
                     present.finish(&mut fg);
+                }
+                // DLSS frame generation: the UI over the copied frame, then the frame's
+                // inputs to Streamline.
+                if let (Some(ui), Some(_), Some(backbuffer)) = (&ui, ui_layer, backbuffer) {
+                    ui.add_passes(
+                        &mut fg,
+                        &mut ring,
+                        &bindless,
+                        &layer,
+                        backbuffer,
+                        &main.camera,
+                        &view_frame,
+                    )
+                    .unwrap();
+                }
+                if let (Some(generation), Some(id)) = (&dlss_generation, frame_id)
+                    && let Some(input) =
+                        view_frame.dlss_generation_input(&main.camera, target, ui_layer)
+                {
+                    generation.add_pass(&mut fg, input, id);
                 }
                 shown = view_frame.generated.is_some_and(|g| g.shown);
                 if feedback_on {
@@ -1504,7 +1758,17 @@ mod windowed {
             let t = Instant::now();
             match (&swapchain, &mut paced) {
                 (Some(swapchain), _) => {
+                    if let Some(l) = latency.as_mut() {
+                        l.mark(swapchain, Marker::RenderSubmitEnd);
+                        l.mark(swapchain, Marker::PresentStart);
+                    }
                     let _ = swapchain.present(device.graphics, acquired.unwrap().index);
+                    if let Some(l) = latency.as_mut() {
+                        l.mark(swapchain, Marker::PresentEnd);
+                    }
+                    if let Some(generation) = &dlss_generation {
+                        dlss.record(generation, drawn);
+                    }
                 }
                 (None, Some(paced)) => {
                     generated_shown += usize::from(shown);
@@ -1544,7 +1808,11 @@ mod windowed {
                 memory_report(&format!("after {WARMUP} frames"), &allocator, &graph);
             }
         }
-        frames.wait_idle().unwrap();
+        match &hooks {
+            // Streamline's queues drain too.
+            Some(hooks) => hooks.device_wait_idle(&device).unwrap(),
+            None => frames.wait_idle().unwrap(),
+        }
         if let Some(mut p) = paced.take() {
             p.drain_presented(|x| presented.push(x));
             swapchain = Some(p.stop(&mut allocator).unwrap());
@@ -1563,7 +1831,7 @@ mod windowed {
             ambient_occlusion.map(|a| a.quality),
             present_mode,
             match (
-                present_apart.unwrap_or(across_adapters) || frame_generation,
+                present_apart.unwrap_or(across_adapters) || frame_generation.is_some(),
                 across_adapters,
             ) {
                 (true, true) => "drawn apart and copied (the monitor is on another GPU)",
@@ -1701,8 +1969,11 @@ mod windowed {
                 s.pipelines
             );
         }
-        if frame_generation {
+        if paced_used {
             frame_generation_report(&presented, generated_shown, drawn);
+        }
+        if dlss_generation.is_some() {
+            dlss.report(drawn);
         }
         println!();
         memory_report("at the end", &allocator, &graph);

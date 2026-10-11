@@ -78,6 +78,13 @@ impl PresentTarget {
         self.swapchain_image.is_some()
     }
 
+    /// The swapchain image: [`Self::texture`] itself unless the frame is drawn apart.
+    /// Passes declared after [`Self::finish`] that write it draw over the copied frame
+    /// (the UI over a frame kept without it, ADR 0091).
+    pub fn swapchain_texture(&self) -> Texture {
+        self.swapchain_image.unwrap_or(self.texture)
+    }
+
     /// Copies the frame into the swapchain image when it was drawn apart: declare it after
     /// every pass that draws the frame.
     pub fn finish(self, fg: &mut FrameGraph<'_>) {

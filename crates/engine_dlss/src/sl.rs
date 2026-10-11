@@ -106,10 +106,18 @@ pub(crate) const SDK_VERSION: u64 = (2 << 48) | (14 << 32) | (1 << 16) | 0xfedc;
 pub(crate) type Feature = u32;
 /// `sl::kFeatureDLSS`.
 pub(crate) const FEATURE_DLSS: Feature = 0;
+/// `kFeatureReflex`.
+pub(crate) const FEATURE_REFLEX: Feature = 3;
+/// `kFeaturePCL` (PC latency markers).
+pub(crate) const FEATURE_PCL: Feature = 4;
+/// `kFeatureDLSS_G` (frame generation).
+pub(crate) const FEATURE_DLSS_G: Feature = 1000;
 
 /// `sl::BufferType` values (`sl_core_types.h`).
 pub(crate) const BUFFER_DEPTH: u32 = 0;
 pub(crate) const BUFFER_MOTION_VECTORS: u32 = 1;
+pub(crate) const BUFFER_HUDLESS_COLOR: u32 = 2;
+pub(crate) const BUFFER_UI_COLOR_AND_ALPHA: u32 = 23;
 pub(crate) const BUFFER_SCALING_INPUT_COLOR: u32 = 3;
 pub(crate) const BUFFER_SCALING_OUTPUT_COLOR: u32 = 4;
 pub(crate) const BUFFER_EXPOSURE: u32 = 13;
@@ -720,6 +728,162 @@ impl DlssState {
     }
 }
 
+/// `sl::DLSSGMode::eOff`.
+pub(crate) const DLSSG_MODE_OFF: u32 = 0;
+/// `sl::DLSSGMode::eOn`: a fixed number of generated frames.
+pub(crate) const DLSSG_MODE_ON: u32 = 1;
+/// `sl::DLSSGFlags::eRetainResourcesWhenOff`.
+pub(crate) const DLSSG_FLAG_RETAIN_RESOURCES_WHEN_OFF: u32 = 1 << 3;
+
+/// `sl::DLSSGOptions` (version 5, `sl_dlss_g.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct DlssgOptions {
+    pub base: BaseStructure,
+    pub mode: u32,
+    pub num_frames_to_generate: u32,
+    pub flags: u32,
+    pub dynamic_res_width: u32,
+    pub dynamic_res_height: u32,
+    pub num_back_buffers: u32,
+    pub mvec_depth_width: u32,
+    pub mvec_depth_height: u32,
+    pub color_width: u32,
+    pub color_height: u32,
+    pub color_buffer_format: u32,
+    pub mvec_buffer_format: u32,
+    pub depth_buffer_format: u32,
+    pub hud_less_buffer_format: u32,
+    pub ui_buffer_format: u32,
+    pub on_error_callback: *const c_void,
+    pub b_reserved15: u8,
+    pub queue_parallelism_mode: u32,
+    pub enable_user_interface_recomposition: u8,
+    pub dynamic_target_frame_rate: f32,
+}
+
+impl DlssgOptions {
+    pub(crate) const TYPE: StructType = guid(
+        0xfac5_f1cb,
+        0x2dfd,
+        0x4f36,
+        [0xa1, 0xe6, 0x3a, 0x9e, 0x86, 0x52, 0x56, 0xc5],
+    );
+
+    pub(crate) fn new() -> Self {
+        Self {
+            base: BaseStructure::new(Self::TYPE, 5),
+            mode: DLSSG_MODE_OFF,
+            num_frames_to_generate: 1,
+            flags: 0,
+            dynamic_res_width: 0,
+            dynamic_res_height: 0,
+            num_back_buffers: 0,
+            mvec_depth_width: 0,
+            mvec_depth_height: 0,
+            color_width: 0,
+            color_height: 0,
+            color_buffer_format: 0,
+            mvec_buffer_format: 0,
+            depth_buffer_format: 0,
+            hud_less_buffer_format: 0,
+            ui_buffer_format: 0,
+            on_error_callback: core::ptr::null(),
+            b_reserved15: INVALID,
+            queue_parallelism_mode: 0,
+            enable_user_interface_recomposition: FALSE,
+            dynamic_target_frame_rate: 0.0,
+        }
+    }
+}
+
+/// `sl::DLSSGState` (version 4, `sl_dlss_g.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct DlssgState {
+    pub base: BaseStructure,
+    pub estimated_vram_usage_in_bytes: u64,
+    pub status: u32,
+    pub min_width_or_height: u32,
+    pub num_frames_actually_presented: u32,
+    pub num_frames_to_generate_max: u32,
+    pub b_reserved4: u8,
+    pub b_is_vsync_support_available: u8,
+    pub inputs_processing_completion_fence: *mut c_void,
+    pub last_present_inputs_processing_completion_fence_value: u64,
+    pub b_is_dynamic_mfg_supported: u8,
+}
+
+impl DlssgState {
+    pub(crate) const TYPE: StructType = guid(
+        0xcc8a_c8e1,
+        0xa179,
+        0x44f5,
+        [0x97, 0xfa, 0xe7, 0x41, 0x12, 0xf9, 0xbc, 0x61],
+    );
+
+    pub(crate) fn new() -> Self {
+        Self {
+            base: BaseStructure::new(Self::TYPE, 4),
+            estimated_vram_usage_in_bytes: 0,
+            status: 0,
+            min_width_or_height: 0,
+            num_frames_actually_presented: 0,
+            num_frames_to_generate_max: 0,
+            b_reserved4: FALSE,
+            b_is_vsync_support_available: FALSE,
+            inputs_processing_completion_fence: core::ptr::null_mut(),
+            last_present_inputs_processing_completion_fence_value: 0,
+            b_is_dynamic_mfg_supported: FALSE,
+        }
+    }
+}
+
+/// `sl::ReflexMode` (a C enum).
+pub(crate) const REFLEX_MODE_OFF: i32 = 0;
+pub(crate) const REFLEX_MODE_LOW_LATENCY: i32 = 1;
+pub(crate) const REFLEX_MODE_LOW_LATENCY_WITH_BOOST: i32 = 2;
+
+/// `sl::ReflexOptions` (version 1, `sl_reflex.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub(crate) struct ReflexOptions {
+    pub base: BaseStructure,
+    pub mode: i32,
+    pub frame_limit_us: u32,
+    pub use_markers_to_optimize: bool,
+    pub virtual_key: u16,
+    pub id_thread: u32,
+}
+
+impl ReflexOptions {
+    pub(crate) const TYPE: StructType = guid(
+        0xf03a_f81a,
+        0x6d0b,
+        0x4902,
+        [0xa6, 0x51, 0xc4, 0x96, 0x5e, 0x21, 0x54, 0x34],
+    );
+
+    pub(crate) fn new() -> Self {
+        Self {
+            base: BaseStructure::new(Self::TYPE, 1),
+            mode: REFLEX_MODE_OFF,
+            frame_limit_us: 0,
+            use_markers_to_optimize: false,
+            virtual_key: 0,
+            id_thread: 0,
+        }
+    }
+}
+
+/// `sl::PCLMarker` (`sl_pcl.h`).
+pub(crate) const PCL_SIMULATION_START: u32 = 0;
+pub(crate) const PCL_SIMULATION_END: u32 = 1;
+pub(crate) const PCL_RENDER_SUBMIT_START: u32 = 2;
+pub(crate) const PCL_RENDER_SUBMIT_END: u32 = 3;
+pub(crate) const PCL_PRESENT_START: u32 = 4;
+pub(crate) const PCL_PRESENT_END: u32 = 5;
+
 // Function signatures (`sl_core_api.h`, `sl_helpers_vk.h`, `sl_dlss.h`). C++ references
 // are pointers in the ABI; every function returns `sl::Result`.
 pub(crate) type PfnInit = unsafe extern "C" fn(*const Preferences, u64) -> SlResult;
@@ -751,6 +915,21 @@ pub(crate) type PfnDlssGetState =
     unsafe extern "C" fn(*const ViewportHandle, *mut DlssState) -> SlResult;
 pub(crate) type PfnDlssSetOptions =
     unsafe extern "C" fn(*const ViewportHandle, *const DlssOptions) -> SlResult;
+pub(crate) type PfnSetTagForFrame = unsafe extern "C" fn(
+    *const FrameToken,
+    *const ViewportHandle,
+    *const ResourceTag,
+    u32,
+    *mut c_void,
+) -> SlResult;
+pub(crate) type PfnDlssgSetOptions =
+    unsafe extern "C" fn(*const ViewportHandle, *const DlssgOptions) -> SlResult;
+pub(crate) type PfnDlssgGetState =
+    unsafe extern "C" fn(*const ViewportHandle, *mut DlssgState, *const DlssgOptions) -> SlResult;
+pub(crate) type PfnSetFeatureLoaded = unsafe extern "C" fn(Feature, bool) -> SlResult;
+pub(crate) type PfnReflexSetOptions = unsafe extern "C" fn(*const ReflexOptions) -> SlResult;
+pub(crate) type PfnReflexSleep = unsafe extern "C" fn(*const FrameToken) -> SlResult;
+pub(crate) type PfnPclSetMarker = unsafe extern "C" fn(u32, *const FrameToken) -> SlResult;
 
 #[cfg(test)]
 mod tests {

@@ -17,6 +17,10 @@
 //! With frame generation a thread of its own presents ([`PacedPresenter`], ADR 0091): the
 //! frame loop passes it where it passed the swapchain, and the markers of presents go
 //! with it ([`Latency::present_markers`]), for real frames only.
+//!
+//! While a library presents in the engine's place and requires its own latency control
+//! (Streamline's Reflex and PC latency markers with DLSS frame generation, ADR 0091 §6),
+//! [`Latency::with_external`] hands the same calls to it ([`ExternalLatency`]).
 
 use engine_rhi::ash::vk;
 use engine_rhi::{Device, Frames, RhiError, Swapchain};
@@ -70,6 +74,23 @@ pub enum Backend {
     AmdAntiLag,
     /// Limiter plus `present_wait` queue control, on any GPU.
     Generic,
+    /// A library's own ([`ExternalLatency`]): Streamline's Reflex with DLSS frame
+    /// generation.
+    External,
+}
+
+/// Latency control a library owns, in place of the driver's extensions: Streamline's
+/// Reflex and PC latency markers while DLSS frame generation is loaded, which works with
+/// no other Reflex integration (ADR 0091 §6). [`Latency::with_external`] calls it at the
+/// points it calls the other backends, with the frame's id.
+pub trait ExternalLatency: Send {
+    /// Applies `settings` (the mode and the frame-rate cap, which caps real frames).
+    fn apply(&mut self, settings: &LatencySettings);
+    /// Sleeps until frame `frame` should start, so that input sampled right after is as
+    /// fresh as possible. Called every frame, whatever the mode.
+    fn sleep(&mut self, frame: u64);
+    /// Records `marker` of frame `frame`. Called for every marker, whatever the mode.
+    fn mark(&mut self, frame: u64, marker: Marker);
 }
 
 /// Latency reduction level.
@@ -337,6 +358,7 @@ pub struct Latency {
     present_wait: bool,
     nv: Option<Nv>,
     amd: Option<Amd>,
+    external: Option<Box<dyn ExternalLatency>>,
     frame: u64,
     next_frame_at: Option<Instant>,
     sleeper: Sleeper,
@@ -433,7 +455,35 @@ impl Latency {
             present_wait: ext.present_id && ext.present_wait,
             nv,
             amd,
+            external: None,
             // Present ids continue from whoever presented to this swapchain before.
+            frame: swapchain.last_present_id(),
+            next_frame_at: None,
+            sleeper: Sleeper::new(),
+            history: Box::new([FrameTimes::default(); HISTORY]),
+        };
+        latency.apply(swapchain)?;
+        Ok(latency)
+    }
+
+    /// Latency control by `external` (see [`ExternalLatency`]): every call goes to it, and
+    /// none to the driver's extensions. Frame ids continue from `swapchain`'s presents.
+    pub fn with_external(
+        device: &Device,
+        swapchain: &impl LatencyTarget,
+        settings: LatencySettings,
+        external: Box<dyn ExternalLatency>,
+    ) -> Result<Self, RhiError> {
+        let ext = device.latency_extensions();
+        let mut latency = Self {
+            backend: Backend::External,
+            settings,
+            device: device.raw().clone(),
+            present_id: ext.present_id,
+            present_wait: false,
+            nv: None,
+            amd: None,
+            external: Some(external),
             frame: swapchain.last_present_id(),
             next_frame_at: None,
             sleeper: Sleeper::new(),
@@ -467,6 +517,10 @@ impl Latency {
     /// Re-applies the settings to the driver. Call after the swapchain is recreated:
     /// Reflex settings belong to a swapchain.
     pub fn apply(&mut self, swapchain: &impl LatencyTarget) -> Result<(), RhiError> {
+        if let Some(external) = &mut self.external {
+            external.apply(&self.settings);
+            return Ok(());
+        }
         if let Some(nv) = &self.nv {
             let interval = self
                 .settings
@@ -513,7 +567,7 @@ impl Latency {
     /// `swapchain`; `None` with no latency backend on or with the generic path. Pass them
     /// again ([`PacedPresenter::set_markers`]) after changing the settings.
     pub fn present_markers(&self, swapchain: &impl LatencyTarget) -> Option<PresentMarkers> {
-        if self.settings.mode == LowLatency::Off {
+        if self.settings.mode == LowLatency::Off || self.external.is_some() {
             return None;
         }
         let nv = self
@@ -541,6 +595,17 @@ impl Latency {
         engine_profiler::zone!("latency::begin_frame");
         self.frame += 1;
         let on = self.settings.mode != LowLatency::Off;
+        if let Some(external) = &mut self.external {
+            // The library sleeps and caps the frame rate itself, in every mode.
+            external.sleep(self.frame);
+            let frame = self.frame;
+            *self.times() = FrameTimes {
+                frame,
+                begin: Some(Instant::now()),
+                marks: [None; MARKERS],
+            };
+            return Ok(frame);
+        }
         let vendor = match (&mut self.nv, on) {
             (Some(nv), true) => {
                 nv.value += 1;
@@ -631,6 +696,9 @@ impl Latency {
     pub fn mark(&mut self, swapchain: &impl LatencyTarget, marker: Marker) {
         let now = Instant::now();
         self.times().marks[marker.index()] = Some(now);
+        if let Some(external) = &mut self.external {
+            external.mark(self.frame, marker);
+        }
         if let Some(nv) = &self.nv
             && self.settings.mode != LowLatency::Off
         {

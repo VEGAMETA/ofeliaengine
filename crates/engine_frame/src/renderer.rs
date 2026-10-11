@@ -284,9 +284,53 @@ pub struct ViewFrame {
     /// resolved with MSAA: what UI placed in the scene is tested against
     /// ([`crate::UiRenderer`]).
     pub depth: Texture,
-    /// With [`FrameRenderer::add_view_generating`] and frame generation on: the frame
-    /// generated before this one.
+    /// With frame generation on ([`FrameRenderer::add_view_generating`] for FSR's): the
+    /// frame generated before this one.
     pub generated: Option<GeneratedFrame>,
+}
+
+#[cfg(feature = "dlss")]
+impl ViewFrame {
+    /// DLSS frame generation's inputs for this frame (ADR 0091 §7), drawn from `camera`
+    /// into `hudless` (the view's target, before any UI) with the UI alone in `ui`; `None`
+    /// unless [`ViewSettings::frame_generation`] is [`FrameGeneration::Dlss`]. Hand them
+    /// to `engine_dlss::DlssFrameGeneration::add_pass` after the UI passes.
+    pub fn dlss_generation_input(
+        &self,
+        camera: &ViewCamera,
+        hudless: Texture,
+        ui: Option<Texture>,
+    ) -> Option<engine_dlss::GenerationInput> {
+        let (generated, motion) = (self.generated?, self.passes.motion?);
+        let aspect = self.output.0 as f32 / self.output.1.max(1) as f32;
+        let clip_from_world = camera.clip_from_world(aspect);
+        let previous_clip_from_clip = if generated.shown {
+            generated.previous.clip_from_world(aspect) * clip_from_world.inverse()
+        } else {
+            Mat4::IDENTITY
+        };
+        let rotation = Quat::from_mat4(&camera.view_from_world).conjugate();
+        Some(engine_dlss::GenerationInput {
+            depth: self.depth,
+            velocity: motion.velocity,
+            hudless,
+            ui,
+            camera: engine_dlss::GenerationCamera {
+                clip_from_view: vulkan_perspective(camera.fov_y, aspect, camera.near, camera.far),
+                previous_clip_from_clip,
+                position: camera.position,
+                up: rotation * Vec3::Y,
+                right: rotation * Vec3::X,
+                forward: rotation * Vec3::NEG_Z,
+                near: camera.near,
+                far: camera.far,
+                fov_y: camera.fov_y,
+                aspect,
+            },
+            jitter: motion.jitter,
+            reset: !generated.shown,
+        })
+    }
 }
 
 /// Where [`FrameRenderer::add_view_generating`] writes the generated frame, and how the
@@ -313,6 +357,8 @@ pub struct GeneratedFrame {
     /// Whether to show it: not after a cut or a reset, nor on the first frame (it is then
     /// the real frame itself).
     pub shown: bool,
+    /// The last real frame's camera (this frame's on the first frame).
+    pub previous: ViewCamera,
 }
 
 /// Composes a whole frame for each view (see the crate documentation): the scene passes
@@ -690,6 +736,13 @@ impl FrameRenderer {
         match kind {
             FrameGeneration::Off => true,
             FrameGeneration::Fsr => cfg!(feature = "fsr"),
+            #[cfg(feature = "dlss")]
+            FrameGeneration::Dlss => self
+                .streamline
+                .as_ref()
+                .is_some_and(engine_dlss::Streamline::frame_generation_supported),
+            #[cfg(not(feature = "dlss"))]
+            FrameGeneration::Dlss => false,
         }
     }
 
@@ -1584,10 +1637,22 @@ impl FrameRenderer {
             generated = Some(GeneratedFrame {
                 camera: halfway(&last, camera),
                 shown: continues,
+                previous: last,
+            });
+        }
+        // DLSS frame generation generates inside Streamline: what the frame hands it
+        // (`ViewFrame::dlss_generation_input`) needs the last camera and whether this frame
+        // continues it.
+        if settings.frame_generation == FrameGeneration::Dlss && passes.motion.is_some() {
+            let last = last_camera.unwrap_or(*camera);
+            generated = Some(GeneratedFrame {
+                camera: halfway(&last, camera),
+                shown: continues,
+                previous: last,
             });
         }
         #[cfg(not(feature = "fsr"))]
-        let _ = (generated_target, last_camera, continues);
+        let _ = generated_target;
         Ok(ViewFrame {
             antialiasing: prepared.antialiasing,
             render,

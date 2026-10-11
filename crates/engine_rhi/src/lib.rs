@@ -44,7 +44,7 @@ pub use adapter::{Adapter, AdapterKind, AdapterPreference, OptionalCaps};
 pub use ash;
 pub use bindless::{Bindless, PUSH_CONSTANT_BYTES, SamplerKind, Wrap};
 pub use breadcrumbs::{Breadcrumbs, MAX_PASSES, MAX_TRACKS, Track};
-pub use device::{Device, LatencyExtensions, Queue};
+pub use device::{Device, ExtraQueueStart, ExtraQueues, LatencyExtensions, Queue};
 pub use error::RhiError;
 pub use fault::{AddressFault, DeviceFault, GpuFaultReport, VendorFault, last_gpu_fault};
 pub use frames::{Frame, Frames};
@@ -62,5 +62,5 @@ pub use pipeline::{
 pub use pipeline_cache::{PipelineCacheLoad, PipelineCacheSave};
 pub use swapchain::{
     AcquiredImage, HdrMetadata, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc,
-    color_range,
+    VulkanHooks, color_range,
 };
