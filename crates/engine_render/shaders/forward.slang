@@ -319,6 +319,7 @@ struct Push
     uint decal_albedo;       // bindless index: the decal buffer's albedo (decal entry points; ADR 0082)
     uint decal_surface;      // bindless index: its normal change, roughness and metalness
     uint gi;                 // bindless index: the view's diffuse irradiance per pixel (GI entry points; ADR 0088)
+    uint _pad;               // `Push` in forward/mod.rs is 128 bytes
 };
 
 static const uint PHASE_ALL = 0;    // frustum culling only
