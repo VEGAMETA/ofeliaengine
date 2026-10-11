@@ -14,11 +14,12 @@ use engine_assets::{
 use engine_brixelizer::{Brixelizer, BrixelizerGi, SdfDebugView, SdfSettings};
 use engine_core::half;
 use engine_core::jobs::ThreadPool;
-use engine_core::math::{Affine3A, Mat4, Quat, Vec3, look_at, vulkan_perspective};
+use engine_core::math::{Affine3A, Mat4, Quat, Vec2, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_ecs::{Entity, GlobalTransform, Transform, World};
 use engine_frame::{
-    Antialiasing, Exposure, FrameContext, FrameRenderer, PrepareContext, Quality, SceneDraws,
-    SceneInput, View, ViewCamera, ViewSettings, ViewTarget,
+    Antialiasing, Exposure, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget,
+    Placement, PrepareContext, Quality, SceneDraws, SceneInput, UiCanvas, UiRenderer, View,
+    ViewCamera, ViewSettings, ViewTarget,
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
@@ -30,7 +31,10 @@ use engine_render::forward::{
 };
 use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::GpuScene;
-use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
+use engine_render::graph::{
+    Access, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, LoadOp, RenderGraph, Texture,
+    TextureDesc, TextureState,
+};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
 use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
@@ -42,6 +46,7 @@ use engine_render::skinning::{SkinnedMeshData, Skinning};
 use engine_render::subsurface::SubsurfaceProfile;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
+use engine_render2d::{Canvas, Quad};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocation, Allocator, Bindless, Device, Instance, InstanceDesc,
@@ -198,6 +203,14 @@ pub struct Shot {
     /// The GI shading's irradiance read back with every capture: its mean
     /// ([`Rendered::gi_means`]) and the first capture's image ([`Rendered::gi_image`]).
     pub gi_readback: bool,
+    /// A UI layer over the frame (ADR 0091), drawn by `engine_frame::UiRenderer` with the
+    /// frame's camera: a HUD (a crosshair, a bar, a frame for a map), a panel in the world
+    /// beside the first view's center, a panel attached to the camera (bottom left).
+    pub ui: bool,
+    /// FSR 3.1's frame generation (ADR 0091; with the UI layer): the captures are the
+    /// frames generated before the captured real frames, the UI drawn on them with their
+    /// half-way camera. Not with particles, Brixelizer GI or the runtime.
+    pub frame_generation: bool,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -260,6 +273,8 @@ impl Shot {
             sky_intensity: 1.0,
             sun_off_after: None,
             gi_readback: false,
+            ui: false,
+            frame_generation: false,
         }
     }
 }
@@ -310,6 +325,10 @@ pub struct Rendered {
     /// distance; 0 for the sky) at the GI's size (probe GI's: its resolve's scale of the
     /// render size): width, height, rows top to bottom.
     pub gi_image: Option<(u32, u32, Vec<[f32; 4]>)>,
+    /// With [`Shot::ui`]: where the UI's parts are in the last capture, as its camera saw
+    /// them (pixel rectangles `[x0, y0, x1, y1]`, clamped to the image): the HUD's bar and
+    /// map frame, the panel in the world, the panel on the camera.
+    pub ui_regions: Vec<(&'static str, [u32; 4])>,
 }
 
 /// How to run [`render`].
@@ -797,6 +816,296 @@ fn median(values: &mut [f64]) -> f64 {
     values[values.len() / 2]
 }
 
+/// The UI layer of [`Shot::ui`] (ADR 0091).
+struct UiLayer {
+    hud: Canvas,
+    panel: Canvas,
+    visor: Canvas,
+    world_from_panel: Mat4,
+    view_from_visor: Mat4,
+}
+
+impl UiLayer {
+    /// The HUD for an output of `size`; the panel in the world 30 % of the way from `eye`
+    /// to `target`, right of the view's center, facing the camera.
+    fn new(eye: Vec3, target: Vec3, size: (u32, u32)) -> Self {
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        // Pixels of a 1920-wide HUD, scaled to the output.
+        let px = w / 1920.0;
+        let mut hud = Canvas::new();
+        let center = Vec2::new(w * 0.5, h * 0.5);
+        // The crosshair at least 2 pixels thick at any size.
+        let (long, thick) = ((24.0 * px).max(10.0), (2.0 * px).max(2.0));
+        hud.draw(&Quad::solid(center, Vec2::new(long, thick)).color(Vec4::ONE));
+        hud.draw(&Quad::solid(center, Vec2::new(thick, long)).color(Vec4::ONE));
+        hud.draw(
+            &Quad::rounded_rect(
+                Vec2::new(200.0 * px, h - 60.0 * px),
+                Vec2::new(300.0, 24.0) * px,
+                6.0 * px,
+            )
+            .color(Vec4::new(0.1, 0.1, 0.1, 0.6)),
+        );
+        hud.draw(
+            &Quad::rounded_rect(
+                Vec2::new(170.0 * px, h - 60.0 * px),
+                Vec2::new(232.0, 16.0) * px,
+                4.0 * px,
+            )
+            .color(Vec4::new(0.85, 0.15, 0.1, 1.0)),
+        );
+        hud.draw(
+            &Quad::rounded_rect(
+                Vec2::new(w - 140.0 * px, 140.0 * px),
+                Vec2::new(220.0, 220.0) * px,
+                10.0 * px,
+            )
+            .outline(4.0 * px)
+            .color(Vec4::new(0.9, 0.9, 0.9, 0.8)),
+        );
+        hud.prepare();
+        let mut panel = Canvas::new();
+        panel.draw(
+            &Quad::rounded_rect(Vec2::new(150.0, 75.0), Vec2::new(300.0, 150.0), 12.0)
+                .color(Vec4::new(0.05, 0.3, 0.6, 0.85)),
+        );
+        for row in 0..4 {
+            panel.draw(
+                &Quad::solid(
+                    Vec2::new(150.0, 30.0 + 30.0 * row as f32),
+                    Vec2::new(240.0 - 40.0 * row as f32, 10.0),
+                )
+                .color(Vec4::new(0.9, 0.95, 1.0, 1.0)),
+            );
+        }
+        panel.prepare();
+        let mut visor = Canvas::new();
+        visor.draw(
+            &Quad::rounded_rect(Vec2::new(50.0, 25.0), Vec2::new(100.0, 50.0), 6.0)
+                .color(Vec4::new(0.1, 0.8, 0.3, 0.7)),
+        );
+        visor.prepare();
+        let rotation = look_rotation(eye, target, Vec3::Y);
+        let distance = (target - eye).length() * 0.3;
+        let center = eye + rotation * Vec3::new(distance * 0.35, distance * 0.05, -distance);
+        // A canvas unit: a 300-unit panel spans about a sixth of the view's width.
+        let unit = distance * 0.0012;
+        Self {
+            hud,
+            panel,
+            visor,
+            world_from_panel: Mat4::from_rotation_translation(rotation, center)
+                * Mat4::from_scale(Vec3::new(unit, -unit, 1.0))
+                * Mat4::from_translation(Vec3::new(-150.0, -75.0, 0.0)),
+            view_from_visor: Mat4::from_scale_rotation_translation(
+                Vec3::new(0.0012, -0.0012, 1.0),
+                Quat::IDENTITY,
+                Vec3::new(-0.42, -0.2, -0.6),
+            ),
+        }
+    }
+
+    /// Pixel rectangles of the UI's parts as `camera` sees them in an output of `size`
+    /// ([`Rendered::ui_regions`]).
+    fn regions(&self, camera: &ViewCamera, size: (u32, u32)) -> Vec<(&'static str, [u32; 4])> {
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        let px = w / 1920.0;
+        let clamp = |min: Vec2, max: Vec2| {
+            [
+                min.x.clamp(0.0, w) as u32,
+                min.y.clamp(0.0, h) as u32,
+                max.x.clamp(0.0, w).ceil() as u32,
+                max.y.clamp(0.0, h).ceil() as u32,
+            ]
+        };
+        let rect = |center: Vec2, extent: Vec2| clamp(center - extent * 0.5, center + extent * 0.5);
+        // A canvas's corners through `clip_from_canvas` (Vulkan's clip space: y down).
+        let projected = |clip_from_canvas: Mat4, extent: Vec2| {
+            let (mut min, mut max) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+            for corner in [
+                Vec2::ZERO,
+                Vec2::new(extent.x, 0.0),
+                Vec2::new(0.0, extent.y),
+                extent,
+            ] {
+                let clip = clip_from_canvas * Vec4::new(corner.x, corner.y, 0.0, 1.0);
+                let ndc = Vec2::new(clip.x, clip.y) / clip.w.max(1e-6);
+                let pixel = (ndc + Vec2::ONE) * 0.5 * Vec2::new(w, h);
+                min = min.min(pixel);
+                max = max.max(pixel);
+            }
+            clamp(min, max)
+        };
+        let aspect = w / h;
+        vec![
+            (
+                "HUD bar",
+                rect(
+                    Vec2::new(200.0 * px, h - 60.0 * px),
+                    Vec2::new(300.0, 24.0) * px,
+                ),
+            ),
+            (
+                "HUD map frame",
+                rect(
+                    Vec2::new(w - 140.0 * px, 140.0 * px),
+                    Vec2::new(220.0, 220.0) * px,
+                ),
+            ),
+            (
+                "world panel",
+                projected(
+                    camera.clip_from_world(aspect) * self.world_from_panel,
+                    Vec2::new(300.0, 150.0),
+                ),
+            ),
+            (
+                "camera panel",
+                projected(
+                    vulkan_perspective(camera.fov_y, aspect, camera.near, camera.far)
+                        * self.view_from_visor,
+                    Vec2::new(100.0, 50.0),
+                ),
+            ),
+        ]
+    }
+
+    fn canvases(&self) -> [UiCanvas<'_>; 3] {
+        [
+            UiCanvas {
+                canvas: &self.hud,
+                placement: Placement::Screen,
+            },
+            UiCanvas {
+                canvas: &self.panel,
+                placement: Placement::World(self.world_from_panel),
+            },
+            UiCanvas {
+                canvas: &self.visor,
+                placement: Placement::Camera(self.view_from_visor),
+            },
+        ]
+    }
+}
+
+/// The images of a [`Shot::frame_generation`] shot: the real frame (the output's sRGB
+/// format, also viewed as its UNORM twin, which frame interpolation reads) and the frame
+/// generated before it (created as the UNORM twin for storage, viewed as sRGB for the UI).
+struct GenerationImages {
+    images: [(vk::Image, vk::ImageView, Allocation); 2],
+    format: vk::Format,
+    raw: vk::Format,
+    size: (u32, u32),
+}
+
+impl GenerationImages {
+    fn new(
+        device: &Device,
+        allocator: &mut Allocator,
+        format: vk::Format,
+        size: (u32, u32),
+    ) -> Self {
+        let raw = match format {
+            vk::Format::R8G8B8A8_SRGB => vk::Format::R8G8B8A8_UNORM,
+            vk::Format::B8G8R8A8_SRGB => vk::Format::B8G8R8A8_UNORM,
+            other => other,
+        };
+        let make = |allocator: &mut Allocator, generated: bool| {
+            let formats = [format, raw];
+            let mut list = vk::ImageFormatListCreateInfo::default().view_formats(&formats);
+            let mut usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST;
+            if generated {
+                usage |= vk::ImageUsageFlags::STORAGE;
+            }
+            let info = vk::ImageCreateInfo::default()
+                .flags(vk::ImageCreateFlags::MUTABLE_FORMAT)
+                .push_next(&mut list)
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(if generated { raw } else { format })
+                .extent(vk::Extent3D {
+                    width: size.0,
+                    height: size.1,
+                    depth: 1,
+                })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(usage);
+            let (image, memory) = allocator
+                .create_image(&info, MemoryLocation::Device)
+                .expect("frame generation image");
+            // The sRGB view draws and samples: an sRGB format allows no storage.
+            let mut view_usage = vk::ImageViewUsageCreateInfo::default()
+                .usage(usage & !vk::ImageUsageFlags::STORAGE);
+            let view_info = vk::ImageViewCreateInfo::default()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(format)
+                .subresource_range(engine_rhi::color_range())
+                .push_next(&mut view_usage);
+            // SAFETY: a view of the whole new image in a format its creation allows.
+            let view = unsafe { device.raw().create_image_view(&view_info, None) }
+                .expect("frame generation view");
+            (image, view, memory)
+        };
+        let real = make(allocator, false);
+        let generated = make(allocator, true);
+        Self {
+            images: [real, generated],
+            format,
+            raw,
+            size,
+        }
+    }
+
+    /// Imports both images into the frame: the real frame's target and the generated
+    /// frame's (their contents are each frame's own).
+    fn import(&self, fg: &mut FrameGraph<'_>) -> (Texture, GeneratedTarget) {
+        let mut import =
+            |name: &'static str, (image, view, _): &(vk::Image, vk::ImageView, Allocation)| {
+                fg.import_texture(
+                    name,
+                    ImportedTexture {
+                        image: *image,
+                        view: *view,
+                        desc: TextureDesc::new_2d(self.format, self.size.0, self.size.1),
+                        initial: TextureState::undefined(),
+                        final_state: Some(TextureState::transfer_source()),
+                        sampled_index: None,
+                        storage_index: None,
+                    },
+                )
+            };
+        let real = import("real frame", &self.images[0]);
+        let generated = import("generated frame", &self.images[1]);
+        (
+            real,
+            GeneratedTarget {
+                texture: generated,
+                format: self.raw,
+                source_format: self.raw,
+            },
+        )
+    }
+
+    /// # Safety
+    ///
+    /// The GPU is done with the images.
+    unsafe fn destroy(self, device: &Device, allocator: &mut Allocator) {
+        for (image, view, memory) in self.images {
+            // SAFETY: guaranteed by the caller.
+            unsafe {
+                device.raw().destroy_image_view(view, None);
+                allocator.destroy_image(image, memory);
+            }
+        }
+    }
+}
+
 /// Renders `shot`, after every texture is resident, and times `timed_frames` more frames.
 ///
 /// # Panics
@@ -1186,6 +1495,11 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         bloom: shot.bloom,
         clear: Some([0.02, 0.02, 0.05, 1.0]),
         screen_space_reflections: shot.ssr.filter(|_| shot.sky),
+        frame_generation: if shot.frame_generation {
+            FrameGeneration::Fsr
+        } else {
+            FrameGeneration::Off
+        },
         ..ViewSettings::default()
     };
     let mut view = View::new(&device, draws.len() as u32);
@@ -1243,6 +1557,22 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut antialiasing = Antialiasing::OFF;
     let (near, far) = (extent * 0.001, extent * 2.0);
     let rotation = look_rotation(eye, target, Vec3::Y);
+    assert!(
+        !shot.frame_generation || !(shot.particles || shot.brixelizer_gi || shot.runtime),
+        "{}: frame generation shots hook nothing into the scene and use no runtime",
+        shot.name
+    );
+    // The UI layer (ADR 0091), and with frame generation the images of the real frame and
+    // of the one generated before it.
+    let ui_layer =
+        (shot.ui || shot.frame_generation).then(|| UiLayer::new(eye, target, (width, height)));
+    let canvases = ui_layer.as_ref().map(UiLayer::canvases);
+    let mut ui = ui_layer.as_ref().map(|_| {
+        UiRenderer::new(&device, &mut allocator, &bindless, output_format).expect("UI renderer")
+    });
+    let generation = shot
+        .frame_generation
+        .then(|| GenerationImages::new(&device, &mut allocator, output_format, (width, height)));
     let mut game = shot.runtime.then(|| {
         let mut world = World::new();
         for draw in &draws {
@@ -1314,6 +1644,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut gi_readback: Option<(vk::Buffer, Allocation, (u32, u32))> = None;
     let mut gi_means = Vec::new();
     let mut gi_image = None;
+    let mut ui_regions = Vec::new();
 
     // The skins' skinning matrices at the shot's time plus `elapsed` clip seconds.
     let palettes_at = |elapsed: f32| -> Vec<Vec<[f32; 12]>> {
@@ -1600,51 +1931,76 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 }),
             };
             let screen_gi = brixelizer_gi.as_ref();
-            let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
+            // With frame generation the real frame and the generated one go into images of
+            // their own (frame interpolation views them as UNORM: they allow both views).
+            let (ldr, generated) = match &generation {
+                Some(images) => {
+                    let (real, generated) = images.import(&mut fg);
+                    (real, Some(generated))
+                }
+                None => (
+                    fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height)),
+                    None,
+                ),
+            };
             if let Some(set) = &decal_set {
                 set.upload(&mut fg, &mut ring);
             }
             let particles = particles.as_ref();
-            let view_frame = frame
-                .add_view_with(
+            let mut context = FrameContext {
+                device: &device,
+                allocator: &mut allocator,
+                bindless: &bindless,
+                ring: &mut ring,
+                frame_number,
+                dt: 1.0 / 60.0,
+            };
+            let scene_input = SceneInput {
+                geometry: &geo,
+                materials: &mats,
+                draws: match &scene_frame {
+                    Some(scene) => SceneDraws::Scene(scene),
+                    None => SceneDraws::List(&draws),
+                },
+                skinning: Some(&skinned_frame),
+                light: match shot.sun_off_after {
+                    Some(after) if captured >= after => DirectionalLight {
+                        color: Vec3::ZERO,
+                        ambient: Vec3::ZERO,
+                        ..sun
+                    },
+                    _ => sun,
+                },
+                lights: &lights,
+                decals: decal_set.as_ref().map_or(&[], |s| s.decals.as_slice()),
+                environment: environment.as_ref(),
+                reflection_probes: probes.as_ref(),
+                gi,
+            };
+            let view_target = ViewTarget {
+                texture: ldr,
+                rect: None,
+                load: LoadOp::DontCare,
+            };
+            let view_frame = match generated {
+                // Frame generation shots hook nothing into the scene (asserted above).
+                Some(generated) => frame.add_view_generating(
                     &mut fg,
-                    &mut FrameContext {
-                        device: &device,
-                        allocator: &mut allocator,
-                        bindless: &bindless,
-                        ring: &mut ring,
-                        frame_number,
-                        dt: 1.0 / 60.0,
-                    },
+                    &mut context,
                     &mut view,
-                    &SceneInput {
-                        geometry: &geo,
-                        materials: &mats,
-                        draws: match &scene_frame {
-                            Some(scene) => SceneDraws::Scene(scene),
-                            None => SceneDraws::List(&draws),
-                        },
-                        skinning: Some(&skinned_frame),
-                        light: match shot.sun_off_after {
-                            Some(after) if captured >= after => DirectionalLight {
-                                color: Vec3::ZERO,
-                                ambient: Vec3::ZERO,
-                                ..sun
-                            },
-                            _ => sun,
-                        },
-                        lights: &lights,
-                        decals: decal_set.as_ref().map_or(&[], |s| s.decals.as_slice()),
-                        environment: environment.as_ref(),
-                        reflection_probes: probes.as_ref(),
-                        gi,
-                    },
+                    &scene_input,
                     &camera,
-                    ViewTarget {
-                        texture: ldr,
-                        rect: None,
-                        load: LoadOp::DontCare,
-                    },
+                    view_target,
+                    generated,
+                    |_, _| {},
+                ),
+                None => frame.add_view_with(
+                    &mut fg,
+                    &mut context,
+                    &mut view,
+                    &scene_input,
+                    &camera,
+                    view_target,
                     |fg, targets| {
                         // Brixelizer GI's radiance cache reads this frame's lit image next
                         // frame.
@@ -1670,8 +2026,44 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                             );
                         }
                     },
+                ),
+            }
+            .expect("frame");
+            // The UI layer over the real frame, and over the generated one with its camera.
+            if let (Some(ui), Some(canvases)) = (ui.as_ref(), canvases.as_ref()) {
+                ui.add_passes(
+                    &mut fg,
+                    &mut ring,
+                    &bindless,
+                    canvases,
+                    ldr,
+                    &camera,
+                    &view_frame,
                 )
-                .expect("frame");
+                .expect("UI");
+                if let (Some(generated), Some(g)) = (generated, view_frame.generated)
+                    && g.shown
+                {
+                    ui.add_passes(
+                        &mut fg,
+                        &mut ring,
+                        &bindless,
+                        canvases,
+                        generated.texture,
+                        &g.camera,
+                        &view_frame,
+                    )
+                    .expect("UI");
+                }
+            }
+            // A frame generation shot captures the generated frame.
+            let (shown, shown_camera) = match (generated, view_frame.generated) {
+                (Some(generated), Some(g)) if g.shown => (generated.texture, g.camera),
+                _ => (ldr, camera),
+            };
+            if capture && let Some(layer) = ui_layer.as_ref() {
+                ui_regions = layer.regions(&shown_camera, (width, height));
+            }
             if let Some((_, _, feedback, _)) = streaming.as_mut() {
                 feedback
                     .add_pass(
@@ -1797,7 +2189,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     },
                 );
                 fg.add_pass("read back")
-                    .read(ldr, Access::TransferRead)
+                    .read(shown, Access::TransferRead)
                     .write(out, Access::TransferWrite)
                     .execute(move |ctx| {
                         let region = vk::BufferImageCopy {
@@ -1818,7 +2210,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         unsafe {
                             ctx.device.cmd_copy_image_to_buffer(
                                 ctx.cmd,
-                                ctx.image(ldr),
+                                ctx.image(shown),
                                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                                 ctx.buffer(out),
                                 &[region],
@@ -1992,6 +2384,12 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         }
         frame.destroy(&device, &mut allocator, &bindless);
         view.destroy(&mut allocator, &bindless);
+        if let Some(ui) = ui.as_mut() {
+            ui.destroy(&mut allocator);
+        }
+        if let Some(images) = generation {
+            images.destroy(&device, &mut allocator);
+        }
         if let Some(particles) = particles.as_mut() {
             particles.destroy(&mut allocator);
         }
@@ -2036,6 +2434,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         brixelizer_gi,
         brixelizer,
         game,
+        ui,
         frame,
         view,
         skinning,
@@ -2068,5 +2467,6 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         gi_settle,
         gi_means,
         gi_image,
+        ui_regions,
     })
 }

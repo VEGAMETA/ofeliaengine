@@ -1,6 +1,8 @@
 # 0091. Frame generation: FSR 3.1 frame interpolation presented by the engine, DLSS FG through Streamline, the UI drawn on every presented frame
 
-- Status: Proposed (2026-10-11; accepted with the measurements below)
+- Status: Accepted (2026-10-12) with the results below. FSR FG measured on both GPUs; DLSS
+  FG implemented, not yet run: Windows' hardware-accelerated GPU scheduling is off on ref-1,
+  which DLSS frame generation requires (Results).
 - Date: 2026-10-11
 - Builds on:
   - [ADR 0023](0023-latency.md): latency, the limiter, Reflex and Anti-Lag;
@@ -233,6 +235,13 @@ Then:
   through Streamline's hooks: the eight functions of manual hooking, extending ADR 0063's
   present-only hook. Streamline paces; the presenter stays in Direct mode with
   Streamline's functions.
+  - As built: `engine_rhi::VulkanHooks` (the interposer's `vkGetInstanceProcAddr`) gives
+    `Surface::from_win32_hooked`, `Swapchain::new_hooked` and `device_wait_idle`; the
+    queues Streamline asks for come after the engine's (`Device::with_extras`,
+    `extra_queue_start`).
+  - **Optical flow in Streamline's interop mode,** not on a native queue: the native mode
+    needs a queue of the optical flow family (`VK_NV_optical_flow` and its feature) and is
+    left for when DLSS FG runs on ref-1, measured against interop.
 - **Toggling.** Turning DLSS FG on or off recreates the swapchain (Streamline copies
   while loaded), with `eRetainResourcesWhenOff` for short pauses.
 - **Each frame:**
@@ -241,8 +250,23 @@ Then:
   - the backbuffer = hudless + UI;
   - common constants once per frame with the frame id;
   - "user interface recomposition" on.
+  - As built (`engine_dlss::DlssFrameGeneration`, `ViewFrame::dlss_generation_input`):
+    the frame is drawn apart (the hudless image), copied into the swapchain image, and the
+    UI drawn over the copy and into its own cleared layer; the four images are tagged
+    "valid only now" from a pass after the UI's (Streamline copies them: the graph reuses
+    transient memory before the present).
+  - The constants in Streamline's conventions, those of its Direct3D origin: row vectors,
+    view space looking down +Z, clip space with y up (`sl_matrix_helpers.h`). The engine's
+    matrices are converted (a unit test checks the reprojection). That Streamline wants
+    them so on Vulkan too is to confirm on the first run.
 - **Latency:** `engine_latency` takes a Streamline backend (`slReflexSleep`,
   `slPCLSetMarker`) while DLSS-G is loaded, as the guide requires.
+  - As built: `engine_latency::ExternalLatency` and `Latency::with_external`, implemented
+    by `engine_dlss::StreamlineLatency`. Reflex stays at least "on" while DLSS-G is loaded:
+    it reports `eFailReflexNotDetectedAtRuntime` otherwise.
+- **Requirements Streamline checks at start-up:** Windows' hardware-accelerated GPU
+  scheduling (`slIsFeatureSupported` returns `eErrorOSDisabledHWS` without it),
+  `Streamline::frame_generation_error` says which.
 - **Generated frames:** counted from `slDLSSGGetState`.
 
 ### 8. Settings and availability
@@ -279,6 +303,66 @@ TAA and FSR Quality:
    - FSR FG, and DLSS FG with world-space widgets in the UI buffer against in the scene.
 5. **Memory:** the components' contexts and the present images.
 6. **A golden shot:** a generated frame with 2D and 3D UI, per vendor.
+
+## Results (2026-10-12)
+
+Ref-1, release builds, `flight` through Sponza at 1080p with the device class's defaults
+(the RTX: TAAU at native size; the Radeon: TAAU Quality, presenting across adapters), 2000
+movers, 64 characters, 7 local lights, the UI layer on.
+
+**FSR FG, rates and pacing:**
+
+| GPU, present mode, cap | FG off: real/s | FG on: real/s, presented/s | interpolation, ms | latency added, ms (median, p99) |
+|---|---:|---:|---:|---:|
+| RTX 4060 Ti, immediate, none | 526 | 211.5 / 423.0 | 1.95 | 2.33 / 4.79 |
+| RTX 4060 Ti, immediate, 60 real | 60 | 60.0 / 120.0 | 2.62 | 8.29 / 9.19 |
+| RTX 4060 Ti, immediate, 120 real | 120 | 120.1 / 240.1 | 1.84 | 4.12 / 4.54 |
+| RTX 4060 Ti, FIFO at 240 Hz | 240 | 120.0 / 240.0 | 1.75 | 4.12 / 4.62 |
+| Radeon iGPU (2 CU), immediate, none | 36.3 | 12.7 / 25.4 | 49.4 | 43.2 / 82.1 |
+
+- **Pacing is exact:** the generated frame's present to the real one's equals the spacing
+  to 0.000 ms at the median and the 99th percentile in every run (0.012 ms at most).
+- **Latency added** is the real frame's wait from its GPU work done to its present: half
+  a real interval, as designed (§2). Input to photon was not measured (PresentMon is not
+  installed on ref-1, no LDAT).
+- **When FG pays:** only when a real frame costs well more than the interpolation. In
+  `flight` uncapped the RTX's frame costs 1.6 ms of GPU against 1.95 ms of interpolation,
+  and FG shows fewer frames than it draws without it. Capped at 60 real it doubles them.
+  The Radeon iGPU interpolates 1080p in 49 ms and should never offer it.
+- **The UI layer** costs 2–3 µs per canvas on the RTX ("2d", "2d in scene").
+- **Memory:** the RTX's device-local usage +163 MiB (612 → 775: the contexts and the two
+  pairs of present images), the C runtime heap +33 MiB. On the Radeon the GPU heap grows
+  +50 MiB, but the process commits +850 MiB of driver-mapped memory (two new 375 MiB
+  allocations): unexplained, to investigate.
+
+**FSR FG, image quality** (`tests/golden`, `framegen::generated_frames_are_nearer_the_truth_than_real_ones`):
+Sponza at 640 × 360 without antialiasing, the camera moving 5.7 cm a frame, the UI layer
+on. The frame generated between real frames 7 and 8 against the frame rendered at that
+moment, and against real frame 8 (what a display shows there without FG), mean FLIP:
+
+| where | RTX: generated | RTX: real held | Radeon: generated | Radeon: real held |
+|---|---:|---:|---:|---:|
+| the image | 0.0253 | 0.0904 | 0.0258 | 0.0910 |
+| HUD bar | 0.0115 | 0.0615 | 0.0129 | 0.0641 |
+| HUD map frame | 0.0089 | 0.0192 | 0.0091 | 0.0195 |
+| panel in the world | 0.0448 | 0.0922 | 0.0437 | 0.0907 |
+| panel on the camera | 0.0108 | 0.0474 | 0.0111 | 0.0475 |
+
+The world panel's error is at its edge where a column crosses it: it is depth-tested
+against the nearest real frame's depth (§3), which puts the column's edge half a frame
+off. The golden shot `sponza_fg` (TAAU at 67 %, the camera moving) renders a generated
+frame with the three kinds of UI, the same bytes on every run on both GPUs.
+
+**DLSS FG** did not run: ref-1 has hardware-accelerated GPU scheduling off
+(`HwSchMode = 1`), and Streamline 2.14.1 refuses DLSS-G (`eErrorOSDisabledHWS`). Turning it
+on is a system setting and a restart, the owner's to decide (it may also shift the perf
+gate's baselines). Until then the path is built and unit-tested, not run.
+
+**The paced presenter's deadlock** (found in `flight`, fixed before these runs): a frame's
+submission waited on the GPU for a copy count whose signal the present thread had not
+submitted yet, and NVIDIA's driver held the present thread's `vkQueuePresentKHR` behind it
+for good. The thread now submits both copies before presenting, and `next_images` returns
+once the copies the frame waits for are submitted.
 
 ## Consequences
 

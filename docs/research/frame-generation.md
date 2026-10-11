@@ -213,6 +213,28 @@ sections) replaces `vkCreateSwapchainKHR`, `vkGetSwapchainImagesKHR`,
   725 MB at 4K.
 - **Measuring:** `MsBetweenPresents` is wrong for DLSS-G (the hardware holds images after
   present); `MsBetweenDisplayChange` (FrameView, PresentMon) is right.
+- **Learned while building it (2026-10-12):**
+  - Hardware-accelerated GPU scheduling is checked at `slInit`: without it `sl.dlss_g`
+    loads, but `slIsFeatureSupported(kFeatureDLSS_G)` returns `eErrorOSDisabledHWS` and the
+    log says "Feature 'kFeatureDLSS_G' requires GPU hardware scheduling to be enabled in
+    the OS". Ref-1 has it off (`HKLM\SYSTEM\CurrentControlSet\Control\GraphicsDrivers`,
+    `HwSchMode = 1`), so DLSS FG has not run there yet.
+  - The matrices follow Direct3D's conventions: `sl_matrix_helpers.h` builds
+    `cameraViewToWorld` with the position in the fourth row and composes
+    `clipToPrevClip = clipToCameraView · cameraViewToPrevCameraView · cameraViewToClipPrev`
+    for row vectors, view space looking down +Z. Nothing in the documentation changes this
+    for Vulkan; the engine converts its matrices (y down in clip space, −Z forward) and
+    confirms it on the first run.
+  - `sl.reflex` (its source ships with the SDK) uses the frame token's index as the present
+    id of `vkSetLatencyMarkerNV`, injects `VkSwapchainLatencyCreateInfoNV` into the
+    swapchain it creates when the device has `VK_NV_low_latency2`, and latches the
+    present-start marker's frame for DLSS-G's present thread: the constants, the tags and
+    the markers must carry the same frame index.
+  - Tags take an array of `sl::ResourceTag` (not a chain); a volatile tag
+    (`eOnlyValidNow`) is copied on the command buffer given, from the layout stated.
+  - `NvLowLatencyVk.dll` ships beside the plugins: `sl.common` loads it for Reflex on
+    Vulkan and logs an error without it (`docs/research/dlss.md`). DLSS alone works without
+    it; DLSS FG needs Reflex, so the engine counts it among frame generation's files.
 
 ### AMD's FSR 3 plugin for Unreal Engine (the guide)
 

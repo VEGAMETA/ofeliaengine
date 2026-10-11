@@ -73,6 +73,23 @@ github.com/NVIDIAGameWorks/Streamline/releases, folder `bin/x64` (not
 Copy only these: every other `sl.*.dll` in the folder is loaded, checked and ignored, which
 adds about 0.5 s to startup.
 
+## Frame generation: the files
+
+DLSS frame generation (ADR 0091; [rendering.md §21](rendering.md#21-frame-generation))
+needs the DLSS files above and, from the same folder of the same release:
+
+| File | What it is |
+|---|---|
+| `sl.dlss_g.dll` | Streamline's frame generation plugin |
+| `nvngx_dlssg.dll` | DLSS frame generation itself |
+| `sl.reflex.dll`, `sl.pcl.dll` | Reflex and the PC latency markers, which frame generation requires |
+| `NvLowLatencyVk.dll` | Reflex on Vulkan |
+
+It also needs an RTX 40 or newer GPU and Windows' **hardware-accelerated GPU scheduling**
+(Settings → System → Display → Graphics → Change default graphics settings, then a
+restart): without it Streamline refuses frame generation (`eErrorOSDisabledHWS`) and the
+option is hidden. FSR's frame generation needs no files.
+
 ## Where they go
 
 The engine looks, in order:

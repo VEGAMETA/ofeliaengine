@@ -606,7 +606,7 @@ tonemap.add_pass(&mut fg, &bindless, upscaled, backbuffer, exposure);
 - **Exposure:** give FSR the exposure the tone mapper applies (`FsrInput::exposure`, a
   1 × 1 `R32_SFLOAT` texture; the frame renderer does it): +0.3 to +0.5 dB against FSR's
   own measurement (ADR 0072). `None` lets FSR measure its own.
-- **Not available:** frame generation (planned, ADR 0060); FSR 4 (AMD ships it for DX12
+- **Frame generation:** section 21. **Not available:** FSR 4 (AMD ships it for DX12
   only).
 
 When to choose it (ref-1, `cargo run -p engine_fsr --release --example upscale_bench`):
@@ -700,7 +700,8 @@ drop(streamline);
   (+0.1 to +0.8 dB against DLSS's own measurement, ADR 0072); `None` lets DLSS measure.
 - **Not passed to DLSS:** the reactive mask of transparent surfaces (NVIDIA's current
   networks take none).
-- **Not available yet:** DLSS frame generation and Ray Reconstruction (ADR 0063).
+- **DLSS frame generation:** section 21. **Not available yet:** Ray Reconstruction
+  (ADR 0063).
 
 What it costs and gives (ref-1, RTX 4060 Ti, `cargo run -p engine_dlss --release
 --example dlss_bench`, FSR's scene):
@@ -1835,3 +1836,88 @@ let scene = SceneInput {
   without ray queries.
 - `scene_bench --gi [spacing] [--gi-scale 1|2|4]` measures a scene's volume (the updates,
   the resolve, the shading); `GI_DEBUG=1` with `--screenshot` saves the irradiance alone.
+
+## 21. Frame generation
+
+A frame generated between each two real ones (ADR 0091), the HUD never interpolated:
+the game hands its UI to the frame renderer as a layer, and the engine draws it on every
+frame shown. **Off by default:** the player turns it on.
+
+| | GPUs | What presents | The UI on generated frames |
+|---|---|---|---|
+| `FrameGeneration::Fsr` | every GPU (FSR 3.1's frame interpolation, built in) | `engine_latency::PacedPresenter`, a thread of its own | drawn again with the generated frame's camera |
+| `FrameGeneration::Dlss` | NVIDIA RTX 40 and newer, with NVIDIA's DLLs ([upscalers.md](upscalers.md#frame-generation-the-files)) and Windows' hardware-accelerated GPU scheduling | Streamline | the real frame's UI layer, which DLSS composites itself |
+
+**The UI layer.** Draw the UI through `engine_frame::UiRenderer` instead of into the
+target. Each canvas has a placement, and nothing more is needed for any kind of UI:
+
+```rust
+let layer = [
+    UiCanvas { canvas: &hud, placement: Placement::Screen },               // pixels
+    UiCanvas { canvas: &sign, placement: Placement::World(world_from_sign) }, // in the world
+    UiCanvas { canvas: &visor, placement: Placement::Camera(view_from_visor) }, // on the camera
+];
+```
+
+Canvases in the world and on the camera are hidden behind what the scene drew in front of
+them. UI shown through materials (a screen in the world) is scene content: it is
+interpolated with the scene.
+
+**FSR's frame generation:**
+
+```rust
+let mut paced = PacedPresenter::start(&device, &mut allocator, swapchain, markers)?;
+// Every frame:
+let images = paced.next_images();                       // the real and the generated image
+let frame = renderer.add_view_generating(&mut fg, &mut ctx, &mut view, &scene, &camera,
+    ViewTarget { texture: real, .. }, GeneratedTarget { texture: generated, .. }, |_, _| {})?;
+ui.add_passes(&mut fg, ring, &bindless, &layer, real, &camera, &frame)?;
+if let Some(g) = frame.generated.filter(|g| g.shown) {
+    ui.add_passes(&mut fg, ring, &bindless, &layer, generated, &g.camera, &frame)?;
+}
+// Submit waiting for `images.wait`, then:
+paced.present(PacedFrame { done: (frames.timeline(), number), generated: shown, .. })?;
+```
+
+`examples/flight.rs --fg` runs it. Nothing is generated across a camera cut
+(`ViewCamera::cut`) or after a change of size.
+
+**DLSS frame generation:** load Streamline with `StreamlineDesc { frame_generation: true, .. }`
+before the instance, create the device with `Device::with_extras(.., streamline.extra_queues())`,
+the surface and the swapchain through `streamline.vulkan_hooks()`
+(`Surface::from_win32_hooked`, `Swapchain::new_hooked`), and give latency control to
+Streamline (`Latency::with_external(.., Box::new(generation.latency()))`: DLSS frame
+generation works with no other Reflex). Every frame, draw the view into an image of its own
+(the "hudless" frame), copy it into the swapchain image, draw the UI over the copy and into
+a cleared layer of its own, then hand the four images over:
+
+```rust
+if let Some(input) = frame.dlss_generation_input(&camera, hudless, Some(ui_layer)) {
+    generation.add_pass(&mut fg, input, frame_id);   // after the UI passes
+}
+```
+
+`examples/flight.rs --fg dlss` runs it. `streamline.frame_generation_error()` says why it
+cannot run (`eErrorOSDisabledHWS`: Windows' hardware-accelerated GPU scheduling is off).
+Turning it on or off for good recreates the swapchain (`Streamline::set_frame_generation_loaded`):
+while it is loaded Streamline copies every frame.
+
+**What it costs and gives** (ref-1, `flight` through Sponza at 1080p, 2026-10-12):
+
+| | RTX 4060 Ti | integrated Radeon (2 CUs) |
+|---|---:|---:|
+| FSR's interpolation, GPU | 1.8–2.6 ms | 49 ms |
+| capped at 60 real frames | 120 shown, +8.3 ms | — |
+| capped at 120 real frames | 240 shown, +4.1 ms | — |
+| uncapped (a light scene) | 526 real without; 212 real / 423 shown with | 36 without; 13 / 25 with |
+| memory | +163 MiB | +50 MiB of GPU memory |
+
+- **The latency it adds** is half a real frame's interval (+8.3 ms at 60 real frames):
+  the generated frame is shown first.
+- **Offer it where a real frame costs much more than the interpolation:** a game at 40–80
+  real frames per second on a discrete GPU. Not on small integrated GPUs, where the
+  interpolation alone costs more than a frame.
+- **Image quality:** against a frame really rendered at that moment, the generated frame's
+  mean FLIP was 0.025 where showing the nearest real frame gave 0.090 (camera moving
+  5.7 cm a frame; the HUD 0.01, a panel in the world 0.045: its edge, where a column
+  crosses it, is tested against the real frame's depth).
