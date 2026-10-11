@@ -83,7 +83,13 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-Nothing. Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:
+- **Brixelizer GI as probe GI's reference** (item 3, ADR 0090, proposed), by the
+  coordinator. Step 1, `engine_ffx`: the FidelityFX SDK built as one library for FSR 3.1,
+  Brixelizer and Brixelizer GI, their SPIR-V checked byte for byte against AMD's compiler;
+  a box's distance field built on both GPUs. Next: `engine_brixelizer` (inputs, the
+  scene's geometry), the GI into the forward shading, the measurements.
+
+Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:
 ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 s), 0a (the
 review's P0 fixes: PRs #124, #125; the Radeon's perf limits, PR #126), 0b (fast turns:
 PRs #127–#130; left optional: the fast-turn test in the perf gate, one wider feedback

@@ -1,7 +1,7 @@
 //! AMD FidelityFX Super Resolution 3.1 upscaling (CLAUDE.md §6, ADR 0060).
 //!
 //! [`Fsr`] runs the FSR 3.1 upscaler of the FidelityFX SDK (v1.1.4, MIT), built from the
-//! vendored source by this crate's build script into the engine's binary: no DLL. It takes
+//! vendored source by `engine_ffx` into the engine's binary: no DLL. It takes
 //! the same inputs as the engine's own TAAU (`engine_upscale::Taau`, ADR 0043): the forward
 //! renderer's jittered HDR color, its depth and its [`MotionOutput`], plus the camera's
 //! planes and field of view and the frame time, and returns an HDR image at the output
@@ -24,28 +24,14 @@
 //! output size changes or the render size grows; creating one compiles its 11 compute
 //! pipelines.
 
-mod ffi;
-
 use core::fmt;
 use core::ptr::NonNull;
 use core::sync::atomic::{AtomicU32, Ordering};
+use engine_ffx::fsr as ffi;
 use engine_render::forward::MotionOutput;
 use engine_render::graph::{Access, FrameGraph, ShaderStages, Texture, TextureDesc};
 use engine_rhi::Device;
 use engine_rhi::ash::vk;
-
-/// Aligns included SPIR-V to 4 bytes (Vulkan reads it as 32-bit words).
-#[repr(C, align(4))]
-struct Aligned<B: ?Sized>(B);
-
-macro_rules! spirv {
-    ($path:literal) => {{
-        const ALIGNED: &$crate::Aligned<[u8]> = &$crate::Aligned(*include_bytes!($path));
-        &ALIGNED.0
-    }};
-}
-
-mod blobs;
 
 /// Format of the upscaled image (HDR).
 pub const OUTPUT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -193,17 +179,6 @@ unsafe extern "C" fn message(kind: u32, text: *const u16) {
     }
 }
 
-/// Handles the SDK needs to create a context.
-#[derive(Clone, Copy)]
-struct Handles {
-    instance: vk::Instance,
-    get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
-    physical_device: vk::PhysicalDevice,
-    device: vk::Device,
-    get_device_proc_addr: vk::PFN_vkGetDeviceProcAddr,
-    fp16: bool,
-}
-
 struct Context {
     raw: NonNull<ffi::Context>,
     max_render: (u32, u32),
@@ -215,7 +190,7 @@ struct Context {
 /// FSR 3.1 upscaling (see the crate documentation). One per view: the SDK's context keeps
 /// the view's history.
 pub struct Fsr {
-    handles: Handles,
+    device: engine_ffx::Device,
     context: Option<Context>,
     /// Contexts replaced by a resize, destroyed once their frames are done.
     retired: Vec<(u64, NonNull<ffi::Context>)>,
@@ -228,28 +203,6 @@ pub struct Fsr {
 // SAFETY: the SDK context is not tied to the thread that created it; `Fsr` is used from one
 // thread at a time (`&mut self`).
 unsafe impl Send for Fsr {}
-
-/// The SPIR-V modules' addresses and sizes, as the shim takes them. Process-wide: the shim
-/// keeps one pointer to them for every context (`engine_fsr_set_modules`), so they must
-/// outlive every `Fsr` (they were per `Fsr`, and a context created on one thread could read
-/// the arrays of an `Fsr` another thread had just dropped).
-struct ModuleTable {
-    data: [*const u8; blobs::MODULES.len()],
-    sizes: [u32; blobs::MODULES.len()],
-}
-
-// SAFETY: the pointers refer to immutable static data.
-unsafe impl Sync for ModuleTable {}
-// SAFETY: as above.
-unsafe impl Send for ModuleTable {}
-
-fn module_table() -> &'static ModuleTable {
-    static TABLE: std::sync::OnceLock<ModuleTable> = std::sync::OnceLock::new();
-    TABLE.get_or_init(|| ModuleTable {
-        data: blobs::MODULES.map(<[u8]>::as_ptr),
-        sizes: blobs::MODULES.map(|m| m.len() as u32),
-    })
-}
 
 impl fmt::Debug for Fsr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -268,16 +221,8 @@ impl Fsr {
     /// [`Self::add_pass`], at its sizes. `frames_in_flight` bounds how long a replaced
     /// context is kept.
     pub fn new(device: &Device, frames_in_flight: usize) -> Self {
-        let instance = device.instance_raw();
         Self {
-            handles: Handles {
-                instance: instance.handle(),
-                get_instance_proc_addr: device.entry().static_fn().get_instance_proc_addr,
-                physical_device: device.physical(),
-                device: device.raw().handle(),
-                get_device_proc_addr: instance.fp_v1_0().get_device_proc_addr,
-                fp16: device.shader_float16_enabled(),
-            },
+            device: engine_ffx::Device::new(device),
             context: None,
             retired: Vec::new(),
             frames_in_flight: frames_in_flight.max(1) as u64,
@@ -405,7 +350,7 @@ impl Fsr {
             .read(velocity, Access::Sampled(ShaderStages::COMPUTE))
             .write(output, Access::StorageWrite(ShaderStages::COMPUTE))
             .execute(move |ctx| {
-                let image = |texture: Texture, desc: TextureDesc| ffi::Image {
+                let image = |texture: Texture, desc: TextureDesc| engine_ffx::Image {
                     image: ctx.image(texture),
                     format: desc.format,
                     width: desc.width,
@@ -416,11 +361,11 @@ impl Fsr {
                 let motion = image(velocity, velocity_desc);
                 let reactive = match (reactive, reactive_desc) {
                     (Some(mask), Some(desc)) => image(mask, desc),
-                    _ => ffi::Image::default(),
+                    _ => engine_ffx::Image::default(),
                 };
                 let exposure = match (exposure, exposure_desc) {
                     (Some(texture), Some(desc)) => image(texture, desc),
-                    _ => ffi::Image::default(),
+                    _ => engine_ffx::Image::default(),
                 };
                 let inputs = [
                     (color.image, vk::ImageAspectFlags::COLOR),
@@ -514,27 +459,19 @@ impl Fsr {
         if self.debug_checking {
             flags |= ffi::ENABLE_DEBUG_CHECKING;
         }
-        let h = self.handles;
+        engine_ffx::register_modules();
         let desc = ffi::CreateDesc {
-            instance: h.instance,
-            get_instance_proc_addr: h.get_instance_proc_addr,
-            physical_device: h.physical_device,
-            device: h.device,
-            get_device_proc_addr: h.get_device_proc_addr,
+            device: self.device,
             max_render_width: render.0,
             max_render_height: render.1,
             upscale_width: output.0,
             upscale_height: output.1,
             flags,
-            fp16: u32::from(h.fp16),
-            modules: module_table().data.as_ptr(),
-            module_sizes: module_table().sizes.as_ptr(),
-            module_count: blobs::MODULES.len() as u32,
             message: Some(message),
         };
         let mut raw = core::ptr::null_mut();
-        // SAFETY: the handles are the engine's live instance and device; the module arrays
-        // are static and point to static SPIR-V.
+        // SAFETY: the handles are the engine's live instance and device; the modules were
+        // handed over above.
         let code = unsafe { ffi::engine_fsr_create(&desc, &mut raw) };
         match NonNull::new(raw) {
             Some(raw) if code == 0 => Ok(Context {
