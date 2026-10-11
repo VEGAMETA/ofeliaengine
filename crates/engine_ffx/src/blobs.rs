@@ -117,3 +117,31 @@ pub(crate) static BRIXELIZER_GI: [&[u8]; 21] = [
     spirv!("../shaders/brixelizergi/downsample.3980b9a4d893097a.spv"),
     spirv!("../shaders/brixelizergi/upsample.4064a50524f88fd9.spv"),
 ];
+
+/// frameinterpolation's SPIR-V modules, which `csrc/permutations_frameinterpolation.inc` refers to by index, 4-byte aligned.
+pub(crate) static FRAME_INTERPOLATION: [&[u8]; 11] = [
+    spirv!("../shaders/frameinterpolation/reconstruct_and_dilate_pass.217787a6993d6419.spv"),
+    spirv!("../shaders/frameinterpolation/setup_pass.93889873682ca72f.spv"),
+    spirv!("../shaders/frameinterpolation/reconstruct_previous_depth_pass.26b1b315ef364146.spv"),
+    spirv!("../shaders/frameinterpolation/game_motion_vector_field_pass.8fac3df27519f543.spv"),
+    spirv!("../shaders/frameinterpolation/optical_flow_vector_field_pass.1b1d11a4a23080ea.spv"),
+    spirv!("../shaders/frameinterpolation/disocclusion_mask_pass.88c1ef96d70723ac.spv"),
+    spirv!("../shaders/frameinterpolation/pass.8ca9c1c616db346b.spv"),
+    spirv!("../shaders/frameinterpolation/compute_inpainting_pyramid_pass.2bb2412875113d55.spv"),
+    spirv!("../shaders/frameinterpolation/inpainting_pass.fb31c32cd82e4fd0.spv"),
+    spirv!(
+        "../shaders/frameinterpolation/compute_game_vector_field_inpainting_pyramid_pass.0e96446f7a9da506.spv"
+    ),
+    spirv!("../shaders/frameinterpolation/debug_view_pass.4c9a288a7d85338f.spv"),
+];
+
+/// opticalflow's SPIR-V modules, which `csrc/permutations_opticalflow.inc` refers to by index, 4-byte aligned.
+pub(crate) static OPTICAL_FLOW: [&[u8]; 7] = [
+    spirv!("../shaders/opticalflow/prepare_luma_pass.3b1fcb11d3d4af12.spv"),
+    spirv!("../shaders/opticalflow/compute_luminance_pyramid_pass.69d1b717522e4617.spv"),
+    spirv!("../shaders/opticalflow/generate_scd_histogram_pass.68d4b51dc5d8509c.spv"),
+    spirv!("../shaders/opticalflow/compute_scd_divergence_pass.31f3723dab0f7583.spv"),
+    spirv!("../shaders/opticalflow/compute_optical_flow_advanced_pass_v5.94755d0541907672.spv"),
+    spirv!("../shaders/opticalflow/filter_optical_flow_pass_v5.4cebc3f79dc276f4.spv"),
+    spirv!("../shaders/opticalflow/scale_optical_flow_advanced_pass_v5.2cddc245f744ed88.spv"),
+];

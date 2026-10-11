@@ -98,7 +98,7 @@ fn main() {
         Backend::AmdAntiLag => {
             configs.push(("Anti-Lag 2 on", Some(Backend::AmdAntiLag), LowLatency::On))
         }
-        Backend::Generic => {}
+        Backend::Generic | Backend::External => {}
     }
     configs.push((
         "generic on (present_wait, 1 queued)",

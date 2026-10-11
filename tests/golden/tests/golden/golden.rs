@@ -608,6 +608,18 @@ fn sponza_with_taau_and_a_moving_camera() {
     });
 }
 
+/// Frame generation (ADR 0091): the frame FSR 3.1 generated before a real one of Sponza
+/// (TAAU at 67 %), the camera moving 2.8 cm a frame diagonally, with a HUD, a panel in the
+/// world and one on the camera drawn over it with its half-way camera.
+#[test]
+fn sponza_with_frame_generation() {
+    check(&Shot {
+        camera_motion: Vec3::new(0.02, 0.0, 0.02),
+        frame_generation: true,
+        ..sponza_antialiased("sponza_fg", Antialiasing::TAAU, Quality::Quality)
+    });
+}
+
 /// A temporal shot renders the same bytes every time (the history and the jitter start
 /// fresh once the scene is resident), so its golden image can be exact.
 #[test]

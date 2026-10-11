@@ -1,6 +1,7 @@
 //! Regenerates the SPIR-V and the permutation tables of the FidelityFX SDK effects the
-//! engine builds (ADR 0060, ADR 0090) from the vendored GLSL: the FSR 3.1 upscaler,
-//! Brixelizer and Brixelizer GI. Run it after updating `third_party/FidelityFX-SDK`:
+//! engine builds (ADR 0060, ADR 0090, ADR 0091) from the vendored GLSL: the FSR 3.1
+//! upscaler, Brixelizer, Brixelizer GI, frame interpolation and optical flow. Run it after
+//! updating `third_party/FidelityFX-SDK`:
 //!
 //! `cargo run -p engine_ffx --example ffx_shaders [-- --glslang <glslangValidator.exe>]`
 //!
@@ -75,7 +76,7 @@ struct Effect {
 const FORMAT_RGBA16F: u32 = 2;
 const FORMAT_RGBA8: u32 = 4;
 
-const EFFECTS: [Effect; 3] = [
+const EFFECTS: [Effect; 5] = [
     Effect {
         name: "fsr3upscaler",
         rust: "FSR3UPSCALER",
@@ -214,6 +215,80 @@ const EFFECTS: [Effect; 3] = [
         fixed: 1 << 0,
         // Specular GI on or off.
         varying: &[1 << 1],
+        fixes: &[],
+    },
+    Effect {
+        name: "frameinterpolation",
+        rust: "FRAME_INTERPOLATION",
+        prefix: "ffx_frameinterpolation_",
+        suffix: ".glsl",
+        // `FfxFrameInterpolationPass` order (`ffx_frameinterpolation.h`); the interpolation
+        // itself is `ffx_frameinterpolation_pass.glsl`. The SDK's accessor never loads its
+        // 16-bit tables (`ffx_frameinterpolation_shaderblobs.cpp`).
+        shaders: &[
+            ("reconstruct_and_dilate_pass", false),
+            ("setup_pass", false),
+            ("reconstruct_previous_depth_pass", false),
+            ("game_motion_vector_field_pass", false),
+            ("optical_flow_vector_field_pass", false),
+            ("disocclusion_mask_pass", false),
+            ("pass", false),
+            ("compute_inpainting_pyramid_pass", false),
+            ("inpainting_pass", false),
+            ("compute_game_vector_field_inpainting_pyramid_pass", false),
+            ("debug_view_pass", false),
+        ],
+        includes: &["", "frameinterpolation"],
+        // `FRAMEINTERPOLATION_BASE_ARGS` without the SC-only ones.
+        defines: &[
+            "-DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_SAMPLERS_USE_DATA_HALF=0",
+            "-DFFX_FRAMEINTERPOLATION_OPTION_ACCUMULATE_SAMPLERS_USE_DATA_HALF=0",
+            "-DFFX_FRAMEINTERPOLATION_OPTION_REPROJECT_SAMPLERS_USE_DATA_HALF=1",
+            "-DFFX_FRAMEINTERPOLATION_OPTION_POSTPROCESSLOCKSTATUS_SAMPLERS_USE_DATA_HALF=0",
+            "-DFFX_FRAMEINTERPOLATION_OPTION_UPSAMPLE_USE_LANCZOS_TYPE=2",
+        ],
+        // `FRAMEINTERPOLATION_SHADER_PERMUTATION_*` (`ffx_frameinterpolation_private.h`).
+        options: &[
+            (
+                1 << 0,
+                "FFX_FRAMEINTERPOLATION_OPTION_LOW_RES_MOTION_VECTORS",
+            ),
+            (
+                1 << 1,
+                "FFX_FRAMEINTERPOLATION_OPTION_JITTER_MOTION_VECTORS",
+            ),
+            (1 << 2, "FFX_FRAMEINTERPOLATION_OPTION_INVERTED_DEPTH"),
+        ],
+        // engine_fsr's contexts (ADR 0091): motion vectors at the render size without
+        // jitter, depth 0 at the near plane.
+        fixed: 1 << 0,
+        varying: &[],
+        fixes: &[],
+    },
+    Effect {
+        name: "opticalflow",
+        rust: "OPTICAL_FLOW",
+        prefix: "ffx_opticalflow_",
+        suffix: ".glsl",
+        // `FfxOpticalflowPass` order (`ffx_opticalflow.h`); the SDK's accessor never loads
+        // its 16-bit tables (`ffx_opticalflow_shaderblobs.cpp`).
+        shaders: &[
+            ("prepare_luma_pass", false),
+            ("compute_luminance_pyramid_pass", false),
+            ("generate_scd_histogram_pass", false),
+            ("compute_scd_divergence_pass", false),
+            ("compute_optical_flow_advanced_pass_v5", false),
+            ("filter_optical_flow_pass_v5", false),
+            ("scale_optical_flow_advanced_pass_v5", false),
+        ],
+        includes: &["", "opticalflow"],
+        defines: &[],
+        // `OPTICALFLOW_HDR_COLOR_INPUT` (`ffx_opticalflow_private.h`), below which are the
+        // wave64 and 16-bit table bits.
+        options: &[(1 << 2, "FFX_OPTICALFLOW_OPTION_HDR_COLOR_INPUT")],
+        fixed: 0,
+        // HDR output or not.
+        varying: &[1 << 2],
         fixes: &[],
     },
 ];

@@ -22,6 +22,8 @@ engine_core.workspace = true
 engine_dlss.workspace = true
 engine_frame.workspace = true
 engine_render.workspace = true
+# The UI layer drawn over frame generation's shots (ADR 0091).
+engine_render2d.workspace = true
 engine_rhi.workspace = true
 # Shots streamed within a GPU budget (ADR 0076).
 engine_streaming.workspace = true

@@ -56,7 +56,8 @@ pub fn golden_path(vendor: &str, name: &str) -> PathBuf {
         .join(format!("{name}.png"))
 }
 
-fn output_dir(vendor: &str) -> PathBuf {
+/// Where renders and error maps are written for inspection: `target/golden/<vendor>/`.
+pub fn output_dir(vendor: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("../../target/golden")
         .join(vendor)

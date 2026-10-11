@@ -13,10 +13,57 @@
 //! 3. [`Latency::before_present`] right before presenting.
 //!
 //! The markers are shared by all backends, Tracy and the latency overlay.
+//!
+//! With frame generation a thread of its own presents ([`PacedPresenter`], ADR 0091): the
+//! frame loop passes it where it passed the swapchain, and the markers of presents go
+//! with it ([`Latency::present_markers`]), for real frames only.
+//!
+//! While a library presents in the engine's place and requires its own latency control
+//! (Streamline's Reflex and PC latency markers with DLSS frame generation, ADR 0091 §6),
+//! [`Latency::with_external`] hands the same calls to it ([`ExternalLatency`]).
 
 use engine_rhi::ash::vk;
 use engine_rhi::{Device, Frames, RhiError, Swapchain};
 use std::time::{Duration, Instant};
+
+mod paced;
+
+pub use paced::{PacedFrame, PacedImages, PacedPresenter, PresentImage, Presented, RING};
+
+/// What latency control needs of the swapchain the frame loop presents to: the swapchain
+/// itself, or the [`PacedPresenter`] that presents to it from a thread of its own.
+pub trait LatencyTarget {
+    /// The swapchain's handle (the Reflex calls take it; they may run on any thread).
+    fn raw(&self) -> vk::SwapchainKHR;
+    /// Whether it was created for Reflex (`VK_NV_low_latency2`).
+    fn low_latency(&self) -> bool;
+    /// The largest present id used so far.
+    fn last_present_id(&self) -> u64;
+    /// Waits until the present tagged `id` is on screen (`VK_KHR_present_wait`).
+    fn wait_for_present(&self, id: u64, timeout_ns: u64) -> Result<bool, RhiError>;
+    /// Whether [`Self::wait_for_present`] can be called from the frame loop.
+    fn can_wait_for_present(&self) -> bool {
+        true
+    }
+}
+
+impl LatencyTarget for Swapchain {
+    fn raw(&self) -> vk::SwapchainKHR {
+        Swapchain::raw(self)
+    }
+
+    fn low_latency(&self) -> bool {
+        Swapchain::low_latency(self)
+    }
+
+    fn last_present_id(&self) -> u64 {
+        Swapchain::last_present_id(self)
+    }
+
+    fn wait_for_present(&self, id: u64, timeout_ns: u64) -> Result<bool, RhiError> {
+        Swapchain::wait_for_present(self, id, timeout_ns)
+    }
+}
 
 /// Which implementation runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,6 +74,23 @@ pub enum Backend {
     AmdAntiLag,
     /// Limiter plus `present_wait` queue control, on any GPU.
     Generic,
+    /// A library's own ([`ExternalLatency`]): Streamline's Reflex with DLSS frame
+    /// generation.
+    External,
+}
+
+/// Latency control a library owns, in place of the driver's extensions: Streamline's
+/// Reflex and PC latency markers while DLSS frame generation is loaded, which works with
+/// no other Reflex integration (ADR 0091 §6). [`Latency::with_external`] calls it at the
+/// points it calls the other backends, with the frame's id.
+pub trait ExternalLatency: Send {
+    /// Applies `settings` (the mode and the frame-rate cap, which caps real frames).
+    fn apply(&mut self, settings: &LatencySettings);
+    /// Sleeps until frame `frame` should start, so that input sampled right after is as
+    /// fresh as possible. Called every frame, whatever the mode.
+    fn sleep(&mut self, frame: u64);
+    /// Records `marker` of frame `frame`. Called for every marker, whatever the mode.
+    fn mark(&mut self, frame: u64, marker: Marker);
 }
 
 /// Latency reduction level.
@@ -157,9 +221,84 @@ struct Nv {
     value: u64,
 }
 
+#[derive(Clone, Copy)]
 struct Amd {
     update: AntiLagUpdateFn,
     device: vk::Device,
+}
+
+impl Amd {
+    fn update(&self, on: bool, max_fps: u32, stage: i32, frame: u64) {
+        let info = AntiLagPresentationInfoAmd {
+            s_type: ANTI_LAG_PRESENTATION_INFO_AMD,
+            p_next: core::ptr::null_mut(),
+            stage,
+            frame_index: frame,
+        };
+        let data = AntiLagDataAmd {
+            s_type: ANTI_LAG_DATA_AMD,
+            p_next: core::ptr::null(),
+            mode: if on {
+                ANTI_LAG_MODE_ON
+            } else {
+                ANTI_LAG_MODE_OFF
+            },
+            max_fps,
+            presentation_info: if on { &info } else { core::ptr::null() },
+        };
+        // SAFETY: the function belongs to this device; the structures follow the
+        // registry's layout and outlive the call.
+        unsafe { (self.update)(self.device, &data) };
+    }
+}
+
+/// The calls around a real frame's present when another thread presents
+/// ([`PacedPresenter`], ADR 0091): Reflex's present markers and Anti-Lag 2's present
+/// stage. Generated frames get none: the latency markers are the real frames'.
+#[derive(Clone)]
+pub struct PresentMarkers {
+    nv: Option<(engine_rhi::ash::nv::low_latency2::Device, vk::SwapchainKHR)>,
+    amd: Option<Amd>,
+    max_fps: u32,
+}
+
+// SAFETY: a function table, handles and a device-level function pointer; the Vulkan calls
+// they make need no host synchronization (`vkSetLatencyMarkerNV`'s swapchain may be used
+// by other threads at the same time, by the spec).
+unsafe impl Send for PresentMarkers {}
+
+impl core::fmt::Debug for PresentMarkers {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PresentMarkers")
+            .field("reflex", &self.nv.is_some())
+            .field("anti_lag", &self.amd.is_some())
+            .finish()
+    }
+}
+
+impl PresentMarkers {
+    /// Right before the real frame `id`'s `vkQueuePresentKHR`.
+    pub fn before_present(&self, id: u64) {
+        if let Some(amd) = &self.amd {
+            amd.update(true, self.max_fps, ANTI_LAG_STAGE_PRESENT, id);
+        }
+        self.nv_marker(id, vk::LatencyMarkerNV::PRESENT_START);
+    }
+
+    /// Right after it.
+    pub fn after_present(&self, id: u64) {
+        self.nv_marker(id, vk::LatencyMarkerNV::PRESENT_END);
+    }
+
+    fn nv_marker(&self, id: u64, marker: vk::LatencyMarkerNV) {
+        if let Some((loader, swapchain)) = &self.nv {
+            let info = vk::SetLatencyMarkerInfoNV::default()
+                .present_id(id)
+                .marker(marker);
+            // SAFETY: the swapchain was created with latency mode enabled.
+            unsafe { loader.set_latency_marker(*swapchain, &info) };
+        }
+    }
 }
 
 /// Fallback when no waitable timer is available (and in non-Windows builds, which exist
@@ -219,6 +358,7 @@ pub struct Latency {
     present_wait: bool,
     nv: Option<Nv>,
     amd: Option<Amd>,
+    external: Option<Box<dyn ExternalLatency>>,
     frame: u64,
     next_frame_at: Option<Instant>,
     sleeper: Sleeper,
@@ -241,7 +381,7 @@ impl Latency {
     /// when `VK_AMD_anti_lag` is enabled, else the generic path. Applies `settings`.
     pub fn new(
         device: &Device,
-        swapchain: &Swapchain,
+        swapchain: &impl LatencyTarget,
         settings: LatencySettings,
     ) -> Result<Self, RhiError> {
         Self::with_backend(device, swapchain, settings, None)
@@ -252,7 +392,7 @@ impl Latency {
     /// works.
     pub fn with_backend(
         device: &Device,
-        swapchain: &Swapchain,
+        swapchain: &impl LatencyTarget,
         settings: LatencySettings,
         backend: Option<Backend>,
     ) -> Result<Self, RhiError> {
@@ -315,7 +455,35 @@ impl Latency {
             present_wait: ext.present_id && ext.present_wait,
             nv,
             amd,
+            external: None,
             // Present ids continue from whoever presented to this swapchain before.
+            frame: swapchain.last_present_id(),
+            next_frame_at: None,
+            sleeper: Sleeper::new(),
+            history: Box::new([FrameTimes::default(); HISTORY]),
+        };
+        latency.apply(swapchain)?;
+        Ok(latency)
+    }
+
+    /// Latency control by `external` (see [`ExternalLatency`]): every call goes to it, and
+    /// none to the driver's extensions. Frame ids continue from `swapchain`'s presents.
+    pub fn with_external(
+        device: &Device,
+        swapchain: &impl LatencyTarget,
+        settings: LatencySettings,
+        external: Box<dyn ExternalLatency>,
+    ) -> Result<Self, RhiError> {
+        let ext = device.latency_extensions();
+        let mut latency = Self {
+            backend: Backend::External,
+            settings,
+            device: device.raw().clone(),
+            present_id: ext.present_id,
+            present_wait: false,
+            nv: None,
+            amd: None,
+            external: Some(external),
             frame: swapchain.last_present_id(),
             next_frame_at: None,
             sleeper: Sleeper::new(),
@@ -338,7 +506,7 @@ impl Latency {
     /// Changes the settings.
     pub fn set_settings(
         &mut self,
-        swapchain: &Swapchain,
+        swapchain: &impl LatencyTarget,
         settings: LatencySettings,
     ) -> Result<(), RhiError> {
         self.settings = settings;
@@ -348,7 +516,11 @@ impl Latency {
 
     /// Re-applies the settings to the driver. Call after the swapchain is recreated:
     /// Reflex settings belong to a swapchain.
-    pub fn apply(&mut self, swapchain: &Swapchain) -> Result<(), RhiError> {
+    pub fn apply(&mut self, swapchain: &impl LatencyTarget) -> Result<(), RhiError> {
+        if let Some(external) = &mut self.external {
+            external.apply(&self.settings);
+            return Ok(());
+        }
         if let Some(nv) = &self.nv {
             let interval = self
                 .settings
@@ -378,28 +550,35 @@ impl Latency {
 
     fn anti_lag(&self, stage: i32) {
         if let Some(amd) = &self.amd {
-            let info = AntiLagPresentationInfoAmd {
-                s_type: ANTI_LAG_PRESENTATION_INFO_AMD,
-                p_next: core::ptr::null_mut(),
+            amd.update(
+                self.settings.mode != LowLatency::Off,
+                self.max_fps(),
                 stage,
-                frame_index: self.frame,
-            };
-            let on = self.settings.mode != LowLatency::Off;
-            let data = AntiLagDataAmd {
-                s_type: ANTI_LAG_DATA_AMD,
-                p_next: core::ptr::null(),
-                mode: if on {
-                    ANTI_LAG_MODE_ON
-                } else {
-                    ANTI_LAG_MODE_OFF
-                },
-                max_fps: self.settings.fps_limit.map_or(0, |f| f.round() as u32),
-                presentation_info: if on { &info } else { core::ptr::null() },
-            };
-            // SAFETY: the function belongs to this device; the structures follow the
-            // registry's layout and outlive the call.
-            unsafe { (amd.update)(amd.device, &data) };
+                self.frame,
+            );
         }
+    }
+
+    fn max_fps(&self) -> u32 {
+        self.settings.fps_limit.map_or(0, |f| f.round() as u32)
+    }
+
+    /// The calls a [`PacedPresenter`]'s thread makes around real frames' presents, for
+    /// `swapchain`; `None` with no latency backend on or with the generic path. Pass them
+    /// again ([`PacedPresenter::set_markers`]) after changing the settings.
+    pub fn present_markers(&self, swapchain: &impl LatencyTarget) -> Option<PresentMarkers> {
+        if self.settings.mode == LowLatency::Off || self.external.is_some() {
+            return None;
+        }
+        let nv = self
+            .nv
+            .as_ref()
+            .map(|nv| (nv.loader.clone(), swapchain.raw()));
+        (nv.is_some() || self.amd.is_some()).then(|| PresentMarkers {
+            nv,
+            amd: self.amd,
+            max_fps: self.max_fps(),
+        })
     }
 
     /// Starts the next frame and returns its present id (one more than the swapchain's
@@ -408,10 +587,25 @@ impl Latency {
     ///
     /// `frames` bounds the GPU queue on the generic path when the device has no
     /// `VK_KHR_present_wait`.
-    pub fn begin_frame(&mut self, swapchain: &Swapchain, frames: &Frames) -> Result<u64, RhiError> {
+    pub fn begin_frame(
+        &mut self,
+        swapchain: &impl LatencyTarget,
+        frames: &Frames,
+    ) -> Result<u64, RhiError> {
         engine_profiler::zone!("latency::begin_frame");
         self.frame += 1;
         let on = self.settings.mode != LowLatency::Off;
+        if let Some(external) = &mut self.external {
+            // The library sleeps and caps the frame rate itself, in every mode.
+            external.sleep(self.frame);
+            let frame = self.frame;
+            *self.times() = FrameTimes {
+                frame,
+                begin: Some(Instant::now()),
+                marks: [None; MARKERS],
+            };
+            return Ok(frame);
+        }
         let vendor = match (&mut self.nv, on) {
             (Some(nv), true) => {
                 nv.value += 1;
@@ -457,7 +651,7 @@ impl Latency {
             // Generic: bound the present queue, then cap the frame rate.
             let depth = u64::from(self.settings.max_queued_presents);
             if on && depth > 0 {
-                if self.present_wait {
+                if self.present_wait && swapchain.can_wait_for_present() {
                     if self.frame > depth + 1 {
                         swapchain
                             .wait_for_present(self.frame - depth - 1, PRESENT_WAIT_TIMEOUT_NS)?;
@@ -499,9 +693,12 @@ impl Latency {
     }
 
     /// Records a marker for the current frame.
-    pub fn mark(&mut self, swapchain: &Swapchain, marker: Marker) {
+    pub fn mark(&mut self, swapchain: &impl LatencyTarget, marker: Marker) {
         let now = Instant::now();
         self.times().marks[marker.index()] = Some(now);
+        if let Some(external) = &mut self.external {
+            external.mark(self.frame, marker);
+        }
         if let Some(nv) = &self.nv
             && self.settings.mode != LowLatency::Off
         {
@@ -547,7 +744,7 @@ impl Latency {
     /// clock), newest last. Empty on other backends.
     pub fn nv_reports(
         &self,
-        swapchain: &Swapchain,
+        swapchain: &impl LatencyTarget,
         out: &mut Vec<NvFrameReport>,
     ) -> Result<(), RhiError> {
         out.clear();

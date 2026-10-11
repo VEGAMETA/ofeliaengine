@@ -11,6 +11,10 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Math for frame generation's camera constants (ADR 0091).
+engine_core.workspace = true
+# Streamline's Reflex as a latency backend, which DLSS frame generation requires (ADR 0091).
+engine_latency.workspace = true
 engine_profiler.workspace = true
 engine_render.workspace = true
 engine_rhi.workspace = true
@@ -29,7 +33,5 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 [dev-dependencies]
-# Math and half floats for the tests and the benchmark.
-engine_core.workspace = true
 # FSR 3.1, compared against in the tests and the benchmark.
 engine_fsr.workspace = true

@@ -18,6 +18,23 @@ pub enum Exposure {
     Auto(ExposureSettings),
 }
 
+/// Frame generation (ADR 0091): frames generated between the real ones, the HUD never
+/// interpolated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum FrameGeneration {
+    /// None: the default; the player turns it on (the owner, 2026-10-11).
+    #[default]
+    Off,
+    /// FSR 3.1's frame interpolation and optical flow, built from the FidelityFX SDK's
+    /// source: any GPU, nothing to install. A paced presenter
+    /// (`engine_latency::PacedPresenter`) shows the frames, with the UI drawn on each.
+    Fsr,
+    /// DLSS frame generation through Streamline, from the user's DLLs (RTX 40 and newer):
+    /// Streamline presents, and composites the UI layer over the frames it generates
+    /// (`engine_dlss::DlssFrameGeneration`, [`crate::ViewFrame::dlss_generation_input`]).
+    Dlss,
+}
+
 /// What one view's frame does. Change it any time: [`crate::FrameRenderer::prepare`]
 /// applies the difference (an upscaler switch or a new output size starts the history
 /// anew; other changes cost nothing).
@@ -75,6 +92,11 @@ pub struct ViewSettings {
     /// the scene's environment and `ForwardRenderer::set_reflections` (through
     /// `FrameRenderer::forward_mut`); the view keeps their history.
     pub screen_space_reflections: Option<SsrSettings>,
+    /// Frame generation (ADR 0091), off by default; it implies motion vectors. FSR's needs
+    /// the view's frame drawn with [`crate::FrameRenderer::add_view_generating`] into a
+    /// paced presenter's images; DLSS's, the frame's inputs handed to Streamline
+    /// ([`crate::ViewFrame::dlss_generation_input`]).
+    pub frame_generation: FrameGeneration,
 }
 
 impl Default for ViewSettings {
@@ -96,6 +118,7 @@ impl Default for ViewSettings {
             previous_color: false,
             cinematic: false,
             screen_space_reflections: None,
+            frame_generation: FrameGeneration::Off,
         }
     }
 }
@@ -103,7 +126,10 @@ impl Default for ViewSettings {
 impl ViewSettings {
     /// Whether the scene passes write motion vectors.
     pub fn wants_motion(&self) -> bool {
-        self.antialiasing.is_temporal() || self.motion_vectors || self.previous_color
+        self.antialiasing.is_temporal()
+            || self.motion_vectors
+            || self.previous_color
+            || self.frame_generation != FrameGeneration::Off
     }
 }
 

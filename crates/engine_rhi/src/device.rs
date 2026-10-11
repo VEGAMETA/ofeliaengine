@@ -63,6 +63,24 @@ unsafe impl vk::ExtendsPhysicalDeviceFeatures2 for AntiLagFeaturesAmd {}
 // SAFETY: as above.
 unsafe impl vk::ExtendsDeviceCreateInfo for AntiLagFeaturesAmd {}
 
+/// Queues a library asks for besides the engine's ([`Device::with_extras`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtraQueues {
+    /// More queues of the graphics family.
+    pub graphics: u32,
+    /// More queues of the compute family (of the graphics family without one).
+    pub compute: u32,
+}
+
+/// Where a library's extra queues start: family and index, for graphics and compute.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExtraQueueStart {
+    /// The graphics family and the first index after the engine's queues in it.
+    pub graphics: (u32, u32),
+    /// The compute family (the graphics family without one) and the first free index.
+    pub compute: (u32, u32),
+}
+
 /// The logical device with the engine's required features enabled.
 pub struct Device {
     /// Shared with every [`crate::Pipeline`]: ash's device is its function table, 1.5 KB,
@@ -85,6 +103,13 @@ pub struct Device {
     extra_extensions: Vec<std::ffi::CString>,
     /// Graphics + compute + transfer (+ present on a desktop GPU).
     pub graphics: Queue,
+    /// A second queue of the graphics family, when the family has one: a paced present
+    /// thread submits its copies and presents on it while the frame loop submits on
+    /// [`Self::graphics`] (ADR 0091). A queue is externally synchronized, so two threads
+    /// cannot share one.
+    pub present: Option<Queue>,
+    /// Where a library's extra queues start ([`Self::with_extras`]).
+    extra_queue_start: ExtraQueueStart,
     /// A compute queue on a family without graphics (async compute), if the GPU has one.
     pub async_compute: Option<Queue>,
     /// A transfer-only queue (copy engine), if the GPU has one.
@@ -113,6 +138,7 @@ impl core::fmt::Debug for Device {
         f.debug_struct("Device")
             .field("adapter", &self.adapter.name())
             .field("graphics", &self.graphics)
+            .field("present", &self.present)
             .field("async_compute", &self.async_compute)
             .field("transfer", &self.transfer)
             .finish()
@@ -134,6 +160,18 @@ impl Device {
         instance: &Instance,
         adapter: &Adapter,
         extra: &[&CStr],
+    ) -> Result<Self, RhiError> {
+        Self::with_extras(instance, adapter, extra, ExtraQueues::default())
+    }
+
+    /// Like [`Self::with_extensions`], also creating `queues` for a library after the
+    /// engine's own in their families (Streamline's DLSS frame generation, ADR 0091; it
+    /// gets them itself, from the indices [`Self::extra_queue_start`] gives).
+    pub fn with_extras(
+        instance: &Instance,
+        adapter: &Adapter,
+        extra: &[&CStr],
+        queues: ExtraQueues,
     ) -> Result<Self, RhiError> {
         engine_profiler::zone!("rhi::Device::new");
         if !adapter.missing_features().is_empty() {
@@ -167,17 +205,53 @@ impl Device {
             vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE,
         );
 
-        let priority = [1.0f32];
+        // The graphics family's second queue (ADR 0091) and a library's extra queues, at the
+        // same priority.
+        let priorities = [1.0f32; 16];
+        let graphics_count = families[graphics_family as usize].queue_count as usize;
+        let graphics_queues = graphics_count.min(2);
+        let compute_extra = if compute_family.is_some() {
+            queues.compute
+        } else {
+            0
+        };
+        let graphics_wanted = graphics_queues
+            + queues.graphics as usize
+            + if compute_family.is_none() {
+                queues.compute as usize
+            } else {
+                0
+            };
+        if graphics_wanted > graphics_count.min(priorities.len()) {
+            return Err(RhiError::NoSuitableAdapter(vec![(
+                adapter.name().to_owned(),
+                vec!["enough graphics queues for the library"],
+            )]));
+        }
         let mut queue_infos = vec![
             vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(graphics_family)
-                .queue_priorities(&priority),
+                .queue_priorities(&priorities[..graphics_wanted]),
         ];
-        for family in [compute_family, transfer_family].into_iter().flatten() {
+        if let Some(family) = compute_family {
+            let count = 1 + compute_extra as usize;
+            if count > (families[family as usize].queue_count as usize).min(priorities.len()) {
+                return Err(RhiError::NoSuitableAdapter(vec![(
+                    adapter.name().to_owned(),
+                    vec!["enough compute queues for the library"],
+                )]));
+            }
             queue_infos.push(
                 vk::DeviceQueueCreateInfo::default()
                     .queue_family_index(family)
-                    .queue_priorities(&priority),
+                    .queue_priorities(&priorities[..count]),
+            );
+        }
+        if let Some(family) = transfer_family {
+            queue_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(family)
+                    .queue_priorities(&priorities[..1]),
             );
         }
 
@@ -428,10 +502,15 @@ impl Device {
             }
         };
         let queue = |family: u32| Queue {
-            // SAFETY: each family was requested with one queue.
+            // SAFETY: each family was requested with at least one queue.
             raw: unsafe { raw.get_device_queue(family, 0) },
             family,
         };
+        let present = (graphics_queues > 1).then(|| Queue {
+            // SAFETY: the graphics family was requested with two queues.
+            raw: unsafe { raw.get_device_queue(graphics_family, 1) },
+            family: graphics_family,
+        });
         let diagnostics =
             crate::fault::Diagnostics::new(instance.raw(), &raw, adapter, &diagnostics_features);
         let ray_query = rays.then(|| {
@@ -445,6 +524,14 @@ impl Device {
             warm_up: std::sync::OnceLock::new(),
             warm_up_enabled: true,
             graphics: queue(graphics_family),
+            present,
+            extra_queue_start: ExtraQueueStart {
+                graphics: (graphics_family, graphics_queues as u32),
+                compute: match compute_family {
+                    Some(family) => (family, 1),
+                    None => (graphics_family, graphics_queues as u32 + queues.graphics),
+                },
+            },
             async_compute: compute_family.map(queue),
             transfer: transfer_family.map(queue),
             raw: Arc::new(raw),
@@ -465,6 +552,12 @@ impl Device {
     /// `VK_KHR_pipeline_executable_properties`.
     pub fn pipeline_statistics_enabled(&self) -> bool {
         self.pipeline_statistics
+    }
+
+    /// Where the extra queues of [`Self::with_extras`] start (the next index after the
+    /// engine's own when none were asked for).
+    pub fn extra_queue_start(&self) -> ExtraQueueStart {
+        self.extra_queue_start
     }
 
     /// Whether `name`, passed to [`Self::with_extensions`], was enabled.

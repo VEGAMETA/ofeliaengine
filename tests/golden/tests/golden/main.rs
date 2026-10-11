@@ -3,4 +3,5 @@
 
 mod aa_modes;
 mod flip_reference;
+mod framegen;
 mod golden;

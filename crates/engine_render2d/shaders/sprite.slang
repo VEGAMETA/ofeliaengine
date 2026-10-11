@@ -38,6 +38,9 @@ struct Push
     uint view_flags;
     float white;          // output value of white: 1, or SDR white in scRGB units for HDR
                           // output (ADR 0038); 1 for multiplied quads (factors, not light)
+    uint depth_texture;   // fragmentDepthTested: the scene's depth, a bindless index
+    float2 depth_scale;   // target pixel → depth texel (the render size over the output's)
+    float depth_bias;     // a fragment is hidden when deeper than the scene by more
     uint _pad;
 };
 
@@ -143,8 +146,7 @@ float sd_round_box(float2 p, float2 b, float4 r)
     return min(max(q.x, q.y), 0.0) + length(max(q, 0.0)) - radius;
 }
 
-[shader("fragment")]
-float4 fragmentMain(VertexOut input) : SV_Target0
+float4 shade(VertexOut input)
 {
     float4 color = input.color;
     // World units per pixel, rotation invariant; `local` is affine, so its derivatives
@@ -170,4 +172,25 @@ float4 fragmentMain(VertexOut input) : SV_Target0
     }
     float alpha = (input.flags & FLAG_ADDITIVE) != 0 ? 0.0 : color.a;
     return float4(color.rgb * (color.a * push.white), alpha);
+}
+
+[shader("fragment")]
+float4 fragmentMain(VertexOut input) : SV_Target0
+{
+    return shade(input);
+}
+
+// UI placed in the scene (ADR 0091): hidden where the scene drew something in front of it.
+// The scene's depth runs from 0 at the near plane to 1 at the far plane, at the render size;
+// the canvas is drawn with the same projection, so their depths compare.
+[shader("fragment")]
+float4 fragmentDepthTested(VertexOut input) : SV_Target0
+{
+    int2 texel = int2(input.position.xy * push.depth_scale);
+    float scene = g_textures[NonUniformResourceIndex(push.depth_texture)].Load(int3(texel, 0)).r;
+    if (input.position.z > scene + push.depth_bias)
+    {
+        discard;
+    }
+    return shade(input);
 }

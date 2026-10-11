@@ -32,16 +32,21 @@
 
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod framegen;
 #[cfg(windows)]
 mod loader;
 mod sl;
+
+pub use framegen::{
+    DlssFrameGeneration, GenerationCamera, GenerationInput, GenerationState, StreamlineLatency,
+};
 
 use core::ffi::{CStr, c_char, c_void};
 use core::fmt;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use engine_render::graph::{Access, FrameGraph, ShaderStages, Texture, TextureDesc};
 use engine_rhi::ash::vk;
-use engine_rhi::{Adapter, Device, Instance, RhiError};
+use engine_rhi::{Adapter, Device, ExtraQueues, Instance, RhiError, VulkanHooks};
 use engine_upscale::{Quality, UpscaleError, UpscaleInput, UpscalerKind};
 use std::ffi::CString;
 use std::path::PathBuf;
@@ -85,6 +90,13 @@ pub struct StreamlineDesc {
     pub log: StreamlineLog,
     /// A folder for Streamline's log file; `None` writes no file.
     pub log_dir: Option<PathBuf>,
+    /// Load DLSS frame generation too (ADR 0091), with Reflex and the PC latency markers it
+    /// requires, when their DLLs are there ([`Streamline::frame_generation`] says whether
+    /// they loaded). Streamline then takes over presentation: the surface and the
+    /// swapchain go through its hooks ([`Streamline::vulkan_hooks`]), and the device has
+    /// its queues ([`Streamline::extra_queues`]). Decide it before the device, for the
+    /// whole session.
+    pub frame_generation: bool,
 }
 
 impl Default for StreamlineDesc {
@@ -96,6 +108,7 @@ impl Default for StreamlineDesc {
             application_id: 0,
             log: StreamlineLog::Default,
             log_dir: None,
+            frame_generation: false,
         }
     }
 }
@@ -294,7 +307,21 @@ struct Functions {
     evaluate_feature: sl::PfnEvaluateFeature,
     free_resources: sl::PfnFreeResources,
     get_feature_function: sl::PfnGetFeatureFunction,
+    set_tag_for_frame: sl::PfnSetTagForFrame,
+    set_feature_loaded: sl::PfnSetFeatureLoaded,
+    get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
     get_device_proc_addr: vk::PFN_vkGetDeviceProcAddr,
+}
+
+/// The functions of DLSS frame generation, Reflex and the PC latency markers
+/// (`sl_dlss_g.h`, `sl_reflex.h`, `sl_pcl.h`), once a device is attached.
+#[derive(Clone, Copy)]
+pub(crate) struct FrameGenerationFunctions {
+    pub(crate) set_options: sl::PfnDlssgSetOptions,
+    pub(crate) get_state: sl::PfnDlssgGetState,
+    pub(crate) reflex_set_options: sl::PfnReflexSetOptions,
+    pub(crate) reflex_sleep: sl::PfnReflexSleep,
+    pub(crate) pcl_set_marker: sl::PfnPclSetMarker,
 }
 
 /// The DLSS plugin's functions (`sl_dlss.h`), available once a device is attached.
@@ -332,6 +359,9 @@ fn load_functions(file: &std::path::Path) -> Result<Functions, DlssError> {
         evaluate_feature: get!(c"slEvaluateFeature", sl::PfnEvaluateFeature),
         free_resources: get!(c"slFreeResources", sl::PfnFreeResources),
         get_feature_function: get!(c"slGetFeatureFunction", sl::PfnGetFeatureFunction),
+        set_tag_for_frame: get!(c"slSetTagForFrame", sl::PfnSetTagForFrame),
+        set_feature_loaded: get!(c"slSetFeatureLoaded", sl::PfnSetFeatureLoaded),
+        get_instance_proc_addr: get!(c"vkGetInstanceProcAddr", vk::PFN_vkGetInstanceProcAddr),
         get_device_proc_addr: get!(c"vkGetDeviceProcAddr", vk::PFN_vkGetDeviceProcAddr),
     })
 }
@@ -354,11 +384,20 @@ const ENGINE_FEATURES: [&str; 8] = [
 /// (`VUID-VkDeviceCreateInfo-pNext-04748`). NGX works with the core feature.
 const EXT_BUFFER_DEVICE_ADDRESS: &CStr = c"VK_EXT_buffer_device_address";
 
+/// `VK_NV_optical_flow`: frame generation's native optical flow needs a queue of its own
+/// family and the extension's feature; the engine leaves it out, and Streamline runs the
+/// optical flow in its "interop" mode instead (Streamline's manual hooking guide §5.2).
+const EXT_OPTICAL_FLOW: &CStr = c"VK_NV_optical_flow";
+
 struct Shared {
     functions: Functions,
     dir: PathBuf,
     instance_extensions: Vec<CString>,
     device_extensions: Vec<CString>,
+    /// DLSS frame generation, Reflex and PCL were loaded ([`StreamlineDesc::frame_generation`]).
+    frame_generation: bool,
+    /// The queues frame generation creates itself, after the engine's.
+    extra_queues: ExtraQueues,
     /// Set by [`Streamline::attach`].
     attached: OnceLock<Attached>,
 }
@@ -366,6 +405,9 @@ struct Shared {
 struct Attached {
     dlss: DlssFunctions,
     present: Option<vk::PFN_vkQueuePresentKHR>,
+    /// Frame generation's functions, or the call that refused it and its `sl::Result`
+    /// (`None` when it was not loaded).
+    frame_generation: Option<Result<FrameGenerationFunctions, (&'static str, i32)>>,
 }
 
 impl Drop for Shared {
@@ -446,7 +488,22 @@ impl Streamline {
         let plugin_dir = loader::wide(&dir);
         let plugin_dirs = [plugin_dir.as_ptr()];
         let log_dir = desc.log_dir.as_deref().map(loader::wide);
-        let features = [sl::FEATURE_DLSS];
+        // Frame generation when asked for and its DLLs are there; it needs Reflex and PCL.
+        let frame_generation = desc.frame_generation
+            && loader::FRAME_GENERATION_FILES
+                .iter()
+                .all(|f| dir.join(f).is_file());
+        let all_features = [
+            sl::FEATURE_DLSS,
+            sl::FEATURE_DLSS_G,
+            sl::FEATURE_REFLEX,
+            sl::FEATURE_PCL,
+        ];
+        let features: &[sl::Feature] = if frame_generation {
+            &all_features
+        } else {
+            &all_features[..1]
+        };
         let project_id = CString::new(desc.project_id.replace('\0', "")).unwrap_or_default();
         let mut preferences = sl::Preferences::new();
         preferences.log_level = match desc.log {
@@ -466,7 +523,7 @@ impl Streamline {
             | sl::PREFERENCE_USE_MANUAL_HOOKING
             | sl::PREFERENCE_FRAME_BASED_TAGGING;
         preferences.features_to_load = features.as_ptr();
-        preferences.num_features_to_load = 1;
+        preferences.num_features_to_load = features.len() as u32;
         preferences.application_id = desc.application_id;
         preferences.engine = sl::ENGINE_CUSTOM;
         preferences.engine_version = c"ofeliaengine 0.0".as_ptr();
@@ -487,32 +544,10 @@ impl Streamline {
             dir,
             instance_extensions: Vec::new(),
             device_extensions: Vec::new(),
+            frame_generation,
+            extra_queues: ExtraQueues::default(),
             attached: OnceLock::new(),
         };
-
-        let mut requirements = sl::FeatureRequirements::new();
-        // SAFETY: Streamline is initialized; `requirements` is a version-2 structure.
-        let result =
-            unsafe { (functions.get_feature_requirements)(sl::FEATURE_DLSS, &mut requirements) };
-        if result != sl::OK {
-            return Err(DlssError::Streamline {
-                call: "slGetFeatureRequirements",
-                result,
-            });
-        }
-        if requirements.flags & sl::REQUIREMENT_VULKAN == 0 {
-            return Err(DlssError::MissingRequirement(String::from(
-                "a Streamline DLSS plugin with Vulkan support",
-            )));
-        }
-        if requirements.vk_num_graphics_queues_required > 0
-            || requirements.vk_num_compute_queues_required > 0
-            || requirements.vk_num_optical_flow_queues_required > 0
-        {
-            return Err(DlssError::MissingRequirement(String::from(
-                "extra queues (the engine creates one per family)",
-            )));
-        }
         let strings = |count: u32, list: *const *const c_char| -> Vec<CString> {
             if list.is_null() {
                 return Vec::new();
@@ -525,34 +560,154 @@ impl Streamline {
                 })
                 .collect()
         };
-        shared.instance_extensions = strings(
-            requirements.vk_num_instance_extensions,
-            requirements.vk_instance_extensions,
-        );
-        shared.device_extensions = strings(
-            requirements.vk_num_device_extensions,
-            requirements.vk_device_extensions,
-        )
-        .into_iter()
-        .filter(|e| e.as_c_str() != EXT_BUFFER_DEVICE_ADDRESS)
-        .collect();
-        for feature in strings(requirements.vk_num_features12, requirements.vk_features12)
-            .into_iter()
-            .chain(strings(
-                requirements.vk_num_features13,
-                requirements.vk_features13,
-            ))
-        {
-            let name = feature.to_string_lossy();
-            if !ENGINE_FEATURES.contains(&name.as_ref()) {
-                return Err(DlssError::MissingRequirement(format!(
-                    "the Vulkan feature {name}"
+        for &feature in features {
+            let mut requirements = sl::FeatureRequirements::new();
+            // SAFETY: Streamline is initialized; `requirements` is a version-2 structure.
+            let result =
+                unsafe { (functions.get_feature_requirements)(feature, &mut requirements) };
+            if result != sl::OK {
+                return Err(DlssError::Streamline {
+                    call: "slGetFeatureRequirements",
+                    result,
+                });
+            }
+            if requirements.flags & sl::REQUIREMENT_VULKAN == 0 {
+                return Err(DlssError::MissingRequirement(String::from(
+                    "a Streamline plugin with Vulkan support",
                 )));
+            }
+            if feature == sl::FEATURE_DLSS
+                && (requirements.vk_num_graphics_queues_required > 0
+                    || requirements.vk_num_compute_queues_required > 0)
+            {
+                return Err(DlssError::MissingRequirement(String::from(
+                    "extra queues for DLSS Super Resolution",
+                )));
+            }
+            // Frame generation's own queues (its optical flow runs on the compute queues:
+            // no native optical flow queue is created, Streamline's "interop" mode).
+            shared.extra_queues.graphics += requirements.vk_num_graphics_queues_required;
+            shared.extra_queues.compute += requirements.vk_num_compute_queues_required;
+            for name in strings(
+                requirements.vk_num_instance_extensions,
+                requirements.vk_instance_extensions,
+            ) {
+                if !shared.instance_extensions.contains(&name) {
+                    shared.instance_extensions.push(name);
+                }
+            }
+            for name in strings(
+                requirements.vk_num_device_extensions,
+                requirements.vk_device_extensions,
+            ) {
+                if name.as_c_str() != EXT_BUFFER_DEVICE_ADDRESS
+                    && name.as_c_str() != EXT_OPTICAL_FLOW
+                    && !shared.device_extensions.contains(&name)
+                {
+                    shared.device_extensions.push(name);
+                }
+            }
+            for name in strings(requirements.vk_num_features12, requirements.vk_features12)
+                .into_iter()
+                .chain(strings(
+                    requirements.vk_num_features13,
+                    requirements.vk_features13,
+                ))
+            {
+                let name = name.to_string_lossy();
+                if !ENGINE_FEATURES.contains(&name.as_ref()) {
+                    return Err(DlssError::MissingRequirement(format!(
+                        "the Vulkan feature {name}"
+                    )));
+                }
             }
         }
         Ok(Self {
             shared: Arc::new(shared),
         })
+    }
+
+    /// Whether DLSS frame generation, Reflex and the PC latency markers were loaded
+    /// ([`StreamlineDesc::frame_generation`] and their DLLs). Whether it runs on the
+    /// device is [`Self::frame_generation_supported`].
+    pub fn frame_generation(&self) -> bool {
+        self.shared.frame_generation
+    }
+
+    /// The queues frame generation asks for besides the engine's: create the device with
+    /// them (`Device::with_extras`).
+    pub fn extra_queues(&self) -> ExtraQueues {
+        self.shared.extra_queues
+    }
+
+    /// The interposer's lookups, for the surface and the swapchain
+    /// (`Surface::from_win32_hooked`, `Swapchain::new_hooked`) when frame generation is
+    /// loaded: Streamline then presents.
+    pub fn vulkan_hooks(&self) -> VulkanHooks {
+        VulkanHooks {
+            get_instance_proc_addr: self.shared.functions.get_instance_proc_addr,
+        }
+    }
+
+    /// Whether frame generation runs on the attached device (after [`Self::attach`]).
+    pub fn frame_generation_supported(&self) -> bool {
+        self.frame_generation_functions().is_some()
+    }
+
+    /// Why frame generation does not run on the attached device: the Streamline call
+    /// that refused it and its result (for instance `eErrorOSDisabledHWS`: Windows'
+    /// hardware-accelerated GPU scheduling is off, which DLSS frame generation needs).
+    /// `None` when it runs, or was not loaded.
+    pub fn frame_generation_error(&self) -> Option<DlssError> {
+        match self.shared.attached.get()?.frame_generation? {
+            Ok(_) => None,
+            Err((call, result)) => Some(DlssError::Streamline { call, result }),
+        }
+    }
+
+    pub(crate) fn frame_generation_functions(&self) -> Option<FrameGenerationFunctions> {
+        self.shared
+            .attached
+            .get()
+            .and_then(|a| a.frame_generation)
+            .and_then(Result::ok)
+    }
+
+    pub(crate) fn core_functions(
+        &self,
+    ) -> (
+        sl::PfnGetNewFrameToken,
+        sl::PfnSetConstants,
+        sl::PfnSetTagForFrame,
+        sl::PfnFreeResources,
+    ) {
+        let f = &self.shared.functions;
+        (
+            f.get_new_frame_token,
+            f.set_constants,
+            f.set_tag_for_frame,
+            f.free_resources,
+        )
+    }
+
+    /// Loads or unloads DLSS frame generation (`slSetFeatureLoaded`): a swapchain created
+    /// while it is loaded goes through it (it copies every frame, even with frame
+    /// generation off). Unload it and recreate the swapchain when the player turns frame
+    /// generation off for good (DLSS-FG guide §18).
+    pub fn set_frame_generation_loaded(&self, loaded: bool) -> Result<(), DlssError> {
+        if !self.shared.frame_generation {
+            return Ok(());
+        }
+        // SAFETY: Streamline is initialized with the feature requested.
+        let result =
+            unsafe { (self.shared.functions.set_feature_loaded)(sl::FEATURE_DLSS_G, loaded) };
+        if result != sl::OK {
+            return Err(DlssError::Streamline {
+                call: "slSetFeatureLoaded",
+                result,
+            });
+        }
+        Ok(())
     }
 
     /// The folder the DLLs were loaded from.
@@ -659,13 +814,13 @@ impl Streamline {
         info.device = vk::Handle::as_raw(device.raw().handle()) as *mut c_void;
         info.instance = vk::Handle::as_raw(device.instance_raw().handle()) as *mut c_void;
         info.physical_device = vk::Handle::as_raw(device.physical()) as *mut c_void;
-        // Streamline's own queues would start after the engine's (one per family); DLSS
-        // Super Resolution asks for none (checked in `load`).
-        info.graphics_queue_family = device.graphics.family;
-        info.graphics_queue_index = 1;
-        let compute = device.async_compute.unwrap_or(device.graphics);
-        info.compute_queue_family = compute.family;
-        info.compute_queue_index = 1;
+        // Streamline's own queues start after the engine's (`Device::with_extras` created
+        // them for frame generation; DLSS Super Resolution asks for none).
+        let start = device.extra_queue_start();
+        info.graphics_queue_family = start.graphics.0;
+        info.graphics_queue_index = start.graphics.1;
+        info.compute_queue_family = start.compute.0;
+        info.compute_queue_index = start.compute.1;
         // SAFETY: Streamline is initialized; the handles are the engine's live instance,
         // physical device and device, created after `slInit`.
         let result = unsafe { (functions.set_vulkan_info)(&info) };
@@ -726,8 +881,72 @@ impl Streamline {
                 core::mem::transmute::<unsafe extern "system" fn(), vk::PFN_vkQueuePresentKHR>(f)
             }
         });
-        let _ = self.shared.attached.set(Attached { dlss, present });
+        let frame_generation = self
+            .shared
+            .frame_generation
+            .then(|| self.frame_generation_on(device));
+        let _ = self.shared.attached.set(Attached {
+            dlss,
+            present,
+            frame_generation,
+        });
         Ok(())
+    }
+
+    /// Frame generation's functions when it runs on `device` (Streamline says so after the
+    /// device is set), or the call that refused it.
+    fn frame_generation_on(
+        &self,
+        device: &Device,
+    ) -> Result<FrameGenerationFunctions, (&'static str, i32)> {
+        let functions = &self.shared.functions;
+        let mut info = sl::AdapterInfo::new();
+        info.vk_physical_device = vk::Handle::as_raw(device.physical()) as *mut c_void;
+        for feature in [sl::FEATURE_DLSS_G, sl::FEATURE_REFLEX, sl::FEATURE_PCL] {
+            // SAFETY: Streamline is initialized and has the device; `info` outlives the call.
+            let result = unsafe { (functions.is_feature_supported)(feature, &info) };
+            if result != sl::OK {
+                return Err(("slIsFeatureSupported", result));
+            }
+        }
+        let function = |feature: sl::Feature,
+                        name: &'static CStr|
+         -> Result<*mut c_void, (&'static str, i32)> {
+            let mut f = core::ptr::null_mut();
+            // SAFETY: the device is set; `name` is NUL-terminated.
+            let result =
+                unsafe { (functions.get_feature_function)(feature, name.as_ptr(), &mut f) };
+            if result == sl::OK && !f.is_null() {
+                Ok(f)
+            } else {
+                Err(("slGetFeatureFunction", result))
+            }
+        };
+        // SAFETY: the plugins' functions of these names have these signatures
+        // (`sl_dlss_g.h`, `sl_reflex.h`, `sl_pcl.h`).
+        unsafe {
+            Ok(FrameGenerationFunctions {
+                set_options: core::mem::transmute::<*mut c_void, sl::PfnDlssgSetOptions>(function(
+                    sl::FEATURE_DLSS_G,
+                    c"slDLSSGSetOptions",
+                )?),
+                get_state: core::mem::transmute::<*mut c_void, sl::PfnDlssgGetState>(function(
+                    sl::FEATURE_DLSS_G,
+                    c"slDLSSGGetState",
+                )?),
+                reflex_set_options: core::mem::transmute::<*mut c_void, sl::PfnReflexSetOptions>(
+                    function(sl::FEATURE_REFLEX, c"slReflexSetOptions")?,
+                ),
+                reflex_sleep: core::mem::transmute::<*mut c_void, sl::PfnReflexSleep>(function(
+                    sl::FEATURE_REFLEX,
+                    c"slReflexSleep",
+                )?),
+                pcl_set_marker: core::mem::transmute::<*mut c_void, sl::PfnPclSetMarker>(function(
+                    sl::FEATURE_PCL,
+                    c"slPCLSetMarker",
+                )?),
+            })
+        }
     }
 
     /// Streamline's `vkQueuePresentKHR` (after [`Self::attach`]), for

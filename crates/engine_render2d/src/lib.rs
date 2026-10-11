@@ -37,6 +37,6 @@ mod text;
 mod view;
 
 pub use canvas::{Blend2d, Canvas, CanvasStats, ClipRect, MAX_CLIPS, Order, Quad, Shape};
-pub use renderer::{QuadMode, Render2dError, Renderer2d};
+pub use renderer::{QuadMode, Render2dError, Renderer2d, SceneDepth};
 pub use text::{GlyphTexture, TextColor, draw_glyphs, draw_text};
 pub use view::{Camera2d, View2d};

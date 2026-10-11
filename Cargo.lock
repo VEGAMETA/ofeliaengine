@@ -314,6 +314,7 @@ version = "0.0.0"
 dependencies = [
  "engine_core",
  "engine_fsr",
+ "engine_latency",
  "engine_profiler",
  "engine_render",
  "engine_rhi",
@@ -370,6 +371,7 @@ dependencies = [
  "engine_fsr",
  "engine_profiler",
  "engine_render",
+ "engine_render2d",
  "engine_rhi",
  "engine_upscale",
 ]
@@ -398,6 +400,7 @@ dependencies = [
  "engine_ecs",
  "engine_frame",
  "engine_render",
+ "engine_render2d",
  "engine_rhi",
  "engine_runtime",
  "engine_streaming",
@@ -417,6 +420,7 @@ dependencies = [
 name = "engine_latency"
 version = "0.0.0"
 dependencies = [
+ "engine_core",
  "engine_platform",
  "engine_profiler",
  "engine_rhi",
@@ -571,12 +575,15 @@ dependencies = [
  "engine_anim",
  "engine_assets",
  "engine_core",
+ "engine_dlss",
  "engine_ecs",
  "engine_frame",
+ "engine_latency",
  "engine_physics",
  "engine_platform",
  "engine_profiler",
  "engine_render",
+ "engine_render2d",
  "engine_rhi",
  "engine_streaming",
 ]

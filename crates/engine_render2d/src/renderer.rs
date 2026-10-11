@@ -2,7 +2,7 @@
 
 use crate::canvas::{Canvas, Instance, PIPELINE_MULTIPLY};
 use crate::view::View2d;
-use engine_render::graph::{FrameGraph, LoadOp, StoreOp, Texture};
+use engine_render::graph::{Access, FrameGraph, LoadOp, ShaderStages, StoreOp, Texture};
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -14,6 +14,7 @@ const VERTEX_INDEXED: &[u8] = include_bytes!("../shaders/sprite.vertexIndexed.sp
 const VERTEX_LIST: &[u8] = include_bytes!("../shaders/sprite.vertexList.spv");
 const VERTEX_INSTANCED: &[u8] = include_bytes!("../shaders/sprite.vertexInstanced.spv");
 const FRAGMENT: &[u8] = include_bytes!("../shaders/sprite.fragmentMain.spv");
+const FRAGMENT_DEPTH_TESTED: &[u8] = include_bytes!("../shaders/sprite.fragmentDepthTested.spv");
 
 /// How quads become vertices. [`QuadMode::for_vendor`] picks the fastest measured one for
 /// a GPU vendor (ADR 0015).
@@ -50,7 +51,7 @@ impl QuadMode {
 /// longer batches are split (a draw call per 16384 quads).
 const QUADS_PER_DRAW: u32 = 16_384;
 
-/// `Push` in `shaders/sprite.slang` (96 bytes).
+/// `Push` in `shaders/sprite.slang` (112 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct Push {
@@ -60,10 +61,13 @@ struct Push {
     aa_expand: f32,
     view_flags: u32,
     white: f32,
+    depth_texture: u32,
+    depth_scale: [f32; 2],
+    depth_bias: f32,
     _pad: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<Push>() == 96);
+const _: () = assert!(core::mem::size_of::<Push>() == 112);
 
 impl Push {
     fn bytes(&self) -> &[u8] {
@@ -104,10 +108,26 @@ impl core::fmt::Display for Render2dError {
 
 impl std::error::Error for Render2dError {}
 
+/// The scene's depth a canvas placed in the scene is tested against
+/// ([`Renderer2d::add_depth_tested_pass`], ADR 0091).
+#[derive(Debug, Clone, Copy)]
+pub struct SceneDepth {
+    /// The depth, 0 at the near plane and 1 at the far plane (sampled).
+    pub texture: Texture,
+    /// The depth texture's size over the target's, per axis (the render size over the
+    /// output's).
+    pub scale: [f32; 2],
+    /// A fragment is hidden when it is deeper than the scene by more than this (in depth
+    /// units: a little, so that a panel flush with a wall stays visible).
+    pub bias: f32,
+}
+
 /// Draws canvases into one color format.
 pub struct Renderer2d {
     /// Indexed by the batch pipeline selector.
     pipelines: [Pipeline; 2],
+    /// The same, testing against the scene's depth ([`Renderer2d::with_depth_test`]).
+    depth_tested: Option<[Pipeline; 2]>,
     mode: QuadMode,
     index_buffer: vk::Buffer,
     index_allocation: Option<Allocation>,
@@ -132,6 +152,30 @@ impl Renderer2d {
         color_format: vk::Format,
         mode: QuadMode,
     ) -> Result<Self, RhiError> {
+        Self::create(device, allocator, bindless, color_format, mode, false)
+    }
+
+    /// [`Self::new`], also with the pipelines that test against the scene's depth, for
+    /// canvases placed in the scene ([`Self::add_depth_tested_pass`], ADR 0091). Their own
+    /// fragment entry point: the others pay nothing for it.
+    pub fn with_depth_test(
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        mode: QuadMode,
+    ) -> Result<Self, RhiError> {
+        Self::create(device, allocator, bindless, color_format, mode, true)
+    }
+
+    fn create(
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        mode: QuadMode,
+        depth_test: bool,
+    ) -> Result<Self, RhiError> {
         let invalid = || RhiError::Vulkan {
             call: "embedded SPIR-V",
             result: vk::Result::ERROR_INVALID_SHADER_NV,
@@ -144,7 +188,7 @@ impl Renderer2d {
         let vertex = spirv_words(vertex_spirv).ok_or_else(invalid)?;
         let fragment = spirv_words(FRAGMENT).ok_or_else(invalid)?;
         let formats = [color_format];
-        let pipeline = |blend| {
+        let pipeline = |blend, fragment: &[u32], entry: &core::ffi::CStr| {
             Pipeline::graphics(
                 device,
                 bindless.pipeline_layout(),
@@ -160,15 +204,27 @@ impl Renderer2d {
                             entry: vertex_entry,
                         },
                         Some(ShaderStageDesc {
-                            spirv: &fragment,
-                            entry: c"fragmentMain",
+                            spirv: fragment,
+                            entry,
                         }),
                     )
                 },
             )
         };
-        let pipelines = [pipeline(Blend::Premultiplied)?, pipeline(Blend::Multiply)?];
+        let pipelines = [
+            pipeline(Blend::Premultiplied, &fragment, c"fragmentMain")?,
+            pipeline(Blend::Multiply, &fragment, c"fragmentMain")?,
+        ];
         debug_assert_eq!(PIPELINE_MULTIPLY, 1);
+        let depth_tested = if depth_test {
+            let fragment = spirv_words(FRAGMENT_DEPTH_TESTED).ok_or_else(invalid)?;
+            Some([
+                pipeline(Blend::Premultiplied, &fragment, c"fragmentDepthTested")?,
+                pipeline(Blend::Multiply, &fragment, c"fragmentDepthTested")?,
+            ])
+        } else {
+            None
+        };
 
         let (index_buffer, index_allocation) = if mode == QuadMode::Indexed {
             let indices = QUADS_PER_DRAW as usize * 6;
@@ -193,6 +249,7 @@ impl Renderer2d {
         };
         Ok(Self {
             pipelines,
+            depth_tested,
             mode,
             index_buffer,
             index_allocation,
@@ -233,6 +290,39 @@ impl Renderer2d {
         target: Texture,
         clear: Option<[f32; 4]>,
     ) -> Result<(), Render2dError> {
+        self.declare(fg, ring, bindless, canvas, view, target, clear, None)
+    }
+
+    /// [`Self::add_pass`] for a canvas placed in the scene (a panel in the world, a
+    /// helmet's visor): `view` is the scene camera's projection times the canvas's place,
+    /// and each fragment the scene drew something in front of is hidden. Needs
+    /// [`Self::with_depth_test`] (else it draws untested).
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_depth_tested_pass<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        canvas: &'g Canvas,
+        view: &View2d,
+        target: Texture,
+        depth: SceneDepth,
+    ) -> Result<(), Render2dError> {
+        self.declare(fg, ring, bindless, canvas, view, target, None, Some(depth))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn declare<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        canvas: &'g Canvas,
+        view: &View2d,
+        target: Texture,
+        clear: Option<[f32; 4]>,
+        depth: Option<SceneDepth>,
+    ) -> Result<(), Render2dError> {
         engine_profiler::zone!("render2d::add_pass");
         if !canvas.is_prepared() {
             return Err(Render2dError::NotPrepared);
@@ -254,27 +344,40 @@ impl Renderer2d {
             view_flags |= VIEW_INDIRECT;
         }
         let white = self.white;
-        let push = Push {
+        let mut push = Push {
             clip_from_world: view.clip_from_world.to_cols_array(),
             instances: instances.address,
             order: order_address,
             aa_expand: view.units_per_pixel,
             view_flags,
             white,
+            depth_texture: 0,
+            depth_scale: depth.map_or([1.0; 2], |d| d.scale),
+            depth_bias: depth.map_or(0.0, |d| d.bias),
             _pad: 0,
         };
-        // Multiplied quads scale what is below them: factors, not light.
-        let multiply_push = Push { white: 1.0, ..push };
         let load = clear.map_or(LoadOp::Load, |[r, g, b, a]| {
             LoadOp::Clear([r * white, g * white, b * white, a])
         });
-        let (pipelines, mode, index_buffer) = (&self.pipelines, self.mode, self.index_buffer);
-        fg.add_pass("2d")
-            .color(target, load, StoreOp::Store)
+        let pipelines = match (depth, &self.depth_tested) {
+            (Some(_), Some(tested)) => tested,
+            _ => &self.pipelines,
+        };
+        let (mode, index_buffer) = (self.mode, self.index_buffer);
+        let mut pass = fg.add_pass(if depth.is_some() { "2d in scene" } else { "2d" });
+        if let Some(depth) = depth {
+            pass = pass.read(depth.texture, Access::Sampled(ShaderStages::FRAGMENT));
+        }
+        pass.color(target, load, StoreOp::Store)
             .execute(move |ctx| {
                 if canvas.is_empty() {
                     return;
                 }
+                if let Some(depth) = depth {
+                    push.depth_texture = ctx.sampled_index(depth.texture).unwrap_or(0);
+                }
+                // Multiplied quads scale what is below them: factors, not light.
+                let multiply_push = Push { white: 1.0, ..push };
                 let area = ctx.render_area();
                 let device = ctx.device;
                 let cmd = ctx.cmd;

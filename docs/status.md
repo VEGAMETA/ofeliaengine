@@ -4,7 +4,7 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-10.
+Last updated: 2026-10-12.
 
 ## 1. What matters most
 
@@ -72,6 +72,7 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 | Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
 | Global illumination (**Echo GI**, the working name; the code's `ProbeGi`): a volume of probes traced with ray queries, converged at load, then a ray budget per frame, read at a reduced resolution (Sponza at 1080p: 0.33 / 2.4 ms per frame on the RTX / iGPU); measured against AMD's Brixelizer GI, built from the SDK as the reference: 4.5 / 14 times less GPU time, 29 / 18 times less memory, a physical bounce where Brixelizer GI gives a fifth | done | ADRs 0088, 0089, 0090 |
 | Upscalers: TAAU, FSR 3.1, DLSS via Streamline (user-supplied DLLs) | done | ADRs 0060, 0063 |
+| **Frame generation**, off by default: FSR 3.1's interpolation built from the SDK and shown by the engine's paced present thread (exact spacing; 60 → 120 frames shown for +8.3 ms on the RTX), the UI handed over as a layer and drawn on every frame shown (screen, world and camera canvases, nothing to mark); DLSS FG through Streamline built, not yet run (ref-1's GPU scheduling) | done (DLSS FG to verify) | ADR 0091 |
 | Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/Catmull-Rom/Lanczos-3/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
 | Physics API on Jolt/Box2D: queries, characters, rollback | done | ADR 0066 |
@@ -83,7 +84,11 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 
 ## 4. In flight
 
-- Nothing.
+- **DLSS frame generation, to verify** (ADR 0091): built and unit-tested, never run.
+  Streamline refuses it on ref-1 (`eErrorOSDisabledHWS`): Windows' hardware-accelerated
+  GPU scheduling is off (`HwSchMode = 1`). Once the owner turns it on (a restart, and it
+  may shift the perf gate's baselines): `flight --fg dlss` on the RTX, its status, rates,
+  the clip-space convention (Direct3D's assumed) and the UI's composition.
 
 Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:
 ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 s), 0a (the
@@ -351,8 +356,15 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    turn of the budget; `ProbeGi::refresh` converges in ten frames); local lights at the
    rays' hits (night scenes); the moments' blend (a third of the cost) at a lower rate.
 3b. **Frame generation out of the box** (owner, 2026-10-11: "needed out of the box, DLSS FG
-   and FSR FG; the HUD fix on by default"; right after GI, off by default). Requirements
-   so far (`docs/research/frame-generation.md`, 2026-09-26) and the owner's:
+   and FSR FG; the HUD fix on by default"; right after GI, off by default). **Done
+   2026-10-12 (ADR 0091), but for running DLSS FG (§4).** FSR FG measured on both GPUs:
+   exact pacing, +half a real interval of latency, generated frames 3.6 times nearer the
+   truth than the real frame a display holds (FLIP), the HUD and the panels sharp on
+   them; the golden shot `sponza_fg`. Left for later: async compute for the
+   interpolation; `VK_EXT_present_timing` pacing on NVIDIA; why the Radeon commits
+   +850 MiB of driver memory with FG on (two 375 MiB mappings); DLSS FG's native optical
+   flow queue; never offering FSR FG on small iGPUs (49 ms at 1080p). The requirements
+   as they were set (`docs/research/frame-generation.md`, 2026-09-26) and the owner's:
    - **Both paths.** FSR 3.1 FG, built from the FidelityFX SDK's source (1.1.x has
      Vulkan frame interpolation and its swapchain), works on every GPU with nothing to
      install. DLSS FG through Streamline works on RTX GPUs with the user's DLLs
@@ -502,7 +514,7 @@ grown, divide and conquer); the old labels stay in parentheses.
   - XeSS;
   - Brixelizer GI (the reference, ADR 0090): its specular is not composited, and
     reflection probes captured in its views see only the sky. The SDK's problems were
-    reported to AMD on 2026-10-12 (the owner: for other developers), FidelityFX SDK
+    reported to AMD on 2026-10-11 (the owner: for other developers), FidelityFX SDK
     issues #202–#204; AMD dropped Brixelizer from the SDK's 2.x line, so no fix is
     expected. The driver bug under the holes (NoContraction lost when an undecorated twin
     exists; `engine_rhi`'s `contraction_repro` example) goes through AMD's Bug Report

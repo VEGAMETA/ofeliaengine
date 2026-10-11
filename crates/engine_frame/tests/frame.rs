@@ -2,11 +2,14 @@
 //! cut (no ghost of the previous view), the texture LOD bias the upscaler asks for is
 //! applied, settings changes start the history anew, an unavailable upscaler falls back
 //! to TAAU, and the previous color reaches the scene hook; and every feature and mode fits
-//! a main thread's 1 MiB stack; a streamed level fades in on screen.
+//! a main thread's 1 MiB stack; a streamed level fades in on screen. `framegen`: frame
+//! generation with the UI layer (ADR 0091).
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 mod common;
+#[path = "frame/framegen.rs"]
+mod framegen;
 
 use common::{Bed, camera};
 use engine_core::math::Vec3;

@@ -1,6 +1,7 @@
 //! Builds the effects the engine uses from the vendored FidelityFX SDK
-//! (third_party/FidelityFX-SDK, v1.1.4): the FSR 3.1 upscaler, Brixelizer and Brixelizer
-//! GI, with the Vulkan backend and the engine's interfaces (csrc/) as one static library,
+//! (third_party/FidelityFX-SDK, v1.1.4): the FSR 3.1 upscaler, frame interpolation and
+//! optical flow (ADR 0091), Brixelizer and Brixelizer GI, with the Vulkan backend and the
+//! engine's interfaces (csrc/) as one static library,
 //! against the vendored Vulkan headers (third_party/Vulkan-Headers). One library for all
 //! of them: the SDK's shader blob dispatcher compiles in the effects it is built with, and
 //! two builds would define the backend twice (ADR 0090). Nothing is linked from the Vulkan
@@ -78,12 +79,17 @@ fn main() {
         ffx.join("src/components/brixelizer/ffx_brixelizer.cpp"),
         ffx.join("src/components/brixelizer/ffx_brixelizer_raw.cpp"),
         ffx.join("src/components/brixelizergi/ffx_brixelizergi.cpp"),
+        ffx.join("src/components/frameinterpolation/ffx_frameinterpolation.cpp"),
+        ffx.join("src/components/opticalflow/ffx_opticalflow.cpp"),
         csrc.join("vulkan.cpp"),
         csrc.join("fsr.cpp"),
         csrc.join("brixelizer.cpp"),
+        csrc.join("framegen.cpp"),
         csrc.join("blobs_fsr3upscaler.cpp"),
         csrc.join("blobs_brixelizer.cpp"),
         csrc.join("blobs_brixelizergi.cpp"),
+        csrc.join("blobs_frameinterpolation.cpp"),
+        csrc.join("blobs_opticalflow.cpp"),
     ];
 
     let target = std::env::var("TARGET").unwrap_or_default();
@@ -105,6 +111,8 @@ fn main() {
         .define("FFX_FSR3UPSCALER", None)
         .define("FFX_BRIXELIZER", None)
         .define("FFX_BRIXELIZER_GI", None)
+        .define("FFX_FI", None)
+        .define("FFX_OF", None)
         // The SDK's own definitions (sdk/CMakeLists.txt).
         .define("_UNICODE", None)
         .define("UNICODE", None)
@@ -177,7 +185,7 @@ fn main() {
             if let Ok(mut f) = std::fs::File::create(dir.join("SOURCE.txt")) {
                 let _ = writeln!(
                     f,
-                    "FidelityFX SDK FSR 3.1 upscaler, Brixelizer, Brixelizer GI, Vulkan backend, engine interfaces; key {key}, target {target}"
+                    "FidelityFX SDK FSR 3.1 upscaler, frame interpolation, optical flow, Brixelizer, Brixelizer GI, Vulkan backend, engine interfaces; key {key}, target {target}"
                 );
             }
         }

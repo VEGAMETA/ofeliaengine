@@ -1,6 +1,6 @@
 [package]
 name = "engine_latency"
-description = "Input latency and frame pacing: NVIDIA Reflex (VK_NV_low_latency2), AMD Anti-Lag 2 (VK_AMD_anti_lag), and a generic limiter with present_wait, behind one interface."
+description = "Input latency and frame pacing: NVIDIA Reflex (VK_NV_low_latency2), AMD Anti-Lag 2 (VK_AMD_anti_lag), and a generic limiter with present_wait, behind one interface; the paced presenter of frame generation (ADR 0091)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,6 +13,8 @@ workspace = true
 [dependencies]
 # Feature unification of shared dependencies for build reuse (ADR 0077).
 engine_workspace_hack.workspace = true
+# The lock-free rings to and from the paced presenter's thread.
+engine_core.workspace = true
 engine_profiler.workspace = true
 engine_rhi.workspace = true
 

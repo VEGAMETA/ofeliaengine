@@ -160,6 +160,8 @@ pub(crate) enum Retired {
     Exposure(AutoExposure),
     History(HistoryImage),
     Reflections(ScreenSpaceReflections),
+    #[cfg(feature = "fsr")]
+    Interpolation(engine_fsr::FrameInterpolation),
 }
 
 /// One view's state across frames (UE's `FSceneViewState`): its temporal state (jitter,
@@ -186,6 +188,11 @@ pub struct View {
     pub(crate) post_history: Option<HistoryImage>,
     /// Screen-space reflections' history (ADR 0073), at the render size.
     pub(crate) reflections: Option<ScreenSpaceReflections>,
+    /// Frame generation's interpolation (ADR 0091): it keeps the previous frame.
+    #[cfg(feature = "fsr")]
+    pub(crate) interpolation: Option<engine_fsr::FrameInterpolation>,
+    /// The camera of the view's last frame: a generated frame's is half-way from it.
+    pub(crate) previous_camera: Option<crate::ViewCamera>,
     pub(crate) retired: Vec<(u64, Retired)>,
     pub(crate) resets: Resets,
     /// The next frame starts its history anew (a change found by `prepare`).
@@ -217,6 +224,9 @@ impl View {
             history: None,
             post_history: None,
             reflections: None,
+            #[cfg(feature = "fsr")]
+            interpolation: None,
+            previous_camera: None,
             retired: Vec::new(),
             resets: Resets::default(),
             reset_pending: false,
@@ -298,6 +308,12 @@ impl View {
         {
             self.retired.push((frame, what));
         }
+        #[cfg(feature = "fsr")]
+        if let Some(interpolation) = self.interpolation.take() {
+            self.retired
+                .push((frame, Retired::Interpolation(interpolation)));
+        }
+        self.previous_camera = None;
         self.collect(allocator, bindless, None);
         self.prepared = None;
     }
@@ -322,6 +338,8 @@ unsafe fn free(
             Retired::Exposure(mut exposure) => exposure.destroy(allocator),
             Retired::History(image) => image.destroy(device, allocator, bindless, frame),
             Retired::Reflections(mut ssr) => ssr.destroy(allocator, bindless),
+            #[cfg(feature = "fsr")]
+            Retired::Interpolation(mut interpolation) => interpolation.destroy(),
         }
     }
 }

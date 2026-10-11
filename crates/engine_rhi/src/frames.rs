@@ -172,11 +172,37 @@ impl Frames {
         signal: Option<vk::Semaphore>,
         present_id: Option<u64>,
     ) -> Result<(), RhiError> {
+        self.submit_waiting(queue, frame, waits_for_image, None, signal, present_id)
+    }
+
+    /// Like [`Frames::submit_tagged`], also waiting before any of its work until the
+    /// timeline semaphore `wait.0` reaches `wait.1` (a paced presenter's copies of the
+    /// images this frame draws into, ADR 0091).
+    pub fn submit_waiting(
+        &mut self,
+        queue: Queue,
+        frame: Frame,
+        waits_for_image: bool,
+        wait: Option<(vk::Semaphore, u64)>,
+        signal: Option<vk::Semaphore>,
+        present_id: Option<u64>,
+    ) -> Result<(), RhiError> {
         engine_profiler::zone!("rhi::Frames::submit");
         let value = self.submitted + 1;
-        let waits = [vk::SemaphoreSubmitInfo::default()
-            .semaphore(frame.image_available)
-            .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT)];
+        let mut waits = [
+            vk::SemaphoreSubmitInfo::default()
+                .semaphore(frame.image_available)
+                .stage_mask(vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT),
+            vk::SemaphoreSubmitInfo::default().stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS),
+        ];
+        let mut wait_count = 0;
+        if waits_for_image {
+            wait_count = 1;
+        }
+        if let Some((semaphore, at)) = wait {
+            waits[wait_count] = waits[1].semaphore(semaphore).value(at);
+            wait_count += 1;
+        }
         let mut signals = [
             vk::SemaphoreSubmitInfo::default()
                 .semaphore(self.timeline)
@@ -195,7 +221,7 @@ impl Frames {
         let mut latency =
             vk::LatencySubmissionPresentIdNV::default().present_id(present_id.unwrap_or(0));
         let mut submit = vk::SubmitInfo2::default()
-            .wait_semaphore_infos(if waits_for_image { &waits } else { &[] })
+            .wait_semaphore_infos(&waits[..wait_count])
             .command_buffer_infos(&commands)
             .signal_semaphore_infos(&signals[..signal_count]);
         if present_id.is_some() {
@@ -226,6 +252,12 @@ impl Frames {
     /// Frames submitted so far.
     pub fn submitted(&self) -> u64 {
         self.submitted
+    }
+
+    /// The timeline semaphore that reaches frame `n`'s number when its work is done: another
+    /// thread can wait for a frame with it (a paced presenter, ADR 0091).
+    pub fn timeline(&self) -> vk::Semaphore {
+        self.timeline
     }
 
     /// Waits until frame `number` (counted like [`Frames::submitted`], from 1) has

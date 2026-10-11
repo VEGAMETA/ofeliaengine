@@ -7,6 +7,67 @@ use ash::{ext, khr, vk};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+/// Vulkan functions looked up through a library that intercepts some of them: the surface
+/// and swapchain functions of Streamline's interposer for DLSS frame generation (ADR
+/// 0091), which takes over presentation. Every other call goes to the driver as usual.
+#[derive(Clone, Copy)]
+pub struct VulkanHooks {
+    /// The library's `vkGetInstanceProcAddr`.
+    pub get_instance_proc_addr: vk::PFN_vkGetInstanceProcAddr,
+}
+
+impl core::fmt::Debug for VulkanHooks {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VulkanHooks").finish_non_exhaustive()
+    }
+}
+
+impl VulkanHooks {
+    fn static_fn(&self) -> ash::StaticFn {
+        ash::StaticFn {
+            get_instance_proc_addr: self.get_instance_proc_addr,
+        }
+    }
+
+    /// An entry whose lookups go through the hook.
+    fn entry(&self) -> ash::Entry {
+        // SAFETY: the hook behaves as the loader's `vkGetInstanceProcAddr` (it forwards
+        // what it does not intercept).
+        unsafe { ash::Entry::from_static_fn(self.static_fn()) }
+    }
+
+    /// `instance`'s functions, looked up through the hook (device-level ones too: its
+    /// `vkGetDeviceProcAddr` is the hook's).
+    fn instance(&self, instance: vk::Instance) -> ash::Instance {
+        // SAFETY: as above; `instance` is alive.
+        unsafe { ash::Instance::load(&self.static_fn(), instance) }
+    }
+
+    /// `vkDeviceWaitIdle` through the hook: the library drains its own queues too.
+    pub fn device_wait_idle(&self, device: &Device) -> Result<(), RhiError> {
+        let instance = self.instance(device.instance_raw().handle());
+        // SAFETY: looking up a core function of a live device.
+        let f = unsafe {
+            instance.get_device_proc_addr(device.raw().handle(), c"vkDeviceWaitIdle".as_ptr())
+        };
+        let Some(f) = f else {
+            return device.wait_idle();
+        };
+        // SAFETY: `vkDeviceWaitIdle` has this signature; the device is alive.
+        let wait = unsafe {
+            core::mem::transmute::<unsafe extern "system" fn(), vk::PFN_vkDeviceWaitIdle>(f)
+        };
+        // SAFETY: as above.
+        match unsafe { wait(device.raw().handle()) } {
+            vk::Result::SUCCESS => Ok(()),
+            result => Err(RhiError::Vulkan {
+                call: "vkDeviceWaitIdle",
+                result,
+            }),
+        }
+    }
+}
+
 /// A presentation surface: a window, or headless for tests.
 pub struct Surface {
     pub(crate) raw: vk::SurfaceKHR,
@@ -48,6 +109,38 @@ impl Surface {
         Ok(Self {
             raw,
             loader: khr::surface::Instance::new(instance.entry(), instance.raw()),
+            hwnd,
+            _instance: instance.shared.clone(),
+        })
+    }
+
+    /// [`Self::from_win32`] through `hooks` (Streamline's, for DLSS frame generation: it
+    /// watches the surface it then presents to).
+    #[cfg(windows)]
+    pub fn from_win32_hooked(
+        instance: &Instance,
+        hinstance: isize,
+        hwnd: isize,
+        hooks: &VulkanHooks,
+    ) -> Result<Self, RhiError> {
+        if !instance.shared.win32_surface_enabled {
+            return Err(RhiError::Vulkan {
+                call: "VK_KHR_win32_surface not enabled",
+                result: vk::Result::ERROR_EXTENSION_NOT_PRESENT,
+            });
+        }
+        let entry = hooks.entry();
+        let hooked = hooks.instance(instance.raw().handle());
+        let loader = khr::win32_surface::Instance::new(&entry, &hooked);
+        let info = vk::Win32SurfaceCreateInfoKHR::default()
+            .hinstance(hinstance)
+            .hwnd(hwnd);
+        // SAFETY: as in `from_win32`.
+        let raw = unsafe { loader.create_win32_surface(&info, None) }
+            .map_err(RhiError::vk("vkCreateWin32SurfaceKHR"))?;
+        Ok(Self {
+            raw,
+            loader: khr::surface::Instance::new(&entry, &hooked),
             hwnd,
             _instance: instance.shared.clone(),
         })
@@ -354,7 +447,34 @@ impl core::fmt::Debug for Swapchain {
 impl Swapchain {
     /// Creates the swapchain.
     pub fn new(device: &Device, surface: &Surface, desc: &SwapchainDesc) -> Result<Self, RhiError> {
-        let loader = khr::swapchain::Device::new(device.instance_raw(), device.raw());
+        Self::create(device, surface, desc, None)
+    }
+
+    /// [`Self::new`] with the swapchain functions looked up through `hooks` (Streamline's,
+    /// for DLSS frame generation: it presents the generated frames; ADR 0091). Create the
+    /// surface through the same hooks.
+    pub fn new_hooked(
+        device: &Device,
+        surface: &Surface,
+        desc: &SwapchainDesc,
+        hooks: &VulkanHooks,
+    ) -> Result<Self, RhiError> {
+        Self::create(device, surface, desc, Some(hooks))
+    }
+
+    fn create(
+        device: &Device,
+        surface: &Surface,
+        desc: &SwapchainDesc,
+        hooks: Option<&VulkanHooks>,
+    ) -> Result<Self, RhiError> {
+        let loader = match hooks {
+            Some(hooks) => khr::swapchain::Device::new(
+                &hooks.instance(device.instance_raw().handle()),
+                device.raw(),
+            ),
+            None => khr::swapchain::Device::new(device.instance_raw(), device.raw()),
+        };
         let mut swapchain = Self {
             loader,
             raw: vk::SwapchainKHR::null(),

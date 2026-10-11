@@ -13,6 +13,17 @@ pub(crate) const REQUIRED_FILES: [&str; 4] = [
     "nvngx_dlss.dll",
 ];
 
+/// Files DLSS frame generation adds (ADR 0091): its plugin and NVIDIA's library, the
+/// Reflex and PC latency plugins it requires, and the library `sl.common` drives Reflex
+/// with on Vulkan (optional for DLSS alone, `docs/research/dlss.md`).
+pub(crate) const FRAME_GENERATION_FILES: [&str; 5] = [
+    "sl.dlss_g.dll",
+    "nvngx_dlssg.dll",
+    "sl.reflex.dll",
+    "sl.pcl.dll",
+    "NvLowLatencyVk.dll",
+];
+
 /// Where to look for the DLLs, in order: `explicit`, `ENGINE_STREAMLINE_DIR`, then
 /// `plugins/nvidia/` next to the executable, then the executable's folder.
 pub(crate) fn candidate_dirs(explicit: Option<&Path>) -> Vec<PathBuf> {
