@@ -35,8 +35,11 @@ distance field with holes through its floor and wall: 30 054 bricks where the RT
    plane it stands perpendicular to (a floor's onto xy) is a segment, whose conservative
    edge tests pass with no margin: an edge parallel to an axis must be exactly zero along
    it. AMD's compiler leaves residues below the coordinates' own precision instead (1e-5
-   between two equal coordinates of 1624.5, also with NoContraction on the subtractions),
-   the tests fail and whole triangles are left out of their bricks. `FfxBrixelizerEmitSDF`
+   between two equal coordinates of 1624.5: the subtraction fused with the division into
+   an FMA), the tests fail and whole triangles are left out of their bricks. `precise` on
+   the subtraction does not help: AMD's driver merges it with `EmitSDF`'s undecorated twin
+   (`ba = V1 - V0`) and fuses it anyway (`engine_rhi`'s `contraction_repro` example;
+   reported to AMD, FidelityFX SDK issue #202). `FfxBrixelizerEmitSDF`
    now passes the edges in, from the world-space vertices, where equal coordinates subtract
    to zero. `engine_brixelizer`'s `the_distance_field_has_no_holes` fails without it.
 2. **Edges stored as the nearest halves** (`ffx_brixelizer_cascade_ops.h`,

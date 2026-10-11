@@ -501,10 +501,12 @@ grown, divide and conquer); the old labels stay in parentheses.
   - probe shadow-map caching;
   - XeSS;
   - Brixelizer GI (the reference, ADR 0090): its specular is not composited, and
-    reflection probes captured in its views see only the sky; the SDK's problems found
-    (AMD's compiler and the distance field, the sky leaking in before the field is built,
-    motion vectors required, the Vulkan backend's descriptor pools) are not reported to
-    AMD (an outward step: the owner's call);
+    reflection probes captured in its views see only the sky. The SDK's problems were
+    reported to AMD on 2026-10-12 (the owner: for other developers), FidelityFX SDK
+    issues #202–#204; AMD dropped Brixelizer from the SDK's 2.x line, so no fix is
+    expected. The driver bug under the holes (NoContraction lost when an undecorated twin
+    exists; `engine_rhi`'s `contraction_repro` example) goes through AMD's Bug Report
+    Tool, by the owner; re-run the example after AMD driver updates;
   - ambient light inconsistent indoors without GI: diffuse ambient comes from the sky's
     irradiance (barely occluded), specular from reflection probes that see the real,
     darker interior. With probe GI (ADR 0088) they agree; on GPUs without ray queries

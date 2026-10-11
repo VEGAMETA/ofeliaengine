@@ -112,9 +112,6 @@ of probe maps, plus the acceleration structures its rays need (ADR 0087; measure
 - **One library.** The SDK's shader blob dispatcher (`ffx_shader_blobs.cpp`) compiles in
   one effect per `#ifdef`. FSR 3.1 and Brixelizer must therefore be one build of the SDK
   in one binary: two builds would define the backend's symbols twice.
-- **Accessor.** The SDK's own blob accessor never copies the blob of
-  `FFX_BRIXELIZER_PASS_CASCADE_CLEAR_BRICK_STORAGE` (`ffx_brixelizer_shaderblobs.cpp`
-  returns without its `memcpy`). Ours, generated, has no such case.
 
 Found running it (2026-10-11, both GPUs, under the validation layer), worked around in
 `engine_ffx`'s Vulkan layer without touching the SDK:
@@ -144,7 +141,13 @@ Found integrating it (2026-10-11):
   whose tests pass with no margin, so an edge parallel to an axis must be exactly zero
   along it. AMD's compiler leaves a residue instead (1e-5 between two equal coordinates
   of 1624.5: below the coordinates' own precision, so the subtraction is fused with the
-  division, also with `precise` on the subtraction), and whole triangles are dropped.
+  division's multiply into an FMA), and whole triangles are dropped. `precise` on the
+  subtraction does not help, and that part is a bug of AMD's driver: `EmitSDF` computes
+  the same differences again without it (`ba`, `ac`, `cb`), and the driver merges the
+  NoContraction subtraction with its undecorated twin and fuses it anyway. A minimal
+  shader shows it (`engine_rhi`'s `contraction_repro` example, 65,536 lanes; driver
+  26.8.1): no `precise`, 6,921 lanes with a residue; the subtraction `precise`, none; the
+  same with its plain twin used too, 6,921 again (NVIDIA: none in any variant).
   Fixed in the vendored SDK (`third_party/README.md`): the edges come from the
   world-space vertices. With two smaller fixes (edges stored as halves rounded to the
   nearest, AMD truncating; device-scope fences around the scans' last-group handoffs)
@@ -170,6 +173,15 @@ Found integrating it (2026-10-11):
   1.19 and 0.20 on the same scene (`engine_render`'s test). Brixelizer GI's is a fifth.
   The cosine alone explains about half of the loss (0.45 on average there); the rest we
   did not trace. The radiance cache holds the wall's lit radiance (0.71 against 0.71).
+
+Reported to AMD on 2026-10-12, for other developers on SDK 1.1.4: the holes and the
+driver's lost NoContraction ([#202](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/issues/202)),
+the sky let in before the field is built ([#203](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/issues/203)),
+the descriptor pool without storage buffers ([#204](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/issues/204)).
+AMD dropped Brixelizer and the Vulkan backend from the SDK's 2.x line (the repository's
+main is the FSR SDK 2.3.0, checked 2026-10-12): 1.1.4 is their last version, so no fix
+is likely to come. The driver bug goes to AMD's driver team through AMD's Bug Report Tool
+with the example's package.
 
 ## Measurements (2026-10-11)
 
