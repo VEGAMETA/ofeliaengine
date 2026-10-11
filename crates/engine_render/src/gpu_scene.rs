@@ -422,6 +422,10 @@ pub struct SceneStats {
     pub moving: u32,
     /// Moving instances whose ticks' transforms were uploaded this frame.
     pub motion_updates: u32,
+    /// Instances added, removed, teleported or given another mesh since the upload before
+    /// (counted at the calls, so an instance added and removed again counts twice): what
+    /// a top-level acceleration structure cannot follow by moving its boxes (ADR 0087).
+    pub restructured: u32,
 }
 
 /// An empty box (dead slots): ignored by the bounds' minimum and maximum.
@@ -511,6 +515,9 @@ pub struct GpuScene {
     written_last: Vec<u32>,
     written: Vec<u32>,
     serial: u64,
+    /// Calls since the last upload that added, removed, teleported or re-meshed an
+    /// instance ([`SceneStats::restructured`]).
+    restructured: u32,
     pub(crate) batches: Vec<Batch>,
     batch_keys: HashMap<BatchKey, u32, BuildHasherDefault<FxHasher>>,
     free_batches: Vec<u32>,
@@ -938,6 +945,7 @@ impl GpuScene {
             written_last: Vec::with_capacity(reserve),
             written: Vec::with_capacity(reserve),
             serial: 0,
+            restructured: 0,
             batches: Vec::new(),
             batch_keys: HashMap::default(),
             free_batches: Vec::new(),
@@ -1060,6 +1068,7 @@ impl GpuScene {
         let generation = slot.generation;
         self.data[index as usize].rows = rows_of(&instance.world_from_object);
         self.live += 1;
+        self.restructured += 1;
         self.queue(index, flag::NEW | flag::DRAW);
         InstanceId { index, generation }
     }
@@ -1081,6 +1090,7 @@ impl GpuScene {
             0
         };
         self.live -= 1;
+        self.restructured += 1;
         self.queue(id.index, flag::REMOVED | was_live);
         self.free.push(Reverse(id.index));
         true
@@ -1122,6 +1132,7 @@ impl GpuScene {
         }
         self.stop_motion(id.index);
         self.data[id.index as usize].rows = rows_of(world_from_object);
+        self.restructured += 1;
         self.queue(id.index, flag::MOVED | flag::TELEPORT);
     }
 
@@ -1291,6 +1302,7 @@ impl GpuScene {
         };
         if slot.mesh != mesh {
             slot.mesh = mesh;
+            self.restructured += 1;
             self.queue(id.index, flag::DRAW);
         }
     }
@@ -2077,6 +2089,7 @@ impl GpuScene {
             grew: needed_slots > capacity,
             moving: self.moving.len() as u32,
             motion_updates: (motion_updates + motion_steps) as u32,
+            restructured: core::mem::take(&mut self.restructured),
         };
         let moving_count = self.moving.len() as u32;
         let alpha = self.alpha;

@@ -143,3 +143,66 @@ Options **1a, 2a, 3a, 4 with compaction, 5a**, as follows.
   skinned meshes keep the shape of their first build (a refitted bottom level from the
   pre-skinned positions, ADR 0068, later); every instance is in the top level (no
   culling by distance or effect).
+
+## Addendum (2026-10-11): the top level refitted between rebuilds, bottom levels under a budget
+
+The next step above, measured and taken (queue item 3a).
+
+**Refits.** `examples/ray_bench.rs` puts 10,000 cubes over a ground slab in a GPU scene,
+moves some of them every frame (a velocity each, bouncing off the field's edges, 1/60 s
+per frame) and traces a ray per pixel at 1080p against several top levels over the same
+scene in the same frames: rebuilt every frame, and refitted with a rebuild after 8, 32,
+128 or no refits. Means over 600 frames (ref-1, release):
+
+| | RTX: top level µs | RTX: rays vs rebuilt | Radeon: top level µs | Radeon: rays vs rebuilt |
+|---|---:|---:|---:|---:|
+| 1,000 cubes at 3 m/s: rebuilt every frame | 146 | (210 µs) | — | — |
+| refitted, rebuilt after 8 | 39 | −0.1 % | — | — |
+| refitted, rebuilt after 32 | 30 | 0.0 % | — | — |
+| refitted, never rebuilt | 26 | +1.4 … +14.4 % (300 frames) | — | — |
+| all 10,000 at 3 m/s: rebuilt every frame | 145 | (207 µs) | 2,621 | (6.71 ms) |
+| refitted, rebuilt after 8 | 39 | 0.0 … +0.1 % | 499 | −0.3 … +0.8 % |
+| refitted, rebuilt after 32 | 30 | +0.7 … +0.9 % | 301 | +2.5 … +4.2 % |
+| refitted, rebuilt after 128 | 27 | +9 … +19 % | 248 | +18 … +37 % |
+| refitted, never rebuilt | 25 | +8 → +776 % | 224 | +22 → +644 % |
+| 1,000 at 10 m/s: rebuilt every frame | 142 | (203 µs) | 2,668 | (6.56 ms) |
+| refitted, rebuilt after 8 | 37 | 0.0 … +0.1 % | 498 | −0.1 … +0.8 % |
+| refitted, rebuilt after 32 | 29 | +0.7 … +1.0 % | 300 | +2.2 … +4.9 % |
+
+The distances of every policy's last frame match the rebuilt structure's exactly (the
+same 1,285,687–688 hits). A refit costs about a sixth (RTX) to a twelfth (Radeon) of a
+rebuild, but its rays slow down without bound as instances travel; a rebuild every
+ninth frame keeps them within 1 % of a rebuilt structure's.
+
+Decision: **`TopLevelUpdate::Refit { rebuild_after: 8 }` by default** (`TopLevelUpdate::Rebuild`
+remains): the top level is built `ALLOW_UPDATE` and updated in place in frames where
+instances only moved, rebuilt after 8 refits in a row and whenever a bottom level
+changed, the slot count changed, or instances were added, removed, teleported or given
+another mesh (`SceneStats::restructured`, counted at those calls: the update rules forbid
+turning instances active or inactive, and a teleport is the move a refit handles worst).
+A move that settles no longer rebuilds it (the slot's transform is already in the
+structure). `ALLOW_UPDATE` costs 15 % more top-level memory on the RTX (Sponza 39.1 → 45.1
+KiB), nothing on the Radeon. Sponza's top level (103 instances, one moving): 16–17 µs per
+frame on the RTX (80 rebuilt), 21 µs on the Radeon (230).
+
+**Build budget.** `RaySettings::build_budget`: triangles of bottom levels built per frame
+(at least one structure per frame; meshes waiting have their instances inactive until
+built, `RayStats::pending`); `u32::MAX` by default, `RaySettings::for_device` 131,072 on
+discrete GPUs and 32,768 on integrated ones. Sponza (`scene_bench --rays --ray-budget`):
+
+| | frames | most in one frame | GPU time in all |
+|---|---:|---:|---:|
+| RTX, no budget / 131,072 | 1 / 3 | 1,543 / 797 µs | 1,543 / 1,705 µs |
+| Radeon, no budget | 1 | 37.9 ms | 37.9 ms |
+| Radeon, 8,192 / 16,384 / 32,768 / 65,536 | 32 / 16 / 9 / 5 | 11.0 / 11.5 / 11.7 / 14.1 ms | 71.5 / 56.4 / 51.7 / 43.6 ms |
+| Radeon, coarsest level, 16,384 / 32,768 | 3 / 2 | 3.3 / 5.6 ms | 9.0 / 8.9 ms |
+
+A mesh larger than the budget is built alone (Sponza's largest finest mesh: 11 ms on the
+Radeon), and small batches build less efficiently; integrated GPUs want the coarsest
+level for rays.
+
+**Not taken: the top level on the async compute queue.** After the refit, the top level's
+work per frame is 17–40 µs on the RTX (the only GPU where async compute is on by
+default, ADR 0065): the most the queue could hide, against every structure's buffer
+shared by both queue families and the graph's queue rules extended to build stages.
+Revisited if a scene's top level costs more.

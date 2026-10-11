@@ -1,8 +1,8 @@
 //! CLAUDE.md §5: zero heap allocations per frame in steady state, for the persistent GPU
 //! scene (ADR 0064) and the forward passes that draw it: moves, removals and insertions
 //! every frame, uploaded and declared, culled and drawn, recorded; with ray queries, its
-//! acceleration structures too (ADR 0087: the top level rebuilt every frame, rays cast
-//! from the camera).
+//! acceleration structures too (ADR 0087: the top level rebuilt every frame, as instances
+//! come and go; rays cast from the camera).
 //!
 //! A counting global allocator observes the process while frames are declared and
 //! recorded after a warm-up (driver allocations happen in C and are not counted). One

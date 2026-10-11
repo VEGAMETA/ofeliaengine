@@ -111,3 +111,17 @@ The RTX's camera rays vary between 0.89 and 0.97 ms from run to run with the sam
 structures, so the refit's 0.968 is within that spread. A refit here follows one small
 move: how fast its hierarchy degrades when many instances travel far is the open
 question before it is used (ADR 0087, next step).
+
+## Refits under motion (2026-10-11)
+
+`examples/ray_bench.rs`: 10,000 cubes over a ground slab, some moving every frame (3 or
+10 m/s, 1/60 s per frame, bouncing off the field's edges), a ray per pixel at 1080p
+traced in the same frames against top levels kept by different policies over the same
+GPU scene. A refitted top level costs a sixth (RTX: 25 µs against 145) to a twelfth
+(Radeon: 224 µs against 2,621) of a rebuilt one, and its rays match the rebuilt one's
+distances exactly, but they slow down as instances travel: with every cube moving at
+3 m/s, +8 % after 100 frames and +776 % after 600 on the RTX (+22 % to +644 % on the
+Radeon). Rebuilt after 8 refits, the rays stay within 0.1 % (RTX) and 0.8 % (Radeon) of a
+rebuilt structure's, at 39 and 499 µs per frame on average; after 32 refits within 1 %
+and 5 %. Hence the default (ADR 0087's addendum, with the full table): refits, a rebuild
+after 8. The budget for bottom-level builds is measured there too.
