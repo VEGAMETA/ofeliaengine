@@ -73,6 +73,14 @@ baseline in every check from the evening of 2026-10-10 on, main's included (A/B 
 main twice), with no change to shadows; its baseline row was measured again (2,412 →
 3,092 µs) on 2026-10-11.
 
+**NVIDIA's shader cache (seen 2026-10-11).** The driver's Vulkan pipeline cache on disk
+(`%LOCALAPPDATA%\NVIDIA\GLCache`) is at 1.1 GB, apparently its limit: a newly built
+executable stays cold run after run (its "renderer + features" start-up phase in `flight`
+174–184 ms every time, against 29 ms for a binary the cache already knew; a byte-for-byte
+copy of that binary under another name was cold too). Compare start-up times across
+builds with the engine's own pipeline cache (`--pipeline-cache`), or after clearing that
+folder (the owner's call: other applications lose their cached shaders too).
+
 What it does **not** cover:
 
 - Intel GPUs (Arc or iGPU): no Intel GPU tests yet.
