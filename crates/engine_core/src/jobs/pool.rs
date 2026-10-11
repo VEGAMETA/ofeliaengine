@@ -237,6 +237,11 @@ pub struct ThreadPool {
 }
 
 impl ThreadPool {
+    /// The pool's shared state (foreign jobs push into its injector).
+    pub(crate) fn registry(&self) -> &Registry {
+        &self.registry
+    }
+
     /// Returns a builder with default settings.
     pub fn builder() -> ThreadPoolBuilder {
         ThreadPoolBuilder::default()

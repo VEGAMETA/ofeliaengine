@@ -36,6 +36,7 @@ use core::ffi::c_void;
 use core::mem::MaybeUninit;
 use core::ptr::null;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use engine_core::jobs::{ForeignJobs, ThreadPool};
 use engine_core::math::Mat4;
 use engine_core::math::{Quat, Vec3};
 use engine_physics::{
@@ -46,7 +47,7 @@ use engine_physics::{
 };
 use ffi::*;
 use std::collections::BTreeMap;
-use std::sync::{Mutex, Once};
+use std::sync::{Arc, Mutex, Once};
 
 fn v3(v: Vec3) -> JPH_Vec3 {
     JPH_Vec3 {
@@ -145,6 +146,31 @@ fn jolt_lock() -> std::sync::MutexGuard<'static, ()> {
 unsafe extern "C" fn run_inline(_: *mut c_void, job: JPH_JobFunction, arg: *mut c_void) {
     // SAFETY: Jolt passes a job function with its argument.
     unsafe { job(arg) };
+}
+
+/// Jolt's jobs on the engine's pool ([`JoltBackend::set_jobs`]): queued through the
+/// pool's injector, or run at once when it is full.
+unsafe extern "C" fn queue_on_pool(context: *mut c_void, job: JPH_JobFunction, arg: *mut c_void) {
+    // SAFETY: the context is the world's `ForeignJobs`, alive as long as this job system.
+    let jobs = unsafe { &*context.cast::<ForeignJobs>() };
+    // SAFETY: Jolt's jobs run on any thread, and `step` waits for every one.
+    if !unsafe { jobs.submit(job, arg) } {
+        // SAFETY: as in `run_inline`.
+        unsafe { job(arg) };
+    }
+}
+
+/// Batch form of [`queue_on_pool`].
+unsafe extern "C" fn queue_many_on_pool(
+    context: *mut c_void,
+    job: JPH_JobFunction,
+    args: *mut *mut c_void,
+    count: u32,
+) {
+    for i in 0..count as usize {
+        // SAFETY: Jolt passes `count` job arguments; the context as above.
+        unsafe { queue_on_pool(context, job, *args.add(i)) };
+    }
 }
 
 /// Batch form of [`run_inline`].
@@ -440,8 +466,12 @@ pub struct JoltBackend {
     query: *const JPH_NarrowPhaseQuery,
     /// Runs every job on the calling thread.
     inline_jobs: *mut JPH_JobSystem,
-    /// Jolt's thread pool, created by the first step that needs it.
+    /// Jolt's thread pool, created by the first step that needs it (without
+    /// [`JoltBackend::set_jobs`]).
     pool_jobs: *mut JPH_JobSystem,
+    /// The engine's pool ([`JoltBackend::set_jobs`]): Jolt's jobs handed to it, and the job
+    /// system that hands them (its context is the boxed `ForeignJobs`).
+    engine_jobs: Option<(Box<ForeignJobs>, *mut JPH_JobSystem)>,
     threads: u32,
     single_thread_below: u32,
     // The layer tables belong to `system` (JoltC frees them with it).
@@ -483,6 +513,42 @@ impl core::fmt::Debug for JoltBackend {
 }
 
 impl JoltBackend {
+    /// Runs the multithreaded steps' jobs on the engine's pool `jobs` (review 2 §3.10, ADR
+    /// 0002 addendum) instead of Jolt's own threads, which then never start: one set of
+    /// threads for the frame's work, placed by the engine. `None`: Jolt's own threads
+    /// again. Steps below [`PhysicsSettings::single_thread_below`] awake bodies stay on the
+    /// calling thread either way; results do not depend on the choice.
+    ///
+    /// [`PhysicsSettings::single_thread_below`]: engine_physics::PhysicsSettings::single_thread_below
+    pub fn set_jobs(&mut self, jobs: Option<Arc<ThreadPool>>) {
+        if let Some((foreign, system)) = self.engine_jobs.take() {
+            foreign.wait();
+            // SAFETY: no step is running (`&mut self`) and its jobs have finished.
+            unsafe { JPH_JobSystem_Destroy(system) };
+        }
+        let Some(pool) = jobs else {
+            return;
+        };
+        let concurrency = pool.num_workers() as u32 + 1;
+        // Records for every job Jolt can have queued at once (cMaxPhysicsJobs).
+        let foreign = Box::new(ForeignJobs::new(pool, 2048));
+        let context = (&raw const *foreign).cast_mut().cast::<c_void>();
+        // SAFETY: the context outlives the job system (both dropped together, the job
+        // system first).
+        let system = unsafe {
+            JPH_JobSystemCallback_Create(&JPH_JobSystemConfig {
+                context,
+                queueJob: Some(queue_on_pool),
+                queueJobs: Some(queue_many_on_pool),
+                maxConcurrency: concurrency,
+                maxBarriers: 8,
+            })
+        };
+        if !system.is_null() {
+            self.engine_jobs = Some((foreign, system));
+        }
+    }
+
     /// Creates a world.
     pub fn new(settings: &PhysicsSettings) -> Result<Self, PhysicsError> {
         init_jolt();
@@ -571,6 +637,7 @@ impl JoltBackend {
                 query: JPH_PhysicsSystem_GetNarrowPhaseQuery(system),
                 inline_jobs,
                 pool_jobs: core::ptr::null_mut(),
+                engine_jobs: None,
                 threads: settings.threads,
                 single_thread_below: settings.single_thread_below,
                 contact_listener,
@@ -1169,7 +1236,7 @@ impl PhysicsBackend for JoltBackend {
         let awake =
             unsafe { JPH_PhysicsSystem_GetNumActiveBodies(self.system, JPH_BODY_TYPE_RIGID) };
         let use_pool = self.threads > 0 && awake >= self.single_thread_below;
-        if use_pool && self.pool_jobs.is_null() {
+        if use_pool && self.pool_jobs.is_null() && self.engine_jobs.is_none() {
             engine_profiler::zone!("physics::jolt::start_workers");
             // SAFETY: plain creation; destroyed in `drop`.
             self.pool_jobs = unsafe {
@@ -1180,10 +1247,10 @@ impl PhysicsBackend for JoltBackend {
                 })
             };
         }
-        let (jobs, step_threads) = if use_pool && !self.pool_jobs.is_null() {
-            (self.pool_jobs, self.threads + 1)
-        } else {
-            (self.inline_jobs, 1)
+        let (jobs, step_threads) = match (&self.engine_jobs, use_pool) {
+            (Some((foreign, jobs)), true) => (*jobs, foreign.pool().num_workers() as u32 + 1),
+            (None, true) if !self.pool_jobs.is_null() => (self.pool_jobs, self.threads + 1),
+            _ => (self.inline_jobs, 1),
         };
         let error = {
             let _serialized = jolt_lock();
@@ -1192,6 +1259,11 @@ impl PhysicsBackend for JoltBackend {
             // step at a time.
             unsafe { JPH_PhysicsSystem_Update(self.system, dt, substeps.max(1) as i32, jobs) }
         };
+        if let Some((foreign, _)) = &self.engine_jobs {
+            // Jolt's barrier saw every job run; the pool may still hold the queued copies of
+            // those the waiting thread ran itself (they only release their job).
+            foreign.wait();
+        }
         // Gather the events written by the callbacks (the step has finished: all writes
         // happened before `Update` returned).
         let written = self
@@ -1782,6 +1854,11 @@ impl Drop for JoltBackend {
             JPH_JobSystem_Destroy(self.inline_jobs);
             if !self.pool_jobs.is_null() {
                 JPH_JobSystem_Destroy(self.pool_jobs);
+            }
+            if let Some((foreign, jobs)) = self.engine_jobs.take() {
+                // Its jobs release into the job system's records: they finish first.
+                foreign.wait();
+                JPH_JobSystem_Destroy(jobs);
             }
             // The layer tables and filters belong to the physics system from creation on:
             // JoltC's `JPH_PhysicsSystem_Destroy` deleted them.

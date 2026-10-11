@@ -197,3 +197,21 @@ Ryzen 7 7700 (8 cores, 16 threads), bench profile, median / p99 step time in ms:
   - more scenes from Jolt's `PerformanceTest` (ragdolls, convex versus mesh, CCD).
 - Build cost: Jolt compiles in about 90 s on 4 cores, once per profile. Cached by CI's
   Rust cache when unchanged.
+
+## Addendum (2026-10-11): Jolt's jobs on the engine's pool
+
+Jolt ran its own thread pool beside `engine_core::jobs` (review 2 §3.10): a frame with
+physics and jobs oversubscribed the CPU, and only our pool is placed on CPU sets.
+`JoltBackend::set_jobs(Some(pool))` hands the multithreaded steps' jobs to the engine's pool
+through JoltC's callback job system and `ForeignJobs` (ADR 0002 addendum); Jolt's own threads
+then never start. After `Update` returns, the step waits for the pool's copies of the jobs
+the waiting thread ran itself (they only release their job), then reads the events. The
+results are the same bits as on the calling thread and on Jolt's threads (test
+`the_engines_pool_steps_the_same_world`).
+
+`cargo bench -p engine_physics_jolt --bench physics` on ref-1 (median ms, Jolt's threads /
+the engine's pool): 1,000-body pile at 16 threads 0.798 / 0.784, at 8 threads 0.806 /
+0.786; 5,000-body pile at 16 threads 3.677 / 3.676, at 8 threads 4.084 / 4.135; 20-level
+pyramid at 16 threads 0.047 / 0.026 (max 0.669 / 0.524); chain at 4 threads 0.126 /
+0.120; orbits at 4 threads 0.048 / 0.038. As fast, often faster on small steps, with one
+set of threads for the frame.

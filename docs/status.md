@@ -317,12 +317,13 @@ grown, divide and conquer); the old labels stay in parentheses.
    transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,
    CLAUDE.md §5, never made), CPU memory accounting (0.9–1.1 GiB private bytes
    unexplained).
-7b (was 6d). Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
-   (review §3.10). Looked at 2026-10-11: Jolt queues jobs from its workers too (a finished
-   job queues its dependents), and `engine_core::jobs::Scope` takes spawns only from its
-   owner thread (it is not `Sync`): the pool needs a submission path from any thread first
-   (the injector, with a fixed pool of job records: no allocation per job), an ADR 0002
-   addendum and loom tests.
+7b (was 6d). ~~Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
+   (review §3.10).~~ Done 2026-10-11: `engine_core::jobs::ForeignJobs` (ADR 0002 addendum:
+   jobs from any thread through the injector, in a fixed set of records, a loom-checked
+   free list) and `JoltBackend::set_jobs` (ADR 0018 addendum): the same results, as fast
+   on the physics bench (piles of 1,000 and 5,000: 0.784 / 3.676 ms against Jolt's 0.798 /
+   3.677 at 16 threads), faster on small steps; one set of threads. The runtime wires it
+   when it owns physics (the player crate, 8a).
 7c (was 6e). ~~`forward.rs` (5,695 lines) split by feature (review §3.12).~~ Done
    2026-10-11 as files (code moved, nothing changed: golden images the same bytes):
    `forward/mod.rs` (the public types and the renderer's API, 2,421 lines), `declare.rs`

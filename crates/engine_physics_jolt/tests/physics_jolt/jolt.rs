@@ -278,6 +278,40 @@ fn deterministic_for_the_same_binary() {
 }
 
 #[test]
+fn the_engines_pool_steps_the_same_world() {
+    // Jolt's jobs handed to `engine_core::jobs` (review 2 §3.10): the same result as on
+    // the calling thread and on Jolt's own threads, run after run.
+    let pool = std::sync::Arc::new(
+        engine_core::jobs::ThreadPool::builder()
+            .workers(4)
+            .build()
+            .unwrap(),
+    );
+    let on_pool = |steps| {
+        let mut w = world(4);
+        w.set_jobs(Some(pool.clone()));
+        scenes::pile(&mut w, 300).unwrap();
+        for _ in 0..steps {
+            w.step(DT, 1).unwrap();
+        }
+        assert_eq!(w.stats().step_threads, 5);
+        w.state_hash()
+    };
+    let (a, b) = (on_pool(120), on_pool(120));
+    assert_eq!(a, b, "two runs on the engine's pool differ");
+    assert_eq!(a, pile_hash(0, 120), "the engine's pool changes the result");
+    // Back to Jolt's own threads.
+    let mut w = world(4);
+    w.set_jobs(Some(pool.clone()));
+    w.set_jobs(None);
+    scenes::pile(&mut w, 300).unwrap();
+    for _ in 0..120 {
+        w.step(DT, 1).unwrap();
+    }
+    assert_eq!(w.state_hash(), a);
+}
+
+#[test]
 fn awake_body_count_picks_the_thread_count() {
     let adaptive = |single_thread_below| {
         JoltBackend::new(&PhysicsSettings {

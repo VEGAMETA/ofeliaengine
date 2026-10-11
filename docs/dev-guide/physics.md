@@ -284,6 +284,11 @@ sync.interpolate(&mut ecs, clock.alpha());         // Transform between the last
     networking.
   - `threads: 0` keeps the simulation on the calling thread always; `single_thread_below:
     0` always uses the workers.
+  - **Give it the engine's thread pool:** `world.set_jobs(Some(jobs.clone()))` (an
+    `Arc<engine_core::jobs::ThreadPool>`) runs the physics jobs on the threads the rest of
+    the frame uses, instead of threads of Jolt's own that compete with them for the cores.
+    As fast on ref-1, faster on small steps, same results; do it whenever your game has a
+    job pool.
 - On ref-1 (8 cores, 16 threads) a 5 000-body pile gains another 27% from the second
   hardware thread of each core; a 1 000-body pile stops gaining at 8 threads. Measure
   your scene with `cargo bench -p engine_physics_jolt --bench physics`, which sweeps 1 to
