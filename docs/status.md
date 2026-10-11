@@ -329,7 +329,16 @@ grown, divide and conquer); the old labels stay in parentheses.
    `docs/research/global-allocator.md`; ADR 0086, Proposed): mimalloc 2.3.2 3.3–4.7× the
    system heap on allocation-heavy work, 1.5–1.6× on glTF imports and pack loads, the
    frame unchanged; it holds memory in sleeping workers' heaps (341 MiB after a level
-   load until they collect): the owner's choice.
+   load until they collect): the owner's choice. The private bytes accounted for
+   2026-10-11 (`flight` now prints its committed memory by kind, and the allocator its
+   mapped bytes per heap): of the RTX's 936 MiB, 607 MiB are write-combined pages the
+   driver mapped into the process (the engine's own mapped Vulkan memory 192 MiB of it),
+   the process heap 56 MiB (Rust's allocations 37 MiB), the rest about 270 MiB (the
+   driver's own and the threads'); the Radeon's 1,049 MiB alike (645 write-combined, 352
+   of it the engine's). Left: the allocator keeps empty host-visible blocks mapped (the
+   RTX's 64 MiB system-memory block holds nothing at the end of the flight, the Radeon's
+   288 MiB hold 64): give them back after a while; and find what the driver's other
+   write-combined pages are (about 300–400 MiB).
 7b (was 6d). ~~Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
    (review §3.10).~~ Done 2026-10-11: `engine_core::jobs::ForeignJobs` (ADR 0002 addendum:
    jobs from any thread through the injector, in a fixed set of records, a loom-checked

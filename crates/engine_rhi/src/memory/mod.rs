@@ -294,6 +294,10 @@ pub struct HeapStats {
     pub dedicated_bytes: u64,
     /// Dedicated allocations.
     pub dedicated_allocations: u32,
+    /// Bytes of blocks and dedicated allocations in host-visible memory types: mapped into
+    /// the process for their whole life, so Windows counts them in its private bytes
+    /// (write-combined pages for uncached memory).
+    pub mapped_bytes: u64,
     /// The OS budget for this process (`VK_EXT_memory_budget`), when available.
     pub budget: Option<u64>,
     /// The process's usage as the OS sees it (all allocators), when available.
@@ -380,6 +384,8 @@ pub struct Allocator {
     pools: Vec<Pool>,
     preferred_block: Vec<u64>,
     dedicated: Vec<(u64, u32)>,
+    /// Bytes of mapped (host-visible) dedicated allocations per heap.
+    dedicated_mapped: Vec<u64>,
     device_memory_count: u32,
     max_device_memory_count: u32,
     budget_available: bool,
@@ -489,6 +495,7 @@ impl Allocator {
             pools,
             preferred_block,
             dedicated: vec![(0, 0); properties.memory_heap_count as usize],
+            dedicated_mapped: vec![0; properties.memory_heap_count as usize],
             device_memory_count: 0,
             max_device_memory_count: adapter.limits.max_memory_allocation_count,
             budget_available: adapter.caps.memory_budget,
@@ -720,6 +727,9 @@ impl Allocator {
         let heap = self.heap_of(memory_type);
         self.dedicated[heap].0 += size;
         self.dedicated[heap].1 += 1;
+        if mapped.is_some() {
+            self.dedicated_mapped[heap] += size;
+        }
         Ok(Allocation {
             memory,
             offset: 0,
@@ -737,6 +747,9 @@ impl Allocator {
                 let heap = self.heap_of(allocation.memory_type);
                 self.dedicated[heap].0 -= allocation.size;
                 self.dedicated[heap].1 -= 1;
+                if allocation.mapped.is_some() {
+                    self.dedicated_mapped[heap] -= allocation.size;
+                }
                 self.device_memory_count -= 1;
                 // SAFETY: the allocation owns this memory; freeing also unmaps it.
                 unsafe { self.device.free_memory(allocation.memory, None) };
@@ -907,11 +920,19 @@ impl Allocator {
                 s.blocks += 1;
                 s.allocated_bytes += block.tlsf.used();
                 s.allocations += block.tlsf.allocation_count();
+                if block.mapped.is_some() {
+                    s.mapped_bytes += block.tlsf.capacity();
+                }
             }
         }
-        for (s, &(bytes, count)) in stats.iter_mut().zip(&self.dedicated) {
+        for ((s, &(bytes, count)), &mapped) in stats
+            .iter_mut()
+            .zip(&self.dedicated)
+            .zip(&self.dedicated_mapped)
+        {
             s.dedicated_bytes = bytes;
             s.dedicated_allocations = count;
+            s.mapped_bytes += mapped;
         }
         if self.budget_available {
             let mut budget = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();

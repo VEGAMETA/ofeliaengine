@@ -20,7 +20,8 @@
 //! Reports start-up phases, CPU per frame by stage (median, 99th percentile, worst), GPU
 //! frame and passes, the frames that took over twice the median with what they spent it
 //! on, pipelines created during the flight, and memory (device heaps, the OS budget,
-//! transient targets, the process).
+//! transient targets, the process: its committed memory by kind, the process heap and
+//! Rust's share of it, the largest private allocations).
 //!
 //! ```text
 //! cargo run -p engine_runtime --release --example flight -- <scene.pack>
@@ -98,8 +99,10 @@ mod windowed {
     };
     use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
     use engine_streaming::{SceneStreamSettings, SceneStreamer, material_desc, texture_format};
+    use std::alloc::{GlobalAlloc, Layout, System};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
     const WIDTH: u32 = 1920;
@@ -237,6 +240,179 @@ mod windowed {
         ) -> i32;
     }
 
+    /// The system allocator, counting the bytes Rust holds: the process heap also serves the
+    /// C runtime of every other module (the graphics drivers' included), so its size alone
+    /// does not say whose memory it is.
+    struct Counting;
+
+    static RUST_HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
+
+    // SAFETY: every call is forwarded to the system allocator unchanged; the counter is
+    // only arithmetic on the sizes.
+    unsafe impl GlobalAlloc for Counting {
+        unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: the caller's layout, forwarded.
+            let p = unsafe { System.alloc(layout) };
+            if !p.is_null() {
+                RUST_HEAP_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+
+        unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+            // SAFETY: as above.
+            let p = unsafe { System.alloc_zeroed(layout) };
+            if !p.is_null() {
+                RUST_HEAP_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+            RUST_HEAP_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+            // SAFETY: the caller's block and layout, forwarded.
+            unsafe { System.dealloc(ptr, layout) };
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+            // SAFETY: as above.
+            let p = unsafe { System.realloc(ptr, layout, new_size) };
+            if !p.is_null() {
+                RUST_HEAP_BYTES.fetch_add(new_size, Ordering::Relaxed);
+                RUST_HEAP_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
+            }
+            p
+        }
+    }
+
+    #[global_allocator]
+    static GLOBAL: Counting = Counting;
+
+    /// `MEMORY_BASIC_INFORMATION` (winnt.h, 64-bit).
+    #[repr(C)]
+    #[derive(Default, Clone, Copy)]
+    struct MemoryBasicInformation {
+        base_address: usize,
+        allocation_base: usize,
+        allocation_protect: u32,
+        partition_id: u16,
+        region_size: usize,
+        state: u32,
+        protect: u32,
+        kind: u32,
+    }
+
+    /// `HEAP_SUMMARY` (heapapi.h).
+    #[repr(C)]
+    #[derive(Default)]
+    struct HeapSummaryInfo {
+        cb: u32,
+        allocated: usize,
+        committed: usize,
+        reserved: usize,
+        max_reserve: usize,
+    }
+
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn VirtualQuery(
+            address: *const core::ffi::c_void,
+            buffer: *mut MemoryBasicInformation,
+            length: usize,
+        ) -> usize;
+        fn GetProcessHeap() -> *mut core::ffi::c_void;
+        fn HeapSummary(
+            heap: *mut core::ffi::c_void,
+            flags: u32,
+            summary: *mut HeapSummaryInfo,
+        ) -> i32;
+    }
+
+    const MEM_COMMIT: u32 = 0x1000;
+    const MEM_PRIVATE: u32 = 0x2_0000;
+    const MEM_MAPPED: u32 = 0x4_0000;
+    const MEM_IMAGE: u32 = 0x100_0000;
+    const PAGE_WRITECOMBINE: u32 = 0x400;
+
+    /// The process's committed memory by kind (private, mapped, module images): of the
+    /// private bytes, the write-combined pages (memory the GPU's driver mapped into the
+    /// process; `engine_mapped`: the engine's mapped Vulkan memory), the process heap and
+    /// Rust's share of it, and the largest private allocations (review 2 §3.9).
+    fn memory_breakdown(engine_mapped: u64) {
+        let (mut private, mut mapped, mut image) = (0usize, 0usize, 0usize);
+        let mut write_combined = 0usize;
+        // Committed private bytes per allocation (its regions are contiguous).
+        let mut allocations: Vec<(usize, usize)> = Vec::new();
+        let mut address = 0usize;
+        loop {
+            let mut info = MemoryBasicInformation::default();
+            // SAFETY: any address may be queried; `info` is a MEMORY_BASIC_INFORMATION of
+            // the size given.
+            let written = unsafe {
+                VirtualQuery(
+                    address as *const core::ffi::c_void,
+                    &raw mut info,
+                    size_of::<MemoryBasicInformation>(),
+                )
+            };
+            if written == 0 || info.region_size == 0 {
+                break;
+            }
+            if info.state == MEM_COMMIT {
+                match info.kind {
+                    MEM_PRIVATE => {
+                        private += info.region_size;
+                        if info.protect & PAGE_WRITECOMBINE != 0 {
+                            write_combined += info.region_size;
+                        }
+                        match allocations.last_mut() {
+                            Some(last) if last.0 == info.allocation_base => {
+                                last.1 += info.region_size;
+                            }
+                            _ => allocations.push((info.allocation_base, info.region_size)),
+                        }
+                    }
+                    MEM_MAPPED => mapped += info.region_size,
+                    MEM_IMAGE => image += info.region_size,
+                    _ => {}
+                }
+            }
+            let Some(next) = info.base_address.checked_add(info.region_size) else {
+                break;
+            };
+            address = next;
+        }
+        let mut heap = HeapSummaryInfo {
+            cb: size_of::<HeapSummaryInfo>() as u32,
+            ..HeapSummaryInfo::default()
+        };
+        // SAFETY: the process heap's handle needs no closing; `heap` has its size in `cb`.
+        let summarized = unsafe { HeapSummary(GetProcessHeap(), 0, &raw mut heap) } != 0;
+        let rust = RUST_HEAP_BYTES.load(Ordering::Relaxed);
+        allocations.sort_by(|a, b| b.1.cmp(&a.1));
+        let largest: Vec<String> = allocations
+            .iter()
+            .take(8)
+            .map(|&(_, bytes)| format!("{:.1}", bytes as f64 / MIB))
+            .collect();
+        if summarized {
+            println!(
+                "Committed memory: private {:.0} MiB (write-combined pages the GPU's driver mapped {:.0} MiB, the engine's mapped Vulkan memory {:.0} MiB of it; the process heap {:.0} MiB committed, {:.0} allocated, of which Rust's allocations {:.0} MiB; private memory outside the process heap {:.0} MiB in {} allocations, largest {} MiB), mapped {:.0} MiB, module images {:.0} MiB.\n",
+                private as f64 / MIB,
+                write_combined as f64 / MIB,
+                engine_mapped as f64 / MIB,
+                heap.committed as f64 / MIB,
+                heap.allocated as f64 / MIB,
+                rust as f64 / MIB,
+                private.saturating_sub(heap.committed) as f64 / MIB,
+                allocations.len(),
+                largest.join(", "),
+                mapped as f64 / MIB,
+                image as f64 / MIB,
+            );
+        }
+    }
+
     /// The process's working set and private bytes, MiB.
     fn process_memory() -> (f64, f64) {
         let mut c = ProcessMemoryCounters {
@@ -259,29 +435,27 @@ mod windowed {
         let (working, private) = process_memory();
         println!("**Memory, {label}:**\n");
         println!(
-            "| heap | device-local | allocator blocks MiB | allocated MiB | dedicated MiB | OS usage MiB | OS budget MiB |"
+            "| heap | device-local | allocator blocks MiB | allocated MiB | dedicated MiB | mapped MiB | OS usage MiB | OS budget MiB |"
         );
-        println!("|---|---|---:|---:|---:|---:|---:|");
+        println!("|---|---|---:|---:|---:|---:|---:|---:|");
         let budget = allocator.budget();
-        for (k, (stats, heap)) in allocator
-            .heap_stats()
-            .iter()
-            .zip(budget.heaps())
-            .enumerate()
-        {
+        let heap_stats = allocator.heap_stats();
+        for (k, (stats, heap)) in heap_stats.iter().zip(budget.heaps()).enumerate() {
             if stats.block_bytes == 0 && stats.dedicated_bytes == 0 && heap.usage == 0 {
                 continue;
             }
             println!(
-                "| {k} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} |",
+                "| {k} | {} | {:.1} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} |",
                 heap.device_local,
                 stats.block_bytes as f64 / MIB,
                 stats.allocated_bytes as f64 / MIB,
                 stats.dedicated_bytes as f64 / MIB,
+                stats.mapped_bytes as f64 / MIB,
                 heap.usage as f64 / MIB,
                 heap.budget as f64 / MIB,
             );
         }
+        let engine_mapped: u64 = heap_stats.iter().map(|s| s.mapped_bytes).sum();
         let g = graph.stats();
         println!(
             "\nTransient targets: {:.1} MiB reserved in this slot's heaps ({:.1} placed, {:.1} without aliasing), {} resources, {} passes ({} culled). Process: working set {working:.0} MiB, private {private:.0} MiB.\n",
@@ -292,6 +466,7 @@ mod windowed {
             g.passes,
             g.culled_passes,
         );
+        memory_breakdown(engine_mapped);
     }
 
     /// Sponza's local lights, as the golden test bed places them (with shadows).
