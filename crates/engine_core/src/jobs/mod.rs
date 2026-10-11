@@ -12,6 +12,8 @@
 //!   that do not depend on the thread count or on scheduling.
 //! - **Waiting helps.** A thread waiting for its jobs runs other jobs; there are no
 //!   fibers (see the ADR for why).
+//! - **Foreign jobs** ([`ForeignJobs`]): a C library's task callbacks (Jolt's) hand jobs
+//!   to the pool from any thread, in a fixed set of records.
 //!
 //! ```
 //! use engine_core::jobs::ThreadPool;
@@ -35,6 +37,7 @@
 
 mod arena;
 mod deque;
+mod foreign;
 mod injector;
 mod job;
 mod latch;
@@ -42,6 +45,7 @@ mod pool;
 mod registry;
 mod scope;
 
+pub use foreign::{ForeignFn, ForeignJobs};
 pub use pool::{BuildError, RegisterError, ThreadPool, ThreadPoolBuilder};
 pub use scope::Scope;
 

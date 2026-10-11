@@ -4,7 +4,9 @@
 //! total, as far as the machine has logical cores), and batched raycasts. The sweep shows
 //! where extra threads stop helping, for example on the second hardware thread (SMT) of
 //! each core. The "auto" row is the default settings: all cores, but on the calling
-//! thread below 300 awake bodies. Our own solver will run the same scenes. Prints Markdown.
+//! thread below 300 awake bodies. "On the engine's pool" rows hand Jolt's jobs to
+//! `engine_core::jobs` (`JoltBackend::set_jobs`) instead of Jolt's own threads. Our own
+//! solver will run the same scenes. Prints Markdown.
 //!
 //! ```text
 //! cargo bench -p engine_physics_jolt --bench physics
@@ -101,6 +103,23 @@ fn main() {
             "| {name} | {bodies} | auto ({}) | {median:.3} | {p99:.3} | {max:.3} |",
             w.stats().step_threads
         );
+        // Jolt's jobs on the engine's pool (`set_jobs`) instead of its own threads.
+        for &workers in sweep.iter().filter(|&&t| t > 0) {
+            let pool = std::sync::Arc::new(
+                engine_core::jobs::ThreadPool::builder()
+                    .workers(workers as usize)
+                    .build()
+                    .unwrap(),
+            );
+            let mut w = world(workers);
+            w.set_jobs(Some(pool));
+            let bodies = build(&mut w);
+            let (median, p99, max) = step_times(&mut w, steps);
+            println!(
+                "| {name} | {bodies} | {} on the engine's pool | {median:.3} | {p99:.3} | {max:.3} |",
+                workers + 1
+            );
+        }
     }
 
     // Batched raycasts over a settled pile.

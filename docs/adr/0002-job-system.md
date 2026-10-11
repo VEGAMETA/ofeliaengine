@@ -140,3 +140,26 @@ dev-dependency as the benchmark baseline only.
 - To revisit with numbers: spin duration before parking (`spin_rounds`, default 64),
   deque capacity, heartbeat-style lazy splitting for fine-grained `join`, fibers if
   waiting latency becomes a measured problem.
+
+## Addendum (2026-10-11): foreign jobs
+
+A C library's task callbacks hand jobs to the pool from whichever thread they run on: Jolt
+queues the jobs that waited for a finished one from the worker that finished it. `Scope`
+takes spawns from its owner thread only (it is not `Sync`), so `ForeignJobs` gives such
+code its own path:
+
+- a fixed set of job records, made once (2,048 for Jolt: its most jobs in flight), each a
+  `JobHeader` and the job's function and argument (`unsafe extern "C" fn(*mut c_void)`);
+- the free records in a lock-free stack (Treiber's, its head a 32-bit index and a 32-bit
+  tag counting changes, against ABA; a loom model checks two threads popping and pushing);
+- `submit` pops a record, fills it and pushes it into the pool's injector (the release and
+  acquire of the injector order the record's contents); with no record free or the
+  injector full it refuses, and the caller runs the job at once (every overflow of the
+  pool degrades so);
+- the executing worker runs the job, gives the record back, then counts it done; `wait`
+  returns once every submitted job is done (a thread of the pool runs jobs meanwhile,
+  another hands the wait to the pool through `install`).
+
+No allocation per job; the records are released before `wait` returns, so they can be
+dropped right after. First user: Jolt Physics (review 2 §3.10, `JoltBackend::set_jobs`).
+Box2D v3's task callbacks can use it the same way.
