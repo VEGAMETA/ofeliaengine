@@ -94,8 +94,11 @@ accesses through buffer addresses in every shader: ADR 0013's addendum), 0g (sha
 variants made on first use and by the device's warm-up thread, start-up phases
 overlapped: ADR 0079). On 2026-10-11: 1 (GPU particles and GPU radix sort: ADRs 0080,
 0081; the reactive mask for effects, ADR 0081's amendment), 2 researched (decals, ADR 0082
-Proposed: the owner's choice), 2b phase 1 (HDRI environments, ADR 0083). Next: 2b phase 2,
-or 2 once the owner has chosen.
+Proposed: the owner's choice), 2b (HDRI environments, ADR 0083 and its amendments:
+`.hdr` and OpenEXR, the sun as a light, cooked BC6H cubes; PRs #143–#145), 3 researched
+(GI, ADR 0084 Proposed: the owner's choice), 7c (`forward.rs` split, PR #147); a bloom
+format experiment measured and rejected (6b). Next: 2 or 3 once the owner has chosen;
+meanwhile 6b (the iGPU's bloom with fewer reads) or the ADR of 4.
 
 ## 5. Queue (in order)
 
