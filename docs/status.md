@@ -339,9 +339,11 @@ grown, divide and conquer); the old labels stay in parentheses.
    of the 256 MiB block, as VMA does) even for allocations of a few KiB, and every
    host-visible block stays mapped: the RTX's 64 MiB of system-memory blocks hold a few
    KiB at the end of the flight, the Radeon's 288 MiB hold 64 MiB. Freeing the empty
-   blocks would give back only 0 and 32 MiB (tried): smaller first blocks for
-   host-visible types would. Also left: what the driver's other write-combined pages
-   are (about 300–400 MiB).
+   blocks would give back only 0 and 32 MiB (tried). Done the same night: mapped system
+   memory starts from blocks of 4 MiB (1/64): the RTX's system-memory blocks 64 → 20 MiB,
+   its OS usage there 150 → 106 MiB; the Radeon's 288 → 272 MiB (its blocks there come
+   from the load and stay partly used). Also left: what the driver's other
+   write-combined pages are (about 300–400 MiB).
 7b (was 6d). ~~Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
    (review §3.10).~~ Done 2026-10-11: `engine_core::jobs::ForeignJobs` (ADR 0002 addendum:
    jobs from any thread through the injector, in a fixed set of records, a loom-checked
