@@ -54,7 +54,8 @@ No code was copied from any source.
 - Both reference GPUs expose `VK_KHR_ray_query`, `VK_KHR_acceleration_structure` and
   `VK_KHR_ray_tracing_position_fetch` (the Radeon iGPU's two RDNA2 compute units with
   their ray accelerators; slow). `engine_rhi` detects ray tracing but builds no
-  acceleration structures.
+  acceleration structures. (Since 2026-10-11 it does: ADR 0087,
+  [acceleration-structures.md](acceleration-structures.md).)
 - The GPU scene (ADR 0064) keeps every instance's transform and mesh; the geometry pool
   (ADR 0039) every mesh's vertices and indices in shared buffers: what bottom-level
   structures are built from.

@@ -16,6 +16,9 @@ use engine_rhi::{
     Allocation, AllocationRequest, Allocator, Bindless, MemoryLocation, ResourceKind, RhiError,
 };
 
+/// The least alignment of a transient buffer (see `requirements_of`).
+const TRANSIENT_BUFFER_ALIGN: u64 = 256;
+
 /// The Vulkan side of one graph resource in the current frame.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Physical {
@@ -295,7 +298,11 @@ impl PhysicalResources {
                         &mut out,
                     );
                 }
-                let r = out.memory_requirements;
+                // Shaders read buffers by address with 16-byte loads (ADR 0013's
+                // addendum) and acceleration structure builds take 16-byte-aligned
+                // instances (ADR 0087): drivers may ask for less (4 on AMD's).
+                let mut r = out.memory_requirements;
+                r.alignment = r.alignment.max(TRANSIENT_BUFFER_ALIGN);
                 self.buffer_requirements
                     .push((buffer.size, buffer_usage, concurrent, r));
                 r

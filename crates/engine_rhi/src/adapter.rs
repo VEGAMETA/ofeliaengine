@@ -55,6 +55,13 @@ pub struct OptionalCaps {
     pub mesh_shader: bool,
     /// `VK_KHR_ray_tracing_pipeline` + `VK_KHR_acceleration_structure`.
     pub ray_tracing: bool,
+    /// `VK_KHR_ray_query` + `VK_KHR_acceleration_structure` (+
+    /// `VK_KHR_deferred_host_operations`, which the latter needs): rays traced from any
+    /// shader (ADR 0087); their features are checked when the device is made.
+    pub ray_query: bool,
+    /// `VK_KHR_ray_tracing_position_fetch`: a hit triangle's positions read from the
+    /// acceleration structure.
+    pub ray_position_fetch: bool,
     /// `VK_EXT_descriptor_buffer`.
     pub descriptor_buffer: bool,
     /// `VK_EXT_graphics_pipeline_library`.
@@ -118,6 +125,7 @@ impl OptionalCaps {
         [
             (self.mesh_shader, "mesh shaders"),
             (self.ray_tracing, "ray tracing"),
+            (self.ray_query, "ray queries"),
             (self.descriptor_buffer, "descriptor buffer"),
             (self.graphics_pipeline_library, "pipeline library"),
             (self.pipeline_binary, "pipeline binary"),
@@ -334,6 +342,10 @@ impl Adapter {
             mesh_shader: has(ash::ext::mesh_shader::NAME),
             ray_tracing: has(ash::khr::ray_tracing_pipeline::NAME)
                 && has(ash::khr::acceleration_structure::NAME),
+            ray_query: has(ash::khr::ray_query::NAME)
+                && has(ash::khr::acceleration_structure::NAME)
+                && has(ash::khr::deferred_host_operations::NAME),
+            ray_position_fetch: has(ash::khr::ray_tracing_position_fetch::NAME),
             descriptor_buffer: has(ash::ext::descriptor_buffer::NAME),
             graphics_pipeline_library: has(ash::ext::graphics_pipeline_library::NAME),
             // Newer than the headers in ash 0.38: compared by name.

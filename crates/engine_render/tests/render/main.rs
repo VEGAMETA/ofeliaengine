@@ -23,6 +23,7 @@ mod motion;
 mod occlusion;
 mod particles;
 mod post;
+mod rays;
 mod reflections;
 mod shaders;
 mod shadows;

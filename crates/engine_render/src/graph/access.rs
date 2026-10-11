@@ -74,6 +74,17 @@ pub enum Access {
     IndexBuffer,
     /// Indirect draw / dispatch arguments.
     Indirect,
+    /// Vertices, indices or instances an acceleration structure is built from (ADR 0087).
+    AccelerationStructureInput,
+    /// A build's scratch memory.
+    AccelerationStructureScratch,
+    /// The buffer of an acceleration structure being built or copied into.
+    AccelerationStructureWrite,
+    /// The buffer of an acceleration structure a build or copy reads (an update's
+    /// source, a compaction's source).
+    AccelerationStructureBuildRead,
+    /// The buffer of an acceleration structure that shaders trace rays against.
+    AccelerationStructureRead(ShaderStages),
 }
 
 /// Synchronization facts about one access.
@@ -294,6 +305,64 @@ impl AccessInfo {
                 ),
                 I::empty(),
                 B::INDIRECT_BUFFER,
+            ),
+            // Vulkan's rules for vkCmdBuildAccelerationStructuresKHR: inputs are shader
+            // reads in the build stage; scratch and structures are structure reads and
+            // writes in it.
+            Access::AccelerationStructureInput => (
+                Self::new(
+                    S::ACCELERATION_STRUCTURE_BUILD_KHR,
+                    A::SHADER_READ,
+                    L::UNDEFINED,
+                    true,
+                    false,
+                ),
+                I::empty(),
+                B::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+            ),
+            Access::AccelerationStructureScratch => (
+                Self::new(
+                    S::ACCELERATION_STRUCTURE_BUILD_KHR,
+                    A::ACCELERATION_STRUCTURE_READ_KHR | A::ACCELERATION_STRUCTURE_WRITE_KHR,
+                    L::UNDEFINED,
+                    true,
+                    true,
+                ),
+                I::empty(),
+                B::STORAGE_BUFFER,
+            ),
+            Access::AccelerationStructureWrite => (
+                Self::new(
+                    S::ACCELERATION_STRUCTURE_BUILD_KHR,
+                    A::ACCELERATION_STRUCTURE_READ_KHR | A::ACCELERATION_STRUCTURE_WRITE_KHR,
+                    L::UNDEFINED,
+                    false,
+                    true,
+                ),
+                I::empty(),
+                B::ACCELERATION_STRUCTURE_STORAGE_KHR,
+            ),
+            Access::AccelerationStructureBuildRead => (
+                Self::new(
+                    S::ACCELERATION_STRUCTURE_BUILD_KHR,
+                    A::ACCELERATION_STRUCTURE_READ_KHR,
+                    L::UNDEFINED,
+                    true,
+                    false,
+                ),
+                I::empty(),
+                B::ACCELERATION_STRUCTURE_STORAGE_KHR,
+            ),
+            Access::AccelerationStructureRead(s) => (
+                Self::new(
+                    s.pipeline_stages(),
+                    A::ACCELERATION_STRUCTURE_READ_KHR,
+                    L::UNDEFINED,
+                    true,
+                    false,
+                ),
+                I::empty(),
+                B::ACCELERATION_STRUCTURE_STORAGE_KHR,
             ),
         };
         Self {

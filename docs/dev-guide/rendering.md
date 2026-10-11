@@ -1708,3 +1708,50 @@ let scene = SceneInput { decals: &decals, ..scene };
 - **Not on:** transparent surfaces, subsurface materials, multisampled (MSAA) views,
   reflection probes' captures; decals do not glow (no emissive yet).
 - `scene_bench --decals <count>` scatters decals over a scene's floor to measure them.
+
+## 19. Ray queries: the scene's acceleration structures
+
+On a GPU with ray queries (`VK_KHR_ray_query`: GeForce RTX, Radeon RX 6000 and later
+including recent integrated Radeons, Arc), the engine can build acceleration structures
+of the GPU scene and trace rays against them from any compute pass (ADR 0087). Global
+illumination uses them; your own passes can too (visibility tests, picking, audio
+occlusion on the GPU). `ENGINE_RAY_QUERY=0` turns ray queries off, to see what players
+without them get.
+
+```rust
+use engine_render::rays::{RAY_MASK_ALL, RAY_MASK_OPAQUE, RayCast, RayScene, RaySettings};
+
+// Once, if the device has ray queries (`device.ray_query().is_some()`):
+let mut rays = RayScene::new(&device, &bindless, RaySettings::default(), frames_in_flight)?;
+
+// Every frame, after the GPU scene's passes:
+let scene_frame = gpu_scene.add_passes(&mut fg, /* ... */)?.unwrap();
+if let Some(ray_frame) = rays.add_passes(
+    &mut fg, &device, &mut allocator, &mut ring, &bindless, &geometry_frame, &scene_frame,
+    frame_number,
+)? {
+    // A batch of rays (`RayCast`s pushed into the upload ring), their nearest hits
+    // (`RayHit`: distance, the GPU scene's slot, triangle, face, barycentrics) into `hits`:
+    ray_frame.add_cast_pass(&mut fg, &bindless, rays_address, hits, count, RAY_MASK_OPAQUE);
+}
+```
+
+- **Your own shader:** declare `.read(ray_frame.tlas, Access::AccelerationStructureRead(ShaderStages::COMPUTE))`,
+  push `ray_frame.address` as a `uint2`, and in Slang trace against
+  `accel_at(address)` (`rays_common.slang`) with a `RayQuery`, as `rays.slang` does.
+- **Masks** pick what rays see: `RAY_MASK_OPAQUE`, `RAY_MASK_MASKED` (alpha-tested
+  materials) and `RAY_MASK_BLENDED` (transparent ones), or `RAY_MASK_ALL`.
+- **Detail:** `RaySettings { detail: BlasDetail::Coarsest }` builds from each mesh's
+  coarsest level: a fifth of the memory and build time, enough for diffuse light.
+- **What it costs** (Sponza, 262k triangles in 103 meshes): 7.5 MiB of structures on an
+  RTX 4060 Ti and 15.8 MiB on the integrated Radeon (1.4 and 2.9 MiB at the coarsest
+  level); the top level is rebuilt in frames where something moved: 80 µs and 0.23 ms,
+  growing with instances (0.18 and 3.8 ms at 10,000); a still scene keeps it. A ray per
+  pixel at 1080p takes 0.9 ms on the RTX and 36 ms on the integrated GPU: there, count
+  rays in thousands per frame, not millions.
+- **Not yet:** alpha-tested surfaces are solid to rays (leaves cast whole quads);
+  skinned meshes keep the shape they had when first built; a mesh's structure is built
+  in the frame it first appears (all of Sponza at once: 1.6 ms on the RTX, 39 ms on the
+  integrated GPU), so load scenes before tracing them.
+- `scene_bench --rays [finest|coarsest]` measures a scene's structures and its rays;
+  with `--screenshot`, it also writes the rays' distance image.

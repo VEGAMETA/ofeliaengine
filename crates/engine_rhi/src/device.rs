@@ -77,6 +77,8 @@ pub struct Device {
     image_view_min_lod: bool,
     /// `shaderFloat16` and `shaderInt16` are enabled.
     shader_float16: bool,
+    /// Ray queries and acceleration structures (ADR 0087), when enabled.
+    ray_query: Option<crate::accel::RayQuery>,
     /// Pipelines capture the driver's statistics (`ENGINE_PIPELINE_STATS=1`).
     pipeline_statistics: bool,
     /// Extensions a library asked for ([`Device::with_extensions`]) that were enabled.
@@ -255,6 +257,50 @@ impl Device {
             features2 = features2.push_next(&mut e_min_lod);
         }
 
+        // Ray queries and acceleration structures (ADR 0087), when the adapter lists them
+        // and `ENGINE_RAY_QUERY` is not `0` (to test what GPUs without them do): their
+        // features are queried first.
+        let wants_rays = adapter.caps.ray_query
+            && std::env::var("ENGINE_RAY_QUERY").map_or(true, |v| v.trim() != "0");
+        let mut q_accel = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+        let mut q_ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+        let mut q_position_fetch = vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default();
+        if wants_rays {
+            let mut query = vk::PhysicalDeviceFeatures2::default()
+                .push_next(&mut q_accel)
+                .push_next(&mut q_ray_query);
+            if adapter.caps.ray_position_fetch {
+                query = query.push_next(&mut q_position_fetch);
+            }
+            // SAFETY: the chain holds structures of extensions the device lists.
+            unsafe {
+                instance
+                    .raw()
+                    .get_physical_device_features2(adapter.physical, &mut query);
+            }
+        }
+        let rays = wants_rays
+            && q_accel.acceleration_structure == vk::TRUE
+            && q_ray_query.ray_query == vk::TRUE;
+        let position_fetch = rays && q_position_fetch.ray_tracing_position_fetch == vk::TRUE;
+        let mut e_accel = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+            .acceleration_structure(true);
+        let mut e_ray_query = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        let mut e_position_fetch = vk::PhysicalDeviceRayTracingPositionFetchFeaturesKHR::default()
+            .ray_tracing_position_fetch(true);
+        if rays {
+            extensions.push(ash::khr::acceleration_structure::NAME.as_ptr());
+            extensions.push(ash::khr::deferred_host_operations::NAME.as_ptr());
+            extensions.push(ash::khr::ray_query::NAME.as_ptr());
+            features2 = features2
+                .push_next(&mut e_accel)
+                .push_next(&mut e_ray_query);
+            if position_fetch {
+                extensions.push(ash::khr::ray_tracing_position_fetch::NAME.as_ptr());
+                features2 = features2.push_next(&mut e_position_fetch);
+            }
+        }
+
         // The driver's statistics of compiled pipelines, on request: measuring shaders.
         let pipeline_statistics = adapter.caps.pipeline_executable_info
             && std::env::var("ENGINE_PIPELINE_STATS").is_ok_and(|v| v == "1");
@@ -388,6 +434,9 @@ impl Device {
         };
         let diagnostics =
             crate::fault::Diagnostics::new(instance.raw(), &raw, adapter, &diagnostics_features);
+        let ray_query = rays.then(|| {
+            crate::accel::RayQuery::new(instance.raw(), &raw, adapter.physical, position_fetch)
+        });
         Ok(Self {
             pipeline_cache,
             diagnostics: Some(diagnostics),
@@ -404,6 +453,7 @@ impl Device {
             hdr_metadata,
             image_view_min_lod,
             shader_float16: adapter.caps.shader_float16,
+            ray_query,
             pipeline_statistics,
             extra_extensions,
             instance: instance.shared.clone(),
@@ -446,6 +496,12 @@ impl Device {
     /// with its `minLod` feature): streamed textures fade new levels in (ADR 0078).
     pub fn image_view_min_lod(&self) -> bool {
         self.image_view_min_lod
+    }
+
+    /// Ray queries and acceleration structures (ADR 0087), when the device has them
+    /// enabled: `None` on GPUs without `VK_KHR_ray_query`, or with `ENGINE_RAY_QUERY=0`.
+    pub fn ray_query(&self) -> Option<&crate::accel::RayQuery> {
+        self.ray_query.as_ref()
     }
 
     /// Whether `VK_EXT_hdr_metadata` is enabled ([`Swapchain::set_hdr_metadata`]).
