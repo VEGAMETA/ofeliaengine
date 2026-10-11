@@ -325,7 +325,11 @@ grown, divide and conquer); the old labels stay in parentheses.
 7a (was 6c). Memory (review §3.9): one transient heap for both frame slots where no
    transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,
    CLAUDE.md §5, never made), CPU memory accounting (0.9–1.1 GiB private bytes
-   unexplained).
+   unexplained). The allocator measured 2026-10-11 (`bench/alloc-compare`,
+   `docs/research/global-allocator.md`; ADR 0086, Proposed): mimalloc 2.3.2 3.3–4.7× the
+   system heap on allocation-heavy work, 1.5–1.6× on glTF imports and pack loads, the
+   frame unchanged; it holds memory in sleeping workers' heaps (341 MiB after a level
+   load until they collect): the owner's choice.
 7b (was 6d). ~~Jolt's jobs on `engine_core::jobs` through JoltC's callback job system
    (review §3.10).~~ Done 2026-10-11: `engine_core::jobs::ForeignJobs` (ADR 0002 addendum:
    jobs from any thread through the injector, in a fixed set of records, a loom-checked

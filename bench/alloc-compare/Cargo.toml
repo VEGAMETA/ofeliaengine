@@ -1,0 +1,28 @@
+[package]
+name = "alloc-compare"
+description = "Research harness for the global allocator decision (CLAUDE.md §5, review 2 §3.9): the system heap against mimalloc 2 and 3 and snmalloc, on synthetic patterns and the engine's own loading and cooking. Not part of the engine build."
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# Standalone: its dependencies are for measurement only and never reach the engine.
+[workspace]
+
+[features]
+# One global allocator per build (none: the system heap, HeapAlloc).
+mimalloc-v2 = ["dep:mimalloc", "mimalloc/v2"]
+mimalloc-v3 = ["dep:mimalloc"]
+snmalloc = ["dep:snmalloc-rs"]
+# The system heap, the process heap a segment heap (application manifest, build.rs).
+segment-heap = []
+
+[dependencies]
+engine_assets = { path = "../../crates/engine_assets" }
+engine_core = { path = "../../crates/engine_core" }
+mimalloc = { version = "=0.1.52", default-features = false, optional = true }
+snmalloc-rs = { version = "=0.7.6", optional = true }
+windows-sys = { version = "0.61", features = ["Win32_System_ProcessStatus", "Win32_System_Threading", "Win32_Foundation"] }
+
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 1
