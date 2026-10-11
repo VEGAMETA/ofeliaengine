@@ -94,8 +94,11 @@ accesses through buffer addresses in every shader: ADR 0013's addendum), 0g (sha
 variants made on first use and by the device's warm-up thread, start-up phases
 overlapped: ADR 0079). On 2026-10-11: 1 (GPU particles and GPU radix sort: ADRs 0080,
 0081; the reactive mask for effects, ADR 0081's amendment), 2 researched (decals, ADR 0082
-Proposed: the owner's choice), 2b phase 1 (HDRI environments, ADR 0083). Next: 2b phase 2,
-or 2 once the owner has chosen.
+Proposed: the owner's choice), 2b (HDRI environments, ADR 0083 and its amendments:
+`.hdr` and OpenEXR, the sun as a light, cooked BC6H cubes; PRs #143–#145), 3 researched
+(GI, ADR 0084 Proposed: the owner's choice), 7c (`forward.rs` split, PR #147); a bloom
+format experiment measured and rejected (6b). Next: 2 or 3 once the owner has chosen;
+meanwhile 6b (the iGPU's bloom with fewer reads) or the ADR of 4.
 
 ## 5. Queue (in order)
 
@@ -303,7 +306,10 @@ grown, divide and conquer); the old labels stay in parentheses.
    default, with latency measured.
 6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms, bloom 1.6 ms (a single-pass
    downsampler), local shadows redrawn every frame when casters move (a per-frame redraw
-   budget; never the patented static/dynamic split).
+   budget; never the patented static/dynamic split). Tried 2026-10-11: bloom levels in
+   R11G11B10F save the bloom passes 10 % on both GPUs, but on the Radeon the tone mapper
+   then takes as much longer (frame unchanged; perf history): fewer reads are needed (a
+   cheaper filter, or the 13 taps from shared memory), not smaller ones.
 7. **The second review's core leftovers.**
 7a (was 6c). Memory (review §3.9): one transient heap for both frame slots where no
    transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,
