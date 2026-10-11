@@ -171,6 +171,11 @@ fn a_box_builds_a_distance_field_and_a_gi_context_over_it() {
                 command_buffer: cmd,
                 center: [0.0; 3],
                 frame_index: frame,
+                debug_mode: 0,
+                inverse_view: [0.0; 16],
+                inverse_projection: [0.0; 16],
+                pad: 0,
+                debug_output: engine_ffx::Image::default(),
             };
             assert_eq!(brix::engine_brixelizer_update(context, &update), 0);
             d.end_command_buffer(cmd).unwrap();

@@ -189,12 +189,17 @@ void FfxBrixelizerGet2DEdges(
     brixelizerreal3 TRIANGLE_VERTEX_0,
     brixelizerreal3 TRIANGLE_VERTEX_1,
     brixelizerreal3 TRIANGLE_VERTEX_2,
+    brixelizerreal3 TRIANGLE_EDGE_0,
+    brixelizerreal3 TRIANGLE_EDGE_1,
+    brixelizerreal3 TRIANGLE_EDGE_2,
     brixelizerreal  offset,
     bool    invert)
 {
-    brixelizerreal3 e0 = TRIANGLE_VERTEX_1.xyz - TRIANGLE_VERTEX_0.xyz;
-    brixelizerreal3 e1 = TRIANGLE_VERTEX_2.xyz - TRIANGLE_VERTEX_1.xyz;
-    brixelizerreal3 e2 = TRIANGLE_VERTEX_0.xyz - TRIANGLE_VERTEX_2.xyz;
+    // The edges come from the caller (an ofeliaengine fix, see third_party/README.md): the
+    // differences of the vertices here leave rounding where they should be zero.
+    brixelizerreal3 e0 = TRIANGLE_EDGE_0;
+    brixelizerreal3 e1 = TRIANGLE_EDGE_1;
+    brixelizerreal3 e2 = TRIANGLE_EDGE_2;
     if (invert) {
         e0 = -e0;
         e1 = -e1;

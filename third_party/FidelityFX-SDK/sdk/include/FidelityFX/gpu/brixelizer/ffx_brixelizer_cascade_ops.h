@@ -249,6 +249,18 @@ struct FfxBrixelizerTrianglePartialCompressed {
     FfxUInt32x2 ed1;
 };
 
+// The nearest half of each value, as a float (an ofeliaengine fix, see
+// third_party/README.md): the rounding of the half conversion below is the
+// implementation's. AMD's truncates (an edge of 39.999996 is stored as 39.97, not 40),
+// which shrinks the stored triangles and makes the vendors' distance fields differ.
+// Exact for the halves' normal range.
+FfxFloat32x4 FfxBrixelizerRoundToHalf(FfxFloat32x4 v)
+{
+    FfxUInt32x4 u = ffxAsUInt32(v);
+    u += FFX_BROADCAST_UINT32X4(0x0fffu) + ((u >> FFX_BROADCAST_UINT32X4(13u)) & FFX_BROADCAST_UINT32X4(1u));
+    return ffxAsFloat(u & FFX_BROADCAST_UINT32X4(0xffffe000u));
+}
+
 // Compress to f32x3 v0 and f16x3 e0, e1 and store
 void FfxBrixelizerStoreTrianglePartial(FfxUInt32 triangle_id_swap_offset, FfxBrixelizerTriangle tri)
 {
@@ -256,9 +268,10 @@ void FfxBrixelizerStoreTrianglePartial(FfxUInt32 triangle_id_swap_offset, FfxBri
     trip.wp0xy      = ffxAsUInt32(tri.wp0.xy);
     FfxFloat32x3 e0 = tri.wp1 - tri.wp0;
     FfxFloat32x3 e1 = tri.wp2 - tri.wp0;
-    FfxFloat32x4 v0 = FfxFloat32x4(e0.xyz, e1.x);
+    FfxFloat32x4 v0 = FfxBrixelizerRoundToHalf(FfxFloat32x4(e0.xyz, e1.x));
+    FfxFloat32x4 v1 = FfxBrixelizerRoundToHalf(FfxFloat32x4(e1.yz, 0.0, 0.0));
     trip.ed0        = ffxPackF32x2(v0);
-    trip.ed1.x      = ffxPackF32(e1.yz);
+    trip.ed1.x      = ffxPackF32(v1.xy);
     trip.ed1.y      = ffxAsUInt32(tri.wp0.z);
     StoreScratchIndexSwapUInt2((triangle_id_swap_offset / FFX_BRIXELIZER_SIZEOF_UINT) + FfxUInt32(0), trip.wp0xy);
     StoreScratchIndexSwapUInt2((triangle_id_swap_offset / FFX_BRIXELIZER_SIZEOF_UINT) + FfxUInt32(2), trip.ed0);
@@ -340,6 +353,17 @@ FfxUInt32 JobLowerBoundBySubvoxel(FfxUInt32 subvoxel_offset, FfxUInt32 total_job
 
     return LOWER_BOUND_RESULT;
 }
+
+// Device-scope release and acquire around the last-group handoffs of the scans below
+// (an ofeliaengine fix, see third_party/README.md): each group's first thread writes the
+// group's sum and then counts its arrival; the last group to arrive reads every sum. A
+// group barrier orders neither across groups, so the memory model lets the last group
+// read sums not yet visible (not seen in our tests; it costs two fences per group).
+#if defined(FFX_GLSL)
+#define FFX_BRIXELIZER_DEVICE_MEMORY_BARRIER memoryBarrierBuffer()
+#elif defined(FFX_HLSL)
+#define FFX_BRIXELIZER_DEVICE_MEMORY_BARRIER DeviceMemoryBarrier()
+#endif
 
 // One group performs global scan for all the other groups
 #define GROUP_SCAN(gid, total_group_count, group_size, LoadGlobal, StoreGlobal)                                                                      \
@@ -692,12 +716,16 @@ void FfxBrixelizerScanJobs(FfxUInt32 job_idx, FfxUInt32 gtid, FfxUInt32 group_id
         if (gtid == 0) // The first thread stores the sum
             StoreGlobalJobTriangleCounterScan(group_id, sum);
     }
-    if (gtid == 0) IncrementScratchCounter(FFX_BRIXELIZER_SCRATCH_COUNTER_GROUP_INDEX, 1, gs_ffx_brixelizer_scan_group_id);
+    if (gtid == 0) {
+        FFX_BRIXELIZER_DEVICE_MEMORY_BARRIER; // the group's sum before its arrival
+        IncrementScratchCounter(FFX_BRIXELIZER_SCRATCH_COUNTER_GROUP_INDEX, 1, gs_ffx_brixelizer_scan_group_id);
+    }
 
     FfxUInt32 total_group_count = (GetBuildInfoNumJobs() + FFX_BRIXELIZER_STATIC_CONFIG_SCAN_REFERENCES_GROUP_SIZE - 1) / FFX_BRIXELIZER_STATIC_CONFIG_SCAN_REFERENCES_GROUP_SIZE;
 
     FFX_GROUP_MEMORY_BARRIER;                      // Wait for gs_ffx_brixelizer_scan_group_id
     if (total_group_count - 1 == gs_ffx_brixelizer_scan_group_id) { // the last group does the rest of the scans
+        FFX_BRIXELIZER_DEVICE_MEMORY_BARRIER; // the other groups' sums after their arrival
 
         GROUP_SCAN(gtid,
                    total_group_count,
@@ -1002,10 +1030,14 @@ void FfxBrixelizerScanReferences(FfxUInt32 voxel_flat_id, FfxUInt32 gtid, FfxUIn
             StoreStampGroupSum(group_id, stamp_sum);
     }
 
-    if (gtid == FfxUInt32(0)) IncrementScratchCounter(FFX_BRIXELIZER_SCRATCH_COUNTER_GROUP_INDEX, FfxUInt32(1), gs_ffx_brixelizer_scan_group_id);
+    if (gtid == FfxUInt32(0)) {
+        FFX_BRIXELIZER_DEVICE_MEMORY_BARRIER; // the group's sums before its arrival
+        IncrementScratchCounter(FFX_BRIXELIZER_SCRATCH_COUNTER_GROUP_INDEX, FfxUInt32(1), gs_ffx_brixelizer_scan_group_id);
+    }
 
     FFX_GROUP_MEMORY_BARRIER;                            // Wait for gs_ffx_brixelizer_scan_group_id
     if (total_group_count - FfxUInt32(1) == gs_ffx_brixelizer_scan_group_id) { // the last group does the rest of the scans
+        FFX_BRIXELIZER_DEVICE_MEMORY_BARRIER; // the other groups' sums after their arrival
 
         GROUP_SCAN(gtid,
                    total_group_count,
@@ -1098,6 +1130,17 @@ void FfxBrixelizerEmitSDF(FfxUInt32 ref_id_offset, FfxUInt32 global_stamp_id)
             FfxFloat32x3      TRIANGLE_VERTEX_0 = (tri.wp0 - brick_min) / (brixel_size);
             FfxFloat32x3      TRIANGLE_VERTEX_1 = (tri.wp1 - brick_min) / (brixel_size);
             FfxFloat32x3      TRIANGLE_VERTEX_2 = (tri.wp2 - brick_min) / (brixel_size);
+            // The edges from the world-space triangle (an ofeliaengine fix, see
+            // third_party/README.md): the conservative tests of a projection the triangle
+            // degenerates in (a floor's onto xy) pass with no margin, so an edge parallel to
+            // an axis must be exactly zero along it. The differences of the vertices above are
+            // not on AMD's compiler: it leaves residues below the vertices' own precision
+            // (1e-5 between two equal coordinates of 1624.5), so it fuses the subtractions
+            // with the divisions, even under NoContraction, and the tests then drop the whole
+            // triangle. Equal world coordinates subtract to an exact zero.
+            FfxFloat32x3      TRIANGLE_EDGE_0   = (tri.wp1 - tri.wp0) / (brixel_size);
+            FfxFloat32x3      TRIANGLE_EDGE_1   = (tri.wp2 - tri.wp1) / (brixel_size);
+            FfxFloat32x3      TRIANGLE_EDGE_2   = (tri.wp0 - tri.wp2) / (brixel_size);
             const FfxFloat32  TRIANGLE_OFFSET   = FfxFloat32(FfxFloat32(0.0));
             FfxFloat32x3      TRIANGLE_MIN      = min(TRIANGLE_VERTEX_0, min(TRIANGLE_VERTEX_1, TRIANGLE_VERTEX_2));
             FfxFloat32x3      TRIANGLE_MAX      = max(TRIANGLE_VERTEX_0, max(TRIANGLE_VERTEX_1, TRIANGLE_VERTEX_2));
@@ -1188,6 +1231,9 @@ void FfxBrixelizerEmitSDF(FfxUInt32 ref_id_offset, FfxUInt32 global_stamp_id)
                     brixelizerreal3(TRIANGLE_VERTEX_0), //
                     brixelizerreal3(TRIANGLE_VERTEX_1), //
                     brixelizerreal3(TRIANGLE_VERTEX_2), //
+                    brixelizerreal3(TRIANGLE_EDGE_0),   //
+                    brixelizerreal3(TRIANGLE_EDGE_1),   //
+                    brixelizerreal3(TRIANGLE_EDGE_2),   //
                     TRIANGLE_OFFSET,            //
                     false
                 );

@@ -15,6 +15,8 @@ workspace = true
 png = "0.18"
 engine_anim.workspace = true
 engine_assets.workspace = true
+# Brixelizer GI's shots, probe GI's reference (ADR 0090).
+engine_brixelizer.workspace = true
 engine_core.workspace = true
 # The frame renderer the shots go through (ADR 0072), and DLSS's Streamline for its shot.
 engine_dlss.workspace = true

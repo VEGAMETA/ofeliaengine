@@ -529,17 +529,17 @@ static const EngineFfxReflection g_reflection[MODULE_COUNT] = {
     { { 2, m32_cbv_names, m32_cbv_bindings, m32_cbv_counts, m32_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 2, m32_srv_buffer_names, m32_srv_buffer_bindings, m32_srv_buffer_counts, m32_srv_buffer_spaces }, { 2, m32_uav_buffer_names, m32_uav_buffer_bindings, m32_uav_buffer_counts, m32_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
     // 33: cascade_ops_coarse_culling_pass.a17aa2f6ab1acf05.spv
     { { 2, m33_cbv_names, m33_cbv_bindings, m33_cbv_counts, m33_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 2, m33_srv_buffer_names, m33_srv_buffer_bindings, m33_srv_buffer_counts, m33_srv_buffer_spaces }, { 2, m33_uav_buffer_names, m33_uav_buffer_bindings, m33_uav_buffer_counts, m33_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
-    // 34: cascade_ops_scan_jobs_pass.d87772ab15b9f21a.spv
+    // 34: cascade_ops_scan_jobs_pass.28f09bd018a690e7.spv
     { { 1, m34_cbv_names, m34_cbv_bindings, m34_cbv_counts, m34_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 2, m34_srv_buffer_names, m34_srv_buffer_bindings, m34_srv_buffer_counts, m34_srv_buffer_spaces }, { 5, m34_uav_buffer_names, m34_uav_buffer_bindings, m34_uav_buffer_counts, m34_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
-    // 35: cascade_ops_scan_jobs_pass.088f08394f47f0d4.spv
+    // 35: cascade_ops_scan_jobs_pass.28b4cabb1370bacd.spv
     { { 1, m35_cbv_names, m35_cbv_bindings, m35_cbv_counts, m35_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 2, m35_srv_buffer_names, m35_srv_buffer_bindings, m35_srv_buffer_counts, m35_srv_buffer_spaces }, { 5, m35_uav_buffer_names, m35_uav_buffer_bindings, m35_uav_buffer_counts, m35_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
-    // 36: cascade_ops_voxelize_pass.00d418113195494f.spv
+    // 36: cascade_ops_voxelize_pass.0626d4efd26e19cb.spv
     { { 2, m36_cbv_names, m36_cbv_bindings, m36_cbv_counts, m36_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 4, m36_srv_buffer_names, m36_srv_buffer_bindings, m36_srv_buffer_counts, m36_srv_buffer_spaces }, { 9, m36_uav_buffer_names, m36_uav_buffer_bindings, m36_uav_buffer_counts, m36_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
-    // 37: cascade_ops_voxelize_pass.8bd4953d84a302a5.spv
+    // 37: cascade_ops_voxelize_pass.7ac67890f7bf521d.spv
     { { 2, m37_cbv_names, m37_cbv_bindings, m37_cbv_counts, m37_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 4, m37_srv_buffer_names, m37_srv_buffer_bindings, m37_srv_buffer_counts, m37_srv_buffer_spaces }, { 9, m37_uav_buffer_names, m37_uav_buffer_bindings, m37_uav_buffer_counts, m37_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
-    // 38: cascade_ops_scan_references_pass.22516abaca5828f5.spv
+    // 38: cascade_ops_scan_references_pass.15f2daf9a5c9680c.spv
     { { 2, m38_cbv_names, m38_cbv_bindings, m38_cbv_counts, m38_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 15, m38_uav_buffer_names, m38_uav_buffer_bindings, m38_uav_buffer_counts, m38_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
-    // 39: cascade_ops_scan_references_pass.b9a0eabd9c0238cf.spv
+    // 39: cascade_ops_scan_references_pass.345340a73eb4c5f2.spv
     { { 2, m39_cbv_names, m39_cbv_bindings, m39_cbv_counts, m39_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 15, m39_uav_buffer_names, m39_uav_buffer_bindings, m39_uav_buffer_counts, m39_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
     // 40: cascade_ops_compact_references_pass.9dad1a2c7ca88613.spv
     { { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 8, m40_uav_buffer_names, m40_uav_buffer_bindings, m40_uav_buffer_counts, m40_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
@@ -549,9 +549,9 @@ static const EngineFfxReflection g_reflection[MODULE_COUNT] = {
     { { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 3, m42_uav_buffer_names, m42_uav_buffer_bindings, m42_uav_buffer_counts, m42_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
     // 43: cascade_ops_clear_brick_storage_pass.1d36b365c055a120.spv
     { { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 3, m43_uav_buffer_names, m43_uav_buffer_bindings, m43_uav_buffer_counts, m43_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
-    // 44: cascade_ops_emit_sdf_pass.790fdeb87fd39a17.spv
+    // 44: cascade_ops_emit_sdf_pass.b34c8530589fffd4.spv
     { { 1, m44_cbv_names, m44_cbv_bindings, m44_cbv_counts, m44_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 9, m44_uav_buffer_names, m44_uav_buffer_bindings, m44_uav_buffer_counts, m44_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
-    // 45: cascade_ops_emit_sdf_pass.ec9bb1e12206939d.spv
+    // 45: cascade_ops_emit_sdf_pass.6f9df2236fb85b0e.spv
     { { 1, m45_cbv_names, m45_cbv_bindings, m45_cbv_counts, m45_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 0, nullptr, nullptr, nullptr, nullptr }, { 9, m45_uav_buffer_names, m45_uav_buffer_bindings, m45_uav_buffer_counts, m45_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },
     // 46: cascade_ops_compress_brick_pass.b9f2b80c1c55c58e.spv
     { { 1, m46_cbv_names, m46_cbv_bindings, m46_cbv_counts, m46_cbv_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 1, m46_uav_texture_names, m46_uav_texture_bindings, m46_uav_texture_counts, m46_uav_texture_spaces }, { 0, nullptr, nullptr, nullptr, nullptr }, { 6, m46_uav_buffer_names, m46_uav_buffer_bindings, m46_uav_buffer_counts, m46_uav_buffer_spaces }, { 0, nullptr, nullptr, nullptr, nullptr } },

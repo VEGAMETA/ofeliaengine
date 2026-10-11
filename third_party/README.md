@@ -1,7 +1,7 @@
 # Third-party sources
 
-Source only, unmodified, each with its license (CLAUDE.md §2, §15). Every entry is also
-listed in `THIRD_PARTY_NOTICES.md`.
+Source only, each with its license (CLAUDE.md §2, §15), unmodified but for the changes
+under "Local modifications". Every entry is also listed in `THIRD_PARTY_NOTICES.md`.
 
 | Directory | Project | Version | License | Used by |
 |---|---|---|---|---|
@@ -17,4 +17,34 @@ commit here, and run the `engine_physics_jolt` tests: the FFI layout test catche
 changes. For the FidelityFX SDK, also regenerate the shaders
 (`cargo run -p engine_ffx --example ffx_shaders -- --glslang <the SDK's
 sdk/tools/binary_store/glslangValidator.exe>`) and run the `engine_ffx` and `engine_fsr`
-tests on both GPUs (ADR 0060, ADR 0090).
+tests on both GPUs (ADR 0060, ADR 0090). Carry the local modifications over, or drop those
+the new version fixes.
+
+## Local modifications
+
+### FidelityFX SDK: Brixelizer on AMD's Vulkan compiler (ADR 0090)
+
+Three changes in `sdk/include/FidelityFX/gpu/brixelizer/`, each marked "an ofeliaengine
+fix" in place. Found on ref-1's Radeon (RDNA2, driver 26.8.1), which built a test scene's
+distance field with holes through its floor and wall: 30 054 bricks where the RTX builds
+38 468. With them, both GPUs build the same bricks.
+
+1. **Edges from the world-space triangle** (`ffx_brixelizer_cascade_ops.h`,
+   `ffx_brixelizer_common_private.h`). `FfxBrixelizerGet2DEdges` took the triangle's edges
+   as differences of its vertices in brick coordinates. A triangle's projection onto a
+   plane it stands perpendicular to (a floor's onto xy) is a segment, whose conservative
+   edge tests pass with no margin: an edge parallel to an axis must be exactly zero along
+   it. AMD's compiler leaves residues below the coordinates' own precision instead (1e-5
+   between two equal coordinates of 1624.5, also with NoContraction on the subtractions),
+   the tests fail and whole triangles are left out of their bricks. `FfxBrixelizerEmitSDF`
+   now passes the edges in, from the world-space vertices, where equal coordinates subtract
+   to zero. `engine_brixelizer`'s `the_distance_field_has_no_holes` fails without it.
+2. **Edges stored as the nearest halves** (`ffx_brixelizer_cascade_ops.h`,
+   `FfxBrixelizerStoreTrianglePartial`). The rounding of the half conversion is the
+   implementation's; AMD's truncates (an edge of 39.999996 is stored as 39.97, not 40), so
+   the vendors' distance fields differed. The edges are rounded to the nearest half first.
+3. **Device-scope fences around the scans' last-group handoffs**
+   (`ffx_brixelizer_cascade_ops.h`, `FfxBrixelizerScanJobs`, `FfxBrixelizerScanReferences`):
+   each group's first thread writes the group's sum and counts its arrival, and the last
+   group reads every sum. A group barrier orders neither across groups; the memory model
+   needs a release and an acquire. Not seen to fail; two fences per group.

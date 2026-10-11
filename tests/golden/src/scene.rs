@@ -11,8 +11,10 @@ use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
     TextureSlot, TextureWrap, cook_scene, import_gltf, write_pack,
 };
+use engine_brixelizer::{Brixelizer, BrixelizerGi, SdfDebugView, SdfSettings};
+use engine_core::half;
 use engine_core::jobs::ThreadPool;
-use engine_core::math::{Affine3A, Mat4, Quat, Vec3, look_at};
+use engine_core::math::{Affine3A, Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_ecs::{Entity, GlobalTransform, Transform, World};
 use engine_frame::{
     Antialiasing, Exposure, FrameContext, FrameRenderer, PrepareContext, Quality, SceneDraws,
@@ -42,7 +44,8 @@ use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, Textu
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, MemoryLocation, Wrap,
+    AdapterPreference, Allocation, Allocator, Bindless, Device, Instance, InstanceDesc,
+    MemoryLocation, Wrap,
 };
 use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
 use engine_streaming::{SceneStreamSettings, SceneStreamer};
@@ -177,7 +180,31 @@ pub struct Shot {
     /// (ADR 0088; with `runtime`; skipped on GPUs without ray queries): converged from the
     /// first frame with every texture resident, before the capture.
     pub gi: Option<f32>,
+    /// Global illumination from AMD's Brixelizer GI instead (ADR 0090), probe GI's
+    /// reference: the distance field over the scene's meshes (built over the first frames,
+    /// a cascade a frame) and the radiance cache fed [`BRIXELIZER_WARMUP`] frames with every
+    /// texture resident before the capture.
+    pub brixelizer_gi: bool,
+    /// With `brixelizer_gi`: its warm-up instead of [`BRIXELIZER_WARMUP`] frames.
+    pub brixelizer_warmup: Option<u32>,
+    /// With `brixelizer_gi`: the captures show this debug view of Brixelizer's distance
+    /// field, traced from the camera, instead of the frame (its values as sRGB colors).
+    pub brixelizer_view: Option<SdfDebugView>,
+    /// The sky's light, its radiance scaled (with `sky`; 0: a black sky, lighting nothing).
+    pub sky_intensity: f32,
+    /// The sun goes out (its color and ambient term zero) after this many captures: the
+    /// next ones show how fast the GI lets go of its light.
+    pub sun_off_after: Option<u32>,
+    /// The GI shading's irradiance read back with every capture: its mean
+    /// ([`Rendered::gi_means`]) and the first capture's image ([`Rendered::gi_image`]).
+    pub gi_readback: bool,
 }
+
+/// Frames Brixelizer GI runs with every texture resident before a shot is captured or
+/// timed: its distance field's cascades are built in the first eight (the GI waits for
+/// them), and its caches, fed by last frame's lit image, settle over the rest (by half
+/// every 48 frames or so).
+pub const BRIXELIZER_WARMUP: u32 = 128;
 
 impl Shot {
     /// Defaults for a shot of `source`: default view, a sun, sky light, bloom, GT curve.
@@ -227,6 +254,12 @@ impl Shot {
             panorama: None,
             decals: false,
             gi: None,
+            brixelizer_gi: false,
+            brixelizer_warmup: None,
+            brixelizer_view: None,
+            sky_intensity: 1.0,
+            sun_off_after: None,
+            gi_readback: false,
         }
     }
 }
@@ -250,12 +283,33 @@ pub struct Rendered {
     /// Median GPU time of the frames end to end (first pass to last), µs: with async
     /// compute, less than the sum of the passes.
     pub frame_us: f64,
+    /// GPU time of each pass over the frames before the first timed one, µs, by pass name:
+    /// the scene's upload, the GI's convergence or warm-up, the probes' captures.
+    pub startup_us: BTreeMap<&'static str, f64>,
     /// Whether async passes ran on the async compute queue.
     pub async_compute: bool,
     /// The antialiasing used (the shot's, or TAAU when its upscaler was unavailable).
     pub antialiasing: Antialiasing,
     /// Every captured frame ([`Shot::captures`]), in order, as `rgba8`.
     pub frames: Vec<Vec<u8>>,
+    /// GPU memory the GI keeps between frames, bytes: probe GI's volume and its ray
+    /// scene's acceleration structures, or Brixelizer GI's distance field (the SDK's
+    /// resources, its scratch included) and the view's GI; 0 without GI.
+    pub gi_bytes: u64,
+    /// `gi_bytes` by part: probe GI's volume and ray scene, or Brixelizer GI's distance
+    /// field and view.
+    pub gi_parts: Vec<(&'static str, u64)>,
+    /// The frames from the scene being resident to the GI being ready, and the GPU time
+    /// the GI's passes took over them, µs (probe GI: the volume's updates and the ray
+    /// scene's builds; Brixelizer GI: the distance field's builds and the warm-up).
+    pub gi_settle: (u32, f64),
+    /// With [`Shot::gi_readback`]: the GI shading's mean irradiance (rgb) over the pixels
+    /// showing a surface, for every capture.
+    pub gi_means: Vec<[f32; 3]>,
+    /// With [`Shot::gi_readback`]: the first capture's GI irradiance (rgb, the surface's
+    /// distance; 0 for the sky) at the GI's size (probe GI's: its resolve's scale of the
+    /// render size): width, height, rows top to bottom.
+    pub gi_image: Option<(u32, u32, Vec<[f32; 4]>)>,
 }
 
 /// How to run [`render`].
@@ -801,9 +855,14 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         "{}: probe GI traces the runtime's GPU scene",
         shot.name
     );
+    assert!(
+        shot.gi.is_none() || !shot.brixelizer_gi,
+        "{}: one GI or the other",
+        shot.name
+    );
     let renderer = frame.forward_mut();
     renderer
-        .set_global_illumination(&device, &bindless, shot.gi.is_some())
+        .set_global_illumination(&device, &bindless, shot.gi.is_some() || shot.brixelizer_gi)
         .expect("global illumination");
     renderer.set_depth_prepass(shot.prepass);
     renderer
@@ -849,6 +908,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let environment = shot.sky.then(|| {
         let mut environment =
             Environment::new(&device, &mut allocator, &bindless, Sky::default()).expect("sky");
+        environment.set_intensity(shot.sky_intensity);
         environment
             .set_atmosphere(&device, &mut allocator, &bindless, shot.atmosphere)
             .expect("atmosphere");
@@ -1233,6 +1293,27 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         )
         .expect("probe GI")
     });
+    // Brixelizer GI (ADR 0090): the distance field over every draw (static), with the
+    // SDK sample's settings; the view's GI is made for the render size on the first frame.
+    let mut brixelizer = shot.brixelizer_gi.then(|| {
+        let mut sdf =
+            Brixelizer::new(&device, &mut allocator, SdfSettings::default()).expect("Brixelizer");
+        let instances: Vec<(MeshId, Mat4)> = draws
+            .iter()
+            .map(|d| (d.mesh, d.world_from_object))
+            .collect();
+        sdf.set_instances(&geometry, &instances)
+            .expect("Brixelizer instances");
+        sdf
+    });
+    let mut brixelizer_gi: Option<BrixelizerGi> = None;
+    let mut brixelizer_frames = 0u32;
+    let mut gi_settle = (0u32, 0.0f64);
+    // With `gi_readback`: the GI's irradiance at the render size, read back with each
+    // capture (made on the first capture).
+    let mut gi_readback: Option<(vk::Buffer, Allocation, (u32, u32))> = None;
+    let mut gi_means = Vec::new();
+    let mut gi_image = None;
 
     // The skins' skinning matrices at the shot's time plus `elapsed` clip seconds.
     let palettes_at = |elapsed: f32| -> Vec<Vec<[f32; 12]>> {
@@ -1260,6 +1341,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     };
     let mut palettes = palettes_at(0.0);
     let mut timings: BTreeMap<&'static str, Vec<f64>> = BTreeMap::new();
+    let mut startup_us: BTreeMap<&'static str, f64> = BTreeMap::new();
     let mut frame_times = Vec::new();
     let mut frame_number = 0u64;
     let mut timed = 0;
@@ -1291,8 +1373,10 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         let uploading = textures.pending().0 > 0 || (streaming.is_some() && quiet < 70);
         // With probes, once every probe was captured with the textures resident.
         let probes_ready = probes.as_ref().is_none_or(|p| p.stats().pending == 0);
-        // With GI, once the volume converged.
-        let gi_ready = gi_volume.as_ref().is_none_or(ProbeGi::is_converged);
+        // With GI, once the volume converged (Brixelizer GI: once warmed up).
+        let warmup = shot.brixelizer_warmup.unwrap_or(BRIXELIZER_WARMUP);
+        let gi_ready = gi_volume.as_ref().is_none_or(ProbeGi::is_converged)
+            && (brixelizer.is_none() || brixelizer_frames >= warmup);
         let capture = !uploading
             && captured < captures
             && resident_frames >= capture_at
@@ -1368,6 +1452,31 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             )
             .expect("prepare");
         antialiasing = prepared.antialiasing;
+        if let Some(sdf) = brixelizer.as_ref()
+            && brixelizer_gi
+                .as_ref()
+                .is_none_or(|gi| gi.size() != prepared.render)
+        {
+            if let Some(mut old) = brixelizer_gi.take() {
+                // SAFETY: the GPU is idle (every frame is waited for).
+                unsafe { old.destroy(&device, &mut allocator, &bindless, frame_number) };
+            }
+            brixelizer_gi = Some(
+                BrixelizerGi::new(
+                    &device,
+                    &mut allocator,
+                    &bindless,
+                    sdf,
+                    prepared.render.0,
+                    prepared.render.1,
+                    engine_brixelizer::GiSettings::for_device(&device),
+                )
+                .expect("Brixelizer GI"),
+            );
+        }
+        if brixelizer.is_some() && !uploading {
+            brixelizer_frames += 1;
+        }
         if shot.animation_rate != 0.0 {
             palettes = palettes_at(shot.animation_rate * accumulated.unwrap_or(0) as f32);
         }
@@ -1453,10 +1562,44 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     .expect("ray scene"),
                 _ => None,
             };
-            let gi = gi_volume.as_ref().map(|volume| ViewGi {
-                volume: volume.begin_frame(&mut fg),
-                rays: ray_frame.filter(|_| !uploading),
-            });
+            let (sdf_frame, sdf_view) = match (brixelizer.as_ref(), shot.brixelizer_view) {
+                (Some(sdf), Some(debug)) => {
+                    let clip_from_world = vulkan_perspective(
+                        camera.fov_y,
+                        width as f32 / height as f32,
+                        camera.near,
+                        camera.far,
+                    ) * camera.view_from_world;
+                    let (sdf_frame, texture) = sdf.add_update_pass_with_debug(
+                        &mut fg,
+                        &geo,
+                        camera.position,
+                        engine_render::forward::Camera {
+                            clip_from_world,
+                            position: camera.position,
+                        },
+                        debug,
+                        (width, height),
+                    );
+                    (Some(sdf_frame), texture)
+                }
+                (Some(sdf), None) => (
+                    Some(sdf.add_update_pass(&mut fg, &geo, camera.position)),
+                    None,
+                ),
+                _ => (None, None),
+            };
+            if let (Some(gi), Some(sdf_frame)) = (brixelizer_gi.as_ref(), sdf_frame.as_ref()) {
+                gi.begin_frame(sdf_frame);
+            }
+            let gi = match brixelizer_gi.as_ref() {
+                Some(gi) => Some(ViewGi::Screen(gi)),
+                None => gi_volume.as_ref().map(|volume| ViewGi::Probes {
+                    volume: volume.begin_frame(&mut fg),
+                    rays: ray_frame.filter(|_| !uploading),
+                }),
+            };
+            let screen_gi = brixelizer_gi.as_ref();
             let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
             if let Some(set) = &decal_set {
                 set.upload(&mut fg, &mut ring);
@@ -1482,7 +1625,14 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                             None => SceneDraws::List(&draws),
                         },
                         skinning: Some(&skinned_frame),
-                        light: sun,
+                        light: match shot.sun_off_after {
+                            Some(after) if captured >= after => DirectionalLight {
+                                color: Vec3::ZERO,
+                                ambient: Vec3::ZERO,
+                                ..sun
+                            },
+                            _ => sun,
+                        },
                         lights: &lights,
                         decals: decal_set.as_ref().map_or(&[], |s| s.decals.as_slice()),
                         environment: environment.as_ref(),
@@ -1496,6 +1646,11 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         load: LoadOp::DontCare,
                     },
                     |fg, targets| {
+                        // Brixelizer GI's radiance cache reads this frame's lit image next
+                        // frame.
+                        if let Some(gi) = screen_gi {
+                            gi.add_capture_pass(fg, targets.color);
+                        }
                         if let (Some(particles), Some(step)) = (particles, particle_frame) {
                             particles.add_passes(
                                 fg,
@@ -1532,6 +1687,103 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         frame_number,
                     )
                     .expect("feedback");
+            }
+            if let Some(view) = sdf_view {
+                // The distance field's view over the frame, converted to its format.
+                fg.add_pass("brixelizer view")
+                    .read(view, Access::TransferRead)
+                    .write(ldr, Access::TransferWrite)
+                    .execute(move |ctx| {
+                        let layers = vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        };
+                        let corner = vk::Offset3D {
+                            x: width as i32,
+                            y: height as i32,
+                            z: 1,
+                        };
+                        let region = vk::ImageBlit {
+                            src_subresource: layers,
+                            src_offsets: [vk::Offset3D::default(), corner],
+                            dst_subresource: layers,
+                            dst_offsets: [vk::Offset3D::default(), corner],
+                        };
+                        // SAFETY: recording; layouts arranged by the graph.
+                        unsafe {
+                            ctx.device.cmd_blit_image(
+                                ctx.cmd,
+                                ctx.image(view),
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                ctx.image(ldr),
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                &[region],
+                                vk::Filter::NEAREST,
+                            );
+                        }
+                    });
+            }
+            if capture
+                && shot.gi_readback
+                && let Some(irradiance) = view_frame.passes.gi
+            {
+                // Probe GI's irradiance is at its resolve's scale of the render size.
+                let desc = fg.texture_desc(irradiance);
+                let (w, h) = (desc.width, desc.height);
+                if gi_readback.is_none() {
+                    let (buffer, memory) = allocator
+                        .create_buffer(
+                            &vk::BufferCreateInfo::default()
+                                .size(u64::from(w * h * 8))
+                                .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                            MemoryLocation::Readback,
+                        )
+                        .expect("GI readback");
+                    gi_readback = Some((buffer, memory, (w, h)));
+                }
+                let (buffer, _, size) = gi_readback.as_ref().expect("GI readback");
+                assert_eq!(*size, (w, h), "{}: the render size changed", shot.name);
+                let out = fg.import_buffer(
+                    "gi readback",
+                    ImportedBuffer {
+                        buffer: *buffer,
+                        size: u64::from(w * h * 8),
+                        address: 0,
+                        initial: BufferState::idle(),
+                        final_state: Some(BufferState::host_read()),
+                    },
+                );
+                fg.add_pass("read back gi")
+                    .read(irradiance, Access::TransferRead)
+                    .write(out, Access::TransferWrite)
+                    .execute(move |ctx| {
+                        let region = vk::BufferImageCopy {
+                            image_subresource: vk::ImageSubresourceLayers {
+                                aspect_mask: vk::ImageAspectFlags::COLOR,
+                                mip_level: 0,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            },
+                            image_extent: vk::Extent3D {
+                                width: w,
+                                height: h,
+                                depth: 1,
+                            },
+                            ..Default::default()
+                        };
+                        // SAFETY: recording; layouts arranged by the graph.
+                        unsafe {
+                            ctx.device.cmd_copy_image_to_buffer(
+                                ctx.cmd,
+                                ctx.image(irradiance),
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                ctx.buffer(out),
+                                &[region],
+                            );
+                        }
+                    });
             }
             if capture {
                 let out = fg.import_buffer(
@@ -1594,6 +1846,12 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             .expect("submit");
             device.wait_idle().expect("wait");
         }
+        if timed == 0 {
+            // Times of the frame before this one's recording, as below.
+            for time in graph.gpu_pass_times() {
+                *startup_us.entry(time.name).or_default() += f64::from(time.gpu_us);
+            }
+        }
         if uploading {
             continue;
         }
@@ -1609,6 +1867,33 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         {
             // Captures made while textures streamed in: again, with all of them.
             p.refresh_all();
+        }
+        if capture && let Some((_, memory, (w, h))) = gi_readback.as_ref() {
+            let ptr = memory.mapped_ptr().expect("mapped GI readback");
+            // SAFETY: the GPU is idle; the mapping covers the image (RGBA16F).
+            let raw = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), (w * h * 8) as usize) };
+            let texel =
+                |p: &[u8], k: usize| half::to_f32(u16::from_le_bytes([p[2 * k], p[2 * k + 1]]));
+            let pixels: Vec<[f32; 4]> = raw
+                .chunks_exact(8)
+                .map(|p| [texel(p, 0), texel(p, 1), texel(p, 2), texel(p, 3)])
+                .collect();
+            let (mut sum, mut n) = ([0.0f64; 3], 0u64);
+            for p in pixels.iter().filter(|p| p[3] > 0.0) {
+                for k in 0..3 {
+                    sum[k] += f64::from(p[k]);
+                }
+                n += 1;
+            }
+            let n = n.max(1) as f64;
+            gi_means.push([
+                (sum[0] / n) as f32,
+                (sum[1] / n) as f32,
+                (sum[2] / n) as f32,
+            ]);
+            if gi_image.is_none() {
+                gi_image = Some((*w, *h, pixels));
+            }
         }
         if capture {
             captured += 1;
@@ -1628,9 +1913,23 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             previous_faces = faces;
             // Not converged after this frame, the frame before or the one before that (whose
             // updates the frame before then made: the times are a frame late).
-            let converging = gi_volume.as_ref().is_some_and(|g| !g.is_converged());
+            let converging = gi_volume.as_ref().is_some_and(|g| !g.is_converged())
+                || (brixelizer.is_some() && brixelizer_frames < warmup);
             let gi_settling = converging || converging_before[0] || converging_before[1];
             converging_before = [converging, converging_before[0]];
+            if gi_settling && resident_frames > 0 && (gi_volume.is_some() || brixelizer.is_some()) {
+                gi_settle.0 += 1;
+                gi_settle.1 += graph
+                    .gpu_pass_times()
+                    .iter()
+                    .filter(|t| {
+                        ["gi ", "brixelizer", "blas", "tlas"]
+                            .iter()
+                            .any(|p| t.name.starts_with(p))
+                    })
+                    .map(|t| f64::from(t.gpu_us))
+                    .sum::<f64>();
+            }
             if resident_frames > 3 && !capturing && !gi_settling {
                 let mut frame: BTreeMap<&'static str, f64> = BTreeMap::new();
                 // The test bed's own passes are not the renderer's.
@@ -1661,6 +1960,24 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         .collect();
     let frame_us = median(&mut frame_times);
     let async_compute = graph.async_compute();
+    let mut gi_parts = Vec::new();
+    if let Some(volume) = gi_volume.as_ref() {
+        gi_parts.push(("probe volume", volume.memory_bytes()));
+    }
+    if let Some(rays) = gi_rays.as_ref() {
+        let stats = rays.stats();
+        gi_parts.push((
+            "acceleration structures",
+            stats.blas_bytes + stats.tlas_bytes,
+        ));
+    }
+    if let Some(sdf) = brixelizer.as_ref() {
+        gi_parts.push(("distance field", sdf.gpu_memory()));
+    }
+    if let Some(gi) = brixelizer_gi.as_ref() {
+        gi_parts.push(("view GI", gi.gpu_memory()));
+    }
+    let gi_bytes = gi_parts.iter().map(|(_, bytes)| bytes).sum();
 
     let mut environment = environment;
     let mut streaming = streaming;
@@ -1687,6 +2004,12 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         if let Some(volume) = gi_volume.as_mut() {
             volume.destroy(&device, &mut allocator, &bindless);
         }
+        if let Some(gi) = brixelizer_gi.as_mut() {
+            gi.destroy(&device, &mut allocator, &bindless, frame_number + 1);
+        }
+        if let Some(sdf) = brixelizer.as_mut() {
+            sdf.destroy(&device, &mut allocator);
+        }
         graph.destroy(&mut allocator, Some(&bindless));
         ring.destroy(&mut allocator);
         skinning.destroy(&mut allocator);
@@ -1703,10 +2026,15 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             set.destroy(&device, &mut allocator, &bindless);
         }
         allocator.destroy_buffer(readback, readback_mem);
+        if let Some((buffer, memory, _)) = gi_readback.take() {
+            allocator.destroy_buffer(buffer, memory);
+        }
         d.destroy_command_pool(command_pool, None);
     }
     // Streamline goes before the device it is attached to (ADR 0063).
     drop((
+        brixelizer_gi,
+        brixelizer,
         game,
         frame,
         view,
@@ -1731,8 +2059,14 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         rgba8,
         pass_us,
         frame_us,
+        startup_us,
         async_compute,
         antialiasing,
         frames,
+        gi_bytes,
+        gi_parts,
+        gi_settle,
+        gi_means,
+        gi_image,
     })
 }

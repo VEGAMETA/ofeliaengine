@@ -242,7 +242,7 @@ fn steady_state_scene_frames_do_not_allocate() {
                     .side_effects()
                     .execute(|_| {});
             }
-            let gi_view = gi.as_ref().map(|g| ViewGi {
+            let gi_view = gi.as_ref().map(|g| ViewGi::Probes {
                 volume: g.begin_frame(&mut fg),
                 rays: ray_frame,
             });

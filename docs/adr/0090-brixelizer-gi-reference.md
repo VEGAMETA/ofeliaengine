@@ -1,6 +1,7 @@
 # 0090. Brixelizer GI built from the FidelityFX SDK as probe GI's reference
 
-- Status: Proposed (measurements to come)
+- Status: Accepted (2026-10-11, with the measurements: probe GI meets ADR 0084's bar on
+  both GPUs; Brixelizer GI stays as the reference)
 - Date: 2026-10-11
 - Research: [docs/research/brixelizer-gi.md](../research/brixelizer-gi.md)
 - Related: [ADR 0084](0084-global-illumination.md) (the bar: our GI must beat Brixelizer GI),
@@ -92,14 +93,52 @@ Three facts shape the build:
 
 ## Decision
 
-To be taken with the measurements. Proposed:
+- Options 1b (`engine_ffx`, `engine_brixelizer`), 2a (`ScreenGi`, `ViewGi::Screen`), 3a,
+  4, 5 (static and dynamic cascades, 8 from 0.2 m), 6.
+- **The vendored SDK carries three fixes for AMD's compiler** (`third_party/README.md`):
+  the distance field's edge tests take edges from the world-space triangle (AMD's compiler
+  left residues where zeros are needed, and the Radeon built Sponza's floor with holes);
+  edges stored as halves rounded to the nearest; device-scope fences in the scans'
+  last-group handoffs.
+- **The GI waits for the distance field.** The first updates build every cascade once (the
+  frame indices the SDK's schedule maps to each, the coarsest last); a view's GI runs from
+  then on. Otherwise its rays take the sky's light through the unbuilt cascades and the
+  caches keep it for hundreds of frames.
+- **Views without motion vectors** get the camera's motion from the depth.
+- **The SDK's diffuse light is irradiance** (π under a uniform sky of radiance 1): no
+  scale.
+- Specular GI is left out, as planned for a diffuse comparison.
 
-- Options 1b, 2a, 3a, 4, 5 (static and dynamic), 6.
-- Specular GI is left for the medallions' second step: Brixelizer's specular into the
-  reflections' composite.
+## Results (2026-10-11, ref-1, `gi_bench`; the research note has the details)
+
+Sponza at 1920 × 1080, the courtyard and the medallions; Brixelizer GI warmed up 256 frames.
+
+| | probe GI, RTX | Brixelizer GI, RTX | probe GI, Radeon | Brixelizer GI, Radeon |
+|---|---:|---:|---:|---:|
+| GI passes, ms | 0.33–0.34 | 1.55–1.63 | 2.38 | 32.2–33.0 |
+| Memory, MiB | 20.4 | 594 | 28.7 | 532 |
+| Ready | converged at load: 10 frames, 22 ms of GPU | field in 8 frames; 90 % of its light after 116 | 10 frames, 1.0 s | field 0.85 s; 90 % after 138 |
+| Sun turned off: frames to half | 15 | 180 | 123 | 203 |
+| Before a sunlit wall, 0.4 m / 4.9 m (physically about 1.14 / 0.20) | 1.19 / 0.20 | 0.22–0.23 / 0.08 | 1.19 / 0.20 | 0.22 / 0.08 |
+
+- **ADR 0084's bar is met** on both GPUs: probe GI costs 4.5 / 14 times less GPU time and
+  29 / 18 times less memory, its bounce has the physical size (Brixelizer GI's a fifth:
+  its rays read a brick's radiance through a cosine lobe), and on the RTX it follows a
+  change of light twelve times sooner.
+- **Brixelizer GI is not the fallback** for cost or quality. It stays as the reference:
+  `engine_brixelizer`, its tests, the golden shot `sponza_brixelizer_gi` and `gi_bench`.
+  On GPUs without ray queries it would be the only one of the two to run.
+- **Found for probe GI:** on the iGPU its far probes wait for their turn of the ray budget
+  (ADR 0089), so a sun turned off leaves a third of its bounce after 400 frames (Brixelizer
+  GI: a quarter). Large changes of light should call `ProbeGi::refresh` (ten frames, as
+  at load): queue.
 
 ## Consequences
 
 - A new crate for the SDK; `engine_fsr` loses its build script but keeps its API.
+- The vendored SDK is no longer unmodified: an update of it carries the three fixes over
+  (or drops those AMD fixed).
 - Brixelizer GI is a screen-space GI: reflection probe captures (ADR 0073) cannot use it, so
   probes captured in a Brixelizer GI view see only the sky's light.
+- Brixelizer GI costs 364 MiB for the distance field whatever the scene and 170–230 MiB
+  per view: a reference, not something to ship by default.
