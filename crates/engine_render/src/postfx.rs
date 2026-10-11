@@ -5,7 +5,10 @@
 //! - [`Bloom`] halves the HDR image several times (a 13-tap filter, Karis' average on the
 //!   first step) and enlarges it back with a 3 × 3 tent, each level mixing in the smaller
 //!   ones (after Jimenez, SIGGRAPH 2014). Every filter is normalized, and the tone mapper
-//!   mixes the result in by `intensity`: energy is kept.
+//!   mixes the result in by `intensity`: energy is kept. A level exactly half the size of
+//!   the one it reads (or twice, going up) is made by a pass that fetches its group's taps
+//!   once into shared memory: neighbouring pixels share them (18 % of the fetches down,
+//!   26 % up). The same fetches and sums: the same values.
 //! - [`AutoExposure`] builds a histogram of log2 luminance, averages it between two
 //!   percentiles, and adapts an exposure towards middle grey over time, all on the GPU.
 
@@ -19,7 +22,9 @@ use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError, SamplerKind};
 
 const DOWNSAMPLE: &[u8] = include_bytes!("../shaders/postfx.bloomDownsample.spv");
+const DOWNSAMPLE_SHARED: &[u8] = include_bytes!("../shaders/postfx.bloomDownsampleShared.spv");
 const UPSAMPLE: &[u8] = include_bytes!("../shaders/postfx.bloomUpsample.spv");
+const UPSAMPLE_SHARED: &[u8] = include_bytes!("../shaders/postfx.bloomUpsampleShared.spv");
 const HISTOGRAM: &[u8] = include_bytes!("../shaders/postfx.exposureHistogram.spv");
 const AVERAGE: &[u8] = include_bytes!("../shaders/postfx.exposureAverage.spv");
 
@@ -96,6 +101,11 @@ pub struct BloomOutput {
 pub struct Bloom {
     downsample: ComputeShader<Push>,
     upsample: ComputeShader<Push>,
+    /// The same filters for levels exactly half (twice) the size of the one they read,
+    /// with each group's taps fetched once into shared memory.
+    downsample_shared: ComputeShader<Push>,
+    upsample_shared: ComputeShader<Push>,
+    shared: Cell<bool>,
     settings: Cell<BloomSettings>,
 }
 
@@ -106,19 +116,31 @@ impl Bloom {
         bindless: &Bindless,
         settings: BloomSettings,
     ) -> Result<Self, RhiError> {
-        let [downsample, upsample] = ComputeSource::create_all(
+        let [downsample, upsample, downsample_shared, upsample_shared] = ComputeSource::create_all(
             device,
             bindless,
             [
                 ComputeSource::new(DOWNSAMPLE, c"bloomDownsample", &[])?,
                 ComputeSource::new(UPSAMPLE, c"bloomUpsample", &[])?,
+                ComputeSource::new(DOWNSAMPLE_SHARED, c"bloomDownsampleShared", &[])?,
+                ComputeSource::new(UPSAMPLE_SHARED, c"bloomUpsampleShared", &[])?,
             ],
         )?;
         Ok(Self {
             downsample,
             upsample,
+            downsample_shared,
+            upsample_shared,
+            shared: Cell::new(true),
             settings: Cell::new(settings),
         })
+    }
+
+    /// Whether levels exactly half (twice) the size of the one they read use the
+    /// shared-memory passes (the default); off for tests and measurements comparing them.
+    #[doc(hidden)]
+    pub fn set_shared_memory(&self, on: bool) {
+        self.shared.set(on);
     }
 
     /// Changes the settings.
@@ -140,6 +162,7 @@ impl Bloom {
     ) -> BloomOutput {
         engine_profiler::zone!("render::Bloom::add_passes");
         let settings = self.settings.get();
+        let shared = self.shared.get();
         let desc = fg.texture_desc(hdr);
         let sampler = Bindless::sampler(SamplerKind::LinearClamp);
         let scatter = settings.scatter.clamp(0.0, 1.0);
@@ -157,6 +180,7 @@ impl Bloom {
         ];
         let mut down = [hdr; MAX_BLOOM_LEVELS as usize];
         let mut previous = hdr;
+        let mut previous_size = [desc.width, desc.height];
         for level in 0..levels.max(1) {
             let [w, h] = if levels == 0 {
                 [
@@ -168,10 +192,15 @@ impl Bloom {
             };
             let target = fg.create_texture(NAMES[level], TextureDesc::new_2d(BLOOM_FORMAT, w, h));
             let source = previous;
+            let shader = if shared && previous_size == [2 * w, 2 * h] {
+                &self.downsample_shared
+            } else {
+                &self.downsample
+            };
             fg.add_compute("bloom downsample", bindless)
                 .read(source, Access::Sampled(ShaderStages::COMPUTE))
                 .write(target, Access::StorageWrite(ShaderStages::COMPUTE))
-                .dispatch(&self.downsample, Dispatch::Threads([w, h, 1]), move |ctx| {
+                .dispatch(shader, Dispatch::Threads([w, h, 1]), move |ctx| {
                     Some(Push {
                         source: ctx.sampled_index(source)?,
                         target: ctx.storage_index(target)?,
@@ -183,6 +212,7 @@ impl Bloom {
                 });
             down[level] = target;
             previous = target;
+            previous_size = [w, h];
         }
         // Back up: each level mixes its own downsample with the enlarged smaller levels.
         let mut up = previous;
@@ -190,11 +220,16 @@ impl Bloom {
             let [w, h] = sizes[level];
             let target = fg.create_texture("bloom up", TextureDesc::new_2d(BLOOM_FORMAT, w, h));
             let (own, lower) = (down[level], up);
+            let shader = if shared && [w, h] == sizes[level + 1].map(|side| 2 * side) {
+                &self.upsample_shared
+            } else {
+                &self.upsample
+            };
             fg.add_compute("bloom upsample", bindless)
                 .read(own, Access::Sampled(ShaderStages::COMPUTE))
                 .read(lower, Access::Sampled(ShaderStages::COMPUTE))
                 .write(target, Access::StorageWrite(ShaderStages::COMPUTE))
-                .dispatch(&self.upsample, Dispatch::Threads([w, h, 1]), move |ctx| {
+                .dispatch(shader, Dispatch::Threads([w, h, 1]), move |ctx| {
                     Some(Push {
                         source: ctx.sampled_index(own)?,
                         lower: ctx.sampled_index(lower)?,

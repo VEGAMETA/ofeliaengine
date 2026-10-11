@@ -55,6 +55,21 @@ While every CPU core is busy, the Radeon renders Sponza ~10 % slower (25.1 again
 stops: what matters for its measurements is a quiet CPU during them, not a cool-down
 before them.
 
+**Memory placement (measured 2026-10-11).** The Radeon's memory-bound passes depend on
+where their images land in memory, by up to 2×. On main the same bloom took 1.1–1.2 ms in
+four perf scenes and 1.9–3.0 ms in the other fourteen, with the same offsets inside the
+transient heap (the heaps themselves differ). Moving the offsets (16 MiB further, or no
+aliasing) moved single passes by −30 to +80 % and Sponza's forward pass by 7 %, both ways;
+the results repeat run after run (each perf run makes a fresh device). Allocation
+priorities (`VK_EXT_memory_priority`, `VK_EXT_pageable_device_local_memory`, the transient
+heaps at 1.0) changed nothing. Two facts that may matter: Windows gives this iGPU a
+512 MiB carve-out (the rest of its 21 GiB "device local" heap is system memory), and the
+driver lays a 1920 × 1080 color image out in 256-byte tiles (alignment 256, no padding),
+keeping 64 KiB tiles for sizes they divide (1920 × 1088, 1024 × 1024); rendering 1,088
+rows moved passes by −36 to +43 %, again both ways. So an A/B on the Radeon compares
+placements as much as code: judge a change over every scene, as the perf gate does, not
+by one pass in one scene.
+
 What it does **not** cover:
 
 - Intel GPUs (Arc or iGPU): no Intel GPU tests yet.

@@ -315,6 +315,45 @@ fn bloom_keeps_energy_and_exposure_finds_middle_grey() {
         "{karis} {asymmetry}"
     );
 
+    // 2b. The shared-memory passes (levels exactly half, and twice, the size of the one
+    // they read: here all but the last) give the plain passes' values, with Karis'
+    // average and without.
+    let spot = Image {
+        background: [0.3, 0.2, 0.1],
+        value: [500.0, 200.0, 50.0],
+        rect: [WIDTH / 3, HEIGHT / 4, 7, 5],
+    };
+    for karis_average in [true, false] {
+        bloom.set_settings(BloomSettings {
+            karis_average,
+            ..BloomSettings::default()
+        });
+        let (shared, _, _) = frame!(fg => {
+            let scene = draw(fg, spot);
+            bloom.add_passes(fg, &bindless, scene).texture
+        });
+        bloom.set_shared_memory(false);
+        let (plain, _, _) = frame!(fg => {
+            let scene = draw(fg, spot);
+            bloom.add_passes(fg, &bindless, scene).texture
+        });
+        bloom.set_shared_memory(true);
+        let worst = shared
+            .iter()
+            .zip(&plain)
+            .flat_map(|(a, b)| {
+                a.iter()
+                    .zip(b)
+                    .map(|(a, b)| (a - b).abs() / b.abs().max(1e-3))
+            })
+            .fold(0.0f32, f32::max);
+        println!(
+            "shared-memory bloom (Karis' average {karis_average}): worst relative difference {worst}"
+        );
+        assert!(worst < 2e-3, "{worst}");
+    }
+    bloom.set_settings(BloomSettings::default());
+
     // 3. Automatic exposure: a tone-map pass without the curve shows exposure × color.
     let mut expose = |image: Image, dt: f32| -> f32 {
         let (out, _, _) = frame!(fg => {

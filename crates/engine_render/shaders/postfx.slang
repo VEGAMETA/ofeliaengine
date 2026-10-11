@@ -84,6 +84,14 @@ void bloomDownsample(uint3 id : SV_DispatchThreadID)
     float3 k = fetch(source, s, uv + t * float2(-2, 2));
     float3 l = fetch(source, s, uv + t * float2(0, 2));
     float3 m = fetch(source, s, uv + t * float2(2, 2));
+    g_images[push.target][id.xy] = float4(downsampled(a, b, c, d, e, f, g, h, i, j, k, l, m), 1.0);
+}
+
+// The 13 taps (a b c / d e / f g h / i j / k l m, in rows) of `bloomDownsample`, combined.
+float3 downsampled(
+    float3 a, float3 b, float3 c, float3 d, float3 e, float3 f, float3 g, float3 h, float3 i,
+    float3 j, float3 k, float3 l, float3 m)
+{
     // Five overlapping 2 × 2 groups: the center one weighs 1/2, the corners 1/8 each.
     float3 groups[5] = {
         (d + e + i + j) * 0.25,
@@ -104,7 +112,71 @@ void bloomDownsample(uint3 id : SV_DispatchThreadID)
         sum += groups[n] * w;
         total += w;
     }
-    g_images[push.target][id.xy] = float4(sum / total, 1.0);
+    return sum / total;
+}
+
+// Pixels per side of a group of the shared-memory bloom passes.
+static const uint BLOOM_TILE = 16;
+static const uint BLOOM_THREADS = BLOOM_TILE * BLOOM_TILE;
+// Texel corners of the downsample's taps for a group: on its pixels' 2 × 2 blocks (the
+// taps at 0 and ±2 texels, ALIGNED a side), then between the blocks (the taps at ±1).
+static const uint ALIGNED = BLOOM_TILE + 2;
+static const uint SHIFTED = BLOOM_TILE + 1;
+static const uint CORNERS = ALIGNED * ALIGNED + SHIFTED * SHIFTED;
+groupshared float3 g_corners[CORNERS];
+
+// `bloomDownsample` of a level exactly half its source's size, through shared memory:
+// neighbouring pixels' taps fall on the same texel corners, so a group fetches each corner
+// once (613 fetches for 256 pixels instead of 3,328). The same fetches and sums.
+[shader("compute")]
+[numthreads(BLOOM_TILE, BLOOM_TILE, 1)]
+void bloomDownsampleShared(
+    uint3 group : SV_GroupID,
+    uint3 local : SV_GroupThreadID,
+    uint index : SV_GroupIndex)
+{
+    Texture2D source = g_textures[push.source];
+    SamplerState s = g_samplers[push.sampler];
+    float2 t = 1.0 / float2(push.size * 2);
+    int2 origin = int2(group.xy * BLOOM_TILE);
+    // Pixel x's taps at 0 and ±2 texels are the corners between texels 2k and 2k + 1 for
+    // k = x - 1 .. x + 1 (at 2k + 1); at ±1, those between 2k - 1 and 2k for k = x, x + 1.
+    // Every fetch first, then every store: the fetches are in flight together.
+    static const uint ROUNDS = (CORNERS + BLOOM_THREADS - 1) / BLOOM_THREADS;
+    float3 fetched[ROUNDS];
+    [unroll]
+    for (uint r = 0; r < ROUNDS; r++)
+    {
+        uint n = min(index + r * BLOOM_THREADS, CORNERS - 1);
+        bool aligned = n < ALIGNED * ALIGNED;
+        uint m = aligned ? n : n - ALIGNED * ALIGNED;
+        uint side = aligned ? ALIGNED : SHIFTED;
+        int2 k = origin + int2(m % side, m / side) - (aligned ? 1 : 0);
+        fetched[r] = fetch(source, s, float2(k * 2 + (aligned ? 1 : 0)) * t);
+    }
+    [unroll]
+    for (uint r = 0; r < ROUNDS; r++)
+    {
+        uint n = index + r * BLOOM_THREADS;
+        if (n < CORNERS)
+            g_corners[n] = fetched[r];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint2 id = group.xy * BLOOM_TILE + local.xy;
+    if (any(id >= push.size))
+        return;
+    // The pixel's corners: on blocks from (x - 1, y - 1), between them from (x, y).
+    uint on = local.y * ALIGNED + local.x;
+    uint between = ALIGNED * ALIGNED + local.y * SHIFTED + local.x;
+    g_images[push.target][id] = float4(
+        downsampled(
+            g_corners[on], g_corners[on + 1], g_corners[on + 2],
+            g_corners[between], g_corners[between + 1],
+            g_corners[on + ALIGNED], g_corners[on + ALIGNED + 1], g_corners[on + ALIGNED + 2],
+            g_corners[between + SHIFTED], g_corners[between + SHIFTED + 1],
+            g_corners[on + 2 * ALIGNED], g_corners[on + 2 * ALIGNED + 1],
+            g_corners[on + 2 * ALIGNED + 2]),
+        1.0);
 }
 
 [shader("compute")]
@@ -127,6 +199,64 @@ void bloomUpsample(uint3 id : SV_DispatchThreadID)
         + fetch(lower, s, uv + t * float2(-1, 1)) + fetch(lower, s, uv + t * float2(1, 1));
     float3 own = fetch(g_textures[push.source], s, uv);
     g_images[push.target][id.xy] = float4(lerp(own, tent / 16.0, push.scatter), 1.0);
+}
+
+// The tent's taps of a group of `bloomUpsampleShared`: pixel 2X + p (p its parity) has
+// them at X + 0.25 + 0.5 p + j lower texels (j = -1, 0, 1), so the pixels of one parity
+// share them; per parity of the column and of the row, BLOOM_TILE / 2 + 2 a side.
+static const uint TENT = BLOOM_TILE / 2 + 2;
+static const uint TENT_TAPS = 4 * TENT * TENT;
+groupshared float3 g_tent[TENT_TAPS];
+
+// `bloomUpsample` of a level exactly twice its lower level's size, through shared memory
+// (400 fetches of the lower level for 256 pixels instead of 2,304). The same fetches and
+// sums.
+[shader("compute")]
+[numthreads(BLOOM_TILE, BLOOM_TILE, 1)]
+void bloomUpsampleShared(
+    uint3 group : SV_GroupID,
+    uint3 local : SV_GroupThreadID,
+    uint index : SV_GroupIndex)
+{
+    SamplerState s = g_samplers[push.sampler];
+    Texture2D lower = g_textures[push.lower];
+    float2 t = 1.0 / float2(push.size / 2);
+    // The group's X are group * BLOOM_TILE / 2 + 0 .. BLOOM_TILE / 2 - 1: their taps' X + j
+    // from one before the first to one after the last. Taps by parity (row, column), then
+    // row, then column.
+    int2 first = int2(group.xy * (BLOOM_TILE / 2)) - 1;
+    static const uint ROUNDS = (TENT_TAPS + BLOOM_THREADS - 1) / BLOOM_THREADS;
+    float3 fetched[ROUNDS];
+    [unroll]
+    for (uint r = 0; r < ROUNDS; r++)
+    {
+        uint n = min(index + r * BLOOM_THREADS, TENT_TAPS - 1);
+        uint2 cell = uint2(n % TENT, (n / TENT) % TENT);
+        uint2 parity = uint2((n / (TENT * TENT)) % 2, n / (2 * TENT * TENT));
+        float2 c = float2(first + int2(cell)) + 0.25 + 0.5 * float2(parity);
+        fetched[r] = fetch(lower, s, c * t);
+    }
+    [unroll]
+    for (uint r = 0; r < ROUNDS; r++)
+    {
+        uint n = index + r * BLOOM_THREADS;
+        if (n < TENT_TAPS)
+            g_tent[n] = fetched[r];
+    }
+    GroupMemoryBarrierWithGroupSync();
+    uint2 id = group.xy * BLOOM_TILE + local.xy;
+    if (any(id >= push.size))
+        return;
+    uint2 p = local.xy & 1;
+    // The taps' cells: q, q + 1 and q + 2 along each axis.
+    uint2 q = local.xy >> 1;
+    uint o = (p.y * 2 + p.x) * TENT * TENT + q.y * TENT + q.x;
+    float3 tent = g_tent[o + TENT + 1] * 4.0
+        + (g_tent[o + TENT] + g_tent[o + TENT + 2] + g_tent[o + 1] + g_tent[o + 2 * TENT + 1]) * 2.0
+        + g_tent[o] + g_tent[o + 2] + g_tent[o + 2 * TENT] + g_tent[o + 2 * TENT + 2];
+    float2 uv = (float2(id) + 0.5) / float2(push.size);
+    float3 own = fetch(g_textures[push.source], s, uv);
+    g_images[push.target][id] = float4(lerp(own, tent / 16.0, push.scatter), 1.0);
 }
 
 groupshared uint g_bins[256];
