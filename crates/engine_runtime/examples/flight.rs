@@ -1183,6 +1183,7 @@ mod windowed {
                             skinning: Some(&skinned_frame),
                             light: sun,
                             lights: &lights,
+                            decals: &[],
                             environment: Some(&environment),
                             reflection_probes: None,
                         },

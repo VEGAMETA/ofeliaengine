@@ -1,8 +1,8 @@
 //! CLAUDE.md §5: zero heap allocations per frame in steady state, for local lights'
 //! shadows (ADR 0071): casters moving near shadowed lights every frame (shadows redrawn
-//! within the budget), a moving light, lights entering and leaving the view, and the sun's
-//! contact shadows, through the persistent GPU scene and a draw list, uploaded and
-//! declared, culled and drawn, recorded.
+//! within the budget), a moving light, lights entering and leaving the view, the sun's
+//! contact shadows and moving decals (ADR 0082), through the persistent GPU scene and a
+//! draw list, uploaded and declared, culled and drawn, recorded.
 //!
 //! A counting global allocator observes the process while frames are declared and
 //! recorded after a warm-up (driver allocations happen in C and are not counted). One
@@ -11,9 +11,9 @@
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
-use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
+use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
+    Camera, Decal, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
     LocalShadowSettings, Occlusion, ShadowSettings, Spot, Temporal,
 };
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
@@ -81,6 +81,7 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
     renderer
         .set_contact_shadows(&device, &bindless, Some(Default::default()))
         .unwrap();
+    renderer.set_decals(&device, &bindless, true).unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 2).unwrap();
     let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
@@ -167,6 +168,22 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
     let mut frame_number = 0u64;
     let mut frame = |i: usize, use_scene: bool| {
         lights[3].position.x = (i as f32 * 0.1).sin() * 3.0 - 10.0;
+        // Decals over the field, drifting (in and out of tiles and z-bins).
+        let decals: [Decal; 24] = core::array::from_fn(|k| Decal {
+            world_from_decal: Mat4::from_scale_rotation_translation(
+                Vec3::new(3.0, 3.0, 4.0),
+                Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2),
+                Vec3::new(
+                    (k % 6) as f32 * 8.0 - 22.0 + (i as f32 * 0.07 + k as f32).sin() * 2.0,
+                    0.0,
+                    (k / 6) as f32 * 6.0 - 18.0,
+                ),
+            ),
+            tint: [0.8, 0.3, 0.2, 0.9],
+            surface: 0.5,
+            order: (k % 3) as i32,
+            ..Decal::default()
+        });
         for k in 0..5 {
             let index = (i * 31 + k * 97) % draws.len();
             draws[index].world_from_object = place(index, i as f32);
@@ -231,6 +248,7 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
                 occlusion: Some(&occlusion),
                 temporal: Some(&temporal),
                 lights: &lights,
+                decals: &decals,
                 environment: None,
                 reflections: Default::default(),
             };
@@ -247,7 +265,9 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
             } else {
                 renderer.add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view)
             };
-            std::hint::black_box(passes.unwrap());
+            let passes = passes.unwrap();
+            assert!(passes.decals.is_some(), "the decals draw");
+            std::hint::black_box(passes);
             fg.add_pass("present stand-in")
                 .read(color, engine_render::graph::Access::TransferRead)
                 .side_effects()

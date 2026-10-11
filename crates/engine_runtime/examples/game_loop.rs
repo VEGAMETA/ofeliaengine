@@ -410,6 +410,7 @@ mod windowed {
                             skinning: None,
                             light,
                             lights: &[],
+                            decals: &[],
                             environment: None,
                             reflection_probes: None,
                         },

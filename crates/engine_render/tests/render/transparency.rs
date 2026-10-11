@@ -232,6 +232,7 @@ fn blended_layers_composite_back_to_front() {
                             occlusion: occluded.then_some(&occlusion),
                             temporal: temporal_state.then_some(&temporal),
                             lights: &[],
+                            decals: &[],
                             environment: None,
                             reflections: Default::default(),
                         },

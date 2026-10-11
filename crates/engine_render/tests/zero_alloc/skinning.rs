@@ -241,6 +241,7 @@ fn steady_state_skinning_frames_do_not_allocate() {
                         occlusion: Some(&occlusion),
                         temporal: Some(&temporal),
                         lights: &[],
+                        decals: &[],
                         environment: None,
                         reflections: Default::default(),
                     },

@@ -282,6 +282,7 @@ fn gpu_frustum_culling_matches_the_cpu_and_keeps_the_image() {
                         occlusion: None,
                         temporal: None,
                         lights: &[],
+                        decals: &[],
                         environment: None,
                         reflections: Default::default(),
                     },

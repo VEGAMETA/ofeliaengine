@@ -201,6 +201,7 @@ fn motion_vectors() {
                         occlusion: use_occlusion.then_some(&occlusion),
                         temporal: Some(&temporal),
                         lights: &[],
+                        decals: &[],
                         environment: None,
                         reflections: Default::default(),
                     },

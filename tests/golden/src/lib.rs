@@ -9,6 +9,7 @@
 // functions document it under `# Panics`).
 #![allow(clippy::expect_used)]
 
+mod decal_set;
 pub mod flip;
 pub mod golden;
 pub mod scene;

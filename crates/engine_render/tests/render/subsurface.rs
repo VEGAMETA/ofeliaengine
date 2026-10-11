@@ -281,6 +281,7 @@ impl Scene {
                             occlusion: frame.occlusion.then_some(&self.occlusion),
                             temporal: frame.temporal.then_some(&self.temporal),
                             lights: frame.lights,
+                            decals: &[],
                             environment: frame.environment.then_some(&self.environment),
                             reflections: Default::default(),
                         },

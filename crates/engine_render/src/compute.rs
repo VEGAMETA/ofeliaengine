@@ -483,7 +483,10 @@ mod tests {
             (include_bytes!("../shaders/environment.irradiance.spv"), 96),
             (include_bytes!("../shaders/environment.dfg.spv"), 96),
             (include_bytes!("../shaders/hiz.hizReduce.spv"), 64),
-            (include_bytes!("../shaders/forward.cullMain.spv"), 112),
+            (
+                include_bytes!("../shaders/forward.cullMain.spv"),
+                size_of::<crate::forward::Push>(),
+            ),
         ];
         for (spirv, bytes) in shaders {
             let words = spirv_words(spirv).unwrap_or_default();

@@ -209,6 +209,7 @@ fn steady_state_reflection_frames_do_not_allocate() {
                         occlusion: None,
                         temporal: Some(&temporal),
                         lights: &[],
+                        decals: &[],
                         environment: Some(&environment),
                         reflections: Reflections {
                             probes: Some(&probes),

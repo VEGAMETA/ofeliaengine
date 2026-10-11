@@ -303,6 +303,7 @@ fn main() {
                             occlusion: None,
                             temporal: motion_vectors.then_some(&temporal),
                             lights: &[],
+                            decals: &[],
                             environment: None,
                             reflections: Default::default(),
                         };

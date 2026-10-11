@@ -716,3 +716,156 @@ impl ReflectionShading {
         .as_ref()
     }
 }
+
+/// The shading features [`DecalShading::ensure`] makes decal variants for.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct DecalFeatures {
+    pub(super) ao: bool,
+    pub(super) contact: bool,
+    pub(super) shadows: bool,
+    pub(super) reflections: bool,
+}
+
+/// Decals (ADR 0082): their passes, and the shading after the depth prepass that blends
+/// the decal buffer in, made when they are first turned on, for each combination of the
+/// other features in use (ambient occlusion, contact shadows, local shadows, reflections).
+#[derive(Debug)]
+pub(super) struct DecalShading {
+    pub(super) passes: DecalPasses,
+    /// `[variant][ambient occlusion][contact shadows][local shadows]` (local shadows only
+    /// in the local-light variants).
+    main: [[[[Option<LazyPipeline>; 2]; 2]; 2]; 4],
+    /// `[lights][ambient occlusion][contact shadows][local shadows]`, as
+    /// [`ReflectionShading::shading`].
+    reflect: ReflectShadingTable,
+}
+
+impl DecalShading {
+    pub(super) fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
+        Ok(Self {
+            passes: DecalPasses::new(device, bindless)?,
+            main: Default::default(),
+            reflect: Default::default(),
+        })
+    }
+
+    /// Describes the variants of `features` not described yet (made on first use or by
+    /// the device's warm-up, ADR 0079).
+    pub(super) fn ensure(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        formats: (vk::Format, vk::Format),
+        features: DecalFeatures,
+    ) -> Result<(), RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let (color, depth) = formats;
+        // Slots by k = (ambient occlusion × 2 + contact shadows) × 2 + local shadows, as
+        // the fragment tables.
+        let wanted = |k: usize| {
+            (k & 4 == 0 || features.ao)
+                && (k & 2 == 0 || features.contact)
+                && (k & 1 == 0 || features.shadows)
+        };
+        let mut main = Vec::new();
+        let mut reflect = Vec::new();
+        for k in (0..8).filter(|&k| wanted(k)) {
+            let (a, c, l) = (k >> 2, (k >> 1) & 1, k & 1);
+            for variant in 0..4 {
+                if (l == 0 || variant & 1 != 0) && self.main[variant][a][c][l].is_none() {
+                    main.push((k, variant));
+                }
+            }
+            for lights in 0..2 {
+                if features.reflections
+                    && (l == 0 || lights != 0)
+                    && self.reflect[lights][a][c][l].is_none()
+                {
+                    reflect.push((k, lights));
+                }
+            }
+        }
+        if main.is_empty() && reflect.is_empty() {
+            return Ok(());
+        }
+        let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+        let words = |table: [(&[u8], &'static core::ffi::CStr); 8]| {
+            table
+                .into_iter()
+                .map(|(bytes, entry)| Ok((spirv_words(bytes).ok_or_else(invalid)?, entry)))
+                .collect::<Result<Vec<_>, RhiError>>()
+        };
+        let main_fragments = words(DECAL_FRAGMENTS)?;
+        let reflect_fragments = words(REFLECT_DECAL_FRAGMENTS)?;
+        let main_formats = [color];
+        let reflect_formats = [color, NORMAL_ROUGHNESS_FORMAT, WEIGHT_FORMAT];
+        let mut descs = Vec::with_capacity(main.len() + reflect.len());
+        for &(k, variant) in &main {
+            let (fragment, entry) = &main_fragments[k];
+            descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+                depth_write: false,
+                depth_compare: vk::CompareOp::EQUAL,
+                ..shading_desc(
+                    &vertex,
+                    fragment,
+                    entry,
+                    &main_formats,
+                    depth,
+                    &VARIANTS[variant],
+                )
+            }));
+        }
+        for &(k, lights) in &reflect {
+            let (fragment, entry) = &reflect_fragments[k];
+            descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+                depth_write: false,
+                depth_compare: vk::CompareOp::EQUAL,
+                ..shading_desc(
+                    &vertex,
+                    fragment,
+                    entry,
+                    &reflect_formats,
+                    depth,
+                    &VARIANTS[2 + lights],
+                )
+            }));
+        }
+        let mut pipelines =
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &descs)
+                .into_iter();
+        for (k, variant) in main {
+            self.main[variant][k >> 2][(k >> 1) & 1][k & 1] = pipelines.next();
+        }
+        for (k, lights) in reflect {
+            self.reflect[lights][k >> 2][(k >> 1) & 1][k & 1] = pipelines.next();
+        }
+        Ok(())
+    }
+
+    /// The shading of a view with decals: of shading `variant` (bit 0 local lights, bit 1
+    /// an environment), writing reflections' inputs (`reflect`, environment variants
+    /// only), with ambient occlusion, the sun's contact shadows, local lights' shadows.
+    pub(super) fn pipeline(
+        &self,
+        variant: usize,
+        reflect: bool,
+        ao: bool,
+        contact: bool,
+        shadowed: bool,
+    ) -> Option<&LazyPipeline> {
+        let lights = variant & 1;
+        let (a, c, l) = (
+            usize::from(ao),
+            usize::from(contact),
+            usize::from(shadowed && lights != 0),
+        );
+        if reflect {
+            self.reflect[lights][a][c][l].as_ref()
+        } else {
+            self.main[variant & 3][a][c][l].as_ref()
+        }
+    }
+}
