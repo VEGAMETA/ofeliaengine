@@ -1135,9 +1135,10 @@ void FfxBrixelizerEmitSDF(FfxUInt32 ref_id_offset, FfxUInt32 global_stamp_id)
             // degenerates in (a floor's onto xy) pass with no margin, so an edge parallel to
             // an axis must be exactly zero along it. The differences of the vertices above are
             // not on AMD's compiler: it leaves residues below the vertices' own precision
-            // (1e-5 between two equal coordinates of 1624.5), so it fuses the subtractions
-            // with the divisions, even under NoContraction, and the tests then drop the whole
-            // triangle. Equal world coordinates subtract to an exact zero.
+            // (1e-5 between two equal coordinates of 1624.5): it fuses the subtractions with
+            // the divisions, also under NoContraction since ba, ac and cb below compute the
+            // same differences undecorated, and the tests then drop the whole triangle.
+            // Equal world coordinates subtract to an exact zero.
             FfxFloat32x3      TRIANGLE_EDGE_0   = (tri.wp1 - tri.wp0) / (brixel_size);
             FfxFloat32x3      TRIANGLE_EDGE_1   = (tri.wp2 - tri.wp1) / (brixel_size);
             FfxFloat32x3      TRIANGLE_EDGE_2   = (tri.wp0 - tri.wp2) / (brixel_size);

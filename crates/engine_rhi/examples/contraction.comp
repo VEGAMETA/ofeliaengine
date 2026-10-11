@@ -1,0 +1,55 @@
+#version 450
+// Does the driver honour NoContraction (GLSL `precise`)?
+//
+// AMD FidelityFX Brixelizer's EmitSDF maps a triangle's vertices to brick space,
+// V = (wp - brick_min) / brixel_size, and takes edges as V1 - V0. A triangle lying in a
+// plane y = const has wp1.y == wp0.y exactly, so e.y must be exactly 0. Each lane here
+// loads wp0 and an edge (with edge.y == 0) from memory, so the compiler cannot prove the
+// two vertices' y equal, and writes e = V1 - V0. A non-zero e.y means the subtraction
+// was fused with the division's multiply into an FMA, keeping the product's rounding
+// error. VARIANT 1: `e` is `precise` (glslang decorates every operation of its chain
+// NoContraction, which forbids fusing them). VARIANT 2: the subtraction alone is `precise`,
+// in a function of its own, as in Brixelizer's FfxBrixelizerGet2DEdges: only it is
+// decorated NoContraction, which still forbids fusing it with the division's multiply.
+// VARIANTS 3 and 4: as 2 and 1, with the same difference also computed without `precise`
+// and used (as EmitSDF computes ba = V1 - V0 for its distances beside the edges): the
+// precise result must stay exact whatever the compiler does with its plain twin.
+layout(local_size_x = 64) in;
+
+struct Item { vec4 wp0; vec4 edge; vec4 brick_min; vec4 size; };
+
+layout(std430, set = 0, binding = 0) readonly buffer Inputs { Item items[]; };
+layout(std430, set = 0, binding = 1) writeonly buffer Outputs { vec4 results[]; };
+
+vec3 edge_between(vec3 a, vec3 b)
+{
+    precise vec3 e = b - a;
+    return e;
+}
+
+void main()
+{
+    uint i = gl_GlobalInvocationID.x;
+    Item it = items[i];
+    vec3 wp0 = it.wp0.xyz;
+    vec3 wp1 = wp0 + it.edge.xyz;
+    vec3 v0 = (wp0 - it.brick_min.xyz) / it.size.x;
+    vec3 v1 = (wp1 - it.brick_min.xyz) / it.size.x;
+    float twin = 0.0;
+#if VARIANT == 1
+    precise vec3 e = v1 - v0;
+#elif VARIANT == 2
+    vec3 e = edge_between(v0, v1);
+#elif VARIANT == 3
+    vec3 plain = v1 - v0;
+    twin = dot(plain, plain);
+    vec3 e = edge_between(v0, v1);
+#elif VARIANT == 4
+    vec3 plain = v1 - v0;
+    twin = dot(plain, plain);
+    precise vec3 e = v1 - v0;
+#else
+    vec3 e = v1 - v0;
+#endif
+    results[i] = vec4(e, twin);
+}
