@@ -84,54 +84,53 @@ use engine_rhi::{
     MemoryLocation, Pipeline, PipelineDesc, RhiError, SamplerKind, ShaderStageDesc, spirv_words,
 };
 
-const VERTEX: &[u8] = include_bytes!("../shaders/forward.vertexMain.spv");
-const SHADOW_VERTEX: &[u8] = include_bytes!("../shaders/forward.shadowVertex.spv");
-const SHADOW_VERTEX_MASKED: &[u8] = include_bytes!("../shaders/forward.shadowVertexMasked.spv");
-const SHADOW_FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.shadowFragmentMasked.spv");
-const FRAGMENT: &[u8] = include_bytes!("../shaders/forward.fragmentMain.spv");
-const FRAGMENT_MASKED: &[u8] = include_bytes!("../shaders/forward.fragmentMasked.spv");
-const DEPTH_VERTEX: &[u8] = include_bytes!("../shaders/forward.depthVertex.spv");
-const FRAGMENT_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMainMotion.spv");
-const FRAGMENT_AO: &[u8] = include_bytes!("../shaders/forward.fragmentMainAo.spv");
-const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.fragmentMaskedMotion.spv");
-const BACKGROUND_VERTEX: &[u8] = include_bytes!("../shaders/forward.backgroundVertex.spv");
-const BACKGROUND_MOTION: &[u8] = include_bytes!("../shaders/forward.backgroundMotion.spv");
-const SKY_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.skyFragment.spv");
-const FRAGMENT_SUBSURFACE: &[u8] = include_bytes!("../shaders/forward.fragmentSubsurface.spv");
-const SCATTER_FRAGMENT: &[u8] = include_bytes!("../shaders/forward.scatterFragment.spv");
+const VERTEX: &[u8] = include_bytes!("../../shaders/forward.vertexMain.spv");
+const SHADOW_VERTEX: &[u8] = include_bytes!("../../shaders/forward.shadowVertex.spv");
+const SHADOW_VERTEX_MASKED: &[u8] = include_bytes!("../../shaders/forward.shadowVertexMasked.spv");
+const SHADOW_FRAGMENT_MASKED: &[u8] = include_bytes!("../../shaders/forward.shadowFragmentMasked.spv");
+const FRAGMENT: &[u8] = include_bytes!("../../shaders/forward.fragmentMain.spv");
+const FRAGMENT_MASKED: &[u8] = include_bytes!("../../shaders/forward.fragmentMasked.spv");
+const DEPTH_VERTEX: &[u8] = include_bytes!("../../shaders/forward.depthVertex.spv");
+const FRAGMENT_MOTION: &[u8] = include_bytes!("../../shaders/forward.fragmentMainMotion.spv");
+const FRAGMENT_AO: &[u8] = include_bytes!("../../shaders/forward.fragmentMainAo.spv");
+const FRAGMENT_MASKED_MOTION: &[u8] = include_bytes!("../../shaders/forward.fragmentMaskedMotion.spv");
+const BACKGROUND_VERTEX: &[u8] = include_bytes!("../../shaders/forward.backgroundVertex.spv");
+const BACKGROUND_MOTION: &[u8] = include_bytes!("../../shaders/forward.backgroundMotion.spv");
+const SKY_FRAGMENT: &[u8] = include_bytes!("../../shaders/forward.skyFragment.spv");
+const FRAGMENT_SUBSURFACE: &[u8] = include_bytes!("../../shaders/forward.fragmentSubsurface.spv");
+const SCATTER_FRAGMENT: &[u8] = include_bytes!("../../shaders/forward.scatterFragment.spv");
 // Local lights' shadows (ADR 0071): culling and drawing the views, and the shading that
 // looks them up.
-const CULL_SHADOW_VIEWS: &[u8] = include_bytes!("../shaders/forward.cullShadowViews.spv");
-const LOCAL_SHADOW_VERTEX: &[u8] = include_bytes!("../shaders/forward.localShadowVertex.spv");
+const CULL_SHADOW_VIEWS: &[u8] = include_bytes!("../../shaders/forward.cullShadowViews.spv");
+const LOCAL_SHADOW_VERTEX: &[u8] = include_bytes!("../../shaders/forward.localShadowVertex.spv");
 const LOCAL_SHADOW_VERTEX_MASKED: &[u8] =
-    include_bytes!("../shaders/forward.localShadowVertexMasked.spv");
-const FRAGMENT_SHADOWED: &[u8] = include_bytes!("../shaders/forward.fragmentMainShadowed.spv");
+    include_bytes!("../../shaders/forward.localShadowVertexMasked.spv");
+const FRAGMENT_SHADOWED: &[u8] = include_bytes!("../../shaders/forward.fragmentMainShadowed.spv");
 const FRAGMENT_MASKED_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMaskedShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentMaskedShadowed.spv");
 const FRAGMENT_MOTION_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMainMotionShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentMainMotionShadowed.spv");
 const FRAGMENT_MASKED_MOTION_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMaskedMotionShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentMaskedMotionShadowed.spv");
 const FRAGMENT_BLENDED_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentBlendedShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentBlendedShadowed.spv");
 const FRAGMENT_BLENDED_REACTIVE_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentBlendedReactiveShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentBlendedReactiveShadowed.spv");
 const FRAGMENT_BLENDED_ATMOSPHERE_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentBlendedAtmosphereShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentBlendedAtmosphereShadowed.spv");
 const FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentBlendedAtmosphereReactiveShadowed.spv");
-const FRAGMENT_AO_SHADOWED: &[u8] = include_bytes!("../shaders/forward.fragmentMainAoShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentBlendedAtmosphereReactiveShadowed.spv");
+const FRAGMENT_AO_SHADOWED: &[u8] = include_bytes!("../../shaders/forward.fragmentMainAoShadowed.spv");
 const FRAGMENT_SUBSURFACE_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentSubsurfaceShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentSubsurfaceShadowed.spv");
 // The sun's contact shadows (ADR 0071): shading after the prepass that reads their mask.
-const FRAGMENT_CONTACT: &[u8] = include_bytes!("../shaders/forward.fragmentMainContact.spv");
-const FRAGMENT_AO_CONTACT: &[u8] = include_bytes!("../shaders/forward.fragmentMainAoContact.spv");
+const FRAGMENT_CONTACT: &[u8] = include_bytes!("../../shaders/forward.fragmentMainContact.spv");
+const FRAGMENT_AO_CONTACT: &[u8] = include_bytes!("../../shaders/forward.fragmentMainAoContact.spv");
 const FRAGMENT_CONTACT_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMainContactShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentMainContactShadowed.spv");
 const FRAGMENT_AO_CONTACT_SHADOWED: &[u8] =
-    include_bytes!("../shaders/forward.fragmentMainAoContactShadowed.spv");
+    include_bytes!("../../shaders/forward.fragmentMainAoContactShadowed.spv");
 
-#[path = "forward_msaa.rs"]
 mod msaa;
 
 pub use crate::contact::ContactShadowSettings;
@@ -144,35 +143,35 @@ pub use crate::reflections::Reflections;
 // local shadows`.
 const REFLECT_FRAGMENTS: [(&[u8], &core::ffi::CStr); 8] = [
     (
-        include_bytes!("../shaders/forward.fragmentReflect.spv"),
+        include_bytes!("../../shaders/forward.fragmentReflect.spv"),
         c"fragmentReflect",
     ),
     (
-        include_bytes!("../shaders/forward.fragmentReflectShadowed.spv"),
+        include_bytes!("../../shaders/forward.fragmentReflectShadowed.spv"),
         c"fragmentReflectShadowed",
     ),
     (
-        include_bytes!("../shaders/forward.fragmentReflectContact.spv"),
+        include_bytes!("../../shaders/forward.fragmentReflectContact.spv"),
         c"fragmentReflectContact",
     ),
     (
-        include_bytes!("../shaders/forward.fragmentReflectContactShadowed.spv"),
+        include_bytes!("../../shaders/forward.fragmentReflectContactShadowed.spv"),
         c"fragmentReflectContactShadowed",
     ),
     (
-        include_bytes!("../shaders/forward.fragmentReflectAo.spv"),
+        include_bytes!("../../shaders/forward.fragmentReflectAo.spv"),
         c"fragmentReflectAo",
     ),
     (
-        include_bytes!("../shaders/forward.fragmentReflectAoShadowed.spv"),
+        include_bytes!("../../shaders/forward.fragmentReflectAoShadowed.spv"),
         c"fragmentReflectAoShadowed",
     ),
     (
-        include_bytes!("../shaders/forward.fragmentReflectAoContact.spv"),
+        include_bytes!("../../shaders/forward.fragmentReflectAoContact.spv"),
         c"fragmentReflectAoContact",
     ),
     (
-        include_bytes!("../shaders/forward.fragmentReflectAoContactShadowed.spv"),
+        include_bytes!("../../shaders/forward.fragmentReflectAoContactShadowed.spv"),
         c"fragmentReflectAoContactShadowed",
     ),
 ];
@@ -181,27 +180,27 @@ pub use crate::shadow::ShadowSettings;
 /// Format of the motion vector target (ADR 0043).
 pub const MOTION_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
 pub(crate) const DEPTH_VERTEX_MASKED: &[u8] =
-    include_bytes!("../shaders/forward.depthVertexMasked.spv");
+    include_bytes!("../../shaders/forward.depthVertexMasked.spv");
 /// The depth prepass that also writes motion vectors: opaque, masked (queue item 0d).
 pub(crate) const DEPTH_VERTEX_MOTION: &[u8] =
-    include_bytes!("../shaders/forward.depthVertexMotion.spv");
-pub(crate) const PREPASS_MOTION: &[u8] = include_bytes!("../shaders/forward.prepassMotion.spv");
+    include_bytes!("../../shaders/forward.depthVertexMotion.spv");
+pub(crate) const PREPASS_MOTION: &[u8] = include_bytes!("../../shaders/forward.prepassMotion.spv");
 pub(crate) const DEPTH_VERTEX_MASKED_MOTION: &[u8] =
-    include_bytes!("../shaders/forward.depthVertexMaskedMotion.spv");
-const PREPASS_MASKED_MOTION: &[u8] = include_bytes!("../shaders/forward.prepassMaskedMotion.spv");
-const CULL: &[u8] = include_bytes!("../shaders/forward.cullMain.spv");
-const FRAGMENT_BLENDED: &[u8] = include_bytes!("../shaders/forward.fragmentBlended.spv");
+    include_bytes!("../../shaders/forward.depthVertexMaskedMotion.spv");
+const PREPASS_MASKED_MOTION: &[u8] = include_bytes!("../../shaders/forward.prepassMaskedMotion.spv");
+const CULL: &[u8] = include_bytes!("../../shaders/forward.cullMain.spv");
+const FRAGMENT_BLENDED: &[u8] = include_bytes!("../../shaders/forward.fragmentBlended.spv");
 const FRAGMENT_BLENDED_REACTIVE: &[u8] =
-    include_bytes!("../shaders/forward.fragmentBlendedReactive.spv");
+    include_bytes!("../../shaders/forward.fragmentBlendedReactive.spv");
 const FRAGMENT_BLENDED_ATMOSPHERE: &[u8] =
-    include_bytes!("../shaders/forward.fragmentBlendedAtmosphere.spv");
+    include_bytes!("../../shaders/forward.fragmentBlendedAtmosphere.spv");
 const FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE: &[u8] =
-    include_bytes!("../shaders/forward.fragmentBlendedAtmosphereReactive.spv");
+    include_bytes!("../../shaders/forward.fragmentBlendedAtmosphereReactive.spv");
 
 /// Format of the reactive mask the transparent pass writes for temporal upsampling: how much
 /// of each pixel transparent surfaces cover (their combined alpha).
 pub const REACTIVE_FORMAT: vk::Format = vk::Format::R8_UNORM;
-const LIGHT_TILES: &[u8] = include_bytes!("../shaders/forward.lightTiles.spv");
+const LIGHT_TILES: &[u8] = include_bytes!("../../shaders/forward.lightTiles.spv");
 
 /// `PHASE_*` in `forward.slang`.
 const PHASE_ALL: u32 = 0;
