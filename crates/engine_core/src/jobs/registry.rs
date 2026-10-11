@@ -375,6 +375,27 @@ impl Registry {
         self.stop_searching(index);
     }
 
+    /// Runs jobs until `done()` returns true without ever sleeping: for a wait whose end
+    /// nobody signals to this participant (a second waiter of `ForeignJobs`).
+    pub(crate) fn work_until(&self, index: usize, done: impl Fn() -> bool) {
+        loop {
+            if done() {
+                break;
+            }
+            if let Some(job) = self.find_work(index) {
+                self.found_work(index);
+                // SAFETY: as in `wait_until`.
+                unsafe { execute(job) };
+                continue;
+            }
+            for _ in 0..SPINS_PER_ROUND {
+                core::hint::spin_loop();
+            }
+            thread::yield_now();
+        }
+        self.stop_searching(index);
+    }
+
     fn sleep(&self, index: usize, done: &impl Fn() -> bool) {
         let slot = &self.slots[index];
         let bit = 1u64 << index;

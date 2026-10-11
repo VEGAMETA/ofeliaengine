@@ -10,7 +10,8 @@
 
 use super::job::{JobHeader, JobRef};
 use super::pool::ThreadPool;
-use crate::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use super::registry::Registry;
+use crate::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::sync::CachePadded;
 use core::cell::UnsafeCell;
 use core::ffi::c_void;
@@ -33,9 +34,15 @@ struct Shared {
     pool: Arc<ThreadPool>,
     records: Box<[Record]>,
     free: FreeList,
-    /// Jobs submitted and not finished yet.
-    outstanding: CachePadded<AtomicUsize>,
+    /// Low 32 bits ([`COUNT`]): jobs submitted and not finished yet. High 32 bits: the
+    /// participant waiting for them in [`ForeignJobs::wait`], plus one (0: none). One word,
+    /// so the job that finishes last learns whom to wake from its own decrement: after it,
+    /// the waiter may return and drop `Shared`.
+    state: CachePadded<AtomicU64>,
 }
+
+/// The jobs' count in [`Shared::state`].
+const COUNT: u64 = 0xFFFF_FFFF;
 
 /// Jobs foreign code hands to a [`ThreadPool`] from any thread (see the module
 /// documentation).
@@ -82,7 +89,7 @@ impl ForeignJobs {
                     })
                     .collect(),
                 free: FreeList::new(capacity),
-                outstanding: CachePadded::new(AtomicUsize::new(0)),
+                state: CachePadded::new(AtomicU64::new(0)),
             }
         });
         Self { shared }
@@ -95,7 +102,7 @@ impl ForeignJobs {
 
     /// Jobs submitted and not finished yet.
     pub fn outstanding(&self) -> usize {
-        self.shared.outstanding.load(Ordering::Acquire)
+        self.shared.outstanding() as usize
     }
 
     /// Hands `run(arg)` to the pool. Returns `false`, having run nothing, when every record
@@ -116,13 +123,15 @@ impl ForeignJobs {
             *record.run.get() = Some(run);
             *record.arg.get() = arg;
         }
-        shared.outstanding.fetch_add(1, Ordering::Relaxed);
+        shared.state.fetch_add(1, Ordering::Relaxed);
         // The header is the record's first field: a pointer to the record is one to it.
         let job: JobRef = NonNull::from(record).cast::<JobHeader>();
         let registry = shared.pool.registry();
         if registry.injector.push(job).is_err() {
-            shared.outstanding.fetch_sub(1, Ordering::Relaxed);
             shared.free.push(index);
+            // A waiter may have counted this job: it is finished like a run one.
+            // SAFETY: the pool's registry; `Shared` lives on (`&self`).
+            unsafe { finish(&raw const *shared.state, registry) };
             return false;
         }
         registry.notify_injected();
@@ -133,19 +142,63 @@ impl ForeignJobs {
     /// another thread hands the waiting to the pool and sleeps.
     pub fn wait(&self) {
         let shared = &*self.shared;
-        let done = || shared.outstanding.load(Ordering::Acquire) == 0;
-        if done() {
+        if shared.outstanding() == 0 {
             return;
         }
         let registry = shared.pool.registry();
         match registry.current_index() {
-            Some(index) => registry.wait_until(index, done),
+            Some(index) => shared.wait_as(registry, index),
             None => shared.pool.install(|| {
                 if let Some(index) = registry.current_index() {
-                    registry.wait_until(index, done);
+                    shared.wait_as(registry, index);
                 }
             }),
         }
+    }
+}
+
+impl Shared {
+    fn outstanding(&self) -> u64 {
+        self.state.load(Ordering::SeqCst) & COUNT
+    }
+
+    /// Waits as participant `index`, running jobs meanwhile. The registered waiter (one at
+    /// a time) may sleep: the job that finishes last wakes it ([`finish`]). Another
+    /// waiter at the same time never sleeps (nobody would wake it).
+    fn wait_as(&self, registry: &Registry, index: usize) {
+        let me = (index as u64 + 1) << 32;
+        // `SeqCst` with the finisher's decrement: either it sees this registration and
+        // wakes us, or our check after it sees the count at zero.
+        let registered = self
+            .state
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |s| {
+                (s >> 32 == 0).then_some(s | me)
+            })
+            .is_ok();
+        let done = || self.outstanding() == 0;
+        if registered {
+            registry.wait_until(index, done);
+            self.state.fetch_and(COUNT, Ordering::SeqCst);
+        } else {
+            registry.work_until(index, done);
+        }
+    }
+}
+
+/// Counts a job finished and, if it was the last, wakes the registered waiter. Nothing of
+/// `Shared` is touched after the decrement: the waiter may drop it at once.
+///
+/// # Safety
+///
+/// `state` points to a live [`Shared::state`]; `registry` is its pool's registry (which
+/// outlives every job of the pool).
+unsafe fn finish(state: *const AtomicU64, registry: *const Registry) {
+    // SAFETY: guaranteed by the caller.
+    let previous = unsafe { (*state).fetch_sub(1, Ordering::SeqCst) };
+    let waiter = previous >> 32;
+    if previous & COUNT == 1 && waiter != 0 {
+        // SAFETY: guaranteed by the caller.
+        unsafe { (*registry).wake_participant(waiter as usize - 1) };
     }
 }
 
@@ -164,16 +217,23 @@ impl Drop for ForeignJobs {
 unsafe fn execute_record(job: JobRef) {
     let record = job.cast::<Record>();
     // SAFETY: guaranteed by the caller; the record's fields were written before it was
-    // queued (ordered by the injector).
+    // queued (ordered by the injector). What `finish` needs is taken before it: once the
+    // count drops, the waiter may free `Shared`.
     unsafe {
-        let record = record.as_ref();
-        let shared = &*record.owner;
-        if let Some(run) = *record.run.get() {
-            run(*record.arg.get());
-        }
-        let index = (record as *const Record).offset_from(shared.records.as_ptr()) as u32;
-        shared.free.push(index);
-        shared.outstanding.fetch_sub(1, Ordering::Release);
+        let (state, registry) = {
+            let record = record.as_ref();
+            let shared = &*record.owner;
+            if let Some(run) = *record.run.get() {
+                run(*record.arg.get());
+            }
+            let index = (record as *const Record).offset_from(shared.records.as_ptr()) as u32;
+            shared.free.push(index);
+            (
+                &raw const *shared.state,
+                core::ptr::from_ref(shared.pool.registry()),
+            )
+        };
+        finish(state, registry);
     }
 }
 
@@ -299,6 +359,64 @@ mod tests {
             free += 1;
         }
         assert_eq!(free, 64);
+    }
+
+    /// Runs for `arg` microseconds.
+    unsafe extern "C" fn spin(arg: *mut c_void) {
+        let start = std::time::Instant::now();
+        while start.elapsed().as_micros() < arg as u128 {
+            core::hint::spin_loop();
+        }
+    }
+
+    /// Short batches waited for over and over, from a thread outside the pool and from one
+    /// inside it: the job that finishes last must wake a waiter that went to sleep (jobs
+    /// long enough for the waiter to stop spinning).
+    #[test]
+    fn waiting_never_misses_the_last_job() {
+        let pool = Arc::new(ThreadPool::builder().workers(4).build().unwrap());
+        let jobs = ForeignJobs::new(pool.clone(), 64);
+        for round in 0..400u32 {
+            for k in 0..(round % 5) + 1 {
+                let micros = core::ptr::without_provenance_mut(50 + 150 * k as usize);
+                // SAFETY: `spin` is sound on any thread.
+                if !unsafe { jobs.submit(spin, micros) } {
+                    // SAFETY: as above.
+                    unsafe { spin(micros) };
+                }
+            }
+            if round % 2 == 0 {
+                jobs.wait();
+            } else {
+                pool.install(|| jobs.wait());
+            }
+            assert_eq!(jobs.outstanding(), 0);
+        }
+    }
+
+    /// Two threads wait at once: one is the registered waiter, the other waits without
+    /// sleeping; both return once every job has finished.
+    #[test]
+    fn two_waiters_at_once() {
+        let pool = Arc::new(ThreadPool::builder().workers(4).build().unwrap());
+        let jobs = Arc::new(ForeignJobs::new(pool, 64));
+        for round in 0..200u32 {
+            for k in 0..(round % 4) + 1 {
+                let micros = core::ptr::without_provenance_mut(100 + 50 * k as usize);
+                // SAFETY: `spin` is sound on any thread.
+                if !unsafe { jobs.submit(spin, micros) } {
+                    // SAFETY: as above.
+                    unsafe { spin(micros) };
+                }
+            }
+            let other = {
+                let jobs = jobs.clone();
+                std::thread::spawn(move || jobs.wait())
+            };
+            jobs.wait();
+            other.join().unwrap();
+            assert_eq!(jobs.outstanding(), 0);
+        }
     }
 
     #[test]
