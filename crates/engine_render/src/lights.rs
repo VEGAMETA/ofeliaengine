@@ -309,7 +309,7 @@ pub(crate) fn sphere_bounds(
 
 /// The tiles a sphere may cover: its exact screen bounds, or the whole screen when it
 /// reaches the plane of the eye.
-fn tile_rect(
+pub(crate) fn tile_rect(
     clip_from_world: Mat4,
     center: Vec3,
     radius: f32,
