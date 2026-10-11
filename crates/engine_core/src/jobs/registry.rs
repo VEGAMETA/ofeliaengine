@@ -58,6 +58,11 @@ pub(crate) struct OwnerState {
     pub(crate) arena: SpawnArena,
     rng: Cell<u64>,
     searching: Cell<bool>,
+    /// Ran a job since it last went to sleep: its allocator heap may hold memory to give
+    /// back (ADR 0086).
+    ran_jobs: Cell<bool>,
+    /// The last [`Registry::release_epoch`] it gave memory back for.
+    released: Cell<u64>,
 }
 
 pub(crate) struct Slot {
@@ -82,6 +87,9 @@ pub(crate) struct Registry {
     sleeping: CachePadded<AtomicU64>,
     searching: CachePadded<AtomicUsize>,
     pub(crate) terminate: AtomicBool,
+    /// Counts [`Registry::request_release`]s: a participant that has not given memory
+    /// back since the last one does so before it sleeps.
+    release_epoch: AtomicU64,
     pub(crate) num_workers: usize,
     spin_rounds: u32,
 }
@@ -110,6 +118,8 @@ impl Registry {
                     // Any odd non-zero seed works for xorshift; spread them per slot.
                     rng: Cell::new(0x9E37_79B9_7F4A_7C15_u64.wrapping_mul(i as u64 + 1) | 1),
                     searching: Cell::new(false),
+                    ran_jobs: Cell::new(false),
+                    released: Cell::new(0),
                 },
             })
             .collect();
@@ -119,6 +129,7 @@ impl Registry {
             sleeping: CachePadded::new(AtomicU64::new(0)),
             searching: CachePadded::new(AtomicUsize::new(0)),
             terminate: AtomicBool::new(false),
+            release_epoch: AtomicU64::new(0),
             num_workers: config.workers,
             spin_rounds: config.spin_rounds,
         }
@@ -258,7 +269,14 @@ impl Registry {
         }
     }
 
-    /// Wakes every sleeper (shutdown).
+    /// Asks every participant to give its allocator heap's memory back: the sleeping ones
+    /// wake, do so on their way back to sleep, and sleep again (ADR 0086).
+    pub(crate) fn request_release(&self) {
+        self.release_epoch.fetch_add(1, Ordering::AcqRel);
+        self.wake_all();
+    }
+
+    /// Wakes every sleeper (shutdown, [`Self::request_release`]).
     pub(crate) fn wake_all(&self) {
         for slot in self.slots.iter() {
             if slot
@@ -359,6 +377,7 @@ impl Registry {
                 // SAFETY: jobs in the queues are live until executed, and each queued
                 // reference is taken by exactly one thread.
                 unsafe { execute(job) };
+                self.slots[index].owner.ran_jobs.set(true);
                 idle_rounds = 0;
                 continue;
             }
@@ -400,6 +419,14 @@ impl Registry {
         let slot = &self.slots[index];
         let bit = 1u64 << index;
         self.stop_searching(index);
+        // Jobs leave memory in this thread's allocator heap (their temporaries, what other
+        // threads freed of theirs): give it back before sleeping, or it stays committed
+        // for as long as the thread sleeps (ADR 0086). Cheap, and before announcing the
+        // sleep, so no wake-up waits for it.
+        let epoch = self.release_epoch.load(Ordering::Acquire);
+        if slot.owner.ran_jobs.replace(false) | (slot.owner.released.replace(epoch) != epoch) {
+            crate::alloc::release_thread_memory();
+        }
 
         slot.state.store(SLEEPING, Ordering::SeqCst);
         self.sleeping.fetch_or(bit, Ordering::SeqCst);

@@ -200,6 +200,10 @@ fn parse(mut args: impl Iterator<Item = String>) -> Result<Args, String> {
     Ok(parsed)
 }
 
+/// The engine's global allocator (ADR 0086).
+#[global_allocator]
+static ALLOCATOR: engine_core::alloc::EngineAllocator = engine_core::alloc::EngineAllocator::new();
+
 fn main() -> ExitCode {
     // The crash monitor is this executable started by `engine_crash::install`.
     if engine_crash::run_monitor_if_requested() {

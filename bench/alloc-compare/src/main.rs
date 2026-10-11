@@ -45,6 +45,16 @@ unsafe extern "C" {
     fn mi_collect(force: bool);
 }
 
+/// `mi_collect(force)` where mimalloc is the allocator.
+fn collect_with(force: bool) {
+    #[cfg(any(feature = "mimalloc-v2", feature = "mimalloc-v3"))]
+    // SAFETY: a plain call into the linked mimalloc.
+    unsafe {
+        mi_collect(force);
+    }
+    let _ = force;
+}
+
 /// Gives the allocator's freed memory back to the OS where it can (mimalloc).
 fn collect() {
     #[cfg(any(feature = "mimalloc-v2", feature = "mimalloc-v3"))]
@@ -245,6 +255,44 @@ fn main() {
                         }
                     }
                 });
+            }
+            // What a collect costs a thread: idle (nothing freed since the last one), and
+            // after a burst of allocations it freed (a job's temporaries), plain and forced.
+            "collect-cost" => {
+                let costs: Vec<[f64; 4]> = std::thread::scope(|s| {
+                    let handles: Vec<_> = (0..threads)
+                        .map(|t| {
+                            s.spawn(move || {
+                                let ns = |f: &dyn Fn()| {
+                                    let start = Instant::now();
+                                    f();
+                                    start.elapsed().as_nanos() as f64
+                                };
+                                collect_with(true);
+                                let idle = ns(&|| collect_with(false));
+                                black_box(churn(200_000, 7 + t as u64));
+                                let after = ns(&|| collect_with(false));
+                                black_box(churn(200_000, 9 + t as u64));
+                                let forced = ns(&|| collect_with(true));
+                                let idle_forced = ns(&|| collect_with(true));
+                                [idle, after, forced, idle_forced]
+                            })
+                        })
+                        .collect();
+                    handles.into_iter().map(|h| h.join().unwrap()).collect()
+                });
+                let median = |k: usize| {
+                    let mut v: Vec<f64> = costs.iter().map(|c| c[k]).collect();
+                    v.sort_by(f64::total_cmp);
+                    v[v.len() / 2] / 1e3
+                };
+                eprintln!(
+                    "collect us (median of {threads} threads): idle {:.1}, after a burst {:.1}, forced after a burst {:.1}, forced idle {:.1}",
+                    median(0),
+                    median(1),
+                    median(2),
+                    median(3)
+                );
             }
             other => panic!("unknown workload {other}"),
         }

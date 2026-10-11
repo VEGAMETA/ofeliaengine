@@ -10,6 +10,11 @@ license.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["mimalloc"]
+# The engine's global allocator (ADR 0086): mimalloc 2.3.2 behind `engine_core::alloc`.
+mimalloc = ["dep:mimalloc"]
+
 [dependencies]
 engine_profiler.workspace = true
 # Feature unification of shared dependencies for build reuse (ADR 0077).
@@ -17,6 +22,9 @@ engine_workspace_hack.workspace = true
 # Vectors, matrices, quaternions with SSE2 SIMD (MIT OR Apache-2.0, no dependencies; ADR 0012).
 # `bytemuck`: glam types are plain data inside ECS components (ADR 0017).
 glam = { version = "0.33", features = ["bytemuck"] }
+# The global allocator (ADR 0086; MIT, the mimalloc 2.3.2 C sources built by cc, about
+# 5 s): 3.3-4.7x the Windows heap on allocation-heavy work (bench/alloc-compare).
+mimalloc = { version = "=0.1.52", default-features = false, features = ["v2"], optional = true }
 
 
 [dev-dependencies]

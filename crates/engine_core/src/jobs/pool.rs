@@ -247,6 +247,15 @@ impl ThreadPool {
         ThreadPoolBuilder::default()
     }
 
+    /// Asks every worker to give the memory its allocator heap holds back to the OS
+    /// (ADR 0086): after a level is loaded or unloaded, when memory the workers allocated was
+    /// freed elsewhere (it goes back to the heap of the thread that allocated it, and a
+    /// sleeping worker never looks). Workers also do it whenever they go idle after running
+    /// jobs. Sleeping workers wake for it and sleep again; the caller does not wait.
+    pub fn release_memory(&self) {
+        self.registry.request_release();
+    }
+
     /// Number of worker threads.
     pub fn num_workers(&self) -> usize {
         self.registry.num_workers

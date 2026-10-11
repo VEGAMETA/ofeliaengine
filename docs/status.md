@@ -337,8 +337,11 @@ grown, divide and conquer); the old labels stay in parentheses.
    `docs/research/global-allocator.md`; ADR 0086, Proposed): mimalloc 2.3.2 3.3–4.7× the
    system heap on allocation-heavy work, 1.5–1.6× on glTF imports and pack loads, the
    frame unchanged; it holds memory in sleeping workers' heaps (341 MiB after a level
-   load until they collect). **mimalloc chosen** (the owner, 2026-10-11): integrate it
-   with idle workers collecting and a counting layer in debug builds. The private bytes accounted for
+   load until they collect). **mimalloc chosen** (the owner, 2026-10-11) and integrated
+   the same day: `engine_core::alloc::EngineAllocator` in the CLI, `flight` and
+   `game_loop`, idle workers and `ThreadPool::release_memory` giving memory back, a
+   counting layer in debug builds; `flight`'s first frame −5 ms, its CPU per frame the
+   same, private memory +5–6 %. Left: Tracy memory events. The private bytes accounted for
    2026-10-11 (`flight` now prints its committed memory by kind, and the allocator its
    mapped bytes per heap): of the RTX's 936 MiB, 607 MiB are write-combined pages the
    driver mapped into the process (the engine's own mapped Vulkan memory 192 MiB of it),
@@ -484,8 +487,8 @@ grown, divide and conquer); the old labels stay in parentheses.
     2026-10-11: cursor events from before the loop are ignored);
   - ~~`scene_bench --ao` takes the next argument as the AO quality even when it is a
     flag~~ (fixed 2026-10-11);
-  - CLAUDE.md §5 (mimalloc) and §2 ("engine_runtime: game executable") describe things
-    that do not exist yet.
+  - CLAUDE.md §2 ("engine_runtime: game executable") describes a thing that does not
+    exist yet (§5's mimalloc does since 2026-10-11).
 
 ## 7. First task of a new coordinator session: a fresh-eyes technical review
 

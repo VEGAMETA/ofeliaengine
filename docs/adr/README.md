@@ -93,7 +93,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0083](0083-hdri-environments.md) | HDRI environments: `.hdr` panoramas kept as RGBE and decoded on the GPU, a background cube of their own turned when sampled, the sun found and taken out into a directional light (lighting cube without its spike; shadows); cooked into BC6H cubes for the DDC and packs (version 4); OpenEXR through the `exr` crate | Accepted |
 | [0084](0084-global-illumination.md) | Global illumination: our own probe GI traced with ray queries (a probe volume converged at load, then a ray budget per frame; acceleration structures), held to cost less than AMD's Brixelizer GI, which is built as the reference and the fallback | Accepted |
 | [0085](0085-visibility-buffer-and-meshlets.md) | Visibility buffer and meshlets: meshlets in the forward renderer first (cook-time clusters culled per view, compacted indices or mesh shaders); the visibility buffer decided with custom materials (item 3b) | Accepted |
-| [0086](0086-global-allocator.md) | The global allocator: mimalloc 2.3.2 for the engine's executables (3.3–4.7× the system heap on allocation-heavy work, 1.5–1.6× on imports and pack loads), its memory given back by the job pool's idle workers; a counting layer in debug builds | Accepted |
+| [0086](0086-global-allocator.md) | The global allocator: mimalloc 2.3.2 (`engine_core::alloc::EngineAllocator`) for the engine's executables (3.3–4.7× the system heap on allocation-heavy work, 1.5–1.6× on imports and pack loads), its memory given back by the job pool's idle workers and `ThreadPool::release_memory`; a counting layer in debug builds | Accepted |
 
 ## Template
 

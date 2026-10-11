@@ -56,6 +56,25 @@ fn update_enemies(enemies: &mut [Enemy]) {
 
 Example: `cargo build --profile profiling --features engine_profiler/tracy-ondemand`.
 
+## Memory: the engine's allocator
+
+Set the engine's allocator in your game's executable (ADR 0086): mimalloc, 1.5–4.7× as
+fast as the Windows heap where your game allocates (loading, tools, UI), and in debug
+builds it counts what Rust holds.
+
+```rust
+#[global_allocator]
+static ALLOCATOR: engine_core::alloc::EngineAllocator =
+    engine_core::alloc::EngineAllocator::new();
+```
+
+- `engine_core::alloc::heap_stats()` (debug builds): bytes Rust holds now and at peak,
+  allocations made.
+- mimalloc keeps freed memory in the heap of the thread that allocated it. The job
+  pool's workers give theirs back when they go idle; after loading or unloading a
+  level, call `jobs.release_memory()` (what the workers allocated and your main thread
+  freed) and `engine_core::alloc::release_thread_memory()` on the main thread.
+
 ## Common mistakes
 
 - **Profiling a `dev` build.** Our crates are compiled at `opt-level = 1` there, so the

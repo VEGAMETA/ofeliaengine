@@ -5,6 +5,7 @@
 //! graphics code. Everything here must be usable from any engine thread, including
 //! the render and audio threads.
 
+pub mod alloc;
 pub mod arena;
 mod atomic;
 pub mod half;
