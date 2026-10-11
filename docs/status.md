@@ -332,7 +332,8 @@ grown, divide and conquer); the old labels stay in parentheses.
    free list) and `JoltBackend::set_jobs` (ADR 0018 addendum): the same results, as fast
    on the physics bench (piles of 1,000 and 5,000: 0.784 / 3.676 ms against Jolt's 0.798 /
    3.677 at 16 threads), faster on small steps; one set of threads. The runtime wires it
-   when it owns physics (the player crate, 8a).
+   when it owns physics (the player crate, 8a). A lost wake-up in `ForeignJobs::wait`
+   (a sleeping waiter missed the last job) was found and fixed the same night.
 7c (was 6e). ~~`forward.rs` (5,695 lines) split by feature (review §3.12).~~ Done
    2026-10-11 as files (code moved, nothing changed: golden images the same bytes):
    `forward/mod.rs` (the public types and the renderer's API, 2,421 lines), `declare.rs`

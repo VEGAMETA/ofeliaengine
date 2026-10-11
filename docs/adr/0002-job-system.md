@@ -163,3 +163,13 @@ code its own path:
 No allocation per job; the records are released before `wait` returns, so they can be
 dropped right after. First user: Jolt Physics (review 2 §3.10, `JoltBackend::set_jobs`).
 Box2D v3's task callbacks can use it the same way.
+
+**Fixed the same night:** the count of jobs was a plain counter, so a waiter that went to
+sleep in the pool (no job left for it while the last ones still ran elsewhere) was never
+woken when they finished; a full check caught `jobs_from_many_threads_all_run_once`
+hanging. The count now shares one atomic word with the waiting participant's index: the
+job that finishes last reads whom to wake from its own decrement and touches nothing
+after it (as the pool's `CountLatch` does). One waiter registers at a time; another waits
+without sleeping (`Registry::work_until`). Tests: `waiting_never_misses_the_last_job`
+(400 batches of jobs long enough for the waiter to fall asleep: hung within seconds
+before the fix) and `two_waiters_at_once`.
