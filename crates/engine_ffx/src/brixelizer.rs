@@ -98,6 +98,18 @@ pub struct UpdateDesc {
     pub center: [f32; 3],
     /// The frame's number (it picks the cascade updated).
     pub frame_index: u32,
+    /// A debug view of the distance field traced from a camera into `debug_output`
+    /// (`GENERAL`): `FfxBrixelizerTraceDebugModes` + 1 (1 distance, 2 UVW, 3 iterations, 4
+    /// normals, 5 bricks, 6 cascades), or 0 for none.
+    pub debug_mode: u32,
+    /// The camera's world from view, as the GI's matrices (row-vector convention).
+    pub inverse_view: [f32; 16],
+    /// Its view from clip.
+    pub inverse_projection: [f32; 16],
+    /// Padding.
+    pub pad: u32,
+    /// The debug view's image.
+    pub debug_output: Image,
 }
 
 /// `EngineBrixelizerStats`: an update's numbers, read back some frames late.
@@ -195,6 +207,27 @@ pub struct GiDispatchDesc {
     pub specular: Image,
 }
 
+/// `EngineBrixelizerGiDebugDesc`: the SDK's view of the GI's caches at each pixel's
+/// surface.
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+#[allow(missing_docs)]
+pub struct GiDebugDesc {
+    pub command_buffer: vk::CommandBuffer,
+    pub view: [f32; 16],
+    pub projection: [f32; 16],
+    /// 0: the radiance cache; 1: the irradiance cache.
+    pub mode: u32,
+    pub normals_unpack_mul: f32,
+    pub normals_unpack_add: f32,
+    pub pad: u32,
+    /// Inputs, in `SHADER_READ_ONLY_OPTIMAL`.
+    pub depth: Image,
+    pub normal: Image,
+    /// Output, in `GENERAL`.
+    pub output: Image,
+}
+
 /// `EngineBrixelizer`: opaque.
 #[repr(C)]
 pub struct Context {
@@ -240,6 +273,7 @@ unsafe extern "C" {
     pub fn engine_brixelizer_gi_destroy(gi: *mut GiContext);
     pub fn engine_brixelizer_gi_dispatch(gi: *mut GiContext, desc: *const GiDispatchDesc) -> i32;
     pub fn engine_brixelizer_gi_gpu_memory(gi: *mut GiContext) -> u64;
+    pub fn engine_brixelizer_gi_debug(gi: *mut GiContext, desc: *const GiDebugDesc) -> i32;
     #[cfg(test)]
     fn engine_brixelizer_layout(out: *mut u32, count: u32);
 }
@@ -251,7 +285,7 @@ mod tests {
 
     #[test]
     fn layout_matches_the_interface() {
-        let mut theirs = [0u32; 17];
+        let mut theirs = [0u32; 20];
         // SAFETY: writes at most `theirs.len()` values.
         unsafe { engine_brixelizer_layout(theirs.as_mut_ptr(), theirs.len() as u32) };
         let ours = [
@@ -262,6 +296,7 @@ mod tests {
             offset_of!(Instance, transform),
             offset_of!(Instance, dynamic),
             size_of::<UpdateDesc>(),
+            offset_of!(UpdateDesc, debug_output),
             size_of::<Stats>(),
             offset_of!(Stats, scratch_needed),
             size_of::<Cube>(),
@@ -272,6 +307,8 @@ mod tests {
             offset_of!(GiDispatchDesc, depth),
             offset_of!(GiDispatchDesc, environment),
             offset_of!(GiDispatchDesc, specular),
+            size_of::<GiDebugDesc>(),
+            offset_of!(GiDebugDesc, depth),
         ]
         .map(|v| v as u32);
         assert_eq!(ours, theirs);

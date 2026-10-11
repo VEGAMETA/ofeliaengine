@@ -1434,7 +1434,7 @@ fn main() {
                     renderer.invalidate_local_shadows();
                 }
                 let started = Instant::now();
-                let gi_view = gi.as_ref().map(|g| ViewGi {
+                let gi_view = gi.as_ref().map(|g| ViewGi::Probes {
                     volume: g.begin_frame(&mut fg),
                     rays: ray_frames.map(|(_, r)| r),
                 });

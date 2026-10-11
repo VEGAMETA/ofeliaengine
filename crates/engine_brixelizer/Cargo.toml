@@ -1,0 +1,25 @@
+[package]
+name = "engine_brixelizer"
+description = "AMD FidelityFX Brixelizer GI in the forward renderer, built from the FidelityFX SDK by engine_ffx: probe GI's reference (ADR 0090)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Push constants as plain bytes (ADR 0052).
+bytemuck = { version = "1.25", features = ["derive"] }
+engine_core.workspace = true
+# The FidelityFX SDK library and its C interface (ADR 0090).
+engine_ffx.workspace = true
+engine_profiler.workspace = true
+engine_render.workspace = true
+engine_rhi.workspace = true
+
+[dev-dependencies]
+# Recompiles the committed shaders to check them against their source.
+engine_shader.workspace = true

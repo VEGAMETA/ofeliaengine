@@ -237,18 +237,25 @@ impl ForwardRenderer {
                 let prepared = d.passes.prepare(ring, view.decals, clip_from_world, size)?;
                 Some((d, prepared))
             });
-        // Probe GI (ADR 0088): a pass after the depth prepass writes each pixel's diffuse
-        // irradiance from the volume, which the GI shading reads. Not in multisampled
-        // views, nor before the volume's first update.
-        let gi_view = view
-            .gi
-            .filter(|g| self.gi_on && ms.is_none() && self.gi.is_some() && g.volume.has_light());
+        // GI (ADR 0088, ADR 0090): a pass after the depth prepass writes each pixel's
+        // diffuse irradiance, from the probe volume or a screen GI, which the GI shading
+        // reads. Not in multisampled views, nor before the volume's first update, nor a
+        // screen GI in probe captures.
+        let gi_view = view.gi.filter(|g| {
+            self.gi_on
+                && ms.is_none()
+                && self.gi.is_some()
+                && match g {
+                    ViewGi::Probes { volume, .. } => volume.has_light(),
+                    ViewGi::Screen(_) => !capture,
+                }
+        });
         // The sky's irradiance harmonics outside the volume (the flat ambient as ones:
         // radiance `ambient` everywhere is irradiance π × ambient).
         let gi_sky = match (gi_view, environment) {
-            (None, _) => None,
-            (Some(_), Some(e)) => Some((e.sh_address, e.intensity)),
-            (Some(_), None) => {
+            (None | Some(ViewGi::Screen(_)), _) => None,
+            (Some(ViewGi::Probes { .. }), Some(e)) => Some((e.sh_address, e.intensity)),
+            (Some(ViewGi::Probes { .. }), None) => {
                 let e = view.light.ambient * (core::f32::consts::PI / 0.282_095);
                 let mut sh = [[0.0f32; 4]; 9];
                 sh[0] = [e.x, e.y, e.z, 0.0];
@@ -350,14 +357,21 @@ impl ForwardRenderer {
             shadow_draws: local_frame.draws,
             shadow_draw_count: shadow_draws,
             shadow_texel: local.map_or(0.0, |s| 1.0 / s.atlas.desc.width.max(1) as f32),
-            gi_scale: gi_view.map_or(1.0, |g| g.volume.resolve_scale() as f32),
-            gi_samples: gi_view.map_or([0; 2], |g| {
-                let scale = g.volume.resolve_scale();
-                [
-                    depth_desc.width.div_ceil(scale),
-                    depth_desc.height.div_ceil(scale),
-                ]
-            }),
+            gi_scale: match gi_view {
+                Some(ViewGi::Probes { volume, .. }) => volume.resolve_scale() as f32,
+                _ => 1.0,
+            },
+            gi_samples: match gi_view {
+                Some(ViewGi::Probes { volume, .. }) => {
+                    let scale = volume.resolve_scale();
+                    [
+                        depth_desc.width.div_ceil(scale),
+                        depth_desc.height.div_ceil(scale),
+                    ]
+                }
+                Some(ViewGi::Screen(_)) => [depth_desc.width, depth_desc.height],
+                None => [0; 2],
+            },
             _gi_pad: 0,
         };
         let frame = ring.push(&[frame])?;
@@ -922,6 +936,25 @@ impl ForwardRenderer {
             )
         });
         let gi_view = gi_view.filter(|_| gi_shading.is_some());
+        // What makes the GI shading's irradiance after the prepass.
+        let gi_resolve = GiResolve {
+            view: gi_view,
+            sky: gi_sky,
+            depth: read_depth,
+            size: [depth_desc.width, depth_desc.height],
+            clip_from_world,
+            screen: ScreenGiInput {
+                depth: read_depth,
+                motion: prepass_velocity.map(|(velocity, _)| velocity),
+                camera: Camera {
+                    clip_from_world: unjittered,
+                    position: view.camera.position,
+                },
+                previous_clip_from_world,
+                environment: environment.map(|e| (e.source, e.intensity)),
+                reset,
+            },
+        };
         let main_pipelines = if let Some(m) = ms {
             let k = shadowed_index(variant);
             let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
@@ -1095,22 +1128,7 @@ impl ForwardRenderer {
                         targets.decals =
                             Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
                     }
-                    if let (Some(g), Some((sh, intensity))) = (gi_view, gi_sky) {
-                        targets.gi = g
-                            .volume
-                            .add_resolve_pass(
-                                fg,
-                                ring,
-                                bindless,
-                                read_depth,
-                                [depth_desc.width, depth_desc.height],
-                                clip_from_world,
-                                view.camera.position,
-                                sh,
-                                intensity,
-                            )
-                            .ok();
-                    }
+                    targets.gi = gi_resolve.add(fg, ring, bindless);
                     let ao_texture = targets.ao;
                     let contact_texture = targets.contact;
                     let decal_texture = targets.decals;
@@ -1300,22 +1318,7 @@ impl ForwardRenderer {
                             targets.decals =
                                 Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
                         }
-                        if let (Some(g), Some((sh, intensity))) = (gi_view, gi_sky) {
-                            targets.gi = g
-                                .volume
-                                .add_resolve_pass(
-                                    fg,
-                                    ring,
-                                    bindless,
-                                    read_depth,
-                                    [depth_desc.width, depth_desc.height],
-                                    clip_from_world,
-                                    view.camera.position,
-                                    sh,
-                                    intensity,
-                                )
-                                .ok();
-                        }
+                        targets.gi = gi_resolve.add(fg, ring, bindless);
                         let ao_texture = targets.ao;
                         let contact_texture = targets.contact;
                         let decal_texture = targets.decals;
@@ -2093,4 +2096,47 @@ fn cascade_data(fit: &CascadeFit, settings: &ShadowSettings) -> [CascadeData; MA
         };
     }
     out
+}
+
+/// What makes the GI shading's irradiance after the depth prepass (ADR 0088, ADR 0090):
+/// the probe volume's resolve or a screen GI's passes.
+#[derive(Clone, Copy)]
+struct GiResolve<'a> {
+    view: Option<ViewGi<'a>>,
+    /// The sky's harmonics and intensity outside the volume.
+    sky: Option<(u64, f32)>,
+    depth: Texture,
+    size: [u32; 2],
+    clip_from_world: Mat4,
+    screen: ScreenGiInput,
+}
+
+impl<'g> GiResolve<'g> {
+    /// Declares the passes; `None` without GI this frame.
+    fn add(
+        self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+    ) -> Option<Texture> {
+        match self.view? {
+            ViewGi::Probes { volume, .. } => {
+                let (sh, intensity) = self.sky?;
+                volume
+                    .add_resolve_pass(
+                        fg,
+                        ring,
+                        bindless,
+                        self.depth,
+                        self.size,
+                        self.clip_from_world,
+                        self.screen.camera.position,
+                        sh,
+                        intensity,
+                    )
+                    .ok()
+            }
+            ViewGi::Screen(screen) => screen.add_passes(fg, ring, bindless, &self.screen),
+        }
+    }
 }

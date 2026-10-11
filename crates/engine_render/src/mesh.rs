@@ -583,6 +583,20 @@ enum Retired {
     Buffer(PoolBuffer),
 }
 
+/// A [`GeometryPool`]'s positions and indices as Vulkan buffers, for libraries that read
+/// the meshes themselves (Brixelizer, ADR 0090). They change when the pool grows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RawGeometry {
+    /// Positions, three floats (12 bytes) per vertex.
+    pub positions: vk::Buffer,
+    /// Bytes of `positions`.
+    pub positions_size: u64,
+    /// 32-bit indices, relative to each mesh's first vertex.
+    pub indices: vk::Buffer,
+    /// Bytes of `indices`.
+    pub indices_size: u64,
+}
+
 /// Vertices and indices of every mesh (see the module documentation).
 #[derive(Debug)]
 pub struct GeometryPool {
@@ -1138,6 +1152,16 @@ impl GeometryPool {
         }
         slot.generation = slot.generation.wrapping_add(1);
         self.free_slots.push(id.index);
+    }
+
+    /// The positions and indices as Vulkan buffers ([`RawGeometry`]).
+    pub fn raw_buffers(&self) -> RawGeometry {
+        RawGeometry {
+            positions: self.positions.buffer,
+            positions_size: self.positions.size,
+            indices: self.indices.buffer,
+            indices_size: self.indices.size,
+        }
     }
 
     /// Where a mesh lives; `None` for stale ids.

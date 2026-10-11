@@ -631,23 +631,68 @@ pub struct ForwardView<'a> {
     /// [`ForwardRenderer::set_decals`]; not drawn in multisampled views or probe captures,
     /// nor on transparent surfaces and subsurface materials.
     pub decals: &'a [Decal],
-    /// Global illumination from a volume of probes (ADR 0088, [`crate::gi`]): the diffuse
-    /// light of opaque surfaces and subsurface materials, after the depth prepass (which
-    /// then runs). It needs [`ForwardRenderer::set_global_illumination`]; not in
-    /// multisampled views; transparent surfaces keep the sky's light.
+    /// Global illumination: the diffuse light of opaque surfaces and subsurface materials,
+    /// from a volume of probes (ADR 0088, [`crate::gi`]) or computed per pixel by another
+    /// crate (ADR 0090), after the depth prepass (which then runs). It needs
+    /// [`ForwardRenderer::set_global_illumination`]; not in multisampled views;
+    /// transparent surfaces keep the sky's light.
     pub gi: Option<ViewGi<'a>>,
 }
 
 /// A view's global illumination ([`ForwardView::gi`]).
 #[derive(Debug, Clone, Copy)]
-pub struct ViewGi<'a> {
-    /// The volume in this frame's graph ([`crate::gi::ProbeGi::begin_frame`], once per
-    /// frame).
-    pub volume: GiFrame<'a>,
-    /// This frame's scene for ray queries ([`crate::rays::RayScene::add_passes`]): while
-    /// the volume converges, its updates trace it (on the persistent GPU scene's path,
-    /// [`ForwardRenderer::add_scene_passes`]); `None` keeps the volume as it is.
-    pub rays: Option<RayFrame<'a>>,
+pub enum ViewGi<'a> {
+    /// A volume of probes (ADR 0088).
+    Probes {
+        /// The volume in this frame's graph ([`crate::gi::ProbeGi::begin_frame`], once per
+        /// frame).
+        volume: GiFrame<'a>,
+        /// This frame's scene for ray queries ([`crate::rays::RayScene::add_passes`]):
+        /// while the volume converges, its updates trace it (on the persistent GPU
+        /// scene's path, [`ForwardRenderer::add_scene_passes`]); `None` keeps the volume
+        /// as it is.
+        rays: Option<RayFrame<'a>>,
+    },
+    /// Light computed per pixel by another crate after the depth prepass (ADR 0090: AMD's
+    /// Brixelizer GI, `engine_brixelizer`). Not in reflection probes' captures, which then
+    /// see the sky's light.
+    Screen(&'a dyn ScreenGi),
+}
+
+/// Diffuse global illumination computed per pixel after the depth prepass (ADR 0090), for
+/// [`ViewGi::Screen`]: the GI shading (ADR 0088) reads what it returns instead of a probe
+/// volume's.
+pub trait ScreenGi: core::fmt::Debug {
+    /// Declares the passes that make the view's diffuse light: an `RGBA16_SFLOAT` texture
+    /// the size of `input.depth`, the irradiance in rgb and the distance from the camera
+    /// to the pixel's surface in alpha (0 for the sky). `None` leaves the view with the
+    /// sky's light this frame.
+    fn add_passes<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        input: &ScreenGiInput,
+    ) -> Option<Texture>;
+}
+
+/// What a [`ScreenGi`] gets from the view.
+#[derive(Debug, Clone, Copy)]
+pub struct ScreenGiInput {
+    /// The depth after the prepass, single-sampled (0 at the near plane, 1 at the far
+    /// plane and the sky).
+    pub depth: Texture,
+    /// Motion vectors ([`MOTION_FORMAT`]: texture coordinates now minus last frame's), in
+    /// temporal views.
+    pub motion: Option<Texture>,
+    /// The camera, without the jitter.
+    pub camera: Camera,
+    /// Last frame's clip from world, without the jitter (this frame's after a reset).
+    pub previous_clip_from_world: Mat4,
+    /// The sky's radiance cube and its intensity, when the view has an environment.
+    pub environment: Option<(Texture, f32)>,
+    /// The view's history was reset (a camera cut).
+    pub reset: bool,
 }
 
 /// Temporal state of one view, kept across frames (ADR 0043): last frame's camera and
@@ -2396,9 +2441,11 @@ impl ForwardRenderer {
         // Probe GI (ADR 0088, ADR 0089): the volume's updates while it converges, then its
         // window of the frame, tracing this frame's scene for ray queries; misses see the
         // view's sky.
-        if let Some(gi) = view.gi.filter(|_| self.gi_on)
-            && let Some(rays) = gi.rays
-            && gi.volume.needs_updates()
+        if let Some(ViewGi::Probes {
+            volume,
+            rays: Some(rays),
+        }) = view.gi.filter(|_| self.gi_on)
+            && volume.needs_updates()
         {
             let sky = match imported.environment {
                 Some(e) => GiSky::Cube {
@@ -2413,7 +2460,7 @@ impl ForwardRenderer {
                 .environment
                 .and_then(|e| e.sun_color)
                 .unwrap_or(view.light.color);
-            gi.volume
+            volume
                 .add_update_passes(
                     fg,
                     ring,
@@ -2560,9 +2607,12 @@ impl ForwardRenderer {
                 decals: &[],
                 environment: view.environment,
                 reflections: Reflections::NONE,
-                // The probe sees the scene lit as the view does (its volume converges
-                // through the view, not here).
-                gi: view.gi.map(|g| ViewGi { rays: None, ..g }),
+                // The probe sees the scene lit as the view's volume lights it (the volume
+                // converges through the view, not here); a screen GI sees only the view.
+                gi: view.gi.and_then(|g| match g {
+                    ViewGi::Probes { volume, .. } => Some(ViewGi::Probes { volume, rays: None }),
+                    ViewGi::Screen(_) => None,
+                }),
             };
             let setup = Setup {
                 depth_desc: fg.texture_desc(depth),

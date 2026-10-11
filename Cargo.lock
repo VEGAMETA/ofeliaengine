@@ -262,6 +262,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_brixelizer"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "engine_core",
+ "engine_ffx",
+ "engine_profiler",
+ "engine_render",
+ "engine_rhi",
+ "engine_shader",
+]
+
+[[package]]
 name = "engine_cli"
 version = "0.0.0"
 dependencies = [

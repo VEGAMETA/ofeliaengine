@@ -1453,7 +1453,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                     .expect("ray scene"),
                 _ => None,
             };
-            let gi = gi_volume.as_ref().map(|volume| ViewGi {
+            let gi = gi_volume.as_ref().map(|volume| ViewGi::Probes {
                 volume: volume.begin_frame(&mut fg),
                 rays: ray_frame.filter(|_| !uploading),
             });

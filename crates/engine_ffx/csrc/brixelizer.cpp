@@ -80,6 +80,13 @@ struct EngineBrixelizerUpdateDesc {
     /// The cascades' center (the camera).
     float center[3];
     uint32_t frameIndex;
+    /// A debug view of the distance field traced from a camera into `debugOutput`
+    /// (GENERAL): FfxBrixelizerTraceDebugModes + 1, or 0 for none.
+    uint32_t debugMode;
+    float inverseView[16];
+    float inverseProjection[16];
+    uint32_t pad;
+    EngineFfxImage debugOutput;
 };
 
 /// `Stats` in src/brixelizer.rs (`FfxBrixelizerStats`, read back a few frames late).
@@ -159,6 +166,23 @@ struct EngineBrixelizerGiDispatchDesc {
     /// Outputs, in GENERAL.
     EngineFfxImage diffuse;
     EngineFfxImage specular;
+};
+
+/// `GiDebugDesc` in src/brixelizer.rs: what the GI's caches hold at each pixel's surface.
+struct EngineBrixelizerGiDebugDesc {
+    VkCommandBuffer commandBuffer;
+    float view[16];
+    float projection[16];
+    /// FfxBrixelizerGIDebugMode: 0 the radiance cache, 1 the irradiance cache.
+    uint32_t mode;
+    float normalsUnpackMul;
+    float normalsUnpackAdd;
+    uint32_t pad;
+    /// Inputs, in SHADER_READ_ONLY_OPTIMAL.
+    EngineFfxImage depth;
+    EngineFfxImage normal;
+    /// Output, in GENERAL.
+    EngineFfxImage output;
 };
 
 }  // extern "C"
@@ -526,6 +550,22 @@ int32_t engine_brixelizer_update(EngineBrixelizer* b, const EngineBrixelizerUpda
     size_t scratchNeeded = 0;
     u.outScratchBufferSize = &scratchNeeded;
     u.outStats = b->readback ? &b->stats : nullptr;
+    FfxBrixelizerDebugVisualizationDescription debug = {};
+    if (desc->debugMode != 0)
+    {
+        std::memcpy(debug.inverseViewMatrix, desc->inverseView, sizeof(debug.inverseViewMatrix));
+        std::memcpy(debug.inverseProjectionMatrix, desc->inverseProjection, sizeof(debug.inverseProjectionMatrix));
+        debug.debugState = FfxBrixelizerTraceDebugModes(desc->debugMode - 1);
+        debug.startCascadeIndex = b->mergedBase;
+        debug.endCascadeIndex = b->mergedBase + b->cascadeCount - 1;
+        debug.sdfSolveEps = 0.5f;
+        debug.tMin = 0.0f;
+        debug.tMax = 10000.0f;
+        debug.renderWidth = desc->debugOutput.width;
+        debug.renderHeight = desc->debugOutput.height;
+        debug.output = image(desc->debugOutput, FFX_RESOURCE_USAGE_UAV, FFX_RESOURCE_STATE_UNORDERED_ACCESS, L"engine brixelizer debug");
+        u.debugVisualizationDesc = &debug;
+    }
     FfxErrorCode error = ffxBrixelizerBakeUpdate(b->context, &u, b->baked);
     if (error != FFX_OK)
         return error;
@@ -673,6 +713,38 @@ int32_t engine_brixelizer_gi_dispatch(EngineBrixelizerGi* gi, const EngineBrixel
     return ffxBrixelizerGIContextDispatch(gi->context, &d, ffxGetCommandListVK(desc->commandBuffer));
 }
 
+/// Records the SDK's debug view of the GI's caches into `desc->commandBuffer`;
+/// FfxErrorCode.
+int32_t engine_brixelizer_gi_debug(EngineBrixelizerGi* gi, const EngineBrixelizerGiDebugDesc* desc)
+{
+    EngineBrixelizer* b = gi->sdf;
+    const EngineFfxScope scope(b->backend.vulkan);
+    FfxBrixelizerGIDebugDescription d = {};
+    std::memcpy(&d.view, desc->view, sizeof(d.view));
+    std::memcpy(&d.projection, desc->projection, sizeof(d.projection));
+    d.startCascade = b->mergedBase;
+    d.endCascade = b->mergedBase + b->cascadeCount - 1;
+    d.outputSize[0] = desc->output.width;
+    d.outputSize[1] = desc->output.height;
+    d.debugMode = FfxBrixelizerGIDebugMode(desc->mode);
+    d.normalsUnpackMul = desc->normalsUnpackMul;
+    d.normalsUnpackAdd = desc->normalsUnpackAdd;
+    d.depth = image(desc->depth, FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ, L"engine depth");
+    d.normal = image(desc->normal, FFX_RESOURCE_USAGE_READ_ONLY, FFX_RESOURCE_STATE_COMPUTE_READ, L"engine normals");
+    d.sdfAtlas = kept(b, b->sdfAtlas);
+    d.bricksAABBs = kept(b, b->brickAabbs);
+    for (uint32_t i = 0; i < FFX_BRIXELIZER_MAX_CASCADES; ++i)
+    {
+        d.cascadeAABBTrees[i] = kept(b, b->aabbTrees[i]);
+        d.cascadeBrickMaps[i] = kept(b, b->brickMaps[i]);
+    }
+    d.outputDebug = image(desc->output, FFX_RESOURCE_USAGE_UAV, FFX_RESOURCE_STATE_UNORDERED_ACCESS, L"engine GI debug");
+    const FfxErrorCode error = ffxBrixelizerGetRawContext(b->context, &d.brixelizerContext);
+    if (error != FFX_OK)
+        return error;
+    return ffxBrixelizerGIContextDebugVisualization(gi->context, &d, ffxGetCommandListVK(desc->commandBuffer));
+}
+
 /// Bytes of GPU memory the GI context holds (its caches and screen-sized images).
 uint64_t engine_brixelizer_gi_gpu_memory(EngineBrixelizerGi* gi)
 {
@@ -696,6 +768,7 @@ void engine_brixelizer_layout(uint32_t* out, uint32_t count)
         offsetof(EngineBrixelizerInstance, transform),
         offsetof(EngineBrixelizerInstance, dynamic),
         sizeof(EngineBrixelizerUpdateDesc),
+        offsetof(EngineBrixelizerUpdateDesc, debugOutput),
         sizeof(EngineBrixelizerStats),
         offsetof(EngineBrixelizerStats, scratchNeeded),
         sizeof(EngineFfxCube),
@@ -706,6 +779,8 @@ void engine_brixelizer_layout(uint32_t* out, uint32_t count)
         offsetof(EngineBrixelizerGiDispatchDesc, depth),
         offsetof(EngineBrixelizerGiDispatchDesc, environment),
         offsetof(EngineBrixelizerGiDispatchDesc, specular),
+        sizeof(EngineBrixelizerGiDebugDesc),
+        offsetof(EngineBrixelizerGiDebugDesc, depth),
     };
     for (uint32_t i = 0; i < count && i < sizeof(values) / sizeof(values[0]); ++i)
         out[i] = values[i];
