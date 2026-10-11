@@ -12,7 +12,8 @@ use engine_core::math::Vec3;
 use engine_frame::{Antialiasing, Msaa, PostAntialiasing, Quality, Upscale};
 use engine_golden::golden::{Outcome, Tolerance, compare};
 use engine_golden::scene::{
-    RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights,
+    RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_day, sponza_lights,
+    sponza_night,
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
@@ -695,6 +696,23 @@ fn procedural_scene_with_reflections() {
         ssr: Some(SsrSettings::default()),
         ..procedural("procedural_reflections")
     });
+}
+
+/// Sponza by day with everything daylight uses (`scene::sponza_day`): the atmosphere and
+/// its sun, light height fog, probe GI, ambient occlusion, contact shadows, reflection
+/// probes and screen-space reflections, TAA, bloom.
+#[test]
+fn sponza_by_day_with_everything() {
+    check(&sponza_day("sponza_day", [640, 360]));
+}
+
+/// Sponza by night with everything on (`scene::sponza_night`): a bonfire in the
+/// courtyard (sparks, smoke, its light), lights along the hall, all with shadows; fog,
+/// probe GI, ambient occlusion, reflection probes and screen-space reflections, TAA,
+/// bloom.
+#[test]
+fn sponza_by_night_with_everything() {
+    check(&sponza_night("sponza_night", [640, 360]));
 }
 
 /// Sponza with global illumination from a volume of probes (ADR 0088), through the
