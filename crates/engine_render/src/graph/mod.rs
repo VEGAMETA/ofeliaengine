@@ -1211,6 +1211,18 @@ impl<'g> PassBuilder<'_, 'g> {
         self
     }
 
+    /// Runs this pass after every pass declared before it and before every pass declared
+    /// after it, whatever resources they declare: for writes that later passes read
+    /// without declaring them (textures uploaded for shaders to reach through bindless
+    /// indices). Without async compute the frame runs in the declared order anyway; with
+    /// it, passes are reordered by their declared dependencies (ADR 0065).
+    pub fn fence(self) -> Self {
+        if let Some(pass) = self.frame.graph.records.passes.last_mut() {
+            pass.fence = true;
+        }
+        self
+    }
+
     /// Never cull this pass (it writes outside the graph: readbacks, queries, UI state).
     pub fn side_effects(self) -> Self {
         if let Some(pass) = self.frame.graph.records.passes.last_mut() {

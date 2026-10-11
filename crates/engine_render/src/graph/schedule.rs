@@ -5,8 +5,9 @@
 //!   graph has one and the pass can (no attachments, only compute and transfer stages).
 //! - The order is a topological order of the passes' dependencies (read after write,
 //!   write after read, write after write; a layout change counts as a write; resources
-//!   owned by one queue family at a time also serialize their accesses across queues)
-//!   that prefers the ancestors of earlier async passes: whatever an async pass needs is
+//!   owned by one queue family at a time also serialize their accesses across queues; a
+//!   fence follows every pass declared before it and precedes every pass declared after
+//!   it) that prefers the ancestors of earlier async passes: whatever an async pass needs is
 //!   scheduled first, so the graphics work that does not lead to it runs while it does.
 //!   Frostbite's frame graph and Granite schedule the same way: async work as early as
 //!   its inputs allow.
@@ -151,10 +152,26 @@ impl Records {
         // A pass that declares no accesses may depend on anything: keep the declared
         // order then.
         let mut reorder = true;
-        for (index, pass) in passes.iter_mut().enumerate() {
+        // The latest fence, and the first pass declared after it.
+        let mut fence = UNUSED;
+        let mut since_fence = 0;
+        for index in 0..passes.len() {
             let start = edges.len() as u32;
-            let index = index as u32;
+            let pass = &passes[index];
             if pass.needed {
+                if fence != UNUSED {
+                    edges.push(fence);
+                }
+                if pass.fence {
+                    edges.extend(
+                        (since_fence..index)
+                            .filter(|&p| passes[p].needed)
+                            .map(|p| p as u32),
+                    );
+                    fence = index as u32;
+                    since_fence = index + 1;
+                }
+                let index = index as u32;
                 let range = pass.accesses.start as usize..pass.accesses.end as usize;
                 reorder &= !range.is_empty();
                 for a in &accesses[range] {
@@ -193,7 +210,7 @@ impl Records {
                     sc.last_access[r] = index;
                 }
             }
-            pass.preds = start..edges.len() as u32;
+            passes[index].preds = start..edges.len() as u32;
         }
 
         // The order: ancestors of earlier async passes first, otherwise as declared.
@@ -414,7 +431,13 @@ mod tests {
     }
 
     fn frame() -> Frame {
+        frame_after(|_| {})
+    }
+
+    /// [`frame`] after the passes `first` declares.
+    fn frame_after(first: impl FnOnce(&mut Records)) -> Frame {
         let mut rec = Records::default();
+        first(&mut rec);
         let shadow_map = texture(&mut rec, "shadow map");
         let depth = texture(&mut rec, "depth");
         let ao = texture(&mut rec, "ao");
@@ -657,6 +680,50 @@ mod tests {
         f.rec.passes[f.shadow].accesses = start..f.rec.accesses.len() as u32;
         assert!(!compile(&mut f.rec, ASYNC));
         assert_eq!(f.rec.segments.len(), 1);
+    }
+
+    /// An upload (side effects) whose results the shading reads without declaring them
+    /// (through bindless indices): it declares only its staging buffer.
+    fn upload(rec: &mut Records) -> usize {
+        rec.resources
+            .push(ResourceRecord::new("staging", Kind::Buffer));
+        let staging = (rec.resources.len() - 1) as u32;
+        let p = pass(rec, "upload", &[(staging, compute(Access::TransferRead))]);
+        rec.passes[p].side_effects = true;
+        p
+    }
+
+    #[test]
+    fn a_fence_follows_the_passes_declared_before_it_and_precedes_the_rest() {
+        let ids = |rec: &Records| -> Vec<usize> { rec.order.iter().map(|&p| p as usize).collect() };
+        // Declared first but unfenced, the upload runs after the AO pass and its ancestors.
+        let mut f = frame_after(|rec| {
+            upload(rec);
+        });
+        assert!(compile(&mut f.rec, ASYNC));
+        assert_eq!(
+            ids(&f.rec),
+            [f.prepass, f.ao, f.blur, 0, f.shadow, f.forward, f.post]
+        );
+        // Fenced, it keeps its place: first.
+        let mut f = frame_after(|rec| {
+            let p = upload(rec);
+            rec.passes[p].fence = true;
+        });
+        assert!(compile(&mut f.rec, ASYNC));
+        assert_eq!(
+            ids(&f.rec),
+            [0, f.prepass, f.ao, f.blur, f.shadow, f.forward, f.post]
+        );
+        // Declared last, it runs last.
+        let mut f = frame();
+        let last = upload(&mut f.rec);
+        f.rec.passes[last].fence = true;
+        assert!(compile(&mut f.rec, ASYNC));
+        assert_eq!(
+            ids(&f.rec),
+            [f.prepass, f.ao, f.blur, f.shadow, f.forward, f.post, last]
+        );
     }
 
     #[test]

@@ -1139,7 +1139,9 @@ impl TexturePool {
             }
             copies.push((t.image, mips, ring, regions));
         }
-        let mut pass = fg.add_pass("texture pool upload");
+        // A fence: shaders reach the textures through bindless indices, undeclared, so
+        // the passes declared after this one must not run before it.
+        let mut pass = fg.add_pass("texture pool upload").fence();
         if let Some(handle) = owned_handle {
             pass = pass.read(handle, Access::TransferRead);
         }
