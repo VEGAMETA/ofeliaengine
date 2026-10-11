@@ -113,3 +113,12 @@ the engine.
     `Allocator::allocate` with raw requirements.
 - `Allocator` must be dropped before the `Device`. It asserts in debug builds that nothing
   leaked.
+
+## Addendum (2026-10-11): small first blocks of mapped system memory
+
+Host-visible memory types in heaps that are not device-local (staging, readback) start
+their pools from 1/64 of the preferred block (4 MiB of 256) instead of 1/8, doubling as
+they grow: such blocks stay mapped, so every byte of them counts as the process's
+private bytes, and those pools hold little (a few KiB of readback made a 32 MiB block).
+Device-local pools, an integrated GPU's host-visible ones included, are unchanged.
+`flight` on the RTX: system-memory blocks 64 → 20 MiB (`docs/perf/history.md`).
