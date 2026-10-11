@@ -231,6 +231,7 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
                 occlusion: Some(&occlusion),
                 temporal: Some(&temporal),
                 lights: &lights,
+                decals: &[],
                 environment: None,
                 reflections: Default::default(),
             };

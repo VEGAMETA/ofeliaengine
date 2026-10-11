@@ -226,6 +226,17 @@ impl ForwardRenderer {
         };
         // Whether the view reflects anything: visible probes or screen-space reflections.
         let reflecting = prepared.is_some_and(|p| p.probes > 0 || p.ssr.is_some());
+        // Decals (ADR 0082): culled and binned for the view, then drawn into the decal
+        // buffer after the depth prepass. Not in probe captures or multisampled views.
+        let decals = self
+            .decals
+            .as_deref()
+            .filter(|_| self.decals_on && !capture && ms.is_none() && !view.decals.is_empty())
+            .and_then(|d| {
+                let size = [depth_desc.width, depth_desc.height];
+                let prepared = d.passes.prepare(ring, view.decals, clip_from_world, size)?;
+                Some((d, prepared))
+            });
         let fit = match capture_shadow {
             Some(c) => c.fit,
             None => shadow::fit_cascades(
@@ -268,7 +279,7 @@ impl ForwardRenderer {
             jitter: [jitter_ndc[0], jitter_ndc[1], 0.0, 0.0],
             previous_count,
             scatter_budget: self.subsurface_settings.unwrap_or_default().budget(),
-            _pad2: [0; 2],
+            decal_tiles: decals.map_or(0, |(_, p)| p.occupied()),
             cascades: cascade_data(&fit, settings),
             cascade_count: fit.count as u32,
             command_count,
@@ -345,6 +356,8 @@ impl ForwardRenderer {
             texture: 0,
             phase: PHASE_ALL,
             ao: NO_AO,
+            decal_albedo: 0,
+            decal_surface: 0,
         };
 
         let command_bytes = u64::from(command_count) * COMMAND_BYTES;
@@ -731,6 +744,7 @@ impl ForwardRenderer {
             ao: None,
             local_atlas: local_frame.atlas.filter(|_| local_frame.shadowed),
             contact: None,
+            decals: None,
             reflect: None,
             resolves: None,
         };
@@ -799,7 +813,8 @@ impl ForwardRenderer {
             || ao.is_some()
             || subsurface_draws
             || contact.is_some()
-            || reflecting;
+            || reflecting
+            || decals.is_some();
         // With a prepass, the prepass writes the motion vectors and the shading after it
         // draws without them (the still variants' registers: on the Radeon its vertex
         // stage takes 49 VGPRs instead of 78).
@@ -851,6 +866,18 @@ impl ForwardRenderer {
                 shadowed.is_some(),
             )
         });
+        // With decals (the prepass is on then), the shading that also blends their buffer
+        // in; without its pipeline (not described), the view draws without decals.
+        let decal_shading = decals.and_then(|(d, _)| {
+            d.pipeline(
+                variant,
+                reflect_shading.is_some(),
+                ao.is_some(),
+                contact.is_some(),
+                shadowed.is_some(),
+            )
+        });
+        let decals = decals.filter(|_| decal_shading.is_some());
         let main_pipelines = if let Some(m) = ms {
             let k = shadowed_index(variant);
             let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
@@ -883,6 +910,10 @@ impl ForwardRenderer {
             [p, p]
         } else {
             match (contact_shading, prepass, velocity.is_some()) {
+                _ if decal_shading.is_some() => {
+                    let p = decal_shading?;
+                    [p, p]
+                }
                 _ if reflect_shading.is_some() => {
                     let p = reflect_shading?;
                     [p, p]
@@ -900,13 +931,14 @@ impl ForwardRenderer {
         // Made now if this is their first frame (ADR 0079).
         let main_pipelines = [ready(main_pipelines[0])?, ready(main_pipelines[1])?];
         // `contact`: the sun's contact shadows, whose mask's index the shading that reads
-        // it takes in `phase` (ADR 0071).
+        // it takes in `phase` (ADR 0071); `decals`: the decal buffer (ADR 0082).
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
                                phase: u32,
                                mask: u32,
                                ao: Option<Texture>,
-                               contact: Option<Texture>| {
+                               contact: Option<Texture>,
+                               decals: Option<DecalTargets>| {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
@@ -915,6 +947,12 @@ impl ForwardRenderer {
                 phase: contact
                     .and_then(|t| ctx.sampled_index(t))
                     .unwrap_or(base.phase),
+                decal_albedo: decals
+                    .and_then(|d| ctx.sampled_index(d.albedo))
+                    .unwrap_or(0),
+                decal_surface: decals
+                    .and_then(|d| ctx.sampled_index(d.surface))
+                    .unwrap_or(0),
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
@@ -973,7 +1011,15 @@ impl ForwardRenderer {
                                 .read(previous, Access::StorageRead(ShaderStages::VERTEX));
                         }
                         pass.execute(move |ctx| {
-                            draw_phase(ctx, prepass_pipelines, PHASE_ALL, DEPTH_STATES, None, None)
+                            draw_phase(
+                                ctx,
+                                prepass_pipelines,
+                                PHASE_ALL,
+                                DEPTH_STATES,
+                                None,
+                                None,
+                                None,
+                            )
                         });
                         DepthUse::ReadOnly
                     } else {
@@ -994,8 +1040,13 @@ impl ForwardRenderer {
                             &settings,
                         ));
                     }
+                    if let Some((d, prepared)) = &decals {
+                        targets.decals =
+                            Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
+                    }
                     let ao_texture = targets.ao;
                     let contact_texture = targets.contact;
+                    let decal_texture = targets.decals;
                     shading_pass(
                         fg,
                         names.forward,
@@ -1018,6 +1069,7 @@ impl ForwardRenderer {
                             PLAIN_STATES,
                             ao_texture,
                             contact_texture,
+                            decal_texture,
                         )
                     });
                     ForwardPasses {
@@ -1069,6 +1121,7 @@ impl ForwardRenderer {
                                 DEPTH_STATES,
                                 None,
                                 None,
+                                None,
                             )
                         });
                     } else {
@@ -1087,7 +1140,15 @@ impl ForwardRenderer {
                             scene_instances,
                         )
                         .execute(move |ctx| {
-                            draw_phase(ctx, main_pipelines, PHASE_EARLY, PLAIN_STATES, None, None)
+                            draw_phase(
+                                ctx,
+                                main_pipelines,
+                                PHASE_EARLY,
+                                PLAIN_STATES,
+                                None,
+                                None,
+                                None,
+                            )
                         });
                     }
                     let pyramid = fg.create_buffer(
@@ -1137,7 +1198,15 @@ impl ForwardRenderer {
                                 .read(previous, Access::StorageRead(ShaderStages::VERTEX));
                         }
                         pass.execute(move |ctx| {
-                            draw_phase(ctx, prepass_pipelines, PHASE_LATE, DEPTH_STATES, None, None)
+                            draw_phase(
+                                ctx,
+                                prepass_pipelines,
+                                PHASE_LATE,
+                                DEPTH_STATES,
+                                None,
+                                None,
+                                None,
+                            )
                         });
                         if let Some(((settings, view_space), passes)) = &ao {
                             targets.ao = Some(passes.passes.add_passes(
@@ -1153,8 +1222,13 @@ impl ForwardRenderer {
                                 &settings,
                             ));
                         }
+                        if let Some((d, prepared)) = &decals {
+                            targets.decals =
+                                Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
+                        }
                         let ao_texture = targets.ao;
                         let contact_texture = targets.contact;
+                        let decal_texture = targets.decals;
                         shading_pass(
                             fg,
                             names.forward,
@@ -1177,6 +1251,7 @@ impl ForwardRenderer {
                                 PLAIN_STATES,
                                 ao_texture,
                                 contact_texture,
+                                decal_texture,
                             );
                             draw_phase(
                                 ctx,
@@ -1185,6 +1260,7 @@ impl ForwardRenderer {
                                 PLAIN_STATES,
                                 ao_texture,
                                 contact_texture,
+                                decal_texture,
                             );
                         });
                     } else {
@@ -1203,7 +1279,15 @@ impl ForwardRenderer {
                             scene_instances,
                         )
                         .execute(move |ctx| {
-                            draw_phase(ctx, main_pipelines, PHASE_LATE, PLAIN_STATES, None, None)
+                            draw_phase(
+                                ctx,
+                                main_pipelines,
+                                PHASE_LATE,
+                                PLAIN_STATES,
+                                None,
+                                None,
+                                None,
+                            )
                         });
                     }
                     ForwardPasses {
@@ -1259,6 +1343,7 @@ impl ForwardRenderer {
             let targets = Targets {
                 reflect: None,
                 resolves: None,
+                decals: None,
                 ..targets
             };
             shading_pass(
@@ -1287,6 +1372,7 @@ impl ForwardRenderer {
                         SUBSURFACE_STATES,
                         ao_texture,
                         None,
+                        None,
                     );
                     draw_phase(
                         ctx,
@@ -1294,6 +1380,7 @@ impl ForwardRenderer {
                         PHASE_LATE,
                         SUBSURFACE_STATES,
                         ao_texture,
+                        None,
                         None,
                     );
                 } else {
@@ -1303,6 +1390,7 @@ impl ForwardRenderer {
                         PHASE_ALL,
                         SUBSURFACE_STATES,
                         ao_texture,
+                        None,
                         None,
                     );
                 }
@@ -1692,6 +1780,8 @@ struct Targets {
     local_atlas: Option<Texture>,
     /// The sun's contact shadows (ADR 0071), computed after the depth prepass.
     contact: Option<Texture>,
+    /// The decal buffer (ADR 0082), computed after the depth prepass.
+    decals: Option<DecalTargets>,
     /// Reflections' inputs (ADR 0073): normal and roughness, specular weight.
     reflect: Option<(Texture, Texture)>,
     /// With MSAA (ADR 0075): what the shading pass resolves its targets into.
@@ -1790,6 +1880,11 @@ fn shading_pass<'a, 'g>(
     }
     if let Some(contact) = targets.contact {
         pass = pass.read(contact, Access::Sampled(ShaderStages::FRAGMENT));
+    }
+    if let Some(decals) = targets.decals {
+        pass = pass
+            .read(decals.albedo, Access::Sampled(ShaderStages::FRAGMENT))
+            .read(decals.surface, Access::Sampled(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),

@@ -260,6 +260,7 @@ impl Bed {
                 occlusion,
                 temporal,
                 lights: &[],
+                decals: &[],
                 environment: environment.as_ref(),
                 reflections: Default::default(),
             };

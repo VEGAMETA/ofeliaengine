@@ -312,6 +312,7 @@ impl Scene {
                         occlusion: None,
                         temporal: None,
                         lights: &[],
+                        decals: &[],
                         environment: None,
                         reflections: Default::default(),
                     },

@@ -310,6 +310,7 @@ fn main() {
                             occlusion: None,
                             temporal: Some(&temporal),
                             lights: &[],
+                            decals: &[],
                             environment: None,
                             reflections: Default::default(),
                         },

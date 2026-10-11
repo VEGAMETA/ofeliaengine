@@ -51,6 +51,7 @@ use crate::atmosphere::{AtmosphereTextures, AtmosphereView, COMPOSITE_FRAGMENT, 
 use crate::compute::{ComputePass, ComputeShader, ComputeSource, Dispatch};
 use crate::contact::{ContactShadows, ContactView};
 use crate::cull::Frustum;
+use crate::decals::{DecalPasses, DecalTargets};
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
 use crate::gpu_scene::SceneFrame;
 use crate::graph::{
@@ -144,12 +145,14 @@ mod shadow_atlas;
 use layout::{Changes, Layout, Source, local_box};
 pub(crate) use layout::{States, mirrored, state};
 use pipelines::{
-    AoPasses, ContactState, ReflectShadingTable, ReflectionShading, Shading, ShadowedPipelines,
-    SubsurfacePipelines, VARIANTS, lazy_statistics, ready, shading_desc, shadowed_index,
+    AoPasses, ContactState, DecalShading, ReflectShadingTable, ReflectionShading, Shading,
+    ShadowedPipelines, SubsurfacePipelines, VARIANTS, lazy_statistics, ready, shading_desc,
+    shadowed_index,
 };
 use shadow_atlas::{AtlasImage, LocalShadowState};
 
 pub use crate::contact::ContactShadowSettings;
+pub use crate::decals::Decal;
 pub use crate::lights::{LocalLight, Spot};
 pub use crate::local_shadows::{LocalShadowSettings, LocalShadowStats};
 pub use crate::reflections::Reflections;
@@ -189,6 +192,77 @@ const REFLECT_FRAGMENTS: [(&[u8], &core::ffi::CStr); 8] = [
     (
         include_bytes!("../../shaders/forward.fragmentReflectAoContactShadowed.spv"),
         c"fragmentReflectAoContactShadowed",
+    ),
+];
+// Decals (ADR 0082): the shading after the depth prepass of views with decals, by
+// `(ambient occlusion × 2 + contact shadows) × 2 + local shadows`, without and with
+// reflections.
+const DECAL_FRAGMENTS: [(&[u8], &core::ffi::CStr); 8] = [
+    (
+        include_bytes!("../../shaders/forward.fragmentMainDecals.spv"),
+        c"fragmentMainDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentMainShadowedDecals.spv"),
+        c"fragmentMainShadowedDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentMainContactDecals.spv"),
+        c"fragmentMainContactDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentMainContactShadowedDecals.spv"),
+        c"fragmentMainContactShadowedDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentMainAoDecals.spv"),
+        c"fragmentMainAoDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentMainAoShadowedDecals.spv"),
+        c"fragmentMainAoShadowedDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentMainAoContactDecals.spv"),
+        c"fragmentMainAoContactDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentMainAoContactShadowedDecals.spv"),
+        c"fragmentMainAoContactShadowedDecals",
+    ),
+];
+const REFLECT_DECAL_FRAGMENTS: [(&[u8], &core::ffi::CStr); 8] = [
+    (
+        include_bytes!("../../shaders/forward.fragmentReflectDecals.spv"),
+        c"fragmentReflectDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentReflectShadowedDecals.spv"),
+        c"fragmentReflectShadowedDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentReflectContactDecals.spv"),
+        c"fragmentReflectContactDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentReflectContactShadowedDecals.spv"),
+        c"fragmentReflectContactShadowedDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentReflectAoDecals.spv"),
+        c"fragmentReflectAoDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentReflectAoShadowedDecals.spv"),
+        c"fragmentReflectAoShadowedDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentReflectAoContactDecals.spv"),
+        c"fragmentReflectAoContactDecals",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentReflectAoContactShadowedDecals.spv"),
+        c"fragmentReflectAoContactShadowedDecals",
     ),
 ];
 pub use crate::shadow::ShadowSettings;
@@ -396,6 +470,11 @@ pub struct ForwardView<'a> {
     /// [`Reflections::NONE`] for the sky's alone). They need an environment and
     /// [`ForwardRenderer::set_reflections`]; perspective views only.
     pub reflections: Reflections<'a>,
+    /// Decals (ADR 0082, [`crate::decals`]), drawn over the opaque surfaces through a
+    /// decal buffer after the depth prepass (which then runs). They need
+    /// [`ForwardRenderer::set_decals`]; not drawn in multisampled views or probe captures,
+    /// nor on transparent surfaces and subsurface materials.
+    pub decals: &'a [Decal],
 }
 
 /// Temporal state of one view, kept across frames (ADR 0043): last frame's camera and
@@ -668,7 +747,8 @@ struct FrameData {
     previous_count: u32,
     /// The subsurface budget (ADR 0059).
     scatter_budget: u32,
-    _pad2: [u32; 2],
+    /// Decals (ADR 0082): per 16-pixel tile a bit, set where they reach (0 without).
+    decal_tiles: u64,
     cascades: [CascadeData; MAX_CASCADES],
     cascade_count: u32,
     /// Draw commands per list (one per detail level of each batch).
@@ -746,7 +826,7 @@ struct BatchData {
     errors: [f32; 4],
 }
 
-/// `Push` in `forward.slang` (112 bytes).
+/// `Push` in `forward.slang` (120 bytes).
 #[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 pub(crate) struct Push {
@@ -767,6 +847,9 @@ pub(crate) struct Push {
     pub(crate) phase: u32,
     /// Bindless index of the view's ambient occlusion, or [`NO_AO`].
     pub(crate) ao: u32,
+    /// Bindless indices of the decal buffer (ADR 0082): albedo, surface.
+    pub(crate) decal_albedo: u32,
+    pub(crate) decal_surface: u32,
 }
 
 /// `NO_TEXTURE` in `forward.slang`: no ambient occlusion.
@@ -777,7 +860,7 @@ const _: () = assert!(core::mem::size_of::<FrameData>() == 1056);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
 const _: () = assert!(crate::mesh::MAX_LODS == 4);
-const _: () = assert!(core::mem::size_of::<Push>() == 112);
+const _: () = assert!(core::mem::size_of::<Push>() == 120);
 const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 const _: () = assert!(COMMAND_BYTES == 20);
 
@@ -1024,6 +1107,10 @@ pub struct ForwardRenderer {
     /// Boxed: 24 pipelines and the passes' would make every renderer large on the stack.
     reflections: Option<Box<ReflectionShading>>,
     reflections_on: bool,
+    /// Decals' passes and shading pipelines (ADR 0082), made when first turned on; boxed
+    /// as reflections'.
+    decals: Option<Box<DecalShading>>,
+    decals_on: bool,
     /// Pipelines for multisampled targets (MSAA, ADR 0075): 2, 4, 8 samples, made by
     /// [`Self::set_samples`].
     msaa: [Option<Box<msaa::MsaaPipelines>>; 3],
@@ -1355,6 +1442,8 @@ impl ForwardRenderer {
             retired_atlases: Vec::new(),
             reflections: None,
             reflections_on: false,
+            decals: None,
+            decals_on: false,
             msaa: [None, None, None],
             depth_resolves: {
                 let modes = device.adapter().depth_resolve_modes;
@@ -1508,7 +1597,27 @@ impl ForwardRenderer {
         if let Some(state) = self.contact.as_mut() {
             state.ensure_extras(device, bindless, (color, depth), ao, shadows)?;
         }
-        Ok(())
+        self.ensure_decal_shading(device, bindless)
+    }
+
+    /// The decal shading for the features in use (ambient occlusion, contact shadows,
+    /// local shadows, reflections), when decals are on.
+    fn ensure_decal_shading(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+    ) -> Result<(), RhiError> {
+        let features = pipelines::DecalFeatures {
+            ao: self.ao.is_some(),
+            contact: self.contact.is_some(),
+            shadows: self.local_shadows.is_some(),
+            reflections: self.reflections.is_some(),
+        };
+        let formats = (self.color_format, self.depth_format);
+        match self.decals.as_mut() {
+            Some(decals) => decals.ensure(device, bindless, formats, features),
+            None => Ok(()),
+        }
     }
 
     /// Turns the sun's contact shadows on with `settings`, or off (`None`, the default;
@@ -1570,6 +1679,7 @@ impl ForwardRenderer {
                 self.depth_format,
             )?));
             self.ensure_msaa(device, bindless)?;
+            self.ensure_decal_shading(device, bindless)?;
         }
         self.reflections_on = enabled;
         Ok(())
@@ -1578,6 +1688,45 @@ impl ForwardRenderer {
     /// Whether local reflections are on.
     pub fn reflections(&self) -> bool {
         self.reflections_on
+    }
+
+    /// Turns decals (ADR 0082, [`crate::decals`]) on or off (the default): views with
+    /// [`ForwardView::decals`] then draw them through a decal buffer after the depth
+    /// prepass, which runs in those views. The first time they are turned on their passes
+    /// are made and their shading pipelines described (up to 36 with every other feature
+    /// on; made on first use or by the device's warm-up, ADR 0079), so a renderer that
+    /// never uses them pays nothing, not even registers in its shading.
+    pub fn set_decals(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        enabled: bool,
+    ) -> Result<(), RhiError> {
+        if enabled && self.decals.is_none() {
+            self.decals = Some(Box::new(DecalShading::new(device, bindless)?));
+            self.ensure_decal_shading(device, bindless)?;
+        }
+        self.decals_on = enabled;
+        Ok(())
+    }
+
+    /// Whether decals are on.
+    pub fn decals(&self) -> bool {
+        self.decals_on
+    }
+
+    /// The driver's statistics of the decal shading (ADR 0082) per shading variant, as
+    /// [`Self::shading_statistics`] (after the prepass, without other features). Empty
+    /// unless the device captures statistics and decals were turned on.
+    pub fn decal_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
+        match &self.decals {
+            Some(d) => core::array::from_fn(|k| {
+                d.pipeline(k, false, false, false, false)
+                    .map(|p| lazy_statistics(p, device))
+                    .unwrap_or_default()
+            }),
+            None => Default::default(),
+        }
     }
 
     /// The driver's statistics of the reflection pipelines (ADR 0073): the opaque shading
@@ -2125,6 +2274,7 @@ impl ForwardRenderer {
                 occlusion: None,
                 temporal: None,
                 lights: view.lights,
+                decals: &[],
                 environment: view.environment,
                 reflections: Reflections::NONE,
             };

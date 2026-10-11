@@ -193,6 +193,7 @@ fn steady_state_scene_frames_do_not_allocate() {
                         occlusion: Some(&occlusion),
                         temporal: Some(&temporal),
                         lights: &[],
+                        decals: &[],
                         environment: None,
                         reflections: Default::default(),
                     },

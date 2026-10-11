@@ -10,8 +10,8 @@ use core::fmt;
 use engine_core::math::{Mat4, Quat, Vec3, vulkan_perspective};
 use engine_render::environment::Environment;
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer, ForwardView, LocalLight,
-    MotionOutput, Occlusion, ShadowSettings, Temporal,
+    Camera, Decal, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer, ForwardView,
+    LocalLight, MotionOutput, Occlusion, ShadowSettings, Temporal,
 };
 use engine_render::fsr1::{Fsr1, Fsr1Exposure};
 use engine_render::gpu_scene::SceneFrame;
@@ -154,6 +154,9 @@ pub struct SceneInput<'a, 'g> {
     pub light: DirectionalLight,
     /// Point and spot lights.
     pub lights: &'g [LocalLight],
+    /// Decals (ADR 0082; drawn with `ForwardRenderer::set_decals` on, not in
+    /// multisampled views).
+    pub decals: &'g [Decal],
     /// Sky light, the sky, the atmosphere and fog, or `None` for the flat ambient color.
     pub environment: Option<&'g Environment>,
     /// Reflection probes (ADR 0073; with an environment and reflections on in the forward
@@ -1051,6 +1054,7 @@ impl FrameRenderer {
             occlusion,
             temporal,
             lights: scene.lights,
+            decals: scene.decals,
             environment: scene.environment,
             reflections: Reflections {
                 probes: scene.reflection_probes,

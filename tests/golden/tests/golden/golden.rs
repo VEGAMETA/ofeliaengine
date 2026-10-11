@@ -239,6 +239,18 @@ fn procedural_scene_with_contact_shadows() {
     });
 }
 
+/// The procedural scene with decals (ADR 0082): a scorch mark across the corner of the
+/// floor and the wall (each face takes it by its own angle), a glossy wet patch with a
+/// painted arrow drawn over its edge, a ring wrapping a sphere and fading at its sides,
+/// a riveted metal plate on the wall (normal map and surface replaced).
+#[test]
+fn procedural_scene_with_decals() {
+    check(&Shot {
+        decals: true,
+        ..procedural("procedural_decals")
+    });
+}
+
 /// The procedural scene with subsurface scattering (ADR 0059): the floor and the
 /// dielectric spheres scatter like wax; the shadows on the floor get soft, reddish edges.
 #[test]

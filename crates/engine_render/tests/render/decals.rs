@@ -1,14 +1,15 @@
 //! The decal buffer (ADR 0082) over a corner: a floor and a wall, their depth computed on
-//! the CPU, two decals projected down onto the floor. The decal pass alone, read back:
-//! where the boxes cover the floor, their order and opacity, and none on the wall (its
-//! normal is at right angles to the decals'). Under the validation layer with
-//! synchronization validation.
+//! the CPU, decals projected down onto the floor. The decal pass alone, read back: where
+//! the boxes cover the floor, their order and opacity, none on the wall (its normal is at
+//! right angles to the decals'), and a tilted decal's normal map laid in the floor's plane.
+//! Under the validation layer with synchronization validation.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 use engine_core::math::{Mat4, Quat, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::decals::{Decal, DecalPasses};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
+use engine_render::texture::GpuTexture;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -142,8 +143,23 @@ fn decals_cover_the_floor_in_order_and_skip_the_wall() {
             MemoryLocation::Readback,
         )
         .unwrap();
+    // A normal map tilted 30 degrees towards the decal's +x: (0.5, 0, 0.866).
+    let mut normal_map = GpuTexture::new(
+        &device,
+        &mut allocator,
+        &bindless,
+        vk::Format::R8G8B8A8_UNORM,
+        2,
+        2,
+    )
+    .unwrap();
+    let normal_texels = [191u8, 128, 238, 255].repeat(4);
     // Projecting down: the decal's +z is the world's +y.
     let down = Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2);
+    // Leaning 30 degrees towards the camera: its +z is (0, 0.866, 0.5), its +y
+    // (0, 0.5, -0.866). Laid in the floor's plane its normal map's frame is the world's
+    // +x and -z, whatever the lean.
+    let leaning = Quat::from_rotation_x(-core::f32::consts::FRAC_PI_3);
     let decals = [
         // Red over a metre square, rough and metallic.
         Decal {
@@ -163,6 +179,17 @@ fn decals_cover_the_floor_in_order_and_skip_the_wall() {
             ),
             tint: [0.0, 0.0, 1.0, 0.5],
             order: 1,
+            ..Decal::default()
+        },
+        // White with the tilted normal map, apart from the others.
+        Decal {
+            world_from_decal: Mat4::from_scale_rotation_translation(
+                Vec3::splat(0.4),
+                leaning,
+                Vec3::new(0.0, 0.0, 1.0),
+            ),
+            normal: Some(normal_map.sampled_index()),
+            order: 2,
             ..Decal::default()
         },
     ];
@@ -242,6 +269,9 @@ fn decals_cover_the_floor_in_order_and_skip_the_wall() {
                     );
                 }
             });
+        normal_map
+            .upload(&mut fg, &mut ring, &normal_texels)
+            .unwrap();
         let targets = passes
             .add_passes(
                 &mut fg,
@@ -264,22 +294,19 @@ fn decals_cover_the_floor_in_order_and_skip_the_wall() {
         );
         fg.add_pass("read back")
             .read(targets.albedo, Access::TransferRead)
-            .read(targets.normal, Access::TransferRead)
             .read(targets.surface, Access::TransferRead)
             .write(out, Access::TransferWrite)
             .execute(move |ctx| {
-                // SAFETY: recording; layouts arranged by the graph; the buffer holds all three.
+                // SAFETY: recording; layouts arranged by the graph; the buffer holds both
+                // (4 and 8 bytes per pixel).
                 unsafe {
-                    for (k, t) in [targets.albedo, targets.normal, targets.surface]
-                        .into_iter()
-                        .enumerate()
-                    {
+                    for (t, offset) in [(targets.albedo, 0), (targets.surface, pixels * 4)] {
                         ctx.device.cmd_copy_image_to_buffer(
                             ctx.cmd,
                             ctx.image(t),
                             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                             ctx.buffer(out),
-                            &[region(k as u64 * pixels * 4)],
+                            &[region(offset)],
                         );
                     }
                 }
@@ -300,20 +327,36 @@ fn decals_cover_the_floor_in_order_and_skip_the_wall() {
         device.wait_idle().unwrap();
     }
     let ptr = readback_memory.mapped_ptr().unwrap();
-    // SAFETY: the GPU is idle; the mapping covers the three targets.
+    // SAFETY: the GPU is idle; the mapping covers both targets.
     let raw = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), (pixels * 12) as usize) };
-    let texel = |target: u64, p: Vec3| {
+    let index = |p: Vec3| {
         let (x, y) = pixel_of(clip_from_world, p);
-        let i = (target * pixels * 4 + u64::from(y * SIZE + x) * 4) as usize;
+        u64::from(y * SIZE + x)
+    };
+    // The albedo: the square root of rgb premultiplied by coverage, and the coverage.
+    let albedo = |p: Vec3| {
+        let i = (index(p) * 4) as usize;
         [raw[i], raw[i + 1], raw[i + 2], raw[i + 3]]
+    };
+    // The surface: the normal's change (signed 10-bit) and roughness, metalness, coverage.
+    let surface = |p: Vec3| {
+        let i = (pixels * 4 + index(p) * 8) as usize;
+        let word = |at: usize| u32::from_le_bytes(raw[at..at + 4].try_into().unwrap());
+        let (x, y) = (word(i), word(i + 4));
+        let signed = |shift: u32| ((x << (22 - shift)) as i32 >> 22) as f32 / 511.0;
+        let unsigned = |shift: u32| ((y >> shift) & 1023) as f32 / 1023.0;
+        (
+            [signed(0), signed(10), signed(20)],
+            [unsigned(0), unsigned(10), unsigned(20)],
+        )
     };
     let near = |a: u8, b: f32| (f32::from(a) / 255.0 - b).abs() <= 2.0 / 255.0;
     // Red alone; red under half the blue; the floor outside; the wall inside the box.
-    let red = texel(0, Vec3::new(-0.25, 0.0, 0.25));
-    let mixed = texel(0, Vec3::new(0.25, 0.0, 0.25));
-    let outside = texel(0, Vec3::new(0.8, 0.0, 0.1));
-    let wall = texel(0, Vec3::new(0.0, 0.3, WALL));
-    let by_the_wall = texel(0, Vec3::new(-0.2, 0.0, -0.15));
+    let red = albedo(Vec3::new(-0.25, 0.0, 0.25));
+    let mixed = albedo(Vec3::new(0.25, 0.0, 0.25));
+    let outside = albedo(Vec3::new(0.8, 0.0, 0.1));
+    let wall = albedo(Vec3::new(0.0, 0.3, WALL));
+    let by_the_wall = albedo(Vec3::new(-0.2, 0.0, -0.15));
     println!(
         "albedo texels (rgba8): red {red:?}, red and half blue {mixed:?}, outside {outside:?}, wall {wall:?}, floor by the wall {by_the_wall:?}"
     );
@@ -321,8 +364,9 @@ fn decals_cover_the_floor_in_order_and_skip_the_wall() {
         near(red[0], 1.0) && near(red[2], 0.0) && near(red[3], 1.0),
         "{red:?}"
     );
+    let half = 0.5f32.sqrt();
     assert!(
-        near(mixed[0], 0.5) && near(mixed[2], 0.5) && near(mixed[3], 1.0),
+        near(mixed[0], half) && near(mixed[2], half) && near(mixed[3], 1.0),
         "{mixed:?}"
     );
     assert_eq!(outside[3], 0, "{outside:?}");
@@ -334,13 +378,34 @@ fn decals_cover_the_floor_in_order_and_skip_the_wall() {
         near(by_the_wall[0], 1.0) && near(by_the_wall[3], 1.0),
         "{by_the_wall:?}"
     );
-    // No normal maps: no normal coverage. Roughness and metalness of the red decal only.
-    assert_eq!(texel(1, Vec3::new(-0.25, 0.0, 0.25))[3], 0);
-    let surface = texel(2, Vec3::new(0.25, 0.0, 0.25));
-    assert!(
-        near(surface[0], 0.2) && near(surface[1], 1.0) && near(surface[2], 1.0),
-        "{surface:?}"
+    // No normal maps there: no change of the normal. Roughness and metalness of the red
+    // decal only.
+    let (bend, rough) = surface(Vec3::new(0.25, 0.0, 0.25));
+    println!(
+        "surface under red and half blue: normal change {bend:?}, roughness, metalness, coverage {rough:?}"
     );
+    assert_eq!(bend, [0.0; 3]);
+    let close = |a: f32, b: f32| (a - b).abs() <= 2.0 / 1023.0;
+    assert!(
+        close(rough[0], 0.2) && close(rough[1], 1.0) && close(rough[2], 1.0),
+        "{rough:?}"
+    );
+    // The leaning decal: its normal map's 30 degrees towards the world's +x on the floor
+    // (normal (0.5, 0.866, 0): a change of (0.5, -0.134, 0)), not along the decal's own
+    // leaning frame; white, no surface change.
+    let leaning_point = Vec3::new(0.0, 0.0, 1.0);
+    let (bend, rough) = surface(leaning_point);
+    let white = albedo(leaning_point);
+    println!("leaning decal: albedo {white:?}, normal change {bend:?}");
+    let expected = [0.5f32, -0.134, 0.0];
+    assert!(
+        bend.iter()
+            .zip(expected)
+            .all(|(a, b)| (a - b).abs() <= 0.012),
+        "{bend:?}"
+    );
+    assert_eq!(rough, [0.0; 3]);
+    assert!(near(white[0], 1.0) && near(white[3], 1.0), "{white:?}");
 
     // SAFETY: the device is idle.
     unsafe {
@@ -348,6 +413,7 @@ fn decals_cover_the_floor_in_order_and_skip_the_wall() {
         ring.destroy(&mut allocator);
         allocator.destroy_buffer(staging, staging_memory);
         allocator.destroy_buffer(readback, readback_memory);
+        normal_map.destroy(&device, &mut allocator, &bindless, 0);
         d.destroy_command_pool(pool, None);
     }
     drop(passes);

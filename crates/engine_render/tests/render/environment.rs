@@ -332,6 +332,7 @@ impl Harness {
                         occlusion: None,
                         temporal: None,
                         lights: &[],
+                        decals: &[],
                         environment: Some(environment),
                         reflections: Default::default(),
                     },

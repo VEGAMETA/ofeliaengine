@@ -4,6 +4,7 @@
 //! back as 8-bit sRGB, with the GPU time of every pass. The golden-image tests and the
 //! performance gate both use it (ADR 0062).
 
+use crate::decal_set::DecalSet;
 use engine_anim::{local_to_model, skinning_matrices};
 use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
 use engine_assets::{
@@ -166,6 +167,10 @@ pub struct Shot {
     /// assets, behind the scene and in its image-based light. Its sun, found in it, is the
     /// shot's sun (direction and color; `sun`'s ambient term stays).
     pub panorama: Option<&'static str>,
+    /// Decals (ADR 0082; they turn the depth prepass on), placed for the procedural
+    /// scene: a scorch mark across the corner of the floor and the wall, a wet patch and
+    /// a painted arrow on the floor, a ring around a sphere, a metal plate on the wall.
+    pub decals: bool,
 }
 
 impl Shot {
@@ -214,6 +219,7 @@ impl Shot {
             texture_budget: None,
             particles: false,
             panorama: None,
+            decals: false,
         }
     }
 }
@@ -723,6 +729,14 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             .set_contact_shadows(&device, &bindless, Some(Default::default()))
             .expect("contact shadows");
     }
+    if shot.decals {
+        renderer
+            .set_decals(&device, &bindless, true)
+            .expect("decals");
+    }
+    let mut decal_set = shot
+        .decals
+        .then(|| DecalSet::new(&device, &mut allocator, &bindless));
     let mut lights = shot.lights.clone();
     for light in lights.iter_mut() {
         light.shadow = shot.local_shadows;
@@ -1288,6 +1302,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 None => None,
             };
             let ldr = fg.create_texture("ldr", TextureDesc::new_2d(output_format, width, height));
+            if let Some(set) = &decal_set {
+                set.upload(&mut fg, &mut ring);
+            }
             let particles = particles.as_ref();
             let view_frame = frame
                 .add_view_with(
@@ -1311,6 +1328,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         skinning: Some(&skinned_frame),
                         light: sun,
                         lights: &lights,
+                        decals: decal_set.as_ref().map_or(&[], |s| s.decals.as_slice()),
                         environment: environment.as_ref(),
                         reflection_probes: probes.as_ref(),
                     },
@@ -1511,6 +1529,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         }
         if let Some(probes) = probes.as_mut() {
             probes.destroy(&mut allocator, &bindless);
+        }
+        if let Some(set) = decal_set.as_mut() {
+            set.destroy(&device, &mut allocator, &bindless);
         }
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);

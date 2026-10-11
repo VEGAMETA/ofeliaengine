@@ -183,6 +183,7 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
                         occlusion: None,
                         temporal: Some(&temporal),
                         lights: &[],
+                        decals: &[],
                         environment: Some(&environment),
                         reflections: Default::default(),
                     },

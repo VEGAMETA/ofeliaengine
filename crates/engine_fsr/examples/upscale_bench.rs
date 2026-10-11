@@ -183,6 +183,7 @@ impl Bench {
                         occlusion: None,
                         temporal: (upscaler != Upscaler::None).then_some(&*temporal),
                         lights: &[],
+                        decals: &[],
                         environment: None,
                         reflections: Default::default(),
                     },
