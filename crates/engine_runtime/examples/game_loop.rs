@@ -23,6 +23,10 @@
     clippy::too_many_lines
 )]
 
+/// The engine's global allocator (ADR 0086).
+#[global_allocator]
+static ALLOCATOR: engine_core::alloc::EngineAllocator = engine_core::alloc::EngineAllocator::new();
+
 #[cfg(not(windows))]
 fn main() {
     println!("game_loop: Windows only");

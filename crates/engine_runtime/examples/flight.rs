@@ -69,6 +69,7 @@ fn main() {
 mod windowed {
     use engine_anim::{Pose, for_each_parallel, local_to_model, skinning_matrices};
     use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf};
+    use engine_core::alloc::EngineAllocator;
     use engine_core::jobs::ThreadPool;
     use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
     use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, pod_component};
@@ -99,7 +100,7 @@ mod windowed {
     };
     use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
     use engine_streaming::{SceneStreamSettings, SceneStreamer, material_desc, texture_format};
-    use std::alloc::{GlobalAlloc, Layout, System};
+    use std::alloc::{GlobalAlloc, Layout};
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -240,19 +241,21 @@ mod windowed {
         ) -> i32;
     }
 
-    /// The system allocator, counting the bytes Rust holds: the process heap also serves the
-    /// C runtime of every other module (the graphics drivers' included), so its size alone
-    /// does not say whose memory it is.
+    /// The engine's allocator (mimalloc, ADR 0086), counting the bytes Rust holds in every
+    /// build (its own counting is for debug builds): the process heap serves the C runtime
+    /// of every other module (the graphics drivers' included).
     struct Counting;
+
+    const ENGINE: EngineAllocator = EngineAllocator::new();
 
     static RUST_HEAP_BYTES: AtomicUsize = AtomicUsize::new(0);
 
-    // SAFETY: every call is forwarded to the system allocator unchanged; the counter is
+    // SAFETY: every call is forwarded to the engine's allocator unchanged; the counter is
     // only arithmetic on the sizes.
     unsafe impl GlobalAlloc for Counting {
         unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
             // SAFETY: the caller's layout, forwarded.
-            let p = unsafe { System.alloc(layout) };
+            let p = unsafe { ENGINE.alloc(layout) };
             if !p.is_null() {
                 RUST_HEAP_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
             }
@@ -261,7 +264,7 @@ mod windowed {
 
         unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
             // SAFETY: as above.
-            let p = unsafe { System.alloc_zeroed(layout) };
+            let p = unsafe { ENGINE.alloc_zeroed(layout) };
             if !p.is_null() {
                 RUST_HEAP_BYTES.fetch_add(layout.size(), Ordering::Relaxed);
             }
@@ -271,12 +274,12 @@ mod windowed {
         unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
             RUST_HEAP_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
             // SAFETY: the caller's block and layout, forwarded.
-            unsafe { System.dealloc(ptr, layout) };
+            unsafe { ENGINE.dealloc(ptr, layout) };
         }
 
         unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
             // SAFETY: as above.
-            let p = unsafe { System.realloc(ptr, layout, new_size) };
+            let p = unsafe { ENGINE.realloc(ptr, layout, new_size) };
             if !p.is_null() {
                 RUST_HEAP_BYTES.fetch_add(new_size, Ordering::Relaxed);
                 RUST_HEAP_BYTES.fetch_sub(layout.size(), Ordering::Relaxed);
@@ -397,13 +400,13 @@ mod windowed {
             .collect();
         if summarized {
             println!(
-                "Committed memory: private {:.0} MiB (write-combined pages the GPU's driver mapped {:.0} MiB, the engine's mapped Vulkan memory {:.0} MiB of it; the process heap {:.0} MiB committed, {:.0} allocated, of which Rust's allocations {:.0} MiB; private memory outside the process heap {:.0} MiB in {} allocations, largest {} MiB), mapped {:.0} MiB, module images {:.0} MiB.\n",
+                "Committed memory: private {:.0} MiB (write-combined pages the GPU's driver mapped {:.0} MiB, the engine's mapped Vulkan memory {:.0} MiB of it; Rust's allocations {:.0} MiB in mimalloc's own memory; the process heap {:.0} MiB committed, {:.0} allocated, for the other modules' C runtime; private memory outside the process heap {:.0} MiB in {} allocations, largest {} MiB), mapped {:.0} MiB, module images {:.0} MiB.\n",
                 private as f64 / MIB,
                 write_combined as f64 / MIB,
                 engine_mapped as f64 / MIB,
+                rust as f64 / MIB,
                 heap.committed as f64 / MIB,
                 heap.allocated as f64 / MIB,
-                rust as f64 / MIB,
                 private.saturating_sub(heap.committed) as f64 / MIB,
                 allocations.len(),
                 largest.join(", "),

@@ -71,3 +71,27 @@ giving memory back and a counting layer in debug builds, as recommended above.
   bytes).
 - The harness `bench/alloc-compare` stays for re-measuring with new versions (mimalloc
   3.5+, a fixed snmalloc build).
+
+## Implementation (2026-10-11)
+
+- `engine_core::alloc::EngineAllocator`: mimalloc 2.3.2 (`mimalloc` =0.1.52 with `v2`,
+  behind `engine_core`'s default feature `mimalloc`); in debug builds it counts the bytes
+  and allocations Rust holds (`heap_stats`).
+- `release_thread_memory`: two forced `mi_collect`s, the first taking in what other
+  threads freed into the heap and freeing the pages that became empty, the second giving
+  back the segments those left (one alone left 64–96 of 385 MiB behind). Under a
+  microsecond with nothing to give, about 5 µs after a burst of jobs.
+- The job pool's participants call it before they sleep when they ran jobs since their
+  last sleep, and on `ThreadPool::release_memory` (every sleeper wakes, gives memory
+  back and sleeps again): memory the workers allocated and another thread freed later
+  (a loaded level dropped) otherwise stays committed while they sleep
+  (`tests/alloc_release.rs`: 385 MiB kept, then back to the 35 MiB before the load).
+- Set in `ofeliaengine` (the CLI), `flight` and `game_loop`; tests keep the system heap.
+
+Measured with `flight` on the RTX (600 frames, the engine's pipeline cache warm): the
+first frame 234.6–235.2 → 229.9 ms, the scene opened 9.9–12.7 → 9.1–9.7 ms, the CPU per
+frame the same (animation on the job system 49.0–51.5 → 49.6–50.6 µs, inside the noise),
+private memory 798–831 → 847–873 MiB (+5–6 %). The cook through the CLI is bound by
+zstd (1.24–1.26 s either way).
+
+Left: Tracy memory events (ADR 0003) through the same allocator.

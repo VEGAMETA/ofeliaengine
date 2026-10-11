@@ -12,6 +12,8 @@ the dependency.
 | ash 0.38 | MIT OR Apache-2.0 | Vulkan bindings in `engine_rhi` (ADR 0006) |
 | libloading 0.8 (+ cfg-if 1) | ISC (cfg-if: MIT OR Apache-2.0) | loads the Vulkan loader at run time (dependency of ash) |
 | glam 0.33 | MIT OR Apache-2.0 | vectors, matrices, quaternions in `engine_core::math` (ADR 0012) |
+| mimalloc 0.1.52 + libmimalloc-sys 0.1.49 (© Octavian Oncescu) | MIT | the global allocator's Rust bindings in `engine_core::alloc` (ADR 0086) |
+| mimalloc 2.3.2 (© Microsoft Corporation, Daan Leijen; vendored inside libmimalloc-sys, built by cc) | MIT | the global allocator (ADR 0086) |
 | bytemuck 1.25 | Zlib OR Apache-2.0 OR MIT | plain-data proofs for ECS components that are snapshotted and hashed byte-wise (ADR 0017) |
 | harfrust 0.13.3 (+ bitflags 2, once_cell 1, smallvec 1) | MIT (the others MIT OR Apache-2.0) | text shaping in `engine_text` (ADR 0025) |
 | mlua 0.12.1 + mlua-sys 0.12 (+ bstr, either, num-traits, parking_lot, rustc-hash) | MIT (the others MIT OR Apache-2.0, bstr MIT OR Apache-2.0) | Luau VM bindings in `engine_script` (ADR 0032) |
@@ -116,6 +118,14 @@ workspace `deny.toml` license allow-list (checked 2026-09-26).
 | hecs 0.11.1 | MIT OR Apache-2.0 | ECS comparison |
 | bevy_ecs 0.18.1 (and its bevy_* dependencies) | MIT OR Apache-2.0 | ECS comparison |
 | flecs_ecs 0.2.2 (+ flecs_ecs_sys, bundled flecs C sources) | MIT | ECS comparison |
+
+`bench/alloc-compare` (ADR 0086) builds these with its own `Cargo.lock`, to compare
+global allocators on the engine's own work (checked 2026-10-11).
+
+| Crate | License | Used for |
+|---|---|---|
+| mimalloc 0.1.52 + libmimalloc-sys 0.1.49 (mimalloc 2.3.2 and 3.3.2 C sources) | MIT | allocator comparison |
+| snmalloc-rs 0.7.6 + snmalloc-sys 0.7.6 (snmalloc C++ sources, © Microsoft Corporation; built through cmake) | MIT | allocator comparison |
 
 `bench/net-crypto` (ADR 0070) builds these with its own `Cargo.lock`, to compare packet
 encryption against Windows CNG (the engine uses CNG):
