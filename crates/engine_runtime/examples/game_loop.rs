@@ -250,9 +250,11 @@ mod windowed {
             // 1. Input: the newest cursor position, and when it arrived.
             let mut close = false;
             let mut moved = false;
+            // Cursor events from before the loop (the window appearing under the cursor) are
+            // not input to measure: one of them once made the median 637 ms.
             windows.drain_events(|e| match e.kind {
                 WindowEventKind::CloseRequested => close = true,
-                WindowEventKind::CursorMoved { x, .. } => {
+                WindowEventKind::CursorMoved { x, .. } if e.time >= start => {
                     input.cursor_x = x as f32;
                     input.at = Some(e.time);
                     moved = true;
@@ -281,7 +283,9 @@ mod windowed {
                 Err(e) => panic!("{e}"),
             };
             windows.drain_events(|e| {
-                if let WindowEventKind::CursorMoved { x, .. } = e.kind {
+                if let WindowEventKind::CursorMoved { x, .. } = e.kind
+                    && e.time >= start
+                {
                     input.cursor_x = x as f32;
                     input.at = Some(e.time);
                     moved = true;
