@@ -95,6 +95,16 @@ fn shots() -> Vec<Shot> {
             lights: procedural_lights(),
             ..Shot::new("procedural", Source::Procedural)
         },
+        // Decals (ADR 0082): the golden shot's five, through the decal buffer (the depth
+        // prepass, the decal tiles and pass, the shading's decal variant).
+        Shot {
+            size: [1920, 1080],
+            eye: Some(Vec3::new(0.4, 1.9, 4.8)),
+            target: Some(Vec3::new(0.0, 1.0, -1.0)),
+            lights: procedural_lights(),
+            decals: true,
+            ..Shot::new("procedural_decals", Source::Procedural)
+        },
         Shot {
             size: [1920, 1080],
             ..Shot::new("sponza", Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))

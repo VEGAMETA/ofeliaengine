@@ -82,6 +82,7 @@
 [[vk::binding(0, 0)]] TextureCube g_cubes[];
 // The sun's contact shadow mask: a float's bits (contact.rs, CONTACT_FORMAT).
 [[vk::binding(0, 0)]] Texture2D<uint> g_uint_textures[];
+[[vk::binding(0, 0)]] Texture2D<uint2> g_uint2_textures[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 [[vk::binding(2, 0)]] SamplerComparisonState g_compare_samplers[];
 
@@ -165,7 +166,7 @@ struct Frame
     float4 jitter;           // xy: this frame's jitter in NDC (clip.xy += jitter × w)
     uint previous_count;     // instances with a previous transform
     uint scatter_budget;     // the subsurface budget, BUDGET_* (ADR 0059)
-    uint2 _pad2;
+    uint* decal_tiles;       // per 16-pixel tile a bit: decals reach it (ADR 0082; decal entry points only)
     Cascade cascades[4];
     uint cascade_count;      // 0: everything is lit
     uint command_count;      // draw commands per list (one per detail level of each batch)
@@ -312,6 +313,8 @@ struct Push
     uint texture;            // bindless index: the shadow map, or the depth to reduce
     uint phase;              // PHASE_*; the cascade in the shadow pass
     uint ao;                 // bindless index: the view's ambient occlusion (NO_TEXTURE: none; ADR 0058)
+    uint decal_albedo;       // bindless index: the decal buffer's albedo (decal entry points; ADR 0082)
+    uint decal_surface;      // bindless index: its normal change, roughness and metalness
 };
 
 static const uint PHASE_ALL = 0;    // frustum culling only
@@ -1300,11 +1303,11 @@ struct SubsurfaceOut
 // removes the code of the other case, so shading without ambient occlusion or local
 // shadows spends no registers on them (on RDNA2 even dead code under a specialization
 // constant took the shading from 64 to 72 VGPRs, 9 to 13 % slower).
-float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = false, bool contact = false)
+float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = false, bool contact = false, bool decals = false)
 {
     SubsurfaceOut unused;
     ReflectOut unused_reflect;
-    return shade_surface(input, front, masked, ao, false, unused, unused_reflect, shadows, contact);
+    return shade_surface(input, front, masked, ao, false, unused, unused_reflect, shadows, contact, false, decals);
 }
 
 // What the reflection entry points write besides the color (ADR 0073).
@@ -1315,10 +1318,43 @@ struct ReflectOut
     float3 weight;           // multiplies the prefiltered radiance (split sum × specular occlusion)
 };
 
+// `pack_snorm10` and `pack_unorm10` in decals.slang.
+float3 unpack_snorm10(uint p)
+{
+    int3 q = int3(int(p << 22), int(p << 12), int(p << 2)) >> 22;
+    return float3(q) / 511.0;
+}
+
+float3 unpack_unorm10(uint p)
+{
+    return float3(uint3(p, p >> 10, p >> 20) & 1023u) / 1023.0;
+}
+
+// The decal buffer (ADR 0082, decals.slang) at `pixel`, blended into the surface before
+// it is lit: albedo, the normal's change (laid in the surface's plane by the decal pass),
+// roughness and metalness. Only in tiles some decal reaches: the decal pass writes no
+// others.
+void apply_decals(Frame frame, uint2 pixel, inout float3 albedo, inout float3 n, inout float roughness, inout float metallic)
+{
+    uint tile = (pixel.y >> 4) * ((frame.depth_size.x + 15) >> 4) + (pixel.x >> 4);
+    if ((frame.decal_tiles[tile >> 5] & (1u << (tile & 31u))) == 0)
+        return;
+    int3 texel = int3(int2(pixel), 0);
+    float4 color = g_textures[push.decal_albedo].Load(texel);
+    albedo = albedo * (1.0 - color.a) + color.rgb * color.rgb;
+    uint2 packed = g_uint2_textures[push.decal_surface].Load(texel);
+    float3 bent = n + unpack_snorm10(packed.x);
+    n = dot(bent, bent) > 1e-8 ? normalize(bent) : n;
+    float3 surface = unpack_unorm10(packed.y);
+    roughness = roughness * (1.0 - surface.z) + surface.x;
+    metallic = metallic * (1.0 - surface.z) + surface.y;
+}
+
 // `shade`; with `subsurface`, the scattered part of the diffuse light goes to `sss`
 // instead of the color. Subsurface materials' pipelines always take `ao` (they are their
-// own; without ambient occlusion `push.ao` skips the read).
-float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false)
+// own; without ambient occlusion `push.ao` skips the read). `decals` blends the decal
+// buffer in (ADR 0082).
+float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false)
 {
     Frame frame = loadAligned<16>(push.frame);
     Material m = read_material(input.material);
@@ -1347,7 +1383,10 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     }
     float4 mr = sample_material(m.metallic_roughness_texture, input.uv);
     float metallic = saturate(mr.b * m.metallic);
-    float perceptual = widen_roughness(saturate(mr.g * m.roughness), kernel);
+    float rough = saturate(mr.g * m.roughness);
+    if (decals)
+        apply_decals(frame, uint2(input.position.xy), base.rgb, n, rough, metallic);
+    float perceptual = widen_roughness(rough, kernel);
     float occlusion = 1.0 + m.occlusion_strength * (sample_material(m.occlusion_texture, input.uv).r - 1.0);
     // The view's ambient occlusion (ADR 0058) joins the material's.
     if (ao && push.ao != NO_TEXTURE)
@@ -1636,14 +1675,14 @@ struct Reflected
     float4 weight : SV_Target2;
 };
 
-// `ao`, `shadows` (local lights', ADR 0071) and `contact` (the sun's, ADR 0071): literals,
-// as in `shade`.
-Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bool contact)
+// `ao`, `shadows` (local lights', ADR 0071), `contact` (the sun's, ADR 0071) and `decals`
+// (ADR 0082): literals, as in `shade`.
+Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bool contact, bool decals = false)
 {
     SubsurfaceOut unused;
     ReflectOut refl;
     Reflected o;
-    o.color = float4(shade_surface(input, front, false, ao, false, unused, refl, shadows, contact, true).rgb, 1.0);
+    o.color = float4(shade_surface(input, front, false, ao, false, unused, refl, shadows, contact, true, decals).rgb, 1.0);
     o.normal_roughness = float4(encode_octahedral(refl.normal), refl.roughness, 1.0);
     o.weight = float4(refl.weight, 1.0);
     return o;
@@ -2019,6 +2058,106 @@ float4 fragmentMainContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
 float4 fragmentMainAoContactShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     return float4(shade(input, front, false, true, true, true).rgb, 1.0);
+}
+
+// Decals (ADR 0082): after the depth prepass of a view with decals, the shading and
+// reflection entry points above (with ambient occlusion, the sun's contact shadows,
+// local lights' shadows) that also blend the decal buffer in, so the others carry no
+// code for it.
+[shader("fragment")]
+float4 fragmentMainDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainShadowedDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainContactDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainContactShadowedDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, false, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoShadowedDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContactDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoContactShadowedDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade(input, front, false, true, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectShadowedDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectContactDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectContactShadowedDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, false, true, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoShadowedDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoContactDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoContactShadowedDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, true, true);
 }
 
 struct Background

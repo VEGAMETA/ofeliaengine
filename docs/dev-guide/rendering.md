@@ -1662,3 +1662,49 @@ frame_renderer.add_view_with(fg, ctx, view, scene, &camera, target, |fg, targets
 - **Not yet:** lighting and shadows on particles, collisions, trails, mesh particles,
   your own simulation code, ECS components (a system you drive yourself today), particles
   in orthographic views, motion vectors for particles.
+
+## 18. Decals
+
+Posters, blood, scorch marks, bullet holes, dirt, road paint: a decal is a box that paints
+the surfaces inside it (ADR 0082). It changes their color, roughness, metalness and relief
+before they are lit, so it takes the scene's light and shadows like the surface itself.
+
+```rust
+use engine_render::forward::Decal;
+
+frame_renderer.forward_mut().set_decals(&device, &bindless, true)?;
+let decals = vec![Decal {
+    // The box [-0.5, 0.5]³: here 1 × 1 m and 0.5 m deep, projecting down (its +z up).
+    world_from_decal: Mat4::from_scale_rotation_translation(
+        Vec3::new(1.0, 1.0, 0.5),
+        Quat::from_rotation_x(-std::f32::consts::FRAC_PI_2),
+        hit_point,
+    ),
+    albedo: Some(scorch_texture),       // bindless, sRGB, coverage in alpha
+    normal: Some(scorch_normals),       // bindless tangent-space normal map
+    tint: [1.0, 1.0, 1.0, 1.0],         // color multiplier and opacity
+    roughness: 0.9,
+    surface: 0.7,                       // how much of the surface's roughness and metalness it replaces
+    order: 0,                           // drawn over lower orders
+    ..Decal::default()
+}];
+// Each frame, with the scene (or `ForwardView::decals` without the frame renderer):
+let scene = SceneInput { decals: &decals, ..scene };
+```
+
+- **Where it lands:** every surface inside the box that faces its +z axis. A decal over a
+  corner paints both faces, each faded by its own angle to the decal (`angle_fade`: whole
+  above the first cosine, gone below the second), and its normal map is laid in each
+  face's plane. The texture's u runs along the box's +x, v along −y.
+- **Relief:** the decal's normal map is added to the surface's own, so a stain on a brick
+  wall keeps the bricks; `normal_scale` scales it like glTF's `normalTexture.scale`.
+- **Order:** decals blend in `order`, then in list order, whatever their depth.
+- **What it costs** (1080p): the golden scene's five decals take 34 µs on an RTX 4060 Ti
+  and 0.63 ms on the two-CU integrated Radeon, plus the depth prepass, which decals turn
+  on (on the integrated GPU the prepass then saves more than the decals cost in a scene
+  with overdraw). A decal costs the pixels it covers: one around the camera covering the
+  screen costs 0.15 and 4 ms. Keep decals small and few on integrated GPUs, and let far
+  ones go: a decal off screen or behind the camera costs only its culling.
+- **Not on:** transparent surfaces, subsurface materials, multisampled (MSAA) views,
+  reflection probes' captures; decals do not glow (no emissive yet).
+- `scene_bench --decals <count>` scatters decals over a scene's floor to measure them.

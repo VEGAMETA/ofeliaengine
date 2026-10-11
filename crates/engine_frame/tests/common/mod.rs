@@ -231,6 +231,7 @@ impl Bed {
                             ambient: Vec3::splat(0.3),
                         },
                         lights: &[],
+                        decals: &[],
                         environment: None,
                         reflection_probes: None,
                     },

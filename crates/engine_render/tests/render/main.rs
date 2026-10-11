@@ -6,6 +6,7 @@ mod async_compute;
 mod atmosphere;
 mod breadcrumbs;
 mod culling;
+mod decals;
 mod environment;
 mod feedback;
 mod forward;

@@ -93,8 +93,8 @@ GPU, the tick's stages on the job system: ADR 0064's addendum), 0f2 (16-byte ali
 accesses through buffer addresses in every shader: ADR 0013's addendum), 0g (shading
 variants made on first use and by the device's warm-up thread, start-up phases
 overlapped: ADR 0079). On 2026-10-11: 1 (GPU particles and GPU radix sort: ADRs 0080,
-0081; the reactive mask for effects, ADR 0081's amendment), 2 researched (decals, ADR 0082
-Proposed: the owner's choice), 2b (HDRI environments, ADR 0083 and its amendments:
+0081; the reactive mask for effects, ADR 0081's amendment), 2 (decals through a decal
+buffer, ADR 0082; clustered decals measured against it on a branch), 2b (HDRI environments, ADR 0083 and its amendments:
 `.hdr` and OpenEXR, the sun as a light, cooked BC6H cubes; PRs #143–#145), 3 researched
 (GI, ADR 0084 Proposed: the owner's choice), 7c (`forward.rs` split, PR #147); a bloom
 format experiment measured and rejected (6b). Next: 2 or 3 once the owner has chosen;
@@ -267,11 +267,14 @@ queue item (done 2026-10-10).
    with a payload in 0.59 ms on the RTX, 9.9 ms on the Radeon) and the particles (ADR
    0081: a GPU pool with GPU-only counts, deterministic, sorted by depth, drawn soft; 16 K
    sparks in 0.13 / 0.65 ms, a golden shot on both GPUs).
-2. Decals. Researched 2026-10-11 (ADR 0082): **a decal buffer before lighting** (the
-   owner, 2026-10-11: without it the corners would come out wrong): a compute pass after
-   the prepass, binned like the lights, writes albedo, normal, roughness and metalness for
-   the shading's decal variants to blend; the prepass runs whenever decals draw;
-   transparent surfaces get none.
+2. ~~Decals.~~ Done 2026-10-11 (ADR 0082): **a decal buffer before lighting** (the owner:
+   without it the corners would come out wrong): a compute pass after the prepass over
+   the tiles some decal reaches (tile and z-bin bitmasks, the wave walking its pixels'
+   decals) writes albedo and a normal change with roughness and metalness; 16 shading
+   entry points blend them. Golden scene's five decals: 34 µs / 0.63 ms (RTX / Radeon);
+   a decal covering the screen 0.15 / 4.1 ms. Clustered decals in the shading, built on a
+   branch to compare: cheaper on the RTX, worse on the iGPU (+6.4 against +4.9 ms on that
+   decal). Left: MSAA views, probe captures, emissive decals, transparent surfaces.
 2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity). ~~Phase 1~~ done
    2026-10-11 (ADR 0083): our own `.hdr` decoder, RGBE kept and decoded on the GPU (an
    unclipped sun exceeds half floats); a background cube of its own made on the GPU (a

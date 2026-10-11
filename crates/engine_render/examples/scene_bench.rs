@@ -21,7 +21,10 @@
 //! lights), `--local-shadow-budget <views>`, `--local-shadow-atlas <texels>` and
 //! `--local-shadow-res <min>,<max>` for their settings, `--local-shadows-every-frame` to draw
 //! every shadow again every frame (the cache dropped), `--contact` for the sun's contact
-//! shadows (ADR 0071; implies the prepass), `--sky` for
+//! shadows (ADR 0071; implies the prepass), `--decals <count>` for decals spread over the
+//! scene's floor (ADR 0082; implies the prepass: boxes projecting down, a blot texture,
+//! every other one with a normal map) and `--decal-size <fraction>` for their side as a
+//! fraction of the scene's size (default 3-8 %), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--atmosphere` for the physically based sky and atmosphere
 //! instead of the gradient sky (ADR 0069; implies `--sky`), `--sun <elevation°>` for the sun's
@@ -53,13 +56,13 @@ use engine_assets::{
     open_scene,
 };
 use engine_core::jobs::ThreadPool;
-use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
+use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, ShadowSettings,
-    Spot, Temporal,
+    Camera, Decal, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
+    ShadowSettings, Spot, Temporal,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
@@ -71,6 +74,7 @@ use engine_render::reflections::{
     ProbeSettings, ReflectionProbe, ReflectionProbes, Reflections, ScreenSpaceReflections,
     SsrSettings,
 };
+use engine_render::texture::GpuTexture;
 use engine_render::texture_pool::StagingSpan;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
@@ -274,6 +278,8 @@ fn main() {
     let mut local_shadows = engine_render::forward::LocalShadowSettings::default();
     let mut local_shadows_every_frame = false;
     let mut contact: Option<engine_render::forward::ContactShadowSettings> = None;
+    let mut decal_count = 0usize;
+    let mut decal_size: Option<f32> = None;
     let mut light_culling = true;
     let (mut with_sky, mut sky_every_frame) = (false, false);
     let (mut atmosphere, mut atmosphere_every_frame, mut fog) = (false, false, false);
@@ -335,6 +341,8 @@ fn main() {
             }
             "--local-shadows-every-frame" => local_shadows_every_frame = true,
             "--contact" => contact = Some(Default::default()),
+            "--decals" => decal_count = args.next().unwrap().parse().unwrap(),
+            "--decal-size" => decal_size = Some(args.next().unwrap().parse().unwrap()),
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
             "--lods" => lods = true,
@@ -695,6 +703,57 @@ fn main() {
             }
         })
         .collect();
+    // Decals spread over the scene's floor (the same sequence, ADR 0082): boxes projecting
+    // down, a few percent of the scene's size, every other one with a normal map.
+    let mut decal_textures: Vec<(GpuTexture, Vec<u8>)> = if decal_count > 0 {
+        [
+            (vk::Format::R8G8B8A8_SRGB, decal_blot()),
+            (vk::Format::R8G8B8A8_UNORM, decal_bumps()),
+        ]
+        .into_iter()
+        .map(|(format, pixels)| {
+            let size = DECAL_TEXTURE;
+            let texture =
+                GpuTexture::new(&device, &mut allocator, &bindless, format, size, size).unwrap();
+            (texture, pixels)
+        })
+        .collect()
+    } else {
+        Vec::new()
+    };
+    let decals: Vec<Decal> = (0..decal_count)
+        .map(|k| {
+            let side = match decal_size {
+                Some(fraction) => size_of_scene * fraction,
+                None => size_of_scene * (0.03 + 0.05 * next()),
+            };
+            // Floors are near the bottom of a scene's box (Sponza's 8 % up).
+            let at = Vec3::new(
+                min.x + (max.x - min.x) * next(),
+                min.y + (max.y - min.y) * 0.08,
+                min.z + (max.z - min.z) * next(),
+            );
+            let turn = Quat::from_rotation_y(next() * core::f32::consts::TAU);
+            Decal {
+                world_from_decal: Mat4::from_scale_rotation_translation(
+                    Vec3::splat(side),
+                    turn * Quat::from_rotation_x(-core::f32::consts::FRAC_PI_2),
+                    at,
+                ),
+                albedo: Some(decal_textures[0].0.sampled_index()),
+                normal: (k % 2 == 0).then(|| decal_textures[1].0.sampled_index()),
+                tint: [
+                    0.3 + 0.7 * next(),
+                    0.3 + 0.7 * next(),
+                    0.3 + 0.7 * next(),
+                    0.9,
+                ],
+                roughness: next(),
+                surface: 0.5,
+                ..Decal::default()
+            }
+        })
+        .collect();
     let size = max - min;
     let camera = Camera {
         clip_from_world: vulkan_perspective(
@@ -816,6 +875,9 @@ fn main() {
     renderer
         .set_contact_shadows(&device, &bindless, contact)
         .unwrap();
+    renderer
+        .set_decals(&device, &bindless, decal_count > 0 || pipeline_stats)
+        .unwrap();
     if pipeline_stats {
         // Needs ENGINE_PIPELINE_STATS=1 (the device captures statistics at creation).
         let names = [
@@ -895,6 +957,22 @@ fn main() {
             "contact shadows + lights + environment",
         ];
         for (name, stats) in names.iter().zip(renderer.contact_statistics(&device)) {
+            if stats.is_empty() {
+                continue;
+            }
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
+        let names = [
+            "decals",
+            "decals + lights",
+            "decals + environment",
+            "decals + lights + environment",
+        ];
+        for (name, stats) in names.iter().zip(renderer.decal_statistics(&device)) {
             if stats.is_empty() {
                 continue;
             }
@@ -1000,10 +1078,11 @@ fn main() {
          GPU motion background + remember instances µs | GPU light tiles µs | CPU add_passes µs | \
          GPU sky µs | GPU environment rebuild µs | GPU bloom µs | GPU exposure µs | GPU tonemap µs | GPU AO µs | \
          GPU frame µs | CPU execute µs | GPU atmosphere tables µs | GPU aerial perspective µs | \
-         GPU atmosphere pass µs | GPU local shadows µs | local shadow views | GPU contact shadows µs |"
+         GPU atmosphere pass µs | GPU local shadows µs | local shadow views | GPU contact shadows µs | \
+         GPU decal tiles µs | GPU decals µs |"
     );
     println!(
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     );
 
     let mut frame_number = 0u64;
@@ -1020,6 +1099,7 @@ fn main() {
         let mut cpu_execute = Vec::new();
         let (mut local_time, mut local_views) = (Vec::new(), Vec::new());
         let mut contact_time = Vec::new();
+        let (mut decal_tiles_time, mut decal_time) = (Vec::new(), Vec::new());
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
         let (mut tables, mut aerial, mut composite) = (Vec::new(), Vec::new(), Vec::new());
         let (mut bloom_time, mut exposure_time, mut tonemap_time) =
@@ -1079,6 +1159,11 @@ fn main() {
                 let geo = geometry
                     .begin_frame(&mut fg, &device, &mut allocator, frame_number)
                     .unwrap();
+                if frame_number == 1 {
+                    for (texture, pixels) in &decal_textures {
+                        texture.upload(&mut fg, &mut ring, pixels).unwrap();
+                    }
+                }
                 let hdr = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
                 let depth =
                     fg.create_texture("depth", TextureDesc::new_2d(depth_format, WIDTH, HEIGHT));
@@ -1124,6 +1209,7 @@ fn main() {
                             occlusion: None,
                             temporal: temporal.as_ref(),
                             lights: &lights,
+                            decals: &decals,
                             environment: environment.as_ref(),
                             reflections: Reflections {
                                 probes: probes.as_ref(),
@@ -1271,6 +1357,7 @@ fn main() {
                 let mut reflect_frame = 0.0;
                 let mut local_frame = 0.0;
                 let mut contact_frame = 0.0;
+                let (mut decal_tiles_frame, mut decal_frame) = (0.0, 0.0);
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
                     match time.name {
@@ -1287,6 +1374,8 @@ fn main() {
                         "contact shadows" | "contact shadows clear" => {
                             contact_frame += f64::from(time.gpu_us);
                         }
+                        "decal tiles clear" | "decal tiles" => decal_tiles_frame += us,
+                        "decals" => decal_frame += us,
                         "local shadow cull" | "local shadows" => {
                             local_frame += f64::from(time.gpu_us);
                         }
@@ -1344,6 +1433,8 @@ fn main() {
                 faces_drawn.push(f64::from(probes.as_ref().map_or(0, |p| p.stats().faces)));
                 local_time.push(local_frame);
                 contact_time.push(contact_frame);
+                decal_tiles_time.push(decal_tiles_frame);
+                decal_time.push(decal_frame);
                 local_views.push(f64::from(renderer.local_shadow_stats().views_drawn));
                 if let Some(us) = graph.gpu_frame_time() {
                     frame_time.push(f64::from(us));
@@ -1360,7 +1451,7 @@ fn main() {
             frame += 1;
         }
         println!(
-            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} | {:.1} |",
+            "| {mode} | {upload_frames} | {:.0} | {:.0} | {:.0} | {:.0} | {:.1} | {:.0} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} | {:.0} | {:.0} | {:.0} | {:.1} | {:.1} | {:.1} | {:.1} | {:.0} | {:.1} | {:.1} | {:.1} |",
             median(&mut shadow),
             median(&mut depth_prepass),
             median(&mut forward),
@@ -1381,6 +1472,8 @@ fn main() {
             median(&mut local_time),
             median(&mut local_views),
             median(&mut contact_time),
+            median(&mut decal_tiles_time),
+            median(&mut decal_time),
         );
         if probes.is_some() || screen_space.is_some() {
             reflection_rows.push(format!(
@@ -1465,7 +1558,49 @@ fn main() {
         if let Some(s) = screen_space.as_mut() {
             s.destroy(&mut allocator, &bindless);
         }
+        for (texture, _) in &mut decal_textures {
+            texture.destroy(&device, &mut allocator, &bindless, 0);
+        }
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);
     }
+}
+
+/// Texels per side of `--decals`' textures.
+const DECAL_TEXTURE: u32 = 64;
+
+/// `--decals`' albedo: a round blot, white (the decals' tints color it), alpha falling
+/// off at its rim.
+fn decal_blot() -> Vec<u8> {
+    let mut out = Vec::with_capacity((DECAL_TEXTURE * DECAL_TEXTURE * 4) as usize);
+    for y in 0..DECAL_TEXTURE {
+        for x in 0..DECAL_TEXTURE {
+            let u = (x as f32 + 0.5) / DECAL_TEXTURE as f32 * 2.0 - 1.0;
+            let v = (y as f32 + 0.5) / DECAL_TEXTURE as f32 * 2.0 - 1.0;
+            let r = (u * u + v * v).sqrt();
+            let alpha = ((1.0 - r) / 0.3).clamp(0.0, 1.0);
+            let shade = (200.0 + 55.0 * (u * 9.0).sin() * (v * 7.0).cos()) as u8;
+            out.extend_from_slice(&[shade, shade, shade, (alpha * 255.0) as u8]);
+        }
+    }
+    out
+}
+
+/// `--decals`' normal map: a grid of bumps.
+fn decal_bumps() -> Vec<u8> {
+    let mut out = Vec::with_capacity((DECAL_TEXTURE * DECAL_TEXTURE * 4) as usize);
+    let k = 6.0 * core::f32::consts::PI;
+    for y in 0..DECAL_TEXTURE {
+        for x in 0..DECAL_TEXTURE {
+            let u = (x as f32 + 0.5) / DECAL_TEXTURE as f32;
+            let v = (y as f32 + 0.5) / DECAL_TEXTURE as f32;
+            // Heights sin(ku) sin(kv); the normal map's y runs up the image.
+            let dx = 0.08 * k * (k * u).cos() * (k * v).sin();
+            let dy = -0.08 * k * (k * u).sin() * (k * v).cos();
+            let n = Vec3::new(-dx, -dy, 1.0).normalize();
+            let byte = |c: f32| ((c * 0.5 + 0.5) * 255.0).round() as u8;
+            out.extend_from_slice(&[byte(n.x), byte(n.y), byte(n.z), 255]);
+        }
+    }
+    out
 }

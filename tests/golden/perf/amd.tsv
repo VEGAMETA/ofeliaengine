@@ -14,6 +14,24 @@ procedural	shadow cull	1.4
 procedural	sky	76.1
 procedural	tonemap	762.6
 procedural	transparent	298.2
+procedural_decals	(frame total)	12255.9
+procedural_decals	(gpu frame)	12300.0
+procedural_decals	bloom downsample	851.4
+procedural_decals	bloom upsample	440.0
+procedural_decals	cull	3.2
+procedural_decals	cull setup	0.8
+procedural_decals	decal tiles	0.3
+procedural_decals	decal tiles clear	0.3
+procedural_decals	decals	625.9
+procedural_decals	depth prepass	227.7
+procedural_decals	forward	8798.6
+procedural_decals	light tiles	11.3
+procedural_decals	light tiles clear	0.3
+procedural_decals	shadow	174.4
+procedural_decals	shadow cull	1.3
+procedural_decals	sky	56.6
+procedural_decals	tonemap	771.0
+procedural_decals	transparent	298.0
 sponza	(frame total)	22857.7
 sponza	(gpu frame)	22905.4
 sponza	bloom downsample	1334.6
