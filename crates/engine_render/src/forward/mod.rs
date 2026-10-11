@@ -51,7 +51,7 @@ use crate::atmosphere::{AtmosphereTextures, AtmosphereView, COMPOSITE_FRAGMENT, 
 use crate::compute::{ComputePass, ComputeShader, ComputeSource, Dispatch};
 use crate::contact::{ContactShadows, ContactView};
 use crate::cull::Frustum;
-use crate::decals::{DecalPasses, DecalTargets};
+use crate::decals::DecalPasses;
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
 use crate::gpu_scene::SceneFrame;
 use crate::graph::{
@@ -747,8 +747,8 @@ struct FrameData {
     previous_count: u32,
     /// The subsurface budget (ADR 0059).
     scatter_budget: u32,
-    /// Decals (ADR 0082): per 16-pixel tile a bit, set where they reach (0 without).
-    decal_tiles: u64,
+    /// Decals (ADR 0082): the view's `DecalView` (0 without).
+    decals: u64,
     cascades: [CascadeData; MAX_CASCADES],
     cascade_count: u32,
     /// Draw commands per list (one per detail level of each batch).
@@ -847,9 +847,8 @@ pub(crate) struct Push {
     pub(crate) phase: u32,
     /// Bindless index of the view's ambient occlusion, or [`NO_AO`].
     pub(crate) ao: u32,
-    /// Bindless indices of the decal buffer (ADR 0082): albedo, surface.
-    pub(crate) decal_albedo: u32,
-    pub(crate) decal_surface: u32,
+    /// The decals' tile bitmasks (ADR 0082).
+    pub(crate) decal_tiles: u64,
 }
 
 /// `NO_TEXTURE` in `forward.slang`: no ambient occlusion.

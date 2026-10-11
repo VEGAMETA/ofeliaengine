@@ -279,7 +279,7 @@ impl ForwardRenderer {
             jitter: [jitter_ndc[0], jitter_ndc[1], 0.0, 0.0],
             previous_count,
             scatter_budget: self.subsurface_settings.unwrap_or_default().budget(),
-            decal_tiles: decals.map_or(0, |(_, p)| p.occupied()),
+            decals: decals.map_or(0, |(_, p)| p.view()),
             cascades: cascade_data(&fit, settings),
             cascade_count: fit.count as u32,
             command_count,
@@ -356,8 +356,7 @@ impl ForwardRenderer {
             texture: 0,
             phase: PHASE_ALL,
             ao: NO_AO,
-            decal_albedo: 0,
-            decal_surface: 0,
+            decal_tiles: 0,
         };
 
         let command_bytes = u64::from(command_count) * COMMAND_BYTES;
@@ -938,7 +937,7 @@ impl ForwardRenderer {
                                mask: u32,
                                ao: Option<Texture>,
                                contact: Option<Texture>,
-                               decals: Option<DecalTargets>| {
+                               decals: Option<Buffer>| {
             let push = Push {
                 visible: ctx.address(visible),
                 texture: ctx.sampled_index(shadow_map).unwrap_or(0),
@@ -947,12 +946,7 @@ impl ForwardRenderer {
                 phase: contact
                     .and_then(|t| ctx.sampled_index(t))
                     .unwrap_or(base.phase),
-                decal_albedo: decals
-                    .and_then(|d| ctx.sampled_index(d.albedo))
-                    .unwrap_or(0),
-                decal_surface: decals
-                    .and_then(|d| ctx.sampled_index(d.surface))
-                    .unwrap_or(0),
+                decal_tiles: decals.map_or(0, |b| ctx.address(b)),
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;
@@ -1042,7 +1036,7 @@ impl ForwardRenderer {
                     }
                     if let Some((d, prepared)) = &decals {
                         targets.decals =
-                            Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
+                            Some(d.passes.add_tiles(fg, bindless, prepared));
                     }
                     let ao_texture = targets.ao;
                     let contact_texture = targets.contact;
@@ -1224,7 +1218,7 @@ impl ForwardRenderer {
                         }
                         if let Some((d, prepared)) = &decals {
                             targets.decals =
-                                Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
+                                Some(d.passes.add_tiles(fg, bindless, prepared));
                         }
                         let ao_texture = targets.ao;
                         let contact_texture = targets.contact;
@@ -1780,8 +1774,8 @@ struct Targets {
     local_atlas: Option<Texture>,
     /// The sun's contact shadows (ADR 0071), computed after the depth prepass.
     contact: Option<Texture>,
-    /// The decal buffer (ADR 0082), computed after the depth prepass.
-    decals: Option<DecalTargets>,
+    /// The decals' tile bitmasks (ADR 0082).
+    decals: Option<Buffer>,
     /// Reflections' inputs (ADR 0073): normal and roughness, specular weight.
     reflect: Option<(Texture, Texture)>,
     /// With MSAA (ADR 0075): what the shading pass resolves its targets into.
@@ -1882,9 +1876,7 @@ fn shading_pass<'a, 'g>(
         pass = pass.read(contact, Access::Sampled(ShaderStages::FRAGMENT));
     }
     if let Some(decals) = targets.decals {
-        pass = pass
-            .read(decals.albedo, Access::Sampled(ShaderStages::FRAGMENT))
-            .read(decals.surface, Access::Sampled(ShaderStages::FRAGMENT));
+        pass = pass.read(decals, Access::StorageRead(ShaderStages::FRAGMENT));
     }
     match depth_use {
         DepthUse::Write(load, store) => pass.depth(depth, load, store),

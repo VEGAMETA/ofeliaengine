@@ -82,7 +82,6 @@
 [[vk::binding(0, 0)]] TextureCube g_cubes[];
 // The sun's contact shadow mask: a float's bits (contact.rs, CONTACT_FORMAT).
 [[vk::binding(0, 0)]] Texture2D<uint> g_uint_textures[];
-[[vk::binding(0, 0)]] Texture2D<uint2> g_uint2_textures[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 [[vk::binding(2, 0)]] SamplerComparisonState g_compare_samplers[];
 
@@ -143,6 +142,37 @@ static const uint BUDGET_FIRST[4] = { 0, 8, 28, 68 };
 // The scatter pass takes at most one sample per this many pixels of its disk.
 static const float PIXELS_PER_SAMPLE = 4.0;
 
+// Decals (ADR 0082), clustered: `Decal` and `DecalView` in decals.rs.
+struct Decal
+{
+    float4 decal_from_world[3];
+    float4 tint;
+    float4 axis_x;
+    float4 axis_y;
+    float4 axis_z;
+    uint albedo;
+    uint normal;
+    float roughness;
+    float metalness;
+    float surface;
+    float normal_scale;
+    float fade_full;
+    float fade_none;
+};
+
+struct DecalView
+{
+    float4 axis;             // xyz the view axis, w: -dot(axis, near plane center)
+    Decal* decals;
+    uint* bins;              // per z-bin (DECAL_BINS), `words` bitmask words
+    uint* occupied;          // per tile a bit
+    uint words;
+    uint tiles_x;
+    float bin_scale;         // z-bins per unit of depth
+    uint sampler;
+    uint2 _pad;
+};
+
 struct Frame
 {
     float4x4 clip_from_world;
@@ -166,7 +196,7 @@ struct Frame
     float4 jitter;           // xy: this frame's jitter in NDC (clip.xy += jitter × w)
     uint previous_count;     // instances with a previous transform
     uint scatter_budget;     // the subsurface budget, BUDGET_* (ADR 0059)
-    uint* decal_tiles;       // per 16-pixel tile a bit: decals reach it (ADR 0082; decal entry points only)
+    DecalView* decals;       // decals (ADR 0082; decal entry points only)
     Cascade cascades[4];
     uint cascade_count;      // 0: everything is lit
     uint command_count;      // draw commands per list (one per detail level of each batch)
@@ -313,8 +343,7 @@ struct Push
     uint texture;            // bindless index: the shadow map, or the depth to reduce
     uint phase;              // PHASE_*; the cascade in the shadow pass
     uint ao;                 // bindless index: the view's ambient occlusion (NO_TEXTURE: none; ADR 0058)
-    uint decal_albedo;       // bindless index: the decal buffer's albedo (decal entry points; ADR 0082)
-    uint decal_surface;      // bindless index: its normal change, roughness and metalness
+    uint* decal_tiles;       // per tile, the decals' bitmask words (decal entry points; ADR 0082)
 };
 
 static const uint PHASE_ALL = 0;    // frustum culling only
@@ -1318,34 +1347,80 @@ struct ReflectOut
     float3 weight;           // multiplies the prefiltered radiance (split sum × specular occlusion)
 };
 
-// `pack_snorm10` and `pack_unorm10` in decals.slang.
-float3 unpack_snorm10(uint p)
+static const uint DECAL_BINS = 256;
+
+float3 decal_normalize(float3 v)
 {
-    int3 q = int3(int(p << 22), int(p << 12), int(p << 2)) >> 22;
-    return float3(q) / 511.0;
+    return v * rsqrt(max(dot(v, v), 1e-12));
 }
 
-float3 unpack_unorm10(uint p)
+// The decals at `p` (pixel `pixel`, geometric normal `ng`, position steps to the next
+// pixels `px`, `py`) blended into the surface before it is lit, in their order: albedo,
+// the normal's change (the decal's normal map laid in the surface's plane), roughness
+// and metalness.
+void apply_decals(Frame frame, float3 p, float2 pixel, float3 ng, float3 px, float3 py, inout float3 albedo, inout float3 n, inout float roughness, inout float metallic)
 {
-    return float3(uint3(p, p >> 10, p >> 20) & 1023u) / 1023.0;
-}
-
-// The decal buffer (ADR 0082, decals.slang) at `pixel`, blended into the surface before
-// it is lit: albedo, the normal's change (laid in the surface's plane by the decal pass),
-// roughness and metalness. Only in tiles some decal reaches: the decal pass writes no
-// others.
-void apply_decals(Frame frame, uint2 pixel, inout float3 albedo, inout float3 n, inout float roughness, inout float metallic)
-{
-    uint tile = (pixel.y >> 4) * ((frame.depth_size.x + 15) >> 4) + (pixel.x >> 4);
-    if ((frame.decal_tiles[tile >> 5] & (1u << (tile & 31u))) == 0)
+    // Through access chains: pointers read out of a loaded struct value read as zero on
+    // the AMD driver (26.8.1).
+    DecalView* view = push.frame.decals;
+    uint words = view.words;
+    uint2 t = uint2(pixel) / LIGHT_TILE;
+    uint tile = t.y * view.tiles_x + t.x;
+    if ((view.occupied[tile >> 5] & (1u << (tile & 31u))) == 0)
         return;
-    int3 texel = int3(int2(pixel), 0);
-    float4 color = g_textures[push.decal_albedo].Load(texel);
-    albedo = albedo * (1.0 - color.a) + color.rgb * color.rgb;
-    uint2 packed = g_uint2_textures[push.decal_surface].Load(texel);
-    float3 bent = n + unpack_snorm10(packed.x);
+    float4 axis = loadAligned<16>(&view.axis);
+    uint bin = min(uint(max((dot(p, axis.xyz) + axis.w) * view.bin_scale, 0.0)), DECAL_BINS - 1);
+    float4 color = 0.0;
+    float3 delta = 0.0;
+    float3 surface = 0.0;
+    SamplerState s = g_samplers[view.sampler];
+    for (uint w = 0; w < words; w++)
+    {
+        uint mask = push.decal_tiles[tile * words + w] & view.bins[bin * words + w];
+        uint merged = WaveActiveBitOr(mask);
+        while (merged != 0)
+        {
+            uint bit = firstbitlow(merged);
+            merged &= merged - 1u;
+            Decal d = loadAligned<16>(view.decals + (w * 32 + bit));
+            if (((mask >> bit) & 1u) == 0)
+                continue;
+            float4 h = float4(p, 1.0);
+            float3 q = float3(dot(d.decal_from_world[0], h), dot(d.decal_from_world[1], h), dot(d.decal_from_world[2], h));
+            if (any(abs(q) > 0.5))
+                continue;
+            float fade = saturate((dot(ng, d.axis_z.xyz) - d.fade_none) / max(d.fade_full - d.fade_none, 1e-4));
+            if (fade <= 0.0)
+                continue;
+            float2 uv = float2(q.x + 0.5, 0.5 - q.y);
+            float2 gx = float2(dot(d.decal_from_world[0].xyz, px), -dot(d.decal_from_world[1].xyz, px));
+            float2 gy = float2(dot(d.decal_from_world[0].xyz, py), -dot(d.decal_from_world[1].xyz, py));
+            float4 texel = d.albedo != NO_TEXTURE
+                ? g_textures[d.albedo].SampleGrad(s, uv, gx, gy)
+                : float4(1.0, 1.0, 1.0, 1.0);
+            float a = saturate(texel.a * d.tint.a * fade);
+            color = float4(color.rgb * (1.0 - a) + texel.rgb * d.tint.rgb * a, color.a * (1.0 - a) + a);
+            if (d.normal != NO_TEXTURE && d.normal_scale != 0.0)
+            {
+                float2 tn = g_textures[d.normal].SampleGrad(s, uv, gx, gy).xy * 2.0 - 1.0;
+                float z = sqrt(saturate(1.0 - dot(tn, tn)));
+                tn *= d.normal_scale;
+                float3 tx = decal_normalize(d.axis_x.xyz - ng * dot(ng, d.axis_x.xyz));
+                float3 ty = d.axis_y.xyz - ng * dot(ng, d.axis_y.xyz);
+                ty = decal_normalize(ty - tx * dot(tx, ty));
+                float3 m = decal_normalize(tn.x * tx + tn.y * ty + z * ng);
+                delta = delta * (1.0 - a) + (m - ng) * a;
+            }
+            if (d.surface > 0.0)
+            {
+                float c = a * saturate(d.surface);
+                surface = float3(surface.xy * (1.0 - c) + float2(d.roughness, d.metalness) * c, surface.z * (1.0 - c) + c);
+            }
+        }
+    }
+    albedo = albedo * (1.0 - color.a) + color.rgb;
+    float3 bent = n + delta;
     n = dot(bent, bent) > 1e-8 ? normalize(bent) : n;
-    float3 surface = unpack_unorm10(packed.y);
     roughness = roughness * (1.0 - surface.z) + surface.x;
     metallic = metallic * (1.0 - surface.z) + surface.y;
 }
@@ -1365,6 +1440,8 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     float3 ng = normalize(geometric);
     // Derivatives first, while every lane of the quad is alive.
     float kernel = specular_aa_kernel(ng);
+    float3 px = decals ? ddx(input.world_position) : 0.0;
+    float3 py = decals ? ddy(input.world_position) : 0.0;
     float4 base = sample_material(m.base_color_texture, input.uv) * m.base_color;
     if (masked && base.a < m.alpha_cutoff)
         discard;
@@ -1385,7 +1462,7 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     float metallic = saturate(mr.b * m.metallic);
     float rough = saturate(mr.g * m.roughness);
     if (decals)
-        apply_decals(frame, uint2(input.position.xy), base.rgb, n, rough, metallic);
+        apply_decals(frame, input.world_position, input.position.xy, ng, px, py, base.rgb, n, rough, metallic);
     float perceptual = widen_roughness(rough, kernel);
     float occlusion = 1.0 + m.occlusion_strength * (sample_material(m.occlusion_texture, input.uv).r - 1.0);
     // The view's ambient occlusion (ADR 0058) joins the material's.

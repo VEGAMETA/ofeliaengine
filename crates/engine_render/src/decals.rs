@@ -182,9 +182,27 @@ struct Culled {
     rect: [u16; 4],
 }
 
+/// `DecalView` in `forward.slang` (64 bytes): what the shading reads of a view's decals.
+#[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+struct DecalView {
+    axis: [f32; 4],
+    decals: u64,
+    bins: u64,
+    occupied: u64,
+    words: u32,
+    tiles_x: u32,
+    bin_scale: f32,
+    sampler: u32,
+    _pad: [u32; 2],
+}
+
+const _: () = assert!(size_of::<DecalView>() == 64);
+
 /// A view's decals, culled, binned and put in the ring by [`DecalPasses::prepare`].
 #[derive(Debug, Clone, Copy)]
 pub struct PreparedDecals {
+    view: u64,
     frame: u64,
     decals: u64,
     bins: u64,
@@ -202,6 +220,11 @@ impl PreparedDecals {
     /// [`DecalTargets`] are written.
     pub fn occupied(&self) -> u64 {
         self.occupied
+    }
+
+    /// The shading's `DecalView`, in the ring.
+    pub fn view(&self) -> u64 {
+        self.view
     }
 }
 
@@ -329,7 +352,19 @@ impl DecalPasses {
             count: n as u32,
             occupied,
         }])?;
+        let view = ring.push(&[DecalView {
+            axis: forward.extend(-forward.dot(axis.near_center)).to_array(),
+            decals: staged_decals.address,
+            bins: staged_bins,
+            occupied,
+            words,
+            tiles_x: tiles[0],
+            bin_scale,
+            sampler: Bindless::sampler(SamplerKind::LinearClamp),
+            _pad: [0; 2],
+        }])?;
         Some(PreparedDecals {
+            view,
             frame,
             decals: staged_decals.address,
             bins: staged_bins,
@@ -340,6 +375,48 @@ impl DecalPasses {
             tiles,
             size,
         })
+    }
+
+    /// Declares the tiles' bitmasks of `prepared` alone, for the shading's clustered decals.
+    pub fn add_tiles<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        prepared: &PreparedDecals,
+    ) -> crate::graph::Buffer {
+        let words = u64::from(prepared.tiles[0])
+            * u64::from(prepared.tiles[1])
+            * u64::from(prepared.words);
+        let tiles = fg.create_buffer("decal tiles", BufferDesc { size: words * 4 });
+        fg.add_pass("decal tiles clear")
+            .write(tiles, Access::TransferWrite)
+            .execute(move |ctx| {
+                // SAFETY: recording outside a rendering scope.
+                unsafe {
+                    ctx.device
+                        .cmd_fill_buffer(ctx.cmd, ctx.buffer(tiles), 0, vk::WHOLE_SIZE, 0);
+                }
+            });
+        let base = Push {
+            frame: prepared.frame,
+            decals: prepared.decals,
+            bins: prepared.bins,
+            rects: prepared.rects,
+            ..Push::default()
+        };
+        fg.add_compute("decal tiles", bindless)
+            .read(tiles, Access::StorageReadWrite(ShaderStages::COMPUTE))
+            .dispatch(
+                &self.tiles,
+                Dispatch::Groups([prepared.count, 1, 1]),
+                move |ctx| {
+                    Some(Push {
+                        tiles: ctx.address(tiles),
+                        ..base
+                    })
+                },
+            );
+        tiles
     }
 
     /// Declares the decal buffer of `prepared` over `depth` (sampled, the size `prepared`
