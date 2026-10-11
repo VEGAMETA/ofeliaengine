@@ -2393,11 +2393,12 @@ impl ForwardRenderer {
         }
         let mut setup = self.setup(fg, view);
         let imported = self.import(fg, ring, bindless, view, &setup)?;
-        // Probe GI (ADR 0088): the volume's updates while it converges, tracing this
-        // frame's scene for ray queries; misses see the view's sky.
+        // Probe GI (ADR 0088, ADR 0089): the volume's updates while it converges, then its
+        // window of the frame, tracing this frame's scene for ray queries; misses see the
+        // view's sky.
         if let Some(gi) = view.gi.filter(|_| self.gi_on)
             && let Some(rays) = gi.rays
-            && !gi.volume.is_converged()
+            && gi.volume.needs_updates()
         {
             let sky = match imported.environment {
                 Some(e) => GiSky::Cube {
@@ -2421,6 +2422,7 @@ impl ForwardRenderer {
                     scene,
                     geometry,
                     materials,
+                    view.camera.position,
                     Some((-view.light.direction, sun)),
                     sky,
                 )

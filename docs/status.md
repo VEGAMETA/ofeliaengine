@@ -329,7 +329,14 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    `sponza_gi_medallions`). **Next:** phase 2 (a ray budget per frame, rays allocated
    where the light changes), then Brixelizer GI built as the reference, its cost and
    memory against ours on both GPUs (ADR 0084's bar). Known limits: normals from the
-   depth facet low-poly curves; light frozen until `refresh()`.
+   depth facet low-poly curves. **Phase 2 done 2026-10-11** (ADR 0089): once converged,
+   every frame traces windows of probes within a ray budget (131,072 rays on discrete
+   GPUs, 8,192 on integrated ones), half in an 8 × 4 × 8 box around the camera and half
+   in turn over the volume, blended with a hysteresis of 0.9. A sun turned off fades as
+   0.9^frames (tested), around the camera first. Sponza: 0.2 ms a frame on the RTX, 1.0
+   ms on the iGPU. **Next:** Brixelizer GI built as the reference (cost and memory on
+   both GPUs, ADR 0084's bar); local lights at the rays' hits (night scenes); the
+   moments' blend (a third of the cost) at a lower rate.
 3b. **Frame generation out of the box** (owner, 2026-10-11: "needed out of the box, DLSS FG
    and FSR FG; the HUD fix on by default"; right after GI, off by default). Requirements
    so far (`docs/research/frame-generation.md`, 2026-09-26) and the owner's:

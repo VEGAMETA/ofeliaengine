@@ -1208,8 +1208,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         }
     });
     // Probe GI (ADR 0088): the GPU scene's coarsest levels for ray queries, every
-    // structure built in the first frame; the volume over the scene, converged in one
-    // frame.
+    // structure built in the first frame; the volume over the scene with the device's
+    // defaults: converged an update a frame (all eleven in one submission take about a
+    // second on the two-CU Radeon, and beside other tests' work the driver resets the GPU).
     let mut gi_rays = shot.gi.map(|_| {
         RayScene::new(
             &device,
@@ -1228,10 +1229,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             &mut allocator,
             &bindless,
             ProbeGrid::covering(min, max, spacing, 16_384),
-            GiSettings {
-                updates_per_frame: 16,
-                ..GiSettings::for_device(&device)
-            },
+            GiSettings::for_device(&device),
         )
         .expect("probe GI")
     });

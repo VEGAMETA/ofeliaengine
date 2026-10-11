@@ -2,7 +2,10 @@
 //! probes over the scene, each holding its irradiance over all directions and the
 //! distances its rays reach, traced against the scene's acceleration structures
 //! ([`crate::rays`]) and converged over a few updates at load (or after
-//! [`ProbeGi::refresh`]), then kept: no tracing in later frames. A pixel's diffuse light
+//! [`ProbeGi::refresh`]); then, within [`GiSettings::rays_per_frame`], windows of probes
+//! are traced again every frame, in turn, and blended in with [`GiSettings::hysteresis`]
+//! (part of them in a box around the camera, which follows it first), so the light
+//! follows the scene (ADR 0089). A pixel's diffuse light
 //! comes from the eight probes around its surface ([`ProbeGi::add_resolve_pass`]), with
 //! Chebyshev visibility against their distances so light does not pass through walls.
 //!
@@ -57,6 +60,9 @@ const MAX_ATLAS: u32 = 16_384;
 pub const MAX_PROBES: u32 = 32_768;
 /// Updates that move probes out of geometry (the next one turns off those still inside).
 const RELOCATING_UPDATES: u32 = 2;
+/// Probes along each axis of the box around the camera that [`GiSettings::local_share`]
+/// keeps fresh (fewer where the volume has fewer).
+pub const LOCAL_BOX: [u32; 3] = [8, 4, 8];
 
 /// The format of the irradiance a resolve pass writes.
 pub const GI_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -136,6 +142,17 @@ pub struct GiSettings {
     pub normal_bias: f32,
     /// See [`Self::normal_bias`].
     pub view_bias: f32,
+    /// Rays traced every frame once converged (0: none, the light stays as it converged):
+    /// the window of `rays_per_frame / rays` probes after the last one, in turn, each
+    /// blended in with [`Self::hysteresis`].
+    pub rays_per_frame: u32,
+    /// The share of a probe's light an update after convergence keeps (0 to 1): higher
+    /// is smoother, slower to follow a change.
+    pub hysteresis: f32,
+    /// The share of [`Self::rays_per_frame`] spent on the box of probes around the camera
+    /// ([`LOCAL_BOX`], each traced at most once a frame); the rest goes round the whole
+    /// volume.
+    pub local_share: f32,
     /// Pixels per resolved sample along each axis (1, 2 or 4): the resolve pass evaluates
     /// the probes once per `scale` × `scale` pixels and the shading takes each pixel's
     /// light from the samples around it whose surfaces are at its distance (diffuse light
@@ -152,6 +169,9 @@ impl Default for GiSettings {
             updates_per_frame: 1,
             normal_bias: 0.06,
             view_bias: 0.24,
+            rays_per_frame: 1 << 17,
+            hysteresis: 0.9,
+            local_share: 0.5,
             resolve_scale: 2,
         }
     }
@@ -160,14 +180,16 @@ impl Default for GiSettings {
 impl GiSettings {
     /// The defaults for `device`: a resolve scale of 4 on integrated GPUs (on a two-CU
     /// Radeon, Sponza's resolve at 1920 × 1080 takes 4.2 ms at a scale of 2 and 1.7 ms
-    /// at 4), 2 on discrete ones (an RTX 4060 Ti: 93 µs).
+    /// at 4), 2 on discrete ones (an RTX 4060 Ti: 93 µs); 8,192 rays a frame on
+    /// integrated GPUs, 131,072 on discrete ones.
     pub fn for_device(device: &Device) -> Self {
-        let resolve_scale = match device.adapter().kind {
-            AdapterKind::Integrated | AdapterKind::Cpu => 4,
-            _ => 2,
-        };
+        let integrated = matches!(
+            device.adapter().kind,
+            AdapterKind::Integrated | AdapterKind::Cpu
+        );
         Self {
-            resolve_scale,
+            resolve_scale: if integrated { 4 } else { 2 },
+            rays_per_frame: if integrated { 1 << 13 } else { 1 << 17 },
             ..Self::default()
         }
     }
@@ -211,7 +233,7 @@ struct GiVolumeData {
     view_bias: f32,
 }
 
-/// `TraceFrame` in `gi.slang` (224 bytes).
+/// `TraceFrame` in `gi.slang` (272 bytes).
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct TraceFrame {
@@ -226,7 +248,11 @@ struct TraceFrame {
     mask: u32,
     bounce: u32,
     linear_sampler: u32,
-    _pad0: u32,
+    first_probe: u32,
+    window: u32,
+    _pad0: [u32; 3],
+    box_origin: [u32; 4],
+    box_size: [u32; 4],
 }
 
 /// `TracePush` in `gi.slang` (72 bytes).
@@ -295,7 +321,7 @@ struct SamplePush {
 }
 
 const _: () = assert!(size_of::<GiVolumeData>() == 96);
-const _: () = assert!(size_of::<TraceFrame>() == 224);
+const _: () = assert!(size_of::<TraceFrame>() == 272);
 const _: () = assert!(size_of::<ResolveFrame>() == 208);
 
 /// A buffer of the volume's, kept across frames.
@@ -386,6 +412,10 @@ pub struct ProbeGi {
     updates: Cell<u32>,
     /// Updates ever done: the random rotations' sequence.
     serial: Cell<u64>,
+    /// The first probe of the next window traced once converged.
+    next_probe: Cell<u32>,
+    /// The same in the box around the camera (an index in the box).
+    next_local: Cell<u32>,
 }
 
 impl core::fmt::Debug for ProbeGi {
@@ -517,6 +547,8 @@ impl ProbeGi {
             defined: Cell::new(false),
             updates: Cell::new(0),
             serial: Cell::new(0),
+            next_probe: Cell::new(0),
+            next_local: Cell::new(0),
         })
     }
 
@@ -546,6 +578,42 @@ impl ProbeGi {
         self.serial.get() > 0
     }
 
+    /// Whether this frame traces: while converging, and after with a ray budget.
+    pub fn needs_updates(&self) -> bool {
+        !self.is_converged() || self.settings.rays_per_frame > 0
+    }
+
+    /// Probes traced in a frame once converged (both windows), at most as many as the
+    /// volume has.
+    pub fn window(&self) -> u32 {
+        (self.settings.rays_per_frame / self.settings.rays).clamp(1, self.grid.probe_count())
+    }
+
+    /// The next update's random rotation number.
+    fn next_serial(&self) -> u64 {
+        let serial = self.serial.get();
+        self.serial.set(serial + 1);
+        serial
+    }
+
+    /// The box of probes around `eye` that converged updates keep fresh first: its first
+    /// probe's grid coordinates and its probes along each axis.
+    fn local_box(&self, eye: Vec3) -> ([u32; 3], [u32; 3]) {
+        let g = &self.grid;
+        let cell = ((eye - g.origin) / g.spacing).floor();
+        let mut origin = [0; 3];
+        let mut size = [0; 3];
+        for axis in 0..3 {
+            let count = g.counts[axis];
+            size[axis] = LOCAL_BOX[axis].min(count);
+            let center = cell[axis].clamp(0.0, (count - 1) as f32) as u32;
+            origin[axis] = center
+                .saturating_sub(size[axis] / 2)
+                .min(count - size[axis]);
+        }
+        (origin, size)
+    }
+
     /// Converges again from the next frame on (the light or the scene changed): the
     /// probes are traced afresh, from where they were moved.
     pub fn refresh(&self) {
@@ -561,7 +629,8 @@ impl ProbeGi {
         texels(IRRADIANCE_TILE) * 8 + texels(MOMENTS_TILE) * 4 + self.probes.size
     }
 
-    /// Bytes of an update's rays: a transient buffer of the frames that update the volume.
+    /// Bytes of an update's rays while converging (every probe): a transient buffer of the
+    /// frames that update the volume ([`Self::window`]'s probes once converged).
     pub fn rays_bytes(&self) -> u64 {
         u64::from(self.grid.probe_count()) * u64::from(self.settings.rays) * 8
     }
@@ -661,13 +730,20 @@ impl<'g> GiFrame<'g> {
         self.gi.has_light()
     }
 
+    /// Whether this frame traces ([`ProbeGi::needs_updates`]).
+    pub fn needs_updates(&self) -> bool {
+        self.gi.needs_updates()
+    }
+
     /// Pixels per resolved sample along each axis ([`GiSettings::resolve_scale`]).
     pub fn resolve_scale(&self) -> u32 {
         self.gi.settings.resolve_scale
     }
 
-    /// Declares this frame's updates while the volume converges (none once it has):
-    /// rays traced against `rays`' top level, their hits shaded from the GPU scene's
+    /// Declares this frame's updates: while the volume converges, rays from every probe
+    /// ([`GiSettings::updates_per_frame`] times); then, with a ray budget, from a window
+    /// of the box of probes around `eye` (the camera) and a window of the whole volume.
+    /// Rays are traced against `rays`' top level, their hits shaded from the GPU scene's
     /// instances, the geometry pool and the materials, lit by the sun (a unit vector
     /// towards it and its color, or `None`) and the volume's own light, misses lit by
     /// `sky`.
@@ -681,21 +757,35 @@ impl<'g> GiFrame<'g> {
         scene: &SceneFrame<'g>,
         geometry: &GeometryFrame<'g>,
         materials: &MaterialFrame<'g>,
+        eye: Vec3,
         sun: Option<(Vec3, Vec3)>,
         sky: GiSky,
     ) -> Result<(), RhiError> {
         let gi = self.gi;
-        if gi.is_converged() {
+        if !gi.needs_updates() {
             return Ok(());
         }
         engine_profiler::zone!("render::GiFrame::add_update_passes");
-        let (irradiance, moments, probes) = (self.irradiance, self.moments, self.probes);
-        // Each update's rays: radiance and distance as four halves per ray, read by the
-        // blend passes of the same update.
+        let probes = self.probes;
+        // While converging, every probe in each update; then the windows the ray budget
+        // pays for, once a frame: around the camera, and in turn over the whole volume.
+        let converging = !gi.is_converged();
+        let count = gi.grid.probe_count();
+        let (box_origin, box_dims) = gi.local_box(eye);
+        let box_count = box_dims[0] * box_dims[1] * box_dims[2];
+        let budget = gi.window();
+        let local = if converging {
+            0
+        } else {
+            ((budget as f32 * gi.settings.local_share.clamp(0.0, 1.0)) as u32).min(box_count)
+        };
+        let global = if converging { count } else { budget - local };
+        // Each update's rays: radiance and distance as four halves per ray, by slot in its
+        // window, read by the blend passes of the same update.
         let results = fg.create_buffer(
             "gi rays",
             BufferDesc {
-                size: gi.rays_bytes(),
+                size: u64::from(global.max(local)) * u64::from(gi.settings.rays) * 8,
             },
         );
         if !gi.cleared.get() {
@@ -718,8 +808,6 @@ impl<'g> GiFrame<'g> {
                     }
                 });
         }
-        let count = gi.grid.probe_count();
-        let volume = gi.volume_data();
         let (sun_direction, sun_color) = sun.map_or(([0.0; 4], [0.0; 4]), |(to_sun, color)| {
             let d = to_sun.normalize_or(Vec3::Y);
             ([d.x, d.y, d.z, 1.0], [color.x, color.y, color.z, 0.0])
@@ -733,131 +821,217 @@ impl<'g> GiFrame<'g> {
                 ..
             } => ([0.0, 0.0, 0.0, intensity], index, Some(texture)),
         };
-        let total = gi.settings.updates();
-        for _ in 0..gi.settings.updates_per_frame {
-            let update = gi.updates.get();
-            if update >= total {
-                break;
+        let base = TraceFrame {
+            volume: gi.volume_data(),
+            sun_direction,
+            sun_color,
+            sky: sky_rgb,
+            accel: rays.address,
+            sky_cube,
+            rays: gi.settings.rays,
+            mask: RAY_MASK_OPAQUE | RAY_MASK_MASKED,
+            linear_sampler: Bindless::sampler(SamplerKind::LinearClamp),
+            ..TraceFrame::default()
+        };
+        let update = |fg: &mut FrameGraph<'g>,
+                      ring: &mut UploadRing,
+                      frame: TraceFrame,
+                      alpha: f32,
+                      relocation: Option<bool>|
+         -> Result<(), RhiError> {
+            self.add_update(
+                fg,
+                ring,
+                bindless,
+                rays,
+                scene,
+                geometry,
+                materials,
+                results,
+                sky_texture,
+                frame,
+                alpha,
+                relocation,
+            )
+        };
+        if converging {
+            let total = gi.settings.updates();
+            for _ in 0..gi.settings.updates_per_frame {
+                let number = gi.updates.get();
+                if number >= total {
+                    break;
+                }
+                gi.updates.set(number + 1);
+                // The first updates replace the maps (the light gains a bounce each time);
+                // the rest are averaged. The first two move probes out of geometry, the
+                // third turns off those still inside.
+                let alpha = if number < gi.settings.bounces {
+                    1.0
+                } else {
+                    1.0 / (number - gi.settings.bounces + 1) as f32
+                };
+                let frame = TraceFrame {
+                    rotation: rotation(gi.next_serial()),
+                    bounce: u32::from(number > 0),
+                    window: count,
+                    ..base
+                };
+                let relocation =
+                    (number <= RELOCATING_UPDATES).then_some(number == RELOCATING_UPDATES);
+                update(fg, ring, frame, alpha, relocation)?;
             }
-            gi.updates.set(update + 1);
-            let serial = gi.serial.get();
-            gi.serial.set(serial + 1);
+            return Ok(());
+        }
+        let alpha = 1.0 - gi.settings.hysteresis.clamp(0.0, 1.0);
+        if local > 0 {
+            let first = gi.next_local.get() % box_count;
+            gi.next_local.set((first + local) % box_count);
             let frame = TraceFrame {
-                volume,
-                rotation: rotation(serial),
-                sun_direction,
-                sun_color,
-                sky: sky_rgb,
-                accel: rays.address,
-                sky_cube,
-                rays: gi.settings.rays,
-                mask: RAY_MASK_OPAQUE | RAY_MASK_MASKED,
-                bounce: u32::from(update > 0),
-                linear_sampler: Bindless::sampler(SamplerKind::LinearClamp),
-                _pad0: 0,
+                rotation: rotation(gi.next_serial()),
+                bounce: 1,
+                first_probe: first,
+                window: local,
+                box_origin: [box_origin[0], box_origin[1], box_origin[2], 1],
+                box_size: [box_dims[0], box_dims[1], box_dims[2], box_count],
+                ..base
             };
-            let frame = ring.push(&[frame]).ok_or(RhiError::Vulkan {
-                call: "probe GI's update constants (upload ring full)",
-                result: vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
-            })?;
-            let batches = rays.batches;
-            let current = scene.current;
-            let positions = geometry.position_address();
-            let (attributes, indices) = (geometry.attributes, geometry.indices);
-            let material_table = materials.buffer;
-            let mut trace = fg
-                .add_compute("gi trace", bindless)
-                .read(
-                    rays.tlas,
-                    Access::AccelerationStructureRead(ShaderStages::COMPUTE),
-                )
-                .read(current, Access::StorageRead(ShaderStages::COMPUTE))
-                .read(attributes, Access::StorageRead(ShaderStages::COMPUTE))
-                .read(indices, Access::StorageRead(ShaderStages::COMPUTE))
-                .read(material_table, Access::StorageRead(ShaderStages::COMPUTE))
-                .read(probes, Access::StorageRead(ShaderStages::COMPUTE))
-                .read(irradiance, Access::Sampled(ShaderStages::COMPUTE))
-                .read(moments, Access::Sampled(ShaderStages::COMPUTE))
-                .write(results, Access::StorageWrite(ShaderStages::COMPUTE));
-            if let Some(texture) = sky_texture {
-                trace = trace.read(texture, Access::Sampled(ShaderStages::COMPUTE));
-            }
-            trace.dispatch(
-                &gi.trace,
-                Dispatch::Threads([count * gi.settings.rays, 1, 1]),
+            update(fg, ring, frame, alpha, None)?;
+        }
+        if global > 0 {
+            let first = gi.next_probe.get();
+            gi.next_probe.set((first + global) % count);
+            let frame = TraceFrame {
+                rotation: rotation(gi.next_serial()),
+                bounce: 1,
+                first_probe: first,
+                window: global,
+                ..base
+            };
+            update(fg, ring, frame, alpha, None)?;
+        }
+        Ok(())
+    }
+
+    /// Declares one update: `frame`'s window of probes traced into `results`, blended into
+    /// the maps with `alpha` (1: replaced), then, with `relocation`, probes moved
+    /// (`Some(false)`) or classified (`Some(true)`).
+    #[allow(clippy::too_many_arguments)]
+    fn add_update(
+        &self,
+        fg: &mut FrameGraph<'g>,
+        ring: &mut UploadRing,
+        bindless: &'g Bindless,
+        rays: &RayFrame<'g>,
+        scene: &SceneFrame<'g>,
+        geometry: &GeometryFrame<'g>,
+        materials: &MaterialFrame<'g>,
+        results: Buffer,
+        sky_texture: Option<Texture>,
+        frame: TraceFrame,
+        alpha: f32,
+        relocation: Option<bool>,
+    ) -> Result<(), RhiError> {
+        let gi = self.gi;
+        let (irradiance, moments, probes) = (self.irradiance, self.moments, self.probes);
+        let window = frame.window;
+        let frame = ring.push(&[frame]).ok_or(RhiError::Vulkan {
+            call: "probe GI's update constants (upload ring full)",
+            result: vk::Result::ERROR_OUT_OF_DEVICE_MEMORY,
+        })?;
+        let batches = rays.batches;
+        let current = scene.current;
+        let positions = geometry.position_address();
+        let (attributes, indices) = (geometry.attributes, geometry.indices);
+        let material_table = materials.buffer;
+        let mut trace = fg
+            .add_compute("gi trace", bindless)
+            .read(
+                rays.tlas,
+                Access::AccelerationStructureRead(ShaderStages::COMPUTE),
+            )
+            .read(current, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(attributes, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(indices, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(material_table, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(probes, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(irradiance, Access::Sampled(ShaderStages::COMPUTE))
+            .read(moments, Access::Sampled(ShaderStages::COMPUTE))
+            .write(results, Access::StorageWrite(ShaderStages::COMPUTE));
+        if let Some(texture) = sky_texture {
+            trace = trace.read(texture, Access::Sampled(ShaderStages::COMPUTE));
+        }
+        trace.dispatch(
+            &gi.trace,
+            Dispatch::Threads([window * gi.settings.rays, 1, 1]),
+            move |ctx| {
+                Some(TracePush {
+                    frame,
+                    probes: ctx.address(probes),
+                    results: ctx.address(results),
+                    instances: ctx.address(current),
+                    batches,
+                    positions,
+                    attributes: ctx.address(attributes),
+                    indices: ctx.address(indices),
+                    materials: ctx.address(material_table),
+                })
+            },
+        );
+        let blend = |target: u32| BlendPush {
+            frame,
+            alpha,
+            target,
+            ..BlendPush::default()
+        };
+        let irradiance_push = blend(gi.irradiance.storage[0]);
+        fg.add_compute("gi irradiance", bindless)
+            .read(results, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(irradiance, Access::StorageReadWrite(ShaderStages::COMPUTE))
+            .dispatch(
+                &gi.irradiance_pass,
+                Dispatch::Groups([window, 1, 1]),
                 move |ctx| {
-                    Some(TracePush {
-                        frame,
-                        probes: ctx.address(probes),
+                    Some(BlendPush {
                         results: ctx.address(results),
-                        instances: ctx.address(current),
-                        batches,
-                        positions,
-                        attributes: ctx.address(attributes),
-                        indices: ctx.address(indices),
-                        materials: ctx.address(material_table),
+                        probes: ctx.address(probes),
+                        ..irradiance_push
                     })
                 },
             );
-            // The first updates replace the maps (the light gains a bounce each time);
-            // the rest are averaged.
-            let alpha = if update < gi.settings.bounces {
-                1.0
-            } else {
-                1.0 / (update - gi.settings.bounces + 1) as f32
+        let moments_push = blend(gi.moments.storage[0]);
+        fg.add_compute("gi moments", bindless)
+            .read(results, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(moments, Access::StorageReadWrite(ShaderStages::COMPUTE))
+            .dispatch(
+                &gi.moments_pass,
+                Dispatch::Groups([window, 1, 1]),
+                move |ctx| {
+                    Some(BlendPush {
+                        results: ctx.address(results),
+                        probes: ctx.address(probes),
+                        ..moments_push
+                    })
+                },
+            );
+        if let Some(classify) = relocation {
+            let relocate_push = BlendPush {
+                classify: u32::from(classify),
+                ..blend(0)
             };
-            let blend = |target: u32| BlendPush {
-                frame,
-                alpha,
-                target,
-                ..BlendPush::default()
-            };
-            let irradiance_push = blend(gi.irradiance.storage[0]);
-            fg.add_compute("gi irradiance", bindless)
+            fg.add_compute("gi relocate", bindless)
                 .read(results, Access::StorageRead(ShaderStages::COMPUTE))
-                .read(irradiance, Access::StorageReadWrite(ShaderStages::COMPUTE))
+                .read(probes, Access::StorageReadWrite(ShaderStages::COMPUTE))
                 .dispatch(
-                    &gi.irradiance_pass,
-                    Dispatch::Groups([count, 1, 1]),
+                    &gi.relocate,
+                    Dispatch::Threads([window, 1, 1]),
                     move |ctx| {
-                        Some(BlendPush {
-                            results: ctx.address(results),
-                            probes: ctx.address(probes),
-                            ..irradiance_push
-                        })
-                    },
-                );
-            let moments_push = blend(gi.moments.storage[0]);
-            fg.add_compute("gi moments", bindless)
-                .read(results, Access::StorageRead(ShaderStages::COMPUTE))
-                .read(moments, Access::StorageReadWrite(ShaderStages::COMPUTE))
-                .dispatch(
-                    &gi.moments_pass,
-                    Dispatch::Groups([count, 1, 1]),
-                    move |ctx| {
-                        Some(BlendPush {
-                            results: ctx.address(results),
-                            probes: ctx.address(probes),
-                            ..moments_push
-                        })
-                    },
-                );
-            if update <= RELOCATING_UPDATES {
-                let relocate_push = BlendPush {
-                    classify: u32::from(update == RELOCATING_UPDATES),
-                    ..blend(0)
-                };
-                fg.add_compute("gi relocate", bindless)
-                    .read(results, Access::StorageRead(ShaderStages::COMPUTE))
-                    .read(probes, Access::StorageReadWrite(ShaderStages::COMPUTE))
-                    .dispatch(&gi.relocate, Dispatch::Threads([count, 1, 1]), move |ctx| {
                         Some(BlendPush {
                             results: ctx.address(results),
                             probes: ctx.address(probes),
                             ..relocate_push
                         })
-                    });
-            }
+                    },
+                );
         }
         Ok(())
     }

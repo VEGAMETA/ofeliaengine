@@ -7,7 +7,10 @@
 //!   near its walls on both sides (no light through the walls);
 //! - a white room whose ceiling glows red: the floor's irradiance is red;
 //! - a sunlit floor: what faces it above gets its reflected light;
-//! - a double-sided glowing box seen from inside: its back faces glow too.
+//! - a double-sided glowing box seen from inside: its back faces glow too;
+//! - once converged, the volume follows a change (ADR 0089): a sun turned off fades out of
+//!   it at the rate its hysteresis sets, first around the camera when the ray budget is
+//!   small.
 //!
 //! Under the validation layer with synchronization validation.
 
@@ -62,9 +65,26 @@ fn slab(min: Vec3, max: Vec3) -> Mat4 {
 /// What a scene puts in the GPU scene: boxes and their materials.
 type Boxes = Vec<(Mat4, MaterialId)>;
 
+/// Frames of updates after the convergence, before the sampling.
+#[derive(Debug, Clone, Copy)]
+struct After {
+    /// The sun in them.
+    sun: Option<(Vec3, Vec3)>,
+    /// How many.
+    frames: u32,
+    /// The ray budget (`GiSettings::rays_per_frame`).
+    rays_per_frame: u32,
+    /// Its share around the camera (`GiSettings::local_share`).
+    local_share: f32,
+    /// The camera.
+    eye: Vec3,
+}
+
 /// Converges a volume over `grid` in a scene of `boxes` under `sky`, then returns the
-/// irradiance (rgb) and coverage (a) at each of `points` (position, normal).
+/// irradiance (rgb) and coverage (a) at each of `points` (position, normal), after the
+/// frames of updates `after` describes, if any.
 fn converge_and_sample(
+    after: Option<After>,
     grid: ProbeGrid,
     sky: Vec3,
     sun: Option<(Vec3, Vec3)>,
@@ -97,6 +117,8 @@ fn converge_and_sample(
         bounces: 3,
         samples: 6,
         updates_per_frame: 9,
+        rays_per_frame: after.map_or(0, |a| a.rays_per_frame),
+        local_share: after.map_or(0.0, |a| a.local_share),
         ..GiSettings::default()
     };
     let mut gi = ProbeGi::new(&device, &mut allocator, &bindless, grid, settings).unwrap();
@@ -147,9 +169,17 @@ fn converge_and_sample(
     // Frames until the volume has converged (the first also builds the structures),
     // then one that samples it.
     let mut frame_number = 0u64;
+    let mut frames_after = after.map_or(0, |a| a.frames);
     let results = loop {
         frame_number += 1;
-        let sampling = gi.is_converged();
+        let converged = gi.is_converged();
+        let (sun, sampling) = match (after, converged) {
+            (Some(a), true) if frames_after > 0 => {
+                frames_after -= 1;
+                (a.sun, false)
+            }
+            _ => (sun, converged),
+        };
         ring.begin_slot(0);
         // SAFETY: one-shot recording; nothing is in flight.
         unsafe {
@@ -237,6 +267,7 @@ fn converge_and_sample(
                         &scene_frame,
                         &geo,
                         &mats,
+                        after.map_or(Vec3::ZERO, |a| a.eye),
                         sun,
                         GiSky::Flat(sky),
                     )
@@ -265,7 +296,10 @@ fn converge_and_sample(
             };
             break floats.to_vec();
         }
-        assert!(frame_number < 8, "the volume never converged");
+        assert!(
+            frame_number < 8 + u64::from(after.map_or(0, |a| a.frames)),
+            "the volume never converged"
+        );
     };
     println!("{gi:?}, {} bytes", gi.memory_bytes());
     for ((p, n), r) in points.iter().zip(&results) {
@@ -318,6 +352,7 @@ fn a_uniform_sky_gives_pi_times_its_radiance() {
     ];
     // One small grey box far away: the ray scene needs an instance.
     let Some(results) = converge_and_sample(
+        None,
         grid,
         sky,
         None,
@@ -358,6 +393,7 @@ fn light_does_not_pass_through_the_walls_of_a_closed_box() {
         (Vec3::new(0.0, 0.0, -1.25), Vec3::NEG_Z),
     ];
     let Some(results) = converge_and_sample(
+        None,
         grid,
         sky,
         None,
@@ -408,6 +444,7 @@ fn a_glowing_red_ceiling_lights_the_floor_red() {
         (Vec3::new(1.5, 1.0, 0.0), Vec3::NEG_X),
     ];
     let Some(results) = converge_and_sample(
+        None,
         grid,
         Vec3::ZERO,
         None,
@@ -461,6 +498,7 @@ fn a_sunlit_floor_lights_what_is_above_it() {
         (Vec3::new(0.0, 1.0, 0.0), Vec3::Y),
     ];
     let Some(results) = converge_and_sample(
+        None,
         grid,
         Vec3::ZERO,
         Some((Vec3::Y, Vec3::splat(3.0))),
@@ -497,6 +535,7 @@ fn a_double_sided_glowing_box_lights_its_inside() {
         (Vec3::new(0.5, -0.4, 0.3), Vec3::NEG_X),
     ];
     let Some(results) = converge_and_sample(
+        None,
         grid,
         Vec3::ZERO,
         None,
@@ -542,6 +581,7 @@ fn a_deep_trench_lets_in_only_the_sky_above_it() {
         (Vec3::new(1.98, 2.0, 0.0), Vec3::NEG_X),
     ];
     let Some(results) = converge_and_sample(
+        None,
         grid,
         sky,
         None,
@@ -573,4 +613,94 @@ fn a_deep_trench_lets_in_only_the_sky_above_it() {
         "the wall: {:?} vs {wall}",
         results[1]
     );
+}
+
+/// The sunlit floor of `a_sunlit_floor_lights_what_is_above_it` with probes over `grid`,
+/// converged; then the sun is off for `frames` frames of updates within `rays_per_frame`
+/// (256 rays a probe) and `local_share` around `eye`, and the irradiance facing the floor
+/// sampled at `points`.
+fn sun_turned_off_for(
+    grid: ProbeGrid,
+    frames: u32,
+    rays_per_frame: u32,
+    local_share: f32,
+    eye: Vec3,
+    points: &[(Vec3, Vec3)],
+) -> Option<Vec<f32>> {
+    let results = converge_and_sample(
+        Some(After {
+            sun: None,
+            frames,
+            rays_per_frame,
+            local_share,
+            eye,
+        }),
+        grid,
+        Vec3::ZERO,
+        Some((Vec3::Y, Vec3::splat(3.0))),
+        |m| {
+            let grey = m.add(MaterialDesc::solid([0.5, 0.5, 0.5], 0.0, 0.5));
+            vec![(
+                slab(Vec3::new(-20.0, -0.2, -20.0), Vec3::new(20.0, 0.0, 20.0)),
+                grey,
+            )]
+        },
+        points,
+    )?;
+    Some(results.iter().map(|r| r[0]).collect())
+}
+
+#[test]
+fn a_light_turned_off_fades_out_at_the_hysteresis_rate() {
+    // Converged, the floor's light reaches the surface above it at about 1.45 (see
+    // `a_sunlit_floor_lights_what_is_above_it`). With every probe traced every frame, each
+    // update keeps 0.9 of a probe's light: 0.9^7 = 0.48 of it after 7 frames, 0.9^40 =
+    // 1.5 % after 40.
+    let grid = ProbeGrid::covering(
+        Vec3::new(-2.0, 0.3, -2.0),
+        Vec3::new(2.0, 2.3, 2.0),
+        0.5,
+        2000,
+    );
+    let middle = [(Vec3::new(0.0, 1.0, 0.0), Vec3::NEG_Y)];
+    let every_probe = grid.probe_count() * 256;
+    let Some(after_7) = sun_turned_off_for(grid, 7, every_probe, 0.0, Vec3::ZERO, &middle) else {
+        return;
+    };
+    let Some(after_40) = sun_turned_off_for(grid, 40, every_probe, 0.0, Vec3::ZERO, &middle) else {
+        return;
+    };
+    let (after_7, after_40) = (after_7[0], after_40[0]);
+    let converged = 1.45;
+    assert!(
+        after_7 > 0.35 * converged && after_7 < 0.62 * converged,
+        "after 7 frames: {after_7}"
+    );
+    assert!(after_40 < 0.05 * converged, "after 40 frames: {after_40}");
+}
+
+#[test]
+fn a_small_budget_follows_the_change_around_the_camera_first() {
+    // A volume of 41 x 5 x 41 probes over a 20 m floor; 64 probes a frame, half of them in
+    // the box around the camera (8 x 4 x 8 = 256 probes), the rest in turn over all 8,405.
+    // After 64 frames each probe by the camera has been traced 8 times (0.9^8 = 0.43 of
+    // its light left), each one at the far corner once at most.
+    let grid = ProbeGrid::covering(
+        Vec3::new(-10.0, 0.3, -10.0),
+        Vec3::new(10.0, 2.3, 10.0),
+        0.5,
+        10_000,
+    );
+    let eye = Vec3::new(-8.0, 1.0, -8.0);
+    let points = [
+        (Vec3::new(-8.0, 1.0, -8.0), Vec3::NEG_Y),
+        (Vec3::new(8.0, 1.0, 8.0), Vec3::NEG_Y),
+    ];
+    let Some(after) = sun_turned_off_for(grid, 64, 64 * 256, 0.5, eye, &points) else {
+        return;
+    };
+    let (near, far) = (after[0], after[1]);
+    let converged = 1.45;
+    assert!(near < 0.6 * converged, "by the camera: {near}");
+    assert!(far > 0.85 * converged, "far from it: {far}");
 }
