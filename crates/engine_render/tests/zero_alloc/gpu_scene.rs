@@ -1,6 +1,8 @@
 //! CLAUDE.md §5: zero heap allocations per frame in steady state, for the persistent GPU
 //! scene (ADR 0064) and the forward passes that draw it: moves, removals and insertions
-//! every frame, uploaded and declared, culled and drawn, recorded.
+//! every frame, uploaded and declared, culled and drawn, recorded; with ray queries, its
+//! acceleration structures too (ADR 0087: the top level rebuilt every frame, rays cast
+//! from the camera).
 //!
 //! A counting global allocator observes the process while frames are declared and
 //! recorded after a warm-up (driver allocations happen in C and are not counted). One
@@ -17,6 +19,7 @@ use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
+use engine_render::rays::{RAY_MASK_ALL, RayScene, RaySettings};
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -77,6 +80,10 @@ fn steady_state_scene_frames_do_not_allocate() {
     let occlusion = Occlusion::new(&device, &mut allocator, 4096).unwrap();
     let temporal = Temporal::new(&device, &mut allocator, 16).unwrap();
     let mut scene = GpuScene::new(&device, &bindless, 4096, 2).unwrap();
+    let mut rays = device
+        .ray_query()
+        .is_some()
+        .then(|| RayScene::new(&device, &bindless, RaySettings::default(), 2).unwrap());
     let place = |i: usize, t: f32| {
         Mat4::from_translation(Vec3::new(
             (i % 50) as f32 - 25.0,
@@ -174,6 +181,42 @@ fn steady_state_scene_frames_do_not_allocate() {
                 )
                 .unwrap()
                 .unwrap();
+            if let Some(rays) = rays.as_mut() {
+                let ray_frame = rays
+                    .add_passes(
+                        &mut fg,
+                        &device,
+                        &mut allocator,
+                        &mut ring,
+                        &bindless,
+                        &geo,
+                        &scene_frame,
+                        frame_number,
+                    )
+                    .unwrap()
+                    .unwrap();
+                let world_from_clip = ring
+                    .push(&[camera.clip_from_world.inverse().to_cols_array()])
+                    .unwrap();
+                let distances = fg.create_buffer(
+                    "ray distances",
+                    engine_render::graph::BufferDesc {
+                        size: 640 * 360 * 4,
+                    },
+                );
+                ray_frame.add_camera_pass(
+                    &mut fg,
+                    &bindless,
+                    world_from_clip,
+                    distances,
+                    [640, 360],
+                    RAY_MASK_ALL,
+                );
+                fg.add_pass("rays stand-in")
+                    .read(distances, engine_render::graph::Access::TransferRead)
+                    .side_effects()
+                    .execute(|_| {});
+            }
             let color = fg.create_texture("color", TextureDesc::new_2d(color_format, 640, 360));
             let depth = fg.create_texture("depth", TextureDesc::new_2d(depth_format, 640, 360));
             let passes = renderer
@@ -223,15 +266,25 @@ fn steady_state_scene_frames_do_not_allocate() {
     }
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     println!(
-        "100 frames: {allocations} heap allocations; {:?}",
-        scene.stats()
+        "100 frames: {allocations} heap allocations; {:?}; {:?}",
+        scene.stats(),
+        rays.as_ref().map(RayScene::stats)
     );
+    if let Some(rays) = &rays {
+        assert!(
+            rays.stats().rebuilt,
+            "the moving scene rebuilds its top level"
+        );
+    }
     assert_eq!(allocations, 0);
 
     device.wait_idle().unwrap();
     let (mut occlusion, mut temporal) = (occlusion, temporal);
     // SAFETY: nothing is in use.
     unsafe {
+        if let Some(rays) = rays.as_mut() {
+            rays.destroy(&device, &mut allocator);
+        }
         scene.destroy(&mut allocator);
         occlusion.destroy(&mut allocator);
         temporal.destroy(&mut allocator);

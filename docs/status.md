@@ -69,6 +69,7 @@ tooling included) about **50 %**.
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
 | HDRI environments: `.hdr` and OpenEXR panoramas as the sky, their sun found and lit as the directional light, cooked into BC6H cubes (DDC, packs) | done | ADR 0083 |
 | GPU particles and GPU radix sort | done | ADRs 0080, 0081 |
+| Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
 | Upscalers: TAAU, FSR 3.1, DLSS via Streamline (user-supplied DLLs) | done | ADRs 0060, 0063 |
 | Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/Catmull-Rom/Lanczos-3/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
@@ -96,9 +97,12 @@ overlapped: ADR 0079). On 2026-10-11: 1 (GPU particles and GPU radix sort: ADRs 
 0081; the reactive mask for effects, ADR 0081's amendment), 2 (decals through a decal
 buffer, ADR 0082; clustered decals measured against it on a branch), 2b (HDRI environments, ADR 0083 and its amendments:
 `.hdr` and OpenEXR, the sun as a light, cooked BC6H cubes; PRs #143–#145), 3 researched
-(GI, ADR 0084 Proposed: the owner's choice), 7c (`forward.rs` split, PR #147); a bloom
-format experiment measured and rejected (6b). Next: 2 or 3 once the owner has chosen;
-meanwhile 6b (the iGPU's bloom with fewer reads) or the ADR of 4.
+(GI, ADR 0084: our own, held to beat Brixelizer GI; the owner's answers, PR #160) and its
+first step, acceleration structures (ADR 0087), 4 researched (ADR 0085: meshlets in the
+forward renderer first), 7c (`forward.rs` split, PR #147), mimalloc as the global
+allocator (ADR 0086, PR #162), contact shadows made deterministic (PRs #159, #161); a
+bloom format experiment measured and rejected (6b). Next: 3a (the ray scene's costs
+spread over frames), then GI phase 1.
 
 ## 5. Queue (in order)
 
@@ -297,7 +301,16 @@ queue item (done 2026-10-10).
    queries** (the owner, 2026-10-11: if it can be faster and cheaper than AMD's, do it),
    held to a bar: less GPU time and memory than AMD's Brixelizer GI (built from the
    FidelityFX SDK as the reference, and the fallback) at comparable quality on both GPUs.
-   Acceleration structures in `engine_rhi` and the GPU scene first.
+   **Acceleration structures done 2026-10-11** (ADR 0087, `engine_render::rays`): a
+   bottom level per mesh (fast trace, compacted: Sponza 7.5 / 15.8 MiB on the RTX /
+   Radeon, 1.4 / 2.9 MiB at the coarsest level), a top level of the GPU scene's slots
+   written on the GPU and rebuilt in frames where something changed (Sponza 80 / 230 µs;
+   10,300 instances 181 / 3,798 µs), shaders reaching it by address; a ray per pixel at
+   1080p 0.9 / 36 ms. **Next (3a):** spread their costs over frames: the top level
+   refitted between rebuilds (measured 4.6–10.6× cheaper; how far its hierarchy may
+   degrade to be studied first), built on the async compute queue, bottom-level builds
+   under a per-frame budget, fast build on integrated GPUs decided with the refit. Then
+   GI phase 1 (the probe volume converged at load).
 3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
    first: it decides permutations and pipeline management for the whole renderer (§9
    material graph and hand-written Slang).

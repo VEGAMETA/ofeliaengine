@@ -455,9 +455,16 @@ impl PoolBuffer {
         usage: vk::BufferUsageFlags,
     ) -> Result<Self, RhiError> {
         let size = size.max(16);
+        // Acceleration structures are built from the pool (ADR 0087).
+        let rays = if device.ray_query().is_some() {
+            vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+        } else {
+            vk::BufferUsageFlags::empty()
+        };
         let (buffer, allocation) = allocator.create_buffer(
             &vk::BufferCreateInfo::default().size(size).usage(
                 usage
+                    | rays
                     | vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                     | vk::BufferUsageFlags::TRANSFER_SRC
@@ -1582,6 +1589,11 @@ impl GeometryFrame<'_> {
     /// Device address of the [`VertexAttributes`].
     pub fn attribute_address(&self) -> vk::DeviceAddress {
         self.pool.attributes.address
+    }
+
+    /// Device address of the indices (32-bit, relative to each mesh's first vertex).
+    pub fn index_address(&self) -> vk::DeviceAddress {
+        self.pool.indices.address
     }
 
     /// Declares that a pass reads the pool: vertex shaders the vertex buffers, the input

@@ -24,7 +24,11 @@
 //! shadows (ADR 0071; implies the prepass), `--decals <count>` for decals spread over the
 //! scene's floor (ADR 0082; implies the prepass: boxes projecting down, a blot texture,
 //! every other one with a normal map) and `--decal-size <fraction>` for their side as a
-//! fraction of the scene's size (default 3-8 %), `--sky` for
+//! fraction of the scene's size (default 3-8 %), `--rays [finest|coarsest]` for the scene's
+//! acceleration structures (ADR 0087: the draws in a GPU scene, bottom levels at that
+//! detail, the top level rebuilt every frame: an instance is nudged) and a ray through every pixel from the
+//! camera (their own table; with `--screenshot`, `<name>-rays.png` of their distances),
+//! `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--atmosphere` for the physically based sky and atmosphere
 //! instead of the gradient sky (ADR 0069; implies `--sky`), `--sun <elevation°>` for the sun's
@@ -64,12 +68,14 @@ use engine_render::forward::{
     Camera, Decal, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
     ShadowSettings, Spot, Temporal,
 };
+use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId};
 use engine_render::png::{PngFormat, encode_png};
 use engine_render::post::{Composite, HDR_FORMAT, ToneCurve, Tonemap};
 use engine_render::postfx::{AutoExposure, Bloom, BloomSettings, ExposureSettings};
+use engine_render::rays::{BlasDetail, RAY_MASK_ALL, RayScene, RaySettings};
 use engine_render::reflections::{
     ProbeSettings, ReflectionProbe, ReflectionProbes, Reflections, ScreenSpaceReflections,
     SsrSettings,
@@ -280,6 +286,7 @@ fn main() {
     let mut contact: Option<engine_render::forward::ContactShadowSettings> = None;
     let mut decal_count = 0usize;
     let mut decal_size: Option<f32> = None;
+    let mut ray_detail: Option<BlasDetail> = None;
     let mut light_culling = true;
     let (mut with_sky, mut sky_every_frame) = (false, false);
     let (mut atmosphere, mut atmosphere_every_frame, mut fog) = (false, false, false);
@@ -343,6 +350,12 @@ fn main() {
             "--contact" => contact = Some(Default::default()),
             "--decals" => decal_count = args.next().unwrap().parse().unwrap(),
             "--decal-size" => decal_size = Some(args.next().unwrap().parse().unwrap()),
+            "--rays" => {
+                ray_detail = Some(match args.next_if(|a| !a.starts_with("--")).as_deref() {
+                    Some("coarsest") => BlasDetail::Coarsest,
+                    _ => BlasDetail::Finest,
+                });
+            }
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
             "--lods" => lods = true,
@@ -824,6 +837,67 @@ fn main() {
         .set_ambient_occlusion(&device, &bindless, ao)
         .unwrap();
     renderer.set_light_culling(light_culling);
+    // The scene for ray queries (ADR 0087): the draws as a GPU scene's instances, and a
+    // buffer of camera-ray distances (persistent, so the pass that writes it is kept).
+    let mut ray_bed = ray_detail
+        .filter(|_| device.ray_query().is_some())
+        .map(|detail| {
+            let mut scene = GpuScene::new(
+                &device,
+                &bindless,
+                draws.len().next_power_of_two() as u32,
+                1,
+            )
+            .unwrap();
+            let mut first = None;
+            for d in &draws {
+                let id = scene.insert(SceneInstance {
+                    mesh: d.mesh,
+                    material: d.material,
+                    world_from_object: d.world_from_object,
+                });
+                first.get_or_insert((id, d.world_from_object));
+            }
+            let rays = RayScene::new(&device, &bindless, RaySettings { detail }, 1).unwrap();
+            let bytes = u64::from(WIDTH * HEIGHT) * 4;
+            let (buffer, memory) = allocator
+                .create_buffer(
+                    &vk::BufferCreateInfo::default().size(bytes).usage(
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                            | vk::BufferUsageFlags::TRANSFER_SRC,
+                    ),
+                    MemoryLocation::Device,
+                )
+                .unwrap();
+            // SAFETY: created with the device address usage.
+            let address = unsafe {
+                d.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buffer))
+            };
+            let (readback, readback_memory) = allocator
+                .create_buffer(
+                    &vk::BufferCreateInfo::default()
+                        .size(bytes)
+                        .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                    MemoryLocation::Readback,
+                )
+                .unwrap();
+            (
+                scene,
+                rays,
+                buffer,
+                Some(memory),
+                address,
+                readback,
+                Some(readback_memory),
+                first,
+            )
+        });
+    if ray_detail.is_some() && ray_bed.is_none() {
+        println!("Rays: this GPU has no ray queries");
+    }
+    let mut ray_rows: Vec<String> = Vec::new();
+    let mut blas_build_us = 0.0f64;
     renderer
         .set_reflections(&device, &bindless, probe_grid.is_some() || ssr.is_some())
         .unwrap();
@@ -1100,6 +1174,7 @@ fn main() {
         let (mut local_time, mut local_views) = (Vec::new(), Vec::new());
         let mut contact_time = Vec::new();
         let (mut decal_tiles_time, mut decal_time) = (Vec::new(), Vec::new());
+        let (mut tlas_time, mut camera_rays_time) = (Vec::new(), Vec::new());
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
         let (mut tables, mut aerial, mut composite) = (Vec::new(), Vec::new(), Vec::new());
         let (mut bloom_time, mut exposure_time, mut tonemap_time) =
@@ -1162,6 +1237,97 @@ fn main() {
                 if frame_number == 1 {
                     for (texture, pixels) in &decal_textures {
                         texture.upload(&mut fg, &mut ring, pixels).unwrap();
+                    }
+                }
+                if let Some((scene, rays, buffer, _, address, readback, _, first)) =
+                    ray_bed.as_mut()
+                {
+                    // One instance nudged every frame: the top level is rebuilt every frame
+                    // (a still scene keeps it), as in a game with anything moving.
+                    if let Some((id, world)) = *first {
+                        let nudge = (frame_number % 2) as f32 * 1e-3;
+                        scene.set_transform(
+                            id,
+                            &(Mat4::from_translation(Vec3::new(nudge, 0.0, 0.0)) * world),
+                        );
+                    }
+                    let scene_frame = scene
+                        .add_passes(
+                            &mut fg,
+                            &device,
+                            &mut allocator,
+                            &mut ring,
+                            &bindless,
+                            &geo,
+                            &mats,
+                            frame_number,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    let ray_frame = rays
+                        .add_passes(
+                            &mut fg,
+                            &device,
+                            &mut allocator,
+                            &mut ring,
+                            &bindless,
+                            &geo,
+                            &scene_frame,
+                            frame_number,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    let world_from_clip = ring
+                        .push(&[camera.clip_from_world.inverse().to_cols_array()])
+                        .unwrap();
+                    let out = fg.import_buffer(
+                        "camera ray distances",
+                        ImportedBuffer {
+                            buffer: *buffer,
+                            size: u64::from(WIDTH * HEIGHT) * 4,
+                            address: *address,
+                            initial: BufferState::idle(),
+                            final_state: Some(BufferState::idle()),
+                        },
+                    );
+                    ray_frame.add_camera_pass(
+                        &mut fg,
+                        &bindless,
+                        world_from_clip,
+                        out,
+                        [WIDTH, HEIGHT],
+                        RAY_MASK_ALL,
+                    );
+                    if capture {
+                        let readback = *readback;
+                        let to = fg.import_buffer(
+                            "camera ray readback",
+                            ImportedBuffer {
+                                buffer: readback,
+                                size: u64::from(WIDTH * HEIGHT) * 4,
+                                address: 0,
+                                initial: BufferState::idle(),
+                                final_state: Some(BufferState::host_read()),
+                            },
+                        );
+                        fg.add_pass("camera ray readback")
+                            .read(out, Access::TransferRead)
+                            .write(to, Access::TransferWrite)
+                            .execute(move |ctx| {
+                                // SAFETY: recording; the graph ordered the copy.
+                                unsafe {
+                                    ctx.device.cmd_copy_buffer(
+                                        ctx.cmd,
+                                        ctx.buffer(out),
+                                        ctx.buffer(to),
+                                        &[vk::BufferCopy {
+                                            src_offset: 0,
+                                            dst_offset: 0,
+                                            size: u64::from(WIDTH * HEIGHT) * 4,
+                                        }],
+                                    );
+                                }
+                            });
                     }
                 }
                 let hdr = fg.create_texture("hdr", TextureDesc::new_2d(HDR_FORMAT, WIDTH, HEIGHT));
@@ -1358,6 +1524,7 @@ fn main() {
                 let mut local_frame = 0.0;
                 let mut contact_frame = 0.0;
                 let (mut decal_tiles_frame, mut decal_frame) = (0.0, 0.0);
+                let (mut tlas_frame, mut camera_rays_frame) = (0.0, 0.0);
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
                     match time.name {
@@ -1375,6 +1542,8 @@ fn main() {
                             contact_frame += f64::from(time.gpu_us);
                         }
                         "decal tiles clear" | "decal tiles" => decal_tiles_frame += us,
+                        "tlas instances" | "tlas build" => tlas_frame += us,
+                        "camera rays" => camera_rays_frame += us,
                         "decals" => decal_frame += us,
                         "local shadow cull" | "local shadows" => {
                             local_frame += f64::from(time.gpu_us);
@@ -1434,11 +1603,42 @@ fn main() {
                 local_time.push(local_frame);
                 contact_time.push(contact_frame);
                 decal_tiles_time.push(decal_tiles_frame);
+                tlas_time.push(tlas_frame);
+                camera_rays_time.push(camera_rays_frame);
                 decal_time.push(decal_frame);
                 local_views.push(f64::from(renderer.local_shadow_stats().views_drawn));
                 if let Some(us) = graph.gpu_frame_time() {
                     frame_time.push(f64::from(us));
                 }
+            }
+            for time in graph.gpu_pass_times() {
+                if time.name == "blas builds" {
+                    blas_build_us += f64::from(time.gpu_us);
+                }
+            }
+            if capture
+                && let Some(file) = &screenshot
+                && let Some((.., Some(memory), _)) = &ray_bed
+            {
+                let ptr = memory.mapped_ptr().unwrap();
+                // SAFETY: the GPU is idle; the mapping holds a float per pixel.
+                let distances = unsafe {
+                    core::slice::from_raw_parts(
+                        ptr.as_ptr().cast::<f32>(),
+                        (WIDTH * HEIGHT) as usize,
+                    )
+                };
+                let mut pixels = Vec::with_capacity(distances.len() * 4);
+                for &t in distances {
+                    let v = if t < 0.0 {
+                        0
+                    } else {
+                        (255.0 / (1.0 + t * 0.15)) as u8
+                    };
+                    pixels.extend_from_slice(&[v, v, v, 255]);
+                }
+                let png = encode_png(WIDTH, HEIGHT, PngFormat::Rgba, &pixels).unwrap();
+                std::fs::write(file.replace(".png", "-rays.png"), png).unwrap();
             }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
@@ -1475,6 +1675,20 @@ fn main() {
             median(&mut decal_tiles_time),
             median(&mut decal_time),
         );
+        if let Some((_, rays, ..)) = &ray_bed {
+            let stats = rays.stats();
+            let us = median(&mut camera_rays_time);
+            ray_rows.push(format!(
+                "| {mode} | {} | {:.1} | {} | {:.1} | {:.1} | {:.0} | {:.0} |",
+                stats.blas_count,
+                stats.blas_bytes as f64 / f64::from(1 << 20),
+                stats.triangles,
+                stats.tlas_bytes as f64 / 1024.0,
+                median(&mut tlas_time),
+                us,
+                f64::from(WIDTH * HEIGHT) / us.max(1e-3),
+            ));
+        }
         if probes.is_some() || screen_space.is_some() {
             reflection_rows.push(format!(
                 "| {mode} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} |",
@@ -1487,6 +1701,20 @@ fn main() {
                 median(&mut ssr_temporal),
                 median(&mut reflect_composite),
             ));
+        }
+    }
+    if !ray_rows.is_empty() {
+        println!();
+        println!(
+            "Rays: bottom levels built in {blas_build_us:.0} µs of GPU time (first frame), {:?}",
+            ray_detail.unwrap_or_default()
+        );
+        println!(
+            "| materials | bottom levels | MiB | triangles | top level KiB | GPU top level µs | GPU camera rays µs | Mrays/s |"
+        );
+        println!("|---|---:|---:|---:|---:|---:|---:|---:|");
+        for row in &ray_rows {
+            println!("{row}");
         }
     }
     if !reflection_rows.is_empty() {
@@ -1560,6 +1788,18 @@ fn main() {
         }
         for (texture, _) in &mut decal_textures {
             texture.destroy(&device, &mut allocator, &bindless, 0);
+        }
+        if let Some((mut scene, mut rays, buffer, memory, _, readback, readback_memory, _)) =
+            ray_bed.take()
+        {
+            rays.destroy(&device, &mut allocator);
+            scene.destroy(&mut allocator);
+            if let Some(memory) = memory {
+                allocator.destroy_buffer(buffer, memory);
+            }
+            if let Some(memory) = readback_memory {
+                allocator.destroy_buffer(readback, memory);
+            }
         }
         allocator.destroy_buffer(readback, readback_mem);
         d.destroy_command_pool(command_pool, None);

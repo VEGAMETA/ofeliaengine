@@ -309,7 +309,7 @@ pub(crate) const SUBSURFACE: usize = 16;
 /// Blended surfaces: drawn by the transparent pass only, one batch per instance, back to
 /// front (ADR 0054).
 pub(crate) const BLENDED: usize = 8;
-const MASKED: usize = 4;
+pub(crate) const MASKED: usize = 4;
 const DOUBLE_SIDED: usize = 2;
 pub(crate) const MIRRORED: usize = 1;
 /// Bitmasks of states for [`States::draw`]: opaque and masked without subsurface

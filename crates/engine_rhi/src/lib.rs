@@ -22,6 +22,7 @@
 //! The minimum GPU tier is Vulkan 1.3 with dynamic rendering, synchronization2, timeline
 //! semaphores, buffer device address and bindless descriptor indexing (ADR 0006).
 
+mod accel;
 mod adapter;
 mod bindless;
 mod breadcrumbs;
@@ -38,6 +39,7 @@ mod pipeline_cache;
 pub mod spirv;
 mod swapchain;
 
+pub use accel::{AccelLevel, AccelerationStructure, RayQuery};
 pub use adapter::{Adapter, AdapterKind, AdapterPreference, OptionalCaps};
 pub use ash;
 pub use bindless::{Bindless, PUSH_CONSTANT_BYTES, SamplerKind, Wrap};

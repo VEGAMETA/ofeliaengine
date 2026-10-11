@@ -67,6 +67,7 @@ pub mod post;
 pub mod postaa;
 pub mod postfx;
 pub mod present;
+pub mod rays;
 pub mod reflections;
 pub mod shadow;
 pub mod skinning;
