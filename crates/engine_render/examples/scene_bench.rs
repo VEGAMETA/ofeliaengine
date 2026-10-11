@@ -292,14 +292,15 @@ fn main() {
     let mut probe_faces = 6u32;
     let mut probes_every_frame = false;
     let mut ssr: Option<bool> = None;
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--screenshot" => screenshot = args.next(),
             "--uncompressed" => uncompressed = true,
             "--prepass" => prepass = true,
             "--ao" => {
-                let quality = match args.next().as_deref() {
+                // An optional quality: the next argument unless it is another flag.
+                let quality = match args.next_if(|a| !a.starts_with("--")).as_deref() {
                     Some("low") => AoQuality::Low,
                     Some("medium") => AoQuality::Medium,
                     Some("ultra") => AoQuality::Ultra,

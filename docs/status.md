@@ -466,8 +466,10 @@ grown, divide and conquer); the old labels stay in parentheses.
 - **Reliability:** two silent process exits (`perf_gate` once, `frame_bench` once) were
   never reproduced or explained. Watch for a recurrence and get a stack.
 - **Housekeeping:** `scene_bench` is wired by hand, outside `engine_frame`. From the second review:
-  - `game_loop`'s "input → camera" counts a stale window event (637 ms);
-  - `scene_bench --ao` takes the next argument as the AO quality even when it is a flag;
+  - ~~`game_loop`'s "input → camera" counts a stale window event (637 ms)~~ (fixed
+    2026-10-11: cursor events from before the loop are ignored);
+  - ~~`scene_bench --ao` takes the next argument as the AO quality even when it is a
+    flag~~ (fixed 2026-10-11);
   - CLAUDE.md §5 (mimalloc) and §2 ("engine_runtime: game executable") describe things
     that do not exist yet.
 
