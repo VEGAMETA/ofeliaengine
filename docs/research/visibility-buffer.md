@@ -56,7 +56,7 @@ No code was copied from any of them.
    visibility buffer needs anyway.
 2. **A visibility buffer** replaces the opaque shading: IDs rasterized, materials shaded in
    compute by tile classes. It changes how shading permutations work (the register rule,
-   ADR 0058) and how custom materials plug in (queue item 3b, "after GI"), and MSAA (ADR
+   ADR 0058) and how custom materials plug in (queue item 3c, "after GI"), and MSAA (ADR
    0075) needs a per-sample path or stays forward. Decide it together with 3b's ADR, with
    measurements of meshlets in hand.
 3. **Software rasterization of small triangles** (64-bit atomics) only after 2, if dense

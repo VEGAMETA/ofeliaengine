@@ -31,7 +31,7 @@ image atomics.
 2. **A visibility buffer:** IDs (instance, meshlet, triangle) rasterized into 32 or 64
    bits, then materials shaded in compute per class of tiles with analytic derivatives;
    transparent surfaces stay forward. It replaces the forward opaque shading, changes how
-   shading permutations and custom materials (item 3b) work, and needs a per-sample path
+   shading permutations and custom materials (item 3c) work, and needs a per-sample path
    for MSAA (or keeps MSAA on the forward path).
 3. **Nanite-like software rasterization** of small triangles with 64-bit atomics into the
    visibility buffer: only on top of option 2.
@@ -39,7 +39,7 @@ image atomics.
 ## Recommendation (to confirm)
 
 Option 1 now: it gains where geometry is dense without touching the shading, works on both
-GPUs, and its clusters are what options 2 and 3 build on. Option 2 decided with item 3b's
+GPUs, and its clusters are what options 2 and 3 build on. Option 2 decided with item 3c's
 ADR (custom materials decide the shading's shape) and with the meshlets' numbers on both
 GPUs. Option 3 only if dense geometry is still the bottleneck then. A fresh patent check
 comes with each step (the Intel tiled-deferred application in the research note before
@@ -47,7 +47,7 @@ option 2).
 
 ## Questions for the owner
 
-1. Meshlets first (option 1), with the visibility buffer decided together with item 3b?
+1. Meshlets first (option 1), with the visibility buffer decided together with item 3c?
 2. Or the visibility buffer now, before custom materials?
 
 ## Decision
@@ -55,7 +55,7 @@ option 2).
 **Option 1 now** (the owner, 2026-10-11): meshlets in the forward renderer, clusters built
 at cook time and culled per view on the GPU, drawn through compacted indices where mesh
 shaders are missing (the iGPU) and through task and mesh shaders where they exist. The
-visibility buffer is decided together with custom materials (queue item 3b).
+visibility buffer is decided together with custom materials (queue item 3c).
 
 ## Consequences
 
