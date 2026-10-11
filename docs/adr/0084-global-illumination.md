@@ -1,6 +1,6 @@
-# 0084. Global illumination: DDGI probes traced with ray queries, or Brixelizer GI
+# 0084. Global illumination: our own probe GI traced with ray queries, held to beat Brixelizer GI
 
-- Status: Proposed (a question for the owner, 2026-10-11)
+- Status: Accepted (option 1, held to beat option 2: the owner, 2026-10-11)
 - Date: 2026-10-11
 - Research: [docs/research/global-illumination.md](../research/global-illumination.md)
 - Related: [ADR 0046](0046-image-based-lighting.md) (the sky's light it adds to),
@@ -69,8 +69,18 @@ on both GPUs, the medallions from above) come with the prototype.
 
 ## Decision
 
-Pending.
+**Option 1, our own probe GI traced with ray queries** (the owner, 2026-10-11: "if you can
+make it better, faster and cheaper than AMD's, try"). Held to a bar: on both reference GPUs,
+at comparable quality (the medallions from above, light leaking, response to moving
+lights), it must cost less GPU time and memory than AMD's Brixelizer GI. Brixelizer GI is
+built from the FidelityFX SDK (MIT; the SDK `engine_fsr` already builds) as the reference
+measurement, and it is the fallback if ours does not beat it.
 
 ## Consequences
 
-Pending.
+- Acceleration structures become part of `engine_rhi` and the GPU scene
+  (`VK_KHR_acceleration_structure`, `VK_KHR_ray_query`); GI needs a GPU with ray queries
+  (both reference GPUs; others fall back to the sky's ambient light).
+- Two phases: a probe volume converged at load, then a ray budget per frame.
+- The comparison with Brixelizer GI (cost and memory on both GPUs, the same scenes and
+  shots) is part of the acceptance, in `docs/perf/history.md` and the research note.

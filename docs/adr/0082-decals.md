@@ -1,6 +1,6 @@
-# 0082. Decals: clustered in the shading, or a decal buffer before lighting
+# 0082. Decals: a decal buffer before lighting
 
-- Status: Proposed (a question for the owner, 2026-10-11)
+- Status: Accepted (option 2, the owner, 2026-10-11)
 - Date: 2026-10-11
 - Research: [docs/research/decals.md](../research/decals.md)
 - Related: [ADR 0045](0045-local-lights.md) (z-bins and tile bitmasks),
@@ -47,8 +47,19 @@ pixel on both GPUs, registers of the decal variants) come with the prototype.
 
 ## Decision
 
-Pending.
+**Option 2, a decal buffer before lighting** (the owner, 2026-10-11: "a decal buffer is
+necessary; without it the corners would come out wrong"). After the depth prepass, a
+compute pass evaluates each pixel's decals, binned like the lights (z-bins and tile
+bitmasks), from the pixel's position and normal in the depth buffer, into render-size
+targets (albedo with coverage, a normal, roughness and metalness); the forward shading's
+decal entry points read them at their pixel and blend before lighting.
 
 ## Consequences
 
-Pending.
+- Decals draw only with the depth prepass (on with AO and in the iGPU defaults); a view
+  with decals turns it on.
+- 8 to 12 bytes per pixel of transient targets while decals draw; nothing without them
+  (the register rule: entry points of their own, made on first use, ADR 0079).
+- Transparent surfaces get no decals.
+- Measurements with the prototype: the decal pass and the shading's extra cost per pixel
+  on both GPUs, the registers of the decal variants.

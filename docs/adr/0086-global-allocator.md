@@ -1,6 +1,6 @@
 # 0086. The global allocator: mimalloc 2, its memory given back by idle workers
 
-- Status: Proposed (a question for the owner, 2026-10-11)
+- Status: Accepted (option 3, the owner, 2026-10-11)
 - Date: 2026-10-11
 - Research: [docs/research/global-allocator.md](../research/global-allocator.md)
 - Related: CLAUDE.md §5 ("Global allocator: mimalloc; in dev builds, a wrapper that
@@ -60,7 +60,8 @@ Option 3, CLAUDE.md §5 as written, with what the measurements add:
 
 ## Decision
 
-Pending.
+**Option 3, mimalloc 2.3.2** (the owner, 2026-10-11), with the job pool's idle workers
+giving memory back and a counting layer in debug builds, as recommended above.
 
 ## Consequences
 
