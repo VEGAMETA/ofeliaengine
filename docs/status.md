@@ -101,8 +101,8 @@ buffer, ADR 0082; clustered decals measured against it on a branch), 2b (HDRI en
 first step, acceleration structures (ADR 0087), 4 researched (ADR 0085: meshlets in the
 forward renderer first), 7c (`forward.rs` split, PR #147), mimalloc as the global
 allocator (ADR 0086, PR #162), contact shadows made deterministic (PRs #159, #161); a
-bloom format experiment measured and rejected (6b). Next: 3a (the ray scene's costs
-spread over frames), then GI phase 1.
+bloom format experiment measured and rejected (6b), 3a (the ray scene's costs spread
+over frames: ADR 0087's addendum). Next: GI phase 1.
 
 ## 5. Queue (in order)
 
@@ -306,11 +306,15 @@ queue item (done 2026-10-10).
    Radeon, 1.4 / 2.9 MiB at the coarsest level), a top level of the GPU scene's slots
    written on the GPU and rebuilt in frames where something changed (Sponza 80 / 230 µs;
    10,300 instances 181 / 3,798 µs), shaders reaching it by address; a ray per pixel at
-   1080p 0.9 / 36 ms. **Next (3a):** spread their costs over frames: the top level
-   refitted between rebuilds (measured 4.6–10.6× cheaper; how far its hierarchy may
-   degrade to be studied first), built on the async compute queue, bottom-level builds
-   under a per-frame budget, fast build on integrated GPUs decided with the refit. Then
-   GI phase 1 (the probe volume converged at load).
+   1080p 0.9 / 36 ms. **3a done 2026-10-11** (ADR 0087's addendum, `ray_bench`): the top
+   level refitted between rebuilds, rebuilt after 8 refits (10,000 instances moving:
+   39 / 499 µs per frame instead of 145 / 2,621, rays within 1 %; never rebuilding slows
+   rays up to 8×), and at once on added, removed, teleported or re-meshed instances
+   (`SceneStats::restructured`); bottom-level builds under a per-frame budget
+   (`RaySettings::for_device`: Sponza at most 0.8 ms per frame on the RTX; on the iGPU
+   its largest mesh alone costs 11 ms, so rays there use the coarsest level); the async
+   compute queue not worth it after the refit (at most 40 µs to hide). **Next:** GI
+   phase 1 (the probe volume converged at load).
 3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
    first: it decides permutations and pipeline management for the whole renderer (§9
    material graph and hand-written Slang).

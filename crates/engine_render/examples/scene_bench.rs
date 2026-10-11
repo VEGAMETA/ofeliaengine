@@ -26,9 +26,10 @@
 //! every other one with a normal map) and `--decal-size <fraction>` for their side as a
 //! fraction of the scene's size (default 3-8 %), `--rays [finest|coarsest]` for the scene's
 //! acceleration structures (ADR 0087: the draws in a GPU scene, bottom levels at that
-//! detail, the top level rebuilt every frame: an instance is nudged) and a ray through every pixel from the
-//! camera (their own table; with `--screenshot`, `<name>-rays.png` of their distances),
-//! `--sky` for
+//! detail, the top level refitted or rebuilt every frame: an instance is nudged) and a ray
+//! through every pixel from the camera (their own table; with `--screenshot`,
+//! `<name>-rays.png` of their distances), `--ray-budget <triangles|device>` for the
+//! bottom levels' build budget per frame (`device`: `RaySettings::for_device`), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--atmosphere` for the physically based sky and atmosphere
 //! instead of the gradient sky (ADR 0069; implies `--sky`), `--sun <elevation°>` for the sun's
@@ -287,6 +288,7 @@ fn main() {
     let mut decal_count = 0usize;
     let mut decal_size: Option<f32> = None;
     let mut ray_detail: Option<BlasDetail> = None;
+    let mut ray_budget: Option<String> = None;
     let mut light_culling = true;
     let (mut with_sky, mut sky_every_frame) = (false, false);
     let (mut atmosphere, mut atmosphere_every_frame, mut fog) = (false, false, false);
@@ -356,6 +358,7 @@ fn main() {
                     _ => BlasDetail::Finest,
                 });
             }
+            "--ray-budget" => ray_budget = args.next(),
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
             "--lods" => lods = true,
@@ -858,7 +861,22 @@ fn main() {
                 });
                 first.get_or_insert((id, d.world_from_object));
             }
-            let rays = RayScene::new(&device, &bindless, RaySettings { detail }, 1).unwrap();
+            let build_budget = match ray_budget.as_deref() {
+                None => u32::MAX,
+                Some("device") => RaySettings::for_device(&device).build_budget,
+                Some(n) => n.parse().unwrap(),
+            };
+            let rays = RayScene::new(
+                &device,
+                &bindless,
+                RaySettings {
+                    detail,
+                    build_budget,
+                    ..RaySettings::default()
+                },
+                1,
+            )
+            .unwrap();
             let bytes = u64::from(WIDTH * HEIGHT) * 4;
             let (buffer, memory) = allocator
                 .create_buffer(
@@ -897,7 +915,8 @@ fn main() {
         println!("Rays: this GPU has no ray queries");
     }
     let mut ray_rows: Vec<String> = Vec::new();
-    let mut blas_build_us = 0.0f64;
+    // The bottom levels' builds: GPU time in all, frames with builds, the most in one.
+    let (mut blas_build_us, mut blas_build_frames, mut blas_build_max) = (0.0f64, 0, 0.0f64);
     renderer
         .set_reflections(&device, &bindless, probe_grid.is_some() || ssr.is_some())
         .unwrap();
@@ -1614,6 +1633,8 @@ fn main() {
             for time in graph.gpu_pass_times() {
                 if time.name == "blas builds" {
                     blas_build_us += f64::from(time.gpu_us);
+                    blas_build_frames += 1;
+                    blas_build_max = blas_build_max.max(f64::from(time.gpu_us));
                 }
             }
             if capture
@@ -1706,8 +1727,9 @@ fn main() {
     if !ray_rows.is_empty() {
         println!();
         println!(
-            "Rays: bottom levels built in {blas_build_us:.0} µs of GPU time (first frame), {:?}",
-            ray_detail.unwrap_or_default()
+            "Rays: bottom levels built in {blas_build_us:.0} µs of GPU time over {blas_build_frames} frame(s), at most {blas_build_max:.0} µs in one; {:?}, budget {}",
+            ray_detail.unwrap_or_default(),
+            ray_budget.as_deref().unwrap_or("none")
         );
         println!(
             "| materials | bottom levels | MiB | triangles | top level KiB | GPU top level µs | GPU camera rays µs | Mrays/s |"

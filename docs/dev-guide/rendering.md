@@ -1721,8 +1721,10 @@ without them get.
 ```rust
 use engine_render::rays::{RAY_MASK_ALL, RAY_MASK_OPAQUE, RayCast, RayScene, RaySettings};
 
-// Once, if the device has ray queries (`device.ray_query().is_some()`):
-let mut rays = RayScene::new(&device, &bindless, RaySettings::default(), frames_in_flight)?;
+// Once, if the device has ray queries (`device.ray_query().is_some()`); `for_device`
+// limits the structures built per frame (`RaySettings::default()` builds all at once):
+let settings = RaySettings::for_device(&device);
+let mut rays = RayScene::new(&device, &bindless, settings, frames_in_flight)?;
 
 // Every frame, after the GPU scene's passes:
 let scene_frame = gpu_scene.add_passes(&mut fg, /* ... */)?.unwrap();
@@ -1745,13 +1747,20 @@ if let Some(ray_frame) = rays.add_passes(
   coarsest level: a fifth of the memory and build time, enough for diffuse light.
 - **What it costs** (Sponza, 262k triangles in 103 meshes): 7.5 MiB of structures on an
   RTX 4060 Ti and 15.8 MiB on the integrated Radeon (1.4 and 2.9 MiB at the coarsest
-  level); the top level is rebuilt in frames where something moved: 80 µs and 0.23 ms,
-  growing with instances (0.18 and 3.8 ms at 10,000); a still scene keeps it. A ray per
-  pixel at 1080p takes 0.9 ms on the RTX and 36 ms on the integrated GPU: there, count
-  rays in thousands per frame, not millions.
+  level). When instances move, the top level is refitted (17 and 21 µs; 25 µs and
+  0.22 ms with 10,000 instances) and rebuilt after 8 refits (80 µs and 0.23 ms; 0.15 and
+  2.6 ms with 10,000), or at once when instances are added, removed, teleported or
+  given another mesh (`TopLevelUpdate` chooses); a still scene keeps it. A ray per pixel
+  at 1080p takes 0.9 ms on the RTX and 36 ms on the integrated GPU: there, count rays in
+  thousands per frame, not millions.
+- **Building:** a mesh's structure is built when it is first drawn. All of Sponza at
+  once takes 1.5 ms on the RTX and 38 ms on the integrated GPU; with
+  `RaySettings::for_device`, at most 0.8 ms per frame on the RTX (three frames) and
+  5.7 ms per frame on average on the integrated GPU (nine frames; its largest mesh alone
+  takes 11 ms), where the coarsest level is the better choice. Meshes waiting for theirs are not hit (`RayStats::pending` counts them), so
+  wait for 0 before tracing a freshly loaded scene.
 - **Not yet:** alpha-tested surfaces are solid to rays (leaves cast whole quads);
-  skinned meshes keep the shape they had when first built; a mesh's structure is built
-  in the frame it first appears (all of Sponza at once: 1.6 ms on the RTX, 39 ms on the
-  integrated GPU), so load scenes before tracing them.
-- `scene_bench --rays [finest|coarsest]` measures a scene's structures and its rays;
-  with `--screenshot`, it also writes the rays' distance image.
+  skinned meshes keep the shape they had when first built.
+- `scene_bench --rays [finest|coarsest] [--ray-budget <triangles|device>]` measures a
+  scene's structures and its rays (with `--screenshot`, also the rays' distance image);
+  `ray_bench` compares the top level's policies with thousands of moving instances.

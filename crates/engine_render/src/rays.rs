@@ -1,20 +1,22 @@
 //! The scene for ray queries (ADR 0087): a bottom-level acceleration structure for each
 //! mesh the GPU scene draws, built when it is first drawn (again when its chosen detail
-//! level changes), and a top-level one rebuilt every frame on the GPU from the GPU scene's
-//! instances (`rays.slang`), so instances placed on the GPU (ADR 0064) move in it too.
+//! level changes), and a top-level one written on the GPU from the GPU scene's instances
+//! (`rays.slang`), so instances placed on the GPU (ADR 0064) move in it too.
 //!
 //! - **Bottom levels:** a mesh's triangles at a detail level ([`BlasDetail`]) from the
 //!   geometry pool's positions and indices, opaque, `PREFER_FAST_TRACE` and
 //!   `ALLOW_COMPACTION` (static geometry: NVIDIA's and AMD's advice). Once the frame that
 //!   built one has finished, its compacted size is read back and it is copied into a
 //!   structure of that size. The pool may move its buffers: a built structure keeps its
-//!   own copy.
+//!   own copy. Builds per frame are held to [`RaySettings::build_budget`].
 //! - **Top level:** one instance per slot of the GPU scene, its custom index the slot.
 //!   Holes, removed meshes and meshes not built yet are inactive (a reference of 0). The
 //!   mask is the batch's kind ([`RAY_MASK_OPAQUE`], [`RAY_MASK_MASKED`],
-//!   [`RAY_MASK_BLENDED`]); facing culling is off (shaders read the face). Rebuilt
-//!   (`PREFER_FAST_TRACE`) in frames where an instance or a structure changed; a still
-//!   scene keeps last frame's.
+//!   [`RAY_MASK_BLENDED`]); facing culling is off (shaders read the face). Built with
+//!   `PREFER_FAST_TRACE`; in frames where instances only moved, refitted or rebuilt as
+//!   [`TopLevelUpdate`] says (by default refitted, rebuilt after 8 refits); rebuilt at
+//!   once when instances came, went, teleported or changed mesh or a bottom level
+//!   changed; kept in a still scene.
 //! - **Shaders** reach it by its address (`accel_at` in `rays_common.slang`), the pass
 //!   declaring [`crate::graph::Access::AccelerationStructureRead`] of [`RayFrame::tlas`].
 //!   [`RayFrame::add_cast_pass`] casts a batch of rays (tests, picking),
@@ -31,7 +33,9 @@ use crate::graph::{
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::upload::UploadRing;
 use engine_rhi::ash::vk;
-use engine_rhi::{AccelLevel, AccelerationStructure, Allocator, Bindless, Device, RhiError};
+use engine_rhi::{
+    AccelLevel, AccelerationStructure, AdapterKind, Allocator, Bindless, Device, RhiError,
+};
 
 const TLAS_INSTANCES: &[u8] = include_bytes!("../shaders/rays.tlasInstances.spv");
 const CAST_RAYS: &[u8] = include_bytes!("../shaders/rays.castRays.spv");
@@ -60,11 +64,73 @@ pub enum BlasDetail {
     Coarsest,
 }
 
+/// How the top level follows instances that moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TopLevelUpdate {
+    /// Rebuilt in every frame where an instance moved.
+    Rebuild,
+    /// Refitted where only transforms changed (its hierarchy kept, its boxes moved:
+    /// cheaper, but its rays slow down as instances travel away from where it was
+    /// built), rebuilt after `rebuild_after` refits in a row and whenever instances were
+    /// added, removed, teleported or given another mesh, or a bottom level changed.
+    Refit {
+        /// Refits in a row before a rebuild.
+        rebuild_after: u32,
+    },
+}
+
+impl Default for TopLevelUpdate {
+    /// Refitted, rebuilt after 8 refits: with 10,000 instances, a tenth of them moving,
+    /// its rays stay within 1 % of a rebuilt structure's while it costs a fifth to a
+    /// quarter of rebuilding every frame (`ray_bench`, ADR 0087's addendum).
+    fn default() -> Self {
+        Self::Refit { rebuild_after: 8 }
+    }
+}
+
 /// Settings of a [`RayScene`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RaySettings {
     /// The detail level structures are built from.
     pub detail: BlasDetail,
+    /// How the top level follows moving instances.
+    pub top_level: TopLevelUpdate,
+    /// Triangles of bottom levels built in one frame at most (at least one structure is
+    /// built per frame): meshes appearing during play do not make one frame build them
+    /// all. Instances of meshes waiting for theirs are not in the top level yet
+    /// ([`RayStats::pending`]). `u32::MAX`: no limit.
+    pub build_budget: u32,
+}
+
+impl Default for RaySettings {
+    /// The finest level, refitted top level, no build budget (everything drawn is built
+    /// in the frame it first appears: right while loading).
+    fn default() -> Self {
+        Self {
+            detail: BlasDetail::default(),
+            top_level: TopLevelUpdate::default(),
+            build_budget: u32::MAX,
+        }
+    }
+}
+
+impl RaySettings {
+    /// The defaults with a build budget for play on `device`'s class of GPU: 131,072
+    /// triangles on discrete GPUs (an RTX 4060 Ti builds Sponza's finest level in three
+    /// frames of at most 0.8 ms), 32,768 on integrated ones (a two-CU Radeon: nine
+    /// frames, 5.7 ms on average). A mesh larger than the budget is built alone in a
+    /// frame (Sponza's largest: 11 ms on that Radeon): integrated GPUs want
+    /// [`BlasDetail::Coarsest`] (Sponza's coarsest level: two frames of at most 5.6 ms).
+    pub fn for_device(device: &Device) -> Self {
+        let build_budget = match device.adapter().kind {
+            AdapterKind::Integrated | AdapterKind::Cpu => 1 << 15,
+            _ => 1 << 17,
+        };
+        Self {
+            build_budget,
+            ..Self::default()
+        }
+    }
 }
 
 /// What a [`RayScene`] holds.
@@ -82,6 +148,10 @@ pub struct RayStats {
     pub compacted: u32,
     /// Whether the top level was rebuilt this frame.
     pub rebuilt: bool,
+    /// Whether the top level was refitted this frame ([`TopLevelUpdate::Refit`]).
+    pub refitted: bool,
+    /// Batches whose mesh waits for its bottom level ([`RaySettings::build_budget`]).
+    pub pending: u32,
     /// The top level's bytes.
     pub tlas_bytes: u64,
     /// Instances (the GPU scene's slots) in the top level this frame.
@@ -334,8 +404,10 @@ pub struct RayScene {
     copies: Vec<(vk::AccelerationStructureKHR, vk::AccelerationStructureKHR)>,
     /// A structure changed since the top level's last build.
     dirty: bool,
-    /// Instances in the top level's last build.
-    last_count: u32,
+    /// Instances in the top level's last full build (0: none since it was made).
+    built_count: u32,
+    /// Refits since the top level's last full build.
+    refits: u32,
 }
 
 impl core::fmt::Debug for RayScene {
@@ -410,7 +482,8 @@ impl RayScene {
             build_queries: (0, 0),
             copies: Vec::new(),
             dirty: true,
-            last_count: 0,
+            built_count: 0,
+            refits: 0,
         })
     }
 
@@ -461,6 +534,8 @@ impl RayScene {
         // Bottom levels of the meshes drawn (batch 0 is the GPU scene's holes).
         self.builds.clear();
         let mut scratch = 0u64;
+        let mut budget = self.settings.build_budget;
+        let mut pending = 0;
         for b in batches.iter().skip(1).filter(|b| b.alive) {
             let Some(info) = geometry.mesh(b.mesh) else {
                 continue;
@@ -483,12 +558,19 @@ impl RayScene {
             {
                 continue;
             }
+            // Over this frame's budget: a later frame builds it.
+            let triangles = level.1 / 3;
+            if !self.builds.is_empty() && triangles > budget {
+                pending += 1;
+                continue;
+            }
+            budget = budget.saturating_sub(triangles);
             let build = PendingBuild {
                 accel: vk::AccelerationStructureKHR::null(),
                 vertices: positions + u64::from(info.first_vertex) * 12,
                 max_vertex: info.vertex_count.saturating_sub(1),
                 indices: indices + u64::from(level.0) * 4,
-                triangles: level.1 / 3,
+                triangles,
                 scratch_offset: scratch.next_multiple_of(self.scratch_alignment),
             };
             let sizes = self.blas_sizes(&build);
@@ -513,6 +595,7 @@ impl RayScene {
             self.dirty = true;
         }
         self.assign_queries(frame_number);
+        self.stats.pending = pending;
 
         // The batches' structures and instance kinds.
         self.batch_rays.clear();
@@ -558,24 +641,34 @@ impl RayScene {
             if let Some(old) = self.tlas.replace(Tlas {
                 accel,
                 capacity,
-                scratch: sizes.build_scratch_size,
+                scratch: sizes.build_scratch_size.max(sizes.update_scratch_size),
             }) {
                 self.retired.push((frame_number, old.accel));
             }
             self.tlas_state = BufferState::idle();
-            self.dirty = true;
+            self.built_count = 0;
         }
-        // Rebuilt when an instance or a structure changed.
+        // Rebuilt when instances came or went or a structure changed; when instances only
+        // moved, refitted or rebuilt as the settings say; kept otherwise. (A move that
+        // settles needs nothing: the slot's transform is the one already in the structure.)
         let changes = scene.stats();
-        let rebuild = self.dirty
-            || count != self.last_count
-            || changes.uploaded > 0
-            || changes.settled > 0
-            || changes.moving > 0
-            || changes.grew;
+        let restructured =
+            self.dirty || count != self.built_count || changes.grew || changes.restructured > 0;
+        let moved = changes.uploaded > 0 || changes.moving > 0;
+        let (rebuild, refit) = match self.settings.top_level {
+            _ if restructured => (true, false),
+            _ if !moved => (false, false),
+            TopLevelUpdate::Refit { rebuild_after } if self.refits < rebuild_after => (false, true),
+            _ => (true, false),
+        };
+        if rebuild {
+            self.built_count = count;
+            self.refits = 0;
+        }
+        self.refits += u32::from(refit);
         self.dirty = false;
-        self.last_count = count;
         self.stats.rebuilt = rebuild;
+        self.stats.refitted = refit;
         self.update_stats();
         // The top level's state before this frame, and after it (read by shaders).
         let initial = core::mem::replace(&mut self.tlas_state, TLAS_READ);
@@ -636,7 +729,7 @@ impl RayScene {
                 final_state: Some(TLAS_READ),
             },
         );
-        if !rebuild {
+        if !rebuild && !refit {
             return Ok(Some(RayFrame {
                 scene: this,
                 tlas: handle,
@@ -697,10 +790,20 @@ impl RayScene {
                                 device_address: ctx.address(instances),
                             }),
                     });
+                // A refit updates the structure in place: its own source.
+                let (mode, source) = if refit {
+                    (vk::BuildAccelerationStructureModeKHR::UPDATE, raw)
+                } else {
+                    (
+                        vk::BuildAccelerationStructureModeKHR::BUILD,
+                        vk::AccelerationStructureKHR::null(),
+                    )
+                };
                 let info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
                     .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                    .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                    .flags(this.tlas_flags())
+                    .mode(mode)
+                    .src_acceleration_structure(source)
                     .dst_acceleration_structure(raw)
                     .geometries(core::slice::from_ref(&geometry))
                     .scratch_data(vk::DeviceOrHostAddressKHR {
@@ -898,6 +1001,8 @@ impl RayScene {
         let mut stats = RayStats {
             instances: self.stats.instances,
             rebuilt: self.stats.rebuilt,
+            refitted: self.stats.refitted,
+            pending: self.stats.pending,
             compacted: self.copies.len() as u32,
             built: self.builds.len() as u32,
             tlas_bytes: self.tlas.as_ref().map_or(0, |t| t.accel.size()),
@@ -954,6 +1059,17 @@ impl RayScene {
         sizes
     }
 
+    /// The top level's build flags: fast trace, and updatable when it is refitted.
+    fn tlas_flags(&self) -> vk::BuildAccelerationStructureFlagsKHR {
+        match self.settings.top_level {
+            TopLevelUpdate::Rebuild => vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE,
+            TopLevelUpdate::Refit { .. } => {
+                vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE
+                    | vk::BuildAccelerationStructureFlagsKHR::ALLOW_UPDATE
+            }
+        }
+    }
+
     fn tlas_sizes(&self, capacity: u32) -> vk::AccelerationStructureBuildSizesInfoKHR<'static> {
         let geometry = vk::AccelerationStructureGeometryKHR::default()
             .geometry_type(vk::GeometryTypeKHR::INSTANCES)
@@ -963,7 +1079,7 @@ impl RayScene {
             });
         let info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
             .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
-            .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+            .flags(self.tlas_flags())
             .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
             .geometries(core::slice::from_ref(&geometry));
         let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
