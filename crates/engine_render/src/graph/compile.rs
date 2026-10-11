@@ -198,6 +198,9 @@ pub(crate) struct PassRecord {
     pub(crate) needed: bool,
     /// Declared with `.async_compute()`.
     pub(crate) async_requested: bool,
+    /// Declared with `.fence()`: runs after every pass declared before it and before
+    /// every pass declared after it.
+    pub(crate) fence: bool,
     /// Where it runs this frame (after scheduling).
     pub(crate) queue: QueueKind,
     /// Its segment (`Records::segments`) this frame.
@@ -225,6 +228,7 @@ impl PassRecord {
             side_effects: false,
             needed: false,
             async_requested: false,
+            fence: false,
             queue: QueueKind::Graphics,
             segment: 0,
             preds: 0..0,

@@ -128,7 +128,8 @@ end to end (first pass to last on the graphics queue), medians of alternating ru
   off.
 - **Schedule** (`graph/schedule.rs`): dependencies from the declared accesses; the order
   prefers ancestors of earlier async passes; passes with no declared accesses keep the
-  declared order. Segments:
+  declared order; a fence (`PassBuilder::fence`) follows every pass declared before it
+  and precedes every pass declared after it (addendum below). Segments:
   - a segment ends where the other queue needs its results; one starts where a pass needs
     the other queue's;
   - a compute segment always waits for the graphics work before it in the order (which
@@ -183,3 +184,29 @@ end to end (first pass to last on the graphics queue), medians of alternating ru
   - `VK_KHR_maintenance9`: buffers keep their contents across families without
     transfers;
   - per-subresource barriers when a pass reads one mip of an image another writes.
+
+## Addendum (2026-10-11): fences for writes read without being declared
+
+Found while building the probe GI (ADR 0084): with async compute on, its first update
+after loading Sponza saw every material texture black. The texture pool's upload pass
+declares only its staging buffers; shaders reach the textures through bindless indices
+from the material table, which nothing ties to the upload. The schedule put the passes
+that lead to an async pass first (the GI updates lead to the reflection probes' capture,
+which reads the volume, and so to its async mips and prefilter), so they ran before the
+upload in the frame the textures arrived. The same held for every frame that uploads
+texture levels: a pass leading to an async pass could sample levels that arrive later in
+that frame (a frame of black or stale texels where the mip fade starts, ADR 0078), and
+the masked depth prepass could test the alpha of textures not copied yet.
+
+- `PassBuilder::fence()`: the pass follows every needed pass declared before it and
+  precedes every needed pass declared after it (one edge from each later pass; the fence
+  has an edge to each pass since the previous fence). Unlike a pass that declares no
+  accesses, it does not turn the whole frame back to the declared order: the passes
+  between fences are still reordered.
+- The texture pool's upload pass is a fence. `Texture::upload` declares no accesses
+  (the declared order holds for its frames, as before).
+- AMD devices run without async compute by default (above), so only NVIDIA (and
+  `ENGINE_ASYNC_COMPUTE=1`) showed it.
+- Test: `a_fence_follows_the_passes_declared_before_it_and_precedes_the_rest`
+  (`graph/schedule.rs`): the upload runs after the AO pass and its ancestors without the
+  fence, first with it, and last when declared last.
