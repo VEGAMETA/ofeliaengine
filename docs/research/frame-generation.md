@@ -62,7 +62,8 @@ Checked on 2026-09-26.
    - latency reports tell real frames from generated ones.
 6. **Settings and fallbacks:**
    - FG off by default in menus and when the base frame rate is too low (FG adds latency
-     below roughly 60 real fps);
+     below roughly 60 real fps). Superseded 2026-10-11: the owner wants FG out of the box;
+     whether it starts on is decided with latency measured (below);
    - the option is hidden when the DLLs or device features are missing, with no errors
      (§6).
 
@@ -73,3 +74,32 @@ Checked on 2026-09-26.
   masks) are a superset of FG's. FG adds hudless, UI and the reset flag, so it is
   specified as one interface.
 - **Swapchain abstraction:** before either FG path is integrated.
+
+## The owner's requirements (2026-10-11)
+
+Queue item 6c in `docs/status.md`.
+
+- **Out of the box, both FSR FG and DLSS FG.** The game developer does nothing to offer
+  it. FSR FG is built from source and runs on any GPU. DLSS FG needs the user's DLLs, as
+  DLSS does.
+- **The HUD is never interpolated, by default.** In many shipped FSR FG games the HUD
+  smears, and players install "HUD fix" mods. Here the frame renderer always gives FG the
+  hudless color and composites the UI on every presented frame.
+- **Immersive UI with nothing to mark.** A developer may make the HUD diegetic, in the
+  world and 3D, and still sets nothing. Since every piece of UI comes through the engine,
+  the engine sorts it:
+  - **2D canvases:** composited after FG.
+  - **World-space and camera-attached widgets** (a helmet visor, a cockpit, a gun's ammo
+    counter): drawn after FG on each presented frame, with that frame's camera
+    (interpolated on generated frames) and a depth test against the nearest real frame's
+    depth.
+  - **UI baked into materials:** scene content, interpolated with its motion vectors.
+- **To research for the ADR:**
+  - **Calling the engine per presented frame.** FSR FG's frame interpolation swapchain
+    calls the application for every presented frame (a UI composition callback), so the
+    UI can be drawn there. DLSS FG takes one UI color-and-alpha buffer per real frame and
+    composites it on generated frames itself. What happens to world-space UI on DLSS FG's
+    generated frames: drawn into the scene with motion vectors, or into the UI buffer and
+    held for a frame. Either way, chosen per element by the engine, not by flags.
+  - **Text in 3D.** Thin glyphs in world-space text, alpha-blended and without motion
+    vectors, are what interpolation smears most. Measure both choices with a 3D HUD shot.

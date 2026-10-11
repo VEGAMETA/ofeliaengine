@@ -346,8 +346,45 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 6. **Rendering leftovers.**
 6a (was 6). Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
-   (ADR 0067), frame generation. For frame generation, both DLSS FG and FSR 3.1 FG, off by
-   default, with latency measured.
+   (ADR 0067). Frame generation is its own item now (6c).
+6c. **Frame generation out of the box** (owner, 2026-10-11: "needed out of the box, DLSS FG
+   and FSR FG; the HUD fix on by default"). Requirements so far
+   (`docs/research/frame-generation.md`, 2026-09-26) and the owner's:
+   - **Both paths.** FSR 3.1 FG, built from the FidelityFX SDK's source (1.1.x has
+     Vulkan frame interpolation and its swapchain), works on every GPU with nothing to
+     install. DLSS FG through Streamline works on RTX GPUs with the user's DLLs
+     (`sl.dlss_g`, `nvngx_dlssg`, `sl.reflex`/`sl.pcl`; the engine ships none, §6). With
+     DLSS FG, Reflex goes through Streamline (§7).
+   - **Out of the box for the game developer.** The frame renderer offers it with no work
+     on their side: the option exists in every game and is hidden where it cannot run.
+     Whether it starts on or off, the owner decides with the latency measured. The
+     research suggested off below about 60 real frames per second.
+   - **The HUD never interpolated, by default.** Many shipped FSR FG games smear their HUD
+     until players install "HUD fix" mods; here nothing needs fixing. The frame renderer
+     hands FG the scene before any UI (hudless color) and composites the UI on every
+     presented frame, real and generated.
+   - **Immersive UI too, with nothing to mark** (owner, 2026-10-11: a developer who makes
+     the HUD diegetic, in the world and 3D, must not have to set anything). The engine
+     knows how each piece of UI is made, so it chooses:
+     - 2D canvases are composited after FG;
+     - widgets placed in the world, or attached to the camera (a helmet visor, a cockpit,
+       a gun's ammo counter), are drawn after FG on each presented frame with that
+       frame's camera (interpolated for generated frames), depth-tested against the
+       nearest real frame's depth;
+     - UI baked into materials (a screen texture on a monitor) is scene content and is
+       interpolated with its motion vectors.
+
+     To research for the ADR: FSR FG calls the application for each presented frame (UI
+     can be drawn there), while DLSS FG takes one UI buffer per real frame. The ADR picks
+     what to do with world-space UI on DLSS FG's generated frames, with no flags for the
+     developer.
+   - **Present path and pacing.** A presenter interface (native, FidelityFX FG
+     swapchain, Streamline). The limiter caps real frames; latency markers belong to real
+     frames; reports tell real from generated; no frame is interpolated across a camera
+     cut.
+   - **Measured** on both GPUs: presented and real frame rates, latency (PresentMon,
+     `engine_latency`), image quality against the real frames (FLIP), the HUD with 2D and
+     3D UI.
 6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms (6.6 ms in the perf gate's
    `sponza_taa`), ~~bloom 1.6 ms~~, local shadows redrawn every frame when casters move (a
    per-frame redraw budget; never the patented static/dynamic split). TAAU tried
