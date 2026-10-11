@@ -1208,8 +1208,9 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         }
     });
     // Probe GI (ADR 0088): the GPU scene's coarsest levels for ray queries, every
-    // structure built in the first frame; the volume over the scene, converged in one
-    // frame.
+    // structure built in the first frame; the volume over the scene with the device's
+    // defaults: converged an update a frame (all eleven in one submission take about a
+    // second on the two-CU Radeon, and beside other tests' work the driver resets the GPU).
     let mut gi_rays = shot.gi.map(|_| {
         RayScene::new(
             &device,
@@ -1228,10 +1229,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             &mut allocator,
             &bindless,
             ProbeGrid::covering(min, max, spacing, 16_384),
-            GiSettings {
-                updates_per_frame: 16,
-                ..GiSettings::for_device(&device)
-            },
+            GiSettings::for_device(&device),
         )
         .expect("probe GI")
     });
@@ -1270,6 +1268,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let mut frames = Vec::with_capacity(captures as usize);
     let mut resident_frames = 0;
     let mut previous_faces = 0;
+    let mut converging_before = [true; 2];
     // Frames in a row with nothing to stream (feedback lags a few frames, and a coarser
     // level waits for its hold).
     let mut quiet = 0;
@@ -1622,11 +1621,17 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         } else if captured > 0 || resident_frames > 2 {
             // Times of the frame before this one's recording (the graph reads them when
             // its slot comes around): every frame after the scene is resident (and its
-            // reflection probes captured: captures are not steady-state work).
+            // reflection probes captured, and its GI volume converged: captures and the
+            // convergence are not steady-state work).
             let faces = probes.as_ref().map_or(0, |p| p.stats().faces);
             let capturing = faces > 0 || previous_faces > 0;
             previous_faces = faces;
-            if resident_frames > 3 && !capturing {
+            // Not converged after this frame, the frame before or the one before that (whose
+            // updates the frame before then made: the times are a frame late).
+            let converging = gi_volume.as_ref().is_some_and(|g| !g.is_converged());
+            let gi_settling = converging || converging_before[0] || converging_before[1];
+            converging_before = [converging, converging_before[0]];
+            if resident_frames > 3 && !capturing && !gi_settling {
                 let mut frame: BTreeMap<&'static str, f64> = BTreeMap::new();
                 // The test bed's own passes are not the renderer's.
                 for time in graph

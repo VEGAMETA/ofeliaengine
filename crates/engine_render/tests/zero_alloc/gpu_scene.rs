@@ -2,9 +2,10 @@
 //! scene (ADR 0064) and the forward passes that draw it: moves, removals and insertions
 //! every frame, uploaded and declared, culled and drawn, recorded; with ray queries, its
 //! acceleration structures too (ADR 0087: the top level rebuilt every frame, as instances
-//! come and go; rays cast from the camera) and probe GI (ADR 0088: frames that update the
-//! volume, then frames that only resolve and shade it; a frame whose passes differ from
-//! the last ones may create graph objects, as any change of a frame's layout).
+//! come and go; rays cast from the camera) and probe GI (ADR 0088, ADR 0089: converged in
+//! the warm-up, then every frame traces its two windows, resolves and shades it; the
+//! frame that ends the convergence changes the frame's layout, which may create graph
+//! objects, as any change of layout).
 //!
 //! A counting global allocator observes the process while frames are declared and
 //! recorded after a warm-up (driver allocations happen in C and are not counted). One
@@ -171,14 +172,6 @@ fn steady_state_scene_frames_do_not_allocate() {
         }
         frame_number += 1;
         let slot = (frame_number % 2) as usize;
-        // The volume updates in every frame until the 80th (converged, it starts again),
-        // then converges and is only read.
-        if let Some(gi) = &gi
-            && i < 80
-            && gi.is_converged()
-        {
-            gi.refresh();
-        }
         // SAFETY: nothing recorded by this test is ever submitted.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())

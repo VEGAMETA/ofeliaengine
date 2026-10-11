@@ -1777,10 +1777,22 @@ rays reached. The shading then takes each pixel's diffuse light from the eight p
 around its surface, weighed so light does not pass through walls. It replaces the sky's
 diffuse light inside the volume; outside, the sky's light takes over over one cell.
 
-The volume converges once, over 11 updates (one per frame by default: 15 ms of GPU time
-in all for Sponza on an RTX 4060 Ti, 1.1 s on a two-CU integrated Radeon, a load-time
-cost), then costs only its reading every frame: the light is frozen. Call `refresh()`
-when the sun or the scene changed (phase 2 will update it continuously).
+The volume converges at load, over 11 updates. That is one per frame by default: 15 ms of
+GPU time in all for Sponza on an RTX 4060 Ti, 1.1 s on a two-CU integrated Radeon.
+
+From then on, every frame traces a window of probes within a ray budget and blends them
+in, so the light follows a moving sun, lights turned on and off, and doors opening (ADR
+0089):
+- **Budget.** `GiSettings::rays_per_frame`: 131,072 rays (1,024 probes) on discrete GPUs,
+  8,192 (64 probes) on integrated ones.
+- **Where it goes.** Half goes round an 8 × 4 × 8 box of probes around the camera, which
+  follows a change first; the rest goes round the whole volume.
+- **Rate.** Each update keeps `hysteresis` (0.9) of a probe's light: a probe updated every
+  frame has 90 % of a change after 22 frames.
+- **Cost.** For Sponza at 1080p, 0.2 ms a frame on the RTX and 1.0 ms on the integrated
+  Radeon, plus reading the volume.
+- **To skip the wait.** Call `refresh()` after a big change (a level's lights switched),
+  and the volume converges again. `rays_per_frame: 0` freezes the light once converged.
 
 ```rust
 use engine_render::forward::ViewGi;
@@ -1818,7 +1830,8 @@ let scene = SceneInput {
   Transparent surfaces do not take part.
 - **Reflection probes** (section 16) capture the scene lit by the volume: metals in shade
   reflect lit surroundings instead of black.
-- **Not yet:** moving objects and lights do not change the light after it converged
-  (phase 2); multisampled views keep the sky's light; GPUs without ray queries too.
+- **Not yet:** point and spot lights do not light the volume: at night it holds only the
+  sky's light and emission. Multisampled views keep the sky's light, and so do GPUs
+  without ray queries.
 - `scene_bench --gi [spacing] [--gi-scale 1|2|4]` measures a scene's volume (the updates,
   the resolve, the shading); `GI_DEBUG=1` with `--screenshot` saves the irradiance alone.

@@ -948,8 +948,10 @@ fn main() {
         .set_global_illumination(&device, &bindless, gi.is_some())
         .unwrap();
     let mut gi_rows: Vec<String> = Vec::new();
-    // GPU time of the volume's updates, per pass name.
+    // GPU time of the volume's updates while it converges, per pass name; then of each
+    // frame's window (ADR 0089), per pass name, every frame.
     let mut gi_update_us: Vec<(&'static str, f64)> = Vec::new();
+    let mut gi_window_us: Vec<(&'static str, Vec<f64>)> = Vec::new();
     let mut ray_rows: Vec<String> = Vec::new();
     // The bottom levels' builds: GPU time in all, frames with builds, the most in one.
     let (mut blas_build_us, mut blas_build_frames, mut blas_build_max) = (0.0f64, 0, 0.0f64);
@@ -1256,7 +1258,12 @@ fn main() {
         let mut faces_drawn = Vec::new();
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
+        // Whether the GI updates of the frame before were the convergence's: pass times
+        // come back a frame late (when the graph's one slot comes around again).
+        let mut gi_converged_before = gi.as_ref().is_none_or(ProbeGi::is_converged);
         while frame < WARMUP + FRAMES + usize::from(last) {
+            let gi_converging = !gi_converged_before;
+            gi_converged_before = gi.as_ref().is_none_or(ProbeGi::is_converged);
             if let Some(s) = streaming.as_mut() {
                 s.pump(
                     &mut textures,
@@ -1700,14 +1707,28 @@ fn main() {
                     frame_time.push(f64::from(us));
                 }
             }
+            // A frame after convergence has two windows (around the camera, then of the
+            // whole volume): its passes' times are summed by name.
+            let window_start = gi_window_us.first().map_or(0, |(_, t)| t.len());
             for time in graph.gpu_pass_times() {
                 if time.name.starts_with("gi ")
                     && time.name != "gi resolve"
                     && time.name != "gi upsample"
                 {
-                    match gi_update_us.iter_mut().find(|(n, _)| *n == time.name) {
-                        Some((_, us)) => *us += f64::from(time.gpu_us),
-                        None => gi_update_us.push((time.name, f64::from(time.gpu_us))),
+                    let us = f64::from(time.gpu_us);
+                    if gi_converging {
+                        match gi_update_us.iter_mut().find(|(n, _)| *n == time.name) {
+                            Some((_, sum)) => *sum += us,
+                            None => gi_update_us.push((time.name, us)),
+                        }
+                    } else {
+                        match gi_window_us.iter_mut().find(|(n, _)| *n == time.name) {
+                            Some((_, times)) if times.len() > window_start => {
+                                *times.last_mut().unwrap() += us;
+                            }
+                            Some((_, times)) => times.push(us),
+                            None => gi_window_us.push((time.name, vec![us])),
+                        }
                     }
                 }
                 if time.name == "blas builds" {
@@ -1827,6 +1848,25 @@ fn main() {
             gi.as_ref().map_or(0, |g| g.grid().probe_count()),
             updates.join(", ")
         );
+        if let Some(g) = &gi
+            && !gi_window_us.is_empty()
+        {
+            let window: Vec<String> = gi_window_us
+                .iter_mut()
+                .map(|(name, times)| format!("{name} {:.0} µs", median(times)))
+                .collect();
+            let total: f64 = gi_window_us
+                .iter_mut()
+                .map(|(_, times)| median(times))
+                .sum();
+            println!(
+                "GI after convergence, per frame (median; {} probes × {} rays, {:.0} % around the camera): {} = {total:.0} µs",
+                g.window(),
+                g.settings().rays,
+                g.settings().local_share * 100.0,
+                window.join(", ")
+            );
+        }
         println!("| materials | probes | MiB | GPU resolve µs | GPU forward µs |");
         println!("|---|---:|---:|---:|---:|");
         for row in &gi_rows {

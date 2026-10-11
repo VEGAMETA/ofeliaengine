@@ -5,6 +5,10 @@
 // Global Illumination with Ray-Traced Irradiance Fields" (JCGT 2019) and "Scaling
 // Probe-Based Real-Time Dynamic Global Illumination for Production" (JCGT 2021).
 //
+// Each update covers a window of probes (`TraceFrame::first_probe`, `window`): all of them
+// while the volume converges, then as many as the frame's ray budget allows, in turn: of
+// the whole volume, and of a box of probes around the camera (`box_origin`, `box_size`).
+//
 // - `giTrace`: a ray per thread from a probe (spherical Fibonacci directions turned by
 //   each update's rotation) against the scene's top level (`rays.slang`); a front-face
 //   hit is shaded with its material's albedo and emission (at a coarse mip), the sun with
@@ -226,7 +230,7 @@ float3 volume_irradiance(GiVolume v, float4* probes, float3 p, float3 n, float3 
 
 // --- Tracing ------------------------------------------------------------------------
 
-// `TraceFrame` in gi.rs (224 bytes), in the upload ring.
+// `TraceFrame` in gi.rs (272 bytes), in the upload ring.
 struct TraceFrame
 {
     GiVolume volume;
@@ -240,8 +244,27 @@ struct TraceFrame
     uint mask;               // the rays' instance mask
     uint bounce;             // 1: hits add the volume's irradiance (another bounce)
     uint linear_sampler;     // for the sky cube
+    uint first_probe;        // the window this update covers: probes first_probe, ...
+    uint window;             // ... first_probe + window - 1, modulo their count
     uint _pad0;
+    uint _pad1;
+    uint _pad2;
+    uint4 box_origin;        // xyz: a box of probes' first (grid coordinates); w: 1 when the
+                             // window counts in the box, 0 in the whole volume
+    uint4 box_size;          // xyz: the box's probes along each axis; w: all of them
 };
+
+// The probe in slot `slot` of an update's window.
+uint window_probe(TraceFrame* f, GiVolume v, uint slot)
+{
+    uint4 box_origin = loadAligned<16>(&f.box_origin);
+    if (box_origin.w == 0)
+        return (f.first_probe + slot) % v.counts.w;
+    uint4 box_size = loadAligned<16>(&f.box_size);
+    uint i = (f.first_probe + slot) % box_size.w;
+    uint3 c = box_origin.xyz + uint3(i % box_size.x, (i / box_size.x) % box_size.y, i / (box_size.x * box_size.y));
+    return probe_index(v, c);
+}
 
 // `TracePush` in gi.rs (72 bytes).
 struct TracePush
@@ -376,7 +399,8 @@ bool double_sided(uint slot)
     return trace_push.batches[inst.batch].double_sided != 0;
 }
 
-// One ray of one probe: its radiance and distance (negative for a back face).
+// One ray of one probe of the window: its radiance and distance (negative for a back
+// face), stored by the probe's slot in the window.
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void giTrace(uint3 id : SV_DispatchThreadID)
@@ -384,10 +408,11 @@ void giTrace(uint3 id : SV_DispatchThreadID)
     TraceFrame* f = trace_push.frame;
     GiVolume v = loadAligned<16>(&f.volume);
     uint rays = f.rays;
-    uint probe = id.x / rays;
+    uint slot = id.x / rays;
     uint ray = id.x % rays;
-    if (probe >= v.counts.w)
+    if (slot >= f.window)
         return;
+    uint probe = window_probe(f, v, slot);
     float4 record = loadAligned<16>(trace_push.probes + probe);
     float3 origin = rest_position(v, probe_coords(v, probe)) + record.xyz;
     float3 local = fibonacci(ray, rays);
@@ -454,12 +479,13 @@ groupshared float3 g_radiance[MAX_RAYS];
 // A tile's texels once blended, for its border.
 groupshared float4 g_tile[MOMENTS_TILE * MOMENTS_TILE];
 
-// Loads probe `probe`'s rays into shared memory (every thread of the group helps).
-void stage_rays(TraceFrame* f, uint probe, uint rays, uint thread, uint threads)
+// Loads the rays of the window's slot `slot` into shared memory (every thread of the
+// group helps).
+void stage_rays(TraceFrame* f, uint slot, uint rays, uint thread, uint threads)
 {
     for (uint r = thread; r < rays; r += threads)
     {
-        uint2 packed = blend_push.results[probe * rays + r];
+        uint2 packed = blend_push.results[slot * rays + r];
         float3 local = fibonacci(r, rays);
         float3 d = normalize(float3(
             dot(loadAligned<16>(&f.rotation[0]).xyz, local),
@@ -486,17 +512,17 @@ uint2 border_source(uint2 texel, uint inner)
     return uint2(last - texel.x, top ? 1 : inner);
 }
 
-// One probe per group: the cosine-weighted mean radiance of its rays in each texel's
-// direction, times π (irradiance), blended into the atlas; then the border.
+// One probe of the window per group: the cosine-weighted mean radiance of its rays in
+// each texel's direction, times π (irradiance), blended into the atlas; then the border.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void giIrradiance(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint flat : SV_GroupIndex)
 {
     TraceFrame* f = blend_push.frame;
     GiVolume v = loadAligned<16>(&f.volume);
-    uint probe = group.x;
+    uint probe = window_probe(f, v, group.x);
     uint rays = f.rays;
-    stage_rays(f, probe, rays, flat, 64);
+    stage_rays(f, group.x, rays, flat, 64);
     uint2 corner = tile_corner(v, probe_coords(v, probe), IRRADIANCE_TILE);
     RWTexture2D<float4> target = g_irradiance_images[blend_push.target];
     bool inside = all(local.xy >= 1u) && all(local.xy <= IRRADIANCE_INNER);
@@ -528,17 +554,18 @@ void giIrradiance(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint
     }
 }
 
-// One probe per group: the mean and mean square of its rays' distances under a sharp
-// lobe around each texel's direction, blended into the atlas; then the border.
+// One probe of the window per group: the mean and mean square of its rays' distances
+// under a sharp lobe around each texel's direction, blended into the atlas; then the
+// border.
 [shader("compute")]
 [numthreads(16, 16, 1)]
 void giMoments(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID, uint flat : SV_GroupIndex)
 {
     TraceFrame* f = blend_push.frame;
     GiVolume v = loadAligned<16>(&f.volume);
-    uint probe = group.x;
+    uint probe = window_probe(f, v, group.x);
     uint rays = f.rays;
-    stage_rays(f, probe, rays, flat, 256);
+    stage_rays(f, group.x, rays, flat, 256);
     uint2 corner = tile_corner(v, probe_coords(v, probe), MOMENTS_TILE);
     RWTexture2D<float2> target = g_moment_images[blend_push.target];
     bool inside = all(local.xy >= 1u) && all(local.xy <= MOMENTS_INNER);
@@ -592,9 +619,10 @@ void giRelocate(uint3 id : SV_DispatchThreadID)
 {
     TraceFrame* f = blend_push.frame;
     GiVolume v = loadAligned<16>(&f.volume);
-    uint probe = id.x;
-    if (probe >= v.counts.w)
+    uint slot = id.x;
+    if (slot >= f.window)
         return;
+    uint probe = window_probe(f, v, slot);
     uint rays = f.rays;
     float4 record = loadAligned<16>(blend_push.probes + probe);
     uint backs = 0;
@@ -604,7 +632,7 @@ void giRelocate(uint3 id : SV_DispatchThreadID)
     float3 front_dir = 0.0;
     for (uint r = 0; r < rays; r++)
     {
-        float distance = f16tof32(blend_push.results[probe * rays + r].y >> 16);
+        float distance = f16tof32(blend_push.results[slot * rays + r].y >> 16);
         float3 local = fibonacci(r, rays);
         float3 d = float3(
             dot(loadAligned<16>(&f.rotation[0]).xyz, local),
