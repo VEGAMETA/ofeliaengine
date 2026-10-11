@@ -1,6 +1,6 @@
 # 0085. Visibility buffer and meshlets: meshlets in the forward renderer first
 
-- Status: Proposed (a question for the owner, 2026-10-11)
+- Status: Accepted (option 1 now, the owner, 2026-10-11)
 - Date: 2026-10-11
 - Research: [docs/research/visibility-buffer.md](../research/visibility-buffer.md)
 - Related: [ADR 0034](0034-gpu-culling-and-indirect-draws.md) (GPU culling),
@@ -52,8 +52,13 @@ option 2).
 
 ## Decision
 
-Pending.
+**Option 1 now** (the owner, 2026-10-11): meshlets in the forward renderer, clusters built
+at cook time and culled per view on the GPU, drawn through compacted indices where mesh
+shaders are missing (the iGPU) and through task and mesh shaders where they exist. The
+visibility buffer is decided together with custom materials (queue item 3b).
 
 ## Consequences
 
-Pending.
+- The cook gains clusters per detail level (meshoptimizer), the pack a format addition.
+- Culling per cluster on both GPUs; numbers on both before the visibility buffer's
+  decision.

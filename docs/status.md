@@ -105,6 +105,12 @@ meanwhile 6b (the iGPU's bloom with fewer reads) or the ADR of 4.
 Merged with the second review's findings (`docs/research/core-audit-2.md`). The owner's
 answers of 2026-10-10: faster checks first, then the review's P0 fixes; the player crate
 after the rendering queue; custom 3D materials after GI; the discrete AO default stays High.
+The owner's answers of 2026-10-11: decals through a decal buffer (ADR 0082); our own GI,
+held to beat AMD's Brixelizer GI in cost (ADR 0084); meshlets first (ADR 0085); mimalloc
+(ADR 0086); Radeon GPU Profiler installed on ref-1 (`D:\SDKs\AMD`); NVIDIA's shader cache
+cleared; contact shadows made deterministic if it is affordable; the iGPU's +1 % from 0f
+kept for now, to fix later; colliders (8c) made from meshes; the split of item 6 was the
+queue item (done 2026-10-10).
 
 0. **Faster checks, first after the review** (owner, 2026-10-02, confirmed 2026-10-10). Then
    `check.ps1 -Gpu -Perf` took 10–25 min, and it grew with every crate and test. Per
@@ -261,10 +267,11 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    with a payload in 0.59 ms on the RTX, 9.9 ms on the Radeon) and the particles (ADR
    0081: a GPU pool with GPU-only counts, deterministic, sorted by depth, drawn soft; 16 K
    sparks in 0.13 / 0.65 ms, a golden shot on both GPUs).
-2. Clustered decals. Researched 2026-10-11 (ADR 0082, Proposed): clustered in the shading
-   doubles the 32 fragment entry points (best after the forward.rs split, 7c), a decal
-   buffer before lighting needs the prepass and skips transparent surfaces. Waiting for
-   the owner's choice; 2b meanwhile.
+2. Decals. Researched 2026-10-11 (ADR 0082): **a decal buffer before lighting** (the
+   owner, 2026-10-11: without it the corners would come out wrong): a compute pass after
+   the prepass, binned like the lights, writes albedo, normal, roughness and metalness for
+   the shading's decal variants to blend; the prepass runs whenever decals draw;
+   transparent surfaces get none.
 2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity). ~~Phase 1~~ done
    2026-10-11 (ADR 0083): our own `.hdr` decoder, RGBE kept and decoded on the GPU (an
    unclipped sun exceeds half floats); a background cube of its own made on the GPU (a
@@ -283,10 +290,11 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    medallions on the curtains (roughness 0.28, metallic 0.74) must read gold when seen from
    above in shade. Today they look dark brown there. The material and the shading are
    right (seen from below they are gold), but the shaded floor they reflect has no bounced
-   light (2026-10-02). Researched 2026-10-11 (ADR 0084, Proposed): DDGI probes traced with
-   ray queries (NVIDIA's patent application on DDGI was abandoned; both reference GPUs have
-   ray queries; acceleration structures needed) or AMD's Brixelizer GI (MIT, compute, any
-   GPU). Waiting for the owner's choice.
+   light (2026-10-02). Researched 2026-10-11 (ADR 0084): **our own probe GI traced with ray
+   queries** (the owner, 2026-10-11: if it can be faster and cheaper than AMD's, do it),
+   held to a bar: less GPU time and memory than AMD's Brixelizer GI (built from the
+   FidelityFX SDK as the reference, and the fallback) at comparable quality on both GPUs.
+   Acceleration structures in `engine_rhi` and the GPU scene first.
 3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
    first: it decides permutations and pipeline management for the whole renderer (§9
    material graph and hand-written Slang).
@@ -295,9 +303,9 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
    direction and cone-based specular occlusion; fixes dielectrics looking too bright next
    to metals in shade indoors (§6). Own entry points, only in views with AO (register rule).
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
-   visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085, Proposed):
-   meshlets in the forward renderer first (both GPUs; the iGPU has no mesh shaders), the
-   visibility buffer decided together with custom materials (3b). The owner's choice.
+   visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085): **meshlets
+   in the forward renderer first** (the owner, 2026-10-11; both GPUs; the iGPU has no mesh
+   shaders), the visibility buffer decided together with custom materials (3b).
 5. Virtual shadow maps.
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.
@@ -329,7 +337,8 @@ grown, divide and conquer); the old labels stay in parentheses.
    `docs/research/global-allocator.md`; ADR 0086, Proposed): mimalloc 2.3.2 3.3–4.7× the
    system heap on allocation-heavy work, 1.5–1.6× on glTF imports and pack loads, the
    frame unchanged; it holds memory in sleeping workers' heaps (341 MiB after a level
-   load until they collect): the owner's choice. The private bytes accounted for
+   load until they collect). **mimalloc chosen** (the owner, 2026-10-11): integrate it
+   with idle workers collecting and a counting layer in debug builds. The private bytes accounted for
    2026-10-11 (`flight` now prints its committed memory by kind, and the allocator its
    mapped bytes per heap): of the RTX's 936 MiB, 607 MiB are write-combined pages the
    driver mapped into the process (the engine's own mapped Vulkan memory 192 MiB of it),
