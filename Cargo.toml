@@ -31,6 +31,7 @@ engine_physics2d = { path = "crates/engine_physics2d" }
 engine_scene = { path = "crates/engine_scene" }
 engine_editor = { path = "crates/engine_editor" }
 engine_dlss = { path = "crates/engine_dlss" }
+engine_ffx = { path = "crates/engine_ffx" }
 engine_fsr = { path = "crates/engine_fsr" }
 engine_frame = { path = "crates/engine_frame" }
 engine_platform = { path = "crates/engine_platform" }

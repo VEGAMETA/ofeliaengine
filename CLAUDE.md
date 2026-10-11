@@ -56,7 +56,8 @@ Decisions change only via an ADR backed by measurements.
   engine_render2d        2D renderer: batching, sprites, tilemaps, vector primitives, 2D lighting
   engine_shader          Slang compilation, permutations, cache, pipeline cache, hot reload
   engine_upscale         TAAU (own) and the `Upscaler` interface shared by every upscaler
-  engine_fsr             FSR 3.1, built from the FidelityFX SDK sources (C++ via `cc`; ADR 0060)
+  engine_ffx             the FidelityFX SDK built from source as one library: FSR 3.1, Brixelizer, Brixelizer GI (C++ via `cc`; ADR 0090)
+  engine_fsr             FSR 3.1 over engine_ffx (ADR 0060)
   engine_dlss            DLSS SR/DLAA through Streamline, user-supplied DLLs (ADR 0063)
   engine_frame           the frame renderer: composes a view's frame (scene, TAA/upscaling, post; ADR 0072)
   engine_latency         frame pacing, limiter, VK_NV_low_latency2, VK_AMD_anti_lag

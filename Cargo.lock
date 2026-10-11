@@ -341,6 +341,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_ffx"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "engine_rhi",
+]
+
+[[package]]
 name = "engine_frame"
 version = "0.0.0"
 dependencies = [
@@ -357,8 +365,8 @@ dependencies = [
 name = "engine_fsr"
 version = "0.0.0"
 dependencies = [
- "cc",
  "engine_core",
+ "engine_ffx",
  "engine_profiler",
  "engine_render",
  "engine_rhi",

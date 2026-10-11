@@ -1,0 +1,21 @@
+[package]
+name = "engine_ffx"
+description = "The AMD FidelityFX SDK effects the engine uses (FSR 3.1, Brixelizer, Brixelizer GI), built from the vendored source as one static library with their SPIR-V, and their C interfaces (ADR 0060, ADR 0090)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+links = "ffx"
+
+[lints]
+workspace = true
+
+[dependencies]
+# Vulkan handle types of the C interfaces.
+engine_rhi.workspace = true
+
+[build-dependencies]
+# Compiles the vendored FidelityFX SDK sources (MIT) and the engine's interfaces (MIT OR
+# Apache-2.0).
+cc = { version = "1", features = ["parallel"] }

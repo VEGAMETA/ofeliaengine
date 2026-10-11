@@ -1,6 +1,7 @@
 # 0060. FSR 3.1 upscaling beside the engine's TAAU, built from source; frame generation later
 
-- Status: Accepted
+- Status: Accepted. Since ADR 0090 the SDK is built by `engine_ffx` (one library for FSR 3.1
+  and Brixelizer GI); `engine_fsr` keeps the Rust API.
 - Date: 2026-10-01
 - Builds on: [ADR 0043](0043-motion-vectors-and-taau.md) (motion vectors, jitter, TAAU),
   [ADR 0054](0054-transparency.md) (the reactive mask),
