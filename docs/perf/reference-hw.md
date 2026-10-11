@@ -68,7 +68,10 @@ driver lays a 1920 × 1080 color image out in 256-byte tiles (alignment 256, no 
 keeping 64 KiB tiles for sizes they divide (1920 × 1088, 1024 × 1024); rendering 1,088
 rows moved passes by −36 to +43 %, again both ways. So an A/B on the Radeon compares
 placements as much as code: judge a change over every scene, as the perf gate does, not
-by one pass in one scene.
+by one pass in one scene. One case: `sponza_smaa_t2x`'s shadow pass ran 26–28 % over its
+baseline in every check from the evening of 2026-10-10 on, main's included (A/B against
+main twice), with no change to shadows; its baseline row was measured again (2,412 →
+3,092 µs) on 2026-10-11.
 
 What it does **not** cover:
 

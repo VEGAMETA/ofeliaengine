@@ -306,9 +306,14 @@ grown, divide and conquer); the old labels stay in parentheses.
 6a (was 6). Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
    (ADR 0067), frame generation. For frame generation, both DLSS FG and FSR 3.1 FG, off by
    default, with latency measured.
-6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms, ~~bloom 1.6 ms~~, local
-   shadows redrawn every frame when casters move (a per-frame redraw budget; never the
-   patented static/dynamic split). Tried 2026-10-11: bloom levels in R11G11B10F save the
+6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms (6.6 ms in the perf gate's
+   `sponza_taa`), ~~bloom 1.6 ms~~, local shadows redrawn every frame when casters move (a
+   per-frame redraw budget; never the patented static/dynamic split). TAAU tried
+   2026-10-11: its 3 × 3 color and depth through shared memory (the bloom's trick) made
+   the Radeon's resolve 20 % slower and the RTX's 3 % faster; without its nine `exp`
+   1 % faster; its history images moved in memory, unchanged. Neither its texture reads
+   nor its placement limit it: about 800 lane-cycles per pixel, its arithmetic as a whole.
+   Next: look at it in Radeon GPU Profiler (instruction timing) before changing it. Tried 2026-10-11: bloom levels in R11G11B10F save the
    bloom passes 10 % on both GPUs, but on the Radeon the tone mapper then takes as much
    longer (frame unchanged; perf history). Done 2026-10-11: the bloom's taps through
    shared memory (the same values bit for bit): over the 18 perf scenes the RTX's bloom
