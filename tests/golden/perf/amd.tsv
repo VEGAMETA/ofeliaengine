@@ -181,7 +181,7 @@ sponza_smaa_t2x	cull setup	1.0
 sponza_smaa_t2x	forward	19563.6
 sponza_smaa_t2x	motion background	34.4
 sponza_smaa_t2x	remember instances	0.3
-sponza_smaa_t2x	shadow	2412.1
+sponza_smaa_t2x	shadow	3091.8
 sponza_smaa_t2x	shadow cull	1.2
 sponza_smaa_t2x	sky	40.1
 sponza_smaa_t2x	smaa blend	874.8
