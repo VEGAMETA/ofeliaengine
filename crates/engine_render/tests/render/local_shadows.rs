@@ -122,8 +122,8 @@ struct Bed {
 }
 
 const BYTES: u64 = (WIDTH * HEIGHT * 8) as u64;
-/// The color and an R8 mask after it.
-const READBACK: u64 = BYTES + (WIDTH * HEIGHT) as u64;
+/// The color and the contact mask (a float's bits per pixel) after it.
+const READBACK: u64 = BYTES + (WIDTH * HEIGHT * 4) as u64;
 
 impl Bed {
     fn new() -> Option<Self> {
@@ -378,10 +378,11 @@ impl Bed {
         let color = (0..(WIDTH * HEIGHT) as usize)
             .map(|i| half::to_f32(u16::from_le_bytes([raw[i * 8], raw[i * 8 + 1]])))
             .collect();
+        // The contact mask holds a float's bits per pixel (`CONTACT_FORMAT`).
         let mask = mask.map(|_| {
             raw[BYTES as usize..]
-                .iter()
-                .map(|&b| f32::from(b) / 255.0)
+                .chunks_exact(4)
+                .map(|b| f32::from_bits(u32::from_le_bytes([b[0], b[1], b[2], b[3]])))
                 .collect()
         });
         (color, mask)
