@@ -1064,6 +1064,7 @@ mod windowed {
                                         decals: &[],
                                         environment: None,
                                         reflections: Default::default(),
+                                        gi: None,
                                     },
                                 );
                             }

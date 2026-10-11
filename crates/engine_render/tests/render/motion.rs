@@ -204,6 +204,7 @@ fn motion_vectors() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();

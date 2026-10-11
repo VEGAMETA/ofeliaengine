@@ -697,6 +697,42 @@ fn procedural_scene_with_reflections() {
     });
 }
 
+/// Sponza with global illumination from a volume of probes (ADR 0088), through the
+/// runtime: the arcades in shade and the galleries behind them take the light the sunlit
+/// floor and walls reflect, without leaking through the walls. Exposed brighter: the
+/// courtyard's floor sees a tenth of the sky's light that the sky's harmonics give it.
+#[test]
+fn sponza_with_gi() {
+    check(&Shot {
+        runtime: true,
+        gi: Some(1.0),
+        exposure: 3.0,
+        ..Shot::new(
+            "sponza_gi",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
+/// The acceptance view of ADR 0084: the curtains' metal medallions seen from above in
+/// shade read gold, reflecting the floor lit by the probe GI that the reflection probes
+/// captured.
+#[test]
+fn sponza_medallions_with_gi() {
+    check(&Shot {
+        eye: Some(Vec3::new(-6.0, 6.5, -2.0)),
+        target: Some(Vec3::new(-3.0, 2.0, 4.5)),
+        runtime: true,
+        gi: Some(1.0),
+        exposure: 3.0,
+        probe_grid: Some([6, 2, 3]),
+        ..Shot::new(
+            "sponza_gi_medallions",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
 /// Sponza with reflection probes (ADR 0073): the atrium cut into boxes, each captured from
 /// its centre; inside, the stone and the floor reflect the arches instead of the sky.
 #[test]

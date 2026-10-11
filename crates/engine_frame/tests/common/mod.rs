@@ -234,6 +234,7 @@ impl Bed {
                         decals: &[],
                         environment: None,
                         reflection_probes: None,
+                        gi: None,
                     },
                     camera,
                     ViewTarget {

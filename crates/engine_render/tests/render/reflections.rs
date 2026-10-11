@@ -278,6 +278,7 @@ impl Bed {
                         decals: &[],
                         environment: Some(&self.environment),
                         reflections,
+                        gi: None,
                     },
                 )
                 .unwrap();
@@ -419,6 +420,7 @@ impl Bed {
                         decals: &[],
                         environment: Some(&self.environment),
                         reflections,
+                        gi: None,
                     },
                 )
                 .unwrap();

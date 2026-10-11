@@ -244,6 +244,7 @@ fn steady_state_skinning_frames_do_not_allocate() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();

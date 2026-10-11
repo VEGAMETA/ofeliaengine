@@ -1764,3 +1764,61 @@ if let Some(ray_frame) = rays.add_passes(
 - `scene_bench --rays [finest|coarsest] [--ray-budget <triangles|device>]` measures a
   scene's structures and its rays (with `--screenshot`, also the rays' distance image);
   `ray_bench` compares the top level's policies with thousands of moving instances.
+
+## 20. Global illumination: a volume of probes
+
+Light bounces: a sunlit floor lights the arcade above it, a red curtain tints the stone
+beside it, a gallery in shade gets what its opening lets in. On a GPU with ray queries
+(section 19), a volume of probes over the scene holds that light (ADR 0088): each probe
+traces rays from where it stands, shades what they hit (the sun with its shadow, the
+materials' colors and glow, the sky where they escape, and the probes' own light for
+further bounces) and keeps the irradiance coming from every direction and how far its
+rays reached. The shading then takes each pixel's diffuse light from the eight probes
+around its surface, weighed so light does not pass through walls. It replaces the sky's
+diffuse light inside the volume; outside, the sky's light takes over over one cell.
+
+The volume converges once, over 11 updates (one per frame by default: 15 ms of GPU time
+in all for Sponza on an RTX 4060 Ti, 1.1 s on a two-CU integrated Radeon, a load-time
+cost), then costs only its reading every frame: the light is frozen. Call `refresh()`
+when the sun or the scene changed (phase 2 will update it continuously).
+
+```rust
+use engine_render::forward::ViewGi;
+use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
+
+// Once, if the device has ray queries, with a `RayScene` (section 19):
+frame.forward_mut().set_global_illumination(&device, &bindless, true)?;
+let grid = ProbeGrid::covering(scene_min, scene_max, 1.0, 16_384); // ~1 m apart
+let gi = ProbeGi::new(&device, &mut allocator, &bindless, grid,
+    GiSettings::for_device(&device))?;
+
+// Every frame, with the GPU scene's frame and the ray scene's:
+let ray_frame = rays.add_passes(&mut fg, /* ... */, &scene_frame, frame_number)?;
+let scene = SceneInput {
+    // ...
+    gi: Some(ViewGi { volume: gi.begin_frame(&mut fg), rays: ray_frame }),
+};
+```
+
+- **When it converges:** the updates trace the scene as it is in those frames. Let the
+  textures arrive first (pass `rays: None` until then: a texture not uploaded counts as
+  white) and wait for `RayStats::pending == 0`, or call `gi.refresh()` once they have.
+  Views read the volume from its first update on.
+- **Spacing:** probes about a metre apart suit rooms and buildings; walls thinner than a
+  tenth of the spacing can leak light. `ProbeGrid::covering` caps the probes (16,384 here:
+  the spacing grows to fit). Memory: 1.5 KiB per probe (Sponza's 8,680 probes: 12.8
+  MiB), and while converging a transient 1 KiB per probe for its rays.
+- **Cost per frame:** a resolve pass evaluates the probes once per 2 × 2 pixels on
+  discrete GPUs and 4 × 4 on integrated ones (`GiSettings::resolve_scale`), and the
+  shading takes each pixel's light from the samples around it at its distance: Sponza
+  at 1920 × 1080, 0.12 ms on the RTX and 1.8 ms on the integrated Radeon.
+- **What it sees:** opaque and alpha-tested surfaces (alpha-tested ones as solid),
+  double-sided ones from both sides; materials at a coarse mip (their average color);
+  emission; the sun; the sky (the environment's cube, or the flat ambient color).
+  Transparent surfaces do not take part.
+- **Reflection probes** (section 16) capture the scene lit by the volume: metals in shade
+  reflect lit surroundings instead of black.
+- **Not yet:** moving objects and lights do not change the light after it converged
+  (phase 2); multisampled views keep the sky's light; GPUs without ray queries too.
+- `scene_bench --gi [spacing] [--gi-scale 1|2|4]` measures a scene's volume (the updates,
+  the resolve, the shading); `GI_DEBUG=1` with `--screenshot` saves the irradiance alone.

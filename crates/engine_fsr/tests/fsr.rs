@@ -210,6 +210,7 @@ impl Gpu {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();

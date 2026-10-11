@@ -11,7 +11,7 @@ use engine_core::math::{Mat4, Quat, Vec3, vulkan_perspective};
 use engine_render::environment::Environment;
 use engine_render::forward::{
     Camera, Decal, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer, ForwardView,
-    LocalLight, MotionOutput, Occlusion, ShadowSettings, Temporal,
+    LocalLight, MotionOutput, Occlusion, ShadowSettings, Temporal, ViewGi,
 };
 use engine_render::fsr1::{Fsr1, Fsr1Exposure};
 use engine_render::gpu_scene::SceneFrame;
@@ -163,6 +163,10 @@ pub struct SceneInput<'a, 'g> {
     /// renderer): the scene's, shared by its views; the first view of a frame captures
     /// what needs capturing.
     pub reflection_probes: Option<&'g ReflectionProbes>,
+    /// Global illumination from a volume of probes (ADR 0088; with
+    /// `ForwardRenderer::set_global_illumination` on, on the persistent GPU scene's path
+    /// while it converges): the scene's, shared by its views.
+    pub gi: Option<ViewGi<'g>>,
 }
 
 impl fmt::Debug for SceneInput<'_, '_> {
@@ -1060,6 +1064,7 @@ impl FrameRenderer {
                 probes: scene.reflection_probes,
                 ssr: reflections.as_ref(),
             },
+            gi: scene.gi,
         };
         let mut passes = match scene.draws {
             SceneDraws::List(draws) => self.forward.add_passes(

@@ -53,6 +53,7 @@ use crate::contact::{ContactShadows, ContactView};
 use crate::cull::Frustum;
 use crate::decals::{DecalPasses, DecalTargets};
 use crate::environment::{Environment, EnvironmentFrame, PREFILTERED_LEVELS};
+use crate::gi::{GiFrame, GiSky};
 use crate::gpu_scene::SceneFrame;
 use crate::graph::{
     Access, Buffer, BufferDesc, BufferState, FrameGraph, ImportedBuffer, LoadOp, PassBuilder,
@@ -67,6 +68,7 @@ use crate::local_shadows::{
 };
 use crate::material::{MaterialFrame, MaterialId, MaterialKind};
 use crate::mesh::{GeometryFrame, MeshId};
+use crate::rays::RayFrame;
 use crate::reflections::{
     MsComposite, NORMAL_ROUGHNESS_FORMAT, ProbeTextures, ReflectionPasses, ReflectionProbes,
     ViewInputs, ViewSetup, WEIGHT_FORMAT,
@@ -145,9 +147,9 @@ mod shadow_atlas;
 use layout::{Changes, Layout, Source, local_box};
 pub(crate) use layout::{States, mirrored, state};
 use pipelines::{
-    AoPasses, ContactState, DecalShading, ReflectShadingTable, ReflectionShading, Shading,
-    ShadowedPipelines, SubsurfacePipelines, VARIANTS, lazy_statistics, ready, shading_desc,
-    shadowed_index,
+    AoPasses, ContactState, DecalShading, GiFeatures, GiShading, ReflectShadingTable,
+    ReflectionShading, Shading, ShadowedPipelines, SubsurfacePipelines, VARIANTS, lazy_statistics,
+    ready, shading_desc, shadowed_index,
 };
 use shadow_atlas::{AtlasImage, LocalShadowState};
 
@@ -265,6 +267,160 @@ const REFLECT_DECAL_FRAGMENTS: [(&[u8], &core::ffi::CStr); 8] = [
         c"fragmentReflectAoContactShadowedDecals",
     ),
 ];
+// Probe-volume GI (ADR 0088): the shading after the depth prepass of views with a probe
+// volume, by decals, then `(ambient occlusion × 2 + contact shadows) × 2 + local shadows`;
+// the same writing reflections' inputs; subsurface materials without and with local
+// shadows.
+const GI_FRAGMENTS: [[(&[u8], &core::ffi::CStr); 8]; 2] = [
+    [
+        (
+            include_bytes!("../../shaders/forward.fragmentMainGi.spv"),
+            c"fragmentMainGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainShadowedGi.spv"),
+            c"fragmentMainShadowedGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainContactGi.spv"),
+            c"fragmentMainContactGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainContactShadowedGi.spv"),
+            c"fragmentMainContactShadowedGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainAoGi.spv"),
+            c"fragmentMainAoGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainAoShadowedGi.spv"),
+            c"fragmentMainAoShadowedGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainAoContactGi.spv"),
+            c"fragmentMainAoContactGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainAoContactShadowedGi.spv"),
+            c"fragmentMainAoContactShadowedGi",
+        ),
+    ],
+    [
+        (
+            include_bytes!("../../shaders/forward.fragmentMainDecalsGi.spv"),
+            c"fragmentMainDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainShadowedDecalsGi.spv"),
+            c"fragmentMainShadowedDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainContactDecalsGi.spv"),
+            c"fragmentMainContactDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainContactShadowedDecalsGi.spv"),
+            c"fragmentMainContactShadowedDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainAoDecalsGi.spv"),
+            c"fragmentMainAoDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainAoShadowedDecalsGi.spv"),
+            c"fragmentMainAoShadowedDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainAoContactDecalsGi.spv"),
+            c"fragmentMainAoContactDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentMainAoContactShadowedDecalsGi.spv"),
+            c"fragmentMainAoContactShadowedDecalsGi",
+        ),
+    ],
+];
+const GI_REFLECT_FRAGMENTS: [[(&[u8], &core::ffi::CStr); 8]; 2] = [
+    [
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectGi.spv"),
+            c"fragmentReflectGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectShadowedGi.spv"),
+            c"fragmentReflectShadowedGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectContactGi.spv"),
+            c"fragmentReflectContactGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectContactShadowedGi.spv"),
+            c"fragmentReflectContactShadowedGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectAoGi.spv"),
+            c"fragmentReflectAoGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectAoShadowedGi.spv"),
+            c"fragmentReflectAoShadowedGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectAoContactGi.spv"),
+            c"fragmentReflectAoContactGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectAoContactShadowedGi.spv"),
+            c"fragmentReflectAoContactShadowedGi",
+        ),
+    ],
+    [
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectDecalsGi.spv"),
+            c"fragmentReflectDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectShadowedDecalsGi.spv"),
+            c"fragmentReflectShadowedDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectContactDecalsGi.spv"),
+            c"fragmentReflectContactDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectContactShadowedDecalsGi.spv"),
+            c"fragmentReflectContactShadowedDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectAoDecalsGi.spv"),
+            c"fragmentReflectAoDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectAoShadowedDecalsGi.spv"),
+            c"fragmentReflectAoShadowedDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectAoContactDecalsGi.spv"),
+            c"fragmentReflectAoContactDecalsGi",
+        ),
+        (
+            include_bytes!("../../shaders/forward.fragmentReflectAoContactShadowedDecalsGi.spv"),
+            c"fragmentReflectAoContactShadowedDecalsGi",
+        ),
+    ],
+];
+const GI_SUBSURFACE_FRAGMENTS: [(&[u8], &core::ffi::CStr); 2] = [
+    (
+        include_bytes!("../../shaders/forward.fragmentSubsurfaceGi.spv"),
+        c"fragmentSubsurfaceGi",
+    ),
+    (
+        include_bytes!("../../shaders/forward.fragmentSubsurfaceShadowedGi.spv"),
+        c"fragmentSubsurfaceShadowedGi",
+    ),
+];
 pub use crate::shadow::ShadowSettings;
 
 /// Format of the motion vector target (ADR 0043).
@@ -310,7 +466,7 @@ pub(crate) const SUBSURFACE: usize = 16;
 /// front (ADR 0054).
 pub(crate) const BLENDED: usize = 8;
 pub(crate) const MASKED: usize = 4;
-const DOUBLE_SIDED: usize = 2;
+pub(crate) const DOUBLE_SIDED: usize = 2;
 pub(crate) const MIRRORED: usize = 1;
 /// Bitmasks of states for [`States::draw`]: opaque and masked without subsurface
 /// scattering (0-7), blended (8-15), with subsurface scattering (16-23).
@@ -475,6 +631,23 @@ pub struct ForwardView<'a> {
     /// [`ForwardRenderer::set_decals`]; not drawn in multisampled views or probe captures,
     /// nor on transparent surfaces and subsurface materials.
     pub decals: &'a [Decal],
+    /// Global illumination from a volume of probes (ADR 0088, [`crate::gi`]): the diffuse
+    /// light of opaque surfaces and subsurface materials, after the depth prepass (which
+    /// then runs). It needs [`ForwardRenderer::set_global_illumination`]; not in
+    /// multisampled views; transparent surfaces keep the sky's light.
+    pub gi: Option<ViewGi<'a>>,
+}
+
+/// A view's global illumination ([`ForwardView::gi`]).
+#[derive(Debug, Clone, Copy)]
+pub struct ViewGi<'a> {
+    /// The volume in this frame's graph ([`crate::gi::ProbeGi::begin_frame`], once per
+    /// frame).
+    pub volume: GiFrame<'a>,
+    /// This frame's scene for ray queries ([`crate::rays::RayScene::add_passes`]): while
+    /// the volume converges, its updates trace it (on the persistent GPU scene's path,
+    /// [`ForwardRenderer::add_scene_passes`]); `None` keeps the volume as it is.
+    pub rays: Option<RayFrame<'a>>,
 }
 
 /// Temporal state of one view, kept across frames (ADR 0043): last frame's camera and
@@ -795,6 +968,11 @@ struct FrameData {
     shadow_draws: u64,
     shadow_draw_count: u32,
     shadow_texel: f32,
+    /// Probe GI (ADR 0088): pixels per resolved sample along each axis, and the samples'
+    /// grid.
+    gi_scale: f32,
+    gi_samples: [u32; 2],
+    _gi_pad: u32,
 }
 
 /// `Instance` in `forward.slang` (64 bytes): the rows of the affine
@@ -850,17 +1028,21 @@ pub(crate) struct Push {
     /// Bindless indices of the decal buffer (ADR 0082): albedo, surface.
     pub(crate) decal_albedo: u32,
     pub(crate) decal_surface: u32,
+    /// Bindless index of the view's diffuse irradiance per pixel (ADR 0088), read by the
+    /// GI entry points.
+    pub(crate) gi: u32,
+    pub(crate) _pad: u32,
 }
 
 /// `NO_TEXTURE` in `forward.slang`: no ambient occlusion.
 const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1056);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1072);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
 const _: () = assert!(crate::mesh::MAX_LODS == 4);
-const _: () = assert!(core::mem::size_of::<Push>() == 120);
+const _: () = assert!(core::mem::size_of::<Push>() == 128);
 const COMMAND_BYTES: u64 = core::mem::size_of::<vk::DrawIndexedIndirectCommand>() as u64;
 const _: () = assert!(COMMAND_BYTES == 20);
 
@@ -900,6 +1082,9 @@ pub struct ForwardPasses {
     pub contact_shadows: Option<Texture>,
     /// The decal buffer (ADR 0082), when decals drew: for debugging views and tests.
     pub decals: Option<crate::decals::DecalTargets>,
+    /// The diffuse irradiance per pixel of probe GI (ADR 0088), when the view had it: for
+    /// debugging views and tests.
+    pub gi: Option<Texture>,
     /// The view's reflection inputs and screen-space reflections (ADR 0073), when it has
     /// reflections: for effects of your own after the scene passes.
     pub reflections: Option<crate::reflections::ReflectionOutput>,
@@ -1113,6 +1298,9 @@ pub struct ForwardRenderer {
     /// as reflections'.
     decals: Option<Box<DecalShading>>,
     decals_on: bool,
+    /// Probe-volume GI's shading pipelines (ADR 0088), described when first turned on.
+    gi: Option<Box<GiShading>>,
+    gi_on: bool,
     /// Pipelines for multisampled targets (MSAA, ADR 0075): 2, 4, 8 samples, made by
     /// [`Self::set_samples`].
     msaa: [Option<Box<msaa::MsaaPipelines>>; 3],
@@ -1446,6 +1634,8 @@ impl ForwardRenderer {
             reflections_on: false,
             decals: None,
             decals_on: false,
+            gi: None,
+            gi_on: false,
             msaa: [None, None, None],
             depth_resolves: {
                 let modes = device.adapter().depth_resolve_modes;
@@ -1616,10 +1806,53 @@ impl ForwardRenderer {
             reflections: self.reflections.is_some(),
         };
         let formats = (self.color_format, self.depth_format);
-        match self.decals.as_mut() {
-            Some(decals) => decals.ensure(device, bindless, formats, features),
+        if let Some(decals) = self.decals.as_mut() {
+            decals.ensure(device, bindless, formats, features)?;
+        }
+        self.ensure_gi_shading(device, bindless)
+    }
+
+    /// The probe-GI shading for the features in use, when GI is on.
+    fn ensure_gi_shading(&mut self, device: &Device, bindless: &Bindless) -> Result<(), RhiError> {
+        let features = GiFeatures {
+            ao: self.ao.is_some(),
+            contact: self.contact.is_some(),
+            shadows: self.local_shadows.is_some(),
+            reflections: self.reflections.is_some(),
+            decals: self.decals.is_some(),
+            subsurface: self.subsurface_pipelines.is_some(),
+        };
+        let formats = (self.color_format, self.depth_format);
+        match self.gi.as_mut() {
+            Some(gi) => gi.ensure(device, bindless, formats, features),
             None => Ok(()),
         }
+    }
+
+    /// Turns global illumination from a volume of probes (ADR 0088, [`crate::gi`]) on or
+    /// off (the default): views with [`ForwardView::gi`] then take the diffuse light of
+    /// their opaque surfaces from it, through a pass after the depth prepass (which runs
+    /// in those views). The first time it is turned on its shading pipelines are
+    /// described (up to 78 with every other feature on; made on first use or by the
+    /// device's warm-up, ADR 0079), so a renderer that never uses it pays nothing, not
+    /// even registers in its shading.
+    pub fn set_global_illumination(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        enabled: bool,
+    ) -> Result<(), RhiError> {
+        if enabled && self.gi.is_none() {
+            self.gi = Some(Box::default());
+            self.ensure_gi_shading(device, bindless)?;
+        }
+        self.gi_on = enabled;
+        Ok(())
+    }
+
+    /// Whether global illumination is on.
+    pub fn global_illumination(&self) -> bool {
+        self.gi_on
     }
 
     /// Turns the sun's contact shadows on with `settings`, or off (`None`, the default;
@@ -1984,6 +2217,19 @@ impl ForwardRenderer {
         core::array::from_fn(|k| lazy_statistics(&self.shading[k].main[0], device))
     }
 
+    /// The driver's statistics of the probe-GI shading after the depth prepass (ADR 0088),
+    /// per shading variant as [`Self::shading_statistics`], without decals, ambient
+    /// occlusion or contact shadows. Empty while GI is off.
+    pub fn gi_statistics(&self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
+        core::array::from_fn(|k| {
+            self.gi
+                .as_deref()
+                .and_then(|gi| gi.pipeline(k, false, false, false, false, false))
+                .map(|p| lazy_statistics(p, device))
+                .unwrap_or_default()
+        })
+    }
+
     /// The driver's statistics of what a view with motion vectors (temporal antialiasing
     /// and upscaling) shades with, per shading variant as [`Self::shading_statistics`]: the
     /// shading that writes them (views without the depth prepass), then the shading after
@@ -2147,6 +2393,39 @@ impl ForwardRenderer {
         }
         let mut setup = self.setup(fg, view);
         let imported = self.import(fg, ring, bindless, view, &setup)?;
+        // Probe GI (ADR 0088): the volume's updates while it converges, tracing this
+        // frame's scene for ray queries; misses see the view's sky.
+        if let Some(gi) = view.gi.filter(|_| self.gi_on)
+            && let Some(rays) = gi.rays
+            && !gi.volume.is_converged()
+        {
+            let sky = match imported.environment {
+                Some(e) => GiSky::Cube {
+                    texture: e.source,
+                    index: e.source_index,
+                    intensity: e.intensity,
+                    sh: e.sh_address,
+                },
+                None => GiSky::Flat(view.light.ambient),
+            };
+            let sun = imported
+                .environment
+                .and_then(|e| e.sun_color)
+                .unwrap_or(view.light.color);
+            gi.volume
+                .add_update_passes(
+                    fg,
+                    ring,
+                    bindless,
+                    &rays,
+                    scene,
+                    geometry,
+                    materials,
+                    Some((-view.light.direction, sun)),
+                    sky,
+                )
+                .ok()?;
+        }
         if let Some((probes, textures)) = imported.probes {
             // What moved, appeared or went away in the scene asks the probes that see it
             // for a new capture; instances moving between ticks move in every frame.
@@ -2279,6 +2558,9 @@ impl ForwardRenderer {
                 decals: &[],
                 environment: view.environment,
                 reflections: Reflections::NONE,
+                // The probe sees the scene lit as the view does (its volume converges
+                // through the view, not here).
+                gi: view.gi.map(|g| ViewGi { rays: None, ..g }),
             };
             let setup = Setup {
                 depth_desc: fg.texture_desc(depth),
@@ -2487,6 +2769,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         atmosphere: None,
         contact_shadows: None,
         decals: None,
+        gi: None,
         reflections: None,
         resolved_depth,
         draws: None,

@@ -264,6 +264,7 @@ fn main() {
                     decals: &[],
                     environment: None,
                     reflections: Default::default(),
+                    gi: None,
                 },
             );
             tonemap.add_pass(&mut fg, &bindless, hdr, backbuffer, 1.0);

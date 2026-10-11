@@ -29,7 +29,13 @@
 //! detail, the top level refitted or rebuilt every frame: an instance is nudged) and a ray
 //! through every pixel from the camera (their own table; with `--screenshot`,
 //! `<name>-rays.png` of their distances), `--ray-budget <triangles|device>` for the
-//! bottom levels' build budget per frame (`device`: `RaySettings::for_device`), `--sky` for
+//! bottom levels' build budget per frame (`device`: `RaySettings::for_device`), `--gi
+//! [spacing]` for global illumination from a volume of probes about `spacing` apart (ADR
+//! 0088, default 1; implies `--rays coarsest`: the draws then render from the GPU scene;
+//! the volume converges in the first frame, then the GI table; `--gi-scale <1|2|4>` for the
+//! pixels per resolved sample, default `GiSettings::for_device`; `GI_DEBUG=1` shows its
+//! irradiance; `--scene-draws` with `--rays` draws from the GPU scene as `--gi` does, the
+//! comparison for its cost), `--sky` for
 //! image-based light and the sky from an environment and `--sky-every-frame` to rebuild it
 //! every frame (ADR 0046), `--atmosphere` for the physically based sky and atmosphere
 //! instead of the gradient sky (ADR 0069; implies `--sky`), `--sun <elevation°>` for the sun's
@@ -67,8 +73,9 @@ use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, Decal, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
-    ShadowSettings, Spot, Temporal,
+    ShadowSettings, Spot, Temporal, ViewGi,
 };
+use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
@@ -289,6 +296,9 @@ fn main() {
     let mut decal_size: Option<f32> = None;
     let mut ray_detail: Option<BlasDetail> = None;
     let mut ray_budget: Option<String> = None;
+    let mut gi_spacing: Option<f32> = None;
+    let mut gi_scale: Option<u32> = None;
+    let mut scene_draws = false;
     let mut light_culling = true;
     let (mut with_sky, mut sky_every_frame) = (false, false);
     let (mut atmosphere, mut atmosphere_every_frame, mut fog) = (false, false, false);
@@ -359,6 +369,15 @@ fn main() {
                 });
             }
             "--ray-budget" => ray_budget = args.next(),
+            "--gi-scale" => gi_scale = Some(args.next().unwrap().parse().unwrap()),
+            "--scene-draws" => scene_draws = true,
+            "--gi" => {
+                gi_spacing = Some(
+                    args.next_if(|a| !a.starts_with("--"))
+                        .map_or(1.0, |v| v.parse().unwrap()),
+                );
+                ray_detail.get_or_insert(BlasDetail::Coarsest);
+            }
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
             "--lods" => lods = true,
@@ -914,6 +933,23 @@ fn main() {
     if ray_detail.is_some() && ray_bed.is_none() {
         println!("Rays: this GPU has no ray queries");
     }
+    // The volume of probes (ADR 0088): over the scene, converged in the first frame.
+    let gi = gi_spacing.filter(|_| ray_bed.is_some()).map(|spacing| {
+        let grid = ProbeGrid::covering(min, max, spacing, 16_384);
+        let defaults = GiSettings::for_device(&device);
+        let settings = GiSettings {
+            updates_per_frame: 11,
+            resolve_scale: gi_scale.unwrap_or(defaults.resolve_scale),
+            ..defaults
+        };
+        ProbeGi::new(&device, &mut allocator, &bindless, grid, settings).unwrap()
+    });
+    renderer
+        .set_global_illumination(&device, &bindless, gi.is_some())
+        .unwrap();
+    let mut gi_rows: Vec<String> = Vec::new();
+    // GPU time of the volume's updates, per pass name.
+    let mut gi_update_us: Vec<(&'static str, f64)> = Vec::new();
     let mut ray_rows: Vec<String> = Vec::new();
     // The bottom levels' builds: GPU time in all, frames with builds, the most in one.
     let (mut blas_build_us, mut blas_build_frames, mut blas_build_max) = (0.0f64, 0, 0.0f64);
@@ -1001,6 +1037,17 @@ fn main() {
                     .collect();
                 println!("Pipeline statistics, {name}, {kind}: {}", line.join("; "));
             }
+        }
+        // The probe-GI shading after the prepass (ADR 0088), with `--gi`.
+        for (name, stats) in names.iter().zip(renderer.gi_statistics(&device)) {
+            if stats.is_empty() {
+                continue;
+            }
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}, GI: {}", line.join("; "));
         }
         let prepass = ["depth prepass", "depth prepass with motion"];
         for (name, stats) in prepass.iter().zip(renderer.prepass_statistics(&device)) {
@@ -1194,6 +1241,7 @@ fn main() {
         let mut contact_time = Vec::new();
         let (mut decal_tiles_time, mut decal_time) = (Vec::new(), Vec::new());
         let (mut tlas_time, mut camera_rays_time) = (Vec::new(), Vec::new());
+        let mut gi_resolve_time = Vec::new();
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
         let (mut tables, mut aerial, mut composite) = (Vec::new(), Vec::new(), Vec::new());
         let (mut bloom_time, mut exposure_time, mut tonemap_time) =
@@ -1258,6 +1306,7 @@ fn main() {
                         texture.upload(&mut fg, &mut ring, pixels).unwrap();
                     }
                 }
+                let mut ray_frames = None;
                 if let Some((scene, rays, buffer, _, address, readback, _, first)) =
                     ray_bed.as_mut()
                 {
@@ -1317,6 +1366,7 @@ fn main() {
                         [WIDTH, HEIGHT],
                         RAY_MASK_ALL,
                     );
+                    ray_frames = Some((scene_frame, ray_frame));
                     if capture {
                         let readback = *readback;
                         let to = fg.import_buffer(
@@ -1377,32 +1427,49 @@ fn main() {
                     renderer.invalidate_local_shadows();
                 }
                 let started = Instant::now();
-                renderer
-                    .add_passes(
-                        &mut fg,
-                        &mut ring,
-                        &bindless,
-                        &geo,
-                        &mats,
-                        &draws,
-                        &ForwardView {
-                            camera,
-                            light,
-                            color: hdr,
-                            depth,
-                            clear: Some([0.02, 0.02, 0.05, 1.0]),
-                            occlusion: None,
-                            temporal: temporal.as_ref(),
-                            lights: &lights,
-                            decals: &decals,
-                            environment: environment.as_ref(),
-                            reflections: Reflections {
-                                probes: probes.as_ref(),
-                                ssr: screen_space.as_ref(),
-                            },
-                        },
-                    )
-                    .unwrap();
+                let gi_view = gi.as_ref().map(|g| ViewGi {
+                    volume: g.begin_frame(&mut fg),
+                    rays: ray_frames.map(|(_, r)| r),
+                });
+                let view = ForwardView {
+                    camera,
+                    light,
+                    color: hdr,
+                    depth,
+                    clear: Some([0.02, 0.02, 0.05, 1.0]),
+                    occlusion: None,
+                    temporal: temporal.as_ref(),
+                    lights: &lights,
+                    decals: &decals,
+                    environment: environment.as_ref(),
+                    reflections: Reflections {
+                        probes: probes.as_ref(),
+                        ssr: screen_space.as_ref(),
+                    },
+                    gi: gi_view,
+                };
+                let passes = match (gi_view, &ray_frames) {
+                    // With GI (its updates need them) or `--scene-draws`, the draws as the
+                    // GPU scene's instances.
+                    (g, Some((scene_frame, _))) if g.is_some() || scene_draws => renderer
+                        .add_scene_passes(
+                            &mut fg,
+                            &mut ring,
+                            &bindless,
+                            &geo,
+                            &mats,
+                            scene_frame,
+                            &view,
+                        ),
+                    _ => renderer
+                        .add_passes(&mut fg, &mut ring, &bindless, &geo, &mats, &draws, &view),
+                }
+                .unwrap();
+                // `GI_DEBUG=1`: the screenshot shows the GI irradiance per pixel instead.
+                let shown = passes
+                    .gi
+                    .filter(|_| std::env::var("GI_DEBUG").is_ok())
+                    .unwrap_or(hdr);
                 added = started.elapsed();
                 if capture {
                     let ldr = fg.create_texture(
@@ -1419,7 +1486,7 @@ fn main() {
                     tonemap.add_composite_pass(
                         &mut fg,
                         &bindless,
-                        hdr,
+                        shown,
                         ldr,
                         Composite {
                             curve,
@@ -1544,6 +1611,7 @@ fn main() {
                 let mut contact_frame = 0.0;
                 let (mut decal_tiles_frame, mut decal_frame) = (0.0, 0.0);
                 let (mut tlas_frame, mut camera_rays_frame) = (0.0, 0.0);
+                let mut gi_resolve_frame = 0.0;
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
                     match time.name {
@@ -1562,6 +1630,7 @@ fn main() {
                         }
                         "decal tiles clear" | "decal tiles" => decal_tiles_frame += us,
                         "tlas instances" | "tlas build" => tlas_frame += us,
+                        "gi resolve" | "gi upsample" => gi_resolve_frame += us,
                         "camera rays" => camera_rays_frame += us,
                         "decals" => decal_frame += us,
                         "local shadow cull" | "local shadows" => {
@@ -1623,6 +1692,7 @@ fn main() {
                 contact_time.push(contact_frame);
                 decal_tiles_time.push(decal_tiles_frame);
                 tlas_time.push(tlas_frame);
+                gi_resolve_time.push(gi_resolve_frame);
                 camera_rays_time.push(camera_rays_frame);
                 decal_time.push(decal_frame);
                 local_views.push(f64::from(renderer.local_shadow_stats().views_drawn));
@@ -1631,6 +1701,15 @@ fn main() {
                 }
             }
             for time in graph.gpu_pass_times() {
+                if time.name.starts_with("gi ")
+                    && time.name != "gi resolve"
+                    && time.name != "gi upsample"
+                {
+                    match gi_update_us.iter_mut().find(|(n, _)| *n == time.name) {
+                        Some((_, us)) => *us += f64::from(time.gpu_us),
+                        None => gi_update_us.push((time.name, f64::from(time.gpu_us))),
+                    }
+                }
                 if time.name == "blas builds" {
                     blas_build_us += f64::from(time.gpu_us);
                     blas_build_frames += 1;
@@ -1696,6 +1775,19 @@ fn main() {
             median(&mut decal_tiles_time),
             median(&mut decal_time),
         );
+        if let Some(g) = &gi {
+            let grid = g.grid();
+            gi_rows.push(format!(
+                "| {mode} | {} ({}×{}×{}) | {:.1} | {:.0} | {:.0} |",
+                grid.probe_count(),
+                grid.counts[0],
+                grid.counts[1],
+                grid.counts[2],
+                g.memory_bytes() as f64 / f64::from(1 << 20),
+                median(&mut gi_resolve_time),
+                median(&mut forward),
+            ));
+        }
         if let Some((_, rays, ..)) = &ray_bed {
             let stats = rays.stats();
             let us = median(&mut camera_rays_time);
@@ -1722,6 +1814,23 @@ fn main() {
                 median(&mut ssr_temporal),
                 median(&mut reflect_composite),
             ));
+        }
+    }
+    if !gi_rows.is_empty() {
+        println!();
+        let updates: Vec<String> = gi_update_us
+            .iter()
+            .map(|(name, us)| format!("{name} {us:.0} µs"))
+            .collect();
+        println!(
+            "GI: {} probes; converging (all updates, GPU): {}",
+            gi.as_ref().map_or(0, |g| g.grid().probe_count()),
+            updates.join(", ")
+        );
+        println!("| materials | probes | MiB | GPU resolve µs | GPU forward µs |");
+        println!("|---|---:|---:|---:|---:|");
+        for row in &gi_rows {
+            println!("{row}");
         }
     }
     if !ray_rows.is_empty() {
@@ -1810,6 +1919,9 @@ fn main() {
         }
         for (texture, _) in &mut decal_textures {
             texture.destroy(&device, &mut allocator, &bindless, 0);
+        }
+        if let Some(mut g) = gi {
+            g.destroy(&device, &mut allocator, &bindless);
         }
         if let Some((mut scene, mut rays, buffer, memory, _, readback, readback_memory, _)) =
             ray_bed.take()

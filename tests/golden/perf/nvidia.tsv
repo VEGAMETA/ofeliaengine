@@ -121,6 +121,19 @@ sponza_fxaa	shadow	157.4
 sponza_fxaa	shadow cull	3.1
 sponza_fxaa	sky	3.1
 sponza_fxaa	tonemap	31.7
+sponza_gi	(frame total)	769.5
+sponza_gi	(gpu frame)	787.7
+sponza_gi	bloom downsample	48.1
+sponza_gi	bloom upsample	31.7
+sponza_gi	cull	4.8
+sponza_gi	cull setup	0.7
+sponza_gi	depth prepass	63.4
+sponza_gi	forward	311.3
+sponza_gi	gi resolve	101.4
+sponza_gi	shadow	172.2
+sponza_gi	shadow cull	3.1
+sponza_gi	sky	3.1
+sponza_gi	tonemap	29.7
 sponza_lanczos3_67	(frame total)	519.8
 sponza_lanczos3_67	(gpu frame)	535.6
 sponza_lanczos3_67	bloom downsample	26.6

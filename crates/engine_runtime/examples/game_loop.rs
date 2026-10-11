@@ -413,6 +413,7 @@ mod windowed {
                             decals: &[],
                             environment: None,
                             reflection_probes: None,
+                            gi: None,
                         },
                         &main.camera,
                         ViewTarget {

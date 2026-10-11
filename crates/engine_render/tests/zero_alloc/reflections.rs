@@ -215,6 +215,7 @@ fn steady_state_reflection_frames_do_not_allocate() {
                             probes: Some(&probes),
                             ssr: Some(&ssr),
                         },
+                        gi: None,
                     },
                 )
                 .unwrap();

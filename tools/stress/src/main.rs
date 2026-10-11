@@ -633,6 +633,7 @@ mod windowed {
                     decals: &[],
                     environment: None,
                     reflections: Default::default(),
+                    gi: None,
                 };
                 if extract.is_some() {
                     let scene_frame = scene

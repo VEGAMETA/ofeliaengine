@@ -306,6 +306,7 @@ fn main() {
                             decals: &[],
                             environment: None,
                             reflections: Default::default(),
+                            gi: None,
                         };
                         let t0 = Instant::now();
                         let passes = if scene_path {

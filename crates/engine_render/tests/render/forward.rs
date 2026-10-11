@@ -208,6 +208,7 @@ fn pbr_lighting_and_shadows() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 );
                 tonemap.add_pass(&mut fg, &bindless, scene, color, 1.0);
@@ -231,6 +232,7 @@ fn pbr_lighting_and_shadows() {
                         decals: &[],
                         environment: None,
                         reflections: Default::default(),
+                        gi: None,
                     },
                 );
             }

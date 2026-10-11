@@ -869,3 +869,178 @@ impl DecalShading {
         }
     }
 }
+
+/// The shading features [`GiShading::ensure`] makes probe-GI variants for.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct GiFeatures {
+    pub(super) ao: bool,
+    pub(super) contact: bool,
+    pub(super) shadows: bool,
+    pub(super) reflections: bool,
+    pub(super) decals: bool,
+    pub(super) subsurface: bool,
+}
+
+/// [`GiShading`]'s pipelines of one variant: `[decals][ambient occlusion][contact
+/// shadows][local shadows]`.
+type GiFeatureTable = [[[[Option<LazyPipeline>; 2]; 2]; 2]; 2];
+
+/// Probe-volume GI (ADR 0088): the shading after the depth prepass that takes its
+/// diffuse ambient light from the GI pass's irradiance per pixel, for each combination of
+/// the other features in use, described when GI is turned on (made on first use or by
+/// the device's warm-up, ADR 0079).
+#[derive(Debug, Default)]
+pub(super) struct GiShading {
+    /// `[variant]` then [`GiFeatureTable`] (local shadows only in the local-light
+    /// variants).
+    main: [GiFeatureTable; 4],
+    /// `[lights]` then [`GiFeatureTable`] (environment variants: reflections need one).
+    reflect: [GiFeatureTable; 2],
+    /// Subsurface materials: `[variant][local shadows]`.
+    subsurface: [[Option<LazyPipeline>; 2]; 4],
+}
+
+impl GiShading {
+    /// Describes the variants of `features` not described yet.
+    pub(super) fn ensure(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        formats: (vk::Format, vk::Format),
+        features: GiFeatures,
+    ) -> Result<(), RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let (color, depth) = formats;
+        // Slots by k = (ambient occlusion × 2 + contact shadows) × 2 + local shadows, as
+        // the fragment tables, and by decals.
+        let wanted = |k: usize, d: usize| {
+            (k & 4 == 0 || features.ao)
+                && (k & 2 == 0 || features.contact)
+                && (k & 1 == 0 || features.shadows)
+                && (d == 0 || features.decals)
+        };
+        let mut main = Vec::new();
+        let mut reflect = Vec::new();
+        let mut subsurface = Vec::new();
+        for d in 0..2 {
+            for k in (0..8).filter(|&k| wanted(k, d)) {
+                let (a, c, l) = (k >> 2, (k >> 1) & 1, k & 1);
+                for variant in 0..4 {
+                    if (l == 0 || variant & 1 != 0) && self.main[variant][d][a][c][l].is_none() {
+                        main.push((d, k, variant));
+                    }
+                }
+                for lights in 0..2 {
+                    if features.reflections
+                        && (l == 0 || lights != 0)
+                        && self.reflect[lights][d][a][c][l].is_none()
+                    {
+                        reflect.push((d, k, lights));
+                    }
+                }
+            }
+        }
+        if features.subsurface {
+            for variant in 0..4 {
+                for l in 0..2 {
+                    if (l == 0 || (features.shadows && variant & 1 != 0))
+                        && self.subsurface[variant][l].is_none()
+                    {
+                        subsurface.push((variant, l));
+                    }
+                }
+            }
+        }
+        if main.is_empty() && reflect.is_empty() && subsurface.is_empty() {
+            return Ok(());
+        }
+        let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+        let words = |table: &[(&[u8], &'static core::ffi::CStr)]| {
+            table
+                .iter()
+                .map(|&(bytes, entry)| Ok((spirv_words(bytes).ok_or_else(invalid)?, entry)))
+                .collect::<Result<Vec<_>, RhiError>>()
+        };
+        let main_fragments = [words(&GI_FRAGMENTS[0])?, words(&GI_FRAGMENTS[1])?];
+        let reflect_fragments = [
+            words(&GI_REFLECT_FRAGMENTS[0])?,
+            words(&GI_REFLECT_FRAGMENTS[1])?,
+        ];
+        let subsurface_fragments = words(&GI_SUBSURFACE_FRAGMENTS)?;
+        let main_formats = [color];
+        let reflect_formats = [color, NORMAL_ROUGHNESS_FORMAT, WEIGHT_FORMAT];
+        let subsurface_formats = [color, IRRADIANCE_FORMAT, ALBEDO_FORMAT];
+        // After the prepass: tested for equality, not written.
+        let mut descs = Vec::with_capacity(main.len() + reflect.len() + subsurface.len());
+        let jobs =
+            main.iter()
+                .map(|&(d, k, variant)| (&main_fragments[d][k], &main_formats[..], variant))
+                .chain(reflect.iter().map(|&(d, k, lights)| {
+                    (&reflect_fragments[d][k], &reflect_formats[..], 2 + lights)
+                }))
+                .chain(subsurface.iter().map(|&(variant, l)| {
+                    (&subsurface_fragments[l], &subsurface_formats[..], variant)
+                }));
+        for (fragment, formats, variant) in jobs {
+            descs.push(PipelineDesc::Graphics(GraphicsPipelineDesc {
+                depth_write: false,
+                depth_compare: vk::CompareOp::EQUAL,
+                ..shading_desc(
+                    &vertex,
+                    &fragment.0,
+                    fragment.1,
+                    formats,
+                    depth,
+                    &VARIANTS[variant],
+                )
+            }));
+        }
+        let mut pipelines =
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &descs)
+                .into_iter();
+        for (d, k, variant) in main {
+            self.main[variant][d][k >> 2][(k >> 1) & 1][k & 1] = pipelines.next();
+        }
+        for (d, k, lights) in reflect {
+            self.reflect[lights][d][k >> 2][(k >> 1) & 1][k & 1] = pipelines.next();
+        }
+        for (variant, l) in subsurface {
+            self.subsurface[variant][l] = pipelines.next();
+        }
+        Ok(())
+    }
+
+    /// The GI shading of a view: of shading `variant` (bit 0 local lights, bit 1 an
+    /// environment), writing reflections' inputs (`reflect`, environment variants only),
+    /// with decals, ambient occlusion, the sun's contact shadows, local lights' shadows.
+    pub(super) fn pipeline(
+        &self,
+        variant: usize,
+        reflect: bool,
+        decals: bool,
+        ao: bool,
+        contact: bool,
+        shadowed: bool,
+    ) -> Option<&LazyPipeline> {
+        let lights = variant & 1;
+        let (d, a, c, l) = (
+            usize::from(decals),
+            usize::from(ao),
+            usize::from(contact),
+            usize::from(shadowed && lights != 0),
+        );
+        if reflect {
+            self.reflect[lights][d][a][c][l].as_ref()
+        } else {
+            self.main[variant & 3][d][a][c][l].as_ref()
+        }
+    }
+
+    /// The GI shading of subsurface materials.
+    pub(super) fn subsurface(&self, variant: usize, shadowed: bool) -> Option<&LazyPipeline> {
+        self.subsurface[variant & 3][usize::from(shadowed && variant & 1 != 0)].as_ref()
+    }
+}

@@ -350,6 +350,7 @@ fn main() {
                             decals: &[],
                             environment: Some(&environment),
                             reflections: Default::default(),
+                            gi: None,
                         },
                     )
                     .unwrap();

@@ -251,6 +251,7 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
                 decals: &decals,
                 environment: None,
                 reflections: Default::default(),
+                gi: None,
             };
             let passes = if use_scene {
                 renderer.add_scene_passes(

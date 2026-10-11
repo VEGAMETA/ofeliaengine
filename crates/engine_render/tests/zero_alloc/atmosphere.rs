@@ -186,6 +186,7 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
                         decals: &[],
                         environment: Some(&environment),
                         reflections: Default::default(),
+                        gi: None,
                     },
                 )
                 .unwrap();
