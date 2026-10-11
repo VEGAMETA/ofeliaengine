@@ -4,7 +4,7 @@ use crate::antialiasing::{
     Antialiasing, AntialiasingSupport, InvalidAntialiasing, Msaa, PostAntialiasing, SmaaQuality,
     Upscale,
 };
-use crate::settings::{Exposure, ViewSettings};
+use crate::settings::{Exposure, FrameGeneration, ViewSettings};
 use crate::view::{HistoryImage, Prepared, Retired, View};
 use core::fmt;
 use engine_core::math::{Mat4, Quat, Vec3, vulkan_perspective};
@@ -280,6 +280,39 @@ pub struct ViewFrame {
     pub resolved: Texture,
     /// The automatic exposure's buffer, when on.
     pub exposure: Option<Buffer>,
+    /// The scene's depth at the render size (0 at the near plane, 1 at the far plane),
+    /// resolved with MSAA: what UI placed in the scene is tested against
+    /// ([`crate::UiRenderer`]).
+    pub depth: Texture,
+    /// With [`FrameRenderer::add_view_generating`] and frame generation on: the frame
+    /// generated before this one.
+    pub generated: Option<GeneratedFrame>,
+}
+
+/// Where [`FrameRenderer::add_view_generating`] writes the generated frame, and how the
+/// real frame's target is read (ADR 0091): a paced presenter's images
+/// (`engine_latency::PacedImages`).
+#[derive(Debug, Clone, Copy)]
+pub struct GeneratedTarget {
+    /// The generated frame, the output's size: a storage image (with an alpha channel)
+    /// written as `format`.
+    pub texture: Texture,
+    /// The format the generated frame is written as (the UNORM twin of an sRGB output).
+    pub format: vk::Format,
+    /// The format the real frame's target is read as by frame interpolation (the same
+    /// twin: the interpolation reads the encoded values).
+    pub source_format: vk::Format,
+}
+
+/// The frame generated before a real frame (ADR 0091).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GeneratedFrame {
+    /// The camera half-way between the last frame's and this one's: the UI placed in the
+    /// scene is drawn on the generated frame with it.
+    pub camera: ViewCamera,
+    /// Whether to show it: not after a cut or a reset, nor on the first frame (it is then
+    /// the real frame itself).
+    pub shown: bool,
 }
 
 /// Composes a whole frame for each view (see the crate documentation): the scene passes
@@ -649,6 +682,17 @@ impl FrameRenderer {
         self.streamline = streamline;
     }
 
+    /// Whether frame generation of `kind` can run here (ADR 0091): FSR's when built in
+    /// (feature `fsr`). Presenting it also needs a paced presenter
+    /// (`engine_latency::PacedPresenter::start` says whether the device has what it
+    /// needs).
+    pub fn frame_generation_available(&self, kind: FrameGeneration) -> bool {
+        match kind {
+            FrameGeneration::Off => true,
+            FrameGeneration::Fsr => cfg!(feature = "fsr"),
+        }
+    }
+
     /// Whether `kind` can run here: TAAU always; FSR when built in (feature `fsr`); DLSS
     /// with Streamline ([`Self::set_streamline`]).
     pub fn available(&self, kind: UpscalerKind) -> bool {
@@ -752,6 +796,25 @@ impl FrameRenderer {
             (false, true) => {
                 if let Some(old) = view.temporal.take() {
                     view.retire(frame_number, Retired::Temporal(old));
+                }
+            }
+            _ => {}
+        }
+        #[cfg(feature = "fsr")]
+        match (
+            settings.frame_generation == FrameGeneration::Fsr,
+            view.interpolation.is_some(),
+        ) {
+            (true, false) => {
+                view.interpolation = Some(engine_fsr::FrameInterpolation::new(
+                    device,
+                    self.frames_in_flight as usize,
+                ));
+                view.previous_camera = None;
+            }
+            (false, true) => {
+                if let Some(old) = view.interpolation.take() {
+                    view.retire(frame_number, Retired::Interpolation(old));
                 }
             }
             _ => {}
@@ -979,6 +1042,45 @@ impl FrameRenderer {
         target: ViewTarget,
         hook: impl FnOnce(&mut FrameGraph<'g>, &SceneTargets<'_>),
     ) -> Result<ViewFrame, FrameError> {
+        self.declare_view(fg, ctx, view, scene, camera, target, None, hook)
+    }
+
+    /// [`Self::add_view_with`] with frame generation (ADR 0091): `target` is a paced
+    /// presenter's real frame, and with [`ViewSettings::frame_generation`] on, the frame
+    /// between the view's last frame and this one goes into `generated` after the real
+    /// one is drawn (no UI in either yet: draw it with [`crate::UiRenderer`] on both).
+    /// [`ViewFrame::generated`] says whether to show it and gives its camera.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::add_view`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_view_generating<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ctx: &mut FrameContext<'_, 'g>,
+        view: &'g mut View,
+        scene: &SceneInput<'_, 'g>,
+        camera: &ViewCamera,
+        target: ViewTarget,
+        generated: GeneratedTarget,
+        hook: impl FnOnce(&mut FrameGraph<'g>, &SceneTargets<'_>),
+    ) -> Result<ViewFrame, FrameError> {
+        self.declare_view(fg, ctx, view, scene, camera, target, Some(generated), hook)
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn declare_view<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        ctx: &mut FrameContext<'_, 'g>,
+        view: &'g mut View,
+        scene: &SceneInput<'_, 'g>,
+        camera: &ViewCamera,
+        target: ViewTarget,
+        generated_target: Option<GeneratedTarget>,
+        hook: impl FnOnce(&mut FrameGraph<'g>, &SceneTargets<'_>),
+    ) -> Result<ViewFrame, FrameError> {
         engine_profiler::zone!("frame::FrameRenderer::add_view");
         // The ring frees what it replaced and grows ahead when frames come close to its
         // capacity (core review 2 §3.6): a full ring would drop the view.
@@ -994,10 +1096,17 @@ impl FrameRenderer {
             post_history,
             resets,
             reset_pending,
+            #[cfg(feature = "fsr")]
+            interpolation,
+            previous_camera,
             ..
         } = view;
         let prepared = (*prepared).ok_or(FrameError::NotPrepared)?;
         let settings = prepared.settings;
+        // Whether this frame continues the last one: frame generation interpolates only
+        // between frames that do.
+        let continues = !(camera.cut || *reset_pending) && previous_camera.is_some();
+        let last_camera = previous_camera.replace(*camera);
         if camera.cut || core::mem::take(reset_pending) {
             if camera.cut {
                 resets.cuts += 1;
@@ -1413,6 +1522,72 @@ impl FrameRenderer {
                 }
             }
         }
+        // 7. Frame generation (ADR 0091): the frame between the last real frame and this
+        // one, from the target this frame was just drawn into (no UI in it yet).
+        let mut generated = None;
+        #[cfg(feature = "fsr")]
+        if let (Some(out), FrameGeneration::Fsr, Some(motion), Some(interpolation)) = (
+            generated_target,
+            settings.frame_generation,
+            passes.motion,
+            interpolation.as_mut(),
+        ) {
+            // The first frame primes the interpolation (it keeps this frame as the
+            // previous one); what it writes is this frame itself, not shown.
+            let last = last_camera.unwrap_or(*camera);
+            if !continues {
+                interpolation.reset();
+            }
+            let transfer = match settings.encoding {
+                OutputEncoding::Pq { white_nits } => engine_fsr::Transfer::Pq {
+                    max_nits: white_nits * settings.peak,
+                },
+                OutputEncoding::Linear { white } if is_float(out.source_format) => {
+                    engine_fsr::Transfer::ScRgb {
+                        min_nits: 0.0,
+                        max_nits: white * settings.peak * 80.0,
+                    }
+                }
+                OutputEncoding::Linear { .. } => engine_fsr::Transfer::Srgb,
+            };
+            let rotation = Quat::from_mat4(&camera.view_from_world).conjugate();
+            interpolation
+                .add_pass(
+                    fg,
+                    engine_fsr::InterpolationInput {
+                        source: target.texture,
+                        source_format: out.source_format,
+                        transfer,
+                        depth,
+                        motion,
+                        camera: engine_fsr::FsrCamera {
+                            near: camera.near,
+                            far: camera.far,
+                            fov_y: camera.fov_y,
+                            meters_per_unit: 1.0,
+                        },
+                        basis: engine_fsr::CameraBasis {
+                            position: camera.position.to_array(),
+                            up: (rotation * Vec3::Y).to_array(),
+                            right: (rotation * Vec3::X).to_array(),
+                            forward: (rotation * Vec3::NEG_Z).to_array(),
+                        },
+                        frame_time_ms: ctx.dt * 1000.0,
+                    },
+                    engine_fsr::InterpolationOutput {
+                        texture: out.texture,
+                        format: out.format,
+                    },
+                    ctx.frame_number,
+                )
+                .map_err(|e| FrameError::Upscale(UpscaleError::from(e)))?;
+            generated = Some(GeneratedFrame {
+                camera: halfway(&last, camera),
+                shown: continues,
+            });
+        }
+        #[cfg(not(feature = "fsr"))]
+        let _ = (generated_target, last_camera, continues);
         Ok(ViewFrame {
             antialiasing: prepared.antialiasing,
             render,
@@ -1420,7 +1595,32 @@ impl FrameRenderer {
             passes,
             resolved,
             exposure: auto_exposure,
+            depth,
+            generated,
         })
+    }
+}
+
+/// Whether `format` holds floats (an scRGB output).
+#[cfg(feature = "fsr")]
+fn is_float(format: vk::Format) -> bool {
+    matches!(
+        format,
+        vk::Format::R16G16B16A16_SFLOAT | vk::Format::R32G32B32A32_SFLOAT
+    )
+}
+
+/// The camera half-way between `a` and `b` (a generated frame's): positions and fields
+/// of view blended, rotations by spherical interpolation.
+pub(crate) fn halfway(a: &ViewCamera, b: &ViewCamera) -> ViewCamera {
+    let ra = Quat::from_mat4(&a.view_from_world).conjugate();
+    let rb = Quat::from_mat4(&b.view_from_world).conjugate();
+    let rotation = ra.slerp(rb, 0.5).normalize();
+    let position = a.position.lerp(b.position, 0.5);
+    ViewCamera {
+        fov_y: 0.5 * (a.fov_y + b.fov_y),
+        cut: false,
+        ..ViewCamera::from_rigid(rotation, position, b.fov_y, b.near, b.far)
     }
 }
 

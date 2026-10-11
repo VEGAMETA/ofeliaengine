@@ -56,10 +56,17 @@
 //!
 //! [`RenderDefaults`] gives measured defaults per [`DeviceClass`] (discrete or small
 //! integrated GPU): ambient occlusion quality, antialiasing and render size.
+//!
+//! Frame generation (ADR 0091, [`FrameGeneration`], off by default):
+//! [`FrameRenderer::add_view_generating`] draws the real frame into a paced presenter's
+//! image and the frame before it into another, and the game hands its UI over as a layer
+//! ([`UiRenderer`], [`UiCanvas`]) that is drawn on both, each with its own camera: the
+//! HUD is never interpolated, UI in the world never smeared.
 
 mod antialiasing;
 mod renderer;
 mod settings;
+mod ui;
 mod view;
 
 pub use antialiasing::{
@@ -68,10 +75,11 @@ pub use antialiasing::{
 };
 
 pub use renderer::{
-    FrameContext, FrameError, FrameRenderer, PrepareContext, SceneDraws, SceneInput, SceneTargets,
-    ViewCamera, ViewFrame, ViewTarget,
+    FrameContext, FrameError, FrameRenderer, GeneratedFrame, GeneratedTarget, PrepareContext,
+    SceneDraws, SceneInput, SceneTargets, ViewCamera, ViewFrame, ViewTarget,
 };
-pub use settings::{DeviceClass, Exposure, RenderDefaults, ViewSettings};
+pub use settings::{DeviceClass, Exposure, FrameGeneration, RenderDefaults, ViewSettings};
+pub use ui::{Placement, UiCanvas, UiRenderer};
 pub use view::{Prepared, Resets, View};
 
 pub use engine_upscale::{Quality, UpscalerKind};

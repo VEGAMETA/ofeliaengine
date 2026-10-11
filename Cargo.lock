@@ -370,6 +370,7 @@ dependencies = [
  "engine_fsr",
  "engine_profiler",
  "engine_render",
+ "engine_render2d",
  "engine_rhi",
  "engine_upscale",
 ]

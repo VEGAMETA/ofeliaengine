@@ -11,11 +11,15 @@
 
 use engine_core::math::{Mat4, Quat, Vec3, look_at};
 use engine_frame::{
-    FrameContext, FrameRenderer, PrepareContext, Prepared, SceneDraws, SceneInput, SceneTargets,
-    View, ViewCamera, ViewSettings, ViewTarget,
+    FrameContext, FrameRenderer, GeneratedFrame, GeneratedTarget, PrepareContext, Prepared,
+    SceneDraws, SceneInput, SceneTargets, UiCanvas, UiRenderer, View, ViewCamera, ViewSettings,
+    ViewTarget,
 };
 use engine_render::forward::{DirectionalLight, DrawItem, ShadowSettings};
-use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
+use engine_render::graph::{
+    Access, BufferState, ImportedBuffer, ImportedTexture, LoadOp, RenderGraph, TextureDesc,
+    TextureState,
+};
 use engine_render::material::{MaterialDesc, MaterialId, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId, cube};
 use engine_render::texture_pool::TexturePool;
@@ -314,6 +318,315 @@ impl Bed {
         (prepared, pixels)
     }
 
+    /// Frame generation's images, as a paced presenter's (ADR 0091): the real frame and the
+    /// generated one, the output's size and format, and a read back of both.
+    pub fn generation_targets(&mut self) -> GenerationTargets {
+        let (width, height) = self.size;
+        let image = |allocator: &mut Allocator, usage: vk::ImageUsageFlags| {
+            let (image, memory) = allocator
+                .create_image(
+                    &vk::ImageCreateInfo::default()
+                        .image_type(vk::ImageType::TYPE_2D)
+                        .format(OUTPUT)
+                        .extent(vk::Extent3D {
+                            width,
+                            height,
+                            depth: 1,
+                        })
+                        .mip_levels(1)
+                        .array_layers(1)
+                        .samples(vk::SampleCountFlags::TYPE_1)
+                        .tiling(vk::ImageTiling::OPTIMAL)
+                        .usage(usage),
+                    MemoryLocation::Device,
+                )
+                .unwrap();
+            (image, memory)
+        };
+        let common = vk::ImageUsageFlags::COLOR_ATTACHMENT
+            | vk::ImageUsageFlags::SAMPLED
+            | vk::ImageUsageFlags::TRANSFER_SRC;
+        let real = image(&mut self.allocator, common);
+        let generated = image(&mut self.allocator, common | vk::ImageUsageFlags::STORAGE);
+        let d = self.device.raw();
+        let view = |image: vk::Image| {
+            // SAFETY: a view of a whole new image in its format.
+            unsafe {
+                d.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(OUTPUT)
+                        .subresource_range(engine_rhi::color_range()),
+                    None,
+                )
+            }
+            .unwrap()
+        };
+        let views = [view(real.0), view(generated.0)];
+        let (readback, memory) = self
+            .allocator
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(u64::from(2 * width * height * 4))
+                    .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                MemoryLocation::Readback,
+            )
+            .unwrap();
+        GenerationTargets {
+            images: [real, generated],
+            views,
+            readback,
+            memory,
+        }
+    }
+
+    /// Like [`Self::render`] with frame generation (ADR 0091): the real frame into
+    /// `targets`' first image and the frame before it into the second, with `layer` drawn
+    /// over both by `ui`, each with its frame's camera. Returns the generated frame's
+    /// state and both images (RGBA8).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_generating(
+        &mut self,
+        view: &mut View,
+        settings: &ViewSettings,
+        draws: &[DrawItem],
+        camera: &ViewCamera,
+        targets: &GenerationTargets,
+        ui: &UiRenderer,
+        layer: &[UiCanvas<'_>],
+    ) -> (Option<GeneratedFrame>, Vec<u8>, Vec<u8>) {
+        self.frame_number += 1;
+        let frame_number = self.frame_number;
+        self.frame
+            .prepare(
+                view,
+                settings,
+                self.size,
+                PrepareContext {
+                    device: &self.device,
+                    allocator: &mut self.allocator,
+                    bindless: &self.bindless,
+                    materials: &mut self.materials,
+                    frame_number,
+                    skinning: None,
+                },
+            )
+            .unwrap();
+        let d = self.device.raw().clone();
+        let cmd = self.cmd;
+        // SAFETY: the previous frame finished (waited below).
+        unsafe {
+            d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
+                .unwrap();
+            d.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .unwrap();
+        }
+        self.ring.begin_slot(0);
+        let (width, height) = self.size;
+        let size = u64::from(width * height * 4);
+        let generated;
+        {
+            // SAFETY: nothing is in flight.
+            let mut fg = unsafe { self.graph.begin_slot(0, cmd) };
+            self.textures
+                .begin_frame(&mut fg, &mut self.allocator, &self.bindless, frame_number)
+                .unwrap();
+            let mats = self
+                .materials
+                .begin_frame(
+                    &mut fg,
+                    &self.device,
+                    &mut self.allocator,
+                    &self.textures,
+                    frame_number,
+                )
+                .unwrap();
+            let geo = self
+                .geometry
+                .begin_frame(&mut fg, &self.device, &mut self.allocator, frame_number)
+                .unwrap();
+            let import = |fg: &mut engine_render::graph::FrameGraph<'_>, i: usize| {
+                fg.import_texture(
+                    if i == 0 { "real" } else { "generated" },
+                    ImportedTexture {
+                        image: targets.images[i].0,
+                        view: targets.views[i],
+                        desc: TextureDesc::new_2d(OUTPUT, width, height),
+                        initial: TextureState::undefined(),
+                        final_state: Some(TextureState::transfer_source()),
+                        sampled_index: None,
+                        storage_index: None,
+                    },
+                )
+            };
+            let real = import(&mut fg, 0);
+            let out = import(&mut fg, 1);
+            let frame = self
+                .frame
+                .add_view_generating(
+                    &mut fg,
+                    &mut FrameContext {
+                        device: &self.device,
+                        allocator: &mut self.allocator,
+                        bindless: &self.bindless,
+                        ring: &mut self.ring,
+                        frame_number,
+                        dt: 1.0 / 60.0,
+                    },
+                    view,
+                    &SceneInput {
+                        geometry: &geo,
+                        materials: &mats,
+                        draws: SceneDraws::List(draws),
+                        skinning: None,
+                        light: DirectionalLight {
+                            direction: Vec3::new(-0.3, -1.0, -0.2),
+                            color: Vec3::splat(2.0),
+                            ambient: Vec3::splat(0.3),
+                        },
+                        lights: &[],
+                        decals: &[],
+                        environment: None,
+                        reflection_probes: None,
+                        gi: None,
+                    },
+                    camera,
+                    ViewTarget {
+                        texture: real,
+                        rect: None,
+                        load: LoadOp::DontCare,
+                    },
+                    GeneratedTarget {
+                        texture: out,
+                        format: OUTPUT,
+                        source_format: OUTPUT,
+                    },
+                    |_, _| {},
+                )
+                .unwrap();
+            generated = frame.generated;
+            ui.add_passes(
+                &mut fg,
+                &mut self.ring,
+                &self.bindless,
+                layer,
+                real,
+                camera,
+                &frame,
+            )
+            .unwrap();
+            if let Some(g) = frame.generated {
+                ui.add_passes(
+                    &mut fg,
+                    &mut self.ring,
+                    &self.bindless,
+                    layer,
+                    out,
+                    &g.camera,
+                    &frame,
+                )
+                .unwrap();
+            }
+            let buffer = fg.import_buffer(
+                "readback",
+                ImportedBuffer {
+                    buffer: targets.readback,
+                    size: 2 * size,
+                    address: 0,
+                    initial: BufferState::idle(),
+                    final_state: Some(BufferState::host_read()),
+                },
+            );
+            let has_generated = frame.generated.is_some();
+            let mut pass = fg
+                .add_pass("read back")
+                .read(real, Access::TransferRead)
+                .write(buffer, Access::TransferWrite);
+            if has_generated {
+                pass = pass.read(out, Access::TransferRead);
+            }
+            pass.execute(move |ctx| {
+                let region = |offset: u64| vk::BufferImageCopy {
+                    buffer_offset: offset,
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_extent: vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: recording; layouts arranged by the graph.
+                unsafe {
+                    ctx.device.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        ctx.image(real),
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(buffer),
+                        &[region(0)],
+                    );
+                    if has_generated {
+                        ctx.device.cmd_copy_image_to_buffer(
+                            ctx.cmd,
+                            ctx.image(out),
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            ctx.buffer(buffer),
+                            &[region(size)],
+                        );
+                    }
+                }
+            });
+            fg.execute_with_bindless(&mut self.allocator, Some(&self.bindless))
+                .unwrap();
+        }
+        // SAFETY: as above.
+        unsafe {
+            d.end_command_buffer(cmd).unwrap();
+            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            d.queue_submit2(
+                self.device.graphics.raw,
+                &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
+                vk::Fence::null(),
+            )
+            .unwrap();
+            self.device.wait_idle().unwrap();
+        }
+        let ptr = targets.memory.mapped_ptr().unwrap();
+        // SAFETY: the GPU is idle; the mapping covers both images.
+        let bytes = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 2 * size as usize) };
+        let (real, out) = bytes.split_at(size as usize);
+        (generated, real.to_vec(), out.to_vec())
+    }
+
+    /// Frees [`Self::generation_targets`]' images.
+    pub fn free_generation_targets(&mut self, targets: GenerationTargets) {
+        self.device.wait_idle().unwrap();
+        let GenerationTargets {
+            images,
+            views,
+            readback,
+            memory,
+        } = targets;
+        // SAFETY: the device is idle.
+        unsafe {
+            for ((image, memory), view) in images.into_iter().zip(views) {
+                self.device.raw().destroy_image_view(view, None);
+                self.allocator.destroy_image(image, memory);
+            }
+            self.allocator.destroy_buffer(readback, memory);
+        }
+    }
+
     /// Frees everything; checks the validation layer saw no error.
     pub fn finish(mut self, views: &mut [&mut View]) {
         self.device.wait_idle().unwrap();
@@ -359,6 +672,14 @@ impl Bed {
             world_from_object: Mat4::from_scale_rotation_translation(scale, Quat::IDENTITY, at),
         }
     }
+}
+
+/// Frame generation's images ([`Bed::generation_targets`]).
+pub struct GenerationTargets {
+    images: [(vk::Image, Allocation); 2],
+    views: [vk::ImageView; 2],
+    readback: vk::Buffer,
+    memory: Allocation,
 }
 
 /// A camera at `eye` looking at `target`.

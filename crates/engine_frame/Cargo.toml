@@ -21,6 +21,8 @@ dlss = ["dep:engine_dlss"]
 engine_core.workspace = true
 engine_profiler.workspace = true
 engine_render.workspace = true
+# The UI layer drawn on every presented frame (ADR 0091).
+engine_render2d.workspace = true
 engine_rhi.workspace = true
 # TAAU and the Upscaler interface every upscaler implements (ADR 0063).
 engine_upscale.workspace = true
