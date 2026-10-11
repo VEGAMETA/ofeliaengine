@@ -118,7 +118,8 @@ held to beat AMD's Brixelizer GI in cost (ADR 0084); meshlets first (ADR 0085); 
 (ADR 0086); Radeon GPU Profiler installed on ref-1 (`D:\SDKs\AMD`); NVIDIA's shader cache
 cleared; contact shadows made deterministic if it is affordable; the iGPU's +1 % from 0f
 kept for now, to fix later; colliders (8c) made from meshes; the split of item 6 was the
-queue item (done 2026-10-10).
+queue item (done 2026-10-10); frame generation out of the box (DLSS FG and FSR FG, the HUD
+never interpolated, immersive UI unmarked) right after GI, off by default.
 
 0. **Faster checks, first after the review** (owner, 2026-10-02, confirmed 2026-10-10). Then
    `check.ps1 -Gpu -Perf` took 10–25 min, and it grew with every crate and test. Per
@@ -329,27 +330,9 @@ queue item (done 2026-10-10).
    where the light changes), then Brixelizer GI built as the reference, its cost and
    memory against ours on both GPUs (ADR 0084's bar). Known limits: normals from the
    depth facet low-poly curves; light frozen until `refresh()`.
-3b. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
-   first: it decides permutations and pipeline management for the whole renderer (§9
-   material graph and hand-written Slang).
-3c. **Directional GTAO and GTSO** (owner, 2026-10-10: after GI): bent normals (XeGTAO's
-   directional term, about +25 % of the AO pass) for ambient light along the unoccluded
-   direction and cone-based specular occlusion; fixes dielectrics looking too bright next
-   to metals in shade indoors (§6). Own entry points, only in views with AO (register rule).
-4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
-   visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085): **meshlets
-   in the forward renderer first** (the owner, 2026-10-11; both GPUs; the iGPU has no mesh
-   shaders), the visibility buffer decided together with custom materials (3b).
-5. Virtual shadow maps.
-Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
-grown, divide and conquer); the old labels stay in parentheses.
-
-6. **Rendering leftovers.**
-6a (was 6). Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
-   (ADR 0067). Frame generation is its own item now (6c).
-6c. **Frame generation out of the box** (owner, 2026-10-11: "needed out of the box, DLSS FG
-   and FSR FG; the HUD fix on by default"). Requirements so far
-   (`docs/research/frame-generation.md`, 2026-09-26) and the owner's:
+3b. **Frame generation out of the box** (owner, 2026-10-11: "needed out of the box, DLSS FG
+   and FSR FG; the HUD fix on by default"; right after GI, off by default). Requirements
+   so far (`docs/research/frame-generation.md`, 2026-09-26) and the owner's:
    - **Both paths.** FSR 3.1 FG, built from the FidelityFX SDK's source (1.1.x has
      Vulkan frame interpolation and its swapchain), works on every GPU with nothing to
      install. DLSS FG through Streamline works on RTX GPUs with the user's DLLs
@@ -357,8 +340,7 @@ grown, divide and conquer); the old labels stay in parentheses.
      none, §6). With DLSS FG, Reflex goes through Streamline (§7).
    - **Out of the box for the game developer.** The frame renderer offers it with no work
      on their side: the option exists in every game and is hidden where it cannot run.
-     Whether it starts on or off, the owner decides with the latency measured. The
-     research suggested off below about 60 real frames per second.
+     **Off by default** (owner, 2026-10-11): the player turns it on; latency measured.
    - **The HUD never interpolated, by default.** Many shipped FSR FG games smear their HUD
      until players install "HUD fix" mods; here nothing needs fixing. The frame renderer
      hands FG the scene before any UI (hudless color) and composites the UI on every
@@ -385,6 +367,24 @@ grown, divide and conquer); the old labels stay in parentheses.
    - **Measured** on both GPUs: presented and real frame rates, latency (PresentMon,
      `engine_latency`), image quality against the real frames (FLIP), the HUD with 2D and
      3D UI.
+3c. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
+   first: it decides permutations and pipeline management for the whole renderer (§9
+   material graph and hand-written Slang).
+3d. **Directional GTAO and GTSO** (owner, 2026-10-10: after GI): bent normals (XeGTAO's
+   directional term, about +25 % of the AO pass) for ambient light along the unoccluded
+   direction and cone-based specular occlusion; fixes dielectrics looking too bright next
+   to metals in shade indoors (§6). Own entry points, only in views with AO (register rule).
+4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
+   visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085): **meshlets
+   in the forward renderer first** (the owner, 2026-10-11; both GPUs; the iGPU has no mesh
+   shaders), the visibility buffer decided together with custom materials (3c).
+5. Virtual shadow maps.
+Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
+grown, divide and conquer); the old labels stay in parentheses.
+
+6. **Rendering leftovers.**
+6a (was 6). Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
+   (ADR 0067). Frame generation is its own item now (3b, after GI).
 6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms (6.6 ms in the perf gate's
    `sponza_taa`), ~~bloom 1.6 ms~~, local shadows redrawn every frame when casters move (a
    per-frame redraw budget; never the patented static/dynamic split). TAAU tried

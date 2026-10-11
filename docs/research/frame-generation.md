@@ -62,8 +62,8 @@ Checked on 2026-09-26.
    - latency reports tell real frames from generated ones.
 6. **Settings and fallbacks:**
    - FG off by default in menus and when the base frame rate is too low (FG adds latency
-     below roughly 60 real fps). Superseded 2026-10-11: the owner wants FG out of the box;
-     whether it starts on is decided with latency measured (below);
+     below roughly 60 real fps). The owner, 2026-10-11: out of the box, and off by
+     default;
    - the option is hidden when the DLLs or device features are missing, with no errors
      (§6).
 
@@ -77,7 +77,7 @@ Checked on 2026-09-26.
 
 ## The owner's requirements (2026-10-11)
 
-Queue item 6c in `docs/status.md`.
+Queue item 3b in `docs/status.md`: right after GI, off by default.
 
 - **Out of the box, both FSR FG and DLSS FG.** The game developer does nothing to offer
   it. FSR FG is built from source and runs on any GPU. DLSS FG needs the user's DLLs, as
