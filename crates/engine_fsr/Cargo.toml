@@ -1,6 +1,6 @@
 [package]
 name = "engine_fsr"
-description = "AMD FidelityFX Super Resolution 3.1 upscaling, built from the vendored FidelityFX SDK source by engine_ffx (ADR 0060)."
+description = "AMD FidelityFX Super Resolution 3.1 upscaling and frame generation's interpolation, built from the vendored FidelityFX SDK source by engine_ffx (ADR 0060, ADR 0091)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

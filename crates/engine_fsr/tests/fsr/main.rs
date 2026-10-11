@@ -14,8 +14,12 @@
 //! It also checks the output's size and format, a change of output size (a new SDK
 //! context), that the SDK reports no warnings with its debug checking on, and that the
 //! engine's jitter sequence is the SDK's.
+//!
+//! `framegen` tests FSR 3.1's frame interpolation (ADR 0091) on the same scene.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
+
+mod framegen;
 
 use engine_core::half;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};

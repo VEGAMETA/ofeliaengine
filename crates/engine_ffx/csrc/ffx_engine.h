@@ -95,7 +95,9 @@ enum EngineFfxEffect : uint32_t {
     ENGINE_FFX_FSR3UPSCALER = 0,
     ENGINE_FFX_BRIXELIZER = 1,
     ENGINE_FFX_BRIXELIZER_GI = 2,
-    ENGINE_FFX_EFFECT_COUNT = 3,
+    ENGINE_FFX_FRAME_INTERPOLATION = 3,
+    ENGINE_FFX_OPTICAL_FLOW = 4,
+    ENGINE_FFX_EFFECT_COUNT = 5,
 };
 
 /// One resource class of a module's reflection (examples/ffx_shaders.rs).

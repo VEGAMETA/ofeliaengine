@@ -1,6 +1,6 @@
 [package]
 name = "engine_ffx"
-description = "The AMD FidelityFX SDK effects the engine uses (FSR 3.1, Brixelizer, Brixelizer GI), built from the vendored source as one static library with their SPIR-V, and their C interfaces (ADR 0060, ADR 0090)."
+description = "The AMD FidelityFX SDK effects the engine uses (FSR 3.1 upscaling and frame generation, Brixelizer, Brixelizer GI), built from the vendored source as one static library with their SPIR-V, and their C interfaces (ADR 0060, ADR 0090, ADR 0091)."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

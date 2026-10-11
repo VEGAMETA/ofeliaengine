@@ -1,6 +1,7 @@
 //! The AMD FidelityFX SDK effects the engine uses, built from the vendored source
 //! (third_party/FidelityFX-SDK, v1.1.4, MIT) into one static library with the SDK's Vulkan
-//! backend: FSR 3.1 (ADR 0060), Brixelizer and Brixelizer GI (ADR 0090). One library, since
+//! backend: FSR 3.1 upscaling (ADR 0060) and frame generation (ADR 0091), Brixelizer and
+//! Brixelizer GI (ADR 0090). One library, since
 //! the SDK's shader blob dispatcher compiles in the effects it is built with and two
 //! builds would define the backend twice.
 //!
@@ -8,6 +9,7 @@
 //! declarations; `engine_fsr` and `engine_brixelizer` wrap it:
 //!
 //! - [`fsr`]: the FSR 3.1 upscaler (`csrc/fsr.cpp`);
+//! - [`framegen`]: FSR 3.1's frame interpolation and optical flow (`csrc/framegen.cpp`);
 //! - [`brixelizer`]: the sparse distance field and its GI (`csrc/brixelizer.cpp`);
 //! - [`Device`]: the engine's handles a context is created on; [`Image`]: an image a
 //!   dispatch reads or writes;
@@ -34,6 +36,7 @@ macro_rules! spirv {
 
 mod blobs;
 pub mod brixelizer;
+pub mod framegen;
 pub mod fsr;
 
 /// `EngineFfxDevice`: the engine's instance and device, as a context is created on them.
@@ -94,6 +97,8 @@ enum Effect {
     Fsr3Upscaler = 0,
     Brixelizer = 1,
     BrixelizerGi = 2,
+    FrameInterpolation = 3,
+    OpticalFlow = 4,
 }
 
 /// The SPIR-V modules' addresses and sizes, as the C++ side takes them. Process-wide: the
@@ -120,7 +125,7 @@ unsafe impl Send for ModuleTable {}
 /// Hands the SPIR-V modules of every effect to the C++ blob accessors, once per process
 /// (later calls do nothing). Call it before creating any context.
 pub fn register_modules() {
-    static TABLES: std::sync::OnceLock<[ModuleTable; 3]> = std::sync::OnceLock::new();
+    static TABLES: std::sync::OnceLock<[ModuleTable; 5]> = std::sync::OnceLock::new();
     TABLES.get_or_init(|| {
         let tables = [
             (Effect::Fsr3Upscaler, ModuleTable::new(&blobs::FSR3UPSCALER)),
@@ -129,6 +134,11 @@ pub fn register_modules() {
                 Effect::BrixelizerGi,
                 ModuleTable::new(&blobs::BRIXELIZER_GI),
             ),
+            (
+                Effect::FrameInterpolation,
+                ModuleTable::new(&blobs::FRAME_INTERPOLATION),
+            ),
+            (Effect::OpticalFlow, ModuleTable::new(&blobs::OPTICAL_FLOW)),
         ];
         for (effect, table) in &tables {
             // SAFETY: the arrays live in a static for the rest of the process and point to
@@ -146,13 +156,16 @@ pub fn register_modules() {
     });
 }
 
-/// Bytes of SPIR-V this crate holds per effect (FSR 3.1, Brixelizer, Brixelizer GI).
-pub fn spirv_bytes() -> [usize; 3] {
+/// Bytes of SPIR-V this crate holds per effect (FSR 3.1, Brixelizer, Brixelizer GI, frame
+/// interpolation, optical flow).
+pub fn spirv_bytes() -> [usize; 5] {
     let total = |modules: &[&[u8]]| modules.iter().map(|m| m.len()).sum();
     [
         total(&blobs::FSR3UPSCALER),
         total(&blobs::BRIXELIZER),
         total(&blobs::BRIXELIZER_GI),
+        total(&blobs::FRAME_INTERPOLATION),
+        total(&blobs::OPTICAL_FLOW),
     ]
 }
 

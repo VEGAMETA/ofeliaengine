@@ -1,4 +1,5 @@
-//! AMD FidelityFX Super Resolution 3.1 upscaling (CLAUDE.md §6, ADR 0060).
+//! AMD FidelityFX Super Resolution 3.1 upscaling (CLAUDE.md §6, ADR 0060) and frame
+//! generation's compute work ([`FrameInterpolation`], ADR 0091).
 //!
 //! [`Fsr`] runs the FSR 3.1 upscaler of the FidelityFX SDK (v1.1.4, MIT), built from the
 //! vendored source by `engine_ffx` into the engine's binary: no DLL. It takes
@@ -32,6 +33,12 @@ use engine_render::forward::MotionOutput;
 use engine_render::graph::{Access, FrameGraph, ShaderStages, Texture, TextureDesc};
 use engine_rhi::Device;
 use engine_rhi::ash::vk;
+
+mod framegen;
+
+pub use framegen::{
+    CameraBasis, FrameInterpolation, InterpolationInput, InterpolationOutput, Transfer,
+};
 
 /// Format of the upscaled image (HDR).
 pub const OUTPUT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -518,22 +525,22 @@ impl Fsr {
     }
 }
 
-/// Layout transitions of the pass's sampled inputs (null images are skipped), after the
-/// accesses in `after` and before compute shader reads.
+/// Layout transitions of a pass's sampled inputs (at most 5; null images are skipped),
+/// after the accesses in `after` and before compute shader reads.
 ///
 /// # Safety
 ///
 /// Recording outside a rendering scope; the images are in `from`.
-unsafe fn transition(
+pub(crate) unsafe fn transition(
     ctx: &engine_render::graph::PassContext<'_>,
-    images: &[(vk::Image, vk::ImageAspectFlags); 5],
+    images: &[(vk::Image, vk::ImageAspectFlags)],
     after: (vk::PipelineStageFlags2, vk::AccessFlags2),
     from: vk::ImageLayout,
     to: vk::ImageLayout,
 ) {
     let mut barriers = [vk::ImageMemoryBarrier2::default(); 5];
     let mut count = 0;
-    for &(image, aspect) in images {
+    for &(image, aspect) in images.iter().take(barriers.len()) {
         if image == vk::Image::null() {
             continue;
         }
