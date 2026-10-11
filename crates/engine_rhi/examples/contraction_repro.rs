@@ -4,14 +4,14 @@
 //! behind the vendored Brixelizer's holes on AMD (ADR 0090, `third_party/README.md`):
 //! AMD's driver 26.8.1 fuses the difference into an FMA (allowed) and keeps doing so under
 //! NoContraction when an undecorated twin of the subtraction is used too (variant 3: not
-//! allowed). Re-run it after a driver update; reported to AMD on 2026-10-12.
+//! allowed). Re-run it after a driver update; reported to AMD on 2026-10-11.
 //!
 //! ```text
 //! for v in 0 1 2 3 4; do glslangValidator -V --target-env vulkan1.1 -DVARIANT=$v //!     -o variant$v.spv crates/engine_rhi/examples/contraction.comp; done
 //! cargo run -p engine_rhi --example contraction_repro -- variant0.spv variant1.spv ...
 //! ```
 //!
-//! (`ENGINE_ADAPTER=radeon` for the iGPU.) On 2026-10-12, items with `e.y != 0` in
+//! (`ENGINE_ADAPTER=radeon` for the iGPU.) On 2026-10-11, items with `e.y != 0` in
 //! variants 0–4: NVIDIA 616.92 none; AMD 26.8.1 6,921 / 0 / 0 / 6,921 / 0.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]

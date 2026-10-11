@@ -502,7 +502,7 @@ grown, divide and conquer); the old labels stay in parentheses.
   - XeSS;
   - Brixelizer GI (the reference, ADR 0090): its specular is not composited, and
     reflection probes captured in its views see only the sky. The SDK's problems were
-    reported to AMD on 2026-10-12 (the owner: for other developers), FidelityFX SDK
+    reported to AMD on 2026-10-11 (the owner: for other developers), FidelityFX SDK
     issues #202–#204; AMD dropped Brixelizer from the SDK's 2.x line, so no fix is
     expected. The driver bug under the holes (NoContraction lost when an undecorated twin
     exists; `engine_rhi`'s `contraction_repro` example) goes through AMD's Bug Report

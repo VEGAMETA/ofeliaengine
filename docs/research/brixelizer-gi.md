@@ -174,12 +174,12 @@ Found integrating it (2026-10-11):
   The cosine alone explains about half of the loss (0.45 on average there); the rest we
   did not trace. The radiance cache holds the wall's lit radiance (0.71 against 0.71).
 
-Reported to AMD on 2026-10-12, for other developers on SDK 1.1.4: the holes and the
+Reported to AMD on 2026-10-11, for other developers on SDK 1.1.4: the holes and the
 driver's lost NoContraction ([#202](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/issues/202)),
 the sky let in before the field is built ([#203](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/issues/203)),
 the descriptor pool without storage buffers ([#204](https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/issues/204)).
 AMD dropped Brixelizer and the Vulkan backend from the SDK's 2.x line (the repository's
-main is the FSR SDK 2.3.0, checked 2026-10-12): 1.1.4 is their last version, so no fix
+main is the FSR SDK 2.3.0, checked 2026-10-11): 1.1.4 is their last version, so no fix
 is likely to come. The driver bug goes to AMD's driver team through AMD's Bug Report Tool
 with the example's package.
 
