@@ -48,7 +48,23 @@ things every engine adds before the tone mapper:
    - Karis' average on the first step (a setting, on by default);
    - upsample level k = lerp(own downsample, tent of level k + 1, scatter), so every level
      stays normalized;
-   - the tone mapper mixes it in by `intensity` (energy-conserving).
+   - the tone mapper mixes it in by `intensity` (energy-conserving);
+   - (2026-10-11) a level exactly half the size of the one it reads (twice, going up) is
+     made by a pass that fetches its group's taps once into shared memory. Down: the 13
+     taps are bilinear fetches at texel corners, and neighbouring pixels' taps fall on the
+     same corners: a group of 16 × 16 pixels fetches its 18 × 18 corners on the pixels'
+     2 × 2 blocks and 17 × 17 between them (613 fetches instead of 3,328). Up: pixel
+     2X + p's tent taps sit at X + 0.25 + 0.5p + j lower texels, shared by the pixels of
+     one parity (400 fetches instead of 2,304). Each thread issues all its fetches before
+     storing any (more requests in flight: the iGPU waits on memory). The same fetches and
+     sums: the values match the plain passes bit for bit on both reference GPUs (test).
+     Odd sizes (1080 → 540 → 270 → 135 → 68) keep the plain passes, whose taps fall
+     between corners. Measured over the 18 perf scenes: the RTX's bloom 2,038 → 1,301 µs
+     summed (−36 %, every frame 40–50 µs shorter), the Radeon's 34.4 → 30.2 ms summed
+     (−12 %; 14 scenes faster, 4 slower by about 0.1 ms: its memory-bound passes depend on
+     where their images land, `docs/perf/reference-hw.md`). Tried and dropped: groups of
+     8 × 8 (slower on the Radeon), 2 × 2 pixels per thread (registers: 2× slower), and the
+     fetch loop without unrolling (13 µs slower on the RTX).
 2. **Automatic exposure:**
    - a 256-bin histogram of log2 luminance (−12..12) from every second pixel along each
      axis, counted in groupshared memory, then added once per bin and group;
