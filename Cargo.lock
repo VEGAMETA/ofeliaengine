@@ -417,6 +417,7 @@ dependencies = [
 name = "engine_latency"
 version = "0.0.0"
 dependencies = [
+ "engine_core",
  "engine_platform",
  "engine_profiler",
  "engine_rhi",

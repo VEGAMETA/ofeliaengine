@@ -85,6 +85,11 @@ pub struct Device {
     extra_extensions: Vec<std::ffi::CString>,
     /// Graphics + compute + transfer (+ present on a desktop GPU).
     pub graphics: Queue,
+    /// A second queue of the graphics family, when the family has one: a paced present
+    /// thread submits its copies and presents on it while the frame loop submits on
+    /// [`Self::graphics`] (ADR 0091). A queue is externally synchronized, so two threads
+    /// cannot share one.
+    pub present: Option<Queue>,
     /// A compute queue on a family without graphics (async compute), if the GPU has one.
     pub async_compute: Option<Queue>,
     /// A transfer-only queue (copy engine), if the GPU has one.
@@ -113,6 +118,7 @@ impl core::fmt::Debug for Device {
         f.debug_struct("Device")
             .field("adapter", &self.adapter.name())
             .field("graphics", &self.graphics)
+            .field("present", &self.present)
             .field("async_compute", &self.async_compute)
             .field("transfer", &self.transfer)
             .finish()
@@ -168,10 +174,13 @@ impl Device {
         );
 
         let priority = [1.0f32];
+        // The graphics family's second queue (ADR 0091), at the same priority.
+        let graphics_priorities = [1.0f32; 2];
+        let graphics_queues = families[graphics_family as usize].queue_count.min(2) as usize;
         let mut queue_infos = vec![
             vk::DeviceQueueCreateInfo::default()
                 .queue_family_index(graphics_family)
-                .queue_priorities(&priority),
+                .queue_priorities(&graphics_priorities[..graphics_queues]),
         ];
         for family in [compute_family, transfer_family].into_iter().flatten() {
             queue_infos.push(
@@ -428,10 +437,15 @@ impl Device {
             }
         };
         let queue = |family: u32| Queue {
-            // SAFETY: each family was requested with one queue.
+            // SAFETY: each family was requested with at least one queue.
             raw: unsafe { raw.get_device_queue(family, 0) },
             family,
         };
+        let present = (graphics_queues > 1).then(|| Queue {
+            // SAFETY: the graphics family was requested with two queues.
+            raw: unsafe { raw.get_device_queue(graphics_family, 1) },
+            family: graphics_family,
+        });
         let diagnostics =
             crate::fault::Diagnostics::new(instance.raw(), &raw, adapter, &diagnostics_features);
         let ray_query = rays.then(|| {
@@ -445,6 +459,7 @@ impl Device {
             warm_up: std::sync::OnceLock::new(),
             warm_up_enabled: true,
             graphics: queue(graphics_family),
+            present,
             async_compute: compute_family.map(queue),
             transfer: transfer_family.map(queue),
             raw: Arc::new(raw),

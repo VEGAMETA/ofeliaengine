@@ -659,13 +659,19 @@ impl Streamline {
         info.device = vk::Handle::as_raw(device.raw().handle()) as *mut c_void;
         info.instance = vk::Handle::as_raw(device.instance_raw().handle()) as *mut c_void;
         info.physical_device = vk::Handle::as_raw(device.physical()) as *mut c_void;
-        // Streamline's own queues would start after the engine's (one per family); DLSS
-        // Super Resolution asks for none (checked in `load`).
+        // Streamline's own queues would start after the engine's (one per family, two in
+        // the graphics family with the present queue, ADR 0091); DLSS Super Resolution
+        // asks for none (checked in `load`).
+        let graphics_queues = 1 + u32::from(device.present.is_some());
         info.graphics_queue_family = device.graphics.family;
-        info.graphics_queue_index = 1;
+        info.graphics_queue_index = graphics_queues;
         let compute = device.async_compute.unwrap_or(device.graphics);
         info.compute_queue_family = compute.family;
-        info.compute_queue_index = 1;
+        info.compute_queue_index = if device.async_compute.is_some() {
+            1
+        } else {
+            graphics_queues
+        };
         // SAFETY: Streamline is initialized; the handles are the engine's live instance,
         // physical device and device, created after `slInit`.
         let result = unsafe { (functions.set_vulkan_info)(&info) };
