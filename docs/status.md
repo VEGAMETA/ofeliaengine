@@ -353,8 +353,8 @@ grown, divide and conquer); the old labels stay in parentheses.
    - **Both paths.** FSR 3.1 FG, built from the FidelityFX SDK's source (1.1.x has
      Vulkan frame interpolation and its swapchain), works on every GPU with nothing to
      install. DLSS FG through Streamline works on RTX GPUs with the user's DLLs
-     (`sl.dlss_g`, `nvngx_dlssg`, `sl.reflex`/`sl.pcl`; the engine ships none, §6). With
-     DLSS FG, Reflex goes through Streamline (§7).
+     (`sl.dlss_g`, `nvngx_dlssg`, `sl.reflex`/`sl.pcl`, `NvLowLatencyVk`; the engine ships
+     none, §6). With DLSS FG, Reflex goes through Streamline (§7).
    - **Out of the box for the game developer.** The frame renderer offers it with no work
      on their side: the option exists in every game and is hidden where it cannot run.
      Whether it starts on or off, the owner decides with the latency measured. The
