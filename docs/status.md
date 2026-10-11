@@ -444,14 +444,12 @@ grown, divide and conquer); the old labels stay in parentheses.
   - The discrete-GPU default stays TAA. The other candidate is MSAA 4× (+1.2 ms on the
     RTX, sharpest in motion, more flicker); the owner decides.
   - A Streamline `eErrorExceptionHandler` hang was seen once in `aa_bench`.
-  - `procedural_contact_shadows` renders a few pixels differently from run to run on both
-    vendors (5–11 pixels, up to 25 levels). Found 2026-10-11: Bend's layout writes many
-    pixels more than once (the lines converge towards the light: 4–38 % of the pixels of
-    a 320 × 180 target in the CPU model of `contact.rs`, for lights on and off screen);
-    the writers agree except at depth edges, where the last write wins, in no fixed
-    order. Deterministic writes would need an atomic minimum (an R32 target) or an
-    ownership rule per pixel; not worth it while the difference stays this small (FLIP
-    passes). `procedural_local_shadows` on the Radeon differed from its golden image
+  - ~~`procedural_contact_shadows` renders a few pixels differently from run to run on
+    both vendors~~ (5–11 pixels, up to 25 levels): Bend's layout writes many pixels more
+    than once, and the last write won at depth edges. Made deterministic 2026-10-11 (the
+    owner: try it; ADR 0071 addendum): an R32 mask with an atomic minimum. Cost: the
+    RTX's contact passes +12–28 µs, the Radeon's +63 µs and its forward pass +180 µs
+    (about 2 % of its frame), only in views with contact shadows. `procedural_local_shadows` on the Radeon differed from its golden image
     (97 pixels, a short streak on a shadow edge) because that image was written on
     2026-10-01, before the iGPU's SoC voltage fix; written again (renders are the same
     bytes run after run on both GPUs, checked with exact test names). `sponza`'s

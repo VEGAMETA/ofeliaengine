@@ -145,3 +145,18 @@ equal or faster; iGPU within the machine's load noise, see the PR). New scene
   claim combining static and dynamic shadow maps per texel through a dynamic mask. The
   general "copy static depth, draw dynamic casters over it" (UE4 4.9, 2015) looks like prior
   art, but a review is needed before we build either.
+
+## Addendum (2026-10-11): deterministic contact shadows
+
+Bend's layout writes many pixels more than once (its lines converge towards the light:
+4–38 % of a 320 × 180 target's pixels, in the CPU model of `contact.rs`), and the writers
+disagree at depth edges, so with plain writes a few pixels changed from run to run, and
+from frame to frame for a still camera (5–11 pixels, up to 25 levels, both GPUs). The
+owner chose to try making it deterministic: the mask is now `R32_UINT`, filled with 1 by
+a clear pass, and every line writes with an atomic minimum of its result's bits (values
+0..1 order as their bits do), so the darkest result stays whatever the order; the shading
+reads the bits back as a float. Renders are the same bytes run after run on both GPUs.
+
+Cost, `scene_bench --contact` (Sponza, 1080p): the RTX's contact passes 182–198 → 210 µs;
+the Radeon's 2,946 → 3,009 µs and its forward pass +180 µs (it reads 4 bytes of mask per
+pixel instead of 1), about 2 % of its frame. Only views with contact shadows pay it.

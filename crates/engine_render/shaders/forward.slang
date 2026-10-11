@@ -80,6 +80,8 @@
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(0, 0)]] TextureCube g_cubes[];
+// The sun's contact shadow mask: a float's bits (contact.rs, CONTACT_FORMAT).
+[[vk::binding(0, 0)]] Texture2D<uint> g_uint_textures[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 [[vk::binding(2, 0)]] SamplerComparisonState g_compare_samplers[];
 
@@ -1376,7 +1378,7 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     // The sun's contact shadows (ADR 0071; `contact` is a literal): their mask's bindless
     // index comes in `push.phase`, which the shading passes do not otherwise read.
     if (contact && visible > 0.0)
-        visible *= g_textures[push.phase].Load(int3(int2(input.position.xy), 0)).r;
+        visible *= asfloat(g_uint_textures[push.phase].Load(int3(int2(input.position.xy), 0)).r);
     float3 local_irradiance = 0.0;
     float3 reflect_weight = 0.0;
     float3 color = (surface_diffuse + specular) * frame.light_color.rgb * n_dot_l * visible

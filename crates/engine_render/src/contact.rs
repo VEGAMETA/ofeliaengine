@@ -16,9 +16,12 @@ use engine_rhi::ash::vk;
 use engine_rhi::{Bindless, Device, RhiError};
 
 const BEND: &[u8] = include_bytes!("../shaders/contact.contactBend.spv");
+const CLEAR: &[u8] = include_bytes!("../shaders/contact.contactClear.spv");
 
-/// Format of the visibility mask: 1 lit, 0 in a contact shadow.
-pub const CONTACT_FORMAT: vk::Format = vk::Format::R8_UNORM;
+/// Format of the visibility mask: the bits of a float, 1 lit, 0 in a contact shadow. Lines
+/// that cross one pixel each contribute with an atomic minimum, so the mask is the same
+/// whatever order their writes land in (`contact.slang`).
+pub const CONTACT_FORMAT: vk::Format = vk::Format::R32_UINT;
 
 /// Threads of a Bend wave (`WAVE_SIZE` in `contact.slang`).
 const WAVE: i32 = 64;
@@ -60,8 +63,7 @@ struct Push {
     near_depth: f32,
     depth: u32,
     target: u32,
-    /// The first dispatch writes the light's own pixel (lit), which no line covers.
-    light_pixel: u32,
+    _pad: u32,
 }
 
 const _: () = assert!(size_of::<Push>() == 64);
@@ -213,6 +215,7 @@ pub(crate) fn bend_dispatches(light: Vec4, size: [u32; 2]) -> ([f32; 4], [BendDi
 /// The contact shadow passes.
 pub struct ContactShadows {
     bend: ComputeShader<Push>,
+    clear: ComputeShader<Push>,
 }
 
 impl core::fmt::Debug for ContactShadows {
@@ -226,6 +229,7 @@ impl ContactShadows {
     pub fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
         Ok(Self {
             bend: ComputeShader::new(device, bindless, BEND, c"contactBend")?,
+            clear: ComputeShader::new(device, bindless, CLEAR, c"contactClear")?,
         })
     }
 
@@ -257,47 +261,48 @@ impl ContactShadows {
         let light = view.clip_from_world * view.to_light.extend(0.0);
         let (coordinate, dispatches, count) = bend_dispatches(light, size);
         let bend = &self.bend;
-        // The lines meet at the light's point (in front of the camera or behind):
-        // when it is on screen, its own pixel may be left unwritten. Lit there.
-        let on_screen = (0.0..size[0] as f32).contains(&coordinate[0])
-            && (0.0..size[1] as f32).contains(&coordinate[1]);
-        // The dispatches cover every pixel once (pixels without geometry are
-        // written lit).
-        mask_pass(fg, bindless, depth, mask).record(move |rec| {
-            let ctx = rec.context();
-            let (Some(depth), Some(target)) = (ctx.sampled_index(depth), ctx.storage_index(mask))
-            else {
-                return;
-            };
-            for (k, d) in dispatches[..count].iter().enumerate() {
-                let push = Push {
-                    light: coordinate,
-                    wave_offset: d.offset,
-                    depth,
-                    target,
-                    light_pixel: u32::from(on_screen && k == 0),
-                    ..base
+        // Every pixel lit first: the light's own pixel, where the lines meet, and pixels
+        // without geometry are covered by no line's write.
+        fg.add_compute("contact shadows clear", bindless)
+            .async_compute()
+            .write(mask, Access::StorageWrite(ShaderStages::COMPUTE))
+            .dispatch(
+                &self.clear,
+                Dispatch::Threads([size[0], size[1], 1]),
+                move |ctx| {
+                    Some(Push {
+                        target: ctx.storage_index(mask)?,
+                        ..base
+                    })
+                },
+            );
+        // On the async compute queue where that is the default (ADR 0065), as ambient
+        // occlusion. The lines cover every pixel at least once; where several cross, the
+        // darkest result stays (atomic minimum).
+        fg.add_compute("contact shadows", bindless)
+            .async_compute()
+            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .write(mask, Access::StorageReadWrite(ShaderStages::COMPUTE))
+            .record(move |rec| {
+                let ctx = rec.context();
+                let (Some(depth), Some(target)) =
+                    (ctx.sampled_index(depth), ctx.storage_index(mask))
+                else {
+                    return;
                 };
-                rec.dispatch(bend, Dispatch::Groups(d.waves), &push);
-            }
-        });
+                for d in &dispatches[..count] {
+                    let push = Push {
+                        light: coordinate,
+                        wave_offset: d.offset,
+                        depth,
+                        target,
+                        ..base
+                    };
+                    rec.dispatch(bend, Dispatch::Groups(d.waves), &push);
+                }
+            });
         mask
     }
-}
-
-/// The pass writing the mask from the depth.
-fn mask_pass<'a, 'g>(
-    fg: &'a mut FrameGraph<'g>,
-    bindless: &'g Bindless,
-    depth: Texture,
-    mask: Texture,
-) -> crate::compute::ComputePass<'a, 'g> {
-    // On the async compute queue where that is the default (ADR 0065), as ambient
-    // occlusion.
-    fg.add_compute("contact shadows", bindless)
-        .async_compute()
-        .read(depth, Access::Sampled(ShaderStages::COMPUTE))
-        .write(mask, Access::StorageWrite(ShaderStages::COMPUTE))
 }
 
 #[cfg(test)]

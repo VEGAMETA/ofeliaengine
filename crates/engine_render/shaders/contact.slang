@@ -17,11 +17,16 @@
 // always on, a thicker default surface (contact.rs), the light's own pixel written lit, the
 // debug outputs removed.
 //
-// It writes the sun's visibility (1 lit, 0 shadowed) into an R8 target the size of the
+// It writes the sun's visibility (1 lit, 0 shadowed) into an R32 target the size of the
 // depth, which the forward pass's `*Contact` entry points multiply into the sun's light.
+// The lines converge towards the light, so several threads write many pixels (4-38 % of
+// them twice or more): each writes with an atomic minimum of the visibility's bits (all
+// values are 0..1, whose bits order as the values do) into a target `contactClear` filled
+// with 1, so the result does not depend on the order the writes land in. The plain
+// writes it replaces made a few pixels at depth edges differ from run to run.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
-[[vk::binding(1, 0)]] [vk::image_format("r8")] RWTexture2D<float> g_images[];
+[[vk::binding(1, 0)]] [vk::image_format("r32ui")] RWTexture2D<uint> g_images[];
 
 // `ContactPush` in contact.rs (64 bytes).
 struct ContactPush
@@ -35,8 +40,8 @@ struct ContactPush
     float far_depth;           // depth value of the far plane
     float near_depth;          // depth value of the near plane
     uint depth;                // bindless sampled: the depth target
-    uint target;               // bindless storage: the visibility
-    uint light_pixel;          // 1: this dispatch also writes the light's own pixel (lit)
+    uint target;               // bindless storage: the visibility (R32 bits)
+    uint _pad;
 };
 
 [[vk::push_constant]]
@@ -91,6 +96,16 @@ void wavefront_extents(int3 group, uint thread, out float2 delta_xy, out float2 
     delta_xy = xy_delta;
 }
 
+// The visibility mask before the lines: every pixel lit (no line covers the light's own
+// pixel, and pixels without geometry are skipped).
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void contactClear(uint3 id : SV_DispatchThreadID)
+{
+    if (all(id.xy < push.size))
+        g_images[push.target][id.xy] = asuint(1.0);
+}
+
 // Bend Studio's screen-space shadow (WriteScreenSpaceShadow), with
 // BilinearSamplingOffsetMode off, IgnoreEdgePixels and UsePrecisionOffset on (without them
 // distant flat ground, at grazing angles to the light's lines, shadowed itself in stripes),
@@ -100,9 +115,6 @@ void wavefront_extents(int3 group, uint thread, out float2 delta_xy, out float2 
 void contactBend(uint3 group_id : SV_GroupID, uint thread : SV_GroupIndex)
 {
     int3 group = int3(group_id);
-    // The lines meet at the light's point on screen: no line covers that pixel.
-    if (push.light_pixel != 0 && all(group_id == 0) && thread == 0)
-        g_images[push.target][int2(push.light.xy)] = 1.0;
     float2 xy_delta;
     float2 pixel_xy;
     float pixel_distance;
@@ -141,14 +153,12 @@ void contactBend(uint3 group_id : SV_GroupID, uint thread : SV_GroupIndex)
         pixel_xy += xy_delta * direction;
     }
 
-    // Pixels without geometry need no shadow (they are written lit); a wave of them stops
-    // here.
+    // Pixels without geometry need no shadow (`contactClear` left them lit); a wave of them
+    // stops here.
     float start = sampling_depth[0];
     bool skip_pixel = start >= max(push.far_depth, push.near_depth) || start <= min(push.far_depth, push.near_depth);
     int2 out_xy = int2(write_xy);
     bool inside = all(out_xy >= int2(0, 0)) && all(out_xy < int2(push.size));
-    if (skip_pixel && inside)
-        g_images[push.target][out_xy] = 1.0;
     bool early_out = !WaveActiveAnyTrue(!skip_pixel);
     if (WaveGetLaneCount() == WAVE_SIZE)
     {
@@ -218,6 +228,7 @@ void contactBend(uint3 group_id : SV_GroupID, uint thread : SV_GroupIndex)
     shadow_value = saturate(shadow_value * push.shadow_contrast + (1.0 - push.shadow_contrast));
     hard_shadow = saturate(hard_shadow * push.shadow_contrast + (1.0 - push.shadow_contrast));
     float result = min(hard_shadow, dot(shadow_value, 0.25));
-    if (inside)
-        g_images[push.target][out_xy] = result;
+    // Below 1 only: the target starts at 1.
+    if (inside && result < 1.0)
+        InterlockedMin(g_images[push.target][out_xy], asuint(result));
 }
