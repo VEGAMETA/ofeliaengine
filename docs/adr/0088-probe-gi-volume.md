@@ -185,6 +185,10 @@ Options **1d, 2c** and hit shading at a coarse mip, as follows (`engine_render::
   heap allocations in 100 frames that update it and then only read it, both GPUs).
   Golden shots `sponza_gi` and `sponza_gi_medallions` on both GPUs: deterministic, FLIP 0
   between runs.
+- **Perf gate scene `sponza_gi`** (the frame renderer, through the runtime, 1080p):
+  - RTX: GPU frame 788 µs (resolve 101, forward 311) against `sponza`'s 708.
+  - Radeon: 19.4 ms against 22.9. The depth prepass that GI turns on removes the
+    shading's overdraw (forward 17.2 → 11.9 ms), more than the GI costs.
 - **Next:**
   - Phase 2: a ray budget per frame, rays allocated by the probes' inconsistency (Wicked
     Engine's idea) and by the camera's view.

@@ -193,6 +193,18 @@ fn shots() -> Vec<Shot> {
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },
+        // Probe GI (ADR 0088), through the runtime: the volume converged before the timed
+        // frames, which resolve it (one sample per 2 × 2 pixels on discrete GPUs, 4 × 4 on
+        // integrated ones) and shade with it; the ray scene kept (nothing moves).
+        Shot {
+            size: [1920, 1080],
+            runtime: true,
+            gi: Some(1.0),
+            ..Shot::new(
+                "sponza_gi",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
         // Textures streamed by texture feedback within an ample budget (ADR 0076): the
         // same frame as `sponza` plus the feedback pass (a quarter of the commands each
         // frame) and the streamer's steady state.
