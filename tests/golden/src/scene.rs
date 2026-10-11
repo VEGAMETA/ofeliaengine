@@ -496,6 +496,90 @@ pub fn procedural_lights() -> Vec<LocalLight> {
     ]
 }
 
+/// Sponza on a summer day with everything daylight uses: the physically based sky and
+/// atmosphere (the sun 75° up, high enough to reach the courtyard's floor, its light
+/// through the air), light height fog, probe GI (through the runtime), ambient
+/// occlusion, the sun's contact shadows, reflection probes and screen-space reflections,
+/// temporal antialiasing at the output size, bloom. Exposed for the shade: GI leaves the
+/// courtyard a tenth of the sky's light, the sunlit floor rolls off in the tone curve.
+pub fn sponza_day(name: &'static str, size: [u32; 2]) -> Shot {
+    Shot {
+        size,
+        sun: sun_at(75.0),
+        exposure: 8.0,
+        fog: Some(HeightFog {
+            density: 0.004,
+            base_height: 0.0,
+            falloff: 0.3,
+            ..HeightFog::default()
+        }),
+        ..sponza_everything(name, size)
+    }
+}
+
+/// Sponza at night with everything on: the sun 6° below the horizon (the sky's last
+/// blue), a bonfire in the courtyard (sparks added, smoke blended, its warm light with
+/// shadows), warm lights along the hall and two cold ones from above, all with shadows;
+/// height fog, probe GI, ambient occlusion, contact shadows, reflection probes and
+/// screen-space reflections, temporal antialiasing, bloom; exposed for the firelight.
+pub fn sponza_night(name: &'static str, size: [u32; 2]) -> Shot {
+    let mut lights = sponza_lights();
+    lights.push(LocalLight {
+        position: Vec3::new(0.0, 0.6, 0.0),
+        range: 14.0,
+        color: Vec3::new(60.0, 28.0, 8.0),
+        spot: None,
+        shadow: true,
+    });
+    Shot {
+        sun: sun_at(-6.0),
+        lights,
+        local_shadows: true,
+        particles: true,
+        fog: Some(HeightFog {
+            density: 0.04,
+            base_height: 0.0,
+            falloff: 0.3,
+            ..HeightFog::default()
+        }),
+        exposure: 4.0,
+        ..sponza_everything(name, size)
+    }
+}
+
+/// The features [`sponza_day`] and [`sponza_night`] share.
+fn sponza_everything(name: &'static str, size: [u32; 2]) -> Shot {
+    Shot {
+        size,
+        atmosphere: Some(Atmosphere::earth()),
+        runtime: true,
+        gi: Some(1.0),
+        ao: Some(AoSettings::default()),
+        contact_shadows: true,
+        // Four probes along the courtyard, each across its whole width: boxes split
+        // across the width (a grid of 2 along z) send the floor's reflections into the
+        // open sky where a box's ceiling is, leaving bright patches.
+        probe_grid: Some([4, 1, 1]),
+        ssr: Some(SsrSettings::default()),
+        antialiasing: Antialiasing::TAAU,
+        quality: Quality::Native,
+        ..Shot::new(name, Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
+    }
+}
+
+/// The sun `elevation` degrees up (below the horizon when negative), behind the default
+/// view's camera (−x, a little +z: along the courtyard, lighting the far end and one
+/// side's arcade, with no haze lit up ahead). Its color is the light outside the
+/// atmosphere, which colors and dims it.
+fn sun_at(elevation: f32) -> DirectionalLight {
+    let e = elevation.to_radians();
+    DirectionalLight {
+        direction: -Vec3::new(-0.832 * e.cos(), e.sin(), 0.555 * e.cos()).normalize(),
+        color: Vec3::splat(4.0),
+        ambient: Vec3::ZERO,
+    }
+}
+
 /// Warm point lights along Sponza's hall, alternating sides, and two cold spot lights
 /// from above.
 pub fn sponza_lights() -> Vec<LocalLight> {
