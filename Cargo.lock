@@ -392,6 +392,7 @@ version = "0.0.0"
 dependencies = [
  "engine_anim",
  "engine_assets",
+ "engine_brixelizer",
  "engine_core",
  "engine_dlss",
  "engine_ecs",

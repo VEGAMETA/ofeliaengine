@@ -11,9 +11,17 @@
 //!   floor under a uniform sky of radiance 1 gets 3.19 to 3.21 on both GPUs at 512 × 512
 //!   (π; `tests/brixelizer/gi.rs`).
 //!
+//! The GI waits for the distance field: its first updates build every cascade once (one a
+//! frame), and a view's GI runs from then on. Rays that leave the built cascades miss
+//! everything and bring the sky into the GI's caches, whence it fades by half every 48
+//! frames or so: a closed room under a sky of radiance 1 kept a quarter of its light 64
+//! frames after the start.
+//!
 //! What the SDK needs that the forward renderer does not make is made for it each frame
 //! (`shaders/brixelizer.slang`): the depth inverted, normals from the depth (as probe GI's
-//! resolve takes them), the history of both, last frame's lit image, blue noise.
+//! resolve takes them), the history of both, last frame's lit image, blue noise, and the
+//! camera's motion from the depth when the view has no motion vectors (no temporal
+//! antialiasing; moving objects then show no motion of their own).
 //!
 //! ```text
 //! // Once per scene: the distance field and its instances (static).
@@ -172,7 +180,8 @@ pub struct Brixelizer {
     registered: Option<Registered>,
     instances: Vec<u32>,
     token: Token,
-    frame: Cell<u32>,
+    /// Updates since the instances were set: the first build every cascade once.
+    updates: Cell<u32>,
     failures: Cell<u32>,
 }
 
@@ -215,6 +224,16 @@ pub enum SdfDebugView {
 pub struct SdfFrame {
     token: Buffer,
     serial: u64,
+    /// Every cascade was built (the GI may trace it).
+    built: bool,
+}
+
+impl SdfFrame {
+    /// Whether every cascade of the distance field was built by this frame: until then a
+    /// view's GI does not run.
+    pub fn built(&self) -> bool {
+        self.built
+    }
 }
 
 impl Brixelizer {
@@ -273,7 +292,7 @@ impl Brixelizer {
             registered: None,
             instances: Vec::new(),
             token,
-            frame: Cell::new(0),
+            updates: Cell::new(0),
             failures: Cell::new(0),
         })
     }
@@ -284,7 +303,8 @@ impl Brixelizer {
     }
 
     /// Places the scene's static instances: each a mesh of `geometry` and its world
-    /// transform; replaces the previous ones (their areas are rebuilt). Call it again after
+    /// transform; replaces the previous ones. Every cascade is built again over the next
+    /// [`SdfSettings::cascades`] updates, before the GI runs again. Call it again after
     /// the pool grows (its buffers change). Instances added after the first update need no
     /// frame using this distance field in flight (the SDK uploads each in a submission of
     /// its own, recycling per-call views).
@@ -381,12 +401,17 @@ impl Brixelizer {
                 self.instances.as_mut_ptr(),
             )
         };
+        // Built again from the next update, every cascade once before the GI traces it.
+        self.updates.set(0);
         ffx("ffxBrixelizerCreateInstances", code)
     }
 
     /// Declares this frame's update (one cascade, around `center`: the camera), reading
     /// the geometry pool. Its views read the distance field after it
-    /// ([`BrixelizerGi::begin_frame`]).
+    /// ([`BrixelizerGi::begin_frame`]). The first [`SdfSettings::cascades`] updates after
+    /// the instances are set build every cascade once, the coarsest last
+    /// ([`SdfFrame::built`]); later ones follow the SDK's schedule (the first cascade every
+    /// other frame, the next every fourth, and so on).
     pub fn add_update_pass<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -437,8 +462,18 @@ impl Brixelizer {
                 final_state: Some(state),
             },
         );
-        let frame = self.frame.get();
-        self.frame.set(frame.wrapping_add(1));
+        // The SDK updates the cascade of the frame index's lowest set bit, the coarsest at 0
+        // (`ffxBrixelizerRawGetCascadeToUpdate`): the first updates take the indices that
+        // build each cascade once, the coarsest last, then the count goes on.
+        let update = self.updates.get();
+        self.updates.set(update.saturating_add(1));
+        let cascades = self.settings.cascades;
+        let frame = match update {
+            k if k + 1 < cascades => 1 << k,
+            k if k + 1 == cascades => 0,
+            k => k,
+        };
+        let built = update + 1 >= cascades;
         let raw = self.raw;
         let failures = &self.failures;
         // The debug view: the camera's matrices as the SDK takes them, and its image.
@@ -503,6 +538,7 @@ impl Brixelizer {
             SdfFrame {
                 token,
                 serial: fg.serial(),
+                built,
             },
             debug.map(|(.., texture, _, _)| texture),
         )
@@ -755,15 +791,17 @@ fn color_range() -> vk::ImageSubresourceRange {
 #[repr(C)]
 struct ScreenFrame {
     world_from_clip: [f32; 16],
+    previous_clip_from_world: [f32; 16],
     eye: [f32; 4],
     size: [u32; 2],
     ndc_per_pixel: [f32; 2],
-    _pad: [u32; 4],
+    motion: u32,
+    _pad: [u32; 3],
 }
 
-const _: () = assert!(size_of::<ScreenFrame>() == 112);
+const _: () = assert!(size_of::<ScreenFrame>() == 176);
 
-/// `Push` in `brixelizer.slang` (24 bytes).
+/// `Push` in `brixelizer.slang` (32 bytes).
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
@@ -772,6 +810,8 @@ struct Push {
     source: u32,
     target0: u32,
     target1: u32,
+    target2: u32,
+    _pad: u32,
 }
 
 /// What [`BrixelizerGi::add_debug_pass`] shows at each pixel's surface (the SDK's debug
@@ -816,6 +856,8 @@ pub struct BrixelizerGi {
     settings: GiSettings,
     depth: [Kept; 2],
     normal: [Kept; 2],
+    /// The camera's motion, for views without motion vectors.
+    motion: Kept,
     lit: Kept,
     noise: Vec<Kept>,
     noise_upload: Option<(vk::Buffer, Allocation)>,
@@ -906,6 +948,15 @@ impl BrixelizerGi {
                 storage,
             )?,
         ];
+        let motion = Kept::new(
+            device,
+            allocator,
+            bindless,
+            NORMAL_FORMAT,
+            width,
+            height,
+            storage,
+        )?;
         // Last frame's lit image at the GI's internal size: the SDK samples it by texture
         // coordinates and downsamples it to that size itself.
         let (lit_width, lit_height) = internal_size(settings.internal_resolution, width, height);
@@ -949,6 +1000,7 @@ impl BrixelizerGi {
             settings,
             depth,
             normal,
+            motion,
             lit,
             noise,
             noise_upload: Some(noise_upload),
@@ -1159,7 +1211,7 @@ impl BrixelizerGi {
                 .depth
                 .iter_mut()
                 .chain(self.normal.iter_mut())
-                .chain(core::iter::once(&mut self.lit))
+                .chain([&mut self.motion, &mut self.lit])
                 .chain(self.noise.iter_mut())
             {
                 kept.destroy(device, allocator, bindless, frame);
@@ -1377,8 +1429,12 @@ impl ScreenGi for BrixelizerGi {
         input: &ScreenGiInput,
     ) -> Option<Texture> {
         engine_profiler::zone!("brixelizer::BrixelizerGi::add_passes");
-        let sdf = self.sdf.get().filter(|s| s.serial == fg.serial())?;
-        let motion = input.motion?;
+        // Not before every cascade is built: rays that leave the built ones bring the sky
+        // into the caches, which fades over hundreds of frames.
+        let sdf = self
+            .sdf
+            .get()
+            .filter(|s| s.serial == fg.serial() && s.built)?;
         let (environment, intensity) = input.environment?;
         let depth_desc = fg.texture_desc(input.depth);
         if (depth_desc.width, depth_desc.height) != (self.width, self.height) {
@@ -1390,30 +1446,48 @@ impl ScreenGi for BrixelizerGi {
         }
         let previous = self.previous.get().unwrap_or((view, projection));
         let images = self.import(fg);
+        // The view's motion vectors, or the camera's motion made from the depth.
+        let own_motion = input.motion.is_none();
+        let motion = match input.motion {
+            Some(motion) => motion,
+            None => self.motion.import(fg, "brixelizer camera motion"),
+        };
         let frame = ScreenFrame {
             world_from_clip: input.camera.clip_from_world.inverse().to_cols_array(),
+            previous_clip_from_world: input.previous_clip_from_world.to_cols_array(),
             eye: input.camera.position.extend(1.0).to_array(),
             size: [self.width, self.height],
             ndc_per_pixel: [2.0 / self.width as f32, 2.0 / self.height as f32],
-            _pad: [0; 4],
+            motion: u32::from(own_motion),
+            _pad: [0; 3],
         };
         let frame = ring.push(&[frame])?;
         let size = [self.width, self.height, 1];
         // 1. The inputs the forward renderer lacks.
         let depth = input.depth;
-        fg.add_compute("brixelizer inputs", bindless)
+        let mut pass = fg
+            .add_compute("brixelizer inputs", bindless)
             .read(depth, Access::Sampled(ShaderStages::COMPUTE))
             .write(images.depth, Access::StorageWrite(ShaderStages::COMPUTE))
-            .write(images.normal, Access::StorageWrite(ShaderStages::COMPUTE))
-            .dispatch(&self.inputs, Dispatch::Threads(size), move |ctx| {
-                Some(Push {
-                    frame,
-                    depth: ctx.sampled_index(depth)?,
-                    source: 0,
-                    target0: ctx.storage_index(images.depth)?,
-                    target1: ctx.storage_index(images.normal)?,
-                })
-            });
+            .write(images.normal, Access::StorageWrite(ShaderStages::COMPUTE));
+        if own_motion {
+            pass = pass.write(motion, Access::StorageWrite(ShaderStages::COMPUTE));
+        }
+        pass.dispatch(&self.inputs, Dispatch::Threads(size), move |ctx| {
+            Some(Push {
+                frame,
+                depth: ctx.sampled_index(depth)?,
+                source: 0,
+                target0: ctx.storage_index(images.depth)?,
+                target1: ctx.storage_index(images.normal)?,
+                target2: if own_motion {
+                    ctx.storage_index(motion)?
+                } else {
+                    0
+                },
+                _pad: 0,
+            })
+        });
         // 2. The SDK's GI.
         let desc = TextureDesc::new_2d(GI_FORMAT, self.width, self.height);
         let diffuse = fg.create_texture("brixelizer diffuse", desc);
@@ -1569,6 +1643,8 @@ impl ScreenGi for BrixelizerGi {
                     source: ctx.sampled_index(diffuse)?,
                     target0: ctx.storage_index(gi)?,
                     target1: 0,
+                    target2: 0,
+                    _pad: 0,
                 })
             });
         self.last.set(Some(LastFrame {

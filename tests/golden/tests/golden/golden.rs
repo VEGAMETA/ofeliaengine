@@ -732,6 +732,26 @@ fn sponza_with_gi() {
     });
 }
 
+/// Sponza with AMD's Brixelizer GI instead (ADR 0090), probe GI's reference, as
+/// `sponza_with_gi` shows it: the distance field built over the first eight frames, the GI
+/// running from then on (its rays would otherwise bring the sky in through the unbuilt
+/// cascades) and warmed up for 128 frames. Its light is bluer and weaker than probe GI's
+/// (its rays read a brick's radiance through a cosine lobe), and it keeps the arcades in
+/// shade. Guards the vendored SDK's fixes for AMD's compiler too: without them the Radeon
+/// builds the floor with holes.
+#[test]
+fn sponza_with_brixelizer_gi() {
+    check(&Shot {
+        runtime: true,
+        brixelizer_gi: true,
+        exposure: 3.0,
+        ..Shot::new(
+            "sponza_brixelizer_gi",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
 /// The acceptance view of ADR 0084: the curtains' metal medallions seen from above in
 /// shade read gold, reflecting the floor lit by the probe GI that the reflection probes
 /// captured.

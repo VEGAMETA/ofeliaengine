@@ -6,7 +6,9 @@
 //! - a white wall standing in the sun lights the floor in front of it, through the radiance
 //!   cache, which holds the wall's lit radiance;
 //! - the distance field has no holes: built by AMD's compiler, the vendored SDK left whole
-//!   triangles of a floor out (`third_party/README.md`).
+//!   triangles of a floor out (`third_party/README.md`);
+//! - a view without motion vectors gets the camera's motion made from the depth, and the
+//!   same light as with the renderer's.
 
 use engine_brixelizer::{
     Brixelizer, BrixelizerGi, DebugView, GiSettings, InternalResolution, SdfDebugView, SdfSettings,
@@ -116,6 +118,9 @@ struct Harness {
     cmd: vk::CommandBuffer,
     frame: u64,
     draws: Vec<DrawItem>,
+    /// The forward renderer's motion vectors (with jitter); without, the GI makes the
+    /// camera's motion itself.
+    motion_vectors: bool,
 }
 
 impl Harness {
@@ -233,6 +238,7 @@ impl Harness {
             cmd,
             frame: 0,
             draws,
+            motion_vectors: true,
         })
     }
 
@@ -275,6 +281,7 @@ impl Harness {
             gi,
             readback,
             draws,
+            motion_vectors,
             ..
         } = self;
         ring.begin_slot(0);
@@ -319,7 +326,7 @@ impl Harness {
                         depth,
                         clear: Some([0.0; 4]),
                         occlusion: None,
-                        temporal: Some(&*temporal),
+                        temporal: motion_vectors.then_some(&*temporal),
                         lights: &[],
                         decals: &[],
                         environment: Some(&*environment),
@@ -334,7 +341,8 @@ impl Harness {
                 Second::Cache(view) => gi.add_debug_pass(&mut fg, view).expect("the cache's view"),
             };
             gi.add_capture_pass(&mut fg, color);
-            let irradiance = passes.gi.expect("Brixelizer GI's irradiance");
+            // None until the distance field is built.
+            let irradiance = passes.gi;
             let out = fg.import_buffer(
                 "readback",
                 ImportedBuffer {
@@ -361,29 +369,38 @@ impl Harness {
                 ..Default::default()
             };
             let half_bytes = READBACK_BYTES / 2;
-            fg.add_pass("read back")
-                .read(irradiance, Access::TransferRead)
+            let mut pass = fg
+                .add_pass("read back")
                 .read(second, Access::TransferRead)
-                .write(out, Access::TransferWrite)
-                .execute(move |ctx| {
-                    // SAFETY: recording; layouts arranged by the graph.
-                    unsafe {
-                        ctx.device.cmd_copy_image_to_buffer(
+                .write(out, Access::TransferWrite);
+            if let Some(irradiance) = irradiance {
+                pass = pass.read(irradiance, Access::TransferRead);
+            }
+            pass.execute(move |ctx| {
+                // SAFETY: recording; layouts arranged by the graph.
+                unsafe {
+                    match irradiance {
+                        Some(irradiance) => ctx.device.cmd_copy_image_to_buffer(
                             ctx.cmd,
                             ctx.image(irradiance),
                             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                             ctx.buffer(out),
                             &[copy(0)],
-                        );
-                        ctx.device.cmd_copy_image_to_buffer(
-                            ctx.cmd,
-                            ctx.image(second),
-                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                            ctx.buffer(out),
-                            &[copy(half_bytes)],
-                        );
+                        ),
+                        None => {
+                            ctx.device
+                                .cmd_fill_buffer(ctx.cmd, ctx.buffer(out), 0, half_bytes, 0)
+                        }
                     }
-                });
+                    ctx.device.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        ctx.image(second),
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(out),
+                        &[copy(half_bytes)],
+                    );
+                }
+            });
             fg.execute_with_bindless(allocator, Some(&*bindless))
                 .unwrap();
         }
@@ -570,8 +587,7 @@ fn a_sunlit_wall_lights_the_floor_in_front_of_it() {
     // The wall's radiance is 0.9 × 3 × 0.8 / π ≈ 0.69 (0.71 in the lit image, with the
     // floor's light), and a floor point 0.4 m in front of it sees the wall over 44 % of its
     // cosine-weighted hemisphere: irradiance ≈ 0.96; 5 m away, ≈ 0.17. Brixelizer GI gives
-    // a fifth of that on both GPUs: 0.20 to 0.21 after 64 frames (0.23 after 256), 0.06
-    // away. Its radiance cache holds the wall's radiance, but a ray reads a hit brick's
+    // a quarter of that on both GPUs: 0.22 to 0.23 after 64 frames, 0.08 away. Its radiance cache holds the wall's radiance, but a ray reads a hit brick's
     // harmonics through a cosine lobe around the surface's normal, the radiance times the
     // cosine of the hit (0.45 on average here), and the screen probes lose the rest.
     let (boxes, sun, camera) = sunlit_wall();
@@ -642,4 +658,95 @@ fn the_distance_field_has_no_holes() {
         "{} of {points} floor points: {holes:?}",
         holes.len()
     );
+}
+
+#[test]
+fn a_view_without_motion_vectors_gets_the_cameras_motion() {
+    // The sunlit wall seen from a camera panning 1 cm a frame, with the forward renderer's
+    // motion vectors and without (the GI's own, from the depth): the same light in front
+    // of the wall.
+    let (boxes, sun, (eye, target, up)) = sunlit_wall();
+    let mut near = Vec::new();
+    for motion_vectors in [true, false] {
+        let Some(mut h) = Harness::new(&boxes, Vec3::ZERO) else {
+            return;
+        };
+        h.motion_vectors = motion_vectors;
+        let mut last = None;
+        for k in 0..64 {
+            let pan = Vec3::new(0.01 * k as f32, 0.0, 0.0);
+            last = Some(h.render((eye + pan, target + pan, up), sun, Second::Lit));
+        }
+        let pan = Vec3::new(0.63, 0.0, 0.0);
+        let point = Vec3::new(0.63, 0.0, -1.5);
+        let pixel = pixel_of((eye + pan, target + pan, up), point).unwrap();
+        near.push(irradiance_at(&last.unwrap(), pixel));
+        h.finish();
+    }
+    println!(
+        "in front of the wall, renderer's motion {:?}, own {:?}",
+        near[0], near[1]
+    );
+    assert!(near[1].x > 0.1, "without motion vectors: {:?}", near[1]);
+    assert!(
+        (near[1].x - near[0].x).abs() < 0.15 * near[0].x,
+        "renderer's motion {:?} against own {:?}",
+        near[0],
+        near[1]
+    );
+}
+
+#[test]
+fn the_sky_does_not_light_the_inside_of_a_closed_box() {
+    // A closed room of 0.2 m walls, 6 × 3 × 6 m inside, under a sky of radiance 1 and no
+    // sun, seen from inside: no ray from inside reaches the sky and nothing lights the
+    // walls, so no light. Had the GI run before the distance field was built, the sky would
+    // still light a quarter of it after 64 frames (0.74, decaying by half every 48 frames).
+    let t = 0.2;
+    let walls = [
+        (
+            Vec3::new(0.0, -t / 2.0, 0.0),
+            Vec3::new(6.0 + 2.0 * t, t, 6.0 + 2.0 * t),
+        ),
+        (
+            Vec3::new(0.0, 3.0 + t / 2.0, 0.0),
+            Vec3::new(6.0 + 2.0 * t, t, 6.0 + 2.0 * t),
+        ),
+        (
+            Vec3::new(-3.0 - t / 2.0, 1.5, 0.0),
+            Vec3::new(t, 3.0, 6.0 + 2.0 * t),
+        ),
+        (
+            Vec3::new(3.0 + t / 2.0, 1.5, 0.0),
+            Vec3::new(t, 3.0, 6.0 + 2.0 * t),
+        ),
+        (
+            Vec3::new(0.0, 1.5, -3.0 - t / 2.0),
+            Vec3::new(6.0 + 2.0 * t, 3.0, t),
+        ),
+        (
+            Vec3::new(0.0, 1.5, 3.0 + t / 2.0),
+            Vec3::new(6.0 + 2.0 * t, 3.0, t),
+        ),
+    ];
+    let boxes: Vec<BoxDesc> = walls
+        .iter()
+        .map(|&(center, size)| BoxDesc {
+            center,
+            size,
+            albedo: [0.8; 3],
+        })
+        .collect();
+    let Some(mut h) = Harness::new(&boxes, Vec3::ONE) else {
+        return;
+    };
+    let camera = (Vec3::new(0.0, 1.5, 2.5), Vec3::new(0.0, 0.5, -2.0), Vec3::Y);
+    let mut last = None;
+    for _ in 0..64 {
+        last = Some(h.render(camera, NO_SUN, Second::Lit));
+    }
+    let mean = central_mean(&last.unwrap(), 20.0);
+    println!("irradiance inside the closed box {mean:?}");
+    h.finish();
+    assert!(mean.x < 0.01 * PI, "the sky leaks in: {mean:?}");
 }
