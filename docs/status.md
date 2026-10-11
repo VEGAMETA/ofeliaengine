@@ -70,7 +70,7 @@ tooling included) about **50 %**.
 | HDRI environments: `.hdr` and OpenEXR panoramas as the sky, their sun found and lit as the directional light, cooked into BC6H cubes (DDC, packs) | done | ADR 0083 |
 | GPU particles and GPU radix sort | done | ADRs 0080, 0081 |
 | Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
-| Global illumination, phase 1: a volume of probes traced with ray queries, converged at load, read at a reduced resolution (Sponza at 1080p: 0.12 / 1.8 ms per frame on the RTX / iGPU) | done | ADR 0088 |
+| Global illumination (**Echo GI**, the working name; the code's `ProbeGi`): a volume of probes traced with ray queries, converged at load, then a ray budget per frame, read at a reduced resolution (Sponza at 1080p: 0.33 / 2.4 ms per frame on the RTX / iGPU); measured against AMD's Brixelizer GI, built from the SDK as the reference: 4.5 / 14 times less GPU time, 29 / 18 times less memory, a physical bounce where Brixelizer GI gives a fifth | done | ADRs 0088, 0089, 0090 |
 | Upscalers: TAAU, FSR 3.1, DLSS via Streamline (user-supplied DLLs) | done | ADRs 0060, 0063 |
 | Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/Catmull-Rom/Lanczos-3/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
@@ -83,11 +83,7 @@ tooling included) about **50 %**.
 
 ## 4. In flight
 
-- **Brixelizer GI as probe GI's reference** (item 3, ADR 0090, proposed), by the
-  coordinator. Step 1, `engine_ffx`: the FidelityFX SDK built as one library for FSR 3.1,
-  Brixelizer and Brixelizer GI, their SPIR-V checked byte for byte against AMD's compiler;
-  a box's distance field built on both GPUs. Next: `engine_brixelizer` (inputs, the
-  scene's geometry), the GI into the forward shading, the measurements.
+- Nothing.
 
 Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:
 ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 s), 0a (the
@@ -340,9 +336,20 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    GPUs, 8,192 on integrated ones), half in an 8 × 4 × 8 box around the camera and half
    in turn over the volume, blended with a hysteresis of 0.9. A sun turned off fades as
    0.9^frames (tested), around the camera first. Sponza: 0.2 ms a frame on the RTX, 1.0
-   ms on the iGPU. **Next:** Brixelizer GI built as the reference (cost and memory on
-   both GPUs, ADR 0084's bar); local lights at the rays' hits (night scenes); the
-   moments' blend (a third of the cost) at a lower rate.
+   ms on the iGPU. **Brixelizer GI reference done 2026-10-11** (ADR 0090,
+   `engine_brixelizer`, `docs/research/brixelizer-gi.md`): AMD's Brixelizer GI built from
+   the FidelityFX SDK (three fixes in the vendored SDK for AMD's compiler, which built the
+   distance field with holes on the Radeon), in the forward renderer as a screen GI
+   (`ViewGi::Screen`), waiting for its distance field (else the sky leaks into its caches
+   for hundreds of frames). Measured with `gi_bench` (Sponza 1080p): probe GI 0.33 / 2.4
+   ms against 1.55 / 33 ms on the RTX / iGPU, 20 / 29 MiB against 594 / 532 MiB; before a
+   sunlit wall 1.19 against 0.23 (physically about 1.14); a sun turned off halves in 15 /
+   123 frames against 180 / 203. ADR 0084's bar is met; Brixelizer GI stays as the
+   reference (the golden shot `sponza_brixelizer_gi`). The owner named our GI **Echo GI**
+   (2026-10-11). **Next:** a refresh after a large change of light (on the iGPU a sun
+   turned off leaves a third of its bounce after 400 frames: the far probes wait for their
+   turn of the budget; `ProbeGi::refresh` converges in ten frames); local lights at the
+   rays' hits (night scenes); the moments' blend (a third of the cost) at a lower rate.
 3b. **Frame generation out of the box** (owner, 2026-10-11: "needed out of the box, DLSS FG
    and FSR FG; the HUD fix on by default"; right after GI, off by default). Requirements
    so far (`docs/research/frame-generation.md`, 2026-09-26) and the owner's:
@@ -493,6 +500,11 @@ grown, divide and conquer); the old labels stay in parentheses.
   - GTSO;
   - probe shadow-map caching;
   - XeSS;
+  - Brixelizer GI (the reference, ADR 0090): its specular is not composited, and
+    reflection probes captured in its views see only the sky; the SDK's problems found
+    (AMD's compiler and the distance field, the sky leaking in before the field is built,
+    motion vectors required, the Vulkan backend's descriptor pools) are not reported to
+    AMD (an outward step: the owner's call);
   - ambient light inconsistent indoors without GI: diffuse ambient comes from the sky's
     irradiance (barely occluded), specular from reflection probes that see the real,
     darker interior. With probe GI (ADR 0088) they agree; on GPUs without ray queries

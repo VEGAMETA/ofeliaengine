@@ -1,6 +1,9 @@
 # 0084. Global illumination: our own probe GI traced with ray queries, held to beat Brixelizer GI
 
-- Status: Accepted (option 1, held to beat option 2: the owner, 2026-10-11)
+- Status: Accepted (option 1, held to beat option 2: the owner, 2026-10-11). The bar was
+  measured on 2026-10-11 ([ADR 0090](0090-brixelizer-gi-reference.md)): met on both GPUs;
+  Brixelizer GI stays as the reference, not the fallback. Working name of our GI: **Echo
+  GI** (the owner, 2026-10-11); the code keeps `ProbeGi`.
 - Date: 2026-10-11
 - Research: [docs/research/global-illumination.md](../research/global-illumination.md)
 - Related: [ADR 0046](0046-image-based-lighting.md) (the sky's light it adds to),

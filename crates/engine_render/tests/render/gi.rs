@@ -704,3 +704,53 @@ fn a_small_budget_follows_the_change_around_the_camera_first() {
     assert!(near < 0.6 * converged, "by the camera: {near}");
     assert!(far > 0.85 * converged, "far from it: {far}");
 }
+
+#[test]
+fn a_sunlit_wall_lights_the_floor_in_front_of_it() {
+    // `engine_brixelizer`'s scene of the same name (ADR 0090): a white wall 8 m wide and
+    // 4 m tall facing the sun (irradiance 3 × 0.8 on it: radiance 0.9 × 2.4 / π ≈ 0.69) on
+    // a grey floor, under a black sky. Integrated over the wall, one bounce gives a floor
+    // point 0.4 m in front of it irradiance 0.958, and 4.9 m in front 0.170. The sunlit
+    // floor lights the wall too (its radiance ≈ 0.82 then): about 1.14 and 0.20. Probe GI
+    // gives 1.19 and 0.20 on both GPUs; Brixelizer GI 0.22 to 0.23 and 0.08.
+    let grid = ProbeGrid::covering(
+        Vec3::new(-4.0, 0.1, -1.8),
+        Vec3::new(4.0, 3.9, 3.5),
+        0.5,
+        4_000,
+    );
+    let points = [
+        (Vec3::new(0.0, 0.0, -1.5), Vec3::Y),
+        (Vec3::new(0.0, 0.0, 3.0), Vec3::Y),
+    ];
+    let Some(results) = converge_and_sample(
+        None,
+        grid,
+        Vec3::ZERO,
+        Some((Vec3::new(0.0, 0.6, 0.8), Vec3::splat(3.0))),
+        |m| {
+            let grey = m.add(MaterialDesc::solid([0.5, 0.5, 0.5], 0.0, 0.5));
+            let white = m.add(MaterialDesc::solid([0.9, 0.9, 0.9], 0.0, 0.5));
+            vec![
+                (
+                    slab(Vec3::new(-20.0, -0.2, -20.0), Vec3::new(20.0, 0.0, 20.0)),
+                    grey,
+                ),
+                (
+                    slab(Vec3::new(-4.0, 0.0, -2.1), Vec3::new(4.0, 4.0, -1.9)),
+                    white,
+                ),
+            ]
+        },
+        &points,
+    ) else {
+        return;
+    };
+    let (near, far) = (results[0], results[1]);
+    println!("in front of the wall {near:?}, 4.9 m away {far:?}");
+    assert!(
+        near[0] > 1.0 && near[0] < 1.3,
+        "in front of the wall: {near:?}"
+    );
+    assert!(far[0] > 0.16 && far[0] < 0.24, "4.9 m away: {far:?}");
+}
