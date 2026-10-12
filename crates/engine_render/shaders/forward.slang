@@ -910,10 +910,51 @@ struct Surface
     float metallic;
     float roughness;    // perceptual, before the specular antialiasing widens it
     uint subsurface;    // subsurface scattering's bits (ADR 0059): profile, mask, transmission
+    // The shading models' own terms (ADR 0092), read only by their model (`IMaterial::model`).
+    float clearcoat;            // MODEL_CLEARCOAT: the coat's strength, 0 … 1
+    float clearcoat_roughness;  // its perceptual roughness
+    float3 sheen;               // MODEL_CLOTH: the sheen's color
+    float sheen_roughness;      // its perceptual roughness
+    float3 hair_tangent;        // MODEL_HAIR: along the strands (world space, unit)
+    float hair_shift;           // the first highlight's shift along the normal (the second's 0.1 lower)
+    float toon_steps;           // MODEL_TOON: lit bands above the shadow (1: two tones)
+    float toon_softness;        // the bands' edge width in n·l
+    float3 toon_highlight;      // the highlight's color (0: none)
+    float3 rim;                 // the rim light's color (0: none)
+    float rim_width;            // where it shows: n·v below this
 };
+
+// Surface terms a model does not read, set to nothing (`Surface` for glTF-like models).
+Surface surface_terms(Surface s)
+{
+    s.clearcoat = 0.0;
+    s.clearcoat_roughness = 0.0;
+    s.sheen = 0.0;
+    s.sheen_roughness = 1.0;
+    s.hair_tangent = float3(0.0, 1.0, 0.0);
+    s.hair_shift = 0.0;
+    s.toon_steps = 1.0;
+    s.toon_softness = 0.05;
+    s.toon_highlight = 0.0;
+    s.rim = 0.0;
+    s.rim_width = 0.3;
+    return s;
+}
+
+// The shading models (ADR 0092): how the engine lights a surface. A material type picks
+// one at compile time (`IMaterial::model` returns a literal): each is its own code, never a
+// branch the others pay for.
+static const uint MODEL_LIT = 0;       // glTF's metallic-roughness (GGX, Lambert)
+static const uint MODEL_UNLIT = 1;     // the base color and emission, no light
+static const uint MODEL_CLEARCOAT = 2; // lit, under a clear dielectric coat (Filament)
+static const uint MODEL_CLOTH = 3;     // sheen: Charlie distribution, Neubelt visibility (Filament)
+static const uint MODEL_HAIR = 4;      // Kajiya-Kay with two shifted highlights (Scheuermann 2004)
+static const uint MODEL_TOON = 5;      // banded diffuse, a hard highlight and a rim light
 
 interface IMaterial
 {
+    // The shading model (`MODEL_*`), a literal.
+    static uint model();
     // The material's parameters (its slot of the material table), loaded once per fragment
     // by `load` and handed to the other functions.
     associatedtype Params;
@@ -937,6 +978,11 @@ interface IMaterial
 struct GltfMaterial : IMaterial
 {
     typealias Params = Material;
+
+    static uint model()
+    {
+        return MODEL_LIT;
+    }
 
     static Material load(MaterialContext ctx)
     {
@@ -966,7 +1012,7 @@ struct GltfMaterial : IMaterial
         s.metallic = saturate(mr.b * m.metallic);
         s.roughness = saturate(mr.g * m.roughness);
         s.subsurface = m.subsurface;
-        return s;
+        return surface_terms(s);
     }
 
     static float occlusion(MaterialContext ctx, Material m)
@@ -1219,6 +1265,117 @@ float3 surface_light(float3 n, float3 v, float3 l, float3 diffuse, float3 f0, fl
     return (diffuse + specular) * n_dot_l;
 }
 
+// What the light functions need of a shading model (ADR 0092); `model` is a literal at
+// every call, so the code of the other models is removed.
+struct ModelTerms
+{
+    uint model;
+    float3 base;
+    float clearcoat;
+    float coat_a;           // the coat's roughness squared
+    float3 coat_normal;     // the interpolated normal: the coat is smooth over a normal map
+    float3 sheen;
+    float sheen_a;          // the sheen's roughness squared
+    float3 hair_tangent;
+    float hair_shift;
+    float toon_steps;
+    float toon_softness;
+    float3 toon_highlight;
+};
+
+// The Charlie sheen distribution (Estevez and Kulla 2017, as in Filament).
+float distribution_charlie(float n_dot_h, float a)
+{
+    float inverse = 1.0 / max(a, 1e-3);
+    float sin2 = max(1.0 - n_dot_h * n_dot_h, 0.0078125);
+    return (2.0 + inverse) * pow(sin2, inverse * 0.5) / (2.0 * PI);
+}
+
+// Neubelt and Pettineo's cloth visibility (2013, as in Filament).
+float visibility_neubelt(float n_dot_v, float n_dot_l)
+{
+    return saturate(1.0 / (4.0 * (n_dot_l + n_dot_v - n_dot_l * n_dot_v)));
+}
+
+// Kelemen's visibility for the clear coat (2001, as in Filament).
+float visibility_kelemen(float l_dot_h)
+{
+    return 0.25 / max(l_dot_h * l_dot_h, 1e-4);
+}
+
+// A Kajiya-Kay highlight along strands `t` (Scheuermann, "Hair Rendering and Shading", 2004).
+float strand_specular(float3 t, float3 h, float exponent)
+{
+    float t_dot_h = dot(t, h);
+    float sin_th = sqrt(max(1.0 - t_dot_h * t_dot_h, 0.0));
+    return smoothstep(-1.0, 0.0, t_dot_h) * pow(sin_th, exponent);
+}
+
+// Toon light: `x` (n·l) in `steps` lit bands above the shadow (n·l ≤ 0), at 1/steps … 1,
+// each rising over `softness` (at most half a band) from its start at n·l = k / steps:
+// nothing at n·l ≤ 0, where the shadow test cuts the light anyway.
+float toon_band(float x, float steps, float softness)
+{
+    float count = max(floor(steps), 1.0);
+    float w = min(softness, 0.5 / count);
+    // The band whose rise is nearest.
+    float k = clamp(floor((x - w) * count + 0.5), 0.0, count - 1.0);
+    float start = k / count;
+    return (k + smoothstep(start, start + 2.0 * w, x)) / count;
+}
+
+// `surface_light` for the shading model of `m` (light from `l`, unit irradiance).
+float3 model_light(ModelTerms m, float3 n, float3 v, float3 l, float3 diffuse, float3 f0, float a)
+{
+    if (m.model == MODEL_LIT)
+        return surface_light(n, v, l, diffuse, f0, a);
+    float n_dot_l_signed = dot(n, l);
+    float n_dot_l = saturate(n_dot_l_signed);
+    float3 h = normalize(v + l);
+    float n_dot_v = max(dot(n, v), 1e-4);
+    float n_dot_h = saturate(dot(n, h));
+    float v_dot_h = saturate(dot(v, h));
+    if (m.model == MODEL_CLEARCOAT)
+    {
+        // The base under the coat, and the coat's lobe (IOR 1.5) on its own normal.
+        float3 f = fresnel_schlick(v_dot_h, f0);
+        float3 below = diffuse + distribution_ggx(n_dot_h, a) * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, a) * f;
+        float fc = fresnel_schlick(v_dot_h, float3(0.04, 0.04, 0.04)).x * m.clearcoat;
+        float coat = distribution_ggx(saturate(dot(m.coat_normal, h)), m.coat_a) * visibility_kelemen(v_dot_h) * fc;
+        return below * (1.0 - fc) * n_dot_l + coat * saturate(dot(m.coat_normal, l));
+    }
+    if (m.model == MODEL_CLOTH)
+    {
+        float3 sheen = distribution_charlie(n_dot_h, m.sheen_a) * visibility_neubelt(n_dot_v, n_dot_l) * m.sheen;
+        return (diffuse + sheen) * n_dot_l;
+    }
+    if (m.model == MODEL_HAIR)
+    {
+        // Two highlights (Scheuermann): the light reflected off the strands' surface, and
+        // a wider one colored by the hair, shifted along the strands. Each lobe normalized
+        // as a Blinn-Phong lobe of its exponent; the diffuse is Lambert's (a wrapped one
+        // would end at the shadow test's cut).
+        float exponent = clamp(2.0 / max(a * a, 1e-4) - 2.0, 4.0, 1024.0);
+        float3 t1 = normalize(m.hair_tangent + n * m.hair_shift);
+        float3 t2 = normalize(m.hair_tangent + n * (m.hair_shift - 0.1));
+        float primary = strand_specular(t1, h, exponent) * (exponent + 2.0);
+        float secondary = strand_specular(t2, h, exponent * 0.25) * (exponent * 0.25 + 2.0);
+        float3 f = fresnel_schlick(v_dot_h, f0);
+        float3 specular = f * (primary + secondary * m.base) * (0.25 / (2.0 * PI));
+        return (diffuse + specular) * n_dot_l;
+    }
+    if (m.model == MODEL_TOON)
+    {
+        float band = toon_band(n_dot_l_signed, m.toon_steps, m.toon_softness);
+        // A flat highlight where GGX is above half its peak (its size from the roughness),
+        // on the lit side.
+        float peak = distribution_ggx(n_dot_h, a) * (PI * a * a);
+        float highlight = smoothstep(0.5 - m.toon_softness, 0.5 + m.toon_softness, peak) * smoothstep(0.0, 2.0 * m.toon_softness, n_dot_l_signed);
+        return diffuse * band + m.toon_highlight * highlight;
+    }
+    return surface_light(n, v, l, diffuse, f0, a);
+}
+
 // How lit `p` (normal `n`) is by a local light whose shadow views start at `first` (ADR
 // 0071). The receiver moves along its normal by about a texel at its depth in the view
 // (the shading normal: the geometric one would cost the light loop three more registers on
@@ -1283,7 +1440,7 @@ float local_shadow(uint first, Light light, float3 p, float3 n)
 // times the spot cone. Adds the irradiance it brings to `irradiance` (subsurface
 // materials; unused and compiled away elsewhere). With `shadows` (a literal), light `index`
 // is shadowed when it has views (ADR 0071).
-float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance, bool shadows, uint index)
+float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance, bool shadows, uint index, ModelTerms m)
 {
     float3 to = light.position_range.xyz - p;
     float d2 = dot(to, to);
@@ -1303,7 +1460,7 @@ float3 local_light(Light light, float3 p, float3 n, float3 v, float3 diffuse, fl
             attenuation *= local_shadow(first, light, p, n);
     }
     irradiance += light.color_scale.rgb * attenuation * saturate(dot(n, l));
-    return surface_light(n, v, l, diffuse, f0, a) * light.color_scale.rgb * attenuation;
+    return model_light(m, n, v, l, diffuse, f0, a) * light.color_scale.rgb * attenuation;
 }
 
 // Bits `lo`..`hi` (light indices) of word `w`.
@@ -1319,7 +1476,7 @@ uint range_bits(uint w, uint lo, uint hi)
 // The local lights reaching `p` (at `pixel`): those in both its tile's bits and its
 // z-bin's index range, or every light without culling. Their irradiance adds to
 // `irradiance`. `shadows` (a literal) looks up the shadowed lights' shadows.
-float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance, bool shadows)
+float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, float3 f0, float a, inout float3 irradiance, bool shadows, ModelTerms m)
 {
     uint count = push.frame.light_count;
     float3 sum = 0.0;
@@ -1328,7 +1485,7 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
     if (push.frame.light_culling == 0)
     {
         for (uint i = 0; i < count; i++)
-            sum += local_light(read_light(i), p, n, v, diffuse, f0, a, irradiance, shadows, i);
+            sum += local_light(read_light(i), p, n, v, diffuse, f0, a, irradiance, shadows, i, m);
         return sum;
     }
     float depth = dot(p, read_float4(&push.frame.view_axis).xyz) + read_float4(&push.frame.view_axis).w;
@@ -1351,7 +1508,7 @@ float3 local_lights(float3 p, float2 pixel, float3 n, float3 v, float3 diffuse, 
             uint bit = firstbitlow(merged);
             merged &= merged - 1u;
             if ((mask >> bit) & 1u)
-                sum += local_light(read_light(w * 32 + bit), p, n, v, diffuse, f0, a, irradiance, shadows, w * 32 + bit);
+                sum += local_light(read_light(w * 32 + bit), p, n, v, diffuse, f0, a, irradiance, shadows, w * 32 + bit, m);
         }
     }
     return sum;
@@ -1416,8 +1573,9 @@ float3 gi_irradiance(float2 pixel, float3 position)
 // material's, times the view's ambient occlusion when `ao` (ADR 0058). With `gi` (a
 // literal, ADR 0088), the diffuse light is the view's irradiance at `pixel` from the
 // probe volume (the sky's harmonics outside it), absolute: the environment's intensity
-// is in it.
-float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao, bool reflective, inout float3 weight, bool gi = false, float2 pixel = 0.0, float3 position = 0.0)
+// is in it. Without `lobe` (a literal), the diffuse light only: a shading model's own
+// specular lobe takes the specular light's place (ADR 0092).
+float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao, bool reflective, inout float3 weight, bool gi = false, float2 pixel = 0.0, float3 position = 0.0, bool lobe = true)
 {
     // With the view's ambient occlusion, the fit of its bounces (for the albedo's
     // luminance: one value instead of three, fewer registers); without it, the material's
@@ -1442,14 +1600,14 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
     float lod = roughness * float(push.frame.env_levels - 1);
     float3 prefiltered = g_cubes[push.frame.prefiltered].SampleLevel(s, r, lod).rgb;
     float2 dfg = g_textures[push.frame.dfg_lut].SampleLevel(s, float2(n_dot_v, roughness), 0.0).xy;
-    float3 specular = prefiltered * lerp(dfg.xxx, dfg.yyy, f0) * (1.0 + f0 * (1.0 / max(dfg.y, 1e-4) - 1.0));
+    float3 specular = lobe ? prefiltered * lerp(dfg.xxx, dfg.yyy, f0) * (1.0 + f0 * (1.0 / max(dfg.y, 1e-4) - 1.0)) : 0.0;
     float a = roughness * roughness;
     // Lagarde and de Rousiers' specular occlusion; 1 without occlusion (most materials),
     // where skipping it frees registers (72 → 64 VGPRs on the Radeon).
     float specular_occlusion = occlusion < 1.0 ? saturate(pow(n_dot_v + occlusion, exp2(-16.0 * a - 1.0)) - 1.0 + occlusion) : 1.0;
     // Reflections (ADR 0073): what multiplies the prefiltered radiance, for the reflection
     // composite to swap the sky's radiance for local probes and screen-space hits.
-    if (reflective)
+    if (reflective && lobe)
         weight = lerp(dfg.xxx, dfg.yyy, f0) * (1.0 + f0 * (1.0 / max(dfg.y, 1e-4) - 1.0)) * specular_occlusion;
     if (gi)
         return diffuse * gi_irradiance(pixel, position) * diffuse_occlusion + specular * specular_occlusion * push.frame.env_intensity;
@@ -1466,6 +1624,62 @@ float3 sky_irradiance(float3 n)
         + read_float4(sh + 6).rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + read_float4(sh + 7).rgb * (1.092548 * n.x * n.z)
         + read_float4(sh + 8).rgb * (0.546274 * (n.x * n.x - n.y * n.y));
     return max(irradiance, 0.0);
+}
+
+// The clear coat's light from the environment (ADR 0092): its lobe (normal `n`, perceptual
+// `roughness`, reflectance 0.04) of the prefiltered sky, `strength` its share; `weight`
+// what multiplies the prefiltered radiance, for the reflections' composite (ADR 0073).
+// Nothing without an environment.
+float3 coat_environment(float3 n, float3 v, float roughness, float strength, float occlusion, out float3 weight)
+{
+    weight = 0.0;
+    if (ENVIRONMENT == 0 || push.frame.environment == 0)
+        return 0.0;
+    SamplerState s = g_samplers[push.frame.linear_sampler];
+    float n_dot_v = max(dot(n, v), 1e-4);
+    float3 r = reflect(-v, n);
+    float3 prefiltered = g_cubes[push.frame.prefiltered].SampleLevel(s, r, roughness * float(push.frame.env_levels - 1)).rgb;
+    float2 dfg = g_textures[push.frame.dfg_lut].SampleLevel(s, float2(n_dot_v, roughness), 0.0).xy;
+    float a = roughness * roughness;
+    float specular_occlusion = occlusion < 1.0 ? saturate(pow(n_dot_v + occlusion, exp2(-16.0 * a - 1.0)) - 1.0 + occlusion) : 1.0;
+    weight = lerp(dfg.x, dfg.y, 0.04) * strength * specular_occlusion;
+    return prefiltered * weight * push.frame.env_intensity;
+}
+
+// The directional albedo of cloth's sheen lobe (Charlie distribution, Neubelt visibility,
+// ADR 0092) at n·v `mu` and perceptual roughness `r` (0.07 … 1): a fit to its integral,
+// within 0.045 (docs/research/custom-materials.md).
+float sheen_albedo(float mu, float r)
+{
+    float a = 1.42617 + r * (-1.68309 + r * 0.78282);
+    float b = 0.08726 + (1.09762 + 0.10519 / r) / r;
+    float c = 1.78444 + r * (-2.16779 + r * 1.60655);
+    return min(a * exp(-b * pow(mu, c)), 1.0);
+}
+
+// Cloth's sheen in the environment's light (ADR 0092): the prefiltered sky at the sheen's
+// perceptual `roughness` (prefiltered for GGX, standing in for Charlie), times the sheen's
+// color and its lobe's albedo; `weight` as `coat_environment`'s. Nothing without an
+// environment.
+float3 sheen_environment(float3 n, float3 v, float roughness, float3 sheen, float occlusion, out float3 weight)
+{
+    weight = 0.0;
+    if (ENVIRONMENT == 0 || push.frame.environment == 0)
+        return 0.0;
+    float3 r = reflect(-v, n);
+    float3 prefiltered = g_cubes[push.frame.prefiltered].SampleLevel(g_samplers[push.frame.linear_sampler], r, roughness * float(push.frame.env_levels - 1)).rgb;
+    weight = sheen * sheen_albedo(max(dot(n, v), 1e-4), roughness) * occlusion;
+    return prefiltered * weight * push.frame.env_intensity;
+}
+
+// The reflectance of a surface of reflectance `f0` (from air) under a coat of IOR 1.5:
+// its IOR from `f0`, then Fresnel's equation at normal incidence against the coat's.
+float3 f0_under_coat(float3 f0)
+{
+    float3 s = sqrt(min(f0, 0.99));
+    float3 ior = (1.0 + s) / (1.0 - s);
+    float3 r = (ior - 1.5) / (ior + 1.5);
+    return r * r;
 }
 
 // The diffuse part of `ambient_light` per unit base color, for subsurface materials;
@@ -1603,12 +1817,42 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     float rough = surface.roughness;
     if (decals)
         apply_decals(frame, uint2(input.position.xy), base.rgb, n, rough, metallic);
+    // A coat scatters what the base reflects: the base is at least as rough (Filament).
+    if (M::model() == MODEL_CLEARCOAT)
+        rough = lerp(rough, max(rough, surface.clearcoat_roughness), saturate(surface.clearcoat));
     float perceptual = widen_roughness(rough, kernel);
     float occlusion = M::occlusion(ctx, params);
     // The view's ambient occlusion (ADR 0058) joins the material's.
     if (ao && push.ao != NO_TEXTURE)
         occlusion *= g_textures[push.ao].Load(int3(int2(input.position.xy), 0)).r;
     float3 emissive = M::emission(ctx, params);
+    // Unlit (ADR 0092): the base color and the emission, nothing else.
+    if (M::model() == MODEL_UNLIT)
+    {
+        sss = (SubsurfaceOut)0;
+        refl = (ReflectOut)0;
+        if (reflective)
+        {
+            refl.normal = n;
+            refl.roughness = 1.0;
+        }
+        return float4(base.rgb + emissive, base.a);
+    }
+    ModelTerms terms;
+    terms.model = M::model();
+    terms.base = base.rgb;
+    terms.clearcoat = saturate(surface.clearcoat);
+    float coat_roughness = clamp(surface.clearcoat_roughness, 0.045, 1.0);
+    float sheen_roughness = clamp(surface.sheen_roughness, 0.07, 1.0);
+    terms.coat_a = coat_roughness * coat_roughness;
+    terms.coat_normal = ng;
+    terms.sheen = surface.sheen;
+    terms.sheen_a = sheen_roughness * sheen_roughness;
+    terms.hair_tangent = surface.hair_tangent;
+    terms.hair_shift = surface.hair_shift;
+    terms.toon_steps = surface.toon_steps;
+    terms.toon_softness = max(surface.toon_softness, 1e-3);
+    terms.toon_highlight = surface.toon_highlight;
 
     float3 v = normalize(frame.camera_position.xyz - input.world_position);
     float3 l = frame.to_light.xyz;
@@ -1621,6 +1865,8 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     float roughness = max(perceptual, 0.045);
     float a = roughness * roughness;
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), base.rgb, metallic);
+    if (M::model() == MODEL_CLEARCOAT)
+        f0 = lerp(f0, f0_under_coat(f0), terms.clearcoat);
     float3 f = fresnel_schlick(v_dot_h, f0);
     float3 specular = distribution_ggx(n_dot_h, a) * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, a) * f;
     float3 diffuse = (1.0 - metallic) * base.rgb / PI;
@@ -1637,16 +1883,49 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
         visible *= asfloat(g_uint_textures[push.phase].Load(int3(int2(input.position.xy), 0)).r);
     float3 local_irradiance = 0.0;
     float3 reflect_weight = 0.0;
-    float3 color = (surface_diffuse + specular) * frame.light_color.rgb * n_dot_l * visible
-        + ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position)
+    // The lobe the reflections replace the sky's light of (ADR 0073).
+    float3 reflect_normal = n;
+    float reflect_roughness = roughness;
+    // The sun: glTF's lobes as written out; the other models through `model_light`.
+    float3 sun;
+    if (M::model() == MODEL_LIT)
+        sun = (surface_diffuse + specular) * frame.light_color.rgb * n_dot_l * visible;
+    else
+        sun = model_light(terms, n, v, l, surface_diffuse, f0, a) * frame.light_color.rgb * visible;
+    float3 ambient;
+    if (M::model() == MODEL_CLOTH)
+    {
+        // Cloth's environment light: the diffuse, and the sheen's lobe instead of GGX's.
+        reflect_roughness = sheen_roughness;
+        ambient = ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position, false);
+        ambient += sheen_environment(n, v, reflect_roughness, terms.sheen, occlusion, reflect_weight);
+    }
+    else
+        ambient = ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position);
+    if (M::model() == MODEL_CLEARCOAT)
+    {
+        // The coat over the base: what it lets through, and what it reflects of the
+        // environment. Its lobe, the sharper, is the one the reflections replace.
+        float fc = fresnel_schlick(max(dot(terms.coat_normal, v), 1e-4), float3(0.04, 0.04, 0.04)).x * terms.clearcoat;
+        reflect_normal = terms.coat_normal;
+        reflect_roughness = coat_roughness;
+        ambient = ambient * (1.0 - fc) + coat_environment(reflect_normal, v, reflect_roughness, terms.clearcoat, occlusion, reflect_weight);
+    }
+    if (M::model() == MODEL_TOON)
+    {
+        // The rim: a flat band of light along the silhouette, where n·v < `rim_width`.
+        ambient += surface.rim * (1.0 - smoothstep(surface.rim_width - terms.toon_softness, surface.rim_width + terms.toon_softness, dot(n, v)));
+    }
+    float3 color = sun
+        + ambient
         + emissive
-        + local_lights(input.world_position, input.position.xy, n, v, surface_diffuse, f0, a, local_irradiance, shadows);
+        + local_lights(input.world_position, input.position.xy, n, v, surface_diffuse, f0, a, local_irradiance, shadows, terms);
     sss = (SubsurfaceOut)0;
     refl = (ReflectOut)0;
     if (reflective)
     {
-        refl.normal = n;
-        refl.roughness = roughness;
+        refl.normal = reflect_normal;
+        refl.roughness = reflect_roughness;
         refl.weight = reflect_weight;
     }
     if (subsurface)

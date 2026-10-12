@@ -1021,8 +1021,11 @@ impl ForwardRenderer {
         let main_pipelines = [ready(main_pipelines[0])?, ready(main_pipelines[1])?];
         // `contact`: the sun's contact shadows, whose mask's index the shading that reads
         // it takes in `phase` (ADR 0071); `decals`: the decal buffer (ADR 0082).
+        // `types`: material types draw with their pipelines (the shading passes); otherwise
+        // with the engine's, as glTF (the depth prepass and the subsurface pass).
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
+                               types: bool,
                                phase: u32,
                                mask: u32,
                                ao: Option<Texture>,
@@ -1055,7 +1058,11 @@ impl ForwardRenderer {
                     bindless,
                     &geometry,
                     pipelines,
-                    &main_typed,
+                    if types {
+                        &main_typed
+                    } else {
+                        &TypedPipelines::BUILTIN
+                    },
                     &push,
                     false,
                     mask,
@@ -1106,6 +1113,7 @@ impl ForwardRenderer {
                             draw_phase(
                                 ctx,
                                 prepass_pipelines,
+                                false,
                                 PHASE_ALL,
                                 DEPTH_STATES,
                                 None,
@@ -1160,6 +1168,7 @@ impl ForwardRenderer {
                         draw_phase(
                             ctx,
                             main_pipelines,
+                            true,
                             PHASE_ALL,
                             PLAIN_STATES,
                             ao_texture,
@@ -1215,6 +1224,7 @@ impl ForwardRenderer {
                             draw_phase(
                                 ctx,
                                 prepass_pipelines,
+                                false,
                                 PHASE_EARLY,
                                 DEPTH_STATES,
                                 None,
@@ -1242,6 +1252,7 @@ impl ForwardRenderer {
                             draw_phase(
                                 ctx,
                                 main_pipelines,
+                                true,
                                 PHASE_EARLY,
                                 PLAIN_STATES,
                                 None,
@@ -1301,6 +1312,7 @@ impl ForwardRenderer {
                             draw_phase(
                                 ctx,
                                 prepass_pipelines,
+                                false,
                                 PHASE_LATE,
                                 DEPTH_STATES,
                                 None,
@@ -1350,6 +1362,7 @@ impl ForwardRenderer {
                             draw_phase(
                                 ctx,
                                 main_pipelines,
+                                true,
                                 PHASE_EARLY,
                                 PLAIN_STATES,
                                 ao_texture,
@@ -1360,6 +1373,7 @@ impl ForwardRenderer {
                             draw_phase(
                                 ctx,
                                 main_pipelines,
+                                true,
                                 PHASE_LATE,
                                 PLAIN_STATES,
                                 ao_texture,
@@ -1387,6 +1401,7 @@ impl ForwardRenderer {
                             draw_phase(
                                 ctx,
                                 main_pipelines,
+                                true,
                                 PHASE_LATE,
                                 PLAIN_STATES,
                                 None,
@@ -1481,6 +1496,7 @@ impl ForwardRenderer {
                     draw_phase(
                         ctx,
                         pipelines,
+                        false,
                         PHASE_EARLY,
                         SUBSURFACE_STATES,
                         ao_texture,
@@ -1491,6 +1507,7 @@ impl ForwardRenderer {
                     draw_phase(
                         ctx,
                         pipelines,
+                        false,
                         PHASE_LATE,
                         SUBSURFACE_STATES,
                         ao_texture,
@@ -1502,6 +1519,7 @@ impl ForwardRenderer {
                     draw_phase(
                         ctx,
                         pipelines,
+                        false,
                         PHASE_ALL,
                         SUBSURFACE_STATES,
                         ao_texture,

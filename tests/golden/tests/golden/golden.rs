@@ -630,6 +630,32 @@ fn procedural_scene_with_a_material_type() {
     });
 }
 
+/// The shading models (ADR 0092): the bottom row of spheres, left to right unlit, clear
+/// coat (a sharp coat over matte red), cloth (blue, a pale sheen), hair (brown, strands
+/// combed down) and toon (two bands, a highlight, a rim), under the sun, the sky and the
+/// local lights; the top row glTF's metal.
+#[test]
+fn procedural_scene_with_the_shading_models() {
+    check(&Shot {
+        shading_models: true,
+        ..procedural("procedural_shading_models")
+    });
+}
+
+/// The shading models over the polished floor with reflection probes and screen-space
+/// reflections (ADR 0073): the clear coat's lobe is the one the reflections replace,
+/// cloth's the sheen's.
+#[test]
+fn the_shading_models_with_reflections() {
+    check(&Shot {
+        shading_models: true,
+        glossy_floor: true,
+        probe_grid: Some([1, 1, 1]),
+        ssr: Some(SsrSettings::default()),
+        ..procedural("procedural_shading_models_reflections")
+    });
+}
+
 /// A material type's first sight: drawn with its glTF fallback, the plain floor, before its
 /// pipelines exist, the frame is the procedural scene's. Up to 0.01 % of the pixels may
 /// differ: a type's batches are drawn after the glTF ones of their state, so where depths

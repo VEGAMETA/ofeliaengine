@@ -144,7 +144,7 @@ Two facts constrain it (research note):
 
 - The visibility buffer's material pass (ADR 0085), with the same `IMaterial` types.
 - The node graph editor.
-- Shading models beyond lit and unlit.
+- Shading models beyond the first version's six.
 
 ## The owner's answers (2026-10-12)
 
@@ -176,9 +176,10 @@ Two facts constrain it (research note):
 1. The passes through `IMaterial`, with `GltfMaterial` the only type: the same SPIR-V,
    golden images and registers. (Done, PR #179.)
 2. Material types in the renderer (taken before the shading models, which need types to be
-   drawn and tested).
+   drawn and tested). (Done, PR #180.)
 3. The shading models, as built-in types where glTF has them (unlit, clear coat, sheen for
-   cloth) and as engine types (hair, toon).
+   cloth) and as engine types (hair, toon). (Done, PR #181, as a property of any type; glTF's
+   extensions onto them come with the material file, below.)
 4. The material file, cooking, "Compile All Shaders" over PSO records, hot reload.
 5. The ubershader experiment against the plain fallback.
 
@@ -239,6 +240,56 @@ Two facts constrain it (research note):
     shader folder);
   - the material file;
   - hot reload of a type's module.
+
+### Step 3 as built (2026-10-12)
+
+- **A model is a type's property:** `IMaterial::model()` returns `MODEL_LIT`, `MODEL_UNLIT`,
+  `MODEL_CLEARCOAT`, `MODEL_CLOTH`, `MODEL_HAIR` or `MODEL_TOON`, a literal. `Surface`
+  gained the models' terms (coat, sheen, strand tangent and shift, toon bands, highlight
+  and rim); `surface_terms(s)` sets them to nothing. The lighting compares the literal, so
+  each type's passes hold its model's code only.
+- **Where each model enters** (`shade_surface`, `model_light`): the sun and the local lights
+  through `model_light` (glTF's lobes for lit, as before); the sky light per model:
+  - unlit returns the base color and the emission before any lighting;
+  - clear coat: Filament's coat (GGX, Kelemen, IOR 1.5, the interpolated normal), the base
+    under it at least as rough and its f0 against the coat; the coat's sky lobe is the one
+    the reflections replace (ADR 0073: one lobe per pixel, and the coat's sharp one is what
+    shows);
+  - cloth: Lambert and Filament's sheen (Charlie, Neubelt); its sky light through an
+    analytic fit of the lobe's albedo (`sheen_albedo`, within 0.045 of the integral;
+    `docs/research/custom-materials.md`) instead of a third channel in the DFG table,
+    which every lit pixel reads;
+  - hair: Lambert and two Kajiya-Kay highlights (Scheuermann), the second in the hair's
+    color;
+  - toon: bands of n·l starting at 0 (where the shadow test cuts the sun), a flat
+    highlight where GGX is above half its peak, a rim by n·v.
+- **A bug of step 2 fixed:** the depth prepass and the subsurface pass drew material types
+  with the types' shading pipelines (a validation error: three color targets in a pass
+  with none), found by the first golden shot with a prepass and types. They draw types
+  with the engine's pipelines now (`draw_phase`'s `types`).
+- **Measured** (ref-1):
+  - the built-in pipelines are unchanged: every shader property identical on the Radeon
+    (`scene_bench --sky --pipeline-stats`, 17 pipelines);
+  - each model's registers, Radeon PS VGPRs without / with local lights / with sky light /
+    with both (`material_registers`, a new example): glTF (textured) 48 / 64 / 64 / 80, a
+    lit type without textures 34 / 60 / 61 / 85, unlit 5 / 5 / 5 / 5, clear coat
+    40 / 67 / 63 / 78, cloth 36 / 50 / 55 / 69, hair 40 / 69 / 54 / 74, toon 47 / 62 / 63 / 81;
+    no scratch memory; the six types' 24 pipelines compiled (one compiler thread) and made
+    in 1.5–3.1 s;
+  - golden shots `procedural_shading_models` (the bottom row of spheres, one model each)
+    and `procedural_shading_models_reflections` (on the polished floor with probes and
+    screen-space reflections), per vendor, the same bytes on every run.
+- **Deterministic shots with types:** a shot's frames must not depend on how long the
+  compiles take (the screen-space reflections' noise follows the frame count, and the
+  first reflection shot differed between runs). `ForwardRenderer::wait_for_material_types`
+  (for tests and tools) blocks on the compiler's results and the warm-up thread; the
+  golden harness calls it after every frame, so the first frame draws the fallbacks and
+  every later one the types.
+- **Not yet:**
+  - glTF's `KHR_materials_unlit`, `_clearcoat` and `_sheen` imported onto the models: they
+    add fields to the cooked material, so they come with the material file (step 4);
+  - Marschner's hair, cloth's subsurface color, anisotropic GGX;
+  - the models in the subsurface entry points (subsurface stays glTF's lit).
 
 ## Consequences
 
