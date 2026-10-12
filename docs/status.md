@@ -84,8 +84,9 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 
 ## 4. In flight
 
-- Nothing. (Ref-1 runs with hardware-accelerated GPU scheduling on since 2026-10-12, for
-  DLSS frame generation.)
+- **3c, custom materials:** researched, ADR 0092 proposed (2026-10-12) with four questions
+  for the owner; implementation waits for the answers. (Ref-1 runs with hardware-accelerated
+  GPU scheduling on since 2026-10-12, for DLSS frame generation.)
 
 Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:
 ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 s), 0a (the
