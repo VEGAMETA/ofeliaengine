@@ -240,6 +240,59 @@ impl LazyPipeline {
         described
     }
 
+    /// A number naming this pipeline (its clones share it) for as long as it is alive:
+    /// what a renderer keys pipelines derived from it by ([`Self::with_fragment`]).
+    pub fn id(&self) -> usize {
+        Arc::as_ptr(&self.0) as usize
+    }
+
+    /// The entry point of its fragment stage, if it has one.
+    pub fn fragment_entry(&self) -> Option<&core::ffi::CStr> {
+        match &self.0.recipe {
+            Recipe::Graphics { fragment, .. } => fragment.as_ref().map(|f| f.entry.as_c_str()),
+            Recipe::Compute { .. } => None,
+        }
+    }
+
+    /// The same pipeline with another fragment module (`spirv`, the same entry point):
+    /// described, not created, and queued for `device`'s warm-up thread, which creates it
+    /// in the background (a material type's variant of an engine pipeline, ADR 0092).
+    /// `None` for a compute pipeline or one without a fragment stage.
+    pub fn with_fragment(&self, device: &Device, spirv: Arc<[u32]>) -> Option<Self> {
+        let Recipe::Graphics {
+            state,
+            vertex,
+            fragment: Some(fragment),
+            color_formats,
+            specialization,
+        } = &self.0.recipe
+        else {
+            return None;
+        };
+        let derived = Self(Arc::new(Slot {
+            context: self.0.context.clone(),
+            layout: self.0.layout.clone(),
+            recipe: Recipe::Graphics {
+                state: *state,
+                vertex: Stage {
+                    spirv: Arc::clone(&vertex.spirv),
+                    entry: vertex.entry.clone(),
+                },
+                fragment: Some(Stage {
+                    spirv,
+                    entry: fragment.entry.clone(),
+                }),
+                color_formats: color_formats.clone(),
+                specialization: specialization.clone(),
+            },
+            created: OnceLock::new(),
+        }));
+        if let Some(warm_up) = device.pipeline_warm_up() {
+            warm_up.add(core::slice::from_ref(&derived));
+        }
+        Some(derived)
+    }
+
     /// The pipeline, once created.
     pub fn get(&self) -> Option<&Pipeline> {
         self.0.created.get().and_then(|r| r.as_ref().ok())

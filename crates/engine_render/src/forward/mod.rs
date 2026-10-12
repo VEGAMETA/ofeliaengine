@@ -66,7 +66,7 @@ use crate::lights::{
 use crate::local_shadows::{
     ChangeSource, Continuity, NO_SHADOW, Plan, ShadowCache, ShadowViewData,
 };
-use crate::material::{MaterialFrame, MaterialId, MaterialKind};
+use crate::material::{MaterialFrame, MaterialId, MaterialKind, MaterialTypeId};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::rays::RayFrame;
 use crate::reflections::{
@@ -140,12 +140,14 @@ const FRAGMENT_AO_CONTACT_SHADOWED: &[u8] =
 
 mod declare;
 mod layout;
+mod material_types;
 mod msaa;
 mod pipelines;
 mod shadow_atlas;
 
 use layout::{Changes, Layout, Source, local_box};
-pub(crate) use layout::{States, mirrored, state};
+pub(crate) use layout::{States, TypedPipelines, mirrored, state};
+pub use material_types::MaterialTypeDesc;
 use pipelines::{
     AoPasses, ContactState, DecalShading, GiFeatures, GiShading, ReflectShadingTable,
     ReflectionShading, Shading, ShadowedPipelines, SubsurfacePipelines, VARIANTS, lazy_statistics,
@@ -1018,6 +1020,11 @@ struct FrameData {
     gi_scale: f32,
     gi_samples: [u32; 2],
     _gi_pad: u32,
+    /// Material types (ADR 0092): their parameters, `material_stride` bytes per material
+    /// slot.
+    material_data: u64,
+    material_stride: u32,
+    _material_pad: u32,
 }
 
 /// `Instance` in `forward.slang` (64 bytes): the rows of the affine
@@ -1083,7 +1090,7 @@ pub(crate) struct Push {
 const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1072);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1088);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
 const _: () = assert!(crate::mesh::MAX_LODS == 4);
@@ -1182,6 +1189,8 @@ struct Run {
     len: u32,
     /// Pipeline state (`MASKED | DOUBLE_SIDED | MIRRORED` bits).
     state: usize,
+    /// The material type of its draws (ADR 0092).
+    ty: crate::material::MaterialTypeId,
     /// Position among the batches ordered by state.
     order: u32,
     /// First draw command (the finest level) and its first instance slot.
@@ -1354,6 +1363,8 @@ pub struct ForwardRenderer {
     /// the device has no min / max resolve.
     depth_resolves: [ResolveMode; 2],
     scratch: RefCell<Scratch>,
+    /// Material types and their pipelines (ADR 0092).
+    material_types: material_types::MaterialTypes,
 }
 
 /// The slot of a sample count in `ForwardRenderer::msaa`: 2, 4, 8 samples.
@@ -1371,6 +1382,60 @@ fn push_bytes(push: &Push) -> &[u8] {
 }
 
 impl ForwardRenderer {
+    /// Registers a material type (ADR 0092): materials of it
+    /// ([`crate::material::MaterialTable::add_typed`]) are drawn with pipelines compiled
+    /// for it, made in the background when a frame first draws it (the material's glTF
+    /// fallback draws until then). Call [`Self::update_material_types`] every frame.
+    pub fn register_material_type(&mut self, desc: MaterialTypeDesc) -> MaterialTypeId {
+        self.material_types.register(desc)
+    }
+
+    /// A registered type's description.
+    pub fn material_type(&self, ty: MaterialTypeId) -> Option<&MaterialTypeDesc> {
+        self.material_types.desc(ty)
+    }
+
+    /// Where `forward.slang` and its modules are read from to compile material types (by
+    /// default the engine's own shader folder).
+    pub fn set_material_shader_dir(&mut self, dir: std::path::PathBuf) {
+        self.material_types.set_shader_dir(dir);
+    }
+
+    /// Hands the material types' requests of the last frames to their compiler and
+    /// describes the pipelines whose SPIR-V arrived (created by the device's warm-up
+    /// thread). Once per frame, before declaring its passes; costs nothing when no type
+    /// waits for anything.
+    pub fn update_material_types(&mut self, device: &Device) {
+        self.material_types.update(device);
+    }
+
+    /// Material types' pipelines on their way (compiling, or described and not created):
+    /// a frame drawing them now draws their fallbacks. Tests and tools wait for 0.
+    pub fn material_types_pending(&self) -> usize {
+        self.material_types.pending()
+    }
+
+    /// Each typed range's pipelines for a pass whose engine pipelines are `roles`
+    /// (`[opaque, masked]`), among the states `mask` draws.
+    pub(crate) fn typed_pipelines<'a>(
+        &'a self,
+        states: &States,
+        roles: [&'a LazyPipeline; 2],
+        mask: u32,
+    ) -> TypedPipelines<'a> {
+        let mut out = TypedPipelines::BUILTIN;
+        for (i, range) in states.typed.as_slice().iter().enumerate() {
+            if mask & (1 << range.state) == 0 {
+                continue;
+            }
+            let role = roles[usize::from(usize::from(range.state) & MASKED != 0)];
+            if let Some(p) = self.material_types.resolve(range.ty, role) {
+                out.ranges[i] = Some([p, p]);
+            }
+        }
+        out
+    }
+
     /// Creates the pipelines for rendering into `color_format` with a `depth_format`
     /// depth buffer.
     pub fn new(
@@ -1697,6 +1762,7 @@ impl ForwardRenderer {
                 ]
             },
             scratch: RefCell::new(Scratch::default()),
+            material_types: material_types::MaterialTypes::new(),
         })
     }
 

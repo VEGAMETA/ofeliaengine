@@ -174,12 +174,71 @@ Two facts constrain it (research note):
 ## Steps
 
 1. The passes through `IMaterial`, with `GltfMaterial` the only type: the same SPIR-V,
-   golden images and registers.
-2. The shading models.
-3. Material types in the renderer: parameter layouts from reflection, the table's slots,
-   batches and pipelines per (type, variant).
+   golden images and registers. (Done, PR #179.)
+2. Material types in the renderer (taken before the shading models, which need types to be
+   drawn and tested).
+3. The shading models, as built-in types where glTF has them (unlit, clear coat, sheen for
+   cloth) and as engine types (hair, toon).
 4. The material file, cooking, "Compile All Shaders" over PSO records, hot reload.
-5. First sight: the plain fallback, then the ubershader experiment.
+5. The ubershader experiment against the plain fallback.
+
+### Step 2's design
+
+- **One source for every type.** `forward.slang`'s entry points shade with `MATERIAL`, a
+  macro that defaults to `GltfMaterial`; a type's entry points are the same file compiled
+  with `-D MATERIAL=<its type>` and its module included (`MATERIAL_FILE`). The built-in
+  SPIR-V does not change; a type compiles only the entry points it is drawn with.
+- **A type's pipeline is the built-in pipeline's description with the type's fragment
+  module** (`LazyPipeline::with_fragment`): blending, depth, formats and specialization
+  stay the engine's, so the pipeline sets of every feature (ambient occlusion, shadows,
+  reflections, decals, GI, MSAA) need no copy per type. The vertex stage stays the
+  engine's (vertex offsets come later, with their own depth, shadow and motion variants).
+- **Every material keeps a glTF record** in the material table: its fallback. It draws the
+  material while the type's pipelines are not ready (first sight), and the passes that do
+  not run material code (GI's ray hits, ADR 0088) read it. A type's own parameters are
+  bytes in a separate buffer, found through a per-slot offset (`Frame.material_offsets`,
+  `Frame.material_data`) that only the types' code reads: the built-in path is unchanged.
+- **Batches are keyed by (mesh, state, type)**: commands are laid out by type then state;
+  each type's batches are drawn with its pipelines, or with the built-in ones until its
+  pipelines are made.
+
+### Step 2 as built (2026-10-12)
+
+- **Shaders.** `forward.slang`'s entry points shade with `MATERIAL` (default
+  `GltfMaterial`); `material_params<T>(ctx)` reads a type's parameters
+  (`Frame.material_data`, `Frame.material_stride`, 256 bytes per slot).
+- **The material table** (`MaterialTable::add_typed`, `MaterialParams`): a material keeps
+  its glTF record (the fallback) and its type's parameter bytes, with texture references
+  resolved like glTF's; the parameters' buffer exists once a typed material does.
+- **Batches and draws.** `MaterialKind::ty`; the GPU scene's batches are keyed by type;
+  the layout sorts a state's runs by type (blended runs stay back to front across types)
+  and keeps up to 128 typed command ranges per frame (`TypedRanges`); a pass draws each
+  with its type's pipeline (`TypedPipelines`) or the built-in one.
+- **Pipelines.** `LazyPipeline::with_fragment` derives a type's pipeline from the engine's
+  ("role"); `forward::material_types` resolves them while a frame is declared, queues the
+  missing ones, and in `FrameRenderer::prepare` sends the entry point to a compiler
+  thread (Slang, `engine_shader`) and describes the pipeline for the warm-up thread once
+  its SPIR-V is back. A frame never waits.
+- **Measured:**
+  - **The built-in path is unchanged:** every pipeline's shader properties are identical
+    on the Radeon (`scene_bench --sky --pipeline-stats`).
+  - **The golden shot `procedural_material_type`** (the procedural scene's floor as a
+    checker type, `tests/golden/materials/stripes.slang`) is the same bytes on every run
+    on both GPUs.
+  - **The first sight draws the fallback:** the first frame is the plain scene's, but for
+    2 pixels on the Radeon where depths tie (`a_material_type_first_draws_its_fallback`).
+- **An AMD compiler bug found on the way.** Reading a struct through a pointer cast
+  (`OpBitcast`) from `uint*` after `OpPtrAccessChain` returns zeros on AMD's driver
+  26.8.1; NVIDIA's reads right. The parameters' address is therefore computed as a 64-bit
+  integer (`OpConvertUToPtr`). This needs `shaderInt64`, now enabled where the adapter
+  has it (both reference GPUs do). Without it, types draw their fallbacks (logged).
+- **Not yet** (later steps):
+  - masked types' own alpha in the depth and shadow passes (they use the fallback's);
+  - vertex offsets;
+  - precompiled SPIR-V for shipped games (types compile at run time from the engine's
+    shader folder);
+  - the material file;
+  - hot reload of a type's module.
 
 ## Consequences
 

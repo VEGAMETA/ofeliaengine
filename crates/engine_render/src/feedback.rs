@@ -470,6 +470,8 @@ impl TextureFeedback {
                                 bindless,
                                 &geometry_copy,
                                 [pipeline, pipeline],
+                                // Feedback reads no material code (ADR 0092).
+                                &crate::forward::TypedPipelines::BUILTIN,
                                 &push,
                                 false,
                                 mask,

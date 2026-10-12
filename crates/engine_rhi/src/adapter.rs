@@ -117,6 +117,10 @@ pub struct OptionalCaps {
     /// `sampleRateShading`: fragment shaders that run per sample (MSAA's per-sample
     /// passes, ADR 0075); enabled when present.
     pub sample_rate_shading: bool,
+    /// `shaderInt64`: 64-bit integers in shaders; enabled when present. Material types read
+    /// their parameters at a 64-bit address (ADR 0092: AMD's compiler reads zeros through
+    /// a pointer cast after pointer arithmetic).
+    pub shader_int64: bool,
 }
 
 impl OptionalCaps {
@@ -147,6 +151,7 @@ impl OptionalCaps {
             (self.hdr_metadata, "HDR metadata"),
             (self.shader_float16, "16-bit shader math"),
             (self.sample_rate_shading, "sample rate shading"),
+            (self.shader_int64, "64-bit shader integers"),
         ]
         .into_iter()
         .filter_map(|(present, name)| present.then_some(name))
@@ -376,6 +381,7 @@ impl Adapter {
             image_view_min_lod: has(c"VK_EXT_image_view_min_lod"),
             shader_float16: f12.shader_float16 == vk::TRUE && base.shader_int16 == vk::TRUE,
             sample_rate_shading: base.sample_rate_shading == vk::TRUE,
+            shader_int64: base.shader_int64 == vk::TRUE,
         };
 
         let kind = match props.device_type {
