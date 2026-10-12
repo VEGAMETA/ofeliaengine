@@ -1,6 +1,7 @@
 # 0092. Custom materials: Slang types that write a surface, specialized into the passes that draw them
 
-- Status: Proposed (2026-10-12); the owner's answers to the questions below decide it
+- Status: Accepted (2026-10-12, the owner: "agree with everything"; ubershaders to be tried;
+  more shading models in the first version)
 - Date: 2026-10-12
 - Builds on:
   - [ADR 0040](0040-materials-and-textures.md): the material table;
@@ -73,7 +74,7 @@ Two facts constrain it (research note):
    color, roughness, metallic, its textures if it names them) draws until the material's
    own pipeline is ready. No hitch; the material looks plain for a few frames.
 
-## Decision (proposed)
+## Decision
 
 ### 1. The material interface
 
@@ -89,9 +90,9 @@ Two facts constrain it (research note):
 
   So the same material later runs over a visibility buffer unchanged.
 - **The engine lights the surface.** Shading models are the engine's, chosen per material
-  at compile time (a static constant of the type): lit (today's, subsurface included)
-  and unlit first; others (clear coat, cloth, hair, toon) as games need them, each its
-  own code path, never a branch.
+  at compile time (a static constant of the type), each its own code path, never a branch.
+  The first version has (the owner, 2026-10-12): lit (today's, subsurface included),
+  unlit, clear coat, cloth (sheen), hair and toon.
 - **The built-in glTF material becomes `GltfMaterial : IMaterial`.** It is the same code
   with the same SPIR-V, the default, and the importer's output.
 
@@ -121,6 +122,10 @@ Two facts constrain it (research note):
 - **First sight** (B.3): the glTF shading draws with the material's fallback parameters
   while the pipeline compiles on the warm-up thread. Never a hitch; a plain look for a few
   frames when no PSO record or cache covers it.
+- **Ubershaders are tried after** (the owner, 2026-10-12): a material's pipeline with the
+  view features as uniforms, made at load, drawing until the specialized one is ready
+  (B.2). It replaces B.3 if it measures right on both GPUs: its cost while it draws, its
+  compile time, and the same picture as the specialized pipeline.
 - **Hot reload** (budget 500 ms, CLAUDE.md §5): editing a material recompiles its pairs in
   use, 0.26 s per entry point measured, in parallel; then the pipelines are swapped. A
   compile error keeps the previous version and is shown at its line.
@@ -141,19 +146,40 @@ Two facts constrain it (research note):
 - The node graph editor.
 - Shading models beyond lit and unlit.
 
-## Questions for the owner
+## The owner's answers (2026-10-12)
 
-1. **Where materials run:** forward passes specialized per material now, the same
-   material code reused later by a visibility buffer (proposed, A.1)? Or a deferred or
-   visibility-buffer renderer first (A.2 / A.3)?
-2. **First sight of a material** whose pipeline is not ready: draw it plain with the
-   built-in shading for a few frames (proposed, B.3), or wait (a hitch), or an ubershader
-   like Godot's (B.2)?
-3. **The material instance file** (an on-disk format, CLAUDE.md §3): a RON text file next
-   to the scene's assets, naming the shader module and setting its parameters, cooked
-   into packs?
-4. **Shading models in the first version:** lit and unlit only, or also one of clear coat,
-   cloth, hair, toon?
+1. Forward, specialized per material, the visibility buffer later with the same materials:
+   yes.
+2. First sight drawn plain with the built-in shading: yes; and try ubershaders.
+3. The material instance file: a RON text file, cooked into packs: yes.
+4. Shading models: lit, unlit, clear coat, cloth, hair and toon.
+
+## Step 1 as built (2026-10-12)
+
+- `forward.slang`: `MaterialContext`, `Surface`, `IMaterial` and `GltfMaterial`;
+  `shade_surface<M : IMaterial>`, and the masked passes through `M::alpha`.
+- **The interface's shape is measured, not free.** A first version computed the whole
+  surface (occlusion and emission included) in one function, reading the material's
+  fields where each was needed. The SPIR-V was the same size, but the Radeon's compiler
+  gave several variants more registers (`scene_bench --sky --pipeline-stats`: environment
+  64 → 70–72 VGPRs, lights + environment 80 → 90, transparent under the atmosphere 78 → 88),
+  and Sponza's textured forward pass took 8 % longer.
+- **As built:** the material's parameters are an associated type `Params`, loaded once at
+  the top (`M::load`, as the material record was before). Occlusion, emission and
+  thickness are functions of their own, called where the lighting used them. Every
+  pipeline's shader properties are now identical on the Radeon (VGPRs, SGPRs, LDS,
+  scratch). 103 of the 105 forward entry points have SPIR-V of the same size; the
+  alpha-to-coverage prepasses are one instruction shorter.
+
+## Steps
+
+1. The passes through `IMaterial`, with `GltfMaterial` the only type: the same SPIR-V,
+   golden images and registers.
+2. The shading models.
+3. Material types in the renderer: parameter layouts from reflection, the table's slots,
+   batches and pipelines per (type, variant).
+4. The material file, cooking, "Compile All Shaders" over PSO records, hot reload.
+5. First sight: the plain fallback, then the ubershader experiment.
 
 ## Consequences
 
