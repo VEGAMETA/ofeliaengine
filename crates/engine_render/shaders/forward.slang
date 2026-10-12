@@ -208,6 +208,9 @@ struct Frame
     float gi_scale;          // probe GI (ADR 0088): pixels per resolved sample along each axis
     uint2 gi_samples;        // and the samples' grid
     uint _gi_pad;
+    uint* material_data;     // material types' parameters (ADR 0092): `material_stride` bytes per slot
+    uint material_stride;
+    uint _material_pad;
 };
 
 struct Instance
@@ -992,12 +995,32 @@ struct GltfMaterial : IMaterial
     }
 }
 
+// A material type's parameters (ADR 0092): its slot's bytes in `Frame.material_data`. A
+// type's `load` returns them. The address is computed as a 64-bit integer (`shaderInt64`,
+// which material types need): AMD's compiler (driver 26.8.1) reads zeros through a pointer
+// cast to `T*` after pointer arithmetic on `uint*`, while the integer path reads right.
+T material_params<T>(MaterialContext ctx)
+{
+    uint64_t address = uint64_t(push.frame.material_data) + uint64_t(ctx.material) * push.frame.material_stride;
+    return loadAligned<16>((T*)address);
+}
+
+// The material the entry points shade with (ADR 0092): the built-in glTF material, or a
+// type compiled in with `-D MATERIAL=<type> -D MATERIAL_FILE="<its module>"`. The
+// subsurface entry points stay the glTF material's (types have no subsurface states).
+#ifdef MATERIAL_FILE
+#include MATERIAL_FILE
+#endif
+#ifndef MATERIAL
+#define MATERIAL GltfMaterial
+#endif
+
 [shader("fragment")]
 void shadowFragmentMasked(ShadowOut input)
 {
     MaterialContext ctx = coverage_context(input.uv, input.material);
-    GltfMaterial.Params p = GltfMaterial::load(ctx);
-    if (GltfMaterial::alpha(ctx, p) < GltfMaterial::alpha_cutoff(p))
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
         discard;
 }
 
@@ -1010,9 +1033,9 @@ void shadowFragmentMasked(ShadowOut input)
 float4 prepassCoverage(ShadowOut input) : SV_Target0
 {
     MaterialContext ctx = coverage_context(input.uv, input.material);
-    GltfMaterial.Params p = GltfMaterial::load(ctx);
-    float alpha = GltfMaterial::alpha(ctx, p);
-    alpha = (alpha - GltfMaterial::alpha_cutoff(p)) / max(fwidth(alpha), 1e-4) + 0.5;
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    float alpha = MATERIAL::alpha(ctx, p);
+    alpha = (alpha - MATERIAL::alpha_cutoff(p)) / max(fwidth(alpha), 1e-4) + 0.5;
     return float4(0.0, 0.0, 0.0, alpha);
 }
 
@@ -1514,7 +1537,7 @@ float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = f
 {
     SubsurfaceOut unused;
     ReflectOut unused_reflect;
-    return shade_surface<GltfMaterial>(input, front, masked, ao, false, unused, unused_reflect, shadows, contact, false, decals, gi);
+    return shade_surface<MATERIAL>(input, front, masked, ao, false, unused, unused_reflect, shadows, contact, false, decals, gi);
 }
 
 // What the reflection entry points write besides the color (ADR 0073).
@@ -1813,8 +1836,8 @@ DepthMaskedMotionOut depthVertexMaskedMotion(uint vertex : SV_VulkanVertexID, ui
 float2 prepassMaskedMotion(DepthMaskedMotionOut input) : SV_Target0
 {
     MaterialContext ctx = coverage_context(input.uv, input.material);
-    GltfMaterial.Params p = GltfMaterial::load(ctx);
-    if (GltfMaterial::alpha(ctx, p) < GltfMaterial::alpha_cutoff(p))
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
         discard;
     return motion(input.position, input.previous_clip);
 }
@@ -1826,9 +1849,9 @@ float2 prepassMaskedMotion(DepthMaskedMotionOut input) : SV_Target0
 float4 prepassCoverageMotion(DepthMaskedMotionOut input) : SV_Target0
 {
     MaterialContext ctx = coverage_context(input.uv, input.material);
-    GltfMaterial.Params p = GltfMaterial::load(ctx);
-    float alpha = GltfMaterial::alpha(ctx, p);
-    alpha = (alpha - GltfMaterial::alpha_cutoff(p)) / max(fwidth(alpha), 1e-4) + 0.5;
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    float alpha = MATERIAL::alpha(ctx, p);
+    alpha = (alpha - MATERIAL::alpha_cutoff(p)) / max(fwidth(alpha), 1e-4) + 0.5;
     return float4(motion(input.position, input.previous_clip), 0.0, alpha);
 }
 
@@ -1878,7 +1901,7 @@ Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bo
     SubsurfaceOut unused;
     ReflectOut refl;
     Reflected o;
-    o.color = float4(shade_surface<GltfMaterial>(input, front, false, ao, false, unused, refl, shadows, contact, true, decals, gi).rgb, 1.0);
+    o.color = float4(shade_surface<MATERIAL>(input, front, false, ao, false, unused, refl, shadows, contact, true, decals, gi).rgb, 1.0);
     o.normal_roughness = float4(encode_octahedral(refl.normal), refl.roughness, 1.0);
     o.weight = float4(refl.weight, 1.0);
     return o;

@@ -16,14 +16,17 @@ bytemuck = { version = "1.25", features = ["derive"] }
 engine_core.workspace = true
 engine_profiler.workspace = true
 engine_rhi.workspace = true
+# Material types compiled on first use, on a thread of their own (ADR 0092); loads the
+# Slang library at run time, so a game without types never touches it.
+engine_shader.workspace = true
+# A type that does not compile is logged; its fallback draws (the version engine_rhi uses).
+log = "0.4"
 
 [[bench]]
 name = "graph"
 harness = false
 
 [dev-dependencies]
-# Recompiles the committed shaders to check them against their source.
-engine_shader.workspace = true
 # glTF scenes for examples/scene_bench.rs.
 engine_assets.workspace = true
 # Unbuffered reads (all hosts) for examples/staging_bench.rs and Windows helpers.

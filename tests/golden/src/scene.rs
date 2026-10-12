@@ -26,6 +26,7 @@ use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::budget::{BudgetSettings, GpuBudget};
 use engine_render::environment::{Environment, Sky};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
+use engine_render::forward::MaterialTypeDesc;
 use engine_render::forward::{
     DirectionalLight, DrawItem, LocalLight, LocalShadowSettings, ShadowSettings, Spot, ViewGi,
 };
@@ -35,7 +36,9 @@ use engine_render::graph::{
     Access, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, LoadOp, RenderGraph, Texture,
     TextureDesc, TextureState,
 };
-use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, Subsurface, TextureRef};
+use engine_render::material::{
+    AlphaMode, MaterialDesc, MaterialParams, MaterialTable, Subsurface, TextureRef,
+};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
 use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
 use engine_render::particles::{ParticleEmitter, ParticleSystem, ParticleTarget};
@@ -211,6 +214,13 @@ pub struct Shot {
     /// frames generated before the captured real frames, the UI drawn on them with their
     /// half-way camera. Not with particles, Brixelizer GI or the runtime.
     pub frame_generation: bool,
+    /// The procedural scene's floor as a material type of its own (ADR 0092): a checker
+    /// from `tests/golden/materials/stripes.slang`, its glTF fallback the plain floor.
+    /// Captured once the type's pipelines are made, unless `material_first_sight`.
+    pub stripes_floor: bool,
+    /// With `stripes_floor`: the capture is the first frame, drawn before the type's
+    /// pipelines exist (with its fallback).
+    pub material_first_sight: bool,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -275,6 +285,8 @@ impl Shot {
             gi_readback: false,
             ui: false,
             frame_generation: false,
+            stripes_floor: false,
+            material_first_sight: false,
         }
     }
 }
@@ -1452,11 +1464,39 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             grow(world, mesh.min, mesh.max);
         }
     }
-    for (mesh, material, world) in &loaded.procedural {
+    // The floor (the first procedural item) as a material type (ADR 0092).
+    let stripes = (shot.stripes_floor && !loaded.procedural.is_empty()).then(|| {
+        frame
+            .forward_mut()
+            .register_material_type(MaterialTypeDesc {
+                name: String::from("stripes"),
+                module: Path::new(env!("CARGO_MANIFEST_DIR")).join("materials/stripes.slang"),
+                type_name: String::from("StripesMaterial"),
+            })
+    });
+    for (k, (mesh, material, world)) in loaded.procedural.iter().enumerate() {
         let id = geometry.add_mesh(&mesh.as_data()).expect("mesh");
+        let material = match stripes.filter(|_| k == 0) {
+            Some(ty) => {
+                // `StripesParams`: two colors, the frequency, roughness, metallic, padding.
+                let floats: [f32; 12] = [
+                    0.85, 0.82, 0.75, 1.0, 0.12, 0.16, 0.3, 1.0, 1.0, 0.55, 0.0, 0.0,
+                ];
+                let bytes = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
+                materials.add_typed(
+                    ty,
+                    *material,
+                    Some(MaterialParams {
+                        bytes,
+                        textures: Vec::new(),
+                    }),
+                )
+            }
+            None => materials.add(*material),
+        };
         draws.push(DrawItem {
             mesh: id,
-            material: materials.add(*material),
+            material,
             world_from_object: *world,
         });
         grow(*world, [-0.5; 3], [0.5; 3]);
@@ -1708,11 +1748,17 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         let warmup = shot.brixelizer_warmup.unwrap_or(BRIXELIZER_WARMUP);
         let gi_ready = gi_volume.as_ref().is_none_or(ProbeGi::is_converged)
             && (brixelizer.is_none() || brixelizer_frames >= warmup);
+        // With a material type: once its pipelines are made (the frames before drew its
+        // fallback), or at once for its first sight.
+        let types_ready = stripes.is_none()
+            || shot.material_first_sight
+            || frame.forward().material_types_pending() == 0;
         let capture = !uploading
             && captured < captures
             && resident_frames >= capture_at
             && probes_ready
-            && gi_ready;
+            && gi_ready
+            && types_ready;
         // Frames since the cut that starts a temporal shot's history (the jitter sequence
         // runs from the first frame: the scene's upload takes the same frames every run).
         let accumulated = (!uploading && resident_frames >= TEMPORAL_START)

@@ -813,6 +813,8 @@ impl FrameRenderer {
         if !view.retired.is_empty() {
             view.collect(allocator, bindless, Some(completed));
         }
+        // Material types' pipelines asked for by the last frames (ADR 0092).
+        self.forward.update_material_types(device);
         let output = (output.0.max(1), output.1.max(1));
         let previous = view.prepared;
         // What was asked must be valid (as `check` says), whatever it falls back to.

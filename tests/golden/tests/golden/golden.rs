@@ -620,6 +620,53 @@ fn sponza_with_frame_generation() {
     });
 }
 
+/// A material type (ADR 0092): the procedural scene's floor as a Slang type of its own (a
+/// checker from its parameters), drawn by the passes compiled for it on first use.
+#[test]
+fn procedural_scene_with_a_material_type() {
+    check(&Shot {
+        stripes_floor: true,
+        ..procedural("procedural_material_type")
+    });
+}
+
+/// A material type's first sight: drawn with its glTF fallback, the plain floor, before its
+/// pipelines exist, the frame is the procedural scene's. Up to 0.01 % of the pixels may
+/// differ: a type's batches are drawn after the glTF ones of their state, so where depths
+/// tie (the floor meeting the wall) the other surface can win (2 pixels on the Radeon).
+#[test]
+fn a_material_type_first_draws_its_fallback() {
+    let options = RenderOptions {
+        validation: true,
+        timed_frames: 0,
+    };
+    let plain = procedural("procedural");
+    let first = Shot {
+        stripes_floor: true,
+        material_first_sight: true,
+        ..procedural("procedural_material_first_sight")
+    };
+    let (plain, first) = match (render(&plain, options), render(&first, options)) {
+        (Ok(a), Ok(b)) => (a, b),
+        (Err(Skip::NoGpu(e)), _) | (_, Err(Skip::NoGpu(e))) => {
+            println!("skipped, no GPU ({e})");
+            return;
+        }
+        (Err(e), _) | (_, Err(e)) => panic!("{e:?}"),
+    };
+    let differing = plain
+        .rgba8
+        .chunks(4)
+        .zip(first.rgba8.chunks(4))
+        .filter(|(a, b)| a != b)
+        .count();
+    let allowed = plain.rgba8.len() / 4 / 10_000;
+    assert!(
+        differing <= allowed,
+        "the first sight differs from the fallback in {differing} pixels (allowed {allowed})"
+    );
+}
+
 /// A temporal shot renders the same bytes every time (the history and the jitter start
 /// fresh once the scene is resident), so its golden image can be exact.
 #[test]

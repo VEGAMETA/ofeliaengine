@@ -1922,3 +1922,62 @@ while it is loaded Streamline copies every frame.
   mean FLIP was 0.025 where showing the nearest real frame gave 0.090 (camera moving
   5.7 cm a frame; the HUD 0.01, a panel in the world 0.045: its edge, where a column
   crosses it, is tested against the real frame's depth).
+
+## 22. Material types: your own shading code
+
+Besides glTF's material, a game can write its own (ADR 0092): a Slang type that turns the
+fragment's interpolants and its parameters into a surface, which the engine lights like
+any other (sun, local lights, shadows, sky light, GI, reflections, fog). The engine's
+passes are compiled for the type with nothing more to do.
+
+```slang
+// my_checker.slang
+struct CheckerParams { float4 color_a; float4 color_b; float frequency; float roughness; float metallic; float _pad; };
+
+struct CheckerMaterial : IMaterial
+{
+    typealias Params = CheckerParams;
+    static CheckerParams load(MaterialContext ctx) { return material_params<CheckerParams>(ctx); }
+    static Surface surface(MaterialContext ctx, CheckerParams p, bool masked)
+    {
+        Surface s;
+        float2 cells = floor(ctx.world_position.xz * p.frequency);
+        s.base = lerp(p.color_a, p.color_b, frac((cells.x + cells.y) * 0.5) * 2.0);
+        s.normal = normalize(ctx.normal * ctx.side);
+        s.metallic = p.metallic;
+        s.roughness = p.roughness;
+        s.subsurface = 0;
+        return s;
+    }
+    static float occlusion(MaterialContext ctx, CheckerParams p) { return 1.0; }
+    static float3 emission(MaterialContext ctx, CheckerParams p) { return 0.0; }
+    static float alpha(MaterialContext ctx, CheckerParams p) { return 1.0; }
+    static float alpha_cutoff(CheckerParams p) { return 0.0; }
+    static float thickness(MaterialContext ctx, CheckerParams p) { return 0.0; }
+}
+```
+
+```rust
+let checker = frame_renderer.forward_mut().register_material_type(MaterialTypeDesc {
+    name: "checker".into(),
+    module: "assets/materials/my_checker.slang".into(),
+    type_name: "CheckerMaterial".into(),
+});
+// The fallback (a glTF description) draws it until its pipelines are made, and in GI.
+let floor = materials.add_typed(checker, MaterialDesc::solid([0.5; 3], 0.0, 0.6),
+    Some(MaterialParams { bytes: params_bytes, textures: vec![] }));
+```
+
+- **Textures** are `uint` fields of the parameters (sampled with `ctx.sample(p.my_texture)`);
+  give them in `MaterialParams::textures` with their byte offsets, and the table writes
+  their bindless indices.
+- **The first frames** draw the material with its fallback while its passes compile
+  (about a quarter of a second per pass variant) and the driver makes their pipelines in
+  the background: the frame never waits. `ForwardRenderer::material_types_pending()` says
+  when everything a frame drew with is made.
+- **What it costs** is what its own code costs: the engine's lighting is the same, and the
+  glTF material's shaders did not change by a single register.
+- **Not yet:** masked types use their fallback's alpha in the depth and shadow passes; no
+  vertex offsets; shipped games will get precompiled shaders with the material files
+  (ADR 0092's later steps). Material types need 64-bit shader integers (every GPU of the
+  reference tier has them).

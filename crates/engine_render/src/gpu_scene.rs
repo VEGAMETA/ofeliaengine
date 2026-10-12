@@ -47,7 +47,7 @@ use crate::compute::{ComputeShader, Dispatch};
 use crate::cull::transform_box;
 use crate::forward::{BLENDED, InstanceData, MIRRORED, mirrored, state};
 use crate::graph::{Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages};
-use crate::material::{MaterialFrame, MaterialId};
+use crate::material::{MaterialFrame, MaterialId, MaterialTypeId};
 use crate::mesh::{GeometryFrame, MeshId};
 use crate::upload::UploadRing;
 use core::cmp::Reverse;
@@ -159,6 +159,8 @@ struct Slot {
     kind_state: u8,
     /// The full pipeline state bits.
     state: u8,
+    /// The material's type (ADR 0092).
+    ty: MaterialTypeId,
     mesh: MeshId,
     material: MaterialId,
     /// The material's slot in the table.
@@ -185,6 +187,8 @@ pub(crate) struct Batch {
     pub(crate) mesh: MeshId,
     /// Pipeline state bits (`forward.rs`), subsurface included.
     pub(crate) state: u8,
+    /// The material type its instances share (ADR 0092).
+    pub(crate) ty: MaterialTypeId,
     /// Live instances.
     pub(crate) count: u32,
     /// Sum of the instances' box centers, for the batch's distance from the camera.
@@ -234,7 +238,7 @@ impl Hasher for FxHasher {
     }
 }
 
-type BatchKey = (MeshId, u8);
+type BatchKey = (MeshId, u8, MaterialTypeId);
 
 /// One slot update, `Update` in `scene.slang` (16 bytes).
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -982,6 +986,7 @@ impl GpuScene {
         scene.batches.push(Batch {
             mesh: bytemuck::Zeroable::zeroed(),
             state: BLENDED as u8,
+            ty: MaterialTypeId::GLTF,
             count: 0,
             sum: [0.0; 3],
             blended_slot: 0,
@@ -1039,6 +1044,7 @@ impl GpuScene {
                     flags: 0,
                     kind_state: 0,
                     state: 0,
+                    ty: MaterialTypeId::GLTF,
                     mesh: instance.mesh,
                     material: instance.material,
                     material_slot: 0,
@@ -1369,7 +1375,7 @@ impl GpuScene {
         if batch.count == 0 {
             batch.alive = false;
             if batch.state as usize & BLENDED == 0 {
-                self.batch_keys.remove(&(batch.mesh, batch.state));
+                self.batch_keys.remove(&(batch.mesh, batch.state, batch.ty));
             }
             self.free_batches.push(slot.batch);
             self.live_batches -= 1;
@@ -1377,15 +1383,16 @@ impl GpuScene {
         self.slots[index as usize].batch = SINK;
     }
 
-    /// The batch for (`mesh`, `state`) of slot `index`, created if needed.
-    fn batch_for(&mut self, index: u32, mesh: MeshId, state_bits: u8) -> u32 {
+    /// The batch for (`mesh`, `state`, `ty`) of slot `index`, created if needed.
+    fn batch_for(&mut self, index: u32, mesh: MeshId, state_bits: u8, ty: MaterialTypeId) -> u32 {
         let blended = state_bits as usize & BLENDED != 0;
-        if !blended && let Some(&batch) = self.batch_keys.get(&(mesh, state_bits)) {
+        if !blended && let Some(&batch) = self.batch_keys.get(&(mesh, state_bits, ty)) {
             return batch;
         }
         let batch = Batch {
             mesh,
             state: state_bits,
+            ty,
             count: 0,
             sum: [0.0; 3],
             blended_slot: index,
@@ -1402,7 +1409,7 @@ impl GpuScene {
             }
         };
         if !blended {
-            self.batch_keys.insert((mesh, state_bits), id);
+            self.batch_keys.insert((mesh, state_bits, ty), id);
         }
         self.live_batches += 1;
         id
@@ -1533,12 +1540,14 @@ impl GpuScene {
             let s = &mut self.slots[index as usize];
             s.material_slot = material_slot;
             s.kind_state = state(kind, false, true) as u8;
+            s.ty = kind.ty;
             s.local_center = local_center;
             s.local_extents = local_extents;
         }
         let slot = &self.slots[i];
-        let (kind_state, mesh, batch_id, old_center, old_state) = (
+        let (kind_state, ty, mesh, batch_id, old_center, old_state) = (
             slot.kind_state,
+            slot.ty,
             slot.mesh,
             slot.batch,
             slot.center,
@@ -1587,7 +1596,7 @@ impl GpuScene {
         let batch = &mut self.batches[batch_id as usize];
         // (Not a blended one's: transparent surfaces are drawn back to front by it.)
         let keep_center = motion_only && state_bits as usize & BLENDED == 0;
-        if batch_id != SINK && batch.mesh == mesh && batch.state == state_bits {
+        if batch_id != SINK && batch.mesh == mesh && batch.state == state_bits && batch.ty == ty {
             if !keep_center {
                 for k in 0..3 {
                     batch.sum[k] += f64::from(center[k] - old_center[k]);
@@ -1595,7 +1604,7 @@ impl GpuScene {
             }
         } else {
             self.leave(index);
-            let id = self.batch_for(index, mesh, state_bits);
+            let id = self.batch_for(index, mesh, state_bits, ty);
             let batch = &mut self.batches[id as usize];
             batch.count += 1;
             for k in 0..3 {

@@ -10,6 +10,13 @@
 //! are removed.
 //!
 //! Slot 0 is the default material (grey, dielectric): stale ids draw with it.
+//!
+//! **Material types** (ADR 0092): a material may be of a type of its own (a Slang type
+//! implementing `IMaterial`, registered with the forward renderer,
+//! `ForwardRenderer::register_material_type`). It then carries its type's parameters
+//! ([`MaterialParams`], up to [`PARAMS_BYTES`]) besides its glTF description, which stays
+//! its fallback: it draws the material until the type's pipelines are made, and the passes
+//! that run no material code (GI's ray hits) read it.
 
 use crate::graph::{Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages};
 use crate::texture_pool::{TextureId, TexturePool};
@@ -188,6 +195,37 @@ impl Default for MaterialDesc {
     }
 }
 
+/// A material type (ADR 0092): [`MaterialTypeId::GLTF`], the built-in glTF material, or one
+/// registered with the forward renderer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Default)]
+pub struct MaterialTypeId(pub(crate) u16);
+
+impl MaterialTypeId {
+    /// The built-in glTF 2.0 metallic-roughness material.
+    pub const GLTF: Self = Self(0);
+
+    /// Its index (0 for glTF's; registered types count from 1).
+    pub fn index(self) -> u16 {
+        self.0
+    }
+}
+
+/// Bytes of a material type's parameters: each material slot has this many in the
+/// parameters' buffer (`material_params<T>` in `forward.slang`).
+pub const PARAMS_BYTES: usize = 256;
+
+/// A material type's parameters: the bytes of its parameter struct (as the Slang type
+/// lays them out, std430), and its textures, written at byte offsets as `uint`s (bindless
+/// index in the low 24 bits, sampler in the top 8; `0xFFFFFFFF` while a texture is not
+/// uploaded, as for glTF materials).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MaterialParams {
+    /// The struct's bytes, at most [`PARAMS_BYTES`].
+    pub bytes: Vec<u8>,
+    /// Textures and the byte offsets they go to (4-byte aligned, inside `bytes`).
+    pub textures: Vec<(u32, TextureRef)>,
+}
+
 /// A material in a [`MaterialTable`]. Ids of removed materials are stale: they draw with
 /// the default material.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
@@ -229,11 +267,13 @@ const MATERIAL_BYTES: u64 = size_of::<GpuMaterial>() as u64;
 const _: () = assert!(MATERIAL_BYTES == 80);
 
 /// What the forward renderer needs to know of a material to pick its pipeline state.
-// Four bytes: with the slot, `MaterialFrame::resolve` returns it in one register (it runs
+// Eight bytes: with the slot, `MaterialFrame::resolve` returns it in one register (it runs
 // once per draw).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 #[repr(C, align(4))]
 pub struct MaterialKind {
+    /// Its type (ADR 0092).
+    pub ty: MaterialTypeId,
     /// Alpha tested.
     pub masked: bool,
     /// Drawn without face culling.
@@ -250,6 +290,8 @@ struct Slot {
     desc: Option<MaterialDesc>,
     gpu: GpuMaterial,
     kind: MaterialKind,
+    /// A material type's parameters (ADR 0092).
+    params: Option<Box<MaterialParams>>,
     dirty: bool,
 }
 
@@ -287,6 +329,11 @@ pub struct MaterialTable {
     /// The texture LOD bias and the first index of its material samplers.
     lod_bias: f32,
     samplers: u32,
+    /// Material types' parameters, [`PARAMS_BYTES`] per slot: made when the first material
+    /// of a type is added, as large as the table.
+    params: Option<TableBuffer>,
+    /// A material of a type was ever added: the parameters' buffer exists from then on.
+    typed: bool,
 }
 
 impl MaterialTable {
@@ -304,6 +351,8 @@ impl MaterialTable {
             revision: 0,
             lod_bias: 0.0,
             samplers: Bindless::material_sampler(Wrap::Repeat, Wrap::Repeat),
+            params: None,
+            typed: false,
         };
         table.add(MaterialDesc::default());
         table
@@ -340,6 +389,18 @@ impl MaterialTable {
 
     /// Adds a material; it reaches the GPU in the next [`Self::begin_frame`].
     pub fn add(&mut self, desc: MaterialDesc) -> MaterialId {
+        self.add_typed(MaterialTypeId::GLTF, desc, None)
+    }
+
+    /// Adds a material of a type (ADR 0092) with its parameters; `fallback` describes it
+    /// for what does not run the type's code (its first frames, GI's ray hits) and gives
+    /// its alpha mode and sides. Parameters beyond [`PARAMS_BYTES`] are cut.
+    pub fn add_typed(
+        &mut self,
+        ty: MaterialTypeId,
+        fallback: MaterialDesc,
+        params: Option<MaterialParams>,
+    ) -> MaterialId {
         let index = match self.free_slots.pop() {
             Some(index) => index,
             None => {
@@ -348,32 +409,67 @@ impl MaterialTable {
                     desc: None,
                     gpu: GpuMaterial::default(),
                     kind: MaterialKind::default(),
+                    params: None,
                     dirty: false,
                 });
                 (self.slots.len() - 1) as u32
             }
         };
         let generation = self.slots[index as usize].generation;
-        self.store(index, desc);
+        self.store(index, ty, fallback, params);
         MaterialId { index, generation }
     }
 
-    /// Replaces a material's description (stale ids are ignored).
+    /// Replaces a material's description (stale ids are ignored); it becomes a glTF
+    /// material.
     pub fn set(&mut self, id: MaterialId, desc: MaterialDesc) {
         if self.get(id).is_some() {
-            self.store(id.index, desc);
+            self.store(id.index, MaterialTypeId::GLTF, desc, None);
         }
     }
 
-    fn store(&mut self, index: u32, desc: MaterialDesc) {
+    /// Replaces a material's type, fallback and parameters (stale ids are ignored).
+    pub fn set_typed(
+        &mut self,
+        id: MaterialId,
+        ty: MaterialTypeId,
+        fallback: MaterialDesc,
+        params: Option<MaterialParams>,
+    ) {
+        if self.get(id).is_some() {
+            self.store(id.index, ty, fallback, params);
+        }
+    }
+
+    /// A material's type; `None` for stale ids.
+    pub fn material_type(&self, id: MaterialId) -> Option<MaterialTypeId> {
+        self.get(id).map(|_| self.slots[id.index as usize].kind.ty)
+    }
+
+    fn store(
+        &mut self,
+        index: u32,
+        ty: MaterialTypeId,
+        desc: MaterialDesc,
+        params: Option<MaterialParams>,
+    ) {
         let slot = &mut self.slots[index as usize];
         let old_kind = slot.desc.map(|_| slot.kind);
         slot.desc = Some(desc);
+        // A type's material does no subsurface scattering (its own code shades it).
+        let typed = ty != MaterialTypeId::GLTF;
+        self.typed |= typed;
+        slot.params = typed.then(|| {
+            let mut p = params.unwrap_or_default();
+            p.bytes.truncate(PARAMS_BYTES);
+            Box::new(p)
+        });
         slot.kind = MaterialKind {
+            ty,
             masked: matches!(desc.alpha, AlphaMode::Mask { .. }),
             double_sided: desc.double_sided,
             blended: desc.alpha == AlphaMode::Blend,
-            subsurface: desc.subsurface.is_some() && desc.alpha != AlphaMode::Blend,
+            subsurface: !typed && desc.subsurface.is_some() && desc.alpha != AlphaMode::Blend,
         };
         if old_kind.is_some_and(|k| k != slot.kind) {
             self.revision += 1;
@@ -400,6 +496,7 @@ impl MaterialTable {
         }
         let slot = &mut self.slots[id.index as usize];
         slot.desc = None;
+        slot.params = None;
         slot.generation = slot.generation.wrapping_add(1);
         self.free_slots.push(id.index);
         self.revision += 1;
@@ -524,7 +621,48 @@ impl MaterialTable {
             }
         }
 
-        // Resolve every material again when textures changed; changed ones upload.
+        // Material types' parameters: a buffer as large as the table, once a typed
+        // material exists; every typed material uploads into a new one.
+        let capacity = self.table.as_ref().map_or(0, |t| t.capacity);
+        if self.typed && self.params.as_ref().is_none_or(|p| p.capacity < capacity) {
+            let (buffer, allocation) = allocator.create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(u64::from(capacity) * PARAMS_BYTES as u64)
+                    .usage(
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::TRANSFER_DST
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    ),
+                MemoryLocation::Device,
+            )?;
+            // SAFETY: created with SHADER_DEVICE_ADDRESS usage and bound.
+            let address = unsafe {
+                device.raw().get_buffer_device_address(
+                    &vk::BufferDeviceAddressInfo::default().buffer(buffer),
+                )
+            };
+            let old = self.params.replace(TableBuffer {
+                buffer,
+                allocation: Some(allocation),
+                address,
+                capacity,
+                state: BufferState::idle(),
+            });
+            if let Some(mut old) = old
+                && let Some(allocation) = old.allocation.take()
+            {
+                self.retired.push((frame_number, old.buffer, allocation));
+            }
+            for (index, slot) in self.slots.iter_mut().enumerate() {
+                if slot.params.is_some() && !slot.dirty {
+                    slot.dirty = true;
+                    self.dirty.push(index as u32);
+                }
+            }
+        }
+
+        // Resolve every material again when textures changed; changed ones upload (and
+        // typed ones with textures among their parameters).
         if self.resolved != Some(textures.generation()) {
             self.resolved = Some(textures.generation());
             for (index, slot) in self.slots.iter_mut().enumerate() {
@@ -532,7 +670,8 @@ impl MaterialTable {
                     continue;
                 };
                 let gpu = resolve(&desc, textures, self.samplers);
-                if gpu != slot.gpu {
+                let params_textures = slot.params.as_ref().is_some_and(|p| !p.textures.is_empty());
+                if gpu != slot.gpu || params_textures {
                     slot.gpu = gpu;
                     if !slot.dirty {
                         slot.dirty = true;
@@ -556,12 +695,27 @@ impl MaterialTable {
             },
         );
         table.state = MATERIAL_READ;
+        let params = self.params.as_mut().map(|p| {
+            let handle = fg.import_buffer(
+                "material parameters",
+                ImportedBuffer {
+                    buffer: p.buffer,
+                    size: u64::from(p.capacity) * PARAMS_BYTES as u64,
+                    address: p.address,
+                    initial: p.state,
+                    final_state: Some(MATERIAL_READ),
+                },
+            );
+            p.state = MATERIAL_READ;
+            handle
+        });
         if !self.dirty.is_empty() {
-            self.upload(fg, allocator, textures, handle, frame_number)?;
+            self.upload(fg, allocator, textures, handle, params, frame_number)?;
         }
         Ok(MaterialFrame {
             table: self,
             buffer: handle,
+            params,
         })
     }
 
@@ -573,19 +727,34 @@ impl MaterialTable {
         allocator: &mut Allocator,
         textures: &TexturePool,
         target: Buffer,
+        params_target: Option<Buffer>,
         frame_number: u64,
     ) -> Result<(), RhiError> {
         self.dirty.sort_unstable();
         self.dirty.dedup();
         let count = self.dirty.len() as u64;
+        // The typed materials' parameters follow the records in the staging buffer.
+        let typed: Vec<u32> = match params_target {
+            Some(_) => self
+                .dirty
+                .iter()
+                .copied()
+                .filter(|&i| self.slots[i as usize].params.is_some())
+                .collect(),
+            None => Vec::new(),
+        };
+        let params_offset = count * MATERIAL_BYTES;
         let (staging, mut memory) = allocator.create_buffer(
             &vk::BufferCreateInfo::default()
-                .size(count * MATERIAL_BYTES)
+                .size(params_offset + typed.len() as u64 * PARAMS_BYTES as u64)
                 .usage(vk::BufferUsageFlags::TRANSFER_SRC),
             MemoryLocation::Upload,
         )?;
         // Runs of consecutive slots become one copy each.
         let mut regions: Vec<vk::BufferCopy> = Vec::new();
+        let mut param_regions: Vec<vk::BufferCopy> = Vec::with_capacity(typed.len());
+        // `typed` lists the dirty typed slots in the dirty slots' order.
+        let mut next_typed = 0usize;
         {
             let Some(bytes) = memory.mapped_slice_mut() else {
                 // SAFETY: never used.
@@ -611,6 +780,35 @@ impl MaterialTable {
                     )
                 };
                 bytes[src as usize..(src + MATERIAL_BYTES) as usize].copy_from_slice(data);
+                if typed.get(next_typed) == Some(&index)
+                    && let Some(params) = slot.params.as_deref()
+                {
+                    let k = next_typed;
+                    next_typed += 1;
+                    let src = params_offset + k as u64 * PARAMS_BYTES as u64;
+                    let out = &mut bytes[src as usize..src as usize + PARAMS_BYTES];
+                    out.fill(0);
+                    out[..params.bytes.len()].copy_from_slice(&params.bytes);
+                    for &(offset, texture) in &params.textures {
+                        let offset = offset as usize & !3;
+                        if offset + 4 > PARAMS_BYTES {
+                            continue;
+                        }
+                        let value = textures.index(texture.texture).map_or(NO_TEXTURE, |i| {
+                            i | (Bindless::material_sampler_in(
+                                self.samplers,
+                                texture.wrap[0],
+                                texture.wrap[1],
+                            ) << 24)
+                        });
+                        out[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+                    }
+                    param_regions.push(vk::BufferCopy {
+                        src_offset: src,
+                        dst_offset: u64::from(index) * PARAMS_BYTES as u64,
+                        size: PARAMS_BYTES as u64,
+                    });
+                }
                 let dst = u64::from(index) * MATERIAL_BYTES;
                 match regions.last_mut() {
                     Some(r) if r.src_offset + r.size == src && r.dst_offset + r.size == dst => {
@@ -629,27 +827,40 @@ impl MaterialTable {
             "material staging",
             ImportedBuffer {
                 buffer: staging,
-                size: count * MATERIAL_BYTES,
+                size: params_offset + typed.len() as u64 * PARAMS_BYTES as u64,
                 address: 0,
                 initial: BufferState::idle(),
                 final_state: None,
             },
         );
-        fg.add_pass("material upload")
+        let mut pass = fg
+            .add_pass("material upload")
             .read(source, Access::TransferRead)
-            .write(target, Access::TransferWrite)
-            .execute(move |ctx| {
-                // SAFETY: recording outside a rendering scope; every region lies inside
-                // both buffers (slots are below the table's capacity).
-                unsafe {
+            .write(target, Access::TransferWrite);
+        if let Some(params) = params_target.filter(|_| !param_regions.is_empty()) {
+            pass = pass.write(params, Access::TransferWrite);
+        }
+        pass.execute(move |ctx| {
+            // SAFETY: recording outside a rendering scope; every region lies inside both
+            // buffers (slots are below the table's capacity, and the parameters' buffer is
+            // as large).
+            unsafe {
+                ctx.device.cmd_copy_buffer(
+                    ctx.cmd,
+                    ctx.buffer(source),
+                    ctx.buffer(target),
+                    &regions,
+                );
+                if let Some(params) = params_target.filter(|_| !param_regions.is_empty()) {
                     ctx.device.cmd_copy_buffer(
                         ctx.cmd,
                         ctx.buffer(source),
-                        ctx.buffer(target),
-                        &regions,
+                        ctx.buffer(params),
+                        &param_regions,
                     );
                 }
-            });
+            }
+        });
         self.retired.push((frame_number, staging, memory));
         Ok(())
     }
@@ -666,6 +877,11 @@ impl MaterialTable {
                 && let Some(allocation) = table.allocation.take()
             {
                 allocator.destroy_buffer(table.buffer, allocation);
+            }
+            if let Some(mut params) = self.params.take()
+                && let Some(allocation) = params.allocation.take()
+            {
+                allocator.destroy_buffer(params.buffer, allocation);
             }
             for (_, buffer, allocation) in self.retired.drain(..) {
                 allocator.destroy_buffer(buffer, allocation);
@@ -727,6 +943,8 @@ pub struct MaterialFrame<'g> {
     table: &'g MaterialTable,
     /// The table: `Material` structs (80 bytes each), indexed by slot.
     pub buffer: Buffer,
+    /// Material types' parameters ([`PARAMS_BYTES`] per slot), once a typed material exists.
+    pub params: Option<Buffer>,
 }
 
 impl MaterialFrame<'_> {
@@ -758,11 +976,24 @@ impl MaterialFrame<'_> {
         self.table.table.as_ref().map_or(0, |t| t.address)
     }
 
-    /// Declares that a pass's fragment shaders read the table.
+    /// Device address of the material types' parameters and the bytes per slot (0 and 0
+    /// without typed materials).
+    pub fn params(&self) -> (vk::DeviceAddress, u32) {
+        match (&self.table.params, self.params) {
+            (Some(p), Some(_)) => (p.address, PARAMS_BYTES as u32),
+            _ => (0, 0),
+        }
+    }
+
+    /// Declares that a pass's fragment shaders read the table (and the types' parameters).
     pub fn read<'a, 'g>(
         &self,
         pass: crate::graph::PassBuilder<'a, 'g>,
     ) -> crate::graph::PassBuilder<'a, 'g> {
-        pass.read(self.buffer, Access::StorageRead(ShaderStages::FRAGMENT))
+        let pass = pass.read(self.buffer, Access::StorageRead(ShaderStages::FRAGMENT));
+        match self.params {
+            Some(params) => pass.read(params, Access::StorageRead(ShaderStages::FRAGMENT)),
+            None => pass,
+        }
     }
 }

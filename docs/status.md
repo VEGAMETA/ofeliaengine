@@ -84,8 +84,11 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 
 ## 4. In flight
 
-- **3c, custom materials:** researched, ADR 0092 proposed (2026-10-12) with four questions
-  for the owner; implementation waits for the answers. (Ref-1 runs with hardware-accelerated
+- **3c, custom materials** (ADR 0092, accepted 2026-10-12): step 1 (the passes through
+  `IMaterial`, PR #179) and step 2 (material types in the renderer: typed materials,
+  batches and pipelines per type, compiled on first sight with the glTF fallback drawing
+  meanwhile) done. Next: the shading models (lit, unlit, clear coat, cloth, hair, toon),
+  then the material file and precompiled shaders, then the ubershader experiment. (Ref-1 runs with hardware-accelerated
   GPU scheduling on since 2026-10-12, for DLSS frame generation.)
 
 Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:

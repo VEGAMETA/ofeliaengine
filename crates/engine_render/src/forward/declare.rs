@@ -373,6 +373,9 @@ impl ForwardRenderer {
                 None => [0; 2],
             },
             _gi_pad: 0,
+            material_data: materials.params().0,
+            material_stride: materials.params().1,
+            _material_pad: 0,
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -617,6 +620,8 @@ impl ForwardRenderer {
                                     bindless,
                                     &geometry,
                                     [&shadow_pipelines[0], &shadow_pipelines[1]],
+                                    // Material types cast as their fallbacks (ADR 0092).
+                                    &TypedPipelines::BUILTIN,
                                     &push,
                                     true,
                                     DEPTH_STATES,
@@ -700,6 +705,7 @@ impl ForwardRenderer {
                                 bindless,
                                 &geometry,
                                 [&pipelines.depth[0], &pipelines.depth[1]],
+                                &TypedPipelines::BUILTIN,
                                 &Push {
                                     phase: k as u32,
                                     ..push
@@ -1009,6 +1015,8 @@ impl ForwardRenderer {
                 (None, false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
             }
         };
+        // Material types' variants of them (ADR 0092).
+        let main_typed = self.typed_pipelines(&states, main_pipelines, PLAIN_STATES);
         // Made now if this is their first frame (ADR 0079).
         let main_pipelines = [ready(main_pipelines[0])?, ready(main_pipelines[1])?];
         // `contact`: the sun's contact shadows, whose mask's index the shading that reads
@@ -1047,6 +1055,7 @@ impl ForwardRenderer {
                     bindless,
                     &geometry,
                     pipelines,
+                    &main_typed,
                     &push,
                     false,
                     mask,
@@ -1576,6 +1585,7 @@ impl ForwardRenderer {
                             bindless,
                             &geometry,
                             [scatter, scatter],
+                            &TypedPipelines::BUILTIN,
                             &push,
                             false,
                             SUBSURFACE_STATES,
@@ -1726,6 +1736,8 @@ impl ForwardRenderer {
                 (None, Some(_), None) => &self.blended_atmosphere[variant & 1][reactive_index],
                 (None, None, _) => &shading.blended[reactive_index],
             };
+            let blended_typed =
+                self.typed_pipelines(&states, [pipelines, pipelines], BLENDED_STATES);
             let pipelines = ready(pipelines)?;
             let mut pass = forward_pass(
                 fg,
@@ -1775,6 +1787,7 @@ impl ForwardRenderer {
                         bindless,
                         &geometry,
                         [pipelines, pipelines],
+                        &blended_typed,
                         &push,
                         false,
                         BLENDED_STATES,

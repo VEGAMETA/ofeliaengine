@@ -61,7 +61,7 @@ impl ForwardRenderer {
             } else {
                 distance
             };
-            (((run.state as u64) << 32) | u64::from(distance), k as u32)
+            (sort_key(run, distance), k as u32)
         }));
         keys.sort_unstable();
         for (order, &(_, k)) in keys.iter().enumerate() {
@@ -83,6 +83,7 @@ impl ForwardRenderer {
             command_count += run.lods;
             counts[run.state] += run.lods;
         }
+        let typed = typed_ranges(keys, runs);
         let mut slot_count = 0u32;
         for run in runs.iter_mut() {
             run.slot = slot_count;
@@ -192,7 +193,11 @@ impl ForwardRenderer {
             drawn_commands: command_count,
             slot_count,
             batch_count,
-            states: States { starts, counts },
+            states: States {
+                starts,
+                counts,
+                typed,
+            },
             min,
             max,
             subsurface_draws,
@@ -241,6 +246,7 @@ impl ForwardRenderer {
                 first: id as u32,
                 len: batch.count,
                 state,
+                ty: batch.ty,
                 order: 0,
                 command: 0,
                 slot: 0,
@@ -260,7 +266,7 @@ impl ForwardRenderer {
             } else {
                 distance
             };
-            (((run.state as u64) << 32) | u64::from(distance), k as u32)
+            (sort_key(run, distance), k as u32)
         }));
         keys.sort_unstable();
         for (order, &(_, k)) in keys.iter().enumerate() {
@@ -283,6 +289,7 @@ impl ForwardRenderer {
             run.slot = slot_count;
             slot_count += run.lods * run.len;
         }
+        let typed = typed_ranges(keys, runs);
         let drawn_commands = command_count;
         // The sink: its command follows the drawn ones in every list (no state draws it),
         // its slots follow theirs; culling appends holes there when it keeps them.
@@ -388,7 +395,11 @@ impl ForwardRenderer {
             drawn_commands,
             slot_count,
             batch_count,
-            states: States { starts, counts },
+            states: States {
+                starts,
+                counts,
+                typed,
+            },
             min,
             max,
             subsurface_draws,
@@ -479,12 +490,15 @@ pub(super) fn batches(
         let state = state(kind, mirrored(&draw.world_from_object), subsurface);
         slots.push(slot);
         match runs.last_mut() {
-            Some(run) if run.state == state && mesh == Some(draw.mesh) => run.len += 1,
+            Some(run) if run.state == state && run.ty == kind.ty && mesh == Some(draw.mesh) => {
+                run.len += 1;
+            }
             _ => {
                 runs.push(Run {
                     first: i as u32,
                     len: 1,
                     state,
+                    ty: kind.ty,
                     order: 0,
                     command: 0,
                     slot: 0,
@@ -499,11 +513,102 @@ pub(super) fn batches(
     }
 }
 
+/// The most runs of commands of material types other than glTF's a frame's layout keeps
+/// apart (ADR 0092); further ones draw with the built-in pipelines, as their fallback.
+pub(crate) const MAX_TYPE_RANGES: usize = 128;
+
+/// Consecutive commands of one pipeline state and one material type other than glTF's.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct TypeRange {
+    pub(crate) ty: crate::material::MaterialTypeId,
+    pub(crate) state: u8,
+    pub(crate) start: u32,
+    pub(crate) count: u32,
+}
+
+/// The typed ranges of a layout, in command order.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct TypedRanges {
+    pub(crate) ranges: [TypeRange; MAX_TYPE_RANGES],
+    pub(crate) len: u32,
+}
+
+impl TypedRanges {
+    pub(crate) fn as_slice(&self) -> &[TypeRange] {
+        &self.ranges[..self.len as usize]
+    }
+}
+
+/// The sort key of a run: its pipeline state, then (opaque and masked states) its material
+/// type, so a type's batches of a state are consecutive commands, then its distance (the
+/// argument: front to back, or `!distance` for blended runs, back to front across types).
+fn sort_key(run: &Run, distance: u32) -> u64 {
+    let ty = if run.state & BLENDED == 0 {
+        u64::from(run.ty.index())
+    } else {
+        0
+    };
+    ((run.state as u64) << 48) | (ty << 32) | u64::from(distance)
+}
+
+/// The runs of consecutive commands of material types other than glTF's, from the runs in
+/// command order (`keys`); at most [`MAX_TYPE_RANGES`].
+fn typed_ranges(keys: &[(u64, u32)], runs: &[Run]) -> TypedRanges {
+    let mut typed = TypedRanges {
+        ranges: [TypeRange::default(); MAX_TYPE_RANGES],
+        len: 0,
+    };
+    for &(_, k) in keys {
+        let run = &runs[k as usize];
+        if run.ty == crate::material::MaterialTypeId::GLTF {
+            continue;
+        }
+        let n = typed.len as usize;
+        if n > 0 {
+            let last = &mut typed.ranges[n - 1];
+            if last.ty == run.ty
+                && usize::from(last.state) == run.state
+                && last.start + last.count == run.command
+            {
+                last.count += run.lods;
+                continue;
+            }
+        }
+        if n == MAX_TYPE_RANGES {
+            continue;
+        }
+        typed.ranges[n] = TypeRange {
+            ty: run.ty,
+            state: run.state as u8,
+            start: run.command,
+            count: run.lods,
+        };
+        typed.len += 1;
+    }
+    typed
+}
+
+/// Each typed range's pipelines for one pass (`[opaque, masked]`): its type's, or `None`
+/// for the built-in ones (the fallback, until the type's are made).
+#[derive(Clone, Copy)]
+pub(crate) struct TypedPipelines<'a> {
+    pub(crate) ranges: [Option<[&'a Pipeline; 2]>; MAX_TYPE_RANGES],
+}
+
+impl TypedPipelines<'_> {
+    /// Every range with the built-in pipelines.
+    pub(crate) const BUILTIN: Self = Self {
+        ranges: [None; MAX_TYPE_RANGES],
+    };
+}
+
 /// Where each pipeline state's batches are among the commands.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct States {
     pub(super) starts: [u32; STATES],
     pub(super) counts: [u32; STATES],
+    /// The commands of material types other than glTF's (ADR 0092).
+    pub(super) typed: TypedRanges,
 }
 
 impl States {
@@ -526,6 +631,7 @@ impl States {
         bindless: &Bindless,
         geometry: &GeometryFrame<'_>,
         pipelines: [&Pipeline; 2],
+        typed: &TypedPipelines<'_>,
         push: &Push,
         shadow: bool,
         mask: u32,
@@ -540,6 +646,7 @@ impl States {
                 bindless,
                 geometry,
                 pipelines,
+                typed,
                 push,
                 shadow,
                 mask,
@@ -564,6 +671,7 @@ impl States {
         bindless: &Bindless,
         geometry: &GeometryFrame<'_>,
         pipelines: [&Pipeline; 2],
+        typed: &TypedPipelines<'_>,
         push: &Push,
         shadow: bool,
         mask: u32,
@@ -573,10 +681,16 @@ impl States {
         (slice, slices): (u32, u32),
     ) {
         let slices = slices.max(1);
-        let mut bound = None;
+        let mut bound: Option<vk::Pipeline> = None;
+        let ranges = self.typed.as_slice();
+        let mut next_range = 0;
         for state in 0..STATES {
             let count = self.counts[state].saturating_sub(slice).div_ceil(slices);
             if count == 0 || mask & (1 << state) == 0 {
+                // Skip its typed ranges.
+                while next_range < ranges.len() && usize::from(ranges[next_range].state) == state {
+                    next_range += 1;
+                }
                 continue;
             }
             let masked = state & MASKED != 0;
@@ -593,28 +707,50 @@ impl States {
             } else {
                 vk::FrontFace::COUNTER_CLOCKWISE
             };
-            // SAFETY: guaranteed by the caller.
-            unsafe {
-                if bound != Some(masked) {
-                    pipelines[usize::from(masked)].bind(ctx.cmd);
-                    if bound.is_none() {
-                        bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
-                        set_viewport(ctx.device, ctx.cmd, area);
-                        bindless.push_constants(ctx.cmd, push_bytes(push));
-                        geometry.bind_indices(ctx);
-                    }
-                    bound = Some(masked);
+            let start = self.starts[state];
+            let end = start + self.counts[state];
+            // The commands from `a` to `b` of this state with `pipeline`: its every
+            // `slices`-th from its `slice`-th (counted from the state's first).
+            let mut draw = |a: u32, b: u32, pipeline: &Pipeline| {
+                let first = a + (slice + slices - (a - start) % slices) % slices;
+                if first >= b {
+                    return;
                 }
-                ctx.device.cmd_set_cull_mode(ctx.cmd, cull);
-                ctx.device.cmd_set_front_face(ctx.cmd, front);
-                ctx.device.cmd_draw_indexed_indirect(
-                    ctx.cmd,
-                    buffer,
-                    offset + u64::from(self.starts[state] + slice) * COMMAND_BYTES,
-                    count,
-                    COMMAND_BYTES as u32 * slices,
-                );
+                let count = (b - first).div_ceil(slices);
+                // SAFETY: guaranteed by the caller.
+                unsafe {
+                    if bound != Some(pipeline.raw()) {
+                        pipeline.bind(ctx.cmd);
+                        if bound.is_none() {
+                            bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                            set_viewport(ctx.device, ctx.cmd, area);
+                            bindless.push_constants(ctx.cmd, push_bytes(push));
+                            geometry.bind_indices(ctx);
+                        }
+                        bound = Some(pipeline.raw());
+                    }
+                    ctx.device.cmd_set_cull_mode(ctx.cmd, cull);
+                    ctx.device.cmd_set_front_face(ctx.cmd, front);
+                    ctx.device.cmd_draw_indexed_indirect(
+                        ctx.cmd,
+                        buffer,
+                        offset + u64::from(first) * COMMAND_BYTES,
+                        count,
+                        COMMAND_BYTES as u32 * slices,
+                    );
+                }
+            };
+            let builtin = pipelines[usize::from(masked)];
+            let mut cursor = start;
+            while next_range < ranges.len() && usize::from(ranges[next_range].state) == state {
+                let range = ranges[next_range];
+                let own = typed.ranges[next_range].map_or(builtin, |p| p[usize::from(masked)]);
+                draw(cursor, range.start, builtin);
+                draw(range.start, range.start + range.count, own);
+                cursor = range.start + range.count;
+                next_range += 1;
             }
+            draw(cursor, end, builtin);
         }
     }
 }
@@ -625,4 +761,69 @@ pub(super) fn local_box(geometry: &GeometryFrame<'_>, mesh: MeshId) -> (Vec3, Ve
     geometry.mesh(mesh).map_or((Vec3::ZERO, Vec3::ZERO), |m| {
         ((m.min + m.max) * 0.5, (m.max - m.min) * 0.5)
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::material::MaterialTypeId;
+
+    fn run(state: usize, ty: u16, command: u32, lods: u32) -> Run {
+        Run {
+            first: 0,
+            len: 1,
+            state,
+            ty: MaterialTypeId(ty),
+            order: 0,
+            command,
+            slot: 0,
+            lods,
+        }
+    }
+
+    /// Opaque states order their runs by type, then distance; blended ones by distance
+    /// only (back to front across types).
+    #[test]
+    fn types_sort_within_opaque_states_only() {
+        let near_typed = sort_key(&run(0, 1, 0, 1), 1);
+        let far_gltf = sort_key(&run(0, 0, 0, 1), 9);
+        assert!(far_gltf < near_typed, "glTF first within a state");
+        let blended_near_typed = sort_key(&run(BLENDED, 1, 0, 1), !1);
+        let blended_far_gltf = sort_key(&run(BLENDED, 0, 0, 1), !9);
+        assert!(
+            blended_far_gltf < blended_near_typed,
+            "farther first, whatever the type"
+        );
+        assert!(sort_key(&run(1, 0, 0, 1), 0) > sort_key(&run(0, 7, 0, 1), u32::MAX));
+    }
+
+    /// Consecutive commands of one type and state make one range; glTF runs make none.
+    #[test]
+    fn typed_ranges_merge_consecutive_commands() {
+        let runs = [
+            run(0, 0, 0, 2),
+            run(0, 1, 2, 3),
+            run(0, 1, 5, 1),
+            run(0, 2, 6, 1),
+            run(BLENDED, 1, 7, 1),
+            run(BLENDED, 0, 8, 1),
+            run(BLENDED, 1, 9, 1),
+        ];
+        let keys: Vec<(u64, u32)> = (0..runs.len() as u32).map(|k| (0, k)).collect();
+        let typed = typed_ranges(&keys, &runs);
+        let got: Vec<(u16, u8, u32, u32)> = typed
+            .as_slice()
+            .iter()
+            .map(|r| (r.ty.0, r.state, r.start, r.count))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (1, 0, 2, 4),
+                (2, 0, 6, 1),
+                (1, BLENDED as u8, 7, 1),
+                (1, BLENDED as u8, 9, 1),
+            ]
+        );
+    }
 }
