@@ -1898,7 +1898,8 @@ if let Some(input) = frame.dlss_generation_input(&camera, hudless, Some(ui_layer
 ```
 
 `examples/flight.rs --fg dlss` runs it. `streamline.frame_generation_error()` says why it
-cannot run (`eErrorOSDisabledHWS`: Windows' hardware-accelerated GPU scheduling is off).
+cannot run (`eErrorOSDisabledHWS`: Windows' hardware-accelerated GPU scheduling is off),
+`streamline.frame_generation_hint()` a sentence for the player.
 Turning it on or off for good recreates the swapchain (`Streamline::set_frame_generation_loaded`):
 while it is loaded Streamline copies every frame.
 

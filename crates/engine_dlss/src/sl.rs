@@ -54,6 +54,9 @@ impl BaseStructure {
 pub(crate) type SlResult = i32;
 /// `sl::Result::eOk`.
 pub(crate) const OK: SlResult = 0;
+pub(crate) const RESULT_DRIVER_OUT_OF_DATE: SlResult = 2;
+pub(crate) const RESULT_OS_OUT_OF_DATE: SlResult = 3;
+pub(crate) const RESULT_OS_DISABLED_HWS: SlResult = 4;
 
 /// Names of `sl::Result` values, by value (`sl_result.h`).
 pub(crate) const RESULT_NAMES: [&str; 40] = [
@@ -732,6 +735,8 @@ impl DlssState {
 pub(crate) const DLSSG_MODE_OFF: u32 = 0;
 /// `sl::DLSSGMode::eOn`: a fixed number of generated frames.
 pub(crate) const DLSSG_MODE_ON: u32 = 1;
+/// `sl::DLSSGFlags::eShowOnlyInterpolatedFrame` (debugging).
+pub(crate) const DLSSG_FLAG_SHOW_ONLY_INTERPOLATED: u32 = 1;
 /// `sl::DLSSGFlags::eRetainResourcesWhenOff`.
 pub(crate) const DLSSG_FLAG_RETAIN_RESOURCES_WHEN_OFF: u32 = 1 << 3;
 
@@ -974,6 +979,22 @@ mod tests {
         assert_eq!(size_of::<Resource>(), 112);
         assert_eq!(size_of::<ResourceTag>(), 64);
         assert_eq!(offset_of!(VulkanInfo, optical_flow_queue_create_flags), 92);
+    }
+
+    #[test]
+    fn hint_results_have_streamlines_names() {
+        assert_eq!(
+            RESULT_NAMES[RESULT_DRIVER_OUT_OF_DATE as usize],
+            "eErrorDriverOutOfDate"
+        );
+        assert_eq!(
+            RESULT_NAMES[RESULT_OS_OUT_OF_DATE as usize],
+            "eErrorOSOutOfDate"
+        );
+        assert_eq!(
+            RESULT_NAMES[RESULT_OS_DISABLED_HWS as usize],
+            "eErrorOSDisabledHWS"
+        );
     }
 
     #[test]

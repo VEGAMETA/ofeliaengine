@@ -10,7 +10,7 @@ Collected 2026-09-25 by `Runner info` (commit a103582, run 36193238273).
 
 | Component | Value |
 |---|---|
-| OS | Windows 11 Pro 24H2, 10.0.26100 |
+| OS | Windows 11 Pro 24H2, 10.0.26100; hardware-accelerated GPU scheduling on since 2026-10-12 (`HwSchMode = 2`, for DLSS frame generation; off before) |
 | CPU | AMD Ryzen 7 7700 (Zen 4), 8 cores / 16 threads, one CCD |
 | RAM | 64 GB, 6000 MT/s |
 | Storage | 2x Apacer AS2280Q4 1 TB NVMe SSD, WD10EZEX 1 TB SATA HDD |

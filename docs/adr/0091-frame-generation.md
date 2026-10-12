@@ -1,8 +1,7 @@
 # 0091. Frame generation: FSR 3.1 frame interpolation presented by the engine, DLSS FG through Streamline, the UI drawn on every presented frame
 
-- Status: Accepted (2026-10-12) with the results below. FSR FG measured on both GPUs; DLSS
-  FG implemented, not yet run: Windows' hardware-accelerated GPU scheduling is off on ref-1,
-  which DLSS frame generation requires (Results).
+- Status: Accepted (2026-10-12) with the results below: FSR FG measured on both GPUs, DLSS
+  FG on the RTX (after the owner turned on hardware-accelerated GPU scheduling).
 - Date: 2026-10-11
 - Builds on:
   - [ADR 0023](0023-latency.md): latency, the limiter, Reflex and Anti-Lag;
@@ -353,10 +352,31 @@ against the nearest real frame's depth (§3), which puts the column's edge half 
 off. The golden shot `sponza_fg` (TAAU at 67 %, the camera moving) renders a generated
 frame with the three kinds of UI, the same bytes on every run on both GPUs.
 
-**DLSS FG** did not run: ref-1 has hardware-accelerated GPU scheduling off
-(`HwSchMode = 1`), and Streamline 2.14.1 refuses DLSS-G (`eErrorOSDisabledHWS`). Turning it
-on is a system setting and a restart, the owner's to decide (it may also shift the perf
-gate's baselines). Until then the path is built and unit-tested, not run.
+**DLSS FG** (RTX 4060 Ti, `flight --fg dlss`, the same flight; 2026-10-12, after the owner
+turned on hardware-accelerated GPU scheduling, `HwSchMode = 2`):
+
+| cap | real/s | shown/s | shown per real frame | status |
+|---|---:|---:|---:|---|
+| none | 213.3 | 426.6 | 2.00 | ok |
+| 60 real | 60.1 | 120.1 | 2.00 | ok |
+| 120 real | 120.1 | 240.2 | 2.00 | ok |
+
+- The inputs' pass (Streamline's copies of the four images) costs 0.115 ms on the frame's
+  queue; the interpolation runs on Streamline's queues, outside the engine's timings.
+- **Two bugs found by the first run:** the frame graph culled the tagging pass (it only
+  reads; it now has side effects) and with it the UI layer's passes, so Streamline got no
+  inputs and showed one frame per real one with status "ok"; and `flight` dropped its
+  `Arc<Device>` before Streamline, whose shutdown then crashed on the destroyed device.
+- **Generated frames alone** (`eShowOnlyInterpolatedFrame`, `FLIGHT_DLSS_DEBUG=generated`,
+  the camera moving four times as far a frame) show clean edges on the scene and the
+  movers. A capture with the constants in Vulkan's clip space did not show a difference
+  either: DLSS-G leans on the motion vectors and its optical flow. The Direct3D
+  convention stays, as Streamline's headers define it.
+- **Without GPU scheduling** the option cannot run; `Streamline::frame_generation_hint`
+  gives the menu a sentence for the player (turn it on and restart; or update the driver
+  or Windows), and FSR FG stays offered. The owner saw some applications flicker or show
+  stale frames with the scheduling on (ref-1 has two GPUs), so the engine never asks for
+  it beyond that hint.
 
 **The paced presenter's deadlock** (found in `flight`, fixed before these runs): a frame's
 submission waited on the GPU for a copy count whose signal the present thread had not

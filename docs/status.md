@@ -72,7 +72,7 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 | Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
 | Global illumination (**Echo GI**, the working name; the code's `ProbeGi`): a volume of probes traced with ray queries, converged at load, then a ray budget per frame, read at a reduced resolution (Sponza at 1080p: 0.33 / 2.4 ms per frame on the RTX / iGPU); measured against AMD's Brixelizer GI, built from the SDK as the reference: 4.5 / 14 times less GPU time, 29 / 18 times less memory, a physical bounce where Brixelizer GI gives a fifth | done | ADRs 0088, 0089, 0090 |
 | Upscalers: TAAU, FSR 3.1, DLSS via Streamline (user-supplied DLLs) | done | ADRs 0060, 0063 |
-| **Frame generation**, off by default: FSR 3.1's interpolation built from the SDK and shown by the engine's paced present thread (exact spacing; 60 → 120 frames shown for +8.3 ms on the RTX), the UI handed over as a layer and drawn on every frame shown (screen, world and camera canvases, nothing to mark); DLSS FG through Streamline built, not yet run (ref-1's GPU scheduling) | done (DLSS FG to verify) | ADR 0091 |
+| **Frame generation**, off by default: FSR 3.1's interpolation built from the SDK and shown by the engine's paced present thread (exact spacing; 60 → 120 frames shown for +8.3 ms on the RTX), the UI handed over as a layer and drawn on every frame shown (screen, world and camera canvases, nothing to mark); DLSS FG through Streamline (213 → 427 shown/s uncapped on the RTX, 60 → 120 capped; needs Windows' GPU scheduling, else a hint for the player) | done | ADR 0091 |
 | Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/Catmull-Rom/Lanczos-3/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
 | Physics API on Jolt/Box2D: queries, characters, rollback | done | ADR 0066 |
@@ -84,11 +84,8 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 
 ## 4. In flight
 
-- **DLSS frame generation, to verify** (ADR 0091): built and unit-tested, never run.
-  Streamline refuses it on ref-1 (`eErrorOSDisabledHWS`): Windows' hardware-accelerated
-  GPU scheduling is off (`HwSchMode = 1`). Once the owner turns it on (a restart, and it
-  may shift the perf gate's baselines): `flight --fg dlss` on the RTX, its status, rates,
-  the clip-space convention (Direct3D's assumed) and the UI's composition.
+- Nothing. (Ref-1 runs with hardware-accelerated GPU scheduling on since 2026-10-12, for
+  DLSS frame generation.)
 
 Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:
 ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 s), 0a (the
