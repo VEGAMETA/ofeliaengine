@@ -291,6 +291,46 @@ Two facts constrain it (research note):
   - Marschner's hair, cloth's subsurface color, anisotropic GGX;
   - the models in the subsurface entry points (subsurface stays glTF's lit).
 
+### Step 4's design (the owner, 2026-10-12)
+
+- **The material file** (`*.material.ron`; the owner confirmed its shape): the type's
+  module (`shader`) and name (`type`), its `Params` fields by name (numbers, vectors
+  `(x, y, z)`, arrays `[...]`, `Texture("path", Color | Data | Normal)`), the glTF
+  `fallback`, `alpha` (`Opaque`, `Mask(cutoff)`, `Blend`) and `double_sided`. Paths are
+  relative to the file. An unset field is zero (a texture: none, white) and reported; an
+  unknown name or a value of the wrong shape is an error naming the field.
+- **Binding to meshes** (the owner's choice): `<scene>.materials.ron` next to the glTF
+  scene maps glTF material names to material files; the cook applies it, and the glTF
+  material it replaces is the fallback unless the file sets one.
+- **The layout** comes from Slang's reflection of `<type>.Params` (fields and types). Its
+  layout rules are std140 and std430, but a struct read through a pointer has Slang's
+  natural layout (`float3` then `float` in 16 bytes, `float4` aligned to 4), so the
+  offsets are the engine's, checked against compiled SPIR-V by a test.
+- **Textures** in parameters are `TextureRef` fields (`ctx.sample(p.pattern)`).
+- **Sub-steps:** 4a material files and layouts (dev path, golden shots through files);
+  4b cooking: the map, textures, pack version 5 with typed materials and precompiled
+  SPIR-V; 4c hot reload of type modules and material files; then "Compile All Shaders" and
+  PSO records where measurements call for them.
+
+### Step 4a as built (2026-10-12)
+
+- `engine_shader::Compiler::reflect_struct`: the front end only (`-skip-codegen`, 0.12 s
+  for `forward.slang` with a type against 7.1 s with code for every entry point), fields
+  from `spReflection_FindTypeByName("<type>.Params")`, natural offsets
+  (`engine_shader::reflect`). The test compiles a probe of every field kind (`float3`
+  packing, `int3`, arrays, nested structs, arrays of structs, `TextureRef`) and compares
+  every offset and the size with the SPIR-V's `Offset` and `ArrayStride` decorations.
+- `engine_assets::material_file`: `MaterialFile` (RON through `ron` 0.12 with implicit
+  `Some`), `build_params`, `MaterialMap` (the scene's map).
+- `engine_render::forward::reflect_material_params` and `material_type_options`: the one
+  place the types' compile convention lives; registering the same module and type again
+  gives the same id.
+- The golden shots' types are set by material files now
+  (`tests/golden/materials/*.material.ron`), with `ModelParams` regrouped into named
+  fields (`float3`s after scalars, not where std430 would put them): every typed shot is
+  the same bytes as before on both GPUs.
+- The built-in SPIR-V did not change (`TextureRef` and its `sample` are unused there).
+
 ## Consequences
 
 - **The built-in path stays as fast as today** (identical SPIR-V), and the register rule

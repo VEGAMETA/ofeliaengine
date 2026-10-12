@@ -1,0 +1,10 @@
+// Hair: brown, roughness 0.35, the highlights shifted by 0.05. (ADR 0092; a golden shot's material file.)
+(
+    shader: "models.slang",
+    type: "HairMaterial",
+    params: {
+        "base": (0.25, 0.12, 0.05, 1.0),
+        "roughness": 0.35,
+        "hair_shift": 0.05,
+    },
+)

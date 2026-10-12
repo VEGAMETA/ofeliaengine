@@ -28,6 +28,7 @@ the dependency.
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
 | meshopt 0.6.2 (+ bitflags 2, float-cmp 0.10, num-traits 0.2, thiserror 2 + thiserror-impl) | MIT OR Apache-2.0 (float-cmp MIT) | mesh simplification for detail levels in `engine_assets` (ADR 0053) |
+| ron 0.12.2 (+ typeid 1.0.3; bitflags, once_cell, serde, unicode-ident already in the tree) | MIT OR Apache-2.0 | material files (`*.material.ron`) in `engine_assets` (ADR 0092) |
 | zstd 0.13.3 (+ zstd-safe 7.3, zstd-sys 2.1) | MIT (zstd-safe, zstd-sys MIT OR Apache-2.0) | compression of pack entries in `engine_assets` (ADR 0056) |
 | zstd 1.5.7 (© Meta Platforms, Inc. and affiliates; vendored inside zstd-sys, built by cc) | BSD-3-Clause | the compression library behind the `zstd` crates |
 | meshoptimizer 0.25 (© Arseny Kapoulkine; vendored inside meshopt, built by cc) | MIT | the simplifier and vertex cache optimizer behind meshopt |

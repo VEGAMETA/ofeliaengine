@@ -39,6 +39,13 @@ exr = { version = "=1.74.0", default-features = false }
 png = "0.18"
 # JPEG decoding (MIT OR Apache-2.0 OR Zlib): as fast as libjpeg-turbo, pure Rust.
 zune-jpeg = { version = "0.5", default-features = false, features = ["std", "x86"] }
+# Material files (ADR 0092): RON text (MIT OR Apache-2.0), the format the owner chose,
+# through serde (already in every build through the workspace hack); not an hour's work
+# (comments, raw strings, escapes, enums, error positions).
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+# A material type's parameter layout through Slang's reflection (ADR 0092).
+engine_shader.workspace = true
 # BC1-5, BC6H and BC7 block compression (MIT): a Rust port of Intel's ISPC Texture
 # Compressor kernels, CPU only (no wgpu). ADR 0041; BC6H for HDR panoramas (ADR 0083), which
 # brings `half` (MIT OR Apache-2.0) and `zerocopy` (BSD-2-Clause OR Apache-2.0 OR MIT).

@@ -1,15 +1,21 @@
 // Material types for the shading models' golden shots (ADR 0092): one type per model, on
-// the procedural scene's bottom row of spheres. Their parameters are shared: a base color,
-// the model's color and numbers.
+// the procedural scene's bottom row of spheres, each set by a material file
+// (`<model>.material.ron`). Their parameters are shared: the base and every model's terms.
 struct ModelParams
 {
-    float4 base;      // linear base color, alpha
-    float4 color;     // the model's color: the sheen's, the toon highlight's
-    float4 rim;       // the toon rim's color, its width
+    float4 base;                // linear base color, alpha
     float roughness;
     float metallic;
-    float x;          // the coat's strength, the hair's shift, the toon's bands
-    float y;          // the coat's roughness, the sheen's roughness, the toon's softness
+    float clearcoat;            // clear coat
+    float clearcoat_roughness;
+    float3 sheen;               // cloth
+    float sheen_roughness;
+    float hair_shift;           // hair
+    float toon_steps;           // toon
+    float toon_softness;
+    float3 toon_highlight;
+    float3 rim;
+    float rim_width;
 };
 
 // What every type here reads first: the color, the interpolated normal.
@@ -63,8 +69,8 @@ struct ClearcoatMaterial : IMaterial
     static Surface surface(MaterialContext ctx, ModelParams p, bool masked)
     {
         Surface s = model_surface(ctx, p);
-        s.clearcoat = p.x;
-        s.clearcoat_roughness = p.y;
+        s.clearcoat = p.clearcoat;
+        s.clearcoat_roughness = p.clearcoat_roughness;
         return s;
     }
 }
@@ -76,8 +82,8 @@ struct ClothMaterial : IMaterial
     static Surface surface(MaterialContext ctx, ModelParams p, bool masked)
     {
         Surface s = model_surface(ctx, p);
-        s.sheen = p.color.rgb;
-        s.sheen_roughness = p.y;
+        s.sheen = p.sheen;
+        s.sheen_roughness = p.sheen_roughness;
         return s;
     }
 }
@@ -93,7 +99,7 @@ struct HairMaterial : IMaterial
         // at the poles).
         float3 down = float3(0.0, -1.0, 0.0) - s.normal * -s.normal.y;
         s.hair_tangent = dot(down, down) > 1e-6 ? normalize(down) : float3(1.0, 0.0, 0.0);
-        s.hair_shift = p.x;
+        s.hair_shift = p.hair_shift;
         return s;
     }
 }
@@ -105,11 +111,11 @@ struct ToonMaterial : IMaterial
     static Surface surface(MaterialContext ctx, ModelParams p, bool masked)
     {
         Surface s = model_surface(ctx, p);
-        s.toon_steps = p.x;
-        s.toon_softness = p.y;
-        s.toon_highlight = p.color.rgb;
-        s.rim = p.rim.rgb;
-        s.rim_width = p.rim.w;
+        s.toon_steps = p.toon_steps;
+        s.toon_softness = p.toon_softness;
+        s.toon_highlight = p.toon_highlight;
+        s.rim = p.rim;
+        s.rim_width = p.rim_width;
         return s;
     }
 }

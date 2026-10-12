@@ -147,7 +147,9 @@ mod shadow_atlas;
 
 use layout::{Changes, Layout, Source, local_box};
 pub(crate) use layout::{States, TypedPipelines, mirrored, state};
-pub use material_types::MaterialTypeDesc;
+pub use material_types::{
+    ENGINE_SHADER_DIR, MaterialTypeDesc, material_type_options, reflect_material_params,
+};
 use pipelines::{
     AoPasses, ContactState, DecalShading, GiFeatures, GiShading, ReflectShadingTable,
     ReflectionShading, Shading, ShadowedPipelines, SubsurfacePipelines, VARIANTS, lazy_statistics,
@@ -1385,7 +1387,8 @@ impl ForwardRenderer {
     /// Registers a material type (ADR 0092): materials of it
     /// ([`crate::material::MaterialTable::add_typed`]) are drawn with pipelines compiled
     /// for it, made in the background when a frame first draws it (the material's glTF
-    /// fallback draws until then). Call [`Self::update_material_types`] every frame.
+    /// fallback draws until then). Call [`Self::update_material_types`] every frame. The
+    /// same module and type registered again get the same id.
     pub fn register_material_type(&mut self, desc: MaterialTypeDesc) -> MaterialTypeId {
         self.material_types.register(desc)
     }

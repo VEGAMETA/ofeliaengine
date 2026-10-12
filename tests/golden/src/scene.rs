@@ -7,6 +7,7 @@
 use crate::decal_set::DecalSet;
 use engine_anim::{local_to_model, skinning_matrices};
 use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
+use engine_assets::material_file::{Alpha, MaterialFile};
 use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
     TextureSlot, TextureWrap, cook_scene, import_gltf, write_pack,
@@ -26,9 +27,11 @@ use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::budget::{BudgetSettings, GpuBudget};
 use engine_render::environment::{Environment, Sky};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
-use engine_render::forward::MaterialTypeDesc;
 use engine_render::forward::{
     DirectionalLight, DrawItem, LocalLight, LocalShadowSettings, ShadowSettings, Spot, ViewGi,
+};
+use engine_render::forward::{
+    ENGINE_SHADER_DIR, ForwardRenderer, MaterialTypeDesc, reflect_material_params,
 };
 use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::GpuScene;
@@ -37,7 +40,8 @@ use engine_render::graph::{
     TextureDesc, TextureState,
 };
 use engine_render::material::{
-    AlphaMode, MaterialDesc, MaterialParams, MaterialTable, Subsurface, TextureRef,
+    AlphaMode, MaterialDesc, MaterialId, MaterialParams, MaterialTable, PARAMS_BYTES, Subsurface,
+    TextureRef,
 };
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
 use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
@@ -56,6 +60,7 @@ use engine_rhi::{
     MemoryLocation, Wrap,
 };
 use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
+use engine_shader::{Compiler, SlangLibrary};
 use engine_streaming::{SceneStreamSettings, SceneStreamer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -563,46 +568,62 @@ fn procedural(subsurface: bool, glossy_floor: bool) -> Vec<(OwnedMeshData, Mater
     items
 }
 
-/// The shading models' material types in `tests/golden/materials/models.slang`, in the
-/// bottom row's order.
-const SHADING_MODEL_TYPES: [&str; 5] = [
-    "UnlitMaterial",
-    "ClearcoatMaterial",
-    "ClothMaterial",
-    "HairMaterial",
-    "ToonMaterial",
-];
+/// The shading models' material files in `tests/golden/materials`, in the bottom row's
+/// order.
+const SHADING_MODEL_FILES: [&str; 5] = ["unlit", "clearcoat", "cloth", "hair", "toon"];
 
-/// `ModelParams` (`models.slang`) of the `i`th shading model's sphere: the base color, the
-/// model's color, the rim's (and its width), roughness, metallic and the model's two
-/// numbers.
-fn shading_model_params(i: usize) -> MaterialParams {
-    let floats: [f32; 16] = match i {
-        // Unlit: a flat green.
-        0 => [
-            0.2, 0.75, 0.35, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0,
-        ],
-        // Clear coat: matte red paint under a sharp, full coat.
-        1 => [
-            0.6, 0.05, 0.05, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6, 0.0, 1.0, 0.05,
-        ],
-        // Cloth: blue fabric, a pale sheen of roughness 0.6.
-        2 => [
-            0.15, 0.2, 0.55, 1.0, 0.6, 0.6, 0.65, 1.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.6,
-        ],
-        // Hair: brown, roughness 0.35, the highlights shifted by 0.05.
-        3 => [
-            0.25, 0.12, 0.05, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.35, 0.0, 0.05, 0.0,
-        ],
-        // Toon: orange in two lit bands, a white highlight, a blue rim.
-        _ => [
-            0.95, 0.55, 0.2, 1.0, 0.9, 0.9, 0.9, 1.0, 0.25, 0.35, 0.6, 0.25, 0.3, 0.0, 2.0, 0.02,
-        ],
+/// A material from a material file (ADR 0092): its type registered with the forward
+/// renderer, its parameters laid out by the type's reflection, `fallback` its glTF look
+/// unless the file sets one (the golden scenes' files have no textures).
+fn material_from_file(
+    forward: &mut ForwardRenderer,
+    compiler: &mut Compiler,
+    materials: &mut MaterialTable,
+    path: &Path,
+    fallback: MaterialDesc,
+) -> MaterialId {
+    let file = MaterialFile::load(path).unwrap_or_else(|e| panic!("{e}"));
+    let desc = MaterialTypeDesc {
+        name: file.type_name.clone(),
+        module: file.shader.clone(),
+        type_name: file.type_name.clone(),
     };
-    MaterialParams {
-        bytes: floats.iter().flat_map(|f| f.to_le_bytes()).collect(),
-        textures: Vec::new(),
-    }
+    let layout = reflect_material_params(compiler, Path::new(ENGINE_SHADER_DIR), &desc)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    let built = file
+        .build_params(&layout)
+        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+    assert!(built.textures.is_empty(), "{}: textures", path.display());
+    assert!(
+        built.bytes.len() <= PARAMS_BYTES,
+        "{}: parameters",
+        path.display()
+    );
+    let mut desc_fallback = match file.fallback {
+        Some(f) => MaterialDesc {
+            base_color: f.base_color,
+            metallic: f.metallic,
+            roughness: f.roughness,
+            emissive: f.emissive,
+            ..fallback
+        },
+        None => fallback,
+    };
+    desc_fallback.alpha = match file.alpha {
+        Alpha::Opaque => AlphaMode::Opaque,
+        Alpha::Mask(cutoff) => AlphaMode::Mask { cutoff },
+        Alpha::Blend => AlphaMode::Blend,
+    };
+    desc_fallback.double_sided = file.double_sided;
+    let ty = forward.register_material_type(desc);
+    materials.add_typed(
+        ty,
+        desc_fallback,
+        Some(MaterialParams {
+            bytes: built.bytes,
+            textures: Vec::new(),
+        }),
+    )
 }
 
 /// Lights for the procedural scene: a warm point light and a cold spot light.
@@ -1512,61 +1533,33 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             grow(world, mesh.min, mesh.max);
         }
     }
-    // The floor (the first procedural item) as a material type (ADR 0092).
-    let stripes = (shot.stripes_floor && !loaded.procedural.is_empty()).then(|| {
-        frame
-            .forward_mut()
-            .register_material_type(MaterialTypeDesc {
-                name: String::from("stripes"),
-                module: Path::new(env!("CARGO_MANIFEST_DIR")).join("materials/stripes.slang"),
-                type_name: String::from("StripesMaterial"),
-            })
+    // Material types (ADR 0092) from material files: the floor (the first procedural item)
+    // as a checker, the bottom row of spheres (items 3, 5, ..., 11) as the shading models.
+    let stripes = shot.stripes_floor && !loaded.procedural.is_empty();
+    let models = shot.shading_models && loaded.procedural.len() > 11;
+    let mut compiler = (stripes || models).then(|| {
+        let library = SlangLibrary::load().expect("Slang for material files");
+        Compiler::new(library).expect("Slang session")
     });
-    // The bottom row of spheres (items 3, 5, ..., 11) as the shading models' types.
-    let models = (shot.shading_models && loaded.procedural.len() > 11).then(|| {
-        let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("materials/models.slang");
-        SHADING_MODEL_TYPES.map(|type_name| {
-            frame
-                .forward_mut()
-                .register_material_type(MaterialTypeDesc {
-                    name: String::from(type_name),
-                    module: module.clone(),
-                    type_name: String::from(type_name),
-                })
-        })
-    });
+    let files = Path::new(env!("CARGO_MANIFEST_DIR")).join("materials");
     for (k, (mesh, material, world)) in loaded.procedural.iter().enumerate() {
         let id = geometry.add_mesh(&mesh.as_data()).expect("mesh");
-        // The bottom row's sphere `i` (left to right) as the `i`th model's type.
-        let model = models
-            .filter(|_| (3..=11).contains(&k) && k % 2 == 1)
-            .map(|types| ((k - 3) / 2, types[(k - 3) / 2]));
-        if let Some((i, ty)) = model {
-            draws.push(DrawItem {
-                mesh: id,
-                material: materials.add_typed(ty, *material, Some(shading_model_params(i))),
-                world_from_object: *world,
-            });
-            grow(*world, [-0.5; 3], [0.5; 3]);
-            continue;
-        }
-        let material = match stripes.filter(|_| k == 0) {
-            Some(ty) => {
-                // `StripesParams`: two colors, the frequency, roughness, metallic, padding.
-                let floats: [f32; 12] = [
-                    0.85, 0.82, 0.75, 1.0, 0.12, 0.16, 0.3, 1.0, 1.0, 0.55, 0.0, 0.0,
-                ];
-                let bytes = floats.iter().flat_map(|f| f.to_le_bytes()).collect();
-                materials.add_typed(
-                    ty,
-                    *material,
-                    Some(MaterialParams {
-                        bytes,
-                        textures: Vec::new(),
-                    }),
-                )
-            }
-            None => materials.add(*material),
+        let file = if stripes && k == 0 {
+            Some(String::from("stripes"))
+        } else if models && (3..=11).contains(&k) && k % 2 == 1 {
+            Some(String::from(SHADING_MODEL_FILES[(k - 3) / 2]))
+        } else {
+            None
+        };
+        let material = match (file, compiler.as_mut()) {
+            (Some(name), Some(compiler)) => material_from_file(
+                frame.forward_mut(),
+                compiler,
+                &mut materials,
+                &files.join(format!("{name}.material.ron")),
+                *material,
+            ),
+            _ => materials.add(*material),
         };
         draws.push(DrawItem {
             mesh: id,
@@ -1824,7 +1817,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             && (brixelizer.is_none() || brixelizer_frames >= warmup);
         // With a material type: once its pipelines are made (the frames before drew its
         // fallback), or at once for its first sight.
-        let types_ready = (stripes.is_none() && models.is_none())
+        let types_ready = (!stripes && !models)
             || shot.material_first_sight
             || frame.forward().material_types_pending() == 0;
         let capture = !uploading
@@ -2368,7 +2361,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         // next one, so every run draws the same frames with them (the first with their
         // fallbacks) however long the compiles take, and temporal effects (screen-space
         // reflections' noise and history) see the same sequence.
-        if (stripes.is_some() || models.is_some()) && !shot.material_first_sight {
+        if (stripes || models) && !shot.material_first_sight {
             assert!(
                 frame
                     .forward_mut()

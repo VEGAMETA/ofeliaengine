@@ -230,10 +230,13 @@ dependencies = [
  "engine_ecs",
  "engine_platform",
  "engine_profiler",
+ "engine_shader",
  "exr",
  "gltf",
  "meshopt",
  "png",
+ "ron",
+ "serde",
  "zstd",
  "zune-jpeg",
 ]
@@ -403,6 +406,7 @@ dependencies = [
  "engine_render2d",
  "engine_rhi",
  "engine_runtime",
+ "engine_shader",
  "engine_streaming",
  "png",
 ]
@@ -1455,6 +1459,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
+name = "ron"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81116b9531d61eabc41aeb228e4b6b2435bcca3233b98cf3b3077d4e6e9debb3"
+dependencies = [
+ "bitflags",
+ "once_cell",
+ "serde",
+ "serde_derive",
+ "typeid",
+ "unicode-ident",
+]
+
+[[package]]
 name = "rustc-hash"
 version = "2.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1734,6 +1752,12 @@ dependencies = [
  "cc",
  "windows-targets",
 ]
+
+[[package]]
+name = "typeid"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc7d623258602320d5c55d1bc22793b57daff0ec7efc270ea7d55ce1d5f5471c"
 
 [[package]]
 name = "uds"
