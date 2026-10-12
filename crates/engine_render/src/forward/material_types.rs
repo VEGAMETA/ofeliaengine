@@ -21,7 +21,8 @@ use std::collections::HashMap;
 use std::ffi::CString;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
+use std::time::{Duration, Instant};
 
 /// A material type: a Slang module defining a type that implements `IMaterial`
 /// (`forward.slang`), and the type's name.
@@ -275,28 +276,38 @@ impl MaterialTypes {
             self.waiting += 1;
             changed = true;
         }
-        if let Some(compiler) = &self.compiler {
-            while let Ok(done) = compiler.done.try_recv() {
-                self.compiling = self.compiling.saturating_sub(1);
-                changed = true;
-                let Some(entry) = self.types.get_mut(usize::from(done.ty.0) - 1) else {
-                    continue;
-                };
-                let state = match done.spirv {
-                    Ok(spirv) => Spirv::Ready(spirv),
-                    Err(e) => {
-                        log::error!(
-                            "material type {}: {} did not compile: {e}",
-                            entry.desc.name,
-                            done.entry.to_string_lossy()
-                        );
-                        Spirv::Failed
-                    }
-                };
-                entry.spirv.insert(done.entry, state);
-            }
+        while let Some(done) = self.compiler.as_ref().and_then(|c| c.done.try_recv().ok()) {
+            self.accept(done);
+            changed = true;
         }
-        if !changed || self.waiting == 0 {
+        if changed {
+            self.describe(device);
+        }
+    }
+
+    /// A compiled entry point (or its error) from the compiler thread.
+    fn accept(&mut self, done: Done) {
+        self.compiling = self.compiling.saturating_sub(1);
+        let Some(entry) = self.types.get_mut(usize::from(done.ty.0) - 1) else {
+            return;
+        };
+        let state = match done.spirv {
+            Ok(spirv) => Spirv::Ready(spirv),
+            Err(e) => {
+                log::error!(
+                    "material type {}: {} did not compile: {e}",
+                    entry.desc.name,
+                    done.entry.to_string_lossy()
+                );
+                Spirv::Failed
+            }
+        };
+        entry.spirv.insert(done.entry, state);
+    }
+
+    /// Describes the pipelines whose SPIR-V arrived for the warm-up thread.
+    fn describe(&mut self, device: &Device) {
+        if self.waiting == 0 {
             return;
         }
         for entry in &mut self.types {
@@ -323,6 +334,39 @@ impl MaterialTypes {
                 };
                 *derived = next;
                 self.waiting -= 1;
+            }
+        }
+    }
+
+    /// Blocks until [`Self::pending`] is 0, or `timeout` passes (then `false`): on the
+    /// compiler's results, then on the warm-up thread. For tests and tools.
+    pub(crate) fn wait(&mut self, device: &Device, timeout: Duration) -> bool {
+        let deadline = Instant::now() + timeout;
+        loop {
+            self.update(device);
+            if self.pending() == 0 {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            if self.compiling > 0 {
+                let received = match &self.compiler {
+                    Some(compiler) => compiler.done.recv_timeout(left),
+                    None => Err(RecvTimeoutError::Disconnected),
+                };
+                match received {
+                    Ok(done) => {
+                        self.accept(done);
+                        self.describe(device);
+                    }
+                    Err(RecvTimeoutError::Timeout) => return false,
+                    // The compiler thread is gone: nothing more will arrive.
+                    Err(RecvTimeoutError::Disconnected) => return false,
+                }
+            } else {
+                device.wait_for_pipeline_warm_up();
             }
         }
     }

@@ -1937,6 +1937,7 @@ struct CheckerParams { float4 color_a; float4 color_b; float frequency; float ro
 struct CheckerMaterial : IMaterial
 {
     typealias Params = CheckerParams;
+    static uint model() { return MODEL_LIT; }
     static CheckerParams load(MaterialContext ctx) { return material_params<CheckerParams>(ctx); }
     static Surface surface(MaterialContext ctx, CheckerParams p, bool masked)
     {
@@ -1947,7 +1948,7 @@ struct CheckerMaterial : IMaterial
         s.metallic = p.metallic;
         s.roughness = p.roughness;
         s.subsurface = 0;
-        return s;
+        return surface_terms(s);  // the other models' terms, unused here
     }
     static float occlusion(MaterialContext ctx, CheckerParams p) { return 1.0; }
     static float3 emission(MaterialContext ctx, CheckerParams p) { return 0.0; }
@@ -1981,3 +1982,71 @@ let floor = materials.add_typed(checker, MaterialDesc::solid([0.5; 3], 0.0, 0.6)
   vertex offsets; shipped games will get precompiled shaders with the material files
   (ADR 0092's later steps). Material types need 64-bit shader integers (every GPU of the
   reference tier has them).
+
+### Shading models
+
+A type also picks how the engine lights it: `model()` returns one of the shading models,
+and the passes compiled for the type contain that model's code only. `surface_terms(s)`
+sets the terms of the other models to nothing; a model's own terms are set after it.
+
+| `model()` | Looks like | Its `Surface` terms |
+|---|---|---|
+| `MODEL_LIT` | glTF's metal and plastic (the default) | none |
+| `MODEL_UNLIT` | the base color and the emission, as they are: UI in the world, holograms, baked looks | none |
+| `MODEL_CLEARCOAT` | car paint, varnished wood, coated plastic: a sharp coat over the base | `clearcoat` (0 … 1), `clearcoat_roughness` |
+| `MODEL_CLOTH` | velvet, cotton, felt: a soft sheen towards the silhouette, no plastic highlight | `sheen` (color), `sheen_roughness` |
+| `MODEL_HAIR` | hair and fur cards: highlights stretched across the strands | `hair_tangent` (along the strands, world space), `hair_shift` |
+| `MODEL_TOON` | cel shading: bands of light, a flat highlight, a rim | `toon_steps`, `toon_softness`, `toon_highlight`, `rim`, `rim_width` |
+
+```slang
+struct VelvetMaterial : IMaterial
+{
+    // ... as above, with:
+    static uint model() { return MODEL_CLOTH; }
+    static Surface surface(MaterialContext ctx, VelvetParams p, bool masked)
+    {
+        Surface s;
+        s.base = p.color;
+        s.normal = normalize(ctx.normal * ctx.side);
+        s.metallic = 0.0;
+        s.roughness = 1.0;
+        s.subsurface = 0;
+        s = surface_terms(s);
+        s.sheen = p.sheen_color;  // a pale tint of the base color looks like velvet
+        s.sheen_roughness = 0.6;
+        return s;
+    }
+}
+```
+
+- **Clear coat:** the coat is smooth over the base's normal map (it uses the interpolated
+  normal), reflects 4 % head on (IOR 1.5), and its reflection is the one that shows
+  probes and screen-space reflections. The base under it is at least as rough as the coat
+  and reflects a little less (its reflectance against the coat instead of air).
+- **Cloth:** Lambert's diffuse and a sheen lobe (Charlie distribution, Neubelt
+  visibility); no metal, no GGX highlight. The sky's sheen light uses a fit of the lobe's
+  albedo.
+- **Hair:** two highlights along the strands (Kajiya-Kay, as in Scheuermann's hair
+  shading): a white one off the strands' surface, shifted along the normal by
+  `hair_shift`, and a wider one in the hair's color 0.1 lower. `roughness` sets their
+  width. The tangent is the strands' direction: from the mesh's tangents
+  (`ctx.tangent.xyz`) or from a flow map.
+- **Toon:** `toon_steps` bands of light above the shadow (1: lit or not), each edge
+  `toon_softness` wide in n·l; a flat highlight of `toon_highlight` where GGX would be
+  above half its peak (its size from `roughness`); a rim of `rim` where n·v is below
+  `rim_width`. Sky light stays the engine's.
+- **Unlit:** no light and no shadows: the color is written as it is (fog, the exposure
+  and the tone curve still apply).
+
+What each costs, as registers on the Radeon iGPU (the pass with no extra features / with
+local lights / with sky light / with both; `material_registers` example, ADR 0092):
+
+| | VGPRs |
+|---|---|
+| glTF (textured) | 48 / 64 / 64 / 80 |
+| a lit type without textures | 34 / 60 / 61 / 85 |
+| unlit | 5 / 5 / 5 / 5 |
+| clear coat | 40 / 67 / 63 / 78 |
+| cloth | 36 / 50 / 55 / 69 |
+| hair | 40 / 69 / 54 / 74 |
+| toon | 47 / 62 / 63 / 81 |

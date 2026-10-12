@@ -1415,6 +1415,33 @@ impl ForwardRenderer {
         self.material_types.pending()
     }
 
+    /// Blocks until the material types' pipelines asked for so far are made, or `timeout`
+    /// passes (then `false`). For tests and tools: a frame never waits (ADR 0092).
+    pub fn wait_for_material_types(
+        &mut self,
+        device: &Device,
+        timeout: std::time::Duration,
+    ) -> bool {
+        self.material_types.wait(device, timeout)
+    }
+
+    /// The driver's statistics of material type `ty`'s shading (ADR 0092), per shading
+    /// variant as [`Self::shading_statistics`]; empty until its pipelines exist. Asks for
+    /// them: [`Self::update_material_types`] makes them (tools wait for
+    /// [`Self::material_types_pending`] to reach 0, then ask again).
+    pub fn material_type_statistics(
+        &self,
+        device: &Device,
+        ty: MaterialTypeId,
+    ) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
+        core::array::from_fn(|k| {
+            self.material_types
+                .resolve(ty, &self.shading[k].main[0])
+                .map(|p| p.statistics(device))
+                .unwrap_or_default()
+        })
+    }
+
     /// Each typed range's pipelines for a pass whose engine pipelines are `roles`
     /// (`[opaque, masked]`), among the states `mask` draws.
     pub(crate) fn typed_pipelines<'a>(

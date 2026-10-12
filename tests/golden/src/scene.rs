@@ -221,6 +221,11 @@ pub struct Shot {
     /// With `stripes_floor`: the capture is the first frame, drawn before the type's
     /// pipelines exist (with its fallback).
     pub material_first_sight: bool,
+    /// The procedural scene's bottom row of spheres as material types of the shading
+    /// models (ADR 0092), left to right unlit, clear coat, cloth, hair and toon, from
+    /// `tests/golden/materials/models.slang`; the top row stays glTF's (lit). Captured
+    /// once the types' pipelines are made.
+    pub shading_models: bool,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -287,6 +292,7 @@ impl Shot {
             frame_generation: false,
             stripes_floor: false,
             material_first_sight: false,
+            shading_models: false,
         }
     }
 }
@@ -555,6 +561,48 @@ fn procedural(subsurface: bool, glossy_floor: bool) -> Vec<(OwnedMeshData, Mater
         ),
     ));
     items
+}
+
+/// The shading models' material types in `tests/golden/materials/models.slang`, in the
+/// bottom row's order.
+const SHADING_MODEL_TYPES: [&str; 5] = [
+    "UnlitMaterial",
+    "ClearcoatMaterial",
+    "ClothMaterial",
+    "HairMaterial",
+    "ToonMaterial",
+];
+
+/// `ModelParams` (`models.slang`) of the `i`th shading model's sphere: the base color, the
+/// model's color, the rim's (and its width), roughness, metallic and the model's two
+/// numbers.
+fn shading_model_params(i: usize) -> MaterialParams {
+    let floats: [f32; 16] = match i {
+        // Unlit: a flat green.
+        0 => [
+            0.2, 0.75, 0.35, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.0, 0.0, 0.0,
+        ],
+        // Clear coat: matte red paint under a sharp, full coat.
+        1 => [
+            0.6, 0.05, 0.05, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6, 0.0, 1.0, 0.05,
+        ],
+        // Cloth: blue fabric, a pale sheen of roughness 0.6.
+        2 => [
+            0.15, 0.2, 0.55, 1.0, 0.6, 0.6, 0.65, 1.0, 0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.0, 0.6,
+        ],
+        // Hair: brown, roughness 0.35, the highlights shifted by 0.05.
+        3 => [
+            0.25, 0.12, 0.05, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.35, 0.0, 0.05, 0.0,
+        ],
+        // Toon: orange in two lit bands, a white highlight, a blue rim.
+        _ => [
+            0.95, 0.55, 0.2, 1.0, 0.9, 0.9, 0.9, 1.0, 0.25, 0.35, 0.6, 0.25, 0.3, 0.0, 2.0, 0.02,
+        ],
+    };
+    MaterialParams {
+        bytes: floats.iter().flat_map(|f| f.to_le_bytes()).collect(),
+        textures: Vec::new(),
+    }
 }
 
 /// Lights for the procedural scene: a warm point light and a cold spot light.
@@ -1474,8 +1522,34 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 type_name: String::from("StripesMaterial"),
             })
     });
+    // The bottom row of spheres (items 3, 5, ..., 11) as the shading models' types.
+    let models = (shot.shading_models && loaded.procedural.len() > 11).then(|| {
+        let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("materials/models.slang");
+        SHADING_MODEL_TYPES.map(|type_name| {
+            frame
+                .forward_mut()
+                .register_material_type(MaterialTypeDesc {
+                    name: String::from(type_name),
+                    module: module.clone(),
+                    type_name: String::from(type_name),
+                })
+        })
+    });
     for (k, (mesh, material, world)) in loaded.procedural.iter().enumerate() {
         let id = geometry.add_mesh(&mesh.as_data()).expect("mesh");
+        // The bottom row's sphere `i` (left to right) as the `i`th model's type.
+        let model = models
+            .filter(|_| (3..=11).contains(&k) && k % 2 == 1)
+            .map(|types| ((k - 3) / 2, types[(k - 3) / 2]));
+        if let Some((i, ty)) = model {
+            draws.push(DrawItem {
+                mesh: id,
+                material: materials.add_typed(ty, *material, Some(shading_model_params(i))),
+                world_from_object: *world,
+            });
+            grow(*world, [-0.5; 3], [0.5; 3]);
+            continue;
+        }
         let material = match stripes.filter(|_| k == 0) {
             Some(ty) => {
                 // `StripesParams`: two colors, the frequency, roughness, metallic, padding.
@@ -1750,7 +1824,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             && (brixelizer.is_none() || brixelizer_frames >= warmup);
         // With a material type: once its pipelines are made (the frames before drew its
         // fallback), or at once for its first sight.
-        let types_ready = stripes.is_none()
+        let types_ready = (stripes.is_none() && models.is_none())
             || shot.material_first_sight
             || frame.forward().material_types_pending() == 0;
         let capture = !uploading
@@ -2289,6 +2363,18 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             for time in graph.gpu_pass_times() {
                 *startup_us.entry(time.name).or_default() += f64::from(time.gpu_us);
             }
+        }
+        // Material types (ADR 0092): the pipelines a frame asked for are made before the
+        // next one, so every run draws the same frames with them (the first with their
+        // fallbacks) however long the compiles take, and temporal effects (screen-space
+        // reflections' noise and history) see the same sequence.
+        if (stripes.is_some() || models.is_some()) && !shot.material_first_sight {
+            assert!(
+                frame
+                    .forward_mut()
+                    .wait_for_material_types(&device, std::time::Duration::from_secs(120)),
+                "material types' pipelines not made in 2 minutes"
+            );
         }
         if uploading {
             continue;

@@ -111,6 +111,82 @@ What they agree on:
 No code was copied from any of these engines; Unreal and Unity were read as products and
 documentation only.
 
+## Shading models (ADR 0092 step 3, 2026-10-12)
+
+The owner asked for lit, unlit, clear coat, cloth, hair and toon in the first version.
+How others light them, and what we take:
+
+| Model | Filament | Godot 4 | Unreal / Unity (products) | Ours |
+|---|---|---|---|---|
+| Clear coat | a second GGX lobe, Kelemen visibility, Schlick at 0.04 (IOR 1.5), on the geometric normal under a normal map; the base (Fd + Fr) × (1 − Fc); in the code the base is made at least as rough as the coat ("a hack but it will do") and its f0 recomputed against the coat (a polynomial fit of the exact formula); the coat's IBL lobe × Fc's attenuation of the base | `clearcoat`: a GGX lobe on the vertex normal (normal maps ignored), Kelemen visibility, Schlick at 0.04, roughness remapped to 0.001–0.1 | Unreal "Clear Coat"; Unity HDRP "coat mask" | Filament's lobe, base roughness and base f0, the f0 by the exact formula (the IOR from f0, then Fresnel against 1.5) |
+| Cloth | Charlie distribution (Estevez and Kulla 2017; their shadowing term omitted for its cost), Neubelt visibility (Neubelt and Pettineo 2013), no Fresnel: the sheen color (default 0.04) instead; optional subsurface color (a wrapped diffuse); IBL through "a single DG term in the 3rd channel of the DFG LUT" | none (rim and "backlight" only) | Unreal "Cloth" (fuzz); Unity HDRP "Fabric" (Charlie) | Filament's lobe without the subsurface color; the sky's sheen through an analytic fit of the lobe's albedo (below), not a third LUT channel |
+| Hair | none | none | Unreal: Marschner-based; Unity HDRP: Kajiya-Kay or Marschner | Kajiya-Kay with Scheuermann's two shifted highlights, Fresnel-weighted, Blinn-Phong-normalized |
+| Toon | none | `diffuse_toon`: smoothstep(−roughness, roughness, n·l) / π; `specular_toon`: a smoothstep of r·v around (1 − roughness)², added to the diffuse light | Unity's toon shaders (bands, high color, rim) | bands of n·l starting at 0 (where the shadow test cuts), a flat highlight from GGX's half-peak, a rim |
+| Unlit | `unlit` model | `unshaded` | Unreal "Unlit" | the color and emission, an early return |
+
+- **Marschner's hair** (2003, as in Unreal) is the physically based alternative: three
+  lobes with azimuthal scattering, more instructions and a LUT or fits. Kajiya-Kay first;
+  Marschner when a game needs it.
+- **Wrapped diffuse for hair** was tried and dropped: the sun's shadow test cuts at
+  n·l = 0, so a wrap ends in a step there. Toon's bands start at n·l = 0 for the same
+  reason.
+- **The clear coat's reflection is the one the reflections replace** (ADR 0073): the
+  composite swaps one lobe per pixel, and the coat's sharp one is what shows on car paint.
+  The base's lobe keeps the sky.
+
+### Cloth's sheen in the sky light: a fit instead of a LUT channel
+
+Filament integrates the cloth lobe into a third channel of its DFG table. Ours is
+`rg16f`, read by every lit pixel; widening it would cost every material for one model.
+Instead the lobe's directional albedo (F = 1),
+
+E(μ, r) = ∫ D_Charlie(n·h; α) · V_Neubelt(μ, n·l) · n·l dω_l, α = max(r, 0.07)²,
+
+was integrated numerically (384 × 192 directions, μ in [0.005, 1] × r in [0.07, 1], 33 ×
+32 points) and fitted (Levenberg-Marquardt, 9 parameters) as
+
+E ≈ min(a(r) · exp(−b(r) · μ^c(r)), 1),
+a = 1.42617 − 1.68309 r + 0.78282 r², b = 0.08726 + 1.09762 / r + 0.10519 / r²,
+c = 1.78444 − 2.16779 r + 1.60655 r²,
+
+with the integral clamped at 1 (Neubelt's visibility is not energy-conserving at grazing
+angles: E reaches 1.54 there). Error over the grid: at most 0.043, root mean square 0.008.
+Two other forms (a rational one, an exponential of a quadratic in μ) fitted worse (0.064,
+0.079). A sample of the integral:
+
+| r \ μ | 0.05 | 0.2 | 0.5 | 0.9 | 1.0 |
+|---|---|---|---|---|---|
+| 0.1 | 1.185 | 0.234 | 0.001 | 0.000 | 0.000 |
+| 0.3 | 0.897 | 0.516 | 0.137 | 0.008 | 0.001 |
+| 0.6 | 0.629 | 0.470 | 0.252 | 0.086 | 0.056 |
+| 1.0 | 0.514 | 0.422 | 0.287 | 0.168 | 0.142 |
+
+The first version scaled the sky's GGX DFG by the sheen color: about 0.6 at every angle for
+the test's sheen, washing the whole sphere white instead of brightening its silhouette.
+
+### Sources (shading models)
+
+- Filament, "Physically Based Rendering in Filament" (google.github.io/filament/Filament.md.html,
+  read 2026-10-12): clear coat, cloth and cloth IBL sections; its shaders at main 764fe6c
+  (`shaders/src/surface_shading_lit.fs`, `surface_shading_model_standard.fs`,
+  `surface_light_indirect.fs`, `surface_material.fs`), read 2026-10-12. Apache 2.0;
+  formulas re-derived, no code copied.
+- A. Estevez, C. Kulla, "Production Friendly Microfacet Sheen BRDF", Sony Pictures
+  Imageworks, 2017.
+- D. Neubelt, M. Pettineo, "Crafting a Next-Gen Material Pipeline for The Order: 1886",
+  SIGGRAPH 2013 course.
+- C. Kelemen, L. Szirmay-Kalos, "A Microfacet Based Coupled Specular-Matte BRDF Model with
+  Importance Sampling", Eurographics 2001.
+- J. Kajiya, T. Kay, "Rendering Fur with Three Dimensional Textures", SIGGRAPH 1989.
+- T. Scheuermann, "Hair Rendering and Shading", GDC 2004 / ShaderX3.
+- S. Marschner et al., "Light Scattering from Human Hair Fibers", SIGGRAPH 2003 (not
+  taken yet).
+- A. Lake et al., "Stylized Rendering Techniques for Scalable Real-Time 3D Animation",
+  NPAR 2000.
+- Godot, `servers/rendering/renderer_rd/shaders/scene_forward_lights_inc.glsl` at master
+  bd02272 (read 2026-10-12): clear coat and the toon modes. MIT; read for ideas, no code
+  copied.
+
 ## Sources
 
 - Filament, `libs/filabridge/include/private/filament/Variant.h` (main, read 2026-10-12),

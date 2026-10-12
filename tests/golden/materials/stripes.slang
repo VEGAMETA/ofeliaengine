@@ -14,6 +14,11 @@ struct StripesMaterial : IMaterial
 {
     typealias Params = StripesParams;
 
+    static uint model()
+    {
+        return MODEL_LIT;
+    }
+
     static StripesParams load(MaterialContext ctx)
     {
         return material_params<StripesParams>(ctx);
@@ -29,7 +34,7 @@ struct StripesMaterial : IMaterial
         s.metallic = p.metallic;
         s.roughness = p.roughness;
         s.subsurface = 0;
-        return s;
+        return surface_terms(s);
     }
 
     static float occlusion(MaterialContext ctx, StripesParams p) { return 1.0; }
