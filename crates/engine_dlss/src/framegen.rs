@@ -114,6 +114,9 @@ pub struct DlssFrameGeneration {
     functions: FrameGenerationFunctions,
     viewport: u32,
     on: bool,
+    /// Tests: show only the generated frames, and the constants in Vulkan's clip space.
+    only_generated: bool,
+    vulkan_clip: bool,
 }
 
 impl core::fmt::Debug for DlssFrameGeneration {
@@ -138,6 +141,8 @@ impl DlssFrameGeneration {
             functions,
             viewport: NEXT_VIEWPORT.fetch_add(1, Ordering::Relaxed),
             on: false,
+            only_generated: false,
+            vulkan_clip: false,
         })
     }
 
@@ -153,7 +158,12 @@ impl DlssFrameGeneration {
             sl::DLSSG_MODE_OFF
         };
         options.num_frames_to_generate = 1;
-        options.flags = sl::DLSSG_FLAG_RETAIN_RESOURCES_WHEN_OFF;
+        options.flags = sl::DLSSG_FLAG_RETAIN_RESOURCES_WHEN_OFF
+            | if self.only_generated {
+                sl::DLSSG_FLAG_SHOW_ONLY_INTERPOLATED
+            } else {
+                0
+            };
         // The UI is interpolated apart from the scene and composited over it (DLSS-FG
         // guide §6.6): the HUD stays sharp, UI placed in the world moves with it.
         options.enable_user_interface_recomposition = sl::TRUE;
@@ -168,6 +178,14 @@ impl DlssFrameGeneration {
         }
         self.on = on;
         Ok(())
+    }
+
+    #[doc(hidden)]
+    /// Tests: show only the generated frames (from the next [`Self::set_enabled`]), and
+    /// give the constants in the engine's (Vulkan's) clip space instead of Direct3D's.
+    pub fn set_debug(&mut self, only_generated: bool, vulkan_clip: bool) {
+        self.only_generated = only_generated;
+        self.vulkan_clip = vulkan_clip;
     }
 
     /// Whether frame generation is on ([`Self::set_enabled`]).
@@ -208,13 +226,16 @@ impl DlssFrameGeneration {
         let velocity_desc = fg.texture_desc(input.velocity);
         let hudless_desc = fg.texture_desc(input.hudless);
         let ui_desc = input.ui.map(|ui| fg.texture_desc(ui));
-        let constants = constants(&input.camera, input.jitter, input.reset);
+        let constants = constants(&input.camera, input.jitter, input.reset, self.vulkan_clip);
         let (get_new_frame_token, set_constants, set_tag_for_frame, _) =
             self.streamline.core_functions();
         let viewport = self.viewport;
         let stage = Access::Sampled(ShaderStages::COMPUTE);
+        // Streamline copies the images outside the graph: nothing in the graph reads what
+        // this pass does, which must not be culled.
         let mut pass = fg
             .add_pass("dlss frame generation inputs")
+            .side_effects()
             .read(input.depth, stage)
             .read(input.velocity, stage)
             .read(input.hudless, stage);
@@ -358,10 +379,19 @@ impl DlssFrameGeneration {
 /// The common constants of a frame (`sl::Constants`): Streamline's matrices are row-major
 /// for row vectors (`sl_matrix_helpers.h`), view space looks down +Z, clip space has y up
 /// (Direct3D's conventions).
-fn constants(camera: &GenerationCamera, jitter: [f32; 2], reset: bool) -> sl::Constants {
+fn constants(
+    camera: &GenerationCamera,
+    jitter: [f32; 2],
+    reset: bool,
+    vulkan_clip: bool,
+) -> sl::Constants {
     // The engine's view space looks down −Z, its clip space has y down (Vulkan).
     let flip_z = Mat4::from_diagonal(engine_core::math::Vec4::new(1.0, 1.0, -1.0, 1.0));
-    let flip_y = Mat4::from_diagonal(engine_core::math::Vec4::new(1.0, -1.0, 1.0, 1.0));
+    let flip_y = if vulkan_clip {
+        Mat4::IDENTITY
+    } else {
+        Mat4::from_diagonal(engine_core::math::Vec4::new(1.0, -1.0, 1.0, 1.0))
+    };
     let clip_from_view = flip_y * camera.clip_from_view * flip_z;
     let previous_clip_from_clip = flip_y * camera.previous_clip_from_clip * flip_y;
     // Column-vector matrices: the columns of M are the rows of Mᵀ, its row-vector form.
@@ -488,7 +518,7 @@ mod tests {
             fov_y: 1.0,
             aspect: 16.0 / 9.0,
         };
-        let c = constants(&camera, [0.0; 2], false);
+        let c = constants(&camera, [0.0; 2], false, false);
         let row_mul = |v: Vec4, m: &sl::Float4x4| {
             Vec4::new(
                 v.x * m[0][0] + v.y * m[1][0] + v.z * m[2][0] + v.w * m[3][0],

@@ -60,6 +60,32 @@ pub const OUTPUT_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 /// ([`StreamlineDesc::project_id`]); games should set theirs.
 pub const ENGINE_PROJECT_ID: &str = "8f0a3c5e-6b1d-4e2f-9a7c-0d4b1e6f3a29";
 
+/// Something the player can do to make DLSS frame generation available
+/// ([`Streamline::frame_generation_hint`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrameGenerationHint {
+    /// Turn on Windows' hardware-accelerated GPU scheduling (Settings → System → Display →
+    /// Graphics → Change default graphics settings) and restart.
+    TurnOnGpuScheduling,
+    /// Install a newer NVIDIA driver.
+    UpdateDriver,
+    /// Update Windows.
+    UpdateWindows,
+}
+
+impl FrameGenerationHint {
+    /// A sentence for a settings menu (English; games translate it).
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::TurnOnGpuScheduling => {
+                "DLSS Frame Generation needs hardware-accelerated GPU scheduling: turn it on in                  Windows Settings > System > Display > Graphics, then restart."
+            }
+            Self::UpdateDriver => "DLSS Frame Generation needs a newer NVIDIA driver.",
+            Self::UpdateWindows => "DLSS Frame Generation needs a newer version of Windows.",
+        }
+    }
+}
+
 /// How much Streamline logs (through the engine's callback, [`Streamline::log`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StreamlineLog {
@@ -662,6 +688,22 @@ impl Streamline {
         match self.shared.attached.get()?.frame_generation? {
             Ok(_) => None,
             Err((call, result)) => Some(DlssError::Streamline { call, result }),
+        }
+    }
+
+    /// What a settings menu tells the player when DLSS frame generation cannot run on the
+    /// attached device and they can fix it (show the option disabled with the hint, the
+    /// engine's FSR frame generation still offered): `None` when it runs, was not loaded,
+    /// or the GPU cannot run it at all.
+    pub fn frame_generation_hint(&self) -> Option<FrameGenerationHint> {
+        let Err((_, result)) = self.shared.attached.get()?.frame_generation? else {
+            return None;
+        };
+        match result {
+            sl::RESULT_DRIVER_OUT_OF_DATE => Some(FrameGenerationHint::UpdateDriver),
+            sl::RESULT_OS_OUT_OF_DATE => Some(FrameGenerationHint::UpdateWindows),
+            sl::RESULT_OS_DISABLED_HWS => Some(FrameGenerationHint::TurnOnGpuScheduling),
+            _ => None,
         }
     }
 

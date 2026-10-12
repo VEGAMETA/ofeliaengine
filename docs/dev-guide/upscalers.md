@@ -87,8 +87,12 @@ needs the DLSS files above and, from the same folder of the same release:
 
 It also needs an RTX 40 or newer GPU and Windows' **hardware-accelerated GPU scheduling**
 (Settings → System → Display → Graphics → Change default graphics settings, then a
-restart): without it Streamline refuses frame generation (`eErrorOSDisabledHWS`) and the
-option is hidden. FSR's frame generation needs no files.
+restart): without it Streamline refuses frame generation (`eErrorOSDisabledHWS`).
+`Streamline::frame_generation_hint` then gives a sentence to show next to the disabled
+option (turn the scheduling on; or update the driver or Windows); offer FSR's frame
+generation instead, which needs neither files nor the scheduling. Do not push players to
+turn the scheduling on: some systems (two GPUs, some overlays) show flicker or stale frames
+in other applications with it.
 
 ## Where they go
 

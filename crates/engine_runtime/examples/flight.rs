@@ -791,6 +791,9 @@ mod windowed {
                     if let Some(e) = s.frame_generation_error() {
                         println!("DLSS frame generation unavailable: {e}");
                     }
+                    if let Some(hint) = s.frame_generation_hint() {
+                        println!("{}", hint.text());
+                    }
                     s.frame_generation_supported()
                 });
                 device.set_pipeline_warm_up(warm_up);
@@ -1283,6 +1286,11 @@ mod windowed {
         // real frames (ADR 0091 §6).
         let dlss_generation = streamline.as_ref().map(|s| {
             let mut generation = DlssFrameGeneration::new(s).unwrap();
+            // Debugging: `FLIGHT_DLSS_DEBUG=generated[,vulkan]` shows only the generated
+            // frames, with the constants in Vulkan's clip space.
+            if let Ok(debug) = std::env::var("FLIGHT_DLSS_DEBUG") {
+                generation.set_debug(debug.contains("generated"), debug.contains("vulkan"));
+            }
             generation.set_enabled(true).unwrap();
             generation
         });
@@ -2018,6 +2026,11 @@ mod windowed {
         drop(allocator);
         drop(swapchain);
         drop(surface);
+        // Streamline before the device it is attached to (its shutdown releases what it
+        // made on it): the `Arc<Device>` above would otherwise go first.
+        drop(latency);
+        drop(dlss_generation);
+        drop(streamline);
         windows.destroy_window(window.id).unwrap();
     }
 }
