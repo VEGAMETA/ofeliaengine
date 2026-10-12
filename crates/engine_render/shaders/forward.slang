@@ -845,11 +845,159 @@ float4 sample_material(uint packed, float2 uv)
     return t.Sample(s, uv);
 }
 
+// Materials (ADR 0092): a material is a type implementing `IMaterial`. It turns what the
+// pass interpolated into a `Surface`; the engine lights the surface. The passes are generic
+// over the material, so Slang emits one entry point per material type drawn and a material
+// pays only for its own code (the built-in glTF material through the interface compiles
+// to the same SPIR-V as written out).
+
+// What a material reads: the interpolants of the fragment and its slot in the material
+// table. Textures are sampled through `sample`, which uses the fragment's implicit
+// derivatives here (a compute material pass would give analytic ones, ADR 0092).
+struct MaterialContext
+{
+    float2 uv;
+    float3 world_position;
+    float3 normal;   // interpolated, not normalized
+    float4 tangent;  // xyz interpolated; w the bitangent's sign
+    float side;      // 1 for a front face, -1 for a back face (double-sided materials)
+    uint material;   // the slot in the material table
+
+    // A bindless texture reference of the material table (index and sampler bits), white
+    // when there is none.
+    float4 sample(uint packed)
+    {
+        return sample_material(packed, uv);
+    }
+}
+
+MaterialContext material_context(VertexOut input, bool front)
+{
+    MaterialContext ctx;
+    ctx.uv = input.uv;
+    ctx.world_position = input.world_position;
+    ctx.normal = input.normal;
+    ctx.tangent = input.tangent;
+    ctx.side = front ? 1.0 : -1.0;
+    ctx.material = input.material;
+    return ctx;
+}
+
+// The masked depth and shadow passes: only the coverage.
+MaterialContext coverage_context(float2 uv, uint material)
+{
+    MaterialContext ctx;
+    ctx.uv = uv;
+    ctx.world_position = 0.0;
+    ctx.normal = float3(0.0, 0.0, 1.0);
+    ctx.tangent = float4(1.0, 0.0, 0.0, 1.0);
+    ctx.side = 1.0;
+    ctx.material = material;
+    return ctx;
+}
+
+// What a material gives the lighting. Its ambient occlusion and emission come from their
+// own functions, which the lighting calls where it needs them: sampled earlier, their values
+// stay live through the lighting's start and cost registers (on RDNA2 up to 10 VGPRs in
+// some variants, measured).
+struct Surface
+{
+    float4 base;        // linear base color and alpha (coverage)
+    float3 normal;      // shading normal, unit, on the fragment's side
+    float metallic;
+    float roughness;    // perceptual, before the specular antialiasing widens it
+    uint subsurface;    // subsurface scattering's bits (ADR 0059): profile, mask, transmission
+};
+
+interface IMaterial
+{
+    // The material's parameters (its slot of the material table), loaded once per fragment
+    // by `load` and handed to the other functions.
+    associatedtype Params;
+    static Params load(MaterialContext ctx);
+    // The surface; with `masked`, fragments below the alpha cutoff are discarded.
+    static Surface surface(MaterialContext ctx, Params p, bool masked);
+    // The material's own ambient occlusion (1: none).
+    static float occlusion(MaterialContext ctx, Params p);
+    // Emitted radiance.
+    static float3 emission(MaterialContext ctx, Params p);
+    // The alpha the masked passes test, and its cutoff.
+    static float alpha(MaterialContext ctx, Params p);
+    static float alpha_cutoff(Params p);
+    // The thickness light passes through (subsurface transmission), sampled only where
+    // light comes from behind.
+    static float thickness(MaterialContext ctx, Params p);
+}
+
+// glTF 2.0's metallic-roughness material (ADR 0040), with subsurface scattering (ADR 0059):
+// the importer's and the default.
+struct GltfMaterial : IMaterial
+{
+    typealias Params = Material;
+
+    static Material load(MaterialContext ctx)
+    {
+        return read_material(ctx.material);
+    }
+
+    static Surface surface(MaterialContext ctx, Material m, bool masked)
+    {
+        Surface s;
+        s.base = ctx.sample(m.base_color_texture) * m.base_color;
+        if (masked && s.base.a < m.alpha_cutoff)
+            discard;
+        float3 geometric = ctx.normal * ctx.side;
+        s.normal = normalize(geometric);
+        if (m.normal_texture != NO_TEXTURE)
+        {
+            // MikkTSpace: the per-pixel bitangent from the interpolated (not renormalized)
+            // normal and tangent, then the normal map's vector in that frame.
+            float3 t = ctx.tangent.xyz * ctx.side;
+            float3 b = ctx.tangent.w * cross(ctx.normal, ctx.tangent.xyz) * ctx.side;
+            float2 xy = ctx.sample(m.normal_texture).xy * 2.0 - 1.0;
+            float z = sqrt(saturate(1.0 - dot(xy, xy)));
+            xy *= m.normal_scale;
+            s.normal = normalize(xy.x * t + xy.y * b + z * geometric);
+        }
+        float4 mr = ctx.sample(m.metallic_roughness_texture);
+        s.metallic = saturate(mr.b * m.metallic);
+        s.roughness = saturate(mr.g * m.roughness);
+        s.subsurface = m.subsurface;
+        return s;
+    }
+
+    static float occlusion(MaterialContext ctx, Material m)
+    {
+        return 1.0 + m.occlusion_strength * (ctx.sample(m.occlusion_texture).r - 1.0);
+    }
+
+    static float3 emission(MaterialContext ctx, Material m)
+    {
+        return ctx.sample(m.emissive_texture).rgb * m.emissive;
+    }
+
+    static float alpha(MaterialContext ctx, Material m)
+    {
+        return ctx.sample(m.base_color_texture).a * m.base_color.a;
+    }
+
+    static float alpha_cutoff(Material m)
+    {
+        return m.alpha_cutoff;
+    }
+
+    static float thickness(MaterialContext ctx, Material m)
+    {
+        return m.thickness * ctx.sample(m.thickness_texture).g;
+    }
+}
+
 [shader("fragment")]
 void shadowFragmentMasked(ShadowOut input)
 {
-    Material m = read_material(input.material);
-    if (sample_material(m.base_color_texture, input.uv).a * m.base_color.a < m.alpha_cutoff)
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    GltfMaterial.Params p = GltfMaterial::load(ctx);
+    if (GltfMaterial::alpha(ctx, p) < GltfMaterial::alpha_cutoff(p))
         discard;
 }
 
@@ -861,9 +1009,10 @@ void shadowFragmentMasked(ShadowOut input)
 [shader("fragment")]
 float4 prepassCoverage(ShadowOut input) : SV_Target0
 {
-    Material m = read_material(input.material);
-    float alpha = sample_material(m.base_color_texture, input.uv).a * m.base_color.a;
-    alpha = (alpha - m.alpha_cutoff) / max(fwidth(alpha), 1e-4) + 0.5;
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    GltfMaterial.Params p = GltfMaterial::load(ctx);
+    float alpha = GltfMaterial::alpha(ctx, p);
+    alpha = (alpha - GltfMaterial::alpha_cutoff(p)) / max(fwidth(alpha), 1e-4) + 0.5;
     return float4(0.0, 0.0, 0.0, alpha);
 }
 
@@ -1365,7 +1514,7 @@ float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = f
 {
     SubsurfaceOut unused;
     ReflectOut unused_reflect;
-    return shade_surface(input, front, masked, ao, false, unused, unused_reflect, shadows, contact, false, decals, gi);
+    return shade_surface<GltfMaterial>(input, front, masked, ao, false, unused, unused_reflect, shadows, contact, false, decals, gi);
 }
 
 // What the reflection entry points write besides the color (ADR 0073).
@@ -1412,44 +1561,31 @@ void apply_decals(Frame frame, uint2 pixel, inout float3 albedo, inout float3 n,
 // instead of the color. Subsurface materials' pipelines always take `ao` (they are their
 // own; without ambient occlusion `push.ao` skips the read). `decals` blends the decal
 // buffer in (ADR 0082).
-float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false, bool gi = false)
+float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false, bool gi = false)
 {
     Frame frame = loadAligned<16>(push.frame);
-    Material m = read_material(input.material);
     // The back of a double-sided surface is lit from its own side: the whole tangent
     // frame flips (as in Khronos' glTF sample viewer).
-    float side = front ? 1.0 : -1.0;
+    MaterialContext ctx = material_context(input, front);
+    M.Params params = M::load(ctx);
+    float side = ctx.side;
     float3 geometric = input.normal * side;
     float3 ng = normalize(geometric);
     // Derivatives first, while every lane of the quad is alive.
     float kernel = specular_aa_kernel(ng);
-    float4 base = sample_material(m.base_color_texture, input.uv) * m.base_color;
-    if (masked && base.a < m.alpha_cutoff)
-        discard;
-
-    float3 n = ng;
-    if (m.normal_texture != NO_TEXTURE)
-    {
-        // MikkTSpace: the per-pixel bitangent from the interpolated (not renormalized)
-        // normal and tangent, then the normal map's vector in that frame.
-        float3 t = input.tangent.xyz * side;
-        float3 b = input.tangent.w * cross(input.normal, input.tangent.xyz) * side;
-        float2 xy = sample_material(m.normal_texture, input.uv).xy * 2.0 - 1.0;
-        float z = sqrt(saturate(1.0 - dot(xy, xy)));
-        xy *= m.normal_scale;
-        n = normalize(xy.x * t + xy.y * b + z * geometric);
-    }
-    float4 mr = sample_material(m.metallic_roughness_texture, input.uv);
-    float metallic = saturate(mr.b * m.metallic);
-    float rough = saturate(mr.g * m.roughness);
+    Surface surface = M::surface(ctx, params, masked);
+    float4 base = surface.base;
+    float3 n = surface.normal;
+    float metallic = surface.metallic;
+    float rough = surface.roughness;
     if (decals)
         apply_decals(frame, uint2(input.position.xy), base.rgb, n, rough, metallic);
     float perceptual = widen_roughness(rough, kernel);
-    float occlusion = 1.0 + m.occlusion_strength * (sample_material(m.occlusion_texture, input.uv).r - 1.0);
+    float occlusion = M::occlusion(ctx, params);
     // The view's ambient occlusion (ADR 0058) joins the material's.
     if (ao && push.ao != NO_TEXTURE)
         occlusion *= g_textures[push.ao].Load(int3(int2(input.position.xy), 0)).r;
-    float3 emissive = sample_material(m.emissive_texture, input.uv).rgb * m.emissive;
+    float3 emissive = M::emission(ctx, params);
 
     float3 v = normalize(frame.camera_position.xyz - input.world_position);
     float3 l = frame.to_light.xyz;
@@ -1492,7 +1628,7 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
     }
     if (subsurface)
     {
-        uint bits = m.subsurface;
+        uint bits = surface.subsurface;
         uint index = min(max(bits & 0xFFu, 1u) - 1u, max(frame.subsurface_count, 1u) - 1u);
         SubsurfaceProfile* profile = frame.subsurface + index;
         // Diffuse light per unit base color: sun, local lights, sky.
@@ -1504,7 +1640,7 @@ float4 shade_surface(VertexOut input, bool front, bool masked, bool ao, bool sub
         float back = saturate(-dot(n, l));
         if (transmission != 0 && back > 0.0)
         {
-            float thickness = m.thickness * sample_material(m.thickness_texture, input.uv).g;
+            float thickness = M::thickness(ctx, params);
             float3 light_normal = normalize(input.light_normal) * side;
             float d = thickness;
             float lit_back = 1.0;
@@ -1676,8 +1812,9 @@ DepthMaskedMotionOut depthVertexMaskedMotion(uint vertex : SV_VulkanVertexID, ui
 [shader("fragment")]
 float2 prepassMaskedMotion(DepthMaskedMotionOut input) : SV_Target0
 {
-    Material m = read_material(input.material);
-    if (sample_material(m.base_color_texture, input.uv).a * m.base_color.a < m.alpha_cutoff)
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    GltfMaterial.Params p = GltfMaterial::load(ctx);
+    if (GltfMaterial::alpha(ctx, p) < GltfMaterial::alpha_cutoff(p))
         discard;
     return motion(input.position, input.previous_clip);
 }
@@ -1688,9 +1825,10 @@ float2 prepassMaskedMotion(DepthMaskedMotionOut input) : SV_Target0
 [shader("fragment")]
 float4 prepassCoverageMotion(DepthMaskedMotionOut input) : SV_Target0
 {
-    Material m = read_material(input.material);
-    float alpha = sample_material(m.base_color_texture, input.uv).a * m.base_color.a;
-    alpha = (alpha - m.alpha_cutoff) / max(fwidth(alpha), 1e-4) + 0.5;
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    GltfMaterial.Params p = GltfMaterial::load(ctx);
+    float alpha = GltfMaterial::alpha(ctx, p);
+    alpha = (alpha - GltfMaterial::alpha_cutoff(p)) / max(fwidth(alpha), 1e-4) + 0.5;
     return float4(motion(input.position, input.previous_clip), 0.0, alpha);
 }
 
@@ -1740,7 +1878,7 @@ Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bo
     SubsurfaceOut unused;
     ReflectOut refl;
     Reflected o;
-    o.color = float4(shade_surface(input, front, false, ao, false, unused, refl, shadows, contact, true, decals, gi).rgb, 1.0);
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, ao, false, unused, refl, shadows, contact, true, decals, gi).rgb, 1.0);
     o.normal_roughness = float4(encode_octahedral(refl.normal), refl.roughness, 1.0);
     o.weight = float4(refl.weight, 1.0);
     return o;
@@ -1995,7 +2133,7 @@ SubsurfaceShaded fragmentSubsurface(VertexOut input, bool front : SV_IsFrontFace
     SubsurfaceOut sss;
     SubsurfaceShaded o;
     ReflectOut unused;
-    o.color = float4(shade_surface(input, front, false, true, true, sss, unused).rgb, 1.0);
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused).rgb, 1.0);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
     return o;
@@ -2085,7 +2223,7 @@ SubsurfaceShaded fragmentSubsurfaceShadowed(VertexOut input, bool front : SV_IsF
     SubsurfaceOut sss;
     SubsurfaceShaded o;
     ReflectOut unused;
-    o.color = float4(shade_surface(input, front, false, true, true, sss, unused, true).rgb, 1.0);
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, true).rgb, 1.0);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
     return o;
@@ -2474,7 +2612,7 @@ SubsurfaceShaded fragmentSubsurfaceGi(VertexOut input, bool front : SV_IsFrontFa
     SubsurfaceOut sss;
     SubsurfaceShaded o;
     ReflectOut unused;
-    o.color = float4(shade_surface(input, front, false, true, true, sss, unused, false, false, false, false, true).rgb, 1.0);
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, false, false, false, false, true).rgb, 1.0);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
     return o;
@@ -2486,7 +2624,7 @@ SubsurfaceShaded fragmentSubsurfaceShadowedGi(VertexOut input, bool front : SV_I
     SubsurfaceOut sss;
     SubsurfaceShaded o;
     ReflectOut unused;
-    o.color = float4(shade_surface(input, front, false, true, true, sss, unused, true, false, false, false, true).rgb, 1.0);
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, true, false, false, false, true).rgb, 1.0);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
     return o;
