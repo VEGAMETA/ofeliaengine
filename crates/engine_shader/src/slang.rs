@@ -13,6 +13,10 @@ pub(crate) type Session = c_void;
 pub(crate) type Request = c_void;
 pub(crate) type Reflection = c_void;
 pub(crate) type ReflectionEntryPoint = c_void;
+pub(crate) type ReflectionType = c_void;
+pub(crate) type ReflectionTypeLayout = c_void;
+pub(crate) type ReflectionVariableLayout = c_void;
+pub(crate) type ReflectionVariable = c_void;
 
 /// `SlangCompileTarget::SLANG_SPIRV`.
 pub(crate) const TARGET_SPIRV: c_int = 6;
@@ -26,6 +30,19 @@ pub(crate) const MATRIX_LAYOUT_COLUMN_MAJOR: u32 = 2;
 /// `SlangDebugInfoLevel`: none / standard.
 pub(crate) const DEBUG_INFO_NONE: u32 = 0;
 pub(crate) const DEBUG_INFO_STANDARD: u32 = 2;
+/// `SlangLayoutRules::SLANG_LAYOUT_RULES_DEFAULT_STRUCTURED_BUFFER` (the types' layout is
+/// only read for their fields; offsets are the engine's, see `crate::reflect`).
+pub(crate) const LAYOUT_RULES_STRUCTURED_BUFFER: u32 = 2;
+/// `SlangTypeKind`.
+pub(crate) const TYPE_KIND_STRUCT: u32 = 1;
+pub(crate) const TYPE_KIND_ARRAY: u32 = 2;
+pub(crate) const TYPE_KIND_MATRIX: u32 = 3;
+pub(crate) const TYPE_KIND_VECTOR: u32 = 4;
+pub(crate) const TYPE_KIND_SCALAR: u32 = 5;
+/// `SlangScalarType`.
+pub(crate) const SCALAR_INT32: u32 = 3;
+pub(crate) const SCALAR_UINT32: u32 = 4;
+pub(crate) const SCALAR_FLOAT32: u32 = 8;
 
 pub(crate) struct Functions {
     pub(crate) create_session: unsafe extern "C" fn(*const c_char) -> *mut Session,
@@ -60,6 +77,29 @@ pub(crate) struct Functions {
         unsafe extern "C" fn(*mut Reflection, usize) -> *mut ReflectionEntryPoint,
     pub(crate) entry_point_name: unsafe extern "C" fn(*mut ReflectionEntryPoint) -> *const c_char,
     pub(crate) entry_point_stage: unsafe extern "C" fn(*mut ReflectionEntryPoint) -> u32,
+    pub(crate) find_type_by_name:
+        unsafe extern "C" fn(*mut Reflection, *const c_char) -> *mut ReflectionType,
+    pub(crate) type_layout: unsafe extern "C" fn(
+        *mut Reflection,
+        *mut ReflectionType,
+        u32,
+    ) -> *mut ReflectionTypeLayout,
+    pub(crate) type_layout_field_count: unsafe extern "C" fn(*mut ReflectionTypeLayout) -> u32,
+    pub(crate) type_layout_field:
+        unsafe extern "C" fn(*mut ReflectionTypeLayout, u32) -> *mut ReflectionVariableLayout,
+    pub(crate) type_layout_type:
+        unsafe extern "C" fn(*mut ReflectionTypeLayout) -> *mut ReflectionType,
+    pub(crate) type_layout_element:
+        unsafe extern "C" fn(*mut ReflectionTypeLayout) -> *mut ReflectionTypeLayout,
+    pub(crate) variable_layout_variable:
+        unsafe extern "C" fn(*mut ReflectionVariableLayout) -> *mut ReflectionVariable,
+    pub(crate) variable_layout_type_layout:
+        unsafe extern "C" fn(*mut ReflectionVariableLayout) -> *mut ReflectionTypeLayout,
+    pub(crate) variable_name: unsafe extern "C" fn(*mut ReflectionVariable) -> *const c_char,
+    pub(crate) type_kind: unsafe extern "C" fn(*mut ReflectionType) -> u32,
+    pub(crate) type_name: unsafe extern "C" fn(*mut ReflectionType) -> *const c_char,
+    pub(crate) type_scalar: unsafe extern "C" fn(*mut ReflectionType) -> u32,
+    pub(crate) type_element_count: unsafe extern "C" fn(*mut ReflectionType) -> usize,
 }
 
 /// The loaded Slang compiler library.
@@ -156,6 +196,19 @@ impl SlangLibrary {
             reflection_entry_point: symbol!("spReflection_getEntryPointByIndex"),
             entry_point_name: symbol!("spReflectionEntryPoint_getName"),
             entry_point_stage: symbol!("spReflectionEntryPoint_getStage"),
+            find_type_by_name: symbol!("spReflection_FindTypeByName"),
+            type_layout: symbol!("spReflection_GetTypeLayout"),
+            type_layout_field_count: symbol!("spReflectionTypeLayout_GetFieldCount"),
+            type_layout_field: symbol!("spReflectionTypeLayout_GetFieldByIndex"),
+            type_layout_type: symbol!("spReflectionTypeLayout_GetType"),
+            type_layout_element: symbol!("spReflectionTypeLayout_GetElementTypeLayout"),
+            variable_layout_variable: symbol!("spReflectionVariableLayout_GetVariable"),
+            variable_layout_type_layout: symbol!("spReflectionVariableLayout_GetTypeLayout"),
+            variable_name: symbol!("spReflectionVariable_GetName"),
+            type_kind: symbol!("spReflectionType_GetKind"),
+            type_name: symbol!("spReflectionType_GetName"),
+            type_scalar: symbol!("spReflectionType_GetScalarType"),
+            type_element_count: symbol!("spReflectionType_GetElementCount"),
         };
         let build_tag: unsafe extern "C" fn() -> *const c_char = symbol!("spGetBuildTagString");
         // SAFETY: returns a static NUL-terminated string.

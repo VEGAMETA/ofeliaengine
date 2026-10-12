@@ -6,7 +6,8 @@
 //! format, and loaded through an I/O ring with zstd per entry (`cook`, `pack`; ADR 0056).
 //! HDR panoramas (`.hdr`) are read, and their sun found, for HDRI environments (`hdr`, ADR
 //! 0083), and cooked into BC6H cube maps for the derived data cache and packs
-//! (`panorama`).
+//! (`panorama`). Material files (`*.material.ron`) set a material type's parameters and
+//! replace a scene's glTF materials (`material_file`, ADR 0092).
 
 pub mod animation;
 pub mod cook;
@@ -14,6 +15,7 @@ mod ddc;
 mod gltf_import;
 pub mod hdr;
 mod lod;
+pub mod material_file;
 pub mod pack;
 pub mod panorama;
 mod texture_compress;

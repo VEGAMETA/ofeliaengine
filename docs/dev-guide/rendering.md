@@ -1983,6 +1983,40 @@ let floor = materials.add_typed(checker, MaterialDesc::solid([0.5; 3], 0.0, 0.6)
   (ADR 0092's later steps). Material types need 64-bit shader integers (every GPU of the
   reference tier has them).
 
+### Material files
+
+Materials of a type are text files, `*.material.ron` (ADR 0092), paths relative to the
+file:
+
+```ron
+// red_velvet.material.ron
+(
+    shader: "velvet.slang",
+    type: "VelvetMaterial",
+    params: {
+        "color": (0.40, 0.05, 0.05, 1.0),
+        "sheen_color": (0.9, 0.6, 0.6),
+        "sheen_roughness": 0.6,
+        "pattern": Texture("../textures/velvet.png", Color),   // a TextureRef field
+    },
+    fallback: (base_color: (0.40, 0.05, 0.05, 1.0), roughness: 0.9),
+    alpha: Opaque,          // Opaque | Mask(0.5) | Blend
+    double_sided: false,
+)
+```
+
+- `params` names the fields of the type's `Params` struct: numbers, vectors `(x, y, z)`,
+  arrays `[a, b]`, nested structs as `"outer.inner"`. Types: 32-bit `float`, `uint` and
+  `int` scalars and vectors, `TextureRef`, arrays and structs of them; at most 256 bytes.
+- A field you leave out is zero (a texture: none, white); a misspelled name or a value of
+  the wrong shape is an error that names the field.
+- Textures in parameters are `TextureRef` fields, sampled with `ctx.sample(p.pattern)`;
+  `Color` is sRGB, `Data` linear, `Normal` a tangent-space normal map.
+- To put material files on a glTF scene's meshes, write `<scene>.materials.ron` next to
+  it: `{ "glTF material name": "materials/red_velvet.material.ron" }`. The cook applies it
+  (the replaced glTF material becomes the fallback unless the file sets one); cooking
+  material files is ADR 0092's next step.
+
 ### Shading models
 
 A type also picks how the engine lights it: `model()` returns one of the shading models,

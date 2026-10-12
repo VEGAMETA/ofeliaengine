@@ -1,9 +1,11 @@
 //! One Slang session and the compile entry point.
 
 use crate::ShaderError;
+use crate::reflect::{StructLayout, natural_layout};
 use crate::slang::{
-    DEBUG_INFO_NONE, DEBUG_INFO_STANDARD, LANGUAGE_SLANG, MATRIX_LAYOUT_COLUMN_MAJOR,
-    OPTIMIZATION_HIGH, OPTIMIZATION_NONE, Request, Session, SlangLibrary, TARGET_SPIRV,
+    DEBUG_INFO_NONE, DEBUG_INFO_STANDARD, LANGUAGE_SLANG, LAYOUT_RULES_STRUCTURED_BUFFER,
+    MATRIX_LAYOUT_COLUMN_MAJOR, OPTIMIZATION_HIGH, OPTIMIZATION_NONE, Request, Session,
+    SlangLibrary, TARGET_SPIRV,
 };
 use core::ffi::{CStr, c_char};
 use core::ptr::NonNull;
@@ -210,101 +212,10 @@ impl Compiler {
         options: &CompileOptions,
     ) -> Result<CompileOutput, ShaderError> {
         engine_profiler::zone!("shader::Compiler::compile");
+        let (request, entry_indices, diagnostics) =
+            self.run(path, source, entries, options, false)?;
         let f = &self.library.functions;
-        // SAFETY: live session.
-        let raw = NonNull::new(unsafe { (f.create_request)(self.session.as_ptr()) }).ok_or_else(
-            || ShaderError::MissingSymbol("spCreateCompileRequest returned null".to_owned()),
-        )?;
-        let request = RequestGuard {
-            library: &self.library,
-            raw,
-        };
         let req = request.raw.as_ptr();
-
-        let path_string = path.to_string_lossy().into_owned();
-        let path_c = cstring(&path_string);
-        let source_c = cstring(source);
-        let mut search_dirs: Vec<CString> = Vec::new();
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            search_dirs.push(cstring(&parent.to_string_lossy()));
-        }
-        search_dirs.extend(
-            options
-                .include_dirs
-                .iter()
-                .map(|d| cstring(&d.to_string_lossy())),
-        );
-        let defines: Vec<(CString, CString)> = options
-            .defines
-            .iter()
-            .map(|(k, v)| (cstring(k), cstring(v)))
-            .collect();
-        let names: Vec<CString> = entries.iter().map(|e| cstring(&e.name)).collect();
-        // SPIR-V entry points keep their source names (Slang otherwise renames them "main").
-        let args = [c"-fvk-use-entrypoint-name".as_ptr()];
-
-        // SAFETY: every pointer passed below is a NUL-terminated string owned by this
-        // frame and outliving the request; indices come from the calls that returned them.
-        let (result, entry_indices) = unsafe {
-            if (f.process_args)(req, args.as_ptr(), args.len() as i32) < 0 {
-                return Err(ShaderError::Compile {
-                    path: path.to_owned(),
-                    diagnostics: String::from("Slang rejected the compiler flags"),
-                });
-            }
-            (f.set_codegen_target)(req, TARGET_SPIRV);
-            // The engine's convention (ADR 0012): matrices are stored column by column, as
-            // glam stores them, so they go into buffers and push constants unchanged.
-            (f.set_matrix_layout)(req, MATRIX_LAYOUT_COLUMN_MAJOR);
-            (f.set_target_profile)(req, 0, self.spirv_profile);
-            (f.set_optimization_level)(
-                req,
-                if options.optimize {
-                    OPTIMIZATION_HIGH
-                } else {
-                    OPTIMIZATION_NONE
-                },
-            );
-            (f.set_debug_info_level)(
-                req,
-                if options.debug_info {
-                    DEBUG_INFO_STANDARD
-                } else {
-                    DEBUG_INFO_NONE
-                },
-            );
-            for dir in &search_dirs {
-                (f.add_search_path)(req, dir.as_ptr());
-            }
-            for (key, value) in &defines {
-                (f.add_define)(req, key.as_ptr(), value.as_ptr());
-            }
-            let unit = (f.add_translation_unit)(req, LANGUAGE_SLANG, c"main".as_ptr());
-            (f.add_source_string)(req, unit, path_c.as_ptr(), source_c.as_ptr());
-            let entry_indices: Vec<i32> = entries
-                .iter()
-                .zip(&names)
-                .map(|(e, name)| (f.add_entry_point)(req, unit, name.as_ptr(), e.stage.raw()))
-                .collect();
-            ((f.compile)(req), entry_indices)
-        };
-
-        // SAFETY: the request is alive; the returned strings stay valid until it is
-        // destroyed and are copied out immediately.
-        let diagnostics = unsafe {
-            let text = (f.diagnostics)(req);
-            if text.is_null() {
-                String::new()
-            } else {
-                CStr::from_ptr(text).to_string_lossy().into_owned()
-            }
-        };
-        if result < 0 {
-            return Err(ShaderError::Compile {
-                path: path.to_owned(),
-                diagnostics,
-            });
-        }
 
         let targets: Vec<(EntryPoint, i32)> = if entries.is_empty() {
             // SAFETY: the request compiled successfully.
@@ -367,6 +278,173 @@ impl Compiler {
             dependencies,
             diagnostics,
         })
+    }
+
+    /// The layout of the struct `type_name` (for example `VelvetMaterial.Params`, an
+    /// associated type) declared in `path` or what it includes, as shaders read it through
+    /// a pointer ([`crate::reflect`]). Slang checks the source but generates no code
+    /// (about a tenth of a second for `forward.slang`).
+    pub fn reflect_struct(
+        &mut self,
+        path: &Path,
+        options: &CompileOptions,
+        type_name: &str,
+    ) -> Result<StructLayout, ShaderError> {
+        engine_profiler::zone!("shader::Compiler::reflect_struct");
+        let source = std::fs::read_to_string(path)?;
+        let (request, _, _) = self.run(path, &source, &[], options, true)?;
+        let f = &self.library.functions;
+        let error = |diagnostics: String| ShaderError::Compile {
+            path: path.to_owned(),
+            diagnostics,
+        };
+        let name = cstring(type_name);
+        // SAFETY: the request compiled; every pointer comes from its reflection and is used
+        // before the request is destroyed.
+        let (struct_name, parts) = unsafe {
+            let reflection = (f.reflection)(request.raw.as_ptr());
+            if reflection.is_null() {
+                return Err(error(String::from("Slang produced no reflection data")));
+            }
+            let ty = (f.find_type_by_name)(reflection, name.as_ptr());
+            if ty.is_null() {
+                return Err(error(format!("no type `{type_name}`")));
+            }
+            let layout = (f.type_layout)(reflection, ty, LAYOUT_RULES_STRUCTURED_BUFFER);
+            if layout.is_null() {
+                return Err(error(format!("no layout for `{type_name}`")));
+            }
+            let raw = (f.type_name)(ty);
+            let struct_name = if raw.is_null() {
+                type_name.to_owned()
+            } else {
+                CStr::from_ptr(raw).to_string_lossy().into_owned()
+            };
+            let parts =
+                natural_layout(f, layout, "").map_err(|e| error(format!("`{type_name}`: {e}")))?;
+            (struct_name, parts)
+        };
+        drop(request);
+        Ok(StructLayout {
+            name: struct_name,
+            size: parts.size,
+            fields: parts.fields,
+        })
+    }
+
+    /// Sets up and runs a compile request: the entry points' code, or with `check_only` the
+    /// front end alone (reflection, no code). Returns the request, the entry points'
+    /// indices and the diagnostics.
+    fn run(
+        &self,
+        path: &Path,
+        source: &str,
+        entries: &[EntryPoint],
+        options: &CompileOptions,
+        check_only: bool,
+    ) -> Result<(RequestGuard<'_>, Vec<i32>, String), ShaderError> {
+        let f = &self.library.functions;
+        // SAFETY: live session.
+        let raw = NonNull::new(unsafe { (f.create_request)(self.session.as_ptr()) }).ok_or_else(
+            || ShaderError::MissingSymbol("spCreateCompileRequest returned null".to_owned()),
+        )?;
+        let request = RequestGuard {
+            library: &self.library,
+            raw,
+        };
+        let req = request.raw.as_ptr();
+
+        let path_string = path.to_string_lossy().into_owned();
+        let path_c = cstring(&path_string);
+        let source_c = cstring(source);
+        let mut search_dirs: Vec<CString> = Vec::new();
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            search_dirs.push(cstring(&parent.to_string_lossy()));
+        }
+        search_dirs.extend(
+            options
+                .include_dirs
+                .iter()
+                .map(|d| cstring(&d.to_string_lossy())),
+        );
+        let defines: Vec<(CString, CString)> = options
+            .defines
+            .iter()
+            .map(|(k, v)| (cstring(k), cstring(v)))
+            .collect();
+        let names: Vec<CString> = entries.iter().map(|e| cstring(&e.name)).collect();
+        // SPIR-V entry points keep their source names (Slang otherwise renames them "main").
+        // Checking only: the front end and reflection, no code for any entry point.
+        let args = [
+            c"-fvk-use-entrypoint-name".as_ptr(),
+            c"-skip-codegen".as_ptr(),
+        ];
+        let arg_count = if check_only { 2 } else { 1 };
+
+        // SAFETY: every pointer passed below is a NUL-terminated string owned by this
+        // frame and outliving the request; indices come from the calls that returned them.
+        let (result, entry_indices) = unsafe {
+            if (f.process_args)(req, args.as_ptr(), arg_count) < 0 {
+                return Err(ShaderError::Compile {
+                    path: path.to_owned(),
+                    diagnostics: String::from("Slang rejected the compiler flags"),
+                });
+            }
+            (f.set_codegen_target)(req, TARGET_SPIRV);
+            // The engine's convention (ADR 0012): matrices are stored column by column, as
+            // glam stores them, so they go into buffers and push constants unchanged.
+            (f.set_matrix_layout)(req, MATRIX_LAYOUT_COLUMN_MAJOR);
+            (f.set_target_profile)(req, 0, self.spirv_profile);
+            (f.set_optimization_level)(
+                req,
+                if options.optimize {
+                    OPTIMIZATION_HIGH
+                } else {
+                    OPTIMIZATION_NONE
+                },
+            );
+            (f.set_debug_info_level)(
+                req,
+                if options.debug_info {
+                    DEBUG_INFO_STANDARD
+                } else {
+                    DEBUG_INFO_NONE
+                },
+            );
+            for dir in &search_dirs {
+                (f.add_search_path)(req, dir.as_ptr());
+            }
+            for (key, value) in &defines {
+                (f.add_define)(req, key.as_ptr(), value.as_ptr());
+            }
+            let unit = (f.add_translation_unit)(req, LANGUAGE_SLANG, c"main".as_ptr());
+            (f.add_source_string)(req, unit, path_c.as_ptr(), source_c.as_ptr());
+            let entry_indices: Vec<i32> = entries
+                .iter()
+                .zip(&names)
+                .map(|(e, name)| (f.add_entry_point)(req, unit, name.as_ptr(), e.stage.raw()))
+                .collect();
+            ((f.compile)(req), entry_indices)
+        };
+
+        // SAFETY: the request is alive; the returned strings stay valid until it is
+        // destroyed and are copied out immediately.
+        let diagnostics = unsafe {
+            let text = (f.diagnostics)(req);
+            if text.is_null() {
+                String::new()
+            } else {
+                CStr::from_ptr(text).to_string_lossy().into_owned()
+            }
+        };
+        if result < 0 {
+            return Err(ShaderError::Compile {
+                path: path.to_owned(),
+                diagnostics,
+            });
+        }
+
+        Ok((request, entry_indices, diagnostics))
     }
 }
 

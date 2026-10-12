@@ -1,0 +1,12 @@
+// The procedural scene's floor as a checker of two colors. (ADR 0092; a golden shot's material file.)
+(
+    shader: "stripes.slang",
+    type: "StripesMaterial",
+    params: {
+        "color_a": (0.85, 0.82, 0.75, 1.0),
+        "color_b": (0.12, 0.16, 0.3, 1.0),
+        "frequency": 1.0,
+        "roughness": 0.55,
+        "metallic": 0.0,
+    },
+)

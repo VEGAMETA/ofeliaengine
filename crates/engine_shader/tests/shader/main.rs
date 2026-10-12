@@ -5,4 +5,5 @@
 mod common;
 
 mod compile;
+mod reflect;
 mod reload;

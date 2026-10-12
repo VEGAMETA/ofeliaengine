@@ -15,11 +15,14 @@
 //!   roots ([`find_shader_sources`]), in parallel, with a [`BuildReport`].
 //! - [`ShaderHotReload`] rebuilds affected shaders in the background when files change
 //!   and reports [`ShaderEvent`]s; on errors the previous SPIR-V stays in use (ADR 0009).
+//! - [`Compiler::reflect_struct`] reads a struct's layout as shaders read it through a
+//!   pointer: a material type's parameters (ADR 0092).
 
 mod build;
 mod cache;
 mod compiler;
 mod pool;
+mod reflect;
 mod reload;
 mod slang;
 mod sources;
@@ -28,6 +31,7 @@ pub use build::{BuildReport, UnitResult, compile_all, compile_all_streaming};
 pub use cache::{CacheOutcome, ShaderCache};
 pub use compiler::{CompileOptions, CompileOutput, CompiledEntry, Compiler, EntryPoint, Stage};
 pub use pool::CompilerPool;
+pub use reflect::{Field, FieldKind, StructLayout, TEXTURE_REF};
 pub use reload::{HotReloadConfig, ShaderEvent, ShaderHotReload, ShaderSet};
 pub use slang::SlangLibrary;
 pub use sources::{

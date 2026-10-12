@@ -1,0 +1,11 @@
+// Cloth: blue fabric, a pale sheen of roughness 0.6. (ADR 0092; a golden shot's material file.)
+(
+    shader: "models.slang",
+    type: "ClothMaterial",
+    params: {
+        "base": (0.15, 0.2, 0.55, 1.0),
+        "roughness": 0.8,
+        "sheen": (0.6, 0.6, 0.65),
+        "sheen_roughness": 0.6,
+    },
+)

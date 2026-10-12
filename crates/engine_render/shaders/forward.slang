@@ -857,6 +857,14 @@ float4 sample_material(uint packed, float2 uv)
 // What a material reads: the interpolants of the fragment and its slot in the material
 // table. Textures are sampled through `sample`, which uses the fragment's implicit
 // derivatives here (a compute material pass would give analytic ones, ADR 0092).
+// A texture in a material type's parameters (ADR 0092): the bindless index and sampler bits
+// the material table writes for a material file's `Texture(...)`; white when none. Sampled
+// with `ctx.sample(p.texture)`.
+struct TextureRef
+{
+    uint packed;
+};
+
 struct MaterialContext
 {
     float2 uv;
@@ -871,6 +879,12 @@ struct MaterialContext
     float4 sample(uint packed)
     {
         return sample_material(packed, uv);
+    }
+
+    // A material type's texture (`TextureRef`), at the fragment's texture coordinates.
+    float4 sample(TextureRef texture)
+    {
+        return sample_material(texture.packed, uv);
     }
 }
 

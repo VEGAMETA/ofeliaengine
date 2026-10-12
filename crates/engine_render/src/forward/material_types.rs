@@ -15,10 +15,13 @@
 
 use crate::material::MaterialTypeId;
 use engine_rhi::{Device, LazyPipeline, Pipeline};
-use engine_shader::{CompileOptions, Compiler, EntryPoint, SlangLibrary, Stage};
+use engine_shader::{
+    CompileOptions, Compiler, EntryPoint, ShaderError, SlangLibrary, Stage, StructLayout,
+};
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ffi::CString;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, channel};
@@ -34,6 +37,40 @@ pub struct MaterialTypeDesc {
     pub module: PathBuf,
     /// The type's name in the module.
     pub type_name: String,
+}
+
+/// The engine's own shader folder: `forward.slang` and its modules (types compile from
+/// it at run time; shipped games will carry precompiled SPIR-V, ADR 0092).
+pub const ENGINE_SHADER_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders");
+
+/// What a material type compiles with: `forward.slang` from `shader_dir` with
+/// `-D MATERIAL=<type> -D MATERIAL_FILE="<module>"` (its entry points shade with the type).
+pub fn material_type_options(shader_dir: &Path, desc: &MaterialTypeDesc) -> CompileOptions {
+    let module = desc.module.to_string_lossy().replace('\\', "/");
+    CompileOptions {
+        optimize: true,
+        debug_info: false,
+        defines: vec![
+            (String::from("MATERIAL"), desc.type_name.clone()),
+            (String::from("MATERIAL_FILE"), format!("\"{module}\"")),
+        ],
+        include_dirs: vec![shader_dir.to_owned()],
+    }
+}
+
+/// The layout of a material type's parameters (`<type>.Params`) as its shaders read them,
+/// through Slang's reflection: what a material file's values are laid out by
+/// (`engine_assets::material_file`). About a tenth of a second (no code is generated).
+pub fn reflect_material_params(
+    compiler: &mut Compiler,
+    shader_dir: &Path,
+    desc: &MaterialTypeDesc,
+) -> Result<StructLayout, ShaderError> {
+    compiler.reflect_struct(
+        &shader_dir.join("forward.slang"),
+        &material_type_options(shader_dir, desc),
+        &format!("{}.Params", desc.type_name),
+    )
 }
 
 /// A type's pipeline standing in for one of the engine's.
@@ -106,16 +143,14 @@ impl CompilerThread {
                     let spirv = match compiler.as_mut() {
                         None => Err(String::from("no Slang compiler")),
                         Some(compiler) => {
-                            let module = job.module.to_string_lossy().replace('\\', "/");
-                            let options = CompileOptions {
-                                optimize: true,
-                                debug_info: false,
-                                defines: vec![
-                                    (String::from("MATERIAL"), job.type_name.clone()),
-                                    (String::from("MATERIAL_FILE"), format!("\"{module}\"")),
-                                ],
-                                include_dirs: vec![shader_dir.clone()],
-                            };
+                            let options = material_type_options(
+                                &shader_dir,
+                                &MaterialTypeDesc {
+                                    name: String::new(),
+                                    module: job.module.clone(),
+                                    type_name: job.type_name.clone(),
+                                },
+                            );
                             let entry =
                                 EntryPoint::new(&job.entry.to_string_lossy(), Stage::Fragment);
                             compiler
@@ -179,7 +214,7 @@ impl MaterialTypes {
             types: Vec::new(),
             requests: RefCell::new(Vec::new()),
             compiler: None,
-            shader_dir: PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/shaders")),
+            shader_dir: PathBuf::from(ENGINE_SHADER_DIR),
             waiting: 0,
             compiling: 0,
         }
@@ -191,7 +226,16 @@ impl MaterialTypes {
         self.shader_dir = dir;
     }
 
+    /// A type's id: the one it was given if the same module and type were registered
+    /// before (a material file per material does not make a type per material).
     pub(crate) fn register(&mut self, desc: MaterialTypeDesc) -> MaterialTypeId {
+        if let Some(k) = self
+            .types
+            .iter()
+            .position(|t| t.desc.module == desc.module && t.desc.type_name == desc.type_name)
+        {
+            return MaterialTypeId(k as u16 + 1);
+        }
         self.types.push(TypeEntry {
             desc,
             pipelines: HashMap::new(),

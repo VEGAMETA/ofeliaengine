@@ -1,0 +1,9 @@
+// Unlit: a flat green. (ADR 0092; a golden shot's material file.)
+(
+    shader: "models.slang",
+    type: "UnlitMaterial",
+    params: {
+        "base": (0.2, 0.75, 0.35, 1.0),
+        "roughness": 0.5,
+    },
+)
