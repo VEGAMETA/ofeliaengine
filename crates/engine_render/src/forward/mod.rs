@@ -1393,6 +1393,17 @@ impl ForwardRenderer {
         self.material_types.register(desc)
     }
 
+    /// [`Self::register_material_type`] with the type's entry points compiled ahead (a
+    /// cooked pack's, `(name, SPIR-V)`): its pipelines are made from them, no compiler
+    /// needed. Entry points it lacks still compile from source when one is drawn.
+    pub fn register_material_type_precompiled(
+        &mut self,
+        desc: MaterialTypeDesc,
+        entries: &[(String, Vec<u32>)],
+    ) -> MaterialTypeId {
+        self.material_types.register_precompiled(desc, entries)
+    }
+
     /// A registered type's description.
     pub fn material_type(&self, ty: MaterialTypeId) -> Option<&MaterialTypeDesc> {
         self.material_types.desc(ty)

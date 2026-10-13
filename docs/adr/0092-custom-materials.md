@@ -331,6 +331,33 @@ Two facts constrain it (research note):
   the same bytes as before on both GPUs.
 - The built-in SPIR-V did not change (`TextureRef` and its `sample` are unused there).
 
+### Step 4b as built (2026-10-12)
+
+- **Cooking.** `ofeliaengine cook` reads `<scene>.materials.ron` (or `--materials <MAP>`);
+  `engine_assets::material_file::apply_material_map` replaces the named glTF materials
+  (`"#14"` names an unnamed one by index: Sponza's are unnamed) by their files: the
+  type's layout and compiled entry points from a `MaterialTypeBuilder`
+  (`SlangMaterialTypes`: `engine_shader::material_types`, the compile convention moved
+  there so the CLI needs no renderer), texture parameters read as images of the scene and
+  cooked with their encoding, the glTF record kept as the fallback.
+- **Pack version 5** (`pack::VERSION`): a `MaterialType` entry per type (module, type,
+  every fragment entry point's SPIR-V), and the scene entry's `meta[4..6]` sections: the
+  typed materials (`TypedMaterialRecord`), their texture parameters and parameter bytes.
+  Packs without types stay at their old version.
+- **Loading.** `engine_streaming::register_material_types` registers a pack's types with
+  their SPIR-V (`ForwardRenderer::register_material_type_precompiled`: pipelines are made
+  without compiling) and `add_materials` adds the scene's materials, typed ones with their
+  parameters and texture references. `flight` uses them.
+- **Measured** (ref-1): a type is 92 fragment entry points; compiled in one request
+  10.5 s, on 8 threads with a session each 3.3 s. Sponza's pack with one type: +3.5 MB raw
+  (about 38 KB of SPIR-V per entry point), +0.5 MB stored. `flight` on that pack: no
+  validation errors, no hitches, the type's 5 pipelines made from the pack's SPIR-V.
+- **Golden shot `sponza_fabric`**: Sponza's curtains (materials 14 to 19) as cloth
+  (`tests/golden/materials/fabric.slang`, their own textures and normal maps as
+  `TextureRef` parameters), through a version 5 pack and back, on both GPUs.
+- **Not yet:** glTF's `KHR_materials_unlit`, `_clearcoat` and `_sheen` onto the models;
+  PSO records to cook only the entry points a game draws (all 92 now); 4c hot reload.
+
 ## Consequences
 
 - **The built-in path stays as fast as today** (identical SPIR-V), and the register rule

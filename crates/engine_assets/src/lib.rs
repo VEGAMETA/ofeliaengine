@@ -23,9 +23,10 @@ mod texture_import;
 
 pub use cook::{
     CookError, CookSettings, CookStats, CookedInstance, CookedMaterial, CookedMesh, CookedScene,
-    CookedSkin, MeshLevelData, MeshLevelRecord, MeshRecord, SceneLayout, StreamedMesh,
-    TextureEntry, TextureSlot, cook_scene, load_pack, open_scene, open_scene_streamed,
-    order_for_streaming, read_mesh_level_entry, streamed_vertex_counts, write_pack,
+    CookedSkin, CookedTypedMaterial, MeshLevelData, MeshLevelRecord, MeshRecord, SceneLayout,
+    StreamedMesh, TextureEntry, TextureSlot, cook_scene, load_pack, open_scene,
+    open_scene_streamed, order_for_streaming, read_mesh_level_entry, streamed_vertex_counts,
+    write_pack,
 };
 pub use ddc::{
     CacheOutcome, DerivedDataCache, import_texture, texture_from_bytes, texture_key,
@@ -33,8 +34,8 @@ pub use ddc::{
 };
 pub use gltf_import::{
     AlphaMode, AnimationData, ChannelData, ChannelKeys, ImportError, ImportedScene, MaterialData,
-    MeshData, MeshInstance, NodeData, Primitive, SkinData, TextureData, TextureSource, TextureWrap,
-    import_gltf, read_texture, spawn_scene,
+    MaterialTypeData, MeshData, MeshInstance, NodeData, Primitive, SkinData, TextureData,
+    TextureSource, TextureWrap, TypedMaterialData, import_gltf, read_texture, spawn_scene,
 };
 pub use lod::{Lod, LodSettings, generate_lods};
 pub use texture_compress::{ENCODER, EncodedTexture, TextureFormat, compress, compressed_format};

@@ -23,16 +23,18 @@
 
 use engine_assets::pack::{Entry, EntryKind, PackError, PackStreamer, StreamThread, Streamed};
 use engine_assets::{
-    AlphaMode as CookedAlpha, CookedMaterial, SceneLayout, TextureFormat as Stored, TextureSlot,
-    TextureWrap, open_scene_streamed, read_mesh_level_entry,
+    AlphaMode as CookedAlpha, CookedMaterial, CookedScene, MaterialTypeData, SceneLayout,
+    TextureFormat as Stored, TextureSlot, TextureWrap, open_scene_streamed, read_mesh_level_entry,
 };
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Vec3};
 use engine_platform::io::AlignedBuffer;
 use engine_render::budget::GpuBudget;
 use engine_render::feedback::TextureFeedback;
+use engine_render::forward::{ForwardRenderer, MaterialTypeDesc};
 use engine_render::material::MaterialTable;
 use engine_render::material::{AlphaMode, MaterialDesc, TextureRef};
+use engine_render::material::{MaterialId, MaterialParams, MaterialTypeId};
 use engine_render::mesh::{
     GeometryPool, LodIndices, MeshData, MeshError, MeshId, StreamedLevel, VertexAttributes,
     encode_attributes,
@@ -102,6 +104,79 @@ pub fn texture_format(format: Stored) -> TextureFormat {
         Stored::Bc7Unorm => TextureFormat::Bc7Unorm,
         Stored::Bc5Unorm => TextureFormat::Bc5Unorm,
     }
+}
+
+/// A cooked scene's material types (ADR 0092) registered with the forward renderer, their
+/// pipelines made from the pack's SPIR-V; ids in the scene's order.
+pub fn register_material_types(
+    forward: &mut ForwardRenderer,
+    types: &[MaterialTypeData],
+) -> Vec<MaterialTypeId> {
+    types
+        .iter()
+        .map(|t| {
+            forward.register_material_type_precompiled(
+                MaterialTypeDesc {
+                    name: t.type_name.clone(),
+                    module: t.module.clone().into(),
+                    type_name: t.type_name.clone(),
+                },
+                &t.entries,
+            )
+        })
+        .collect()
+}
+
+/// A cooked scene's materials added to `table`, in the scene's order: glTF ones, and the
+/// materials of types (`types` from [`register_material_types`]) with their parameters,
+/// their glTF records their fallbacks. Texture slots index `textures`.
+pub fn add_materials(
+    table: &mut MaterialTable,
+    scene: &CookedScene,
+    types: &[MaterialTypeId],
+    textures: &[TextureId],
+) -> Vec<MaterialId> {
+    let wrap = |w: TextureWrap| match w {
+        TextureWrap::Repeat => Wrap::Repeat,
+        TextureWrap::MirroredRepeat => Wrap::MirroredRepeat,
+        TextureWrap::ClampToEdge => Wrap::ClampToEdge,
+    };
+    scene
+        .materials
+        .iter()
+        .enumerate()
+        .map(|(k, m)| {
+            let desc = material_desc(m, textures);
+            let typed = scene
+                .typed_materials
+                .iter()
+                .find(|t| t.material as usize == k)
+                .and_then(|t| Some((t, *types.get(t.ty as usize)?)));
+            match typed {
+                Some((t, ty)) => table.add_typed(
+                    ty,
+                    desc,
+                    Some(MaterialParams {
+                        bytes: t.params.clone(),
+                        textures: t
+                            .textures
+                            .iter()
+                            .filter_map(|&(offset, slot)| {
+                                Some((
+                                    offset,
+                                    TextureRef {
+                                        texture: *textures.get(slot.texture as usize)?,
+                                        wrap: slot.wrap.map(wrap),
+                                    },
+                                ))
+                            })
+                            .collect(),
+                    }),
+                ),
+                None => table.add(desc),
+            }
+        })
+        .collect()
 }
 
 /// The renderer's description of a cooked material whose texture slots index `textures`.

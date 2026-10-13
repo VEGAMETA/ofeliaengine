@@ -2013,9 +2013,13 @@ file:
 - Textures in parameters are `TextureRef` fields, sampled with `ctx.sample(p.pattern)`;
   `Color` is sRGB, `Data` linear, `Normal` a tangent-space normal map.
 - To put material files on a glTF scene's meshes, write `<scene>.materials.ron` next to
-  it: `{ "glTF material name": "materials/red_velvet.material.ron" }`. The cook applies it
-  (the replaced glTF material becomes the fallback unless the file sets one); cooking
-  material files is ADR 0092's next step.
+  it: `{ "glTF material name": "materials/red_velvet.material.ron" }` (`"#14"` for an
+  unnamed glTF material, by index). `ofeliaengine cook` applies it (or `--materials
+  <MAP>`): the replaced glTF material becomes the fallback unless the file sets one, the
+  texture parameters are cooked like the scene's, and the types' shaders are compiled into
+  the pack (about 3 s per type), so a game never compiles them.
+- Loading such a pack: `engine_streaming::register_material_types` then `add_materials`
+  (as `flight` does).
 
 ### Shading models
 

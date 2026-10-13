@@ -21,6 +21,7 @@
 mod build;
 mod cache;
 mod compiler;
+pub mod material_types;
 mod pool;
 mod reflect;
 mod reload;

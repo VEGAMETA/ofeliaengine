@@ -29,8 +29,13 @@
 //!   struct does not have, or a value of the wrong shape, is an error naming it.
 //!
 //! A scene's glTF materials are replaced by material files through a file next to it,
-//! `<scene>.materials.ron` ([`MaterialMap`]): `{ "glTF material name": "file.material.ron" }`.
+//! `<scene>.materials.ron` ([`MaterialMap`]): `{ "glTF material name": "file.material.ron" }`;
+//! `"#3"` names the scene's fourth material (glTF materials need not have names).
 
+use crate::gltf_import::{
+    AlphaMode, ImportedScene, MaterialTypeData, TextureData, TextureSource, TextureWrap,
+    TypedMaterialData,
+};
 use engine_shader::{FieldKind, StructLayout};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -415,6 +420,168 @@ impl MaterialMap {
             message: e.message,
         })
     }
+}
+
+/// What cooking material files needs of material types: their parameters' layout and
+/// their compiled entry points (`engine_render` implements it with Slang, ADR 0092).
+pub trait MaterialTypeBuilder {
+    /// The layout of the type's `Params`.
+    fn layout(&mut self, module: &Path, type_name: &str) -> Result<StructLayout, String>;
+    /// Its fragment entry points' SPIR-V, by name.
+    fn entries(
+        &mut self,
+        module: &Path,
+        type_name: &str,
+    ) -> Result<Vec<(String, Vec<u32>)>, String>;
+}
+
+/// [`MaterialTypeBuilder`] through Slang: the engine's `forward.slang` in `shader_dir`
+/// compiled for each type (`engine_shader::material_types`).
+pub struct SlangMaterialTypes {
+    compiler: engine_shader::Compiler,
+    shader_dir: PathBuf,
+}
+
+impl SlangMaterialTypes {
+    /// Loads Slang and opens a session (a few hundred milliseconds).
+    pub fn new(shader_dir: &Path) -> Result<Self, String> {
+        let library = engine_shader::SlangLibrary::load().map_err(|e| e.to_string())?;
+        let compiler = engine_shader::Compiler::new(library).map_err(|e| e.to_string())?;
+        Ok(Self {
+            compiler,
+            shader_dir: shader_dir.to_owned(),
+        })
+    }
+}
+
+impl MaterialTypeBuilder for SlangMaterialTypes {
+    fn layout(&mut self, module: &Path, type_name: &str) -> Result<StructLayout, String> {
+        engine_shader::material_types::reflect_material_params(
+            &mut self.compiler,
+            &self.shader_dir,
+            module,
+            type_name,
+        )
+        .map_err(|e| e.to_string())
+    }
+
+    fn entries(
+        &mut self,
+        module: &Path,
+        type_name: &str,
+    ) -> Result<Vec<(String, Vec<u32>)>, String> {
+        engine_shader::material_types::compile_material_type(
+            &mut self.compiler,
+            &self.shader_dir,
+            module,
+            type_name,
+            std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(8),
+        )
+        .map_err(|e| e.to_string())
+    }
+}
+
+/// Replaces `scene`'s materials named in `map` by their material files: each becomes a
+/// material of its file's type (built once per module and type), its parameters laid out,
+/// its texture parameters added to the scene's textures, its glTF record the fallback
+/// (overridden by the file's `fallback`, `alpha` and `double_sided`). Returns warnings:
+/// names the scene does not have, fields the files leave unset.
+pub fn apply_material_map(
+    scene: &mut ImportedScene,
+    map: &MaterialMap,
+    builder: &mut dyn MaterialTypeBuilder,
+) -> Result<Vec<String>, MaterialFileError> {
+    let mut warnings = Vec::new();
+    for (name, path) in &map.files {
+        let matching: Vec<usize> = scene
+            .materials
+            .iter()
+            .enumerate()
+            .filter(|(k, m)| &m.name == name || name.strip_prefix('#') == Some(&k.to_string()))
+            .map(|(k, _)| k)
+            .collect();
+        if matching.is_empty() {
+            warnings.push(format!(
+                "{}: the scene has no material `{name}`",
+                path.display()
+            ));
+            continue;
+        }
+        let error = |message: String| MaterialFileError {
+            path: Some(path.clone()),
+            message,
+        };
+        let file = MaterialFile::load(path)?;
+        let module = file.shader.to_string_lossy().into_owned();
+        let ty = match scene
+            .material_types
+            .iter()
+            .position(|t| t.module == module && t.type_name == file.type_name)
+        {
+            Some(ty) => ty,
+            None => {
+                let entries = builder
+                    .entries(&file.shader, &file.type_name)
+                    .map_err(error)?;
+                scene.material_types.push(MaterialTypeData {
+                    module: module.clone(),
+                    type_name: file.type_name.clone(),
+                    entries,
+                });
+                scene.material_types.len() - 1
+            }
+        };
+        let layout = builder
+            .layout(&file.shader, &file.type_name)
+            .map_err(error)?;
+        let built = file.build_params(&layout).map_err(|e| error(e.message))?;
+        if !built.unset.is_empty() {
+            warnings.push(format!(
+                "{}: unset (zero): {}",
+                path.display(),
+                built.unset.join(", ")
+            ));
+        }
+        // Texture parameters' images, read now: a material file's paths may leave the
+        // scene's folder, which glTF's own may not.
+        let mut textures: Vec<(u32, usize, TextureEncoding)> = Vec::new();
+        for t in &built.textures {
+            let bytes =
+                std::fs::read(&t.path).map_err(|e| error(format!("{}: {e}", t.path.display())))?;
+            scene.textures.push(TextureData {
+                source: TextureSource::Embedded {
+                    bytes,
+                    mime: String::new(),
+                },
+                wrap: [TextureWrap::Repeat; 2],
+            });
+            textures.push((t.offset, scene.textures.len() - 1, t.encoding));
+        }
+        for material in matching {
+            let m = &mut scene.materials[material];
+            if let Some(f) = file.fallback {
+                m.base_color = f.base_color;
+                m.metallic = f.metallic;
+                m.roughness = f.roughness;
+                m.emissive = f.emissive;
+            }
+            m.alpha = match file.alpha {
+                Alpha::Opaque => AlphaMode::Opaque,
+                Alpha::Mask(cutoff) => AlphaMode::Mask(cutoff.to_bits()),
+                Alpha::Blend => AlphaMode::Blend,
+            };
+            m.double_sided = file.double_sided;
+            scene.typed_materials.push(TypedMaterialData {
+                material,
+                ty,
+                params: built.bytes.clone(),
+                textures: textures.clone(),
+            });
+        }
+    }
+    Ok(warnings)
 }
 
 #[cfg(test)]

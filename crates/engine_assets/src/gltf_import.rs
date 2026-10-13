@@ -236,6 +236,35 @@ pub struct ImportedScene {
     pub skins: Vec<SkinData>,
     /// Animations.
     pub animations: Vec<AnimationData>,
+    /// Material types of materials replaced by material files
+    /// (`crate::material_file::apply_material_map`, ADR 0092).
+    pub material_types: Vec<MaterialTypeData>,
+    /// The materials of those types: their parameters.
+    pub typed_materials: Vec<TypedMaterialData>,
+}
+
+/// A material type (ADR 0092): its source and its fragment entry points compiled.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MaterialTypeData {
+    /// The module defining it (as found when cooking; a name for logs and tools).
+    pub module: String,
+    /// The type's name.
+    pub type_name: String,
+    /// Its entry points' SPIR-V, by name.
+    pub entries: Vec<(String, Vec<u32>)>,
+}
+
+/// A material of a type: which material it is, its type and parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TypedMaterialData {
+    /// Index into [`ImportedScene::materials`] (its glTF record is the fallback).
+    pub material: usize,
+    /// Index into [`ImportedScene::material_types`].
+    pub ty: usize,
+    /// The parameter bytes (texture fields hold `u32::MAX` until loaded).
+    pub params: Vec<u8>,
+    /// Texture parameters: byte offset, index into [`ImportedScene::textures`], encoding.
+    pub textures: Vec<(u32, usize, crate::material_file::TextureEncoding)>,
 }
 
 impl ImportedScene {

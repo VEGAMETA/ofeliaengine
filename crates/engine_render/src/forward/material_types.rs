@@ -43,33 +43,23 @@ pub struct MaterialTypeDesc {
 /// it at run time; shipped games will carry precompiled SPIR-V, ADR 0092).
 pub const ENGINE_SHADER_DIR: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/shaders");
 
-/// What a material type compiles with: `forward.slang` from `shader_dir` with
-/// `-D MATERIAL=<type> -D MATERIAL_FILE="<module>"` (its entry points shade with the type).
+/// What a material type compiles with (`engine_shader::material_types`).
 pub fn material_type_options(shader_dir: &Path, desc: &MaterialTypeDesc) -> CompileOptions {
-    let module = desc.module.to_string_lossy().replace('\\', "/");
-    CompileOptions {
-        optimize: true,
-        debug_info: false,
-        defines: vec![
-            (String::from("MATERIAL"), desc.type_name.clone()),
-            (String::from("MATERIAL_FILE"), format!("\"{module}\"")),
-        ],
-        include_dirs: vec![shader_dir.to_owned()],
-    }
+    engine_shader::material_types::material_type_options(shader_dir, &desc.module, &desc.type_name)
 }
 
 /// The layout of a material type's parameters (`<type>.Params`) as its shaders read them,
-/// through Slang's reflection: what a material file's values are laid out by
-/// (`engine_assets::material_file`). About a tenth of a second (no code is generated).
+/// through Slang's reflection (`engine_shader::material_types`).
 pub fn reflect_material_params(
     compiler: &mut Compiler,
     shader_dir: &Path,
     desc: &MaterialTypeDesc,
 ) -> Result<StructLayout, ShaderError> {
-    compiler.reflect_struct(
-        &shader_dir.join("forward.slang"),
-        &material_type_options(shader_dir, desc),
-        &format!("{}.Params", desc.type_name),
+    engine_shader::material_types::reflect_material_params(
+        compiler,
+        shader_dir,
+        &desc.module,
+        &desc.type_name,
     )
 }
 
@@ -244,6 +234,27 @@ impl MaterialTypes {
         MaterialTypeId(self.types.len() as u16)
     }
 
+    /// [`Self::register`] with the type's entry points compiled ahead (a cooked pack's):
+    /// pipelines are made from them without compiling.
+    pub(crate) fn register_precompiled(
+        &mut self,
+        desc: MaterialTypeDesc,
+        entries: &[(String, Vec<u32>)],
+    ) -> MaterialTypeId {
+        let ty = self.register(desc);
+        let entry = &mut self.types[usize::from(ty.0) - 1];
+        for (name, spirv) in entries {
+            let Ok(name) = CString::new(name.as_str()) else {
+                continue;
+            };
+            entry
+                .spirv
+                .entry(name)
+                .or_insert_with(|| Spirv::Ready(Arc::from(spirv.as_slice())));
+        }
+        ty
+    }
+
     pub(crate) fn desc(&self, ty: MaterialTypeId) -> Option<&MaterialTypeDesc> {
         let index = usize::from(ty.0).checked_sub(1)?;
         self.types.get(index).map(|t| &t.desc)
@@ -279,14 +290,15 @@ impl MaterialTypes {
             if entry.pipelines.contains_key(&role.id()) {
                 continue;
             }
-            if !entry.spirv.contains_key(&entry_name) && !device.adapter().caps.shader_int64 {
-                // Types read their parameters at 64-bit addresses (`material_params`).
-                if entry.spirv.is_empty() {
-                    log::warn!(
-                        "material type {}: the GPU has no 64-bit shader integers; its fallback draws",
-                        entry.desc.name
-                    );
-                }
+            if !device.adapter().caps.shader_int64
+                && !matches!(entry.spirv.get(&entry_name), Some(Spirv::Failed))
+            {
+                // Types read their parameters at 64-bit addresses (`material_params`):
+                // neither compiled nor precompiled code runs without them.
+                log::warn!(
+                    "material type {}: the GPU has no 64-bit shader integers; its fallback draws",
+                    entry.desc.name
+                );
                 entry.spirv.insert(entry_name.clone(), Spirv::Failed);
             }
             if !entry.spirv.contains_key(&entry_name) {
