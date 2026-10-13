@@ -1,6 +1,7 @@
 //! Prints the driver's register counts of the shading models' pipelines (ADR 0092) beside
-//! the engine's own shading: the material types of `tests/golden/materials/models.slang`,
-//! compiled and made as a frame would ask for them. `ENGINE_PIPELINE_STATS=1
+//! the engine's own shading: the material types of `tests/golden/materials/models.slang`
+//! and the engine's built-in glTF types (`shaders/materials/gltf.slang`: glTF's unlit, clear
+//! coat and sheen), compiled and made as a frame would ask for them. `ENGINE_PIPELINE_STATS=1
 //! ENGINE_ADAPTER=radeon cargo run --release -p engine_render --example material_registers`.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
@@ -9,7 +10,7 @@ use engine_render::forward::{ForwardRenderer, MaterialTypeDesc, ShadowSettings};
 use engine_render::post::HDR_FORMAT;
 use engine_rhi::ash::vk;
 use engine_rhi::{AdapterPreference, Bindless, Device, Instance, InstanceDesc};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// The types in `models.slang`, glTF's lighting first.
@@ -20,6 +21,14 @@ const TYPES: [&str; 6] = [
     "ClothMaterial",
     "HairMaterial",
     "ToonMaterial",
+];
+
+/// The built-in types of glTF's extensions (`engine_assets::gltf_models`).
+const GLTF_TYPES: [&str; 4] = [
+    "GltfUnlit",
+    "GltfClearcoat",
+    "GltfSheen",
+    "GltfSheenClearcoat",
 ];
 
 fn main() {
@@ -54,8 +63,15 @@ fn main() {
             type_name: String::from(name),
         })
     });
+    let gltf_types = GLTF_TYPES.map(|name| {
+        renderer.register_material_type(MaterialTypeDesc {
+            name: String::from(name),
+            module: PathBuf::from("materials/gltf.slang"),
+            type_name: String::from(name),
+        })
+    });
     // Ask for every type's shading, then make it.
-    for &ty in &types {
+    for &ty in types.iter().chain(&gltf_types) {
         let _ = renderer.material_type_statistics(&device, ty);
     }
     let start = Instant::now();
@@ -87,7 +103,11 @@ fn main() {
     for (variant, stats) in variants.iter().zip(renderer.shading_statistics(&device)) {
         println!("engine, {variant}: {}", vgprs(&stats));
     }
-    for (name, &ty) in TYPES.iter().zip(&types) {
+    for (name, &ty) in TYPES
+        .iter()
+        .chain(&GLTF_TYPES)
+        .zip(types.iter().chain(&gltf_types))
+    {
         for (variant, stats) in variants
             .iter()
             .zip(renderer.material_type_statistics(&device, ty))

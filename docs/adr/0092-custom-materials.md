@@ -427,3 +427,67 @@ To measure again, on new hardware or drivers: `scene_bench --uber` on the branch
 - **The pipeline cache and PSO records become part of a game's build.**
 - **A material type is code:** it can be slow. The profiler shows its pipelines' GPU time
   per batch, as the passes do now.
+
+## Addendum (2026-10-13): glTF's unlit, clear coat and sheen as built-in types
+
+Step 3's leftover ("glTF's extensions onto them come with the material file"), after
+step 4: `KHR_materials_unlit`, `KHR_materials_clearcoat` and `KHR_materials_sheen` imported
+onto the shading models. Research: [docs/research/gltf-material-extensions.md](../research/gltf-material-extensions.md)
+(Filament's gltfio, three.js, Bevy 0.20, Godot; the Khronos specifications).
+
+**Options for sheen.**
+
+1. **Onto `MODEL_CLOTH`.** No new model, but cloth drops GGX: glTF's sheen is a layer over
+   the metallic-roughness base, highlight kept (`material · (1 − max3(sheen) · E(N·V)) +
+   sheen`), and Filament's importer keeps its cloth model out of glTF too.
+2. **A new model, lit under the sheen layer (chosen):** `MODEL_SHEEN`, and
+   `MODEL_SHEEN_CLEARCOAT` for both extensions (the coat over the sheen, as the
+   specification layers them). E is the Charlie and Neubelt lobe's albedo fit cloth
+   already has (`sheen_albedo`), as Filament's `DFG_cloth` matches its lobe.
+
+**As built.**
+
+- **Import** (`engine_assets`, `gltf` with its `extensions` and `KHR_materials_unlit`
+  features: flags only, no new crates):
+  - `MaterialData::layers` (`MaterialLayers`): unlit, `ClearcoatData`, `SheenData`;
+  - a zero coat factor or a black sheen turns the layer off, and unlit excludes the others;
+  - clear coat and sheen are read from their JSON. Files may list them in
+    `extensionsRequired`: they are taken out of that list before the crate's validation,
+    which still refuses unknown required extensions.
+- **Types** (`shaders/materials/gltf.slang`, a module without entry points, which the shader
+  build skips):
+  - `GltfUnlit`, `GltfClearcoat`, `GltfSheen` and `GltfSheenClearcoat`;
+  - each reads its glTF record from the material table, as `GltfMaterial` does (and reuses
+    its functions), and its extension's parameters from its slot (`material_params`), with
+    a copy of the record's alpha cutoff for the masked depth passes' `alpha_cutoff`.
+- **`engine_assets::gltf_models::apply_gltf_models`:**
+  - turns those materials into typed ones, after the material files (a file wins);
+  - builds each type once with the `MaterialTypeBuilder` (Slang: the 128 fragment entry
+    points in 3.3–4.1 s; the layout through reflection, every field checked against the
+    values written);
+  - the cook (`ofeliaengine cook`) and the golden harness call it. Packs need no new
+    format: the types and their SPIR-V go in as material files' types do (version 5).
+- **The models** (`forward.slang`):
+  - the coat's own normal map (`Surface.clearcoat_normal`; none: the interpolated normal,
+    as before);
+  - the emission under the coat darkened by `1 − clearcoat · F`, as the specification says;
+  - the sheen layer's scaling computed once per pixel (`ModelTerms.sheen_scaling`);
+  - its sky light: the base's ambient and the reflections' weight scaled by it, plus the
+    sheen's lobe in the sky.
+- **Measured** (ref-1):
+  - the built-in pipelines are unchanged: every shader property identical on the Radeon
+    (`scene_bench --sky --ao --pipeline-stats`, 25 pipelines). The SPIR-V differs only in
+    the order of constants;
+  - the test types' registers are identical to main (`material_registers`);
+  - the new types, Radeon PS VGPRs without / with local lights / with sky light / with
+    both: unlit 11 / 11 / 11 / 11, clear coat 59 / 70 / 82 / 96, sheen 48 / 65 / 79 / 84,
+    sheen and clear coat 64 / 80 / 87 / 100 (glTF's textured base is 48 / 64 / 64 / 80); no
+    scratch memory;
+  - golden shots `gltf_clearcoat` (ClearCoatTest), `gltf_clearcoat_wicker`, `gltf_sheen`
+    (SheenTestGrid) and `gltf_unlit` per vendor, the same bytes on every run, compared by
+    eye with the Khronos sample viewer's screenshots.
+- **Not yet:**
+  - texture coordinates other than the first set, and `KHR_texture_transform` (as for
+    glTF's other textures; SheenChair needs both);
+  - vertex colors (for unlit too);
+  - PSO records, so that a cook compiles only the entry points a game draws.

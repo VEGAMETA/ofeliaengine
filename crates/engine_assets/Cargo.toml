@@ -29,7 +29,7 @@ bytemuck = { version = "1.25", features = ["derive"] }
 # glTF 2.0 document model and accessor readers (MIT OR Apache-2.0). Without default
 # features: no image decoding, no URL handling — buffers are resolved here, textures are
 # decoded by the texture pipeline later. ADR 0033.
-gltf = { version = "1.4", default-features = false, features = ["utils", "names", "KHR_lights_punctual", "KHR_texture_transform", "KHR_materials_emissive_strength", "KHR_materials_volume"] }
+gltf = { version = "1.4", default-features = false, features = ["utils", "names", "extensions", "KHR_lights_punctual", "KHR_texture_transform", "KHR_materials_emissive_strength", "KHR_materials_unlit", "KHR_materials_volume"] }
 # OpenEXR panoramas (BSD-3-Clause; ADR 0083): Poly Haven's and Blender's EXRs are PIZ
 # compressed, which is not an hour's work. Without rayon (default feature). 1.74.0 exactly:
 # 1.74.1 added lossy DWA compression through pulp, which brings the unmaintained paste

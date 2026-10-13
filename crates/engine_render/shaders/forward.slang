@@ -925,9 +925,10 @@ struct Surface
     float roughness;    // perceptual, before the specular antialiasing widens it
     uint subsurface;    // subsurface scattering's bits (ADR 0059): profile, mask, transmission
     // The shading models' own terms (ADR 0092), read only by their model (`IMaterial::model`).
-    float clearcoat;            // MODEL_CLEARCOAT: the coat's strength, 0 … 1
+    float clearcoat;            // the coated models: the coat's strength, 0 … 1
     float clearcoat_roughness;  // its perceptual roughness
-    float3 sheen;               // MODEL_CLOTH: the sheen's color
+    float3 clearcoat_normal;    // its own normal (world space, unit; 0: the interpolated normal)
+    float3 sheen;               // MODEL_CLOTH and glTF's sheen layer: the sheen's color
     float sheen_roughness;      // its perceptual roughness
     float3 hair_tangent;        // MODEL_HAIR: along the strands (world space, unit)
     float hair_shift;           // the first highlight's shift along the normal (the second's 0.1 lower)
@@ -943,6 +944,7 @@ Surface surface_terms(Surface s)
 {
     s.clearcoat = 0.0;
     s.clearcoat_roughness = 0.0;
+    s.clearcoat_normal = 0.0;
     s.sheen = 0.0;
     s.sheen_roughness = 1.0;
     s.hair_tangent = float3(0.0, 1.0, 0.0);
@@ -964,6 +966,20 @@ static const uint MODEL_CLEARCOAT = 2; // lit, under a clear dielectric coat (Fi
 static const uint MODEL_CLOTH = 3;     // sheen: Charlie distribution, Neubelt visibility (Filament)
 static const uint MODEL_HAIR = 4;      // Kajiya-Kay with two shifted highlights (Scheuermann 2004)
 static const uint MODEL_TOON = 5;      // banded diffuse, a hard highlight and a rim light
+static const uint MODEL_SHEEN = 6;     // lit under glTF's sheen layer (KHR_materials_sheen)
+static const uint MODEL_SHEEN_CLEARCOAT = 7; // the sheen layer, under a clear coat
+
+// The models with a clear coat, and those with glTF's sheen layer over the lit base: with a
+// literal argument each folds to a constant.
+bool model_coated(uint model)
+{
+    return model == MODEL_CLEARCOAT || model == MODEL_SHEEN_CLEARCOAT;
+}
+
+bool model_sheen_layer(uint model)
+{
+    return model == MODEL_SHEEN || model == MODEL_SHEEN_CLEARCOAT;
+}
 
 interface IMaterial
 {
@@ -1290,6 +1306,7 @@ struct ModelTerms
     float3 coat_normal;     // the interpolated normal: the coat is smooth over a normal map
     float3 sheen;
     float sheen_a;          // the sheen's roughness squared
+    float sheen_scaling;    // glTF's sheen layer: what the lit base keeps under it
     float3 hair_tangent;
     float hair_shift;
     float toon_steps;
@@ -1349,11 +1366,17 @@ float3 model_light(ModelTerms m, float3 n, float3 v, float3 l, float3 diffuse, f
     float n_dot_v = max(dot(n, v), 1e-4);
     float n_dot_h = saturate(dot(n, h));
     float v_dot_h = saturate(dot(v, h));
-    if (m.model == MODEL_CLEARCOAT)
+    if (model_coated(m.model) || model_sheen_layer(m.model))
     {
-        // The base under the coat, and the coat's lobe (IOR 1.5) on its own normal.
+        // The lit base; under glTF's sheen layer, what the layer lets through and the
+        // layer's lobe (KHR_materials_sheen); under a coat, the coat's lobe (IOR 1.5) on its
+        // own normal.
         float3 f = fresnel_schlick(v_dot_h, f0);
         float3 below = diffuse + distribution_ggx(n_dot_h, a) * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, a) * f;
+        if (model_sheen_layer(m.model))
+            below = below * m.sheen_scaling + distribution_charlie(n_dot_h, m.sheen_a) * visibility_neubelt(n_dot_v, n_dot_l) * m.sheen;
+        if (!model_coated(m.model))
+            return below * n_dot_l;
         float fc = fresnel_schlick(v_dot_h, float3(0.04, 0.04, 0.04)).x * m.clearcoat;
         float coat = distribution_ggx(saturate(dot(m.coat_normal, h)), m.coat_a) * visibility_kelemen(v_dot_h) * fc;
         return below * (1.0 - fc) * n_dot_l + coat * saturate(dot(m.coat_normal, l));
@@ -1870,7 +1893,7 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     if (decals)
         apply_decals(frame, uint2(input.position.xy), base.rgb, n, rough, metallic);
     // A coat scatters what the base reflects: the base is at least as rough (Filament).
-    if (M::model() == MODEL_CLEARCOAT)
+    if (model_coated(M::model()))
         rough = lerp(rough, max(rough, surface.clearcoat_roughness), saturate(surface.clearcoat));
     float perceptual = widen_roughness(rough, kernel);
     float occlusion = M::occlusion(ctx, params);
@@ -1904,7 +1927,9 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     float coat_roughness = clamp(surface.clearcoat_roughness, 0.045, 1.0);
     float sheen_roughness = clamp(surface.sheen_roughness, 0.07, 1.0);
     terms.coat_a = coat_roughness * coat_roughness;
-    terms.coat_normal = ng;
+    // The coat's normal: its own map's, or the interpolated normal (the coat is smooth over
+    // the base's normal map).
+    terms.coat_normal = model_coated(M::model()) && any(surface.clearcoat_normal != 0.0) ? surface.clearcoat_normal : ng;
     terms.sheen = surface.sheen;
     terms.sheen_a = sheen_roughness * sheen_roughness;
     terms.hair_tangent = surface.hair_tangent;
@@ -1920,11 +1945,16 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     float n_dot_l = saturate(dot(n, l));
     float n_dot_h = saturate(dot(n, h));
     float v_dot_h = saturate(dot(v, h));
+    // glTF's sheen layer lets through what its lobe does not reflect (KHR_materials_sheen's
+    // albedo scaling, from n·v; `sheen_albedo` is the lobe's directional albedo).
+    terms.sheen_scaling = model_sheen_layer(M::model())
+        ? 1.0 - max(terms.sheen.r, max(terms.sheen.g, terms.sheen.b)) * sheen_albedo(n_dot_v, sheen_roughness)
+        : 1.0;
 
     float roughness = max(perceptual, 0.045);
     float a = roughness * roughness;
     float3 f0 = lerp(float3(0.04, 0.04, 0.04), base.rgb, metallic);
-    if (M::model() == MODEL_CLEARCOAT)
+    if (model_coated(M::model()))
         f0 = lerp(f0, f0_under_coat(f0), terms.clearcoat);
     float3 f = fresnel_schlick(v_dot_h, f0);
     float3 specular = distribution_ggx(n_dot_h, a) * visibility_smith_ggx_correlated(n_dot_v, n_dot_l, a) * f;
@@ -1961,14 +1991,25 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     }
     else
         ambient = ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position, true, bent, sky_normal);
-    if (M::model() == MODEL_CLEARCOAT)
+    if (model_sheen_layer(M::model()))
+    {
+        // glTF's sheen over the lit base: the base's sky light through what the layer lets
+        // pass (the reflections' weight with it: they still replace the base's lobe), and
+        // the layer's lobe in the sky's light.
+        float3 sheen_weight;
+        ambient = ambient * terms.sheen_scaling + sheen_environment(n, v, sheen_roughness, terms.sheen, occlusion, sheen_weight);
+        reflect_weight *= terms.sheen_scaling;
+    }
+    if (model_coated(M::model()))
     {
         // The coat over the base: what it lets through, and what it reflects of the
-        // environment. Its lobe, the sharper, is the one the reflections replace.
+        // environment. Its lobe, the sharper, is the one the reflections replace. The
+        // emission is under the coat too (KHR_materials_clearcoat).
         float fc = fresnel_schlick(max(dot(terms.coat_normal, v), 1e-4), float3(0.04, 0.04, 0.04)).x * terms.clearcoat;
         reflect_normal = terms.coat_normal;
         reflect_roughness = coat_roughness;
         ambient = ambient * (1.0 - fc) + coat_environment(reflect_normal, v, reflect_roughness, terms.clearcoat, occlusion, reflect_weight);
+        emissive *= 1.0 - fc;
     }
     if (M::model() == MODEL_TOON)
     {
