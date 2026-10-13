@@ -384,6 +384,37 @@ Two facts constrain it (research note):
   front end and one entry point's code, the pipeline); a material file edited to on screen
   31 ms (the quiet time; no compile). No validation messages as pipelines are replaced.
 
+### Step 5: the ubershader experiment (2026-10-13)
+
+The owner asked to try ubershaders against the plain fallback (B.2 against B.3). The
+prototype (branch `exp/ubershader`, not merged): `fragmentUber` and `fragmentUberMasked`
+read the view's features (ambient occlusion, local shadows, contact shadows, decals, GI)
+from a push constant at run time, local lights and the environment compiled in and skipped
+at run time; `ForwardRenderer::set_ubershader` draws the main shading with them, glTF
+included, so their cost is measured on Sponza.
+
+| | Specialized | Ubershader |
+|---|---|---|
+| Radeon PS VGPRs | 48 / 64 / 64 / 80 (the four variants) | 90 |
+| RTX forward, sky light | 377 µs | 430 µs (+14 %) |
+| RTX forward, prepass, AO, contact shadows, 32 lights | 357 µs | 385 µs (+8 %) |
+| Radeon forward, sky light | 18.2 ms | 27.9 ms (+53 %) |
+| Radeon forward, prepass, AO, contact shadows, 32 lights | 17.9 ms | 21.8 ms (+22 %) |
+| Compile one entry point (glTF or a cloth type) | 205–220 ms | 215–225 ms |
+| Picture (1920 × 1080, both GPUs) | | 3 pixels differ, by 1/255 |
+
+**Decision: the glTF fallback stays (B.3); no ubershader.**
+- The picture is the same, as the ADR asked.
+- The cost fails on the iGPU: its 90 registers cut occupancy, and a type drawn with it
+  would cost up to half the frame's forward pass while its specialized pipelines compile.
+- Nothing is gained at first sight: compiling the ubershader's one entry point takes as
+  long as compiling the specialized one the view needs.
+- It would help only a view that changes its features while a type is on screen (one
+  compile for every feature set). Cooked packs carry every entry point's SPIR-V, so such
+  a change costs a pipeline made on the warm-up thread, not a compile.
+
+To measure again, on new hardware or drivers: `scene_bench --uber` on the branch.
+
 ## Consequences
 
 - **The built-in path stays as fast as today** (identical SPIR-V), and the register rule

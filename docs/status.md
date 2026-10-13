@@ -93,8 +93,9 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
   4a material files and parameter layouts through Slang's reflection (PR #182) and 4b
   cooking (the map, texture parameters, pack version 5 with typed materials and their
   SPIR-V, PR #183) and 4c hot reload (types' modules and material files, PR #184) done;
-  next the ubershader experiment; later glTF's unlit, clear coat and sheen extensions onto
-  the models and PSO records. (Ref-1 runs
+  step 5, the ubershader experiment, measured and declined (iGPU forward +22–53 %, 90
+  VGPRs; the fallback stays; branch `exp/ubershader`). Left: glTF's unlit, clear coat and
+  sheen extensions onto the models, PSO records. (Ref-1 runs
   with hardware-accelerated GPU scheduling on since 2026-10-12, for DLSS frame
   generation.)
 
