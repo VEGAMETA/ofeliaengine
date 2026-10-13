@@ -1015,6 +1015,15 @@ impl ForwardRenderer {
                 (None, false, true) => [&shading.main_motion[0], &shading.main_motion[1]],
             }
         };
+        // With ambient occlusion's bent normals, the variants that read them (ADR 0058).
+        let bent = ao
+            .as_ref()
+            .is_some_and(|((settings, _), _)| settings.bent_normals);
+        let main_pipelines = if bent {
+            main_pipelines.map(|p| self.bent_twins.twin(p))
+        } else {
+            main_pipelines
+        };
         // Material types' variants of them (ADR 0092).
         let main_typed = self.typed_pipelines(&states, main_pipelines, PLAIN_STATES);
         // Made now if this is their first frame (ADR 0079).
@@ -1461,7 +1470,11 @@ impl ForwardRenderer {
                 (None, Some(p)) => &p[shadowed_index(variant)],
                 (None, None) => &pipelines.shading[variant],
             };
-            let pipeline = ready(pipeline)?;
+            let pipeline = ready(if bent {
+                self.bent_twins.twin(pipeline)
+            } else {
+                pipeline
+            })?;
             let two_phases = flag_buffer.is_some();
             // Their diffuse light is occluded by the view's ambient occlusion too, and
             // comes from the probe volume with GI.

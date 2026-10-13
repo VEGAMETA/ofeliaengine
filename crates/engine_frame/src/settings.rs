@@ -174,8 +174,11 @@ impl RenderDefaults {
                 quality: Quality::Native,
             },
             DeviceClass::Integrated => Self {
+                // Without the bent normals: their registers cost the Radeon iGPU about
+                // 20 % of its shading with local lights (ADR 0058).
                 ambient_occlusion: Some(AoSettings {
                     quality: AoQuality::Low,
+                    bent_normals: false,
                     ..AoSettings::default()
                 }),
                 antialiasing: Antialiasing::TAAU,

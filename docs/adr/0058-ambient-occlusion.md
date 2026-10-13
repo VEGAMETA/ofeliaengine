@@ -154,3 +154,85 @@ the GPU to about 0.005.
   term, about +25 %) for directional ambient; visibility bitmasks; fp16 math on AMD (RDNA
   runs packed fp16 at twice the rate); a Hilbert index lookup table (the index costs about
   16 µs of the main pass).
+
+## Addendum (2026-10-13): bent normals and cone specular occlusion (GTSO)
+
+Queue item 3d. Indoors without GI, diffuse ambient came from the sky's harmonics along the
+shading normal, and dielectric reflections kept the sky's brightness under arches: they
+looked too bright in shade next to metals. Research:
+[docs/research/bent-normals-gtso.md](../research/bent-normals-gtso.md).
+
+**Options.**
+
+1. **Always with AO.** No new variants. Costs every view with AO (below).
+2. **A switch, `AoSettings::bent_normals`, with its own entry points (chosen; the owner,
+   2026-10-13).** Off, everything is exactly as before; on by default on discrete GPUs,
+   off on integrated ones.
+3. **Diffuse only (no GTSO).** Fewer registers (lights + environment 83 VGPRs on the
+   Radeon instead of 93), but without the half of the benefit that matters most here: the
+   reflections under the arches.
+
+**Measured** (Sponza 1920 × 1080, `scene_bench --sky --ao [--lights 32] [--no-bent]`,
+main and the branch alternated, 3 rounds; ref-1):
+
+| | RTX 4060 Ti | Radeon iGPU |
+|---|---|---|
+| AO passes, High | 518–544 → 565–568 µs | 13.5–15.0 → 16.3–20.2 ms (bimodal, as main) |
+| denoise (perf gate) | 42 → 58 µs | 0.94 → 2.70 ms |
+| forward, sky | 323 → 330 µs | 15.2 → 15.6 ms |
+| forward, sky + 32 lights | 343 → 363 µs | 17.3 → 21.0 ms |
+| GPU frame, High | +2.5–7 % (+0 with async compute in the gate's scenes) | +10–25 % |
+| AO Low | AO 313 → 313 µs, forward +10 µs | AO +1 ms, forward +1.9 ms |
+| `--no-bent` | = main | = main |
+
+Radeon VGPRs after the prepass with AO (plain / lights / environment / both): 48 / 63 /
+72 / 80 without the bent normals (unchanged), 48 / 63 / 72 / 93 with them. Every shading
+pipeline without them is byte-identical to main's SPIR-V.
+
+**Decision.**
+
+- **AO pass:** `aoMainBent` also integrates the bent normal (the paper's Algorithm 2, as
+  XeGTAO writes it), with `t0` and `t1` written without trigonometry from the horizons'
+  cosines (per side `4 s³ cos n + (4 c³ − 12 c) sin n` and `4 s³ sin n − 4 c³ cos n`);
+  turns it to world space with the camera's rotation (a quaternion in the push
+  constants); writes RGBA8 with the **visibility in R** and the bent normal × 0.5 + 0.5
+  in GBA. `aoDenoiseBent` blurs all four with the same edge weights (from loads) and
+  renormalizes. Without the switch, `aoMain` and `aoDenoise` write R8 as before.
+- **Shading:** the AO is read early (its latency hides behind the material); with the
+  bent normal the sky normal is `normalize(n + bent − n_geometric)` (the shading normal
+  bent as the geometry's), used for the harmonics and for GTSO. GTSO: the share of the
+  specular cone (aperture `exp2(−3.32 α²)`) inside the visible cone (`cos = √(1 − V)`),
+  from all of the smaller cap to none along a smoothstep, taken in the cosines of the
+  angles (`cos(θv ∓ θs)`), not their arc cosines; faded out below roughness 0.1
+  (Filament's form of Jimenez et al.'s GTSO with Oat and Sander's intersection).
+- **Pipelines:** 36 entry points `fragmentMainAoBent…`, `fragmentReflectAoBent…`,
+  `fragmentSubsurfaceBent…` (237 → 275 `.spv`). They are not described with the
+  renderer's other pipelines: each pipeline that reads AO gets a twin the first time a
+  frame draws with it under the switch (`forward/bent.rs`: the same description with the
+  bent entry point, `LazyPipeline::with_fragment_entry`), made by the device's warm-up
+  thread through `update_material_types`. Until the twin exists the frame draws with the
+  pipeline it derives from, which reads R: right visibility, no hitch. Material types
+  follow (a twin is a role like any other). The golden harness waits for twins as for
+  material types. Each entry keeps the pipeline it derives from, so that its id (the
+  map's key) is never reused while the entry lives, as material types keep their roles.
+- **Without the warm-up thread** (`Device::set_pipeline_warm_up(false)`, `flight
+  --no-warm-up`) a derived pipeline (`LazyPipeline::with_fragment`, `with_fragment_entry`)
+  is now created when it is described: nothing else would make it. Before, material types'
+  variants were never made in that mode (their fallback drew for good).
+- **Tried, not taken** (lights + environment on the Radeon stayed at 89–95 VGPRs): the
+  bent normal in view space turned in the shading (+3 registers and 6 uniform loads per
+  pixel); reading AO late (+0.9 ms: the latency shows); bent and sky normals both live;
+  half precision for the sky normal; GTSO computed early as one scalar; ambient after
+  the local lights (raised the pipelines without AO: 80 → 84).
+
+**Consequences.**
+
+- On discrete GPUs ambient light comes from the unoccluded direction and reflections fade
+  where the visible cone does not cover them: the golden shots with AO changed (FLIP mean
+  0.027–0.062), metals' lower halves no longer mirror the sky, shaded stone and cloth
+  under Sponza's arches got darker.
+- Integrated GPUs keep AO without them by default: with local lights their registers cost
+  the Radeon about 20 % of its shading.
+- Cooked packs compile 36 more entry points per material type.
+- To revisit: the denoise of RGBA8 from four gathers per channel (×2.9 on the Radeon);
+  the lights + environment variant's registers.

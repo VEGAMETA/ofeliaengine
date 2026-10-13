@@ -1416,6 +1416,16 @@ renderer.set_ambient_occlusion(&device, &bindless, Some(AoSettings {
 - **Perspective cameras only:** orthographic views draw without it.
 - **Look:** `power` (2.2) darkens or lightens the whole effect, `falloff` softens its outer
   edge, `denoise_passes` (0–3, 1) blurs it along surfaces without crossing depth edges.
+- **Bent normals** (`bent_normals`, on by default; off in the frame renderer's defaults for
+  integrated GPUs): the pass also finds the mean unoccluded direction. The sky's diffuse
+  light then comes from that direction, and the environment's reflections fade where the
+  visible part of the sky does not cover them (GTSO): no more shiny stone and cloth in the
+  shade of an arch, no sky mirrored in the underside of a metal ball.
+  - Cost at 1080p High on an RTX 4060 Ti: about 50 µs of AO and 10–30 µs of shading; on the
+    Radeon iGPU 10–25 % of the frame (its shading with local lights loses registers).
+  - Off, the shading is exactly what it was without it: its pipelines are separate, made
+    the first time a frame needs them (the frame draws without the bent normal until
+    then, never a hitch). `--no-bent` in `scene_bench` turns it off.
 - **Limits of screen space:** nothing off screen or hidden behind the nearest surface
   occludes, and thin objects (poles, railings) occlude everything behind them within the
   radius.

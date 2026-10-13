@@ -16,7 +16,7 @@
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
-use engine_render::ao::{AO_FORMAT, AoQuality, AoSettings};
+use engine_render::ao::{AO_BENT_FORMAT, AO_FORMAT, AoQuality, AoSettings};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion, ShadowSettings,
     Temporal,
@@ -104,11 +104,12 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
         ShadowSettings::default(),
     )
     .unwrap();
-    let settings = |quality| AoSettings {
+    let settings = |quality, bent_normals| AoSettings {
         quality,
         radius: 1.0,
         falloff: 0.01,
         power: 1.0,
+        bent_normals,
         ..AoSettings::default()
     };
     let mut geometry =
@@ -153,7 +154,9 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
         )
     };
 
-    let bytes = u64::from(SIZE * SIZE);
+    // RGBA8 with the bent normals: the visibility, then the bent normal (world space ×
+    // 0.5 + 0.5); R8 without them.
+    let bytes = u64::from(SIZE * SIZE * 4);
     let (readback, readback_mem) = allocator
         .create_buffer(
             &vk::BufferCreateInfo::default()
@@ -196,18 +199,20 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
         steps: 32,
     };
     let mut frame_number = 0;
-    // (quality, occlusion culling, temporal state)
-    for (quality, occluded, temporal_state) in [
-        (many, false, false),
-        (many, true, false),
-        (many, false, true),
-        (AoQuality::Low, false, false),
-        (AoQuality::Medium, false, true),
-        (AoQuality::High, false, false),
-        (AoQuality::Ultra, false, true),
+    // (quality, occlusion culling, temporal state, bent normals)
+    for (quality, occluded, temporal_state, bent) in [
+        (many, false, false, true),
+        (many, true, false, true),
+        (many, false, true, true),
+        (many, false, false, false),
+        (AoQuality::Low, false, false, true),
+        (AoQuality::Medium, false, true, true),
+        (AoQuality::High, false, false, true),
+        (AoQuality::High, false, false, false),
+        (AoQuality::Ultra, false, true, true),
     ] {
         renderer
-            .set_ambient_occlusion(&device, &bindless, Some(settings(quality)))
+            .set_ambient_occlusion(&device, &bindless, Some(settings(quality, bent)))
             .unwrap();
         // Two frames: occlusion culling's second frame has the first's visibility.
         for _ in 0..2 {
@@ -274,7 +279,10 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
                     )
                     .unwrap();
                 let ao = passes.ao.unwrap();
-                assert_eq!(fg.texture_desc(ao).format, AO_FORMAT);
+                assert_eq!(
+                    fg.texture_desc(ao).format,
+                    if bent { AO_BENT_FORMAT } else { AO_FORMAT }
+                );
                 fg.add_pass("read back")
                     .read(ao, Access::TransferRead)
                     .write(out, Access::TransferWrite)
@@ -324,9 +332,16 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
         let ptr = readback_mem.mapped_ptr().unwrap();
         // SAFETY: the GPU is idle; the mapping covers the image.
         let image = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), bytes as usize) };
-        let at = |p: Vec3| {
+        let stride = if bent { 4 } else { 1 };
+        let texel = |p: Vec3| {
             let (x, y) = pixel_of(p);
-            f32::from(image[(y * SIZE + x) as usize]) / 255.0
+            let at = ((y * SIZE + x) * stride) as usize;
+            [0, 1, 2, 3].map(|c| f32::from(image[at + c.min(stride as usize - 1)]) / 255.0)
+        };
+        let at = |p: Vec3| texel(p)[0];
+        let bent_at = |p: Vec3| {
+            let t = texel(p);
+            (Vec3::new(t[1], t[2], t[3]) * 2.0 - 1.0).normalize()
         };
         // The mean of a row of pixels at the same distance from the wall: the noise of
         // the few-slice presets averages out, as TAA averages it over frames.
@@ -338,7 +353,7 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
             })
             .collect();
         println!(
-            "{quality:?}, occlusion {occluded}, temporal {temporal_state}: {DISTANCES:?} -> {values:?}"
+            "{quality:?}, occlusion {occluded}, temporal {temporal_state}, bent normals {bent}: {DISTANCES:?} -> {values:?}"
         );
         for (k, &v) in values.iter().enumerate() {
             if quality == many {
@@ -376,7 +391,39 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
         for z in [-2.0, 2.0] {
             let open = at(Vec3::new(3.5, 0.0, z));
             assert!(open > 0.97, "open floor at z = {z}: {open}");
+            // The bent normal of open floor is its normal.
+            if bent {
+                let normal = bent_at(Vec3::new(3.5, 0.0, z));
+                assert!(
+                    normal.dot(Vec3::Y) > 0.98,
+                    "open floor's bent normal at z = {z}: {normal}"
+                );
+            }
         }
+        if !bent {
+            continue;
+        }
+        // Next to the wall (x = 0) it leans away from it, less with distance (the mean of
+        // a row, as above).
+        let lean: Vec<f32> = DISTANCES
+            .iter()
+            .map(|&d| {
+                let row = [-0.6, -0.4, -0.2, 0.0, 0.2, 0.4, 0.6];
+                row.iter()
+                    .map(|&z| bent_at(Vec3::new(d, 0.0, z)).x)
+                    .sum::<f32>()
+                    / row.len() as f32
+            })
+            .collect();
+        println!("  bent normal's lean away from the wall (x): {lean:?}");
+        assert!(
+            lean[0] > 0.15,
+            "the bent normal leans away from the wall: {lean:?}"
+        );
+        assert!(
+            lean.windows(2).all(|w| w[1] <= w[0] + 0.05),
+            "and less further away: {lean:?}"
+        );
     }
 
     // SAFETY: the device is idle.

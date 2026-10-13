@@ -257,8 +257,30 @@ impl LazyPipeline {
     /// The same pipeline with another fragment module (`spirv`, the same entry point):
     /// described, not created, and queued for `device`'s warm-up thread, which creates it
     /// in the background (a material type's variant of an engine pipeline, ADR 0092).
-    /// `None` for a compute pipeline or one without a fragment stage.
+    /// Without the warm-up thread ([`Device::set_pipeline_warm_up`]) it is created now:
+    /// such a variant is described when a frame first needs it, and nothing else would
+    /// make it. `None` for a compute pipeline or one without a fragment stage.
     pub fn with_fragment(&self, device: &Device, spirv: Arc<[u32]>) -> Option<Self> {
+        self.derive_fragment(device, spirv, None)
+    }
+
+    /// [`Self::with_fragment`] with another entry point too: `entry` in `spirv` (a
+    /// feature's variant of an engine pipeline, such as ambient occlusion's bent normals).
+    pub fn with_fragment_entry(
+        &self,
+        device: &Device,
+        spirv: Arc<[u32]>,
+        entry: &core::ffi::CStr,
+    ) -> Option<Self> {
+        self.derive_fragment(device, spirv, Some(entry))
+    }
+
+    fn derive_fragment(
+        &self,
+        device: &Device,
+        spirv: Arc<[u32]>,
+        entry: Option<&core::ffi::CStr>,
+    ) -> Option<Self> {
         let Recipe::Graphics {
             state,
             vertex,
@@ -280,7 +302,7 @@ impl LazyPipeline {
                 },
                 fragment: Some(Stage {
                     spirv,
-                    entry: fragment.entry.clone(),
+                    entry: entry.map_or_else(|| fragment.entry.clone(), CString::from),
                 }),
                 color_formats: color_formats.clone(),
                 specialization: specialization.clone(),
@@ -289,6 +311,9 @@ impl LazyPipeline {
         }));
         if let Some(warm_up) = device.pipeline_warm_up() {
             warm_up.add(core::slice::from_ref(&derived));
+        } else {
+            // A failure is logged and kept by the pipeline (settled, never drawn with).
+            let _ = derived.get_or_create();
         }
         Some(derived)
     }

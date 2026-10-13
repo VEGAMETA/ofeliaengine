@@ -63,7 +63,7 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 | Vulkan RHI: bindless, render graph, async compute, pipeline cache, crash/GPU-fault reports, Vulkan instances on a process-lifetime loader thread | solid | ADRs 0006, 0055, 0061, 0065 |
 | Persistent GPU scene, ECS extraction, runtime frame loop, cameras | done | ADR 0064 |
 | **Frame renderer** (`engine_frame`): one object composes a frame: scene → hook → exposure → TAA/TAAU/FSR/DLSS → bloom/tonemap; defaults per device class | done | ADR 0072 |
-| Lighting: PBR forward with clustered lights, CSM, IBL, GTAO, SSS, transparency (sorted + OIT) | done | ADRs 0045–0047, 0054, 0058, 0059 |
+| Lighting: PBR forward with clustered lights, CSM, IBL, GTAO with bent normals and GTSO, SSS, transparency (sorted + OIT) | done | ADRs 0045–0047, 0054, 0058, 0059 |
 | Local-light shadows (cached atlas), contact shadows (Bend) | done | ADR 0071 |
 | Reflections: parallax-corrected probes, SSR (FidelityFX SSSR-based) | done | ADR 0073 |
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
@@ -411,10 +411,10 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
 3c. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
    first: it decides permutations and pipeline management for the whole renderer (§9
    material graph and hand-written Slang).
-3d. **Directional GTAO and GTSO** (owner, 2026-10-10: after GI): bent normals (XeGTAO's
-   directional term, about +25 % of the AO pass) for ambient light along the unoccluded
-   direction and cone-based specular occlusion; fixes dielectrics looking too bright next
-   to metals in shade indoors (§6). Own entry points, only in views with AO (register rule).
+3d. ~~**Directional GTAO and GTSO**~~ done 2026-10-13 (ADR 0058's addendum): bent normals
+   and cone specular occlusion behind `AoSettings::bent_normals` (the owner, 2026-10-13: a
+   switch, on for discrete GPUs, off for integrated), 36 twin entry points made on first
+   use; off, the shading is byte-identical to before.
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
    visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085): **meshlets
    in the forward renderer first** (the owner, 2026-10-11; both GPUs; the iGPU has no mesh
@@ -518,7 +518,6 @@ grown, divide and conquer); the old labels stay in parentheses.
   - contact shadows of local lights (owner, 2026-10-10: on request): Bend's pass per light,
     for the brightest one or two; today only the sun has them;
   - reflections on transparent surfaces;
-  - GTSO;
   - probe shadow-map caching;
   - XeSS;
   - Brixelizer GI (the reference, ADR 0090): its specular is not composited, and
@@ -532,7 +531,8 @@ grown, divide and conquer); the old labels stay in parentheses.
     irradiance (barely occluded), specular from reflection probes that see the real,
     darker interior. With probe GI (ADR 0088) they agree; on GPUs without ray queries
     irradiance from the reflection probes (SH of their captures) would still help;
-  - cloth shading (sheen) and anisotropy are missing from the material model;
+  - anisotropic GGX is missing from the material model (cloth, clear coat and hair are
+    shading models since ADR 0092);
   - FSR 4: ML, RDNA4-only, shipped as a DLL (DX12 at first). Check Vulkan availability and
     license; it needs an RDNA4 GPU to test.
 - **Patents avoided on purpose** (don't build without a new decision): static/dynamic

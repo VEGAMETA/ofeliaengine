@@ -2429,8 +2429,10 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         // Material types (ADR 0092): the pipelines a frame asked for are made before the
         // next one, so every run draws the same frames with them (the first with their
         // fallbacks) however long the compiles take, and temporal effects (screen-space
-        // reflections' noise and history) see the same sequence.
-        if typed && !shot.material_first_sight {
+        // reflections' noise and history) see the same sequence. So are ambient occlusion's
+        // bent-normal variants (ADR 0058).
+        let bent = shot.ao.is_some_and(|ao| ao.bent_normals);
+        if (typed || bent) && !shot.material_first_sight {
             assert!(
                 frame
                     .forward_mut()
