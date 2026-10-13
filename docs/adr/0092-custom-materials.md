@@ -358,6 +358,32 @@ Two facts constrain it (research note):
 - **Not yet:** glTF's `KHR_materials_unlit`, `_clearcoat` and `_sheen` onto the models;
   PSO records to cook only the entry points a game draws (all 92 now); 4c hot reload.
 
+### Step 4c as built (2026-10-13)
+
+- **Types' modules** (`ForwardRenderer::set_material_hot_reload`): the folders of the
+  files a type's compiles read are watched (Slang's dependency list: its module,
+  `forward.slang`, their includes; `engine_platform::fs_watch::WatchSet`). A change quiet
+  for 30 ms (editors save in steps) compiles the entry points the type is drawn with again,
+  in one request on the material compiler thread, tagged with a generation (a stale result
+  is dropped). Entry points not drawn are forgotten and compile from the new source when
+  first drawn (a cooked type's 92 do not all compile again).
+- **No gap on screen:** a pipeline in use keeps drawing until its successor is made
+  (`Derived::Ready::previous`), then is retired and destroyed once the frames that may
+  use it are done (`ForwardRenderer::collect_material_types`, called by the frame
+  renderer with the frame number, as bindless indices are).
+- **Errors:** a module that does not compile keeps the previous version drawing; the error
+  (Slang's diagnostics, at the module's line) is kept until the next good compile
+  (`ForwardRenderer::material_type_error`).
+- **Material files** (`engine_streaming::material_files::LiveMaterialFiles`): a material
+  loaded from a file is laid out again and replaced in the table (`set_typed`) when the
+  file changes; its type's layout is cached and reflected again only when the module
+  changes; a file that does not parse keeps the previous parameters, its error kept. The
+  golden harness loads its material files through it.
+- **Measured** (`engine_frame` test `hot_reload`, both GPUs, validation on): a type's
+  module edited to on screen 240–266 ms (budget 500 ms, CLAUDE.md §5: the 30 ms quiet, the
+  front end and one entry point's code, the pipeline); a material file edited to on screen
+  31 ms (the quiet time; no compile). No validation messages as pipelines are replaced.
+
 ## Consequences
 
 - **The built-in path stays as fast as today** (identical SPIR-V), and the register rule

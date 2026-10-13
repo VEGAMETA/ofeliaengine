@@ -21,6 +21,8 @@ engine_rhi.workspace = true
 engine_shader.workspace = true
 # A type that does not compile is logged; its fallback draws (the version engine_rhi uses).
 log = "0.4"
+# Directory watchers for hot reload of material types' modules (ADR 0092).
+engine_platform.workspace = true
 
 [[bench]]
 name = "graph"
@@ -29,8 +31,6 @@ harness = false
 [dev-dependencies]
 # glTF scenes for examples/scene_bench.rs.
 engine_assets.workspace = true
-# Unbuffered reads (all hosts) for examples/staging_bench.rs and Windows helpers.
-engine_platform.workspace = true
 # zstd into staging memory in examples/staging_bench.rs (ADR 0057).
 zstd = { version = "0.13", default-features = false }
 # The deliberate GPU fault test writes its report to a temporary directory (ADR 0061).

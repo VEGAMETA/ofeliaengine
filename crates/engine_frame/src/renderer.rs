@@ -813,7 +813,9 @@ impl FrameRenderer {
         if !view.retired.is_empty() {
             view.collect(allocator, bindless, Some(completed));
         }
-        // Material types' pipelines asked for by the last frames (ADR 0092).
+        // Material types' pipelines asked for by the last frames, and their hot reload
+        // (ADR 0092): pipelines a reload replaced go once the frames using them are done.
+        self.forward.collect_material_types(frame_number, completed);
         self.forward.update_material_types(device);
         let output = (output.0.max(1), output.1.max(1));
         let previous = view.prepared;

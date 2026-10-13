@@ -83,6 +83,67 @@ pub(crate) fn parse_notifications(root: &Path, bytes: &[u8], mut emit: impl FnMu
 #[cfg(windows)]
 pub use watcher::DirectoryWatcher;
 
+/// Folders watched together (not recursively), their events in one channel: what hot
+/// reload of files spread over a few folders needs (material types' modules, material
+/// files). A folder added twice is watched once; one that cannot be watched is reported.
+pub struct WatchSet {
+    events: std::sync::mpsc::Receiver<FileEvent>,
+    sender: std::sync::mpsc::Sender<FileEvent>,
+    #[cfg(windows)]
+    watchers: Vec<DirectoryWatcher>,
+    /// The watched folders, as given.
+    folders: Vec<PathBuf>,
+}
+
+impl core::fmt::Debug for WatchSet {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("WatchSet")
+            .field("folders", &self.folders)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for WatchSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl WatchSet {
+    /// Watches nothing yet.
+    pub fn new() -> Self {
+        let (sender, events) = std::sync::mpsc::channel();
+        Self {
+            events,
+            sender,
+            #[cfg(windows)]
+            watchers: Vec::new(),
+            folders: Vec::new(),
+        }
+    }
+
+    /// Watches `folder` (once; `folder` compared as given, so pass one spelling).
+    pub fn watch(&mut self, folder: &Path) -> std::io::Result<()> {
+        if self.folders.iter().any(|f| f == folder) {
+            return Ok(());
+        }
+        #[cfg(windows)]
+        {
+            let sender = self.sender.clone();
+            let watcher =
+                DirectoryWatcher::with_sink(folder, false, move |e| sender.send(e).is_ok())?;
+            self.watchers.push(watcher);
+        }
+        self.folders.push(folder.to_owned());
+        Ok(())
+    }
+
+    /// The next event, if one is waiting.
+    pub fn try_next(&self) -> Option<FileEvent> {
+        self.events.try_recv().ok()
+    }
+}
+
 #[cfg(windows)]
 mod watcher {
     use super::{FileEvent, FileEventKind, parse_notifications};

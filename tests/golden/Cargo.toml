@@ -15,8 +15,6 @@ workspace = true
 png = "0.18"
 engine_anim.workspace = true
 engine_assets.workspace = true
-# Material files' parameter layouts through Slang's reflection (ADR 0092).
-engine_shader.workspace = true
 # Brixelizer GI's shots, probe GI's reference (ADR 0090).
 engine_brixelizer.workspace = true
 engine_core.workspace = true

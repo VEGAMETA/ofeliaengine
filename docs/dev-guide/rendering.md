@@ -2020,6 +2020,13 @@ file:
   the pack (about 3 s per type), so a game never compiles them.
 - Loading such a pack: `engine_streaming::register_material_types` then `add_materials`
   (as `flight` does).
+- **Hot reload** (development): `ForwardRenderer::set_material_hot_reload(true)` watches
+  your types' modules; saving one puts the new code on screen in about a quarter of a
+  second, and a mistake keeps the previous version drawing (`material_type_error` has the
+  compiler's message at your line). Materials loaded from files with
+  `engine_streaming::material_files::LiveMaterialFiles` (hot reload on) take a saved
+  file's new parameters at the next frame (about 30 ms); new texture paths need the
+  resolver you pass to load them.
 
 ### Shading models
 

@@ -7,9 +7,7 @@
 use crate::decal_set::DecalSet;
 use engine_anim::{local_to_model, skinning_matrices};
 use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
-use engine_assets::material_file::{
-    Alpha, MaterialFile, MaterialMap, SlangMaterialTypes, apply_material_map,
-};
+use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_material_map};
 use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
     TextureSlot, TextureWrap, cook_scene, import_gltf, write_pack,
@@ -29,11 +27,9 @@ use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::budget::{BudgetSettings, GpuBudget};
 use engine_render::environment::{Environment, Sky};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
+use engine_render::forward::ENGINE_SHADER_DIR;
 use engine_render::forward::{
     DirectionalLight, DrawItem, LocalLight, LocalShadowSettings, ShadowSettings, Spot, ViewGi,
-};
-use engine_render::forward::{
-    ENGINE_SHADER_DIR, ForwardRenderer, MaterialTypeDesc, reflect_material_params,
 };
 use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::GpuScene;
@@ -42,8 +38,7 @@ use engine_render::graph::{
     TextureDesc, TextureState,
 };
 use engine_render::material::{
-    AlphaMode, MaterialDesc, MaterialId, MaterialParams, MaterialTable, PARAMS_BYTES, Subsurface,
-    TextureRef,
+    AlphaMode, MaterialDesc, MaterialParams, MaterialTable, Subsurface, TextureRef,
 };
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
 use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
@@ -62,7 +57,7 @@ use engine_rhi::{
     MemoryLocation, Wrap,
 };
 use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
-use engine_shader::{Compiler, SlangLibrary};
+use engine_streaming::material_files::LiveMaterialFiles;
 use engine_streaming::{SceneStreamSettings, SceneStreamer};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -579,60 +574,6 @@ fn procedural(subsurface: bool, glossy_floor: bool) -> Vec<(OwnedMeshData, Mater
 /// The shading models' material files in `tests/golden/materials`, in the bottom row's
 /// order.
 const SHADING_MODEL_FILES: [&str; 5] = ["unlit", "clearcoat", "cloth", "hair", "toon"];
-
-/// A material from a material file (ADR 0092): its type registered with the forward
-/// renderer, its parameters laid out by the type's reflection, `fallback` its glTF look
-/// unless the file sets one (the golden scenes' files have no textures).
-fn material_from_file(
-    forward: &mut ForwardRenderer,
-    compiler: &mut Compiler,
-    materials: &mut MaterialTable,
-    path: &Path,
-    fallback: MaterialDesc,
-) -> MaterialId {
-    let file = MaterialFile::load(path).unwrap_or_else(|e| panic!("{e}"));
-    let desc = MaterialTypeDesc {
-        name: file.type_name.clone(),
-        module: file.shader.clone(),
-        type_name: file.type_name.clone(),
-    };
-    let layout = reflect_material_params(compiler, Path::new(ENGINE_SHADER_DIR), &desc)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    let built = file
-        .build_params(&layout)
-        .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    assert!(built.textures.is_empty(), "{}: textures", path.display());
-    assert!(
-        built.bytes.len() <= PARAMS_BYTES,
-        "{}: parameters",
-        path.display()
-    );
-    let mut desc_fallback = match file.fallback {
-        Some(f) => MaterialDesc {
-            base_color: f.base_color,
-            metallic: f.metallic,
-            roughness: f.roughness,
-            emissive: f.emissive,
-            ..fallback
-        },
-        None => fallback,
-    };
-    desc_fallback.alpha = match file.alpha {
-        Alpha::Opaque => AlphaMode::Opaque,
-        Alpha::Mask(cutoff) => AlphaMode::Mask { cutoff },
-        Alpha::Blend => AlphaMode::Blend,
-    };
-    desc_fallback.double_sided = file.double_sided;
-    let ty = forward.register_material_type(desc);
-    materials.add_typed(
-        ty,
-        desc_fallback,
-        Some(MaterialParams {
-            bytes: built.bytes,
-            textures: Vec::new(),
-        }),
-    )
-}
 
 /// Lights for the procedural scene: a warm point light and a cold spot light.
 pub fn procedural_lights() -> Vec<LocalLight> {
@@ -1667,10 +1608,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     let stripes = shot.stripes_floor && !loaded.procedural.is_empty();
     let models = shot.shading_models && loaded.procedural.len() > 11;
     let typed = stripes || models || typed_scene;
-    let mut compiler = (stripes || models).then(|| {
-        let library = SlangLibrary::load().expect("Slang for material files");
-        Compiler::new(library).expect("Slang session")
-    });
+    let mut live = LiveMaterialFiles::new(Path::new(ENGINE_SHADER_DIR));
     let files = Path::new(env!("CARGO_MANIFEST_DIR")).join("materials");
     for (k, (mesh, material, world)) in loaded.procedural.iter().enumerate() {
         let id = geometry.add_mesh(&mesh.as_data()).expect("mesh");
@@ -1681,15 +1619,17 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         } else {
             None
         };
-        let material = match (file, compiler.as_mut()) {
-            (Some(name), Some(compiler)) => material_from_file(
-                frame.forward_mut(),
-                compiler,
-                &mut materials,
-                &files.join(format!("{name}.material.ron")),
-                *material,
-            ),
-            _ => materials.add(*material),
+        let material = match file {
+            Some(name) => live
+                .load(
+                    &files.join(format!("{name}.material.ron")),
+                    *material,
+                    frame.forward_mut(),
+                    &mut materials,
+                    &mut |_, _| None,
+                )
+                .unwrap_or_else(|e| panic!("{e}")),
+            None => materials.add(*material),
         };
         draws.push(DrawItem {
             mesh: id,

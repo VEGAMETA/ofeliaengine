@@ -446,6 +446,13 @@ impl MaterialTable {
         self.get(id).map(|_| self.slots[id.index as usize].kind.ty)
     }
 
+    /// A material of a type's parameters (ADR 0092); `None` for stale ids and glTF
+    /// materials.
+    pub fn typed_params(&self, id: MaterialId) -> Option<&MaterialParams> {
+        self.get(id)?;
+        self.slots[id.index as usize].params.as_deref()
+    }
+
     fn store(
         &mut self,
         index: u32,

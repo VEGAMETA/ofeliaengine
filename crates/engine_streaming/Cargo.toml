@@ -20,3 +20,7 @@ engine_platform.workspace = true
 engine_profiler.workspace = true
 engine_render.workspace = true
 engine_rhi.workspace = true
+# Material files' parameter layouts through Slang's reflection (ADR 0092).
+engine_shader.workspace = true
+# A material file that does not load is logged (the version engine_rhi uses).
+log = "0.4"

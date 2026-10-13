@@ -92,8 +92,9 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
   done. Step 4 (the owner confirmed the material file and the scene's map, 2026-10-12):
   4a material files and parameter layouts through Slang's reflection (PR #182) and 4b
   cooking (the map, texture parameters, pack version 5 with typed materials and their
-  SPIR-V, PR #183) done; next 4c hot reload, then the ubershader experiment; later glTF's
-  unlit, clear coat and sheen extensions onto the models and PSO records. (Ref-1 runs
+  SPIR-V, PR #183) and 4c hot reload (types' modules and material files, PR #184) done;
+  next the ubershader experiment; later glTF's unlit, clear coat and sheen extensions onto
+  the models and PSO records. (Ref-1 runs
   with hardware-accelerated GPU scheduling on since 2026-10-12, for DLSS frame
   generation.)
 
