@@ -53,10 +53,14 @@ impl DerivedDataCache {
         fs::read(self.path(key, kind)).ok()
     }
 
-    /// Stores an entry (atomically: readers see the old entry or the new one).
+    /// Stores an entry (atomically: readers see the old entry or the new one). Writers of
+    /// the same entry at once (threads of one process, or processes) each write a
+    /// temporary file of their own: the last rename wins, whole.
     pub fn put(&self, key: u128, kind: &str, bytes: &[u8]) -> io::Result<()> {
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let path = self.path(key, kind);
-        let temp = path.with_extension(format!("{kind}.tmp{}", std::process::id()));
+        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let temp = path.with_extension(format!("{kind}.tmp{}-{n}", std::process::id()));
         fs::write(&temp, bytes)?;
         fs::rename(&temp, &path)
     }
@@ -207,6 +211,29 @@ mod tests {
         let mut wrong = bytes.clone();
         wrong[8] = 99;
         assert_eq!(texture_from_bytes(&wrong), None, "unknown format");
+    }
+
+    #[test]
+    fn writers_of_one_entry_at_once_leave_it_whole() {
+        // Threads of one process caching the same texture (parallel tests of one scene):
+        // each entry read back is one writer's bytes, never a mix.
+        let dir = std::env::temp_dir().join(format!("engine_ddc_race_{}", std::process::id()));
+        let cache = DerivedDataCache::new(&dir).unwrap();
+        std::thread::scope(|scope| {
+            for t in 0..8u8 {
+                let cache = &cache;
+                scope.spawn(move || {
+                    for _ in 0..32 {
+                        cache.put(7, "texture", &vec![t; 1 << 16]).unwrap();
+                        if let Some(bytes) = cache.get(7, "texture") {
+                            assert_eq!(bytes.len(), 1 << 16);
+                            assert!(bytes.iter().all(|&b| b == bytes[0]), "a mixed entry");
+                        }
+                    }
+                });
+            }
+        });
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

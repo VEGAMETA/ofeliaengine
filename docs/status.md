@@ -540,19 +540,26 @@ grown, divide and conquer); the old labels stay in parentheses.
     shading models since ADR 0092);
   - FSR 4: ML, RDNA4-only, shipped as a DLL (DX12 at first). Check Vulkan availability and
     license; it needs an RDNA4 GPU to test;
-  - `ERROR_DEVICE_LOST` on the Radeon when an MSAA view draws beside another device in
-    one process (found 2026-10-13, on main too). Narrowed 2026-10-14:
-    - fails every run: an MSAA golden test and any second test as two threads (e.g.
-      `cargo test -p engine_golden --test golden -- texture_feedback_with_msaa
-      flight_helmet --test-threads 2`); the MSAA device is lost within 0.5 s;
-    - passes: one device, four nextest processes (as the gate runs it), four devices
-      without MSAA in one process, the RTX in any mix;
-    - validation off: still fails. No TDR (no event 4101), and the fault probe finds no
-      device lost.
-    - No process-wide Vulkan objects in the engine; most likely the AMD driver (state it
-      shares between a process's devices on its MSAA path). Next: a minimal Vulkan repro
-      (two devices, one MSAA pass with a resolve), then AMD's bug report tool (the owner),
-      as for `contraction_repro`;
+  - `ERROR_DEVICE_LOST` on the Radeon, in the process or as a crash of it, when an MSAA
+    view with texture streaming draws beside another device in one process (found
+    2026-10-13, on main too; narrowed 2026-10-14):
+    - fails on every run, with a lost device or an access violation of the process
+      (`STATUS_ACCESS_VIOLATION`, 2 runs of 3): Sponza with MSAA 4× and a texture budget
+      (streaming by feedback, ADR 0076) as one thread and any other golden shot as the
+      second (`texture_feedback_with_msaa flight_helmet --test-threads 2`);
+    - passes: Sponza with MSAA 4× or 2× without streaming, with SMAA, streaming without
+      MSAA; a bare MSAA pass with a resolve on two devices in one process in every mix
+      (`engine_rhi`'s `multi_device_msaa` example: not the driver alone); one device;
+      separate processes (the gate); the RTX in any mix;
+    - validation off: still fails. GPU-assisted validation on: it stops failing (timing or
+      memory placement). No TDR (no event 4101), and the fault probe finds no device lost.
+    - So most likely an engine bug on the streaming path under MSAA that one device in
+      a process hides (an out-of-bounds GPU write landing in its own memory, or a CPU write
+      through a stale mapping), not the driver. Next: the access violation's module (the
+      crash handler in the test binary, or WER local dumps on ref-1: the owner's machine
+      setting), then the feedback and streaming code's buffer sizes under MSAA.
+    - Found on the way and fixed: the derived data cache's temporary file was named by the
+      process only, so two threads caching one texture at once failed (now one per write);
   - glTF's texture coordinates beyond the first set, `KHR_texture_transform` and vertex
     colors (Khronos' SheenChair needs the first two);
   - physical light units (the owner, 2026-10-13: for the future, much later): emission in
