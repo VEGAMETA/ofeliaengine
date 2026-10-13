@@ -9,6 +9,7 @@ use engine_anim::{local_to_model, skinning_matrices};
 use engine_assets::gltf_models::apply_gltf_models;
 use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
 use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_material_map};
+use engine_assets::pso_record::PsoRecord;
 use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
     TextureSlot, TextureWrap, cook_scene, import_gltf, write_pack,
@@ -356,6 +357,12 @@ pub struct Rendered {
     /// them (pixel rectangles `[x0, y0, x1, y1]`, clamped to the image): the HUD's bar and
     /// map frame, the panel in the world, the panel on the camera.
     pub ui_regions: Vec<(&'static str, [u32; 4])>,
+}
+
+/// The golden shots' PSO record (ADR 0092): the entry points their material types draw,
+/// which their cooks compile.
+pub fn golden_pso_record() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("pso.ron")
 }
 
 /// How to run [`render`].
@@ -849,8 +856,15 @@ fn load(
             // engine's built-in types (ADR 0092), compiled with Slang.
             let layered = scene.materials.iter().any(|m| m.layers.any());
             if fabric || layered {
+                // Cooked as a game's would be: only the entry points the shots' PSO record
+                // names (ADR 0092), unless the shots are recording one.
                 let mut builder = SlangMaterialTypes::new(Path::new(ENGINE_SHADER_DIR))
                     .expect("Slang for material types");
+                if std::env::var_os("ENGINE_GOLDEN_PSO_RECORD").is_none() {
+                    builder = builder.with_pso_record(
+                        PsoRecord::load(&golden_pso_record()).expect("tests/golden/pso.ron"),
+                    );
+                }
                 if fabric {
                     let map = fabric_map(dir.expect("the scene's folder"));
                     apply_material_map(&mut scene, &map, &mut builder).expect("material map");
@@ -2631,6 +2645,27 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             allocator.destroy_buffer(buffer, memory);
         }
         d.destroy_command_pool(command_pool, None);
+    }
+    // `ENGINE_GOLDEN_PSO_RECORD=<file>`: the material types' entry points this shot drew,
+    // merged into a PSO record (ADR 0092); `tests/golden/pso.ron` is the shots' own, which
+    // their cooks use (and every entry point a shot drew must be in it).
+    if let Ok(path) = std::env::var("ENGINE_GOLDEN_PSO_RECORD") {
+        let mut record = PsoRecord::new();
+        for (desc, entries) in frame.forward().material_type_entries_drawn() {
+            for entry in entries {
+                record.add(&desc.module, &desc.type_name, &entry);
+            }
+        }
+        record.save_merged(Path::new(&path)).expect("PSO record");
+    } else {
+        let misses = frame.forward().material_type_pack_misses();
+        assert!(
+            misses.is_empty(),
+            "the shots' PSO record {} lacks {misses:?}: record it again with \
+             ENGINE_GOLDEN_PSO_RECORD={} (both GPUs)",
+            golden_pso_record().display(),
+            golden_pso_record().display(),
+        );
     }
     // Streamline goes before the device it is attached to (ADR 0063).
     drop((

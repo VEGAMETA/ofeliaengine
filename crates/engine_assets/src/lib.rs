@@ -8,7 +8,8 @@
 //! 0083), and cooked into BC6H cube maps for the derived data cache and packs
 //! (`panorama`). Material files (`*.material.ron`) set a material type's parameters and
 //! replace a scene's glTF materials (`material_file`, ADR 0092); glTF's unlit, clear coat
-//! and sheen become materials of the engine's built-in types (`gltf_models`).
+//! and sheen become materials of the engine's built-in types (`gltf_models`); PSO records
+//! (`pso_record`) let a cook compile only the entry points a game draws.
 
 pub mod animation;
 pub mod cook;
@@ -20,6 +21,7 @@ mod lod;
 pub mod material_file;
 pub mod pack;
 pub mod panorama;
+pub mod pso_record;
 mod texture_compress;
 mod texture_import;
 

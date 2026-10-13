@@ -384,6 +384,23 @@ fn gltf_clear_coat() {
     });
 }
 
+/// ClearCoatTest with ambient occlusion and its bent normals (ADR 0058): a material type
+/// drawn by the twins of the AO pipelines (its PSO record holds both its plain and its
+/// bent-normal entry points: the first frames draw the plain one).
+#[test]
+fn gltf_clear_coat_with_ambient_occlusion() {
+    check(&Shot {
+        size: [400, 800],
+        eye: Some(Vec3::new(0.0, 0.3, 13.3)),
+        target: Some(Vec3::new(0.0, 0.3, 0.0)),
+        ao: Some(AoSettings::default()),
+        ..Shot::new(
+            "gltf_clearcoat_ao",
+            Source::Gltf(PathBuf::from("ClearCoatTest/ClearCoatTest.gltf")),
+        )
+    });
+}
+
 /// The coat's own normal map over a textured, normal-mapped base: Khronos' ClearcoatWicker
 /// (wrinkled plastic over wicker).
 #[test]
