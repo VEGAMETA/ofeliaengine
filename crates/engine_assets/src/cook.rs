@@ -37,6 +37,14 @@
 //! and a skinned mesh entry has attribute bit 8 (influences) with its sets of four in
 //! `meta[4]`: after the tangents, `[u16; 4]` joints then `[f32; 4]` weights, `vertices ×
 //! sets` each.
+//!
+//! Meshlets (ADR 0085) need no new version. A mesh or mesh level entry with attribute
+//! bit 16 ends, after its other sections, with a section of the meshlet count of each level
+//! it holds the indices of (a mesh's full level then its detail levels; the coarsest level
+//! of a mesh stored for streaming; a mesh level's own), then one of those levels'
+//! [`Meshlet`]s, level after level. A level's meshlets are consecutive ranges of its
+//! indices, in order (a level without meshlets counts 0). Engines from before meshlets
+//! read the same triangles, reordered meshlet by meshlet, and never reach the tables.
 
 use crate::animation::{raw_clip, shell_distances, skin_skeleton};
 use crate::ddc::{DerivedDataCache, import_texture};
@@ -45,6 +53,7 @@ use crate::gltf_import::{
 };
 use crate::lod::{Lod, LodSettings, generate_lods};
 use crate::material_file::TextureEncoding;
+use crate::meshlet::{Meshlet, build_meshlets, meshlets_cover};
 use crate::pack::{
     DEFAULT_CHUNK_SHIFT, EntryData, EntryKind, LoadStats, Pack, PackError, PackStats, PackWriter,
     PreparedEntry, invalid,
@@ -70,6 +79,9 @@ pub struct CookedMesh {
     pub tangents: Vec<[f32; 4]>,
     /// Triangles.
     pub indices: Vec<u32>,
+    /// Meshlets of the full mesh (ADR 0085): consecutive ranges of `indices`, in order;
+    /// none for a skinned mesh or one cooked without them.
+    pub meshlets: Vec<Meshlet>,
     /// Coarser detail levels over the same vertices (ADR 0053).
     pub lods: Vec<Lod>,
     /// Bounds of the positions.
@@ -199,6 +211,9 @@ fn encoding_usage(encoding: TextureEncoding) -> TextureUsage {
 pub struct CookSettings {
     /// Make detail levels for meshes (ADR 0053).
     pub lods: bool,
+    /// Make meshlets for meshes (ADR 0085): each level's triangles reordered meshlet by
+    /// meshlet, with a table of their bounds and normal cones. Skinned meshes get none.
+    pub meshlets: bool,
     /// zstd level for pack entries (1-22; 0 stores them as they are). 19 by default: the
     /// smallest files for loading speeds that do not change (decoding runs at the same
     /// speed at every level).
@@ -214,6 +229,7 @@ impl Default for CookSettings {
     fn default() -> Self {
         Self {
             lods: true,
+            meshlets: true,
             compression_level: 19,
             block_compression: true,
             animation_error: 1e-4,
@@ -314,8 +330,10 @@ pub struct CookStats {
     pub cache_hits: usize,
     /// Seconds spent on textures.
     pub texture_seconds: f64,
-    /// Seconds spent on meshes (detail levels).
+    /// Seconds spent on meshes (detail levels and meshlets).
     pub mesh_seconds: f64,
+    /// Meshlets made, over every mesh and level.
+    pub meshlets: usize,
     /// Seconds spent compressing clips.
     pub animation_seconds: f64,
     /// Clips compressed: source and compressed bytes, largest error.
@@ -409,12 +427,22 @@ pub fn cook_scene(
                 uvs: p.uvs.clone(),
                 tangents: p.tangents.clone(),
                 indices: p.indices.clone(),
+                meshlets: Vec::new(),
                 lods,
                 min: p.min,
                 max: p.max,
                 joints: p.joints.clone(),
                 weights: normalized_weights(&p.weights, p.influence_sets()),
             };
+            // Meshlets per level (ADR 0085), before the vertices are ordered for streaming
+            // so that their first use follows the meshlets. Skinned meshes get none: their
+            // bounds move.
+            if settings.meshlets && mesh.joints.is_empty() {
+                mesh.meshlets = build_meshlets(&mesh.positions, &mut mesh.indices);
+                for l in &mut mesh.lods {
+                    l.meshlets = build_meshlets(&mesh.positions, &mut l.indices);
+                }
+            }
             // Levels stream from the coarsest up (ADR 0076): each uses a prefix of the
             // vertices. Skinned meshes are not streamed.
             if !mesh.lods.is_empty() && mesh.joints.is_empty() {
@@ -428,6 +456,11 @@ pub fn cook_scene(
         .filter_map(OnceLock::into_inner)
         .collect();
     stats.mesh_seconds = start.elapsed().as_secs_f64();
+    stats.meshlets = cooked
+        .meshes
+        .iter()
+        .map(|m| m.meshlets.len() + m.lods.iter().map(|l| l.meshlets.len()).sum::<usize>())
+        .sum();
 
     let slot = |texture: Option<usize>, usage: TextureUsage| {
         let texture = texture?;
@@ -840,6 +873,10 @@ fn mesh_entry(m: &CookedMesh, level: i32) -> PreparedEntry {
     for l in &m.lods {
         section(&mut data, bytemuck::cast_slice(&l.indices));
     }
+    let levels: Vec<&[Meshlet]> = core::iter::once(m.meshlets.as_slice())
+        .chain(m.lods.iter().map(|l| l.meshlets.as_slice()))
+        .collect();
+    attributes |= meshlet_sections(&mut data, &levels);
     let meta = [
         m.positions.len() as u32,
         m.indices.len() as u32,
@@ -850,6 +887,51 @@ fn mesh_entry(m: &CookedMesh, level: i32) -> PreparedEntry {
         0,
     ];
     PreparedEntry::new(EntryKind::Mesh, meta, &data, level, DEFAULT_CHUNK_SHIFT)
+}
+
+/// The attribute bit of mesh and mesh level entries that end with meshlet tables.
+const MESHLETS: u32 = 16;
+
+/// Appends the meshlet tables of `levels` when any has meshlets (see the module
+/// documentation); returns the attribute bit.
+fn meshlet_sections(data: &mut Vec<u8>, levels: &[&[Meshlet]]) -> u32 {
+    if levels.iter().all(|l| l.is_empty()) {
+        return 0;
+    }
+    let counts: Vec<u32> = levels.iter().map(|l| l.len() as u32).collect();
+    section(data, bytemuck::cast_slice(&counts));
+    let meshlets: Vec<Meshlet> = levels.iter().flat_map(|l| l.iter().copied()).collect();
+    section(data, bytemuck::cast_slice(&meshlets));
+    MESHLETS
+}
+
+/// Reads the meshlet tables of levels with `index_counts` indices when the entry has them
+/// (`present`), each checked to cover its level; otherwise none per level.
+fn read_meshlets(
+    s: &mut Sections<'_>,
+    present: bool,
+    index_counts: &[usize],
+) -> Result<Vec<Vec<Meshlet>>, PackError> {
+    if !present {
+        return Ok(vec![Vec::new(); index_counts.len()]);
+    }
+    let counts = s.next::<u32>(index_counts.len())?;
+    let total = counts
+        .iter()
+        .try_fold(0usize, |sum, &c| sum.checked_add(c as usize))
+        .ok_or_else(|| invalid("too many meshlets"))?;
+    let meshlets = s.next::<Meshlet>(total)?;
+    let mut levels = Vec::with_capacity(counts.len());
+    let mut at = 0;
+    for (&count, &index_count) in counts.iter().zip(index_counts) {
+        let level = &meshlets[at..at + count as usize];
+        at += count as usize;
+        if !level.is_empty() && !meshlets_cover(level, index_count) {
+            return Err(invalid("meshlets do not cover their level"));
+        }
+        levels.push(level.to_vec());
+    }
+    Ok(levels)
 }
 
 /// Orders a mesh's vertices for streaming its detail levels (ADR 0076): by first use in
@@ -974,7 +1056,7 @@ fn streamed_mesh_entry(m: &CookedMesh, counts: &[u32], level: i32) -> PreparedEn
     let coarsest = counts.len() - 1;
     let vertices = counts[coarsest] as usize;
     let mut data = Vec::new();
-    let attributes = vertex_sections(&mut data, m, 0..vertices);
+    let mut attributes = vertex_sections(&mut data, m, 0..vertices);
     section(&mut data, bytemuck::cast_slice(&[m.min, m.max]));
     let table: Vec<u32> = core::iter::once((m.indices.len(), 0.0f32))
         .chain(m.lods.iter().map(|l| (l.indices.len(), l.error)))
@@ -986,6 +1068,7 @@ fn streamed_mesh_entry(m: &CookedMesh, counts: &[u32], level: i32) -> PreparedEn
         &mut data,
         bytemuck::cast_slice(&m.lods[coarsest - 1].indices),
     );
+    attributes |= meshlet_sections(&mut data, &[&m.lods[coarsest - 1].meshlets]);
     let meta = [
         m.positions.len() as u32,
         m.indices.len() as u32,
@@ -1001,14 +1084,15 @@ fn streamed_mesh_entry(m: &CookedMesh, counts: &[u32], level: i32) -> PreparedEn
 /// The entry of a finer level `k` (0: the full mesh) of a mesh stored for streaming.
 fn mesh_level_entry(m: &CookedMesh, counts: &[u32], k: usize, level: i32) -> PreparedEntry {
     let (first, end) = (counts[k + 1] as usize, counts[k] as usize);
-    let indices = if k == 0 {
-        &m.indices
+    let (indices, meshlets) = if k == 0 {
+        (&m.indices, &m.meshlets)
     } else {
-        &m.lods[k - 1].indices
+        (&m.lods[k - 1].indices, &m.lods[k - 1].meshlets)
     };
     let mut data = Vec::new();
-    let attributes = vertex_sections(&mut data, m, first..end);
+    let mut attributes = vertex_sections(&mut data, m, first..end);
     section(&mut data, bytemuck::cast_slice(indices));
+    attributes |= meshlet_sections(&mut data, &[meshlets]);
     let meta = [
         k as u32,
         first as u32,
@@ -1044,6 +1128,8 @@ pub struct MeshLevelData {
     pub tangents: Vec<[f32; 4]>,
     /// The level's triangles, over every vertex up to the new ones.
     pub indices: Vec<u32>,
+    /// The level's meshlets (ADR 0085): consecutive ranges of `indices`, or none.
+    pub meshlets: Vec<Meshlet>,
 }
 
 /// Reads a mesh level entry ([`EntryKind::MeshLevel`]) from its meta and raw bytes.
@@ -1074,6 +1160,10 @@ pub fn read_mesh_level_entry(meta: [u32; 7], data: &[u8]) -> Result<MeshLevelDat
     if indices.iter().any(|&i| i >= end) {
         return Err(invalid("mesh level index out of range"));
     }
+    let meshlets = read_meshlets(&mut s, attributes & MESHLETS != 0, &[indices.len()])?
+        .into_iter()
+        .next()
+        .unwrap_or_default();
     Ok(MeshLevelData {
         level,
         first_vertex: first,
@@ -1082,6 +1172,7 @@ pub fn read_mesh_level_entry(meta: [u32; 7], data: &[u8]) -> Result<MeshLevelDat
         uvs,
         tangents,
         indices,
+        meshlets,
     })
 }
 
@@ -1451,8 +1542,8 @@ fn read_levels_entry(meta: [u32; 7], data: &[u8]) -> Result<Vec<Vec<u8>>, PackEr
 }
 
 /// A mesh entry: the whole mesh, or for a mesh stored for streaming its coarsest level
-/// (the mesh's vertices that level uses and its indices, no `lods`) with every level's
-/// record (entries not filled in).
+/// (the mesh's vertices that level uses, its indices and meshlets, no `lods`) with every
+/// level's record (entries not filled in).
 fn read_mesh_entry_parts(
     meta: [u32; 7],
     data: &[u8],
@@ -1491,6 +1582,14 @@ fn read_mesh_entry_parts(
     {
         return Err(invalid("bad streamed mesh levels"));
     }
+    let meshlets = read_meshlets(
+        &mut s,
+        attributes & MESHLETS as usize != 0,
+        &[indices.len()],
+    )?
+    .into_iter()
+    .next()
+    .unwrap_or_default();
     let levels = table
         .iter()
         .map(|&[index_count, error, vertices]| MeshLevelRecord {
@@ -1507,6 +1606,7 @@ fn read_mesh_entry_parts(
             uvs,
             tangents,
             indices,
+            meshlets,
             lods: Vec::new(),
             min: bounds[0],
             max: bounds[1],
@@ -1524,8 +1624,10 @@ fn assemble_mesh(
     finer: &[MeshLevelData],
 ) -> Result<CookedMesh, PackError> {
     let coarse_indices = coarse.indices.clone();
+    let coarse_meshlets = coarse.meshlets.clone();
     let mut mesh = CookedMesh {
         indices: Vec::new(),
+        meshlets: Vec::new(),
         ..coarse
     };
     let coarsest = streamed.levels.len() - 1;
@@ -1547,21 +1649,23 @@ fn assemble_mesh(
         mesh.tangents.extend_from_slice(&level.tangents);
     }
     for (k, record) in streamed.levels.iter().enumerate() {
-        let indices = if k == coarsest {
-            coarse_indices.clone()
+        let (indices, meshlets) = if k == coarsest {
+            (coarse_indices.clone(), coarse_meshlets.clone())
         } else {
             finer
                 .iter()
                 .find(|l| l.level == k as u32)
-                .map(|l| l.indices.clone())
+                .map(|l| (l.indices.clone(), l.meshlets.clone()))
                 .ok_or_else(|| invalid("mesh level missing"))?
         };
         if k == 0 {
             mesh.indices = indices;
+            mesh.meshlets = meshlets;
         } else {
             lods.push(Lod {
                 indices,
                 error: record.error,
+                meshlets,
             });
         }
     }
@@ -1602,12 +1706,13 @@ fn read_mesh_entry(meta: [u32; 7], data: &[u8]) -> Result<CookedMesh, PackError>
     let bounds = s.next::<[f32; 3]>(2)?;
     let indices = s.next::<u32>(index_count)?;
     let table = s.next::<[u32; 2]>(lod_count)?;
-    let lods = table
+    let mut lods = table
         .iter()
         .map(|&[count, error]| {
             Ok(Lod {
                 indices: s.next::<u32>(count as usize)?,
                 error: f32::from_bits(error),
+                meshlets: Vec::new(),
             })
         })
         .collect::<Result<Vec<_>, PackError>>()?;
@@ -1615,12 +1720,22 @@ fn read_mesh_entry(meta: [u32; 7], data: &[u8]) -> Result<CookedMesh, PackError>
     if out_of_range(&indices) || lods.iter().any(|l| out_of_range(&l.indices)) {
         return Err(invalid("mesh index out of range"));
     }
+    let index_counts: Vec<usize> = core::iter::once(indices.len())
+        .chain(lods.iter().map(|l| l.indices.len()))
+        .collect();
+    let mut tables =
+        read_meshlets(&mut s, attributes & MESHLETS as usize != 0, &index_counts)?.into_iter();
+    let meshlets = tables.next().unwrap_or_default();
+    for (l, table) in lods.iter_mut().zip(tables) {
+        l.meshlets = table;
+    }
     Ok(CookedMesh {
         positions,
         normals,
         uvs,
         tangents,
         indices,
+        meshlets,
         lods,
         min: bounds[0],
         max: bounds[1],
@@ -2091,9 +2206,11 @@ mod tests {
             uvs: vec![[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             tangents: Vec::new(),
             indices: vec![0, 1, 2, 0, 2, 3],
+            meshlets: Vec::new(),
             lods: vec![Lod {
                 indices: vec![0, 1, 2],
                 error: 0.25,
+                meshlets: Vec::new(),
             }],
             min: [0.0; 3],
             max: [1.0, 1.0, 0.0],
@@ -2150,10 +2267,11 @@ mod tests {
             }],
             meshes: vec![
                 quad.clone(),
-                CookedMesh {
+                // Without detail levels, with meshlets.
+                with_meshlets(CookedMesh {
                     lods: Vec::new(),
                     ..quad
-                },
+                }),
             ],
             materials: vec![material],
             instances: vec![
@@ -2176,6 +2294,15 @@ mod tests {
         }
     }
 
+    /// `mesh` with meshlets on every level, as the cook makes them.
+    fn with_meshlets(mut mesh: CookedMesh) -> CookedMesh {
+        mesh.meshlets = build_meshlets(&mesh.positions, &mut mesh.indices);
+        for l in &mut mesh.lods {
+            l.meshlets = build_meshlets(&mesh.positions, &mut l.indices);
+        }
+        mesh
+    }
+
     /// The sample with a skinned copy of the quad (two sets of influences), a two-joint
     /// skin and a clip.
     fn skinned_sample() -> CookedScene {
@@ -2185,6 +2312,8 @@ mod tests {
         };
         let mut scene = sample();
         let mut mesh = scene.meshes[1].clone();
+        // Skinned meshes have no meshlets (the cook makes none).
+        mesh.meshlets = Vec::new();
         mesh.joints = [[0, 1, 0, 0], [1, 0, 0, 0]].repeat(4);
         mesh.weights = [[0.5, 0.25, 0.0, 0.0], [0.25, 0.0, 0.0, 0.0]].repeat(4);
         scene.meshes.push(mesh);
@@ -2399,7 +2528,9 @@ mod tests {
         }
         let lods = generate_lods(&positions, &indices, &LodSettings::default());
         assert!(lods.len() >= 2, "{}", lods.len());
-        let mut mesh = CookedMesh {
+        // With meshlets on every level, made before the vertices are ordered (the cook's
+        // order).
+        let mut mesh = with_meshlets(CookedMesh {
             uvs: positions.iter().map(|p| [p[0], p[1]]).collect(),
             normals: vec![[0.0, 0.0, 1.0]; positions.len()],
             positions,
@@ -2407,7 +2538,8 @@ mod tests {
             lods,
             max: [1.0, 1.0, 0.1],
             ..CookedMesh::default()
-        };
+        });
+        assert!(mesh.meshlets.len() > 1 && mesh.lods.iter().all(|l| !l.meshlets.is_empty()));
         // Not ordered yet: no prefixes.
         assert!(streamed_vertex_counts(&mesh).is_none());
         let before = mesh.clone();
@@ -2447,6 +2579,7 @@ mod tests {
         let coarsest = streamed.levels.len() - 1;
         assert_eq!(coarse.positions.len() as u32, counts[coarsest]);
         assert_eq!(coarse.indices, mesh.lods[coarsest - 1].indices);
+        assert_eq!(coarse.meshlets, mesh.lods[coarsest - 1].meshlets);
         let mut finer = Vec::new();
         for record in &streamed.levels[..coarsest] {
             let data = Mutex::new(Vec::new());
@@ -2482,5 +2615,26 @@ mod tests {
         let mut meta = entry.meta_for_tests();
         meta[3] = 11;
         assert!(read_levels_entry(meta, &data).is_err());
+        // Meshlets that do not cover their level.
+        let mesh = sample().meshes[1].clone();
+        assert!(!mesh.meshlets.is_empty());
+        let mut bad = mesh.clone();
+        bad.meshlets[0].triangles += 1;
+        let entry = mesh_entry(&bad, 0);
+        assert!(read_mesh_entry(entry.meta_for_tests(), &entry.raw_for_tests()).is_err());
+        // An engine from before meshlets skips their tables (bit 16 unknown to it): the
+        // same mesh without them.
+        let entry = mesh_entry(&mesh, 0);
+        let mut meta = entry.meta_for_tests();
+        assert_ne!(meta[3] & MESHLETS, 0);
+        meta[3] &= !MESHLETS;
+        let read = read_mesh_entry(meta, &entry.raw_for_tests()).unwrap();
+        assert_eq!(
+            read,
+            CookedMesh {
+                meshlets: Vec::new(),
+                ..mesh
+            }
+        );
     }
 }

@@ -1,7 +1,7 @@
 //! Asset import (CLAUDE.md §13, ADR 0033). glTF 2.0 into memory and into the ECS;
 //! PNG and JPEG textures decoded and given mip chains filtered for their use (ADR 0040),
 //! block-compressed (BC7, BC5) and kept in a derived data cache (ADR 0041). Meshes get
-//! detail levels from meshoptimizer (ADR 0053). Skins and animations become `engine_anim`
+//! detail levels and meshlets from meshoptimizer (ADRs 0053, 0085; `meshlet`). Skins and animations become `engine_anim`
 //! skeletons and compressed clips (`animation`, ADR 0068). Scenes are cooked into packs, the runtime
 //! format, and loaded through an I/O ring with zstd per entry (`cook`, `pack`; ADR 0056).
 //! HDR panoramas (`.hdr`) are read, and their sun found, for HDRI environments (`hdr`, ADR
@@ -19,6 +19,7 @@ pub mod gltf_models;
 pub mod hdr;
 mod lod;
 pub mod material_file;
+pub mod meshlet;
 pub mod pack;
 pub mod panorama;
 pub mod pso_record;

@@ -44,7 +44,8 @@
 //! `--post` for bloom, automatic exposure and tone mapping every
 //! frame (ADR 0047), `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
-//! levels made at load (ADR 0053), `--pack <file>` to load a cooked pack instead of the glTF
+//! levels made at load (ADR 0053), `--no-meshlets` to keep each level's triangles in their
+//! order before meshlets (ADR 0085: the cook reorders them meshlet by meshlet), `--pack <file>` to load a cooked pack instead of the glTF
 //! scene (ADR 0056; `ofeliaengine cook` makes one), `--stream` with it to stream the
 //! textures while drawing (ADR 0057: tails first, then larger levels, through the texture
 //! pool's staging ring), `--async-compute on|off` to run the async passes (ambient occlusion)
@@ -304,6 +305,7 @@ fn main() {
     let (mut atmosphere, mut atmosphere_every_frame, mut fog) = (false, false, false);
     let mut sun_elevation: Option<f32> = None;
     let mut lods = false;
+    let mut meshlets = true;
     let mut pipeline_stats = false;
     let mut msaa_stats: u32 = 0;
     let mut post = false;
@@ -389,6 +391,7 @@ fn main() {
             "--no-light-culling" => light_culling = false,
             "--sky" => with_sky = true,
             "--lods" => lods = true,
+            "--no-meshlets" => meshlets = false,
             "--pipeline-stats" => pipeline_stats = true,
             // With --pipeline-stats: also the multisampled shading's (ADR 0075).
             "--msaa" => msaa_stats = args.next().unwrap().parse().unwrap(),
@@ -485,13 +488,14 @@ fn main() {
             let cache = DerivedDataCache::new(&ddc).unwrap();
             let settings = CookSettings {
                 lods,
+                meshlets,
                 compression_level: 0,
                 block_compression: !uncompressed,
                 ..CookSettings::default()
             };
             let (cooked, stats) = cook_scene(&scene, dir, Some(&cache), &jobs, &settings).unwrap();
             let source = format!(
-                "glTF {:.0} ms; {} textures {} in {:.0} ms on {} threads ({} from the cache); meshes{} {:.0} ms",
+                "glTF {:.0} ms; {} textures {} in {:.0} ms on {} threads ({} from the cache); meshes{} ({} meshlets) {:.0} ms",
                 imported.as_secs_f64() * 1e3,
                 cooked.textures.len(),
                 if uncompressed {
@@ -503,6 +507,7 @@ fn main() {
                 jobs.num_workers() + 1,
                 stats.cache_hits,
                 if lods { " with detail levels" } else { "" },
+                stats.meshlets,
                 stats.mesh_seconds * 1e3,
             );
             (cooked, source)

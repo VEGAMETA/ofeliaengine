@@ -62,3 +62,65 @@ visibility buffer is decided together with custom materials (queue item 3c).
 - The cook gains clusters per detail level (meshoptimizer), the pack a format addition.
 - Culling per cluster on both GPUs; numbers on both before the visibility buffer's
   decision.
+
+## Addendum (2026-10-14): the implementation plan
+
+Research: [docs/research/meshlets.md](../research/meshlets.md) (meshoptimizer 0.25, Granite's
+measurements, niagara's culling).
+
+- **Step 1, the cook** (done 2026-10-14, `engine_assets::meshlet`):
+  - Meshlets per detail level: 64 vertices and 124 triangles, cone weight 0.25. Skinned
+    meshes get none (their bounds move).
+  - Each level's index buffer is reordered meshlet by meshlet, with global indices. The
+    vertex order stays, so streaming by level (ADR 0076) holds.
+  - Inside a meshlet, the triangles take the vertex cache optimizer's order instead of
+    `optimize_meshlet`'s: the instanced draws of whole levels read the same buffer (below).
+  - A meshlet table per level: sphere, cone, first index, triangles (32 bytes each).
+  - No new pack version: the tables end the mesh and mesh level entries, behind attribute
+    bit 16. Engines from before read the same triangles, reordered, and never reach the
+    tables. Readers check that a level's meshlets cover its indices, in order.
+- **Step 2, culling and drawing on both GPUs:**
+  - The geometry pool keeps the tables on the GPU.
+  - Instances of meshes with enough meshlets (a threshold to measure) take the meshlet
+    path. The cull pass emits one indexed draw per visible meshlet into a per-state list
+    with a count (`vkCmdDrawIndexedIndirectCount`; Granite's fastest path on RDNA2, equal to
+    mesh shaders on NVIDIA). The other instances keep today's instanced draws.
+  - The two phases keep only the instance's flag from the previous frame. The early phase
+    culls the meshlets of instances visible last frame by frustum and cone; the late phase
+    culls those of newly visible instances by frustum, cone and the early phase's pyramid.
+  - No visibility bit per meshlet (the patent note of ADR 0035).
+- **Step 3, mesh shaders on the RTX:** the same culling's output through
+  `vkCmdDrawMeshTasksIndirectCountEXT`, with per-primitive culling in the mesh shader, as
+  separate entry points (the register rule).
+- **Step 4, shadows:** the meshlets culled per cascade and per local light's view.
+- **Measured at every step on both GPUs:**
+  - Sponza and a dense scene (many instances of a high-polygon mesh);
+  - the passes' times, the draws issued, the triangles drawn.
+
+### Step 1, measured (2026-10-14)
+
+- **Meshlets of the test scenes** (the `meshlet_stats` example): Sponza 3,460 for its
+  262 k triangles (the full level) and 3,258 for its detail levels. They are 61 % full in
+  triangles and 99 % in vertices: Sponza's seams make the 64-vertex limit bind first.
+  FlightHelmet's are 71 % full, MetalRoughSpheres' 78 %.
+- **The vertex cache of whole-level draws** (meshoptimizer's models, vertices transformed
+  per triangle):
+  - Against the vertex cache optimizer's order alone, meshlet order costs 1–9 %.
+    With `optimize_meshlet`'s order inside the meshlets it cost 4–18 %, so that order is
+    not taken.
+  - Larger meshlets (128 or 255 vertices) do not change this. They only halve the
+    meshlet count.
+  - Against the file's order, which the cook kept until now for full levels: Sponza
+    0.815 → 0.847 (FIFO 16), FlightHelmet 1.035 → 0.746, MetalRoughSpheres 0.846 →
+    0.716.
+- **GPU time, before any culling** (`scene_bench --prepass`, 1080p, 4 cascades, alternated
+  runs with `--no-meshlets`):
+  - RTX: Sponza shadow 160 → 161 µs, prepass 57 → 58, forward 233 → 234; FlightHelmet
+    unchanged.
+  - Radeon: Sponza shadow 2,858 → 2,887 µs (+1 %), prepass 1,038 → 1,033, forward 9,597 →
+    9,522 (−0.8 %). FlightHelmet: shadow 504 → 439 µs (−13 %), prepass 220 → 213, forward
+    1,949 → 1,904 (−2.3 %).
+- **The cost of cooking:** Sponza's meshes take 1 → 17 ms on 16 threads (24 → 51 ms with
+  detail levels). Its pack grows from 72.68 to 72.95 MB (+0.4 %).
+- **Golden images:** unchanged on both GPUs.
+

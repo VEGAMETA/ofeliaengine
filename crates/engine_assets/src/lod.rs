@@ -4,6 +4,8 @@
 //! keep the surface as close as they can, measured by the largest distance the surface
 //! moved.
 
+use crate::meshlet::Meshlet;
+
 /// How detail levels are made.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct LodSettings {
@@ -34,10 +36,14 @@ impl Default for LodSettings {
 /// A simplified level.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Lod {
-    /// Triangles over the mesh's vertices, ordered for the GPU's vertex cache.
+    /// Triangles over the mesh's vertices, ordered for the GPU's vertex cache (or meshlet
+    /// by meshlet, once the cook has made the level's meshlets).
     pub indices: Vec<u32>,
     /// How far the level's surface strays from the full mesh, in the mesh's units.
     pub error: f32,
+    /// The level's meshlets (ADR 0085): consecutive ranges of `indices`, in order; none
+    /// until the cook makes them ([`crate::meshlet::build_meshlets`]).
+    pub meshlets: Vec<Meshlet>,
 }
 
 /// Simplified levels of the mesh `positions` / `indices`, coarser ones last. Fewer than
@@ -79,6 +85,7 @@ pub fn generate_lods(positions: &[[f32; 3]], indices: &[u32], settings: &LodSett
         lods.push(Lod {
             indices: meshopt::optimize_vertex_cache(&simplified, positions.len()),
             error,
+            meshlets: Vec::new(),
         });
         previous = triangles;
     }

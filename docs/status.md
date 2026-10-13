@@ -4,7 +4,7 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-12.
+Last updated: 2026-10-14.
 
 ## 1. What matters most
 
@@ -84,6 +84,14 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 
 ## 4. In flight
 
+- **4, meshlets in the forward renderer** (ADR 0085's addendum of 2026-10-14). Step 1 is
+  done: the cook makes meshlets per detail level (64 vertices, 124 triangles; none for
+  skinned meshes) and reorders each level's triangles by them. The tables sit at the end
+  of the mesh entries, so the pack version stays.
+  - On its own, the new order already makes the Radeon's FlightHelmet shadows 13 %
+    faster. Sponza and the RTX are within ±1 %. Golden images are unchanged.
+  - Next is step 2: the tables on the GPU, culling per meshlet and one indexed draw per
+    visible meshlet, a hybrid with today's instanced draws.
 - **3c, custom materials** (ADR 0092, accepted 2026-10-12): step 1 (the passes through
   `IMaterial`, PR #179), step 2 (material types in the renderer: typed materials,
   batches and pipelines per type, compiled on first sight with the glTF fallback drawing
@@ -423,7 +431,8 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
 4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
    visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085): **meshlets
    in the forward renderer first** (the owner, 2026-10-11; both GPUs; the iGPU has no mesh
-   shaders), the visibility buffer decided together with custom materials (3c).
+   shaders), the visibility buffer decided together with custom materials (3c). Step 1
+   (meshlets made by the cook) done 2026-10-14; steps 2–4 in ADR 0085's addendum.
 5. Virtual shadow maps.
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.

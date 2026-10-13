@@ -21,7 +21,9 @@ packs/level1.pack: 361 entries, 71.5 MB (104.5 MB raw, 68%), written in 2.6 s
   normal maps; see rendering.md §2). They go through the derived data cache, by default
   `.ddc` next to the scene's folder (`--ddc <dir>` for another), so a second cook takes
   seconds.
-- **Meshes** get detail levels (`--no-lods` to skip them).
+- **Meshes** get detail levels (`--no-lods` to skip them) and meshlets (`--no-meshlets`):
+  clusters of up to 124 triangles that the renderer culls on the GPU, each level's
+  triangles reordered by them. Skinned meshes get none.
 - **Every entry** is compressed with zstd in chunks of 1 MiB (each decompresses on its
   own thread) when that saves at least 5%. `--level 0` stores everything raw, which loads
   a little faster from NVMe but makes the file a third larger.
