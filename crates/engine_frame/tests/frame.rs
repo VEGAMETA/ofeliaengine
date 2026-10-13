@@ -10,6 +10,8 @@
 mod common;
 #[path = "frame/framegen.rs"]
 mod framegen;
+#[path = "frame/hot_reload.rs"]
+mod hot_reload;
 
 use common::{Bed, camera};
 use engine_core::math::Vec3;

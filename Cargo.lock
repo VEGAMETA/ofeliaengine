@@ -376,6 +376,7 @@ dependencies = [
  "engine_render",
  "engine_render2d",
  "engine_rhi",
+ "engine_streaming",
  "engine_upscale",
 ]
 
@@ -406,7 +407,6 @@ dependencies = [
  "engine_render2d",
  "engine_rhi",
  "engine_runtime",
- "engine_shader",
  "engine_streaming",
  "png",
 ]
@@ -633,6 +633,8 @@ dependencies = [
  "engine_profiler",
  "engine_render",
  "engine_rhi",
+ "engine_shader",
+ "log",
 ]
 
 [[package]]

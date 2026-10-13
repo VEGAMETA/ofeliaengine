@@ -21,6 +21,8 @@
 //! into the geometry pool. Call [`SceneStreamer::update`] once per frame before the frame's
 //! graph, then the budget's [`GpuBudget::update`].
 
+pub mod material_files;
+
 use engine_assets::pack::{Entry, EntryKind, PackError, PackStreamer, StreamThread, Streamed};
 use engine_assets::{
     AlphaMode as CookedAlpha, CookedMaterial, CookedScene, MaterialTypeData, SceneLayout,

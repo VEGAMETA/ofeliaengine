@@ -29,3 +29,7 @@ engine_upscale.workspace = true
 engine_fsr = { workspace = true, optional = true }
 engine_dlss = { workspace = true, optional = true }
 
+
+[dev-dependencies]
+# Material files kept live, under hot reload (ADR 0092).
+engine_streaming.workspace = true

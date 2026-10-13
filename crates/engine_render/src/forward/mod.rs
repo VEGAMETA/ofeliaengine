@@ -148,7 +148,8 @@ mod shadow_atlas;
 use layout::{Changes, Layout, Source, local_box};
 pub(crate) use layout::{States, TypedPipelines, mirrored, state};
 pub use material_types::{
-    ENGINE_SHADER_DIR, MaterialTypeDesc, material_type_options, reflect_material_params,
+    ENGINE_SHADER_DIR, MaterialTypeDesc, RELOAD_QUIET, material_type_options,
+    reflect_material_params,
 };
 use pipelines::{
     AoPasses, ContactState, DecalShading, GiFeatures, GiShading, ReflectShadingTable,
@@ -1402,6 +1403,28 @@ impl ForwardRenderer {
         entries: &[(String, Vec<u32>)],
     ) -> MaterialTypeId {
         self.material_types.register_precompiled(desc, entries)
+    }
+
+    /// Watches the files material types compile from (their modules, `forward.slang` and
+    /// what they include) and compiles a type again when one changes: its pipelines in use
+    /// keep drawing until their successors are made; a module that does not compile keeps
+    /// the previous version ([`Self::material_type_error`] says why). Off by default; for
+    /// development builds and the editor.
+    pub fn set_material_hot_reload(&mut self, enabled: bool) {
+        self.material_types.set_hot_reload(enabled);
+    }
+
+    /// The latest compile error of material type `ty`, if its last compile failed (its
+    /// previous version, or its fallback, draws).
+    pub fn material_type_error(&self, ty: MaterialTypeId) -> Option<&str> {
+        self.material_types.error(ty)
+    }
+
+    /// Starts frame `frame` for material types: pipelines a hot reload replaced are
+    /// destroyed once the frames up to `completed` are done. Before
+    /// [`Self::update_material_types`] (the frame renderer calls both).
+    pub fn collect_material_types(&mut self, frame: u64, completed: u64) {
+        self.material_types.collect(frame, completed);
     }
 
     /// A registered type's description.
