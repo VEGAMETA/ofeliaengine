@@ -96,7 +96,11 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
   step 5, the ubershader experiment, measured and declined (iGPU forward +22–53 %, 90
   VGPRs; the fallback stays; branch `exp/ubershader`); glTF's unlit, clear coat and sheen
   onto the models as built-in types (ADR 0092's addendum of 2026-10-13: `MODEL_SHEEN` for
-  glTF's sheen layer, the coat's normal map). Left: PSO records. (Ref-1 runs
+  glTF's sheen layer, the coat's normal map); PSO records (ADR 0092's addendum of
+  2026-10-14: the cook compiles only the entry points playtests drew, `*.pso.ron`;
+  ClearCoatTest's type 128 entry points in 4.0 s → 1 in 0.6 s, its pack 1.93 → 0.98 MB).
+  **3c is done** but for the warm-up making recorded pipelines first and prediction for
+  types no record names (later). (Ref-1 runs
   with hardware-accelerated GPU scheduling on since 2026-10-12, for DLSS frame
   generation.)
 
@@ -536,14 +540,19 @@ grown, divide and conquer); the old labels stay in parentheses.
     shading models since ADR 0092);
   - FSR 4: ML, RDNA4-only, shipped as a DLL (DX12 at first). Check Vulkan availability and
     license; it needs an RDNA4 GPU to test;
-  - `ERROR_DEVICE_LOST` on the Radeon when several devices draw in one process (found
-    2026-10-13, on main too): `cargo test -p engine_golden --test golden -- aa_modes
-    --test-threads 4` loses the device in `texture_feedback_with_msaa` and
-    `msaa_shows_no_edge_halos_with_screen_space_effects` every run, while 4 processes
-    (nextest, as the gate runs it) and one thread pass. No process-wide Vulkan objects
-    were found (the RHI's statics are diagnostics, the loader and counters). Engine (an
-    object shared between devices) or driver: to investigate, with
-    `VK_EXT_device_fault` reports in the harness;
+  - `ERROR_DEVICE_LOST` on the Radeon when an MSAA view draws beside another device in
+    one process (found 2026-10-13, on main too). Narrowed 2026-10-14:
+    - fails every run: an MSAA golden test and any second test as two threads (e.g.
+      `cargo test -p engine_golden --test golden -- texture_feedback_with_msaa
+      flight_helmet --test-threads 2`); the MSAA device is lost within 0.5 s;
+    - passes: one device, four nextest processes (as the gate runs it), four devices
+      without MSAA in one process, the RTX in any mix;
+    - validation off: still fails. No TDR (no event 4101), and the fault probe finds no
+      device lost.
+    - No process-wide Vulkan objects in the engine; most likely the AMD driver (state it
+      shares between a process's devices on its MSAA path). Next: a minimal Vulkan repro
+      (two devices, one MSAA pass with a resolve), then AMD's bug report tool (the owner),
+      as for `contraction_repro`;
   - glTF's texture coordinates beyond the first set, `KHR_texture_transform` and vertex
     colors (Khronos' SheenChair needs the first two);
   - physical light units (the owner, 2026-10-13: for the future, much later): emission in

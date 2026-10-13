@@ -48,6 +48,8 @@
 //!                           DLLs, an RTX 40 or newer): Streamline presents, Reflex paces
 //!     [--ui]                a UI layer drawn on every presented frame: a HUD, a panel on
 //!                           the nave's wall, a panel on the camera
+//!     [--record-pso <file>] the material types' entry points drawn, merged into that PSO
+//!                           record at the end (ADR 0092; `ofeliaengine cook --pso`)
 //! ```
 //!
 //! Cook the pack with `ofeliaengine cook test-assets/Sponza/Sponza.gltf -o sponza.pack`.
@@ -722,6 +724,9 @@ mod windowed {
         let warm_up = !flag("--no-warm-up");
         // `--fg`: FSR 3.1's, shown by a paced presenter; `--fg dlss`: DLSS's, through
         // Streamline (ADR 0091).
+        // `--record-pso <file>`: the material types' entry points the flight drew, merged
+        // into that PSO record at the end (ADR 0092): a playtest's record for the cook.
+        let record_pso = option("--record-pso").map(PathBuf::from);
         let frame_generation = flag("--fg").then(|| match option("--fg") {
             Some("dlss") => FrameGeneration::Dlss,
             _ => FrameGeneration::Fsr,
@@ -1826,6 +1831,23 @@ mod windowed {
         if let Some(mut p) = paced.take() {
             p.drain_presented(|x| presented.push(x));
             swapchain = Some(p.stop(&mut allocator).unwrap());
+        }
+        if let Some(path) = &record_pso {
+            let mut record = engine_assets::pso_record::PsoRecord::new();
+            for (desc, entries) in frame_renderer.forward().material_type_entries_drawn() {
+                for entry in entries {
+                    record.add(&desc.module, &desc.type_name, &entry);
+                }
+            }
+            match record.save_merged(path) {
+                Ok(merged) => println!(
+                    "PSO record {}: {} entry points drawn, {} in the record",
+                    path.display(),
+                    record.len(),
+                    merged.len()
+                ),
+                Err(e) => println!("PSO record: {e}"),
+            }
         }
 
         // The report.

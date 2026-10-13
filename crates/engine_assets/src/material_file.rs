@@ -36,6 +36,7 @@ use crate::gltf_import::{
     AlphaMode, ImportedScene, MaterialTypeData, TextureData, TextureSource, TextureWrap,
     TypedMaterialData,
 };
+use crate::pso_record::PsoRecord;
 use engine_shader::{FieldKind, StructLayout};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -436,10 +437,12 @@ pub trait MaterialTypeBuilder {
 }
 
 /// [`MaterialTypeBuilder`] through Slang: the engine's `forward.slang` in `shader_dir`
-/// compiled for each type (`engine_shader::material_types`).
+/// compiled for each type (`engine_shader::material_types`); with a PSO record, only the
+/// entry points it names for the types it names ([`Self::with_pso_record`]).
 pub struct SlangMaterialTypes {
     compiler: engine_shader::Compiler,
     shader_dir: PathBuf,
+    record: Option<PsoRecord>,
 }
 
 impl SlangMaterialTypes {
@@ -450,7 +453,15 @@ impl SlangMaterialTypes {
         Ok(Self {
             compiler,
             shader_dir: shader_dir.to_owned(),
+            record: None,
         })
+    }
+
+    /// Compiles only the entry points `record` names for the types it names (ADR 0092);
+    /// the others whole, as without a record.
+    pub fn with_pso_record(mut self, record: PsoRecord) -> Self {
+        self.record = Some(record);
+        self
     }
 }
 
@@ -470,14 +481,21 @@ impl MaterialTypeBuilder for SlangMaterialTypes {
         module: &Path,
         type_name: &str,
     ) -> Result<Vec<(String, Vec<u32>)>, String> {
-        engine_shader::material_types::compile_material_type(
+        let threads = std::thread::available_parallelism()
+            .map_or(1, |n| n.get())
+            .min(8);
+        let recorded = self
+            .record
+            .as_ref()
+            .and_then(|r| r.entries(module, type_name));
+        let keep = |name: &str| recorded.is_none_or(|entries| entries.contains(name));
+        engine_shader::material_types::compile_material_type_entries(
             &mut self.compiler,
             &self.shader_dir,
             module,
             type_name,
-            std::thread::available_parallelism()
-                .map_or(1, |n| n.get())
-                .min(8),
+            threads,
+            &keep,
         )
         .map_err(|e| e.to_string())
     }

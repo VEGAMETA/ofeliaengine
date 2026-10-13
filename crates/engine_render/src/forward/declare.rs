@@ -1019,13 +1019,20 @@ impl ForwardRenderer {
         let bent = ao
             .as_ref()
             .is_some_and(|((settings, _), _)| settings.bent_normals);
+        let plain_pipelines = main_pipelines;
         let main_pipelines = if bent {
             main_pipelines.map(|p| self.bent_twins.twin(p))
         } else {
             main_pipelines
         };
-        // Material types' variants of them (ADR 0092).
-        let main_typed = self.typed_pipelines(&states, main_pipelines, PLAIN_STATES);
+        // Material types' variants of them (ADR 0092); a type without its bent-normal
+        // variant (still compiling, or not in its pack) draws its plain one.
+        let main_typed = self.typed_pipelines_or(
+            &states,
+            main_pipelines,
+            bent.then_some(plain_pipelines),
+            PLAIN_STATES,
+        );
         // Made now if this is their first frame (ADR 0079).
         let main_pipelines = [ready(main_pipelines[0])?, ready(main_pipelines[1])?];
         // `contact`: the sun's contact shadows, whose mask's index the shading that reads

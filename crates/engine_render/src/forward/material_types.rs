@@ -29,7 +29,7 @@ use engine_shader::{
     CompileOptions, Compiler, EntryPoint, ShaderError, SlangLibrary, Stage, StructLayout, path_key,
 };
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::CString;
 use std::path::Path;
 use std::path::PathBuf;
@@ -125,6 +125,11 @@ struct TypeEntry {
     generation: u32,
     /// The latest compile error (the previous version draws).
     error: Option<String>,
+    /// Registered with a cooked pack's SPIR-V: an entry point missing from it means the
+    /// pack was cooked with a PSO record that lacks it (warned once).
+    precompiled: bool,
+    /// The entry points frames drew the type with (PSO records, ADR 0092).
+    drawn: BTreeSet<CString>,
 }
 
 /// An entry point's SPIR-V by name, and the files the compile read.
@@ -297,6 +302,9 @@ pub(crate) struct MaterialTypes {
     hot_reload: Option<HotReload>,
     /// Pipelines replaced by a reload, with the last frame that may use them.
     retired: Vec<(u64, LazyPipeline)>,
+    /// Entry points frames drew a precompiled type with that its pack lacks: type name and
+    /// entry point (the pack's PSO record lacked them).
+    pack_misses: Vec<(String, String)>,
     /// The frame being prepared ([`Self::collect`]).
     frame: u64,
 }
@@ -323,6 +331,7 @@ impl MaterialTypes {
             compiling: 0,
             hot_reload: None,
             retired: Vec::new(),
+            pack_misses: Vec::new(),
             frame: 0,
         }
     }
@@ -381,6 +390,8 @@ impl MaterialTypes {
             reload: Reload::Idle,
             generation: 0,
             error: None,
+            precompiled: false,
+            drawn: BTreeSet::new(),
         });
         MaterialTypeId(self.types.len() as u16)
     }
@@ -394,6 +405,7 @@ impl MaterialTypes {
     ) -> MaterialTypeId {
         let ty = self.register(desc);
         let entry = &mut self.types[usize::from(ty.0) - 1];
+        entry.precompiled = true;
         for (name, spirv) in entries {
             let Ok(name) = CString::new(name.as_str()) else {
                 continue;
@@ -404,6 +416,28 @@ impl MaterialTypes {
                 .or_insert_with(|| Spirv::Ready(Arc::from(spirv.as_slice())));
         }
         ty
+    }
+
+    /// Every type's entry points frames drew it with so far, sorted: what a PSO record
+    /// keeps (ADR 0092), so that a cook compiles only those.
+    pub(crate) fn drawn(&self) -> Vec<(&MaterialTypeDesc, Vec<String>)> {
+        self.types
+            .iter()
+            .filter(|t| !t.drawn.is_empty())
+            .map(|t| {
+                let entries = t
+                    .drawn
+                    .iter()
+                    .map(|e| e.to_string_lossy().into_owned())
+                    .collect();
+                (&t.desc, entries)
+            })
+            .collect()
+    }
+
+    /// What [`Self::pack_misses`] collected.
+    pub(crate) fn pack_misses(&self) -> &[(String, String)] {
+        &self.pack_misses
     }
 
     pub(crate) fn desc(&self, ty: MaterialTypeId) -> Option<&MaterialTypeDesc> {
@@ -456,6 +490,22 @@ impl MaterialTypes {
             let Some(entry) = self.types.get_mut(usize::from(ty.0) - 1) else {
                 continue;
             };
+            if entry.drawn.insert(entry_name.clone())
+                && entry.precompiled
+                && !entry.spirv.contains_key(&entry_name)
+            {
+                log::warn!(
+                    "material type {}: its pack has no `{}` (cooked with a PSO record that \
+                     lacks it): its fallback draws until it compiles; record PSOs with this \
+                     view's features and cook again",
+                    entry.desc.name,
+                    entry_name.to_string_lossy()
+                );
+                self.pack_misses.push((
+                    entry.desc.type_name.clone(),
+                    entry_name.to_string_lossy().into_owned(),
+                ));
+            }
             if entry.pipelines.contains_key(&role.id()) {
                 continue;
             }

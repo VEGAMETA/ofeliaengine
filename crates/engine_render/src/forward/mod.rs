@@ -1453,6 +1453,21 @@ impl ForwardRenderer {
         self.bent_twins.update(device);
     }
 
+    /// Every material type's entry points frames drew it with so far (sorted): what a PSO
+    /// record keeps (`engine_assets::pso_record`, ADR 0092), so that a cook compiles only
+    /// those. Playtests save it at exit and merge it with the record on disk.
+    pub fn material_type_entries_drawn(&self) -> Vec<(&MaterialTypeDesc, Vec<String>)> {
+        self.material_types.drawn()
+    }
+
+    /// The entry points frames drew a type registered with precompiled SPIR-V (a pack's)
+    /// with that the pack lacks, as (type name, entry point): its PSO record lacked them
+    /// (logged; the fallback draws until the entry point compiles, where Slang is). Tools
+    /// that check records want none.
+    pub fn material_type_pack_misses(&self) -> &[(String, String)] {
+        self.material_types.pack_misses()
+    }
+
     /// Material types' pipelines on their way (compiling, or described and not created):
     /// a frame drawing them now draws their fallbacks. Tests and tools wait for 0.
     pub fn material_types_pending(&self) -> usize {
@@ -1499,13 +1514,31 @@ impl ForwardRenderer {
         roles: [&'a LazyPipeline; 2],
         mask: u32,
     ) -> TypedPipelines<'a> {
+        self.typed_pipelines_or(states, roles, None, mask)
+    }
+
+    /// [`Self::typed_pipelines`], and where a type has no pipeline of `roles` (yet, or its
+    /// pack lacks the entry point), its pipeline of `fallback`'s: a feature's variants
+    /// (ambient occlusion's bent normals) fall back to the type without the feature, not
+    /// to the type's glTF fallback.
+    pub(crate) fn typed_pipelines_or<'a>(
+        &'a self,
+        states: &States,
+        roles: [&'a LazyPipeline; 2],
+        fallback: Option<[&'a LazyPipeline; 2]>,
+        mask: u32,
+    ) -> TypedPipelines<'a> {
         let mut out = TypedPipelines::BUILTIN;
         for (i, range) in states.typed.as_slice().iter().enumerate() {
             if mask & (1 << range.state) == 0 {
                 continue;
             }
-            let role = roles[usize::from(usize::from(range.state) & MASKED != 0)];
-            if let Some(p) = self.material_types.resolve(range.ty, role) {
+            let k = usize::from(usize::from(range.state) & MASKED != 0);
+            let resolved = self
+                .material_types
+                .resolve(range.ty, roles[k])
+                .or_else(|| fallback.and_then(|f| self.material_types.resolve(range.ty, f[k])));
+            if let Some(p) = resolved {
                 out.ranges[i] = Some([p, p]);
             }
         }

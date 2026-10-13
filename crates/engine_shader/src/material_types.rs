@@ -51,13 +51,29 @@ pub fn compile_material_type(
     type_name: &str,
     threads: usize,
 ) -> Result<CompiledEntries, ShaderError> {
+    compile_material_type_entries(compiler, shader_dir, module, type_name, threads, &|_| true)
+}
+
+/// [`compile_material_type`] for the fragment entry points `keep` accepts by name (a PSO
+/// record's, ADR 0092).
+pub fn compile_material_type_entries(
+    compiler: &mut Compiler,
+    shader_dir: &Path,
+    module: &Path,
+    type_name: &str,
+    threads: usize,
+    keep: &dyn Fn(&str) -> bool,
+) -> Result<CompiledEntries, ShaderError> {
     let source = shader_dir.join("forward.slang");
     let options = material_type_options(shader_dir, module, type_name);
     let fragments: Vec<EntryPoint> = compiler
         .entry_points(&source, &options)?
         .into_iter()
-        .filter(|e| e.stage == Stage::Fragment)
+        .filter(|e| e.stage == Stage::Fragment && keep(&e.name))
         .collect();
+    if fragments.is_empty() {
+        return Ok(Vec::new());
+    }
     let threads = threads.clamp(1, fragments.len().max(1));
     if threads == 1 {
         let compiled = compiler.compile_file(&source, &fragments, &options)?;

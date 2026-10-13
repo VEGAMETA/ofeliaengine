@@ -2143,4 +2143,28 @@ of the engine's built-in types (`engine_assets::gltf_models::apply_gltf_models`,
   - unlit takes no vertex colors (the importer reads none).
 - **The test scenes** are Khronos' ClearCoatTest, ClearcoatWicker, SheenTestGrid and
   UnlitTest (`tools/fetch-test-assets.ps1`), golden shots `gltf_clearcoat`,
-  `gltf_clearcoat_wicker`, `gltf_sheen`, `gltf_unlit`.
+  `gltf_clearcoat_ao`, `gltf_clearcoat_wicker`, `gltf_sheen`, `gltf_unlit`.
+
+### PSO records: cook only what the game draws
+
+Without a record, the cook compiles every fragment entry point of `forward.slang` for
+every material type: 128, about 4 s and up to a megabyte of SPIR-V per type. A PSO record
+says which a game's frames draw:
+
+```text
+# a playtest: fly through the level with the settings players will use (every quality
+# preset you offer), the record merged at the end
+cargo run -p engine_runtime --release --example flight -- game.pack --record-pso game.pso.ron
+
+# the cook: only the recorded entry points for the types the record names
+ofeliaengine cook level.gltf -o level.pack --pso game.pso.ron
+```
+
+- **Keep it in version control:** it names types by their module's file name, not by path,
+  and every run merges into it (under a file lock), so it only grows.
+- **A miss is logged:** a pack's type that frames draw with an entry point the record
+  lacked logs `its pack has no …` and draws without that variant (its plain variant for
+  bent normals, its glTF fallback otherwise). Record again with that view's features.
+- **`<scene>.pso.ron` next to the scene** is used when `--pso` is not given; a type the
+  record does not name is cooked whole.
+- ClearCoatTest's type: 128 entry points in 4.0 s → 1 in 0.6 s, the pack 1.93 → 0.98 MB.

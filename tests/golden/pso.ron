@@ -1,0 +1,17 @@
+// PSO record (ADR 0092): the material types' entry points frames drew.
+// Merged by every recording run; a cook compiles only these.
+(
+    version: 1,
+    types: {
+        "fabric.slang:FabricMaterial": ["fragmentMain"],
+        "gltf.slang:GltfClearcoat": ["fragmentMain", "fragmentMainAo", "fragmentMainAoBent"],
+        "gltf.slang:GltfSheen": ["fragmentMain"],
+        "gltf.slang:GltfUnlit": ["fragmentMain"],
+        "models.slang:ClearcoatMaterial": ["fragmentMain", "fragmentReflect"],
+        "models.slang:ClothMaterial": ["fragmentMain", "fragmentReflect"],
+        "models.slang:HairMaterial": ["fragmentMain", "fragmentReflect"],
+        "models.slang:ToonMaterial": ["fragmentMain", "fragmentReflect"],
+        "models.slang:UnlitMaterial": ["fragmentMain", "fragmentReflect"],
+        "stripes.slang:StripesMaterial": ["fragmentMain"],
+    },
+)

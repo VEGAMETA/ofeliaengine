@@ -4,7 +4,8 @@
 //! ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
 //! ofeliaengine shaders watch [OPTIONS] <ROOT>...   rebuild on every change (Windows)
 //! ofeliaengine cook <SCENE.gltf> -o <OUT.pack>     cook a scene into a pack (ADR 0056), its
-//!                                                  `<SCENE>.materials.ron` applied (ADR 0092)
+//!                                                  `<SCENE>.materials.ron` and `<SCENE>.pso.ron`
+//!                                                  applied (ADR 0092)
 //! ```
 //!
 //! Run `ofeliaengine help` for the options.
@@ -14,6 +15,7 @@
 
 use engine_assets::gltf_models::apply_gltf_models;
 use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_material_map};
+use engine_assets::pso_record::PsoRecord;
 use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf, write_pack};
 use engine_core::jobs::ThreadPool;
 use engine_shader::{
@@ -37,7 +39,10 @@ usage:
                                                    <SCENE>.materials.ron (or --materials <MAP>)
                                                    replaces glTF materials by material files,
                                                    their types compiled into the pack
-                                                   (--engine-shaders <DIR>: forward.slang)
+                                                   (--engine-shaders <DIR>: forward.slang);
+                                                   <SCENE>.pso.ron (or --pso <RECORD>): a PSO
+                                                   record, only the entry points playtests
+                                                   drew compiled for the types it names
 
 A shader is a .slang file with at least one [shader(\"<stage>\")] entry point; other
 .slang files are modules, compiled through the shaders that import them.
@@ -66,6 +71,7 @@ struct CookArgs {
     settings: CookSettings,
     materials: Option<PathBuf>,
     engine_shaders: PathBuf,
+    pso: Option<PathBuf>,
 }
 
 /// The engine's shader folder in this repository (`forward.slang`, which material types
@@ -85,7 +91,7 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
 }
 
 fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String> {
-    let (mut scene, mut out, mut ddc, mut materials) = (None, None, None, None);
+    let (mut scene, mut out, mut ddc, mut materials, mut pso) = (None, None, None, None, None);
     let mut engine_shaders = PathBuf::from(ENGINE_SHADERS);
     let mut settings = CookSettings::default();
     while let Some(arg) = args.next() {
@@ -95,6 +101,7 @@ fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String
             "--ddc" => ddc = Some(PathBuf::from(value("--ddc")?)),
             "--materials" => materials = Some(PathBuf::from(value("--materials")?)),
             "--engine-shaders" => engine_shaders = PathBuf::from(value("--engine-shaders")?),
+            "--pso" => pso = Some(PathBuf::from(value("--pso")?)),
             "--no-lods" => settings.lods = false,
             "--level" => {
                 let level = value("--level")?;
@@ -116,6 +123,7 @@ fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String
         settings,
         materials,
         engine_shaders,
+        pso,
     })
 }
 
@@ -140,6 +148,26 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
     if !map.files.is_empty() || layered {
         let types_start = Instant::now();
         let mut builder = SlangMaterialTypes::new(&args.engine_shaders)?;
+        // A PSO record (ADR 0092): only the entry points playtests drew, for the types it
+        // names. The one given, or the one next to the scene.
+        let pso_path = args
+            .pso
+            .clone()
+            .unwrap_or_else(|| PsoRecord::path_for(&args.scene));
+        let record = PsoRecord::load(&pso_path).map_err(|e| e.to_string())?;
+        if record.is_empty() {
+            if args.pso.is_some() {
+                return Err(format!("{}: no PSO record there", pso_path.display()));
+            }
+        } else {
+            println!(
+                "{}: a PSO record of {} entry points of {} types",
+                pso_path.display(),
+                record.len(),
+                record.types.len()
+            );
+            builder = builder.with_pso_record(record);
+        }
         if !map.files.is_empty() {
             let warnings =
                 apply_material_map(&mut scene, &map, &mut builder).map_err(|e| e.to_string())?;

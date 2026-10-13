@@ -491,3 +491,68 @@ onto the shading models. Research: [docs/research/gltf-material-extensions.md](.
     glTF's other textures; SheenChair needs both);
   - vertex colors (for unlit too);
   - PSO records, so that a cook compiles only the entry points a game draws.
+
+## Addendum (2026-10-14): PSO records
+
+The decision's "Compile All Shaders over the pairs a project's PSO collection recorded".
+Research: [docs/research/pso-records.md](../research/pso-records.md) (Unreal's bundled PSO
+cache, Unity 6's PSO tracing, Godot 4.4's precompilation).
+
+**Options.**
+
+1. **Records from playtests (chosen):** what frames drew, merged across runs (Unreal,
+   Unity).
+2. **Prediction:** the entry points of the feature sets each device class turns on (Godot,
+   Unreal's precaching). It needs no playtest, but it misses what a game turns on itself.
+   It stays a candidate for types no record names.
+
+**As built.**
+
+- **What is recorded:** every (type, fragment entry point) pair frames asked for
+  (`ForwardRenderer::material_type_entries_drawn`), the bent-normal twins' included.
+  First sight counts: a type drawn under ambient occlusion records its plain entry point
+  (its first frames) and the twin's.
+- **The record** (`engine_assets::pso_record::PsoRecord`, RON, version 1):
+  - by "module file name:type", sorted, so a team shares it and merges diff cleanly;
+  - saved by merging into the file under a file lock (`save_merged`): parallel runs keep
+    each other's entries;
+  - written by `flight --record-pso <file>` and by the golden harness
+    (`ENGINE_GOLDEN_PSO_RECORD=<file>`).
+- **The cook:**
+  - `ofeliaengine cook --pso <record>` (or `<scene>.pso.ron`) compiles only the record's
+    entry points for the types it names, through
+    `SlangMaterialTypes::with_pso_record` and
+    `engine_shader::material_types::compile_material_type_entries`;
+  - a type the record does not name is cooked whole;
+  - a pack's type lacking an entry point frames ask for logs a warning and is counted
+    (`ForwardRenderer::material_type_pack_misses`). Where Slang is there, the entry point
+    then compiles on first sight; in a shipped game the type draws without it.
+- **Degrading within the type:** a type without its bent-normal twin's pipeline (compiling,
+  or missing from its pack) draws its plain variant, not its glTF fallback
+  (`typed_pipelines_or`). Checked by hand: the twin left out of the record and run-time
+  compiles disabled, ClearCoatTest under AO kept its coats (FLIP 0.006 against the bent
+  image, the difference only in ambient light).
+- **The golden shots cook with their own record** (`tests/golden/pso.ron`, recorded on both
+  GPUs) and fail on any miss, with the command to record it again. A shot that starts
+  drawing a new variant makes the record stale at once.
+
+**Measured** (ref-1):
+
+| Scene (one type) | Compile, all → recorded | Pack |
+|---|---|---|
+| ClearCoatTest | 128 entry points 4.0 s → 1 in 0.6 s | 1.93 → 0.98 MB |
+| SheenTestGrid | 3.8 s → 0.6 s | 0.97 → 0.09 MB |
+| UnlitTest | 3.2 s → 0.5 s | 127 → 20 KB |
+
+The golden suite (one thread) took 105 s with every entry point and 78 s with the record
+(−26 %), on both GPUs.
+
+**Consequences.**
+
+- A game's build includes its PSO record. A view feature the playtests never turned on
+  draws its types' fallbacks (logged), as Unreal's misses hitch: record with every quality
+  preset a game offers.
+- Not yet:
+  - the warm-up making recorded pipelines first at load (ADR 0079's next step);
+  - prediction for types no record names;
+  - "Compile All Shaders" in the editor (there is no editor yet).
