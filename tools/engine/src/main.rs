@@ -3,7 +3,8 @@
 //! ```text
 //! ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
 //! ofeliaengine shaders watch [OPTIONS] <ROOT>...   rebuild on every change (Windows)
-//! ofeliaengine cook <SCENE.gltf> -o <OUT.pack>     cook a scene into a pack (ADR 0056)
+//! ofeliaengine cook <SCENE.gltf> -o <OUT.pack>     cook a scene into a pack (ADR 0056), its
+//!                                                  `<SCENE>.materials.ron` applied (ADR 0092)
 //! ```
 //!
 //! Run `ofeliaengine help` for the options.
@@ -11,6 +12,7 @@
 // A command-line tool reports on stdout/stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_material_map};
 use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf, write_pack};
 use engine_core::jobs::ThreadPool;
 use engine_shader::{
@@ -30,7 +32,11 @@ usage:
                                                    cook a scene into a pack: textures compressed
                                                    with mips (through the derived data cache,
                                                    default <scene dir>/../.ddc), meshes with
-                                                   detail levels, entries zstd level N (19)
+                                                   detail levels, entries zstd level N (19);
+                                                   <SCENE>.materials.ron (or --materials <MAP>)
+                                                   replaces glTF materials by material files,
+                                                   their types compiled into the pack
+                                                   (--engine-shaders <DIR>: forward.slang)
 
 A shader is a .slang file with at least one [shader(\"<stage>\")] entry point; other
 .slang files are modules, compiled through the shaders that import them.
@@ -57,7 +63,16 @@ struct CookArgs {
     out: PathBuf,
     ddc: Option<PathBuf>,
     settings: CookSettings,
+    materials: Option<PathBuf>,
+    engine_shaders: PathBuf,
 }
+
+/// The engine's shader folder in this repository (`forward.slang`, which material types
+/// compile from).
+const ENGINE_SHADERS: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../crates/engine_render/shaders"
+);
 
 fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, String> {
     match args.next().as_deref() {
@@ -69,13 +84,16 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
 }
 
 fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String> {
-    let (mut scene, mut out, mut ddc) = (None, None, None);
+    let (mut scene, mut out, mut ddc, mut materials) = (None, None, None, None);
+    let mut engine_shaders = PathBuf::from(ENGINE_SHADERS);
     let mut settings = CookSettings::default();
     while let Some(arg) = args.next() {
         let mut value = |name: &str| args.next().ok_or_else(|| format!("{name} needs a value"));
         match arg.as_str() {
             "-o" | "--out" => out = Some(PathBuf::from(value("-o")?)),
             "--ddc" => ddc = Some(PathBuf::from(value("--ddc")?)),
+            "--materials" => materials = Some(PathBuf::from(value("--materials")?)),
+            "--engine-shaders" => engine_shaders = PathBuf::from(value("--engine-shaders")?),
             "--no-lods" => settings.lods = false,
             "--level" => {
                 let level = value("--level")?;
@@ -95,6 +113,8 @@ fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String
         out: out.ok_or("no output given (-o <OUT.pack>)")?,
         ddc,
         settings,
+        materials,
+        engine_shaders,
     })
 }
 
@@ -102,7 +122,39 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
     let start = Instant::now();
     let bytes = std::fs::read(&args.scene).map_err(|e| format!("{}: {e}", args.scene.display()))?;
     let dir = args.scene.parent();
-    let scene = import_gltf(&bytes, dir).map_err(|e| format!("{}: {e}", args.scene.display()))?;
+    let mut scene =
+        import_gltf(&bytes, dir).map_err(|e| format!("{}: {e}", args.scene.display()))?;
+    // Material files (ADR 0092): the map next to the scene, or the one given.
+    let map = match &args.materials {
+        Some(path) => {
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+            MaterialMap::parse(&text, path.parent().unwrap_or(std::path::Path::new("")))
+                .map_err(|e| format!("{}: {e}", path.display()))?
+        }
+        None => MaterialMap::for_scene(&args.scene).map_err(|e| e.to_string())?,
+    };
+    if !map.files.is_empty() {
+        let types_start = Instant::now();
+        let mut builder = SlangMaterialTypes::new(&args.engine_shaders)?;
+        let warnings =
+            apply_material_map(&mut scene, &map, &mut builder).map_err(|e| e.to_string())?;
+        for warning in warnings {
+            eprintln!("warning: {warning}");
+        }
+        println!(
+            "{}: {} materials of {} types from material files ({} entry points), compiled in {:.1} s",
+            args.scene.display(),
+            scene.typed_materials.len(),
+            scene.material_types.len(),
+            scene
+                .material_types
+                .iter()
+                .map(|t| t.entries.len())
+                .sum::<usize>(),
+            types_start.elapsed().as_secs_f64(),
+        );
+    }
     let ddc_dir = args.ddc.clone().unwrap_or_else(|| {
         dir.and_then(std::path::Path::parent)
             .unwrap_or(std::path::Path::new("."))

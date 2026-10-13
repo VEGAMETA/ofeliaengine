@@ -40,8 +40,11 @@
 
 use crate::animation::{raw_clip, shell_distances, skin_skeleton};
 use crate::ddc::{DerivedDataCache, import_texture};
-use crate::gltf_import::{AlphaMode, ImportError, ImportedScene, TextureWrap, read_texture};
+use crate::gltf_import::{
+    AlphaMode, ImportError, ImportedScene, MaterialTypeData, TextureWrap, read_texture,
+};
 use crate::lod::{Lod, LodSettings, generate_lods};
+use crate::material_file::TextureEncoding;
 use crate::pack::{
     DEFAULT_CHUNK_SHIFT, EntryData, EntryKind, LoadStats, Pack, PackError, PackStats, PackWriter,
     PreparedEntry, invalid,
@@ -161,6 +164,34 @@ pub struct CookedScene {
     pub instances: Vec<CookedInstance>,
     /// Skins, with their skeletons and clips.
     pub skins: Vec<CookedSkin>,
+    /// Material types (ADR 0092), with their compiled entry points.
+    pub material_types: Vec<MaterialTypeData>,
+    /// Materials of those types.
+    pub typed_materials: Vec<CookedTypedMaterial>,
+}
+
+/// A material of a type (ADR 0092): its glTF record in [`CookedScene::materials`] is its
+/// fallback.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CookedTypedMaterial {
+    /// Index into [`CookedScene::materials`].
+    pub material: u32,
+    /// Index into [`CookedScene::material_types`].
+    pub ty: u32,
+    /// The parameter bytes (texture fields hold `u32::MAX` until the material table writes
+    /// their bindless references).
+    pub params: Vec<u8>,
+    /// Texture parameters: byte offset and texture.
+    pub textures: Vec<(u32, TextureSlot)>,
+}
+
+/// How a texture parameter's image is filtered and compressed.
+fn encoding_usage(encoding: TextureEncoding) -> TextureUsage {
+    match encoding {
+        TextureEncoding::Color => TextureUsage::Color,
+        TextureEncoding::Data => TextureUsage::Data,
+        TextureEncoding::Normal => TextureUsage::Normal,
+    }
 }
 
 /// How to cook.
@@ -246,6 +277,11 @@ fn texture_uses(scene: &ImportedScene) -> Vec<(usize, TextureUsage)> {
         add(m.metallic_roughness_texture, TextureUsage::Data);
         add(m.occlusion_texture, TextureUsage::Data);
         add(m.normal_texture, TextureUsage::Normal);
+    }
+    for t in &scene.typed_materials {
+        for &(_, texture, encoding) in &t.textures {
+            add(Some(texture), encoding_usage(encoding));
+        }
     }
     uses
 }
@@ -420,6 +456,23 @@ pub fn cook_scene(
             double_sided: m.double_sided,
         })
         .collect();
+    cooked.material_types = scene.material_types.clone();
+    cooked.typed_materials = scene
+        .typed_materials
+        .iter()
+        .map(|t| CookedTypedMaterial {
+            material: t.material as u32,
+            ty: t.ty as u32,
+            params: t.params.clone(),
+            textures: t
+                .textures
+                .iter()
+                .filter_map(|&(offset, texture, encoding)| {
+                    Some((offset, slot(Some(texture), encoding_usage(encoding))?))
+                })
+                .collect(),
+        })
+        .collect();
 
     // Skins: skeletons, and every animation that moves one, compressed in parallel.
     let start = std::time::Instant::now();
@@ -582,6 +635,112 @@ pub struct InstanceRecord {
 }
 
 const _: () = assert!(size_of::<InstanceRecord>() == 80);
+
+/// A material of a type in a scene entry (version 5, ADR 0092).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct TypedMaterialRecord {
+    /// Material index in the scene (its glTF record, the fallback).
+    material: u32,
+    /// Its type: the `ty`th material type entry.
+    ty: u32,
+    /// Its parameter bytes in the scene entry's parameter section.
+    params_offset: u32,
+    params_bytes: u32,
+    /// Its texture parameters in the scene entry's [`ParamTextureRecord`]s.
+    first_texture: u32,
+    texture_count: u32,
+    reserved: [u32; 2],
+}
+
+const _: () = assert!(size_of::<TypedMaterialRecord>() == 32);
+
+/// A texture parameter of a material of a type (version 5, ADR 0092).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+struct ParamTextureRecord {
+    /// Byte offset in the parameters.
+    offset: u32,
+    /// Index of the scene's texture records.
+    texture: u32,
+    /// Wrap modes: u | v << 8.
+    wrap: u32,
+    reserved: u32,
+}
+
+const _: () = assert!(size_of::<ParamTextureRecord>() == 16);
+
+/// A material type entry: `meta = [entries, module bytes, type name bytes]`; the module's
+/// and the type's names (each padded to 4 bytes), then per entry point `[name bytes,
+/// SPIR-V words]`, its name padded to 4, its SPIR-V.
+fn material_type_entry(ty: &MaterialTypeData) -> ([u32; 7], Vec<u8>) {
+    fn string(out: &mut Vec<u8>, s: &str) {
+        out.extend_from_slice(s.as_bytes());
+        out.resize(out.len().next_multiple_of(4), 0);
+    }
+    let mut data = Vec::new();
+    string(&mut data, &ty.module);
+    string(&mut data, &ty.type_name);
+    for (name, spirv) in &ty.entries {
+        data.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        data.extend_from_slice(&(spirv.len() as u32).to_le_bytes());
+        string(&mut data, name);
+        data.extend_from_slice(bytemuck::cast_slice(spirv));
+    }
+    let meta = [
+        ty.entries.len() as u32,
+        ty.module.len() as u32,
+        ty.type_name.len() as u32,
+        0,
+        0,
+        0,
+        0,
+    ];
+    (meta, data)
+}
+
+/// Reads a material type entry ([`material_type_entry`]).
+fn read_material_type_entry(meta: [u32; 7], data: &[u8]) -> Result<MaterialTypeData, PackError> {
+    let mut at = 0usize;
+    let mut take = |len: usize| -> Result<&[u8], PackError> {
+        let bytes = data
+            .get(
+                at..at
+                    .checked_add(len)
+                    .ok_or_else(|| invalid("material type entry"))?,
+            )
+            .ok_or_else(|| invalid("material type entry truncated"))?;
+        at += len.next_multiple_of(4);
+        Ok(bytes)
+    };
+    let text = |b: &[u8]| {
+        String::from_utf8(b.to_vec()).map_err(|_| invalid("material type name is not UTF-8"))
+    };
+    let module = text(take(meta[1] as usize)?)?;
+    let type_name = text(take(meta[2] as usize)?)?;
+    let mut entries = Vec::new();
+    for _ in 0..meta[0] {
+        let counts = take(8)?;
+        let name_len = u32::from_le_bytes([counts[0], counts[1], counts[2], counts[3]]) as usize;
+        let words = u32::from_le_bytes([counts[4], counts[5], counts[6], counts[7]]) as usize;
+        let name = text(take(name_len)?)?;
+        let bytes = take(
+            words
+                .checked_mul(4)
+                .ok_or_else(|| invalid("material type entry"))?,
+        )?;
+        let spirv = bytes
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes([w[0], w[1], w[2], w[3]]))
+            .collect();
+        entries.push((name, spirv));
+    }
+    Ok(MaterialTypeData {
+        module,
+        type_name,
+        entries,
+    })
+}
 
 const NONE: u32 = u32::MAX;
 
@@ -1164,19 +1323,55 @@ pub fn write_pack(
     } else {
         Vec::new()
     };
+    // Material types (version 5, ADR 0092): an entry each, in order.
+    for ty in &scene.material_types {
+        let (meta, data) = material_type_entry(ty);
+        writer.add(&PreparedEntry::new(
+            EntryKind::MaterialType,
+            meta,
+            &data,
+            level,
+            DEFAULT_CHUNK_SHIFT,
+        ))?;
+    }
+    let mut typed = Vec::new();
+    let mut param_textures = Vec::new();
+    let mut param_bytes = Vec::new();
+    for t in &scene.typed_materials {
+        typed.push(TypedMaterialRecord {
+            material: t.material,
+            ty: t.ty,
+            params_offset: param_bytes.len() as u32,
+            params_bytes: t.params.len() as u32,
+            first_texture: param_textures.len() as u32,
+            texture_count: t.textures.len() as u32,
+            reserved: [0; 2],
+        });
+        param_bytes.extend_from_slice(&t.params);
+        param_bytes.resize(param_bytes.len().next_multiple_of(4), 0);
+        param_textures.extend(t.textures.iter().map(|&(offset, s)| ParamTextureRecord {
+            offset,
+            texture: s.texture,
+            wrap: wrap_code(s.wrap[0]) | wrap_code(s.wrap[1]) << 8,
+            reserved: 0,
+        }));
+    }
     let mut data = Vec::new();
     section(&mut data, bytemuck::cast_slice(&records));
     section(&mut data, bytemuck::cast_slice(&materials));
     section(&mut data, bytemuck::cast_slice(&instances));
     section(&mut data, bytemuck::cast_slice(&mesh_records));
+    section(&mut data, bytemuck::cast_slice(&typed));
+    section(&mut data, bytemuck::cast_slice(&param_textures));
+    section(&mut data, &param_bytes);
     let meta = [
         records.len() as u32,
         materials.len() as u32,
         instances.len() as u32,
         mesh_records.len() as u32,
-        0,
-        0,
-        0,
+        typed.len() as u32,
+        param_textures.len() as u32,
+        param_bytes.len() as u32,
     ];
     writer.add(&PreparedEntry::new(
         EntryKind::Scene,
@@ -1504,7 +1699,9 @@ enum Decoded {
         Vec<MaterialRecord>,
         Vec<InstanceRecord>,
         Vec<MeshRecord>,
+        (Vec<TypedMaterialRecord>, Vec<ParamTextureRecord>, Vec<u8>),
     ),
+    MaterialType(MaterialTypeData),
 }
 
 fn add_stats(total: &mut LoadStats, more: LoadStats) {
@@ -1569,7 +1766,19 @@ fn open_scene_with(
                 let materials = s.next::<MaterialRecord>(e.meta[1] as usize)?;
                 let instances = s.next::<InstanceRecord>(e.meta[2] as usize)?;
                 let meshes = s.next::<MeshRecord>(e.meta[3] as usize)?;
-                Decoded::Scene(textures, materials, instances, meshes)
+                let typed = s.next::<TypedMaterialRecord>(e.meta[4] as usize)?;
+                let param_textures = s.next::<ParamTextureRecord>(e.meta[5] as usize)?;
+                let param_bytes = s.next::<u8>(e.meta[6] as usize)?;
+                Decoded::Scene(
+                    textures,
+                    materials,
+                    instances,
+                    meshes,
+                    (typed, param_textures, param_bytes),
+                )
+            }
+            EntryKind::MaterialType => {
+                Decoded::MaterialType(read_material_type_entry(e.meta, &data)?)
             }
             EntryKind::Skin => Decoded::Skin(read_skin_entry(e.meta, &data)?),
             EntryKind::Clip => {
@@ -1604,16 +1813,19 @@ fn open_scene_with(
             None if entries[i].kind() == EntryKind::MeshLevel && stream_meshes => {}
             Some(Decoded::Skin(skin)) => layout.scene.skins.push(skin),
             Some(Decoded::Clip(skin, clip)) => clips.push((skin, clip)),
-            Some(Decoded::Scene(t, m, inst, meshes)) => {
-                if records.replace((t, m, inst, meshes)).is_some() {
+            Some(Decoded::Scene(t, m, inst, meshes, typed)) => {
+                if records.replace((t, m, inst, meshes, typed)).is_some() {
                     return Err(invalid("more than one scene"));
                 }
             }
+            Some(Decoded::MaterialType(ty)) => layout.scene.material_types.push(ty),
             None if entries[i].kind() == EntryKind::TextureLevels => {}
             None => return Err(invalid(format!("entry {i} not loaded"))),
         }
     }
-    let Some((textures, materials, instances, mesh_records)) = records else {
+    let Some((textures, materials, instances, mesh_records, (typed, param_textures, param_bytes))) =
+        records
+    else {
         return Err(invalid("no scene"));
     };
     // Meshes stored for streaming: their levels' entries, then whole meshes unless they
@@ -1732,6 +1944,41 @@ fn open_scene_with(
                 _ => return Err(invalid("bad alpha mode")),
             },
             double_sided: m.double_sided != 0,
+        });
+    }
+    for t in &typed {
+        if t.material as usize >= layout.scene.materials.len()
+            || t.ty as usize >= layout.scene.material_types.len()
+        {
+            return Err(invalid("material of a missing material or type"));
+        }
+        let params = param_bytes
+            .get(
+                t.params_offset as usize
+                    ..(t.params_offset as usize).saturating_add(t.params_bytes as usize),
+            )
+            .ok_or_else(|| invalid("material parameters out of bounds"))?
+            .to_vec();
+        let records = param_textures
+            .get(
+                t.first_texture as usize
+                    ..(t.first_texture as usize).saturating_add(t.texture_count as usize),
+            )
+            .ok_or_else(|| invalid("material texture parameters out of bounds"))?;
+        let mut textures = Vec::with_capacity(records.len());
+        for r in records {
+            if r.offset as usize + 4 > params.len() {
+                return Err(invalid("texture parameter outside its parameters"));
+            }
+            let s = slot(r.texture, r.wrap)?
+                .ok_or_else(|| invalid("texture parameter without a texture"))?;
+            textures.push((r.offset, s));
+        }
+        layout.scene.typed_materials.push(CookedTypedMaterial {
+            material: t.material,
+            ty: t.ty,
+            params,
+            textures,
         });
     }
     for i in &instances {
@@ -1924,6 +2171,8 @@ mod tests {
                 },
             ],
             skins: Vec::new(),
+            material_types: Vec::new(),
+            typed_materials: Vec::new(),
         }
     }
 
@@ -2018,6 +2267,50 @@ mod tests {
             );
             assert_eq!(kinds[9].0, EntryKind::Scene);
         }
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn material_types_survive_their_pack_as_version_5() {
+        let jobs = ThreadPool::builder().workers(2).build().unwrap();
+        let path =
+            std::env::temp_dir().join(format!("engine_assets_typed_{}.pack", std::process::id()));
+        let mut scene = sample();
+        scene.material_types = vec![
+            MaterialTypeData {
+                module: String::from("materials/velvet.slang"),
+                type_name: String::from("VelvetMaterial"),
+                entries: vec![
+                    (String::from("fragmentMain"), vec![0x0723_0203, 1, 2, 3]),
+                    (String::from("fragmentMainAo"), vec![0x0723_0203, 4]),
+                ],
+            },
+            MaterialTypeData {
+                module: String::from("odd.slang"),
+                type_name: String::from("Odd"),
+                entries: Vec::new(),
+            },
+        ];
+        scene.typed_materials = vec![CookedTypedMaterial {
+            material: 0,
+            ty: 0,
+            params: (0..44u8).collect(),
+            textures: vec![(
+                8,
+                TextureSlot {
+                    texture: 2,
+                    wrap: [TextureWrap::ClampToEdge, TextureWrap::Repeat],
+                },
+            )],
+        }];
+        write_pack(&path, &scene, &jobs, 3).unwrap();
+        let header = std::fs::read(&path).unwrap();
+        assert_eq!(
+            u32::from_le_bytes([header[4], header[5], header[6], header[7]]),
+            5
+        );
+        let (loaded, _) = load_pack(&path, &jobs, 4).unwrap();
+        assert_eq!(loaded, scene);
         let _ = std::fs::remove_file(path);
     }
 

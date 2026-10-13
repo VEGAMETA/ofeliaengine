@@ -47,8 +47,9 @@ pub const MAGIC: [u8; 4] = *b"OFPK";
 /// those refuse a version 2 pack instead of misreading it. Version 3 (ADR 0076) adds
 /// meshes stored for streaming: the coarsest detail level in the mesh entry, each finer
 /// level's extra vertices and indices in a mesh level entry. Version 4 (ADR 0083) adds
-/// cooked HDR panoramas (`crate::panorama`).
-pub const VERSION: u32 = 4;
+/// cooked HDR panoramas (`crate::panorama`). Version 5 (ADR 0092) adds material types (their
+/// compiled entry points) and the scene's materials of those types.
+pub const VERSION: u32 = 5;
 /// Oldest version this engine reads.
 pub const MIN_VERSION: u32 = 1;
 /// Largest entry a pack accepts (raw bytes): 4 GiB.
@@ -109,6 +110,9 @@ pub enum EntryKind {
     /// A cooked HDR panorama: a BC6H cube with mips and its sun (version 4, ADR 0083;
     /// `crate::panorama`).
     Panorama,
+    /// A material type: its names and its fragment entry points' SPIR-V (version 5,
+    /// ADR 0092).
+    MaterialType,
 }
 
 impl EntryKind {
@@ -121,6 +125,7 @@ impl EntryKind {
             Self::Clip => 5,
             Self::MeshLevel => 6,
             Self::Panorama => 7,
+            Self::MaterialType => 8,
         }
     }
 
@@ -131,6 +136,7 @@ impl EntryKind {
             Self::Skin | Self::Clip => 2,
             Self::MeshLevel => 3,
             Self::Panorama => 4,
+            Self::MaterialType => 5,
         }
     }
 
@@ -143,6 +149,7 @@ impl EntryKind {
             5 => Some(Self::Clip),
             6 => Some(Self::MeshLevel),
             7 => Some(Self::Panorama),
+            8 => Some(Self::MaterialType),
             _ => None,
         }
     }

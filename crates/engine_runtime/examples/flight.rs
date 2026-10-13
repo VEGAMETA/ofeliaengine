@@ -992,11 +992,13 @@ mod windowed {
         let mut materials = MaterialTable::new(IN_FLIGHT);
         let scene_layout = streamer.layout().scene.clone();
         let texture_ids = streamer.textures().to_vec();
-        let material_ids: Vec<_> = scene_layout
-            .materials
-            .iter()
-            .map(|m| materials.add(material_desc(m, &texture_ids)))
-            .collect();
+        // Material types (ADR 0092): drawn from the pack's SPIR-V.
+        let type_ids = engine_streaming::register_material_types(
+            frame_renderer.forward_mut(),
+            &scene_layout.material_types,
+        );
+        let material_ids =
+            engine_streaming::add_materials(&mut materials, &scene_layout, &type_ids, &texture_ids);
         let fallback = materials.default_material();
         let mut world = World::new();
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));

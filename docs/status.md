@@ -90,10 +90,10 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
   meanwhile, PR #180) and step 3 (the shading models lit, unlit, clear coat, cloth, hair
   and toon as a type's `model()`, PR #181; the built-in pipelines' registers unchanged)
   done. Step 4 (the owner confirmed the material file and the scene's map, 2026-10-12):
-  4a material files and parameter layouts through Slang's reflection (PR #182) done;
-  next 4b cooking (the map, textures, typed materials and precompiled SPIR-V in packs;
-  glTF's unlit, clear coat and sheen extensions onto the models), 4c hot reload, then
-  the ubershader experiment. (Ref-1 runs
+  4a material files and parameter layouts through Slang's reflection (PR #182) and 4b
+  cooking (the map, texture parameters, pack version 5 with typed materials and their
+  SPIR-V, PR #183) done; next 4c hot reload, then the ubershader experiment; later glTF's
+  unlit, clear coat and sheen extensions onto the models and PSO records. (Ref-1 runs
   with hardware-accelerated GPU scheduling on since 2026-10-12, for DLSS frame
   generation.)
 

@@ -7,7 +7,9 @@
 use crate::decal_set::DecalSet;
 use engine_anim::{local_to_model, skinning_matrices};
 use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
-use engine_assets::material_file::{Alpha, MaterialFile};
+use engine_assets::material_file::{
+    Alpha, MaterialFile, MaterialMap, SlangMaterialTypes, apply_material_map,
+};
 use engine_assets::{
     AlphaMode as GltfAlpha, CookSettings, CookedScene, DerivedDataCache, TextureFormat as Stored,
     TextureSlot, TextureWrap, cook_scene, import_gltf, write_pack,
@@ -231,6 +233,11 @@ pub struct Shot {
     /// `tests/golden/materials/models.slang`; the top row stays glTF's (lit). Captured
     /// once the types' pipelines are made.
     pub shading_models: bool,
+    /// Sponza's curtains (its materials 14 to 19) as cloth: material files
+    /// (`tests/golden/materials/fabric.slang` with the curtains' own textures) applied by a
+    /// material map when cooking, the scene written to a pack (version 5, the types'
+    /// SPIR-V in it) and loaded back, the types drawn from the pack's SPIR-V (ADR 0092).
+    pub fabric_curtains: bool,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -298,6 +305,7 @@ impl Shot {
             stripes_floor: false,
             material_first_sight: false,
             shading_models: false,
+            fabric_curtains: false,
         }
     }
 }
@@ -815,7 +823,74 @@ fn gpu(validation: bool, dlss: bool) -> Result<(Instance, Device, Dlss), Skip> {
     }
 }
 
-fn load(source: &Source, subsurface: bool, glossy_floor: bool) -> Result<Loaded, Skip> {
+/// Sponza's curtains as fabric (`Shot::fabric_curtains`): a material map and material
+/// files written for the scene in `dir`, in a folder of their own.
+fn fabric_map(dir: &Path) -> MaterialMap {
+    let out = std::env::temp_dir().join(format!("engine_golden_fabric_{}", std::process::id()));
+    std::fs::create_dir_all(&out).expect("fabric folder");
+    let module = Path::new(env!("CARGO_MANIFEST_DIR")).join("materials/fabric.slang");
+    let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    // Material, its color and normal map, a sheen tinted like the cloth.
+    let curtains = [
+        (
+            14,
+            "4675343432951571524.jpg",
+            "7056944414013900257.jpg",
+            "(0.1, 0.2, 0.1)",
+        ),
+        (
+            15,
+            "2775690330959970771.jpg",
+            "2374361008830720677.jpg",
+            "(0.1, 0.12, 0.25)",
+        ),
+        (
+            16,
+            "2185409758123873465.jpg",
+            "332936164838540657.jpg",
+            "(0.25, 0.08, 0.08)",
+        ),
+        (
+            17,
+            "17876391417123941155.jpg",
+            "6593109234861095314.jpg",
+            "(0.1, 0.12, 0.25)",
+        ),
+        (
+            18,
+            "11474523244911310074.jpg",
+            "4601176305987539675.jpg",
+            "(0.25, 0.08, 0.08)",
+        ),
+        (
+            19,
+            "9288698199695299068.jpg",
+            "4910669866631290573.jpg",
+            "(0.1, 0.2, 0.1)",
+        ),
+    ];
+    let mut map = String::from("{\n");
+    for (material, color, normal, sheen) in curtains {
+        let file = out.join(format!("fabric_{material}.material.ron"));
+        let text = format!(
+            "(\n    shader: \"{}\",\n    type: \"FabricMaterial\",\n    params: {{\n        \"albedo\": Texture(\"{}\", Color),\n        \"normal\": Texture(\"{}\", Normal),\n        \"tint\": (1.0, 1.0, 1.0, 1.0),\n        \"sheen\": {sheen},\n        \"sheen_roughness\": 0.5,\n        \"roughness\": 0.9,\n    }},\n)\n",
+            slash(&module),
+            slash(&dir.join(color)),
+            slash(&dir.join(normal)),
+        );
+        std::fs::write(&file, text).expect("fabric file");
+        map.push_str(&format!("    \"#{material}\": \"{}\",\n", slash(&file)));
+    }
+    map.push('}');
+    MaterialMap::parse(&map, &out).expect("fabric map")
+}
+
+fn load(
+    source: &Source,
+    subsurface: bool,
+    glossy_floor: bool,
+    fabric: bool,
+) -> Result<Loaded, Skip> {
     match source {
         Source::Procedural => Ok(Loaded {
             cooked: None,
@@ -827,7 +902,13 @@ fn load(source: &Source, subsurface: bool, glossy_floor: bool) -> Result<Loaded,
                 return Err(Skip::NoScene(path));
             };
             let dir = path.parent();
-            let scene = import_gltf(&bytes, dir).map_err(|_| Skip::NoScene(path.clone()))?;
+            let mut scene = import_gltf(&bytes, dir).map_err(|_| Skip::NoScene(path.clone()))?;
+            if fabric {
+                let mut builder = SlangMaterialTypes::new(Path::new(ENGINE_SHADER_DIR))
+                    .expect("Slang for material files");
+                let map = fabric_map(dir.expect("the scene's folder"));
+                apply_material_map(&mut scene, &map, &mut builder).expect("material map");
+            }
             let jobs = ThreadPool::builder()
                 .build()
                 .map_err(|_| Skip::NoScene(path.clone()))?;
@@ -839,8 +920,16 @@ fn load(source: &Source, subsurface: bool, glossy_floor: bool) -> Result<Loaded,
                 block_compression: true,
                 ..CookSettings::default()
             };
-            let (cooked, _) = cook_scene(&scene, dir, Some(&cache), &jobs, &settings)
+            let (mut cooked, _) = cook_scene(&scene, dir, Some(&cache), &jobs, &settings)
                 .map_err(|_| Skip::NoScene(path.clone()))?;
+            if fabric {
+                // Through a pack and back: version 5, the types' SPIR-V in it.
+                let pack = std::env::temp_dir()
+                    .join(format!("engine_golden_fabric_{}.pack", std::process::id()));
+                write_pack(&pack, &cooked, &jobs, 1).expect("pack");
+                cooked = engine_assets::load_pack(&pack, &jobs, 8).expect("pack").0;
+                let _ = std::fs::remove_file(&pack);
+            }
             Ok(Loaded {
                 cooked: Some(cooked),
                 procedural: Vec::new(),
@@ -1194,7 +1283,12 @@ impl GenerationImages {
 /// On Vulkan errors and, with validation, on validation errors.
 #[allow(clippy::too_many_lines)]
 pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
-    let loaded = load(&shot.source, shot.subsurface, shot.glossy_floor)?;
+    let loaded = load(
+        &shot.source,
+        shot.subsurface,
+        shot.glossy_floor,
+        shot.fabric_curtains,
+    )?;
     // The HDR panorama, read and its sun found before the GPU starts.
     let panorama = match shot.panorama.filter(|_| shot.sky) {
         Some(name) => {
@@ -1392,6 +1486,8 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // Skinned instances: (skinning id, skin, world transform).
     let mut skinned = Vec::new();
     let mut skins = Vec::new();
+    // A cooked scene with materials of types (ADR 0092).
+    let mut typed_scene = false;
     let mut textures = TexturePool::new(&device, 256 << 20, 1);
     // A captured frame shows the levels resident then, not a fade of them (ADR 0078).
     textures.set_mip_fade(None);
@@ -1492,10 +1588,43 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                 textures.add(&device, &mut allocator, levels).ok()
             })
             .collect();
+        // Material types (ADR 0092): registered with the pack's SPIR-V.
+        let type_ids =
+            engine_streaming::register_material_types(frame.forward_mut(), &cooked.material_types);
         let material_ids: Vec<_> = material_descs(&cooked, &ids)
             .into_iter()
-            .map(|m| materials.add(m))
+            .enumerate()
+            .map(|(k, m)| {
+                let typed = cooked
+                    .typed_materials
+                    .iter()
+                    .find(|t| t.material as usize == k);
+                match typed {
+                    Some(t) => materials.add_typed(
+                        type_ids[t.ty as usize],
+                        m,
+                        Some(MaterialParams {
+                            bytes: t.params.clone(),
+                            textures: t
+                                .textures
+                                .iter()
+                                .filter_map(|&(offset, slot)| {
+                                    Some((
+                                        offset,
+                                        TextureRef {
+                                            texture: ids[slot.texture as usize]?,
+                                            wrap: slot.wrap.map(wrap),
+                                        },
+                                    ))
+                                })
+                                .collect(),
+                        }),
+                    ),
+                    None => materials.add(m),
+                }
+            })
             .collect();
+        typed_scene = !cooked.typed_materials.is_empty();
         let fallback = materials.default_material();
         skins = std::mem::take(&mut cooked.skins);
         for instance in &cooked.instances {
@@ -1537,6 +1666,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     // as a checker, the bottom row of spheres (items 3, 5, ..., 11) as the shading models.
     let stripes = shot.stripes_floor && !loaded.procedural.is_empty();
     let models = shot.shading_models && loaded.procedural.len() > 11;
+    let typed = stripes || models || typed_scene;
     let mut compiler = (stripes || models).then(|| {
         let library = SlangLibrary::load().expect("Slang for material files");
         Compiler::new(library).expect("Slang session")
@@ -1817,9 +1947,8 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
             && (brixelizer.is_none() || brixelizer_frames >= warmup);
         // With a material type: once its pipelines are made (the frames before drew its
         // fallback), or at once for its first sight.
-        let types_ready = (!stripes && !models)
-            || shot.material_first_sight
-            || frame.forward().material_types_pending() == 0;
+        let types_ready =
+            !typed || shot.material_first_sight || frame.forward().material_types_pending() == 0;
         let capture = !uploading
             && captured < captures
             && resident_frames >= capture_at
@@ -2361,7 +2490,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         // next one, so every run draws the same frames with them (the first with their
         // fallbacks) however long the compiles take, and temporal effects (screen-space
         // reflections' noise and history) see the same sequence.
-        if (stripes || models) && !shot.material_first_sight {
+        if typed && !shot.material_first_sight {
             assert!(
                 frame
                     .forward_mut()

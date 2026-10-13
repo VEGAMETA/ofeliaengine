@@ -322,6 +322,20 @@ fn sponza() {
     ));
 }
 
+/// Sponza's curtains as cloth (ADR 0092): material files with the curtains' own textures
+/// and a sheen, applied by a material map when cooking, through a version 5 pack and
+/// drawn from its SPIR-V.
+#[test]
+fn sponza_with_fabric_curtains() {
+    check(&Shot {
+        fabric_curtains: true,
+        ..Shot::new(
+            "sponza_fabric",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
 /// Sponza's atrium with its textures streamed by texture feedback in a pool of 4 GiB
 /// (ADR 0076): every level the view samples is resident, so the picture is `sponza`'s.
 #[test]

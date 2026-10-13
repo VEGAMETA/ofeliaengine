@@ -332,6 +332,26 @@ impl Compiler {
         })
     }
 
+    /// The entry points (`[shader("<stage>")]` functions) of `path`, in source order,
+    /// without compiling them (the front end only).
+    pub fn entry_points(
+        &mut self,
+        path: &Path,
+        options: &CompileOptions,
+    ) -> Result<Vec<EntryPoint>, ShaderError> {
+        engine_profiler::zone!("shader::Compiler::entry_points");
+        let source = std::fs::read_to_string(path)?;
+        let (request, _, _) = self.run(path, &source, &[], options, true)?;
+        // SAFETY: the request compiled.
+        let found =
+            unsafe { discovered_entry_points(&self.library.functions, request.raw.as_ptr()) }
+                .map_err(|diagnostics| ShaderError::Compile {
+                    path: path.to_owned(),
+                    diagnostics,
+                })?;
+        Ok(found.into_iter().map(|(entry, _)| entry).collect())
+    }
+
     /// Sets up and runs a compile request: the entry points' code, or with `check_only` the
     /// front end alone (reflection, no code). Returns the request, the entry points'
     /// indices and the diagnostics.
