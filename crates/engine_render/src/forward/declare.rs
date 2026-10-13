@@ -403,7 +403,7 @@ impl ForwardRenderer {
             decal_albedo: 0,
             decal_surface: 0,
             gi: 0,
-            _pad: 0,
+            features: 0,
         };
 
         let command_bytes = u64::from(command_count) * COMMAND_BYTES;
@@ -961,7 +961,24 @@ impl ForwardRenderer {
                 reset,
             },
         };
-        let main_pipelines = if let Some(m) = ms {
+        // The ubershader experiment (ADR 0092 step 5): every feature set of the main shading
+        // through one pipeline per state; not for reflections or motion vectors (other
+        // targets).
+        let uber = self.uber.as_ref().filter(|_| {
+            ms.is_none() && reflect_shading.is_none() && (prepass || velocity.is_none())
+        });
+        let uber_features = (u32::from(ao.is_some()) * FEATURE_AO)
+            | (u32::from(shadowed.is_some()) * FEATURE_SHADOWS)
+            | (u32::from(contact.is_some()) * FEATURE_CONTACT)
+            | (u32::from(decals.is_some()) * FEATURE_DECALS)
+            | (u32::from(gi_shading.is_some()) * FEATURE_GI);
+        let main_pipelines = if let Some(u) = uber {
+            if prepass {
+                [&u.shade, &u.shade]
+            } else {
+                [&u.main[0], &u.main[1]]
+            }
+        } else if let Some(m) = ms {
             let k = shadowed_index(variant);
             let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
             let p: &LazyPipeline = if reflect_shading.is_some() {
@@ -1047,6 +1064,7 @@ impl ForwardRenderer {
                     .and_then(|d| ctx.sampled_index(d.surface))
                     .unwrap_or(0),
                 gi: gi.and_then(|t| ctx.sampled_index(t)).unwrap_or(0),
+                features: uber_features,
                 ..base
             };
             let offset = u64::from(phase.saturating_sub(1)) * command_bytes;

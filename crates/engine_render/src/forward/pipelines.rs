@@ -23,6 +23,14 @@ pub(super) struct Shading {
     pub(super) blended: [LazyPipeline; 2],
 }
 
+/// The ubershader experiment's pipelines (ADR 0092 step 5): main shading, opaque and
+/// masked, and after the depth prepass.
+#[derive(Debug)]
+pub(super) struct UberShading {
+    pub(super) main: [LazyPipeline; 2],
+    pub(super) shade: LazyPipeline,
+}
+
 /// A pipeline a frame draws with, made now if this is its first use (ADR 0079). `None`,
 /// the view not drawn, when the driver could not make it (`engine_rhi` logs why).
 pub(super) fn ready(pipeline: &LazyPipeline) -> Option<&Pipeline> {

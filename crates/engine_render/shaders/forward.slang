@@ -322,8 +322,16 @@ struct Push
     uint decal_albedo;       // bindless index: the decal buffer's albedo (decal entry points; ADR 0082)
     uint decal_surface;      // bindless index: its normal change, roughness and metalness
     uint gi;                 // bindless index: the view's diffuse irradiance per pixel (GI entry points; ADR 0088)
-    uint _pad;               // `Push` in forward/mod.rs is 128 bytes
+    uint features;           // FEATURE_* bits: what the ubershader entry points do (ADR 0092)
 };
+
+// The view's features as bits, for the ubershader entry points only (ADR 0092 step 5): the
+// other entry points take them as literals.
+static const uint FEATURE_AO = 1;
+static const uint FEATURE_SHADOWS = 2;
+static const uint FEATURE_CONTACT = 4;
+static const uint FEATURE_DECALS = 8;
+static const uint FEATURE_GI = 16;
 
 static const uint PHASE_ALL = 0;    // frustum culling only
 static const uint PHASE_EARLY = 1;  // visible last frame and in the frustum
@@ -1997,6 +2005,29 @@ float4 fragmentMainAo(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 float4 fragmentMasked(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
 {
     return float4(shade(input, front, true, false).rgb, 1.0);
+}
+
+// The ubershader experiment (ADR 0092 step 5): one entry point for every feature set of
+// the main shading, the features read from `push.features` at run time instead of compiled
+// in (local lights and the environment are compiled in, specialized on, and skipped at run
+// time when the view has none).
+float4 shade_uber(VertexOut input, bool front, bool masked)
+{
+    uint f = push.features;
+    return shade(input, front, masked, (f & FEATURE_AO) != 0, (f & FEATURE_SHADOWS) != 0,
+        (f & FEATURE_CONTACT) != 0, (f & FEATURE_DECALS) != 0, (f & FEATURE_GI) != 0);
+}
+
+[shader("fragment")]
+float4 fragmentUber(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_uber(input, front, false).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentUberMasked(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_uber(input, front, true).rgb, 1.0);
 }
 
 // Transparent surfaces (ADR 0054): premultiplied color over what is behind. Alpha is

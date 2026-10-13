@@ -94,6 +94,15 @@ const SHADOW_FRAGMENT_MASKED: &[u8] =
     include_bytes!("../../shaders/forward.shadowFragmentMasked.spv");
 const FRAGMENT: &[u8] = include_bytes!("../../shaders/forward.fragmentMain.spv");
 const FRAGMENT_MASKED: &[u8] = include_bytes!("../../shaders/forward.fragmentMasked.spv");
+const FRAGMENT_UBER: &[u8] = include_bytes!("../../shaders/forward.fragmentUber.spv");
+const FRAGMENT_UBER_MASKED: &[u8] = include_bytes!("../../shaders/forward.fragmentUberMasked.spv");
+
+/// `FEATURE_*` in `forward.slang` (the ubershader entry points, ADR 0092 step 5).
+pub(crate) const FEATURE_AO: u32 = 1;
+pub(crate) const FEATURE_SHADOWS: u32 = 2;
+pub(crate) const FEATURE_CONTACT: u32 = 4;
+pub(crate) const FEATURE_DECALS: u32 = 8;
+pub(crate) const FEATURE_GI: u32 = 16;
 const DEPTH_VERTEX: &[u8] = include_bytes!("../../shaders/forward.depthVertex.spv");
 const FRAGMENT_MOTION: &[u8] = include_bytes!("../../shaders/forward.fragmentMainMotion.spv");
 const FRAGMENT_AO: &[u8] = include_bytes!("../../shaders/forward.fragmentMainAo.spv");
@@ -153,8 +162,8 @@ pub use material_types::{
 };
 use pipelines::{
     AoPasses, ContactState, DecalShading, GiFeatures, GiShading, ReflectShadingTable,
-    ReflectionShading, Shading, ShadowedPipelines, SubsurfacePipelines, VARIANTS, lazy_statistics,
-    ready, shading_desc, shadowed_index,
+    ReflectionShading, Shading, ShadowedPipelines, SubsurfacePipelines, UberShading, VARIANTS,
+    lazy_statistics, ready, shading_desc, shadowed_index,
 };
 use shadow_atlas::{AtlasImage, LocalShadowState};
 
@@ -1086,7 +1095,8 @@ pub(crate) struct Push {
     /// Bindless index of the view's diffuse irradiance per pixel (ADR 0088), read by the
     /// GI entry points.
     pub(crate) gi: u32,
-    pub(crate) _pad: u32,
+    /// `FEATURE_*` bits (`forward.slang`): what the ubershader entry points do (ADR 0092).
+    pub(crate) features: u32,
 }
 
 /// `NO_TEXTURE` in `forward.slang`: no ambient occlusion.
@@ -1328,6 +1338,9 @@ pub struct ForwardRenderer {
     reactive_effects: bool,
     color_format: vk::Format,
     depth_format: vk::Format,
+    /// The ubershader experiment (ADR 0092 step 5): the main shading through one entry
+    /// point whose features are read at run time; `None`: off (the default).
+    uber: Option<UberShading>,
     /// Ambient occlusion's passes and shading pipelines, made when it is first turned on.
     ao: Option<AoPasses>,
     ao_settings: Option<AoSettings>,
@@ -1425,6 +1438,79 @@ impl ForwardRenderer {
     /// [`Self::update_material_types`] (the frame renderer calls both).
     pub fn collect_material_types(&mut self, frame: u64, completed: u64) {
         self.material_types.collect(frame, completed);
+    }
+
+    /// The ubershader experiment (ADR 0092 step 5): the main shading (opaque and masked,
+    /// with or without the depth prepass; not reflections, not motion vectors) drawn by one
+    /// pipeline per state whose features (ambient occlusion, local shadows, contact shadows,
+    /// decals, GI) are read at run time, local lights and the environment compiled in and
+    /// skipped at run time. For measuring it against the specialized pipelines.
+    pub fn set_ubershader(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        enabled: bool,
+    ) -> Result<(), RhiError> {
+        if !enabled {
+            self.uber = None;
+            return Ok(());
+        }
+        if self.uber.is_some() {
+            return Ok(());
+        }
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
+        let fragment = spirv_words(FRAGMENT_UBER).ok_or_else(invalid)?;
+        let fragment_masked = spirv_words(FRAGMENT_UBER_MASKED).ok_or_else(invalid)?;
+        let formats = [self.color_format];
+        let lit = VARIANTS.len() - 1;
+        let main = |fragment, entry, equal: bool| GraphicsPipelineDesc {
+            depth_write: !equal,
+            depth_compare: if equal {
+                vk::CompareOp::EQUAL
+            } else {
+                vk::CompareOp::LESS
+            },
+            ..shading_desc(
+                &vertex,
+                fragment,
+                entry,
+                &formats,
+                self.depth_format,
+                &VARIANTS[lit],
+            )
+        };
+        let descs = [
+            PipelineDesc::Graphics(main(&fragment, c"fragmentUber", false)),
+            PipelineDesc::Graphics(main(&fragment_masked, c"fragmentUberMasked", false)),
+            PipelineDesc::Graphics(main(&fragment, c"fragmentUber", true)),
+        ];
+        let mut made =
+            LazyPipeline::describe_many(device, bindless.shared_pipeline_layout(), &descs)
+                .into_iter();
+        let mut next = || {
+            made.next().ok_or(RhiError::Vulkan {
+                call: "ubershader pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        self.uber = Some(UberShading {
+            main: [next()?, next()?],
+            shade: next()?,
+        });
+        Ok(())
+    }
+
+    /// The driver's statistics of the ubershader's main shading (made now), for comparing
+    /// its registers with [`Self::shading_statistics`]'; empty while it is off.
+    pub fn ubershader_statistics(&self, device: &Device) -> Vec<engine_rhi::PipelineStatistic> {
+        self.uber
+            .as_ref()
+            .map(|u| lazy_statistics(&u.main[0], device))
+            .unwrap_or_default()
     }
 
     /// A registered type's description.
@@ -1793,6 +1879,7 @@ impl ForwardRenderer {
             reactive_effects: false,
             color_format,
             depth_format,
+            uber: None,
             ao: None,
             ao_settings: None,
             ao_frame: Cell::new(0),

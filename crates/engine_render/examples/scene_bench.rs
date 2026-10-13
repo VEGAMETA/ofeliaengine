@@ -317,12 +317,15 @@ fn main() {
     let mut probe_faces = 6u32;
     let mut probes_every_frame = false;
     let mut ssr: Option<bool> = None;
+    // The ubershader experiment (ADR 0092 step 5).
+    let mut uber = false;
     let mut args = std::env::args().skip(1).peekable();
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--screenshot" => screenshot = args.next(),
             "--uncompressed" => uncompressed = true,
             "--prepass" => prepass = true,
+            "--uber" => uber = true,
             "--ao" => {
                 // An optional quality: the next argument unless it is another flag.
                 let quality = match args.next_if(|a| !a.starts_with("--")).as_deref() {
@@ -1009,7 +1012,19 @@ fn main() {
     renderer
         .set_decals(&device, &bindless, decal_count > 0 || pipeline_stats)
         .unwrap();
+    renderer
+        .set_ubershader(&device, &bindless, uber || pipeline_stats)
+        .unwrap();
     if pipeline_stats {
+        let line: Vec<String> = renderer
+            .ubershader_statistics(&device)
+            .iter()
+            .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+            .collect();
+        println!("Ubershader statistics: {}", line.join("; "));
+        if !uber {
+            renderer.set_ubershader(&device, &bindless, false).unwrap();
+        }
         // Needs ENGINE_PIPELINE_STATS=1 (the device captures statistics at creation).
         let names = [
             "plain",
