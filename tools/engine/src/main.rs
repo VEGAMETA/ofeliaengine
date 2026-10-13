@@ -31,11 +31,12 @@ const USAGE: &str = "\
 usage:
   ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
   ofeliaengine shaders watch [OPTIONS] <ROOT>...   compile, then rebuild on every change (Windows)
-  ofeliaengine cook <SCENE.gltf> -o <OUT.pack> [--ddc <DIR>] [--no-lods] [--level <N>]
-                                                   cook a scene into a pack: textures compressed
+  ofeliaengine cook <SCENE.gltf> -o <OUT.pack> [--ddc <DIR>] [--no-lods] [--no-meshlets]
+                    [--level <N>]                  cook a scene into a pack: textures compressed
                                                    with mips (through the derived data cache,
                                                    default <scene dir>/../.ddc), meshes with
-                                                   detail levels, entries zstd level N (19);
+                                                   detail levels and meshlets, entries zstd
+                                                   level N (19);
                                                    <SCENE>.materials.ron (or --materials <MAP>)
                                                    replaces glTF materials by material files,
                                                    their types compiled into the pack
@@ -103,6 +104,7 @@ fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String
             "--engine-shaders" => engine_shaders = PathBuf::from(value("--engine-shaders")?),
             "--pso" => pso = Some(PathBuf::from(value("--pso")?)),
             "--no-lods" => settings.lods = false,
+            "--no-meshlets" => settings.meshlets = false,
             "--level" => {
                 let level = value("--level")?;
                 settings.compression_level = level
@@ -206,11 +208,12 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
     let written = write_pack(&args.out, &cooked, &jobs, args.settings.compression_level)
         .map_err(|e| format!("{}: {e}", args.out.display()))?;
     println!(
-        "{}: {} textures ({} from the derived data cache), {} meshes, {} materials, {} instances; cooked in {:.1} s",
+        "{}: {} textures ({} from the derived data cache), {} meshes ({} meshlets), {} materials, {} instances; cooked in {:.1} s",
         args.scene.display(),
         cooked.textures.len(),
         stats.cache_hits,
         cooked.meshes.len(),
+        stats.meshlets,
         cooked.materials.len(),
         cooked.instances.len(),
         cooked_at.as_secs_f64(),
@@ -447,15 +450,17 @@ mod tests {
 
     #[test]
     fn parses_cook_options() {
-        let parsed = cook_args("cook a/scene.gltf -o out.pack --ddc d --no-lods --level 3")
-            .unwrap_or_else(|e| panic!("{e}"));
+        let parsed =
+            cook_args("cook a/scene.gltf -o out.pack --ddc d --no-lods --no-meshlets --level 3")
+                .unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(parsed.scene, PathBuf::from("a/scene.gltf"));
         assert_eq!(parsed.out, PathBuf::from("out.pack"));
         assert_eq!(parsed.ddc, Some(PathBuf::from("d")));
-        assert!(!parsed.settings.lods);
+        assert!(!parsed.settings.lods && !parsed.settings.meshlets);
         assert_eq!(parsed.settings.compression_level, 3);
         let defaults = cook_args("cook s.gltf -o o.pack").unwrap_or_else(|e| panic!("{e}"));
-        assert!(defaults.settings.lods && defaults.settings.block_compression);
+        assert!(defaults.settings.lods && defaults.settings.meshlets);
+        assert!(defaults.settings.block_compression);
         assert_eq!(defaults.settings.compression_level, 19);
         assert!(cook_args("cook s.gltf").is_err());
         assert!(cook_args("cook -o o.pack").is_err());
