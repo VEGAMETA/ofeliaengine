@@ -15,6 +15,7 @@ use engine_rhi::{
     Device, GraphicsPipelineDesc, LazyPipeline, PipelineDesc, ShaderStageDesc,
     SharedPipelineLayout, creation_stats, spirv_words,
 };
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const VERTEX: &[u8] = include_bytes!("../../shaders/triangle.vert.spv");
@@ -105,6 +106,17 @@ fn lazy_pipelines_are_created_once_by_whoever_needs_them_first() {
     assert_eq!(lazy[0].get().unwrap().raw(), first);
     assert_eq!(creation_stats().created - before.created, 4);
     assert_eq!(device.pipelines_warming_up(), 0);
+    // A pipeline derived from a described one (a material type's or a feature's variant)
+    // is made at once: nothing else would make it.
+    let fragment: Arc<[u32]> = Arc::from(spirv_words(FRAGMENT).unwrap());
+    let derived_now = lazy[5]
+        .with_fragment_entry(&device, Arc::clone(&fragment), c"fragmentMain")
+        .unwrap();
+    assert!(derived_now.get().is_some(), "derived without the warm-up");
+    assert!(
+        lazy[5].get().is_none(),
+        "the pipeline it derives from stays undone"
+    );
 
     // With it: what is described is made in the background, each pipeline once.
     device.set_pipeline_warm_up(true);
@@ -116,6 +128,10 @@ fn lazy_pipelines_are_created_once_by_whoever_needs_them_first() {
     let after = creation_stats();
     println!("warm-up: {before:?} -> {after:?}");
     assert_eq!(after.created - before.created, u64::from(COUNT));
+    // With it, a derived pipeline is made in the background too.
+    let derived_warm = warmed[0].with_fragment(&device, fragment).unwrap();
+    device.wait_for_pipeline_warm_up();
+    assert!(derived_warm.get().is_some(), "derived with the warm-up");
 
     // The warm-up and a frame wanting the same new pipelines at once: all made, and the
     // handles a frame got are the ones kept.
@@ -137,7 +153,7 @@ fn lazy_pipelines_are_created_once_by_whoever_needs_them_first() {
     let dropped = describe(&device, &layout, nonce(), 64);
     drop(dropped);
     let many = describe(&device, &layout, nonce(), 64);
-    drop((lazy, warmed, racing, layout));
+    drop((lazy, warmed, racing, derived_now, derived_warm, layout));
     let start = Instant::now();
     let made = many.iter().filter(|p| p.is_settled()).count();
     drop(many);

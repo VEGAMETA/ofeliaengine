@@ -340,7 +340,15 @@ fn main() {
                 };
                 ao = Some(AoSettings {
                     quality,
+                    bent_normals: ao.is_none_or(|a| a.bent_normals),
                     ..AoSettings::default()
+                });
+            }
+            // Ambient occlusion without its bent normals (with or before `--ao`).
+            "--no-bent" => {
+                ao = Some(AoSettings {
+                    bent_normals: false,
+                    ..ao.unwrap_or_default()
                 });
             }
             "--motion" => motion = true,
@@ -1040,6 +1048,20 @@ fn main() {
                 println!("Pipeline statistics, {name}, {kind}: {}", line.join("; "));
             }
         }
+        // With the bent normals too (ADR 0058), with `--ao`.
+        for (name, stats) in names.iter().zip(renderer.bent_statistics(&device)) {
+            if stats.is_empty() {
+                continue;
+            }
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!(
+                "Pipeline statistics, {name}, after the prepass with AO and bent normals: {}",
+                line.join("; ")
+            );
+        }
         // The probe-GI shading after the prepass (ADR 0088), with `--gi`.
         for (name, stats) in names.iter().zip(renderer.gi_statistics(&device)) {
             if stats.is_empty() {
@@ -1276,6 +1298,9 @@ fn main() {
                 textures.pending().0 > 0 || streaming.as_ref().is_some_and(Streaming::busy);
             upload_frames += usize::from(uploading);
             let capture = last && frame == WARMUP + FRAMES;
+            // Pipelines derived from the engine's (ambient occlusion's bent normals) that
+            // the last frames asked for.
+            renderer.update_material_types(&device);
             if frame == WARMUP {
                 // Shading variants no frame drew with are made on the device's warm-up
                 // thread (ADR 0079): the timed frames do not share the CPU with it.

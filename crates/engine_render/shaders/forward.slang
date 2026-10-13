@@ -1582,14 +1582,39 @@ float3 gi_irradiance(float2 pixel, float3 position)
     return total > 1e-4 ? sum / total : nearest;
 }
 
+// Specular occlusion from the visible cone (GTSO, Jimenez et al. 2016): the share of the
+// reflection's cone (aperture from the roughness `a`) inside the cone around the bent
+// normal `bent` whose solid angle is the visibility. The cones' overlap goes from all of
+// the smaller one (axes closer than the apertures' difference) to none (farther than their
+// sum) along a smoothstep, as Oat and Sander's approximation does (Filament's
+// `SpecularAO_Cones`), but taken in the cosines of those angles: no arc cosines, fewer
+// registers. None for nearly smooth surfaces, whose reflections it would remove entirely.
+float cone_specular_occlusion(float3 bent, float3 r, float visibility, float a)
+{
+    float cos_visible = sqrt(saturate(1.0 - visibility));
+    float sin_visible = sqrt(saturate(visibility));
+    float cos_specular = exp2(-3.321928 * a * a);
+    float sin_specular = sqrt(saturate(1.0 - cos_specular * cos_specular));
+    // cos(θv ∓ θs) = cos θv cos θs ± sin θv sin θs.
+    float cos_product = cos_visible * cos_specular;
+    float sin_product = sin_visible * sin_specular;
+    float x = saturate((dot(bent, r) - cos_product + sin_product) / max(2.0 * sin_product, 1e-4));
+    float overlap = x * x * (3.0 - 2.0 * x);
+    float occlusion = overlap * saturate((1.0 - cos_visible) / max(1.0 - cos_specular, 1e-4));
+    return lerp(1.0, occlusion, smoothstep(0.01, 0.09, a));
+}
+
 // Light from the whole sky: the environment's harmonics (diffuse) and prefiltered cube
 // (specular), or the flat ambient color without an environment. `occlusion` is the
 // material's, times the view's ambient occlusion when `ao` (ADR 0058). With `gi` (a
 // literal, ADR 0088), the diffuse light is the view's irradiance at `pixel` from the
 // probe volume (the sky's harmonics outside it), absolute: the environment's intensity
 // is in it. Without `lobe` (a literal), the diffuse light only: a shading model's own
-// specular lobe takes the specular light's place (ADR 0092).
-float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao, bool reflective, inout float3 weight, bool gi = false, float2 pixel = 0.0, float3 position = 0.0, bool lobe = true)
+// specular lobe takes the specular light's place (ADR 0092). With `bent` (a literal: the
+// view's ambient occlusion gave its bent normal, ADR 0058), the harmonics are read along
+// `sky_normal` (the shading normal bent as the geometry's was) and the specular occlusion
+// is the visible cone's (GTSO) instead of Lagarde's fit.
+float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughness, float occlusion, float3 albedo, bool ao, bool reflective, inout float3 weight, bool gi = false, float2 pixel = 0.0, float3 position = 0.0, bool lobe = true, bool bent = false, float3 sky_normal = 0.0)
 {
     // With the view's ambient occlusion, the fit of its bounces (for the albedo's
     // luminance: one value instead of three, fewer registers); without it, the material's
@@ -1603,11 +1628,12 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
         return read_float4(&push.frame.ambient).rgb * albedo * diffuse_occlusion;
     float n_dot_v = max(dot(n, v), 1e-4);
     float4* sh = push.frame.sh;
+    float3 sn = bent ? sky_normal : n;
     float3 irradiance = gi ? 0.0 : read_float4(sh + 0).rgb * 0.282095
-        + read_float4(sh + 1).rgb * (0.488603 * n.y) + read_float4(sh + 2).rgb * (0.488603 * n.z) + read_float4(sh + 3).rgb * (0.488603 * n.x)
-        + read_float4(sh + 4).rgb * (1.092548 * n.x * n.y) + read_float4(sh + 5).rgb * (1.092548 * n.y * n.z)
-        + read_float4(sh + 6).rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) + read_float4(sh + 7).rgb * (1.092548 * n.x * n.z)
-        + read_float4(sh + 8).rgb * (0.546274 * (n.x * n.x - n.y * n.y));
+        + read_float4(sh + 1).rgb * (0.488603 * sn.y) + read_float4(sh + 2).rgb * (0.488603 * sn.z) + read_float4(sh + 3).rgb * (0.488603 * sn.x)
+        + read_float4(sh + 4).rgb * (1.092548 * sn.x * sn.y) + read_float4(sh + 5).rgb * (1.092548 * sn.y * sn.z)
+        + read_float4(sh + 6).rgb * (0.315392 * (3.0 * sn.z * sn.z - 1.0)) + read_float4(sh + 7).rgb * (1.092548 * sn.x * sn.z)
+        + read_float4(sh + 8).rgb * (0.546274 * (sn.x * sn.x - sn.y * sn.y));
     irradiance = max(irradiance, 0.0);
     SamplerState s = g_samplers[push.frame.linear_sampler];
     float3 r = reflect(-v, n);
@@ -1617,8 +1643,11 @@ float3 ambient_light(float3 n, float3 v, float3 diffuse, float3 f0, float roughn
     float3 specular = lobe ? prefiltered * lerp(dfg.xxx, dfg.yyy, f0) * (1.0 + f0 * (1.0 / max(dfg.y, 1e-4) - 1.0)) : 0.0;
     float a = roughness * roughness;
     // Lagarde and de Rousiers' specular occlusion; 1 without occlusion (most materials),
-    // where skipping it frees registers (72 → 64 VGPRs on the Radeon).
-    float specular_occlusion = occlusion < 1.0 ? saturate(pow(n_dot_v + occlusion, exp2(-16.0 * a - 1.0)) - 1.0 + occlusion) : 1.0;
+    // where skipping it frees registers (72 → 64 VGPRs on the Radeon). With the bent
+    // normal, the visible cone's.
+    float specular_occlusion = bent
+        ? cone_specular_occlusion(sky_normal, r, occlusion, a)
+        : (occlusion < 1.0 ? saturate(pow(n_dot_v + occlusion, exp2(-16.0 * a - 1.0)) - 1.0 + occlusion) : 1.0);
     // Reflections (ADR 0073): what multiplies the prefiltered radiance, for the reflection
     // composite to swap the sky's radiance for local probes and screen-space hits.
     if (reflective && lobe)
@@ -1768,6 +1797,14 @@ float4 shade(VertexOut input, bool front, bool masked, bool ao, bool shadows = f
     return shade_surface<MATERIAL>(input, front, masked, ao, false, unused, unused_reflect, shadows, contact, false, decals, gi);
 }
 
+// `shade` with ambient occlusion and its bent normal (the `*AoBent*` entry points).
+float4 shade_bent(VertexOut input, bool front, bool masked, bool shadows = false, bool contact = false, bool decals = false, bool gi = false)
+{
+    SubsurfaceOut unused;
+    ReflectOut unused_reflect;
+    return shade_surface<MATERIAL>(input, front, masked, true, false, unused, unused_reflect, shadows, contact, false, decals, gi, true);
+}
+
 // What the reflection entry points write besides the color (ADR 0073).
 struct ReflectOut
 {
@@ -1811,8 +1848,9 @@ void apply_decals(Frame frame, uint2 pixel, inout float3 albedo, inout float3 n,
 // `shade`; with `subsurface`, the scattered part of the diffuse light goes to `sss`
 // instead of the color. Subsurface materials' pipelines always take `ao` (they are their
 // own; without ambient occlusion `push.ao` skips the read). `decals` blends the decal
-// buffer in (ADR 0082).
-float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false, bool gi = false)
+// buffer in (ADR 0082). `bent`: the view's ambient occlusion carries its bent normal
+// (`AoSettings::bent_normals`): visibility in R, the bent normal in world space in GBA.
+float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false, bool gi = false, bool bent = false)
 {
     Frame frame = loadAligned<16>(push.frame);
     // The back of a double-sided surface is lit from its own side: the whole tangent
@@ -1836,9 +1874,16 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
         rough = lerp(rough, max(rough, surface.clearcoat_roughness), saturate(surface.clearcoat));
     float perceptual = widen_roughness(rough, kernel);
     float occlusion = M::occlusion(ctx, params);
-    // The view's ambient occlusion (ADR 0058) joins the material's.
+    // The view's ambient occlusion (ADR 0058) joins the material's; its bent normal bends
+    // the shading normal as it bends the geometry's (`sky_normal`).
+    float3 sky_normal = n;
     if (ao && push.ao != NO_TEXTURE)
-        occlusion *= g_textures[push.ao].Load(int3(int2(input.position.xy), 0)).r;
+    {
+        float4 view_ao = g_textures[push.ao].Load(int3(int2(input.position.xy), 0));
+        occlusion *= view_ao.r;
+        if (bent)
+            sky_normal = normalize(n + (view_ao.gba * 2.0 - 1.0) - ng);
+    }
     float3 emissive = M::emission(ctx, params);
     // Unlit (ADR 0092): the base color and the emission, nothing else.
     if (M::model() == MODEL_UNLIT)
@@ -1911,11 +1956,11 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     {
         // Cloth's environment light: the diffuse, and the sheen's lobe instead of GGX's.
         reflect_roughness = sheen_roughness;
-        ambient = ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position, false);
+        ambient = ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position, false, bent, sky_normal);
         ambient += sheen_environment(n, v, reflect_roughness, terms.sheen, occlusion, reflect_weight);
     }
     else
-        ambient = ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position);
+        ambient = ambient_light(n, v, surface_diffuse, f0, roughness, occlusion, ambient_albedo, ao, reflective, reflect_weight, gi, input.position.xy, input.world_position, true, bent, sky_normal);
     if (M::model() == MODEL_CLEARCOAT)
     {
         // The coat over the base: what it lets through, and what it reflects of the
@@ -2189,12 +2234,12 @@ struct Reflected
 
 // `ao`, `shadows` (local lights', ADR 0071), `contact` (the sun's, ADR 0071) and `decals`
 // (ADR 0082): literals, as in `shade`.
-Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bool contact, bool decals = false, bool gi = false)
+Reflected shade_reflected(VertexOut input, bool front, bool ao, bool shadows, bool contact, bool decals = false, bool gi = false, bool bent = false)
 {
     SubsurfaceOut unused;
     ReflectOut refl;
     Reflected o;
-    o.color = float4(shade_surface<MATERIAL>(input, front, false, ao, false, unused, refl, shadows, contact, true, decals, gi).rgb, 1.0);
+    o.color = float4(shade_surface<MATERIAL>(input, front, false, ao, false, unused, refl, shadows, contact, true, decals, gi, bent).rgb, 1.0);
     o.normal_roughness = float4(encode_octahedral(refl.normal), refl.roughness, 1.0);
     o.weight = float4(refl.weight, 1.0);
     return o;
@@ -2941,6 +2986,249 @@ SubsurfaceShaded fragmentSubsurfaceShadowedGi(VertexOut input, bool front : SV_I
     SubsurfaceShaded o;
     ReflectOut unused;
     o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, true, false, false, false, true).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+// The entry points that read the view's ambient occlusion, with its bent normal
+// (`AoSettings::bent_normals`, ADR 0058): drawn instead of them while it is on, so the
+// others carry no code for it.
+[shader("fragment")]
+float4 fragmentMainAoBent(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false).rgb, 1.0);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBent(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, false, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, false, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentContact(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, true, false, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentContactShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, true, false, false, true);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceBent(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    ReflectOut unused;
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, false, false, false, false, false, true).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceBentShadowed(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    ReflectOut unused;
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, true, false, false, false, false, true).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentContact(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentContactShadowed(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentShadowedDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentContactDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentContactShadowedDecals(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, false, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentShadowedDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, false, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentContactDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, true, true, false, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentContactShadowedDecals(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, true, true, false, true);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, false, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentShadowedGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, true, false, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentContactGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, false, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentContactShadowedGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, true, true, false, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, false, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, true, false, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentContactDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, false, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentMainAoBentContactShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return float4(shade_bent(input, front, false, true, true, true, true).rgb, 1.0);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, false, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentShadowedGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, false, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentContactGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, true, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentContactShadowedGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, true, false, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, false, true, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, false, true, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentContactDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, false, true, true, true, true);
+}
+
+[shader("fragment")]
+Reflected fragmentReflectAoBentContactShadowedDecalsGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return shade_reflected(input, front, true, true, true, true, true, true);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceBentGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    ReflectOut unused;
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, false, false, false, false, true, true).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceBentShadowedGi(VertexOut input, bool front : SV_IsFrontFace)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    ReflectOut unused;
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, true, false, false, false, true, true).rgb, 1.0);
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
     return o;

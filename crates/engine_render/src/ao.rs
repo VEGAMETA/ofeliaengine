@@ -7,15 +7,21 @@
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::forward::ViewSpace;
 use crate::graph::{Access, FrameGraph, ShaderStages, Texture, TextureDesc};
+use engine_core::math::Quat;
 use engine_rhi::ash::vk;
 use engine_rhi::{Bindless, Device, RhiError, SamplerKind};
 
 const DEPTHS: &[u8] = include_bytes!("../shaders/ao.aoDepths.spv");
 const MAIN: &[u8] = include_bytes!("../shaders/ao.aoMain.spv");
 const DENOISE: &[u8] = include_bytes!("../shaders/ao.aoDenoise.spv");
+const MAIN_BENT: &[u8] = include_bytes!("../shaders/ao.aoMainBent.spv");
+const DENOISE_BENT: &[u8] = include_bytes!("../shaders/ao.aoDenoiseBent.spv");
 
 /// Format of the visibility the forward pass reads: 1 open, 0 fully occluded.
 pub const AO_FORMAT: vk::Format = vk::Format::R8_UNORM;
+/// The format with [`AoSettings::bent_normals`]: the visibility in R (as in
+/// [`AO_FORMAT`]), the bent normal in world space (× 0.5 + 0.5) in GBA.
+pub const AO_BENT_FORMAT: vk::Format = vk::Format::R8G8B8A8_UNORM;
 const DEPTH_FORMAT: vk::Format = vk::Format::R32_SFLOAT;
 /// Four edge weights of two bits each (`pack_edges` in `ao.slang`).
 const EDGE_FORMAT: vk::Format = vk::Format::R8_UNORM;
@@ -58,6 +64,7 @@ struct Push {
     level4_y: u32,
     sampler: u32,
     output_scale: f32,
+    world_q: [f32; 4],
 }
 
 /// How many directions and samples each pixel takes.
@@ -108,6 +115,12 @@ pub struct AoSettings {
     pub power: f32,
     /// Edge-aware blur passes over the result (0-3; 1 by default).
     pub denoise_passes: u32,
+    /// Also the bent normal, the mean unoccluded direction (on by default): the ambient
+    /// light then comes from the harmonics along it and the environment's reflections
+    /// fade by the visible cone (GTSO). Its own shading pipelines: off, the shading is
+    /// exactly as without it. Costs on the RTX 4060 Ti, Sponza 1080p High: about 50 µs
+    /// of ambient occlusion and 10-30 µs of shading; on the Radeon iGPU about 20 %.
+    pub bent_normals: bool,
 }
 
 impl Default for AoSettings {
@@ -118,6 +131,7 @@ impl Default for AoSettings {
             falloff: 0.615,
             power: 2.2,
             denoise_passes: 1,
+            bent_normals: true,
         }
     }
 }
@@ -127,6 +141,8 @@ pub struct AmbientOcclusion {
     depths: ComputeShader<Push>,
     main: ComputeShader<Push>,
     denoise: ComputeShader<Push>,
+    main_bent: ComputeShader<Push>,
+    denoise_bent: ComputeShader<Push>,
 }
 
 impl core::fmt::Debug for AmbientOcclusion {
@@ -143,25 +159,30 @@ fn level_size(width: u32, height: u32, k: u32) -> (u32, u32) {
 impl AmbientOcclusion {
     /// Creates the pipelines.
     pub fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
-        let [depths, main, denoise] = ComputeSource::create_all(
+        let [depths, main, denoise, main_bent, denoise_bent] = ComputeSource::create_all(
             device,
             bindless,
             [
                 ComputeSource::new(DEPTHS, c"aoDepths", &[])?,
                 ComputeSource::new(MAIN, c"aoMain", &[])?,
                 ComputeSource::new(DENOISE, c"aoDenoise", &[])?,
+                ComputeSource::new(MAIN_BENT, c"aoMainBent", &[])?,
+                ComputeSource::new(DENOISE_BENT, c"aoDenoiseBent", &[])?,
             ],
         )?;
         Ok(Self {
             depths,
             main,
             denoise,
+            main_bent,
+            denoise_bent,
         })
     }
 
     /// Adds the passes computing the visibility of `depth` (sampled) seen by `view`, and
-    /// returns it ([`AO_FORMAT`], the depth's size). `frame` rotates the noise; with a
-    /// temporal resolve (TAA) the frames' noise averages out.
+    /// returns it ([`AO_FORMAT`], or [`AO_BENT_FORMAT`] with the bent normals; the depth's
+    /// size). `frame` rotates the noise; with a temporal resolve (TAA) the frames' noise
+    /// averages out.
     pub fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -203,6 +224,7 @@ impl AmbientOcclusion {
             level3_y: (1..3).map(|k| level_size(width, height, k).1).sum(),
             level4_y: (1..4).map(|k| level_size(width, height, k).1).sum(),
             sampler: Bindless::sampler(SamplerKind::NearestClamp),
+            world_q: Quat::from_mat4(&view.view_from_world).inverse().to_array(),
             ..Push::default()
         };
         fg.add_compute("ao depths", bindless)
@@ -220,30 +242,31 @@ impl AmbientOcclusion {
                     })
                 },
             );
-        let visibility = fg.create_texture("ao", TextureDesc::new_2d(AO_FORMAT, width, height));
+        let (format, main, denoise) = if settings.bent_normals {
+            (AO_BENT_FORMAT, &self.main_bent, &self.denoise_bent)
+        } else {
+            (AO_FORMAT, &self.main, &self.denoise)
+        };
+        let visibility = fg.create_texture("ao", TextureDesc::new_2d(format, width, height));
         let edges = fg.create_texture("ao edges", TextureDesc::new_2d(EDGE_FORMAT, width, height));
         fg.add_compute("ao", bindless)
             .async_compute()
             .read(atlas, Access::Sampled(ShaderStages::COMPUTE))
             .write(visibility, Access::StorageWrite(ShaderStages::COMPUTE))
             .write(edges, Access::StorageWrite(ShaderStages::COMPUTE))
-            .dispatch(
-                &self.main,
-                Dispatch::Threads([width, height, 1]),
-                move |ctx| {
-                    Some(Push {
-                        depths: ctx.sampled_index(atlas)?,
-                        target: ctx.storage_index(visibility)?,
-                        edges: ctx.storage_index(edges)?,
-                        output_scale: if passes > 0 {
-                            1.0 / OCCLUSION_TERM_SCALE
-                        } else {
-                            1.0
-                        },
-                        ..base
-                    })
-                },
-            );
+            .dispatch(main, Dispatch::Threads([width, height, 1]), move |ctx| {
+                Some(Push {
+                    depths: ctx.sampled_index(atlas)?,
+                    target: ctx.storage_index(visibility)?,
+                    edges: ctx.storage_index(edges)?,
+                    output_scale: if passes > 0 {
+                        1.0 / OCCLUSION_TERM_SCALE
+                    } else {
+                        1.0
+                    },
+                    ..base
+                })
+            });
         let mut result = visibility;
         for pass in 0..passes {
             let output_scale = if pass + 1 == passes {
@@ -252,26 +275,22 @@ impl AmbientOcclusion {
                 1.0
             };
             let blurred =
-                fg.create_texture("ao denoised", TextureDesc::new_2d(AO_FORMAT, width, height));
+                fg.create_texture("ao denoised", TextureDesc::new_2d(format, width, height));
             let source = result;
             fg.add_compute("ao denoise", bindless)
                 .async_compute()
                 .read(source, Access::Sampled(ShaderStages::COMPUTE))
                 .read(edges, Access::Sampled(ShaderStages::COMPUTE))
                 .write(blurred, Access::StorageWrite(ShaderStages::COMPUTE))
-                .dispatch(
-                    &self.denoise,
-                    Dispatch::Threads([width, height, 1]),
-                    move |ctx| {
-                        Some(Push {
-                            source: ctx.sampled_index(source)?,
-                            edges: ctx.sampled_index(edges)?,
-                            target: ctx.storage_index(blurred)?,
-                            output_scale,
-                            ..base
-                        })
-                    },
-                );
+                .dispatch(denoise, Dispatch::Threads([width, height, 1]), move |ctx| {
+                    Some(Push {
+                        source: ctx.sampled_index(source)?,
+                        edges: ctx.sampled_index(edges)?,
+                        target: ctx.storage_index(blurred)?,
+                        output_scale,
+                        ..base
+                    })
+                });
             result = blurred;
         }
         result

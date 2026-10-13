@@ -138,6 +138,7 @@ const FRAGMENT_CONTACT_SHADOWED: &[u8] =
 const FRAGMENT_AO_CONTACT_SHADOWED: &[u8] =
     include_bytes!("../../shaders/forward.fragmentMainAoContactShadowed.spv");
 
+mod bent;
 mod declare;
 mod layout;
 mod material_types;
@@ -1126,8 +1127,9 @@ pub struct ForwardPasses {
     pub commands: Option<Buffer>,
     /// Motion vectors and jitter, with a [`Temporal`] state.
     pub motion: Option<MotionOutput>,
-    /// The view's ambient occlusion ([`crate::ao::AO_FORMAT`], sampled by the forward
-    /// pass), when it is on: for debugging views and effects of your own.
+    /// The view's ambient occlusion ([`crate::ao::AO_FORMAT`], or
+    /// [`crate::ao::AO_BENT_FORMAT`] with its bent normals; sampled by the forward pass),
+    /// when it is on: for debugging views and effects of your own.
     pub ao: Option<Texture>,
     /// The environment's atmosphere tables this frame, when it has a physical sky (ADR
     /// 0069): for debugging views and tests.
@@ -1368,6 +1370,8 @@ pub struct ForwardRenderer {
     scratch: RefCell<Scratch>,
     /// Material types and their pipelines (ADR 0092).
     material_types: material_types::MaterialTypes,
+    /// The shading's variants that read ambient occlusion's bent normal (ADR 0058).
+    bent_twins: bent::BentTwins,
 }
 
 /// The slot of a sample count in `ForwardRenderer::msaa`: 2, 4, 8 samples.
@@ -1441,15 +1445,18 @@ impl ForwardRenderer {
     /// Hands the material types' requests of the last frames to their compiler and
     /// describes the pipelines whose SPIR-V arrived (created by the device's warm-up
     /// thread). Once per frame, before declaring its passes; costs nothing when no type
-    /// waits for anything.
+    /// waits for anything. Describes the variants that read ambient occlusion's bent normal
+    /// the last frames asked for too ([`AoSettings::bent_normals`]): without this call
+    /// frames draw without the bent normal.
     pub fn update_material_types(&mut self, device: &Device) {
         self.material_types.update(device);
+        self.bent_twins.update(device);
     }
 
     /// Material types' pipelines on their way (compiling, or described and not created):
     /// a frame drawing them now draws their fallbacks. Tests and tools wait for 0.
     pub fn material_types_pending(&self) -> usize {
-        self.material_types.pending()
+        self.material_types.pending() + self.bent_twins.pending()
     }
 
     /// Blocks until the material types' pipelines asked for so far are made, or `timeout`
@@ -1459,7 +1466,12 @@ impl ForwardRenderer {
         device: &Device,
         timeout: std::time::Duration,
     ) -> bool {
-        self.material_types.wait(device, timeout)
+        let done = self.material_types.wait(device, timeout);
+        self.bent_twins.update(device);
+        if self.bent_twins.pending() > 0 {
+            device.wait_for_pipeline_warm_up();
+        }
+        done && self.bent_twins.pending() == 0
     }
 
     /// The driver's statistics of material type `ty`'s shading (ADR 0092), per shading
@@ -1827,6 +1839,7 @@ impl ForwardRenderer {
             },
             scratch: RefCell::new(Scratch::default()),
             material_types: material_types::MaterialTypes::new(),
+            bent_twins: bent::BentTwins::default(),
         })
     }
 
@@ -2422,6 +2435,21 @@ impl ForwardRenderer {
                     .map(|ao| lazy_statistics(&ao.shading[k], device))
                     .unwrap_or_default(),
             ]
+        })
+    }
+
+    /// The driver's statistics of the shading after the prepass with ambient occlusion and
+    /// its bent normals ([`AoSettings::bent_normals`]), per shading variant as
+    /// [`Self::shading_statistics`] (made now); empty until ambient occlusion was turned on.
+    pub fn bent_statistics(&mut self, device: &Device) -> [Vec<engine_rhi::PipelineStatistic>; 4] {
+        core::array::from_fn(|k| {
+            let Some(role) = self.ao.as_ref().map(|ao| ao.shading[k].clone()) else {
+                return Vec::new();
+            };
+            self.bent_twins
+                .twin_now(device, &role)
+                .map(|twin| lazy_statistics(&twin, device))
+                .unwrap_or_default()
         })
     }
 

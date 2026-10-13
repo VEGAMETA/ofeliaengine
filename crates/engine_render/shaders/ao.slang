@@ -12,15 +12,20 @@
 //    them, projected onto the normal, integrates the cosine-weighted visibility exactly.
 //    Far samples read coarser depth levels. The normal comes from the depth, from the
 //    neighbours on the side without an edge. Writes the visibility (÷ 1.5 when a blur
-//    follows) and the edges (two bits per side in one byte).
+//    follows) and the edges (two bits per side in one byte). aoMainBent also writes the
+//    bent normal: the mean direction of the visible, cosine-weighted arcs (the paper's
+//    Algorithm 2, as XeGTAO computes it), turned to world space, × 0.5 + 0.5, in GBA of an
+//    RGBA8 whose R is the visibility (so that shading without it reads R as ever).
 // 3. aoDenoise: a 3 × 3 blur that does not cross the edges, from gathers; the last pass
-//    restores the scale. The temporal resolve (TAA) averages the per-frame noise further.
+//    restores the scale. aoDenoiseBent blurs the bent normal with the same weights and
+//    renormalizes it. The temporal resolve (TAA) averages the per-frame noise further.
 //
 // View space here: x right, y up, z forward (depth, positive), in the camera's units.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(1, 0)]] [vk::image_format("r32f")] RWTexture2D<float> g_depths[];
 [[vk::binding(1, 0)]] [vk::image_format("r8")] RWTexture2D<float> g_visibility[];
+[[vk::binding(1, 0)]] [vk::image_format("rgba8")] RWTexture2D<float4> g_bent[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 
 static const float PI = 3.14159265358979;
@@ -52,6 +57,10 @@ struct AoPush
     uint level4_y;
     uint sampler;        // aoDenoise: nearest, clamp to edge, for gathers of 2 × 2 texels
     float output_scale;  // the written visibility's scale (see OCCLUSION_TERM_SCALE)
+    float world_qx;      // aoMainBent: the view's rotation into the world (a quaternion,
+    float world_qy;      // x y z w), for the bent normal
+    float world_qz;
+    float world_qw;
 };
 
 // Before the blur the visibility is stored divided by this (XeGTAO's
@@ -216,9 +225,17 @@ float fast_acos(float x)
     return x >= 0.0 ? r : PI - r;
 }
 
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void aoMain(uint3 id : SV_DispatchThreadID)
+// A direction of this pass's view space (x right, y up, z forward) in world space.
+float3 to_world(float3 d)
+{
+    float3 v = float3(d.xy, -d.z); // the camera's right-handed frame looks along −z
+    float3 q = float3(push.world_qx, push.world_qy, push.world_qz);
+    float3 t = 2.0 * cross(q, v);
+    return v + push.world_qw * t + cross(q, t);
+}
+
+// `bent` (a literal): also the bent normal, into an RGBA8 target.
+void ao_main(uint3 id, bool bent_normal)
 {
     if (any(id.xy >= push.size))
         return;
@@ -253,7 +270,10 @@ void aoMain(uint3 id : SV_DispatchThreadID)
     float screen_radius = push.radius / pixel_extent;
     if (screen_radius < 1.0)
     {
-        g_visibility[push.target][pixel] = push.output_scale;
+        if (bent_normal)
+            g_bent[push.target][pixel] = float4(push.output_scale, to_world(normal) * 0.5 + 0.5);
+        else
+            g_visibility[push.target][pixel] = push.output_scale;
         return;
     }
     const float too_close = 1.3; // pixels: nearer samples would read the pixel itself
@@ -270,6 +290,7 @@ void aoMain(uint3 id : SV_DispatchThreadID)
     float phi = noise.x * slice_angle;
     float2 omega = float2(cos(phi), -sin(phi));
     float visibility = 0.0;
+    float3 bent = 0.0;
     for (uint slice = 0; slice < push.slices; slice++)
     {
         float3 direction = float3(omega.x, -omega.y, 0.0);
@@ -281,6 +302,7 @@ void aoMain(uint3 id : SV_DispatchThreadID)
         float cos_n = saturate(dot(projected, view) / max(projected_length, 1e-6));
         float n = sign_n * fast_acos(cos_n);
         float sin_n = sin(n);
+        float3 ortho_unit = ortho * rsqrt(max(dot(ortho, ortho), 1e-12));
         // Horizons start at the tangent plane (the hemisphere's edge) on each side:
         // cos(n + π/2) and cos(n - π/2).
         float low0 = -sin_n;
@@ -317,6 +339,24 @@ void aoMain(uint3 id : SV_DispatchThreadID)
         float arc0 = (cos_n + 2.0 * h0 * sin_n - cos(2.0 * h0 - n)) / 4.0;
         float arc1 = (cos_n + 2.0 * h1 * sin_n - cos(2.0 * h1 - n)) / 4.0;
         visibility += projected_length * (arc0 + arc1);
+        if (bent_normal)
+        {
+            // The arcs' mean direction in the slice (the paper's Algorithm 2, as XeGTAO
+            // writes it): `t0` along the slice's direction, `t1` along the view vector.
+            // Per side, with c = cos h and s = sin h (the clamps above only absorb
+            // fast_acos's error: cos h0 = horizon1, cos h1 = horizon0, h0 ≤ 0 ≤ h1),
+            // 6 sin(h − n) − sin(3h − n) − 3 sin(h + n) = 4 s³ cos n + (4 c³ − 12 c) sin n
+            // and −cos(3h − n) − 3 cos(h + n) = 4 s³ sin n − 4 c³ cos n.
+            float c0 = horizon1;
+            float c1 = horizon0;
+            float s0 = -sqrt(saturate(1.0 - c0 * c0));
+            float s1 = sqrt(saturate(1.0 - c1 * c1));
+            float s3 = s0 * s0 * s0 + s1 * s1 * s1;
+            float c3 = c0 * c0 * c0 + c1 * c1 * c1;
+            float t0 = (4.0 * s3 * cos_n + (4.0 * c3 - 12.0 * (c0 + c1) + 16.0) * sin_n) / 12.0;
+            float t1 = (4.0 * s3 * sin_n + (8.0 - 4.0 * c3) * cos_n) / 12.0;
+            bent += projected_length * (t0 * ortho_unit + t1 * view);
+        }
         omega = float2(omega.x * rotation.x + omega.y * rotation.y,
                        omega.y * rotation.x - omega.x * rotation.y);
     }
@@ -325,7 +365,28 @@ void aoMain(uint3 id : SV_DispatchThreadID)
     visibility += saturate((10.0 - screen_radius) / 100.0) * 0.5 / float(push.slices);
     // Never fully black: a little ambient light always reaches (as XeGTAO).
     visibility = max(pow(max(visibility, 0.0), push.power), 0.03);
-    g_visibility[push.target][pixel] = saturate(visibility * push.output_scale);
+    if (bent_normal)
+    {
+        float bent_length = length(bent);
+        bent = bent_length > 1e-6 ? bent / bent_length : normal;
+        g_bent[push.target][pixel] = float4(saturate(visibility * push.output_scale), to_world(bent) * 0.5 + 0.5);
+    }
+    else
+        g_visibility[push.target][pixel] = saturate(visibility * push.output_scale);
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void aoMain(uint3 id : SV_DispatchThreadID)
+{
+    ao_main(id, false);
+}
+
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void aoMainBent(uint3 id : SV_DispatchThreadID)
+{
+    ao_main(id, true);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -367,4 +428,47 @@ void aoDenoise(uint3 id : SV_DispatchThreadID)
     sum += dot(dw, corners);
     total += dot(dw, 1.0);
     g_visibility[push.target][pixel] = saturate(sum / total * push.output_scale);
+}
+
+// aoDenoise's blur of visibility and bent normal (RGBA8): the same weights, from loads.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void aoDenoiseBent(uint3 id : SV_DispatchThreadID)
+{
+    if (any(id.xy >= push.size))
+        return;
+    int2 pixel = int2(id.xy);
+    Texture2D source = g_textures[NonUniformResourceIndex(push.source)];
+    Texture2D edge_map = g_textures[NonUniformResourceIndex(push.edges)];
+    SamplerState point = g_samplers[push.sampler];
+    float2 corner = float2(pixel) * push.pixel_size;
+    float4 edges_up_left = edge_map.GatherRed(point, corner);
+    float4 edges_down_right = edge_map.GatherRed(point, corner, int2(1, 1));
+    float4 edges = unpack_edges(edges_up_left.y);
+    float left = unpack_edges(edges_up_left.x).y;
+    float top = unpack_edges(edges_up_left.z).w;
+    float right = unpack_edges(edges_down_right.z).x;
+    float bottom = unpack_edges(edges_down_right.x).z;
+    float4 w = edges * float4(left, right, top, bottom);
+    // The pixel, its four neighbours and the diagonals, clamped at the target's edges.
+    int2 last = int2(push.size) - 1;
+    float4 c = source.Load(int3(pixel, 0));
+    float4 l = source.Load(int3(max(pixel + int2(-1, 0), int2(0, 0)), 0));
+    float4 r = source.Load(int3(min(pixel + int2(1, 0), last), 0));
+    float4 t = source.Load(int3(max(pixel + int2(0, -1), int2(0, 0)), 0));
+    float4 b = source.Load(int3(min(pixel + int2(0, 1), last), 0));
+    float4 tl = source.Load(int3(clamp(pixel + int2(-1, -1), int2(0, 0), last), 0));
+    float4 tr = source.Load(int3(clamp(pixel + int2(1, -1), int2(0, 0), last), 0));
+    float4 bl = source.Load(int3(clamp(pixel + int2(-1, 1), int2(0, 0), last), 0));
+    float4 br = source.Load(int3(clamp(pixel + int2(1, 1), int2(0, 0), last), 0));
+    float4 sum = c + w.x * l + w.y * r + w.z * t + w.w * b;
+    float total = 1.0 + dot(w, 1.0);
+    float4 dw = 0.5 * float4(w.x * w.z, w.y * w.z, w.x * w.w, w.y * w.w);
+    sum += dw.x * tl + dw.y * tr + dw.z * bl + dw.w * br;
+    total += dot(dw, 1.0);
+    float4 mean = sum / total;
+    float3 bent = mean.gba * 2.0 - 1.0;
+    float bent_length = length(bent);
+    bent = bent_length > 1e-6 ? bent / bent_length : c.gba * 2.0 - 1.0;
+    g_bent[push.target][pixel] = float4(saturate(mean.r * push.output_scale), bent * 0.5 + 0.5);
 }
