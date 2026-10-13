@@ -173,8 +173,9 @@ let geo = geometry.begin_frame(&mut fg, &device, &mut allocator, frame.number)?;
 
 ## 2. Materials and textures
 
-Materials are glTF 2.0's metallic-roughness model (ADR 0040). Every material lives in one
-`MaterialTable`, every texture in one `TexturePool`:
+Materials are glTF 2.0's metallic-roughness model (ADR 0040). glTF's unlit, clear coat
+and sheen extensions are imported too, as materials of built-in types (section 22). Every
+material lives in one `MaterialTable`, every texture in one `TexturePool`:
 
 ```rust
 use engine_assets::{DerivedDataCache, TextureUsage, import_texture};
@@ -2052,6 +2053,8 @@ sets the terms of the other models to nothing; a model's own terms are set after
 | `MODEL_CLOTH` | velvet, cotton, felt: a soft sheen towards the silhouette, no plastic highlight | `sheen` (color), `sheen_roughness` |
 | `MODEL_HAIR` | hair and fur cards: highlights stretched across the strands | `hair_tangent` (along the strands, world space), `hair_shift` |
 | `MODEL_TOON` | cel shading: bands of light, a flat highlight, a rim | `toon_steps`, `toon_softness`, `toon_highlight`, `rim`, `rim_width` |
+| `MODEL_SHEEN` | glTF's sheen: the lit base under a soft sheen layer, its highlight kept | `sheen` (color), `sheen_roughness` |
+| `MODEL_SHEEN_CLEARCOAT` | the sheen layer under a clear coat | the sheen's and the coat's |
 
 ```slang
 struct VelvetMaterial : IMaterial
@@ -2075,9 +2078,13 @@ struct VelvetMaterial : IMaterial
 ```
 
 - **Clear coat:** the coat is smooth over the base's normal map (it uses the interpolated
-  normal), reflects 4 % head on (IOR 1.5), and its reflection is the one that shows
-  probes and screen-space reflections. The base under it is at least as rough as the coat
-  and reflects a little less (its reflectance against the coat instead of air).
+  normal, or its own map: `clearcoat_normal`, world space), reflects 4 % head on (IOR
+  1.5), and its reflection is the one that shows probes and screen-space reflections. The
+  base under it is at least as rough as the coat and reflects a little less (its
+  reflectance against the coat instead of air); the emission is under the coat too.
+- **Sheen (glTF):** unlike cloth, the lit base stays (diffuse and GGX highlight), scaled
+  by what the sheen layer lets through (`1 − max(sheen) · its albedo`), and the sheen's
+  lobe lies on top; the reflections still replace the base's lobe.
 - **Cloth:** Lambert's diffuse and a sheen lobe (Charlie distribution, Neubelt
   visibility); no metal, no GGX highlight. The sky's sheen light uses a fit of the lobe's
   albedo.
@@ -2102,6 +2109,38 @@ local lights / with sky light / with both; `material_registers` example, ADR 009
 | a lit type without textures | 34 / 60 / 61 / 85 |
 | unlit | 5 / 5 / 5 / 5 |
 | clear coat | 40 / 67 / 63 / 78 |
-| cloth | 36 / 50 / 55 / 69 |
-| hair | 40 / 69 / 54 / 74 |
-| toon | 47 / 62 / 63 / 81 |
+| cloth | 32 / 50 / 58 / 67 |
+| hair | 40 / 66 / 50 / 75 |
+| toon | 42 / 63 / 59 / 78 |
+| glTF unlit (textured) | 11 / 11 / 11 / 11 |
+| glTF clear coat (textured, coat textures and normal map) | 59 / 70 / 82 / 96 |
+| glTF sheen (textured, sheen textures) | 48 / 65 / 79 / 84 |
+| glTF sheen and clear coat | 64 / 80 / 87 / 100 |
+
+(Measured 2026-10-13; the test types' numbers are those of `tests/golden/materials/models.slang`.)
+
+### glTF's unlit, clear coat and sheen
+
+glTF's `KHR_materials_unlit`, `KHR_materials_clearcoat` and `KHR_materials_sheen` need no
+material files: the cook (`ofeliaengine cook`) makes the materials that use them materials
+of the engine's built-in types (`engine_assets::gltf_models::apply_gltf_models`, in
+`shaders/materials/gltf.slang`), with their glTF record as the fallback.
+
+| Extensions | Type | Model |
+|---|---|---|
+| unlit | `GltfUnlit` | `MODEL_UNLIT`: the base color, no emission (glTF ignores it there) |
+| clear coat | `GltfClearcoat` | `MODEL_CLEARCOAT`, with the coat's textures and normal map |
+| sheen | `GltfSheen` | `MODEL_SHEEN` |
+| both | `GltfSheenClearcoat` | `MODEL_SHEEN_CLEARCOAT` |
+
+- **A material file wins:** a material the scene's `<scene>.materials.ron` replaces keeps
+  its file's type.
+- **Each type compiles once per scene** (128 entry points, about 4 s on 8 threads), then
+  ships in the pack with its SPIR-V like any material type. A game never compiles it.
+- **Limits:**
+  - the textures must use the first set of texture coordinates, as glTF's other
+    textures here, and `KHR_texture_transform` is not applied;
+  - unlit takes no vertex colors (the importer reads none).
+- **The test scenes** are Khronos' ClearCoatTest, ClearcoatWicker, SheenTestGrid and
+  UnlitTest (`tools/fetch-test-assets.ps1`), golden shots `gltf_clearcoat`,
+  `gltf_clearcoat_wicker`, `gltf_sheen`, `gltf_unlit`.

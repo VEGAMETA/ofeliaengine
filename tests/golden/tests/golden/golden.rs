@@ -368,6 +368,60 @@ fn flight_helmet() {
     ));
 }
 
+/// glTF's clear coat on the clear coat model (ADR 0092, a built-in type): Khronos'
+/// ClearCoatTest, rows of the coat's strength, roughness, their textures and the coat's
+/// own normal map over a lit base.
+#[test]
+fn gltf_clear_coat() {
+    check(&Shot {
+        size: [400, 800],
+        eye: Some(Vec3::new(0.0, 0.3, 13.3)),
+        target: Some(Vec3::new(0.0, 0.3, 0.0)),
+        ..Shot::new(
+            "gltf_clearcoat",
+            Source::Gltf(PathBuf::from("ClearCoatTest/ClearCoatTest.gltf")),
+        )
+    });
+}
+
+/// The coat's own normal map over a textured, normal-mapped base: Khronos' ClearcoatWicker
+/// (wrinkled plastic over wicker).
+#[test]
+fn gltf_clear_coat_wicker() {
+    check(&Shot::new(
+        "gltf_clearcoat_wicker",
+        Source::Gltf(PathBuf::from("ClearcoatWicker/ClearcoatWicker.gltf")),
+    ));
+}
+
+/// glTF's sheen as a layer over the lit base (ADR 0092, a built-in type): Khronos'
+/// SheenTestGrid, the sheen's color and roughness over a checkered backdrop.
+#[test]
+fn gltf_sheen() {
+    check(&Shot {
+        eye: Some(Vec3::new(-0.17, 0.0, 0.7)),
+        target: Some(Vec3::new(-0.17, 0.0, 0.0)),
+        ..Shot::new(
+            "gltf_sheen",
+            Source::Gltf(PathBuf::from("SheenTestGrid/SheenTestGrid.gltf")),
+        )
+    });
+}
+
+/// glTF's unlit (ADR 0092, a built-in type): Khronos' UnlitTest, an orange and a blue
+/// object each one flat color, no light on them (their shadows on the ground are allowed).
+#[test]
+fn gltf_unlit() {
+    check(&Shot {
+        eye: Some(Vec3::new(0.0, 1.2, 6.0)),
+        target: Some(Vec3::new(0.0, 0.0, 0.0)),
+        ..Shot::new(
+            "gltf_unlit",
+            Source::Gltf(PathBuf::from("UnlitTest/UnlitTest.gltf")),
+        )
+    });
+}
+
 /// The fox (ADR 0068), skinned on the GPU at 0.4 s into its Walk cycle (clip 1): legs
 /// apart, tail curved. Seen from its side, its texture, sun shadows on itself.
 #[test]

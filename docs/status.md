@@ -94,8 +94,9 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
   cooking (the map, texture parameters, pack version 5 with typed materials and their
   SPIR-V, PR #183) and 4c hot reload (types' modules and material files, PR #184) done;
   step 5, the ubershader experiment, measured and declined (iGPU forward +22–53 %, 90
-  VGPRs; the fallback stays; branch `exp/ubershader`). Left: glTF's unlit, clear coat and
-  sheen extensions onto the models, PSO records. (Ref-1 runs
+  VGPRs; the fallback stays; branch `exp/ubershader`); glTF's unlit, clear coat and sheen
+  onto the models as built-in types (ADR 0092's addendum of 2026-10-13: `MODEL_SHEEN` for
+  glTF's sheen layer, the coat's normal map). Left: PSO records. (Ref-1 runs
   with hardware-accelerated GPU scheduling on since 2026-10-12, for DLSS frame
   generation.)
 
@@ -534,7 +535,23 @@ grown, divide and conquer); the old labels stay in parentheses.
   - anisotropic GGX is missing from the material model (cloth, clear coat and hair are
     shading models since ADR 0092);
   - FSR 4: ML, RDNA4-only, shipped as a DLL (DX12 at first). Check Vulkan availability and
-    license; it needs an RDNA4 GPU to test.
+    license; it needs an RDNA4 GPU to test;
+  - `ERROR_DEVICE_LOST` on the Radeon when several devices draw in one process (found
+    2026-10-13, on main too): `cargo test -p engine_golden --test golden -- aa_modes
+    --test-threads 4` loses the device in `texture_feedback_with_msaa` and
+    `msaa_shows_no_edge_halos_with_screen_space_effects` every run, while 4 processes
+    (nextest, as the gate runs it) and one thread pass. No process-wide Vulkan objects
+    were found (the RHI's statics are diagnostics, the loader and counters). Engine (an
+    object shared between devices) or driver: to investigate, with
+    `VK_EXT_device_fault` reports in the harness;
+  - glTF's texture coordinates beyond the first set, `KHR_texture_transform` and vertex
+    colors (Khronos' SheenChair needs the first two);
+  - physical light units (the owner, 2026-10-13: for the future, much later): emission in
+    nits (cd/m²) or EV, the sun in lux, local lights in lumens or candela, a camera with
+    EV100, and pre-exposure (100,000 lux overflows FP16) as Filament and Frostbite do.
+    Today every light and emission is on one relative scale (the sun's color about 3–4,
+    emission added as is, exposure fixed or from the histogram). It changes all lighting:
+    an ADR first.
 - **Patents avoided on purpose** (don't build without a new decision): static/dynamic
   split of cached shadows (Warner Bros US 11,908,062 / 12,315,068); dual-quaternion
   skinning variants (US9613456B2); motion matching variants; Burley's diffusion profile;

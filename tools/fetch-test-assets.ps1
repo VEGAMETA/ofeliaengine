@@ -26,7 +26,12 @@ $models = @(
     @('CesiumMan', 'CesiumMan/glTF/CesiumMan.gltf', 'CC-BY 4.0 (Cesium)'),
     @('RiggedFigure', 'RiggedFigure/glTF/RiggedFigure.gltf', 'CC-BY 4.0 (Cesium)'),
     @('RiggedSimple', 'RiggedSimple/glTF/RiggedSimple.gltf', 'CC-BY 4.0 (Cesium)'),
-    @('SimpleSkin', 'SimpleSkin/glTF/SimpleSkin.gltf', 'CC0')
+    @('SimpleSkin', 'SimpleSkin/glTF/SimpleSkin.gltf', 'CC0'),
+    # glTF's unlit, clear coat and sheen on the shading models (ADR 0092).
+    @('ClearCoatTest', 'ClearCoatTest/glTF/ClearCoatTest.gltf', 'CC-BY 4.0 (Ed Mackey, Analytical Graphics)'),
+    @('ClearcoatWicker', 'ClearcoatWicker/glTF/ClearcoatWicker.gltf', 'CC0 (Eric Chadwick)'),
+    @('SheenTestGrid', 'SheenTestGrid/glTF/SheenTestGrid.gltf', 'CC0 (Eric Chadwick)'),
+    @('UnlitTest', 'UnlitTest/glTF/UnlitTest.gltf', 'CC-BY 4.0 (Ed Mackey, Analytical Graphics)')
 )
 
 # name, URL, MD5, license: HDR panoramas into test-assets\HDRI (the leading comma keeps a

@@ -7,12 +7,14 @@
 //! HDR panoramas (`.hdr`) are read, and their sun found, for HDRI environments (`hdr`, ADR
 //! 0083), and cooked into BC6H cube maps for the derived data cache and packs
 //! (`panorama`). Material files (`*.material.ron`) set a material type's parameters and
-//! replace a scene's glTF materials (`material_file`, ADR 0092).
+//! replace a scene's glTF materials (`material_file`, ADR 0092); glTF's unlit, clear coat
+//! and sheen become materials of the engine's built-in types (`gltf_models`).
 
 pub mod animation;
 pub mod cook;
 mod ddc;
 mod gltf_import;
+pub mod gltf_models;
 pub mod hdr;
 mod lod;
 pub mod material_file;
@@ -33,9 +35,10 @@ pub use ddc::{
     texture_to_bytes,
 };
 pub use gltf_import::{
-    AlphaMode, AnimationData, ChannelData, ChannelKeys, ImportError, ImportedScene, MaterialData,
-    MaterialTypeData, MeshData, MeshInstance, NodeData, Primitive, SkinData, TextureData,
-    TextureSource, TextureWrap, TypedMaterialData, import_gltf, read_texture, spawn_scene,
+    AlphaMode, AnimationData, ChannelData, ChannelKeys, ClearcoatData, ImportError, ImportedScene,
+    MaterialData, MaterialLayers, MaterialTypeData, MeshData, MeshInstance, NodeData, Primitive,
+    SheenData, SkinData, TextureData, TextureSource, TextureWrap, TypedMaterialData, import_gltf,
+    read_texture, spawn_scene,
 };
 pub use lod::{Lod, LodSettings, generate_lods};
 pub use texture_compress::{ENCODER, EncodedTexture, TextureFormat, compress, compressed_format};

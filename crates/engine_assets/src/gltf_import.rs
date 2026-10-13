@@ -121,6 +121,124 @@ pub struct MaterialData {
     pub thickness: f32,
     /// Thickness texture (green), multiplied by `thickness` (`thicknessTexture`).
     pub thickness_texture: Option<usize>,
+    /// glTF's extensions that pick a shading model (ADR 0092): made materials of the
+    /// engine's built-in types by [`crate::gltf_models::apply_gltf_models`].
+    pub layers: MaterialLayers,
+}
+
+/// glTF's material extensions that pick a shading model (ADR 0092,
+/// `docs/research/gltf-material-extensions.md`). Their textures, like the others, use the
+/// first set of texture coordinates.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MaterialLayers {
+    /// `KHR_materials_unlit`: the base color only (it excludes the other two).
+    pub unlit: bool,
+    /// `KHR_materials_clearcoat`; none when its factor is 0 (the coat is off).
+    pub clearcoat: Option<ClearcoatData>,
+    /// `KHR_materials_sheen`; none when its color is black (the layer is off).
+    pub sheen: Option<SheenData>,
+}
+
+impl MaterialLayers {
+    /// Whether any extension sets the material's shading model.
+    pub fn any(&self) -> bool {
+        self.unlit || self.clearcoat.is_some() || self.sheen.is_some()
+    }
+}
+
+/// `KHR_materials_clearcoat`'s values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClearcoatData {
+    /// `clearcoatFactor`: the coat's strength.
+    pub factor: f32,
+    /// `clearcoatTexture` (red), multiplied by `factor`.
+    pub texture: Option<usize>,
+    /// `clearcoatRoughnessFactor`.
+    pub roughness: f32,
+    /// `clearcoatRoughnessTexture` (green), multiplied by `roughness`.
+    pub roughness_texture: Option<usize>,
+    /// `clearcoatNormalTexture`: the coat's own normal map (none: the interpolated
+    /// normal, whatever the base's normal map).
+    pub normal_texture: Option<usize>,
+    /// Its scale.
+    pub normal_scale: f32,
+}
+
+/// `KHR_materials_sheen`'s values.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SheenData {
+    /// `sheenColorFactor` (linear).
+    pub color: [f32; 3],
+    /// `sheenColorTexture` (sRGB color), multiplied by `color`.
+    pub color_texture: Option<usize>,
+    /// `sheenRoughnessFactor`.
+    pub roughness: f32,
+    /// `sheenRoughnessTexture` (alpha), multiplied by `roughness`.
+    pub roughness_texture: Option<usize>,
+}
+
+/// A number of an extension's object, or `default`.
+fn extension_number(extension: &gltf::json::Value, key: &str, default: f32) -> f32 {
+    extension
+        .get(key)
+        .and_then(gltf::json::Value::as_f64)
+        .map_or(default, |v| v as f32)
+}
+
+/// The texture of an extension's `textureInfo` (`{"index": …}`), if it names one of the
+/// file's `textures`.
+fn extension_texture(info: Option<&gltf::json::Value>, textures: usize) -> Option<usize> {
+    let index = usize::try_from(info?.get("index")?.as_u64()?).ok()?;
+    (index < textures).then_some(index)
+}
+
+/// The shading-model extensions of `m`, from a file with `textures` textures.
+fn material_layers(m: &gltf::Material<'_>, textures: usize) -> MaterialLayers {
+    if m.unlit() {
+        return MaterialLayers {
+            unlit: true,
+            ..MaterialLayers::default()
+        };
+    }
+    let clearcoat = m
+        .extension_value("KHR_materials_clearcoat")
+        .map(|e| ClearcoatData {
+            factor: extension_number(e, "clearcoatFactor", 0.0),
+            texture: extension_texture(e.get("clearcoatTexture"), textures),
+            roughness: extension_number(e, "clearcoatRoughnessFactor", 0.0),
+            roughness_texture: extension_texture(e.get("clearcoatRoughnessTexture"), textures),
+            normal_texture: extension_texture(e.get("clearcoatNormalTexture"), textures),
+            normal_scale: e
+                .get("clearcoatNormalTexture")
+                .map_or(1.0, |t| extension_number(t, "scale", 1.0)),
+        })
+        .filter(|c| c.factor > 0.0);
+    let sheen = m
+        .extension_value("KHR_materials_sheen")
+        .map(|e| {
+            let color = e
+                .get("sheenColorFactor")
+                .and_then(gltf::json::Value::as_array)
+                .map_or([0.0; 3], |c| {
+                    core::array::from_fn(|i| {
+                        c.get(i)
+                            .and_then(gltf::json::Value::as_f64)
+                            .map_or(0.0, |v| v as f32)
+                    })
+                });
+            SheenData {
+                color,
+                color_texture: extension_texture(e.get("sheenColorTexture"), textures),
+                roughness: extension_number(e, "sheenRoughnessFactor", 0.0),
+                roughness_texture: extension_texture(e.get("sheenRoughnessTexture"), textures),
+            }
+        })
+        .filter(|s| s.color != [0.0; 3]);
+    MaterialLayers {
+        unlit: false,
+        clearcoat,
+        sheen,
+    }
 }
 
 /// Where a texture's encoded image is (decoded later by the texture pipeline).
@@ -446,11 +564,22 @@ fn smooth_normals(positions: &[[f32; 3]], indices: &[u32]) -> Vec<[f32; 3]> {
         .collect()
 }
 
+/// Extensions the importer reads itself, from their JSON (ADR 0092), that the `gltf` crate
+/// does not know: a file may list them as required.
+const OWN_EXTENSIONS: [&str; 2] = ["KHR_materials_clearcoat", "KHR_materials_sheen"];
+
 /// Imports a glTF 2.0 file from memory. `base_dir` resolves external buffer files.
 pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScene, ImportError> {
     engine_profiler::zone!("assets::import_gltf");
+    let parse = |e: gltf::Error| ImportError::Parse(e.to_string());
+    // Validated as `gltf::Gltf::from_slice` does, but for the extensions read here: the
+    // crate refuses required extensions it does not know.
     let gltf::Gltf { document, blob } =
-        gltf::Gltf::from_slice(bytes).map_err(|e| ImportError::Parse(e.to_string()))?;
+        gltf::Gltf::from_slice_without_validation(bytes).map_err(parse)?;
+    let mut json = document.into_json();
+    json.extensions_required
+        .retain(|e| !OWN_EXTENSIONS.contains(&e.as_str()));
+    let document = gltf::Document::from_json(json).map_err(parse)?;
     let buffers = load_buffers(&document, blob, base_dir)?;
     let mut scene = ImportedScene::default();
 
@@ -494,6 +623,7 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
         });
     }
 
+    let texture_count = document.textures().count();
     for m in document.materials() {
         let pbr = m.pbr_metallic_roughness();
         let strength = m.emissive_strength().unwrap_or(1.0);
@@ -526,6 +656,7 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
                 .volume()
                 .and_then(|v| v.thickness_texture())
                 .map(|t| t.texture().index()),
+            layers: material_layers(&m, texture_count),
         });
     }
 

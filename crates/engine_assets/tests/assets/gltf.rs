@@ -351,3 +351,81 @@ fn textures_samplers_and_material_maps() {
     assert_eq!((d.alpha, d.double_sided), (AlphaMode::Opaque, false));
     std::fs::remove_dir_all(&dir).unwrap();
 }
+
+#[test]
+fn unlit_clear_coat_and_sheen_extensions() {
+    use engine_assets::{ClearcoatData, MaterialLayers, SheenData};
+    let json = r#"{
+  "asset": {"version": "2.0"},
+  "extensionsUsed": ["KHR_materials_unlit", "KHR_materials_clearcoat", "KHR_materials_sheen"],
+  "extensionsRequired": ["KHR_materials_unlit", "KHR_materials_clearcoat", "KHR_materials_sheen"],
+  "images": [{"uri": "a.png"}, {"uri": "b.png"}, {"uri": "c.png"}],
+  "textures": [{"source": 0}, {"source": 1}, {"source": 2}],
+  "materials": [
+    {"name": "unlit", "extensions": {"KHR_materials_unlit": {}}},
+    {"name": "coat", "extensions": {"KHR_materials_clearcoat": {
+      "clearcoatFactor": 0.8, "clearcoatTexture": {"index": 0},
+      "clearcoatRoughnessFactor": 0.1, "clearcoatRoughnessTexture": {"index": 1},
+      "clearcoatNormalTexture": {"index": 2, "scale": 0.5}}}},
+    {"name": "sheen", "extensions": {"KHR_materials_sheen": {
+      "sheenColorFactor": [1, 0.5, 0.25], "sheenColorTexture": {"index": 0},
+      "sheenRoughnessFactor": 0.6, "sheenRoughnessTexture": {"index": 9}}}},
+    {"name": "both", "extensions": {
+      "KHR_materials_clearcoat": {"clearcoatFactor": 1},
+      "KHR_materials_sheen": {"sheenColorFactor": [0.2, 0.2, 0.2]}}},
+    {"name": "off", "extensions": {
+      "KHR_materials_clearcoat": {"clearcoatRoughnessFactor": 0.3},
+      "KHR_materials_sheen": {"sheenRoughnessFactor": 0.5}}},
+    {"name": "unlit wins", "extensions": {
+      "KHR_materials_unlit": {}, "KHR_materials_clearcoat": {"clearcoatFactor": 1}}}
+  ]
+}"#;
+    let scene = import_gltf(json.as_bytes(), None).unwrap();
+    let layers: Vec<MaterialLayers> = scene.materials.iter().map(|m| m.layers).collect();
+    let unlit = MaterialLayers {
+        unlit: true,
+        ..MaterialLayers::default()
+    };
+    assert_eq!(layers[0], unlit);
+    assert_eq!(
+        layers[1].clearcoat,
+        Some(ClearcoatData {
+            factor: 0.8,
+            texture: Some(0),
+            roughness: 0.1,
+            roughness_texture: Some(1),
+            normal_texture: Some(2),
+            normal_scale: 0.5,
+        })
+    );
+    assert_eq!(layers[1].sheen, None);
+    assert_eq!(
+        layers[2].sheen,
+        Some(SheenData {
+            color: [1.0, 0.5, 0.25],
+            color_texture: Some(0),
+            roughness: 0.6,
+            roughness_texture: None,
+        }),
+        "a texture the file does not have is dropped"
+    );
+    assert!(layers[3].clearcoat.is_some() && layers[3].sheen.is_some());
+    let normal_scale = layers[3].clearcoat.map(|c| c.normal_scale);
+    assert_eq!(normal_scale, Some(1.0), "the default scale");
+    assert_eq!(
+        layers[4],
+        MaterialLayers::default(),
+        "a zero coat factor and a black sheen turn them off"
+    );
+    assert_eq!(layers[5], unlit, "unlit excludes the others");
+    assert!(layers.iter().take(4).all(MaterialLayers::any));
+    // A required extension nothing reads is still refused.
+    let unknown = json.replace(
+        r#""extensionsRequired": ["#,
+        r#""extensionsRequired": ["EXT_unknown", "#,
+    );
+    assert!(matches!(
+        import_gltf(unknown.as_bytes(), None),
+        Err(ImportError::Parse(_))
+    ));
+}

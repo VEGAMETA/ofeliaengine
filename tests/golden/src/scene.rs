@@ -6,6 +6,7 @@
 
 use crate::decal_set::DecalSet;
 use engine_anim::{local_to_model, skinning_matrices};
+use engine_assets::gltf_models::apply_gltf_models;
 use engine_assets::hdr::{SunSearch, decode_hdr, find_sun};
 use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_material_map};
 use engine_assets::{
@@ -844,11 +845,17 @@ fn load(
             };
             let dir = path.parent();
             let mut scene = import_gltf(&bytes, dir).map_err(|_| Skip::NoScene(path.clone()))?;
-            if fabric {
+            // Material files (the fabric), then glTF's unlit, clear coat and sheen as the
+            // engine's built-in types (ADR 0092), compiled with Slang.
+            let layered = scene.materials.iter().any(|m| m.layers.any());
+            if fabric || layered {
                 let mut builder = SlangMaterialTypes::new(Path::new(ENGINE_SHADER_DIR))
-                    .expect("Slang for material files");
-                let map = fabric_map(dir.expect("the scene's folder"));
-                apply_material_map(&mut scene, &map, &mut builder).expect("material map");
+                    .expect("Slang for material types");
+                if fabric {
+                    let map = fabric_map(dir.expect("the scene's folder"));
+                    apply_material_map(&mut scene, &map, &mut builder).expect("material map");
+                }
+                apply_gltf_models(&mut scene, &mut builder).expect("glTF's material extensions");
             }
             let jobs = ThreadPool::builder()
                 .build()

@@ -12,6 +12,7 @@
 // A command-line tool reports on stdout/stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
+use engine_assets::gltf_models::apply_gltf_models;
 use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_material_map};
 use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf, write_pack};
 use engine_core::jobs::ThreadPool;
@@ -134,16 +135,21 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
         }
         None => MaterialMap::for_scene(&args.scene).map_err(|e| e.to_string())?,
     };
-    if !map.files.is_empty() {
+    // glTF's unlit, clear coat and sheen: materials of the engine's built-in types.
+    let layered = scene.materials.iter().any(|m| m.layers.any());
+    if !map.files.is_empty() || layered {
         let types_start = Instant::now();
         let mut builder = SlangMaterialTypes::new(&args.engine_shaders)?;
-        let warnings =
-            apply_material_map(&mut scene, &map, &mut builder).map_err(|e| e.to_string())?;
-        for warning in warnings {
-            eprintln!("warning: {warning}");
+        if !map.files.is_empty() {
+            let warnings =
+                apply_material_map(&mut scene, &map, &mut builder).map_err(|e| e.to_string())?;
+            for warning in warnings {
+                eprintln!("warning: {warning}");
+            }
         }
+        let from_gltf = apply_gltf_models(&mut scene, &mut builder).map_err(|e| e.to_string())?;
         println!(
-            "{}: {} materials of {} types from material files ({} entry points), compiled in {:.1} s",
+            "{}: {} materials of {} types from material files and glTF's extensions ({from_gltf} from glTF's; {} entry points), compiled in {:.1} s",
             args.scene.display(),
             scene.typed_materials.len(),
             scene.material_types.len(),
