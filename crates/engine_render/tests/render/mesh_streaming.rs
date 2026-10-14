@@ -2,18 +2,20 @@
 //! synchronization validation: a mesh starts with its coarsest level; finer levels arrive
 //! one at a time (each a larger vertex prefix, the old one copied on the GPU, the new
 //! vertices and the level's indices uploaded) and are evicted again; after every frame the
-//! pool holds exactly the resident vertices and each level's indices, and levels not
-//! resident draw the finest resident one.
+//! pool holds exactly the resident vertices and each level's indices and meshlets (ADR
+//! 0085), and levels not resident draw the finest resident one.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
+use engine_assets::meshlet::build_meshlets;
 use engine_assets::{
     CookedMesh, LodSettings, generate_lods, order_for_streaming, streamed_vertex_counts,
 };
 use engine_core::math::Vec3;
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph};
 use engine_render::mesh::{
-    GeometryCapacity, GeometryPool, MeshData, MeshError, MeshId, StreamedLevel, encode_octahedral,
+    GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshError, MeshId, Meshlet,
+    StreamedLevel, encode_octahedral,
 };
 use engine_rhi::ash::vk;
 use engine_rhi::{AdapterPreference, Allocator, Device, Instance, InstanceDesc, MemoryLocation};
@@ -45,7 +47,8 @@ fn gpu() -> Option<(Instance, Device)> {
     }
 }
 
-/// A bumpy 48 × 48 grid with its detail levels, vertices ordered for streaming.
+/// A bumpy 48 × 48 grid with its detail levels and their meshlets, vertices ordered for
+/// streaming (the cook's order).
 fn mesh() -> (CookedMesh, Vec<u32>) {
     let n = 49u32;
     let mut positions = Vec::new();
@@ -73,6 +76,11 @@ fn mesh() -> (CookedMesh, Vec<u32>) {
         min: [0.0, -0.1, 0.0],
         ..CookedMesh::default()
     };
+    mesh.meshlets = build_meshlets(&mesh.positions, &mut mesh.indices);
+    for l in &mut mesh.lods {
+        l.meshlets = build_meshlets(&mesh.positions, &mut l.indices);
+    }
+    assert!(mesh.meshlets.len() > 4 && mesh.lods.iter().all(|l| !l.meshlets.is_empty()));
     order_for_streaming(&mut mesh);
     let counts = streamed_vertex_counts(&mesh).unwrap();
     (mesh, counts)
@@ -86,6 +94,25 @@ fn level_indices(mesh: &CookedMesh, k: usize) -> &[u32] {
     }
 }
 
+/// Level `k`'s meshlets, as the pool takes them (the cook's are the same 32 bytes).
+fn level_meshlets(mesh: &CookedMesh, k: usize) -> &[Meshlet] {
+    bytemuck::cast_slice(if k == 0 {
+        &mesh.meshlets
+    } else {
+        &mesh.lods[k - 1].meshlets
+    })
+}
+
+/// Index buffer words of a level's range: its indices, then its meshlets from the next
+/// 32-byte boundary.
+fn range_words(indices: usize, meshlets: usize) -> u64 {
+    if meshlets == 0 {
+        indices as u64
+    } else {
+        (indices.next_multiple_of(8) + meshlets * 8) as u64
+    }
+}
+
 /// The new vertices and indices of level `k`.
 fn level_data<'a>(mesh: &'a CookedMesh, counts: &[u32], k: usize) -> MeshData<'a> {
     let (first, end) = (counts[k + 1] as usize, counts[k] as usize);
@@ -95,6 +122,7 @@ fn level_data<'a>(mesh: &'a CookedMesh, counts: &[u32], k: usize) -> MeshData<'a
         tangents: &[],
         uvs: &mesh.uvs[first..end],
         indices: level_indices(mesh, k),
+        meshlets: level_meshlets(mesh, k),
     }
 }
 
@@ -269,6 +297,7 @@ fn levels_stream_in_and_out_and_the_pool_holds_what_is_resident() {
         tangents: &[],
         uvs: &mesh.uvs[..counts[coarsest] as usize],
         indices: level_indices(&mesh, coarsest),
+        meshlets: level_meshlets(&mesh, coarsest),
     };
     let id = pool
         .add_streamed_mesh(&coarse, &levels, Vec3::from(mesh.min), Vec3::from(mesh.max))
@@ -310,10 +339,34 @@ fn levels_stream_in_and_out_and_the_pool_holds_what_is_resident() {
                 expected,
                 "level {k} indices"
             );
+            // Its meshlets after them, 32-byte aligned.
+            let meshlets = level_meshlets(&mesh, shown);
+            assert_eq!(
+                lod.meshlet_count as usize,
+                meshlets.len(),
+                "level {k} meshlets"
+            );
+            let m = lod.first_meshlet as usize;
+            assert_eq!(m % 8, 0, "level {k} meshlets aligned");
+            assert!(
+                m >= i + expected.len(),
+                "level {k} meshlets after its indices"
+            );
+            let words: &[u32] = bytemuck::cast_slice(meshlets);
+            assert_eq!(
+                &got.indices[m..m + words.len()],
+                words,
+                "level {k} meshlets"
+            );
         }
         let bytes = n as u64 * 28
             + (resident..counts.len())
-                .map(|k| level_indices(&mesh, k).len() as u64 * 4)
+                .map(|k| {
+                    range_words(
+                        level_indices(&mesh, k).len(),
+                        level_meshlets(&mesh, k).len(),
+                    ) * 4
+                })
                 .sum::<u64>();
         assert_eq!(pool.streamed_bytes(), bytes);
     };
@@ -341,12 +394,26 @@ fn levels_stream_in_and_out_and_the_pool_holds_what_is_resident() {
     ));
 
     // Evict down to the coarsest but one: the full mesh's vertices and the finer levels'
-    // indices go; what stays is moved and intact.
+    // indices and meshlets go; what stays is moved and intact.
     let kept = coarsest - 1;
     pool.evict_mesh_levels(id, kept as u32, frame_number.get())
         .unwrap();
     let got = run_frame(&mut pool, &mut allocator);
     check(&pool, &got, id, kept);
+    // Meshlets that do not cover their level are refused.
+    let mut bad: Vec<Meshlet> = level_meshlets(&mesh, kept - 1).to_vec();
+    bad[0].triangles += 1;
+    assert!(matches!(
+        pool.upload_mesh_level(
+            id,
+            kept as u32 - 1,
+            &MeshData {
+                meshlets: &bad,
+                ..level_data(&mesh, &counts, kept - 1)
+            }
+        ),
+        Err(MeshError::BadMeshlets)
+    ));
     // And back up.
     for k in (0..kept).rev() {
         pool.upload_mesh_level(id, k as u32, &level_data(&mesh, &counts, k))
@@ -354,6 +421,62 @@ fn levels_stream_in_and_out_and_the_pool_holds_what_is_resident() {
         let got = run_frame(&mut pool, &mut allocator);
         check(&pool, &got, id, k);
     }
+
+    // The same mesh whole, with its levels: their indices one after the other, then every
+    // level's meshlets.
+    let lods: Vec<LodIndices<'_>> = (1..counts.len())
+        .map(|k| LodIndices {
+            indices: level_indices(&mesh, k),
+            error: mesh.lods[k - 1].error,
+            meshlets: level_meshlets(&mesh, k),
+        })
+        .collect();
+    let whole = pool
+        .add_mesh_with_lods(
+            &MeshData {
+                positions: &mesh.positions,
+                normals: &mesh.normals,
+                tangents: &[],
+                uvs: &mesh.uvs,
+                indices: &mesh.indices,
+                meshlets: level_meshlets(&mesh, 0),
+            },
+            &lods,
+        )
+        .unwrap();
+    let got = run_frame(&mut pool, &mut allocator);
+    let info = *pool.mesh(whole).unwrap();
+    for k in 0..counts.len() {
+        let lod = info.lods[k];
+        let (indices, meshlets) = (level_indices(&mesh, k), level_meshlets(&mesh, k));
+        let i = lod.first_index as usize;
+        assert_eq!(
+            &got.indices[i..i + indices.len()],
+            indices,
+            "whole level {k}"
+        );
+        let m = lod.first_meshlet as usize;
+        assert_eq!((m % 8, lod.meshlet_count as usize), (0, meshlets.len()));
+        let words: &[u32] = bytemuck::cast_slice(meshlets);
+        assert_eq!(
+            &got.indices[m..m + words.len()],
+            words,
+            "whole level {k} meshlets"
+        );
+    }
+    pool.remove_mesh(whole, frame_number.get());
+    // Meshlets that do not cover their level are refused here too.
+    assert!(matches!(
+        pool.add_mesh(&MeshData {
+            positions: &mesh.positions,
+            normals: &mesh.normals,
+            tangents: &[],
+            uvs: &mesh.uvs,
+            indices: &mesh.indices[3..],
+            meshlets: level_meshlets(&mesh, 0),
+        }),
+        Err(MeshError::BadMeshlets)
+    ));
     pool.remove_mesh(id, frame_number.get());
     run_frame(&mut pool, &mut allocator);
     run_frame(&mut pool, &mut allocator);

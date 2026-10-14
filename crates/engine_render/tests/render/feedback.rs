@@ -139,6 +139,7 @@ fn feedback_reports_the_levels_the_sampler_uses() {
                 tangents: &[],
                 uvs: &uvs,
                 indices: &indices,
+                meshlets: &[],
             })
             .unwrap();
         let texture = textures

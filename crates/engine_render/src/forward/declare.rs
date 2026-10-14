@@ -5,6 +5,7 @@
 //! reflections, in the order the frame runs them.
 
 use super::*;
+use crate::graph::PassContext;
 
 impl ForwardRenderer {
     /// Declares the passes of a laid-out frame (both paths).
@@ -71,7 +72,19 @@ impl ForwardRenderer {
             min,
             max,
             subsurface_draws,
+            meshlets,
         } = *layout;
+        // The meshlet lists (ADR 0085): in the command buffer after every phase's command
+        // list, one per phase; their draws' slots in the visible buffer after the phases'.
+        let command_bytes = u64::from(command_count) * COMMAND_BYTES;
+        let meshlet_draws = meshlets.map(|layout| MeshletDraws {
+            layout,
+            base: (u64::from(phases) * command_bytes).next_multiple_of(16),
+            bytes: layout.list_bytes(instance_count),
+            work: instance_count,
+        });
+        let meshlet_shaders = self.meshlet_shaders().filter(|_| meshlet_draws.is_some());
+
         let subsurface = self.subsurface_states();
         // The scene's instances, read by culling and by the vertex shaders.
         let scene_instances = match source {
@@ -250,6 +263,41 @@ impl ForwardRenderer {
                     ViewGi::Screen(_) => !capture,
                 }
         });
+        // Ambient occlusion needs the whole depth before shading: the prepass draws it.
+        // Probe captures draw without it.
+        let ao = self
+            .ao_settings
+            .filter(|_| !capture)
+            .zip(view.camera.view_space())
+            .zip(self.ao.as_ref());
+        // The sun's contact shadows (ADR 0071) need it too.
+        let contact = self
+            .contact_settings
+            .filter(|_| !capture)
+            .zip(view.camera.view_space())
+            .zip(self.contact.as_ref());
+        // As do multisampled targets, subsurface materials (their pass follows the forward
+        // pass with the depth tested for equality), reflections (their inputs are written
+        // by the shading after it), decals and GI.
+        let prepass = ms.is_some()
+            || self.depth_prepass
+            || ao.is_some()
+            || subsurface_draws
+            || contact.is_some()
+            || reflecting
+            || decals.is_some()
+            || gi_view.is_some();
+        // Views draw by meshlet (ADR 0085) only after a depth prepass: without one, the
+        // meshlet draws' order (the GPU's) would undo the front-to-back order by which the
+        // depth test rejects hidden pixels (Sponza without a prepass: forward +15 % on the
+        // Radeon, +35-50 % on the RTX).
+        let meshlet_draws = meshlet_draws.filter(|_| prepass);
+        let meshlet_shaders = meshlet_shaders.filter(|_| prepass);
+        let meshlet_lists = meshlet_draws.map(|m| MeshletLists {
+            offset: m.base,
+            bytes: m.bytes,
+            draws: m.layout.draws,
+        });
         // The sky's irradiance harmonics outside the volume (the flat ambient as ones:
         // radiance `ambient` everywhere is irradiance π × ambient).
         let gi_sky = match (gi_view, environment) {
@@ -376,6 +424,16 @@ impl ForwardRenderer {
             material_data: materials.params().0,
             material_stride: materials.params().1,
             _material_pad: 0,
+            batch_meshlets: meshlet_draws.map_or(0, |m| m.layout.table),
+            meshlets: meshlet_draws.map_or(0, |_| geometry.index_address()),
+            // The late phase's commands start a list later.
+            meshlet_offset: meshlet_draws.map_or([0; 2], |m| {
+                [m.lists(0) as u32, (m.lists(1) - command_bytes) as u32]
+            }),
+            meshlet_slot: meshlet_draws.map_or([0; 2], |m| {
+                let first = phases * slot_count;
+                [first, first + m.layout.draws]
+            }),
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -406,18 +464,18 @@ impl ForwardRenderer {
             _pad: 0,
         };
 
-        let command_bytes = u64::from(command_count) * COMMAND_BYTES;
         let culled = fg.create_buffer(
             "draw commands",
             BufferDesc {
-                size: u64::from(phases) * command_bytes,
+                size: meshlet_draws.map_or(u64::from(phases) * command_bytes, |m| m.lists(phases)),
             },
         );
         let visible_bytes = u64::from(slot_count) * 4;
         let visible = fg.create_buffer(
             "visible instances",
             BufferDesc {
-                size: u64::from(phases) * visible_bytes,
+                size: u64::from(phases)
+                    * (visible_bytes + meshlet_draws.map_or(0, |m| u64::from(m.layout.draws) * 4)),
             },
         );
         let shadow_commands = fg.create_buffer(
@@ -497,6 +555,20 @@ impl ForwardRenderer {
             unsafe {
                 ctx.device
                     .cmd_copy_buffer(ctx.cmd, commands.buffer, ctx.buffer(culled), &[region]);
+                if let Some(m) = meshlet_draws {
+                    let header = |list: u32| vk::BufferCopy {
+                        src_offset: m.layout.header.offset,
+                        dst_offset: m.lists(list),
+                        size: MESHLET_HEADER_BYTES,
+                    };
+                    let regions = [header(0), header(1)];
+                    ctx.device.cmd_copy_buffer(
+                        ctx.cmd,
+                        m.layout.header.buffer,
+                        ctx.buffer(culled),
+                        &regions[..phases as usize],
+                    );
+                }
                 ctx.device.cmd_copy_buffer(
                     ctx.cmd,
                     commands.buffer,
@@ -537,7 +609,7 @@ impl ForwardRenderer {
         } else {
             names.cull
         };
-        cull_pass(
+        let first_cull = cull_pass(
             fg,
             bindless,
             name,
@@ -546,15 +618,27 @@ impl ForwardRenderer {
             flag_buffer,
             first_phase,
             scene_instances,
-        )
-        .dispatch(cull, cull_threads, move |ctx| {
-            Some(Push {
-                visible: ctx.address(visible),
-                commands: ctx.address(culled),
-                phase: first_phase,
-                ..base
-            })
-        });
+        );
+        let first_push = move |ctx: &PassContext<'_>| Push {
+            visible: ctx.address(visible),
+            commands: ctx.address(culled),
+            phase: first_phase,
+            ..base
+        };
+        match (meshlet_shaders, meshlet_draws) {
+            (Some(shaders), Some(m)) => {
+                record_meshlet_cull(
+                    first_cull,
+                    geometry,
+                    culled,
+                    shaders,
+                    m.lists(0),
+                    cull_threads,
+                    first_push,
+                );
+            }
+            _ => first_cull.dispatch(cull, cull_threads, move |ctx| Some(first_push(ctx))),
+        }
 
         // Shadow casters of each cascade, then each cascade drawn into its atlas tile; a
         // probe's later faces read its first face's map.
@@ -799,13 +883,6 @@ impl ForwardRenderer {
             resolves: None,
         };
 
-        // Ambient occlusion needs the whole depth before shading: the prepass draws it.
-        // Probe captures draw without it.
-        let ao = self
-            .ao_settings
-            .filter(|_| !capture)
-            .zip(view.camera.view_space())
-            .zip(self.ao.as_ref());
         let ao_frame = if temporal.is_some() {
             let frame = self.ao_frame.get().wrapping_add(1);
             self.ao_frame.set(frame);
@@ -814,14 +891,6 @@ impl ForwardRenderer {
             // Without a temporal resolve changing noise would flicker.
             0
         };
-        // Subsurface materials need it too: their pass follows the forward pass with the
-        // depth tested for equality.
-        // The sun's contact shadows (ADR 0071) need it too.
-        let contact = self
-            .contact_settings
-            .filter(|_| !capture)
-            .zip(view.camera.view_space())
-            .zip(self.contact.as_ref());
         let contact_view = ContactView {
             clip_from_world,
             to_light: -view.light.direction.normalize_or(Vec3::NEG_Y),
@@ -858,14 +927,6 @@ impl ForwardRenderer {
             lit: r.lit.filter(|_| !scattering),
             ..r
         });
-        let prepass = ms.is_some()
-            || self.depth_prepass
-            || ao.is_some()
-            || subsurface_draws
-            || contact.is_some()
-            || reflecting
-            || decals.is_some()
-            || gi_view.is_some();
         // With a prepass, the prepass writes the motion vectors and the shading after it
         // draws without them (the still variants' registers: on the Radeon its vertex
         // stage takes 49 VGPRs instead of 78).
@@ -1086,6 +1147,20 @@ impl ForwardRenderer {
                     offset,
                     ctx.render_area(),
                 );
+                if let Some(m) = &meshlet_draws {
+                    states.draw_meshlets(
+                        ctx,
+                        bindless,
+                        &geometry,
+                        pipelines,
+                        &push,
+                        mask,
+                        ctx.buffer(culled),
+                        m.lists(u32::from(phase == PHASE_LATE)),
+                        m,
+                        ctx.render_area(),
+                    );
+                }
             }
         };
         // The depth is needed after the frame's passes for motion vectors and upsampling.
@@ -1102,46 +1177,253 @@ impl ForwardRenderer {
             phases,
             command_bytes,
             states,
+            meshlets: meshlet_draws,
         };
-        let mut passes =
-            match flag_buffer {
-                None => {
-                    let depth_use = if prepass {
-                        let mut pass = prepass_pass(
-                            fg,
-                            names.depth_prepass,
-                            &geometry,
-                            &materials,
-                            culled,
-                            visible,
-                            scene_instances,
+        let mut passes = match flag_buffer {
+            None => {
+                let depth_use = if prepass {
+                    let mut pass = prepass_pass(
+                        fg,
+                        names.depth_prepass,
+                        &geometry,
+                        &materials,
+                        culled,
+                        visible,
+                        scene_instances,
+                    )
+                    .depth(depth, depth_clear, StoreOp::Store);
+                    if let Some(resolved) = resolved_depth {
+                        pass = pass.resolve(resolved, nearest);
+                    }
+                    if let Some((velocity, previous)) = prepass_velocity {
+                        pass = pass
+                            .color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+                            .read(previous, Access::StorageRead(ShaderStages::VERTEX));
+                    }
+                    pass.execute(move |ctx| {
+                        draw_phase(
+                            ctx,
+                            prepass_pipelines,
+                            false,
+                            PHASE_ALL,
+                            DEPTH_STATES,
+                            None,
+                            None,
+                            None,
+                            None,
                         )
-                        .depth(depth, depth_clear, StoreOp::Store);
-                        if let Some(resolved) = resolved_depth {
-                            pass = pass.resolve(resolved, nearest);
-                        }
-                        if let Some((velocity, previous)) = prepass_velocity {
-                            pass = pass
-                                .color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store)
-                                .read(previous, Access::StorageRead(ShaderStages::VERTEX));
-                        }
-                        pass.execute(move |ctx| {
-                            draw_phase(
-                                ctx,
-                                prepass_pipelines,
-                                false,
-                                PHASE_ALL,
-                                DEPTH_STATES,
-                                None,
-                                None,
-                                None,
-                                None,
-                            )
-                        });
-                        DepthUse::ReadOnly
-                    } else {
-                        DepthUse::Write(depth_clear, depth_store)
-                    };
+                    });
+                    DepthUse::ReadOnly
+                } else {
+                    DepthUse::Write(depth_clear, depth_store)
+                };
+                if let Some(((settings, view_space), passes)) = &ao {
+                    targets.ao = Some(
+                        passes
+                            .passes
+                            .add_passes(fg, bindless, read_depth, view_space, settings, ao_frame),
+                    );
+                }
+                if let Some(((settings, _), state)) = contact {
+                    targets.contact = Some(state.passes.add_passes(
+                        fg,
+                        bindless,
+                        read_depth,
+                        &contact_view,
+                        &settings,
+                    ));
+                }
+                if let Some((d, prepared)) = &decals {
+                    targets.decals =
+                        Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
+                }
+                targets.gi = gi_resolve.add(fg, ring, bindless);
+                let ao_texture = targets.ao;
+                let contact_texture = targets.contact;
+                let decal_texture = targets.decals;
+                let gi_texture = targets.gi;
+                shading_pass(
+                    fg,
+                    names.forward,
+                    &geometry,
+                    &materials,
+                    shadow_map,
+                    culled,
+                    visible,
+                    targets,
+                    true,
+                    depth,
+                    depth_use,
+                    scene_instances,
+                )
+                .execute(move |ctx| {
+                    draw_phase(
+                        ctx,
+                        main_pipelines,
+                        true,
+                        PHASE_ALL,
+                        PLAIN_STATES,
+                        ao_texture,
+                        contact_texture,
+                        decal_texture,
+                        gi_texture,
+                    )
+                });
+                ForwardPasses {
+                    instances: instance_count,
+                    batches: batch_count,
+                    draw_commands: drawn_commands,
+                    list_commands: command_count,
+                    occlusion: false,
+                    commands: Some(culled),
+                    motion: None,
+                    ao: targets.ao,
+                    atmosphere: atmosphere.and_then(|a| a.textures),
+                    contact_shadows: targets.contact,
+                    decals: targets.decals,
+                    gi: targets.gi,
+                    reflections: None,
+                    resolved_depth,
+                    draws: Some(draw_lists),
+                    meshlets: meshlet_lists,
+                }
+            }
+            Some(flags) => {
+                // Two phases: draw what was visible, build the pyramid from its depth, then
+                // test everything against it and draw what the first phase missed. With the
+                // prepass the phases draw depth only, and the forward pass shades both
+                // lists once.
+                if prepass {
+                    let mut pass = prepass_pass(
+                        fg,
+                        "depth prepass early",
+                        &geometry,
+                        &materials,
+                        culled,
+                        visible,
+                        scene_instances,
+                    )
+                    .depth(depth, depth_clear, StoreOp::Store);
+                    // The pyramid keeps the farthest depth: conservative for culling.
+                    if let Some(resolved) = resolved_depth {
+                        pass = pass.resolve(resolved, farthest);
+                    }
+                    if let Some((velocity, previous)) = prepass_velocity {
+                        pass = pass
+                            .color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+                            .read(previous, Access::StorageRead(ShaderStages::VERTEX));
+                    }
+                    pass.execute(move |ctx| {
+                        draw_phase(
+                            ctx,
+                            prepass_pipelines,
+                            false,
+                            PHASE_EARLY,
+                            DEPTH_STATES,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    });
+                } else {
+                    shading_pass(
+                        fg,
+                        "forward early",
+                        &geometry,
+                        &materials,
+                        shadow_map,
+                        culled,
+                        visible,
+                        targets,
+                        true,
+                        depth,
+                        DepthUse::Write(depth_clear, StoreOp::Store),
+                        scene_instances,
+                    )
+                    .execute(move |ctx| {
+                        draw_phase(
+                            ctx,
+                            main_pipelines,
+                            true,
+                            PHASE_EARLY,
+                            PLAIN_STATES,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    });
+                }
+                let pyramid = fg.create_buffer(
+                    "depth pyramid",
+                    BufferDesc {
+                        size: pyramid_layout.bytes(),
+                    },
+                );
+                self.pyramid.add_pass(fg, bindless, read_depth, pyramid);
+                let late_cull = cull_pass(
+                    fg,
+                    bindless,
+                    "cull late",
+                    culled,
+                    visible,
+                    Some(flags),
+                    PHASE_LATE,
+                    scene_instances,
+                )
+                .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE));
+                let late_push = move |ctx: &PassContext<'_>| Push {
+                    visible: ctx.address(visible) + visible_bytes,
+                    commands: ctx.address(culled) + command_bytes,
+                    pyramid: ctx.address(pyramid),
+                    phase: PHASE_LATE,
+                    ..base
+                };
+                match (meshlet_shaders, meshlet_draws) {
+                    (Some(shaders), Some(m)) => record_meshlet_cull(
+                        late_cull,
+                        &geometry,
+                        culled,
+                        shaders,
+                        m.lists(1),
+                        cull_threads,
+                        late_push,
+                    ),
+                    _ => late_cull.dispatch(cull, cull_threads, move |ctx| Some(late_push(ctx))),
+                }
+                if prepass {
+                    let mut pass = prepass_pass(
+                        fg,
+                        "depth prepass late",
+                        &geometry,
+                        &materials,
+                        culled,
+                        visible,
+                        scene_instances,
+                    )
+                    .depth(depth, LoadOp::Load, StoreOp::Store);
+                    if let Some(resolved) = resolved_depth {
+                        pass = pass.resolve(resolved, nearest);
+                    }
+                    if let Some((velocity, previous)) = prepass_velocity {
+                        pass = pass
+                            .color(velocity, LoadOp::Load, StoreOp::Store)
+                            .read(previous, Access::StorageRead(ShaderStages::VERTEX));
+                    }
+                    pass.execute(move |ctx| {
+                        draw_phase(
+                            ctx,
+                            prepass_pipelines,
+                            false,
+                            PHASE_LATE,
+                            DEPTH_STATES,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    });
                     if let Some(((settings, view_space), passes)) = &ao {
                         targets.ao =
                             Some(passes.passes.add_passes(
@@ -1177,7 +1459,7 @@ impl ForwardRenderer {
                         targets,
                         true,
                         depth,
-                        depth_use,
+                        DepthUse::ReadOnly,
                         scene_instances,
                     )
                     .execute(move |ctx| {
@@ -1185,267 +1467,74 @@ impl ForwardRenderer {
                             ctx,
                             main_pipelines,
                             true,
-                            PHASE_ALL,
+                            PHASE_EARLY,
                             PLAIN_STATES,
                             ao_texture,
                             contact_texture,
                             decal_texture,
                             gi_texture,
-                        )
-                    });
-                    ForwardPasses {
-                        instances: instance_count,
-                        batches: batch_count,
-                        draw_commands: drawn_commands,
-                        list_commands: command_count,
-                        occlusion: false,
-                        commands: Some(culled),
-                        motion: None,
-                        ao: targets.ao,
-                        atmosphere: atmosphere.and_then(|a| a.textures),
-                        contact_shadows: targets.contact,
-                        decals: targets.decals,
-                        gi: targets.gi,
-                        reflections: None,
-                        resolved_depth,
-                        draws: Some(draw_lists),
-                    }
-                }
-                Some(flags) => {
-                    // Two phases: draw what was visible, build the pyramid from its depth, then
-                    // test everything against it and draw what the first phase missed. With the
-                    // prepass the phases draw depth only, and the forward pass shades both
-                    // lists once.
-                    if prepass {
-                        let mut pass = prepass_pass(
-                            fg,
-                            "depth prepass early",
-                            &geometry,
-                            &materials,
-                            culled,
-                            visible,
-                            scene_instances,
-                        )
-                        .depth(depth, depth_clear, StoreOp::Store);
-                        // The pyramid keeps the farthest depth: conservative for culling.
-                        if let Some(resolved) = resolved_depth {
-                            pass = pass.resolve(resolved, farthest);
-                        }
-                        if let Some((velocity, previous)) = prepass_velocity {
-                            pass = pass
-                                .color(velocity, LoadOp::Clear([0.0; 4]), StoreOp::Store)
-                                .read(previous, Access::StorageRead(ShaderStages::VERTEX));
-                        }
-                        pass.execute(move |ctx| {
-                            draw_phase(
-                                ctx,
-                                prepass_pipelines,
-                                false,
-                                PHASE_EARLY,
-                                DEPTH_STATES,
-                                None,
-                                None,
-                                None,
-                                None,
-                            )
-                        });
-                    } else {
-                        shading_pass(
-                            fg,
-                            "forward early",
-                            &geometry,
-                            &materials,
-                            shadow_map,
-                            culled,
-                            visible,
-                            targets,
+                        );
+                        draw_phase(
+                            ctx,
+                            main_pipelines,
                             true,
-                            depth,
-                            DepthUse::Write(depth_clear, StoreOp::Store),
-                            scene_instances,
-                        )
-                        .execute(move |ctx| {
-                            draw_phase(
-                                ctx,
-                                main_pipelines,
-                                true,
-                                PHASE_EARLY,
-                                PLAIN_STATES,
-                                None,
-                                None,
-                                None,
-                                None,
-                            )
-                        });
-                    }
-                    let pyramid = fg.create_buffer(
-                        "depth pyramid",
-                        BufferDesc {
-                            size: pyramid_layout.bytes(),
-                        },
-                    );
-                    self.pyramid.add_pass(fg, bindless, read_depth, pyramid);
-                    cull_pass(
+                            PHASE_LATE,
+                            PLAIN_STATES,
+                            ao_texture,
+                            contact_texture,
+                            decal_texture,
+                            gi_texture,
+                        );
+                    });
+                } else {
+                    shading_pass(
                         fg,
-                        bindless,
-                        "cull late",
+                        "forward late",
+                        &geometry,
+                        &materials,
+                        shadow_map,
                         culled,
                         visible,
-                        Some(flags),
-                        PHASE_LATE,
+                        targets,
+                        false,
+                        depth,
+                        DepthUse::Write(LoadOp::Load, depth_store),
                         scene_instances,
                     )
-                    .read(pyramid, Access::StorageRead(ShaderStages::COMPUTE))
-                    .dispatch(cull, cull_threads, move |ctx| {
-                        Some(Push {
-                            visible: ctx.address(visible) + visible_bytes,
-                            commands: ctx.address(culled) + command_bytes,
-                            pyramid: ctx.address(pyramid),
-                            phase: PHASE_LATE,
-                            ..base
-                        })
-                    });
-                    if prepass {
-                        let mut pass = prepass_pass(
-                            fg,
-                            "depth prepass late",
-                            &geometry,
-                            &materials,
-                            culled,
-                            visible,
-                            scene_instances,
-                        )
-                        .depth(depth, LoadOp::Load, StoreOp::Store);
-                        if let Some(resolved) = resolved_depth {
-                            pass = pass.resolve(resolved, nearest);
-                        }
-                        if let Some((velocity, previous)) = prepass_velocity {
-                            pass = pass
-                                .color(velocity, LoadOp::Load, StoreOp::Store)
-                                .read(previous, Access::StorageRead(ShaderStages::VERTEX));
-                        }
-                        pass.execute(move |ctx| {
-                            draw_phase(
-                                ctx,
-                                prepass_pipelines,
-                                false,
-                                PHASE_LATE,
-                                DEPTH_STATES,
-                                None,
-                                None,
-                                None,
-                                None,
-                            )
-                        });
-                        if let Some(((settings, view_space), passes)) = &ao {
-                            targets.ao = Some(passes.passes.add_passes(
-                                fg, bindless, read_depth, view_space, settings, ao_frame,
-                            ));
-                        }
-                        if let Some(((settings, _), state)) = contact {
-                            targets.contact = Some(state.passes.add_passes(
-                                fg,
-                                bindless,
-                                read_depth,
-                                &contact_view,
-                                &settings,
-                            ));
-                        }
-                        if let Some((d, prepared)) = &decals {
-                            targets.decals =
-                                Some(d.passes.add_prepared(fg, bindless, read_depth, prepared));
-                        }
-                        targets.gi = gi_resolve.add(fg, ring, bindless);
-                        let ao_texture = targets.ao;
-                        let contact_texture = targets.contact;
-                        let decal_texture = targets.decals;
-                        let gi_texture = targets.gi;
-                        shading_pass(
-                            fg,
-                            names.forward,
-                            &geometry,
-                            &materials,
-                            shadow_map,
-                            culled,
-                            visible,
-                            targets,
+                    .execute(move |ctx| {
+                        draw_phase(
+                            ctx,
+                            main_pipelines,
                             true,
-                            depth,
-                            DepthUse::ReadOnly,
-                            scene_instances,
+                            PHASE_LATE,
+                            PLAIN_STATES,
+                            None,
+                            None,
+                            None,
+                            None,
                         )
-                        .execute(move |ctx| {
-                            draw_phase(
-                                ctx,
-                                main_pipelines,
-                                true,
-                                PHASE_EARLY,
-                                PLAIN_STATES,
-                                ao_texture,
-                                contact_texture,
-                                decal_texture,
-                                gi_texture,
-                            );
-                            draw_phase(
-                                ctx,
-                                main_pipelines,
-                                true,
-                                PHASE_LATE,
-                                PLAIN_STATES,
-                                ao_texture,
-                                contact_texture,
-                                decal_texture,
-                                gi_texture,
-                            );
-                        });
-                    } else {
-                        shading_pass(
-                            fg,
-                            "forward late",
-                            &geometry,
-                            &materials,
-                            shadow_map,
-                            culled,
-                            visible,
-                            targets,
-                            false,
-                            depth,
-                            DepthUse::Write(LoadOp::Load, depth_store),
-                            scene_instances,
-                        )
-                        .execute(move |ctx| {
-                            draw_phase(
-                                ctx,
-                                main_pipelines,
-                                true,
-                                PHASE_LATE,
-                                PLAIN_STATES,
-                                None,
-                                None,
-                                None,
-                                None,
-                            )
-                        });
-                    }
-                    ForwardPasses {
-                        instances: instance_count,
-                        batches: batch_count,
-                        draw_commands: drawn_commands,
-                        list_commands: command_count,
-                        occlusion: true,
-                        commands: Some(culled),
-                        motion: None,
-                        ao: targets.ao,
-                        atmosphere: atmosphere.and_then(|a| a.textures),
-                        contact_shadows: targets.contact,
-                        decals: targets.decals,
-                        gi: targets.gi,
-                        reflections: None,
-                        resolved_depth,
-                        draws: Some(draw_lists),
-                    }
+                    });
                 }
-            };
+                ForwardPasses {
+                    instances: instance_count,
+                    batches: batch_count,
+                    draw_commands: drawn_commands,
+                    list_commands: command_count,
+                    occlusion: true,
+                    commands: Some(culled),
+                    motion: None,
+                    ao: targets.ao,
+                    atmosphere: atmosphere.and_then(|a| a.textures),
+                    contact_shadows: targets.contact,
+                    decals: targets.decals,
+                    gi: targets.gi,
+                    reflections: None,
+                    resolved_depth,
+                    draws: Some(draw_lists),
+                    meshlets: meshlet_lists,
+                }
+            }
+        };
         // Subsurface materials (ADR 0059): shaded after the others, also writing their
         // diffuse light and albedo, then scattered into the color target.
         if let Some(pipelines) = subsurface.filter(|_| subsurface_draws) {
@@ -2080,6 +2169,31 @@ fn cull_pass<'a, 'g>(
         Some(flags) => pass.read(flags, Access::StorageRead(ShaderStages::COMPUTE)),
         None => pass,
     }
+}
+
+/// Records a forward phase's culling with the meshlet path (ADR 0085) into `pass`:
+/// `cullMainMeshlets` over the instances, then the meshlet cull over the work items it
+/// wrote into the phase's meshlet lists at `lists` in `culled` (their dispatch arguments
+/// there too). The meshlets are read from the geometry pool's index buffer.
+#[allow(clippy::too_many_arguments)]
+fn record_meshlet_cull<'a, 'g>(
+    pass: ComputePass<'a, 'g>,
+    geometry: &GeometryFrame<'_>,
+    culled: Buffer,
+    shaders: &'g MeshletCull,
+    lists: u64,
+    threads: Dispatch,
+    push: impl Fn(&PassContext<'_>) -> Push + 'g,
+) {
+    pass.read(culled, Access::Indirect)
+        .read(geometry.indices, Access::StorageRead(ShaderStages::COMPUTE))
+        .record(move |rec| {
+            let push = push(rec.context());
+            let args = rec.context().buffer(culled);
+            rec.dispatch(&shaders.instances, threads, &push);
+            rec.barrier_for_indirect();
+            rec.dispatch_indirect(&shaders.meshlets, args, lists + MESHLET_ARGS, &push);
+        });
 }
 
 /// A depth prepass phase that draws the culled commands, without its attachment.

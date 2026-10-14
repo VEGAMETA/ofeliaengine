@@ -38,8 +38,8 @@ use engine_render::material::MaterialTable;
 use engine_render::material::{AlphaMode, MaterialDesc, TextureRef};
 use engine_render::material::{MaterialId, MaterialParams, MaterialTypeId};
 use engine_render::mesh::{
-    GeometryPool, LodIndices, MeshData, MeshError, MeshId, StreamedLevel, VertexAttributes,
-    encode_attributes,
+    GeometryPool, LodIndices, MeshData, MeshError, MeshId, Meshlet, StreamedLevel,
+    VertexAttributes, encode_attributes,
 };
 use engine_render::streaming::{
     LevelRequest, LodView, MeshLevelRequest, MeshStreamer, MeshStreamerStats, StreamerSettings,
@@ -251,16 +251,23 @@ impl Default for SceneStreamSettings {
 }
 
 /// Bytes a mesh level entry takes once decoded in place ([`decode_mesh_level`]): a
-/// 16-byte header, positions, encoded attributes, indices.
+/// 16-byte header, positions, encoded attributes, indices, meshlets (ADR 0085).
 fn decoded_mesh_level_bytes(entry: &Entry) -> usize {
     let (vertices, indices) = (entry.meta[2] as usize, entry.meta[3] as usize);
-    16 + vertices * (12 + 16) + indices * 4
+    let meshlets = entry.meta[5] as usize;
+    16 + vertices * (12 + 16) + indices * 4 + meshlets * size_of::<Meshlet>()
+}
+
+/// The cook's meshlets as the geometry pool takes them: the same 32 bytes, field by field
+/// (ADR 0085).
+pub fn gpu_meshlets(meshlets: &[engine_assets::meshlet::Meshlet]) -> &[Meshlet] {
+    bytemuck::cast_slice(meshlets)
 }
 
 /// Runs on the streaming thread on every entry it read: a mesh level entry is decoded and
 /// its vertices encoded as the geometry pool stores them, in place (`[vertices, indices,
-/// first vertex, level]`, positions, attributes, indices), so the frame's thread only
-/// copies it.
+/// first vertex, level]`, positions, attributes, indices, meshlets), so the frame's thread
+/// only copies it.
 fn decode_mesh_level(entry: &Entry, bytes: &mut [u8]) -> Result<(), PackError> {
     if entry.kind() != EntryKind::MeshLevel {
         return Ok(());
@@ -278,11 +285,12 @@ fn decode_mesh_level(entry: &Entry, bytes: &mut [u8]) -> Result<(), PackError> {
             tangents: &level.tangents,
             uvs: &level.uvs,
             indices: &level.indices,
+            meshlets: &[],
         },
         &mut attributes,
     );
     let (n, i) = (level.positions.len(), level.indices.len());
-    let needed = 16 + n * 28 + i * 4;
+    let needed = 16 + n * 28 + i * 4 + level.meshlets.len() * size_of::<Meshlet>();
     let out = bytes
         .get_mut(..needed)
         .ok_or_else(|| invalid("mesh level target too small"))?;
@@ -290,7 +298,8 @@ fn decode_mesh_level(entry: &Entry, bytes: &mut [u8]) -> Result<(), PackError> {
     out[..16].copy_from_slice(bytemuck::cast_slice(&header));
     out[16..16 + n * 12].copy_from_slice(bytemuck::cast_slice(&level.positions));
     out[16 + n * 12..16 + n * 28].copy_from_slice(bytemuck::cast_slice(&attributes));
-    out[16 + n * 28..].copy_from_slice(bytemuck::cast_slice(&level.indices));
+    out[16 + n * 28..16 + n * 28 + i * 4].copy_from_slice(bytemuck::cast_slice(&level.indices));
+    out[16 + n * 28 + i * 4..].copy_from_slice(bytemuck::cast_slice(&level.meshlets));
     Ok(())
 }
 
@@ -428,6 +437,7 @@ impl SceneStreamer {
                 tangents: &mesh.tangents,
                 uvs: &mesh.uvs,
                 indices: &mesh.indices,
+                meshlets: gpu_meshlets(&mesh.meshlets),
             };
             let (min, max) = (Vec3::from(mesh.min), Vec3::from(mesh.max));
             let id = match layout.mesh_streams.get(m).and_then(Option::as_ref) {
@@ -452,6 +462,7 @@ impl SceneStreamer {
                         .map(|l| LodIndices {
                             indices: &l.indices,
                             error: l.error,
+                            meshlets: gpu_meshlets(&l.meshlets),
                         })
                         .collect();
                     geometry.add_mesh_with_lods(&data, &lods)?
@@ -468,10 +479,11 @@ impl SceneStreamer {
             if let Some(finest) = streamed.levels.first() {
                 vertices += 2 * u64::from(finest.vertices);
             }
+            // Meshlets follow each level's indices: about 8 words per 64 triangles.
             indices += streamed
                 .levels
                 .iter()
-                .map(|l| u64::from(l.index_count))
+                .map(|l| u64::from(l.index_count) + u64::from(l.index_count) / 24 + 4)
                 .sum::<u64>();
         }
         geometry.reserve(vertices, indices);
@@ -808,16 +820,23 @@ impl SceneStreamer {
             return false;
         };
         let header: &[u32] = bytemuck::cast_slice(&bytes[..16]);
-        let (n, i) = (header[0] as usize, header[1] as usize);
-        if header[3] != request.level || 16 + n * 28 + i * 4 != needed {
+        let (n, i, m) = (header[0] as usize, header[1] as usize, e.meta[5] as usize);
+        if header[3] != request.level || 16 + n * 28 + i * 4 + m * size_of::<Meshlet>() != needed {
             return false;
         }
         let positions: &[[f32; 3]] = bytemuck::cast_slice(&bytes[16..16 + n * 12]);
         let attributes: &[VertexAttributes] =
             bytemuck::cast_slice(&bytes[16 + n * 12..16 + n * 28]);
-        let indices: &[u32] = bytemuck::cast_slice(&bytes[16 + n * 28..]);
+        let indices: &[u32] = bytemuck::cast_slice(&bytes[16 + n * 28..16 + n * 28 + i * 4]);
+        let meshlets: &[Meshlet] = bytemuck::cast_slice(&bytes[16 + n * 28 + i * 4..]);
         geometry
-            .upload_mesh_level_encoded(request.mesh, request.level, positions, attributes, indices)
+            .upload_mesh_level_encoded(
+                request.mesh,
+                request.level,
+                positions,
+                attributes,
+                (indices, meshlets),
+            )
             .is_ok()
     }
 
@@ -854,5 +873,35 @@ impl SceneStreamer {
                 pool.cancel_staging(span);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The cook's meshlet and the pool's are the same bytes, field by field.
+    #[test]
+    fn cooked_meshlets_reach_the_pool_field_by_field() {
+        let cooked = engine_assets::meshlet::Meshlet {
+            center: [1.0, -2.0, 3.5],
+            radius: 0.25,
+            cone: [-127, 64, 5, 127],
+            first_index: 372,
+            triangles: 124,
+            reserved: 0,
+        };
+        let gpu = gpu_meshlets(core::slice::from_ref(&cooked));
+        assert_eq!(
+            gpu,
+            [Meshlet {
+                center: [1.0, -2.0, 3.5],
+                radius: 0.25,
+                cone: [-127, 64, 5, 127],
+                first_index: 372,
+                triangles: 124,
+                reserved: 0,
+            }]
+        );
     }
 }

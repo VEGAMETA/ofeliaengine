@@ -20,6 +20,7 @@ mod local_shadows;
 mod lods;
 mod materials;
 mod mesh_streaming;
+mod meshlets;
 mod motion;
 mod occlusion;
 mod particles;

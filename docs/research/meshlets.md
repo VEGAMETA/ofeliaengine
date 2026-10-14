@@ -101,6 +101,28 @@ in ADR 0085's addendum.
   - `optimize_meshlet` orders for mesh shaders' rasterization. The mesh shader path
     (step 3) builds its own vertex lists anyway.
 
+## Measured on the GPU (2026-10-14)
+
+Step 2, one indexed draw per visible meshlet. The numbers are in ADR 0085's addendum.
+
+- **Degenerate cones.** meshoptimizer marks a meshlet whose normals spread over more than
+  a half space with an axis of 0 and a cutoff of 127. A test that normalizes the axis gets
+  NaN, and NaN culls the meshlet. In Sponza that removed walls, pillars and arches (922
+  visible meshlets). The test must skip such cones.
+- **Draws cost.** On the RTX, 2,568 meshlet draws made Sponza's depth prepass 15 µs slower
+  than its 103 instanced ones. That is about 6 ns a draw, against about 0.1 ns a triangle
+  of depth-only vertex work, about 8 ns for a meshlet of 76 triangles. To pay for the
+  draws of the others there, more than about four meshlets in ten must be culled. On the Radeon, vertex work is about
+  15 times dearer, and the dense scenes gain 10–19 %.
+- **Order.** Meshlet draws come in the GPU's order. Without a depth prepass that undoes
+  the front-to-back order: Sponza +15 % (Radeon) and +35–50 % (RTX). The path needs the
+  prepass.
+- **Merging runs of visible meshlets into one draw** (consecutive ranges of the level's
+  indices) cuts the draws 16× on Sponza. But finding the runs through shared memory
+  costs the cull more than the RTX's prepass saves.
+- **Frustum-crossing instances only.** Keeping instances wholly in view whole drops the
+  dense scenes' gain: there, the normal cones do the culling.
+
 ## Open questions, for measurement
 
 - The threshold between the instanced and the meshlet path (meshlet count, screen size).

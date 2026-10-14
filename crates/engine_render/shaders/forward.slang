@@ -143,6 +143,29 @@ static const uint BUDGET_FIRST[4] = { 0, 8, 28, 68 };
 // The scatter pass takes at most one sample per this many pixels of its disk.
 static const float PIXELS_PER_SAMPLE = 4.0;
 
+// The meshlet path (ADR 0085), per batch: each level's meshlets in the geometry pool's
+// index buffer (`BatchMeshletData` in forward/mod.rs).
+struct BatchMeshlets
+{
+    uint4 first;             // per level: its first meshlet, as an index of `Frame.meshlets`
+    uint4 count;             // per level: its meshlets (0: the level is drawn whole)
+    uint state;              // the batch's pipeline state: the list its meshlet draws go to
+    uint cone;               // 1: meshlets facing away may be culled (single-sided)
+    uint _pad0;
+    uint _pad1;
+};
+
+// A meshlet (`engine_render::mesh::Meshlet`, 32 bytes).
+struct Meshlet
+{
+    float3 center;           // bounding sphere, object space
+    float radius;
+    uint cone;               // normal cone: axis x, y, z and cutoff, snorm8 over 127 (x lowest)
+    uint first_index;        // relative to its level's
+    uint triangles;
+    uint reserved;
+};
+
 struct Frame
 {
     float4x4 clip_from_world;
@@ -211,6 +234,10 @@ struct Frame
     uint* material_data;     // material types' parameters (ADR 0092): `material_stride` bytes per slot
     uint material_stride;
     uint _material_pad;
+    BatchMeshlets* batch_meshlets; // the meshlet entry points (ADR 0085): per batch, its levels' meshlets
+    Meshlet* meshlets;       // the geometry pool's index buffer as meshlets (levels' meshlets follow their indices, 32-byte aligned)
+    uint2 meshlet_offset;    // per phase (all or early; late): bytes from `commands` to its meshlet lists
+    uint2 meshlet_slot;      // per phase: the first slot in `visible` of its meshlet draws
 };
 
 struct Instance
@@ -543,14 +570,68 @@ void append(DrawCommand* commands, uint* visible, uint b, uint first, uint index
     }
 }
 
-// One thread per instance: frustum (and occlusion) test of the instance's world-space
-// bounding box, then append to the batch's visible list. The shadow phase instead tests
-// the box against every cascade and appends to each cascade's lists.
-[shader("compute")]
-[numthreads(64, 1, 1)]
-void cullMain(uint3 id : SV_DispatchThreadID)
+// The meshlet lists of a forward phase (ADR 0085; `MeshletLists` in forward/layout.rs), in
+// the command buffer after the phases' command lists: this header, then a work item per
+// instance taking the meshlet path (`uint2`: the instance, its level | state << 8), then
+// the draws, per state from `offset[state]`.
+struct MeshletHeader
 {
-    uint index = id.x;
+    uint drawn[32];          // per state: meshlet draws written (the draws' count)
+    uint reserved[32];       // per state: draws reserved by the instances taking the path
+    uint offset[32];         // per state: its first draw among the lists' draws
+    uint capacity[32];       // per state: its draws at most
+    uint args[4];            // the meshlet cull's dispatch: work items, 1, 1
+};
+
+static const uint MESHLET_HEADER_BYTES = 528;
+
+// This phase's meshlet lists. Addresses are computed as 64-bit integers (`shaderInt64`):
+// AMD's compiler (driver 26.8.1) reads zeros through a pointer cast after pointer
+// arithmetic (see `material_params`).
+uint64_t meshlet_lists()
+{
+    uint offset = push.phase == PHASE_LATE ? push.frame.meshlet_offset.y : push.frame.meshlet_offset.x;
+    return uint64_t(push.commands) + offset;
+}
+
+uint meshlet_first_slot()
+{
+    return push.phase == PHASE_LATE ? push.frame.meshlet_slot.y : push.frame.meshlet_slot.x;
+}
+
+BatchMeshlets read_batch_meshlets(uint batch)
+{
+    return loadAligned<16>(push.frame.batch_meshlets + batch);
+}
+
+// Whether instance `index`, visible in this phase at level `lod`, is drawn by meshlet:
+// its level has meshlets and its state's lists have room for all of them. It is then a
+// work item of the meshlet cull (`cullMeshlets`) instead of an instance of its command.
+bool take_meshlets(uint batch, uint index, uint lod)
+{
+    BatchMeshlets bm = read_batch_meshlets(batch);
+    uint count = bm.count[lod];
+    if (count == 0)
+        return false;
+    uint64_t lists = meshlet_lists();
+    MeshletHeader* header = (MeshletHeader*)lists;
+    uint base;
+    InterlockedAdd(header.reserved[bm.state], count, base);
+    if (base + count > header.capacity[bm.state])
+        return false;
+    uint item;
+    InterlockedAdd(header.args[0], 1, item);
+    uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
+    work[item] = uint2(index, lod | (bm.state << 8));
+    return true;
+}
+
+// One thread per instance: frustum (and occlusion) test of the instance's world-space
+// bounding box, then append to the batch's visible list (or, with `meshlets`, to the
+// meshlet cull's work: `take_meshlets`). The shadow phase instead tests the box against
+// every cascade and appends to each cascade's lists.
+void cull_instance(uint index, bool meshlets)
+{
     if (index >= push.instance_count)
         return;
     Instance inst = read_instance(push.instances, index);
@@ -621,7 +702,118 @@ void cullMain(uint3 id : SV_DispatchThreadID)
             visible = visible && !was_visible;
         }
     }
-    append(push.commands, push.visible, command, first, index, visible);
+    // Blended batches have no meshlet lists (their count is 0).
+    bool whole = visible;
+    if (meshlets && visible && take_meshlets(inst.batch, index, lod))
+        whole = false;
+    append(push.commands, push.visible, command, first, index, whole);
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullMain(uint3 id : SV_DispatchThreadID)
+{
+    cull_instance(id.x, false);
+}
+
+// `cullMain` with the meshlet path (ADR 0085): its own entry point, so views without
+// meshlets keep the plain one's registers.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullMainMeshlets(uint3 id : SV_DispatchThreadID)
+{
+    cull_instance(id.x, true);
+}
+
+// A snorm8 over 127 of `bits` at `shift`.
+float snorm8(uint bits, uint shift)
+{
+    return float(int(bits << (24 - shift)) >> 24) / 127.0;
+}
+
+// The meshlet cull's chunk of 64 meshlets: which are visible, and where each one's
+// indices end.
+groupshared uint meshlet_visible[64];
+groupshared uint meshlet_end[64];
+
+// The meshlet cull (ADR 0085): one group per work item of `cull_instance`, its lanes over
+// the instance's level's meshlets. A meshlet is drawn unless its bounding sphere is
+// outside the frustum, its normal cone faces away from the camera (single-sided batches,
+// uniformly scaled instances), or, in the late phase, the depth pyramid hides it. Each
+// run of consecutive drawn meshlets (up to 64) is one indexed draw of one instance in its
+// state's list. Nothing about a meshlet is kept from frame to frame (ADR 0035's patent
+// note).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
+{
+    uint64_t lists = meshlet_lists();
+    MeshletHeader* header = (MeshletHeader*)lists;
+    uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
+    DrawCommand* draws = (DrawCommand*)(lists + MESHLET_HEADER_BYTES + 8 * uint64_t(push.instance_count));
+    uint2 item = work[group.x];
+    uint index = item.x;
+    uint lod = item.y & 0xFFu;
+    uint state = item.y >> 8;
+    Instance inst = read_instance(push.instances, index);
+    Batch batch = read_batch(inst.batch);
+    BatchMeshlets bm = read_batch_meshlets(inst.batch);
+    DrawCommand level = push.commands[batch.command + lod];
+    // The instance's scale: a sphere grows by the largest; the cone keeps its angle only
+    // when all three agree.
+    float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+    float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+    float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+    float3 lengths = float3(dot(c0, c0), dot(c1, c1), dot(c2, c2));
+    float largest = max(lengths.x, max(lengths.y, lengths.z));
+    float smallest = min(lengths.x, min(lengths.y, lengths.z));
+    float scale = sqrt(largest);
+    bool cone = bm.cone != 0 && smallest >= largest * 0.999;
+    float3 eye = read_float4(&push.frame.camera_position).xyz;
+    bool cull = push.frame.cull != 0;
+    uint first_slot = meshlet_first_slot();
+    for (uint m = local; m < bm.count[lod]; m += 64)
+    {
+        Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + m);
+        float3 center = transform_point(inst, meshlet.center);
+        float radius = meshlet.radius * scale;
+        bool visible = true;
+        if (cull)
+        {
+            [unroll]
+            for (int i = 0; i < 6; i++)
+            {
+                float4 plane = read_float4(&push.frame.planes[i]);
+                visible = visible && dot(plane.xyz, center) + plane.w >= -radius;
+            }
+            if (visible && cone && (meshlet.cone >> 24) != 127u)
+            {
+                float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
+                float cutoff = snorm8(meshlet.cone, 24);
+                float3 d = center - eye;
+                visible = dot(d, axis) < cutoff * length(d) + radius;
+            }
+            if (visible && push.phase == PHASE_LATE)
+                visible = !occluded(center, float3(radius, radius, radius));
+        }
+        uint count = WaveActiveCountBits(visible);
+        uint base = 0;
+        if (WaveIsFirstLane() && count > 0)
+            InterlockedAdd(header.drawn[state], count, base);
+        base = WaveReadLaneFirst(base);
+        if (visible)
+        {
+            uint at = header.offset[state] + base + WavePrefixCountBits(visible);
+            DrawCommand draw;
+            draw.index_count = meshlet.triangles * 3;
+            draw.instance_count = 1;
+            draw.first_index = level.first_index + meshlet.first_index;
+            draw.vertex_offset = level.vertex_offset;
+            draw.first_instance = first_slot + at;
+            draws[at] = draw;
+            push.visible[first_slot + at] = index;
+        }
+    }
 }
 
 // The coarsest detail level a shadow view seen from `eye` with `lod_scale` pixels per unit

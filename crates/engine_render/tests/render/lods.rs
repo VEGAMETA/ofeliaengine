@@ -84,10 +84,12 @@ fn the_culling_pass_draws_the_level_the_distance_calls_for() {
             &[
                 LodIndices {
                     indices: &cube.indices[..24],
+                    meshlets: &[],
                     error: ERRORS[1],
                 },
                 LodIndices {
                     indices: &cube.indices[..12],
+                    meshlets: &[],
                     error: ERRORS[2],
                 },
             ],

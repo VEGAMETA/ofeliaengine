@@ -242,6 +242,7 @@ fn skinning() {
                     tangents: &mesh.tangents,
                     uvs: &mesh.uvs,
                     indices: &mesh.indices,
+                    meshlets: &[],
                 },
                 joints: &joints,
                 weights: &weights,

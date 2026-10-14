@@ -124,3 +124,62 @@ measurements, niagara's culling).
   detail levels). Its pack grows from 72.68 to 72.95 MB (+0.4 %).
 - **Golden images:** unchanged on both GPUs.
 
+### Step 2, as built and measured (2026-10-14)
+
+- **The pool.** A level's meshlets follow its indices in its index range, from the next
+  32-byte boundary. Ranges, streaming by level, eviction and growth stay as they were.
+  `MeshLod` gains `first_meshlet` and `meshlet_count`.
+- **The pack.** A mesh level entry's meshlet count is in its `meta[5]`: the streaming
+  thread sizes the level's decoded form by it.
+- **Culling.**
+  - `cullMainMeshlets`, a twin of `cullMain`, sends the instance to the meshlet cull's
+    work list. That happens when it is visible in its phase, of a batch neither blended
+    nor of a material type, its level has meshlets, and its pipeline state's lists have
+    room for all of them (`MAX_MESHLET_DRAWS`, 2^17 a phase). Otherwise it keeps its
+    instanced draw.
+  - `cullMeshlets` is dispatched indirectly, one group per work item. Each meshlet's
+    sphere is tested against the frustum. Its normal cone is tested too (single-sided
+    batches, uniformly scaled instances, not meshoptimizer's "no cone" of axis 0 and
+    cutoff 127). In occlusion culling's late phase, the depth pyramid is tested.
+  - Each visible meshlet is one indexed draw of one instance in its state's list.
+  - Nothing about a meshlet is kept between frames (ADR 0035's patent note).
+- **Drawing.** Every forward-phase pass draws the lists after its state's instanced draws:
+  the depth prepass, the shading, texture feedback. It uses
+  `vkCmdDrawIndexedIndirectCount`, with the count written by the meshlet cull.
+- **Only with a depth prepass.** Without one, the draws' GPU order undoes the
+  front-to-back order. Sponza's shading without a prepass ran +15 % slower on the Radeon
+  and +35–50 % on the RTX.
+- **Needs** `drawIndirectCount` and `shaderInt64`, optional device features that both
+  GPUs have. **Off by default:** `ForwardRenderer::set_meshlet_culling`.
+- **Measured** (1920 × 1080, depth prepass, frustum culling; prepass + shading + culling
+  µs, medians, off → on):
+
+| scene | RTX 4060 Ti | Radeon iGPU |
+|---|---|---|
+| Sponza (`scene_bench --prepass`) | 297 → 313 (+5 %) | 10,598 → 10,319 (−2.6 %) |
+| FlightHelmet | 80 → 92 (+15 %) | 2,166 → 2,263 (+4.5 %) |
+| 10,000 spheres of 4,096 triangles, overview (`draw_bench --sphere 32 --prepass`) | 8,617 → 8,383 (−2.7 %) | 136.0 → 121.9 ms (−10.4 %) |
+| the same, inside the field | 1,421 → 1,253 (−12 %) | 29.6 → 24.1 ms (−19 %) |
+
+  - It pays where vertex work counts: dense meshes, and the iGPU with its 2 CUs.
+  - Where pixels dominate (Sponza at 1080p: 0.13 triangles a pixel; FlightHelmet), each
+    draw's cost outweighs the meshlets culled.
+  - The Radeon's memory-bound passes also move with where its resources land
+    (`docs/perf/reference-hw.md`), and the path changes buffer sizes.
+- **Tried and dropped:**
+  - Merging consecutive visible meshlets into one draw. On Sponza it cut 2,568 draws
+    to 163 and the RTX's prepass from 73 to 65 µs. But culling rose 13 → 22 µs on the
+    RTX and 19 → 53 µs on the Radeon, and the Radeon's shading lost its gain (9,306 →
+    9,567 µs).
+  - Only instances crossing the frustum. That removed most of the dense scenes' gain
+    (overview on the RTX: +0.7 %).
+- **Found on the way:** meshoptimizer gives meshlets whose normals spread over more than a
+  half space a zero axis. Normalized, it made NaN, which culled 922 visible meshlets of
+  Sponza. The test `tests/render/meshlets.rs` now draws a cube, a meshlet without a cone.
+- **Open:**
+  - Whether to turn it on by default per device class (a question for the owner).
+  - A rule per instance that keeps pixel-bound instances whole (triangles per pixel?).
+  - Room beyond 2^17 draws: in the dense overview only 29 % of the instances fit.
+  - Step 3 (mesh shaders on the RTX, without a draw per meshlet) and step 4 (shadows: the
+    largest pass of the dense scenes, unchanged here).
+

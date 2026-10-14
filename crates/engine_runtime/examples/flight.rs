@@ -1111,6 +1111,7 @@ mod windowed {
                         tangents: &mesh.tangents,
                         uvs: &mesh.uvs,
                         indices: &mesh.indices,
+                        meshlets: &[],
                     },
                     joints: &mesh.joints,
                     weights: &mesh.weights,

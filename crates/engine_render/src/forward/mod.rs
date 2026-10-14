@@ -146,7 +146,7 @@ mod msaa;
 mod pipelines;
 mod shadow_atlas;
 
-use layout::{Changes, Layout, Source, local_box};
+use layout::{Changes, Layout, MESHLET_ARGS, MESHLET_HEADER_BYTES, Source, local_box};
 pub(crate) use layout::{States, TypedPipelines, mirrored, state};
 pub use material_types::{
     ENGINE_SHADER_DIR, MaterialTypeDesc, RELOAD_QUIET, material_type_options,
@@ -442,6 +442,8 @@ pub(crate) const DEPTH_VERTEX_MASKED_MOTION: &[u8] =
 const PREPASS_MASKED_MOTION: &[u8] =
     include_bytes!("../../shaders/forward.prepassMaskedMotion.spv");
 const CULL: &[u8] = include_bytes!("../../shaders/forward.cullMain.spv");
+const CULL_MESHLETS: &[u8] = include_bytes!("../../shaders/forward.cullMainMeshlets.spv");
+const MESHLET_CULL: &[u8] = include_bytes!("../../shaders/forward.cullMeshlets.spv");
 const FRAGMENT_BLENDED: &[u8] = include_bytes!("../../shaders/forward.fragmentBlended.spv");
 const FRAGMENT_BLENDED_REACTIVE: &[u8] =
     include_bytes!("../../shaders/forward.fragmentBlendedReactive.spv");
@@ -943,7 +945,7 @@ struct CascadeData {
     bounds: [f32; 4],
 }
 
-/// `Frame` in `forward.slang` (1056 bytes).
+/// `Frame` in `forward.slang` (1120 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -1029,6 +1031,28 @@ struct FrameData {
     material_data: u64,
     material_stride: u32,
     _material_pad: u32,
+    /// The meshlet path (ADR 0085): the batches' meshlets, the pool's index buffer (their
+    /// meshlets), and per phase (all or early; late) the bytes from its command list to
+    /// its meshlet lists and the first slot of its meshlet draws.
+    batch_meshlets: u64,
+    meshlets: u64,
+    meshlet_offset: [u32; 2],
+    meshlet_slot: [u32; 2],
+}
+
+/// `BatchMeshlets` in `forward.slang` (48 bytes): a batch's levels' meshlets (ADR 0085).
+#[derive(Clone, Copy, Default)]
+#[repr(C)]
+struct BatchMeshletData {
+    /// Per level: its first meshlet, an index of the pool's index buffer read as meshlets.
+    first: [u32; 4],
+    /// Per level: its meshlets (0: the level is drawn whole).
+    count: [u32; 4],
+    /// The batch's pipeline state: the list its meshlet draws go to.
+    state: u32,
+    /// 1: meshlets facing away may be culled (single-sided).
+    cone: u32,
+    _pad: [u32; 2],
 }
 
 /// `Instance` in `forward.slang` (64 bytes): the rows of the affine
@@ -1094,7 +1118,8 @@ pub(crate) struct Push {
 const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1088);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1120);
+const _: () = assert!(core::mem::size_of::<BatchMeshletData>() == 48);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
 const _: () = assert!(crate::mesh::MAX_LODS == 4);
@@ -1153,6 +1178,22 @@ pub struct ForwardPasses {
     /// What passes drawing the view's visible instances again need (texture feedback,
     /// [`crate::feedback`]).
     pub(crate) draws: Option<DrawLists>,
+    /// The meshlet lists in `commands`, when the view drew by meshlet (ADR 0085): read a
+    /// phase's first 32 words back to count its meshlet draws.
+    pub meshlets: Option<MeshletLists>,
+}
+
+/// Where a view's meshlet lists are in [`ForwardPasses::commands`] (ADR 0085): one per
+/// culling phase, each starting with the meshlet draws it made per pipeline state (32
+/// `u32`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MeshletLists {
+    /// Bytes into the command buffer of the first phase's lists.
+    pub offset: u64,
+    /// Bytes of a phase's lists.
+    pub bytes: u64,
+    /// Room for meshlet draws in a phase.
+    pub draws: u32,
 }
 
 /// The view's culled draw lists in this frame's graph, for passes that draw the visible
@@ -1170,6 +1211,26 @@ pub(crate) struct DrawLists {
     pub(crate) phases: u32,
     pub(crate) command_bytes: u64,
     pub(crate) states: States,
+    /// The phases' meshlet lists in `commands`, when the view drew by meshlet (ADR 0085).
+    pub(crate) meshlets: Option<MeshletDraws>,
+}
+
+/// Where a view's meshlet lists are (ADR 0085), for the passes that draw them.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MeshletDraws {
+    pub(crate) layout: layout::MeshletLayout,
+    /// The first phase's lists in the command buffer, and the bytes of each.
+    pub(crate) base: u64,
+    pub(crate) bytes: u64,
+    /// Work items each phase's lists have room for (the instances).
+    pub(crate) work: u32,
+}
+
+impl MeshletDraws {
+    /// Where phase `list`'s lists start (0: all or early; 1: late).
+    pub(crate) fn lists(&self, list: u32) -> u64 {
+        self.base + u64::from(list) * self.bytes
+    }
 }
 
 /// Which instance-slot region command list `list` uses: the forward phases' lists
@@ -1316,6 +1377,10 @@ pub struct ForwardRenderer {
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
     cull: ComputeShader<Push>,
+    /// The meshlet path's culling (ADR 0085), made when first turned on;
+    /// `meshlets_on` says whether it is on now.
+    meshlet_cull: Option<Box<MeshletCull>>,
+    meshlets_on: bool,
     /// The tiles' light bitmasks.
     light_tiles: ComputeShader<Push>,
     pyramid: DepthPyramid,
@@ -1372,6 +1437,21 @@ pub struct ForwardRenderer {
     material_types: material_types::MaterialTypes,
     /// The shading's variants that read ambient occlusion's bent normal (ADR 0058).
     bent_twins: bent::BentTwins,
+}
+
+/// The meshlet path's compute shaders (ADR 0085).
+struct MeshletCull {
+    /// `cullMain` with the meshlet path: instances whose level has meshlets become work
+    /// items.
+    instances: ComputeShader<Push>,
+    /// The meshlet cull: one group per work item.
+    meshlets: ComputeShader<Push>,
+}
+
+impl core::fmt::Debug for MeshletCull {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("MeshletCull").finish_non_exhaustive()
+    }
 }
 
 /// The slot of a sample count in `ForwardRenderer::msaa`: 2, 4, 8 samples.
@@ -1828,6 +1908,8 @@ impl ForwardRenderer {
             blended_atmosphere,
             shadow,
             cull,
+            meshlet_cull: None,
+            meshlets_on: false,
             light_tiles,
             pyramid,
             shadow_settings,
@@ -2144,6 +2226,51 @@ impl ForwardRenderer {
     /// Whether local reflections are on.
     pub fn reflections(&self) -> bool {
         self.reflections_on
+    }
+
+    /// Draws the instances whose detail level has meshlets (ADR 0085) one indexed draw per
+    /// meshlet that may be seen, in the forward phases (the depth prepass, the shading,
+    /// texture feedback): culling tests each meshlet's bounding sphere against the
+    /// frustum, its normal cone against the camera (single-sided materials, uniformly
+    /// scaled instances) and, in occlusion culling's second phase, against the depth
+    /// pyramid. Blended instances, those of material types and those beyond a frame's room
+    /// for meshlet draws keep their instanced draw, as do the shadow passes and reflection
+    /// probes' captures. Meshes get meshlets from the cook (`engine_assets`). Needs the
+    /// device's `drawIndirectCount` and `shaderInt64`; returns whether it is on.
+    pub fn set_meshlet_culling(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        enabled: bool,
+    ) -> Result<bool, RhiError> {
+        let caps = &device.adapter().caps;
+        let supported = caps.draw_indirect_count && caps.shader_int64;
+        if enabled && supported && self.meshlet_cull.is_none() {
+            let [instances, meshlets] = ComputeSource::create_all(
+                device,
+                bindless,
+                [
+                    ComputeSource::<Push>::new(CULL_MESHLETS, c"cullMainMeshlets", &[])?,
+                    ComputeSource::<Push>::new(MESHLET_CULL, c"cullMeshlets", &[])?,
+                ],
+            )?;
+            self.meshlet_cull = Some(Box::new(MeshletCull {
+                instances,
+                meshlets,
+            }));
+        }
+        self.meshlets_on = enabled && supported;
+        Ok(self.meshlets_on)
+    }
+
+    /// Whether views draw by meshlet ([`Self::set_meshlet_culling`]).
+    pub fn meshlet_culling(&self) -> bool {
+        self.meshlets_on
+    }
+
+    /// The meshlet path's shaders while it is on.
+    fn meshlet_shaders(&self) -> Option<&MeshletCull> {
+        self.meshlet_cull.as_deref().filter(|_| self.meshlets_on)
     }
 
     /// Turns decals (ADR 0082, [`crate::decals`]) on or off (the default): views with
@@ -3016,6 +3143,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         reflections: None,
         resolved_depth,
         draws: None,
+        meshlets: None,
     }
 }
 

@@ -14,7 +14,9 @@
 //! `--sphere <rings>` draws UV spheres of `rings` × 2·`rings` quads (radius 0.5) instead of
 //! cubes; `--lods` gives the mesh detail levels from `engine_assets::generate_lods`
 //! (ADR 0053). `--blended` makes every instance half transparent (ADR 0054): the forward
-//! column then includes the transparent pass.
+//! column then includes the transparent pass. `--meshlets` gives the mesh and its levels
+//! meshlets (`engine_assets::meshlet`) and draws by meshlet (ADR 0085; needs the depth
+//! prepass).
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -25,7 +27,7 @@ use engine_render::forward::{
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialId, MaterialTable};
 use engine_render::mesh::{
-    GeometryCapacity, GeometryPool, LodIndices, MeshId, OwnedMeshData, cube,
+    GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId, OwnedMeshData, cube,
 };
 use engine_render::post::HDR_FORMAT;
 use engine_render::texture_pool::TexturePool;
@@ -194,6 +196,7 @@ fn main() {
     let mut sphere_rings = None;
     let mut lods = false;
     let mut blended = false;
+    let mut meshlets = false;
     let mut shadows = ShadowSettings::default();
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -204,6 +207,7 @@ fn main() {
             "--sphere" => sphere_rings = Some(args.next().unwrap().parse().unwrap()),
             "--lods" => lods = true,
             "--blended" => blended = true,
+            "--meshlets" => meshlets = true,
             n => max_instances = n.parse().unwrap(),
         }
     }
@@ -227,8 +231,8 @@ fn main() {
         ForwardRenderer::new(&device, &bindless, HDR_FORMAT, depth_format, shadows).unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
-    let mesh_data = sphere_rings.map_or_else(cube, sphere);
-    let levels = if lods {
+    let mut mesh_data = sphere_rings.map_or_else(cube, sphere);
+    let mut levels = if lods {
         engine_assets::generate_lods(
             &mesh_data.positions,
             &mesh_data.indices,
@@ -246,15 +250,39 @@ fn main() {
         );
     }
     println!();
+    // Meshlets per level, as the cook makes them (each level's triangles reordered).
+    let full_meshlets = if meshlets {
+        let made =
+            engine_assets::meshlet::build_meshlets(&mesh_data.positions, &mut mesh_data.indices);
+        for l in &mut levels {
+            l.meshlets =
+                engine_assets::meshlet::build_meshlets(&mesh_data.positions, &mut l.indices);
+        }
+        println!(
+            "Meshlets: {} (levels {:?})",
+            made.len(),
+            levels.iter().map(|l| l.meshlets.len()).collect::<Vec<_>>()
+        );
+        made
+    } else {
+        Vec::new()
+    };
     let lod_indices: Vec<LodIndices<'_>> = levels
         .iter()
         .map(|l| LodIndices {
             indices: &l.indices,
             error: l.error,
+            meshlets: bytemuck::cast_slice(&l.meshlets),
         })
         .collect();
     let mesh = geometry
-        .add_mesh_with_lods(&mesh_data.as_data(), &lod_indices)
+        .add_mesh_with_lods(
+            &MeshData {
+                meshlets: bytemuck::cast_slice(&full_meshlets),
+                ..mesh_data.as_data()
+            },
+            &lod_indices,
+        )
         .unwrap();
     let mut textures = TexturePool::new(&device, 64 << 20, 1);
     let mut materials = MaterialTable::new(1);
@@ -333,6 +361,15 @@ fn main() {
     );
     println!("|---:|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|");
     renderer.set_depth_prepass(prepass);
+    if meshlets {
+        let on = renderer
+            .set_meshlet_culling(&device, &bindless, true)
+            .unwrap();
+        println!(
+            "Meshlet culling: {}",
+            if on { "on" } else { "not supported" }
+        );
+    }
 
     let mut draws: Vec<DrawItem> = Vec::new();
     let configurations = [
