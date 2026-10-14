@@ -598,9 +598,15 @@ grown, divide and conquer); the old labels stay in parentheses.
       - So most likely the driver's (26.8.1): independent instances should not affect each
         other.
     - **Worked around:** `engine_rhi` destroys an instance that goes while others live
-      only with the last of them. The test of the workaround waits for the Radeon to work
-      again: after some fifteen losses in a row on 2026-10-14 its driver stopped (code 43
-      until a restart).
+      only with the last of them. Checked on the Radeon after a restart:
+      - the repro passes 8 rounds of 8, with an idle second device and with FlightHelmet
+        beside;
+      - `texture_feedback_with_msaa flight_helmet --test-threads 2` passes, where it failed
+        every time.
+    - The older driver 32.0.21036.18 (November 2025) has the same bug: not a regression of
+      26.8.1.
+    - Some fifteen losses in a row stopped the Radeon's driver (code 43; back after
+      `pnputil /restart-device` and a restart).
     - Found on the way and fixed: the derived data cache's temporary file was named by the
       process only, so two threads caching one texture at once failed (now one per write);
   - glTF's texture coordinates beyond the first set, `KHR_texture_transform` and vertex
