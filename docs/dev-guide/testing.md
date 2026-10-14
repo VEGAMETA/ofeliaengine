@@ -74,7 +74,11 @@ set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden -- golden:
 
 `perf_gate` renders the procedural scene and Sponza with each feature and antialiasing mode
 at 1920 × 1080 (three runs of 100 frames per scene) and compares every pass's GPU time with
-the baseline of the GPU's vendor (`tests/golden/perf/<vendor>.tsv`):
+the baseline of the GPU's vendor (`tests/golden/perf/<vendor>.tsv`). Each device class's
+defaults (`RenderDefaults`) are measured on Sponza and on Intel's Sponza, a dense scene of
+3.7 M triangles. Intel's Sponza is not among the default test assets: fetch it with
+`tools\fetch-test-assets.ps1 -Only IntelSponza` (5.4 GB of archives); without it its scenes
+are skipped.
 
 ```
 set VK_LOADER_LAYERS_DISABLE=~implicit~

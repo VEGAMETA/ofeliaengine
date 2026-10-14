@@ -316,7 +316,8 @@ measurements, niagara's culling).
   - `ForwardRenderer` itself still starts with it off. `flight` takes the default
     (`--meshlet-culling on|off`).
   - The perf gate measures each class's defaults on Sponza
-    (`sponza_defaults_discrete`, `sponza_defaults_integrated`).
+    (`sponza_defaults_discrete`, `sponza_defaults_integrated`) and on Intel's Sponza
+    where it was fetched (`intel_sponza_defaults_*`).
 - **Next:**
   - step 3: mesh shaders on the RTX, with no draw per meshlet;
   - the shadow casters in the light's order;

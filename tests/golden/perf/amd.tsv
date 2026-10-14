@@ -1,5 +1,43 @@
 # GPU µs per pass (median of 3 runs' medians over 100 frames, a round at a time), AMD Radeon(TM) Graphics (integrated, Vulkan 1.4.315, 21.2 GiB, AMD proprietary driver 26.8.1 (AMD proprietary shader compiler))
 # scene	pass	µs
+intel_sponza_defaults_discrete	(frame total)	82551.9
+intel_sponza_defaults_discrete	(gpu frame)	82505.0
+intel_sponza_defaults_discrete	ao	14721.2
+intel_sponza_defaults_discrete	ao denoise	2884.4
+intel_sponza_defaults_discrete	ao depths	1575.9
+intel_sponza_defaults_discrete	bloom downsample	1665.4
+intel_sponza_defaults_discrete	bloom upsample	840.1
+intel_sponza_defaults_discrete	cull	95.6
+intel_sponza_defaults_discrete	cull setup	3.7
+intel_sponza_defaults_discrete	depth prepass	4971.6
+intel_sponza_defaults_discrete	forward	23333.8
+intel_sponza_defaults_discrete	motion background	40.2
+intel_sponza_defaults_discrete	remember instances	0.3
+intel_sponza_defaults_discrete	shadow	21316.8
+intel_sponza_defaults_discrete	shadow cull	557.2
+intel_sponza_defaults_discrete	sky	80.4
+intel_sponza_defaults_discrete	taau	6761.2
+intel_sponza_defaults_discrete	tonemap	915.5
+intel_sponza_defaults_discrete	transparent	2715.1
+intel_sponza_defaults_integrated	(frame total)	57655.6
+intel_sponza_defaults_integrated	(gpu frame)	57647.0
+intel_sponza_defaults_integrated	ao	2311.9
+intel_sponza_defaults_integrated	ao denoise	506.8
+intel_sponza_defaults_integrated	ao depths	748.9
+intel_sponza_defaults_integrated	bloom downsample	1737.4
+intel_sponza_defaults_integrated	bloom upsample	839.4
+intel_sponza_defaults_integrated	cull	96.0
+intel_sponza_defaults_integrated	cull setup	3.7
+intel_sponza_defaults_integrated	depth prepass	4221.7
+intel_sponza_defaults_integrated	forward	15432.8
+intel_sponza_defaults_integrated	motion background	14.6
+intel_sponza_defaults_integrated	remember instances	0.3
+intel_sponza_defaults_integrated	shadow	21328.6
+intel_sponza_defaults_integrated	shadow cull	551.4
+intel_sponza_defaults_integrated	sky	23.4
+intel_sponza_defaults_integrated	taau	7465.8
+intel_sponza_defaults_integrated	tonemap	904.8
+intel_sponza_defaults_integrated	transparent	1476.0
 procedural	(frame total)	13840.2
 procedural	(gpu frame)	13853.7
 procedural	bloom downsample	806.1
