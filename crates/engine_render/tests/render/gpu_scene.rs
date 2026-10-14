@@ -7,7 +7,9 @@
 //!   frames without changes upload nothing;
 //! - motion vectors of moved, still (settled), teleported, new and removed instances;
 //! - occlusion culling keys off slots: instances spawned in a shuffled order, and
-//!   removed and spawned again, are culled as well as a fixed draw list is.
+//!   removed and spawned again, are culled as well as a fixed draw list is;
+//! - cached shadow cascades (ADR 0093) follow the scene's uploads: nothing drawn while
+//!   nothing changes, everything when an instance moves.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::too_many_lines)]
 
@@ -16,8 +18,8 @@ use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_orthographic, vulkan_p
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion, ShadowSettings,
-    Temporal,
+    Camera, CascadeCache, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion,
+    ShadowSettings, Temporal,
 };
 use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance, SceneStats};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
@@ -112,6 +114,8 @@ struct Bed {
     frame_number: u64,
     /// Sky light, atmosphere and fog for the frames, when set (ADR 0069).
     environment: Option<Environment>,
+    /// The view's cached shadow cascades, when set (ADR 0093).
+    shadow_cache: Option<CascadeCache>,
     device: Device,
     instance: VkInstance,
 }
@@ -186,6 +190,7 @@ impl Bed {
             size,
             frame_number: 0,
             environment: None,
+            shadow_cache: None,
         })
     }
 
@@ -213,6 +218,7 @@ impl Bed {
             size,
             frame_number,
             environment,
+            shadow_cache,
             ..
         } = self;
         let (d, cmd, size) = (device.raw(), *cmd, *size);
@@ -259,6 +265,7 @@ impl Bed {
                 clear: Some([0.0, 0.0, 0.25, 1.0]),
                 occlusion,
                 temporal,
+                shadow_cache: shadow_cache.as_ref(),
                 lights: &[],
                 decals: &[],
                 environment: environment.as_ref(),
@@ -440,6 +447,9 @@ impl Bed {
             self.textures.destroy(allocator, &self.bindless);
             if let Some(environment) = self.environment.as_mut() {
                 environment.destroy(allocator, &self.bindless);
+            }
+            if let Some(cache) = self.shadow_cache.as_mut() {
+                cache.destroy(allocator, &self.bindless);
             }
             if let Some(memory) = self.readback_memory.take() {
                 allocator.destroy_buffer(self.readback, memory);
@@ -1440,4 +1450,76 @@ fn moving_instances_apply_the_same_on_one_thread_and_on_a_pool() {
     let [a, b] = scenes;
     let [t0, t1] = temporal;
     bed.finish(vec![a, b], (Vec::new(), vec![t0, t1]));
+}
+
+/// Cached shadow cascades (ADR 0093) on the scene path: frames that upload nothing draw no
+/// shadows, an upload that moves an instance draws them all again (the first step), a
+/// moving camera only strips, and what the cache holds shades as drawing it all does.
+#[test]
+fn cached_cascades_follow_the_scenes_uploads() {
+    let Some(mut bed) = Bed::new(128) else {
+        return;
+    };
+    let mesh = bed.geometry.add_mesh(&cube().as_data()).unwrap();
+    let gray = bed
+        .materials
+        .add(MaterialDesc::solid([0.6, 0.6, 0.6], 0.0, 0.8));
+    let mut scene = bed.scene(16);
+    let place = |size: Vec3, at: Vec3| SceneInstance {
+        mesh,
+        material: gray,
+        world_from_object: Mat4::from_scale_rotation_translation(size, Quat::IDENTITY, at),
+    };
+    scene.insert(place(Vec3::new(30.0, 0.2, 30.0), Vec3::new(0.0, -0.1, 0.0)));
+    let tower = scene.insert(place(Vec3::new(1.0, 4.0, 1.0), Vec3::new(-1.0, 2.0, -1.0)));
+    scene.insert(place(Vec3::new(2.0, 1.0, 1.0), Vec3::new(2.0, 0.5, 1.0)));
+    let settings = *bed.renderer.shadow_settings();
+    bed.shadow_cache =
+        Some(CascadeCache::new(&bed.device, &mut bed.allocator, &bed.bindless, &settings).unwrap());
+    let layers = u64::from(settings.cascades * settings.resolution * settings.resolution);
+    let mut camera = perspective_camera(Vec3::new(2.0, 7.0, 9.0));
+    let frame = |bed: &mut Bed, scene: &mut GpuScene, camera: Camera| {
+        let shot = bed.frame(Draw::Scene(scene), camera, None, None);
+        let texels = bed.shadow_cache.as_ref().unwrap().stats().last_texels;
+        (shot.image, texels)
+    };
+    assert_eq!(
+        frame(&mut bed, &mut scene, camera).1,
+        layers,
+        "the first frame"
+    );
+    assert_eq!(frame(&mut bed, &mut scene, camera).1, 0, "nothing uploaded");
+    assert!(scene.set_transform(
+        tower,
+        &Mat4::from_scale_rotation_translation(
+            Vec3::new(1.0, 4.0, 1.0),
+            Quat::IDENTITY,
+            Vec3::new(-1.5, 2.0, -1.0)
+        )
+    ));
+    assert_eq!(
+        frame(&mut bed, &mut scene, camera).1,
+        layers,
+        "an instance moved"
+    );
+    assert_eq!(frame(&mut bed, &mut scene, camera).1, 0, "nothing since");
+    camera = perspective_camera(Vec3::new(2.2, 7.0, 8.9));
+    // The scene is small, its cascades too: a step is many of their texels.
+    let strips = frame(&mut bed, &mut scene, camera).1;
+    assert!(
+        strips > 0 && strips < layers / 2,
+        "the camera moved: {strips} texels"
+    );
+    let (kept, none) = frame(&mut bed, &mut scene, camera);
+    assert_eq!(none, 0);
+    bed.shadow_cache.as_ref().unwrap().set_redraw_always(true);
+    let (whole, all) = frame(&mut bed, &mut scene, camera);
+    assert_eq!(all, layers);
+    assert_eq!(
+        differing(&kept, &whole),
+        0,
+        "what the cache holds shades as drawing everything: {}",
+        explain(&kept, &whole, 128)
+    );
+    bed.finish(vec![scene], (Vec::new(), Vec::new()));
 }

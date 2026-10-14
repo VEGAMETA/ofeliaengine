@@ -80,6 +80,8 @@
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(0, 0)]] TextureCube g_cubes[];
+// The sun's shadow map: a layer per cascade (ADR 0093).
+[[vk::binding(0, 0)]] Texture2DArray g_texture_arrays[];
 // The sun's contact shadow mask: a float's bits (contact.rs, CONTACT_FORMAT).
 [[vk::binding(0, 0)]] Texture2D<uint> g_uint_textures[];
 [[vk::binding(0, 0)]] Texture2D<uint2> g_uint2_textures[];
@@ -98,13 +100,18 @@ struct Attributes
     float2 uv;
 };
 
-// `CascadeData` in forward.rs.
+// `CascadeData` in forward/mod.rs: one cascade of the sun's shadows, a layer of the map
+// (ADR 0093).
 struct Cascade
 {
     float4 scale;            // xyz: light view → cascade NDC scale; w: world size of a texel
     float4 offset;           // xyz: offset; w: NDC edge within which the filter stays inside
-    float4 atlas;            // cascade NDC → atlas uv: xy scale, zw offset
-    float4 bounds;           // light view: xy center, z half size, w far depth (−z)
+    float4 atlas;            // cascade NDC → uv of its layer: xy scale, zw offset (where its window starts there)
+    float4 drawn[2];         // light view rectangles (x0, y0, x1, y1) drawn this frame; an empty one has x0 > x1
+    float far;               // light view far depth (−z) of its projection
+    float lod_error;         // world-space error its casters' detail levels may have (0: full meshes)
+    uint _pad0;
+    uint _pad1;
 };
 
 // `ShadowViewData` in local_shadows.rs: one view of a light's shadow in the atlas.
@@ -230,7 +237,7 @@ struct Frame
     float shadow_texel;      // 1 / atlas size
     float gi_scale;          // probe GI (ADR 0088): pixels per resolved sample along each axis
     uint2 gi_samples;        // and the samples' grid
-    uint _gi_pad;
+    uint cascade_sampler;    // the cascades' comparison sampler: repeat (their layers wrap around, ADR 0093)
     uint* material_data;     // material types' parameters (ADR 0092): `material_stride` bytes per slot
     uint material_stride;
     uint _material_pad;
@@ -357,7 +364,6 @@ struct Push
 static const uint PHASE_ALL = 0;    // frustum culling only
 static const uint PHASE_EARLY = 1;  // visible last frame and in the frustum
 static const uint PHASE_LATE = 2;   // visible now and not drawn by the early phase
-static const uint PHASE_SHADOW = 3; // casters of each cascade
 // `LIGHT_TILE` and `Z_BINS` in lights.rs.
 static const uint LIGHT_TILE = 16;
 static const uint Z_BINS = 1024;
@@ -647,8 +653,7 @@ bool take_meshlets(uint batch, uint index, uint lod, uint list)
 
 // One thread per instance: frustum (and occlusion) test of the instance's world-space
 // bounding box, then append to the batch's visible list (or, with `meshlets`, to the
-// meshlet cull's work: `take_meshlets`). The shadow phase instead tests the box against
-// every cascade and appends to each cascade's lists (or its meshlet cull's work).
+// meshlet cull's work: `take_meshlets`). The shadow cascades cull in `cull_shadow_instance`.
 void cull_instance(uint index, bool meshlets)
 {
     if (index >= push.instance_count)
@@ -667,27 +672,6 @@ void cull_instance(uint index, bool meshlets)
     uint lod = choose_lod(inst, batch, center, extents);
     uint command = batch.command + lod;
     uint first = batch.slot + lod * batch.count;
-    if (push.phase == PHASE_SHADOW)
-    {
-        // The box in light view space (Arvo again: the light view is a rotation).
-        float4x4 light = read_matrix(&push.frame.light_from_world);
-        float3 c = mul(light, float4(center, 1.0)).xyz;
-        float3 e = float3(dot(abs(light[0].xyz), extents), dot(abs(light[1].xyz), extents), dot(abs(light[2].xyz), extents));
-        uint cascades = push.frame.cascade_count;
-        for (uint k = 0; k < cascades; k++)
-        {
-            float4 b = read_float4(&push.frame.cascades[k].bounds);
-            // Inside the cascade's square, and not wholly beyond its far depth: anything
-            // between the light and the slice casts into it.
-            bool caster = !blended && (!cull || (all(abs(c.xy - b.xy) <= b.z + e.xy) && -(c.z + e.z) <= b.w));
-            // With meshlets, a caster of the cascade may be its meshlet cull's work item.
-            bool whole = caster;
-            if (meshlets && caster && take_meshlets(inst.batch, index, lod, 2 + k))
-                whole = false;
-            append(push.commands + k * push.frame.command_count, push.visible + k * push.frame.slot_count, command, first, index, whole);
-        }
-        return;
-    }
     bool visible = true;
     if (cull)
     {
@@ -737,6 +721,92 @@ void cull_instance(uint index, bool meshlets)
 void cullMain(uint3 id : SV_DispatchThreadID)
 {
     cull_instance(id.x, false);
+}
+
+// Whether the light view box `c` ± `e` reaches the light view rectangle `r` (x0, y0, x1,
+// y1; never an empty one, x0 > x1).
+bool reaches(float4 r, float3 c, float3 e)
+{
+    return c.x + e.x >= r.x && c.x - e.x <= r.z && c.y + e.y >= r.y && c.y - e.y <= r.w;
+}
+
+// The coarsest detail level whose error, for an instance whose largest scale is `scale`,
+// stays within `allowed` world units (none: the full mesh).
+uint lod_within(Batch batch, float scale, float allowed)
+{
+    uint lods = batch.lods & LOD_COUNT_MASK;
+    if (lods <= 1 || allowed <= 0.0)
+        return 0;
+    uint lod = 0;
+    for (uint k = 1; k < lods; k++)
+    {
+        if (batch.errors[k] * scale <= allowed)
+            lod = k;
+    }
+    return lod;
+}
+
+// The sun's cascades' cull (ADR 0093): one thread per instance. An instance casts into a
+// cascade when its world box, in light view space, reaches a rectangle the cascade draws
+// this frame and is not wholly beyond its far depth (anything between the light and the
+// slice casts into it). It is appended to the cascade's lists (or, with `meshlets`, to its
+// meshlet cull's work) at the detail level the cascade's texels allow: what a cascade
+// draws never depends on the camera, so the texels it keeps from earlier frames stay what
+// it would draw now.
+void cull_shadow_instance(uint index, bool meshlets)
+{
+    if (index >= push.instance_count)
+        return;
+    Instance inst = read_instance(push.instances, index);
+    Batch batch = read_batch(inst.batch);
+    float3 center = transform_point(inst, batch.center.xyz);
+    float3 e = batch.extents.xyz;
+    float3 extents = float3(dot(abs(inst.row0.xyz), e), dot(abs(inst.row1.xyz), e), dot(abs(inst.row2.xyz), e));
+    bool cull = push.frame.cull != 0;
+    // Blended batches cast no shadows.
+    bool blended = (batch.lods & BATCH_BLENDED) != 0;
+    // The box in light view space (Arvo again: the light view is a rotation).
+    float4x4 light = read_matrix(&push.frame.light_from_world);
+    float3 c = mul(light, float4(center, 1.0)).xyz;
+    float3 le = float3(dot(abs(light[0].xyz), extents), dot(abs(light[1].xyz), extents), dot(abs(light[2].xyz), extents));
+    // The instance's largest scale (its columns' lengths).
+    float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+    float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+    float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+    float scale = sqrt(max(dot(c0, c0), max(dot(c1, c1), dot(c2, c2))));
+    uint cascades = push.frame.cascade_count;
+    for (uint k = 0; k < cascades; k++)
+    {
+        float4 r0 = read_float4(&push.frame.cascades[k].drawn[0]);
+        float4 r1 = read_float4(&push.frame.cascades[k].drawn[1]);
+        // A cascade drawing nothing this frame takes nothing, even without culling.
+        bool drawn = r0.x <= r0.z || r1.x <= r1.z;
+        bool reached = (reaches(r0, c, le) || reaches(r1, c, le)) && -(c.z + le.z) <= push.frame.cascades[k].far;
+        bool caster = !blended && drawn && (!cull || reached);
+        uint lod = lod_within(batch, scale, push.frame.cascades[k].lod_error);
+        uint command = batch.command + lod;
+        uint first = batch.slot + lod * batch.count;
+        // With meshlets, a caster of the cascade may be its meshlet cull's work item.
+        bool whole = caster;
+        if (meshlets && caster && take_meshlets(inst.batch, index, lod, 2 + k))
+            whole = false;
+        append(push.commands + k * push.frame.command_count, push.visible + k * push.frame.slot_count, command, first, index, whole);
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullShadows(uint3 id : SV_DispatchThreadID)
+{
+    cull_shadow_instance(id.x, false);
+}
+
+// `cullShadows` with the meshlet path (ADR 0085).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullShadowsMeshlets(uint3 id : SV_DispatchThreadID)
+{
+    cull_shadow_instance(id.x, true);
 }
 
 // `cullMain` with the meshlet path (ADR 0085): its own entry point, so views without
@@ -802,13 +872,13 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     float3 eye = read_float4(&push.frame.camera_position).xyz;
     bool cull = push.frame.cull != 0;
     uint first_slot = push.frame.meshlet_slot[list];
-    // A shadow cascade's cull: its bounds in light view space, and the light's direction.
-    // The shadow pass draws single-sided geometry's faces away from the light (front faces
-    // culled), subsurface materials' faces towards it: a meshlet all of whose faces the
-    // rasterizer would cull is not drawn.
+    // A shadow cascade's cull: the rectangles it draws this frame in light view space, and
+    // the light's direction. The shadow pass draws single-sided geometry's faces away from
+    // the light (front faces culled), subsurface materials' faces towards it: a meshlet all
+    // of whose faces the rasterizer would cull is not drawn.
     bool shadow = list >= 2;
+    uint cascade = shadow ? list - 2 : 0;
     float4x4 light = read_matrix(&push.frame.light_from_world);
-    float4 bounds = shadow ? read_float4(&push.frame.cascades[list - 2].bounds) : float4(0.0);
     float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
     Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + min(m, bm.count[lod] - 1));
     float3 center = transform_point(inst, meshlet.center);
@@ -816,9 +886,12 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     bool visible = valid;
     if (cull && shadow)
     {
-        // Inside the cascade's square, and not wholly beyond its far depth.
+        // Reaching a rectangle the cascade draws, and not wholly beyond its far depth.
         float3 c = mul(light, float4(center, 1.0)).xyz;
-        visible = all(abs(c.xy - bounds.xy) <= bounds.z + radius) && -(c.z + radius) <= bounds.w;
+        float3 e = float3(radius, radius, radius);
+        float4 r0 = read_float4(&push.frame.cascades[cascade].drawn[0]);
+        float4 r1 = read_float4(&push.frame.cascades[cascade].drawn[1]);
+        visible = visible && (reaches(r0, c, e) || reaches(r1, c, e)) && -(c.z + radius) <= push.frame.cascades[cascade].far;
         // The light is a direction: the cone test from infinitely far away.
         if (visible && cone && (meshlet.cone >> 24) != 127u)
         {
@@ -1020,13 +1093,23 @@ float4 shadow_clip(float3 world)
     return float4(light * k.scale.xyz + k.offset.xyz, 1.0);
 }
 
+// A cascade's vertex: its position, in its layer of the map (`push.phase`, ADR 0093).
+struct CascadeVertex
+{
+    float4 position : SV_Position;
+    uint layer : SV_RenderTargetArrayIndex;
+};
+
 // Drawn with a cascade's culled commands: instance `slot` is a slot of its caster list.
 // Only positions are fetched.
 [shader("vertex")]
-float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
+CascadeVertex shadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     Instance inst = read_instance(push.instances, push.visible[slot]);
-    return shadow_clip(transform_point(inst, load_position(vertex)));
+    CascadeVertex o;
+    o.position = shadow_clip(transform_point(inst, load_position(vertex)));
+    o.layer = push.phase;
+    return o;
 }
 
 // A local light's shadow view (`push.phase`: the drawn view): positions only.
@@ -1053,15 +1136,26 @@ struct ShadowOut
     nointerpolation uint material : MATERIAL;
 };
 
+// `ShadowOut` of a cascade, in its layer of the map (`shadowFragmentMasked` reads the
+// rest).
+struct CascadeOut
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint material : MATERIAL;
+    uint layer : SV_RenderTargetArrayIndex;
+};
+
 // Shadows of masked materials: texture coordinates for the alpha test.
 [shader("vertex")]
-ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+CascadeOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     Instance inst = read_instance(push.instances, push.visible[slot]);
-    ShadowOut o;
+    CascadeOut o;
     o.position = shadow_clip(transform_point(inst, load_position(vertex)));
     o.uv = read_attributes(vertex).uv;
     o.material = inst.material;
+    o.layer = push.phase;
     return o;
 }
 
@@ -1475,17 +1569,18 @@ float cascade_shadow(uint c, float3 light, float3 normal)
     if (ndc.z > 1.0)
         return 1.0;
     float2 uv = ndc.xy * k.atlas.xy + k.atlas.zw;
-    Texture2D map = g_textures[NonUniformResourceIndex(push.texture)];
-    SamplerComparisonState s = g_compare_samplers[push.frame.shadow_sampler];
-    uint width, height;
-    map.GetDimensions(width, height);
+    // Its layer of the map, wrapping around: the window starts anywhere in it (ADR 0093).
+    Texture2DArray map = g_texture_arrays[NonUniformResourceIndex(push.texture)];
+    SamplerComparisonState s = g_compare_samplers[push.frame.cascade_sampler];
+    uint width, height, layers;
+    map.GetDimensions(width, height, layers);
     float2 texel = 1.0 / float2(width, height);
     float lit = 0.0;
     [unroll]
     for (int y = -1; y <= 1; y++)
         [unroll]
         for (int x = -1; x <= 1; x++)
-            lit += map.SampleCmpLevelZero(s, uv + float2(x, y) * texel, ndc.z);
+            lit += map.SampleCmpLevelZero(s, float3(uv + float2(x, y) * texel, float(c)), ndc.z);
     return lit / 9.0;
 }
 

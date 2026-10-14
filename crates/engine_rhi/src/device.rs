@@ -272,6 +272,7 @@ impl Device {
             .shader_storage_image_array_non_uniform_indexing(true)
             .shader_storage_buffer_array_non_uniform_indexing(true)
             .scalar_block_layout(true)
+            .shader_output_layer(true)
             // 16-bit math where supported: optional (FSR 3.1's faster variants, ADR 0060).
             .shader_float16(adapter.caps.shader_float16)
             // Meshlets drawn one indirect draw each, counted on the GPU (ADR 0085).

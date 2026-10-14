@@ -20,8 +20,9 @@ pub const MAX_CASCADES: usize = 4;
 /// Shadow settings of a [`crate::forward::ForwardRenderer`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShadowSettings {
-    /// Width and height of each cascade in texels (the atlas holds up to 2 × 2 of them).
-    /// The default, 1024, gives the 2048² atlas the single shadow map had (ADR 0044).
+    /// Width and height of each cascade in texels, a layer of the shadow map each (ADR
+    /// 0093). The default, 1024, gives 4 cascades the texels of the 2048² single shadow map
+    /// before them (ADR 0044).
     pub resolution: u32,
     /// Depth format.
     pub format: vk::Format,
@@ -58,21 +59,6 @@ impl ShadowSettings {
     /// Cascades actually used (at least 1, at most [`MAX_CASCADES`]).
     pub fn cascade_count(&self) -> usize {
         (self.cascades as usize).clamp(1, MAX_CASCADES)
-    }
-
-    /// Columns and rows of cascade tiles in the atlas.
-    pub fn atlas_grid(&self) -> (u32, u32) {
-        match self.cascade_count() {
-            1 => (1, 1),
-            2 => (2, 1),
-            _ => (2, 2),
-        }
-    }
-
-    /// Size of the atlas in texels.
-    pub fn atlas_size(&self) -> (u32, u32) {
-        let (columns, rows) = self.atlas_grid();
-        (self.resolution * columns, self.resolution * rows)
     }
 }
 
@@ -131,10 +117,29 @@ pub struct CascadeFit {
     /// Cascades in use; 0 when the view cannot be split (degenerate camera, nothing in
     /// front of it): everything is lit.
     pub count: usize,
+    /// How far from the camera's near plane the cascades reach (the last one's split).
+    pub reach: f32,
     /// Whether shadows end at the distance setting before the scene or the view does:
     /// they then fade out over the blend band at the last cascade's edge instead of ending
     /// abruptly.
     pub fade: bool,
+}
+
+/// How [`fit_cascades_keeping`] holds cascades still for their cache (ADR 0093).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Keep {
+    /// The reach the cache's cascades were split over: kept while it still covers the view
+    /// and is at most a quarter more than it needs (the view's depth changes with every
+    /// step in a scene smaller than the shadows' distance, and the splits with it).
+    pub reach: Option<f32>,
+    /// Per cascade, the radius its cache was drawn with: kept while it still holds the
+    /// slice and is at most a quarter larger than needed, so turning and moving the camera
+    /// seldom changes the texel size.
+    pub radius: [Option<f32>; MAX_CASCADES],
+    /// The cascades are cached. Their depth range is the scene's, not the slice's: depths
+    /// drawn in one frame stay right in the next. A reach chosen anew gets a tenth more
+    /// than the view needs, so it is kept for longer.
+    pub cached: bool,
 }
 
 /// Splits the view of `clip_from_world` (unjittered; the camera at `eye`) into cascades
@@ -147,6 +152,27 @@ pub fn fit_cascades(
     scene_min: Vec3,
     scene_max: Vec3,
     settings: &ShadowSettings,
+) -> CascadeFit {
+    fit_cascades_keeping(
+        clip_from_world,
+        eye,
+        direction,
+        scene_min,
+        scene_max,
+        settings,
+        &Keep::default(),
+    )
+}
+
+/// [`fit_cascades`], holding the cascades as `keep` says.
+pub(crate) fn fit_cascades_keeping(
+    clip_from_world: Mat4,
+    eye: Vec3,
+    direction: Vec3,
+    scene_min: Vec3,
+    scene_max: Vec3,
+    settings: &ShadowSettings,
+    keep: &Keep,
 ) -> CascadeFit {
     let direction = direction.normalize_or(Vec3::NEG_Y);
     let up = if direction.y.abs() > 0.99 {
@@ -168,6 +194,7 @@ pub fn fit_cascades(
         light_from_world,
         cascades: [empty; MAX_CASCADES],
         count: 0,
+        reach: 0.0,
         fade: false,
     };
 
@@ -212,10 +239,16 @@ pub fn fit_cascades(
     if far_plane.is_finite() && far_plane > 0.0 {
         view_reach = view_reach.min(far_plane);
     }
-    let reach = settings.distance.min(view_reach);
-    if reach.is_nan() || reach <= 0.0 {
+    let needed = settings.distance.min(view_reach);
+    if needed.is_nan() || needed <= 0.0 {
         return fit;
     }
+    let reach = match keep.reach.filter(|&r| r >= needed && r <= needed * 1.25) {
+        Some(kept) => kept,
+        None if keep.cached => (needed * 1.1).min(settings.distance),
+        None => needed,
+    };
+    fit.reach = reach;
     fit.fade = settings.distance < view_reach;
 
     // Practical splits (Zhang et al. 2006), in distance from the near plane.
@@ -266,6 +299,9 @@ pub fn fit_cascades(
         radius = radius * (1.0 + 1.0 / resolution) / limit;
         let step = 2f32.powi(radius.max(1e-6).log2().floor() as i32 - 6);
         radius = (radius / step).ceil() * step;
+        if let Some(kept) = keep.radius[i].filter(|&r| r >= radius && r <= radius * 1.25) {
+            radius = kept;
+        }
         let texel = 2.0 * radius / resolution;
         // Centered on whole texels: moving the camera moves the map by whole texels.
         let light = light_from_world.transform_point3(center);
@@ -276,7 +312,11 @@ pub fn fit_cascades(
         let depth = -light.z;
         let margin = texel;
         let near = light_near - margin;
-        let far = (depth + radius).min(light_far) + margin;
+        let far = if keep.cached {
+            light_far + margin
+        } else {
+            (depth + radius).min(light_far) + margin
+        };
         *cascade = Cascade {
             center: snapped,
             radius,
@@ -323,6 +363,7 @@ pub fn fit_sphere(
         light_from_world,
         cascades: [empty; MAX_CASCADES],
         count: 0,
+        reach: 0.0,
         fade: false,
     };
     let radius = radius.min(settings.distance);
@@ -363,6 +404,7 @@ pub fn fit_sphere(
         split: radius,
     };
     fit.count = 1;
+    fit.reach = radius;
     fit.fade = settings.distance < radius;
     fit
 }
@@ -529,6 +571,98 @@ mod tests {
         );
         assert!(f.cascades[f.count - 1].split < 20.0);
         assert!(!f.fade);
+    }
+
+    /// Walking towards a small scene's far side shortens what the view needs at every
+    /// step: cached cascades keep their reach (and so their splits and texels) until it is
+    /// a quarter more than needed, then take a tenth more than the view needs.
+    #[test]
+    fn cached_cascades_keep_their_reach_while_the_view_shortens() {
+        let (lo, hi) = (Vec3::new(-20.0, -1.0, -60.0), Vec3::new(20.0, 10.0, 20.0));
+        let settings = ShadowSettings::default();
+        let at = |z: f32, keep: &Keep| {
+            let eye = Vec3::new(0.0, 2.0, z);
+            fit_cascades_keeping(camera(eye, 0.0), eye, LIGHT, lo, hi, &settings, keep)
+        };
+        let first = at(
+            0.0,
+            &Keep {
+                cached: true,
+                ..Keep::default()
+            },
+        );
+        assert!(first.reach < settings.distance);
+        let mut keep = Keep {
+            reach: Some(first.reach),
+            radius: first.cascades.map(|c| Some(c.radius)),
+            cached: true,
+        };
+        let (mut kept, mut changed) = (0, 0);
+        for step in 1..40 {
+            let f = at(-(step as f32), &keep);
+            if f.reach == keep.reach.unwrap() {
+                kept += 1;
+                // The same splits: the same texels.
+                for (c, r) in f.cascades[..f.count].iter().zip(keep.radius) {
+                    assert_eq!(Some(c.radius), r, "step {step}");
+                }
+            } else {
+                changed += 1;
+                assert!(f.reach < keep.reach.unwrap(), "the view only shortens");
+            }
+            keep.reach = Some(f.reach);
+            keep.radius = f.cascades.map(|c| Some(c.radius));
+        }
+        // 39 steps of a metre over a view of some 60: a handful of new reaches.
+        assert!(
+            kept > 30 && changed > 0 && changed < 8,
+            "kept {kept}, changed {changed}"
+        );
+        // Without the cache the reach follows the view at every step.
+        let plain = at(-10.0, &Keep::default());
+        let needed = plain.reach;
+        assert!(needed < first.reach);
+    }
+
+    #[test]
+    fn kept_cascades_keep_their_texels_and_the_scene_depth() {
+        let eye = Vec3::new(1.0, 2.0, 3.0);
+        let first = fit(eye, 0.0);
+        let mut keep = Keep {
+            cached: true,
+            ..Keep::default()
+        };
+        for (k, c) in first.cascades[..first.count].iter().enumerate() {
+            keep.radius[k] = Some(c.radius * 1.2);
+        }
+        let kept = fit_cascades_keeping(
+            camera(eye + Vec3::new(0.7, 0.0, -0.3), 0.4),
+            eye + Vec3::new(0.7, 0.0, -0.3),
+            LIGHT,
+            SCENE.0,
+            SCENE.1,
+            &ShadowSettings::default(),
+            &keep,
+        );
+        for (k, c) in kept.cascades[..kept.count].iter().enumerate() {
+            assert_eq!(Some(c.radius), keep.radius[k]);
+            assert_eq!(c.texel, 2.0 * c.radius / 1024.0);
+            // Every cascade reaches the scene's far side (and a texel), whatever its slice.
+            let scene_far = kept.cascades[0].far - kept.cascades[0].texel;
+            assert!((c.far - c.texel - scene_far).abs() < 1e-3, "{c:?}");
+        }
+        // A radius too large (or too small) is not kept.
+        keep.radius[0] = Some(first.cascades[0].radius * 2.0);
+        let refit = fit_cascades_keeping(
+            camera(eye, 0.0),
+            eye,
+            LIGHT,
+            SCENE.0,
+            SCENE.1,
+            &ShadowSettings::default(),
+            &keep,
+        );
+        assert_eq!(refit.cascades[0].radius, first.cascades[0].radius);
     }
 
     #[test]

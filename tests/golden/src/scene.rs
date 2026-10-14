@@ -233,6 +233,9 @@ pub struct Shot {
     /// Culling and drawing by meshlet (ADR 0085): the meshes with meshlets, in the view
     /// when it has the depth prepass and in the sun's shadow cascades.
     pub meshlets: bool,
+    /// The sun's cascades kept across frames (`ViewSettings::cached_shadows`, ADR 0093; on
+    /// by default as there): a still camera draws them once.
+    pub cached_shadows: bool,
     /// Sponza's curtains (its materials 14 to 19) as cloth: material files
     /// (`tests/golden/materials/fabric.slang` with the curtains' own textures) applied by a
     /// material map when cooking, the scene written to a pack (version 5, the types'
@@ -294,6 +297,7 @@ impl Shot {
             panorama: None,
             decals: false,
             meshlets: false,
+            cached_shadows: true,
             gi: None,
             brixelizer_gi: false,
             brixelizer_warmup: None,
@@ -1699,6 +1703,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         quality: shot.quality,
         render_size: shot.render_size,
         occlusion_culling: shot.occlusion_culling,
+        cached_shadows: shot.cached_shadows,
         exposure: Exposure::Fixed(shot.exposure),
         curve: shot.curve,
         bloom: shot.bloom,

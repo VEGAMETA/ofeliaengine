@@ -77,6 +77,11 @@ pub struct ViewSettings {
     /// Two-phase occlusion culling (ADR 0035): what was visible last frame is drawn first,
     /// and hidden objects are skipped.
     pub occlusion_culling: bool,
+    /// The sun's shadow cascades kept across frames (ADR 0093, on by default): each frame
+    /// draws only the strips the camera's movement exposed, nothing for a still camera
+    /// over a still scene (for now everything again when the casters change). Costs the
+    /// view a shadow map of its own (16 MiB with the default 4 cascades of 1024²).
+    pub cached_shadows: bool,
     /// Motion vectors even without temporal antialiasing (for effects of your own).
     /// Temporal antialiasing always has them.
     pub motion_vectors: bool,
@@ -114,6 +119,7 @@ impl Default for ViewSettings {
             bloom: true,
             clear: Some([0.02, 0.02, 0.05, 1.0]),
             occlusion_culling: false,
+            cached_shadows: true,
             motion_vectors: false,
             previous_color: false,
             cinematic: false,

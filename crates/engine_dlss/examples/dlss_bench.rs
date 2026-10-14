@@ -188,6 +188,7 @@ impl Bench {
                         clear: Some([0.02, 0.02, 0.05, 1.0]),
                         occlusion: None,
                         temporal: (which != Which::None).then_some(&*temporal),
+                        shadow_cache: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

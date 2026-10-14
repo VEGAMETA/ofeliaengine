@@ -85,8 +85,12 @@ pub struct TextureDesc {
     pub height: u32,
     /// Mip levels.
     pub mip_levels: u32,
-    /// Array layers.
+    /// Array layers. A pass with attachments of several layers renders them all (layered
+    /// rendering: its vertex shaders pick the layer, `SV_RenderTargetArrayIndex`).
     pub layers: u32,
+    /// Viewed as an array even with one layer (what shaders reading a `Texture2DArray`
+    /// need); textures of several layers always are.
+    pub array: bool,
     /// Samples per pixel.
     pub samples: vk::SampleCountFlags,
 }
@@ -100,7 +104,17 @@ impl TextureDesc {
             height,
             mip_levels: 1,
             layers: 1,
+            array: false,
             samples: vk::SampleCountFlags::TYPE_1,
+        }
+    }
+
+    /// A single-sampled 2D array of `layers` without mips, viewed as an array.
+    pub fn new_2d_array(format: vk::Format, width: u32, height: u32, layers: u32) -> Self {
+        Self {
+            layers: layers.max(1),
+            array: true,
+            ..Self::new_2d(format, width, height)
         }
     }
 
@@ -1584,10 +1598,13 @@ fn begin_rendering(
         width: u32::MAX,
         height: u32::MAX,
     };
+    // Every layer the attachments share.
+    let mut layers = u32::MAX;
     for a in attachments {
         let desc = &textures[a.resource as usize];
         extent.width = extent.width.min(desc.width);
         extent.height = extent.height.min(desc.height);
+        layers = layers.min(desc.layers.max(1));
         let (load, clear) = match a.load {
             LoadOp::Load => (vk::AttachmentLoadOp::LOAD, [0.0; 4]),
             LoadOp::Clear(value) => (vk::AttachmentLoadOp::CLEAR, value),
@@ -1641,7 +1658,7 @@ fn begin_rendering(
     };
     let mut rendering = vk::RenderingInfo::default()
         .render_area(area)
-        .layer_count(1)
+        .layer_count(if layers == u32::MAX { 1 } else { layers })
         .color_attachments(colors);
     let depth_info;
     if let Some(info) = depth {

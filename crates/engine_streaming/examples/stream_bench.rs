@@ -518,6 +518,7 @@ fn main() {
                         clear: Some([0.3, 0.4, 0.5, 1.0]),
                         occlusion: None,
                         temporal: None,
+                        shadow_cache: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

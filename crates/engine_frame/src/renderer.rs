@@ -10,8 +10,8 @@ use core::fmt;
 use engine_core::math::{Mat4, Quat, Vec3, vulkan_perspective};
 use engine_render::environment::Environment;
 use engine_render::forward::{
-    Camera, Decal, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer, ForwardView,
-    LocalLight, MotionOutput, Occlusion, ShadowSettings, Temporal, ViewGi,
+    Camera, CascadeCache, Decal, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer,
+    ForwardView, LocalLight, MotionOutput, Occlusion, ShadowSettings, Temporal, ViewGi,
 };
 use engine_render::fsr1::{Fsr1, Fsr1Exposure};
 use engine_render::gpu_scene::SceneFrame;
@@ -887,6 +887,18 @@ impl FrameRenderer {
             }
             _ => {}
         }
+        match (settings.cached_shadows, view.shadow_cache.is_some()) {
+            (true, false) => {
+                let shadows = self.forward.shadow_settings();
+                view.shadow_cache = Some(CascadeCache::new(device, allocator, bindless, shadows)?);
+            }
+            (false, true) => {
+                if let Some(old) = view.shadow_cache.take() {
+                    view.retire(frame_number, Retired::ShadowCache(old));
+                }
+            }
+            _ => {}
+        }
         match settings.exposure {
             Exposure::Auto(exposure) => match &view.exposure {
                 Some(auto) => auto.set_settings(exposure),
@@ -1146,6 +1158,7 @@ impl FrameRenderer {
             prepared,
             temporal,
             occlusion,
+            shadow_cache,
             upscaler,
             exposure,
             history,
@@ -1192,6 +1205,7 @@ impl FrameRenderer {
         }
         let temporal: Option<&'g Temporal> = temporal.as_ref();
         let occlusion: Option<&'g Occlusion> = occlusion.as_ref();
+        let shadow_cache: Option<&'g CascadeCache> = shadow_cache.as_ref();
         let upscaler: Option<&'g mut Box<dyn Upscaler>> = upscaler.as_mut();
         let exposure: Option<&'g AutoExposure> = exposure.as_ref();
         let (render, output) = (prepared.render, prepared.output);
@@ -1223,6 +1237,7 @@ impl FrameRenderer {
             clear: settings.clear,
             occlusion,
             temporal,
+            shadow_cache,
             lights: scene.lights,
             decals: scene.decals,
             environment: scene.environment,

@@ -353,6 +353,7 @@ fn meshlet_culling_keeps_the_image_and_draws_less() {
                         clear: Some([0.0, 0.0, 0.25, 1.0]),
                         occlusion,
                         temporal: None,
+                        shadow_cache: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

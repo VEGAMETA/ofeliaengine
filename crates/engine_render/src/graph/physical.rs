@@ -763,7 +763,7 @@ unsafe fn create_image(
     }
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
-        .view_type(if desc.layers > 1 {
+        .view_type(if desc.layers > 1 || desc.array {
             vk::ImageViewType::TYPE_2D_ARRAY
         } else {
             vk::ImageViewType::TYPE_2D

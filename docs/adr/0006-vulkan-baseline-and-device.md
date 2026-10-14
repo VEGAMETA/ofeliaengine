@@ -47,6 +47,9 @@ the floor and 1.4 used opportunistically.
     without leaving the quad's derivatives undefined);
   - `textureCompressionBC`, which every desktop GPU supports (added by
     [ADR 0041](0041-texture-compression.md): BC7 and BC5 textures).
+  - `shaderOutputLayer`, which every desktop driver supports (added by
+    [ADR 0093](0093-cached-shadows-and-virtual-shadow-maps.md): the vertex shader picks the
+    layer, one per shadow cascade).
 
   An adapter lacking any of them is listed with the missing names, and the error names them all.
 - **Optional, detected and reported** (`OptionalCaps`), enabled when a feature needs it:

@@ -2,7 +2,7 @@
 
 use crate::antialiasing::Antialiasing;
 use crate::settings::ViewSettings;
-use engine_render::forward::{Occlusion, Temporal};
+use engine_render::forward::{CascadeCache, Occlusion, Temporal};
 use engine_render::graph::TextureState;
 use engine_render::postfx::AutoExposure;
 use engine_render::reflections::ScreenSpaceReflections;
@@ -157,6 +157,7 @@ pub(crate) enum Retired {
     Upscaler(Box<dyn Upscaler>),
     Temporal(Temporal),
     Occlusion(Occlusion),
+    ShadowCache(CascadeCache),
     Exposure(AutoExposure),
     History(HistoryImage),
     Reflections(ScreenSpaceReflections),
@@ -181,6 +182,8 @@ pub struct View {
     pub(crate) prepared: Option<Prepared>,
     pub(crate) temporal: Option<Temporal>,
     pub(crate) occlusion: Option<Occlusion>,
+    /// The sun's cascades kept across frames (ADR 0093).
+    pub(crate) shadow_cache: Option<CascadeCache>,
     pub(crate) upscaler: Option<Box<dyn Upscaler>>,
     pub(crate) exposure: Option<AutoExposure>,
     pub(crate) history: Option<HistoryImage>,
@@ -219,6 +222,7 @@ impl View {
             prepared: None,
             temporal: None,
             occlusion: None,
+            shadow_cache: None,
             upscaler: None,
             exposure: None,
             history: None,
@@ -250,6 +254,12 @@ impl View {
     /// The view's temporal state (jitter, motion vectors), when it has one.
     pub fn temporal(&self) -> Option<&Temporal> {
         self.temporal.as_ref()
+    }
+
+    /// The view's cached shadow cascades (ADR 0093), with
+    /// [`ViewSettings::cached_shadows`]: their statistics, or to draw them whole again.
+    pub fn shadow_cache(&self) -> Option<&CascadeCache> {
+        self.shadow_cache.as_ref()
     }
 
     /// How often the history started over.
@@ -298,6 +308,7 @@ impl View {
             self.upscaler.take().map(Retired::Upscaler),
             self.temporal.take().map(Retired::Temporal),
             self.occlusion.take().map(Retired::Occlusion),
+            self.shadow_cache.take().map(Retired::ShadowCache),
             self.exposure.take().map(Retired::Exposure),
             self.history.take().map(Retired::History),
             self.post_history.take().map(Retired::History),
@@ -335,6 +346,7 @@ unsafe fn free(
             Retired::Upscaler(mut upscaler) => upscaler.destroy(allocator, bindless),
             Retired::Temporal(mut temporal) => temporal.destroy(allocator),
             Retired::Occlusion(mut occlusion) => occlusion.destroy(allocator),
+            Retired::ShadowCache(mut cache) => cache.destroy(allocator, bindless),
             Retired::Exposure(mut exposure) => exposure.destroy(allocator),
             Retired::History(image) => image.destroy(device, allocator, bindless, frame),
             Retired::Reflections(mut ssr) => ssr.destroy(allocator, bindless),

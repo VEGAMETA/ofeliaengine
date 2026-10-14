@@ -254,6 +254,7 @@ fn culled_lights_match_every_light_for_every_pixel() {
                         clear: Some([0.0; 4]),
                         occlusion: None,
                         temporal: None,
+                        shadow_cache: None,
                         lights,
                         decals: &[],
                         environment: None,

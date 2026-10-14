@@ -17,8 +17,10 @@
 //!    and counts them in the batch's command;
 //! 3. **shadow cull** and **shadow**: the culling shader tests every instance against each
 //!    shadow cascade ([`crate::shadow`]) and appends the casters to that cascade's
-//!    commands; a depth-only pass draws each cascade into its tile of a transient atlas
-//!    (with depth bias); masked materials test their alpha;
+//!    commands; a depth-only pass draws each cascade into its layer of the shadow map (with
+//!    depth bias); masked materials test their alpha. With a [`CascadeCache`] the layers
+//!    live across frames and each frame draws only the strips the camera's movement
+//!    exposed (ADR 0093); without one, a transient map is drawn whole;
 //! 4. **forward**: metallic-roughness PBR (GGX, height-correlated Smith, Schlick; after
 //!    Filament's documentation) with normal maps, occlusion, emission, geometric specular
 //!    antialiasing and 3×3 PCF shadows from the finest cascade holding each pixel, into the
@@ -139,6 +141,7 @@ const FRAGMENT_AO_CONTACT_SHADOWED: &[u8] =
     include_bytes!("../../shaders/forward.fragmentMainAoContactShadowed.spv");
 
 mod bent;
+mod cascade_cache;
 mod declare;
 mod layout;
 mod material_types;
@@ -158,6 +161,9 @@ use pipelines::{
     ready, shading_desc, shadowed_index,
 };
 use shadow_atlas::{AtlasImage, LocalShadowState};
+
+pub use cascade_cache::{CascadeCache, CascadeCacheStats};
+use cascade_cache::{Casters, whole_plans};
 
 pub use crate::contact::ContactShadowSettings;
 pub use crate::decals::Decal;
@@ -443,6 +449,11 @@ const PREPASS_MASKED_MOTION: &[u8] =
     include_bytes!("../../shaders/forward.prepassMaskedMotion.spv");
 const CULL: &[u8] = include_bytes!("../../shaders/forward.cullMain.spv");
 const CULL_MESHLETS: &[u8] = include_bytes!("../../shaders/forward.cullMainMeshlets.spv");
+// The sun's cascades' cull (ADR 0093): their own entry points, so the view's keep their
+// registers.
+const CULL_SHADOWS: &[u8] = include_bytes!("../../shaders/forward.cullShadows.spv");
+const CULL_SHADOWS_MESHLETS: &[u8] =
+    include_bytes!("../../shaders/forward.cullShadowsMeshlets.spv");
 const MESHLET_CULL: &[u8] = include_bytes!("../../shaders/forward.cullMeshlets.spv");
 const FRAGMENT_BLENDED: &[u8] = include_bytes!("../../shaders/forward.fragmentBlended.spv");
 const FRAGMENT_BLENDED_REACTIVE: &[u8] =
@@ -465,7 +476,6 @@ const PHASE_SHADOW_MESHLETS: u32 = 16;
 const PHASE_ALL: u32 = 0;
 const PHASE_EARLY: u32 = 1;
 const PHASE_LATE: u32 = 2;
-const PHASE_SHADOW: u32 = 3;
 
 /// Pipeline states of batches, drawn in this order: bit 4 subsurface scattering, bit 3
 /// blended, bit 2 masked, bit 1 double-sided, bit 0 mirrored (negative determinant, so
@@ -628,6 +638,9 @@ pub struct ForwardView<'a> {
     /// This view's temporal state, for a jittered projection and motion vectors (TAA,
     /// upscalers, motion blur), or `None`.
     pub temporal: Option<&'a Temporal>,
+    /// This view's sun shadows kept across frames (ADR 0093): each frame then draws only
+    /// what changed. `None` draws every cascade whole every frame.
+    pub shadow_cache: Option<&'a CascadeCache>,
     /// Point and spot lights (ADR 0045). Only those reaching the view are shaded, each by
     /// the pixels it can reach.
     pub lights: &'a [LocalLight],
@@ -939,17 +952,25 @@ impl Occlusion {
     }
 }
 
-/// `Cascade` in `forward.slang` (64 bytes).
+/// `Cascade` in `forward.slang` (96 bytes).
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 struct CascadeData {
     scale: [f32; 4],
     offset: [f32; 4],
+    /// Cascade NDC to the uv of its layer (where its window starts there, ADR 0093).
     atlas: [f32; 4],
-    bounds: [f32; 4],
+    /// Light view rectangles (x0, y0, x1, y1) drawn this frame; an empty one has
+    /// x0 > x1.
+    drawn: [[f32; 4]; 2],
+    /// Light view far depth of its projection.
+    far: f32,
+    /// World-space error its casters' detail levels may have (0: full meshes).
+    lod_error: f32,
+    _pad: [u32; 2],
 }
 
-/// `Frame` in `forward.slang` (1152 bytes).
+/// `Frame` in `forward.slang` (1280 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -1029,7 +1050,8 @@ struct FrameData {
     /// grid.
     gi_scale: f32,
     gi_samples: [u32; 2],
-    _gi_pad: u32,
+    /// The cascades' comparison sampler: repeat (their layers wrap around, ADR 0093).
+    cascade_sampler: u32,
     /// Material types (ADR 0092): their parameters, `material_stride` bytes per material
     /// slot.
     material_data: u64,
@@ -1122,8 +1144,8 @@ pub(crate) struct Push {
 /// `NO_TEXTURE` in `forward.slang`: no ambient occlusion.
 const NO_AO: u32 = u32::MAX;
 
-const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1152);
+const _: () = assert!(core::mem::size_of::<CascadeData>() == 96);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1280);
 const _: () = assert!(core::mem::size_of::<BatchMeshletData>() == 48);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
@@ -1380,6 +1402,8 @@ pub struct ForwardRenderer {
     /// Shadow map: opaque (depth only), masked.
     shadow: [Pipeline; 2],
     cull: ComputeShader<Push>,
+    /// The sun's cascades' cull (ADR 0093).
+    shadow_cull: ComputeShader<Push>,
     /// The meshlet path's culling (ADR 0085), made when first turned on;
     /// `meshlets_on` says whether it is on now.
     meshlet_cull: Option<Box<MeshletCull>>,
@@ -1447,6 +1471,8 @@ struct MeshletCull {
     /// `cullMain` with the meshlet path: instances whose level has meshlets become work
     /// items.
     instances: ComputeShader<Push>,
+    /// The cascades' cull with the meshlet path.
+    shadow_instances: ComputeShader<Push>,
     /// The meshlet cull: one group per work item.
     meshlets: ComputeShader<Push>,
 }
@@ -1855,11 +1881,17 @@ impl ForwardRenderer {
         }
         // The compute passes' shaders, created with the rest.
         let cull = ComputeSource::<Push>::new(CULL, c"cullMain", &[])?;
+        let shadow_cull = ComputeSource::<Push>::new(CULL_SHADOWS, c"cullShadows", &[])?;
         let light_tiles = ComputeSource::<Push>::new(LIGHT_TILES, c"lightTiles", &[])?;
         let reduce = DepthPyramid::source()?;
         let mut all: Vec<PipelineDesc<'_>> =
             descs.iter().copied().map(PipelineDesc::Graphics).collect();
-        all.extend([cull.desc(), light_tiles.desc(), reduce.desc()]);
+        all.extend([
+            cull.desc(),
+            shadow_cull.desc(),
+            light_tiles.desc(),
+            reduce.desc(),
+        ]);
         let layout = bindless.pipeline_layout();
         let mut pipelines = Pipeline::create_many(device, layout, &all)?.into_iter();
         let mut next = || {
@@ -1874,6 +1906,7 @@ impl ForwardRenderer {
         let prepass_motion = [next()?, next()?];
         let shadow = [next()?, next()?];
         let cull = cull.finish(next()?);
+        let shadow_cull = shadow_cull.finish(next()?);
         let light_tiles = light_tiles.finish(next()?);
         let pyramid = DepthPyramid::from_source(&reduce, next()?);
         let lazy: Vec<PipelineDesc<'_>> = lazy_descs
@@ -1911,6 +1944,7 @@ impl ForwardRenderer {
             blended_atmosphere,
             shadow,
             cull,
+            shadow_cull,
             meshlet_cull: None,
             meshlets_on: false,
             light_tiles,
@@ -2251,16 +2285,18 @@ impl ForwardRenderer {
         let caps = &device.adapter().caps;
         let supported = caps.draw_indirect_count && caps.shader_int64;
         if enabled && supported && self.meshlet_cull.is_none() {
-            let [instances, meshlets] = ComputeSource::create_all(
+            let [instances, shadow_instances, meshlets] = ComputeSource::create_all(
                 device,
                 bindless,
                 [
                     ComputeSource::<Push>::new(CULL_MESHLETS, c"cullMainMeshlets", &[])?,
+                    ComputeSource::<Push>::new(CULL_SHADOWS_MESHLETS, c"cullShadowsMeshlets", &[])?,
                     ComputeSource::<Push>::new(MESHLET_CULL, c"cullMeshlets", &[])?,
                 ],
             )?;
             self.meshlet_cull = Some(Box::new(MeshletCull {
                 instances,
+                shadow_instances,
                 meshlets,
             }));
         }
@@ -2516,6 +2552,37 @@ impl ForwardRenderer {
         }
     }
 
+    /// The driver's statistics of the culling and the sun's shadow pipelines, by name:
+    /// the view's cull (and with meshlets its meshlet path and meshlet cull), the shadow
+    /// cascades' (ADR 0093), and the shadow pass's opaque and masked pipelines. Empty
+    /// unless the device captures statistics.
+    pub fn cull_statistics(
+        &self,
+        device: &Device,
+    ) -> Vec<(&'static str, Vec<engine_rhi::PipelineStatistic>)> {
+        let mut out = vec![
+            ("cull", self.cull.pipeline().statistics(device)),
+            (
+                "shadow cull",
+                self.shadow_cull.pipeline().statistics(device),
+            ),
+        ];
+        if let Some(m) = self.meshlet_cull.as_deref() {
+            out.push((
+                "cull, meshlet path",
+                m.instances.pipeline().statistics(device),
+            ));
+            out.push((
+                "shadow cull, meshlet path",
+                m.shadow_instances.pipeline().statistics(device),
+            ));
+            out.push(("meshlet cull", m.meshlets.pipeline().statistics(device)));
+        }
+        out.push(("shadow", self.shadow[0].statistics(device)));
+        out.push(("shadow, masked", self.shadow[1].statistics(device)));
+        out
+    }
+
     /// The driver's statistics of the opaque forward pipelines that look up local lights'
     /// shadows: without and with an environment. Empty unless local shadows were turned on
     /// and the device captures statistics.
@@ -2667,9 +2734,15 @@ impl ForwardRenderer {
 
     /// How far (in pixels on screen) a mesh's coarser detail level may stray from the full
     /// mesh to be drawn instead (default 1; ADR 0053). 0 always draws the full meshes.
-    /// Orthographic views always draw the full meshes.
+    /// Orthographic views always draw the full meshes. The sun's cascades take it in their
+    /// own texels instead: what they draw never depends on the camera (ADR 0093).
     pub fn set_lod_threshold(&mut self, pixels: f32) {
         self.lod_threshold = pixels.max(0.0);
+    }
+
+    /// The sun's shadows: what a view's [`CascadeCache`] is made with.
+    pub fn shadow_settings(&self) -> &shadow::ShadowSettings {
+        &self.shadow_settings
     }
 
     /// Declares the culling, shadow and forward passes for `draws` into the view's
@@ -2719,6 +2792,9 @@ impl ForwardRenderer {
         setup.shadow_draws =
             self.plan_local_shadows(view, geometry, materials, &setup, Changes::Draws(draws));
         let layout = self.layout_draws(ring, geometry, materials, draws, view, &setup);
+        if let (Some(cache), Some(layout)) = (view.shadow_cache, layout.as_ref()) {
+            cache.note_casters(Casters::Draws(layout.casters), materials.revision());
+        }
         let passes = layout.and_then(|layout| {
             self.declare(
                 fg, ring, bindless, geometry, materials, view, &setup, &layout, &imported, None,
@@ -2820,6 +2896,9 @@ impl ForwardRenderer {
         }
         setup.shadow_draws =
             self.plan_local_shadows(view, geometry, materials, &setup, Changes::Scene(scene));
+        if let Some(cache) = view.shadow_cache {
+            self.note_scene_casters(cache, geometry, materials, scene);
+        }
         let layout = self.layout_scene(ring, geometry, scene, view, &setup);
         let passes = layout.and_then(|layout| {
             self.declare(
@@ -2926,6 +3005,7 @@ impl ForwardRenderer {
                 clear: Some([0.0; 4]),
                 occlusion: None,
                 temporal: None,
+                shadow_cache: None,
                 lights: view.lights,
                 decals: &[],
                 environment: view.environment,
@@ -2987,6 +3067,42 @@ impl ForwardRenderer {
         self.subsurface_pipelines
             .as_ref()
             .filter(|_| self.subsurface_settings.is_some() && !self.subsurface_profiles.is_empty())
+    }
+
+    /// The start of the hash of what the cached cascades cast from (ADR 0093): the
+    /// renderer's settings that change what they draw, and `count`.
+    fn caster_settings(&self, count: u64) -> u64 {
+        let mut hash = cascade_cache::mix(0, count);
+        hash = cascade_cache::mix(hash, u64::from(self.subsurface_states().is_some()));
+        cascade_cache::mix(hash, u64::from(self.lod_threshold.to_bits()))
+    }
+
+    /// Notes what a scene's view with cached cascades (ADR 0093) casts from this frame:
+    /// the scene's upload and its batches' meshes (and their shapes).
+    fn note_scene_casters(
+        &self,
+        cache: &CascadeCache,
+        geometry: &GeometryFrame<'_>,
+        materials: &MaterialFrame<'_>,
+        scene: &SceneFrame<'_>,
+    ) {
+        let batches = scene.batches();
+        let mut meshes = self.caster_settings(batches.len() as u64);
+        for (id, batch) in batches.iter().enumerate().filter(|(_, b)| b.alive) {
+            let shape = geometry.mesh(batch.mesh).map_or(u32::MAX, |m| m.revision);
+            meshes = cascade_cache::mix(meshes, id as u64 | u64::from(batch.state) << 32);
+            meshes = cascade_cache::mix(meshes, bytemuck::cast(batch.mesh));
+            meshes = cascade_cache::mix(meshes, u64::from(shape));
+        }
+        cache.note_casters(
+            Casters::Scene {
+                serial: scene.serial(),
+                meshes,
+                changed: !scene.changes().is_empty(),
+                moving: !scene.moving_boxes().is_empty(),
+            },
+            materials.revision(),
+        );
     }
 
     /// What a frame's layout depends on besides the instances.
@@ -3157,20 +3273,49 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
 /// `cmd` is recording.
 unsafe fn set_viewport(device: &engine_rhi::ash::Device, cmd: vk::CommandBuffer, area: vk::Rect2D) {
     // SAFETY: guaranteed by the caller.
+    unsafe { set_draw_area(device, cmd, area.into()) }
+}
+
+/// Where draws land: their viewport and the scissor within it (one rectangle for most
+/// passes; a cached cascade's pieces shift the viewport across their layer's seam and
+/// draw within a scissor, ADR 0093).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DrawArea {
+    pub(crate) viewport: vk::Rect2D,
+    pub(crate) scissor: vk::Rect2D,
+}
+
+impl From<vk::Rect2D> for DrawArea {
+    fn from(area: vk::Rect2D) -> Self {
+        Self {
+            viewport: area,
+            scissor: area,
+        }
+    }
+}
+
+/// Sets the viewport and scissor of `area`.
+///
+/// # Safety
+///
+/// `cmd` is recording.
+unsafe fn set_draw_area(device: &engine_rhi::ash::Device, cmd: vk::CommandBuffer, area: DrawArea) {
+    let v = area.viewport;
+    // SAFETY: guaranteed by the caller.
     unsafe {
         device.cmd_set_viewport(
             cmd,
             0,
             &[vk::Viewport {
-                x: area.offset.x as f32,
-                y: area.offset.y as f32,
-                width: area.extent.width as f32,
-                height: area.extent.height as f32,
+                x: v.offset.x as f32,
+                y: v.offset.y as f32,
+                width: v.extent.width as f32,
+                height: v.extent.height as f32,
                 min_depth: 0.0,
                 max_depth: 1.0,
             }],
         );
-        device.cmd_set_scissor(cmd, 0, &[area]);
+        device.cmd_set_scissor(cmd, 0, &[area.scissor]);
     }
 }
 

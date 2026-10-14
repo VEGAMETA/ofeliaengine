@@ -260,6 +260,7 @@ fn frame(
                     clear: Some([0.02, 0.02, 0.03, 1.0]),
                     occlusion: None,
                     temporal: Some(temporal),
+                    shadow_cache: None,
                     lights: &[],
                     decals: &[],
                     environment: None,

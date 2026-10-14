@@ -250,7 +250,7 @@ impl Adapter {
         if props.api_version < vk::API_VERSION_1_3 {
             missing.push("Vulkan 1.3");
         }
-        let required: [(&'static str, vk::Bool32); 20] = [
+        let required: [(&'static str, vk::Bool32); 21] = [
             ("dynamicRendering", f13.dynamic_rendering),
             ("synchronization2", f13.synchronization2),
             ("maintenance4", f13.maintenance4),
@@ -305,6 +305,9 @@ impl Adapter {
                 f12.shader_storage_buffer_array_non_uniform_indexing,
             ),
             ("scalarBlockLayout", f12.scalar_block_layout),
+            // Layered rendering: the vertex shader picks the layer (the sun's cascades,
+            // one layer each, ADR 0093). Every desktop driver has it.
+            ("shaderOutputLayer", f12.shader_output_layer),
             ("shaderDrawParameters", f11.shader_draw_parameters),
         ];
         missing.extend(
