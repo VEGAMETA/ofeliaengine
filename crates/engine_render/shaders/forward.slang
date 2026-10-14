@@ -118,8 +118,8 @@ struct Cascade
     float2 seam;
     uint pieces;
     uint masks;
+    uint rects;              // rectangles in `drawn` (they come first)
     uint _pad0;
-    uint _pad1;
 };
 
 // `ShadowViewData` in local_shadows.rs: one view of a light's shadow in the atlas.
@@ -781,16 +781,15 @@ void cull_shadow_instance(uint index, bool meshlets)
     uint cascades = push.frame.cascade_count;
     for (uint k = 0; k < cascades; k++)
     {
-        // A cascade drawing nothing this frame takes nothing, even without culling.
-        bool drawn = false;
-        bool reached = false;
-        [unroll]
-        for (int r = 0; r < 4; r++)
-        {
-            float4 rect = read_float4(&push.frame.cascades[k].drawn[r]);
-            drawn = drawn || rect.x <= rect.z;
-            reached = reached || reaches(rect, c, le);
-        }
+        // A cascade drawing nothing this frame takes nothing, even without culling. Moved
+        // casters' clusters after the strips are tested only when there are any: the cull
+        // keeps step 1's registers (ADR 0093).
+        float4 r0 = read_float4(&push.frame.cascades[k].drawn[0]);
+        float4 r1 = read_float4(&push.frame.cascades[k].drawn[1]);
+        bool drawn = r0.x <= r0.z || r1.x <= r1.z;
+        bool reached = reaches(r0, c, le) || reaches(r1, c, le);
+        if (push.frame.cascades[k].rects > 2)
+            reached = reached || reaches(read_float4(&push.frame.cascades[k].drawn[2]), c, le) || reaches(read_float4(&push.frame.cascades[k].drawn[3]), c, le);
         reached = reached && -(c.z + le.z) <= push.frame.cascades[k].far;
         bool caster = !blended && drawn && (!cull || reached);
         uint lod = lod_within(batch, scale, push.frame.cascades[k].lod_error);
@@ -893,8 +892,6 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     // them (Sponza: prepass +8 %, shadows +9 %; ADR 0093).
     float4 r0 = shadow ? read_float4(&push.frame.cascades[cascade].drawn[0]) : float4(0.0);
     float4 r1 = shadow ? read_float4(&push.frame.cascades[cascade].drawn[1]) : float4(0.0);
-    float4 r2 = shadow ? read_float4(&push.frame.cascades[cascade].drawn[2]) : float4(0.0);
-    float4 r3 = shadow ? read_float4(&push.frame.cascades[cascade].drawn[3]) : float4(0.0);
     float far = shadow ? push.frame.cascades[cascade].far : 0.0;
     float4x4 light = read_matrix(&push.frame.light_from_world);
     float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
@@ -907,7 +904,12 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
         // Reaching a rectangle the cascade draws, and not wholly beyond its far depth.
         float3 c = mul(light, float4(center, 1.0)).xyz;
         float3 e = float3(radius, radius, radius);
-        visible = (reaches(r0, c, e) || reaches(r1, c, e) || reaches(r2, c, e) || reaches(r3, c, e)) && -(c.z + radius) <= far;
+        visible = reaches(r0, c, e) || reaches(r1, c, e);
+        // Moved casters' clusters after the strips, only when there are any (the Radeon's
+        // registers for all four rectangles at the top: 53 → 64).
+        if (!visible && push.frame.cascades[cascade].rects > 2)
+            visible = reaches(read_float4(&push.frame.cascades[cascade].drawn[2]), c, e) || reaches(read_float4(&push.frame.cascades[cascade].drawn[3]), c, e);
+        visible = visible && -(c.z + radius) <= far;
         // The light is a direction: the cone test from infinitely far away.
         if (visible && cone && (meshlet.cone >> 24) != 127u)
         {

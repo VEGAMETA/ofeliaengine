@@ -2632,7 +2632,8 @@ fn cascade_data(
             seam,
             pieces,
             masks,
-            _pad: [0; 2],
+            rects: plans[k].rect_count as u32,
+            _pad: 0,
         };
     }
     out

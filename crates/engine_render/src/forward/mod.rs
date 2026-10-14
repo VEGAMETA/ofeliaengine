@@ -980,7 +980,9 @@ struct CascadeData {
     seam: [f32; 2],
     pieces: u32,
     masks: u32,
-    _pad: [u32; 2],
+    /// Rectangles in `drawn` (first).
+    rects: u32,
+    _pad: u32,
 }
 
 /// `Frame` in `forward.slang` (1472 bytes).
