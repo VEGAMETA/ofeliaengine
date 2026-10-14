@@ -35,7 +35,8 @@
 //!   scene's first baseline).
 //!
 //! Run it in release with the implicit layers off (`VK_LOADER_LAYERS_DISABLE=~implicit~`,
-//! overlays change timing) and `ENGINE_ADAPTER=radeon` for the iGPU.
+//! overlays change timing; elevated, also each overlay's own switch, as `tools\check.ps1`
+//! sets them) and `ENGINE_ADAPTER=radeon` for the iGPU.
 
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
