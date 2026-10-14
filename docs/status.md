@@ -98,13 +98,21 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
     the cone seen from the light).
   - The meshlet cull runs a group per chunk of 64 meshlets, not per instance: small
     scenes' culls were latency-bound.
-  - The frame's shadow + prepass + shading + culling, off → on:
-    - 10,000 spheres of 4k triangles: −3 to −8 % on the RTX, −10 to −17 % on the Radeon;
-    - Sponza: −0.4 % / −2.4 %;
-    - FlightHelmet: +14 % (15 µs) / −1.4 %.
+  - The shadow cascades draw each run of consecutive drawn meshlets as one draw.
+  - **On by default for both device classes** (`RenderDefaults::meshlet_culling`,
+    2026-10-14; the owner left the choice to the coordinator). With each class's
+    defaults, off → on:
+    - Intel's Sponza (3.7 M triangles): −6.4 % on the RTX, −10.4 % on the Radeon;
+    - Sponza: +1.8 % (24 µs) on the RTX, about the same on the Radeon;
+    - 10,000 detailed spheres (scene settings of `draw_bench`): −3 to −8 % on the RTX,
+      −11 to −19 % on the Radeon.
   - Drawing pixel-bound instances whole was tried and dropped (ADR 0085's addendum).
-  - Next: the default per device class, measured on a heavier scene (Intel's Sponza);
-    step 3 (RTX mesh shaders); local lights' shadows.
+  - Next:
+    - step 3, RTX mesh shaders;
+    - the shadow casters in the light's depth order (the camera's front-to-back order
+      costs the RTX's Sponza shadows 17 µs);
+    - the view's meshlet draws front to back;
+    - local lights' shadows.
 - **3c, custom materials** (ADR 0092, accepted 2026-10-12): step 1 (the passes through
   `IMaterial`, PR #179), step 2 (material types in the renderer: typed materials,
   batches and pipelines per type, compiled on first sight with the glTF fallback drawing
@@ -445,8 +453,8 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085): **meshlets
    in the forward renderer first** (the owner, 2026-10-11; both GPUs; the iGPU has no mesh
    shaders), the visibility buffer decided together with custom materials (3c). Step 1
-   (meshlets made by the cook), step 2 (culling per meshlet, off by default) and step 4
-   (the shadow cascades too) done 2026-10-14; step 3 in ADR 0085's addendum.
+   (meshlets made by the cook), step 2 (culling per meshlet) and step 4 (the shadow
+   cascades too) done 2026-10-14, on by default since; step 3 in ADR 0085's addendum.
 5. Virtual shadow maps.
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.

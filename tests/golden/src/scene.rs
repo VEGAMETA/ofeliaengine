@@ -230,6 +230,9 @@ pub struct Shot {
     /// `tests/golden/materials/models.slang`; the top row stays glTF's (lit). Captured
     /// once the types' pipelines are made.
     pub shading_models: bool,
+    /// Culling and drawing by meshlet (ADR 0085): the meshes with meshlets, in the view
+    /// when it has the depth prepass and in the sun's shadow cascades.
+    pub meshlets: bool,
     /// Sponza's curtains (its materials 14 to 19) as cloth: material files
     /// (`tests/golden/materials/fabric.slang` with the curtains' own textures) applied by a
     /// material map when cooking, the scene written to a pack (version 5, the types'
@@ -290,6 +293,7 @@ impl Shot {
             particles: false,
             panorama: None,
             decals: false,
+            meshlets: false,
             gi: None,
             brixelizer_gi: false,
             brixelizer_warmup: None,
@@ -1342,6 +1346,11 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         renderer
             .set_decals(&device, &bindless, true)
             .expect("decals");
+    }
+    if shot.meshlets {
+        renderer
+            .set_meshlet_culling(&device, &bindless, true)
+            .expect("meshlet culling");
     }
     let mut decal_set = shot
         .decals

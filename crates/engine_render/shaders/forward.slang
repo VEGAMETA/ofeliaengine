@@ -754,13 +754,21 @@ float snorm8(uint bits, uint shift)
     return float(int(bits << (24 - shift)) >> 24) / 127.0;
 }
 
+// The meshlet cull's chunk: which of its meshlets are drawn, and where each one's indices
+// end (relative to its level's).
+groupshared uint meshlet_drawn[MESHLET_CHUNK];
+groupshared uint meshlet_end[MESHLET_CHUNK];
+
 // The meshlet cull (ADR 0085): one group per work item of `cull_instance`, a lane per
 // meshlet of its chunk (a group never loops: a large instance's chunks run side by side).
 // A meshlet is drawn unless its bounding sphere is outside the frustum, its normal cone
 // faces away from the camera (single-sided batches, uniformly scaled instances), or, in
 // the late phase, the depth pyramid hides it. Each drawn meshlet is one indexed draw of
-// one instance in its state's list. Nothing about a meshlet is kept from frame to frame
-// (ADR 0035's patent note).
+// one instance in its state's list; in a shadow cascade, each run of consecutive drawn
+// meshlets of the chunk is (a level's meshlets' indices follow each other): depth-only
+// passes pay for every draw, while the view's passes gained nothing from runs on the RTX
+// and its shading lost on the Radeon iGPU (ADR 0085). Nothing about a meshlet is kept
+// from frame to frame (ADR 0035's patent note).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
@@ -778,8 +786,8 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     Instance inst = read_instance(push.instances, index);
     Batch batch = read_batch(inst.batch);
     BatchMeshlets bm = read_batch_meshlets(inst.batch);
-    if (m >= bm.count[lod])
-        return;
+    // Lanes past the level's last meshlet take part in the chunk's runs as not drawn.
+    bool valid = m < bm.count[lod];
     DrawCommand level = push.commands[batch.command + lod];
     // The instance's scale: a sphere grows by the largest; the cone keeps its angle only
     // when all three agree.
@@ -802,10 +810,10 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     float4x4 light = read_matrix(&push.frame.light_from_world);
     float4 bounds = shadow ? read_float4(&push.frame.cascades[list - 2].bounds) : float4(0.0);
     float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
-    Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + m);
+    Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + min(m, bm.count[lod] - 1));
     float3 center = transform_point(inst, meshlet.center);
     float radius = meshlet.radius * scale;
-    bool visible = true;
+    bool visible = valid;
     if (cull && shadow)
     {
         // Inside the cascade's square, and not wholly beyond its far depth.
@@ -836,16 +844,34 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
         if (visible && push.phase == PHASE_LATE)
             visible = !occluded(center, float3(radius, radius, radius));
     }
-    uint count = WaveActiveCountBits(visible);
+    // A shadow cascade's runs: a drawn meshlet after one that is not starts one, which
+    // takes in the drawn meshlets after it (`shadow` is the same in the whole dispatch).
+    bool first = visible;
+    uint end = meshlet.first_index + meshlet.triangles * 3;
+    if (shadow)
+    {
+        meshlet_drawn[local] = visible ? 1u : 0u;
+        meshlet_end[local] = end;
+        GroupMemoryBarrierWithGroupSync();
+        first = visible && (local == 0 || meshlet_drawn[local - 1] == 0u);
+        uint last = local;
+        if (first)
+        {
+            while (last + 1 < MESHLET_CHUNK && meshlet_drawn[last + 1] != 0u)
+                last++;
+        }
+        end = meshlet_end[last];
+    }
+    uint count = WaveActiveCountBits(first);
     uint base = 0;
     if (WaveIsFirstLane() && count > 0)
         InterlockedAdd(header.drawn[state], count, base);
     base = WaveReadLaneFirst(base);
-    if (visible)
+    if (first)
     {
-        uint at = header.offset[state] + base + WavePrefixCountBits(visible);
+        uint at = header.offset[state] + base + WavePrefixCountBits(first);
         DrawCommand draw;
-        draw.index_count = meshlet.triangles * 3;
+        draw.index_count = end - meshlet.first_index;
         draw.instance_count = 1;
         draw.first_index = level.first_index + meshlet.first_index;
         draw.vertex_offset = level.vertex_offset;

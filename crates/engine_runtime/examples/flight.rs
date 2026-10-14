@@ -10,8 +10,8 @@
 //! - `characters` skinned characters (glTF Fox) walking in circles, their poses sampled
 //!   on the job system every frame and skinned on the GPU (ADR 0068);
 //! - Sponza's seven local lights with cached shadows (ADR 0071), sky light (ADR 0046);
-//! - the frame renderer with the device class's defaults: ambient occlusion and the
-//!   antialiasing / render size (ADR 0072);
+//! - the frame renderer with the device class's defaults: ambient occlusion, the
+//!   antialiasing / render size (ADR 0072) and meshlet culling (ADR 0085);
 //! - a window, presented without vsync (or with `--vsync`), two frames in flight.
 //!
 //! The camera flies through the nave for `frames` frames of 1/60 s of game time each (the
@@ -32,6 +32,8 @@
 //!     [--characters <n>]    skinned characters (default 64; needs test-assets/Fox)
 //!     [--no-lights]         no local lights
 //!     [--no-ao]             no ambient occlusion
+//!     [--meshlet-culling on|off]  drawing by meshlet (ADR 0085; default: the device
+//!                           class's)
 //!     [--aa off|taau|fsr]   [--quality native|quality|balanced|performance]
 //!     [--vsync]
 //!     [--cap <fps>]         at most this many real frames per second (a game's limiter;
@@ -932,6 +934,11 @@ mod windowed {
         } else {
             defaults.ambient_occlusion
         };
+        let meshlet_culling = match option("--meshlet-culling") {
+            Some("on") => true,
+            Some("off") => false,
+            _ => defaults.meshlet_culling,
+        };
         let mut frame_renderer = FrameRenderer::new(
             &device,
             &bindless,
@@ -944,6 +951,10 @@ mod windowed {
         frame_renderer
             .forward_mut()
             .set_ambient_occlusion(&device, &bindless, ambient_occlusion)
+            .unwrap();
+        frame_renderer
+            .forward_mut()
+            .set_meshlet_culling(&device, &bindless, meshlet_culling)
             .unwrap();
         if lights_on {
             frame_renderer

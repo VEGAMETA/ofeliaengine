@@ -32,9 +32,11 @@ use engine_frame::{
 // Once: the passes' pipelines, for the swapchain's format.
 let frame = FrameRenderer::new(&device, &bindless, swapchain.format(), vk::Format::D32_SFLOAT,
     ShadowSettings::default(), frames_in_flight)?;
-// Measured defaults for this GPU (discrete or small integrated): AO, antialiasing, size.
+// Measured defaults for this GPU (discrete or small integrated): AO, antialiasing, size,
+// meshlet culling.
 let defaults = RenderDefaults::for_device(&device);
 frame.forward_mut().set_ambient_occlusion(&device, &bindless, defaults.ambient_occlusion)?;
+frame.forward_mut().set_meshlet_culling(&device, &bindless, defaults.meshlet_culling)?;
 let mut settings = defaults.view_settings();          // or ViewSettings { .. }
 // Once per view (main camera, each split-screen player, each render target):
 let mut view = View::new(&device, 100_000);
@@ -126,7 +128,7 @@ lower is better):
 - On a small integrated GPU, TAAU from 67 % is *cheaper* than no antialiasing at full
   size; FSR costs more than the whole scene there. The defaults follow this
   (`RenderDefaults`): TAA and AO High on discrete GPUs, TAAU 67 % and AO Low on integrated
-  ones.
+  ones, and [meshlet culling](#meshlets-culling-inside-a-mesh) on both.
 - A still image rewards sharpness: TAAU and FSR soften textures a little (their FLIP is
   higher than no antialiasing's), while removing the shimmer of edges and foliage in
   motion that a still image does not show. DLSS does both.
@@ -435,14 +437,21 @@ by meshlet in views with a depth prepass, and in the sun's shadow cascades:
 - in the shadow cascades, meshlets outside the cascade, and those whose faces all face
   the light, are not drawn.
 
-- **It pays for dense geometry,** where vertex work counts: thousands of detailed objects,
-  and integrated GPUs. 10,000 spheres of 4,096 triangles: −3 to −8 % on an RTX 4060 Ti,
-  −10 to −17 % on a Radeon iGPU (shadows, prepass and shading).
-- **It costs a little where pixels dominate.** Each meshlet is a draw of its own, and
-  each culling pass waits for the instances' culling. Sponza: −0.4 % on the RTX, −2.4 %
-  on the iGPU. FlightHelmet: +15 µs on the RTX, −1.4 % on the iGPU.
-- **So it is off by default.** Measure your scenes with it on and off (`scene_bench
-  --meshlet-culling`, `draw_bench --meshlets`).
+- **It pays for dense geometry,** where vertex work counts: detailed scenes, thousands of
+  detailed objects, integrated GPUs.
+  - Intel's Sponza (3.7 M triangles) with each class's default settings: −6.4 % on an RTX
+    4060 Ti, −10.4 % on a Radeon iGPU.
+  - 10,000 spheres of 4,096 triangles: −3 to −8 % and −11 to −19 %.
+- **It costs a little where pixels dominate.** In the view each meshlet is a draw of its
+  own (in the shadow cascades, each run of them), and each culling pass waits for the
+  instances' culling.
+  - Sponza with the defaults: +1.8 % (24 µs) on the RTX, about the same on the iGPU.
+  - FlightHelmet: +12 µs on the RTX.
+- **So games start with it on:** `engine_frame::RenderDefaults::meshlet_culling` is on for
+  both device classes. `ForwardRenderer` itself starts with it off.
+  - A game of a few light meshes may turn it off.
+  - Measure your scenes with it on and off: `scene_bench --meshlet-culling`,
+    `draw_bench --meshlets`.
 - **Not drawn by meshlet:**
   - transparent materials (drawn back to front);
   - material types;
@@ -508,8 +517,8 @@ culling off, frustum only, or frustum and occlusion:
 
 `cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza/Sponza.gltf`
 measures a real glTF scene with its materials and textures, textured and with factors
-only (fetch scenes with `tools/fetch-test-assets.ps1`; `--screenshot out.png` saves the
-frame). `cargo run -p engine_assets --release --example texture_bench -- <scene>` measures
+only (fetch scenes with `tools/fetch-test-assets.ps1`, and Intel's Sponza, 3.7 M
+triangles, with its `-Only IntelSponza`; `--screenshot out.png` saves the frame). `cargo run -p engine_assets --release --example texture_bench -- <scene>` measures
 texture decoding and mip generation.
 
 Results from the reference machine are in `docs/perf/history.md` and ADRs 0035, 0039 and
