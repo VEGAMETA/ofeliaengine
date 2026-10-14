@@ -572,20 +572,24 @@ void append(DrawCommand* commands, uint* visible, uint b, uint first, uint index
     }
 }
 
-// The meshlet lists of a forward phase (ADR 0085; `MeshletLists` in forward/layout.rs), in
-// the command buffer after the phases' command lists: this header, then a work item per
-// instance taking the meshlet path (`uint2`: the instance, its level | state << 8), then
-// the draws, per state from `offset[state]`.
+// The meshlet lists of a forward phase or shadow cascade (ADR 0085; `MeshletLayout` in
+// forward/layout.rs), in the command buffer after the command lists: this header, then
+// the work items, a chunk of up to `MESHLET_CHUNK` meshlets of an instance taking the
+// meshlet path each (`uint2`: the instance, its level | state << 8 | chunk << 16), then the
+// draws, per state from `offset[state]`.
 struct MeshletHeader
 {
     uint drawn[32];          // per state: meshlet draws written (the draws' count)
     uint reserved[32];       // per state: draws reserved by the instances taking the path
     uint offset[32];         // per state: its first draw among the lists' draws
     uint capacity[32];       // per state: its draws at most
-    uint args[4];            // the meshlet cull's dispatch: work items, 1, 1
+    uint args[3];            // the meshlet cull's dispatch: work items, 1, 1
+    uint work;               // room for work items (the draws follow them)
 };
 
 static const uint MESHLET_HEADER_BYTES = 528;
+// Meshlets per work item of the meshlet cull: one per lane of its group.
+static const uint MESHLET_CHUNK = 64;
 
 // `push.phase` of the meshlet cull of shadow cascade k: this plus k.
 static const uint PHASE_SHADOW_MESHLETS = 16;
@@ -615,9 +619,11 @@ BatchMeshlets read_batch_meshlets(uint batch)
 }
 
 // Whether instance `index`, visible in meshlet lists `list` at level `lod`, is drawn by
-// meshlet: its level has meshlets and its state's lists have room for all of them. It is
-// then a work item of the meshlet cull (`cullMeshlets`) instead of an instance of its
-// command.
+// meshlet: its level has meshlets and its state's lists have room for all of them. Its
+// meshlets are then work items of the meshlet cull (`cullMeshlets`), a chunk of
+// `MESHLET_CHUNK` each, instead of an instance of its command. The lists' room for work
+// items covers every chunk: the chunks of the instances that fit fill at most one more
+// work item each than their meshlets would fill.
 bool take_meshlets(uint batch, uint index, uint lod, uint list)
 {
     BatchMeshlets bm = read_batch_meshlets(batch);
@@ -630,10 +636,12 @@ bool take_meshlets(uint batch, uint index, uint lod, uint list)
     InterlockedAdd(header.reserved[bm.state], count, base);
     if (base + count > header.capacity[bm.state])
         return false;
+    uint chunks = (count + MESHLET_CHUNK - 1) / MESHLET_CHUNK;
     uint item;
-    InterlockedAdd(header.args[0], 1, item);
+    InterlockedAdd(header.args[0], chunks, item);
     uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
-    work[item] = uint2(index, lod | (bm.state << 8));
+    for (uint c = 0; c < chunks; c++)
+        work[item + c] = uint2(index, lod | (bm.state << 8) | (c << 16));
     return true;
 }
 
@@ -746,18 +754,13 @@ float snorm8(uint bits, uint shift)
     return float(int(bits << (24 - shift)) >> 24) / 127.0;
 }
 
-// The meshlet cull's chunk of 64 meshlets: which are visible, and where each one's
-// indices end.
-groupshared uint meshlet_visible[64];
-groupshared uint meshlet_end[64];
-
-// The meshlet cull (ADR 0085): one group per work item of `cull_instance`, its lanes over
-// the instance's level's meshlets. A meshlet is drawn unless its bounding sphere is
-// outside the frustum, its normal cone faces away from the camera (single-sided batches,
-// uniformly scaled instances), or, in the late phase, the depth pyramid hides it. Each
-// run of consecutive drawn meshlets (up to 64) is one indexed draw of one instance in its
-// state's list. Nothing about a meshlet is kept from frame to frame (ADR 0035's patent
-// note).
+// The meshlet cull (ADR 0085): one group per work item of `cull_instance`, a lane per
+// meshlet of its chunk (a group never loops: a large instance's chunks run side by side).
+// A meshlet is drawn unless its bounding sphere is outside the frustum, its normal cone
+// faces away from the camera (single-sided batches, uniformly scaled instances), or, in
+// the late phase, the depth pyramid hides it. Each drawn meshlet is one indexed draw of
+// one instance in its state's list. Nothing about a meshlet is kept from frame to frame
+// (ADR 0035's patent note).
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
@@ -766,14 +769,17 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     uint64_t lists = meshlet_lists(list);
     MeshletHeader* header = (MeshletHeader*)lists;
     uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
-    DrawCommand* draws = (DrawCommand*)(lists + MESHLET_HEADER_BYTES + 8 * uint64_t(push.instance_count));
+    DrawCommand* draws = (DrawCommand*)(lists + MESHLET_HEADER_BYTES + 8 * uint64_t(header.work));
     uint2 item = work[group.x];
     uint index = item.x;
     uint lod = item.y & 0xFFu;
-    uint state = item.y >> 8;
+    uint state = (item.y >> 8) & 0xFFu;
+    uint m = (item.y >> 16) * MESHLET_CHUNK + local;
     Instance inst = read_instance(push.instances, index);
     Batch batch = read_batch(inst.batch);
     BatchMeshlets bm = read_batch_meshlets(inst.batch);
+    if (m >= bm.count[lod])
+        return;
     DrawCommand level = push.commands[batch.command + lod];
     // The instance's scale: a sphere grows by the largest; the cone keeps its angle only
     // when all three agree.
@@ -796,59 +802,56 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     float4x4 light = read_matrix(&push.frame.light_from_world);
     float4 bounds = shadow ? read_float4(&push.frame.cascades[list - 2].bounds) : float4(0.0);
     float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
-    for (uint m = local; m < bm.count[lod]; m += 64)
+    Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + m);
+    float3 center = transform_point(inst, meshlet.center);
+    float radius = meshlet.radius * scale;
+    bool visible = true;
+    if (cull && shadow)
     {
-        Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + m);
-        float3 center = transform_point(inst, meshlet.center);
-        float radius = meshlet.radius * scale;
-        bool visible = true;
-        if (cull && shadow)
+        // Inside the cascade's square, and not wholly beyond its far depth.
+        float3 c = mul(light, float4(center, 1.0)).xyz;
+        visible = all(abs(c.xy - bounds.xy) <= bounds.z + radius) && -(c.z + radius) <= bounds.w;
+        // The light is a direction: the cone test from infinitely far away.
+        if (visible && cone && (meshlet.cone >> 24) != 127u)
         {
-            // Inside the cascade's square, and not wholly beyond its far depth.
-            float3 c = mul(light, float4(center, 1.0)).xyz;
-            visible = all(abs(c.xy - bounds.xy) <= bounds.z + radius) && -(c.z + radius) <= bounds.w;
-            // The light is a direction: the cone test from infinitely far away.
-            if (visible && cone && (meshlet.cone >> 24) != 127u)
-            {
-                float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
-                visible = dot(culled_side, axis) < snorm8(meshlet.cone, 24);
-            }
+            float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
+            visible = dot(culled_side, axis) < snorm8(meshlet.cone, 24);
         }
-        else if (cull)
+    }
+    else if (cull)
+    {
+        [unroll]
+        for (int i = 0; i < 6; i++)
         {
-            [unroll]
-            for (int i = 0; i < 6; i++)
-            {
-                float4 plane = read_float4(&push.frame.planes[i]);
-                visible = visible && dot(plane.xyz, center) + plane.w >= -radius;
-            }
-            if (visible && cone && (meshlet.cone >> 24) != 127u)
-            {
-                float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
-                float cutoff = snorm8(meshlet.cone, 24);
-                float3 d = center - eye;
-                visible = dot(d, axis) < cutoff * length(d) + radius;
-            }
-            if (visible && push.phase == PHASE_LATE)
-                visible = !occluded(center, float3(radius, radius, radius));
+            float4 plane = read_float4(&push.frame.planes[i]);
+            visible = visible && dot(plane.xyz, center) + plane.w >= -radius;
         }
-        uint count = WaveActiveCountBits(visible);
-        uint base = 0;
-        if (WaveIsFirstLane() && count > 0)
-            InterlockedAdd(header.drawn[state], count, base);
-        base = WaveReadLaneFirst(base);
-        if (visible)
+        if (visible && cone && (meshlet.cone >> 24) != 127u)
         {
-            uint at = header.offset[state] + base + WavePrefixCountBits(visible);
-            DrawCommand draw;
-            draw.index_count = meshlet.triangles * 3;
-            draw.instance_count = 1;
-            draw.first_index = level.first_index + meshlet.first_index;
-            draw.vertex_offset = level.vertex_offset;
-            draw.first_instance = first_slot + at;
-            draws[at] = draw;
-            push.visible[first_slot + at] = index;
+            float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
+            float cutoff = snorm8(meshlet.cone, 24);
+            float3 d = center - eye;
+            visible = dot(d, axis) < cutoff * length(d) + radius;
         }
+        if (visible && push.phase == PHASE_LATE)
+            visible = !occluded(center, float3(radius, radius, radius));
+    }
+    uint count = WaveActiveCountBits(visible);
+    uint base = 0;
+    if (WaveIsFirstLane() && count > 0)
+        InterlockedAdd(header.drawn[state], count, base);
+    base = WaveReadLaneFirst(base);
+    if (visible)
+    {
+        uint at = header.offset[state] + base + WavePrefixCountBits(visible);
+        DrawCommand draw;
+        draw.index_count = meshlet.triangles * 3;
+        draw.instance_count = 1;
+        draw.first_index = level.first_index + meshlet.first_index;
+        draw.vertex_offset = level.vertex_offset;
+        draw.first_instance = first_slot + at;
+        draws[at] = draw;
+        push.visible[first_slot + at] = index;
     }
 }
 

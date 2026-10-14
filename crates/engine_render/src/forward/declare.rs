@@ -80,8 +80,7 @@ impl ForwardRenderer {
         let meshlet_draws = meshlets.map(|layout| MeshletDraws {
             layout,
             base: (u64::from(phases) * command_bytes).next_multiple_of(16),
-            bytes: layout.list_bytes(instance_count),
-            work: instance_count,
+            bytes: layout.list_bytes(),
         });
         let meshlet_shaders = self.meshlet_shaders().filter(|_| meshlet_draws.is_some());
         // And each shadow cascade's (the shadow passes draw depth only: any order will do),
@@ -91,8 +90,7 @@ impl ForwardRenderer {
             .map(|layout| MeshletDraws {
                 layout,
                 base: (u64::from(cascade_count) * command_bytes).next_multiple_of(16),
-                bytes: layout.list_bytes(instance_count),
-                work: instance_count,
+                bytes: layout.list_bytes(),
             });
         let shadow_shaders = meshlet_shaders.filter(|_| shadow_meshlets.is_some());
 
