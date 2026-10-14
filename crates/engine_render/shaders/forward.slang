@@ -236,8 +236,10 @@ struct Frame
     uint _material_pad;
     BatchMeshlets* batch_meshlets; // the meshlet entry points (ADR 0085): per batch, its levels' meshlets
     Meshlet* meshlets;       // the geometry pool's index buffer as meshlets (levels' meshlets follow their indices, 32-byte aligned)
-    uint2 meshlet_offset;    // per phase (all or early; late): bytes from `commands` to its meshlet lists
-    uint2 meshlet_slot;      // per phase: the first slot in `visible` of its meshlet draws
+    // Meshlet lists (0: all or early, 1: late, 2 + k: shadow cascade k): bytes from the
+    // `commands` of their culling to them, and the first slot of their draws in `visible`.
+    uint meshlet_offset[6];
+    uint meshlet_slot[6];
 };
 
 struct Instance
@@ -585,18 +587,26 @@ struct MeshletHeader
 
 static const uint MESHLET_HEADER_BYTES = 528;
 
-// This phase's meshlet lists. Addresses are computed as 64-bit integers (`shaderInt64`):
-// AMD's compiler (driver 26.8.1) reads zeros through a pointer cast after pointer
-// arithmetic (see `material_params`).
-uint64_t meshlet_lists()
+// `push.phase` of the meshlet cull of shadow cascade k: this plus k.
+static const uint PHASE_SHADOW_MESHLETS = 16;
+// `SUBSURFACE` in forward/mod.rs: the pipeline state bit of subsurface materials.
+static const uint STATE_SUBSURFACE = 16;
+
+// The meshlet lists of this dispatch's phase: 0 (all or early), 1 (late), 2 + k (shadow
+// cascade k, in the meshlet cull).
+uint meshlet_list()
 {
-    uint offset = push.phase == PHASE_LATE ? push.frame.meshlet_offset.y : push.frame.meshlet_offset.x;
-    return uint64_t(push.commands) + offset;
+    if (push.phase >= PHASE_SHADOW_MESHLETS)
+        return 2 + push.phase - PHASE_SHADOW_MESHLETS;
+    return push.phase == PHASE_LATE ? 1 : 0;
 }
 
-uint meshlet_first_slot()
+// Meshlet lists `list`. Addresses are computed as 64-bit integers (`shaderInt64`): AMD's
+// compiler (driver 26.8.1) reads zeros through a pointer cast after pointer arithmetic
+// (see `material_params`).
+uint64_t meshlet_lists(uint list)
 {
-    return push.phase == PHASE_LATE ? push.frame.meshlet_slot.y : push.frame.meshlet_slot.x;
+    return uint64_t(push.commands) + push.frame.meshlet_offset[list];
 }
 
 BatchMeshlets read_batch_meshlets(uint batch)
@@ -604,16 +614,17 @@ BatchMeshlets read_batch_meshlets(uint batch)
     return loadAligned<16>(push.frame.batch_meshlets + batch);
 }
 
-// Whether instance `index`, visible in this phase at level `lod`, is drawn by meshlet:
-// its level has meshlets and its state's lists have room for all of them. It is then a
-// work item of the meshlet cull (`cullMeshlets`) instead of an instance of its command.
-bool take_meshlets(uint batch, uint index, uint lod)
+// Whether instance `index`, visible in meshlet lists `list` at level `lod`, is drawn by
+// meshlet: its level has meshlets and its state's lists have room for all of them. It is
+// then a work item of the meshlet cull (`cullMeshlets`) instead of an instance of its
+// command.
+bool take_meshlets(uint batch, uint index, uint lod, uint list)
 {
     BatchMeshlets bm = read_batch_meshlets(batch);
     uint count = bm.count[lod];
     if (count == 0)
         return false;
-    uint64_t lists = meshlet_lists();
+    uint64_t lists = meshlet_lists(list);
     MeshletHeader* header = (MeshletHeader*)lists;
     uint base;
     InterlockedAdd(header.reserved[bm.state], count, base);
@@ -629,7 +640,7 @@ bool take_meshlets(uint batch, uint index, uint lod)
 // One thread per instance: frustum (and occlusion) test of the instance's world-space
 // bounding box, then append to the batch's visible list (or, with `meshlets`, to the
 // meshlet cull's work: `take_meshlets`). The shadow phase instead tests the box against
-// every cascade and appends to each cascade's lists.
+// every cascade and appends to each cascade's lists (or its meshlet cull's work).
 void cull_instance(uint index, bool meshlets)
 {
     if (index >= push.instance_count)
@@ -661,7 +672,11 @@ void cull_instance(uint index, bool meshlets)
             // Inside the cascade's square, and not wholly beyond its far depth: anything
             // between the light and the slice casts into it.
             bool caster = !blended && (!cull || (all(abs(c.xy - b.xy) <= b.z + e.xy) && -(c.z + e.z) <= b.w));
-            append(push.commands + k * push.frame.command_count, push.visible + k * push.frame.slot_count, command, first, index, caster);
+            // With meshlets, a caster of the cascade may be its meshlet cull's work item.
+            bool whole = caster;
+            if (meshlets && caster && take_meshlets(inst.batch, index, lod, 2 + k))
+                whole = false;
+            append(push.commands + k * push.frame.command_count, push.visible + k * push.frame.slot_count, command, first, index, whole);
         }
         return;
     }
@@ -704,7 +719,7 @@ void cull_instance(uint index, bool meshlets)
     }
     // Blended batches have no meshlet lists (their count is 0).
     bool whole = visible;
-    if (meshlets && visible && take_meshlets(inst.batch, index, lod))
+    if (meshlets && visible && take_meshlets(inst.batch, index, lod, push.phase == PHASE_LATE ? 1 : 0))
         whole = false;
     append(push.commands, push.visible, command, first, index, whole);
 }
@@ -747,7 +762,8 @@ groupshared uint meshlet_end[64];
 [numthreads(64, 1, 1)]
 void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
 {
-    uint64_t lists = meshlet_lists();
+    uint list = meshlet_list();
+    uint64_t lists = meshlet_lists(list);
     MeshletHeader* header = (MeshletHeader*)lists;
     uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
     DrawCommand* draws = (DrawCommand*)(lists + MESHLET_HEADER_BYTES + 8 * uint64_t(push.instance_count));
@@ -771,14 +787,34 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     bool cone = bm.cone != 0 && smallest >= largest * 0.999;
     float3 eye = read_float4(&push.frame.camera_position).xyz;
     bool cull = push.frame.cull != 0;
-    uint first_slot = meshlet_first_slot();
+    uint first_slot = push.frame.meshlet_slot[list];
+    // A shadow cascade's cull: its bounds in light view space, and the light's direction.
+    // The shadow pass draws single-sided geometry's faces away from the light (front faces
+    // culled), subsurface materials' faces towards it: a meshlet all of whose faces the
+    // rasterizer would cull is not drawn.
+    bool shadow = list >= 2;
+    float4x4 light = read_matrix(&push.frame.light_from_world);
+    float4 bounds = shadow ? read_float4(&push.frame.cascades[list - 2].bounds) : float4(0.0);
+    float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
     for (uint m = local; m < bm.count[lod]; m += 64)
     {
         Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + m);
         float3 center = transform_point(inst, meshlet.center);
         float radius = meshlet.radius * scale;
         bool visible = true;
-        if (cull)
+        if (cull && shadow)
+        {
+            // Inside the cascade's square, and not wholly beyond its far depth.
+            float3 c = mul(light, float4(center, 1.0)).xyz;
+            visible = all(abs(c.xy - bounds.xy) <= bounds.z + radius) && -(c.z + radius) <= bounds.w;
+            // The light is a direction: the cone test from infinitely far away.
+            if (visible && cone && (meshlet.cone >> 24) != 127u)
+            {
+                float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
+                visible = dot(culled_side, axis) < snorm8(meshlet.cone, 24);
+            }
+        }
+        else if (cull)
         {
             [unroll]
             for (int i = 0; i < 6; i++)

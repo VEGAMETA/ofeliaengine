@@ -183,3 +183,37 @@ measurements, niagara's culling).
   - Step 3 (mesh shaders on the RTX, without a draw per meshlet) and step 4 (shadows: the
     largest pass of the dense scenes, unchanged here).
 
+### Step 4, the shadow cascades (2026-10-14)
+
+- **Work items per cascade.** With meshlets on, the shadow phase of `cullMainMeshlets`
+  makes a caster of a cascade the work item of that cascade's meshlet lists. Each cascade
+  has its own lists in the shadow command buffer after the cascades' command lists, and
+  its draws' slots after the cascades' casters.
+- **One indirect dispatch of `cullMeshlets` per cascade**
+  (`push.phase = PHASE_SHADOW_MESHLETS + k`). It tests each meshlet's sphere against the
+  cascade's square and far depth in light view space.
+- **The cone, from infinitely far along the light.** The shadow pass draws single-sided
+  geometry's faces away from the light and subsurface materials' faces towards it. A
+  meshlet all of whose faces it would cull is skipped:
+  `dot(±to_light, axis) ≥ cutoff`.
+- **The shadows need no depth prepass** (depth only: any order will do). They draw by
+  meshlet whenever meshlet culling is on.
+- **Measured.** The shadow passes (culling included) and the frame's prepass + shading +
+  culling, off → on:
+
+| scene | RTX 4060 Ti | Radeon iGPU |
+|---|---|---|
+| spheres, overview: shadow | 4,294 → 4,123 µs (−4 %) | 67.4 → 60.2 ms (−11 %) |
+| spheres, inside the field: shadow | 3,865 → 3,619 µs (−6 %) | 64.7 → 53.9 ms (−17 %) |
+| spheres, overview: shadow + prepass + shading + culling | 12,932 → 12,526 µs (−3 %) | 203.4 → 182.2 ms (−10 %) |
+| spheres, inside the field: all four | 5,287 → 4,875 µs (−8 %) | 94.4 → 78.0 ms (−17 %) |
+| Sponza: shadow | 161 → 152 µs | 2,868 → 2,738 µs |
+| Sponza: all four | 458 → 464 µs (+1.3 %) | 13,464 → 13,106 µs (−2.7 %) |
+| FlightHelmet: shadow | 23 → 32 µs | 441 → 362 µs |
+| FlightHelmet: all four | 103 → 124 µs (+20 %) | 2,580 → 2,629 µs (+1.9 %) |
+
+  - Small scenes pay the fixed cost of the cascades' dispatches: about 7–9 µs on the
+    RTX.
+  - One dispatch for all the cascades' work items would save most of it (later).
+  - Local lights' shadow views still draw whole instances.
+

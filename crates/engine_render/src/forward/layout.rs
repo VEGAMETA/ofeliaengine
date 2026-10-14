@@ -898,10 +898,10 @@ impl States {
         }
     }
 
-    /// Records each pipeline state's meshlet draws (ADR 0085) from one phase's lists at
-    /// `lists` in `buffer`, as many as its meshlet cull wrote (their count is in the
-    /// lists' header), with the built-in `pipelines` (opaque, masked), for the states
-    /// `mask` sets.
+    /// Records each pipeline state's meshlet draws (ADR 0085) from one phase's (or shadow
+    /// cascade's: `shadow`) lists at `lists` in `buffer`, as many as its meshlet cull wrote
+    /// (their count is in the lists' header), with the built-in `pipelines` (opaque,
+    /// masked), for the states `mask` sets.
     ///
     /// # Safety
     ///
@@ -914,6 +914,7 @@ impl States {
         geometry: &GeometryFrame<'_>,
         pipelines: [&Pipeline; 2],
         push: &Push,
+        shadow: bool,
         mask: u32,
         buffer: vk::Buffer,
         lists: u64,
@@ -929,7 +930,7 @@ impl States {
                 continue;
             }
             let pipeline = pipelines[usize::from(state & MASKED != 0)];
-            let (cull, front) = faces(state, false);
+            let (cull, front) = faces(state, shadow);
             // SAFETY: guaranteed by the caller; the count is at the state's word of the
             // header and never above `room` (the cull reserves before it writes).
             unsafe {

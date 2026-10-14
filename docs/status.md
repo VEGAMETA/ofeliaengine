@@ -94,11 +94,15 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
     keeps each level's meshlets after its indices. Culling tests each meshlet's sphere,
     normal cone and (late phase) the depth pyramid, and draws one indexed draw per
     visible meshlet through `vkCmdDrawIndexedIndirectCount`, only after a depth prepass.
-  - Dense meshes gain on both GPUs: 10,000 spheres of 4k triangles −3 to −12 % on the
-    RTX and −10 to −19 % on the Radeon. Pixel-bound scenes lose a little: Sponza +5 %
-    on the RTX, −2.6 % on the Radeon; FlightHelmet +15 % / +4.5 %.
+  - Step 4 is done too: the shadow cascades are culled per meshlet (each cascade's bounds,
+    the cone seen from the light).
+  - The frame's shadow + prepass + shading + culling, off → on:
+    - 10,000 spheres of 4k triangles: −3 to −8 % on the RTX, −10 to −17 % on the Radeon;
+    - Sponza: +1.3 % / −2.7 %;
+    - FlightHelmet: +20 % (21 µs) / +1.9 %.
   - Open for the owner: on by default per device class? Next are step 3 (RTX mesh
-    shaders), step 4 (shadows) and a per-instance rule for pixel-bound instances.
+    shaders), one dispatch for all cascades, local lights' shadows, and a per-instance
+    rule for pixel-bound instances.
 - **3c, custom materials** (ADR 0092, accepted 2026-10-12): step 1 (the passes through
   `IMaterial`, PR #179), step 2 (material types in the renderer: typed materials,
   batches and pipelines per type, compiled on first sight with the glTF fallback drawing
@@ -439,8 +443,8 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085): **meshlets
    in the forward renderer first** (the owner, 2026-10-11; both GPUs; the iGPU has no mesh
    shaders), the visibility buffer decided together with custom materials (3c). Step 1
-   (meshlets made by the cook) and step 2 (culling per meshlet, off by default) done
-   2026-10-14; steps 3–4 in ADR 0085's addendum.
+   (meshlets made by the cook), step 2 (culling per meshlet, off by default) and step 4
+   (the shadow cascades too) done 2026-10-14; step 3 in ADR 0085's addendum.
 5. Virtual shadow maps.
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.

@@ -84,6 +84,17 @@ impl ForwardRenderer {
             work: instance_count,
         });
         let meshlet_shaders = self.meshlet_shaders().filter(|_| meshlet_draws.is_some());
+        // And each shadow cascade's (the shadow passes draw depth only: any order will do),
+        // after the cascades' command lists, their draws' slots after the cascades' casters.
+        let shadow_meshlets = meshlets
+            .filter(|_| cascade_count > 0 && meshlet_shaders.is_some())
+            .map(|layout| MeshletDraws {
+                layout,
+                base: (u64::from(cascade_count) * command_bytes).next_multiple_of(16),
+                bytes: layout.list_bytes(instance_count),
+                work: instance_count,
+            });
+        let shadow_shaders = meshlet_shaders.filter(|_| shadow_meshlets.is_some());
 
         let subsurface = self.subsurface_states();
         // The scene's instances, read by culling and by the vertex shaders.
@@ -424,16 +435,36 @@ impl ForwardRenderer {
             material_data: materials.params().0,
             material_stride: materials.params().1,
             _material_pad: 0,
-            batch_meshlets: meshlet_draws.map_or(0, |m| m.layout.table),
-            meshlets: meshlet_draws.map_or(0, |_| geometry.index_address()),
-            // The late phase's commands start a list later.
-            meshlet_offset: meshlet_draws.map_or([0; 2], |m| {
-                [m.lists(0) as u32, (m.lists(1) - command_bytes) as u32]
-            }),
-            meshlet_slot: meshlet_draws.map_or([0; 2], |m| {
-                let first = phases * slot_count;
-                [first, first + m.layout.draws]
-            }),
+            batch_meshlets: meshlets.map_or(0, |m| m.table),
+            meshlets: meshlets.map_or(0, |_| geometry.index_address()),
+            meshlet_offset: {
+                let mut offsets = [0; 6];
+                if let Some(m) = meshlet_draws {
+                    // The late phase's commands start a list later.
+                    offsets[0] = m.lists(0) as u32;
+                    offsets[1] = (m.lists(1) - command_bytes) as u32;
+                }
+                if let Some(m) = shadow_meshlets {
+                    for k in 0..cascade_count {
+                        offsets[2 + k as usize] = m.lists(k) as u32;
+                    }
+                }
+                offsets
+            },
+            meshlet_slot: {
+                let mut slots = [0; 6];
+                if let Some(m) = meshlet_draws {
+                    let first = phases * slot_count;
+                    slots[0] = first;
+                    slots[1] = first + m.layout.draws;
+                }
+                if let Some(m) = shadow_meshlets {
+                    for k in 0..cascade_count {
+                        slots[2 + k as usize] = cascade_count * slot_count + k * m.layout.draws;
+                    }
+                }
+                slots
+            },
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -481,13 +512,17 @@ impl ForwardRenderer {
         let shadow_commands = fg.create_buffer(
             "shadow commands",
             BufferDesc {
-                size: u64::from(cascade_count) * command_bytes,
+                size: shadow_meshlets.map_or(u64::from(cascade_count) * command_bytes, |m| {
+                    m.lists(cascade_count)
+                }),
             },
         );
         let casters = fg.create_buffer(
             "shadow casters",
             BufferDesc {
-                size: u64::from(cascade_count) * visible_bytes,
+                size: u64::from(cascade_count)
+                    * (visible_bytes
+                        + shadow_meshlets.map_or(0, |m| u64::from(m.layout.draws) * 4)),
             },
         );
         // Local lights' shadow views drawn this frame: their command and caster lists,
@@ -575,6 +610,20 @@ impl ForwardRenderer {
                     ctx.buffer(shadow_commands),
                     &[shadow_region],
                 );
+                if let Some(m) = shadow_meshlets {
+                    let header = |list: u32| vk::BufferCopy {
+                        src_offset: m.layout.header.offset,
+                        dst_offset: m.lists(list),
+                        size: MESHLET_HEADER_BYTES,
+                    };
+                    let regions = [header(0), header(1), header(2), header(3)];
+                    ctx.device.cmd_copy_buffer(
+                        ctx.cmd,
+                        m.layout.header.buffer,
+                        ctx.buffer(shadow_commands),
+                        &regions[..cascade_count as usize],
+                    );
+                }
                 if let Some((flags, true)) = flags {
                     ctx.device
                         .cmd_fill_buffer(ctx.cmd, ctx.buffer(flags), 0, vk::WHOLE_SIZE, 0);
@@ -648,21 +697,50 @@ impl ForwardRenderer {
         let shadow_map = match shared_shadow {
             Some(map) => map,
             None => {
-                fg.add_compute(names.shadow_cull, bindless)
+                let shadow_cull = fg
+                    .add_compute(names.shadow_cull, bindless)
                     .read(
                         shadow_commands,
                         Access::StorageReadWrite(ShaderStages::COMPUTE),
                     )
                     .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
-                    .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE))
-                    .dispatch(cull, cull_threads, move |ctx| {
-                        Some(Push {
-                            visible: ctx.address(casters),
-                            commands: ctx.address(shadow_commands),
-                            phase: PHASE_SHADOW,
-                            ..base
-                        })
-                    });
+                    .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE));
+                let shadow_push = move |ctx: &PassContext<'_>| Push {
+                    visible: ctx.address(casters),
+                    commands: ctx.address(shadow_commands),
+                    phase: PHASE_SHADOW,
+                    ..base
+                };
+                match (shadow_shaders, shadow_meshlets) {
+                    // With meshlets (ADR 0085): the casters, then each cascade's meshlet
+                    // cull over its work items.
+                    (Some(shaders), Some(m)) => {
+                        shadow_cull
+                            .read(shadow_commands, Access::Indirect)
+                            .read(geometry.indices, Access::StorageRead(ShaderStages::COMPUTE))
+                            .record(move |rec| {
+                                let push = shadow_push(rec.context());
+                                let args = rec.context().buffer(shadow_commands);
+                                rec.dispatch(&shaders.instances, cull_threads, &push);
+                                rec.barrier_for_indirect();
+                                for k in 0..cascade_count {
+                                    let push = Push {
+                                        phase: PHASE_SHADOW_MESHLETS + k,
+                                        ..push
+                                    };
+                                    rec.dispatch_indirect(
+                                        &shaders.meshlets,
+                                        args,
+                                        m.lists(k) + MESHLET_ARGS,
+                                        &push,
+                                    );
+                                }
+                            });
+                    }
+                    _ => {
+                        shadow_cull.dispatch(cull, cull_threads, move |ctx| Some(shadow_push(ctx)))
+                    }
+                }
                 let resolution = settings.resolution;
                 let (atlas_width, atlas_height) = settings.atlas_size();
                 let columns = settings.atlas_grid().0;
@@ -713,6 +791,21 @@ impl ForwardRenderer {
                                     u64::from(cascade) * command_bytes,
                                     tile,
                                 );
+                                if let Some(m) = &shadow_meshlets {
+                                    states.draw_meshlets(
+                                        ctx,
+                                        bindless,
+                                        &geometry,
+                                        [&shadow_pipelines[0], &shadow_pipelines[1]],
+                                        &push,
+                                        true,
+                                        DEPTH_STATES,
+                                        ctx.buffer(shadow_commands),
+                                        m.lists(cascade),
+                                        m,
+                                        tile,
+                                    );
+                                }
                             }
                         }
                     });
@@ -1154,6 +1247,7 @@ impl ForwardRenderer {
                         &geometry,
                         pipelines,
                         &push,
+                        false,
                         mask,
                         ctx.buffer(culled),
                         m.lists(u32::from(phase == PHASE_LATE)),

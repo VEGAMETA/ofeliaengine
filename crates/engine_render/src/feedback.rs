@@ -489,6 +489,7 @@ impl TextureFeedback {
                                     &geometry_copy,
                                     [pipeline, pipeline],
                                     &push,
+                                    false,
                                     mask,
                                     ctx.buffer(draws.commands),
                                     m.lists(phase),
