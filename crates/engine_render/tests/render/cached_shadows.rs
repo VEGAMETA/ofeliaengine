@@ -2,15 +2,18 @@
 //! under the validation layer with synchronization validation.
 //!
 //! A ground and a field of poles and boxes under a directional light, seen by a camera
-//! that walks, strafes, turns, stands still and jumps far, then waits while a box moves.
-//! Every frame draws the view twice with the same camera: through a cache, which draws only
-//! the strips its cascades' windows newly cover, and through one drawn whole every frame
-//! (with the same fit). The images must match, and the cache must have drawn less: nothing
-//! while the camera stands still, everything again after the jump and while a caster moves
-//! (ADR 0093's first step).
+//! that walks, strafes, turns, stands still and jumps far, then waits while a box moves,
+//! then walks on with it. Every frame draws the view twice with the same camera: through a
+//! cache, which draws only the strips its cascades' windows newly cover and the moved
+//! box's old and new places, and through one drawn whole every frame (with the same fit).
+//! The images must match, and the cache must have drawn less: nothing while nothing moves,
+//! a little when the box does, everything again after the jump. Once with instanced draws,
+//! once by meshlet (with spheres for the poles), where a cascade's pieces are drawn at once
+//! when vertex shaders can pick viewports.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
+use engine_assets::meshlet::build_meshlets;
 use engine_core::half;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
@@ -18,7 +21,7 @@ use engine_render::forward::{
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
-use engine_render::mesh::{GeometryCapacity, GeometryPool, cube};
+use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, cube};
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
@@ -66,16 +69,19 @@ struct Pose {
     yaw: f32,
 }
 
-/// The frames a box moves in, the camera still.
-const MOVING: core::ops::Range<usize> = 36..39;
+/// The frames a box moves in: the camera still, then walking too.
+const MOVING: core::ops::Range<usize> = 36..44;
+
+/// The frame after the box stops (the camera still).
+const STOPPED: usize = MOVING.end;
 
 /// The walk: forward, strafing, turning (also on the spot), standing still, then a jump
-/// far away, a few steps there, and a wait while a box moves.
+/// far away, a few steps there, a wait while a box moves, and walking while it does.
 fn path() -> Vec<Pose> {
     let mut poses = Vec::new();
     let mut eye = Vec3::new(0.0, 3.0, 0.0);
     let mut yaw = 0.0f32;
-    for k in 0..MOVING.end + 1 {
+    for k in 0..STOPPED + 1 {
         match k {
             // Walking forward at 5 m/s (60 fps), then faster.
             0..8 => eye.z -= 0.083,
@@ -95,7 +101,12 @@ fn path() -> Vec<Pose> {
                 eye.x -= 0.2;
                 eye.z -= 0.1;
             }
-            // Still while a box moves, and one frame after.
+            // Walking while the box moves (after three frames of standing).
+            39..44 => {
+                eye.x += 0.06;
+                eye.z -= 0.05;
+            }
+            // Still while the box moves, and once it stopped.
             _ => {}
         }
         poses.push(Pose { eye, yaw });
@@ -105,6 +116,15 @@ fn path() -> Vec<Pose> {
 
 #[test]
 fn cached_cascades_match_cascades_drawn_whole() {
+    run(false);
+}
+
+#[test]
+fn cached_cascades_by_meshlet_match_cascades_drawn_whole() {
+    run(true);
+}
+
+fn run(meshlets: bool) {
     let Some((instance, device)) = gpu() else {
         return;
     };
@@ -113,14 +133,57 @@ fn cached_cascades_match_cascades_drawn_whole() {
     let bindless = Bindless::new(&device).unwrap();
     let mut geometry =
         GeometryPool::new(&device, &mut allocator, GeometryCapacity::default(), 1).unwrap();
-    let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+    // By meshlet: the cube's one meshlet, and spheres of many for the poles.
+    let (mesh, pole) = if meshlets {
+        let data = cube();
+        let mut indices = data.indices.clone();
+        let cube_meshlets = build_meshlets(&data.positions, &mut indices);
+        let mesh = geometry
+            .add_mesh(&MeshData {
+                indices: &indices,
+                meshlets: bytemuck::cast_slice(&cube_meshlets),
+                ..data.as_data()
+            })
+            .unwrap();
+        // Half a unit across, as the cube.
+        let (unit, mut indices) = super::meshlets::sphere(24, 48);
+        let positions: Vec<[f32; 3]> = unit.iter().map(|p| p.map(|c| c * 0.5)).collect();
+        let sphere_meshlets = build_meshlets(&positions, &mut indices);
+        assert!(
+            sphere_meshlets.len() > 10,
+            "{} meshlets",
+            sphere_meshlets.len()
+        );
+        let pole = geometry
+            .add_mesh(&MeshData {
+                positions: &positions,
+                normals: &unit,
+                tangents: &[],
+                uvs: &[],
+                indices: &indices,
+                meshlets: bytemuck::cast_slice(&sphere_meshlets),
+            })
+            .unwrap();
+        (mesh, pole)
+    } else {
+        let mesh = geometry.add_mesh(&cube().as_data()).unwrap();
+        (mesh, mesh)
+    };
     let mut textures = TexturePool::new(&device, 1 << 20, 1);
     let mut materials = MaterialTable::new(1);
     let gray = materials.add(MaterialDesc::solid([0.5, 0.5, 0.5], 0.0, 1.0));
     let mut ring = UploadRing::new(&device, &mut allocator, 1, 8 << 20).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
     let settings = ShadowSettings::default();
-    let renderer = ForwardRenderer::new(&device, &bindless, HDR, DEPTH, settings).unwrap();
+    let mut renderer = ForwardRenderer::new(&device, &bindless, HDR, DEPTH, settings).unwrap();
+    if meshlets
+        && !renderer
+            .set_meshlet_culling(&device, &bindless, true)
+            .unwrap()
+    {
+        println!("skipping: no drawIndirectCount or shaderInt64");
+        return;
+    }
     let cached = CascadeCache::new(&device, &mut allocator, &bindless, &settings).unwrap();
     let whole = CascadeCache::new(&device, &mut allocator, &bindless, &settings).unwrap();
     whole.set_redraw_always(true);
@@ -147,19 +210,21 @@ fn cached_cascades_match_cascades_drawn_whole() {
             0..3 => Vec3::new(random() * 460.0 - 120.0, 0.0, -random() * 400.0 + 60.0),
             n => spots[n % 2] + Vec3::new(random() * 60.0 - 30.0, 0.0, random() * 60.0 - 30.0),
         };
-        let size = if random() < 0.7 {
+        let (size, mesh) = if random() < 0.7 {
             // A pole.
-            Vec3::new(
+            let size = Vec3::new(
                 0.2 + random() * 0.4,
                 1.0 + random() * 6.0,
                 0.2 + random() * 0.4,
-            )
+            );
+            (size, pole)
         } else {
-            Vec3::new(
+            let size = Vec3::new(
                 1.0 + random() * 6.0,
                 0.5 + random() * 8.0,
                 1.0 + random() * 6.0,
-            )
+            );
+            (size, mesh)
         };
         draws.push(DrawItem {
             mesh,
@@ -374,10 +439,14 @@ fn cached_cascades_match_cascades_drawn_whole() {
             // The jump: every cascade it took out of its window (the coarsest may still
             // overlap and only draw what it newly covers).
             28 => assert!(c.last_texels > layers / 2, "frame 28: {}", c.last_texels),
-            // A caster moved: everything (moved casters' regions alone come next).
-            f if MOVING.contains(&f) => assert_eq!(c.last_texels, layers, "frame {f}"),
+            // A caster moved: its old and new places, with the strips while walking.
+            f if MOVING.contains(&f) => assert!(
+                c.last_texels > 0 && c.last_texels < layers / 8,
+                "frame {f}: {}",
+                c.last_texels
+            ),
             // Nothing moved since.
-            f if f == MOVING.end => assert_eq!(c.last_texels, 0, "frame {f}"),
+            STOPPED => assert_eq!(c.last_texels, 0, "frame {STOPPED}"),
             // Standing still (the frame before moved): nothing.
             21 | 22 => assert_eq!(c.last_texels, 0, "frame {frame}"),
             _ => assert!(
@@ -398,6 +467,14 @@ fn cached_cascades_match_cascades_drawn_whole() {
     // The same projections, drawn in pieces or whole: the same image, up to the odd
     // pixel the rasterizer snaps apart across a viewport offset.
     assert!(worst <= 8, "{worst} pixels differ");
+    // By meshlet, where vertex shaders pick viewports, the walk's strips were drawn at once.
+    let together = cached.stats().together;
+    println!("cascades drawn in pieces at once: {together}");
+    if meshlets && device.adapter().caps.viewport_index {
+        assert!(together > 20, "{together} cascades drawn in pieces at once");
+    } else {
+        assert_eq!(together, 0);
+    }
 
     // SAFETY: the device is idle.
     unsafe {

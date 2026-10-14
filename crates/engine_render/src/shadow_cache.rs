@@ -6,10 +6,12 @@
 //! the camera (`b`, the base, is where the window started when the layer was last drawn
 //! whole, so a whole layer is always drawn in one piece). The window moves in whole texels
 //! (ADR 0044's snapping), so after a move only the columns and rows it has not covered
-//! before need drawing. Each such strip is a rectangle of the window; where it crosses the
-//! layer's edge it is drawn as up to four pieces, each through the cascade's own projection
-//! with the viewport shifted by `N` across the seam and a scissor around its part of the
-//! layer.
+//! before need drawing. Casters that moved need their old and new places drawn again: the
+//! light view rectangles of their boxes, gathered into clusters (as many as the strips
+//! leave room for when a cascade's pieces are drawn at once, else two). Each strip or
+//! cluster is a rectangle of the window; where it crosses the layer's edge it is drawn as
+//! up to four pieces, each through the cascade's own projection with the viewport shifted
+//! by `N` across the seam and a scissor around its part of the layer.
 
 use crate::shadow::Cascade;
 use engine_core::math::Mat4;
@@ -79,6 +81,26 @@ impl Held {
         ]
     }
 
+    /// The rectangle of window texels (`x0, y0, x1, y1`) a light view rectangle touches,
+    /// a texel more around it, within the window (`None` when outside).
+    pub(crate) fn window_rect(&self, light: [f32; 4]) -> Option<[i32; 4]> {
+        let (t, n) = (self.texel, self.resolution as i32);
+        let [lx0, ly0, lx1, ly1] = light;
+        if !(lx0 <= lx1 && ly0 <= ly1) {
+            return None;
+        }
+        // Grid column c spans x from c to c + 1 texels; grid row r spans y from −(r + 1)
+        // to −r texels (rows grow towards −y).
+        let at = |v: f32| (v / t).clamp(-1e9, 1e9);
+        let x0 = at(lx0).floor() as i64 - 1 - i64::from(self.origin[0]);
+        let x1 = at(lx1).ceil() as i64 + 1 - i64::from(self.origin[0]);
+        let y0 = at(-ly1).floor() as i64 - 1 - i64::from(self.origin[1]);
+        let y1 = at(-ly0).ceil() as i64 + 1 - i64::from(self.origin[1]);
+        let clamp = |v: i64| v.clamp(0, i64::from(n)) as i32;
+        let r = [clamp(x0), clamp(y0), clamp(x1), clamp(y1)];
+        (r[0] < r[2] && r[1] < r[3]).then_some(r)
+    }
+
     /// The light view rectangle (`x0, y0, x1, y1`) a rectangle of window texels covers.
     pub(crate) fn light_rect(&self, window: [i32; 4]) -> [f32; 4] {
         let [x0, y0, x1, y1] = window;
@@ -118,26 +140,102 @@ impl Dirty {
     }
 }
 
-/// What a cascade draws this frame: up to two rectangles (a strip of columns, a strip of
-/// rows), or the whole window (in one piece).
+/// Rectangles a cascade draws in a frame at most: a strip of columns, a strip of rows, and
+/// two clusters of moved casters (`Cascade::drawn` in `forward.slang`).
+pub(crate) const MAX_RECTS: usize = 4;
+
+/// Pieces a cascade draws in a frame at most: each rectangle's in each quadrant of the
+/// layer the seams cut (`reached_pieces` in `forward.slang`).
+pub(crate) const MAX_PIECES: usize = MAX_RECTS * 4;
+
+/// What a cascade draws this frame: up to [`MAX_RECTS`] rectangles, or the whole window (in
+/// one piece).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Plan {
-    pub rects: [Dirty; 2],
+    pub rects: [Dirty; MAX_RECTS],
     pub rect_count: usize,
-    /// The whole window is drawn (nothing usable was held).
+    /// The whole window is drawn (nothing usable was held, or what changed covered most
+    /// of it).
     pub full: bool,
 }
 
 /// A plan that draws nothing.
 pub(crate) const NOTHING: Plan = Plan {
-    rects: [EMPTY_DIRTY; 2],
+    rects: [EMPTY_DIRTY; MAX_RECTS],
     rect_count: 0,
     full: false,
 };
 
+/// Up to `most` rectangles (at most [`MAX_RECTS`]) covering `rects` (window texels),
+/// gathered greedily: each joins a cluster it overlaps, else a new one while there are
+/// fewer than `most`, else the one whose area grows least; clusters that grew into each
+/// other become one. Returns the clusters and their count.
+pub(crate) fn clusters(rects: &[[i32; 4]], most: usize) -> ([[i32; 4]; MAX_RECTS], usize) {
+    let union = |a: [i32; 4], b: [i32; 4]| {
+        [
+            a[0].min(b[0]),
+            a[1].min(b[1]),
+            a[2].max(b[2]),
+            a[3].max(b[3]),
+        ]
+    };
+    let area = |r: [i32; 4]| i64::from(r[2] - r[0]) * i64::from(r[3] - r[1]);
+    let touch =
+        |a: [i32; 4], b: [i32; 4]| a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3];
+    let most = most.clamp(1, MAX_RECTS);
+    let mut out = [[0; 4]; MAX_RECTS];
+    let mut count = 0;
+    for &r in rects {
+        if let Some(k) = (0..count).find(|&k| touch(out[k], r)) {
+            out[k] = union(out[k], r);
+        } else if count < most {
+            out[count] = r;
+            count += 1;
+        } else {
+            let grow = |k: usize| area(union(out[k], r)) - area(out[k]);
+            let k = (0..count).min_by_key(|&k| grow(k)).unwrap_or(0);
+            out[k] = union(out[k], r);
+        }
+    }
+    let mut merged = true;
+    while merged {
+        merged = false;
+        let pair = (0..count)
+            .flat_map(|a| (a + 1..count).map(move |b| (a, b)))
+            .find(|&(a, b)| touch(out[a], out[b]));
+        if let Some((a, b)) = pair {
+            out[a] = union(out[a], out[b]);
+            out[b] = out[count - 1];
+            count -= 1;
+            merged = true;
+        }
+    }
+    (out, count)
+}
+
 impl Plan {
     pub(crate) fn rects(&self) -> &[Dirty] {
         &self.rects[..self.rect_count]
+    }
+
+    /// Pieces drawn.
+    pub(crate) fn piece_count(&self) -> usize {
+        self.rects().iter().map(|r| r.piece_count).sum()
+    }
+
+    /// Each piece with its slot among a cascade's pieces drawn at once (`reached_pieces`
+    /// in `forward.slang`): `r * 4 + q` for rectangle `r`'s piece in quadrant `q` of the
+    /// layer (`q & 2`: past the column seam, `q & 1`: past the row seam) of a window whose
+    /// first column and row land at `storage`.
+    pub(crate) fn piece_slots(&self, storage: [u32; 2]) -> impl Iterator<Item = (usize, &Piece)> {
+        self.rects().iter().enumerate().flat_map(move |(r, rect)| {
+            rect.pieces().iter().map(move |p| {
+                // Past a seam, the viewport is shifted back by the layer's side.
+                let q = 2 * usize::from(p.viewport[0] != storage[0] as i32)
+                    + usize::from(p.viewport[1] != storage[1] as i32);
+                (r * 4 + q, p)
+            })
+        })
     }
 }
 
@@ -203,6 +301,56 @@ fn dirty(window: [i32; 4], storage: [u32; 2], n: i32) -> Dirty {
             };
             out.piece_count += 1;
         }
+    }
+    out
+}
+
+/// How far the casters a cascade draws reach beyond its rectangles, as a share of the
+/// window: a rectangle's casters (whole meshes, meshlets) cover about this many times its
+/// area (calibrated on Intel's Sponza, ADR 0093).
+const REACH: f32 = 3.0;
+
+/// A plan's cost against drawing the window whole (1): the casters any of the cascade's
+/// rectangles reaches, about [`REACH`] times their share of the window, drawn once with
+/// the pieces `together`, else once per piece.
+fn relative_cost(plan: &Plan, n: i32, together: bool) -> f32 {
+    let area: i64 = plan
+        .rects()
+        .iter()
+        .map(|r| i64::from(r.window[2] - r.window[0]) * i64::from(r.window[3] - r.window[1]))
+        .sum();
+    let share = (REACH * area as f32 / (n as f32 * n as f32)).min(1.0);
+    if together {
+        share
+    } else {
+        plan.piece_count() as f32 * share
+    }
+}
+
+/// [`plan`], with the casters that moved since: `changed`, rectangles of the window `now`
+/// (their old and new places), drawn again too, gathered into as many clusters as the
+/// strips leave room for when the pieces are drawn `together` (else two). When drawing
+/// those would cost more than most of the whole window, the whole of it is.
+pub(crate) fn plan_with_changes(
+    held: Option<&Held>,
+    now: &mut Held,
+    changed: &[[i32; 4]],
+    together: bool,
+) -> Plan {
+    let mut out = plan(held, now);
+    if out.full || changed.is_empty() {
+        return out;
+    }
+    let n = now.resolution as i32;
+    let room = MAX_RECTS - out.rect_count;
+    let (clusters, count) = clusters(changed, if together { room } else { room.min(2) });
+    let storage = now.storage_origin();
+    for &r in &clusters[..count] {
+        out.rects[out.rect_count] = dirty(r, storage, n);
+        out.rect_count += 1;
+    }
+    if relative_cost(&out, n, together) > 0.8 {
+        return plan(None, now);
     }
     out
 }
@@ -372,6 +520,123 @@ mod tests {
             check(&image, &next);
             now = next;
         }
+    }
+
+    /// Moved casters' rectangles are drawn again with the strips, and the window stays
+    /// whole: after every frame each texel holds its grid texel, and every texel a change
+    /// touched was drawn in that frame.
+    #[test]
+    fn moved_casters_draw_their_places_again() {
+        let n = N as i32;
+        let mut now = held([3, -7]);
+        let mut image = vec![None; (N * N) as usize];
+        let first = plan(None, &mut now);
+        draw(&mut image, &first, &now);
+        let mut seed = 99u32;
+        let mut next = || {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            (seed >> 16) as i32
+        };
+        for _ in 0..300 {
+            let (dx, dy) = (next() % 7 - 3, next() % 7 - 3);
+            let mut moved = held([now.origin[0] + dx, now.origin[1] + dy]);
+            // A few changed rectangles in the new window.
+            let changes: Vec<[i32; 4]> = (0..(next() % 4))
+                .map(|_| {
+                    let (x, y) = (next() % n, next() % n);
+                    let (w, h) = (1 + next() % 9, 1 + next() % 9);
+                    [x, y, (x + w).min(n), (y + h).min(n)]
+                })
+                .collect();
+            let p = plan_with_changes(Some(&now), &mut moved, &changes, next() % 2 == 0);
+            assert!(p.rect_count <= MAX_RECTS);
+            // Mark what the plan draws, then check each change was covered.
+            let mut drawn = vec![false; (N * N) as usize];
+            for rect in p.rects() {
+                let [x0, y0, x1, y1] = rect.window;
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        drawn[(y * n + x) as usize] = true;
+                    }
+                }
+            }
+            for c in &changes {
+                for y in c[1]..c[3] {
+                    for x in c[0]..c[2] {
+                        assert!(drawn[(y * n + x) as usize], "change {c:?} not drawn");
+                    }
+                }
+            }
+            draw(&mut image, &p, &moved);
+            check(&image, &moved);
+            now = moved;
+        }
+    }
+
+    #[test]
+    fn changes_gather_into_clusters() {
+        let (c, k) = clusters(&[[0, 0, 4, 4], [2, 2, 6, 6], [40, 40, 44, 44]], 2);
+        assert_eq!(k, 2);
+        assert_eq!(&c[..k], &[[0, 0, 6, 6], [40, 40, 44, 44]]);
+        // A third far rectangle joins the cluster it grows least.
+        let (c, k) = clusters(&[[0, 0, 2, 2], [60, 60, 62, 62], [4, 4, 6, 6]], 2);
+        assert_eq!(k, 2);
+        assert_eq!(&c[..k], &[[0, 0, 6, 6], [60, 60, 62, 62]]);
+        // With room for more, it keeps its own.
+        let (c, k) = clusters(&[[0, 0, 2, 2], [60, 60, 62, 62], [4, 4, 6, 6]], 4);
+        assert_eq!(&c[..k], &[[0, 0, 2, 2], [60, 60, 62, 62], [4, 4, 6, 6]]);
+        // Clusters that end up touching become one.
+        let (c, k) = clusters(&[[0, 0, 2, 2], [10, 0, 12, 2], [1, 0, 11, 2]], 2);
+        assert_eq!((k, c[0]), (1, [0, 0, 12, 2]));
+        let (c, k) = clusters(
+            &[[0, 0, 2, 2], [10, 0, 12, 2], [20, 0, 22, 2], [1, 0, 21, 2]],
+            4,
+        );
+        assert_eq!((k, c[0]), (1, [0, 0, 22, 2]));
+    }
+
+    #[test]
+    fn changes_over_most_of_the_window_draw_it_whole() {
+        let now = held([5, 5]);
+        let n = N as i32;
+        for together in [false, true] {
+            let mut again = now;
+            let p = plan_with_changes(Some(&now), &mut again, &[[0, 0, n, n - 10]], together);
+            assert!(p.full);
+            assert_eq!(again.base, again.origin);
+            // A small change draws only itself.
+            let mut again = now;
+            let p = plan_with_changes(Some(&now), &mut again, &[[10, 10, 20, 20]], together);
+            assert!(!p.full);
+            assert_eq!(p.rect_count, 1);
+            assert_eq!(p.rects()[0].window, [10, 10, 20, 20]);
+        }
+        // After a step across both seams, a change in the corner they cut: drawn piece by
+        // piece, the plan's seven pieces cost more than the whole; drawn together, they
+        // do not.
+        let moved = held([7, 7]);
+        let mut again = moved;
+        let change = [[n - 8, n - 8, n, n]];
+        assert!(plan_with_changes(Some(&now), &mut again, &change, false).full);
+        let mut again = moved;
+        assert!(!plan_with_changes(Some(&now), &mut again, &change, true).full);
+    }
+
+    /// A light view rectangle's window texels hold it, a texel around, within the window.
+    #[test]
+    fn window_rects_hold_their_light_rects() {
+        let h = Held {
+            texel: 0.25,
+            ..held([-40, 12])
+        };
+        // Window texels 10..14 × 20..30 back and forth.
+        let light = h.light_rect([10, 20, 14, 30]);
+        assert_eq!(h.window_rect(light), Some([9, 19, 15, 31]));
+        // Partly outside: clamped; wholly outside: none.
+        let big = h.light_rect([-30, -5, 5, 5]);
+        assert_eq!(h.window_rect(big), Some([0, 0, 6, 6]));
+        let away = h.light_rect([200, 200, 210, 210]);
+        assert_eq!(h.window_rect(away), None);
     }
 
     #[test]

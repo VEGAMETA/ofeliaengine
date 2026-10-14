@@ -55,7 +55,7 @@ fn gpu() -> Option<(Instance, Device)> {
 }
 
 /// A unit sphere of `rings` × `segments` quads, counter-clockwise from outside.
-fn sphere(rings: u32, segments: u32) -> (Vec<[f32; 3]>, Vec<u32>) {
+pub(crate) fn sphere(rings: u32, segments: u32) -> (Vec<[f32; 3]>, Vec<u32>) {
     let mut positions = Vec::new();
     for r in 0..=rings {
         let theta = core::f32::consts::PI * r as f32 / rings as f32;

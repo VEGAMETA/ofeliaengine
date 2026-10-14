@@ -4,8 +4,13 @@
 
 use super::*;
 use crate::graph::{ImportedTexture, TextureState};
+use crate::local_shadows::DrawDiff;
 use crate::shadow::{Keep, ShadowSettings};
 use crate::shadow_cache::{self, Held, NOTHING};
+
+/// More moved boxes than this pending: every cascade is drawn whole (cheaper than
+/// gathering them).
+const MAX_MOVES: usize = 512;
 
 /// What a view's cached cascades drew ([`CascadeCache::stats`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -13,26 +18,39 @@ pub struct CascadeCacheStats {
     /// Frames that drew texels of any cascade.
     pub frames_drawn: u64,
     /// Cascades drawn whole: in the first frame, after the light turned, the camera jumped
-    /// or the cascade's texels changed size, and whenever the casters changed.
+    /// or the cascade's texels changed size, when what changed covered most of a cascade,
+    /// and when the renderer could not tell what changed.
     pub whole: u64,
     /// Texels drawn in the last frame, over every cascade.
     pub last_texels: u64,
+    /// Cascades whose pieces were drawn at once (several pieces with the meshlet path,
+    /// where vertex shaders pick viewports): each meshlet once, into the pieces it reaches.
+    pub together: u64,
 }
 
-/// The casters a cache's layers were drawn from, to find their changes.
+/// Where a frame's casters came from, to tell how its changes follow the last frame's.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Casters {
-    /// A draw list: a hash of its meshes (and their shapes), materials and transforms.
-    Draws(u64),
-    /// A GPU scene: its upload's serial, a hash of its batches' meshes (and their shapes),
-    /// whether the upload moved, added or removed instances, and whether instances move
-    /// between ticks (on the GPU, every frame).
-    Scene {
-        serial: u64,
-        meshes: u64,
-        changed: bool,
-        moving: bool,
-    },
+enum CasterSource {
+    /// A draw list, compared with the previous one draw by draw.
+    Draws,
+    /// A GPU scene: its upload's serial and a hash of its batches' meshes (and their
+    /// shapes).
+    Scene { serial: u64, meshes: u64 },
+}
+
+/// The casters the layers were drawn from, and what moved since.
+#[derive(Debug, Default)]
+struct Moves {
+    /// What the last frame's casters came from, the renderer settings that change what
+    /// casts, and the material table's revision.
+    last: Option<(CasterSource, u64, u64)>,
+    /// A draw list's previous draws.
+    draws: DrawDiff,
+    /// The world boxes of casters that moved, appeared or went (their old and new places)
+    /// since the layers were last drawn.
+    boxes: Vec<[Vec3; 2]>,
+    /// One cascade's window rectangles of them (scratch).
+    rects: Vec<[i32; 4]>,
 }
 
 /// A view's sun shadow map kept across frames (ADR 0093): a layer per cascade, each
@@ -42,10 +60,12 @@ pub(crate) enum Casters {
 ///
 /// The cascades keep their texel size while it still covers the view (a quarter larger at
 /// most), and their depth range is the scene's: what they hold stays valid from frame to
-/// frame. They are drawn whole again in the first frame, when the light turns, when the
-/// camera jumps or the texel size changes, and (for now) whenever the casters change: a
-/// draw list that is not the same as last frame's, a scene upload that moved anything,
-/// changed materials or meshes. [`Self::invalidate`] forces it.
+/// frame. Casters that move, appear or go (a draw list's changed draws, a scene upload's
+/// changes, instances moving between ticks) draw their old and new places again. The
+/// cascades are drawn whole in the first frame, when the light turns, when the camera
+/// jumps or the texel size changes, when what changed covers most of one, and when the
+/// renderer cannot tell what changed (another draw list or scene, edited materials or
+/// meshes, many hundreds of changes). [`Self::invalidate`] forces it.
 ///
 /// One per view: create it with the renderer's [`ShadowSettings`]
 /// ([`ForwardRenderer::shadow_settings`]; a cache made with others is not used), free it
@@ -67,8 +87,8 @@ pub struct CascadeCache {
     /// Every cascade is drawn whole next (until one frame drew them all).
     stale: Cell<bool>,
     redraw_always: Cell<bool>,
-    /// The casters the layers were drawn from, and the materials' revision.
-    casters: Cell<Option<(Casters, u64)>>,
+    /// The casters the layers were drawn from, and what moved since.
+    moves: RefCell<Moves>,
     /// The frame (graph serial) the layers were last imported into, and their handle.
     imported: Cell<Option<(u64, Texture)>>,
     stats: Cell<CascadeCacheStats>,
@@ -203,7 +223,7 @@ impl CascadeCache {
             reach: Cell::new(None),
             stale: Cell::new(true),
             redraw_always: Cell::new(false),
-            casters: Cell::new(None),
+            moves: RefCell::new(Moves::default()),
             imported: Cell::new(None),
             stats: Cell::new(CascadeCacheStats::default()),
         })
@@ -287,45 +307,74 @@ impl CascadeCache {
         }
     }
 
-    /// Notes this frame's casters and the materials' revision: any change since the
-    /// layers were drawn draws them whole.
-    pub(crate) fn note_casters(&self, now: Casters, materials: u64) {
-        let unchanged = match (self.casters.get(), now) {
-            (Some((_, m)), _) if m != materials => false,
-            (Some((Casters::Draws(a), _)), Casters::Draws(b)) => a == b,
-            (
-                Some((
-                    Casters::Scene {
-                        serial: a,
-                        meshes: before,
-                        ..
-                    },
-                    _,
-                )),
-                Casters::Scene {
-                    serial: b,
-                    meshes,
-                    changed,
-                    moving,
-                },
-            ) => {
-                // The same upload again (its changes were seen), or the next one without
-                // changes; instances moving between ticks move every frame.
-                meshes == before && !moving && (b == a || (b == a + 1 && !changed))
-            }
-            _ => false,
-        };
-        if !unchanged {
+    /// Notes this frame's draw list (`mesh`: a mesh's object box and shape revision), the
+    /// renderer settings that change what casts and the materials' revision: the changed
+    /// draws' old and new places are drawn again; another list or other settings draw
+    /// everything.
+    pub(crate) fn note_draws(
+        &self,
+        draws: &[DrawItem],
+        mesh: impl Fn(MeshId) -> (Vec3, Vec3, u32),
+        settings: u64,
+        materials: u64,
+    ) {
+        let mut m = self.moves.borrow_mut();
+        let now = (CasterSource::Draws, settings, materials);
+        let follows = m.last == Some(now);
+        m.last = Some(now);
+        m.draws.diff(draws, mesh);
+        let Moves { draws, boxes, .. } = &mut *m;
+        boxes.extend_from_slice(&draws.changes);
+        if !follows || boxes.len() > MAX_MOVES {
             self.stale.set(true);
         }
-        self.casters.set(Some((now, materials)));
     }
 
-    /// This frame's plan for each cascade of `fit`, and what each layer holds once the
-    /// plan is drawn (cascades beyond the fit's keep theirs).
+    /// Notes this frame's scene upload (`serial`, its batches' `meshes` hash, its
+    /// `changes` and the boxes of its instances `moving` between ticks), the renderer
+    /// settings that change what casts and the materials' revision: what changed is drawn
+    /// again (the same upload again brings only its moving instances); a skipped upload or
+    /// other meshes draw everything.
+    pub(crate) fn note_scene(
+        &self,
+        serial: u64,
+        meshes: u64,
+        settings: u64,
+        materials: u64,
+        changes: &[[Vec3; 2]],
+        moving: &[[Vec3; 2]],
+    ) {
+        let mut m = self.moves.borrow_mut();
+        let (same, next) = match m.last {
+            Some((
+                CasterSource::Scene {
+                    serial: a,
+                    meshes: before,
+                },
+                s,
+                mat,
+            )) if before == meshes && s == settings && mat == materials => {
+                (serial == a, serial == a + 1)
+            }
+            _ => (false, false),
+        };
+        m.last = Some((CasterSource::Scene { serial, meshes }, settings, materials));
+        if next {
+            m.boxes.extend_from_slice(changes);
+        }
+        m.boxes.extend_from_slice(moving);
+        if !(same || next) || m.boxes.len() > MAX_MOVES {
+            self.stale.set(true);
+        }
+    }
+
+    /// This frame's plan for each cascade of `fit` (with its pieces drawn `together`, see
+    /// [`shadow_cache::plan_with_changes`]), and what each layer holds once the plan is
+    /// drawn (cascades beyond the fit's keep theirs).
     pub(crate) fn plan(
         &self,
         fit: &CascadeFit,
+        together: bool,
     ) -> (
         [shadow_cache::Plan; MAX_CASCADES],
         [Option<Held>; MAX_CASCADES],
@@ -334,28 +383,51 @@ impl CascadeCache {
         let held = self.held.get();
         let mut plans = [NOTHING; MAX_CASCADES];
         let mut now = held;
+        let mut m = self.moves.borrow_mut();
+        let Moves { boxes, rects, .. } = &mut *m;
+        let light = fit.light_from_world;
+        // The light view is a rotation: a box's extents there are the absolute rotation's
+        // (Arvo).
+        let abs = engine_core::math::Mat3::from_cols(
+            light.x_axis.truncate().abs(),
+            light.y_axis.truncate().abs(),
+            light.z_axis.truncate().abs(),
+        );
         for k in 0..fit.count.min(self.desc.layers as usize) {
             let mut h = Held::of(&fit.cascades[k], fit.light_from_world, self.desc.width);
             let before = if whole { None } else { held[k].as_ref() };
-            plans[k] = shadow_cache::plan(before, &mut h);
+            rects.clear();
+            if before.is_some() {
+                for b in boxes.iter() {
+                    let c = light.transform_point3((b[0] + b[1]) * 0.5);
+                    let e = abs * ((b[1] - b[0]) * 0.5);
+                    if let Some(r) = h.window_rect([c.x - e.x, c.y - e.y, c.x + e.x, c.y + e.y]) {
+                        rects.push(r);
+                    }
+                }
+            }
+            plans[k] = shadow_cache::plan_with_changes(before, &mut h, rects, together);
             now[k] = Some(h);
         }
         (plans, now)
     }
 
-    /// Records a frame that drew `plans` (of `count` cascades split over `reach`): the
-    /// layers hold `now`.
+    /// Records a frame that drew `plans` (of `count` cascades split over `reach`, of which
+    /// `together` drew their pieces at once): the layers hold `now`.
     pub(crate) fn commit(
         &self,
         plans: &[shadow_cache::Plan; MAX_CASCADES],
         now: [Option<Held>; MAX_CASCADES],
         count: usize,
         reach: f32,
+        together: u64,
     ) {
         self.held.set(now);
         if count > 0 {
             self.reach.set(Some(reach));
         }
+        // What moved is drawn.
+        self.moves.borrow_mut().boxes.clear();
         let plans = &plans[..count.min(MAX_CASCADES)];
         if !plans.is_empty() && plans.iter().all(|p| p.full) {
             self.stale.set(false);
@@ -370,11 +442,14 @@ impl CascadeCache {
         stats.frames_drawn += u64::from(texels > 0);
         stats.whole += plans.iter().filter(|p| p.full).count() as u64;
         stats.last_texels = texels;
+        stats.together += together;
         self.stats.set(stats);
     }
 
-    /// Records a frame that drew nothing (a still camera over a still scene).
+    /// Records a frame that drew nothing (a still camera over a still scene, or what moved
+    /// lay outside every cascade).
     pub(crate) fn idle(&self) {
+        self.moves.borrow_mut().boxes.clear();
         let mut stats = self.stats.get();
         stats.last_texels = 0;
         self.stats.set(stats);
@@ -428,9 +503,9 @@ pub(crate) fn whole_plans(
     (plans, held)
 }
 
-/// One step of the hash of what the cascades are drawn from ([`Casters`]): FxHash's. Each
-/// step is a bijection of the hash for a given word, so lists that differ in one word
-/// always hash apart.
+/// One step of the hashes of what the cascades are drawn from (a scene's meshes, the
+/// renderer's settings): FxHash's. Each step is a bijection of the hash for a given word,
+/// so lists that differ in one word always hash apart.
 #[inline]
 pub(crate) fn mix(hash: u64, word: u64) -> u64 {
     (hash.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95)
