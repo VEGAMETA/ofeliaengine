@@ -457,6 +457,10 @@ const FRAGMENT_BLENDED_ATMOSPHERE_REACTIVE: &[u8] =
 pub const REACTIVE_FORMAT: vk::Format = vk::Format::R8_UNORM;
 const LIGHT_TILES: &[u8] = include_bytes!("../../shaders/forward.lightTiles.spv");
 
+/// `PHASE_SHADOW_MESHLETS` in `forward.slang`: the meshlet cull of shadow cascade k runs
+/// with this phase plus k.
+const PHASE_SHADOW_MESHLETS: u32 = 16;
+
 /// `PHASE_*` in `forward.slang`.
 const PHASE_ALL: u32 = 0;
 const PHASE_EARLY: u32 = 1;
@@ -945,7 +949,7 @@ struct CascadeData {
     bounds: [f32; 4],
 }
 
-/// `Frame` in `forward.slang` (1120 bytes).
+/// `Frame` in `forward.slang` (1152 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -1032,12 +1036,13 @@ struct FrameData {
     material_stride: u32,
     _material_pad: u32,
     /// The meshlet path (ADR 0085): the batches' meshlets, the pool's index buffer (their
-    /// meshlets), and per phase (all or early; late) the bytes from its command list to
-    /// its meshlet lists and the first slot of its meshlet draws.
+    /// meshlets), and per meshlet lists (0: all or early, 1: late, 2 + k: shadow cascade
+    /// k) the bytes from the command list its culling reads to them and the first slot of
+    /// their draws.
     batch_meshlets: u64,
     meshlets: u64,
-    meshlet_offset: [u32; 2],
-    meshlet_slot: [u32; 2],
+    meshlet_offset: [u32; 6],
+    meshlet_slot: [u32; 6],
 }
 
 /// `BatchMeshlets` in `forward.slang` (48 bytes): a batch's levels' meshlets (ADR 0085).
@@ -1118,7 +1123,7 @@ pub(crate) struct Push {
 const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 64);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1120);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1152);
 const _: () = assert!(core::mem::size_of::<BatchMeshletData>() == 48);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
@@ -2233,10 +2238,12 @@ impl ForwardRenderer {
     /// texture feedback): culling tests each meshlet's bounding sphere against the
     /// frustum, its normal cone against the camera (single-sided materials, uniformly
     /// scaled instances) and, in occlusion culling's second phase, against the depth
-    /// pyramid. Blended instances, those of material types and those beyond a frame's room
-    /// for meshlet draws keep their instanced draw, as do the shadow passes and reflection
-    /// probes' captures. Meshes get meshlets from the cook (`engine_assets`). Needs the
-    /// device's `drawIndirectCount` and `shaderInt64`; returns whether it is on.
+    /// pyramid. The sun's shadow cascades draw by meshlet too, with or without a prepass:
+    /// each cascade's bounds, and the normal cone seen from the light. Blended instances,
+    /// those of material types and those beyond a frame's room for meshlet draws keep their
+    /// instanced draw, as do local lights' shadow views and reflection probes' captures.
+    /// Meshes get meshlets from the cook (`engine_assets`). Needs the device's
+    /// `drawIndirectCount` and `shaderInt64`; returns whether it is on.
     pub fn set_meshlet_culling(
         &mut self,
         device: &Device,

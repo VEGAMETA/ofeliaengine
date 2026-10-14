@@ -429,21 +429,28 @@ and `engine_streaming` hand them to the geometry pool (`MeshData::meshlets`,
 `LodIndices::meshlets`).
 
 `renderer.set_meshlet_culling(&device, &bindless, true)` then draws such meshes meshlet
-by meshlet in views with a depth prepass. Meshlets out of the view, facing away
-(single-sided materials) or, with occlusion culling, hidden behind what was drawn are not
-drawn.
+by meshlet in views with a depth prepass, and in the sun's shadow cascades:
+- in the view, meshlets that are out of it, face away (single-sided materials) or are
+  hidden behind what was drawn (occlusion culling) are not drawn;
+- in the shadow cascades, meshlets outside the cascade, and those whose faces all face
+  the light, are not drawn.
 
 - **It pays for dense geometry,** where vertex work counts: thousands of detailed objects,
-  and integrated GPUs. 10,000 spheres of 4,096 triangles: −3 to −12 % on an RTX 4060
-  Ti, −10 to −19 % on a Radeon iGPU.
-- **It costs a little where pixels dominate.** Each meshlet is a draw of its own: Sponza
-  +5 % on the RTX (−2.6 % on the iGPU).
+  and integrated GPUs. 10,000 spheres of 4,096 triangles: −3 to −8 % on an RTX 4060 Ti,
+  −10 to −17 % on a Radeon iGPU (shadows, prepass and shading).
+- **It costs a little where pixels dominate.** Each meshlet is a draw of its own, and each
+  shadow cascade a culling pass. Sponza: +1.3 % on the RTX, −2.7 % on the iGPU.
+  FlightHelmet: +21 µs on the RTX.
 - **So it is off by default.** Measure your scenes with it on and off (`scene_bench
   --meshlet-culling`, `draw_bench --meshlets`).
-- **Not drawn by meshlet:** transparent materials (drawn back to front), material types,
-  skinned meshes (the cook makes them no meshlets), shadows and reflection probes'
-  captures. Without a depth prepass nothing is drawn by meshlet: the draws' order would
-  undo the front-to-back sorting.
+- **Not drawn by meshlet:**
+  - transparent materials (drawn back to front);
+  - material types;
+  - skinned meshes (the cook makes them no meshlets);
+  - local lights' shadows;
+  - reflection probes' captures.
+- Without a depth prepass, the view itself is not drawn by meshlet (the draws' order would
+  undo the front-to-back sorting); its shadows still are.
 - **Needs** `drawIndirectCount` and `shaderInt64`, which desktop GPUs have.
   `set_meshlet_culling` returns `false` where they are missing.
 - `ForwardPasses::meshlets` says where each phase's meshlet draw counts are, to read back
