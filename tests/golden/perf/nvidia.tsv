@@ -1,5 +1,43 @@
 # GPU µs per pass (median of 3 runs' medians over 100 frames, a round at a time), NVIDIA GeForce RTX 4060 Ti (discrete, Vulkan 1.4.351, 15.7 GiB, NVIDIA 616.92)
 # scene	pass	µs
+intel_sponza_defaults_discrete	(frame total)	2749.0
+intel_sponza_defaults_discrete	(gpu frame)	2150.2
+intel_sponza_defaults_discrete	ao	512.0
+intel_sponza_defaults_discrete	ao denoise	84.0
+intel_sponza_defaults_discrete	ao depths	52.3
+intel_sponza_defaults_discrete	bloom downsample	52.2
+intel_sponza_defaults_discrete	bloom upsample	28.7
+intel_sponza_defaults_discrete	cull	11.3
+intel_sponza_defaults_discrete	cull setup	1.5
+intel_sponza_defaults_discrete	depth prepass	176.4
+intel_sponza_defaults_discrete	forward	487.4
+intel_sponza_defaults_discrete	motion background	3.1
+intel_sponza_defaults_discrete	remember instances	2.4
+intel_sponza_defaults_discrete	shadow	1080.5
+intel_sponza_defaults_discrete	shadow cull	24.1
+intel_sponza_defaults_discrete	sky	4.1
+intel_sponza_defaults_discrete	taau	149.3
+intel_sponza_defaults_discrete	tonemap	27.6
+intel_sponza_defaults_discrete	transparent	52.2
+intel_sponza_defaults_integrated	(frame total)	1763.9
+intel_sponza_defaults_integrated	(gpu frame)	1676.4
+intel_sponza_defaults_integrated	ao	93.2
+intel_sponza_defaults_integrated	ao denoise	22.5
+intel_sponza_defaults_integrated	ao depths	26.4
+intel_sponza_defaults_integrated	bloom downsample	43.0
+intel_sponza_defaults_integrated	bloom upsample	29.7
+intel_sponza_defaults_integrated	cull	11.5
+intel_sponza_defaults_integrated	cull setup	1.5
+intel_sponza_defaults_integrated	depth prepass	162.8
+intel_sponza_defaults_integrated	forward	329.7
+intel_sponza_defaults_integrated	motion background	2.0
+intel_sponza_defaults_integrated	remember instances	2.3
+intel_sponza_defaults_integrated	shadow	831.3
+intel_sponza_defaults_integrated	shadow cull	23.1
+intel_sponza_defaults_integrated	sky	3.1
+intel_sponza_defaults_integrated	taau	124.4
+intel_sponza_defaults_integrated	tonemap	27.6
+intel_sponza_defaults_integrated	transparent	28.7
 procedural	(frame total)	400.2
 procedural	(gpu frame)	417.8
 procedural	bloom downsample	37.9

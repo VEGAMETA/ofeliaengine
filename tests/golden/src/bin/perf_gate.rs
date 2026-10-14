@@ -86,6 +86,10 @@ fn limits(vendor: &str) -> Limits {
     }
 }
 
+/// Intel's Sponza (2022), the dense scene of ADR 0085: not in the default test assets
+/// (`tools/fetch-test-assets.ps1 -Only IntelSponza`), its shots skipped where it is missing.
+const INTEL_SPONZA: &str = "IntelSponza/main_sponza/NewSponza_Main_glTF_003.gltf";
+
 fn shots() -> Vec<Shot> {
     vec![
         Shot {
@@ -157,8 +161,24 @@ fn shots() -> Vec<Shot> {
         // 0072): with meshlet culling (ADR 0085), its culls and the prepass, shading and
         // shadows drawn by meshlet; the integrated class's from 67 % with lighter ambient
         // occlusion.
-        class_defaults("sponza_defaults_discrete", DeviceClass::Discrete),
-        class_defaults("sponza_defaults_integrated", DeviceClass::Integrated),
+        class_defaults("sponza_defaults_discrete", SPONZA, DeviceClass::Discrete),
+        class_defaults(
+            "sponza_defaults_integrated",
+            SPONZA,
+            DeviceClass::Integrated,
+        ),
+        // Intel's Sponza with each class's defaults: 3.7 M triangles with 4K textures, where
+        // the shadows, the prepass and meshlet culling carry the frame.
+        class_defaults(
+            "intel_sponza_defaults_discrete",
+            INTEL_SPONZA,
+            DeviceClass::Discrete,
+        ),
+        class_defaults(
+            "intel_sponza_defaults_integrated",
+            INTEL_SPONZA,
+            DeviceClass::Integrated,
+        ),
         // The other antialiasing and scaling modes (ADR 0075): MSAA 4× (the depth prepass,
         // multisampled shading, the resolves), the filters after tone mapping (FXAA, SMAA
         // 1x, SMAA T2x with its temporal resolve), FSR 1 from 67 %.
@@ -224,8 +244,10 @@ fn shots() -> Vec<Shot> {
     ]
 }
 
-/// Sponza with `class`'s defaults (`engine_frame::RenderDefaults`).
-fn class_defaults(name: &'static str, class: DeviceClass) -> Shot {
+const SPONZA: &str = "Sponza/Sponza.gltf";
+
+/// The glTF `scene` with `class`'s defaults (`engine_frame::RenderDefaults`).
+fn class_defaults(name: &'static str, scene: &str, class: DeviceClass) -> Shot {
     let defaults = RenderDefaults::for_class(class);
     Shot {
         size: [1920, 1080],
@@ -233,7 +255,7 @@ fn class_defaults(name: &'static str, class: DeviceClass) -> Shot {
         antialiasing: defaults.antialiasing,
         quality: defaults.quality,
         meshlets: defaults.meshlet_culling,
-        ..Shot::new(name, Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
+        ..Shot::new(name, Source::Gltf(PathBuf::from(scene)))
     }
 }
 
