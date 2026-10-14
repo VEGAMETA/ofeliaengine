@@ -38,6 +38,44 @@ intel_sponza_defaults_integrated	sky	23.4
 intel_sponza_defaults_integrated	taau	7465.8
 intel_sponza_defaults_integrated	tonemap	904.8
 intel_sponza_defaults_integrated	transparent	1476.0
+intel_sponza_walk_discrete	(frame total)	60997.8
+intel_sponza_walk_discrete	(gpu frame)	59916.1
+intel_sponza_walk_discrete	ao	14729.9
+intel_sponza_walk_discrete	ao denoise	2896.7
+intel_sponza_walk_discrete	ao depths	1565.5
+intel_sponza_walk_discrete	bloom downsample	1415.1
+intel_sponza_walk_discrete	bloom upsample	445.8
+intel_sponza_walk_discrete	cull	86.3
+intel_sponza_walk_discrete	cull setup	3.8
+intel_sponza_walk_discrete	depth prepass	4308.0
+intel_sponza_walk_discrete	forward	22710.4
+intel_sponza_walk_discrete	motion background	40.2
+intel_sponza_walk_discrete	remember instances	0.3
+intel_sponza_walk_discrete	shadow	1464.7
+intel_sponza_walk_discrete	shadow cull	105.1
+intel_sponza_walk_discrete	sky	61.3
+intel_sponza_walk_discrete	taau	7649.7
+intel_sponza_walk_discrete	tonemap	786.6
+intel_sponza_walk_discrete	transparent	2700.6
+intel_sponza_walk_integrated	(frame total)	36450.5
+intel_sponza_walk_integrated	(gpu frame)	35919.8
+intel_sponza_walk_integrated	ao	2319.0
+intel_sponza_walk_integrated	ao denoise	505.2
+intel_sponza_walk_integrated	ao depths	734.1
+intel_sponza_walk_integrated	bloom downsample	1730.4
+intel_sponza_walk_integrated	bloom upsample	889.8
+intel_sponza_walk_integrated	cull	85.3
+intel_sponza_walk_integrated	cull setup	3.7
+intel_sponza_walk_integrated	depth prepass	3500.8
+intel_sponza_walk_integrated	forward	14144.5
+intel_sponza_walk_integrated	motion background	15.4
+intel_sponza_walk_integrated	remember instances	0.3
+intel_sponza_walk_integrated	shadow	1456.0
+intel_sponza_walk_integrated	shadow cull	104.6
+intel_sponza_walk_integrated	sky	21.7
+intel_sponza_walk_integrated	taau	7753.1
+intel_sponza_walk_integrated	tonemap	1565.6
+intel_sponza_walk_integrated	transparent	1625.7
 procedural	(frame total)	13840.2
 procedural	(gpu frame)	13853.7
 procedural	bloom downsample	806.1

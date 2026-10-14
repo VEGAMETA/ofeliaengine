@@ -38,6 +38,44 @@ intel_sponza_defaults_integrated	sky	3.1
 intel_sponza_defaults_integrated	taau	123.9
 intel_sponza_defaults_integrated	tonemap	27.6
 intel_sponza_defaults_integrated	transparent	28.7
+intel_sponza_walk_discrete	(frame total)	1574.4
+intel_sponza_walk_discrete	(gpu frame)	1595.3
+intel_sponza_walk_discrete	ao	443.4
+intel_sponza_walk_discrete	ao denoise	58.4
+intel_sponza_walk_discrete	ao depths	40.7
+intel_sponza_walk_discrete	bloom downsample	49.2
+intel_sponza_walk_discrete	bloom upsample	28.7
+intel_sponza_walk_discrete	cull	11.6
+intel_sponza_walk_discrete	cull setup	1.5
+intel_sponza_walk_discrete	depth prepass	145.7
+intel_sponza_walk_discrete	forward	459.8
+intel_sponza_walk_discrete	motion background	3.1
+intel_sponza_walk_discrete	remember instances	2.4
+intel_sponza_walk_discrete	shadow	80.3
+intel_sponza_walk_discrete	shadow cull	13.3
+intel_sponza_walk_discrete	sky	3.1
+intel_sponza_walk_discrete	taau	151.0
+intel_sponza_walk_discrete	tonemap	27.6
+intel_sponza_walk_discrete	transparent	54.3
+intel_sponza_walk_integrated	(frame total)	894.7
+intel_sponza_walk_integrated	(gpu frame)	902.4
+intel_sponza_walk_integrated	ao	79.9
+intel_sponza_walk_integrated	ao denoise	18.4
+intel_sponza_walk_integrated	ao depths	19.6
+intel_sponza_walk_integrated	bloom downsample	41.0
+intel_sponza_walk_integrated	bloom upsample	29.7
+intel_sponza_walk_integrated	cull	11.4
+intel_sponza_walk_integrated	cull setup	1.5
+intel_sponza_walk_integrated	depth prepass	129.7
+intel_sponza_walk_integrated	forward	297.0
+intel_sponza_walk_integrated	motion background	2.0
+intel_sponza_walk_integrated	remember instances	2.4
+intel_sponza_walk_integrated	shadow	62.4
+intel_sponza_walk_integrated	shadow cull	12.3
+intel_sponza_walk_integrated	sky	3.1
+intel_sponza_walk_integrated	taau	125.0
+intel_sponza_walk_integrated	tonemap	27.6
+intel_sponza_walk_integrated	transparent	30.7
 procedural	(frame total)	351.3
 procedural	(gpu frame)	369.2
 procedural	bloom downsample	37.9
