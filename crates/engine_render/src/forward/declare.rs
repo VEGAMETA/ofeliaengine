@@ -6,6 +6,8 @@
 
 use super::*;
 use crate::graph::PassContext;
+use crate::shadow::Keep;
+use crate::shadow_cache::{Held, Plan as ShadowPlan};
 
 impl ForwardRenderer {
     /// Declares the passes of a laid-out frame (both paths).
@@ -73,6 +75,7 @@ impl ForwardRenderer {
             max,
             subsurface_draws,
             meshlets,
+            ..
         } = *layout;
         // The meshlet lists (ADR 0085): in the command buffer after every phase's command
         // list, one per phase; their draws' slots in the visible buffer after the phases'.
@@ -319,16 +322,26 @@ impl ForwardRenderer {
                 Some((ring.push(&sh)?, 1.0))
             }
         };
+        // The sun's cascades (ADR 0093): a view's cache holds them still across frames
+        // (their texel size while it covers the view, the scene's depth range) and draws
+        // only what changed; without one (and in a probe's capture) each is drawn whole.
+        let cache = view.shadow_cache.filter(|c| !capture && c.fits(settings));
         let fit = match capture_shadow {
             Some(c) => c.fit,
-            None => shadow::fit_cascades(
+            None => shadow::fit_cascades_keeping(
                 unjittered,
                 view.camera.position,
                 view.light.direction,
                 min,
                 max,
                 settings,
+                &cache.map_or_else(Keep::default, CascadeCache::keep),
             ),
+        };
+        let resolution = settings.resolution.max(1);
+        let (plans, held) = match cache {
+            Some(c) => c.plan(&fit),
+            None => whole_plans(&fit, resolution),
         };
         let frame = FrameData {
             clip_from_world: clip_from_world.to_cols_array(),
@@ -347,6 +360,7 @@ impl ForwardRenderer {
                 .planes
                 .map(|p| p.to_array()),
             shadow_sampler: Bindless::sampler(SamplerKind::ShadowCompare),
+            cascade_sampler: Bindless::sampler(SamplerKind::ShadowCompareRepeat),
             cull: u32::from(self.frustum_culling),
             visibility_capacity: occlusion.map_or(0, Occlusion::capacity),
             hiz_levels: pyramid_layout.levels,
@@ -362,7 +376,13 @@ impl ForwardRenderer {
             previous_count,
             scatter_budget: self.subsurface_settings.unwrap_or_default().budget(),
             decal_tiles: decals.map_or(0, |(_, p)| p.occupied()),
-            cascades: cascade_data(&fit, settings),
+            cascades: cascade_data(
+                &fit,
+                &plans,
+                &held,
+                self.lod_threshold,
+                cache.is_none().then(|| settings.atlas_grid()),
+            ),
             cascade_count: fit.count as u32,
             command_count,
             cascade_blend: settings.blend.clamp(0.0, 1.0),
@@ -429,7 +449,6 @@ impl ForwardRenderer {
                 Some(ViewGi::Screen(_)) => [depth_desc.width, depth_desc.height],
                 None => [0; 2],
             },
-            _gi_pad: 0,
             material_data: materials.params().0,
             material_stride: materials.params().1,
             _material_pad: 0,
@@ -687,126 +706,232 @@ impl ForwardRenderer {
             _ => first_cull.dispatch(cull, cull_threads, move |ctx| Some(first_push(ctx))),
         }
 
-        // Shadow casters of each cascade, then each cascade drawn into its atlas tile; a
-        // probe's later faces read its first face's map.
+        // Shadow casters of what each cascade draws this frame, then each piece of it drawn
+        // into the cascade's layer (ADR 0093): with the view's cache, the strips the
+        // camera's movement exposed (nothing at all for a still camera over a still
+        // scene); otherwise every cascade whole, into a transient map. A probe's later
+        // faces read its first face's map.
         let shared_shadow = capture_shadow.and_then(|c| c.map.get());
         let geometry = *geometry;
         let materials = *materials;
         let shadow_map = match shared_shadow {
             Some(map) => map,
             None => {
-                let shadow_cull = fg
-                    .add_compute(names.shadow_cull, bindless)
-                    .read(
-                        shadow_commands,
-                        Access::StorageReadWrite(ShaderStages::COMPUTE),
-                    )
-                    .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
-                    .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE));
-                let shadow_push = move |ctx: &PassContext<'_>| Push {
-                    visible: ctx.address(casters),
-                    commands: ctx.address(shadow_commands),
-                    phase: PHASE_SHADOW,
-                    ..base
+                let (count, reach) = (fit.count, fit.reach);
+                let layers = cache.map_or(1, |_| settings.cascade_count());
+                // Without a cache, the cascades are tiles of one layer, drawn in one rendering
+                // (each layer rendered on its own costs the RTX some 4 µs a cascade with
+                // meshlets, one layered rendering 18 % on Sponza; ADR 0093).
+                let (columns, _) = settings.atlas_grid();
+                let shadow_map = match cache {
+                    Some(c) => c.import(fg),
+                    None => {
+                        let (width, height) = settings.atlas_size();
+                        fg.create_texture(
+                            "shadow map",
+                            TextureDesc::new_2d_array(settings.format, width, height, 1),
+                        )
+                    }
                 };
-                match (shadow_shaders, shadow_meshlets) {
-                    // With meshlets (ADR 0085): the casters, then each cascade's meshlet
-                    // cull over its work items.
-                    (Some(shaders), Some(m)) => {
-                        shadow_cull
-                            .read(shadow_commands, Access::Indirect)
-                            .read(geometry.indices, Access::StorageRead(ShaderStages::COMPUTE))
-                            .record(move |rec| {
-                                let push = shadow_push(rec.context());
-                                let args = rec.context().buffer(shadow_commands);
-                                rec.dispatch(&shaders.instances, cull_threads, &push);
-                                rec.barrier_for_indirect();
-                                for k in 0..cascade_count {
-                                    let push = Push {
-                                        phase: PHASE_SHADOW_MESHLETS + k,
-                                        ..push
-                                    };
-                                    rec.dispatch_indirect(
-                                        &shaders.meshlets,
-                                        args,
-                                        m.lists(k) + MESHLET_ARGS,
-                                        &push,
+                let drawing = cache.is_none() || plans[..count].iter().any(|p| p.rect_count > 0);
+                if drawing {
+                    let shadow_cull = fg
+                        .add_compute(names.shadow_cull, bindless)
+                        .read(
+                            shadow_commands,
+                            Access::StorageReadWrite(ShaderStages::COMPUTE),
+                        )
+                        .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
+                        .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE));
+                    let shadow_push = move |ctx: &PassContext<'_>| Push {
+                        visible: ctx.address(casters),
+                        commands: ctx.address(shadow_commands),
+                        ..base
+                    };
+                    match (shadow_shaders, shadow_meshlets) {
+                        // With meshlets (ADR 0085): the casters, then the meshlet cull over
+                        // the work items of each cascade drawn.
+                        (Some(shaders), Some(m)) => {
+                            shadow_cull
+                                .read(shadow_commands, Access::Indirect)
+                                .read(geometry.indices, Access::StorageRead(ShaderStages::COMPUTE))
+                                .record(move |rec| {
+                                    let push = shadow_push(rec.context());
+                                    let args = rec.context().buffer(shadow_commands);
+                                    rec.dispatch(&shaders.shadow_instances, cull_threads, &push);
+                                    rec.barrier_for_indirect();
+                                    for k in 0..cascade_count {
+                                        if plans[k as usize].rect_count == 0 {
+                                            continue;
+                                        }
+                                        let push = Push {
+                                            phase: PHASE_SHADOW_MESHLETS + k,
+                                            ..push
+                                        };
+                                        rec.dispatch_indirect(
+                                            &shaders.meshlets,
+                                            args,
+                                            m.lists(k) + MESHLET_ARGS,
+                                            &push,
+                                        );
+                                    }
+                                });
+                        }
+                        _ => shadow_cull.dispatch(&self.shadow_cull, cull_threads, move |ctx| {
+                            Some(shadow_push(ctx))
+                        }),
+                    }
+                    let shadow_pipelines = &self.shadow;
+                    // A cache's cascades render into their layers one at a time (four layers
+                    // of one layered rendering cost the RTX 18 % on Sponza): a layer drawn
+                    // whole is cleared as its rendering begins, each piece of one drawn in
+                    // strips before it is drawn; layers drawn whole all at once need nothing
+                    // kept. Without a cache, the atlas is cleared and every tile drawn in one
+                    // rendering.
+                    let transient = cache.is_none();
+                    let discards =
+                        transient || (count == layers && plans[..count].iter().all(|p| p.full));
+                    let pass = materials
+                        .read(geometry.read(fg.add_pass(names.shadow)))
+                        .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
+                        .read(shadow_commands, Access::Indirect)
+                        .read(casters, Access::StorageRead(ShaderStages::VERTEX));
+                    let pass = if transient {
+                        pass.depth(shadow_map, depth_clear, StoreOp::Store)
+                    } else {
+                        pass.depth_layers(shadow_map, !discards)
+                    };
+                    pass.execute(move |ctx| {
+                        let push = Push {
+                            visible: ctx.address(casters),
+                            ..base
+                        };
+                        for (cascade, plan) in plans[..count].iter().enumerate() {
+                            if plan.rect_count == 0 {
+                                continue;
+                            }
+                            let load = if transient || plan.full {
+                                depth_clear
+                            } else {
+                                LoadOp::Load
+                            };
+                            if !transient {
+                                // SAFETY: the pass declared the map's layers; the map has
+                                // this one; no rendering is begun.
+                                unsafe {
+                                    ctx.begin_depth_layer(
+                                        shadow_map,
+                                        cascade as u32,
+                                        load,
+                                        StoreOp::Store,
                                     );
                                 }
-                            });
-                    }
-                    _ => {
-                        shadow_cull.dispatch(cull, cull_threads, move |ctx| Some(shadow_push(ctx)))
-                    }
-                }
-                let resolution = settings.resolution;
-                let (atlas_width, atlas_height) = settings.atlas_size();
-                let columns = settings.atlas_grid().0;
-                let shadow_map = fg.create_texture(
-                    "shadow map",
-                    TextureDesc::new_2d(settings.format, atlas_width, atlas_height),
-                );
-                let shadow_pipelines = &self.shadow;
-                let drawn_cascades = fit.count as u32;
-                materials
-                    .read(geometry.read(fg.add_pass(names.shadow)))
-                    .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
-                    .read(shadow_commands, Access::Indirect)
-                    .read(casters, Access::StorageRead(ShaderStages::VERTEX))
-                    .depth(shadow_map, depth_clear, StoreOp::Store)
-                    .execute(move |ctx| {
-                        for cascade in 0..drawn_cascades {
-                            let tile = vk::Rect2D {
-                                offset: vk::Offset2D {
-                                    x: ((cascade % columns) * resolution) as i32,
-                                    y: ((cascade / columns) * resolution) as i32,
-                                },
-                                extent: vk::Extent2D {
-                                    width: resolution,
-                                    height: resolution,
-                                },
-                            };
+                            }
+                            // The vertex shaders project with the cascade's constants.
                             let push = Push {
-                                visible: ctx.address(casters),
-                                phase: cascade,
-                                ..base
+                                phase: cascade as u32,
+                                ..push
                             };
-                            // SAFETY: recording inside the pass's rendering scope; the pass reads
-                            // the commands (indirect), the caster lists, the pool and the material
-                            // table.
-                            unsafe {
-                                states.draw(
-                                    ctx,
-                                    bindless,
-                                    &geometry,
-                                    [&shadow_pipelines[0], &shadow_pipelines[1]],
-                                    // Material types cast as their fallbacks (ADR 0092).
-                                    &TypedPipelines::BUILTIN,
-                                    &push,
-                                    true,
-                                    DEPTH_STATES,
-                                    ctx.buffer(shadow_commands),
-                                    u64::from(cascade) * command_bytes,
-                                    tile,
-                                );
-                                if let Some(m) = &shadow_meshlets {
-                                    states.draw_meshlets(
+                            // Its tile of the atlas, or its own layer.
+                            let tile = if transient {
+                                let k = cascade as u32;
+                                vk::Offset2D {
+                                    x: ((k % columns) * resolution) as i32,
+                                    y: ((k / columns) * resolution) as i32,
+                                }
+                            } else {
+                                vk::Offset2D::default()
+                            };
+                            for piece in plan.rects().iter().flat_map(|r| r.pieces()) {
+                                let area = DrawArea {
+                                    viewport: vk::Rect2D {
+                                        offset: vk::Offset2D {
+                                            x: tile.x + piece.viewport[0],
+                                            y: tile.y + piece.viewport[1],
+                                        },
+                                        extent: vk::Extent2D {
+                                            width: resolution,
+                                            height: resolution,
+                                        },
+                                    },
+                                    scissor: vk::Rect2D {
+                                        offset: vk::Offset2D {
+                                            x: tile.x + piece.scissor.offset.x,
+                                            y: tile.y + piece.scissor.offset.y,
+                                        },
+                                        extent: piece.scissor.extent,
+                                    },
+                                };
+                                // SAFETY: recording inside the pass's rendering scope; the
+                                // pass reads the commands (indirect), the caster lists,
+                                // the pool and the material table; the piece is inside
+                                // the layer.
+                                unsafe {
+                                    if load == LoadOp::Load {
+                                        ctx.device.cmd_clear_attachments(
+                                            ctx.cmd,
+                                            &[vk::ClearAttachment {
+                                                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                                                color_attachment: 0,
+                                                clear_value: vk::ClearValue {
+                                                    depth_stencil: vk::ClearDepthStencilValue {
+                                                        depth: 1.0,
+                                                        stencil: 0,
+                                                    },
+                                                },
+                                            }],
+                                            &[vk::ClearRect {
+                                                rect: piece.scissor,
+                                                base_array_layer: 0,
+                                                layer_count: 1,
+                                            }],
+                                        );
+                                    }
+                                    states.draw(
                                         ctx,
                                         bindless,
                                         &geometry,
                                         [&shadow_pipelines[0], &shadow_pipelines[1]],
+                                        // Material types cast as their fallbacks (ADR 0092).
+                                        &TypedPipelines::BUILTIN,
                                         &push,
                                         true,
                                         DEPTH_STATES,
                                         ctx.buffer(shadow_commands),
-                                        m.lists(cascade),
-                                        m,
-                                        tile,
+                                        cascade as u64 * command_bytes,
+                                        area,
                                     );
+                                    if let Some(m) = &shadow_meshlets {
+                                        states.draw_meshlets(
+                                            ctx,
+                                            bindless,
+                                            &geometry,
+                                            [&shadow_pipelines[0], &shadow_pipelines[1]],
+                                            &push,
+                                            true,
+                                            DEPTH_STATES,
+                                            ctx.buffer(shadow_commands),
+                                            m.lists(cascade as u32),
+                                            m,
+                                            area,
+                                        );
+                                    }
                                 }
                             }
+                            if !transient {
+                                // SAFETY: its rendering was begun above.
+                                unsafe { ctx.end_rendering() };
+                            }
+                        }
+                        // The layers hold what was drawn once it is recorded: a frame
+                        // that is never recorded leaves the cache as it was.
+                        if let Some(c) = cache {
+                            c.commit(&plans, held, count, reach);
                         }
                     });
+                } else if let Some(c) = cache {
+                    c.idle();
+                }
                 if let Some(c) = capture_shadow {
                     c.map.set(Some(shadow_map));
                 }
@@ -2328,28 +2453,65 @@ fn forward_pass<'a, 'g>(
 
 /// The shader's view of the frame's cascades: projections as scale and offset, atlas
 /// tiles, selection limits and caster bounds.
-fn cascade_data(fit: &CascadeFit, settings: &ShadowSettings) -> [CascadeData; MAX_CASCADES] {
-    let (columns, rows) = settings.atlas_grid();
+/// Each cascade's constants: its projection; its tile of the atlas of `atlas` columns and
+/// rows, or where its window starts in its own layer, which `held` says; the light view
+/// rectangles it draws this frame (`plans`); and the error its casters' detail levels may
+/// have, `lod_threshold` of its texels (ADR 0093).
+fn cascade_data(
+    fit: &CascadeFit,
+    plans: &[ShadowPlan; MAX_CASCADES],
+    held: &[Option<Held>; MAX_CASCADES],
+    lod_threshold: f32,
+    atlas: Option<(u32, u32)>,
+) -> [CascadeData; MAX_CASCADES] {
+    // Reached by nothing: the shaders test boxes against it without checking it.
+    const EMPTY: [f32; 4] = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
     let mut out = [CascadeData::default(); MAX_CASCADES];
     for (k, (data, cascade)) in out.iter_mut().zip(&fit.cascades[..fit.count]).enumerate() {
+        let Some(h) = held[k] else {
+            continue;
+        };
         let m = cascade.clip_from_light();
-        let tile = [(k as u32 % columns) as f32, (k as u32 / columns) as f32];
-        let grid = [columns as f32, rows as f32];
+        let (uv, layer) = match atlas {
+            Some((columns, rows)) => {
+                let tile = [(k as u32 % columns) as f32, (k as u32 / columns) as f32];
+                let grid = [columns as f32, rows as f32];
+                let uv = [
+                    0.5 / grid[0],
+                    0.5 / grid[1],
+                    (0.5 + tile[0]) / grid[0],
+                    (0.5 + tile[1]) / grid[1],
+                ];
+                (uv, 0.0)
+            }
+            None => {
+                let n = h.resolution as f32;
+                let start = h.storage_origin();
+                let uv = [
+                    0.5,
+                    0.5,
+                    0.5 + start[0] as f32 / n,
+                    0.5 + start[1] as f32 / n,
+                ];
+                (uv, k as f32)
+            }
+        };
+        // Half a texel around each rectangle: whatever touches its texels is drawn.
+        let pad = 0.5 * cascade.texel;
+        let mut drawn = [EMPTY; 2];
+        for (d, rect) in drawn.iter_mut().zip(plans[k].rects()) {
+            let [x0, y0, x1, y1] = h.light_rect(rect.window);
+            *d = [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
+        }
         *data = CascadeData {
             scale: [m.x_axis.x, m.y_axis.y, m.z_axis.z, cascade.texel],
             offset: [m.w_axis.x, m.w_axis.y, m.w_axis.z, cascade.limit],
-            atlas: [
-                0.5 / grid[0],
-                0.5 / grid[1],
-                (0.5 + tile[0]) / grid[0],
-                (0.5 + tile[1]) / grid[1],
-            ],
-            bounds: [
-                cascade.center.x,
-                cascade.center.y,
-                cascade.radius,
-                cascade.far,
-            ],
+            atlas: uv,
+            drawn,
+            far: cascade.far,
+            lod_error: lod_threshold * cascade.texel,
+            layer,
+            _pad: 0,
         };
     }
     out

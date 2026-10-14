@@ -19,11 +19,18 @@ use engine_rhi::{
 /// The least alignment of a transient buffer (see `requirements_of`).
 const TRANSIENT_BUFFER_ALIGN: u64 = 256;
 
+/// Layers of a layered texture that get a view of their own each: what a pass renders
+/// into one by one ([`super::PassBuilder::depth_layers`]).
+pub(crate) const MAX_LAYER_VIEWS: usize = 6;
+
 /// The Vulkan side of one graph resource in the current frame.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Physical {
     pub(crate) image: vk::Image,
     pub(crate) view: vk::ImageView,
+    /// A view of each of its first layers, for an array texture that is an attachment
+    /// (null otherwise).
+    pub(crate) layer_views: [vk::ImageView; MAX_LAYER_VIEWS],
     pub(crate) buffer: vk::Buffer,
     pub(crate) address: vk::DeviceAddress,
     pub(crate) extent: vk::Extent2D,
@@ -64,6 +71,7 @@ struct CachedImage {
     offset: u64,
     image: vk::Image,
     view: vk::ImageView,
+    layer_views: [vk::ImageView; MAX_LAYER_VIEWS],
     sampled_index: Option<u32>,
     storage_index: Option<u32>,
     used: bool,
@@ -100,6 +108,11 @@ impl CachedImage {
         }
         // SAFETY: guaranteed by the caller.
         unsafe {
+            for view in self.layer_views {
+                if view != vk::ImageView::null() {
+                    device.destroy_image_view(view, None);
+                }
+            }
             if self.view != vk::ImageView::null() {
                 device.destroy_image_view(self.view, None);
             }
@@ -530,7 +543,7 @@ impl PhysicalResources {
                             None => {
                                 let families = concurrent.then_some(&self.families);
                                 // SAFETY: memory and offset come from the heap and placement.
-                                let (image, view) = unsafe {
+                                let (image, view, layer_views) = unsafe {
                                     create_image(
                                         device,
                                         desc,
@@ -549,6 +562,7 @@ impl PhysicalResources {
                                     offset: item.offset,
                                     image,
                                     view,
+                                    layer_views,
                                     sampled_index: None,
                                     storage_index: None,
                                     used: true,
@@ -562,6 +576,7 @@ impl PhysicalResources {
                         self.current[r] = Physical {
                             image: c.image,
                             view: c.view,
+                            layer_views: c.layer_views,
                             extent: vk::Extent2D {
                                 width: desc.width,
                                 height: desc.height,
@@ -734,7 +749,7 @@ unsafe fn create_image(
     families: Option<&[u32; 2]>,
     memory: vk::DeviceMemory,
     offset: u64,
-) -> Result<(vk::Image, vk::ImageView), RhiError> {
+) -> Result<(vk::Image, vk::ImageView, [vk::ImageView; MAX_LAYER_VIEWS]), RhiError> {
     // SAFETY: valid create info.
     let image = unsafe { device.create_image(&image_info(desc, usage, families), None) }.map_err(
         |result| RhiError::Vulkan {
@@ -758,12 +773,13 @@ unsafe fn create_image(
         | vk::ImageUsageFlags::COLOR_ATTACHMENT
         | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
         | vk::ImageUsageFlags::INPUT_ATTACHMENT;
+    let mut layer_views = [vk::ImageView::null(); MAX_LAYER_VIEWS];
     if !usage.intersects(viewable) {
-        return Ok((image, vk::ImageView::null()));
+        return Ok((image, vk::ImageView::null(), layer_views));
     }
     let view_info = vk::ImageViewCreateInfo::default()
         .image(image)
-        .view_type(if desc.layers > 1 {
+        .view_type(if desc.layers > 1 || desc.array {
             vk::ImageViewType::TYPE_2D_ARRAY
         } else {
             vk::ImageViewType::TYPE_2D
@@ -776,18 +792,48 @@ unsafe fn create_image(
             base_array_layer: 0,
             layer_count: vk::REMAINING_ARRAY_LAYERS,
         });
+    let failed = |result, views: &[vk::ImageView]| {
+        // SAFETY: never used.
+        unsafe {
+            for &view in views {
+                device.destroy_image_view(view, None);
+            }
+            device.destroy_image(image, None);
+        }
+        RhiError::Vulkan {
+            call: "vkCreateImageView",
+            result,
+        }
+    };
     // SAFETY: the image is bound to memory.
-    match unsafe { device.create_image_view(&view_info, None) } {
-        Ok(view) => Ok((image, view)),
-        Err(result) => {
-            // SAFETY: never used.
-            unsafe { device.destroy_image(image, None) };
-            Err(RhiError::Vulkan {
-                call: "vkCreateImageView",
-                result,
-            })
+    let view = unsafe { device.create_image_view(&view_info, None) }.map_err(|r| failed(r, &[]))?;
+    // A view of each layer an attachment of layers (an array, even of one) is rendered
+    // into one by one.
+    let attachment =
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+    if (desc.layers > 1 || desc.array) && usage.intersects(attachment) {
+        for layer in 0..(desc.layers as usize).min(MAX_LAYER_VIEWS) {
+            let info = view_info
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: aspect_of(desc.format),
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: layer as u32,
+                    layer_count: 1,
+                });
+            // SAFETY: as above.
+            match unsafe { device.create_image_view(&info, None) } {
+                Ok(v) => layer_views[layer] = v,
+                Err(r) => {
+                    let mut made = layer_views;
+                    made[layer] = view;
+                    return Err(failed(r, &made[..=layer]));
+                }
+            }
         }
     }
+    Ok((image, view, layer_views))
 }
 
 /// # Safety

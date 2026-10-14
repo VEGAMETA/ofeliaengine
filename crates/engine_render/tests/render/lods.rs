@@ -247,6 +247,7 @@ fn the_culling_pass_draws_the_level_the_distance_calls_for() {
                         clear: Some([0.0; 4]),
                         occlusion: None,
                         temporal: None,
+                        shadow_cache: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

@@ -240,6 +240,7 @@ fn steady_state_skinning_frames_do_not_allocate() {
                         clear: Some([0.0; 4]),
                         occlusion: Some(&occlusion),
                         temporal: Some(&temporal),
+                        shadow_cache: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

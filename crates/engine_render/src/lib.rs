@@ -71,6 +71,7 @@ pub mod present;
 pub mod rays;
 pub mod reflections;
 pub mod shadow;
+mod shadow_cache;
 pub mod skinning;
 pub mod sort;
 pub mod streaming;

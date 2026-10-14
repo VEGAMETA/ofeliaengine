@@ -1002,7 +1002,8 @@ How to read it:
 The directional light casts through up to four cascades (ADR 0044):
 
 - the view is cut along its depth into slices, finest near the camera;
-- each slice gets its own square shadow map, a tile of one atlas.
+- each slice gets its own square shadow map, a tile of one atlas (with a cascade cache,
+  below, a layer of its own).
 
 A 15 cm pole 4 m away keeps a crisp shadow, and a building 100 m away still casts one.
 
@@ -1047,6 +1048,47 @@ What it costs (ref-1, 1080p; `scene_bench -- --cascades N --shadow-res R`, `draw
   sits in every cascade.
 - **On integrated GPUs, start with 2 cascades.** Most of the sharpness is in the first
   ones.
+
+### Cached cascades: draw only what changed (ADR 0093)
+
+A view can keep its cascades from frame to frame. Each frame then draws only the strips
+the camera's movement uncovered:
+
+- a still camera over a still scene draws no shadows at all;
+- walking draws under 1–3 % of the texels.
+
+`engine_frame` does this for every view (`ViewSettings::cached_shadows`, on by default).
+With the forward renderer directly, give each view a cache of its own:
+
+```rust
+use engine_render::forward::CascadeCache;
+
+let cache = CascadeCache::new(&device, &mut allocator, &bindless, renderer.shadow_settings())?;
+// every frame:
+let view = ForwardView { shadow_cache: Some(&cache), ..view };
+// when the GPU is done with it:
+unsafe { cache.destroy(&mut allocator, &bindless) };
+```
+
+- **What it costs.** One shadow map per view: 16 MiB with 4 cascades of 1024². The
+  cascades' texel size changes less often than it would without the cache: it may stay up
+  to a quarter larger than the view needs, so shadows can be slightly softer.
+- **What draws everything again.** The first frame; the sun turning; a jump farther than
+  a cascade; and, for now, any change to the casters. That means a different draw list or
+  a scene upload that moves something, changed materials or meshes, and instances moving
+  between ticks. A scene where something always moves gains nothing yet. Drawing only the
+  moved objects' regions is the next step.
+- **Changes the renderer cannot see** (vertices rewritten in place by your own pass):
+  call `cache.invalidate()`.
+- **`cache.stats()`** tells how many texels the last frame drew and how many cascades
+  were drawn whole.
+
+| GPU shadow passes, 1080p, walking 5 cm a frame | drawn whole | cached |
+|---|---:|---:|
+| Intel's Sponza, RTX 4060 Ti | 728 µs | 69 µs |
+| Intel's Sponza, Radeon iGPU | 18.9 ms | 2.0 ms |
+| Sponza, RTX 4060 Ti | 129 µs | 32 µs |
+| Sponza, Radeon iGPU | 2.46 ms | 0.56 ms |
 
 ### Contact shadows (ADR 0071)
 

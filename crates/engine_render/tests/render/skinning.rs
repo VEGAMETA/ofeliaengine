@@ -369,6 +369,7 @@ fn skinning() {
                 clear: Some([0.0; 4]),
                 occlusion: None,
                 temporal: Some(&temporal),
+                shadow_cache: None,
                 lights: &[],
                 decals: &[],
                 environment: None,

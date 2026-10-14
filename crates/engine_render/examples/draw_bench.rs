@@ -455,6 +455,7 @@ fn main() {
                                 clear: Some([0.02, 0.02, 0.05, 1.0]),
                                 occlusion: (culling == Culling::Occlusion).then_some(&occlusion),
                                 temporal: None,
+                                shadow_cache: None,
                                 lights: &[],
                                 decals: &[],
                                 environment: None,

@@ -56,7 +56,11 @@
 //! bounding box cut into that many boxes (ADR 0073; implies `--sky`), `--probe-faces <1-6>`
 //! for their capture budget per frame, `--probes-every-frame` to capture them again
 //! continuously (the cost of a capture), `--ssr full|half` for screen-space reflections
-//! (implies `--sky`); reflections' passes get a table of their own. The last column is the GPU frame time end to end (the graph's
+//! (implies `--sky`); reflections' passes get a table of their own; `--cached-shadows` for
+//! the sun's cascades kept across frames (ADR 0093: a still camera draws no shadows) and
+//! `--walk <units per frame>` to walk the camera back and forth along its view (level, 120
+//! frames each way), `--turn <degrees per frame>` to turn it back and forth too: the
+//! cached cascades then draw the strips the movement exposes. The last column is the GPU frame time end to end (the graph's
 //! first pass to its last on the graphics queue), which async compute shortens while the
 //! overlapped passes themselves may read longer.
 
@@ -75,8 +79,8 @@ use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
-    Camera, Decal, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight,
-    ShadowSettings, Spot, Temporal, ViewGi,
+    Camera, CascadeCache, Decal, DirectionalLight, DrawItem, ForwardRenderer, ForwardView,
+    LocalLight, ShadowSettings, Spot, Temporal, ViewGi,
 };
 use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
@@ -297,6 +301,8 @@ fn main() {
     let mut contact: Option<engine_render::forward::ContactShadowSettings> = None;
     let mut decal_count = 0usize;
     let mut decal_size: Option<f32> = None;
+    let mut cached_shadows = false;
+    let (mut walk, mut turn) = (0.0f32, 0.0f32);
     let mut ray_detail: Option<BlasDetail> = None;
     let mut ray_budget: Option<String> = None;
     let mut gi_spacing: Option<f32> = None;
@@ -397,6 +403,9 @@ fn main() {
             "--no-meshlets" => meshlets = false,
             "--meshlet-culling" => meshlet_culling = true,
             "--pipeline-stats" => pipeline_stats = true,
+            "--cached-shadows" => cached_shadows = true,
+            "--walk" => walk = args.next().unwrap().parse().unwrap(),
+            "--turn" => turn = args.next().unwrap().parse().unwrap(),
             // With --pipeline-stats: also the multisampled shading's (ADR 0075).
             "--msaa" => msaa_stats = args.next().unwrap().parse().unwrap(),
             "--post" => post = true,
@@ -819,14 +828,30 @@ fn main() {
         })
         .collect();
     let size = max - min;
+    let projection = vulkan_perspective(
+        60f32.to_radians(),
+        WIDTH as f32 / HEIGHT as f32,
+        size.length() * 0.001,
+        size.length() * 2.0,
+    );
     let camera = Camera {
-        clip_from_world: vulkan_perspective(
-            60f32.to_radians(),
-            WIDTH as f32 / HEIGHT as f32,
-            size.length() * 0.001,
-            size.length() * 2.0,
-        ) * look_at(eye, target, Vec3::Y),
+        clip_from_world: projection * look_at(eye, target, Vec3::Y),
         position: eye,
+    };
+    // `--walk` and `--turn`: frame `n`'s camera, back and forth 120 frames each way.
+    let walking = move |n: u64| -> Camera {
+        if walk == 0.0 && turn == 0.0 {
+            return camera;
+        }
+        let leg = (n % 240) as f32;
+        let t = if leg < 120.0 { leg } else { 240.0 - leg };
+        let ahead = Vec3::new(target.x - eye.x, 0.0, target.z - eye.z).normalize_or(Vec3::NEG_Z);
+        let at = eye + ahead * (walk * t);
+        let look = Quat::from_rotation_y((turn * t).to_radians()) * (target - eye);
+        Camera {
+            clip_from_world: projection * look_at(at, at + look, Vec3::Y),
+            position: at,
+        }
     };
     let light = DirectionalLight {
         direction: Vec3::new(-0.3, -1.0, -0.2),
@@ -1176,6 +1201,13 @@ fn main() {
                 .collect();
             println!("Pipeline statistics, {name}: {}", line.join("; "));
         }
+        for (name, stats) in renderer.cull_statistics(&device) {
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, {name}: {}", line.join("; "));
+        }
         let names = ["lights with shadows", "lights with shadows + environment"];
         for (name, stats) in names.iter().zip(renderer.shadowed_statistics(&device)) {
             if stats.is_empty() {
@@ -1279,6 +1311,16 @@ fn main() {
         "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
     );
 
+    // The sun's cascades kept across frames (ADR 0093).
+    let mut shadow_cache = cached_shadows.then(|| {
+        CascadeCache::new(
+            &device,
+            &mut allocator,
+            &bindless,
+            renderer.shadow_settings(),
+        )
+        .unwrap()
+    });
     let mut frame_number = 0u64;
     let mut reflection_rows: Vec<String> = Vec::new();
     for (mode, descs) in [("textured", &textured), ("factors only", &untextured)] {
@@ -1310,6 +1352,8 @@ fn main() {
         let mut faces_drawn = Vec::new();
         // The forward phases' culling (with meshlets, their cull too: ADR 0085).
         let mut cull_time = Vec::new();
+        // The cached cascades' texels drawn per frame (ADR 0093).
+        let mut cache_texels = Vec::new();
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
         let mut meshlet_room = 0u32;
@@ -1353,6 +1397,7 @@ fn main() {
             ring.begin_slot(0);
             let added;
             let executed;
+            let camera = walking(frame_number + 1);
             {
                 // SAFETY: nothing is in flight.
                 let mut fg = unsafe { graph.begin_slot(0, cmd) };
@@ -1504,6 +1549,7 @@ fn main() {
                     clear: Some([0.02, 0.02, 0.05, 1.0]),
                     occlusion: None,
                     temporal: temporal.as_ref(),
+                    shadow_cache: shadow_cache.as_ref(),
                     lights: &lights,
                     decals: &decals,
                     environment: environment.as_ref(),
@@ -1795,6 +1841,9 @@ fn main() {
                 camera_rays_time.push(camera_rays_frame);
                 decal_time.push(decal_frame);
                 local_views.push(f64::from(renderer.local_shadow_stats().views_drawn));
+                if let Some(c) = &shadow_cache {
+                    cache_texels.push(c.stats().last_texels as f64);
+                }
                 if let Some(us) = graph.gpu_frame_time() {
                     frame_time.push(f64::from(us));
                 }
@@ -1899,6 +1948,18 @@ fn main() {
             median(&mut decal_time),
         );
         println!("{mode}: GPU cull µs {:.1}", median(&mut cull_time));
+        if let Some(c) = &shadow_cache {
+            let layers = f64::from(shadows.cascade_count() as u32 * shadows.resolution.pow(2));
+            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+            println!(
+                "{mode}: cached cascades drew {:.2} % of their texels per frame on average \
+                 (median {:.2} %), {} cascades whole so far; GPU shadow µs mean {:.0}",
+                100.0 * mean(&cache_texels) / layers,
+                100.0 * median(&mut cache_texels) / layers,
+                c.stats().whole,
+                mean(&shadow),
+            );
+        }
         if let Some(g) = &gi {
             let grid = g.grid();
             gi_rows.push(format!(
@@ -2041,6 +2102,9 @@ fn main() {
     unsafe {
         renderer.destroy(&device, &mut allocator, &bindless);
         graph.destroy(&mut allocator, Some(&bindless));
+        if let Some(c) = shadow_cache.as_mut() {
+            c.destroy(&mut allocator, &bindless);
+        }
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);
         materials.destroy(&mut allocator);

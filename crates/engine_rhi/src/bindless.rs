@@ -41,6 +41,9 @@ pub enum SamplerKind {
     AnisotropicRepeat = 4,
     /// Depth comparison (shadow maps), clamp, `LESS_OR_EQUAL`.
     ShadowCompare = 5,
+    /// Depth comparison, repeat (wrap-around shadow maps: the sun's cached cascades,
+    /// ADR 0093), `LESS_OR_EQUAL`.
+    ShadowCompareRepeat = 6,
 }
 
 /// How a material texture repeats along one axis (glTF's sampler wrap modes).
@@ -76,13 +79,14 @@ const MATERIAL_SAMPLERS: u32 = 9;
 /// besides the unbiased set: their slots are reserved, the samplers made on demand.
 const LOD_BIAS_SETS: u32 = 8;
 
-const SAMPLER_KINDS: [SamplerKind; 6] = [
+const SAMPLER_KINDS: [SamplerKind; 7] = [
     SamplerKind::LinearRepeat,
     SamplerKind::LinearClamp,
     SamplerKind::NearestRepeat,
     SamplerKind::NearestClamp,
     SamplerKind::AnisotropicRepeat,
     SamplerKind::ShadowCompare,
+    SamplerKind::ShadowCompareRepeat,
 ];
 
 /// Hands out descriptor indices; freed ones come back after their frame finished.
@@ -289,7 +293,9 @@ impl Bindless {
             ));
             for kind in SAMPLER_KINDS {
                 let (filter, mip, address) = match kind {
-                    SamplerKind::LinearRepeat | SamplerKind::AnisotropicRepeat => (
+                    SamplerKind::LinearRepeat
+                    | SamplerKind::AnisotropicRepeat
+                    | SamplerKind::ShadowCompareRepeat => (
                         vk::Filter::LINEAR,
                         vk::SamplerMipmapMode::LINEAR,
                         vk::SamplerAddressMode::REPEAT,
@@ -311,7 +317,8 @@ impl Bindless {
                     ),
                 };
                 let anisotropic = kind == SamplerKind::AnisotropicRepeat;
-                let compare = kind == SamplerKind::ShadowCompare;
+                let compare =
+                    kind == SamplerKind::ShadowCompare || kind == SamplerKind::ShadowCompareRepeat;
                 let info = vk::SamplerCreateInfo::default()
                     .mag_filter(filter)
                     .min_filter(filter)

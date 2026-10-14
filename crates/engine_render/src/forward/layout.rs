@@ -94,12 +94,17 @@ impl ForwardRenderer {
             *start = next;
             next += count;
         }
-        // Instances in draw order, and the scene's bounding box for the light on the way.
+        // Instances in draw order, and the scene's bounding box for the light on the way;
+        // for a view with cached cascades (ADR 0093), a hash of what they cast from.
         let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+        let hashing = view.shadow_cache.is_some();
+        let mut casters = self.caster_settings(u64::from(instance_count));
         let instances = {
             let (out, staged) = ring.alloc::<InstanceData>(draws.len())?;
             for run in runs.iter() {
-                let (center, extents) = local_box(geometry, draws[run.first as usize].mesh);
+                let mesh = draws[run.first as usize].mesh;
+                let (center, extents) = local_box(geometry, mesh);
+                let shape = geometry.mesh(mesh).map_or(u32::MAX, |m| m.revision);
                 let range = run.first as usize..(run.first + run.len) as usize;
                 let items = draws[range.clone()].iter().zip(&slots[range.clone()]);
                 for ((item, &material), slot) in items.zip(&mut out[range]) {
@@ -108,6 +113,18 @@ impl ForwardRenderer {
                     min = min.min(world_center - world_extents);
                     max = max.max(world_center + world_extents);
                     let rows = item.world_from_object.transpose();
+                    if hashing {
+                        casters = cascade_cache::mix(casters, bytemuck::cast(item.mesh));
+                        casters = cascade_cache::mix(casters, u64::from(shape));
+                        casters = cascade_cache::mix(casters, bytemuck::cast(item.material));
+                        for row in [rows.x_axis, rows.y_axis, rows.z_axis] {
+                            let [x, y, z, w] = row.to_array().map(f32::to_bits);
+                            casters =
+                                cascade_cache::mix(casters, u64::from(x) | u64::from(y) << 32);
+                            casters =
+                                cascade_cache::mix(casters, u64::from(z) | u64::from(w) << 32);
+                        }
+                    }
                     slot.write(InstanceData {
                         rows: [
                             rows.x_axis.to_array(),
@@ -217,6 +234,7 @@ impl ForwardRenderer {
             max,
             subsurface_draws,
             meshlets,
+            casters,
         })
     }
 
@@ -433,6 +451,7 @@ impl ForwardRenderer {
             max,
             subsurface_draws,
             meshlets,
+            casters: 0,
         })
     }
 }
@@ -618,6 +637,9 @@ pub(super) struct Layout {
     pub(super) subsurface_draws: bool,
     /// The meshlet lists, when the view draws by meshlet (ADR 0085).
     pub(super) meshlets: Option<MeshletLayout>,
+    /// A draw list's hash of what the cascades cast from, for a view that caches them
+    /// (ADR 0093; [`Casters::Draws`]).
+    pub(super) casters: u64,
 }
 
 /// Whether a transform mirrors (negative determinant of its linear part).
@@ -782,7 +804,8 @@ pub(crate) struct States {
 
 impl States {
     /// Records one indirect draw per pipeline state in use, from the commands at `offset`
-    /// in `buffer` (one per batch, in state order), into `area` of the target: `pipelines`
+    /// in `buffer` (one per batch, in state order), into `area` of the target (a rectangle,
+    /// or a viewport with a scissor of its own): `pipelines`
     /// are the opaque and the masked one. Only the states whose bits `mask` sets are drawn
     /// (`*_STATES`). The shadow pass renders back faces of single-sided
     /// geometry (fewer self-shadowing artifacts on closed meshes), except for subsurface
@@ -806,7 +829,7 @@ impl States {
         mask: u32,
         buffer: vk::Buffer,
         offset: u64,
-        area: vk::Rect2D,
+        area: impl Into<super::DrawArea>,
     ) {
         // SAFETY: guaranteed by the caller.
         unsafe {
@@ -846,9 +869,10 @@ impl States {
         mask: u32,
         buffer: vk::Buffer,
         offset: u64,
-        area: vk::Rect2D,
+        area: impl Into<super::DrawArea>,
         (slice, slices): (u32, u32),
     ) {
+        let area = area.into();
         let slices = slices.max(1);
         let mut bound: Option<vk::Pipeline> = None;
         let ranges = self.typed.as_slice();
@@ -880,7 +904,7 @@ impl States {
                         pipeline.bind(ctx.cmd);
                         if bound.is_none() {
                             bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
-                            set_viewport(ctx.device, ctx.cmd, area);
+                            super::set_draw_area(ctx.device, ctx.cmd, area);
                             bindless.push_constants(ctx.cmd, push_bytes(push));
                             geometry.bind_indices(ctx);
                         }
@@ -932,8 +956,9 @@ impl States {
         buffer: vk::Buffer,
         lists: u64,
         meshlets: &super::MeshletDraws,
-        area: vk::Rect2D,
+        area: impl Into<super::DrawArea>,
     ) {
+        let area = area.into();
         let layout = &meshlets.layout;
         let draws = lists + layout.draws_offset();
         let mut bound: Option<vk::Pipeline> = None;
@@ -951,7 +976,7 @@ impl States {
                     pipeline.bind(ctx.cmd);
                     if bound.is_none() {
                         bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
-                        set_viewport(ctx.device, ctx.cmd, area);
+                        super::set_draw_area(ctx.device, ctx.cmd, area);
                         bindless.push_constants(ctx.cmd, push_bytes(push));
                         geometry.bind_indices(ctx);
                     }

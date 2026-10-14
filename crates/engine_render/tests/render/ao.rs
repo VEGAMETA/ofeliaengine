@@ -270,6 +270,7 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
                             clear: Some([0.0, 0.0, 0.0, 1.0]),
                             occlusion: occluded.then_some(&occlusion),
                             temporal: temporal_state.then_some(&temporal),
+                            shadow_cache: None,
                             lights: &[],
                             decals: &[],
                             environment: None,

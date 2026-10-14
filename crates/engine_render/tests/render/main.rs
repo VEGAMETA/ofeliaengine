@@ -5,6 +5,7 @@ mod ao;
 mod async_compute;
 mod atmosphere;
 mod breadcrumbs;
+mod cached_shadows;
 mod culling;
 mod decals;
 mod environment;

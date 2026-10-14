@@ -280,6 +280,7 @@ impl Scene {
                             clear: Some([0.0, 0.0, 0.0, 1.0]),
                             occlusion: frame.occlusion.then_some(&self.occlusion),
                             temporal: frame.temporal.then_some(&self.temporal),
+                            shadow_cache: None,
                             lights: frame.lights,
                             decals: &[],
                             environment: frame.environment.then_some(&self.environment),

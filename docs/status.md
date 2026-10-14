@@ -458,6 +458,12 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
 5. Virtual shadow maps. Researched 2026-10-14 (ADR 0093, accepted): scrolling cached
    cascades first (only what changed is drawn), virtual pages after; one cache, no
    static/dynamic pair merged by a mask (the owner, 2026-10-14).
+   - **Step 1 done 2026-10-14:** the cascades kept across frames in a view's
+     `CascadeCache`, on by default in `engine_frame`.
+     - Shadows when walking: Intel's Sponza on the RTX 728 → 69 µs, on the Radeon
+       18.9 → 2.0 ms. A still camera draws nothing.
+     - Any caster change still draws every cascade whole.
+   - **Next, step 2:** moved casters draw only their old and new regions.
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.
 
@@ -543,11 +549,37 @@ grown, divide and conquer); the old labels stay in parentheses.
    split into convex parts (CoACD, MIT, or V-HACD, BSD-3: compare), and colliders authored
    in the source taken as they are (`UCX_` names, a glTF physics extension). Today shapes
    are only made in code.
+8d. **Localization and internationalization for the game developer** (owner, 2026-10-14:
+   simple to use). Today the engine has none. To research first (Fluent and its Rust crates,
+   ICU4X, gettext's PO format, Godot's `TranslationServer`, Unreal's string tables and text
+   gathering, Unity's Localization package) and decide in an ADR:
+   - text string tables per language as source assets (merge-friendly, stable keys), cooked
+     into the pack;
+   - a lookup from scripts and Rust with arguments, CLDR plural and gender rules, numbers and
+     dates per locale;
+   - the language switched at run time, the tables hot-reloaded;
+   - per-language fonts and fallbacks, right-to-left and complex scripts through
+     `engine_text`'s shaping and bidi;
+   - a check for missing and unused keys ("one button": the CLI and later the editor).
+8e. **Color vision settings for the game developer** (owner, 2026-10-14: a light addition):
+   - protanopia, deuteranopia and tritanopia for the player: their correction (daltonizing)
+     with a strength;
+   - their simulation for the developer, to check what such players see;
+   - a 3 × 3 matrix in the tone mapper, at no cost while off (its own entry point or a
+     specialization constant).
+
+   To research first: Machado et al. 2009, Brettel, Viénot and Mollon 1997, daltonization,
+   Unreal's `r.Color.Deficiency`, what shipped games offer.
 9. Then: editor tools, Luau bindings and debugger, other tooling.
 
 ## 6. Known gaps and leftovers (candidates for the queue)
 
 - **Rendering:**
+  - **the meshlet draws' order follows the GPU's scheduling** (atomic appends). A meshlet
+    cull with fewer registers on the RTX (47 → 40) ran more groups at once and shuffled
+    the draws. That cost the passes drawing them their front-to-back order: Sponza,
+    prepass +8 %, shadows +9–13 % (ADR 0093). Appends that keep the work items' order
+    (counts, a scan, then writes) would make it robust;
   - half-resolution aerial perspective and fog on the iGPU (about 1–2 ms there);
   - froxel volumetric fog;
   - per-pixel local-shadow mask (the shadowed forward shading costs +10–12 % on the iGPU);

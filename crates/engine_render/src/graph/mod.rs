@@ -85,8 +85,12 @@ pub struct TextureDesc {
     pub height: u32,
     /// Mip levels.
     pub mip_levels: u32,
-    /// Array layers.
+    /// Array layers. A pass renders into them one at a time
+    /// ([`PassBuilder::depth_layers`]).
     pub layers: u32,
+    /// Viewed as an array even with one layer (what shaders reading a `Texture2DArray`
+    /// need); textures of several layers always are.
+    pub array: bool,
     /// Samples per pixel.
     pub samples: vk::SampleCountFlags,
 }
@@ -100,7 +104,17 @@ impl TextureDesc {
             height,
             mip_levels: 1,
             layers: 1,
+            array: false,
             samples: vk::SampleCountFlags::TYPE_1,
+        }
+    }
+
+    /// A single-sampled 2D array of `layers` without mips, viewed as an array.
+    pub fn new_2d_array(format: vk::Format, width: u32, height: u32, layers: u32) -> Self {
+        Self {
+            layers: layers.max(1),
+            array: true,
+            ..Self::new_2d(format, width, height)
         }
     }
 
@@ -305,6 +319,76 @@ impl PassContext<'_> {
     /// transfers, which cannot have views).
     pub fn view(&self, texture: Texture) -> vk::ImageView {
         self.physical[texture.0 as usize].view
+    }
+
+    /// A view of layer `layer` of a graph array texture that is an attachment (an imported
+    /// one's are its owner's, [`FrameGraph::set_layer_views`]); null for others and past
+    /// the first few layers.
+    pub fn layer_view(&self, texture: Texture, layer: u32) -> vk::ImageView {
+        self.physical[texture.0 as usize]
+            .layer_views
+            .get(layer as usize)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Begins rendering into layer `layer` of `texture`, its depth attachment, over the
+    /// whole layer (a pass declared with [`PassBuilder::depth_layers`]). `load`:
+    /// [`LoadOp::Clear`] clears the layer first.
+    ///
+    /// # Safety
+    ///
+    /// The pass declared `texture` with [`PassBuilder::depth_layers`], it has that layer,
+    /// and no rendering is begun.
+    pub unsafe fn begin_depth_layer(
+        &self,
+        texture: Texture,
+        layer: u32,
+        load: LoadOp,
+        store: StoreOp,
+    ) {
+        let physical = &self.physical[texture.0 as usize];
+        let (load, clear) = match load {
+            LoadOp::Load => (vk::AttachmentLoadOp::LOAD, [0.0; 4]),
+            LoadOp::Clear(value) => (vk::AttachmentLoadOp::CLEAR, value),
+            LoadOp::DontCare => (vk::AttachmentLoadOp::DONT_CARE, [0.0; 4]),
+        };
+        let store = match store {
+            StoreOp::Store => vk::AttachmentStoreOp::STORE,
+            StoreOp::DontCare => vk::AttachmentStoreOp::DONT_CARE,
+        };
+        let depth = vk::RenderingAttachmentInfo::default()
+            .image_view(self.layer_view(texture, layer))
+            .image_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL)
+            .load_op(load)
+            .store_op(store)
+            .clear_value(vk::ClearValue {
+                depth_stencil: vk::ClearDepthStencilValue {
+                    depth: clear[0],
+                    stencil: clear[1] as u32,
+                },
+            });
+        let area = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: physical.extent,
+        };
+        let rendering = vk::RenderingInfo::default()
+            .render_area(area)
+            .layer_count(1)
+            .depth_attachment(&depth);
+        // SAFETY: guaranteed by the caller; the graph laid the texture out as an
+        // attachment for the pass.
+        unsafe { self.device.cmd_begin_rendering(self.cmd, &rendering) };
+    }
+
+    /// Ends the rendering [`Self::begin_depth_layer`] began.
+    ///
+    /// # Safety
+    ///
+    /// A rendering is begun.
+    pub unsafe fn end_rendering(&self) {
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.device.cmd_end_rendering(self.cmd) };
     }
 
     /// The Vulkan buffer of a graph buffer.
@@ -781,6 +865,14 @@ impl<'g> FrameGraph<'g> {
         Texture(id)
     }
 
+    /// An imported texture's views of each layer (its first few), for passes that render
+    /// into its layers one at a time ([`PassBuilder::depth_layers`]).
+    pub fn set_layer_views(&mut self, texture: Texture, views: &[vk::ImageView]) {
+        let physical = &mut self.graph.imports[texture.0 as usize];
+        let n = views.len().min(physical.layer_views.len());
+        physical.layer_views[..n].copy_from_slice(&views[..n]);
+    }
+
     /// Uses a buffer owned outside the graph. Passes writing it are never culled.
     pub fn import_buffer(&mut self, name: &'static str, buffer: ImportedBuffer) -> Buffer {
         let id = self.add_resource(name, Kind::Buffer);
@@ -1154,6 +1246,17 @@ impl<'g> PassBuilder<'_, 'g> {
             AccessInfo::depth_attachment(load == LoadOp::Load, true),
         );
         self.attachment(texture, true, false, load, store);
+        self
+    }
+
+    /// Renders into the layers of `texture` (a depth texture of several layers) one at a
+    /// time, with depth writes: the pass begins and ends each layer's rendering itself
+    /// ([`PassContext::begin_depth_layer`]), with that layer's load operation. `load`: some
+    /// layer keeps its contents (otherwise every layer drawn into is cleared first). Each
+    /// layer renders on its own, which some GPUs need to keep their depth culling (the
+    /// RTX 4060 Ti drew four layers of one layered rendering 18 % slower, ADR 0093).
+    pub fn depth_layers(mut self, texture: Texture, load: bool) -> Self {
+        self.access(texture.0, AccessInfo::depth_attachment(load, true));
         self
     }
 

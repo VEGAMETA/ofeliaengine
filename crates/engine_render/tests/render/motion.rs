@@ -200,6 +200,7 @@ fn motion_vectors() {
                         clear: Some([0.0; 4]),
                         occlusion: use_occlusion.then_some(&occlusion),
                         temporal: Some(&temporal),
+                        shadow_cache: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

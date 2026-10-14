@@ -92,7 +92,7 @@ fn limits(vendor: &str) -> Limits {
 const INTEL_SPONZA: &str = "IntelSponza/main_sponza/NewSponza_Main_glTF_003.gltf";
 
 fn shots() -> Vec<Shot> {
-    vec![
+    let mut shots = vec![
         Shot {
             size: [1920, 1080],
             eye: Some(Vec3::new(0.4, 1.9, 4.8)),
@@ -242,7 +242,25 @@ fn shots() -> Vec<Shot> {
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },
-    ]
+    ];
+    // The still shots draw the sun's cascades whole every frame, as they did before their
+    // cache (ADR 0093): their passes stay measured. A still camera's cached cascades
+    // draw nothing.
+    for shot in &mut shots {
+        shot.cached_shadows = false;
+    }
+    // The cache's own cost: the camera walking (5 cm a frame) through Intel's Sponza with
+    // each class's defaults, the cascades drawing the strips it exposes.
+    for (name, class) in [
+        ("intel_sponza_walk_discrete", DeviceClass::Discrete),
+        ("intel_sponza_walk_integrated", DeviceClass::Integrated),
+    ] {
+        shots.push(Shot {
+            camera_motion: Vec3::new(0.05, 0.0, 0.0),
+            ..class_defaults(name, INTEL_SPONZA, class)
+        });
+    }
+    shots
 }
 
 const SPONZA: &str = "Sponza/Sponza.gltf";

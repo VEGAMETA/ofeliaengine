@@ -247,6 +247,7 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
                 clear: Some([0.0; 4]),
                 occlusion: Some(&occlusion),
                 temporal: Some(&temporal),
+                shadow_cache: None,
                 lights: &lights,
                 decals: &decals,
                 environment: None,

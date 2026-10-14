@@ -302,6 +302,7 @@ fn main() {
                             clear: Some([0.02, 0.02, 0.05, 1.0]),
                             occlusion: None,
                             temporal: motion_vectors.then_some(&temporal),
+                            shadow_cache: None,
                             lights: &[],
                             decals: &[],
                             environment: None,

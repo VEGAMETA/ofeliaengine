@@ -241,6 +241,7 @@ fn main() {
                                 clear: Some([0.0, 0.0, 0.0, 1.0]),
                                 occlusion: None,
                                 temporal: None,
+                                shadow_cache: None,
                                 lights: &[],
                                 decals: &[],
                                 environment: None,

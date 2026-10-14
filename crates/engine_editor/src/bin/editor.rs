@@ -1060,6 +1060,7 @@ mod windowed {
                                         clear,
                                         occlusion: None,
                                         temporal: None,
+                                        shadow_cache: None,
                                         lights: &[],
                                         decals: &[],
                                         environment: None,
