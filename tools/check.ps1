@@ -338,11 +338,41 @@ if ($adr.Count) {
     Write-Output "ok         0.0 s  adr index"
 }
 
+# Third-party implicit Vulkan layers (overlays: RivaTuner, OBS, Steam, Epic) hook into every
+# Vulkan process: they change timing, and RivaTuner's crashes when several instances are
+# created at once. VK_LOADER_LAYERS_DISABLE turns them off, but the loader ignores it in an
+# elevated process (a terminal run as administrator); each layer's own switch, its
+# manifest's `disable_environment`, still works. The drivers' own layers are registered
+# elsewhere and stay.
+function Get-ImplicitLayerSwitches {
+    $switches = @{}
+    foreach ($key in @('HKLM:\SOFTWARE\Khronos\Vulkan\ImplicitLayers',
+                       'HKCU:\SOFTWARE\Khronos\Vulkan\ImplicitLayers')) {
+        $item = Get-Item -LiteralPath $key -ErrorAction SilentlyContinue
+        if (-not $item) { continue }
+        foreach ($manifest in $item.GetValueNames()) {
+            try {
+                $json = Get-Content -Raw -LiteralPath $manifest -ErrorAction Stop | ConvertFrom-Json
+            } catch {
+                continue
+            }
+            foreach ($layer in @($json.layer) + @($json.layers)) {
+                if (-not $layer -or -not $layer.disable_environment) { continue }
+                foreach ($switch in $layer.disable_environment.PSObject.Properties) {
+                    $switches[$switch.Name] = [string]$switch.Value
+                }
+            }
+        }
+    }
+    $switches
+}
+$layerSwitches = Get-ImplicitLayerSwitches
+
 $stepVars = @(
     'ENGINE_ADAPTER', 'ENGINE_REQUIRE_GPU', 'ENGINE_REQUIRE_SLANG', 'ENGINE_REQUIRE_GOLDEN',
     'VK_LOADER_LAYERS_DISABLE',
     'TRACY_SYMBOL_OFFLINE_RESOLVE', 'RUSTFLAGS', 'CARGO_TARGET_DIR'
-)
+) + @($layerSwitches.Keys)
 if (-not $failed) { $failed = @() }
 foreach ($name in $steps.Keys) {
     if ($Only.Count -and $Only -notcontains $name) { continue }
@@ -373,6 +403,13 @@ foreach ($name in $steps.Keys) {
             $env:ENGINE_ADAPTER = 'radeon'
             $command = $command.Substring(7)
         }
+        if ($name -eq 'gpu' -or $name -eq 'perf') {
+            # Without the overlays (above): elevated, the loader ignores the first.
+            $env:VK_LOADER_LAYERS_DISABLE = '~implicit~'
+            foreach ($switch in $layerSwitches.Keys) {
+                [Environment]::SetEnvironmentVariable($switch, $layerSwitches[$switch])
+            }
+        }
         if ($name -eq 'gpu') {
             $env:ENGINE_REQUIRE_GPU = '1'
             # ref-1 has the test scenes and a golden image per vendor: none may be missing.
@@ -382,7 +419,6 @@ foreach ($name in $steps.Keys) {
             Wait-QuietCpu $log
             Test-BusyGpu $log
             $env:ENGINE_REQUIRE_GPU = '1'
-            $env:VK_LOADER_LAYERS_DISABLE = '~implicit~'
         }
         if ($name -eq 'slang') { $env:ENGINE_REQUIRE_SLANG = '1' }
         if ($name -eq 'tracy') {

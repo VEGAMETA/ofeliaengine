@@ -1,4 +1,12 @@
 //! Vulkan instance, validation layer and debug messenger.
+//!
+//! **An instance whose last handle goes while other instances of the process live is
+//! destroyed with the last of them** ([`Instances`]). On the Radeon iGPU's driver (26.8.1),
+//! destroying an instance loses another instance's device that renders with MSAA and
+//! streamed textures: its next submit returns `ERROR_DEVICE_LOST`, while destroying only the
+//! other device does not (`docs/status.md` §6). A game creates one instance and destroys it
+//! last, as before; tests and tools that run several at once keep the ones that finished
+//! until the last one does.
 
 use crate::adapter::{Adapter, AdapterPreference};
 use crate::error::RhiError;
@@ -55,6 +63,52 @@ pub struct ValidationReport {
     pub first_errors: Vec<String>,
 }
 
+/// The process's instances: how many are alive, and those whose last handle went while
+/// others lived, destroyed with the last one (the module's documentation says why).
+struct Instances {
+    live: usize,
+    parked: Vec<Parked>,
+}
+
+static INSTANCES: Mutex<Instances> = Mutex::new(Instances {
+    live: 0,
+    parked: Vec::new(),
+});
+
+/// An instance waiting for the process's other instances to go.
+struct Parked {
+    raw: ash::Instance,
+    debug_utils: Option<(ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
+    /// The messenger's user data, alive as long as the messenger.
+    _debug_state: Option<Box<DebugState>>,
+}
+
+impl Parked {
+    /// Destroys the messenger, then the instance.
+    ///
+    /// # Safety
+    ///
+    /// Every object created from the instance (devices, surfaces) has been destroyed.
+    unsafe fn destroy(self) {
+        // SAFETY: guaranteed by the caller; the messenger belongs to the instance.
+        unsafe {
+            if let Some((utils, messenger)) = self.debug_utils {
+                utils.destroy_debug_utils_messenger(messenger, None);
+            }
+            self.raw.destroy_instance(None);
+        }
+    }
+}
+
+/// Instances alive and parked in the process (tests).
+#[cfg(test)]
+fn instance_counts() -> (usize, usize) {
+    let instances = INSTANCES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    (instances.live, instances.parked.len())
+}
+
 #[derive(Default)]
 struct DebugState {
     errors: AtomicU32,
@@ -81,19 +135,38 @@ pub(crate) struct InstanceShared {
 
 impl Drop for InstanceShared {
     fn drop(&mut self) {
-        // SAFETY: every object created from the instance (devices, surfaces) holds an
-        // `Arc` to this struct and is destroyed first; the messenger belongs to it.
+        let this = Parked {
+            raw: self.raw.clone(),
+            debug_utils: self.debug_utils.take(),
+            _debug_state: self.debug_state.take(),
+        };
+        // Not a hot path: instances come and go with devices. The lock is held while the
+        // last instance destroys the parked ones, so none is destroyed while another one
+        // counts as alive.
+        let mut instances = INSTANCES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        instances.live = instances.live.saturating_sub(1);
+        if instances.live > 0 {
+            instances.parked.push(this);
+            return;
+        }
+        let parked = std::mem::take(&mut instances.parked);
+        // SAFETY: every object created from an instance (devices, surfaces) holds an `Arc`
+        // to its shared state and is destroyed first: this one's and the parked ones' are
+        // gone.
         unsafe {
-            if let Some((utils, messenger)) = self.debug_utils.take() {
-                utils.destroy_debug_utils_messenger(messenger, None);
+            this.destroy();
+            for instance in parked {
+                instance.destroy();
             }
-            self.raw.destroy_instance(None);
         }
     }
 }
 
 /// A Vulkan instance. Cheap to clone (shared); destroyed when the last clone and every
-/// device created from it are gone.
+/// device created from it are gone, or, while other instances of the process live, with the
+/// last of them (the module's documentation says why).
 #[derive(Clone)]
 pub struct Instance {
     pub(crate) shared: Arc<InstanceShared>,
@@ -322,6 +395,10 @@ impl Instance {
             None
         };
 
+        INSTANCES
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .live += 1;
         Ok(Self {
             shared: Arc::new(InstanceShared {
                 entry,
@@ -411,5 +488,37 @@ impl Instance {
             .filter(|a| a.missing_features().is_empty())
             .max_by_key(|a| a.score(preference))
             .ok_or(RhiError::NoSuitableAdapter(unsuitable))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_instance_that_goes_beside_another_is_destroyed_with_the_last_one() {
+        let desc = InstanceDesc {
+            validation: false,
+            surface: false,
+            ..InstanceDesc::default()
+        };
+        // No Vulkan loader on the machine: nothing to test.
+        let Ok(first) = Instance::new(&desc) else {
+            return;
+        };
+        let second = Instance::new(&desc).expect("a second instance");
+        assert_eq!(instance_counts(), (2, 0));
+        // A clone keeps it alive; the last handle parks it while `second` lives.
+        let clone = first.clone();
+        drop(first);
+        assert_eq!(instance_counts(), (2, 0));
+        drop(clone);
+        assert_eq!(instance_counts(), (1, 1));
+        drop(second);
+        assert_eq!(instance_counts(), (0, 0));
+        // Alone, an instance is destroyed with its last handle, as before.
+        let alone = Instance::new(&desc).expect("an instance");
+        drop(alone);
+        assert_eq!(instance_counts(), (0, 0));
     }
 }

@@ -584,11 +584,23 @@ grown, divide and conquer); the old labels stay in parentheses.
       separate processes (the gate); the RTX in any mix;
     - validation off: still fails. GPU-assisted validation on: it stops failing (timing or
       memory placement). No TDR (no event 4101), and the fault probe finds no device lost.
-    - So most likely an engine bug on the streaming path under MSAA that one device in
-      a process hides (an out-of-bounds GPU write landing in its own memory, or a CPU write
-      through a stale mapping), not the driver. Next: the access violation's module (the
-      crash handler in the test binary, or WER local dumps on ref-1: the owner's machine
-      setting), then the feedback and streaming code's buffer sizes under MSAA.
+    - **Narrowed further (2026-10-14, the `fix/radeon-device-lost` branch's repro):**
+      - The trigger is another instance of the process being destroyed
+        (`vkDestroyInstance`) while the device renders. The device is lost at its next
+        submit.
+      - A second instance with an idle device is enough: destroyed while Sponza renders,
+        the loss follows; destroyed after, it does not (4/4).
+      - Its device destroyed while Sponza renders and the instance only after: no loss
+        (3/3).
+      - The overlays are not the cause. RivaTuner's and OBS's implicit layers were in
+        every process: an elevated process's loader ignores `VK_LOADER_LAYERS_DISABLE`.
+        Turned off by their own switches, the loss stays.
+      - So most likely the driver's (26.8.1): independent instances should not affect each
+        other.
+    - **Worked around:** `engine_rhi` destroys an instance that goes while others live
+      only with the last of them. The test of the workaround waits for the Radeon to work
+      again: after some fifteen losses in a row on 2026-10-14 its driver stopped (code 43
+      until a restart).
     - Found on the way and fixed: the derived data cache's temporary file was named by the
       process only, so two threads caching one texture at once failed (now one per write);
   - glTF's texture coordinates beyond the first set, `KHR_texture_transform` and vertex

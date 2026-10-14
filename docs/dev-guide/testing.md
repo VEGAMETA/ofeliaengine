@@ -108,6 +108,11 @@ cargo run -p engine_golden --release --bin perf_gate
   seconds before each GPU.
 - **Overlays change timing:** keep `VK_LOADER_LAYERS_DISABLE=~implicit~` (OBS, RivaTuner and
   Steam hook into every Vulkan process) and close other GPU work.
+  - In an elevated process (a terminal run as administrator) the loader ignores that
+    variable. Each layer's own switch still works, from its manifest's
+    `disable_environment`: `DISABLE_RTSS_LAYER=1`, `DISABLE_VULKAN_OBS_CAPTURE=1`.
+  - `VK_LOADER_DEBUG=layer` lists the layers a process gets.
+  - `tools\check.ps1` sets every registered overlay's switch for its GPU steps.
 - **A change made a pass faster or slower on purpose:** `--update` writes the new baseline
   (each pass's median run, so that one lucky run does not set the bar); commit it with the
   change and put the numbers in `docs/perf/history.md`.
