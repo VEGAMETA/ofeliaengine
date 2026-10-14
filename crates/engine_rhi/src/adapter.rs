@@ -124,6 +124,10 @@ pub struct OptionalCaps {
     /// `drawIndirectCount`: indirect draws whose count the GPU writes (meshlets drawn one
     /// draw each, ADR 0085); enabled when present.
     pub draw_indirect_count: bool,
+    /// `multiViewport` and `shaderOutputViewportIndex` with at least 16 viewports: a vertex
+    /// shader picks the viewport of what it draws (a cached cascade's pieces drawn at once,
+    /// ADR 0093); enabled when present.
+    pub viewport_index: bool,
 }
 
 impl OptionalCaps {
@@ -155,6 +159,7 @@ impl OptionalCaps {
             (self.shader_float16, "16-bit shader math"),
             (self.sample_rate_shading, "sample rate shading"),
             (self.shader_int64, "64-bit shader integers"),
+            (self.viewport_index, "viewport index"),
         ]
         .into_iter()
         .filter_map(|(present, name)| present.then_some(name))
@@ -386,6 +391,9 @@ impl Adapter {
             sample_rate_shading: base.sample_rate_shading == vk::TRUE,
             shader_int64: base.shader_int64 == vk::TRUE,
             draw_indirect_count: f12.draw_indirect_count == vk::TRUE,
+            viewport_index: base.multi_viewport == vk::TRUE
+                && f12.shader_output_viewport_index == vk::TRUE
+                && props.limits.max_viewports >= 16,
         };
 
         let kind = match props.device_type {

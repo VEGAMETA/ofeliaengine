@@ -275,7 +275,9 @@ impl Device {
             // 16-bit math where supported: optional (FSR 3.1's faster variants, ADR 0060).
             .shader_float16(adapter.caps.shader_float16)
             // Meshlets drawn one indirect draw each, counted on the GPU (ADR 0085).
-            .draw_indirect_count(adapter.caps.draw_indirect_count);
+            .draw_indirect_count(adapter.caps.draw_indirect_count)
+            // Vertex shaders that pick their viewport (ADR 0093).
+            .shader_output_viewport_index(adapter.caps.viewport_index);
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)
@@ -294,7 +296,8 @@ impl Device {
             .image_cube_array(true)
             .shader_int16(adapter.caps.shader_float16)
             .shader_int64(adapter.caps.shader_int64)
-            .sample_rate_shading(adapter.caps.sample_rate_shading);
+            .sample_rate_shading(adapter.caps.sample_rate_shading)
+            .multi_viewport(adapter.caps.viewport_index);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .features(features)
             .push_next(&mut f11)
