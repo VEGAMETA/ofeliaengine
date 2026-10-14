@@ -967,7 +967,9 @@ struct CascadeData {
     far: f32,
     /// World-space error its casters' detail levels may have (0: full meshes).
     lod_error: f32,
-    _pad: [u32; 2],
+    /// Its layer of the map.
+    layer: f32,
+    _pad: u32,
 }
 
 /// `Frame` in `forward.slang` (1280 bytes).

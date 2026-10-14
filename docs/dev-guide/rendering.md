@@ -1002,7 +1002,8 @@ How to read it:
 The directional light casts through up to four cascades (ADR 0044):
 
 - the view is cut along its depth into slices, finest near the camera;
-- each slice gets its own square shadow map, a layer of one array.
+- each slice gets its own square shadow map, a tile of one atlas (with a cascade cache,
+  below, a layer of its own).
 
 A 15 cm pole 4 m away keeps a crisp shadow, and a building 100 m away still casts one.
 
@@ -1012,7 +1013,7 @@ use engine_render::forward::ShadowSettings;
 let renderer = ForwardRenderer::new(&device, &bindless, HDR_FORMAT, depth_format,
     ShadowSettings {
         cascades: 4,        // 1–4
-        resolution: 1024,   // texels per cascade (a layer each)
+        resolution: 1024,   // texels per cascade; the atlas holds 2 × 2
         distance: 150.0,    // how far from the camera shadows reach (world units)
         ..ShadowSettings::default()
     })?;
@@ -1084,10 +1085,10 @@ unsafe { cache.destroy(&mut allocator, &bindless) };
 
 | GPU shadow passes, 1080p, walking 5 cm a frame | drawn whole | cached |
 |---|---:|---:|
-| Intel's Sponza, RTX 4060 Ti | 802 µs | 65 µs |
-| Intel's Sponza, Radeon iGPU | 18.6 ms | 1.8 ms |
-| Sponza, RTX 4060 Ti | 192 µs | 32 µs |
-| Sponza, Radeon iGPU | 2.37 ms | 0.55 ms |
+| Intel's Sponza, RTX 4060 Ti | 728 µs | 69 µs |
+| Intel's Sponza, Radeon iGPU | 18.9 ms | 2.0 ms |
+| Sponza, RTX 4060 Ti | 129 µs | 32 µs |
+| Sponza, Radeon iGPU | 2.46 ms | 0.56 ms |
 
 ### Contact shadows (ADR 0071)
 

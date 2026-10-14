@@ -100,18 +100,19 @@ struct Attributes
     float2 uv;
 };
 
-// `CascadeData` in forward/mod.rs: one cascade of the sun's shadows, a layer of the map
-// (ADR 0093).
+// `CascadeData` in forward/mod.rs: one cascade of the sun's shadows, in a layer of the
+// map: a tile of its only layer drawn whole every frame, or a layer of its own in a
+// view's cache, addressed wrap-around (ADR 0093).
 struct Cascade
 {
     float4 scale;            // xyz: light view → cascade NDC scale; w: world size of a texel
     float4 offset;           // xyz: offset; w: NDC edge within which the filter stays inside
-    float4 atlas;            // cascade NDC → uv of its layer: xy scale, zw offset (where its window starts there)
+    float4 atlas;            // cascade NDC → uv of its layer: xy scale, zw offset (its tile, or where its window starts)
     float4 drawn[2];         // light view rectangles (x0, y0, x1, y1) drawn this frame; an empty one has x0 > x1
     float far;               // light view far depth (−z) of its projection
     float lod_error;         // world-space error its casters' detail levels may have (0: full meshes)
+    float layer;             // its layer of the map
     uint _pad0;
-    uint _pad1;
 };
 
 // `ShadowViewData` in local_shadows.rs: one view of a light's shadow in the atlas.
@@ -878,6 +879,12 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     // of whose faces the rasterizer would cull is not drawn.
     bool shadow = list >= 2;
     uint cascade = shadow ? list - 2 : 0;
+    // Read here, not in the test: fewer registers made the RTX run more groups at once,
+    // which shuffled the draws they append and cost the depth tests of the passes drawing
+    // them (Sponza: prepass +8 %, shadows +9 %; ADR 0093).
+    float4 r0 = shadow ? read_float4(&push.frame.cascades[cascade].drawn[0]) : float4(0.0);
+    float4 r1 = shadow ? read_float4(&push.frame.cascades[cascade].drawn[1]) : float4(0.0);
+    float far = shadow ? push.frame.cascades[cascade].far : 0.0;
     float4x4 light = read_matrix(&push.frame.light_from_world);
     float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
     Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + min(m, bm.count[lod] - 1));
@@ -889,9 +896,7 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
         // Reaching a rectangle the cascade draws, and not wholly beyond its far depth.
         float3 c = mul(light, float4(center, 1.0)).xyz;
         float3 e = float3(radius, radius, radius);
-        float4 r0 = read_float4(&push.frame.cascades[cascade].drawn[0]);
-        float4 r1 = read_float4(&push.frame.cascades[cascade].drawn[1]);
-        visible = visible && (reaches(r0, c, e) || reaches(r1, c, e)) && -(c.z + radius) <= push.frame.cascades[cascade].far;
+        visible = (reaches(r0, c, e) || reaches(r1, c, e)) && -(c.z + radius) <= far;
         // The light is a direction: the cone test from infinitely far away.
         if (visible && cone && (meshlet.cone >> 24) != 127u)
         {
@@ -1093,23 +1098,13 @@ float4 shadow_clip(float3 world)
     return float4(light * k.scale.xyz + k.offset.xyz, 1.0);
 }
 
-// A cascade's vertex: its position, in its layer of the map (`push.phase`, ADR 0093).
-struct CascadeVertex
-{
-    float4 position : SV_Position;
-    uint layer : SV_RenderTargetArrayIndex;
-};
-
 // Drawn with a cascade's culled commands: instance `slot` is a slot of its caster list.
 // Only positions are fetched.
 [shader("vertex")]
-CascadeVertex shadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+float4 shadowVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID) : SV_Position
 {
     Instance inst = read_instance(push.instances, push.visible[slot]);
-    CascadeVertex o;
-    o.position = shadow_clip(transform_point(inst, load_position(vertex)));
-    o.layer = push.phase;
-    return o;
+    return shadow_clip(transform_point(inst, load_position(vertex)));
 }
 
 // A local light's shadow view (`push.phase`: the drawn view): positions only.
@@ -1136,26 +1131,15 @@ struct ShadowOut
     nointerpolation uint material : MATERIAL;
 };
 
-// `ShadowOut` of a cascade, in its layer of the map (`shadowFragmentMasked` reads the
-// rest).
-struct CascadeOut
-{
-    float4 position : SV_Position;
-    float2 uv : TEXCOORD0;
-    nointerpolation uint material : MATERIAL;
-    uint layer : SV_RenderTargetArrayIndex;
-};
-
 // Shadows of masked materials: texture coordinates for the alpha test.
 [shader("vertex")]
-CascadeOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
     Instance inst = read_instance(push.instances, push.visible[slot]);
-    CascadeOut o;
+    ShadowOut o;
     o.position = shadow_clip(transform_point(inst, load_position(vertex)));
     o.uv = read_attributes(vertex).uv;
     o.material = inst.material;
-    o.layer = push.phase;
     return o;
 }
 
@@ -1569,7 +1553,8 @@ float cascade_shadow(uint c, float3 light, float3 normal)
     if (ndc.z > 1.0)
         return 1.0;
     float2 uv = ndc.xy * k.atlas.xy + k.atlas.zw;
-    // Its layer of the map, wrapping around: the window starts anywhere in it (ADR 0093).
+    // Its layer of the map (a cache's wraps around: the window starts anywhere in it, ADR
+    // 0093).
     Texture2DArray map = g_texture_arrays[NonUniformResourceIndex(push.texture)];
     SamplerComparisonState s = g_compare_samplers[push.frame.cascade_sampler];
     uint width, height, layers;
@@ -1580,7 +1565,7 @@ float cascade_shadow(uint c, float3 light, float3 normal)
     for (int y = -1; y <= 1; y++)
         [unroll]
         for (int x = -1; x <= 1; x++)
-            lit += map.SampleCmpLevelZero(s, float3(uv + float2(x, y) * texel, float(c)), ndc.z);
+            lit += map.SampleCmpLevelZero(s, float3(uv + float2(x, y) * texel, k.layer), ndc.z);
     return lit / 9.0;
 }
 

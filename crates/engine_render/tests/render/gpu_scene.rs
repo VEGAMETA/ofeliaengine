@@ -1503,8 +1503,12 @@ fn cached_cascades_follow_the_scenes_uploads() {
         "an instance moved"
     );
     assert_eq!(frame(&mut bed, &mut scene, camera).1, 0, "nothing since");
+    // A first step may outgrow the reach the cascades were split over (a new view's is just
+    // what it needs): it is chosen again with room, and everything drawn once more.
     camera = perspective_camera(Vec3::new(2.2, 7.0, 8.9));
+    frame(&mut bed, &mut scene, camera);
     // The scene is small, its cascades too: a step is many of their texels.
+    camera = perspective_camera(Vec3::new(2.4, 7.0, 8.8));
     let strips = frame(&mut bed, &mut scene, camera).1;
     assert!(
         strips > 0 && strips < layers / 2,

@@ -20,9 +20,9 @@ pub const MAX_CASCADES: usize = 4;
 /// Shadow settings of a [`crate::forward::ForwardRenderer`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ShadowSettings {
-    /// Width and height of each cascade in texels, a layer of the shadow map each (ADR
-    /// 0093). The default, 1024, gives 4 cascades the texels of the 2048² single shadow map
-    /// before them (ADR 0044).
+    /// Width and height of each cascade in texels: a tile of an atlas of up to 2 × 2, or a
+    /// layer of a view's cascade cache (ADR 0093). The default, 1024, gives the 2048² atlas
+    /// the single shadow map had (ADR 0044).
     pub resolution: u32,
     /// Depth format.
     pub format: vk::Format,
@@ -59,6 +59,22 @@ impl ShadowSettings {
     /// Cascades actually used (at least 1, at most [`MAX_CASCADES`]).
     pub fn cascade_count(&self) -> usize {
         (self.cascades as usize).clamp(1, MAX_CASCADES)
+    }
+
+    /// Columns and rows of cascade tiles in the atlas a view without a cascade cache draws
+    /// every frame (a cache gives each cascade a layer of its own, ADR 0093).
+    pub fn atlas_grid(&self) -> (u32, u32) {
+        match self.cascade_count() {
+            1 => (1, 1),
+            2 => (2, 1),
+            _ => (2, 2),
+        }
+    }
+
+    /// Size of that atlas in texels.
+    pub fn atlas_size(&self) -> (u32, u32) {
+        let (columns, rows) = self.atlas_grid();
+        (self.resolution * columns, self.resolution * rows)
     }
 }
 
@@ -137,8 +153,9 @@ pub(crate) struct Keep {
     /// seldom changes the texel size.
     pub radius: [Option<f32>; MAX_CASCADES],
     /// The cascades are cached. Their depth range is the scene's, not the slice's: depths
-    /// drawn in one frame stay right in the next. A reach chosen anew gets a tenth more
-    /// than the view needs, so it is kept for longer.
+    /// drawn in one frame stay right in the next. A kept reach the view outgrew (or no
+    /// longer needs) is chosen again with a tenth more than the view needs, so it is kept
+    /// for longer; the first is what the view needs, as without the cache.
     pub cached: bool,
 }
 
@@ -243,10 +260,10 @@ pub(crate) fn fit_cascades_keeping(
     if needed.is_nan() || needed <= 0.0 {
         return fit;
     }
-    let reach = match keep.reach.filter(|&r| r >= needed && r <= needed * 1.25) {
-        Some(kept) => kept,
-        None if keep.cached => (needed * 1.1).min(settings.distance),
-        None => needed,
+    let reach = match keep.reach {
+        Some(kept) if kept >= needed && kept <= needed * 1.25 => kept,
+        Some(_) if keep.cached => (needed * 1.1).min(settings.distance),
+        _ => needed,
     };
     fit.reach = reach;
     fit.fade = settings.distance < view_reach;

@@ -151,13 +151,24 @@ mask (Warner Bros US 11,908,062 / 12,315,068).
   - `engine_render::forward::CascadeCache` is a view's map: a 2D array, a layer per
     cascade (16 MiB at 4 × 1024² of 32-bit depth).
   - A view passes it as `ForwardView::shadow_cache`. `engine_frame` gives every view one
-    (`ViewSettings::cached_shadows`, on by default). A view without one, and a probe's
-    capture, draws its cascades whole into a transient array, as before.
-- **One map shape for both.** The 2 × 2 atlas is gone: every cascade is a layer, drawn in
-  one pass with layered rendering. The vertex shader writes the layer, which needs
-  `shaderOutputLayer` (now required, ADR 0006; both reference GPUs have it). The shading
-  samples one `Texture2DArray` through a repeating comparison sampler. The descriptor stays
-  the same for every pixel, so there is no non-uniform indexing.
+    (`ViewSettings::cached_shadows`, on by default).
+  - A view without one, and a probe's capture, draws its cascades whole every frame into
+    the transient atlas, as before: tiles of one layer, one rendering.
+- **The shading reads both alike.** The map is a `Texture2DArray`; each cascade has its
+  layer and its uv transform (its tile, or where its window starts in its layer). The
+  comparison sampler repeats. The descriptor is the same for every pixel, so there is no
+  non-uniform indexing. The shading's registers did not change (Radeon 48 / 64).
+- **A cache's layers are drawn one at a time, each in a rendering of its own.** The
+  frame graph's new `PassBuilder::depth_layers` declares the pass, and the pass begins
+  and ends each layer itself through the graph's per-layer views. Two ways measured
+  worse on the RTX 4060 Ti, Sponza, 4 cascades:
+  - **one layered rendering** (the vertex shader picking the layer): shadow pass
+    +18 % (158 → 186 µs), likely its depth culling across layers;
+  - **a rendering per layer for the atlas too:** with meshlets, about +4 µs a cascade
+    (1 / 2 / 4 cascades: +0 / +5 / +13 µs).
+
+  So views without a cache keep the atlas, and caches pay the renderings: a strip frame
+  draws little, and step 2 removes most whole redraws.
 - **Wrap-around addressing.**
   - Grid texel `g` of the light view lives at `(g − base) mod N` in its layer.
   - The base is reset whenever a layer is drawn whole, so a whole layer is always one
@@ -168,22 +179,29 @@ mask (Warner Bros US 11,908,062 / 12,315,068).
 - **Culling stays per cascade.** Each cascade has 2 light-view rectangles (the strips),
   and the instance cull and the meshlet cull test boxes and spheres against them.
   - The cascades' cull moved into its own entry points, `cullShadows` and
-    `cullShadowsMeshlets`, so the view's cull lost its shadow branch. Radeon VGPRs: view
-    cull 32 (unchanged), its meshlet path 40 → 35, the meshlet cull 56 → 55, the shadow
-    vertex shader 45 → 43; the new shadow cull 43, with meshlets 46.
-  - The shading's registers did not change on the Radeon (48 / 64). On the RTX they rose
-    by one at most, within the same occupancy step.
+    `cullShadowsMeshlets`, so the view's cull lost its shadow branch (Radeon VGPRs of its
+    meshlet path 40 → 35).
+  - **The meshlet cull's registers move other passes.** A version with fewer registers on
+    the RTX (47 → 40) ran more groups at once. That shuffled the draws they append, which
+    cost the depth tests of the passes drawing them: Sponza with each class's defaults,
+    prepass +8–9 % and shadows +9–13 %. The rectangles are now read where main read the
+    bounds (48 registers), and both passes are back to main's. Order-preserving appends
+    would remove this fragility (status §6).
 - **What a cascade draws never depends on the camera.**
   - Its casters' detail levels follow its own texels: an error of at most
     `lod_threshold` texels. Before, they followed the camera's pixels. This applies to every
     cascade, cached or not.
   - Its depth range is the scene's.
   - Its reach is kept while it covers the view and is at most a quarter more than needed.
-    A new reach gets a tenth more than needed. In a scene smaller than the shadow distance,
-    the view's depth changes with every step.
+    The first reach is what the view needs, as without a cache. One the view outgrows is
+    chosen again with a tenth more. In a scene smaller than the shadow distance, the view's
+    depth changes with every step.
   - Its radius has the same kind of hysteresis.
   - Together these keep kept texels valid. Without the reach hysteresis, walking through
-    Intel's Sponza drew 24 cascades whole in 200 frames; with it, none.
+    Intel's Sponza drew 24 cascades whole in 200 frames; with it, the 4 of the first
+    frame and the 4 of the first step that outgrew it.
+  - A camera cut (in `engine_frame`) and any change that draws everything also forget the
+    hysteresis: the fit is then a new view's.
 - **Changes draw everything (this step).** The caster state covers:
   - for a draw list, a hash of meshes, their shapes' revisions, materials, transforms and
     the renderer settings that change what casts;
@@ -196,29 +214,32 @@ mask (Warner Bros US 11,908,062 / 12,315,068).
   - `cached_cascades_match_cascades_drawn_whole` covers 40 frames: walking, strafing,
     turning, standing still, a 316 m jump and a moving box. Each frame is compared with a
     cache that draws everything every frame, with the same fit.
-    - RTX: 0 pixels differ in every frame. Radeon: at most 1 pixel in 3 frames, one of
-      them a frame both draw whole (coplanar ties).
+    - RTX: 0 pixels differ. Radeon: at most 1 pixel in 3 frames, one of them a frame
+      both draw whole (coplanar ties).
     - The cache drew 13.8 % of the texels. Still frames drew 0. The moving box drew
       everything.
   - `cached_cascades_follow_the_scenes_uploads` checks the scene path's serials and
     changes. What the cache holds shades identically to drawing everything.
-  - The golden suite is unchanged on both GPUs.
+  - The golden suite and `engine_frame`'s cut test pass on both GPUs.
 - **Measured** (ref-1, release, 1920 × 1080, `scene_bench --sky --meshlet-culling
-  --prepass [--cached-shadows] [--walk 0.05]`, 4 cascades of 1024², 200 frames; GPU
-  shadow passes, median):
+  --prepass [--cached-shadows] [--walk 0.05]`, 4 cascades of 1024², 200 frames). GPU shadow
+  passes (with their culling), median, and the GPU frame:
 
-  | Scene, GPU | drawn whole every frame (still / walking) | cached, still | cached, walking 5 cm a frame | GPU frame whole → cached (still / walking) |
+  | Scene, GPU | drawn whole (still / walking) | cached, still | cached, walking 5 cm a frame | GPU frame whole → cached (still / walking) |
   |---|---:|---:|---:|---:|
-  | Intel's Sponza, RTX | 884 / 802 µs | 0 | 65 µs | — |
-  | Intel's Sponza, Radeon | 21.4 / 18.6 ms | 0 | 1.81 ms | 48.6 → 26.7 ms / 42.1 → 25.3 ms |
-  | Sponza, RTX | 211 / 192 µs | 0 | 32 µs | 618 → 363 µs / 560 → 389 µs |
-  | Sponza, Radeon | 2.49 / 2.37 ms | 0 | 0.55 ms | 16.1 → 13.5 ms / 15.7 → 13.8 ms |
+  | Intel's Sponza, RTX | 824 / 728 µs | 0 | 69 µs | 1,520 → 692 µs / 1,312 → 650 µs |
+  | Intel's Sponza, Radeon | 21.7 / 18.9 ms | 0 | 1.98 ms | 50.6 → 28.5 ms / 43.7 → 27.0 ms |
+  | Sponza, RTX | 135 / 129 µs | 0 | 32 µs | 516 → 366 µs / 499 → 389 µs |
+  | Sponza, Radeon | 2.49 / 2.46 ms | 0 | 0.56 ms | 16.9 → 14.8 ms / 16.6 → 14.9 ms |
 
-  Walking, the cascades drew 0.6 % (Intel's Sponza) and 2.3 % (Sponza) of their texels
-  per frame. Sponza's mean includes 3 reaches chosen anew.
-- **The perf gate.** Its still shots keep drawing the cascades whole
-  (`cached_shadows: false`), so the drawing stays measured against its baselines. Two
-  new shots, `intel_sponza_walk_discrete` and `intel_sponza_walk_integrated`, walk the
-  camera 5 cm a frame with the cache on.
+  - Walking, the cascades drew 1.15 % (Intel's Sponza) and 1.30 % (Sponza) of their
+    texels per frame.
+  - Views without a cache, against main (A/B, RTX, Sponza): 161 → 162 µs plain, 134 →
+    135 µs with meshlets and the prepass.
+- **The perf gate.**
+  - Its still shots keep drawing the cascades whole (`cached_shadows: false`), so the
+    drawing stays measured against its baselines.
+  - Two new shots, `intel_sponza_walk_discrete` and `intel_sponza_walk_integrated`, walk
+    the camera 5 cm a frame with the cache on.
 - **Next (step 2).** Moved casters should draw their old and new light-space bounds only,
   not every cascade whole.

@@ -376,7 +376,13 @@ impl ForwardRenderer {
             previous_count,
             scatter_budget: self.subsurface_settings.unwrap_or_default().budget(),
             decal_tiles: decals.map_or(0, |(_, p)| p.occupied()),
-            cascades: cascade_data(&fit, &plans, &held, self.lod_threshold),
+            cascades: cascade_data(
+                &fit,
+                &plans,
+                &held,
+                self.lod_threshold,
+                cache.is_none().then(|| settings.atlas_grid()),
+            ),
             cascade_count: fit.count as u32,
             command_count,
             cascade_blend: settings.blend.clamp(0.0, 1.0),
@@ -712,18 +718,20 @@ impl ForwardRenderer {
             Some(map) => map,
             None => {
                 let (count, reach) = (fit.count, fit.reach);
-                let layers = cache.map_or(count.max(1), |_| settings.cascade_count());
+                let layers = cache.map_or(1, |_| settings.cascade_count());
+                // Without a cache, the cascades are tiles of one layer, drawn in one rendering
+                // (each layer rendered on its own costs the RTX some 4 µs a cascade with
+                // meshlets, one layered rendering 18 % on Sponza; ADR 0093).
+                let (columns, _) = settings.atlas_grid();
                 let shadow_map = match cache {
                     Some(c) => c.import(fg),
-                    None => fg.create_texture(
-                        "shadow map",
-                        TextureDesc::new_2d_array(
-                            settings.format,
-                            resolution,
-                            resolution,
-                            layers as u32,
-                        ),
-                    ),
+                    None => {
+                        let (width, height) = settings.atlas_size();
+                        fg.create_texture(
+                            "shadow map",
+                            TextureDesc::new_2d_array(settings.format, width, height, 1),
+                        )
+                    }
                 };
                 let drawing = cache.is_none() || plans[..count].iter().any(|p| p.rect_count > 0);
                 if drawing {
@@ -774,105 +782,153 @@ impl ForwardRenderer {
                         }),
                     }
                     let shadow_pipelines = &self.shadow;
-                    // Every layer drawn whole is cleared as the pass starts; otherwise each
-                    // piece is, before it is drawn.
-                    let whole = count == layers && plans[..count].iter().all(|p| p.full);
-                    let load = if whole { depth_clear } else { LoadOp::Load };
-                    materials
+                    // A cache's cascades render into their layers one at a time (four layers
+                    // of one layered rendering cost the RTX 18 % on Sponza): a layer drawn
+                    // whole is cleared as its rendering begins, each piece of one drawn in
+                    // strips before it is drawn; layers drawn whole all at once need nothing
+                    // kept. Without a cache, the atlas is cleared and every tile drawn in one
+                    // rendering.
+                    let transient = cache.is_none();
+                    let discards =
+                        transient || (count == layers && plans[..count].iter().all(|p| p.full));
+                    let pass = materials
                         .read(geometry.read(fg.add_pass(names.shadow)))
                         .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
                         .read(shadow_commands, Access::Indirect)
-                        .read(casters, Access::StorageRead(ShaderStages::VERTEX))
-                        .depth(shadow_map, load, StoreOp::Store)
-                        .execute(move |ctx| {
-                            let push = Push {
-                                visible: ctx.address(casters),
-                                ..base
+                        .read(casters, Access::StorageRead(ShaderStages::VERTEX));
+                    let pass = if transient {
+                        pass.depth(shadow_map, depth_clear, StoreOp::Store)
+                    } else {
+                        pass.depth_layers(shadow_map, !discards)
+                    };
+                    pass.execute(move |ctx| {
+                        let push = Push {
+                            visible: ctx.address(casters),
+                            ..base
+                        };
+                        for (cascade, plan) in plans[..count].iter().enumerate() {
+                            if plan.rect_count == 0 {
+                                continue;
+                            }
+                            let load = if transient || plan.full {
+                                depth_clear
+                            } else {
+                                LoadOp::Load
                             };
-                            for (cascade, plan) in plans[..count].iter().enumerate() {
-                                // The vertex shaders project with the cascade's constants
-                                // into its layer.
-                                let push = Push {
-                                    phase: cascade as u32,
-                                    ..push
-                                };
-                                for piece in plan.rects().iter().flat_map(|r| r.pieces()) {
-                                    let area = DrawArea {
-                                        viewport: vk::Rect2D {
-                                            offset: vk::Offset2D {
-                                                x: piece.viewport[0],
-                                                y: piece.viewport[1],
-                                            },
-                                            extent: vk::Extent2D {
-                                                width: resolution,
-                                                height: resolution,
-                                            },
+                            if !transient {
+                                // SAFETY: the pass declared the map's layers; the map has
+                                // this one; no rendering is begun.
+                                unsafe {
+                                    ctx.begin_depth_layer(
+                                        shadow_map,
+                                        cascade as u32,
+                                        load,
+                                        StoreOp::Store,
+                                    );
+                                }
+                            }
+                            // The vertex shaders project with the cascade's constants.
+                            let push = Push {
+                                phase: cascade as u32,
+                                ..push
+                            };
+                            // Its tile of the atlas, or its own layer.
+                            let tile = if transient {
+                                let k = cascade as u32;
+                                vk::Offset2D {
+                                    x: ((k % columns) * resolution) as i32,
+                                    y: ((k / columns) * resolution) as i32,
+                                }
+                            } else {
+                                vk::Offset2D::default()
+                            };
+                            for piece in plan.rects().iter().flat_map(|r| r.pieces()) {
+                                let area = DrawArea {
+                                    viewport: vk::Rect2D {
+                                        offset: vk::Offset2D {
+                                            x: tile.x + piece.viewport[0],
+                                            y: tile.y + piece.viewport[1],
                                         },
-                                        scissor: piece.scissor,
-                                    };
-                                    // SAFETY: recording inside the pass's rendering scope; the
-                                    // pass reads the commands (indirect), the caster lists,
-                                    // the pool and the material table; the piece is inside
-                                    // the layer.
-                                    unsafe {
-                                        if !whole {
-                                            ctx.device.cmd_clear_attachments(
-                                                ctx.cmd,
-                                                &[vk::ClearAttachment {
-                                                    aspect_mask: vk::ImageAspectFlags::DEPTH,
-                                                    color_attachment: 0,
-                                                    clear_value: vk::ClearValue {
-                                                        depth_stencil: vk::ClearDepthStencilValue {
-                                                            depth: 1.0,
-                                                            stencil: 0,
-                                                        },
+                                        extent: vk::Extent2D {
+                                            width: resolution,
+                                            height: resolution,
+                                        },
+                                    },
+                                    scissor: vk::Rect2D {
+                                        offset: vk::Offset2D {
+                                            x: tile.x + piece.scissor.offset.x,
+                                            y: tile.y + piece.scissor.offset.y,
+                                        },
+                                        extent: piece.scissor.extent,
+                                    },
+                                };
+                                // SAFETY: recording inside the pass's rendering scope; the
+                                // pass reads the commands (indirect), the caster lists,
+                                // the pool and the material table; the piece is inside
+                                // the layer.
+                                unsafe {
+                                    if load == LoadOp::Load {
+                                        ctx.device.cmd_clear_attachments(
+                                            ctx.cmd,
+                                            &[vk::ClearAttachment {
+                                                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                                                color_attachment: 0,
+                                                clear_value: vk::ClearValue {
+                                                    depth_stencil: vk::ClearDepthStencilValue {
+                                                        depth: 1.0,
+                                                        stencil: 0,
                                                     },
-                                                }],
-                                                &[vk::ClearRect {
-                                                    rect: piece.scissor,
-                                                    base_array_layer: cascade as u32,
-                                                    layer_count: 1,
-                                                }],
-                                            );
-                                        }
-                                        states.draw(
+                                                },
+                                            }],
+                                            &[vk::ClearRect {
+                                                rect: piece.scissor,
+                                                base_array_layer: 0,
+                                                layer_count: 1,
+                                            }],
+                                        );
+                                    }
+                                    states.draw(
+                                        ctx,
+                                        bindless,
+                                        &geometry,
+                                        [&shadow_pipelines[0], &shadow_pipelines[1]],
+                                        // Material types cast as their fallbacks (ADR 0092).
+                                        &TypedPipelines::BUILTIN,
+                                        &push,
+                                        true,
+                                        DEPTH_STATES,
+                                        ctx.buffer(shadow_commands),
+                                        cascade as u64 * command_bytes,
+                                        area,
+                                    );
+                                    if let Some(m) = &shadow_meshlets {
+                                        states.draw_meshlets(
                                             ctx,
                                             bindless,
                                             &geometry,
                                             [&shadow_pipelines[0], &shadow_pipelines[1]],
-                                            // Material types cast as their fallbacks (ADR 0092).
-                                            &TypedPipelines::BUILTIN,
                                             &push,
                                             true,
                                             DEPTH_STATES,
                                             ctx.buffer(shadow_commands),
-                                            cascade as u64 * command_bytes,
+                                            m.lists(cascade as u32),
+                                            m,
                                             area,
                                         );
-                                        if let Some(m) = &shadow_meshlets {
-                                            states.draw_meshlets(
-                                                ctx,
-                                                bindless,
-                                                &geometry,
-                                                [&shadow_pipelines[0], &shadow_pipelines[1]],
-                                                &push,
-                                                true,
-                                                DEPTH_STATES,
-                                                ctx.buffer(shadow_commands),
-                                                m.lists(cascade as u32),
-                                                m,
-                                                area,
-                                            );
-                                        }
                                     }
                                 }
                             }
-                            // The layers hold what was drawn once it is recorded: a frame
-                            // that is never recorded leaves the cache as it was.
-                            if let Some(c) = cache {
-                                c.commit(&plans, held, count, reach);
+                            if !transient {
+                                // SAFETY: its rendering was begun above.
+                                unsafe { ctx.end_rendering() };
                             }
-                        });
+                        }
+                        // The layers hold what was drawn once it is recorded: a frame
+                        // that is never recorded leaves the cache as it was.
+                        if let Some(c) = cache {
+                            c.commit(&plans, held, count, reach);
+                        }
+                    });
                 } else if let Some(c) = cache {
                     c.idle();
                 }
@@ -2397,14 +2453,16 @@ fn forward_pass<'a, 'g>(
 
 /// The shader's view of the frame's cascades: projections as scale and offset, atlas
 /// tiles, selection limits and caster bounds.
-/// Each cascade's constants: its projection; where its window starts in its layer, which
-/// `held` says; the light view rectangles it draws this frame (`plans`); and the error its
-/// casters' detail levels may have, `lod_threshold` of its texels (ADR 0093).
+/// Each cascade's constants: its projection; its tile of the atlas of `atlas` columns and
+/// rows, or where its window starts in its own layer, which `held` says; the light view
+/// rectangles it draws this frame (`plans`); and the error its casters' detail levels may
+/// have, `lod_threshold` of its texels (ADR 0093).
 fn cascade_data(
     fit: &CascadeFit,
     plans: &[ShadowPlan; MAX_CASCADES],
     held: &[Option<Held>; MAX_CASCADES],
     lod_threshold: f32,
+    atlas: Option<(u32, u32)>,
 ) -> [CascadeData; MAX_CASCADES] {
     // Reached by nothing: the shaders test boxes against it without checking it.
     const EMPTY: [f32; 4] = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
@@ -2414,8 +2472,30 @@ fn cascade_data(
             continue;
         };
         let m = cascade.clip_from_light();
-        let n = h.resolution as f32;
-        let start = h.storage_origin();
+        let (uv, layer) = match atlas {
+            Some((columns, rows)) => {
+                let tile = [(k as u32 % columns) as f32, (k as u32 / columns) as f32];
+                let grid = [columns as f32, rows as f32];
+                let uv = [
+                    0.5 / grid[0],
+                    0.5 / grid[1],
+                    (0.5 + tile[0]) / grid[0],
+                    (0.5 + tile[1]) / grid[1],
+                ];
+                (uv, 0.0)
+            }
+            None => {
+                let n = h.resolution as f32;
+                let start = h.storage_origin();
+                let uv = [
+                    0.5,
+                    0.5,
+                    0.5 + start[0] as f32 / n,
+                    0.5 + start[1] as f32 / n,
+                ];
+                (uv, k as f32)
+            }
+        };
         // Half a texel around each rectangle: whatever touches its texels is drawn.
         let pad = 0.5 * cascade.texel;
         let mut drawn = [EMPTY; 2];
@@ -2426,16 +2506,12 @@ fn cascade_data(
         *data = CascadeData {
             scale: [m.x_axis.x, m.y_axis.y, m.z_axis.z, cascade.texel],
             offset: [m.w_axis.x, m.w_axis.y, m.w_axis.z, cascade.limit],
-            atlas: [
-                0.5,
-                0.5,
-                0.5 + start[0] as f32 / n,
-                0.5 + start[1] as f32 / n,
-            ],
+            atlas: uv,
             drawn,
             far: cascade.far,
             lod_error: lod_threshold * cascade.texel,
-            _pad: [0; 2],
+            layer,
+            _pad: 0,
         };
     }
     out

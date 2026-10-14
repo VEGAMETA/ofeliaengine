@@ -54,7 +54,10 @@ pub struct CascadeCache {
     device: engine_rhi::ash::Device,
     image: vk::Image,
     allocation: Option<Allocation>,
+    /// The layers, sampled as an array.
     view: vk::ImageView,
+    /// Each layer, rendered into on its own.
+    layer_views: [vk::ImageView; MAX_CASCADES],
     sampled: u32,
     desc: TextureDesc,
     state: Cell<TextureState>,
@@ -136,10 +139,50 @@ impl CascadeCache {
                 return Err(RhiError::vk("vkCreateImageView")(e));
             }
         };
+        // Each layer on its own: the cascades render one at a time (ADR 0093).
+        let mut layer_views = [vk::ImageView::null(); MAX_CASCADES];
+        for (layer, out) in layer_views.iter_mut().enumerate().take(layers as usize) {
+            // SAFETY: a view of the image just created.
+            let made = unsafe {
+                device.raw().create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(settings.format)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::DEPTH,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: layer as u32,
+                            layer_count: 1,
+                        }),
+                    None,
+                )
+            };
+            match made {
+                Ok(v) => *out = v,
+                Err(e) => {
+                    // SAFETY: never used by the GPU.
+                    unsafe {
+                        for v in layer_views.into_iter().chain([view]) {
+                            if v != vk::ImageView::null() {
+                                device.raw().destroy_image_view(v, None);
+                            }
+                        }
+                        allocator.destroy_image(image, allocation);
+                    }
+                    return Err(RhiError::vk("vkCreateImageView")(e));
+                }
+            }
+        }
         let Some(sampled) = bindless.add_sampled_image(view) else {
             // SAFETY: never used by the GPU.
             unsafe {
-                device.raw().destroy_image_view(view, None);
+                for v in layer_views.into_iter().chain([view]) {
+                    if v != vk::ImageView::null() {
+                        device.raw().destroy_image_view(v, None);
+                    }
+                }
                 allocator.destroy_image(image, allocation);
             }
             return Err(RhiError::Vulkan {
@@ -152,6 +195,7 @@ impl CascadeCache {
             image,
             allocation: Some(allocation),
             view,
+            layer_views,
             sampled,
             desc: TextureDesc::new_2d_array(settings.format, size, size, layers),
             state: Cell::new(TextureState::undefined()),
@@ -165,8 +209,10 @@ impl CascadeCache {
         })
     }
 
-    /// Draws every cascade whole in the next frame (after changes the renderer cannot see,
-    /// such as a mesh's vertices rewritten in place).
+    /// Draws every cascade whole in the next frame, fitted as a new view's are: after
+    /// changes the renderer cannot see (a mesh's vertices rewritten in place), and after a
+    /// camera cut (what the cascades kept from before is then forgotten, as a view's
+    /// history is).
     pub fn invalidate(&self) {
         self.stale.set(true);
     }
@@ -205,6 +251,11 @@ impl CascadeCache {
             bindless.remove_sampled_image(self.sampled, 0);
             // SAFETY: guaranteed by the caller.
             unsafe {
+                for view in self.layer_views {
+                    if view != vk::ImageView::null() {
+                        self.device.destroy_image_view(view, None);
+                    }
+                }
                 self.device.destroy_image_view(self.view, None);
                 allocator.destroy_image(self.image, allocation);
             }
@@ -220,8 +271,15 @@ impl CascadeCache {
     }
 
     /// How the fit holds the cascades still: the reach and the radii their layers were
-    /// drawn with, and the scene's depth range.
+    /// drawn with (none when they are drawn whole anyway: the fit is then what a new view
+    /// gets), and the scene's depth range.
     pub(crate) fn keep(&self) -> Keep {
+        if self.stale.get() {
+            return Keep {
+                cached: true,
+                ..Keep::default()
+            };
+        }
         Keep {
             reach: self.reach.get(),
             radius: self.held.get().map(|h| h.map(|h| h.radius)),
@@ -344,6 +402,7 @@ impl CascadeCache {
                 storage_index: None,
             },
         );
+        fg.set_layer_views(texture, &self.layer_views[..self.desc.layers as usize]);
         self.state.set(final_state);
         self.imported.set(Some((serial, texture)));
         texture

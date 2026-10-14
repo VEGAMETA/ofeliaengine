@@ -1180,6 +1180,10 @@ impl FrameRenderer {
         if camera.cut || core::mem::take(reset_pending) {
             if camera.cut {
                 resets.cuts += 1;
+                // The cascades' fit kept from before the cut (ADR 0093) goes with it.
+                if let Some(cache) = shadow_cache.as_ref() {
+                    cache.invalidate();
+                }
                 if let Some(temporal) = temporal.as_ref() {
                     temporal.reset();
                 }
