@@ -217,3 +217,48 @@ measurements, niagara's culling).
   - One dispatch for all the cascades' work items would save most of it (later).
   - Local lights' shadow views still draw whole instances.
 
+### The meshlet cull in chunks (2026-10-14)
+
+- **Where small scenes paid.** Per pass, off → on (scene_bench, 1080p, prepass, 4
+  cascades):
+  - FlightHelmet on the RTX: cull 4.5 → 11–12 µs, shadow cull 3.1 → 9–9.6, prepass 26 →
+    30, shadow 20 → 23, shading 49 → 50.
+  - Sponza on the RTX: the two culls +15 µs, prepass +14 (2,568 draws), shading −6,
+    shadow −18.
+  - Sponza on the Radeon: cull 9.6 → 21.5 µs, shadow cull 1.2 → 40.9.
+  - The culls were latency-bound. One group per work item looped over all of an
+    instance's meshlets, 64 at a time, so a large mesh's chain of dependent loads and
+    atomics ran serially: FlightHelmet's 1,083 meshlets are in 6 instances.
+  - It was not the number of dispatches: the cascades' four run back to back, without
+    barriers between them.
+- **Now a work item is a chunk of 64 meshlets.** `take_meshlets` appends one work item
+  per chunk (`uint2`: the instance, its level | state << 8 | chunk << 16), and each of
+  the meshlet cull's lanes tests one meshlet; a group never loops. The lists' room for
+  work items is the instances plus the draws over 64: the chunks of the instances that
+  fit fill at most one more work item each than their draws. It is in the header's last
+  word (`MeshletHeader.work`); the draws follow the work items.
+- **Measured,** off → on, shadow (its culling included) + prepass + shading + culling:
+
+| scene | RTX 4060 Ti | Radeon iGPU |
+|---|---|---|
+| FlightHelmet | 103.6 → 118.3 µs (+14 %; was +20 %) | 2,583 → 2,548 µs (−1.4 %; was +1.9 %) |
+| Sponza | 457.7 → 455.8 µs (−0.4 %; was +1.3 %) | 13,488 → 13,170 µs (−2.4 %; was −2.7 %) |
+| 10,000 spheres, overview | 12,907 → 12,502 µs (−3.1 %) | 203.7 → 182.3 ms (−10.5 %) |
+| 10,000 spheres, inside the field | 5,280 → 4,849 µs (−8.2 %) | 94.5 → 77.9 ms (−17.5 %) |
+
+  - The culls of small scenes: FlightHelmet on the RTX 8.8 and 7.6 µs (was 11–12 and
+    9–9.6), Sponza on the Radeon 14.3 and 35.9 µs (was 21.5 and 40.9).
+  - What the RTX still pays on small scenes (about 9 µs) is the barrier and the dependent
+    dispatch of each cull. Mesh shaders (step 3) cull in the task shader instead.
+  - The dense scenes are unchanged: their instances are small.
+- **Tried and dropped: drawing pixel-bound instances whole.** An instance wholly in view
+  with fewer than D triangles per pixel of its bounding sphere's projection kept its
+  instanced draw. With D = 1:
+  - RTX: Sponza −5 µs, FlightHelmet −3 µs (its prepass back to 26.6 µs); but the spheres
+    inside the field +40 µs (their near spheres' shading 622 → 658) and the city blocks
+    +14 µs.
+  - Radeon: Sponza +430 µs (prepass 1,022 → 1,117, shading 9,300 → 9,636), FlightHelmet
+    slower too. The iGPU's few vertices and primitives a clock make culling meshlets pay
+    even where pixels dominate.
+  - So every instance that may take the path takes it.
+

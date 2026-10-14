@@ -438,9 +438,9 @@ by meshlet in views with a depth prepass, and in the sun's shadow cascades:
 - **It pays for dense geometry,** where vertex work counts: thousands of detailed objects,
   and integrated GPUs. 10,000 spheres of 4,096 triangles: −3 to −8 % on an RTX 4060 Ti,
   −10 to −17 % on a Radeon iGPU (shadows, prepass and shading).
-- **It costs a little where pixels dominate.** Each meshlet is a draw of its own, and each
-  shadow cascade a culling pass. Sponza: +1.3 % on the RTX, −2.7 % on the iGPU.
-  FlightHelmet: +21 µs on the RTX.
+- **It costs a little where pixels dominate.** Each meshlet is a draw of its own, and
+  each culling pass waits for the instances' culling. Sponza: −0.4 % on the RTX, −2.4 %
+  on the iGPU. FlightHelmet: +15 µs on the RTX, −1.4 % on the iGPU.
 - **So it is off by default.** Measure your scenes with it on and off (`scene_bench
   --meshlet-culling`, `draw_bench --meshlets`).
 - **Not drawn by meshlet:**

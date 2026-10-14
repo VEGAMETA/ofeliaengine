@@ -96,13 +96,15 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
     visible meshlet through `vkCmdDrawIndexedIndirectCount`, only after a depth prepass.
   - Step 4 is done too: the shadow cascades are culled per meshlet (each cascade's bounds,
     the cone seen from the light).
+  - The meshlet cull runs a group per chunk of 64 meshlets, not per instance: small
+    scenes' culls were latency-bound.
   - The frame's shadow + prepass + shading + culling, off → on:
     - 10,000 spheres of 4k triangles: −3 to −8 % on the RTX, −10 to −17 % on the Radeon;
-    - Sponza: +1.3 % / −2.7 %;
-    - FlightHelmet: +20 % (21 µs) / +1.9 %.
-  - Open for the owner: on by default per device class? Next are step 3 (RTX mesh
-    shaders), one dispatch for all cascades, local lights' shadows, and a per-instance
-    rule for pixel-bound instances.
+    - Sponza: −0.4 % / −2.4 %;
+    - FlightHelmet: +14 % (15 µs) / −1.4 %.
+  - Drawing pixel-bound instances whole was tried and dropped (ADR 0085's addendum).
+  - Next: the default per device class, measured on a heavier scene (Intel's Sponza);
+    step 3 (RTX mesh shaders); local lights' shadows.
 - **3c, custom materials** (ADR 0092, accepted 2026-10-12): step 1 (the passes through
   `IMaterial`, PR #179), step 2 (material types in the renderer: typed materials,
   batches and pipelines per type, compiled on first sight with the glTF fallback drawing

@@ -151,6 +151,7 @@ impl ForwardRenderer {
                 ring,
                 geometry,
                 batch_count as usize,
+                instance_count,
                 keys.iter().map(|&(_, k)| {
                     let run = &runs[k as usize];
                     (run.order as usize, run, draws[run.first as usize].mesh)
@@ -361,6 +362,7 @@ impl ForwardRenderer {
                 ring,
                 geometry,
                 batches.len(),
+                scene.slot_count(),
                 runs.iter()
                     .map(|run| (run.first as usize, run, batches[run.first as usize].mesh)),
             )
@@ -445,6 +447,9 @@ pub(super) const MESHLET_HEADER_BYTES: u64 = 528;
 /// Where the dispatch arguments of the meshlet cull are in a phase's lists.
 pub(super) const MESHLET_ARGS: u64 = 512;
 
+/// Meshlets per work item of the meshlet cull (`MESHLET_CHUNK` in `forward.slang`).
+const MESHLET_CHUNK: u32 = 64;
+
 /// A frame's meshlet lists (ADR 0085), the same in every forward phase: the batches'
 /// meshlets and, per pipeline state, room for the draws of every instance that may take
 /// the path.
@@ -460,29 +465,34 @@ pub(crate) struct MeshletLayout {
     pub(super) caps: [u32; STATES],
     /// Draws in a phase's lists (the sum of `caps`).
     pub(super) draws: u32,
+    /// Work items a phase's lists have room for: a chunk of up to [`MESHLET_CHUNK`]
+    /// meshlets each. The instances that fit fill at most one more each than their draws.
+    pub(super) work: u32,
 }
 
 impl MeshletLayout {
-    /// Where the draws start in a phase's lists with room for `work` work items.
-    pub(super) fn draws_offset(work: u32) -> u64 {
-        MESHLET_HEADER_BYTES + 8 * u64::from(work)
+    /// Where the draws start in a phase's lists, after the work items.
+    pub(super) fn draws_offset(&self) -> u64 {
+        MESHLET_HEADER_BYTES + 8 * u64::from(self.work)
     }
 
-    /// Bytes of a phase's lists with room for `work` work items.
-    pub(super) fn list_bytes(&self, work: u32) -> u64 {
-        (Self::draws_offset(work) + COMMAND_BYTES * u64::from(self.draws)).next_multiple_of(16)
+    /// Bytes of a phase's lists.
+    pub(super) fn list_bytes(&self) -> u64 {
+        (self.draws_offset() + COMMAND_BYTES * u64::from(self.draws)).next_multiple_of(16)
     }
 }
 
 /// Lays out the meshlet lists (ADR 0085) of `runs` (`(index in the batch table, run,
-/// mesh)`) for a batch table of `len`: each eligible run's levels' meshlets, and per
-/// pipeline state room for the draws of all its instances, scaled down to
-/// [`MAX_MESHLET_DRAWS`]. Blended runs (drawn back to front) and those of material types
-/// (their own pipelines) are not eligible. `None` when no run is, or the ring is full.
+/// mesh)`) for a batch table of `len` and `instances` culled: each eligible run's levels'
+/// meshlets, and per pipeline state room for the draws of all its instances, scaled down
+/// to [`MAX_MESHLET_DRAWS`]. Blended runs (drawn back to front) and those of material
+/// types (their own pipelines) are not eligible. `None` when no run is, or the ring is
+/// full.
 fn meshlet_layout<'r>(
     ring: &mut UploadRing,
     geometry: &GeometryFrame<'_>,
     len: usize,
+    instances: u32,
     runs: impl Iterator<Item = (usize, &'r Run, MeshId)> + Clone,
 ) -> Option<MeshletLayout> {
     let eligible = |run: &Run, mesh: MeshId| {
@@ -545,12 +555,14 @@ fn meshlet_layout<'r>(
         }
         staged.address
     };
+    let work = instances + draws.div_ceil(MESHLET_CHUNK);
     // The header: counters zero, then each state's offset and room, then the meshlet
-    // cull's dispatch (no work items yet; one group high and deep).
+    // cull's dispatch (no work items yet; one group high and deep) and the room for work
+    // items.
     let mut header = [0u32; (MESHLET_HEADER_BYTES / 4) as usize];
     header[64..96].copy_from_slice(&offsets);
     header[96..128].copy_from_slice(&caps);
-    header[128..132].copy_from_slice(&[0, 1, 1, 0]);
+    header[128..132].copy_from_slice(&[0, 1, 1, work]);
     let header = ring.stage(&header)?;
     Some(MeshletLayout {
         table,
@@ -558,6 +570,7 @@ fn meshlet_layout<'r>(
         offsets,
         caps,
         draws,
+        work,
     })
 }
 
@@ -922,7 +935,7 @@ impl States {
         area: vk::Rect2D,
     ) {
         let layout = &meshlets.layout;
-        let draws = lists + MeshletLayout::draws_offset(meshlets.work);
+        let draws = lists + layout.draws_offset();
         let mut bound: Option<vk::Pipeline> = None;
         for state in 0..STATES {
             let room = layout.caps[state];

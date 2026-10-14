@@ -1227,8 +1227,6 @@ pub(crate) struct MeshletDraws {
     /// The first phase's lists in the command buffer, and the bytes of each.
     pub(crate) base: u64,
     pub(crate) bytes: u64,
-    /// Work items each phase's lists have room for (the instances).
-    pub(crate) work: u32,
 }
 
 impl MeshletDraws {
