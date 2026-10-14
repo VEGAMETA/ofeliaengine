@@ -480,6 +480,22 @@ impl TextureFeedback {
                                 ctx.render_area(),
                                 (slice, slices),
                             );
+                            // Instances drawn by meshlet (ADR 0085; none are blended), in
+                            // the first slice.
+                            if let Some(m) = draws.meshlets.filter(|_| slice == 0) {
+                                draws.states.draw_meshlets(
+                                    ctx,
+                                    bindless,
+                                    &geometry_copy,
+                                    [pipeline, pipeline],
+                                    &push,
+                                    mask,
+                                    ctx.buffer(draws.commands),
+                                    m.lists(phase),
+                                    &m,
+                                    ctx.render_area(),
+                                );
+                            }
                         }
                     }
                 }

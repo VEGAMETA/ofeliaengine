@@ -1534,6 +1534,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                         tangents: &m.tangents,
                         uvs: &m.uvs,
                         indices: &m.indices,
+                        meshlets: engine_streaming::gpu_meshlets(&m.meshlets),
                     })
                     .expect("mesh")
             })
@@ -1602,6 +1603,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
                             tangents: &mesh.tangents,
                             uvs: &mesh.uvs,
                             indices: &mesh.indices,
+                            meshlets: &[],
                         },
                         joints: &mesh.joints,
                         weights: &mesh.weights,

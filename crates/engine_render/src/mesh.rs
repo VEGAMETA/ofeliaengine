@@ -9,7 +9,8 @@
 //!   encoding at 16 bits per axis (the tangent's bitangent sign in the lowest bit), one
 //!   set of texture coordinates as `f32 × 2`;
 //! - **indices**, 32-bit, relative to the mesh's first vertex (the draw's vertex offset
-//!   adds it).
+//!   adds it). A range of them may end with its levels' [`Meshlet`]s (ADR 0085), 32-byte
+//!   aligned after the indices: what the cull pass reads to draw a level by meshlet.
 //!
 //! Vertex and index ranges come from two [`RangeAllocator`]s. When one is full, its
 //! buffers grow: [`GeometryPool::begin_frame`] creates buffers twice as large (or as
@@ -213,6 +214,64 @@ pub struct MeshData<'a> {
     pub uvs: &'a [[f32; 2]],
     /// Triangles, three indices each.
     pub indices: &'a [u32],
+    /// The triangles' meshlets (ADR 0085): consecutive ranges of `indices`, in order, or
+    /// none (the level is drawn whole).
+    pub meshlets: &'a [Meshlet],
+}
+
+/// A meshlet of a detail level (ADR 0085), as the cull pass reads it: a cluster of the
+/// level's triangles with its bounding sphere and normal cone. The cook makes them
+/// (`engine_assets::meshlet`, the same 32 bytes).
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct Meshlet {
+    /// Bounding sphere in object space: center.
+    pub center: [f32; 3],
+    /// And radius.
+    pub radius: f32,
+    /// Normal cone: axis (x, y, z) and cutoff as signed 8-bit values over 127. Seen from
+    /// `eye`, the meshlet faces away when `dot(center − eye, axis) ≥ cutoff · |center −
+    /// eye| + radius`. A cutoff of 127 means no cone (normals over more than a half space):
+    /// the axis is then zero, and the test must be skipped.
+    pub cone: [i8; 4],
+    /// Its first index, relative to its level's.
+    pub first_index: u32,
+    /// Its triangles.
+    pub triangles: u32,
+    /// 0.
+    pub reserved: u32,
+}
+
+const _: () = assert!(size_of::<Meshlet>() == 32);
+
+/// 32-bit words of a [`Meshlet`] in the index buffer.
+const MESHLET_WORDS: u64 = (size_of::<Meshlet>() / 4) as u64;
+
+/// Whether `meshlets` cover a level of `index_count` indices exactly, in order, each with
+/// at least one triangle; no meshlets cover any level (it is drawn whole).
+fn meshlets_cover(meshlets: &[Meshlet], index_count: usize) -> bool {
+    if meshlets.is_empty() {
+        return true;
+    }
+    let mut next = 0u64;
+    for m in meshlets {
+        if u64::from(m.first_index) != next || m.triangles == 0 {
+            return false;
+        }
+        next += u64::from(m.triangles) * 3;
+    }
+    next == index_count as u64
+}
+
+/// Words of an index range holding `indices` indices and `meshlets` meshlets: the
+/// indices, then the meshlets from the next 32-byte boundary (the shaders index the
+/// buffer as meshlets).
+fn range_words(indices: u64, meshlets: u64) -> u64 {
+    if meshlets == 0 {
+        indices
+    } else {
+        indices.next_multiple_of(MESHLET_WORDS) + meshlets * MESHLET_WORDS
+    }
 }
 
 /// An owned [`MeshData`] (procedural meshes).
@@ -239,6 +298,7 @@ impl OwnedMeshData {
             tangents: &self.tangents,
             uvs: &self.uvs,
             indices: &self.indices,
+            meshlets: &[],
         }
     }
 }
@@ -307,6 +367,8 @@ pub enum MeshError {
     /// The mesh's last change has not reached the GPU yet ([`GeometryPool::begin_frame`]):
     /// try again next frame.
     Busy,
+    /// A level's meshlets do not cover its triangles, consecutively and in order.
+    BadMeshlets,
 }
 
 impl core::fmt::Display for MeshError {
@@ -322,6 +384,7 @@ impl core::fmt::Display for MeshError {
             Self::PoolFull => write!(f, "geometry pool is full"),
             Self::BadLevel => write!(f, "detail level does not follow the resident ones"),
             Self::Busy => write!(f, "the mesh's last change is not on the GPU yet"),
+            Self::BadMeshlets => write!(f, "meshlets do not cover their level's triangles"),
         }
     }
 }
@@ -342,6 +405,11 @@ pub struct MeshLod {
     /// the full mesh). The renderer draws the coarsest level whose error covers at most a
     /// pixel or so on screen.
     pub error: f32,
+    /// Where its meshlets start in the index buffer, in 32-bit words (32-byte aligned: a
+    /// multiple of a meshlet's 8 words).
+    pub first_meshlet: u32,
+    /// Its meshlets (ADR 0085; 0: it is drawn whole).
+    pub meshlet_count: u32,
 }
 
 /// A simplified level added with a mesh ([`GeometryPool::add_mesh_with_lods`]): triangles
@@ -352,6 +420,8 @@ pub struct LodIndices<'a> {
     pub indices: &'a [u32],
     /// Geometric error against the full mesh (object space).
     pub error: f32,
+    /// The level's meshlets, as [`MeshData::meshlets`].
+    pub meshlets: &'a [Meshlet],
 }
 
 /// A mesh in a [`GeometryPool`]. Ids of removed meshes are stale: lookups give `None`.
@@ -529,6 +599,8 @@ pub struct StreamedLevel {
 struct Streamed {
     levels: [StreamedLevel; MAX_LODS],
     ranges: [Option<Range>; MAX_LODS],
+    /// Meshlets of each resident level (in its range after its indices).
+    meshlets: [u32; MAX_LODS],
     count: u32,
     /// The finest resident level.
     resident: u32,
@@ -695,9 +767,18 @@ impl GeometryPool {
         if levels().any(|indices| !indices.len().is_multiple_of(3)) {
             return Err(MeshError::NotTriangles);
         }
+        let meshlets = || core::iter::once(data.meshlets).chain(lods.iter().map(|l| l.meshlets));
+        if levels()
+            .zip(meshlets())
+            .any(|(indices, meshlets)| !meshlets_cover(meshlets, indices.len()))
+        {
+            return Err(MeshError::BadMeshlets);
+        }
         let vertex_count = u32::try_from(vertex_count).map_err(|_| MeshError::PoolFull)?;
         let total_indices: usize = levels().map(<[u32]>::len).sum();
-        let index_count = u32::try_from(total_indices).map_err(|_| MeshError::PoolFull)?;
+        let total_meshlets: usize = meshlets().map(<[Meshlet]>::len).sum();
+        let words = range_words(total_indices as u64, total_meshlets as u64);
+        let index_count = u32::try_from(words).map_err(|_| MeshError::PoolFull)?;
         if let Some(&index) = levels().flatten().find(|&&i| i >= vertex_count) {
             return Err(MeshError::IndexOutOfRange {
                 index,
@@ -705,7 +786,7 @@ impl GeometryPool {
             });
         }
         let vertices = reserve(&mut self.vertex_ranges, u64::from(vertex_count))?;
-        let indices = match reserve(&mut self.index_ranges, u64::from(index_count)) {
+        let indices = match reserve_words(&mut self.index_ranges, words, total_meshlets > 0) {
             Ok(range) => range,
             Err(e) => {
                 self.vertex_ranges.free(vertices);
@@ -746,8 +827,12 @@ impl GeometryPool {
             }));
         let mut levels_info = [MeshLod::default(); MAX_LODS];
         let mut next = upload.first_index;
-        for (k, (indices, error)) in core::iter::once((data.indices, 0.0))
+        // The levels' meshlets follow every level's indices, from a 32-byte boundary.
+        let mut next_meshlet =
+            upload.first_index + (total_indices as u64).next_multiple_of(MESHLET_WORDS) as u32;
+        for (k, ((indices, error), meshlets)) in core::iter::once((data.indices, 0.0))
             .chain(lods.iter().map(|l| (l.indices, l.error.max(0.0))))
+            .zip(meshlets())
             .enumerate()
         {
             self.staged_indices.extend_from_slice(indices);
@@ -755,8 +840,20 @@ impl GeometryPool {
                 first_index: next,
                 index_count: indices.len() as u32,
                 error,
+                first_meshlet: if meshlets.is_empty() { 0 } else { next_meshlet },
+                meshlet_count: meshlets.len() as u32,
             };
             next += indices.len() as u32;
+            next_meshlet += meshlets.len() as u32 * MESHLET_WORDS as u32;
+        }
+        if total_meshlets > 0 {
+            let pad = (total_indices as u64).next_multiple_of(MESHLET_WORDS) - total_indices as u64;
+            self.staged_indices
+                .extend(core::iter::repeat_n(0, pad as usize));
+            for meshlets in meshlets() {
+                self.staged_indices
+                    .extend_from_slice(bytemuck::cast_slice(meshlets));
+            }
         }
         self.uploads.push(upload);
 
@@ -796,42 +893,67 @@ impl GeometryPool {
         })
     }
 
-    /// Stages vertices `data` (positions and attributes) and `indices` for upload to
-    /// `first_vertex` and `first_index`.
+    /// Stages vertices `data` (positions and attributes), its indices and meshlets for
+    /// upload to `first_vertex` and `first_index`.
     fn stage(&mut self, data: &MeshData<'_>, first_vertex: u32, first_index: u32) {
-        self.uploads.push(Upload {
-            first_vertex,
-            vertex_count: data.positions.len() as u32,
-            first_index,
-            index_count: data.indices.len() as u32,
-            staged_vertex: self.staged_positions.len() as u32,
-            staged_index: self.staged_indices.len() as u32,
-        });
+        let staged_vertex = self.staged_positions.len() as u32;
         self.staged_positions.extend_from_slice(data.positions);
         encode_attributes(data, &mut self.staged_attributes);
-        self.staged_indices.extend_from_slice(data.indices);
+        self.stage_level(
+            data.indices,
+            data.meshlets,
+            (first_vertex, data.positions.len() as u32, staged_vertex),
+            first_index,
+        );
     }
 
-    /// Stages vertices already encoded (positions, [`VertexAttributes`]) and indices.
+    /// Stages vertices already encoded (positions, [`VertexAttributes`]), indices and
+    /// meshlets.
     fn stage_encoded(
         &mut self,
         positions: &[[f32; 3]],
         attributes: &[VertexAttributes],
-        indices: &[u32],
+        (indices, meshlets): (&[u32], &[Meshlet]),
         first_vertex: u32,
         first_index: u32,
     ) {
-        self.uploads.push(Upload {
-            first_vertex,
-            vertex_count: positions.len() as u32,
-            first_index,
-            index_count: indices.len() as u32,
-            staged_vertex: self.staged_positions.len() as u32,
-            staged_index: self.staged_indices.len() as u32,
-        });
+        let staged_vertex = self.staged_positions.len() as u32;
         self.staged_positions.extend_from_slice(positions);
         self.staged_attributes.extend_from_slice(attributes);
+        self.stage_level(
+            indices,
+            meshlets,
+            (first_vertex, positions.len() as u32, staged_vertex),
+            first_index,
+        );
+    }
+
+    /// Stages one level's range: its indices, then its meshlets from the next 32-byte
+    /// boundary (`range_words`), with the vertices staged before it (`first`, `count`,
+    /// where they start in the staged arrays).
+    fn stage_level(
+        &mut self,
+        indices: &[u32],
+        meshlets: &[Meshlet],
+        (first_vertex, vertex_count, staged_vertex): (u32, u32, u32),
+        first_index: u32,
+    ) {
+        let words = range_words(indices.len() as u64, meshlets.len() as u64);
+        self.uploads.push(Upload {
+            first_vertex,
+            vertex_count,
+            first_index,
+            index_count: words as u32,
+            staged_vertex,
+            staged_index: self.staged_indices.len() as u32,
+        });
         self.staged_indices.extend_from_slice(indices);
+        if !meshlets.is_empty() {
+            let pad = indices.len().next_multiple_of(MESHLET_WORDS as usize) - indices.len();
+            self.staged_indices.extend(core::iter::repeat_n(0, pad));
+            self.staged_indices
+                .extend_from_slice(bytemuck::cast_slice(meshlets));
+        }
     }
 
     /// Adds a mesh streamed by detail level (ADR 0076) with its coarsest level resident:
@@ -868,25 +990,32 @@ impl GeometryPool {
                 vertex_count: vertex_count as u32,
             });
         }
+        if !meshlets_cover(coarse.meshlets, coarse.indices.len()) {
+            return Err(MeshError::BadMeshlets);
+        }
+        let words = range_words(coarse.indices.len() as u64, coarse.meshlets.len() as u64);
         let vertices = reserve(&mut self.vertex_ranges, vertex_count as u64)?;
-        let indices = match reserve(&mut self.index_ranges, coarse.indices.len() as u64) {
-            Ok(range) => range,
-            Err(e) => {
-                self.vertex_ranges.free(vertices);
-                return Err(e);
-            }
-        };
+        let indices =
+            match reserve_words(&mut self.index_ranges, words, !coarse.meshlets.is_empty()) {
+                Ok(range) => range,
+                Err(e) => {
+                    self.vertex_ranges.free(vertices);
+                    return Err(e);
+                }
+            };
         self.stage(coarse, vertices.offset() as u32, indices.offset() as u32);
         let mut streamed = Streamed {
             levels: [StreamedLevel::default(); MAX_LODS],
             ranges: [None; MAX_LODS],
+            meshlets: [0; MAX_LODS],
             count: levels.len() as u32,
             resident: coarsest as u32,
         };
         streamed.levels[..levels.len()].copy_from_slice(levels);
         streamed.ranges[coarsest] = Some(indices);
-        self.streamed_bytes += vertex_count as u64 * (POSITION_BYTES + ATTRIBUTE_BYTES)
-            + coarse.indices.len() as u64 * INDEX_BYTES;
+        streamed.meshlets[coarsest] = coarse.meshlets.len() as u32;
+        self.streamed_bytes +=
+            vertex_count as u64 * (POSITION_BYTES + ATTRIBUTE_BYTES) + words * INDEX_BYTES;
         let mut info = MeshInfo {
             first_vertex: vertices.offset() as u32,
             vertex_count: vertex_count as u32,
@@ -958,40 +1087,55 @@ impl GeometryPool {
         if data.normals.len() != data.positions.len() {
             return Err(MeshError::MismatchedLengths);
         }
-        let first_vertex = self.grow_level(id, level, data.positions.len() as u32, data.indices)?;
+        let first_vertex = self.grow_level(
+            id,
+            level,
+            data.positions.len() as u32,
+            data.indices,
+            data.meshlets,
+        )?;
         self.stage(data, first_vertex.0, first_vertex.1);
         Ok(())
     }
 
     /// [`Self::upload_mesh_level`] with the vertices already encoded as the pool stores
     /// them ([`encode_attributes`]): a copy on the frame's thread, the encoding done where
-    /// the data was read (the streaming thread, ADR 0076).
+    /// the data was read (the streaming thread, ADR 0076). `meshlets` are the level's, as
+    /// [`MeshData::meshlets`].
     pub fn upload_mesh_level_encoded(
         &mut self,
         id: MeshId,
         level: u32,
         positions: &[[f32; 3]],
         attributes: &[VertexAttributes],
-        indices: &[u32],
+        (indices, meshlets): (&[u32], &[Meshlet]),
     ) -> Result<(), MeshError> {
         if attributes.len() != positions.len() {
             return Err(MeshError::MismatchedLengths);
         }
         let (first_vertex, first_index) =
-            self.grow_level(id, level, positions.len() as u32, indices)?;
-        self.stage_encoded(positions, attributes, indices, first_vertex, first_index);
+            self.grow_level(id, level, positions.len() as u32, indices, meshlets)?;
+        self.stage_encoded(
+            positions,
+            attributes,
+            (indices, meshlets),
+            first_vertex,
+            first_index,
+        );
         Ok(())
     }
 
-    /// Makes room for level `level` of a streamed mesh adding `added` vertices and
-    /// `indices`: a new vertex range (the old prefix moved into it in `begin_frame`) and
-    /// an index range. Returns where the new vertices and the indices go.
+    /// Makes room for level `level` of a streamed mesh adding `added` vertices,
+    /// `indices` and `meshlets`: a new vertex range (the old prefix moved into it in
+    /// `begin_frame`) and an index range. Returns where the new vertices and the indices
+    /// go.
     fn grow_level(
         &mut self,
         id: MeshId,
         level: u32,
         added: u32,
         indices: &[u32],
+        meshlets: &[Meshlet],
     ) -> Result<(u32, u32), MeshError> {
         let Some(slot) = self.slots.get_mut(id.index as usize) else {
             return Err(MeshError::BadLevel);
@@ -1023,8 +1167,12 @@ impl GeometryPool {
                 vertex_count: new,
             });
         }
+        if !meshlets_cover(meshlets, indices.len()) {
+            return Err(MeshError::BadMeshlets);
+        }
+        let words = range_words(indices.len() as u64, meshlets.len() as u64);
         let vertices = reserve(&mut self.vertex_ranges, u64::from(new))?;
-        let index_range = match reserve(&mut self.index_ranges, indices.len() as u64) {
+        let index_range = match reserve_words(&mut self.index_ranges, words, !meshlets.is_empty()) {
             Ok(range) => range,
             Err(e) => {
                 self.vertex_ranges.free(vertices);
@@ -1044,14 +1192,15 @@ impl GeometryPool {
         });
         m.vertices = vertices;
         s.ranges[level as usize] = Some(index_range);
+        s.meshlets[level as usize] = meshlets.len() as u32;
         s.resident = level;
         m.info.first_vertex = vertices.offset() as u32;
         m.info.vertex_count = new;
         streamed_lods(&mut m.info, s);
         m.info.revision = m.info.revision.wrapping_add(1);
         m.pending = true;
-        self.streamed_bytes += u64::from(added) * (POSITION_BYTES + ATTRIBUTE_BYTES)
-            + indices.len() as u64 * INDEX_BYTES;
+        self.streamed_bytes +=
+            u64::from(added) * (POSITION_BYTES + ATTRIBUTE_BYTES) + words * INDEX_BYTES;
         self.pending_slots.push(id.index);
         Ok((vertices.offset() as u32 + old, index_range.offset() as u32))
     }
@@ -1096,6 +1245,7 @@ impl GeometryPool {
             unreachable!("looked up above");
         };
         for k in s.resident..first {
+            s.meshlets[k as usize] = 0;
             if let Some(range) = s.ranges[k as usize].take() {
                 self.streamed_bytes -= range.size() * INDEX_BYTES;
                 self.retired.push((frame_number, Retired::Indices(range)));
@@ -1559,14 +1709,26 @@ impl GeometryPool {
 /// level it would and draws what is there).
 fn streamed_lods(info: &mut MeshInfo, s: &Streamed) {
     let resident = s.resident as usize;
-    let own =
-        |k: usize| s.ranges[k].map_or((0, 0), |r| (r.offset() as u32, s.levels[k].index_count));
+    let own = |k: usize| {
+        s.ranges[k].map_or((0, 0, 0, 0), |r| {
+            let (first, count, meshlets) =
+                (r.offset() as u32, s.levels[k].index_count, s.meshlets[k]);
+            let first_meshlet = if meshlets == 0 {
+                0
+            } else {
+                first + count.next_multiple_of(MESHLET_WORDS as u32)
+            };
+            (first, count, first_meshlet, meshlets)
+        })
+    };
     for k in 0..s.count as usize {
-        let (first_index, index_count) = own(k.max(resident));
+        let (first_index, index_count, first_meshlet, meshlet_count) = own(k.max(resident));
         info.lods[k] = MeshLod {
             first_index,
             index_count,
             error: s.levels[k].error,
+            first_meshlet,
+            meshlet_count,
         };
     }
     info.first_index = info.lods[0].first_index;
@@ -1576,15 +1738,30 @@ fn streamed_lods(info: &mut MeshInfo, s: &Streamed) {
 /// A range of `size` units, growing the allocator when it is full: to twice its capacity,
 /// or more if the request needs it (the buffers follow in the next frame).
 fn reserve(ranges: &mut RangeAllocator, size: u64) -> Result<Range, MeshError> {
-    if let Some(range) = ranges.allocate(size, 1) {
+    reserve_aligned(ranges, size, 1)
+}
+
+/// An index range of `words`, 32-byte aligned when it holds meshlets (they follow its
+/// indices from a 32-byte boundary of the buffer).
+fn reserve_words(
+    ranges: &mut RangeAllocator,
+    words: u64,
+    meshlets: bool,
+) -> Result<Range, MeshError> {
+    reserve_aligned(ranges, words, if meshlets { MESHLET_WORDS } else { 1 })
+}
+
+/// [`reserve`] with an alignment, in units.
+fn reserve_aligned(ranges: &mut RangeAllocator, size: u64, align: u64) -> Result<Range, MeshError> {
+    if let Some(range) = ranges.allocate(size, align) {
         return Ok(range);
     }
     let capacity = ranges.capacity();
     let wanted = (capacity * 2)
-        .max(capacity + size.max(1))
+        .max(capacity + size.max(1) + align)
         .min(u64::from(u32::MAX));
     ranges.grow(wanted);
-    ranges.allocate(size, 1).ok_or(MeshError::PoolFull)
+    ranges.allocate(size, align).ok_or(MeshError::PoolFull)
 }
 
 /// The pool's buffers in one frame's graph, for the passes that draw from it.
@@ -1661,6 +1838,32 @@ impl GeometryFrame<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn meshlet(first_index: u32, triangles: u32) -> Meshlet {
+        Meshlet {
+            first_index,
+            triangles,
+            ..Meshlet::default()
+        }
+    }
+
+    /// Meshlets must cover their level's triangles consecutively and in order; none
+    /// covers any level. Their words follow the indices from a 32-byte boundary.
+    #[test]
+    fn meshlets_cover_their_level_and_follow_its_indices() {
+        let level = [meshlet(0, 2), meshlet(6, 1)];
+        assert!(meshlets_cover(&level, 9));
+        assert!(meshlets_cover(&[], 9));
+        assert!(!meshlets_cover(&level, 12), "short of the level");
+        assert!(!meshlets_cover(&[meshlet(0, 1), meshlet(6, 1)], 6), "a gap");
+        assert!(
+            !meshlets_cover(&[meshlet(0, 0), meshlet(0, 3)], 9),
+            "an empty one"
+        );
+        assert_eq!(range_words(9, 0), 9);
+        assert_eq!(range_words(9, 2), 16 + 16);
+        assert_eq!(range_words(16, 1), 16 + 8);
+    }
 
     /// Small deterministic generator (xorshift64*).
     struct Rng(u64);

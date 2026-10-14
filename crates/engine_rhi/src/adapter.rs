@@ -121,6 +121,9 @@ pub struct OptionalCaps {
     /// their parameters at a 64-bit address (ADR 0092: AMD's compiler reads zeros through
     /// a pointer cast after pointer arithmetic).
     pub shader_int64: bool,
+    /// `drawIndirectCount`: indirect draws whose count the GPU writes (meshlets drawn one
+    /// draw each, ADR 0085); enabled when present.
+    pub draw_indirect_count: bool,
 }
 
 impl OptionalCaps {
@@ -382,6 +385,7 @@ impl Adapter {
             shader_float16: f12.shader_float16 == vk::TRUE && base.shader_int16 == vk::TRUE,
             sample_rate_shading: base.sample_rate_shading == vk::TRUE,
             shader_int64: base.shader_int64 == vk::TRUE,
+            draw_indirect_count: f12.draw_indirect_count == vk::TRUE,
         };
 
         let kind = match props.device_type {

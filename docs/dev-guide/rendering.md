@@ -392,7 +392,10 @@ Give it detail levels and the renderer picks one per object, per frame (ADR 0053
 
 ```rust
 let levels = engine_assets::generate_lods(&mesh.positions, &mesh.indices, &LodSettings::default());
-let lods: Vec<LodIndices> = levels.iter().map(|l| LodIndices { indices: &l.indices, error: l.error }).collect();
+let lods: Vec<LodIndices> = levels
+    .iter()
+    .map(|l| LodIndices { indices: &l.indices, error: l.error, meshlets: &[] })
+    .collect();
 let id = geometry.add_mesh_with_lods(&mesh.as_data(), &lods)?;
 ```
 
@@ -417,6 +420,34 @@ let id = geometry.add_mesh_with_lods(&mesh.as_data(), &lods)?;
   them, within the GPU memory budget (`GeometryPool::add_streamed_mesh`,
   `engine_streaming::SceneStreamer`, see the assets guide). A level not loaded yet draws
   the finest one that is.
+
+### Meshlets (culling inside a mesh)
+
+The cook splits each detail level into meshlets: clusters of up to 124 triangles with a
+bounding sphere and a cone of their normals (ADR 0085; `engine_assets::meshlet`). Packs
+and `engine_streaming` hand them to the geometry pool (`MeshData::meshlets`,
+`LodIndices::meshlets`).
+
+`renderer.set_meshlet_culling(&device, &bindless, true)` then draws such meshes meshlet
+by meshlet in views with a depth prepass. Meshlets out of the view, facing away
+(single-sided materials) or, with occlusion culling, hidden behind what was drawn are not
+drawn.
+
+- **It pays for dense geometry,** where vertex work counts: thousands of detailed objects,
+  and integrated GPUs. 10,000 spheres of 4,096 triangles: −3 to −12 % on an RTX 4060
+  Ti, −10 to −19 % on a Radeon iGPU.
+- **It costs a little where pixels dominate.** Each meshlet is a draw of its own: Sponza
+  +5 % on the RTX (−2.6 % on the iGPU).
+- **So it is off by default.** Measure your scenes with it on and off (`scene_bench
+  --meshlet-culling`, `draw_bench --meshlets`).
+- **Not drawn by meshlet:** transparent materials (drawn back to front), material types,
+  skinned meshes (the cook makes them no meshlets), shadows and reflection probes'
+  captures. Without a depth prepass nothing is drawn by meshlet: the draws' order would
+  undo the front-to-back sorting.
+- **Needs** `drawIndirectCount` and `shaderInt64`, which desktop GPUs have.
+  `set_meshlet_culling` returns `false` where they are missing.
+- `ForwardPasses::meshlets` says where each phase's meshlet draw counts are, to read back
+  what was drawn.
 
 ## 5. Occlusion culling: skipping what is hidden
 

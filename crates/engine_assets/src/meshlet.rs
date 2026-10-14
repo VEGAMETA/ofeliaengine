@@ -34,7 +34,8 @@ pub struct Meshlet {
     /// Its normal cone: axis (x, y, z) and cutoff as signed 8-bit values over 127,
     /// rounded so the test stays conservative (meshoptimizer's). Seen from `eye`, the
     /// meshlet faces away when `dot(center − eye, axis) ≥ cutoff · |center − eye| +
-    /// radius`; a cutoff of 127 means no cone (every direction).
+    /// radius`. A cutoff of 127 means no cone (normals over more than a half space): the
+    /// axis is then zero, and the test must be skipped.
     pub cone: [i8; 4],
     /// Its first index in the level's index buffer.
     pub first_index: u32,

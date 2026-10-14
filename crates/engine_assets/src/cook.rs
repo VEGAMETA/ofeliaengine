@@ -15,8 +15,8 @@
 //!   the coarsest level: positions and attributes of those, the bounds, a table of
 //!   `[index count, error bits, vertices used]` for every level from the full mesh to the
 //!   coarsest, then the coarsest level's indices. Each finer level is a **mesh level**
-//!   entry, `[level, first vertex, vertices, indices, attributes]`: the vertices it adds
-//!   (positions, then attributes) and its indices. The scene entry's mesh records
+//!   entry, `[level, first vertex, vertices, indices, attributes, meshlets]`: the vertices
+//!   it adds (positions, then attributes) and its indices. The scene entry's mesh records
 //!   (`meta[3]`) name each mesh's entries.
 //! - **texture levels:** `[format code, width, height, levels, first level, level count]`
 //!   (width and height of level 0); the levels, each padded to 16 bytes. A texture's
@@ -1099,7 +1099,7 @@ fn mesh_level_entry(m: &CookedMesh, counts: &[u32], k: usize, level: i32) -> Pre
         (end - first) as u32,
         indices.len() as u32,
         attributes,
-        0,
+        meshlets.len() as u32,
         0,
     ];
     PreparedEntry::new(
@@ -1164,6 +1164,10 @@ pub fn read_mesh_level_entry(meta: [u32; 7], data: &[u8]) -> Result<MeshLevelDat
         .into_iter()
         .next()
         .unwrap_or_default();
+    // The count is in the meta too: what a reader sizes the level's decoded form by.
+    if meta[5] as usize != meshlets.len() {
+        return Err(invalid("mesh level meshlets differ from its meta"));
+    }
     Ok(MeshLevelData {
         level,
         first_vertex: first,
@@ -2622,6 +2626,17 @@ mod tests {
         bad.meshlets[0].triangles += 1;
         let entry = mesh_entry(&bad, 0);
         assert!(read_mesh_entry(entry.meta_for_tests(), &entry.raw_for_tests()).is_err());
+        // A mesh level entry whose meta disagrees with its meshlet table.
+        let mut grid = sample().meshes[0].clone();
+        grid.meshlets = build_meshlets(&grid.positions, &mut grid.indices);
+        let counts = [grid.positions.len() as u32, 3];
+        let entry = mesh_level_entry(&grid, &counts, 0, 0);
+        let mut meta = entry.meta_for_tests();
+        assert_eq!(meta[5] as usize, grid.meshlets.len());
+        let level = read_mesh_level_entry(meta, &entry.raw_for_tests()).unwrap();
+        assert_eq!(level.meshlets, grid.meshlets);
+        meta[5] += 1;
+        assert!(read_mesh_level_entry(meta, &entry.raw_for_tests()).is_err());
         // An engine from before meshlets skips their tables (bit 16 unknown to it): the
         // same mesh without them.
         let entry = mesh_entry(&mesh, 0);

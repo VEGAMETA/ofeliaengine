@@ -273,7 +273,9 @@ impl Device {
             .shader_storage_buffer_array_non_uniform_indexing(true)
             .scalar_block_layout(true)
             // 16-bit math where supported: optional (FSR 3.1's faster variants, ADR 0060).
-            .shader_float16(adapter.caps.shader_float16);
+            .shader_float16(adapter.caps.shader_float16)
+            // Meshlets drawn one indirect draw each, counted on the GPU (ADR 0085).
+            .draw_indirect_count(adapter.caps.draw_indirect_count);
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
             .dynamic_rendering(true)
             .synchronization2(true)

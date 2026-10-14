@@ -45,7 +45,9 @@
 //! frame (ADR 0047), `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
 //! levels made at load (ADR 0053), `--no-meshlets` to keep each level's triangles in their
-//! order before meshlets (ADR 0085: the cook reorders them meshlet by meshlet), `--pack <file>` to load a cooked pack instead of the glTF
+//! order before meshlets (ADR 0085: the cook reorders them meshlet by meshlet),
+//! `--meshlet-culling` to draw by meshlet where meshes have them (culled per meshlet on the
+//! GPU, ADR 0085), `--pack <file>` to load a cooked pack instead of the glTF
 //! scene (ADR 0056; `ofeliaengine cook` makes one), `--stream` with it to stream the
 //! textures while drawing (ADR 0057: tails first, then larger levels, through the texture
 //! pool's staging ring), `--async-compute on|off` to run the async passes (ambient occlusion)
@@ -306,6 +308,7 @@ fn main() {
     let mut sun_elevation: Option<f32> = None;
     let mut lods = false;
     let mut meshlets = true;
+    let mut meshlet_culling = false;
     let mut pipeline_stats = false;
     let mut msaa_stats: u32 = 0;
     let mut post = false;
@@ -392,6 +395,7 @@ fn main() {
             "--sky" => with_sky = true,
             "--lods" => lods = true,
             "--no-meshlets" => meshlets = false,
+            "--meshlet-culling" => meshlet_culling = true,
             "--pipeline-stats" => pipeline_stats = true,
             // With --pipeline-stats: also the multisampled shading's (ADR 0075).
             "--msaa" => msaa_stats = args.next().unwrap().parse().unwrap(),
@@ -551,6 +555,15 @@ fn main() {
     if let Some(on) = async_compute {
         graph.set_async_compute(on);
     }
+    // Meshlet draws per state of the screenshot's frame (`--meshlet-culling`).
+    let (counts_readback, counts_mem) = allocator
+        .create_buffer(
+            &vk::BufferCreateInfo::default()
+                .size(128)
+                .usage(vk::BufferUsageFlags::TRANSFER_DST),
+            MemoryLocation::Readback,
+        )
+        .unwrap();
     let readback_size = u64::from(WIDTH * HEIGHT * 4);
     let (readback, readback_mem) = allocator
         .create_buffer(
@@ -594,6 +607,8 @@ fn main() {
                 .map(|l| LodIndices {
                     indices: &l.indices,
                     error: l.error,
+                    // The cook's meshlets: the same 32 bytes (ADR 0085).
+                    meshlets: bytemuck::cast_slice(&l.meshlets),
                 })
                 .collect();
             geometry
@@ -604,6 +619,7 @@ fn main() {
                         tangents: &m.tangents,
                         uvs: &m.uvs,
                         indices: &m.indices,
+                        meshlets: bytemuck::cast_slice(&m.meshlets),
                     },
                     &levels,
                 )
@@ -1022,6 +1038,15 @@ fn main() {
     renderer
         .set_decals(&device, &bindless, decal_count > 0 || pipeline_stats)
         .unwrap();
+    if meshlet_culling {
+        let on = renderer
+            .set_meshlet_culling(&device, &bindless, true)
+            .unwrap();
+        println!(
+            "Meshlet culling: {}",
+            if on { "on" } else { "not supported" }
+        );
+    }
     if pipeline_stats {
         // Needs ENGINE_PIPELINE_STATS=1 (the device captures statistics at creation).
         let names = [
@@ -1283,8 +1308,11 @@ fn main() {
             (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut reflect_composite = Vec::new();
         let mut faces_drawn = Vec::new();
+        // The forward phases' culling (with meshlets, their cull too: ADR 0085).
+        let mut cull_time = Vec::new();
         let last = mode == "textured" && screenshot.is_some();
         let mut frame = 0;
+        let mut meshlet_room = 0u32;
         // Whether the GI updates of the frame before were the convergence's: pass times
         // come back a frame late (when the graph's one slot comes around again).
         let mut gi_converged_before = gi.as_ref().is_none_or(ProbeGi::is_converged);
@@ -1542,6 +1570,37 @@ fn main() {
                             final_state: Some(BufferState::host_read()),
                         },
                     );
+                    if let (Some(lists), Some(commands)) = (passes.meshlets, passes.commands) {
+                        let counts = fg.import_buffer(
+                            "meshlet counts",
+                            ImportedBuffer {
+                                buffer: counts_readback,
+                                size: 128,
+                                address: 0,
+                                initial: BufferState::idle(),
+                                final_state: Some(BufferState::host_read()),
+                            },
+                        );
+                        fg.add_pass("meshlet counts")
+                            .read(commands, Access::TransferRead)
+                            .write(counts, Access::TransferWrite)
+                            .execute(move |ctx| {
+                                // SAFETY: recording; within both buffers.
+                                unsafe {
+                                    ctx.device.cmd_copy_buffer(
+                                        ctx.cmd,
+                                        ctx.buffer(commands),
+                                        ctx.buffer(counts),
+                                        &[vk::BufferCopy {
+                                            src_offset: lists.offset,
+                                            dst_offset: 0,
+                                            size: 128,
+                                        }],
+                                    );
+                                }
+                            });
+                        meshlet_room = lists.draws;
+                    }
                     fg.add_pass("read back")
                         .read(ldr, Access::TransferRead)
                         .write(out, Access::TransferWrite)
@@ -1636,6 +1695,7 @@ fn main() {
             if frame > WARMUP && !capture {
                 let mut extra = 0.0;
                 let mut shadow_frame = 0.0;
+                let mut cull_frame = 0.0;
                 let mut tiles_frame = 0.0;
                 let mut ao_frame = 0.0;
                 let (mut sky_frame, mut rebuild_frame) = (0.0, 0.0);
@@ -1674,6 +1734,7 @@ fn main() {
                             local_frame += f64::from(time.gpu_us);
                         }
                         "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
+                        "cull setup" | "cull" | "cull early" | "cull late" => cull_frame += us,
                         "forward" => forward.push(f64::from(time.gpu_us)),
                         "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
                         "ao depths" | "ao" | "ao denoise" => ao_frame += f64::from(time.gpu_us),
@@ -1705,6 +1766,7 @@ fn main() {
                 }
                 motion_extra.push(extra);
                 shadow.push(shadow_frame);
+                cull_time.push(cull_frame);
                 light_tiles.push(tiles_frame);
                 cpu_add.push(added.as_secs_f64() * 1e6);
                 cpu_execute.push(executed.as_secs_f64() * 1e6);
@@ -1791,6 +1853,16 @@ fn main() {
                 let png = encode_png(WIDTH, HEIGHT, PngFormat::Rgba, &pixels).unwrap();
                 std::fs::write(file.replace(".png", "-rays.png"), png).unwrap();
             }
+            if capture && meshlet_room > 0 {
+                let ptr = counts_mem.mapped_ptr().unwrap();
+                // SAFETY: the GPU is idle; the mapping covers the 32 counts.
+                let counts = unsafe { core::slice::from_raw_parts(ptr.as_ptr(), 128) };
+                let drawn: u32 = counts
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .sum();
+                println!("Meshlet draws: {drawn} (room for {meshlet_room})");
+            }
             if capture && let Some(file) = &screenshot {
                 let ptr = readback_mem.mapped_ptr().unwrap();
                 // SAFETY: the GPU is idle; the mapping covers the image.
@@ -1826,6 +1898,7 @@ fn main() {
             median(&mut decal_tiles_time),
             median(&mut decal_time),
         );
+        println!("{mode}: GPU cull µs {:.1}", median(&mut cull_time));
         if let Some(g) = &gi {
             let grid = g.grid();
             gi_rows.push(format!(
@@ -2006,6 +2079,7 @@ fn main() {
             }
         }
         allocator.destroy_buffer(readback, readback_mem);
+        allocator.destroy_buffer(counts_readback, counts_mem);
         d.destroy_command_pool(command_pool, None);
     }
 }

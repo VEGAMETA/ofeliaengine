@@ -145,6 +145,20 @@ impl ForwardRenderer {
             }
             staged.address
         };
+        // The meshlet lists (ADR 0085), with the batch table's order.
+        let meshlets = if self.meshlet_shaders().is_some() && !setup.capture {
+            meshlet_layout(
+                ring,
+                geometry,
+                batch_count as usize,
+                keys.iter().map(|&(_, k)| {
+                    let run = &runs[k as usize];
+                    (run.order as usize, run, draws[run.first as usize].mesh)
+                }),
+            )
+        } else {
+            None
+        };
         // Draw commands, in state order: the forward pass's for each phase, then the shadow
         // pass's for each cascade, with no instances until culling counts them (each list's
         // slots follow the previous list's).
@@ -201,6 +215,7 @@ impl ForwardRenderer {
             min,
             max,
             subsurface_draws,
+            meshlets,
         })
     }
 
@@ -340,6 +355,18 @@ impl ForwardRenderer {
             }
             staged.address
         };
+        // The meshlet lists (ADR 0085), indexed by batch id as the batch table.
+        let meshlets = if self.meshlet_shaders().is_some() && !setup.capture {
+            meshlet_layout(
+                ring,
+                geometry,
+                batches.len(),
+                runs.iter()
+                    .map(|run| (run.first as usize, run, batches[run.first as usize].mesh)),
+            )
+        } else {
+            None
+        };
         let commands = {
             let per_list = command_count as usize;
             let (out, staged) =
@@ -403,8 +430,135 @@ impl ForwardRenderer {
             min,
             max,
             subsurface_draws,
+            meshlets,
         })
     }
+}
+
+/// Room for meshlet draws in each forward phase's lists (ADR 0085); instances beyond it
+/// keep their instanced draw. 2^17 draws: 2.6 MB of commands and 0.5 MB of slots a phase.
+const MAX_MESHLET_DRAWS: u64 = 1 << 17;
+
+/// Bytes of a phase's meshlet lists' header (`MeshletHeader` in `forward.slang`).
+pub(super) const MESHLET_HEADER_BYTES: u64 = 528;
+
+/// Where the dispatch arguments of the meshlet cull are in a phase's lists.
+pub(super) const MESHLET_ARGS: u64 = 512;
+
+/// A frame's meshlet lists (ADR 0085), the same in every forward phase: the batches'
+/// meshlets and, per pipeline state, room for the draws of every instance that may take
+/// the path.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct MeshletLayout {
+    /// The batches' meshlets (`BatchMeshletData`), indexed as the batch table.
+    pub(super) table: vk::DeviceAddress,
+    /// The lists' header with its counters zero, in the ring: copied into every phase's
+    /// lists before culling.
+    pub(super) header: crate::upload::Staged,
+    /// Per state: its first draw and its draws at most.
+    pub(super) offsets: [u32; STATES],
+    pub(super) caps: [u32; STATES],
+    /// Draws in a phase's lists (the sum of `caps`).
+    pub(super) draws: u32,
+}
+
+impl MeshletLayout {
+    /// Where the draws start in a phase's lists with room for `work` work items.
+    pub(super) fn draws_offset(work: u32) -> u64 {
+        MESHLET_HEADER_BYTES + 8 * u64::from(work)
+    }
+
+    /// Bytes of a phase's lists with room for `work` work items.
+    pub(super) fn list_bytes(&self, work: u32) -> u64 {
+        (Self::draws_offset(work) + COMMAND_BYTES * u64::from(self.draws)).next_multiple_of(16)
+    }
+}
+
+/// Lays out the meshlet lists (ADR 0085) of `runs` (`(index in the batch table, run,
+/// mesh)`) for a batch table of `len`: each eligible run's levels' meshlets, and per
+/// pipeline state room for the draws of all its instances, scaled down to
+/// [`MAX_MESHLET_DRAWS`]. Blended runs (drawn back to front) and those of material types
+/// (their own pipelines) are not eligible. `None` when no run is, or the ring is full.
+fn meshlet_layout<'r>(
+    ring: &mut UploadRing,
+    geometry: &GeometryFrame<'_>,
+    len: usize,
+    runs: impl Iterator<Item = (usize, &'r Run, MeshId)> + Clone,
+) -> Option<MeshletLayout> {
+    let eligible = |run: &Run, mesh: MeshId| {
+        let info = geometry.mesh(mesh)?;
+        let levels = run.lods as usize;
+        (run.state & BLENDED == 0
+            && run.ty == crate::material::MaterialTypeId::GLTF
+            && info.lods[..levels].iter().any(|l| l.meshlet_count > 0))
+        .then_some(info)
+    };
+    let mut wanted = [0u64; STATES];
+    for (_, run, mesh) in runs.clone() {
+        if let Some(info) = eligible(run, mesh) {
+            let most = info.lods[..run.lods as usize]
+                .iter()
+                .map(|l| l.meshlet_count)
+                .max()
+                .unwrap_or(0);
+            wanted[run.state] += u64::from(run.len) * u64::from(most);
+        }
+    }
+    let total: u64 = wanted.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let mut caps = [0u32; STATES];
+    let mut offsets = [0u32; STATES];
+    let mut draws = 0u32;
+    for state in 0..STATES {
+        caps[state] = if total > MAX_MESHLET_DRAWS {
+            (wanted[state] * MAX_MESHLET_DRAWS / total) as u32
+        } else {
+            wanted[state] as u32
+        };
+        offsets[state] = draws;
+        draws += caps[state];
+    }
+    let table = {
+        let (out, staged) = ring.alloc::<BatchMeshletData>(len.max(1))?;
+        for out in out.iter_mut() {
+            out.write(BatchMeshletData::default());
+        }
+        for (index, run, mesh) in runs {
+            let Some(info) = eligible(run, mesh) else {
+                continue;
+            };
+            let mut entry = BatchMeshletData {
+                state: run.state as u32,
+                cone: u32::from(run.state & DOUBLE_SIDED == 0),
+                ..BatchMeshletData::default()
+            };
+            for (k, level) in info.lods[..run.lods as usize].iter().enumerate() {
+                // The pool's meshlets are 8 words, 32-byte aligned.
+                entry.first[k] = level.first_meshlet / 8;
+                entry.count[k] = level.meshlet_count;
+            }
+            if let Some(slot) = out.get_mut(index) {
+                slot.write(entry);
+            }
+        }
+        staged.address
+    };
+    // The header: counters zero, then each state's offset and room, then the meshlet
+    // cull's dispatch (no work items yet; one group high and deep).
+    let mut header = [0u32; (MESHLET_HEADER_BYTES / 4) as usize];
+    header[64..96].copy_from_slice(&offsets);
+    header[96..128].copy_from_slice(&caps);
+    header[128..132].copy_from_slice(&[0, 1, 1, 0]);
+    let header = ring.stage(&header)?;
+    Some(MeshletLayout {
+        table,
+        header,
+        offsets,
+        caps,
+        draws,
+    })
 }
 
 /// Where a frame's instance changes come from, for the local shadows' cache.
@@ -449,6 +603,8 @@ pub(super) struct Layout {
     pub(super) min: Vec3,
     pub(super) max: Vec3,
     pub(super) subsurface_draws: bool,
+    /// The meshlet lists, when the view draws by meshlet (ADR 0085).
+    pub(super) meshlets: Option<MeshletLayout>,
 }
 
 /// Whether a transform mirrors (negative determinant of its linear part).
@@ -694,19 +850,7 @@ impl States {
                 continue;
             }
             let masked = state & MASKED != 0;
-            let cull = match (state & DOUBLE_SIDED != 0, shadow) {
-                (true, _) => vk::CullModeFlags::NONE,
-                // Subsurface materials cast from the faces towards the light: the shadow
-                // map then holds where light enters them, for thick transmission.
-                (false, true) if state & SUBSURFACE != 0 => vk::CullModeFlags::BACK,
-                (false, true) => vk::CullModeFlags::FRONT,
-                (false, false) => vk::CullModeFlags::BACK,
-            };
-            let front = if state & MIRRORED != 0 {
-                vk::FrontFace::CLOCKWISE
-            } else {
-                vk::FrontFace::COUNTER_CLOCKWISE
-            };
+            let (cull, front) = faces(state, shadow);
             let start = self.starts[state];
             let end = start + self.counts[state];
             // The commands from `a` to `b` of this state with `pipeline`: its every
@@ -753,6 +897,87 @@ impl States {
             draw(cursor, end, builtin);
         }
     }
+
+    /// Records each pipeline state's meshlet draws (ADR 0085) from one phase's lists at
+    /// `lists` in `buffer`, as many as its meshlet cull wrote (their count is in the
+    /// lists' header), with the built-in `pipelines` (opaque, masked), for the states
+    /// `mask` sets.
+    ///
+    /// # Safety
+    ///
+    /// As [`Self::draw`]; `buffer` holds the lists and has indirect-buffer usage.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) unsafe fn draw_meshlets(
+        &self,
+        ctx: &crate::graph::PassContext<'_>,
+        bindless: &Bindless,
+        geometry: &GeometryFrame<'_>,
+        pipelines: [&Pipeline; 2],
+        push: &Push,
+        mask: u32,
+        buffer: vk::Buffer,
+        lists: u64,
+        meshlets: &super::MeshletDraws,
+        area: vk::Rect2D,
+    ) {
+        let layout = &meshlets.layout;
+        let draws = lists + MeshletLayout::draws_offset(meshlets.work);
+        let mut bound: Option<vk::Pipeline> = None;
+        for state in 0..STATES {
+            let room = layout.caps[state];
+            if room == 0 || mask & (1 << state) == 0 {
+                continue;
+            }
+            let pipeline = pipelines[usize::from(state & MASKED != 0)];
+            let (cull, front) = faces(state, false);
+            // SAFETY: guaranteed by the caller; the count is at the state's word of the
+            // header and never above `room` (the cull reserves before it writes).
+            unsafe {
+                if bound != Some(pipeline.raw()) {
+                    pipeline.bind(ctx.cmd);
+                    if bound.is_none() {
+                        bindless.bind(ctx.cmd, vk::PipelineBindPoint::GRAPHICS);
+                        set_viewport(ctx.device, ctx.cmd, area);
+                        bindless.push_constants(ctx.cmd, push_bytes(push));
+                        geometry.bind_indices(ctx);
+                    }
+                    bound = Some(pipeline.raw());
+                }
+                ctx.device.cmd_set_cull_mode(ctx.cmd, cull);
+                ctx.device.cmd_set_front_face(ctx.cmd, front);
+                ctx.device.cmd_draw_indexed_indirect_count(
+                    ctx.cmd,
+                    buffer,
+                    draws + u64::from(layout.offsets[state]) * COMMAND_BYTES,
+                    buffer,
+                    lists + state as u64 * 4,
+                    room,
+                    COMMAND_BYTES as u32,
+                );
+            }
+        }
+    }
+}
+
+/// The faces a pipeline state culls and its front face. The shadow passes render back
+/// faces of single-sided geometry (fewer self-shadowing artifacts on closed meshes),
+/// except for subsurface materials (their front faces, where light enters, for thick
+/// transmission); the forward passes cull them.
+fn faces(state: usize, shadow: bool) -> (vk::CullModeFlags, vk::FrontFace) {
+    let cull = match (state & DOUBLE_SIDED != 0, shadow) {
+        (true, _) => vk::CullModeFlags::NONE,
+        // Subsurface materials cast from the faces towards the light: the shadow map then
+        // holds where light enters them, for thick transmission.
+        (false, true) if state & SUBSURFACE != 0 => vk::CullModeFlags::BACK,
+        (false, true) => vk::CullModeFlags::FRONT,
+        (false, false) => vk::CullModeFlags::BACK,
+    };
+    let front = if state & MIRRORED != 0 {
+        vk::FrontFace::CLOCKWISE
+    } else {
+        vk::FrontFace::COUNTER_CLOCKWISE
+    };
+    (cull, front)
 }
 
 /// A mesh's object-space bounding box as center and half extents (empty for removed
