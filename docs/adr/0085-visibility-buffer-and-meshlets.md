@@ -262,3 +262,64 @@ measurements, niagara's culling).
     even where pixels dominate.
   - So every instance that may take the path takes it.
 
+### Runs in the shadow cascades; on by default (2026-10-14)
+
+- **Runs again, now per chunk.** Within a chunk, a run of consecutive drawn meshlets is
+  one draw: their indices follow each other in the level's buffer. The group shares
+  which of its meshlets are drawn, and where their indices end, in groupshared memory
+  (one barrier). `tests/render/meshlets.rs` then draws 72 instead of 382.
+  - The shadow cascades gain on both GPUs. Sponza's shadow pass with the integrated
+    class's defaults (below): RTX 173 → 146 µs, Radeon about 2,440 → 2,160 µs.
+  - The view's passes do not. RTX: prepass 94 → 97 µs, shading 328 → 323. Radeon: the
+    shading lost 350 µs with TAA and AO.
+  - So only the shadow cascades merge runs (`shadow` is uniform in a dispatch); the view
+    keeps a draw per meshlet.
+  - Each run's first lane scans for its end. That costs the Radeon's shadow cull about
+    40 µs on Sponza (36 → 76 µs). Wave ballots could find the end at once (later).
+- **What the view's prepass still pays.** With TAA the prepass writes motion vectors.
+  Drawn by meshlet it costs the RTX 26 µs more on Sponza (68 → 94 µs, ambient occlusion
+  in sync).
+  - Part of it is order: the meshlet lists follow the instances' order, the instanced
+    batches go front to back. The batches drawn unsorted take 78 µs.
+  - The rest is the draws themselves. Mesh shaders (step 3) have none.
+  - Seen on the way: the cascades draw the batches in the camera's front-to-back order.
+    That costs the RTX's shadow pass 17 µs on Sponza against no order at all (161 → 144
+    µs). The casters should go in the light's order (later).
+- **A heavy scene: Intel's Sponza** (2022, CC-BY 4.0, `tools/fetch-test-assets.ps1 -Only
+  IntelSponza`). It has 3.75 M triangles in 405 primitives, 41,069 meshlets and 72
+  textures (1.5 GB as BC7 and BC5). Its shadows are its largest pass.
+- **Measured** with `scene_bench` (1080p, prepass, 4 cascades of 1024²): shadow + prepass
+  + shading + culling, off → on, 2 alternated rounds.
+
+| scene | RTX 4060 Ti | Radeon iGPU |
+|---|---|---|
+| Intel's Sponza | 1,499 → 1,389 µs (−7.4 %) | 49.5 → 42.9 ms (−13.3 %) |
+| Sponza | 458 → 443 µs (−3.4 %) | 13,474 → 12,830 µs (−4.8 %) |
+| FlightHelmet | 95.7 → 107.6 µs (+12 µs) | 2,565 → 2,496 µs (−2.7 %) |
+| 10,000 spheres, overview | 12,907 → 12,505 µs (−3.1 %) | 203.8 → 181.2 ms (−11.1 %) |
+| 10,000 spheres, inside the field | 5,279 → 4,854 µs (−8.1 %) | 94.5 → 76.4 ms (−19.2 %) |
+
+- **With each class's default settings** (`perf_gate`, the GPU frame end to end, 3 runs):
+  the discrete class has TAA and AO High at 1080p, the integrated one TAAU from 67 % and
+  AO Low.
+
+| scene | RTX, discrete defaults | Radeon, integrated defaults |
+|---|---|---|
+| Intel's Sponza | 2,298 → 2,152 µs (−6.4 %) | 64.6 → 57.9 ms (−10.4 %) |
+| Sponza | 1,328 → 1,353 µs (+1.8 %) | about the same: its shadows −280 µs, within the iGPU's 1–3 % noise |
+
+- **Decision: on by default for both device classes**
+  (`engine_frame::RenderDefaults::meshlet_culling`). The owner left the choice to the
+  coordinator (2026-10-14).
+  - Dense scenes, which decide whether a frame fits its budget, gain 6–19 %.
+  - Light ones lose at most 24 µs (the RTX's Sponza, +1.8 %) or 12–15 µs (FlightHelmet).
+  - `ForwardRenderer` itself still starts with it off. `flight` takes the default
+    (`--meshlet-culling on|off`).
+  - The perf gate measures each class's defaults on Sponza
+    (`sponza_defaults_discrete`, `sponza_defaults_integrated`).
+- **Next:**
+  - step 3: mesh shaders on the RTX, with no draw per meshlet;
+  - the shadow casters in the light's order;
+  - the view's meshlet draws front to back;
+  - local lights' shadows.
+

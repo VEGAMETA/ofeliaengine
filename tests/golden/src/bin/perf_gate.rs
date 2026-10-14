@@ -40,7 +40,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use engine_core::math::Vec3;
-use engine_frame::{Antialiasing, Msaa, Quality, Upscale};
+use engine_frame::{Antialiasing, DeviceClass, Msaa, Quality, RenderDefaults, Upscale};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights, vendor_name,
 };
@@ -147,13 +147,18 @@ fn shots() -> Vec<Shot> {
         antialiased("sponza_taa", Antialiasing::TAAU, Quality::Native),
         antialiased("sponza_taau_67", Antialiasing::TAAU, Quality::Quality),
         antialiased("sponza_fsr_quality", Antialiasing::FSR, Quality::Quality),
-        // A discrete GPU's default settings: TAA with ambient occlusion, so the depth
-        // prepass draws and writes the motion vectors, and the shading after it draws
-        // without them.
+        // TAA with ambient occlusion, so the depth prepass draws and writes the motion
+        // vectors, and the shading after it draws without them.
         Shot {
             ao: Some(AoSettings::default()),
             ..antialiased("sponza_taa_ao", Antialiasing::TAAU, Quality::Native)
         },
+        // Each device class's defaults as a game starts with them (`RenderDefaults`, ADR
+        // 0072): with meshlet culling (ADR 0085), its culls and the prepass, shading and
+        // shadows drawn by meshlet; the integrated class's from 67 % with lighter ambient
+        // occlusion.
+        class_defaults("sponza_defaults_discrete", DeviceClass::Discrete),
+        class_defaults("sponza_defaults_integrated", DeviceClass::Integrated),
         // The other antialiasing and scaling modes (ADR 0075): MSAA 4× (the depth prepass,
         // multisampled shading, the resolves), the filters after tone mapping (FXAA, SMAA
         // 1x, SMAA T2x with its temporal resolve), FSR 1 from 67 %.
@@ -217,6 +222,19 @@ fn shots() -> Vec<Shot> {
             )
         },
     ]
+}
+
+/// Sponza with `class`'s defaults (`engine_frame::RenderDefaults`).
+fn class_defaults(name: &'static str, class: DeviceClass) -> Shot {
+    let defaults = RenderDefaults::for_class(class);
+    Shot {
+        size: [1920, 1080],
+        ao: defaults.ambient_occlusion,
+        antialiasing: defaults.antialiasing,
+        quality: defaults.quality,
+        meshlets: defaults.meshlet_culling,
+        ..Shot::new(name, Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")))
+    }
 }
 
 fn antialiased(name: &'static str, antialiasing: Antialiasing, quality: Quality) -> Shot {

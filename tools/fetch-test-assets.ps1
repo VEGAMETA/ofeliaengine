@@ -5,10 +5,12 @@
 #
 # Khronos glTF sample models are fetched file by file (the .gltf, its buffers and images);
 # HDR panoramas (ADR 0083, `-Only HDRI` for them alone) from Poly Haven, checked against
-# their MD5.
+# their MD5. Intel's Sponza (5.4 GB of archives) only when named: `-Only IntelSponza`.
 param([string[]]$Only = @())
 
 $ErrorActionPreference = 'Stop'
+# The progress bar slows Invoke-WebRequest down several times over.
+$ProgressPreference = 'SilentlyContinue'
 # Under -File, `-Only a,b` arrives as one string.
 $Only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 $root = Join-Path $PSScriptRoot '..\test-assets'
@@ -50,6 +52,15 @@ $panoramas = @(
       'ca0c1317a4b22bb25e826cb3640ee833', 'CC0 (Poly Haven; Greg Zaal, sky edits Jarod Guest)')
 )
 
+# Intel's Sponza (2022; Intel Sample Library, Frank Meinl and Anton Kaplanyan; CC-BY 4.0):
+# 3.7 M triangles with 4K textures, the dense scene of ADR 0085, and its ivy add-on. Name,
+# URL, bytes of the archive, of which the glTF, its buffers and images and the license are
+# kept (not the 3ds Max, FBX and USD sources).
+$intel = @(
+    , @('main_sponza', 'https://cdrdv2.intel.com/v1/dl/getContent/830833', 3987608266)
+    , @('pkg_b_ivy', 'https://cdrdv2.intel.com/v1/dl/getContent/726656', 1383921436)
+)
+
 function Fetch($url, $path) {
     if (Test-Path $path) { return }
     New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
@@ -86,4 +97,36 @@ foreach ($p in $panoramas) {
         throw "${name}: MD5 $hash, expected $md5 (removed; run again)"
     }
     Write-Output "$name ($license): $([math]::Round((Get-Item $path).Length / 1MB, 1)) MB in $(Split-Path $path)"
+}
+
+if ($Only -contains 'IntelSponza') {
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $dir = [System.IO.Path]::GetFullPath((Join-Path $root 'IntelSponza'))
+    foreach ($p in $intel) {
+        $name, $url, $bytes = $p
+        if (Test-Path (Join-Path $dir $name)) { continue }
+        $zip = Join-Path $dir "$name.zip"
+        Fetch $url $zip
+        $got = (Get-Item $zip).Length
+        if ($got -ne $bytes) {
+            Remove-Item $zip
+            throw "${name}: $got bytes, expected $bytes (removed; run again)"
+        }
+        $archive = [System.IO.Compression.ZipFile]::OpenRead($zip)
+        try {
+            foreach ($entry in $archive.Entries) {
+                if ($entry.FullName -notmatch '\.(gltf|bin|png|jpg|txt)$') { continue }
+                $out = [System.IO.Path]::GetFullPath((Join-Path $dir $entry.FullName))
+                if (-not $out.StartsWith($dir + [System.IO.Path]::DirectorySeparatorChar)) {
+                    throw "${name}: $($entry.FullName) is outside $dir"
+                }
+                New-Item -ItemType Directory -Force (Split-Path $out) | Out-Null
+                [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, $out, $true)
+            }
+        } finally {
+            $archive.Dispose()
+        }
+        Remove-Item $zip
+    }
+    Write-Output "IntelSponza (CC-BY 4.0, Intel Sample Library): $([math]::Round((Get-ChildItem -Recurse $dir | Measure-Object Length -Sum).Sum / 1GB, 2)) GB in $dir"
 }

@@ -162,6 +162,10 @@ pub struct RenderDefaults {
     pub antialiasing: Antialiasing,
     /// Render size relative to the output.
     pub quality: Quality,
+    /// Culling and drawing by meshlet (ADR 0085, `ForwardRenderer::set_meshlet_culling`):
+    /// the meshes with meshlets, in views with the depth prepass and in the sun's shadow
+    /// cascades.
+    pub meshlet_culling: bool,
 }
 
 impl RenderDefaults {
@@ -172,6 +176,10 @@ impl RenderDefaults {
                 ambient_occlusion: Some(AoSettings::default()),
                 antialiasing: Antialiasing::TAAU,
                 quality: Quality::Native,
+                // Dense scenes gain far more than light ones lose (ADR 0085): on an RTX
+                // 4060 Ti with these settings Intel's Sponza (3.7 M triangles) 6.4 %,
+                // 10,000 detailed spheres 3-8 %; Sponza costs 1.8 % (24 µs).
+                meshlet_culling: true,
             },
             DeviceClass::Integrated => Self {
                 // Without the bent normals: their registers cost the Radeon iGPU about
@@ -183,6 +191,10 @@ impl RenderDefaults {
                 }),
                 antialiasing: Antialiasing::TAAU,
                 quality: Quality::Quality,
+                // The Radeon iGPU's few vertices and primitives a clock (ADR 0085): with
+                // these settings Intel's Sponza gains 10.4 %, 10,000 detailed spheres
+                // 10-17 %, Sponza about the same.
+                meshlet_culling: true,
             },
         }
     }
@@ -234,8 +246,10 @@ mod tests {
             discrete.ambient_occlusion.map(|a| a.quality),
             Some(AoQuality::High)
         );
+        assert!(discrete.meshlet_culling);
         let integrated = RenderDefaults::for_class(DeviceClass::Integrated);
         assert_eq!(integrated.quality, Quality::Quality);
+        assert!(integrated.meshlet_culling);
         assert_eq!(
             integrated.ambient_occlusion.map(|a| a.quality),
             Some(AoQuality::Low)

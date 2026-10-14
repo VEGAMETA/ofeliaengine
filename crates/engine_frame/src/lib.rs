@@ -55,7 +55,8 @@
 //! effects go there). A camera cut ([`ViewCamera::cut`]) drops the view's history.
 //!
 //! [`RenderDefaults`] gives measured defaults per [`DeviceClass`] (discrete or small
-//! integrated GPU): ambient occlusion quality, antialiasing and render size.
+//! integrated GPU): ambient occlusion quality, antialiasing, render size and meshlet
+//! culling.
 //!
 //! Frame generation (ADR 0091, [`FrameGeneration`], off by default):
 //! [`FrameRenderer::add_view_generating`] draws the real frame into a paced presenter's

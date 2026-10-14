@@ -81,6 +81,42 @@ sponza_catmull_rom_67	shadow	2458.6
 sponza_catmull_rom_67	shadow cull	1.2
 sponza_catmull_rom_67	sky	14.7
 sponza_catmull_rom_67	tonemap	2048.4
+sponza_defaults_discrete	(frame total)	47084.2
+sponza_defaults_discrete	(gpu frame)	47429.9
+sponza_defaults_discrete	ao	14629.7
+sponza_defaults_discrete	ao denoise	2890.7
+sponza_defaults_discrete	ao depths	777.6
+sponza_defaults_discrete	bloom downsample	1319.3
+sponza_defaults_discrete	bloom upsample	660.8
+sponza_defaults_discrete	cull	22.5
+sponza_defaults_discrete	cull setup	1.4
+sponza_defaults_discrete	depth prepass	1856.8
+sponza_defaults_discrete	forward	14542.3
+sponza_defaults_discrete	motion background	34.2
+sponza_defaults_discrete	remember instances	0.3
+sponza_defaults_discrete	shadow	2171.2
+sponza_defaults_discrete	shadow cull	75.6
+sponza_defaults_discrete	sky	36.1
+sponza_defaults_discrete	taau	7171.3
+sponza_defaults_discrete	tonemap	848.7
+sponza_defaults_integrated	(frame total)	22230.4
+sponza_defaults_integrated	(gpu frame)	22164.8
+sponza_defaults_integrated	ao	2064.0
+sponza_defaults_integrated	ao denoise	366.6
+sponza_defaults_integrated	ao depths	305.9
+sponza_defaults_integrated	bloom downsample	1235.1
+sponza_defaults_integrated	bloom upsample	651.4
+sponza_defaults_integrated	cull	22.1
+sponza_defaults_integrated	cull setup	1.4
+sponza_defaults_integrated	depth prepass	951.9
+sponza_defaults_integrated	forward	7710.6
+sponza_defaults_integrated	motion background	14.1
+sponza_defaults_integrated	remember instances	0.3
+sponza_defaults_integrated	shadow	2158.9
+sponza_defaults_integrated	shadow cull	75.7
+sponza_defaults_integrated	sky	15.0
+sponza_defaults_integrated	taau	5860.1
+sponza_defaults_integrated	tonemap	849.2
 sponza_fsr1_67	(frame total)	18445.2
 sponza_fsr1_67	(gpu frame)	18433.6
 sponza_fsr1_67	bloom downsample	898.6
