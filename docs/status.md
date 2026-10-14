@@ -455,7 +455,9 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    shaders), the visibility buffer decided together with custom materials (3c). Step 1
    (meshlets made by the cook), step 2 (culling per meshlet) and step 4 (the shadow
    cascades too) done 2026-10-14, on by default since; step 3 in ADR 0085's addendum.
-5. Virtual shadow maps.
+5. Virtual shadow maps. Researched 2026-10-14 (ADR 0093, accepted): scrolling cached
+   cascades first (only what changed is drawn), virtual pages after; one cache, no
+   static/dynamic pair merged by a mask (the owner, 2026-10-14).
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.
 
