@@ -301,6 +301,22 @@ sponza_local_shadows	shadow	158.1
 sponza_local_shadows	shadow cull	3.1
 sponza_local_shadows	sky	3.1
 sponza_local_shadows	tonemap	26.6
+sponza_motion_blur	(frame total)	1130.8
+sponza_motion_blur	(gpu frame)	1151.2
+sponza_motion_blur	bloom downsample	54.3
+sponza_motion_blur	bloom upsample	30.7
+sponza_motion_blur	cull	4.5
+sponza_motion_blur	cull setup	0.7
+sponza_motion_blur	forward	417.8
+sponza_motion_blur	motion background	2.0
+sponza_motion_blur	motion blur gather	356.4
+sponza_motion_blur	motion blur neighbors	3.1
+sponza_motion_blur	motion blur tiles	72.1
+sponza_motion_blur	remember instances	2.0
+sponza_motion_blur	shadow	153.0
+sponza_motion_blur	shadow cull	4.1
+sponza_motion_blur	sky	3.1
+sponza_motion_blur	tonemap	28.7
 sponza_msaa4	(frame total)	888.4
 sponza_msaa4	(gpu frame)	904.4
 sponza_msaa4	bloom downsample	47.1

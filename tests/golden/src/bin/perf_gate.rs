@@ -41,7 +41,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 use engine_core::math::Vec3;
-use engine_frame::{Antialiasing, DeviceClass, Msaa, Quality, RenderDefaults, Upscale};
+use engine_frame::{Antialiasing, DeviceClass, Msaa, Quality, RenderDefaults, Upscale, ViewKind};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights, vendor_name,
 };
@@ -49,6 +49,7 @@ use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::dof::DofSettings;
 use engine_render::grading::ColorGrading;
+use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::reflections::SsrSettings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -175,6 +176,19 @@ fn shots() -> Vec<Shot> {
             }),
             ..Shot::new(
                 "sponza_dof",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
+        // Motion blur on a cinematic view (ADR 0096): the camera walking forward 7 cm a
+        // frame, so the whole image moves (radially); the default settings.
+        Shot {
+            size: [1920, 1080],
+            camera_motion: Vec3::new(0.07, 0.0, 0.0),
+            kind: ViewKind::Cinematic {
+                motion_blur: Some(MotionBlurSettings::default()),
+            },
+            ..Shot::new(
+                "sponza_motion_blur",
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },

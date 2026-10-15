@@ -22,7 +22,7 @@ use engine_ecs::{Entity, GlobalTransform, Transform, World};
 use engine_frame::{
     Antialiasing, Exposure, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget,
     Placement, PrepareContext, Quality, SceneDraws, SceneInput, UiCanvas, UiRenderer, View,
-    ViewCamera, ViewSettings, ViewTarget,
+    ViewCamera, ViewKind, ViewSettings, ViewTarget,
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
@@ -247,6 +247,10 @@ pub struct Shot {
     pub grading: ColorGrading,
     /// Depth of field (`ViewSettings::depth_of_field`, ADR 0095; off by default).
     pub depth_of_field: Option<DofSettings>,
+    /// Gameplay or cinematic with its motion blur (`ViewSettings::kind`, ADRs 0067 and
+    /// 0096; gameplay by default). Not on the runtime path: there the camera entity has
+    /// its own.
+    pub kind: ViewKind,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -319,6 +323,7 @@ impl Shot {
             fabric_curtains: false,
             grading: ColorGrading::default(),
             depth_of_field: None,
+            kind: ViewKind::Gameplay,
         }
     }
 }
@@ -1716,6 +1721,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         curve: shot.curve,
         grading: shot.grading,
         depth_of_field: shot.depth_of_field,
+        kind: shot.kind,
         bloom: shot.bloom,
         clear: Some([0.02, 0.02, 0.05, 1.0]),
         screen_space_reflections: shot.ssr.filter(|_| shot.sky),

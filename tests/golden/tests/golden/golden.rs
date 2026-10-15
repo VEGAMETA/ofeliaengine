@@ -9,7 +9,7 @@
 #![allow(clippy::print_stdout)]
 
 use engine_core::math::Vec3;
-use engine_frame::{Antialiasing, Msaa, PostAntialiasing, Quality, Upscale};
+use engine_frame::{Antialiasing, Msaa, PostAntialiasing, Quality, Upscale, ViewKind};
 use engine_golden::golden::{Outcome, Tolerance, compare};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_day, sponza_lights,
@@ -20,6 +20,7 @@ use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::dof::DofSettings;
 use engine_render::forward::{DirectionalLight, LocalLight, Spot};
 use engine_render::grading::ColorGrading;
+use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::reflections::SsrSettings;
 use std::path::PathBuf;
 
@@ -359,6 +360,23 @@ fn sponza_dof() {
         }),
         ..Shot::new(
             "sponza_dof",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
+/// A cinematic view with motion blur (ADRs 0067, 0096): Sponza strafed past at 20 cm a
+/// frame, a 180° shutter; three frames after the cut, so the motion vectors carry it.
+#[test]
+fn sponza_motion_blur() {
+    check(&Shot {
+        camera_motion: Vec3::new(0.0, 0.0, 0.2),
+        capture_after: Some(3),
+        kind: ViewKind::Cinematic {
+            motion_blur: Some(MotionBlurSettings::default()),
+        },
+        ..Shot::new(
+            "sponza_motion_blur",
             Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
         )
     });
