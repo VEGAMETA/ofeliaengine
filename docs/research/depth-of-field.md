@@ -217,6 +217,32 @@ Checked 2026-10-15 by targeted searches; Google Patents' legal status is its own
 4. **Later:** bokeh shapes (blades), GPU autofocus, bright highlights scattered as
    sprites, translucent surfaces.
 
+## Measured while building it (2026-10-15, ref-1)
+
+- **FidelityFX's ring merging** reads a flat tile's inner rings from coarser mips.
+  - It turns a bright point into a cone: 1.7 times as bright at its center as the disk's
+    mean, with a tail 8 pixels past its radius.
+  - Without it the disk is flat to within 16 % of its mean, its edge soft over 3 pixels.
+  - Merging saves the strong Sponza scene's blur 11 µs on the RTX and 0.27 ms on the
+    Radeon. We keep the disk.
+- **FidelityFX's near field starts at the plane in focus.**
+  - A surface barely in front of focus (0.8 half-size pixels of radius) then joins the
+    near field with a sharp pixel's weight (1 / r² = 1).
+  - A blurred object in front of it spreads 6 % of its color a quarter of its radius past
+    its edge, instead of 28 %. Sponza's curtains kept hard silhouettes.
+  - From a radius of one pixel, the composite's fixed blur covers what is below.
+- **FidelityFX reads the depth twice:** once for its tiles, once for its mips.
+  - From one read, the tiles cost nothing extra: RTX −14 µs, Radeon −0.38 ms.
+- **Composite:**
+  - Shared memory as separate channels (FidelityFX's own 32-bit layout): RTX 128–138 →
+    115 µs.
+  - The fixed 3 × 3 blur only where it shows: Radeon 3.38 → 3.22 ms.
+- **Costs** at 1080p (Sponza, focused at 3 m, f/1.4 on a 10 cm sensor, 4 rings):
+  - RTX 4060 Ti: 256 µs.
+  - Radeon iGPU: 8.2 ms. Its composite and downsample are bound by memory (about 60 and
+    30 MB a frame), its blur by arithmetic.
+  - With almost nothing blurred (f/64): 124 µs and 3.8 ms.
+
 ## Sources
 
 - Bevy, `crates/bevy_post_process/src/dof/mod.rs`, `dof.wesl`, main, checked 2026-10-15 (MIT OR Apache-2.0)

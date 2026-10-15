@@ -68,6 +68,7 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 | Reflections: parallax-corrected probes, SSR (FidelityFX SSSR-based) | done | ADR 0073 |
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
 | Color grading: white balance, channel mixer, shadows / mid-tones / highlights, ASC CDL, contrast, vibrance, saturation; with the tone curve in one LUT built on the GPU when either changes | done | ADR 0094 |
+| Depth of field: FidelityFX DOF's tiled gather (near and far fields), after the upscalers; a thin lens | done | ADR 0095 |
 | HDRI environments: `.hdr` and OpenEXR panoramas as the sky, their sun found and lit as the directional light, cooked into BC6H cubes (DDC, packs) | done | ADR 0083 |
 | GPU particles and GPU radix sort | done | ADRs 0080, 0081 |
 | Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
@@ -474,17 +475,25 @@ Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: it
 grown, divide and conquer); the old labels stay in parentheses.
 
 6. **Rendering leftovers.**
-6a (was 6). Remaining post effects: ~~LUT grading~~, DOF, motion blur only on cinematic
-   views (ADR 0067). Frame generation is its own item now (3b, after GI).
+6a (was 6). Remaining post effects: ~~LUT grading~~, ~~DOF~~, motion blur only on
+   cinematic views (ADR 0067). Frame generation is its own item now (3b, after GI).
    - **Color grading done 2026-10-15** (ADR 0094): `ViewSettings::grading`.
      - The grading and the tone curve are one 48³ LUT, built on the GPU when either
        changes. Graded twins of the tone mapper's entry points read it once per pixel;
        the plain ones are unchanged.
      - Within 0.85 / 255 of the exact chain.
      - Sponza's tone map pass at 1080p: RTX 29–31 → 44 µs, Radeon 1.12 → 1.22 ms.
-   - Next: DOF, then motion blur.
-6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms (6.6 ms in the perf gate's
-   `sponza_taa`), ~~bloom 1.6 ms~~, local shadows redrawn every frame when casters move (a
+   - **Depth of field done 2026-10-15** (ADR 0095): `ViewSettings::depth_of_field`.
+     - FidelityFX DOF 1.1's passes ported. Inverse depth instead of a signed circle of
+       confusion (patent), the near field from a radius of one pixel, no ring merging.
+     - After the upscalers.
+     - At 1080p: RTX 0.12–0.26 ms; Radeon 3.8–8.2 ms (its composite and downsample
+       bound by memory, its blur by arithmetic; to item 6b).
+   - Next: motion blur on cinematic views.
+6b. The iGPU's expensive passes (review §3.11): depth of field 3.8–8.2 ms at 1080p
+   (ADR 0095: a 16-bit blur, the composite in place or in the tone mapper, a
+   quarter-size gather), TAAU 4.2 ms (6.6 ms in the perf gate's `sponza_taa`),
+   ~~bloom 1.6 ms~~, local shadows redrawn every frame when casters move (a
    per-frame redraw budget; never the patented static/dynamic split). TAAU tried
    2026-10-11: its 3 × 3 color and depth through shared memory (the bloom's trick) made
    the Radeon's resolve 20 % slower and the RTX's 3 % faster; without its nine `exp`

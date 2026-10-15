@@ -1491,6 +1491,49 @@ settings.grading = ColorGrading {
   Compare: `scene_bench -- <scene> --post` and `--grading`.
 - **Not yet:** LUTs made in other tools (`.cube`), hue rotation, curves.
 
+### Depth of field (ADR 0095)
+
+A camera lens focuses at one distance. In front of that distance and behind it, things
+blur. `ViewSettings::depth_of_field` turns it on for a view.
+
+```rust
+use engine_render::dof::DofSettings;
+
+// Aiming down sights at a target 12 m away.
+settings.depth_of_field = Some(DofSettings {
+    focus_distance: 12.0, // meters from the camera
+    f_number: 2.0,        // lower: more blur
+    ..DofSettings::default()
+});
+```
+
+- **The lens** is a thin lens.
+  - The blur grows with the distance from the plane in focus, as a real camera's does.
+  - `f_number`: halving it doubles every blur.
+  - `sensor_height` (24 mm, full frame): with the view's field of view it sets the focal
+    length. A wide view barely blurs, as a wide lens barely does. For a cinematic look at
+    a wide field of view, take a larger sensor (36–100 mm) or a lower f-number.
+  - `max_radius` caps the blur (4 % of the image's height by default).
+- **What it gets right:**
+  - a sharp object in front of a blurred background stays sharp;
+  - a blurred object in front spreads over what is behind it;
+  - a bright point out of focus becomes a disk (bokeh).
+- **Where it runs:** on the antialiased image, after TAAU, FSR or DLSS, before bloom and
+  tone mapping. The upscalers keep reprojecting a sharp image, and the blur sees no
+  jitter.
+- **Animating** the focus or the aperture every frame is fine: nothing is rebuilt, and
+  nothing is allocated.
+- **What it costs** at 1080p (Sponza, a strong blur):
+  - 0.26 ms on an RTX 4060 Ti, 0.12 ms with almost nothing blurred;
+  - 8.2 ms on a Radeon iGPU, 3.8 ms with almost nothing blurred;
+  - nothing when off. On integrated GPUs, keep it for cutscenes or photo modes, or lower
+    `rings` (2: 7.2 ms).
+
+  Compare: `scene_bench -- <scene> --dof <focus distance>` (`--dof-rings`,
+  `--dof-f-number`).
+- **Not yet:** bokeh shapes (blades), autofocus, translucent surfaces (one depth per
+  pixel).
+
 ## 12. Transparent surfaces
 
 Materials with `AlphaMode::Blend` are drawn by a transparent pass after the opaque
