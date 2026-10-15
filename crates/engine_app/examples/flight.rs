@@ -2,6 +2,11 @@
 //! what a frame costs on the CPU stage by stage, where its worst frames come from, how
 //! long the game takes to show its first frame, and how much memory it holds.
 //!
+//! A game on the player (`engine_app`, ADR 0099): the player starts the process, the
+//! window, the device, latency control, the renderer and the streamed scene; the game
+//! (`Flight`) moves the props, walks the characters and flies the camera through its
+//! hooks.
+//!
 //! The game:
 //! - a cooked scene from its pack, its textures and mesh levels streamed by GPU feedback
 //!   within the memory budget (ADR 0076);
@@ -13,7 +18,8 @@
 //! - the frame renderer with the device class's defaults: ambient occlusion, the
 //!   antialiasing / render size (ADR 0072) and meshlet culling (ADR 0085);
 //! - a borderless window over the monitor (or `--window`), presented without vsync (or
-//!   with `--vsync`), two frames in flight.
+//!   with `--vsync`), two frames in flight, latency control on (Reflex on NVIDIA, Anti-Lag 2
+//!   on AMD, or `--low-latency`).
 //!
 //! The camera flies through the nave for `frames` frames of 1/60 s of game time each (the
 //! same path on every GPU), turning 180° in 0.2 s every 5 s.
@@ -25,7 +31,7 @@
 //! Rust's share of it, the largest private allocations).
 //!
 //! ```text
-//! cargo run -p engine_runtime --release --example flight -- <scene.pack>
+//! cargo run -p engine_app --release --example flight -- <scene.pack>
 //!     [--frames <n>]        frames of flight (default 1800: 30 s of game time)
 //!     [--fps <n>]           game time per frame, 1/n s (default 60: the 64 Hz
 //!                           simulation ticks in most frames; 240 about one in four)
@@ -41,14 +47,17 @@
 //!                           the same with the swapchain holding the monitor for itself
 //!                           (`VK_EXT_full_screen_exclusive`), or a 1920 × 1080 window fit
 //!                           into the work area (ADR 0099)
-//!     [--fse default|allowed|disallowed]   what the driver may do with a borderless or
-//!                           windowed swapchain (default: disallowed; measurements)
+//!     [--low-latency off|on|boost]   latency control (ADR 0023; default on)
+//!     [--no-process-setup]  the process as Windows starts it: power throttling, no MMCSS
+//!                           for the frame thread
 //!     [--cap <fps>]         at most this many real frames per second (a game's limiter;
 //!                           frame generation shows twice as many)
 //!     [--present apart|direct]   the frame into an image of its own copied into the
 //!                                swapchain image, or straight into it (default: apart
 //!                                only when presenting across adapters)
 //!     [--pipeline-cache <dir>]   load and save the pipeline cache there (default: none)
+//!     [--no-feedback]       textures streamed by distance only, not by what the views
+//!                           sampled
 //!     [--no-warm-up]        shading variants made on first use only, not also on the
 //!                           device's warm-up thread (ADR 0079)
 //!     [--fg]                frame generation (FSR 3.1, ADR 0091): a paced presenter shows
@@ -87,55 +96,30 @@ fn main() {
 #[cfg(windows)]
 mod windowed {
     use engine_anim::{Pose, for_each_parallel, local_to_model, skinning_matrices};
-    use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf};
+    use engine_app::{FrameParts, Game, Player, PlayerSettings, Window};
+    use engine_assets::{CookSettings, CookedSkin, DerivedDataCache, cook_scene, import_gltf};
     use engine_core::alloc::EngineAllocator;
     use engine_core::jobs::ThreadPool;
     use engine_core::math::{Affine3A, Mat4, Quat, Vec2, Vec3, Vec4};
-    use engine_dlss::{DlssFrameGeneration, Streamline, StreamlineDesc};
+    use engine_dlss::DlssFrameGeneration;
     use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, pod_component};
-    use engine_frame::{
-        Antialiasing, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget, Placement,
-        PrepareContext, Quality, RenderDefaults, SceneDraws, SceneInput, UiCanvas, UiRenderer,
-        View, ViewTarget,
-    };
-    use engine_latency::{
-        Latency, LatencySettings, Marker, PacedFrame, PacedPresenter, PresentImage, Presented,
-    };
-    use engine_platform::window::{WindowDesc, WindowEventKind, WindowMode, WindowSystem};
-    use engine_render::budget::GpuBudget;
-    use engine_render::environment::{Environment, Sky};
-    use engine_render::feedback::{FeedbackSettings, TextureFeedback};
-    use engine_render::forward::{
-        DirectionalLight, LocalLight, LocalShadowSettings, ShadowSettings, Spot,
-    };
-    use engine_render::gpu_scene::{GpuScene, InstanceId};
-    use engine_render::graph::{
-        Access, ImportedTexture, LoadOp, RenderGraph, Texture, TextureDesc, TextureState,
-    };
-    use engine_render::material::{MaterialDesc, MaterialTable};
-    use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, cube};
-    use engine_render::present::PresentTarget;
-    use engine_render::skinning::{SkinnedId, SkinnedMeshData, Skinning};
-    use engine_render::streaming::LodView;
-    use engine_render::texture_pool::{TextureId, TextureLevels, TexturePool};
-    use engine_render::upload::UploadRing;
+    use engine_frame::{Antialiasing, FrameGeneration, Placement, Quality};
+    use engine_latency::{LowLatency, Presented};
+    use engine_render::forward::{LocalLight, LocalShadowSettings, Spot};
+    use engine_render::graph::RenderGraph;
+    use engine_render::material::MaterialDesc;
+    use engine_render::mesh::{MeshData, cube};
+    use engine_render::skinning::{SkinnedId, SkinnedMeshData};
+    use engine_render::texture_pool::{TextureId, TextureLevels};
     use engine_render2d::{Canvas, Quad};
-    use engine_rhi::ash::vk;
-    use engine_rhi::{
-        AdapterPreference, Allocator, Bindless, Device, Frames, FullScreenExclusive, Instance,
-        InstanceDesc, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc,
-    };
-    use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
-    use engine_streaming::{SceneStreamSettings, SceneStreamer, material_desc, texture_format};
+    use engine_rhi::Allocator;
+    use engine_runtime::{MeshRenderer, look_rotation};
+    use engine_streaming::{material_desc, texture_format};
     use std::alloc::{GlobalAlloc, Layout};
     use std::path::{Path, PathBuf};
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Instant;
 
-    const WIDTH: u32 = 1920;
-    const HEIGHT: u32 = 1080;
-    const IN_FLIGHT: usize = 2;
     /// Frames left out of the statistics at the start (first uploads, first captures).
     const WARMUP: usize = 120;
     const MIB: f64 = (1u64 << 20) as f64;
@@ -231,10 +215,6 @@ mod windowed {
         let mut v = values.to_vec();
         v.sort_by(f64::total_cmp);
         v[((v.len() - 1) as f64 * p).round() as usize]
-    }
-
-    fn us(start: Instant) -> f64 {
-        start.elapsed().as_secs_f64() * 1e6
     }
 
     fn ms(start: Instant) -> f64 {
@@ -696,6 +676,74 @@ mod windowed {
         println!();
     }
 
+    /// The flight's game: movers spinning, characters walking in circles, the camera on its
+    /// path through the nave.
+    struct Flight {
+        spins: QueryState<(&'static mut Transform, &'static Spin)>,
+        walkers: QueryState<(&'static mut Transform, &'static mut Walk)>,
+        camera: Entity,
+        min: Vec3,
+        max: Vec3,
+        /// Game time: the same path on every GPU, whatever the frame rate.
+        game_time: f64,
+        frame_time: f64,
+        characters: Vec<Character>,
+        fox: Option<(CookedSkin, Vec<Affine3A>)>,
+    }
+
+    impl Game for Flight {
+        fn tick(&mut self, world: &mut World, dt: f32) {
+            self.spins.for_each(world, |(t, spin)| {
+                t.rotation *= Quat::from_rotation_y(spin.0 * dt);
+            });
+            self.walkers.for_each(world, |(t, walk)| {
+                walk.angle += walk.speed * dt;
+                let (sin, cos) = walk.angle.sin_cos();
+                t.translation.x = walk.x + walk.radius * cos;
+                t.translation.z = walk.z + walk.radius * sin;
+                t.rotation = Quat::from_rotation_y(-walk.angle);
+            });
+        }
+
+        fn present(&mut self, world: &mut World, _alpha: f32) {
+            self.game_time += self.frame_time;
+            let (eye, rotation) = camera_at(self.game_time as f32, self.min, self.max);
+            if let Some(t) = world.get_mut::<Transform>(self.camera) {
+                t.translation = eye;
+                t.rotation = rotation;
+            }
+        }
+
+        // Animation: every character's pose on the job system, then its pose for the GPU
+        // with the scene instance's transform (bit for bit, for the motion pass).
+        fn animate(&mut self, parts: &mut FrameParts<'_>, dt: f32) {
+            let Some((skin, inverse_bind)) = self.fox.as_ref() else {
+                return;
+            };
+            let clip = &skin.clips[1 % skin.clips.len()];
+            let duration = clip.duration().max(1e-3);
+            for_each_parallel(parts.jobs, &mut self.characters, 4, |c| {
+                c.time = (c.time + dt) % duration;
+                clip.sample(c.time, skin.skeleton.rest(), &mut c.pose);
+                local_to_model(&skin.skeleton, &c.pose, &Affine3A::IDENTITY, &mut c.model);
+                skinning_matrices(&c.model, &skin.joints, inverse_bind, &mut c.palette);
+            });
+            for c in &self.characters {
+                if let Some(id) = parts.runtime.extract().instance(c.entity)
+                    && let Some(instance) = parts.scene.get(id)
+                {
+                    parts.skinning.set_scene_instance(c.skinned, Some(id));
+                    parts
+                        .skinning
+                        .set_pose(c.skinned, &c.palette, &instance.world_from_object);
+                }
+            }
+            parts
+                .skinning
+                .update_bounds(&mut *parts.geometry, Some(&mut *parts.scene));
+        }
+    }
+
     pub(crate) fn run() {
         let t0 = Instant::now();
         let args: Vec<String> = std::env::args().skip(1).collect();
@@ -725,1130 +773,400 @@ mod windowed {
         let movers = number("--movers", 2000);
         let character_count = number("--characters", 64);
         let lights_on = !flag("--no-lights");
-        let feedback_on = !flag("--no-feedback");
-        // Where the frame is drawn (`engine_render::present`): `--present apart|direct`,
-        // by default apart only when the swapchain presents across adapters.
-        let present_apart = option("--present").map(|v| v == "apart");
-        let vsync = flag("--vsync");
-        // `--window`: borderless over the monitor (default), the same holding the monitor
-        // (exclusive), or a window; `--fse`: what the driver may do otherwise.
-        let window_choice = option("--window").unwrap_or("full-screen");
-        let exclusive_wanted = window_choice == "exclusive";
-        let window_mode = if window_choice == "windowed" {
-            WindowMode::Windowed
-        } else {
-            WindowMode::FullScreen
-        };
-        let fse_choice = match option("--fse") {
-            Some("default") => FullScreenExclusive::Default,
-            Some("allowed") => FullScreenExclusive::Allowed,
-            _ => FullScreenExclusive::Disallowed,
-        };
-        let cache_dir = option("--pipeline-cache").map(PathBuf::from);
-        let warm_up = !flag("--no-warm-up");
         // `--fg`: FSR 3.1's, shown by a paced presenter; `--fg dlss`: DLSS's, through
         // Streamline (ADR 0091).
+        let frame_generation = if flag("--fg") {
+            match option("--fg") {
+                Some("dlss") => FrameGeneration::Dlss,
+                _ => FrameGeneration::Fsr,
+            }
+        } else {
+            FrameGeneration::Off
+        };
+        let ui_on = frame_generation != FrameGeneration::Off || flag("--ui");
         // `--record-pso <file>`: the material types' entry points the flight drew, merged
         // into that PSO record at the end (ADR 0092): a playtest's record for the cook.
         let record_pso = option("--record-pso").map(PathBuf::from);
-        let frame_generation = flag("--fg").then(|| match option("--fg") {
-            Some("dlss") => FrameGeneration::Dlss,
-            _ => FrameGeneration::Fsr,
-        });
-        let dlss_wanted = frame_generation == Some(FrameGeneration::Dlss);
-        let ui_on = frame_generation.is_some() || flag("--ui");
 
-        // Start-up, phase by phase. What does not depend on each other overlaps (queue
-        // item 0g): the Vulkan instance and device (the drivers' own start-up) on a thread
-        // beside the window, and the swapchain on a thread beside the renderer, the pack
-        // and the scene (on the Radeon iGPU, presenting across adapters, it takes 170 ms).
-        // Each phase reports its own time; the first frame's time since `main` is what
-        // the overlap shortens.
-        let mut startup: Vec<(&str, f64)> = Vec::new();
-        let gpu = std::thread::Builder::new()
-            .name(String::from("vulkan start-up"))
+        // The player's settings from the options.
+        let settings = PlayerSettings {
+            title: String::from("flight"),
+            pack: Some(pack.clone()),
+            window: match option("--window") {
+                Some("exclusive") => Window::Exclusive,
+                Some("windowed") => Window::Windowed {
+                    width: 1920,
+                    height: 1080,
+                },
+                _ => Window::FullScreen,
+            },
+            vsync: flag("--vsync"),
+            low_latency: match option("--low-latency") {
+                Some("off") => LowLatency::Off,
+                Some("boost") => LowLatency::Boost,
+                _ => LowLatency::On,
+            },
+            // `--cap`: real frames at most this often, as a game's limiter (ADR 0091: it
+            // caps real frames; frame generation shows twice as many).
+            fps_limit: option("--cap")
+                .and_then(|v| v.parse::<f64>().ok())
+                .filter(|fps| *fps > 0.0),
+            frame_generation,
+            ambient_occlusion: flag("--no-ao").then_some(None),
+            meshlet_culling: match option("--meshlet-culling") {
+                Some("on") => Some(true),
+                Some("off") => Some(false),
+                _ => None,
+            },
+            antialiasing: match option("--aa") {
+                Some("off") => Some(Antialiasing::OFF),
+                Some("taau") => Some(Antialiasing::TAAU),
+                Some("fsr") => Some(Antialiasing::FSR),
+                _ => None,
+            },
+            quality: match option("--quality") {
+                Some("native") => Some(Quality::Native),
+                Some("quality") => Some(Quality::Quality),
+                Some("balanced") => Some(Quality::Balanced),
+                Some("performance") => Some(Quality::Performance),
+                _ => None,
+            },
+            local_shadows: lights_on.then(LocalShadowSettings::default),
+            texture_feedback: !flag("--no-feedback"),
+            // Where the frame is drawn (`engine_render::present`): `--present apart|direct`,
+            // by default apart only when the swapchain presents across adapters.
+            present_apart: option("--present").map(|v| v == "apart"),
+            // No cache unless asked: start-up compiles, the same on every run.
+            pipeline_cache: Some(option("--pipeline-cache").map(PathBuf::from)),
+            warm_up: !flag("--no-warm-up"),
+            process_setup: !flag("--no-process-setup"),
+            ..PlayerSettings::default()
+        };
+
+        // The glTF Fox imported and cooked through the derived data cache, beside the
+        // player's start-up.
+        let fox = std::thread::Builder::new()
+            .name(String::from("fox"))
             .spawn(move || {
                 let phase = Instant::now();
-                // DLSS frame generation: Streamline before the instance, its extensions and
-                // queues with the device (ADR 0091 §7).
-                let streamline = dlss_wanted
-                    .then(|| {
-                        Streamline::load(&StreamlineDesc {
-                            frame_generation: true,
-                            ..StreamlineDesc::default()
-                        })
-                        .map_err(|e| println!("DLSS frame generation unavailable: {e}"))
-                        .ok()
-                    })
-                    .flatten()
-                    .filter(Streamline::frame_generation);
-                let instance = Instance::with_extensions(
-                    &InstanceDesc::default(),
-                    &streamline
-                        .as_ref()
-                        .map(Streamline::instance_extensions)
-                        .unwrap_or_default(),
-                )
-                .unwrap();
-                let preference =
-                    AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance);
-                let adapter = instance.select_adapter(&preference).unwrap();
-                let adapter_name = adapter.summary();
-                let streamline = streamline.filter(|s| {
-                    s.check_adapter(&instance, &adapter)
-                        .map_err(|e| println!("DLSS frame generation unsupported: {e}"))
-                        .is_ok()
-                });
-                let mut device = Device::with_extras(
-                    &instance,
-                    &adapter,
-                    &streamline
-                        .as_ref()
-                        .map(Streamline::device_extensions)
-                        .unwrap_or_default(),
-                    streamline
-                        .as_ref()
-                        .map(Streamline::extra_queues)
-                        .unwrap_or_default(),
-                )
-                .unwrap();
-                let streamline = streamline.filter(|s| {
-                    if let Err(e) = s.attach(&device) {
-                        println!("DLSS frame generation unavailable: {e}");
-                        return false;
-                    }
-                    if let Some(e) = s.frame_generation_error() {
-                        println!("DLSS frame generation unavailable: {e}");
-                    }
-                    if let Some(hint) = s.frame_generation_hint() {
-                        println!("{}", hint.text());
-                    }
-                    s.frame_generation_supported()
-                });
-                device.set_pipeline_warm_up(warm_up);
-                let cache_path = cache_dir
-                    .as_deref()
-                    .map(|dir| dir.join(device.pipeline_cache_file_name()));
-                let cache_load = cache_path
-                    .as_deref()
-                    .map(|path| device.load_pipeline_cache(path));
-                (
-                    instance,
-                    adapter_name,
-                    device,
-                    cache_path,
-                    cache_load,
-                    ms(phase),
-                    streamline,
-                )
+                let jobs = ThreadPool::builder().build().unwrap();
+                let cooked = Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../../test-assets/Fox/Fox.gltf")
+                    .canonicalize()
+                    .ok()
+                    .filter(|_| character_count > 0)
+                    .map(|path| {
+                        let bytes = std::fs::read(&path).unwrap();
+                        let dir = path.parent();
+                        let scene = import_gltf(&bytes, dir).unwrap();
+                        let cache =
+                            DerivedDataCache::new(path.parent().unwrap().join("../.ddc")).unwrap();
+                        cook_scene(&scene, dir, Some(&cache), &jobs, &CookSettings::default())
+                            .unwrap()
+                            .0
+                    });
+                (cooked, ms(phase))
             })
             .unwrap();
-        let phase = Instant::now();
-        let mut windows = WindowSystem::start(4096).unwrap();
-        let window = windows
-            .create_window(&WindowDesc {
-                title: String::from("flight"),
-                width: WIDTH,
-                height: HEIGHT,
-                resizable: false,
-                visible: true,
-                mode: window_mode,
-                ..WindowDesc::default()
-            })
-            .unwrap();
-        startup.push(("window (beside the device)", ms(phase)));
-        // Work that needs no device, beside it too: the job pool, and the glTF Fox
-        // imported and cooked through the derived data cache.
-        let phase = Instant::now();
-        let jobs = Arc::new(ThreadPool::builder().build().unwrap());
-        let fox = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../test-assets/Fox/Fox.gltf")
-            .canonicalize()
-            .ok()
-            .filter(|_| character_count > 0)
-            .map(|path| {
-                let bytes = std::fs::read(&path).unwrap();
-                let dir = path.parent();
-                let scene = import_gltf(&bytes, dir).unwrap();
-                let cache = DerivedDataCache::new(path.parent().unwrap().join("../.ddc")).unwrap();
-                cook_scene(&scene, dir, Some(&cache), &jobs, &CookSettings::default())
-                    .unwrap()
-                    .0
-            });
-        startup.push((
-            "job pool + Fox cooked from the cache (beside the device)",
-            ms(phase),
-        ));
-        let (instance, adapter_name, device, cache_path, cache_load, device_ms, streamline) =
-            gpu.join().unwrap();
-        if dlss_wanted && streamline.is_none() {
-            let log = Streamline::log();
-            println!(
-                "DLSS frame generation is off: the frame is presented as without --fg (Streamline: {} errors, {} warnings: {:?}).",
-                log.errors, log.warnings, log.first_errors
-            );
+        let mut player = Player::new(&settings).unwrap_or_else(|e| panic!("{e}"));
+        player.set_frame_time(Some(dt));
+        let (fox, fox_ms) = fox.join().unwrap();
+        let mut startup = player.startup().phases.clone();
+        startup.push(("Fox cooked from the cache (beside the player)", fox_ms));
+        for note in &player.startup().notes {
+            println!("{note}");
         }
-        // With DLSS frame generation Streamline presents: the surface and the swapchain go
-        // through its hooks.
-        let hooks = streamline.as_ref().map(Streamline::vulkan_hooks);
-        startup.push((
-            "Vulkan instance + device (+ pipeline cache file)",
-            device_ms,
-        ));
-        let surface = Arc::new(match &hooks {
-            Some(hooks) => {
-                Surface::from_win32_hooked(&instance, window.hinstance, window.hwnd, hooks).unwrap()
-            }
-            None => Surface::from_win32(&instance, window.hinstance, window.hwnd).unwrap(),
-        });
-        let swapchain_desc = SwapchainDesc {
-            width: WIDTH,
-            height: HEIGHT,
-            present_mode: if vsync {
-                PresentMode::Fifo
-            } else {
-                PresentMode::Immediate
-            },
-            srgb: true,
-            color: OutputColor::Sdr,
-            low_latency: false,
-            full_screen_exclusive: match engine_platform::display::window_monitor(window.hwnd) {
-                Some(monitor) if exclusive_wanted => FullScreenExclusive::Exclusive {
-                    monitor: monitor.handle,
-                },
-                _ => fse_choice,
-            },
-        };
-        // The renderer draws into the format the swapchain will have.
-        let swapchain_format = Swapchain::format_for(&device, &surface, &swapchain_desc).unwrap();
-        let device = Arc::new(device);
-        let pending_swapchain = {
-            let (device, surface) = (Arc::clone(&device), Arc::clone(&surface));
-            std::thread::Builder::new()
-                .name(String::from("swapchain"))
-                .spawn(move || {
-                    let phase = Instant::now();
-                    let swapchain = match hooks {
-                        Some(hooks) => {
-                            Swapchain::new_hooked(&device, &surface, &swapchain_desc, &hooks)
-                        }
-                        None => Swapchain::new(&device, &surface, &swapchain_desc),
-                    }
-                    .unwrap();
-                    (swapchain, ms(phase))
-                })
-                .unwrap()
-        };
-
-        let phase = Instant::now();
-        let pipelines_before = engine_rhi::creation_stats();
-        let mut allocator = Allocator::new(&device);
-        let bindless = Bindless::new(&device).unwrap();
-        let depth_format = vk::Format::D32_SFLOAT;
-        let defaults = RenderDefaults::for_device(&device);
-        let antialiasing = match option("--aa") {
-            Some("off") => Antialiasing::OFF,
-            Some("taau") => Antialiasing::TAAU,
-            Some("fsr") => Antialiasing::FSR,
-            _ => defaults.antialiasing,
-        };
-        let quality = match option("--quality") {
-            Some("native") => Quality::Native,
-            Some("quality") => Quality::Quality,
-            Some("balanced") => Quality::Balanced,
-            Some("performance") => Quality::Performance,
-            _ => defaults.quality,
-        };
-        let ambient_occlusion = if flag("--no-ao") {
-            None
-        } else {
-            defaults.ambient_occlusion
-        };
-        let meshlet_culling = match option("--meshlet-culling") {
-            Some("on") => true,
-            Some("off") => false,
-            _ => defaults.meshlet_culling,
-        };
-        let mut frame_renderer = FrameRenderer::new(
-            &device,
-            &bindless,
-            swapchain_format,
-            depth_format,
-            ShadowSettings::default(),
-            IN_FLIGHT,
-        )
-        .unwrap();
-        frame_renderer
-            .forward_mut()
-            .set_ambient_occlusion(&device, &bindless, ambient_occlusion)
-            .unwrap();
-        frame_renderer
-            .forward_mut()
-            .set_meshlet_culling(&device, &bindless, meshlet_culling)
-            .unwrap();
-        if lights_on {
-            frame_renderer
-                .forward_mut()
-                .set_local_shadows(
-                    &device,
-                    &mut allocator,
-                    &bindless,
-                    Some(LocalShadowSettings::default()),
-                )
-                .unwrap();
-        }
-        let mut skinning = Skinning::new(
-            &device,
-            &mut allocator,
-            &bindless,
-            depth_format,
-            1 << 16,
-            IN_FLIGHT,
-        )
-        .unwrap();
-        let mut feedback =
-            TextureFeedback::new(&device, &bindless, FeedbackSettings::default(), IN_FLIGHT)
-                .unwrap();
-        let mut environment =
-            Environment::new(&device, &mut allocator, &bindless, Sky::default()).unwrap();
-        let pipelines_after = engine_rhi::creation_stats();
-        startup.push(("renderer + features (pipelines)", ms(phase)));
-
-        // The scene from its pack, streamed.
-        let phase = Instant::now();
-        let mut budget = GpuBudget::new(&device);
-        let mut textures = TexturePool::new(&device, 32 << 20, IN_FLIGHT);
-        let mut geometry = GeometryPool::new(
-            &device,
-            &mut allocator,
-            GeometryCapacity::default(),
-            IN_FLIGHT,
-        )
-        .unwrap();
-        let mut streamer = SceneStreamer::open(
-            &pack,
-            &jobs,
-            &mut textures,
-            &mut geometry,
-            &mut allocator,
-            &mut budget,
-            SceneStreamSettings::default(),
-        )
-        .unwrap();
-        let mut materials = MaterialTable::new(IN_FLIGHT);
-        let scene_layout = streamer.layout().scene.clone();
-        let texture_ids = streamer.textures().to_vec();
-        // Material types (ADR 0092): drawn from the pack's SPIR-V.
-        let type_ids = engine_streaming::register_material_types(
-            frame_renderer.forward_mut(),
-            &scene_layout.material_types,
-        );
-        let material_ids =
-            engine_streaming::add_materials(&mut materials, &scene_layout, &type_ids, &texture_ids);
-        let fallback = materials.default_material();
-        let mut world = World::new();
-        let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
-        for instance in &scene_layout.instances {
-            let world_from_object = Mat4::from_cols_array(&instance.world_from_object);
-            let mesh = &scene_layout.meshes[instance.mesh as usize];
-            for corner in 0..8 {
-                let pick = |bit: usize, axis: usize| {
-                    if corner & bit != 0 {
-                        mesh.max[axis]
-                    } else {
-                        mesh.min[axis]
-                    }
-                };
-                let c = world_from_object.transform_point3(Vec3::new(
-                    pick(1, 0),
-                    pick(2, 1),
-                    pick(4, 2),
-                ));
-                min = min.min(c);
-                max = max.max(c);
-            }
-            world.spawn((
-                GlobalTransform(Affine3A::from_mat4(world_from_object)),
-                MeshRenderer::new(
-                    streamer.meshes()[instance.mesh as usize],
-                    instance
-                        .material
-                        .map_or(fallback, |i| material_ids[i as usize]),
-                ),
-            ));
-        }
-        startup.push(("scene opened from its pack (tails resident)", ms(phase)));
+        let defaults = *player.defaults();
+        let (antialiasing, quality) = (player.antialiasing(), player.quality());
+        let presentation = player.presentation();
+        let adapter_name = player.device().adapter().summary();
+        let extent = player.extent();
+        let (width, height) = (extent.width, extent.height);
 
         // Moving props: cubes in spinning hierarchies of 10 along the nave.
         let phase = Instant::now();
-        let cube_mesh = geometry.add_mesh(&cube().as_data()).unwrap();
-        let paints: Vec<_> = (0..16)
-            .map(|k| {
-                let h = k as f32 / 16.0;
-                materials.add(MaterialDesc::solid(
-                    [0.3 + 0.6 * h, 0.55, 0.9 - 0.6 * h],
-                    0.0,
-                    0.5,
-                ))
-            })
-            .collect();
+        let instances = player.scene_info().meshes.len();
+        let (min, max) = player.scene_info().bounds;
         let size = max - min;
-        let hierarchies = movers.div_ceil(10);
-        for s in 0..hierarchies {
-            let f = (s as f32 + 0.5) / hierarchies as f32;
-            let root = world.spawn((
-                Transform::from_xyz(
-                    min.x + size.x * (0.1 + 0.8 * f),
-                    min.y + size.y * (0.1 + 0.25 * ((s * 7) % 10) as f32 / 10.0),
-                    min.z + size.z * (0.3 + 0.4 * ((s * 3) % 10) as f32 / 10.0),
-                )
-                .with_scale(Vec3::splat(0.25)),
-                GlobalTransform::IDENTITY,
-                MeshRenderer::new(cube_mesh, paints[s % paints.len()]),
-                Spin(0.5 + (s % 5) as f32 * 0.3),
-            ));
-            for c in 0..9 {
-                let a = c as f32 * 0.7;
-                let child = world.spawn((
-                    Transform::from_xyz(a.cos() * 2.0, 0.6 * c as f32, a.sin() * 2.0)
-                        .with_scale(Vec3::splat(0.6)),
-                    GlobalTransform::IDENTITY,
-                    MeshRenderer::new(cube_mesh, paints[(s + c) % paints.len()]),
-                ));
-                world.set_parent(child, Some(root)).unwrap();
-            }
-        }
-
-        // Skinned characters: the Fox cooked above.
         let mut characters: Vec<Character> = Vec::new();
         let mut fox_skin = None;
-        if let Some(mut cooked) = fox {
-            let ids: Vec<TextureId> = std::mem::take(&mut cooked.textures)
-                .into_iter()
-                .map(|t| {
-                    textures
-                        .add(
-                            &device,
-                            &mut allocator,
-                            TextureLevels {
-                                width: t.width,
-                                height: t.height,
-                                format: texture_format(t.format),
-                                levels: t.levels,
-                            },
-                        )
-                        .unwrap()
+        {
+            let setup = player.setup();
+            let cube_mesh = setup.geometry.add_mesh(&cube().as_data()).unwrap();
+            let paints: Vec<_> = (0..16)
+                .map(|k| {
+                    let h = k as f32 / 16.0;
+                    setup.materials.add(MaterialDesc::solid(
+                        [0.3 + 0.6 * h, 0.55, 0.9 - 0.6 * h],
+                        0.0,
+                        0.5,
+                    ))
                 })
                 .collect();
-            let fox_material = materials.add(material_desc(&cooked.materials[0], &ids));
-            let instance = cooked.instances.iter().find(|i| i.skin.is_some()).unwrap();
-            let mesh = &cooked.meshes[instance.mesh as usize];
-            let skin = cooked.skins.swap_remove(instance.skin.unwrap() as usize);
-            let source = skinning
-                .add_skin(&SkinnedMeshData {
-                    mesh: MeshData {
-                        positions: &mesh.positions,
-                        normals: &mesh.normals,
-                        tangents: &mesh.tangents,
-                        uvs: &mesh.uvs,
-                        indices: &mesh.indices,
-                        meshlets: &[],
-                    },
-                    joints: &mesh.joints,
-                    weights: &mesh.weights,
-                    joint_count: skin.joints.len() as u16,
-                })
-                .unwrap();
-            for k in 0..character_count {
-                let (skinned, drawn) = skinning.add_instance(source, &mut geometry).unwrap();
-                let f = (k as f32 + 0.5) / character_count as f32;
-                let walk = Walk {
-                    x: min.x + size.x * (0.15 + 0.7 * f),
-                    z: min.z + size.z * (0.35 + 0.3 * ((k * 5) % 7) as f32 / 7.0),
-                    radius: 0.8 + (k % 3) as f32 * 0.4,
-                    speed: 0.6 + (k % 4) as f32 * 0.15,
-                    angle: k as f32,
-                };
-                let entity = world.spawn((
-                    Transform::from_xyz(walk.x, min.y, walk.z).with_scale(Vec3::splat(0.012)),
+            let world = setup.world;
+            let hierarchies = movers.div_ceil(10);
+            for s in 0..hierarchies {
+                let f = (s as f32 + 0.5) / hierarchies as f32;
+                let root = world.spawn((
+                    Transform::from_xyz(
+                        min.x + size.x * (0.1 + 0.8 * f),
+                        min.y + size.y * (0.1 + 0.25 * ((s * 7) % 10) as f32 / 10.0),
+                        min.z + size.z * (0.3 + 0.4 * ((s * 3) % 10) as f32 / 10.0),
+                    )
+                    .with_scale(Vec3::splat(0.25)),
                     GlobalTransform::IDENTITY,
-                    MeshRenderer::new(drawn, fox_material),
-                    walk,
+                    MeshRenderer::new(cube_mesh, paints[s % paints.len()]),
+                    Spin(0.5 + (s % 5) as f32 * 0.3),
                 ));
-                let n = skin.skeleton.joint_count();
-                characters.push(Character {
-                    entity,
-                    skinned,
-                    time: k as f32 * 0.37,
-                    pose: skin.skeleton.rest().clone(),
-                    model: vec![Affine3A::IDENTITY; n],
-                    palette: vec![[0.0; 12]; skin.joints.len()],
-                });
+                for c in 0..9 {
+                    let a = c as f32 * 0.7;
+                    let child = world.spawn((
+                        Transform::from_xyz(a.cos() * 2.0, 0.6 * c as f32, a.sin() * 2.0)
+                            .with_scale(Vec3::splat(0.6)),
+                        GlobalTransform::IDENTITY,
+                        MeshRenderer::new(cube_mesh, paints[(s + c) % paints.len()]),
+                    ));
+                    world.set_parent(child, Some(root)).unwrap();
+                }
             }
-            let inverse_bind: Vec<Affine3A> = skin
-                .inverse_bind
-                .iter()
-                .map(|m| Affine3A::from_mat4(Mat4::from_cols_array(m)))
-                .collect();
-            fox_skin = Some((skin, inverse_bind));
+
+            // Skinned characters: the Fox cooked above.
+            if let Some(mut cooked) = fox {
+                let ids: Vec<TextureId> = std::mem::take(&mut cooked.textures)
+                    .into_iter()
+                    .map(|t| {
+                        setup
+                            .textures
+                            .add(
+                                setup.device,
+                                &mut *setup.allocator,
+                                TextureLevels {
+                                    width: t.width,
+                                    height: t.height,
+                                    format: texture_format(t.format),
+                                    levels: t.levels,
+                                },
+                            )
+                            .unwrap()
+                    })
+                    .collect();
+                let fox_material = setup
+                    .materials
+                    .add(material_desc(&cooked.materials[0], &ids));
+                let instance = cooked.instances.iter().find(|i| i.skin.is_some()).unwrap();
+                let mesh = &cooked.meshes[instance.mesh as usize];
+                let skin = cooked.skins.swap_remove(instance.skin.unwrap() as usize);
+                let source = setup
+                    .skinning
+                    .add_skin(&SkinnedMeshData {
+                        mesh: MeshData {
+                            positions: &mesh.positions,
+                            normals: &mesh.normals,
+                            tangents: &mesh.tangents,
+                            uvs: &mesh.uvs,
+                            indices: &mesh.indices,
+                            meshlets: &[],
+                        },
+                        joints: &mesh.joints,
+                        weights: &mesh.weights,
+                        joint_count: skin.joints.len() as u16,
+                    })
+                    .unwrap();
+                for k in 0..character_count {
+                    let (skinned, drawn) = setup
+                        .skinning
+                        .add_instance(source, &mut *setup.geometry)
+                        .unwrap();
+                    let f = (k as f32 + 0.5) / character_count as f32;
+                    let walk = Walk {
+                        x: min.x + size.x * (0.15 + 0.7 * f),
+                        z: min.z + size.z * (0.35 + 0.3 * ((k * 5) % 7) as f32 / 7.0),
+                        radius: 0.8 + (k % 3) as f32 * 0.4,
+                        speed: 0.6 + (k % 4) as f32 * 0.15,
+                        angle: k as f32,
+                    };
+                    let entity = world.spawn((
+                        Transform::from_xyz(walk.x, min.y, walk.z).with_scale(Vec3::splat(0.012)),
+                        GlobalTransform::IDENTITY,
+                        MeshRenderer::new(drawn, fox_material),
+                        walk,
+                    ));
+                    let n = skin.skeleton.joint_count();
+                    characters.push(Character {
+                        entity,
+                        skinned,
+                        time: k as f32 * 0.37,
+                        pose: skin.skeleton.rest().clone(),
+                        model: vec![Affine3A::IDENTITY; n],
+                        palette: vec![[0.0; 12]; skin.joints.len()],
+                    });
+                }
+                let inverse_bind: Vec<Affine3A> = skin
+                    .inverse_bind
+                    .iter()
+                    .map(|m| Affine3A::from_mat4(Mat4::from_cols_array(m)))
+                    .collect();
+                fox_skin = Some((skin, inverse_bind));
+            }
         }
         startup.push(("movers + characters", ms(phase)));
 
         // The player's camera.
         let (eye, rotation) = camera_at(0.0, min, max);
-        let extent = size.length();
-        let camera = world.spawn((
+        let extent_len = size.length();
+        let camera_component = player.camera(70f32.to_radians(), 0.05, extent_len * 2.0);
+        let camera = player.world_mut().spawn((
             Transform::from_translation(eye).with_rotation(rotation),
-            Camera::perspective(70f32.to_radians(), 0.05, extent * 2.0)
-                .with_antialiasing(antialiasing, quality),
+            camera_component,
         ));
-        let mut cameras = CameraView::new(&mut world, defaults.view_settings());
-        let entities = world.len() as u32;
-        let mut scene = GpuScene::new(&device, &bindless, entities + 16, IN_FLIGHT).unwrap();
-        scene.set_jobs(jobs.clone());
-        let mut view = View::new(&device, entities + 16);
-        let mut runtime = Runtime::<InstanceId>::new(world, 64.0);
-        runtime.set_jobs(jobs.clone());
-        let mut spins = QueryState::<(&mut Transform, &Spin)>::new(&mut runtime.world);
-        let mut walkers = QueryState::<(&mut Transform, &mut Walk)>::new(&mut runtime.world);
-        let mut ring = UploadRing::new(&device, &mut allocator, IN_FLIGHT, 32 << 20).unwrap();
-        let mut frames = Frames::new(&device, device.graphics.family, IN_FLIGHT).unwrap();
-        let mut graph = RenderGraph::new(&device, IN_FLIGHT);
-        let lights = if lights_on {
-            sponza_lights()
-        } else {
-            Vec::new()
-        };
-        let sun = DirectionalLight {
-            direction: Vec3::new(-0.3, -1.0, -0.2),
-            color: Vec3::splat(3.0),
-            ambient: Vec3::splat(0.08),
-        };
-
-        // The swapchain, made beside all of the above.
-        let wait = Instant::now();
-        let (swapchain, swapchain_ms) = pending_swapchain.join().unwrap();
-        startup.push((
-            "surface + swapchain (beside the renderer and the scene)",
-            swapchain_ms,
-        ));
-        startup.push(("waiting for the swapchain", ms(wait)));
-        let present_mode = swapchain.present_mode();
-        let across_adapters = swapchain.presents_across_adapters();
-        let exclusive = swapchain.exclusive();
-        let exclusive_refused = swapchain.exclusive_refused();
-        // The frame's size: the swapchain's (the monitor's in full screen, the window's
-        // client area fit into the work area otherwise).
-        let (width, height) = (swapchain.extent().width, swapchain.extent().height);
-        // With FSR's frame generation a paced presenter takes the swapchain (ADR 0091).
-        let mut swapchain = Some(swapchain);
-        let mut paced = None;
-        if frame_generation == Some(FrameGeneration::Fsr) {
-            match PacedPresenter::start(&device, &mut allocator, swapchain.take().unwrap(), None) {
-                Ok(p) => paced = Some(p),
-                Err(failed) => {
-                    let (s, e) = *failed;
-                    println!("frame generation unavailable: {e}");
-                    swapchain = Some(s);
-                }
-            }
+        if lights_on {
+            *player.lights_mut() = sponza_lights();
         }
-        let paced_used = paced.is_some();
+        let light_count = player.lights_mut().len();
+
         // The UI layer: a HUD (a crosshair, a bar, a frame for a map), a panel on the nave's
         // wall, a panel on the camera (bottom left, as a helmet's display).
-        let ui = ui_on.then(|| {
-            UiRenderer::new(&device, &mut allocator, &bindless, swapchain_format).unwrap()
-        });
-        let mut hud = Canvas::new();
-        let (w, h) = (width as f32, height as f32);
-        hud.draw(&Quad::solid(Vec2::new(w * 0.5, h * 0.5), Vec2::new(24.0, 2.0)).color(Vec4::ONE));
-        hud.draw(&Quad::solid(Vec2::new(w * 0.5, h * 0.5), Vec2::new(2.0, 24.0)).color(Vec4::ONE));
-        hud.draw(
-            &Quad::rounded_rect(Vec2::new(200.0, h - 60.0), Vec2::new(300.0, 24.0), 6.0)
-                .color(Vec4::new(0.1, 0.1, 0.1, 0.6)),
-        );
-        hud.draw(
-            &Quad::rounded_rect(Vec2::new(170.0, h - 60.0), Vec2::new(232.0, 16.0), 4.0)
-                .color(Vec4::new(0.85, 0.15, 0.1, 1.0)),
-        );
-        hud.draw(
-            &Quad::rounded_rect(Vec2::new(w - 140.0, 140.0), Vec2::new(220.0, 220.0), 10.0)
-                .outline(4.0)
-                .color(Vec4::new(0.9, 0.9, 0.9, 0.8)),
-        );
-        hud.prepare();
-        let mut wall_panel = Canvas::new();
-        wall_panel.draw(
-            &Quad::rounded_rect(Vec2::new(150.0, 75.0), Vec2::new(300.0, 150.0), 12.0)
-                .color(Vec4::new(0.05, 0.3, 0.6, 0.85)),
-        );
-        for row in 0..4 {
-            wall_panel.draw(
-                &Quad::solid(
-                    Vec2::new(150.0, 30.0 + 30.0 * row as f32),
-                    Vec2::new(240.0 - 40.0 * row as f32, 10.0),
-                )
-                .color(Vec4::new(0.9, 0.95, 1.0, 1.0)),
+        if ui_on {
+            let (w, h) = (width as f32, height as f32);
+            let mut hud = Canvas::new();
+            hud.draw(
+                &Quad::solid(Vec2::new(w * 0.5, h * 0.5), Vec2::new(24.0, 2.0)).color(Vec4::ONE),
             );
-        }
-        wall_panel.prepare();
-        let mut visor = Canvas::new();
-        visor.draw(
-            &Quad::rounded_rect(Vec2::new(50.0, 25.0), Vec2::new(100.0, 50.0), 6.0)
-                .color(Vec4::new(0.1, 0.8, 0.3, 0.7)),
-        );
-        visor.prepare();
-        let (wall_from_panel, view_from_visor) = {
-            let center = (min + max) * 0.5;
-            let size = max - min;
-            (
-                // 3 × 1.5 m on the wall side of the nave, a centimeter per canvas unit,
-                // canvas y down.
-                Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.01, -0.01, 1.0),
-                    Quat::IDENTITY,
-                    Vec3::new(
-                        center.x - 1.5,
-                        min.y + size.y * 0.25,
-                        center.z + size.z * 0.3,
-                    ),
-                ),
-                Mat4::from_scale_rotation_translation(
-                    Vec3::new(0.0012, -0.0012, 1.0),
-                    Quat::IDENTITY,
-                    Vec3::new(-0.42, -0.2, -0.6),
-                ),
-            )
-        };
-        let layer = [
-            UiCanvas {
-                canvas: &hud,
-                placement: Placement::Screen,
-            },
-            UiCanvas {
-                canvas: &wall_panel,
-                placement: Placement::World(wall_from_panel),
-            },
-            UiCanvas {
-                canvas: &visor,
-                placement: Placement::Camera(view_from_visor),
-            },
-        ];
-        let mut presented: Vec<Presented> = Vec::with_capacity(2 * frames_to_run + 8);
-        let mut generated_shown = 0usize;
-        // DLSS frame generation: on from the first frame, Streamline's Reflex pacing the
-        // real frames (ADR 0091 §6).
-        let dlss_generation = streamline.as_ref().map(|s| {
-            let mut generation = DlssFrameGeneration::new(s).unwrap();
-            // Debugging: `FLIGHT_DLSS_DEBUG=generated[,vulkan]` shows only the generated
-            // frames, with the constants in Vulkan's clip space.
-            if let Ok(debug) = std::env::var("FLIGHT_DLSS_DEBUG") {
-                generation.set_debug(debug.contains("generated"), debug.contains("vulkan"));
+            hud.draw(
+                &Quad::solid(Vec2::new(w * 0.5, h * 0.5), Vec2::new(2.0, 24.0)).color(Vec4::ONE),
+            );
+            hud.draw(
+                &Quad::rounded_rect(Vec2::new(200.0, h - 60.0), Vec2::new(300.0, 24.0), 6.0)
+                    .color(Vec4::new(0.1, 0.1, 0.1, 0.6)),
+            );
+            hud.draw(
+                &Quad::rounded_rect(Vec2::new(170.0, h - 60.0), Vec2::new(232.0, 16.0), 4.0)
+                    .color(Vec4::new(0.85, 0.15, 0.1, 1.0)),
+            );
+            hud.draw(
+                &Quad::rounded_rect(Vec2::new(w - 140.0, 140.0), Vec2::new(220.0, 220.0), 10.0)
+                    .outline(4.0)
+                    .color(Vec4::new(0.9, 0.9, 0.9, 0.8)),
+            );
+            hud.prepare();
+            let mut wall_panel = Canvas::new();
+            wall_panel.draw(
+                &Quad::rounded_rect(Vec2::new(150.0, 75.0), Vec2::new(300.0, 150.0), 12.0)
+                    .color(Vec4::new(0.05, 0.3, 0.6, 0.85)),
+            );
+            for row in 0..4 {
+                wall_panel.draw(
+                    &Quad::solid(
+                        Vec2::new(150.0, 30.0 + 30.0 * row as f32),
+                        Vec2::new(240.0 - 40.0 * row as f32, 10.0),
+                    )
+                    .color(Vec4::new(0.9, 0.95, 1.0, 1.0)),
+                );
             }
-            generation.set_enabled(true).unwrap();
-            generation
-        });
-        let mut latency = dlss_generation.as_ref().map(|generation| {
-            Latency::with_external(
-                &device,
-                swapchain.as_ref().unwrap(),
-                LatencySettings::default(),
-                Box::new(generation.latency()),
-            )
-            .unwrap()
-        });
-        let mut dlss = DlssReport::default();
+            wall_panel.prepare();
+            let mut visor = Canvas::new();
+            visor.draw(
+                &Quad::rounded_rect(Vec2::new(50.0, 25.0), Vec2::new(100.0, 50.0), 6.0)
+                    .color(Vec4::new(0.1, 0.8, 0.3, 0.7)),
+            );
+            visor.prepare();
+            let center = (min + max) * 0.5;
+            // 3 × 1.5 m on the wall side of the nave, a centimeter per canvas unit, canvas
+            // y down.
+            let wall_from_panel = Mat4::from_scale_rotation_translation(
+                Vec3::new(0.01, -0.01, 1.0),
+                Quat::IDENTITY,
+                Vec3::new(
+                    center.x - 1.5,
+                    min.y + size.y * 0.25,
+                    center.z + size.z * 0.3,
+                ),
+            );
+            let view_from_visor = Mat4::from_scale_rotation_translation(
+                Vec3::new(0.0012, -0.0012, 1.0),
+                Quat::IDENTITY,
+                Vec3::new(-0.42, -0.2, -0.6),
+            );
+            let ui = player.ui_mut().unwrap();
+            ui.canvases.push((hud, Placement::Screen));
+            ui.canvases
+                .push((wall_panel, Placement::World(wall_from_panel)));
+            ui.canvases
+                .push((visor, Placement::Camera(view_from_visor)));
+        }
+
+        let mut game = {
+            let world = player.world_mut();
+            Flight {
+                spins: QueryState::new(world),
+                walkers: QueryState::new(world),
+                camera,
+                min,
+                max,
+                game_time: 0.0,
+                frame_time: dt,
+                characters,
+                fox: fox_skin,
+            }
+        };
 
         let mut log: Vec<Stages> = Vec::with_capacity(frames_to_run);
         let mut passes: std::collections::BTreeMap<&'static str, Vec<f64>> =
             std::collections::BTreeMap::new();
+        let mut presented: Vec<Presented> = Vec::with_capacity(2 * frames_to_run + 8);
+        let mut generated_shown = 0usize;
+        let mut dlss = DlssReport::default();
         let mut first_present = None;
         let mut first_idle = None;
         let mut memory_logged = false;
         let mut drawn = 0usize;
         let mut previous_start: Option<Instant> = None;
-        let mut game_time = 0.0f64;
-        // `--cap`: real frames at most this often, as a game's limiter (ADR 0091: it caps
-        // real frames; frame generation shows twice as many).
-        let cap = option("--cap")
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|fps| *fps > 0.0)
-            .map(|fps| std::time::Duration::from_secs_f64(1.0 / fps));
-        let mut cap_sleeper = cap.and_then(|_| engine_platform::time::PreciseSleeper::new().ok());
-        let mut next_due: Option<Instant> = None;
-        'main: loop {
-            let mut close = false;
-            windows.drain_events(|e| {
-                if matches!(e.kind, WindowEventKind::CloseRequested) {
-                    close = true;
-                }
-            });
-            if close || drawn >= frames_to_run {
-                break 'main;
-            }
-            if let (Some(interval), Some(sleeper)) = (cap, cap_sleeper.as_mut()) {
-                let now = Instant::now();
-                let due = next_due.unwrap_or(now);
-                if due > now {
-                    let _ = sleeper.sleep_until(due);
-                }
-                // At most one frame of catching up after a stall.
-                next_due = Some(due.max(now) + interval);
-            }
-            let mut s = Stages::default();
+        while drawn < frames_to_run && !player.closing() {
             let frame_start = Instant::now();
+            let Some(report) = player.frame(&mut game).unwrap_or_else(|e| panic!("{e}")) else {
+                continue;
+            };
             if let Some(p) = previous_start
                 && let Some(last) = log.last_mut()
             {
                 last.interval = (frame_start - p).as_secs_f64() * 1e6;
             }
             previous_start = Some(frame_start);
-            let pipelines_at_start = engine_rhi::creation_stats().created;
-            // Streamline's Reflex sleeps here with DLSS frame generation; the frame's id
-            // goes with its markers and its inputs.
-            let frame_id = latency.as_mut().map(|l| {
-                let id = l.begin_frame(swapchain.as_ref().unwrap(), &frames).unwrap();
-                l.mark(swapchain.as_ref().unwrap(), Marker::SimulationStart);
-                id
-            });
-            let frame = frames.begin().unwrap();
-            s.wait = us(frame_start);
-            let work = Instant::now();
-            let t = Instant::now();
-            let acquired = match swapchain.as_mut() {
-                Some(swapchain) => match swapchain.acquire(frame.image_available, u64::MAX) {
-                    Ok(a) => Some(a),
-                    // Out of date, or the monitor held for itself lost (ADR 0099).
-                    Err(e) if e.is_out_of_date() => {
-                        frames.wait_idle().unwrap();
-                        let e = swapchain.extent();
-                        swapchain
-                            .recreate(&device, &surface, e.width, e.height)
-                            .unwrap();
-                        continue;
-                    }
-                    Err(e) => panic!("{e}"),
-                },
-                None => None,
+            let mut s = Stages {
+                wait: report.wait + report.latency_wait,
+                acquire: report.acquire,
+                simulate: report.simulate,
+                propagate: report.propagate,
+                extract: report.extract,
+                interpolate: report.interpolate,
+                animate: report.animate,
+                streaming: report.streaming,
+                pools: report.pools,
+                pool_parts: report.pool_parts,
+                upload: report.upload,
+                compose: report.compose,
+                execute: report.execute,
+                submit: report.submit,
+                present: report.present,
+                cpu: report.cpu,
+                pipelines: report.pipelines,
+                arrived: report.arrived,
+                ..Stages::default()
             };
-            let paced_images = paced.as_ref().map(PacedPresenter::next_images);
-            s.acquire = us(t);
-            game_time += dt;
-            let time = game_time as f32;
-            let (eye, rotation) = camera_at(time, min, max);
-
-            // Ticks, the per-frame camera, interpolation.
-            let stages = runtime.frame(
-                dt,
-                &(),
-                &mut scene,
-                |world, (), dt| {
-                    spins.for_each(world, |(t, spin)| {
-                        t.rotation *= Quat::from_rotation_y(spin.0 * dt);
-                    });
-                    walkers.for_each(world, |(t, walk)| {
-                        walk.angle += walk.speed * dt;
-                        let (sin, cos) = walk.angle.sin_cos();
-                        t.translation.x = walk.x + walk.radius * cos;
-                        t.translation.z = walk.z + walk.radius * sin;
-                        t.rotation = Quat::from_rotation_y(-walk.angle);
-                    });
-                },
-                |world, (), _alpha| {
-                    if let Some(t) = world.get_mut::<Transform>(camera) {
-                        t.translation = eye;
-                        t.rotation = rotation;
-                    }
-                },
-            );
-            s.simulate = stages.simulate_us;
-            s.propagate = stages.propagate_us;
-            s.extract = stages.extract_us;
-            s.interpolate = stages.interpolate_us + stages.present_us;
-
-            // Animation: every character's pose on the job system, then its pose for the
-            // GPU with the scene instance's transform (bit for bit, for the motion pass).
-            let t = Instant::now();
-            if let Some((skin, inverse_bind)) = fox_skin.as_ref() {
-                let clip = &skin.clips[1 % skin.clips.len()];
-                let duration = clip.duration().max(1e-3);
-                for_each_parallel(&jobs, &mut characters, 4, |c| {
-                    c.time = (c.time + dt as f32) % duration;
-                    clip.sample(c.time, skin.skeleton.rest(), &mut c.pose);
-                    local_to_model(&skin.skeleton, &c.pose, &Affine3A::IDENTITY, &mut c.model);
-                    skinning_matrices(&c.model, &skin.joints, inverse_bind, &mut c.palette);
-                });
-                for c in &characters {
-                    if let Some(id) = runtime.extract().instance(c.entity)
-                        && let Some(instance) = scene.get(id)
-                    {
-                        skinning.set_scene_instance(c.skinned, Some(id));
-                        skinning.set_pose(c.skinned, &c.palette, &instance.world_from_object);
-                    }
-                }
-                skinning.update_bounds(&mut geometry, Some(&mut scene));
+            generated_shown += usize::from(report.generated_shown);
+            if let Some(paced) = player.paced() {
+                paced.drain_presented(|p| presented.push(p));
             }
-            s.animate = us(t);
-
-            let main = cameras.resolve(&runtime.world).unwrap();
-            let clip_from_world = main.camera.clip_from_world(width as f32 / height as f32);
-            let t = Instant::now();
-            // Mesh levels by distance in every direction: a fast turn finds them loaded.
-            let lod_view = LodView::new(&clip_from_world, eye, height, 1.0).around();
-            let arrived_before = streamer.stats();
-            streamer.update(
-                &mut textures,
-                &mut geometry,
-                &mut allocator,
-                &mut budget,
-                feedback_on.then_some(&mut feedback),
-                Some(&lod_view),
-                &materials,
-                frame.number,
-            );
-            budget.update(&allocator);
-            s.arrived = streamer
-                .stats()
-                .arrived
-                .saturating_sub(arrived_before.arrived);
-            s.streaming = us(t);
-            if first_idle.is_none() && drawn > 0 && streamer.idle() {
-                first_idle = Some(ms(t0));
+            if let Some(generation) = player.dlss() {
+                dlss.record(generation, drawn);
             }
-
-            let extent = match (&swapchain, &paced) {
-                (Some(swapchain), _) => swapchain.extent(),
-                (None, Some(paced)) => paced.extent(),
-                (None, None) => unreachable!("one of them presents"),
-            };
-            let mut settings = main.settings;
-            if paced.is_some() {
-                settings.frame_generation = FrameGeneration::Fsr;
-            }
-            if let Some(l) = latency.as_mut() {
-                settings.frame_generation = FrameGeneration::Dlss;
-                l.mark(swapchain.as_ref().unwrap(), Marker::SimulationEnd);
-                l.mark(swapchain.as_ref().unwrap(), Marker::RenderSubmitStart);
-            }
-            let t = Instant::now();
-            frame_renderer
-                .prepare(
-                    &mut view,
-                    &settings,
-                    (extent.width, extent.height),
-                    PrepareContext {
-                        device: &device,
-                        allocator: &mut allocator,
-                        bindless: &bindless,
-                        materials: &mut materials,
-                        frame_number: frame.number,
-                        skinning: Some(&mut skinning),
-                    },
-                )
-                .unwrap();
-            s.compose = us(t);
-            let lod_bias = materials.texture_lod_bias();
-            let shown;
-            {
-                let t = Instant::now();
-                let mut fg = graph.begin(&frame);
-                ring.begin(&frame);
-                let p = Instant::now();
-                textures
-                    .begin_frame(&mut fg, &mut allocator, &bindless, frame.number)
-                    .unwrap();
-                s.pool_parts[0] = us(p);
-                let p = Instant::now();
-                let mats = materials
-                    .begin_frame(&mut fg, &device, &mut allocator, &textures, frame.number)
-                    .unwrap();
-                s.pool_parts[1] = us(p);
-                let p = Instant::now();
-                let geo = geometry
-                    .begin_frame(&mut fg, &device, &mut allocator, frame.number)
-                    .unwrap();
-                s.pool_parts[2] = us(p);
-                let skinned_frame = skinning
-                    .begin_frame(
-                        &mut fg,
-                        &mut ring,
-                        &device,
-                        &mut allocator,
-                        &bindless,
-                        &geo,
-                        frame.number,
-                    )
-                    .unwrap();
-                s.pools = us(t);
-                let t = Instant::now();
-                let scene_frame = scene
-                    .add_passes(
-                        &mut fg,
-                        &device,
-                        &mut allocator,
-                        &mut ring,
-                        &bindless,
-                        &geo,
-                        &mats,
-                        frame.number,
-                    )
-                    .unwrap()
-                    .unwrap();
-                s.upload = us(t);
-                let import = |fg: &mut engine_render::graph::FrameGraph<'_>,
-                              name: &'static str,
-                              image: PresentImage|
-                 -> Texture {
-                    fg.import_texture(
-                        name,
-                        ImportedTexture {
-                            image: image.image,
-                            view: image.view,
-                            desc: TextureDesc::new_2d(image.format, extent.width, extent.height),
-                            initial: TextureState::undefined(),
-                            final_state: Some(TextureState::transfer_source()),
-                            sampled_index: None,
-                            storage_index: None,
-                        },
-                    )
-                };
-                let (present, generated) = match (&swapchain, paced_images) {
-                    (Some(swapchain), _) => (
-                        // DLSS frame generation: the frame is drawn apart, kept without its UI
-                        // for Streamline, and copied to the swapchain image under the UI.
-                        Some(PresentTarget::import_with(
-                            &mut fg,
-                            swapchain,
-                            acquired.unwrap().index,
-                            dlss_generation.is_some()
-                                || present_apart
-                                    .unwrap_or_else(|| swapchain.presents_across_adapters()),
-                        )),
-                        None,
-                    ),
-                    (None, Some(images)) => (
-                        None,
-                        Some((
-                            import(&mut fg, "real frame", images.real),
-                            GeneratedTarget {
-                                texture: import(&mut fg, "generated frame", images.generated),
-                                format: images.generated.raw_format,
-                                source_format: images.real.raw_format,
-                            },
-                        )),
-                    ),
-                    (None, None) => unreachable!("one of them presents"),
-                };
-                let target = match (&present, &generated) {
-                    (Some(present), _) => present.texture,
-                    (None, Some((real, _))) => *real,
-                    (None, None) => unreachable!("one of them presents"),
-                };
-                let t = Instant::now();
-                let mut context = FrameContext {
-                    device: &device,
-                    allocator: &mut allocator,
-                    bindless: &bindless,
-                    ring: &mut ring,
-                    frame_number: frame.number,
-                    dt: dt as f32,
-                };
-                let scene_input = SceneInput {
-                    geometry: &geo,
-                    materials: &mats,
-                    draws: SceneDraws::Scene(&scene_frame),
-                    skinning: Some(&skinned_frame),
-                    light: sun,
-                    lights: &lights,
-                    decals: &[],
-                    environment: Some(&environment),
-                    reflection_probes: None,
-                    gi: None,
-                };
-                let view_target = ViewTarget {
-                    texture: target,
-                    rect: None,
-                    load: LoadOp::DontCare,
-                };
-                let view_frame = match generated {
-                    Some((_, generated_target)) => frame_renderer
-                        .add_view_generating(
-                            &mut fg,
-                            &mut context,
-                            &mut view,
-                            &scene_input,
-                            &main.camera,
-                            view_target,
-                            generated_target,
-                            |_, _| {},
-                        )
-                        .unwrap(),
-                    None => frame_renderer
-                        .add_view(
-                            &mut fg,
-                            &mut context,
-                            &mut view,
-                            &scene_input,
-                            &main.camera,
-                            view_target,
-                        )
-                        .unwrap(),
-                };
-                // DLSS frame generation: the UI alone into a layer of its own, cleared to
-                // nothing (Streamline composites it over the frames it generates).
-                let ui_layer = (dlss_generation.is_some() && ui.is_some()).then(|| {
-                    let layer = fg.create_texture(
-                        "ui layer",
-                        TextureDesc::new_2d(swapchain_format, extent.width, extent.height),
-                    );
-                    fg.add_pass("ui layer clear")
-                        .write(layer, Access::TransferWrite)
-                        .execute(move |ctx| {
-                            let range = vk::ImageSubresourceRange {
-                                aspect_mask: vk::ImageAspectFlags::COLOR,
-                                base_mip_level: 0,
-                                level_count: 1,
-                                base_array_layer: 0,
-                                layer_count: 1,
-                            };
-                            // SAFETY: recording; the graph made the layer a transfer
-                            // destination.
-                            unsafe {
-                                ctx.device.cmd_clear_color_image(
-                                    ctx.cmd,
-                                    ctx.image(layer),
-                                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                                    &vk::ClearColorValue::default(),
-                                    &[range],
-                                );
-                            }
-                        });
-                    layer
-                });
-                if let Some(ui) = &ui {
-                    ui.add_passes(
-                        &mut fg,
-                        &mut ring,
-                        &bindless,
-                        &layer,
-                        ui_layer.unwrap_or(target),
-                        &main.camera,
-                        &view_frame,
-                    )
-                    .unwrap();
-                    if let (Some((_, g)), Some(frame_g)) = (generated, view_frame.generated)
-                        && frame_g.shown
-                    {
-                        ui.add_passes(
-                            &mut fg,
-                            &mut ring,
-                            &bindless,
-                            &layer,
-                            g.texture,
-                            &frame_g.camera,
-                            &view_frame,
-                        )
-                        .unwrap();
-                    }
-                }
-                let backbuffer = present.as_ref().map(PresentTarget::swapchain_texture);
-                if let Some(present) = present {
-                    present.finish(&mut fg);
-                }
-                // DLSS frame generation: the UI over the copied frame, then the frame's
-                // inputs to Streamline.
-                if let (Some(ui), Some(_), Some(backbuffer)) = (&ui, ui_layer, backbuffer) {
-                    ui.add_passes(
-                        &mut fg,
-                        &mut ring,
-                        &bindless,
-                        &layer,
-                        backbuffer,
-                        &main.camera,
-                        &view_frame,
-                    )
-                    .unwrap();
-                }
-                if let (Some(generation), Some(id)) = (&dlss_generation, frame_id)
-                    && let Some(input) =
-                        view_frame.dlss_generation_input(&main.camera, target, ui_layer)
-                {
-                    generation.add_pass(&mut fg, input, id);
-                }
-                shown = view_frame.generated.is_some_and(|g| g.shown);
-                if feedback_on {
-                    feedback
-                        .add_pass(
-                            &mut fg,
-                            &device,
-                            &mut allocator,
-                            &bindless,
-                            &geo,
-                            &mats,
-                            &view_frame.passes,
-                            view_frame.render,
-                            lod_bias,
-                            frame.number,
-                        )
-                        .unwrap();
-                }
-                s.compose += us(t);
-                let t = Instant::now();
-                fg.execute_with_bindless(&mut allocator, Some(&bindless))
-                    .unwrap();
-                s.execute = us(t);
-            }
-            let t = Instant::now();
-            let number = frame.number;
-            match (&swapchain, paced_images) {
-                (Some(swapchain), _) => frames
-                    .submit(
-                        device.graphics,
-                        frame,
-                        true,
-                        Some(swapchain.render_finished(acquired.unwrap().index)),
-                    )
-                    .unwrap(),
-                (None, Some(images)) => frames
-                    .submit_waiting(device.graphics, frame, false, Some(images.wait), None, None)
-                    .unwrap(),
-                (None, None) => unreachable!("one of them presents"),
-            }
-            s.submit = us(t);
-            let t = Instant::now();
-            match (&swapchain, &mut paced) {
-                (Some(swapchain), _) => {
-                    if let Some(l) = latency.as_mut() {
-                        l.mark(swapchain, Marker::RenderSubmitEnd);
-                        l.mark(swapchain, Marker::PresentStart);
-                    }
-                    let _ = swapchain.present(device.graphics, acquired.unwrap().index);
-                    if let Some(l) = latency.as_mut() {
-                        l.mark(swapchain, Marker::PresentEnd);
-                    }
-                    if let Some(generation) = &dlss_generation {
-                        dlss.record(generation, drawn);
-                    }
-                }
-                (None, Some(paced)) => {
-                    generated_shown += usize::from(shown);
-                    paced
-                        .present(PacedFrame {
-                            done: (frames.timeline(), number),
-                            generated: shown,
-                            present_id: None,
-                            reset: !shown,
-                        })
-                        .unwrap();
-                    paced.drain_presented(|p| presented.push(p));
-                }
-                (None, None) => unreachable!("one of them presents"),
-            }
-            s.present = us(t);
-            s.cpu = us(work);
             if first_present.is_none() {
                 first_present = Some(ms(t0));
             }
+            if first_idle.is_none() && drawn > 0 && player.streamer().is_some_and(|s| s.idle()) {
+                first_idle = Some(ms(t0));
+            }
+            let graph = player.graph();
             s.gpu = f64::from(graph.gpu_frame_time().unwrap_or(0.0));
             for p in graph.gpu_pass_times() {
                 if f64::from(p.gpu_us) > s.top.1 {
@@ -1860,26 +1178,23 @@ mod windowed {
                     passes.entry(p.name).or_default().push(f64::from(p.gpu_us));
                 }
             }
-            s.pipelines = engine_rhi::creation_stats().created - pipelines_at_start;
             log.push(s);
             drawn += 1;
             if drawn == WARMUP && !memory_logged {
                 memory_logged = true;
-                memory_report(&format!("after {WARMUP} frames"), &allocator, &graph);
+                memory_report(
+                    &format!("after {WARMUP} frames"),
+                    player.allocator(),
+                    player.graph(),
+                );
             }
         }
-        match &hooks {
-            // Streamline's queues drain too.
-            Some(hooks) => hooks.device_wait_idle(&device).unwrap(),
-            None => frames.wait_idle().unwrap(),
-        }
-        if let Some(mut p) = paced.take() {
-            p.drain_presented(|x| presented.push(x));
-            swapchain = Some(p.stop(&mut allocator).unwrap());
+        if let Some(paced) = player.paced() {
+            paced.drain_presented(|x| presented.push(x));
         }
         if let Some(path) = &record_pso {
             let mut record = engine_assets::pso_record::PsoRecord::new();
-            for (desc, entries) in frame_renderer.forward().material_type_entries_drawn() {
+            for (desc, entries) in player.renderer().forward().material_type_entries_drawn() {
                 for entry in entries {
                     record.add(&desc.module, &desc.type_name, &entry);
                 }
@@ -1897,35 +1212,33 @@ mod windowed {
 
         // The report.
         println!(
-            "### Flight: {} ({} instances), {movers} movers, {} characters, {} local lights\n",
+            "### Flight: {} ({instances} meshes), {movers} movers, {} characters, {light_count} local lights\n",
             pack.display(),
-            scene_layout.instances.len(),
-            characters.len(),
-            lights.len()
+            game.characters.len(),
         );
         println!(
-            "Adapter: {adapter_name}; {width}×{height} ({}), {antialiasing} at {quality:?}, AO {:?}; present mode {:?}, {}; {drawn} frames ({WARMUP} warm-up frames left out)\n",
-            match (window_mode, exclusive) {
-                (WindowMode::Windowed, _) => String::from("a window"),
-                (WindowMode::FullScreen, true) => {
-                    String::from("full screen, the monitor held by the swapchain")
-                }
-                (WindowMode::FullScreen, false) if exclusive_wanted => format!(
-                    "full screen, borderless: the driver refused the monitor ({exclusive_refused:?})"
+            "Adapter: {adapter_name}; {width}×{height} ({}), {antialiasing} at {quality:?}, AO {:?}; present mode {:?}, {}; latency control {}; {drawn} frames ({WARMUP} warm-up frames left out)\n",
+            match (presentation.window, presentation.exclusive) {
+                (Window::Windowed { .. }, _) => String::from("a window"),
+                (_, true) => String::from("full screen, the monitor held by the swapchain"),
+                (Window::Exclusive, false) => format!(
+                    "full screen, borderless: the driver refused the monitor ({:?})",
+                    presentation.exclusive_refused
                 ),
-                (WindowMode::FullScreen, false) => String::from("full screen, borderless"),
+                (Window::FullScreen, false) => String::from("full screen, borderless"),
             },
-            ambient_occlusion.map(|a| a.quality),
-            present_mode,
-            match (
-                present_apart.unwrap_or(across_adapters) || frame_generation.is_some(),
-                across_adapters,
-            ) {
+            defaults.ambient_occlusion.map(|a| a.quality),
+            presentation.present_mode,
+            match (presentation.drawn_apart, presentation.across_adapters) {
                 (true, true) => "drawn apart and copied (the monitor is on another GPU)",
                 (true, false) => "drawn apart and copied",
                 (false, true) => "drawn into the swapchain image (the monitor is on another GPU)",
                 (false, false) => "drawn into the swapchain image",
-            }
+            },
+            match player.latency() {
+                Some(latency) => format!("{:?}, {:?}", latency.backend(), settings.low_latency),
+                None => String::from("none"),
+            },
         );
         println!("**Start-up** (ms):\n");
         println!("| phase | ms |\n|---|---:|");
@@ -1940,16 +1253,18 @@ mod windowed {
             "| streaming idle for the first time (since `main`) | {:.1} |",
             first_idle.unwrap_or(f64::NAN)
         );
+        let pipelines = player.startup().pipelines;
         println!(
             "\nPipelines at start-up: {} created ({} from the pipeline cache, {} compiled), {:.1} ms in the driver summed over threads; cache file: {}\n",
-            pipelines_after.created - pipelines_before.created,
-            pipelines_after.cache_hits - pipelines_before.cache_hits,
-            pipelines_after.cache_misses - pipelines_before.cache_misses,
-            (pipelines_after.time - pipelines_before.time).as_secs_f64() * 1e3,
-            match &cache_load {
-                Some(load) => format!("{load:?}"),
-                None => String::from("not used"),
-            }
+            pipelines.created,
+            pipelines.from_cache,
+            pipelines.compiled,
+            pipelines.driver_ms,
+            player
+                .startup()
+                .cache
+                .clone()
+                .unwrap_or_else(|| String::from("not used"))
         );
 
         let timed: Vec<Stages> = log.iter().skip(WARMUP).copied().collect();
@@ -2056,15 +1371,15 @@ mod windowed {
                 s.pipelines
             );
         }
-        if paced_used {
+        if player.paced().is_some() {
             frame_generation_report(&presented, generated_shown, drawn);
         }
-        if dlss_generation.is_some() {
+        if player.dlss().is_some() {
             dlss.report(drawn);
         }
         println!();
-        memory_report("at the end", &allocator, &graph);
-        let stats = streamer.stats();
+        memory_report("at the end", player.allocator(), player.graph());
+        let stats = player.streamer().map(|s| s.stats()).unwrap_or_default();
         println!(
             "Streaming: {} texture levels arrived ({:.1} MiB read), {} mesh levels; request to arrival {:.0} ms on average, {:.0} ms at worst ({} frames); textures planned {:.1} MiB of {:.1} MiB required, grant {:.1} MiB.\n",
             stats.arrived,
@@ -2078,38 +1393,7 @@ mod windowed {
             stats.textures.grant as f64 / MIB,
         );
 
-        if let Some(path) = cache_path.as_deref() {
-            let _ = device.save_pipeline_cache(path);
-        }
-        // SAFETY: the device is idle.
-        unsafe {
-            if let Some(mut ui) = ui {
-                ui.destroy(&mut allocator);
-            }
-            frame_renderer.destroy(&device, &mut allocator, &bindless);
-            view.destroy(&mut allocator, &bindless);
-            scene.destroy(&mut allocator);
-            skinning.destroy(&mut allocator);
-            feedback.destroy(&mut allocator);
-            environment.destroy(&mut allocator, &bindless);
-            graph.destroy(&mut allocator, Some(&bindless));
-            ring.destroy(&mut allocator);
-            geometry.destroy(&mut allocator);
-            materials.destroy(&mut allocator);
-            textures.destroy(&mut allocator, &bindless);
-        }
-        drop(streamer);
-        drop(frames);
-        drop(frame_renderer);
-        drop(bindless);
-        drop(allocator);
-        drop(swapchain);
-        drop(surface);
-        // Streamline before the device it is attached to (its shutdown releases what it
-        // made on it): the `Arc<Device>` above would otherwise go first.
-        drop(latency);
-        drop(dlss_generation);
-        drop(streamline);
-        windows.destroy_window(window.id).unwrap();
+        // The player's drop waits for the GPU, saves the pipeline cache and tears down.
+        drop(player);
     }
 }
