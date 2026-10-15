@@ -1534,6 +1534,45 @@ settings.depth_of_field = Some(DofSettings {
 - **Not yet:** bokeh shapes (blades), autofocus, translucent surfaces (one depth per
   pixel).
 
+### Motion blur in cutscenes (ADR 0096)
+
+While a film camera's shutter is open, what moves streaks along its motion. The engine
+does this for **cinematic views only**: cutscenes and sequences. The team decided (ADR
+0067) that a view the player controls has no motion blur. It hides the scene just when
+the player needs to read it, adds felt latency and makes some players unwell. The API
+enforces it: the settings live inside `ViewKind::Cinematic`.
+
+```rust
+use engine_frame::ViewKind;
+use engine_render::motion_blur::MotionBlurSettings;
+
+// A cutscene's camera.
+settings.kind = ViewKind::Cinematic {
+    motion_blur: Some(MotionBlurSettings::default()), // a 180° shutter
+};
+// Back to play: no motion blur, and no way to ask for it.
+settings.kind = ViewKind::Gameplay;
+```
+
+With `engine_runtime`, mark the camera entity `cinematic: 1` and give it a `shutter`
+(0.5 is film's 180°; 0 is none).
+
+- **What blurs:** the camera's motion and every object's, from the motion vectors the
+  renderer writes. The settings:
+  - `shutter`: the share of the frame the shutter is open (1: a streak as long as the
+    frame's motion);
+  - `samples`: 19 by default;
+  - `max_radius`: the longest blur each way, 3.7 % of the height (40 pixels at 1080p).
+- **What it gets right:**
+  - a moving object streaks over a still background;
+  - a still object in front of a moving background stays sharp.
+- **Cuts:** mark them (`ViewCamera::cut`, `Camera::cut`). The camera's jump then leaves
+  no streak: its motion starts anew.
+- **What it costs** at 1080p, every pixel moving:
+  - 0.43 ms on an RTX 4060 Ti;
+  - 15.7 ms on a Radeon iGPU (7.9 ms with `samples: 9`);
+  - nothing on gameplay views, and nothing on cinematic views without it.
+
 ## 12. Transparent surfaces
 
 Materials with `AlphaMode::Blend` are drawn by a transparent pass after the opaque
