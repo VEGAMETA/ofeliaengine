@@ -107,3 +107,8 @@ cargo run -p engine_render --release --example scene_bench -- test-assets/Sponza
   - NVIDIA: `Register Count`, `Binary Size`.
 - `ForwardRenderer::shading_statistics` gives them for each shading variant (with or
   without local lights and an environment).
+- The perf gate checks them for every pipeline its scenes make: `perf_gate --registers`
+  (run by `tools\check.ps1 -Perf` on both GPUs) lists each pipeline whose vector registers
+  or spills grew against `tests/golden/perf/<vendor>.registers.tsv`, as a warning. A
+  change that moves them on purpose records the new values with
+  `perf_gate --registers --update` on both GPUs (`ENGINE_ADAPTER=radeon` for the iGPU).

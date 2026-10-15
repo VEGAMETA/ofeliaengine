@@ -230,7 +230,8 @@ version must include the date it was checked.
   VGPRs (9–13 % slower). Use separate entry points with literal arguments and lazily created
   pipelines, or keep the parameter out of the shader (the LOD bias lives in the samplers).
   Check with `ENGINE_PIPELINE_STATS=1 ENGINE_ADAPTER=radeon scene_bench --sky --pipeline-stats`
-  (ADR 0058, ADR 0060).
+  (ADR 0058, ADR 0060); `tools/check.ps1 -Perf` warns when any pipeline's registers grow
+  (`perf_gate --registers`, ADR 0062).
 
 ---
 

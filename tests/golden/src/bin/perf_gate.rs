@@ -34,6 +34,13 @@
 //!   `--update` their rows replace theirs in the baseline and the others stay: a new
 //!   scene's first baseline).
 //!
+//! `perf_gate --registers [--update] [--scene NAME]...` is the register check instead
+//! ([`engine_golden::registers`], ADR 0062's addendum of 2026-10-15): every scene rendered
+//! once with the driver's pipeline statistics on, and the vector registers and spills of
+//! every pipeline they made against `tests/golden/perf/<vendor>.registers.tsv`. A pipeline
+//! using more is reported (`**more registers**`), never fatal. `--update` writes the
+//! baseline (with `--scene`, those scenes' pipelines replace theirs).
+//!
 //! Run it in release with the implicit layers off (`VK_LOADER_LAYERS_DISABLE=~implicit~`,
 //! overlays change timing; elevated, also each overlay's own switch, as `tools\check.ps1`
 //! sets them) and `ENGINE_ADAPTER=radeon` for the iGPU.
@@ -42,6 +49,7 @@
 
 use engine_core::math::Vec3;
 use engine_frame::{Antialiasing, DeviceClass, Msaa, Quality, RenderDefaults, Upscale, ViewKind};
+use engine_golden::registers::{self, Registers};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights, vendor_name,
 };
@@ -344,6 +352,126 @@ fn baseline_path(vendor: &str) -> PathBuf {
         .join(format!("{vendor}.tsv"))
 }
 
+/// The register check (`--registers`, the module's documentation): renders `shots` once
+/// each with the driver's statistics on, and compares the registers of every pipeline
+/// they made with this vendor's baseline, or with `update` writes it (`some`: only some
+/// scenes ran, so the baseline's other pipelines stay, and none is reported gone).
+fn check_registers(shots: &[&Shot], update: bool, some: bool) -> ExitCode {
+    let started = Instant::now();
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let shaders = registers::shader_names(&root);
+    let options = RenderOptions {
+        validation: false,
+        timed_frames: 0,
+    };
+    let mut measured = Registers::new();
+    let mut gpu: Option<(String, String)> = None;
+    for shot in shots {
+        let why = match render(shot, options) {
+            Ok(r) => {
+                gpu = Some((vendor_name(r.vendor_id), r.adapter));
+                None
+            }
+            Err(Skip::NoGpu(e)) => {
+                eprintln!("no GPU: {e}");
+                return ExitCode::FAILURE;
+            }
+            Err(Skip::NoScene(path)) => Some(format!("{} missing", path.display())),
+            Err(Skip::Unsupported(e)) => Some(e),
+            Err(Skip::NoDlss(e)) => Some(format!("no DLSS ({e})")),
+        };
+        if let Some(why) = why {
+            eprintln!("{}: skipped, {why}", shot.name);
+        }
+        registers::add(
+            &mut measured,
+            &engine_rhi::take_pipeline_records(),
+            &shaders,
+        );
+    }
+    let Some((vendor, adapter)) = gpu else {
+        eprintln!("nothing rendered");
+        return ExitCode::FAILURE;
+    };
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("perf")
+        .join(format!("{vendor}.registers.tsv"));
+    println!("registers: {adapter}; baseline {}", path.display());
+    if measured.is_empty() {
+        println!("registers: the driver reports no pipeline statistics; nothing to check");
+        return ExitCode::SUCCESS;
+    }
+    if update {
+        let mut rows = if some {
+            registers::read(&path)
+        } else {
+            Registers::new()
+        };
+        rows.extend(measured);
+        let header = format!(
+            "Vector registers and spills of every pipeline the perf gate's scenes make, as \
+             the driver reports them\n(perf_gate --registers, ADR 0062), {adapter}"
+        );
+        if let Err(e) = std::fs::write(&path, registers::format(&rows, &header)) {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+        println!(
+            "register baseline written ({} pipelines, {:.0} s)",
+            rows.len(),
+            started.elapsed().as_secs_f64()
+        );
+        return ExitCode::SUCCESS;
+    }
+    let baseline = registers::read(&path);
+    let changes = registers::compare(&baseline, &measured);
+    if !changes.grew.is_empty() || !changes.shrank.is_empty() {
+        println!("| pipeline | stage | statistic | baseline | now |");
+        println!("|---|---|---|---:|---:|");
+        for (change, more) in changes
+            .grew
+            .iter()
+            .map(|c| (c, true))
+            .chain(changes.shrank.iter().map(|c| (c, false)))
+        {
+            println!(
+                "| {} | {} | {} | {} | {}{} |",
+                change.pipeline,
+                change.stage,
+                change.statistic,
+                change.before,
+                change.now,
+                if more { " **more registers**" } else { "" }
+            );
+        }
+    }
+    for pipeline in &changes.new {
+        println!("registers: new pipeline {pipeline}");
+    }
+    if !some {
+        for pipeline in &changes.gone {
+            println!("registers: gone {pipeline}");
+        }
+    }
+    let grew: BTreeSet<&str> = changes.grew.iter().map(|c| c.pipeline.as_str()).collect();
+    println!(
+        "registers: {} pipelines, {} use more than the baseline (a warning), {} fewer; {} new, \
+         {} gone ({:.0} s)",
+        measured.len(),
+        grew.len(),
+        changes
+            .shrank
+            .iter()
+            .map(|c| c.pipeline.as_str())
+            .collect::<BTreeSet<_>>()
+            .len(),
+        changes.new.len(),
+        if some { 0 } else { changes.gone.len() },
+        started.elapsed().as_secs_f64()
+    );
+    ExitCode::SUCCESS
+}
+
 /// `scene \t pass \t µs` lines.
 fn read_baseline(path: &Path) -> BTreeMap<(String, String), f64> {
     let Ok(text) = std::fs::read_to_string(path) else {
@@ -531,10 +659,12 @@ fn main() -> ExitCode {
     let mut frames = 100usize;
     let mut threshold: Option<f64> = None;
     let mut only: Vec<String> = Vec::new();
+    let mut check_registers_only = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--update" => update = true,
+            "--registers" => check_registers_only = true,
             "--strict" => strict = true,
             "--runs" => runs = args.next().and_then(|v| v.parse().ok()).unwrap_or(runs),
             "--frames" => frames = args.next().and_then(|v| v.parse().ok()).unwrap_or(frames),
@@ -558,6 +688,11 @@ fn main() -> ExitCode {
         .iter()
         .filter(|s| only.is_empty() || only.iter().any(|n| n == s.name))
         .collect();
+    if check_registers_only {
+        // SAFETY: no other thread runs yet; each device reads it when it is created.
+        unsafe { std::env::set_var("ENGINE_PIPELINE_STATS", "1") };
+        return check_registers(&shots, update, !only.is_empty());
+    }
     let mut gpu = Measured::default();
     let Some(runs_of) = measure(&shots, runs, options, &mut gpu) else {
         return ExitCode::FAILURE;

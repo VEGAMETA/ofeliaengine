@@ -56,8 +56,8 @@ pub use memory::{
 };
 pub use pipeline::{
     Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineContext, PipelineCreationStats,
-    PipelineDesc, PipelineStatistic, ShaderStageDesc, SharedPipelineLayout, creation_stats,
-    spirv_words,
+    PipelineDesc, PipelineRecord, PipelineStatistic, ShaderStageDesc, SharedPipelineLayout,
+    creation_stats, spirv_hash, spirv_words, take_pipeline_records,
 };
 pub use pipeline_cache::{PipelineCacheLoad, PipelineCacheSave};
 pub use swapchain::{

@@ -546,11 +546,15 @@ grown, divide and conquer); the old labels stay in parentheses.
      - the sun's 3 × 3 PCF as 4 gathers tried: the RTX's forward 0.3–5.7 % faster in every
        scene, but the Radeon's shading registers rose (plain 47 → 54, environment 64 → 78)
        and 12 scenes ran 4–12 % slower. Not adopted.
-6c. **The perf gate's register check** (the owner, 2026-10-15). Every pipeline's
-   registers (the drivers' statistics, which do not vary from run to run) against a
-   baseline per vendor, a warning listing the pipelines that grew. The time gate let 64 →
-   70 VGPRs through on the Radeon (ADR 0093); the PCF gathers of 2026-10-15 rose 64 → 78
-   and cost 12 scenes 4–12 %.
+6c. ~~**The perf gate's register check**~~ (the owner, 2026-10-15). **Done 2026-10-15
+   (ADR 0062's addendum):** `perf_gate --registers`, run by `tools/check.ps1 -Perf` on
+   both GPUs.
+   - Every pipeline the perf scenes make (191 per vendor) is compared with
+     `tests/golden/perf/<vendor>.registers.tsv`: its vector registers and spills.
+   - A pipeline that uses more is a warning (`**more registers**`).
+
+   The time gate had let 64 → 70 VGPRs through on the Radeon (ADR 0093); the PCF gathers
+   of 2026-10-15 rose 64 → 78 and cost 12 scenes 4–12 %.
 6d. **Anisotropic filtering as a player setting** (the owner, 2026-10-15). Off / 2× / 4× /
    8× / 16× for the materials, 16× by default, changed at run time. Measured 2026-10-15:
    16× → 4× −1.5–3 % of the forward pass, 2× −7 %, off −13–19 %.

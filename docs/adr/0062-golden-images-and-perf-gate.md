@@ -215,3 +215,44 @@ JEDEC speed) could remove the cause; the owner chose to raise the iGPU's thresho
 Consequences: on the Radeon only regressions of about 10 % or more are reported, which
 still covers the iGPU-specific ones the gate exists for (the 64 → 72 VGPR forward shader
 was 9–13 % slower); smaller ones show on the RTX unless they are AMD-only.
+
+## Addendum (2026-10-15): the register check (queue item 6c)
+
+The time gate cannot see a few registers more. The Radeon's environment shading went from
+64 to 70 VGPRs under it (ADR 0093: the forward pass +5 % on Intel's Sponza, under the AMD
+threshold), and a trial of the sun's PCF as 4 gathers raised 64 to 78 and cost 12 scenes
+4–12 %. Registers do not vary from run to run as times do. The owner chose a register
+check, as a warning (2026-10-15).
+
+- **Recorded at creation.** On a device created with `ENGINE_PIPELINE_STATS=1`, every
+  pipeline records the driver's statistics as it is made
+  (`engine_rhi::take_pipeline_records`), with what identifies it:
+  - its stages' entry points and SPIR-V hashes;
+  - its specialization constants;
+  - for graphics, what it draws to (formats, samples, alpha to coverage), which the
+    compiled code can depend on.
+- **Names that survive shader edits.** `perf_gate` hashes the repository's `.spv` files
+  and names each stage by its file, so a pipeline reads
+  `forward.vertexMain+forward.fragmentMain spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT`.
+- **Watched:**
+  - vector registers (AMD `numUsedVgprs`, NVIDIA `Register Count`);
+  - spills (AMD `scratchMemUsageInBytes`).
+- **Not watched:**
+  - AMD's scalar registers: on RDNA they never bound occupancy;
+  - shared memory: the shader declares it;
+  - NVIDIA's `Local Memory Size`: it reads 2^36 for every stage.
+- **`perf_gate --registers`** renders every perf scene once and compares each pipeline
+  with `tests/golden/perf/<vendor>.registers.tsv`.
+  - One that uses more is listed with `**more registers**`. Fewer, new and gone ones are
+    listed too.
+  - Never fatal.
+  - `--update` writes the baseline. A change that moves registers on purpose updates it on
+    both GPUs and says why.
+- **`tools/check.ps1 -Perf`** runs it after each GPU's time gate and shows the warnings in
+  its summary.
+- **Measured (ref-1):**
+  - 191 pipelines per vendor: 14 s on the RTX, 33 s on the Radeon;
+  - a second run reads every value the same;
+  - a baseline lowered by hand (64 → 58 VGPRs) is reported.
+- **Not covered:** the pipelines the vendor SDKs make themselves (FidelityFX, Streamline),
+  and those no perf scene makes.

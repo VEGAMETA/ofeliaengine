@@ -97,8 +97,9 @@ pub struct Device {
     shader_float16: bool,
     /// Ray queries and acceleration structures (ADR 0087), when enabled.
     ray_query: Option<crate::accel::RayQuery>,
-    /// Pipelines capture the driver's statistics (`ENGINE_PIPELINE_STATS=1`).
-    pipeline_statistics: bool,
+    /// Reads the driver's statistics of pipelines, which capture them
+    /// (`ENGINE_PIPELINE_STATS=1`); `None` when they do not.
+    pipeline_statistics: Option<ash::khr::pipeline_executable_properties::Device>,
     /// Extensions a library asked for ([`Device::with_extensions`]) that were enabled.
     extra_extensions: Vec<std::ffi::CString>,
     /// Graphics + compute + transfer (+ present on a desktop GPU).
@@ -522,6 +523,8 @@ impl Device {
         let ray_query = rays.then(|| {
             crate::accel::RayQuery::new(instance.raw(), &raw, adapter.physical, position_fetch)
         });
+        let pipeline_statistics = pipeline_statistics
+            .then(|| ash::khr::pipeline_executable_properties::Device::new(instance.raw(), &raw));
         Ok(Self {
             pipeline_cache,
             diagnostics: Some(diagnostics),
@@ -557,7 +560,14 @@ impl Device {
     /// set `ENGINE_PIPELINE_STATS=1` before creating the device, on a driver with
     /// `VK_KHR_pipeline_executable_properties`.
     pub fn pipeline_statistics_enabled(&self) -> bool {
-        self.pipeline_statistics
+        self.pipeline_statistics.is_some()
+    }
+
+    /// Reads the driver's statistics of this device's pipelines, when they capture them.
+    pub(crate) fn pipeline_statistics_reader(
+        &self,
+    ) -> Option<&ash::khr::pipeline_executable_properties::Device> {
+        self.pipeline_statistics.as_ref()
     }
 
     /// Where the extra queues of [`Self::with_extras`] start (the next index after the
@@ -816,7 +826,7 @@ impl Device {
         crate::pipeline::PipelineContext {
             device: Arc::clone(&self.raw),
             cache: self.pipeline_cache,
-            statistics: self.pipeline_statistics,
+            statistics: self.pipeline_statistics.clone(),
             jobs: self.jobs.clone(),
         }
     }
