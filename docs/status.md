@@ -521,8 +521,9 @@ grown, divide and conquer); the old labels stay in parentheses.
    2026-10-15 a group's render pixels are tone mapped once in shared memory, ADR 0043's
    addendum: Radeon −5 to −12 % in the perf gate's frames, RTX −5 to −7 %; the attempt of
    2026-10-11 below shared only the loads),
-   ~~bloom 1.6 ms~~, local shadows redrawn every frame when casters move (a
-   per-frame redraw budget; never the patented static/dynamic split). TAAU tried
+   ~~bloom 1.6 ms~~, ~~local shadows redrawn every frame when casters move~~ (a per-frame
+   redraw budget; never the patented static/dynamic split; since 2026-10-15 moved casters
+   redraw pieces of the views, ADR 0071's addendum: for the same work 25–69 % less). TAAU tried
    2026-10-11: its 3 × 3 color and depth through shared memory (the bloom's trick) made
    the Radeon's resolve 20 % slower and the RTX's 3 % faster; without its nine `exp`
    1 % faster; its history images moved in memory, unchanged. Neither its texture reads

@@ -160,3 +160,55 @@ reads the bits back as a float. Renders are the same bytes run after run on both
 Cost, `scene_bench --contact` (Sponza, 1080p): the RTX's contact passes 182–198 → 210 µs;
 the Radeon's 2,946 → 3,009 µs and its forward pass +180 µs (it reads 4 bytes of mask per
 pixel instead of 1), about 2 % of its frame. Only views with contact shadows pay it.
+
+## Addendum (2026-10-15): moved casters redraw pieces of the views
+
+Queue item 6b. The cascades already draw only what changed (ADR 0093's step 2). A light's
+views were drawn whole when any caster in its range changed: with things moving near
+lights, 12 views a frame cost the Radeon about 1.6 ms in Sponza.
+
+- **What a light keeps.** An out-of-date light keeps the world boxes of what changed in its
+  range, old and new places: up to 8, more merged into the box that grows least.
+- **Pieces.** For each of its views, the boxes in the view's frustum are projected to
+  rectangles of its tile (a texel wider), gathered into at most 2.
+  - A view no box reaches is not drawn.
+  - A view is drawn whole when its pieces would cover more than half of it, or a box in
+    its frustum reaches across its eye plane (around the light).
+- **Drawn through the view's projection narrowed to the piece,** with the piece as viewport
+  and scissor. Each piece is a drawn view of its own, so nothing else changed:
+  - every texel lands where the view puts it;
+  - the GPU culling (the frustum's planes from the matrix) keeps what reaches the piece;
+  - the level of detail stays the view's.
+- **The budget counts a piece as a view.** A large mesh reaching into a piece is drawn
+  whole, its vertices as for the view.
+- **The draw lists are sized at least for the budget,** so their sizes stay put while
+  pieces change the count every frame (no allocation per frame).
+
+Measured (ref-1, release, `scene_bench --sky --lights 16 --shadowed-lights 16`; the movers
+are the scene's smallest draws, going back and forth). Means over 400 frames; `budget
+200` redraws every out-of-date light every frame, the same work before and after:
+
+| scene, movers, budget | Radeon before → after | RTX before → after | lights updated a frame |
+|---|---|---|---|
+| Intel's Sponza, 256, 12 | 4.52 → 2.78 ms | 140 → 91 µs | 2 → 4 |
+| Intel's Sponza, 256, 200 | 10.35 → 3.23 ms | 311 → 104 µs | 5 → 5 |
+| Sponza, 64, 12 | 1.61 → 1.83 ms | 56 → 67 µs | 2 → 3 |
+| Sponza, 64, 200 | 2.82 → 2.02 ms | 92 → 69 µs | 3.5 → 3.5 |
+
+- **For the same work, 25–69 % less.** Intel's Sponza is many meshes, so a piece draws
+  only those near the movers. Sponza is a few large ones, each drawn whole into any piece
+  it reaches.
+- **At the default budget, more lights are brought up to date a frame,** since views no
+  change reaches cost nothing:
+  - Intel's Sponza: twice as many lights, in 35–39 % less time;
+  - Sponza: half as many again, in 13–20 % more time (each light 24 % cheaper).
+- **Tests:**
+  - `local_shadows_match_analytic_shadows_and_cache`, both GPUs:
+    - a caster moved near the spot light draws one piece;
+    - moved back, the frame is the reference's bit for bit (the narrowed projection draws
+      as the view);
+    - the pole beside the point light draws 2 pieces instead of 6 views;
+    - a removal draws one piece.
+  - Unit tests of the pieces, the narrowed projection, the merging and the budget.
+  - No allocation per frame.
+- **Static scenes** (the perf gate's) draw nothing either way.
