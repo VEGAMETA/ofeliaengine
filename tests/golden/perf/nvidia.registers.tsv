@@ -14,7 +14,7 @@ atmosphere.transmittanceLut	CS	Register Count	40
 decals.decalApply	CS	Register Count	96
 decals.decalTiles	CS	Register Count	16
 dof.dofBlur	CS	Register Count	56
-dof.dofComposite	CS	Register Count	79
+dof.dofComposite	CS	Register Count	78
 dof.dofDilate	CS	Register Count	21
 dof.dofDownsample	CS	Register Count	63
 environment.dfg	CS	Register Count	23

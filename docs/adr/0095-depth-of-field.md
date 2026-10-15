@@ -157,3 +157,57 @@ a 10 cm sensor, rings 4. A strong blur: the curtains in front and the atrium's f
   - focus measured on the GPU (autofocus);
   - sprites for bright highlights;
   - translucent surfaces (one depth per pixel, as in FidelityFX).
+
+## Addendum (2026-10-15): the integrated GPU's costs, measured pass by pass
+
+Queue item 6b. Sponza at 1080p (`scene_bench --sky --dof 3`), on the Radeon iGPU unless
+said otherwise. Before: f/1.4 8.23 ms (downsample 1.86, dilate 0.15, blur 2.98, composite
+3.25); f/64 3.84 ms (blur 0.74, composite 1.15).
+
+What bounds each pass, from variants of the shaders:
+
+- **Composite: the latency of its reads.**
+  - Without the per-pixel depth reads it took 2.52 ms instead of 3.25. They came after its
+    waits for shared memory, where nothing hid them.
+  - Without the full-size color: −7 %. Without the medians: −3 %.
+- **Blur: arithmetic.**
+  - Without any ring sample 0.62 ms; without the samples' texture reads (the same
+    arithmetic) 2.51 ms. Its 61 samples per pixel cost 2.36 ms, a sixth of it fetching.
+- **Downsample: memory.**
+  - Without the depth reads 1.38 ms (−26 %).
+  - The four depths of a quad in one gather changed nothing.
+  - Its time moves with where its images land in the iGPU's memory (1.15–1.87 ms across
+    the bench's two scenes, same sizes).
+
+Done, the same image bit for bit (`sponza_dof`: FLIP 0 on both GPUs):
+
+1. **The composite reads its depths first,** and loads every texel of its windows before
+   it stores any to shared memory.
+   - Composite at f/1.4: Radeon 3.25 → 2.82 ms; RTX 124 → 100–109 µs.
+2. **The blur's waves in focus write their centers only where the composite reads them.**
+   - The texels of a blur group are read only by the composite's group over the same
+     pixels and its 8 neighbors (their 11 × 11 windows); where none blends the fields,
+     nothing is written.
+   - Blur at f/64: Radeon 740 → 420 µs; at f/1.4 unchanged.
+   - Checking every group before its gather instead: 127 µs at f/64, but +4 % at f/1.4
+     (the check's 36 tile reads before the gather). Not taken.
+
+Totals: **f/1.4 8.23 → 7.82 ms, f/64 3.84 → 3.52 ms; RTX f/1.4 276 → 242–263 µs.**
+
+Not done, and why:
+
+- **The composite in place** (sharp groups would write nothing: f/64's composite
+  1.15 → 0.16 ms).
+  - With TAAU, the default on every device class, the image depth of field blurs is TAAU's
+    history for the next frame: it cannot be written in place.
+  - A copy for the temporal modes would cost what it saves.
+- **16-bit arithmetic in the blur.**
+  - Its accumulators can overflow half precision (inputs up to 65,000, about 60 samples).
+  - They would stay 32-bit, so only part of the arithmetic would pack.
+  - Not tried for that reason.
+- **Fewer rings** stay the game's choice (`DofSettings::rings`): 2 rings cost the Radeon
+  6.85 ms at f/1.4 (blur 2.06 ms), FLIP 0.036 (mean) against 4. The strongest blur comes
+  from coarser levels, a little smoother.
+- **A quarter-size gather** (estimated: blur and fields a quarter, about −2.5 ms at f/1.4
+  on the Radeon) blurs regions near focus from quarter-size fields. Left until a game
+  needs it on an integrated GPU.

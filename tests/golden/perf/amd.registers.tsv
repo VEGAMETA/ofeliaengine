@@ -27,7 +27,7 @@ decals.decalTiles	ShaderProperties.cs	numUsedVgprs	10
 decals.decalTiles	ShaderProperties.cs	scratchMemUsageInBytes	0
 dof.dofBlur	ShaderProperties.cs	numUsedVgprs	72
 dof.dofBlur	ShaderProperties.cs	scratchMemUsageInBytes	0
-dof.dofComposite	ShaderProperties.cs	numUsedVgprs	70
+dof.dofComposite	ShaderProperties.cs	numUsedVgprs	69
 dof.dofComposite	ShaderProperties.cs	scratchMemUsageInBytes	0
 dof.dofDilate	ShaderProperties.cs	numUsedVgprs	19
 dof.dofDilate	ShaderProperties.cs	scratchMemUsageInBytes	0
