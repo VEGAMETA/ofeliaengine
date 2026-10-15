@@ -306,3 +306,53 @@ Panning a third of a pixel per frame (`tests/taa.rs`): 38.36 dB on the RTX and 3
 the Radeon with the loads (38.3 and 38.4 before). The filter is optional and off by
 default; its extra cost over bilinear grew from about 20 % to 50 % of the resolve on the
 RTX (17 % to 24 % on the Radeon).
+
+## Addendum (2026-10-15): each group's render pixels tone mapped once, in shared memory
+
+- **What bounds the resolve on the Radeon iGPU.** The Radeon GPU Profiler cannot capture
+  this iGPU (gfx1036), so variants of the shader were timed against it (`taau_bench`,
+  1080p from 720p, 4,252 µs):
+
+| variant | Radeon | RTX |
+|---|---:|---:|
+| the motion vector of every tap loaded with its depth (no load waits for the search) | +3.5 % | — |
+| no dependent motion load at all (the nearest pixel's) | −0.2 % | — |
+| no history fetch | +0.4 % | — |
+| no depth loads | −6 % | −18 % |
+| no output store | −13 % | −18 % |
+| each tap's tone mapping and weight computed twice | +27 % | +10 % |
+| no tone mapping and YCoCg per tap | −33 % | −15 % |
+
+  - The resolve's arithmetic carries it, most of all the tone mapping and YCoCg done for
+    every tap: nine taps read each render pixel for up to nine output pixels.
+  - The chain of dependent loads costs nothing measurable.
+- **The change** (`resolveShared`, `resolveSharedCatmullRom`):
+  - each group of 8 × 8 output pixels first loads the render pixels its taps read
+    (11 × 11), tone maps them, converts them to YCoCg and keeps them with their depth in
+    shared memory;
+  - the taps then read shared memory and sum in YCoCg;
+  - the weights are separable, exp(a) exp(b), from the samples' unclamped positions: at
+    the image's edge the edge pixel stands in for the one beyond it, weighted where that
+    one would be.
+  - A render size larger than the output's keeps the tap-by-tap resolve (a group's render
+    pixels would not fit). The test now covers it: TAA from twice the resolution, 46.6 dB.
+- **Quality** against 4 × 4 supersampling (`taa_converges_to_the_supersampled_image`),
+  before → after:
+  - RTX: TAA 39.60 → 39.59 dB, TAAU from half resolution 32.97 → 32.94, panning 37.14 →
+    37.15, Catmull-Rom history 38.36 → 38.42;
+  - Radeon: 39.54 → 39.54, 32.95 → 32.97, 37.30 → 37.31, 38.45 → 38.46.
+- **Measured** in the perf gate's frames (3 runs, both binaries in turns), the resolve:
+
+| scene | RTX | Radeon |
+|---|---:|---:|
+| `sponza_taau_67` (from 67 %) | 128.4 → 120.3 µs | 5,860 → 5,191 µs |
+| `sponza_defaults_integrated` | 127.7 → 119.8 µs | 6,018 → 5,350 µs |
+| `intel_sponza_defaults_integrated` | 124.9 → 116.8 µs | 7,420 → 6,846 µs |
+| `sponza_taa` (native 1080p) | 163.5 → 154.4 µs | 6,616 → 6,155 µs |
+| `intel_sponza_defaults_discrete` | 152.0 → 141.5 µs | 6,789 → 5,995 µs |
+
+  - `taau_bench` promised more (−18 % on both GPUs): its cubes are cheap to read, and
+    Sponza's frames are partly bound by memory.
+  - 16 × 16 groups read less of each footprint twice. They won `taau_bench`'s native
+    1440p on the Radeon (−14 %) but lost Sponza's native 1080p (+9–11 %) and 3 % on the
+    RTX: 8 × 8 it is.

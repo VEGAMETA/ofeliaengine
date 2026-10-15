@@ -507,14 +507,19 @@ grown, divide and conquer); the old labels stay in parentheses.
        it.
 6b. The iGPU's expensive passes (review §3.11): depth of field 3.8–8.2 ms at 1080p
    (ADR 0095: a 16-bit blur, the composite in place or in the tone mapper, a
-   quarter-size gather), TAAU 4.2 ms (6.6 ms in the perf gate's `sponza_taa`),
+   quarter-size gather), TAAU 4.2 ms (6.6 ms in the perf gate's `sponza_taa`; since
+   2026-10-15 a group's render pixels are tone mapped once in shared memory, ADR 0043's
+   addendum: Radeon −5 to −12 % in the perf gate's frames, RTX −5 to −7 %; the attempt of
+   2026-10-11 below shared only the loads),
    ~~bloom 1.6 ms~~, local shadows redrawn every frame when casters move (a
    per-frame redraw budget; never the patented static/dynamic split). TAAU tried
    2026-10-11: its 3 × 3 color and depth through shared memory (the bloom's trick) made
    the Radeon's resolve 20 % slower and the RTX's 3 % faster; without its nine `exp`
    1 % faster; its history images moved in memory, unchanged. Neither its texture reads
    nor its placement limit it: about 800 lane-cycles per pixel, its arithmetic as a whole.
-   Next: look at it in Radeon GPU Profiler (instruction timing) before changing it. Tried 2026-10-11: bloom levels in R11G11B10F save the
+   The Radeon GPU Profiler cannot capture this iGPU (gfx1036); variants of the shader
+   showed the per-tap tone mapping and YCoCg as a third of it (2026-10-15). What is left:
+   the output store (13 %), the depth loads (6 %), memory in Sponza's frames. Tried 2026-10-11: bloom levels in R11G11B10F save the
    bloom passes 10 % on both GPUs, but on the Radeon the tone mapper then takes as much
    longer (frame unchanged; perf history). Done 2026-10-11: the bloom's taps through
    shared memory (the same values bit for bit): over the 18 perf scenes the RTX's bloom
