@@ -337,3 +337,78 @@ mask (Warner Bros US 11,908,062 / 12,315,068).
 - **Left.** Instanced draws still draw each piece's casters again (the same tags could
   cull them per piece). The clusters are greedy. A rendering per layer costs the Radeon
   6 % when everything is drawn whole (the first frame, a cut, the light turning).
+
+## Step 3: virtual pages for the sun (design, 2026-10-15)
+
+The owner put the pages after the player crate (2026-10-15). The cache's cost is low now
+(a still camera draws nothing, a walk 0.8–2 % of the texels); what it leaves wanting is
+**resolution**. With the defaults a shadow texel is never smaller than 2.2 pixels, and is
+4–10 pixels at 2–5 m from the camera (the research note's table). Pages give each pixel
+about a texel and back only what pixels sample.
+
+**Options for the parts:**
+
+1. **Drawing into pages.**
+   - (a) **A rendering without attachments over a level's virtual 4096², the fragment
+     shader writing the depth with an atomic minimum into the pool** through the page
+     table, only into dirty pages (Timberdoodle, StratusGFX, UnityVSM). No limit on pages
+     a frame; no early depth test (depth only: cheap fragments).
+   - (b) A viewport per dirty page and the pool as the depth attachment: early depth
+     tests, but at most 16 viewports a draw (`multiViewport`), so the draws repeat per
+     group of pages.
+   - (c) Mesh shaders culling triangles per page: not on the Radeon today (#88).
+   - **Chosen: (a)**, with our meshlet cull (ADR 0085) choosing what each level draws.
+     It needs `fragmentStoresAndAtomics` (every desktop GPU), enabled when present.
+2. **Allocation.** (a) On the GPU, from a scan of the physical pages (Timberdoodle);
+   (b) through a readback to the CPU (StratusGFX's first version: a frame late).
+   **Chosen: (a).**
+3. **Shading.**
+   - (a) Every shading variant looks the pages up itself: a twin of every variant, and
+     registers in the forward shader (ADR 0058's rule).
+   - (b) **A screen-space pass after the pages are drawn** writes the sun's visibility,
+     filtered, into the mask the contact shadows write today (ADR 0071). The variants
+     that read that mask skip the cascades' lookup: fewer registers than now.
+     Transparent surfaces have no depth in the prepass and keep a lookup of their own.
+   - **Chosen: (b).** One cache and a visibility mask is not the static and dynamic pair
+     merged per texel that Warner Bros' patents claim.
+4. **Filtering.** The 3 × 3 tent PCF the cascades have, each tap through the page table
+   when the footprint crosses a page's edge (Timberdoodle's way). A 1-texel border per
+   page is the alternative if the lookups cost.
+
+**The design:**
+
+- **Levels.** 16 levels of 4096² virtual texels in 64² pages (a 64 × 64 page table
+  each). Level `k` covers `2 m × 2^k` around the camera. The first texel is 0.5 mm; the
+  last level is 65 km across. Each level's window snaps to whole pages and its page table
+  is addressed modulo 64 (scrolling frees the pages that wrap). The light's depth range is
+  the scene's, as the cascades' is.
+- **The pool.** 4,096 pages of 64² in one `R32_UINT` image of 4096² (64 MiB), and one
+  meta entry per page (the virtual page it backs, the last frame a pixel needed it).
+  Per device class once measured.
+- **Each frame**, after the depth prepass:
+  1. levels scroll; wrapped pages are freed;
+  2. pages are invalidated: all of them when the light turns or its depth range changes,
+     those under a moved caster's old and new light-space boxes otherwise (the GPU scene's
+     changes, as the cascades take them);
+  3. marking: each pixel's level (from its distance, the finest that gives about a texel
+     per pixel), its page flagged as needed, a first request appended;
+  4. allocation: free pages first, then those no pixel needed for a few frames;
+  5. new and dirty pages cleared to the far plane;
+  6. per level, a hierarchy of dirty bits; the meshlet cull keeps what touches dirty
+     pages; the levels with dirty pages are drawn (an indirect draw list each);
+  7. the visibility pass fills the sun's mask; the shading reads it.
+- **Fallback.** A pixel whose page could not be allocated uses the next coarser level that
+  has one (and the coarsest levels can be kept resident).
+
+**Steps:**
+
+- **3a.** The pages' machinery without drawing: pool, tables, scrolling, marking,
+  allocation, invalidation, clearing. Tested against a CPU model of the same rules: a
+  depth buffer marks the pages it should; allocation fills them; still frames allocate
+  nothing; scrolling frees what wraps; the pool's overflow fails gracefully.
+- **3b.** Drawing and shading: culling into dirty pages, the attachment-less drawing, the
+  visibility pass, the shading variants reading the mask. Golden shots near the camera
+  and in the distance, a test against a high-resolution reference map, perf gate scenes,
+  register checks on both GPUs.
+- **3c.** Moved casters and the light turning, defaults per device class, measurements
+  against the cascade cache, documentation.
