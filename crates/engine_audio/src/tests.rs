@@ -1001,3 +1001,24 @@ fn streams_with_unsupported_formats_are_refused() {
     );
     assert!(matches!(result, Err(AudioError::Decode(_))));
 }
+
+#[test]
+fn a_stream_reports_how_far_the_mix_has_taken_it() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let voice = audio
+        .play_stream(
+            Box::new(Synthetic::new(48_000, 1, 48_000)),
+            &PlayParams::default(),
+        )
+        .unwrap();
+    assert_eq!(audio.stream_position(voice), Some(0));
+    for _ in 0..4 {
+        render(&mut renderer, 256);
+    }
+    // The renderer runs at the stream's rate here: one frame of stream per frame mixed.
+    assert_eq!(audio.stream_position(voice), Some(1024));
+    // A clip is not a stream.
+    let clip = Clip::from_interleaved(48_000, 1, &[0.0; 64]).unwrap();
+    let not_a_stream = audio.play(&clip).unwrap();
+    assert_eq!(audio.stream_position(not_a_stream), None);
+}

@@ -195,3 +195,133 @@ impl<S: Source> Decoder for OpusDecoder<S> {
         Ok(())
     }
 }
+
+/// Raw Opus packets, as a WebM track holds them (`A_OPUS`), decoded one at a time by
+/// libopus. The track's codec private data is the `OpusHead` header: channels, pre-skip
+/// (the frames to drop at the stream's start) and output gain.
+pub struct OpusPackets {
+    decoder: *mut ffi::OpusDecoder,
+    channels: u16,
+    pre_skip: u64,
+    gain: f32,
+}
+
+// SAFETY: as `OpusDecoder`: plain memory owned by this value, used through `&mut self`.
+unsafe impl Send for OpusPackets {}
+
+impl core::fmt::Debug for OpusPackets {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("OpusPackets")
+            .field("channels", &self.channels)
+            .field("pre_skip", &self.pre_skip)
+            .finish_non_exhaustive()
+    }
+}
+
+impl OpusPackets {
+    /// The longest packet decoded: 120 ms at 48 kHz, in frames.
+    pub const MAX_FRAMES: usize = MAX_FRAME;
+
+    /// A decoder for the stream `head` (an `OpusHead` header) describes.
+    ///
+    /// # Errors
+    ///
+    /// A damaged header, more than two channels, or a mapping family other than 0.
+    pub fn new(head: &[u8]) -> Result<Self, DecodeError> {
+        let (channels, pre_skip, gain) = parse_head(head)?;
+        let mut error = 0;
+        // SAFETY: plain constructor; the result is checked before use.
+        let decoder =
+            unsafe { ffi::opus_decoder_create(RATE as i32, i32::from(channels), &mut error) };
+        if decoder.is_null() || error != ffi::OPUS_OK {
+            return Err(DecodeError::Corrupt(format!(
+                "libopus refused the stream ({error})"
+            )));
+        }
+        Ok(Self {
+            decoder,
+            channels,
+            pre_skip,
+            gain,
+        })
+    }
+
+    /// The channels: 1 or 2.
+    pub fn channels(&self) -> u16 {
+        self.channels
+    }
+
+    /// Frames to drop at the stream's start (the encoder's delay).
+    pub fn pre_skip(&self) -> u64 {
+        self.pre_skip
+    }
+
+    /// Opus always decodes at 48 kHz.
+    pub fn sample_rate(&self) -> u32 {
+        RATE
+    }
+
+    /// Decodes `packet` into `out` (interleaved, with the header's gain), at most
+    /// [`Self::MAX_FRAMES`] frames, and returns how many.
+    ///
+    /// # Errors
+    ///
+    /// A damaged packet, or `out` shorter than [`Self::MAX_FRAMES`] frames.
+    pub fn decode(&mut self, packet: &[u8], out: &mut [f32]) -> Result<usize, DecodeError> {
+        let channels = usize::from(self.channels);
+        if out.len() < MAX_FRAME * channels {
+            return Err(DecodeError::Unsupported(
+                "an output shorter than the longest packet".into(),
+            ));
+        }
+        let len = i32::try_from(packet.len())
+            .map_err(|_| DecodeError::Corrupt("packet too long".into()))?;
+        // SAFETY: the decoder is live; `out` holds MAX_FRAME frames of `channels`.
+        let frames = unsafe {
+            ffi::opus_decode_float(
+                self.decoder,
+                packet.as_ptr(),
+                len,
+                out.as_mut_ptr(),
+                MAX_FRAME as i32,
+                0,
+            )
+        };
+        if frames < 0 {
+            return Err(DecodeError::Corrupt(format!("libopus error {frames}")));
+        }
+        let frames = frames as usize;
+        if self.gain != 1.0 {
+            for sample in &mut out[..frames * channels] {
+                *sample *= self.gain;
+            }
+        }
+        Ok(frames)
+    }
+
+    /// The frames `packet` decodes to, read from its header without decoding it.
+    ///
+    /// # Errors
+    ///
+    /// A damaged packet.
+    pub fn packet_frames(packet: &[u8]) -> Result<usize, DecodeError> {
+        let len = i32::try_from(packet.len())
+            .map_err(|_| DecodeError::Corrupt("packet too long".into()))?;
+        // SAFETY: the pointer and length describe `packet`; libopus only reads it.
+        let frames = unsafe { ffi::opus_packet_get_nb_samples(packet.as_ptr(), len, RATE as i32) };
+        usize::try_from(frames).map_err(|_| DecodeError::Corrupt(format!("libopus error {frames}")))
+    }
+
+    /// Forgets what the decoder heard (decoding continues elsewhere, after a seek).
+    pub fn reset(&mut self) {
+        // SAFETY: the decoder is live; OPUS_RESET_STATE takes no argument.
+        unsafe { ffi::opus_decoder_ctl(self.decoder, ffi::OPUS_RESET_STATE) };
+    }
+}
+
+impl Drop for OpusPackets {
+    fn drop(&mut self) {
+        // SAFETY: created by `opus_decoder_create` and destroyed once.
+        unsafe { ffi::opus_decoder_destroy(self.decoder) };
+    }
+}

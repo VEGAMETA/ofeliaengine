@@ -127,6 +127,11 @@ impl StreamRing {
         self.mask + 1
     }
 
+    /// Frames the reader is done with since the start: the stream's position in the mix.
+    pub(crate) fn released(&self) -> u64 {
+        self.released.load(Ordering::Acquire)
+    }
+
     /// Writer: frames that fit now.
     pub(crate) fn space(&self) -> u64 {
         let written = self.written.load(Ordering::Relaxed);

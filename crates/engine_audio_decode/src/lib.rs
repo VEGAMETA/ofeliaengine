@@ -26,7 +26,7 @@ use std::io::{BufReader, Cursor, Read, Seek};
 use std::path::Path;
 
 pub use flac::FlacDecoder;
-pub use opus::OpusDecoder;
+pub use opus::{OpusDecoder, OpusPackets};
 pub use vorbis::VorbisDecoder;
 
 /// A source the decoders read from: a file, or bytes in memory.

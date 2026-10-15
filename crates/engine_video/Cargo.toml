@@ -17,6 +17,9 @@ default = ["software"]
 software = ["dep:rav1d"]
 
 [dependencies]
+# A video's Opus track played as an audio stream, its position the clock (ADR 0100).
+engine_audio.workspace = true
+engine_audio_decode.workspace = true
 # Decoding on the GPU's video engine through Vulkan Video (ADR 0100).
 engine_rhi.workspace = true
 # Feature unification of shared dependencies for build reuse (ADR 0077).
