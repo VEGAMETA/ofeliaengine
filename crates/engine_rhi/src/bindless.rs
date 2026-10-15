@@ -75,9 +75,19 @@ impl Wrap {
 /// wrap modes.
 const MATERIAL_SAMPLERS: u32 = 9;
 
-/// Sets of material samplers with a level-of-detail bias (temporal upscaling, ADR 0060),
-/// besides the unbiased set: their slots are reserved, the samplers made on demand.
-const LOD_BIAS_SETS: u32 = 8;
+/// Sets of material samplers besides the default one (no bias, 16× anisotropic): with a
+/// level-of-detail bias (temporal upscaling, ADR 0060) or other anisotropic filtering (the
+/// player's setting, ADR 0098). Their slots are reserved, the samplers made on demand.
+const EXTRA_MATERIAL_SETS: u32 = 16;
+
+/// A set of material samplers besides the default one ([`Bindless::material_samplers`]).
+struct MaterialSet {
+    /// The LOD bias in 1/16 levels.
+    bias: i32,
+    /// The most samples a lookup takes (1: trilinear).
+    anisotropy: u32,
+    samplers: Vec<vk::Sampler>,
+}
 
 const SAMPLER_KINDS: [SamplerKind; 7] = [
     SamplerKind::LinearRepeat,
@@ -150,8 +160,8 @@ pub struct Bindless {
     /// alive past the set (ADR 0079).
     shared_layout: Option<crate::pipeline::SharedPipelineLayout>,
     samplers: Vec<vk::Sampler>,
-    /// Material sampler sets with a LOD bias: the bias in 1/16 levels, the samplers.
-    biased: RefCell<Vec<(i32, Vec<vk::Sampler>)>>,
+    /// The other material sampler sets.
+    extra: RefCell<Vec<MaterialSet>>,
     max_anisotropy: f32,
     max_lod_bias: f32,
     sampled: RefCell<Indices>,
@@ -182,7 +192,8 @@ impl Bindless {
                 .instance_raw()
                 .get_physical_device_properties2(device.physical(), &mut props2)
         };
-        let samplers_count = SAMPLER_KINDS.len() as u32 + MATERIAL_SAMPLERS * (1 + LOD_BIAS_SETS);
+        let samplers_count =
+            SAMPLER_KINDS.len() as u32 + MATERIAL_SAMPLERS * (1 + EXTRA_MATERIAL_SETS);
         let per_stage_total = props12
             .max_per_stage_update_after_bind_resources
             .saturating_sub(samplers_count);
@@ -232,7 +243,7 @@ impl Bindless {
             pipeline_layout: vk::PipelineLayout::null(),
             shared_layout: None,
             samplers: Vec::with_capacity(SAMPLER_KINDS.len()),
-            biased: RefCell::new(Vec::new()),
+            extra: RefCell::new(Vec::new()),
             max_anisotropy: 16.0f32.min(limits.max_sampler_anisotropy),
             max_lod_bias: limits.max_sampler_lod_bias,
             sampled: RefCell::new(Indices::new(sampled_count)),
@@ -340,7 +351,7 @@ impl Bindless {
                         .map_err(RhiError::vk("vkCreateSampler"))?,
                 );
             }
-            let materials = partial.create_material_samplers(0.0)?;
+            let materials = partial.create_material_samplers(0.0, partial.max_anisotropy)?;
             partial.samplers.extend(materials);
             let image_infos: Vec<vk::DescriptorImageInfo> = partial
                 .samplers
@@ -410,37 +421,47 @@ impl Bindless {
 
     /// The first index in `g_samplers` of a set of material samplers whose level of
     /// detail is biased by `bias` (negative: sharper; to 1/16 of a level, within the
-    /// device's limit). The unbiased set is always there; up to 8 biased sets are made
-    /// on first request (a few samplers, no pipelines); beyond that the set with the
-    /// nearest bias is returned. The bias lives in the samplers, so shaders pay nothing
-    /// for it (ADR 0060: a bias in the shader cost the Radeon 8 registers in every
-    /// shading pipeline).
+    /// device's limit) and which take up to `anisotropy` samples along a texture's slope
+    /// (1: trilinear; at most 16 and the device's limit).
+    ///
+    /// The default set (no bias, 16×) is always there. Up to 16 others are made on first
+    /// request (a few samplers, no pipelines); beyond that the nearest one is returned,
+    /// one with the same anisotropy first. Both live in the samplers, so shaders pay
+    /// nothing for them (ADR 0060: a bias in the shader cost the Radeon 8 registers in
+    /// every shading pipeline; ADR 0098).
     ///
     /// # Errors
     ///
     /// When a sampler cannot be created.
-    pub fn material_samplers(&self, bias: f32) -> Result<u32, RhiError> {
+    pub fn material_samplers(&self, bias: f32, anisotropy: u32) -> Result<u32, RhiError> {
         let base = SAMPLER_KINDS.len() as u32;
         let limit = self.max_lod_bias.max(0.0);
         let sixteenths = (bias.clamp(-limit, limit) * 16.0).round() as i32;
-        if sixteenths == 0 {
+        let anisotropy = (anisotropy.max(1) as f32).min(self.max_anisotropy) as u32;
+        if sixteenths == 0 && anisotropy == self.max_anisotropy as u32 {
             return Ok(base);
         }
         let first = |k: usize| base + MATERIAL_SAMPLERS * (1 + k as u32);
-        let mut biased = self.biased.borrow_mut();
-        if let Some(k) = biased.iter().position(|(b, _)| *b == sixteenths) {
+        let mut extra = self.extra.borrow_mut();
+        if let Some(k) = extra
+            .iter()
+            .position(|set| set.bias == sixteenths && set.anisotropy == anisotropy)
+        {
             return Ok(first(k));
         }
-        if biased.len() as u32 >= LOD_BIAS_SETS {
-            let nearest = biased
+        if extra.len() as u32 >= EXTRA_MATERIAL_SETS {
+            let nearest = extra
                 .iter()
                 .enumerate()
-                .min_by_key(|(_, (b, _))| (b - sixteenths).abs())
+                .min_by_key(|(_, set)| {
+                    (set.anisotropy != anisotropy, (set.bias - sixteenths).abs())
+                })
                 .map_or(0, |(k, _)| k);
             return Ok(first(nearest));
         }
-        let samplers = self.create_material_samplers(sixteenths as f32 / 16.0)?;
-        let k = biased.len();
+        let samplers =
+            self.create_material_samplers(sixteenths as f32 / 16.0, anisotropy as f32)?;
+        let k = extra.len();
         let infos: Vec<vk::DescriptorImageInfo> = samplers
             .iter()
             .map(|&sampler| vk::DescriptorImageInfo::default().sampler(sampler))
@@ -458,12 +479,21 @@ impl Bindless {
                 &[],
             );
         }
-        biased.push((sixteenths, samplers));
+        extra.push(MaterialSet {
+            bias: sixteenths,
+            anisotropy,
+            samplers,
+        });
         Ok(first(k))
     }
 
-    /// The 9 material samplers (one per pair of wrap modes) with `bias`.
-    fn create_material_samplers(&self, bias: f32) -> Result<Vec<vk::Sampler>, RhiError> {
+    /// The 9 material samplers (one per pair of wrap modes) with `bias` and up to
+    /// `anisotropy` samples (1: trilinear).
+    fn create_material_samplers(
+        &self,
+        bias: f32,
+        anisotropy: f32,
+    ) -> Result<Vec<vk::Sampler>, RhiError> {
         let mut samplers = Vec::with_capacity(MATERIAL_SAMPLERS as usize);
         for s in Wrap::ALL {
             for t in Wrap::ALL {
@@ -476,8 +506,8 @@ impl Bindless {
                     .address_mode_w(vk::SamplerAddressMode::REPEAT)
                     .mip_lod_bias(bias)
                     .max_lod(vk::LOD_CLAMP_NONE)
-                    .anisotropy_enable(true)
-                    .max_anisotropy(self.max_anisotropy);
+                    .anisotropy_enable(anisotropy > 1.0)
+                    .max_anisotropy(anisotropy.max(1.0));
                 // SAFETY: valid create info; the device is live.
                 match unsafe { self.device.create_sampler(&info, None) } {
                     Ok(sampler) => samplers.push(sampler),
@@ -601,8 +631,8 @@ impl Drop for Bindless {
             for &sampler in &self.samplers {
                 self.device.destroy_sampler(sampler, None);
             }
-            for (_, samplers) in self.biased.get_mut().iter() {
-                for &sampler in samplers {
+            for set in self.extra.get_mut().iter() {
+                for &sampler in &set.samplers {
                     self.device.destroy_sampler(sampler, None);
                 }
             }
