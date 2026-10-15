@@ -37,6 +37,9 @@ use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiErr
 
 const RESOLVE: &[u8] = include_bytes!("../shaders/taau.resolve.spv");
 const RESOLVE_CATMULL_ROM: &[u8] = include_bytes!("../shaders/taau.resolveCatmullRom.spv");
+const RESOLVE_SHARED: &[u8] = include_bytes!("../shaders/taau.resolveShared.spv");
+const RESOLVE_SHARED_CATMULL_ROM: &[u8] =
+    include_bytes!("../shaders/taau.resolveSharedCatmullRom.spv");
 
 /// Format of the history and of the resolved image (HDR, accumulated weight in alpha).
 pub const HISTORY_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
@@ -120,8 +123,10 @@ pub enum HistoryFilter {
 /// keeps the view's history.
 pub struct Taau {
     device: engine_rhi::ash::Device,
-    /// Resolve pipelines by [`HistoryFilter`]: bilinear, Catmull-Rom.
-    shaders: [ComputeShader<Push>; 2],
+    /// Resolve pipelines by [`HistoryFilter`] (bilinear, Catmull-Rom): with each group's
+    /// render pixels in shared memory where the render size is at most the output's, then
+    /// reading them tap by tap for a larger render size.
+    shaders: [ComputeShader<Push>; 4],
     filter: HistoryFilter,
     history: Option<History>,
     /// Histories replaced by a resize, freed once their frames are done.
@@ -148,11 +153,13 @@ impl Taau {
         bindless: &Bindless,
         frames_in_flight: usize,
     ) -> Result<Self, RhiError> {
-        // Bilinear and Catmull-Rom history.
+        // Bilinear and Catmull-Rom history, shared or tap by tap.
         let shaders = ComputeSource::create_all(
             device,
             bindless,
             [
+                ComputeSource::new(RESOLVE_SHARED, c"resolveShared", &[])?,
+                ComputeSource::new(RESOLVE_SHARED_CATMULL_ROM, c"resolveSharedCatmullRom", &[])?,
                 ComputeSource::new(RESOLVE, c"resolve", &[])?,
                 ComputeSource::new(RESOLVE_CATMULL_ROM, c"resolveCatmullRom", &[])?,
             ],
@@ -251,10 +258,13 @@ impl Taau {
         history.valid = true;
 
         let input_desc = fg.texture_desc(input.color);
+        // A group's render pixels fit its shared memory when the render size is at most the
+        // output's (every quality preset).
+        let shared = input_desc.width <= width && input_desc.height <= height;
         let shader = &self.shaders[match self.filter {
             HistoryFilter::Bilinear => 0,
             HistoryFilter::CatmullRom => 1,
-        }];
+        } + if shared { 0 } else { 2 }];
         let jitter = input.motion.jitter;
         let velocity = input.motion.velocity;
         let reactive = input.motion.reactive;

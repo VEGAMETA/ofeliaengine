@@ -467,6 +467,22 @@ fn taa_converges_to_the_supersampled_image() {
     }
     let half = gpu.render(&draws, 0.0, Mode::Plain(SIZE / 2));
     let stretched = stretch(&half, SIZE / 2);
+    // TAA from twice the resolution: the resolve that reads its taps one by one (a group's
+    // render pixels do not fit its shared memory then).
+    temporal.set_jitter_phases(Taau::jitter_phases((SIZE * 2, SIZE * 2), (SIZE, SIZE)));
+    temporal.reset();
+    let mut supersampled = Vec::new();
+    for _ in 0..24 {
+        supersampled = gpu.render(
+            &draws,
+            0.0,
+            Mode::Temporal {
+                render: SIZE * 2,
+                output: SIZE,
+                temporal: &temporal,
+            },
+        );
+    }
 
     // The camera pans right by 0.02 units a frame (about a third of a pixel).
     temporal.set_jitter_phases(8);
@@ -518,6 +534,7 @@ fn taa_converges_to_the_supersampled_image() {
             "panning, TAA, Catmull-Rom history",
             psnr(&sharp, &panned_truth),
         ),
+        ("TAA from twice the resolution", psnr(&supersampled, &truth)),
     ];
     for (name, db) in scores {
         println!("{name}: {db:.2} dB against 4×4 supersampling");
@@ -538,6 +555,10 @@ fn taa_converges_to_the_supersampled_image() {
     assert!(
         scores[6].1 > scores[5].1,
         "the Catmull-Rom history is sharper in motion: {scores:?}"
+    );
+    assert!(
+        scores[7].1 > scores[0].1 + 3.0,
+        "TAA from a larger render size antialiases: {scores:?}"
     );
 
     let Gpu {
