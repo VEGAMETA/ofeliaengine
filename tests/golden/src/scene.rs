@@ -35,6 +35,7 @@ use engine_render::forward::{
 };
 use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::GpuScene;
+use engine_render::grading::ColorGrading;
 use engine_render::graph::{
     Access, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, LoadOp, RenderGraph, Texture,
     TextureDesc, TextureState,
@@ -241,6 +242,8 @@ pub struct Shot {
     /// material map when cooking, the scene written to a pack (version 5, the types'
     /// SPIR-V in it) and loaded back, the types drawn from the pack's SPIR-V (ADR 0092).
     pub fabric_curtains: bool,
+    /// Color grading (`ViewSettings::grading`, ADR 0094; neutral by default).
+    pub grading: ColorGrading,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -311,6 +314,7 @@ impl Shot {
             material_first_sight: false,
             shading_models: false,
             fabric_curtains: false,
+            grading: ColorGrading::default(),
         }
     }
 }
@@ -1706,6 +1710,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         cached_shadows: shot.cached_shadows,
         exposure: Exposure::Fixed(shot.exposure),
         curve: shot.curve,
+        grading: shot.grading,
         bloom: shot.bloom,
         clear: Some([0.02, 0.02, 0.05, 1.0]),
         screen_space_reflections: shot.ssr.filter(|_| shot.sky),
