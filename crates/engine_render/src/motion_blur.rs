@@ -162,10 +162,7 @@ impl MotionBlur {
             TextureDesc::new_2d(TILE_FORMAT, tile_count[0], tile_count[1]),
         );
         let output = fg.create_texture("motion blur", TextureDesc::new_2d(desc.format, w, h));
-        let vz = fg.create_texture(
-            "motion blur velocity",
-            TextureDesc::new_2d(VZ_FORMAT, w, h),
-        );
+        let vz = fg.create_texture("motion blur velocity", TextureDesc::new_2d(VZ_FORMAT, w, h));
         let samples = settings.samples.clamp(1, 64);
         let near = camera.near.max(1e-6);
         let base = Push {
