@@ -13,9 +13,12 @@
 //!   whose texel is about its footprint; when the light turned, the needed pages are
 //!   drawn again and the others freed; requests take free pages, then pages no pixel
 //!   needed for [`VsmSettings::keep_frames`] frames, and fail when there are none (asked
-//!   for again the next frame); dirty pages are cleared to the far plane.
-//! - **Step 3a** (this module so far) keeps the pages; drawing into them and shading with
-//!   them follow (steps 3b, 3c).
+//!   for again the next frame); dirty pages are cleared to the far plane. The forward
+//!   renderer then draws the casters into the dirty pages, and [`VirtualShadows::add_visibility`]
+//!   writes the sun's visibility per pixel for the shading (step 3b).
+//! - **Casters that change** (moved, added, removed, another draw list or scene) redraw
+//!   every page a frame needs and free the others, as the light turning does; step 3c
+//!   redraws only the pages under what changed.
 //!
 //! The design follows Timberdoodle's virtual shadow maps (Apache-2.0; M. Sakmáry); the
 //! code is written for this engine.
@@ -25,6 +28,7 @@ use crate::environment::{Image, ImageKind};
 use crate::graph::{
     Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages, Texture, TextureDesc,
 };
+use crate::local_shadows::DrawDiff;
 use crate::upload::UploadRing;
 use core::cell::{Cell, RefCell};
 use engine_core::math::{IVec2, Mat4, Vec2, Vec3, look_at};
@@ -323,6 +327,26 @@ struct State {
     light: Option<[u32; 5]>,
     /// Frames so far.
     frame: u32,
+    /// What the pages were drawn from, and whether it changed since.
+    casters: Casters,
+}
+
+/// A frame's casters: a draw list (`None`) or a scene upload (its serial and a hash of its
+/// batches' meshes); the renderer settings that change what casts; the materials'
+/// revision.
+type CasterKey = (Option<(u64, u64)>, u64, u64);
+
+/// What a view's pages were drawn from ([`VirtualShadows::note_draws`],
+/// [`VirtualShadows::note_scene`]).
+#[derive(Debug, Default)]
+struct Casters {
+    /// The last frame's casters.
+    last: Option<CasterKey>,
+    /// A draw list's previous draws.
+    draws: DrawDiff,
+    /// Something casts otherwise than when the pages were last drawn: the next frame
+    /// draws every page it needs again and frees the others.
+    changed: bool,
 }
 
 /// The windows of every level for a camera at `eye` (light space), and the masks of the
@@ -598,9 +622,12 @@ impl VirtualShadows {
             range[0].to_bits(),
             range[1].to_bits(),
         ];
+        // The light turned, or casters changed (until step 3c redraws only the pages under
+        // what changed): every page the frame needs is drawn again, the others freed.
         let turned = state.light.is_some_and(|key| key != light_key);
+        let redraw = turned || state.casters.changed;
         for level in levels.iter_mut().take(settings.levels as usize) {
-            level.flags = u32::from(turned);
+            level.flags = u32::from(redraw);
         }
         let number = state.frame.wrapping_add(1);
         // A pixel's footprint at a metre, over the first level's texel.
@@ -630,6 +657,7 @@ impl VirtualShadows {
         }])?;
         // The frame is declared: what it moved is remembered.
         let reset = core::mem::take(&mut state.reset);
+        state.casters.changed = false;
         state.frame = number;
         for (k, level) in levels.iter().enumerate().take(settings.levels as usize) {
             state.first_pages[k] = Some(IVec2::from(level.first_page));
@@ -750,6 +778,64 @@ impl VirtualShadows {
             lists,
             hierarchy,
         }
+    }
+
+    /// Notes this frame's draw list (`mesh`: a mesh's object box and shape revision), the
+    /// renderer settings that change what casts and the materials' revision: when anything
+    /// casts otherwise than last frame, the frame draws its pages again.
+    pub(crate) fn note_draws(
+        &self,
+        draws: &[crate::forward::DrawItem],
+        mesh: impl Fn(crate::mesh::MeshId) -> (Vec3, Vec3, u32),
+        settings: u64,
+        materials: u64,
+    ) {
+        let mut state = self.state.borrow_mut();
+        let casters = &mut state.casters;
+        let now = (None, settings, materials);
+        let follows = casters.last == Some(now);
+        casters.last = Some(now);
+        casters.draws.diff(draws, mesh);
+        if !follows || !casters.draws.changes.is_empty() {
+            casters.changed = true;
+        }
+    }
+
+    /// Notes this frame's scene upload (`serial`, a hash of its batches' `meshes`), the
+    /// renderer settings that change what casts, the materials' revision, whether the
+    /// upload changed instances (`changes`) and whether instances move between ticks
+    /// (`moving`): when anything casts otherwise than last frame (or an upload was
+    /// skipped), the frame draws its pages again.
+    pub(crate) fn note_scene(
+        &self,
+        serial: u64,
+        meshes: u64,
+        settings: u64,
+        materials: u64,
+        changes: bool,
+        moving: bool,
+    ) {
+        let mut state = self.state.borrow_mut();
+        let casters = &mut state.casters;
+        let (same, next) = match casters.last {
+            Some((Some((last, hash)), s, m))
+                if hash == meshes && s == settings && m == materials =>
+            {
+                (serial == last, serial == last.wrapping_add(1))
+            }
+            _ => (false, false),
+        };
+        casters.last = Some((Some((serial, meshes)), settings, materials));
+        if !(same || next) || (next && changes) || moving {
+            casters.changed = true;
+        }
+    }
+
+    /// Draws every page again when a frame next needs it (and frees the others): for
+    /// changes the renderer cannot see, such as vertices rewritten in place by a pass of
+    /// your own.
+    pub fn invalidate(&self) {
+        self.state.borrow_mut().casters.changed = true;
     }
 
     /// Writes the sun's visibility from the pages per pixel of `depth` (the depth they were

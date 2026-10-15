@@ -2,7 +2,8 @@
 //! renderer, against the depths a ray along the light finds.
 //!
 //! A ground slab and two boxes under a directional light, seen from a camera that stands,
-//! stands still and steps aside. After each frame, every texel of every backed page must
+//! stands still and steps aside; then the plate in the air moves. After each frame, every
+//! texel of every backed page must
 //! hold the depth (along the light, across the pages' range) where the light's ray
 //! through the texel's center leaves the first box it meets: the shadow pass draws the
 //! faces turned away from the light. And the sun's visibility the view's shading reads
@@ -88,6 +89,34 @@ const BOXES: [Box3; 3] = [
         size: Vec3::new(1.0, 2.0, 1.0),
     },
 ];
+
+/// [`BOXES`] with the plate in the air moved by `plate`.
+fn boxes_with(plate: Vec3) -> [Box3; 3] {
+    let mut boxes = BOXES;
+    boxes[1].center += plate;
+    boxes
+}
+
+/// The pages' depth range over `boxes`: their extent along the light, as the renderer
+/// finds it.
+fn depth_range_of(boxes: &[Box3]) -> [f64; 2] {
+    let direction = LIGHT.normalize();
+    let along = boxes.iter().flat_map(|b| {
+        (0..8).map(move |i: u32| {
+            let corner = b.center
+                + b.size
+                    * 0.5
+                    * Vec3::new(
+                        if i & 1 == 0 { -1.0 } else { 1.0 },
+                        if i & 2 == 0 { -1.0 } else { 1.0 },
+                        if i & 4 == 0 { -1.0 } else { 1.0 },
+                    );
+            corner.dot(direction)
+        })
+    });
+    let extent = along.fold([f32::MAX, f32::MIN], |[lo, hi], d| [lo.min(d), hi.max(d)]);
+    depth_range(extent).map(f64::from)
+}
 
 /// Where the ray `origin + t · direction` enters `b` and the normal of the face it enters
 /// by, if it meets it in front of the origin.
@@ -178,40 +207,12 @@ fn run(meshlets: bool) {
         ..VsmSettings::default()
     };
     let vsm = VirtualShadows::new(&device, &mut allocator, &bindless, settings).unwrap();
-    let draws: Vec<DrawItem> = BOXES
-        .iter()
-        .map(|b| DrawItem {
-            mesh,
-            material: gray,
-            world_from_object: Mat4::from_scale_rotation_translation(
-                b.size,
-                Quat::IDENTITY,
-                b.center,
-            ),
-        })
-        .collect();
     let light = DirectionalLight {
         direction: LIGHT,
         color: Vec3::splat(3.0),
         ambient: Vec3::splat(0.1),
     };
-    // The pages' depth range: the scene's extent along the light, as the renderer finds it.
     let direction = LIGHT.normalize();
-    let along = BOXES.iter().flat_map(|b| {
-        (0..8).map(move |i: u32| {
-            let corner = b.center
-                + b.size
-                    * 0.5
-                    * Vec3::new(
-                        if i & 1 == 0 { -1.0 } else { 1.0 },
-                        if i & 2 == 0 { -1.0 } else { 1.0 },
-                        if i & 4 == 0 { -1.0 } else { 1.0 },
-                    );
-            corner.dot(direction)
-        })
-    });
-    let extent = along.fold([f32::MAX, f32::MIN], |[lo, hi], d| [lo.min(d), hi.max(d)]);
-    let [lo, hi] = depth_range(extent).map(f64::from);
     let world_from_light = VirtualShadows::light_from_world(LIGHT).inverse();
 
     let rows = POOL_PAGES.div_ceil(TABLE_PAGES);
@@ -253,13 +254,30 @@ fn run(meshlets: bool) {
         (pool, cmd)
     };
 
-    // Standing, standing still, a step aside.
-    let eyes = [
-        Vec3::new(0.0, 1.7, 4.0),
-        Vec3::new(0.0, 1.7, 4.0),
-        Vec3::new(1.0, 1.7, 3.5),
+    // Standing, standing still, a step aside; then the plate moves under a still camera
+    // (the pages it draws were all drawn before: only the scene's change redraws them),
+    // within the scene's depth range.
+    let frames = [
+        (Vec3::new(0.0, 1.7, 4.0), Vec3::ZERO),
+        (Vec3::new(0.0, 1.7, 4.0), Vec3::ZERO),
+        (Vec3::new(1.0, 1.7, 3.5), Vec3::ZERO),
+        (Vec3::new(1.0, 1.7, 3.5), Vec3::new(-1.5, 0.0, 0.5)),
     ];
-    for (frame, &eye) in eyes.iter().enumerate() {
+    for (frame, &(eye, plate)) in frames.iter().enumerate() {
+        let boxes = boxes_with(plate);
+        let draws: Vec<DrawItem> = boxes
+            .iter()
+            .map(|b| DrawItem {
+                mesh,
+                material: gray,
+                world_from_object: Mat4::from_scale_rotation_translation(
+                    b.size,
+                    Quat::IDENTITY,
+                    b.center,
+                ),
+            })
+            .collect();
+        let [lo, hi] = depth_range_of(&boxes);
         let clip_from_world = vulkan_perspective(1.0, WIDTH as f32 / HEIGHT as f32, 0.1, 100.0)
             * look_at(eye, eye + Vec3::new(0.0, -0.3, -1.0), Vec3::Y);
         let camera = Camera {
@@ -474,7 +492,7 @@ fn run(meshlets: bool) {
                     ));
                     let origin_world = across.to_array().map(f64::from);
                     let ray = direction.to_array().map(f64::from);
-                    let nearest = BOXES
+                    let nearest = boxes
                         .iter()
                         .filter_map(|b| exit(b, origin_world, ray))
                         .fold(f64::MAX, f64::min);
@@ -522,7 +540,7 @@ fn run(meshlets: bool) {
                     .normalize()
                     .to_array()
                     .map(f64::from);
-                let hit = BOXES
+                let hit = boxes
                     .iter()
                     .filter_map(|b| enter(b, eye_at, ray))
                     .min_by(|a, b| a.0.total_cmp(&b.0));
@@ -535,7 +553,7 @@ fn run(meshlets: bool) {
                     continue;
                 }
                 let point = [0, 1, 2].map(|i| eye_at[i] + t * ray[i] + normal[i] * 1e-3);
-                let shadowed = BOXES.iter().any(|b| enter(b, point, to_sun).is_some());
+                let shadowed = boxes.iter().any(|b| enter(b, point, to_sun).is_some());
                 let visible = f64::from(f32::from_bits(mask[(y * WIDTH + x) as usize]));
                 if visible > 0.05 && visible < 0.95 {
                     penumbra += 1;

@@ -35,6 +35,7 @@ use engine_render::reflections::{ReflectionProbes, Reflections, ScreenSpaceRefle
 use engine_render::skinning::Skinning;
 use engine_render::skinning::SkinningFrame;
 use engine_render::upload::UploadRing;
+use engine_render::vsm::VirtualShadows;
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocator, Bindless, Device, RhiError, SamplerKind};
 use engine_upscale::{
@@ -896,6 +897,26 @@ impl FrameRenderer {
             }
             _ => {}
         }
+        // The sun's virtual shadow pages (ADR 0093 step 3): made the first frame they are
+        // wanted (with the renderer's culls and pipelines for them), made again when their
+        // settings change; a device without fragment atomics keeps the cascades alone.
+        let pages = view.virtual_shadows.as_ref().map(|(made, _)| *made);
+        match (settings.virtual_shadows, pages) {
+            (Some(wanted), made) if made != Some(wanted) => {
+                if self.forward.set_virtual_shadows(device, bindless, true)? {
+                    let pages = VirtualShadows::new(device, allocator, bindless, wanted)?;
+                    if let Some((_, old)) = view.virtual_shadows.replace((wanted, pages)) {
+                        view.retire(frame_number, Retired::VirtualShadows(old));
+                    }
+                }
+            }
+            (None, Some(_)) => {
+                if let Some((_, old)) = view.virtual_shadows.take() {
+                    view.retire(frame_number, Retired::VirtualShadows(old));
+                }
+            }
+            _ => {}
+        }
         match (settings.cached_shadows, view.shadow_cache.is_some()) {
             (true, false) => {
                 let shadows = self.forward.shadow_settings();
@@ -1182,6 +1203,7 @@ impl FrameRenderer {
             temporal,
             occlusion,
             shadow_cache,
+            virtual_shadows,
             upscaler,
             exposure,
             grading,
@@ -1234,6 +1256,10 @@ impl FrameRenderer {
         let temporal: Option<&'g Temporal> = temporal.as_ref();
         let occlusion: Option<&'g Occlusion> = occlusion.as_ref();
         let shadow_cache: Option<&'g CascadeCache> = shadow_cache.as_ref();
+        let virtual_shadows: Option<&'g VirtualShadows> = virtual_shadows
+            .as_ref()
+            .map(|(_, pages)| pages)
+            .filter(|_| settings.virtual_shadows.is_some());
         let upscaler: Option<&'g mut Box<dyn Upscaler>> = upscaler.as_mut();
         let exposure: Option<&'g AutoExposure> = exposure.as_ref();
         let grading: Option<&'g GradingLut> = grading.as_ref();
@@ -1267,7 +1293,7 @@ impl FrameRenderer {
             occlusion,
             temporal,
             shadow_cache,
-            virtual_shadows: None,
+            virtual_shadows,
             lights: scene.lights,
             decals: scene.decals,
             environment: scene.environment,

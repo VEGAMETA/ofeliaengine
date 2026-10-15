@@ -3086,14 +3086,23 @@ impl ForwardRenderer {
         setup.shadow_draws =
             self.plan_local_shadows(view, geometry, materials, &setup, Changes::Draws(draws));
         let layout = self.layout_draws(ring, geometry, materials, draws, view, &setup);
+        let mesh_box = |mesh| {
+            let (center, extents) = local_box(geometry, mesh);
+            let revision = geometry.mesh(mesh).map_or(0, |m| m.revision);
+            (center, extents, revision)
+        };
         if let Some(cache) = view.shadow_cache {
             cache.note_draws(
                 draws,
-                |mesh| {
-                    let (center, extents) = local_box(geometry, mesh);
-                    let revision = geometry.mesh(mesh).map_or(0, |m| m.revision);
-                    (center, extents, revision)
-                },
+                mesh_box,
+                self.caster_settings(view),
+                materials.revision(),
+            );
+        }
+        if let Some(pages) = view.virtual_shadows {
+            pages.note_draws(
+                draws,
+                mesh_box,
                 self.caster_settings(view),
                 materials.revision(),
             );
@@ -3199,8 +3208,8 @@ impl ForwardRenderer {
         }
         setup.shadow_draws =
             self.plan_local_shadows(view, geometry, materials, &setup, Changes::Scene(scene));
-        if let Some(cache) = view.shadow_cache {
-            self.note_scene_casters(cache, geometry, materials, scene, view);
+        if view.shadow_cache.is_some() || view.virtual_shadows.is_some() {
+            self.note_scene_casters(geometry, materials, scene, view);
         }
         let layout = self.layout_scene(ring, geometry, scene, view, &setup);
         let passes = layout.and_then(|layout| {
@@ -3389,12 +3398,11 @@ impl ForwardRenderer {
         cascade_cache::mix(hash, u64::from(self.lod_threshold.to_bits()))
     }
 
-    /// Notes what a scene's view with cached cascades (ADR 0093) casts from this frame:
-    /// the scene's upload, its changes and moving instances, and its batches' meshes (and
-    /// their shapes: another mesh or shape draws them whole).
+    /// Notes what a scene's view with cached cascades or virtual shadow pages (ADR 0093)
+    /// casts from this frame: the scene's upload, its changes and moving instances, and its
+    /// batches' meshes (and their shapes: another mesh or shape draws them whole).
     fn note_scene_casters(
         &self,
-        cache: &CascadeCache,
         geometry: &GeometryFrame<'_>,
         materials: &MaterialFrame<'_>,
         scene: &SceneFrame<'_>,
@@ -3408,14 +3416,27 @@ impl ForwardRenderer {
             meshes = cascade_cache::mix(meshes, bytemuck::cast(batch.mesh));
             meshes = cascade_cache::mix(meshes, u64::from(shape));
         }
-        cache.note_scene(
-            scene.serial(),
-            meshes,
-            self.caster_settings(view),
-            materials.revision(),
-            scene.changes(),
-            scene.moving_boxes(),
-        );
+        let settings = self.caster_settings(view);
+        if let Some(cache) = view.shadow_cache {
+            cache.note_scene(
+                scene.serial(),
+                meshes,
+                settings,
+                materials.revision(),
+                scene.changes(),
+                scene.moving_boxes(),
+            );
+        }
+        if let Some(pages) = view.virtual_shadows {
+            pages.note_scene(
+                scene.serial(),
+                meshes,
+                settings,
+                materials.revision(),
+                !scene.changes().is_empty(),
+                !scene.moving_boxes().is_empty(),
+            );
+        }
     }
 
     /// What a frame's layout depends on besides the instances.

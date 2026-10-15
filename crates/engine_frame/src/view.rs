@@ -7,6 +7,7 @@ use engine_render::grading::GradingLut;
 use engine_render::graph::TextureState;
 use engine_render::postfx::AutoExposure;
 use engine_render::reflections::ScreenSpaceReflections;
+use engine_render::vsm::{VirtualShadows, VsmSettings};
 use engine_rhi::ash::vk;
 use engine_rhi::{Allocation, Allocator, Bindless, Device, MemoryLocation, RhiError};
 use engine_upscale::Upscaler;
@@ -159,6 +160,7 @@ pub(crate) enum Retired {
     Temporal(Temporal),
     Occlusion(Occlusion),
     ShadowCache(CascadeCache),
+    VirtualShadows(VirtualShadows),
     Exposure(AutoExposure),
     Grading(GradingLut),
     History(HistoryImage),
@@ -186,6 +188,9 @@ pub struct View {
     pub(crate) occlusion: Option<Occlusion>,
     /// The sun's cascades kept across frames (ADR 0093).
     pub(crate) shadow_cache: Option<CascadeCache>,
+    /// The sun's virtual shadow pages (ADR 0093 step 3), with the settings they were made
+    /// with.
+    pub(crate) virtual_shadows: Option<(VsmSettings, VirtualShadows)>,
     pub(crate) upscaler: Option<Box<dyn Upscaler>>,
     pub(crate) exposure: Option<AutoExposure>,
     /// Its color grading and tone curve as one LUT (ADR 0094), from the first frame it
@@ -228,6 +233,7 @@ impl View {
             temporal: None,
             occlusion: None,
             shadow_cache: None,
+            virtual_shadows: None,
             upscaler: None,
             exposure: None,
             grading: None,
@@ -320,6 +326,9 @@ impl View {
             self.temporal.take().map(Retired::Temporal),
             self.occlusion.take().map(Retired::Occlusion),
             self.shadow_cache.take().map(Retired::ShadowCache),
+            self.virtual_shadows
+                .take()
+                .map(|(_, pages)| Retired::VirtualShadows(pages)),
             self.exposure.take().map(Retired::Exposure),
             self.grading.take().map(Retired::Grading),
             self.history.take().map(Retired::History),
@@ -359,6 +368,7 @@ unsafe fn free(
             Retired::Temporal(mut temporal) => temporal.destroy(allocator),
             Retired::Occlusion(mut occlusion) => occlusion.destroy(allocator),
             Retired::ShadowCache(mut cache) => cache.destroy(allocator, bindless),
+            Retired::VirtualShadows(mut pages) => pages.destroy(allocator, bindless),
             Retired::Exposure(mut exposure) => exposure.destroy(allocator),
             Retired::Grading(mut lut) => lut.destroy(allocator, bindless, frame),
             Retired::History(image) => image.destroy(device, allocator, bindless, frame),

@@ -10,10 +10,12 @@ Last updated: 2026-10-15.
 
 - **Working on: virtual shadow maps, step 3** (queue item 5, ADR 0093): virtual pages for
   the sun.
-  - 3a, the pages' machinery, was done 2026-10-15 (not yet used by a frame).
-  - Next is 3b: drawing into the pages, the sun's visibility from them, the shading
-    reading it.
-  - Then 3c: moved casters, a turning sun, defaults per device class.
+  - 3a, the pages' machinery, and 3b, drawing into them and shading with them, were done
+    2026-10-15. `ViewSettings::virtual_shadows` turns them on (off by default): sharper
+    shadows, but not yet cheaper than the cascades.
+  - Next is 3c: cut the cost of drawing while walking (13× the cached cascades on the
+    RTX) and of the visibility on the Radeon (13.7 ms at 1080p); then moved casters, a
+    turning sun, defaults per device class.
 - **Then, in order** (§5): 8b video playback, 8c colliders made from meshes,
   8d localization. After them, item 9: the editor, Luau and tooling.
 - **Parked:**
@@ -118,9 +120,8 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 ## 4. In flight
 
-- **5, virtual shadow maps, step 3** (ADR 0093). 3a was done 2026-10-15: the pages'
-  machinery, not yet used by a frame. 3b is next, then 3c. Details are under
-  the queue's item 5.
+- **5, virtual shadow maps, step 3** (ADR 0093). 3a and 3b were done 2026-10-15: the
+  pages are drawn and read, opt-in. 3c is next. Details are under the queue's item 5.
 
 Nothing else is in flight. Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
@@ -131,7 +132,7 @@ them.
 **What is left, in order.** The numbered items below keep their history; struck-through
 items are done.
 
-1. **5, virtual shadow maps, step 3:** 3b, then 3c (in flight, §4).
+1. **5, virtual shadow maps, step 3:** 3c (in flight, §4).
 2. **8b, video playback.**
 3. **8c, colliders made from meshes.**
 4. **8d, localization.**
@@ -529,12 +530,29 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
        model of the rules on both GPUs.
        - At 1080p (a ground plane, 3,185 pages): RTX 62 µs a frame (the first 121 µs),
          Radeon 1.03 ms (the first 1.88 ms).
-     - **Next, 3b:** drawing into the dirty pages, the visibility pass into the sun's mask,
-       the shading reading it; golden shots and perf gate scenes.
-     - **Then 3c:** moved casters, a slowly turning sun (today every turn redraws the
-       needed pages), the pool's size and the level bias per device class. A ground plane
-       at 1080p fills 78 % of the default pool, and the Radeon's marking costs 1 ms, so
-       the integrated class keeps the cascades unless measured otherwise.
+     - **3b done 2026-10-15:** `ViewSettings::virtual_shadows` (off by default). Casters
+       are culled into the dirty pages and drawn with an atomic minimum, without
+       attachments; a pass after the prepass writes the sun's visibility into the mask
+       the shading reads (the cascades' lookup skipped; transparent surfaces keep the
+       cascades). Casters that change redraw every page a frame needs. Tests against
+       rays on both GPUs, golden shots, three perf gate scenes.
+       - Sharper shadows; on walls under a high sun larger than the cascades' (their
+         normal offset is 5–10 times wider).
+       - Intel's Sponza at 1080p: still RTX 246 µs (the visibility 164), Radeon 15.8 ms
+         (the visibility 13.7); walking 5 cm a frame, drawing RTX 885 µs, Radeon 27.6 ms,
+         against the cached cascades' 69 µs and 0.75 ms.
+     - **Next, 3c**, in order of cost (ADR 0093's "What 3b leaves"):
+       1. drawing while walking: clip each draw to the dirty pages it reaches, so the
+          fragments outside them are not rasterized;
+       2. the visibility on the Radeon: fewer reads a pixel (hardware comparisons on a
+          float view of the pool with a texel of border per page; the normal from fewer
+          depths);
+       3. moved casters redraw only the pages under their old and new places;
+       4. transparent surfaces and subsurface transmission from the pages, so the
+          cascades need not be drawn;
+       5. a slowly turning sun (every turn redraws the needed pages); the pool's size,
+          the level bias and the default per device class. Off everywhere until the
+          pages cost less than the cascades they replace.
    - The instanced draws' pieces culled with the same tags (left from step 2).
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.

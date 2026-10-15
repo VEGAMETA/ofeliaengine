@@ -77,6 +77,10 @@ forward.cullShadows	ShaderProperties.cs	numUsedVgprs	43
 forward.cullShadows	ShaderProperties.cs	scratchMemUsageInBytes	0
 forward.cullShadowsMeshlets	ShaderProperties.cs	numUsedVgprs	46
 forward.cullShadowsMeshlets	ShaderProperties.cs	scratchMemUsageInBytes	0
+forward.cullVsm	ShaderProperties.cs	numUsedVgprs	50
+forward.cullVsm	ShaderProperties.cs	scratchMemUsageInBytes	0
+forward.cullVsmMeshlets	ShaderProperties.cs	numUsedVgprs	40
+forward.cullVsmMeshlets	ShaderProperties.cs	scratchMemUsageInBytes	0
 forward.depthVertex /D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
 forward.depthVertex /D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.depthVertex /D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	2
@@ -311,6 +315,42 @@ forward.vertexMain+forward.fragmentMainAoBent spec=0,1 R16G16B16A16_SFLOAT/D32_S
 forward.vertexMain+forward.fragmentMainAoBent spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentMainAoBent spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	72
 forward.vertexMain+forward.fragmentMainAoBent spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoBentContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainAoBentContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoBentContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	72
+forward.vertexMain+forward.fragmentMainAoBentContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainAoContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	54
+forward.vertexMain+forward.fragmentMainAoContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainAoContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	70
+forward.vertexMain+forward.fragmentMainAoContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainAoContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	63
+forward.vertexMain+forward.fragmentMainAoContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainAoContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainAoContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	80
+forward.vertexMain+forward.fragmentMainAoContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	48
+forward.vertexMain+forward.fragmentMainContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	72
+forward.vertexMain+forward.fragmentMainContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	58
+forward.vertexMain+forward.fragmentMainContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentMainContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentMainContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	80
+forward.vertexMain+forward.fragmentMainContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentMainDecals spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
 forward.vertexMain+forward.fragmentMainDecals spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentMainDecals spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	48
@@ -483,6 +523,14 @@ forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	95
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vsmVertex+forward.vsmFragment	ShaderProperties.gs	numUsedVgprs	47
+forward.vsmVertex+forward.vsmFragment	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vsmVertex+forward.vsmFragment	ShaderProperties.ps	numUsedVgprs	9
+forward.vsmVertex+forward.vsmFragment	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.gs	numUsedVgprs	47
+forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.ps	numUsedVgprs	9
+forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.ps	scratchMemUsageInBytes	0
 fsr1.easu	ShaderProperties.cs	numUsedVgprs	76
 fsr1.easu	ShaderProperties.cs	scratchMemUsageInBytes	0
 fsr1.rcasNative	ShaderProperties.cs	numUsedVgprs	30
@@ -651,3 +699,19 @@ tonemap.vertexMain+tonemap.lanczos3Across R16G16B16A16_SFLOAT	ShaderProperties.g
 tonemap.vertexMain+tonemap.lanczos3Across R16G16B16A16_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 tonemap.vertexMain+tonemap.lanczos3Across R16G16B16A16_SFLOAT	ShaderProperties.ps	numUsedVgprs	31
 tonemap.vertexMain+tonemap.lanczos3Across R16G16B16A16_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+vsm.vsmAllocate	ShaderProperties.cs	numUsedVgprs	5
+vsm.vsmAllocate	ShaderProperties.cs	scratchMemUsageInBytes	0
+vsm.vsmArgs	ShaderProperties.cs	numUsedVgprs	4
+vsm.vsmArgs	ShaderProperties.cs	scratchMemUsageInBytes	0
+vsm.vsmBeginFrame	ShaderProperties.cs	numUsedVgprs	9
+vsm.vsmBeginFrame	ShaderProperties.cs	scratchMemUsageInBytes	0
+vsm.vsmClear	ShaderProperties.cs	numUsedVgprs	12
+vsm.vsmClear	ShaderProperties.cs	scratchMemUsageInBytes	0
+vsm.vsmCollectDirty	ShaderProperties.cs	numUsedVgprs	13
+vsm.vsmCollectDirty	ShaderProperties.cs	scratchMemUsageInBytes	0
+vsm.vsmFindPages	ShaderProperties.cs	numUsedVgprs	6
+vsm.vsmFindPages	ShaderProperties.cs	scratchMemUsageInBytes	0
+vsm.vsmMark	ShaderProperties.cs	numUsedVgprs	34
+vsm.vsmMark	ShaderProperties.cs	scratchMemUsageInBytes	0
+vsm.vsmVisibility	ShaderProperties.cs	numUsedVgprs	102
+vsm.vsmVisibility	ShaderProperties.cs	scratchMemUsageInBytes	0

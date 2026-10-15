@@ -39,6 +39,8 @@ forward.cullMeshlets	CS	Register Count	48
 forward.cullShadowViews	CS	Register Count	53
 forward.cullShadows	CS	Register Count	40
 forward.cullShadowsMeshlets	CS	Register Count	40
+forward.cullVsm	CS	Register Count	40
+forward.cullVsmMeshlets	CS	Register Count	40
 forward.depthVertex /D32_SFLOAT	VS	Register Count	36
 forward.depthVertex /D32_SFLOAT x4	VS	Register Count	36
 forward.depthVertexMasked+forward.feedbackFragment /D16_UNORM	FS	Register Count	17
@@ -151,6 +153,24 @@ forward.vertexMain+forward.fragmentMainAo spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOA
 forward.vertexMain+forward.fragmentMainAo spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentMainAoBent spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
 forward.vertexMain+forward.fragmentMainAoBent spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAoBentContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainAoBentContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAoContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainAoContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAoContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMainAoContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAoContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainAoContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAoContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMainAoContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainContact spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMainContact spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainContact spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMainContact spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentMainDecals spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	55
 forward.vertexMain+forward.fragmentMainDecals spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentMainDecals spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
@@ -237,6 +257,10 @@ forward.vertexMain+forward.fragmentReflectContactShadowed spec=1,1 R16G16B16A16_
 forward.vertexMain+forward.fragmentReflectContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	69
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vsmVertex+forward.vsmFragment	FS	Register Count	16
+forward.vsmVertex+forward.vsmFragment	VS	Register Count	39
+forward.vsmVertexMasked+forward.vsmFragmentMasked	FS	Register Count	16
+forward.vsmVertexMasked+forward.vsmFragmentMasked	VS	Register Count	40
 fsr1.easu	CS	Register Count	63
 fsr1.rcasNative	CS	Register Count	35
 fsr1.rcasScaled	CS	Register Count	36
@@ -321,3 +345,11 @@ tonemap.vertexMain+tonemap.fragmentPerceptualGraded A2B10G10R10_UNORM_PACK32	FS	
 tonemap.vertexMain+tonemap.fragmentPerceptualGraded A2B10G10R10_UNORM_PACK32	VS	Register Count	16
 tonemap.vertexMain+tonemap.lanczos3Across R16G16B16A16_SFLOAT	FS	Register Count	39
 tonemap.vertexMain+tonemap.lanczos3Across R16G16B16A16_SFLOAT	VS	Register Count	16
+vsm.vsmAllocate	CS	Register Count	16
+vsm.vsmArgs	CS	Register Count	16
+vsm.vsmBeginFrame	CS	Register Count	16
+vsm.vsmClear	CS	Register Count	28
+vsm.vsmCollectDirty	CS	Register Count	16
+vsm.vsmFindPages	CS	Register Count	16
+vsm.vsmMark	CS	Register Count	35
+vsm.vsmVisibility	CS	Register Count	48

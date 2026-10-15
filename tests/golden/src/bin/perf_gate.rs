@@ -60,6 +60,7 @@ use engine_render::dof::DofSettings;
 use engine_render::grading::ColorGrading;
 use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::reflections::SsrSettings;
+use engine_render::vsm::VsmSettings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -320,6 +321,33 @@ fn shots() -> Vec<Shot> {
     ] {
         shots.push(Shot {
             camera_motion: Vec3::new(0.05, 0.0, 0.0),
+            ..class_defaults(name, INTEL_SPONZA, class)
+        });
+    }
+    // The sun's virtual shadow pages (ADR 0093 step 3) in Intel's Sponza: still, what
+    // they cost every frame (the pages the pixels need marked, the bookkeeping, the culls
+    // with nothing dirty, the visibility); walking as above, the pages the camera exposes
+    // drawn too. The cascades stay cached beside them (transparent surfaces read them).
+    for (name, class, motion) in [
+        (
+            "intel_sponza_vsm_discrete",
+            DeviceClass::Discrete,
+            Vec3::ZERO,
+        ),
+        (
+            "intel_sponza_walk_vsm_discrete",
+            DeviceClass::Discrete,
+            Vec3::new(0.05, 0.0, 0.0),
+        ),
+        (
+            "intel_sponza_walk_vsm_integrated",
+            DeviceClass::Integrated,
+            Vec3::new(0.05, 0.0, 0.0),
+        ),
+    ] {
+        shots.push(Shot {
+            camera_motion: motion,
+            virtual_shadows: Some(VsmSettings::default()),
             ..class_defaults(name, INTEL_SPONZA, class)
         });
     }
