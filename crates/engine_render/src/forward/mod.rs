@@ -3435,8 +3435,8 @@ impl ForwardRenderer {
                 meshes,
                 settings,
                 materials.revision(),
-                !scene.changes().is_empty(),
-                !scene.moving_boxes().is_empty(),
+                scene.changes(),
+                scene.moving_boxes(),
             );
         }
     }
