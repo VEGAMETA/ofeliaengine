@@ -13,8 +13,10 @@
 //! injects a job and blocks issues a `SeqCst` fence after the push and then reads the
 //! mask; the sleeper sets its mask bit with a `SeqCst` RMW and then re-checks every queue
 //! before parking, so one of the two always sees the other. Latch completions use the
-//! same pattern on the per-participant `state`. Pushes to a participant's own deque skip
-//! the fence (see `notify_work`).
+//! same pattern on the per-participant `state`, and so do requests to give memory back
+//! (`request_release`: the epoch's `SeqCst` RMW before claiming sleepers, re-read by a
+//! sleeper after it announced itself). Pushes to a participant's own deque skip the fence
+//! (see `notify_work`).
 //!
 //! # Throttled wake-ups
 //!
@@ -92,6 +94,18 @@ pub(crate) struct Registry {
     release_epoch: AtomicU64,
     pub(crate) num_workers: usize,
     spin_rounds: u32,
+    #[cfg(test)]
+    pub(crate) test_hook: TestHook,
+}
+
+/// Test instrumentation of giving memory back: the epoch a participant last gave it back
+/// for, and a pause after doing so, before it announces its sleep (the window a release
+/// asked for meanwhile falls into).
+#[cfg(test)]
+#[derive(Default)]
+pub(crate) struct TestHook {
+    pub(crate) pause_after_release_ms: AtomicU64,
+    pub(crate) released_epoch: AtomicU64,
 }
 
 pub(crate) struct RegistryConfig {
@@ -132,6 +146,8 @@ impl Registry {
             release_epoch: AtomicU64::new(0),
             num_workers: config.workers,
             spin_rounds: config.spin_rounds,
+            #[cfg(test)]
+            test_hook: TestHook::default(),
         }
     }
 
@@ -272,7 +288,9 @@ impl Registry {
     /// Asks every participant to give its allocator heap's memory back: the sleeping ones
     /// wake, do so on their way back to sleep, and sleep again (ADR 0086).
     pub(crate) fn request_release(&self) {
-        self.release_epoch.fetch_add(1, Ordering::AcqRel);
+        // SeqCst: pairs with the epoch check a participant makes after announcing its sleep
+        // (`sleep`): either that check sees the new epoch, or `wake_all` sees it asleep.
+        self.release_epoch.fetch_add(1, Ordering::SeqCst);
         self.wake_all();
     }
 
@@ -426,14 +444,29 @@ impl Registry {
         let epoch = self.release_epoch.load(Ordering::Acquire);
         if slot.owner.ran_jobs.replace(false) | (slot.owner.released.replace(epoch) != epoch) {
             crate::alloc::release_thread_memory();
+            #[cfg(test)]
+            {
+                let hook = &self.test_hook;
+                hook.released_epoch.store(epoch, Ordering::SeqCst);
+                let pause = hook.pause_after_release_ms.load(Ordering::SeqCst);
+                if pause > 0 {
+                    #[allow(clippy::disallowed_methods)] // a test's pause: no precision needed
+                    thread::sleep(std::time::Duration::from_millis(pause));
+                }
+            }
         }
 
         slot.state.store(SLEEPING, Ordering::SeqCst);
         self.sleeping.fetch_or(bit, Ordering::SeqCst);
 
-        // Re-check after announcing: a job pushed or a latch set before our announcement
-        // is visible here; one pushed after it will find our bit.
-        let cancel = done() || self.has_work() || self.terminate.load(Ordering::SeqCst);
+        // Re-check after announcing: a job pushed, a latch set or a release asked for before
+        // our announcement is visible here; one after it finds us asleep. Without the epoch
+        // check, a release asked for after the read above would pass this participant by
+        // (`wake_all` found it awake), and it would sleep without giving that memory back.
+        let cancel = done()
+            || self.has_work()
+            || self.terminate.load(Ordering::SeqCst)
+            || self.release_epoch.load(Ordering::SeqCst) != epoch;
         if !cancel {
             engine_profiler::zone!("jobs::park");
             while slot.state.load(Ordering::SeqCst) == SLEEPING {

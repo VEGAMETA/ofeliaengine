@@ -17,8 +17,12 @@
 //! Without the `mimalloc` feature (on by default) the allocator is the system heap.
 
 use core::alloc::{GlobalAlloc, Layout};
+#[cfg(feature = "mimalloc")]
+use core::sync::atomic::AtomicBool;
+#[cfg(any(debug_assertions, feature = "mimalloc"))]
+use core::sync::atomic::Ordering;
 #[cfg(debug_assertions)]
-use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize};
 
 #[cfg(feature = "mimalloc")]
 const INNER: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -133,22 +137,50 @@ pub fn heap_stats() -> Option<HeapStats> {
 #[cfg(feature = "mimalloc")]
 unsafe extern "C" {
     // mimalloc's C API (part of every build of the library `libmimalloc-sys` links).
+    fn mi_thread_init();
     fn mi_collect(force: bool);
 }
 
+/// Set by a thread that collected its heap in [`release_thread_memory`]: a purge has to
+/// start after that.
+#[cfg(feature = "mimalloc")]
+static PURGE_ASKED: AtomicBool = AtomicBool::new(false);
+/// Held by the one thread purging for [`release_thread_memory`].
+#[cfg(feature = "mimalloc")]
+static PURGING: AtomicBool = AtomicBool::new(false);
+
 /// Gives the memory the calling thread's heap holds back to the OS: what it freed, and
 /// what other threads freed into it. mimalloc keeps it until the thread allocates again.
-/// Two forced collects: the first takes in what other threads freed and frees the pages
-/// that became empty, the second gives back the segments those left empty (one alone left
-/// 64–96 of 385 MiB behind in `tests/alloc_release.rs`). Cheap: under a microsecond with
-/// nothing to give, about 5 µs after a burst of jobs (ref-1). Does nothing without the
-/// `mimalloc` feature.
+/// Lock-free, and cheap: under a microsecond with nothing to give, about 5 µs after a
+/// burst of jobs (ref-1). Does nothing without the `mimalloc` feature.
+///
+/// A forced collect frees the heap's empty pages and segments, then purges (decommits)
+/// the free parts of mimalloc's arenas. mimalloc lets one thread purge at a time; one
+/// asking meanwhile goes on without purging. So when threads gave memory back together
+/// (the job pool's workers on `ThreadPool::release_memory`), what one freed after the
+/// purging one had passed stayed committed until some thread allocated again: 64–128 MiB
+/// in `tests/alloc_release.rs`, in 11 of 72 runs with 24 copies running at once (ADR 0086).
+/// Here the purges run one at a time, and again until one has started after every
+/// caller's collect.
 pub fn release_thread_memory() {
     #[cfg(feature = "mimalloc")]
-    // SAFETY: plain calls into the linked mimalloc; they collect the calling thread's heap.
-    unsafe {
-        mi_collect(true);
-        mi_collect(true);
+    {
+        // SAFETY: plain calls into the linked mimalloc. The first sets up the calling
+        // thread's heap if it never allocated (a collect skips a thread without one, purge
+        // included); the second collects that heap.
+        unsafe {
+            mi_thread_init();
+            mi_collect(true);
+        }
+        // SeqCst throughout: either the purging thread sees this request once it has let
+        // go, or this thread takes the purge over.
+        PURGE_ASKED.store(true, Ordering::SeqCst);
+        while PURGE_ASKED.load(Ordering::SeqCst) && !PURGING.swap(true, Ordering::SeqCst) {
+            PURGE_ASKED.store(false, Ordering::SeqCst);
+            // SAFETY: as above; a forced collect is mimalloc's public way to purge.
+            unsafe { mi_collect(true) };
+            PURGING.store(false, Ordering::SeqCst);
+        }
     }
 }
 

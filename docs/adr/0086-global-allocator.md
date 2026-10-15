@@ -80,7 +80,8 @@ giving memory back and a counting layer in debug builds, as recommended above.
 - `release_thread_memory`: two forced `mi_collect`s, the first taking in what other
   threads freed into the heap and freeing the pages that became empty, the second giving
   back the segments those left (one alone left 64–96 of 385 MiB behind). Under a
-  microsecond with nothing to give, about 5 µs after a burst of jobs.
+  microsecond with nothing to give, about 5 µs after a burst of jobs. (The addendum of
+  2026-10-15 found the real reason and replaced the second collect.)
 - The job pool's participants call it before they sleep when they ran jobs since their
   last sleep, and on `ThreadPool::release_memory` (every sleeper wakes, gives memory
   back and sleeps again): memory the workers allocated and another thread freed later
@@ -95,3 +96,50 @@ private memory 798–831 → 847–873 MiB (+5–6 %). The cook through the CLI 
 zstd (1.24–1.26 s either way).
 
 Left: Tracy memory events (ADR 0003) through the same allocator.
+
+## Addendum (2026-10-15): purges one at a time, and a missed release
+
+`tests/alloc_release.rs` failed under load: in the gate's parallel tests, and in 11 of 72
+runs with 24 copies running at once. 64–128 MiB stayed committed after `release_memory`,
+always whole 32 MiB segments.
+
+- **Cause.** A forced `mi_collect` frees the heap's empty segments into mimalloc's arenas,
+  then purges (decommits) the arenas' free blocks. mimalloc 2.3.2 lets one thread purge at
+  a time (`mi_arenas_try_purge`); a thread asking meanwhile goes on without purging.
+  - Workers woken together by `release_memory` freed their segments while one of them was
+    purging and had passed their blocks; their own purges were skipped.
+  - Then every thread slept, and nothing purged later.
+  - With `MIMALLOC_PURGE_DELAY=0` (a segment purged as it is freed, without the shared
+    purge) none of 72 runs failed: the residue was freed segments waiting for a purge.
+  - The second forced collect of the first implementation was a second chance at that
+    purge, not a second step of the collect.
+- **Options:**
+  1. purging at once (`purge_delay` 0): every segment and page span freed is decommitted
+     on the spot and committed again on its next use, which mimalloc's delay (10 ms, 100 ms
+     for arenas) saves loading from;
+  2. a lock around the releases: on the path every worker takes when it goes idle;
+  3. mimalloc patched to wait for the purge when forced: a fork to keep;
+  4. **purge turns of our own (taken).** `release_thread_memory` collects the thread's heap
+     once and asks for a purge; it purges unless another caller is purging, and the one
+     purging purges again while requests come in. So one purge starts after every
+     caller's collect. Lock-free: two flags.
+- **`mi_thread_init` first.** mimalloc's collect does nothing, purge included, on a thread
+  that never allocated, and such a thread could be the one purging for the others.
+- **A missed release, found on the way.**
+  - A release asked for between a participant's read of the epoch and its sleep
+    announcement passed it by: `wake_all` found it awake, and it slept without giving
+    memory back.
+  - The sleeper now reads the epoch again after announcing itself (Dekker-style, as for
+    jobs).
+  - `a_release_asked_for_on_the_way_to_sleep_is_not_missed` pauses a worker in that
+    window. Without the check, the worker never gives memory back for the new epoch.
+- **Measured (ref-1):**
+  - 24 copies of `tests/alloc_release.rs` at once: 11 of 72 runs failed before; 17 of 72
+    with only the epoch check; 0 of 120 with the purge turns, with or without it.
+  - A 300 ms pause in the sleep window: the old protocol failed 3 runs of 3 (64–96 MiB
+    left), the new one passed 3 of 3.
+  - `release_thread_memory` alone (release build): 0.45 µs with nothing to give either
+    way; 2.8 → 2.6 µs (median) after freeing 256 small blocks.
+- **Left:** a thread outside `release_thread_memory` purging at that moment (one freeing a
+  segment after the delay) can still make the last purge skip. That memory is then purged
+  at the next allocation after the delay, as before.

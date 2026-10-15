@@ -2,6 +2,7 @@ use super::*;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 
 fn pool(workers: usize) -> ThreadPool {
     ThreadPool::builder().workers(workers).build().unwrap()
@@ -338,6 +339,25 @@ fn idle_pool_wakes_up_repeatedly() {
             std::hint::spin_loop();
         }
     }
+}
+
+#[test]
+#[allow(clippy::disallowed_methods)] // pauses: no timer precision needed
+fn a_release_asked_for_on_the_way_to_sleep_is_not_missed() {
+    // After its job the worker gives memory back, then pauses before announcing its sleep.
+    // A release asked for meanwhile finds it awake, so `wake_all` passes it by: the worker
+    // has to see the new epoch itself, and give memory back for it before it sleeps.
+    let pool = pool(1);
+    let hook = &pool.registry().test_hook;
+    hook.pause_after_release_ms.store(200, Ordering::SeqCst);
+    pool.install(|| ());
+    std::thread::sleep(Duration::from_millis(50));
+    pool.release_memory();
+    let start = Instant::now();
+    while hook.released_epoch.load(Ordering::SeqCst) < 1 && start.elapsed().as_secs() < 5 {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(hook.released_epoch.load(Ordering::SeqCst), 1);
 }
 
 #[test]
