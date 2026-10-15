@@ -172,8 +172,9 @@ pub struct SkinId {
     generation: u32,
 }
 
-/// A skinned instance.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// A skinned instance (plain data: an ECS component can hold it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
 pub struct SkinnedId {
     index: u32,
     generation: u32,
@@ -764,6 +765,14 @@ impl Skinning {
     /// one its draw item or scene instance uses, bit for bit: the motion pass matches the
     /// forward pass's depth). Allocates nothing.
     pub fn set_pose(&mut self, id: SkinnedId, palette: &[[f32; 12]], world_from_object: &Mat4) {
+        self.set_palette(id, palette);
+        self.set_transform(id, world_from_object);
+    }
+
+    /// [`Self::set_pose`]'s skinning matrices alone: the animation's part, when someone
+    /// else places the instance ([`Self::set_transform`]; the player does, from its scene
+    /// instance). Allocates nothing.
+    pub fn set_palette(&mut self, id: SkinnedId, palette: &[[f32; 12]]) {
         let Some(index) = self.instance_mut(id).map(|_| id.index as usize) else {
             return;
         };
@@ -776,11 +785,18 @@ impl Skinning {
         }
         instance.palette[..n].copy_from_slice(&palette[..n]);
         instance.posed = true;
-        instance.rows = rows_of(world_from_object);
         let bounds = posed_bounds(boxes, &instance.palette);
         if bounds != instance.bounds {
             instance.bounds = bounds;
             instance.bounds_dirty = true;
+        }
+    }
+
+    /// [`Self::set_pose`]'s object-to-world transform alone: the one its draw item or
+    /// scene instance uses this frame, bit for bit.
+    pub fn set_transform(&mut self, id: SkinnedId, world_from_object: &Mat4) {
+        if let Some(instance) = self.instance_mut(id) {
+            instance.rows = rows_of(world_from_object);
         }
     }
 

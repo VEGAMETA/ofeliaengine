@@ -22,7 +22,7 @@ use engine_platform::window::{
 use engine_render::budget::GpuBudget;
 use engine_render::environment::{Environment, Sky};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
-use engine_render::forward::{DirectionalLight, LocalLight, ShadowSettings};
+use engine_render::forward::{DirectionalLight, ShadowSettings};
 use engine_render::gpu_scene::{GpuScene, InstanceId};
 use engine_render::graph::{
     Access, FrameGraph, ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState,
@@ -48,6 +48,12 @@ use std::time::Instant;
 
 /// The depth buffer's format.
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+/// No sun: a world without a `Sun` entity has no sunlight and no ambient term.
+const NO_SUN: DirectionalLight = DirectionalLight {
+    direction: Vec3::NEG_Y,
+    color: Vec3::ZERO,
+    ambient: Vec3::ZERO,
+};
 /// The most UI canvases a frame draws.
 pub const MAX_UI_CANVASES: usize = 16;
 
@@ -191,8 +197,6 @@ pub struct Player {
     // The simulation.
     runtime: Runtime<InstanceId>,
     cameras: CameraView,
-    sun: DirectionalLight,
-    lights: Vec<LocalLight>,
     scene_info: SceneInfo,
     // GPU objects destroyed in `Drop`.
     ui: Option<UiLayer>,
@@ -532,12 +536,6 @@ impl Player {
         let mut player = Self {
             runtime,
             cameras,
-            sun: DirectionalLight {
-                direction: Vec3::new(-0.3, -1.0, -0.2),
-                color: Vec3::splat(3.0),
-                ambient: Vec3::splat(0.08),
-            },
-            lights: Vec::new(),
             scene_info,
             ui: None,
             view: None,
@@ -732,17 +730,6 @@ impl Player {
     /// The runtime: the world, the simulation clock, extraction.
     pub fn runtime(&self) -> &Runtime<InstanceId> {
         &self.runtime
-    }
-
-    /// The sun.
-    pub fn sun_mut(&mut self) -> &mut DirectionalLight {
-        &mut self.sun
-    }
-
-    /// The local lights (point and spot), shadowed with
-    /// [`PlayerSettings::local_shadows`](crate::PlayerSettings::local_shadows).
-    pub fn lights_mut(&mut self) -> &mut Vec<LocalLight> {
-        &mut self.lights
     }
 
     /// The UI layer, made on first use; its canvases are drawn on every presented frame.
@@ -1032,6 +1019,10 @@ impl Player {
             },
             elapsed as f32,
         );
+        // Skinned meshes at their scene instances, then their bounds (ADR 0099 step 3).
+        self.runtime.place_skinned(&self.scene, &mut self.skinning);
+        self.skinning
+            .update_bounds(&mut self.geometry, Some(&mut self.scene));
         report.animate = us(t);
         marker(
             &mut self.latency,
@@ -1267,8 +1258,8 @@ impl Player {
                 materials: &mats,
                 draws,
                 skinning: Some(&skinned),
-                light: self.sun,
-                lights: &self.lights,
+                light: self.runtime.lights().sun().unwrap_or(NO_SUN),
+                lights: self.runtime.lights().lights(),
                 decals: &[],
                 environment: Some(&self.environment),
                 reflection_probes: None,

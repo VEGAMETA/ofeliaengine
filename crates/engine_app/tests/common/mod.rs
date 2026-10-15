@@ -7,7 +7,7 @@ use engine_core::math::{Quat, Vec3};
 use engine_ecs::{GlobalTransform, QueryState, Transform, World, bytemuck, pod_component};
 use engine_render::material::MaterialDesc;
 use engine_render::mesh::cube;
-use engine_runtime::MeshRenderer;
+use engine_runtime::{MeshRenderer, PointLight, Sun};
 
 /// Turns its entity about Y, radians per second.
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -90,6 +90,23 @@ pub fn player() -> Option<(Player, Cubes)> {
             Transform::from_xyz(0.0, -0.6, 0.0).with_scale(Vec3::new(10.0, 0.2, 10.0)),
             GlobalTransform::IDENTITY,
             MeshRenderer::new(mesh, floor),
+        ));
+        // A sun from above and a light in the middle (components, ADR 0099 step 3).
+        setup.world.spawn((
+            GlobalTransform(engine_core::math::Affine3A::from_rotation_translation(
+                Quat::from_rotation_x(-1.2),
+                Vec3::ZERO,
+            )),
+            Sun {
+                color: Vec3::splat(2.0),
+                ambient: Vec3::splat(0.05),
+            },
+        ));
+        setup.world.spawn((
+            GlobalTransform(engine_core::math::Affine3A::from_translation(Vec3::new(
+                0.0, 1.0, 0.0,
+            ))),
+            PointLight::new(Vec3::new(8.0, 6.0, 4.0), 4.0).with_shadow(),
         ));
         for k in 0..8 {
             let a = k as f32 * core::f32::consts::TAU / 8.0;
