@@ -336,5 +336,6 @@ frame.add_view(&mut fg, &mut ctx, &mut view, &scene_input, &main.camera, target)
   becomes active or gets a higher priority): the next frame starts its history anew.
 - **On the camera:** field of view, near and far planes, exposure (fixed, or with
   `auto_exposure` a compensation in EV), antialiasing and render size, and `cinematic`
-  for cutscenes (the only views that may get camera motion blur, ADR 0067). Everything else
+  for cutscenes with its `shutter` for motion blur (the only views that may have it, ADR
+  0067 and 0096). Everything else
   (bloom, tone curve, occlusion culling) comes from the `CameraView`'s base settings.

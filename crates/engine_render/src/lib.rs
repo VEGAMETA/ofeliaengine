@@ -62,6 +62,7 @@ pub mod lights;
 pub mod local_shadows;
 pub mod material;
 pub mod mesh;
+pub mod motion_blur;
 pub mod msaa;
 pub mod panorama;
 pub mod particles;

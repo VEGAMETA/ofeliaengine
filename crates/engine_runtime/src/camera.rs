@@ -7,8 +7,9 @@ use engine_ecs::{
 };
 use engine_frame::{
     Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, SmaaQuality, Upscale, UpscalerKind,
-    ViewCamera, ViewSettings,
+    ViewCamera, ViewKind, ViewSettings,
 };
+use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::postfx::ExposureSettings;
 
 /// A camera that renders: its projection, exposure and antialiasing. Put it on an entity
@@ -40,7 +41,7 @@ pub struct Camera {
     /// [`Quality`] as stored: its index in [`Quality::ALL`] ([`Self::quality`]).
     pub quality: u32,
     /// Nonzero: a cinematic camera (cutscenes, sequences; ADR 0067), the only kind that
-    /// may get camera motion blur.
+    /// may get motion blur.
     pub cinematic: u32,
     /// Among active cameras, the highest priority is the main view.
     pub priority: i32,
@@ -49,6 +50,9 @@ pub struct Camera {
     /// Cut generation: [`Self::cut`] bumps it, and the next frame drops the view's
     /// history (teleports, edits of the camera that are not motion).
     pub cut_generation: u32,
+    /// A cinematic camera's motion blur (ADR 0096): the share of the frame its shutter is
+    /// open (0.5: film's 180°); 0 none. A gameplay camera has none, whatever this holds.
+    pub shutter: f32,
 }
 
 pod_component!(Camera);
@@ -69,6 +73,7 @@ impl Camera {
             priority: 0,
             active: 1,
             cut_generation: 0,
+            shutter: 0.0,
         }
     }
 
@@ -100,6 +105,19 @@ impl Camera {
     /// Whether it is cinematic.
     pub fn is_cinematic(&self) -> bool {
         self.cinematic != 0
+    }
+
+    /// Its view's kind: cinematic (with motion blur when it has a shutter) or gameplay.
+    pub fn view_kind(&self) -> ViewKind {
+        if !self.is_cinematic() {
+            return ViewKind::Gameplay;
+        }
+        ViewKind::Cinematic {
+            motion_blur: (self.shutter > 0.0).then(|| MotionBlurSettings {
+                shutter: self.shutter,
+                ..MotionBlurSettings::default()
+            }),
+        }
     }
 
     /// Marks a cut: the next rendered frame does not continue the last one.
@@ -272,7 +290,7 @@ impl CameraView {
                 antialiasing: camera.antialiasing(),
                 quality: camera.quality(),
                 exposure,
-                cinematic: camera.is_cinematic(),
+                kind: camera.view_kind(),
                 ..self.base
             },
         })

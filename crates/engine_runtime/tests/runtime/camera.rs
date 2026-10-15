@@ -6,7 +6,7 @@
 use engine_core::math::{Quat, Vec3, look_at};
 use engine_ecs::{GlobalTransform, Transform, World};
 use engine_frame::{
-    Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, Upscale, ViewSettings,
+    Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, Upscale, ViewKind, ViewSettings,
 };
 use engine_runtime::{Camera, CameraView, look_rotation};
 
@@ -138,6 +138,7 @@ fn the_camera_carries_its_settings() {
             exposure: 1.5,
             auto_exposure: 1,
             cinematic: 1,
+            shutter: 0.5,
             ..Camera::perspective(0.8, 0.5, 300.0)
                 .with_antialiasing(Antialiasing::FSR, Quality::Balanced)
         },
@@ -150,7 +151,10 @@ fn the_camera_carries_its_settings() {
     let main = cameras.resolve(&world).unwrap();
     assert_eq!(main.settings.antialiasing, Antialiasing::FSR);
     assert_eq!(main.settings.quality, Quality::Balanced);
-    assert!(main.settings.cinematic);
+    assert!(matches!(
+        main.settings.kind,
+        ViewKind::Cinematic { motion_blur: Some(m) } if m.shutter == 0.5
+    ));
     assert!(!main.settings.bloom, "the base settings are kept");
     assert!(matches!(main.settings.exposure, Exposure::Auto(s) if s.compensation == 1.5));
     assert_eq!(
