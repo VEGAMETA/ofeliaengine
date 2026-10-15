@@ -502,7 +502,9 @@ grown, divide and conquer); the old labels stay in parentheses.
    - **Motion blur on cinematic views done 2026-10-15** (ADR 0096).
      - `ViewSettings::kind`: a gameplay view cannot ask for motion blur.
      - Guertin, McGuire and Nowrouzezahrai's filter.
-     - At 1080p: RTX 0.43 ms, Radeon 15.7 ms (7.9 ms with 9 samples).
+     - At 1080p: RTX 0.43 ms, Radeon 15.7 ms (7.9 ms with 9 samples); since the
+       gather runs at half size (2026-10-15, ADR 0096's addendum) RTX 0.23 ms, Radeon
+       7.3 ms.
      - Open (ADR 0067): object-only motion blur in gameplay views, if the team wants
        it.
 6b. The iGPU's expensive passes (review §3.11): depth of field 3.8–8.2 ms at 1080p
@@ -527,6 +529,15 @@ grown, divide and conquer); the old labels stay in parentheses.
    Found on the way: the Radeon's memory-bound passes vary by up to 2× with where their
    images land in memory (`docs/perf/reference-hw.md`); a single-pass downsampler (levels
    kept in shared memory) is left for later.
+   - **2026-10-15:**
+     - motion blur's gather runs at half size (ADR 0096's addendum): Radeon 15.7 → 7.3 ms,
+       RTX 0.43 → 0.23 ms at 1080p;
+     - the materials' anisotropy measured: 16× → 4× saves the forward pass 1.5–3 % on both
+       GPUs, 2× 7 %, trilinear 13–19 %. It stays 16×: the rest is a player's setting
+       (later), not a default;
+     - the sun's 3 × 3 PCF as 4 gathers tried: the RTX's forward 0.3–5.7 % faster in every
+       scene, but the Radeon's shading registers rose (plain 47 → 54, environment 64 → 78)
+       and 12 scenes ran 4–12 % slower. Not adopted.
 7. **The second review's core leftovers.**
 7a (was 6c). Memory (review §3.9): one transient heap for both frame slots where no
    transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,

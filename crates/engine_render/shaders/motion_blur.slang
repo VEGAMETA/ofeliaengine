@@ -3,13 +3,17 @@
 // after McGuire et al., "A Reconstruction Filter for Plausible Motion Blur" (I3D 2012),
 // written from the papers (no code taken):
 //
-// 1. `mbTileMax`: each pixel's velocity and depth into one texel (the gather's samples
-//    read one), and the largest velocity of each r × r tile (r: the largest blur);
+// 1. `mbTileMax`: the largest velocity of each r × r tile (r: the largest blur), and the
+//    velocity and depth of the nearest pixel of each 2 × 2 into one texel of half size;
 // 2. `mbNeighborMax`: the largest of the 3 × 3 tiles around, a diagonal tile only if it
 //    blurs towards the center tile;
-// 3. `mbGather`: each pixel's N samples along the neighbourhood's dominant velocity and its
-//    own, alternately, weighted by depth (who is in front), by reach (cones and cylinders
-//    of the velocities) and by direction (dot products of the directions involved).
+// 3. `mbGather`, at half size (Jimenez 2014): each 2 × 2's N samples along the
+//    neighbourhood's dominant velocity and its own, alternately, weighted by depth (who is
+//    in front), by reach (cones and cylinders of the velocities) and by direction (dot
+//    products of the directions involved). It keeps the samples' blur apart from the
+//    center: their color, premultiplied by their share of the result, and that share;
+// 4. `mbComposite`: each pixel of the image blends its own color, sharp, with the blur
+//    of the half-size texels around it, those at its depth first.
 //
 // Velocities are half the blur's extent, in pixels of the image: the shutter's share of the
 // frame's motion, the streak running from p − v to p + v. They are clamped to [0.5, r].
@@ -38,7 +42,11 @@ struct Push
     float near;          // linear depth from the depth buffer: near / (1 − d · depth_scale)
     float depth_scale;
     float jitter;        // τ ψ / N: the samples' jitter, in sample spacings
-    uint vz;             // per pixel: velocity, linear depth, speed; storage, then sampled
+    uint vz;             // half size: the velocity, linear depth and speed of each 2 × 2's
+                         // nearest pixel; storage, then sampled
+    uint blur;           // half size: the samples' blur, premultiplied by its share, and the
+                         // share; storage, then sampled
+    uint _pad;
 };
 
 [[vk::push_constant]]
@@ -76,28 +84,41 @@ float linear_depth_at(uint2 pixel)
 
 groupshared float2 g_largest[64];
 
-// Each pixel's velocity and depth, and the largest velocity of each tile: a workgroup per
-// tile, each thread a part of it.
+// The largest velocity of each tile, and each 2 × 2's nearest pixel's velocity and depth
+// (a foreground thinner than the 2 × 2 still stands in front): a workgroup per tile (r is
+// even, so the 2 × 2s never straddle tiles), each thread a part of it.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void mbTileMax(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID, uint index : SV_GroupIndex)
 {
-    uint2 origin = group.xy * push.tile;
-    uint step = (push.tile + 7) / 8;
+    uint half_tile = push.tile / 2;
+    uint2 origin = group.xy * half_tile;
+    uint step = (half_tile + 7) / 8;
     float2 largest = float2(0.0, 0.0);
     for (uint y = 0; y < step; y++)
     {
         for (uint x = 0; x < step; x++)
         {
-            // Interleaved: neighbouring threads read and write neighbouring pixels.
+            // Interleaved: neighbouring threads read and write neighbouring texels.
             uint2 local = thread.xy + uint2(x, y) * 8;
-            uint2 p = origin + local;
-            if (all(local < push.tile) && all(p < push.size))
+            uint2 h = origin + local;
+            if (all(local < half_tile) && all(h * 2 < push.size))
             {
-                float2 v = velocity_at(p);
-                g_images[push.vz][p] = float4(v, linear_depth_at(p), length(v));
-                if (dot(v, v) > dot(largest, largest))
-                    largest = v;
+                float4 nearest = float4(0.0, 0.0, 3.0e38, 0.0);
+                [unroll]
+                for (uint k = 0; k < 4; k++)
+                {
+                    uint2 p = h * 2 + uint2(k & 1, k >> 1);
+                    if (any(p >= push.size))
+                        continue;
+                    float2 v = velocity_at(p);
+                    float z = linear_depth_at(p);
+                    if (dot(v, v) > dot(largest, largest))
+                        largest = v;
+                    if (z < nearest.z)
+                        nearest = float4(v, z, length(v));
+                }
+                g_images[push.vz][h] = nearest;
             }
         }
     }
@@ -179,26 +200,35 @@ float2 safe_normalize(float2 v, float2 fallback)
     return len > 1e-4 ? v / len : fallback;
 }
 
-// The blur of each pixel.
+// The half size: a texel per 2 × 2 pixels of the image.
+uint2 half_size()
+{
+    return (push.size + 1) / 2;
+}
+
+// The blur of each 2 × 2 pixels (texel `h` of half size): the samples' color premultiplied
+// by their share of the result, and that share (the center's color is the composite's,
+// sharp).
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void mbGather(uint3 id : SV_DispatchThreadID)
 {
-    uint2 p = id.xy;
-    if (any(p >= push.size))
+    uint2 h = id.xy;
+    if (any(h >= half_size()))
         return;
     float2 rcp_size = 1.0 / float2(push.size);
     Texture2D color = g_textures[push.color];
     SamplerState s = g_samplers[push.linear_sampler];
-    float4 center = color.Load(int3(p, 0));
+    // The 2 × 2's center, in pixels of the image.
+    float2 pc = float2(h) * 2.0 + 1.0;
 
     // The neighbourhood's dominant velocity, the lookup moved into the next tile (never a
     // diagonal one) with a probability that falls off linearly from 1/2 at the tile's
     // border to 0 at its center (Guertin et al., Section 4.2).
-    float noise = pixel_noise(float2(p));
-    float tile_noise = pixel_noise(float2(p) + float2(17.0, 53.0));
-    uint2 tile = p / push.tile;
-    float2 local = (float2(p % push.tile) + 0.5) / float(push.tile);
+    float noise = pixel_noise(float2(h));
+    float tile_noise = pixel_noise(float2(h) + float2(17.0, 53.0));
+    uint2 tile = (h * 2) / push.tile;
+    float2 local = (pc - float2(tile * push.tile)) / float(push.tile);
     float2 border = min(local, 1.0 - local);
     int2 offset = int2(0, 0);
     if (border.x < border.y)
@@ -213,13 +243,13 @@ void mbGather(uint3 id : SV_DispatchThreadID)
     float vmax_len = length(vmax);
     if (vmax_len <= 0.5)
     {
-        g_images[push.output][p] = float4(center.rgb, 1.0);
+        g_images[push.blur][h] = float4(0.0, 0.0, 0.0, 0.0);
         return;
     }
 
     float2 wn = vmax / vmax_len;
     Texture2D vz = g_textures[push.vz];
-    float4 center_vz = vz.Load(int3(p, 0));
+    float4 center_vz = vz.Load(int3(h, 0));
     float2 vc = center_vz.xy;
     float vc_len = max(center_vz.w, 0.5);
     float2 wp = float2(-wn.y, wn.x);
@@ -232,9 +262,11 @@ void mbGather(uint3 id : SV_DispatchThreadID)
 
     float n = float(push.samples);
     // The center weight, normalized against N (Section 4.3).
-    float total = n / (KAPPA * vc_len);
-    float3 sum = center.rgb * total;
+    float center_weight = n / (KAPPA * vc_len);
+    float total = 0.0;
+    float3 sum = float3(0.0, 0.0, 0.0);
     float j = (noise * 2.0 - 1.0) * push.jitter;
+    uint2 last = half_size() - 1;
     for (uint i = 0; i < push.samples; i++)
     {
         float t = lerp(-1.0, 1.0, (float(i) + j + 1.0) / (n + 1.0));
@@ -245,8 +277,8 @@ void mbGather(uint3 id : SV_DispatchThreadID)
         // samples (the paper's T = t ‖v_max‖): the samples along a still pixel's own
         // velocity gather where they land, but weigh as if spread along the dominant one.
         float dist = abs(t) * vmax_len;
-        float2 sp = float2(p) + 0.5 + offset_px;
-        uint2 sq = uint2(clamp(sp, float2(0.0, 0.0), float2(push.size) - 1.0));
+        float2 sp = pc + offset_px;
+        uint2 sq = min(uint2(max(sp, float2(0.0, 0.0)) * 0.5), last);
         float4 sample_vz = vz.Load(int3(sq, 0));
         float2 vs = sample_vz.xy;
         float vs_len = max(sample_vz.w, 0.5);
@@ -268,5 +300,49 @@ void mbGather(uint3 id : SV_DispatchThreadID)
         total += w;
         sum += cs * w;
     }
-    g_images[push.output][p] = float4(sum / total, 1.0);
+    float all_weights = total + center_weight;
+    g_images[push.blur][h] = float4(sum / all_weights, total / all_weights);
+}
+
+// Each pixel: its own color, sharp, over the blur of the half-size texels around it
+// (bilinear, each texel weighted down as its nearest depth departs from the pixel's: a still
+// edge in front keeps its own color). Tiles whose neighbourhood does not move keep the image
+// as it is.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void mbComposite(uint3 id : SV_DispatchThreadID)
+{
+    uint2 p = id.xy;
+    if (any(p >= push.size))
+        return;
+    float4 sharp = g_textures[push.color].Load(int3(p, 0));
+    float2 vmax = g_textures[push.neighbors].Load(int3(p / push.tile, 0)).xy;
+    if (dot(vmax, vmax) <= 0.25)
+    {
+        g_images[push.output][p] = sharp;
+        return;
+    }
+    float z = linear_depth_at(p);
+    // The pixel's center in texels of half size, and the four around it.
+    float2 at = (float2(p) + 0.5) * 0.5 - 0.5;
+    float2 base = floor(at);
+    float2 f = at - base;
+    int2 last = int2(half_size()) - 1;
+    Texture2D blur = g_textures[push.blur];
+    Texture2D vz = g_textures[push.vz];
+    float4 sum = float4(0.0, 0.0, 0.0, 0.0);
+    float weights = 0.0;
+    [unroll]
+    for (int k = 0; k < 4; k++)
+    {
+        int2 o = int2(k & 1, k >> 1);
+        int2 t = clamp(int2(base) + o, int2(0, 0), last);
+        float bilinear = (o.x != 0 ? f.x : 1.0 - f.x) * (o.y != 0 ? f.y : 1.0 - f.y);
+        float zt = vz.Load(int3(t, 0)).z;
+        float w = bilinear / (0.01 + abs(zt - z) / z);
+        sum += blur.Load(int3(t, 0)) * w;
+        weights += w;
+    }
+    float4 b = sum / max(weights, 1e-12);
+    g_images[push.output][p] = float4(sharp.rgb * (1.0 - b.a) + b.rgb, sharp.a);
 }
