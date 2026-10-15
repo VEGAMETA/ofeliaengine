@@ -223,3 +223,24 @@ flight):
 **Test.** `frames_in_flight_share_transient_heaps_without_hazards`: two frames in flight
 submitted back to back, under synchronization validation, both GPUs. With the barrier
 there are no errors; without it, 7.
+
+## Addendum (2026-10-15): the objects of recent frame shapes are kept
+
+A frame that runs a pass only now and then (a reflection probe captured every 30 frames,
+ADR 0073's addendum) has transients the frames around it lack, so its placement differs.
+Each slot kept one placement per group and destroyed the objects a frame did not use: every
+such frame re-placed the transients and made their objects again, and so did the frame
+after it.
+
+- **A slot keeps up to 4 placements per group** (`PLACEMENTS_PER_GROUP`), found by the
+  frame shape's hash; a fifth shape replaces the one used longest ago.
+- **Objects no frame used are kept for 128 of their slot's frames** (`KEEP_UNUSED`), then
+  destroyed as before. Kept objects alias the same heap memory as the rest, and a
+  transient starts undefined in every frame, so reusing one is as good as making it.
+
+Measured (`flight` on Sponza's pack with four probes captured every 30 frames, RTX 4060
+Ti): graph compile and record p99 1,530 → 380 µs, CPU frame p99 2,307 → 1,187 µs. Without
+probes the frames are unchanged (CPU frame median 849–852 µs on main and the branch).
+
+**Test.** `zero_alloc/graph.rs` now adds a pass with a transient of its own every seventh
+frame: main's graph made 15 objects and 15 heap allocations in 100 such frames; now none.

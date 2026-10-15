@@ -178,5 +178,55 @@ end (the machine was shared with other agents; RTX numbers vary ±10 %).
 - **Not done:** probes relit from G-buffers; probe shadow maps cached across frames (one
   face per frame draws its cascade each frame); probes or SSR on transparent surfaces;
   SSR ray reuse across neighbours (Stachowiak) and last frame's color for multiple
-  bounces; GTSO (needs bent normals from GTAO); the render graph keeping transient
-  objects of frames that skip a capture (intermittent captures allocate).
+  bounces; GTSO (needs bent normals from GTAO); ~~the render graph keeping transient
+  objects of frames that skip a capture (intermittent captures allocate)~~ (done, see
+  the addendum).
+
+## Addendum (2026-10-15): the capture order, an interval for the scene's changes, and the graph's frame shapes
+
+Probes placed as entities in a game world (ADR 0099 step 4) met moving things for the
+first time: `flight` with four probes along Sponza's courtyard, 2,000 spinning cubes and
+64 walking characters inside them.
+
+- **A probe was captured in every frame.** Instances moving inside its boxes asked for a
+  new capture as soon as one finished.
+- **The farthest probe was never captured:** the waiting probe nearest the camera always
+  went first (3 of 4 captured after 600 frames).
+
+Changes:
+
+- **The probe captured longest ago goes first** (one never captured first of all), the
+  nearest among equals. Every waiting probe gets its turn; at load, all equal, the order
+  is the old one.
+- **`ProbeSettings::scene_interval`, 30 frames by default.** A probe that only the scene's
+  changes ask for (instances moving, appearing or going inside its boxes;
+  `invalidate_region`) waits until that many frames have passed since its last capture
+  started. Edits of the probe, `refresh` and a change of the sky or the sun capture at
+  once. 0 is the old behavior.
+- **The render graph keeps the shapes of recent frames** (ADR 0011's addendum). A frame
+  that captures has transients of its own, so its placement differs from the frames
+  around it. Every capture re-placed the transients and made their objects again twice,
+  in and out. A slot now keeps up to 4 placements per group and keeps objects no frame
+  used for 128 of its frames. Objects alias the same heap memory, and a transient starts
+  undefined in every frame, so a kept object is as good as a new one.
+  - Test (`zero_alloc/graph.rs`, every seventh frame with a pass and a transient of its
+    own): main's graph made 15 objects and 15 heap allocations in 100 frames; now none.
+
+Measured on ref-1 (`flight`, release, 1797 × 1011 window, latency control off; RTX 1,800
+frames, Radeon 900):
+
+| RTX 4060 Ti | GPU frame median µs | CPU frame median / p99 µs | graph compile + record p99 µs | captures |
+|---|---:|---:|---:|---:|
+| no probes | 1,782 | 851 / 1,091 | 256 | – |
+| four probes, captured whenever asked (interval 0) | 2,191 | 1,039 / 1,319 | 441 | every frame |
+| interval 30, the graph as before | 1,911 | 909 / 2,307 | 1,530 | 224 of 1,680 frames |
+| interval 30 | 1,914 | 913 / 1,187 | 380 | 224 of 1,680 frames |
+
+- **Radeon iGPU, GPU frame median:** no probes 21.3 ms; interval 0 28.1 ms; interval 30
+  24.7 ms. Its p99 (33.5 ms) is a capture's six faces in one frame, about 6 ms there; one
+  face a frame (`faces_per_frame`) would spread it, a default per device class to
+  measure.
+- **The composite costs every frame either way:** 93 µs on the RTX, 1.56 ms on the
+  Radeon.
+- Golden images are unchanged: their scenes are still, so their probes capture at load
+  only.

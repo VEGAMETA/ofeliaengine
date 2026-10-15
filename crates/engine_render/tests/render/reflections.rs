@@ -187,17 +187,15 @@ impl Bed {
     }
 
     fn probes(&mut self, capacity: u32, faces_per_frame: u32) -> ReflectionProbes {
-        ReflectionProbes::new(
-            &self.device,
-            &mut self.allocator,
-            &self.bindless,
-            ProbeSettings {
-                capacity,
-                faces_per_frame,
-                ..ProbeSettings::default()
-            },
-        )
-        .unwrap()
+        self.probes_with(ProbeSettings {
+            capacity,
+            faces_per_frame,
+            ..ProbeSettings::default()
+        })
+    }
+
+    fn probes_with(&mut self, settings: ProbeSettings) -> ReflectionProbes {
+        ReflectionProbes::new(&self.device, &mut self.allocator, &self.bindless, settings).unwrap()
     }
 
     fn ssr(&mut self, settings: SsrSettings) -> ScreenSpaceReflections {
@@ -789,8 +787,14 @@ fn probe_captures_are_cached_and_budgeted() {
     };
     let grey = bed.material(MaterialDesc::solid([0.5; 3], 0.0, 0.5));
     let draws = room(&bed, &[grey; 5], grey);
-    // Two probes, two faces per frame: each takes three frames.
-    let mut probes = bed.probes(2, 2);
+    // Two probes, two faces per frame: each takes three frames. The scene's changes
+    // capture at once here (the interval is checked below).
+    let mut probes = bed.probes_with(ProbeSettings {
+        capacity: 2,
+        faces_per_frame: 2,
+        scene_interval: 0,
+        ..ProbeSettings::default()
+    });
     let a = probes
         .add(ReflectionProbe::room(
             Vec3::new(-2.0, 2.0, 0.0),
@@ -877,7 +881,37 @@ fn probe_captures_are_cached_and_budgeted() {
     // SAFETY: the device is idle.
     unsafe { scene.destroy(&mut bed.allocator) };
     drop(scene);
-    bed.finish(vec![probes], Vec::new());
+
+    // With an interval, the scene's changes wait for it: the probe whose capture started
+    // in the first frame is captured again 8 frames after it, not at once after a change
+    // in the fourth.
+    let mut timed = bed.probes_with(ProbeSettings {
+        capacity: 1,
+        faces_per_frame: 2,
+        scene_interval: 8,
+        ..ProbeSettings::default()
+    });
+    timed
+        .add(ReflectionProbe::room(
+            Vec3::new(-2.0, 2.0, 0.0),
+            Vec3::new(2.0, 2.0, 4.0),
+        ))
+        .unwrap();
+    let mut faces = Vec::new();
+    for frame in 0..12 {
+        if frame == 3 {
+            timed.invalidate_region(Vec3::new(-3.0, 0.0, 0.0), Vec3::new(-2.5, 1.0, 1.0));
+        }
+        let reflections = Reflections {
+            probes: Some(&timed),
+            ssr: None,
+        };
+        bed.render(view, &draws, reflections);
+        faces.push(timed.stats().faces);
+    }
+    println!("faces per frame with an interval of 8: {faces:?}");
+    assert_eq!(faces, [2, 2, 2, 0, 0, 0, 0, 0, 2, 2, 2, 0]);
+    bed.finish(vec![probes, timed], Vec::new());
 }
 
 #[test]

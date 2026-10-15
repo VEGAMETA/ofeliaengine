@@ -5,8 +5,9 @@
 //!   renderer itself (the scene drawn into six faces), GGX-prefiltered on the GPU into one
 //!   cube array and kept until something asks for a new capture: an edit of the probe,
 //!   [`ReflectionProbes::refresh`], a change of the sky or the sun, or, on the persistent
-//!   GPU scene path, an instance moving, appearing or going inside its box. Captures
-//!   follow a budget of faces per frame. A pixel blends the probes whose influence box
+//!   GPU scene path, an instance moving, appearing or going inside its box (at most every
+//!   [`ProbeSettings::scene_interval`] frames). Captures follow a budget of faces per
+//!   frame, the probe captured longest ago first. A pixel blends the probes whose influence box
 //!   holds it (smallest first, fading over each one's blend distance), with the reflected
 //!   ray corrected for parallax against the probe's box (Lagarde and Zanuttini 2012); the
 //!   rest comes from the sky.
@@ -291,7 +292,8 @@ impl ProbeBox {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ProbeRefresh {
     /// After edits of the probe, changes of the sky or the sun, and (on the persistent GPU
-    /// scene path) when instances inside its boxes change.
+    /// scene path) when instances inside its boxes change: then at most every
+    /// [`ProbeSettings::scene_interval`] frames.
     #[default]
     OnChange,
     /// Only after edits of the probe and [`ReflectionProbes::refresh`].
@@ -373,15 +375,26 @@ pub struct ProbeSettings {
     pub faces_per_frame: u32,
     /// The face cameras' near plane.
     pub near: f32,
+    /// Frames from a probe's capture to the next one that only the scene's changes ask
+    /// for (instances moving, appearing or going inside its boxes;
+    /// [`ReflectionProbes::invalidate_region`]): a probe with something moving inside is
+    /// captured again this often, not every frame (0: every frame). Edits of the probe,
+    /// [`ReflectionProbes::refresh`] and changes of the sky or the sun capture at once.
+    pub scene_interval: u32,
 }
 
 impl Default for ProbeSettings {
+    /// 16 probes of 128², a whole probe per frame, captured again at most every 30 frames
+    /// for the scene's changes (ADR 0073's addendum: four probes along Sponza with 2,000
+    /// moving cubes and 64 walking characters inside took 0.33 ms a frame on an RTX
+    /// 4060 Ti, capturing every frame, and the farthest probe never got its turn).
     fn default() -> Self {
         Self {
             capacity: 16,
             resolution: 128,
             faces_per_frame: 6,
             near: 0.05,
+            scene_interval: 30,
         }
     }
 }
@@ -414,8 +427,14 @@ pub struct ProbeStats {
 struct Slot {
     probe: Option<ReflectionProbe>,
     generation: u32,
-    /// Waiting for a capture.
+    /// Waiting for a capture, taken as soon as the budget allows (an edit, a refresh, the
+    /// light).
     dirty: bool,
+    /// Waiting for a capture the scene's changes asked for, taken
+    /// [`ProbeSettings::scene_interval`] frames after the last one.
+    scene_dirty: bool,
+    /// The frame (of the set's plans) its last capture started; 0: never.
+    captured_at: u64,
     /// Its cube holds a capture.
     captured: bool,
 }
@@ -431,6 +450,8 @@ struct Progress {
 struct State {
     slots: Vec<Slot>,
     capturing: Option<Progress>,
+    /// Frames planned so far.
+    plans: u64,
     /// The light the captures were made under.
     light: Option<[u32; 6]>,
     /// Visible probes this frame, by volume: (volume, slot).
@@ -517,6 +538,7 @@ impl ReflectionProbes {
             resolution,
             faces_per_frame: settings.faces_per_frame.clamp(1, 6),
             near: settings.near.max(1e-4),
+            scene_interval: settings.scene_interval,
         };
         let [face, downsample, prefilter] = ComputeSource::create_all(
             device,
@@ -593,6 +615,8 @@ impl ReflectionProbes {
         let s = &mut state.slots[slot];
         s.probe = Some(probe);
         s.dirty = true;
+        s.scene_dirty = false;
+        s.captured_at = 0;
         s.captured = false;
         Some(ProbeId {
             slot: slot as u32,
@@ -624,6 +648,7 @@ impl ReflectionProbes {
             slot.probe = None;
             slot.generation = slot.generation.wrapping_add(1);
             slot.dirty = false;
+            slot.scene_dirty = false;
             slot.captured = false;
         }
     }
@@ -658,9 +683,10 @@ impl ReflectionProbes {
     }
 
     /// Something changed in the world-space box `min`..`max`: the probes that see it
-    /// ([`ReflectionProbe::region`], [`ProbeRefresh::OnChange`]) are captured again. The
-    /// persistent GPU scene path calls it with the scene's changes; call it yourself for
-    /// changes the renderer does not see (a draw list's moved objects, local lights).
+    /// ([`ReflectionProbe::region`], [`ProbeRefresh::OnChange`]) are captured again,
+    /// [`ProbeSettings::scene_interval`] frames after their last capture at the soonest.
+    /// The persistent GPU scene path calls it with the scene's changes; call it yourself
+    /// for changes the renderer does not see (a draw list's moved objects, local lights).
     pub fn invalidate_region(&self, min: Vec3, max: Vec3) {
         let mut state = self.state.borrow_mut();
         invalidate(&mut state.slots, &[[min, max]]);
@@ -678,8 +704,10 @@ impl ReflectionProbes {
     }
 
     /// Starts a frame's bookkeeping: a changed light or sky (`rebuilt`) asks for new
-    /// captures; then picks the faces to draw (the capture in progress, else the dirty
-    /// probe nearest to `camera`).
+    /// captures; then picks the faces to draw: the capture in progress, else, of the
+    /// probes waiting (those the scene's changes alone asked for once their interval has
+    /// passed), the one captured longest ago (never first), the nearest to `camera` among
+    /// equals, so every probe gets its turn.
     pub(crate) fn plan(
         &self,
         light: &DirectionalLight,
@@ -714,6 +742,9 @@ impl ReflectionProbes {
         }
         state.stats.faces = 0;
         state.stats.completed = 0;
+        state.plans += 1;
+        let now = state.plans;
+        let interval = u64::from(self.settings.scene_interval);
         // A capture whose probe went away stops.
         if let Some(p) = state.capturing
             && state.slots[p.slot as usize].probe.is_none()
@@ -721,15 +752,23 @@ impl ReflectionProbes {
             state.capturing = None;
         }
         if state.capturing.is_none() {
-            let nearest = state
+            let next = state
                 .slots
                 .iter()
                 .enumerate()
-                .filter(|(_, s)| s.dirty)
-                .filter_map(|(k, s)| s.probe.map(|p| (k, p.position.distance_squared(camera))))
-                .min_by(|a, b| a.1.total_cmp(&b.1));
-            if let Some((k, _)) = nearest {
-                state.slots[k].dirty = false;
+                .filter(|(_, s)| {
+                    s.dirty || (s.scene_dirty && now.saturating_sub(s.captured_at) >= interval)
+                })
+                .filter_map(|(k, s)| {
+                    s.probe
+                        .map(|p| (k, s.captured_at, p.position.distance_squared(camera)))
+                })
+                .min_by(|a, b| a.1.cmp(&b.1).then(a.2.total_cmp(&b.2)));
+            if let Some((k, ..)) = next {
+                let slot = &mut state.slots[k];
+                slot.dirty = false;
+                slot.scene_dirty = false;
+                slot.captured_at = now;
                 state.capturing = Some(Progress {
                     slot: k as u32,
                     next_face: 0,
@@ -923,7 +962,7 @@ impl ReflectionProbes {
         for (k, slot) in state.slots.iter().enumerate() {
             let Some(probe) = slot.probe else { continue };
             probes += 1;
-            pending += u32::from(slot.dirty || !slot.captured);
+            pending += u32::from(slot.dirty || slot.scene_dirty || !slot.captured);
             if !slot.captured {
                 continue;
             }
@@ -1050,7 +1089,7 @@ impl ReflectionProbes {
 fn invalidate(slots: &mut [Slot], boxes: &[[Vec3; 2]]) {
     for slot in slots.iter_mut() {
         let Some(probe) = slot.probe else { continue };
-        if probe.refresh != ProbeRefresh::OnChange || slot.dirty {
+        if probe.refresh != ProbeRefresh::OnChange || slot.dirty || slot.scene_dirty {
             continue;
         }
         let (lo, hi) = probe.region();
@@ -1058,7 +1097,7 @@ fn invalidate(slots: &mut [Slot], boxes: &[[Vec3; 2]]) {
             .iter()
             .any(|b| b[0].cmple(hi).all() && b[1].cmpge(lo).all())
         {
-            slot.dirty = true;
+            slot.scene_dirty = true;
         }
     }
 }
