@@ -911,7 +911,9 @@ impl FrameRenderer {
         // Color grading (ADR 0094): the view's LUT, made the first frame it grades and kept
         // while it lives, so that a grading animated back to neutral and away again (a
         // damage flash) makes nothing again.
-        if !settings.grading.is_neutral() && view.grading.is_none() {
+        if (!settings.grading.is_neutral() || !settings.color_vision.is_off())
+            && view.grading.is_none()
+        {
             view.grading = Some(GradingLut::new(device, allocator, bindless)?);
         }
         match settings.exposure {
@@ -1579,9 +1581,10 @@ impl FrameRenderer {
             Upscale::Nearest | Upscale::Integer => SamplerKind::NearestClamp,
             _ => SamplerKind::LinearClamp,
         };
-        // Through the view's LUT while it grades (a neutral grading: the plain curve).
+        // Through the view's LUT while it grades or corrects for a color vision deficiency
+        // (neither: the plain curve).
         let grading = grading
-            .filter(|_| !settings.grading.is_neutral())
+            .filter(|_| !settings.grading.is_neutral() || !settings.color_vision.is_off())
             .and_then(|lut| {
                 lut.add_passes(
                     fg,
@@ -1590,6 +1593,7 @@ impl FrameRenderer {
                     &settings.grading,
                     settings.curve,
                     settings.peak,
+                    &settings.color_vision,
                 )
             });
         let composite = Composite {

@@ -20,6 +20,7 @@ use engine_frame::{
     Upscale, UpscalerKind, View, ViewKind, ViewSettings,
 };
 use engine_render::ao::AoSettings;
+use engine_render::color_vision::{ColorVision, ColorVisionMode, Deficiency};
 use engine_render::dof::DofSettings;
 use engine_render::forward::LocalShadowSettings;
 use engine_render::grading::ColorGrading;
@@ -391,6 +392,16 @@ fn antialiasing_is_validated_and_modes_switch() {
             quality,
             bloom: false,
             grading,
+            // A tritan's view simulated (ADR 0097), on and off with the grading.
+            color_vision: if graded {
+                ColorVision {
+                    deficiency: Some(Deficiency::Tritan),
+                    severity: 1.0,
+                    mode: ColorVisionMode::Simulate,
+                }
+            } else {
+                ColorVision::default()
+            },
             // Focused on the cube (the camera is 3.67 from its center): its face stays sharp.
             depth_of_field: graded.then(|| DofSettings {
                 focus_distance: 3.0,

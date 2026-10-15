@@ -17,6 +17,7 @@ use engine_golden::scene::{
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::color_vision::{ColorVision, ColorVisionMode, Deficiency};
 use engine_render::dof::DofSettings;
 use engine_render::forward::{DirectionalLight, LocalLight, Spot};
 use engine_render::grading::ColorGrading;
@@ -342,6 +343,23 @@ fn sponza_graded() {
         },
         ..Shot::new(
             "sponza_graded",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
+/// Sponza as a viewer with deuteranopia sees it (ADR 0097, simulated): the red and green
+/// curtains alike, the blue ones still apart.
+#[test]
+fn sponza_deuteranopia() {
+    check(&Shot {
+        color_vision: ColorVision {
+            deficiency: Some(Deficiency::Deutan),
+            severity: 1.0,
+            mode: ColorVisionMode::Simulate,
+        },
+        ..Shot::new(
+            "sponza_deuteranopia",
             Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
         )
     });

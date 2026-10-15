@@ -2,6 +2,7 @@
 
 use crate::antialiasing::Antialiasing;
 use engine_render::ao::{AoQuality, AoSettings};
+use engine_render::color_vision::ColorVision;
 use engine_render::dof::DofSettings;
 use engine_render::grading::ColorGrading;
 use engine_render::motion_blur::MotionBlurSettings;
@@ -73,6 +74,10 @@ pub struct ViewSettings {
     /// LUT (864 KiB) the first frame it grades and keeps it; it is built again in the
     /// frames where the grading, the curve or the peak change.
     pub grading: ColorGrading,
+    /// A color vision deficiency, corrected for (the player's choice) or simulated (the
+    /// developer's check, ADR 0097); off by default, which costs nothing. On, the view tone
+    /// maps through its grading LUT, which holds the transform after the curve.
+    pub color_vision: ColorVision,
     /// Where the tone mapper's roll-off ends, in units of reference white (1 for SDR;
     /// `OutputLevels::peak` for HDR displays, ADR 0038).
     pub peak: f32,
@@ -130,6 +135,7 @@ impl Default for ViewSettings {
             exposure: Exposure::Fixed(1.0),
             curve: ToneCurve::Gt,
             grading: ColorGrading::default(),
+            color_vision: ColorVision::default(),
             peak: 1.0,
             encoding: OutputEncoding::LINEAR,
             bloom: true,

@@ -2,8 +2,9 @@
 //! through the frame renderer (ADR 0072): the pools' frames, `prepare`, `add_view` (scene
 //! passes, TAAU or FSR, bloom, automatic exposure, tone mapping, the previous color) and
 //! the graph's execution, every path again with an animated color grading (its LUT built
-//! every frame, ADR 0094), again with depth of field (ADR 0095), and again as a cinematic
-//! view with motion blur (ADR 0096). FSR's own allocations happen in C++ and are not counted. One
+//! every frame, ADR 0094), again with depth of field (ADR 0095), again as a cinematic
+//! view with motion blur (ADR 0096), and again with a color vision correction whose severity
+//! changes every frame (ADR 0097). FSR's own allocations happen in C++ and are not counted. One
 //! test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -15,6 +16,7 @@ use engine_core::math::Vec3;
 use engine_frame::{
     Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, Upscale, View, ViewKind, ViewSettings,
 };
+use engine_render::color_vision::{ColorVision, ColorVisionMode, Deficiency};
 use engine_render::dof::DofSettings;
 use engine_render::grading::ColorGrading;
 use engine_render::motion_blur::MotionBlurSettings;
@@ -84,9 +86,15 @@ fn steady_state_frames_do_not_allocate() {
         (Antialiasing::SMAA_4X, Quality::Native),
         (Antialiasing::TAAU.with_samples(Msaa::X2), Quality::Quality),
     ];
-    for (variant, (antialiasing, quality)) in ["", ", graded", ", depth of field", ", motion blur"]
-        .into_iter()
-        .flat_map(|variant| paths.map(|path| (variant, path)))
+    for (variant, (antialiasing, quality)) in [
+        "",
+        ", graded",
+        ", depth of field",
+        ", motion blur",
+        ", color vision",
+    ]
+    .into_iter()
+    .flat_map(|variant| paths.map(|path| (variant, path)))
     {
         let graded = variant == ", graded";
         let kind = if variant == ", motion blur" {
@@ -114,6 +122,16 @@ fn steady_state_frames_do_not_allocate() {
             } else {
                 ColorGrading::default()
             };
+            // A correction whose strength changes every frame: the LUT is built in each.
+            let color_vision = if variant == ", color vision" {
+                ColorVision {
+                    deficiency: Some(Deficiency::Deutan),
+                    severity: 0.5 + 0.4 * (0.1 * k as f32).sin(),
+                    mode: ColorVisionMode::Correct,
+                }
+            } else {
+                ColorVision::default()
+            };
             let settings = ViewSettings {
                 antialiasing,
                 quality,
@@ -121,6 +139,7 @@ fn steady_state_frames_do_not_allocate() {
                 previous_color: true,
                 occlusion_culling: true,
                 grading,
+                color_vision,
                 depth_of_field,
                 kind,
                 ..ViewSettings::default()
