@@ -515,9 +515,9 @@ grown, divide and conquer); the old labels stay in parentheses.
        7.3 ms.
      - Object-only motion blur in gameplay views: not wanted (the owner, 2026-10-15).
        Motion blur stays on cinematic views only.
-6b. The iGPU's expensive passes (review §3.11): depth of field 3.8–8.2 ms at 1080p
-   (ADR 0095: a 16-bit blur, the composite in place or in the tone mapper, a
-   quarter-size gather), TAAU 4.2 ms (6.6 ms in the perf gate's `sponza_taa`; since
+6b. The iGPU's expensive passes (review §3.11): depth of field 3.5–7.8 ms at 1080p
+   (3.8–8.2 before 2026-10-15; ADR 0095's addendum: what bounds each pass, a quarter-size
+   gather left), TAAU 4.2 ms (6.6 ms in the perf gate's `sponza_taa`; since
    2026-10-15 a group's render pixels are tone mapped once in shared memory, ADR 0043's
    addendum: Radeon −5 to −12 % in the perf gate's frames, RTX −5 to −7 %; the attempt of
    2026-10-11 below shared only the loads),
@@ -538,6 +538,12 @@ grown, divide and conquer); the old labels stay in parentheses.
    images land in memory (`docs/perf/reference-hw.md`); a single-pass downsampler (levels
    kept in shared memory) is left for later.
    - **2026-10-15:**
+     - depth of field measured pass by pass on the Radeon (ADR 0095's addendum): its
+       composite's reads issued early and its blur writing only what the composite reads,
+       the same image bit for bit: f/1.4 8.23 → 7.82 ms, f/64 3.84 → 3.52 ms. The blur is
+       bound by arithmetic, the downsample by memory; in place is impossible with TAAU (its
+       input is TAAU's history). A quarter-size gather (about −2.5 ms) is left until a game
+       needs it;
      - motion blur's gather runs at half size (ADR 0096's addendum): Radeon 15.7 → 7.3 ms,
        RTX 0.43 → 0.23 ms at 1080p;
      - the materials' anisotropy measured: 16× → 4× saves the forward pass 1.5–3 % on both

@@ -1533,10 +1533,11 @@ settings.depth_of_field = Some(DofSettings {
 - **Animating** the focus or the aperture every frame is fine: nothing is rebuilt, and
   nothing is allocated.
 - **What it costs** at 1080p (Sponza, a strong blur):
-  - 0.26 ms on an RTX 4060 Ti, 0.12 ms with almost nothing blurred;
-  - 8.2 ms on a Radeon iGPU, 3.8 ms with almost nothing blurred;
+  - 0.24 ms on an RTX 4060 Ti, 0.11 ms with almost nothing blurred;
+  - 7.8 ms on a Radeon iGPU, 3.5 ms with almost nothing blurred;
   - nothing when off. On integrated GPUs, keep it for cutscenes or photo modes, or lower
-    `rings` (2: 7.2 ms).
+    `rings`: 2 rings cost the Radeon 6.9 ms, and blur the strongest regions a little
+    more smoothly (sampled from coarser levels).
 
   Compare: `scene_bench -- <scene> --dof <focus distance>` (`--dof-rings`,
   `--dof-f-number`).
