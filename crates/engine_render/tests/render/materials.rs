@@ -830,3 +830,37 @@ fn materials_and_textures() {
 fn scene_texture_color(rgb: [u8; 3]) -> TextureLevels {
     blocks(false, |_, _| [rgb[0], rgb[1], rgb[2], 255])
 }
+
+#[test]
+fn external_textures_take_their_owners_index() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let bindless = Bindless::new(&device).unwrap();
+    let mut textures = TexturePool::new(&device, 1 << 20, 1);
+    let video = textures.add_external();
+    // Missing until its owner gives the index; materials re-resolve at each change.
+    assert_eq!(textures.index(video), None);
+    let generation = textures.generation();
+    textures.set_external(video, Some(7));
+    assert_eq!(textures.index(video), Some(7));
+    assert!(textures.generation() > generation);
+    let generation = textures.generation();
+    textures.set_external(video, Some(7));
+    assert_eq!(
+        textures.generation(),
+        generation,
+        "no change, no new generation"
+    );
+    // Removed: the id is stale, the slot reused; the index stays the owner's.
+    textures.remove(video, 1, &bindless);
+    assert_eq!(textures.index(video), None);
+    let next = textures.add_external();
+    assert_eq!(next.slot(), video.slot());
+    assert_eq!(textures.index(next), None);
+    textures.remove(next, 1, &bindless);
+    drop(textures);
+    drop(bindless);
+    drop(device);
+    assert_eq!(instance.validation_report().errors, 0);
+}

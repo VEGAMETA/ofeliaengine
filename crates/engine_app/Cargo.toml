@@ -24,6 +24,9 @@ engine_runtime.workspace = true
 engine_streaming.workspace = true
 # DLSS frame generation through Streamline, with DLLs the user supplies (ADR 0091).
 engine_dlss.workspace = true
+# Videos (ADR 0100): decoding, the conversion pass, the sound through an audio output.
+engine_video.workspace = true
+engine_audio.workspace = true
 
 [dev-dependencies]
 # The flight example: skinned characters (glTF Fox) cooked through the derived data cache,

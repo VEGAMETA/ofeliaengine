@@ -26,6 +26,10 @@
 //!   [`TexturePool::memory`] reports the images' bytes for the GPU memory budget
 //!   ([`crate::budget`]).
 //!
+//! - **External textures:** [`TexturePool::add_external`] names an image its owner keeps
+//!   (a video's, ADR 0100), so materials can use it; [`TexturePool::set_external`] gives
+//!   its bindless index once it may be sampled.
+//!
 //! Uploads record their own layout transitions: materials sample textures through
 //! bindless indices without declaring them to the graph, so a level is either being
 //! uploaded (inside the upload pass) or read-only.
@@ -393,6 +397,9 @@ pub fn levels_bytes(format: TextureFormat, width: u32, height: u32, levels: u32,
 struct Slot {
     generation: u32,
     texture: Option<PoolTexture>,
+    /// Held by an external texture ([`TexturePool::add_external`]): its bindless index,
+    /// once it has one.
+    external: Option<Option<u32>>,
 }
 
 /// Where an upload's data is.
@@ -642,22 +649,54 @@ impl TexturePool {
             view: None,
             bindless: None,
         };
-        let index = match self.free_slots.pop() {
-            Some(index) => index,
-            None => {
-                self.slots.push(Slot {
-                    generation: 0,
-                    texture: None,
-                });
-                (self.slots.len() - 1) as u32
-            }
-        };
+        let index = self.free_slot();
         let slot = &mut self.slots[index as usize];
         slot.texture = Some(entry);
         Ok(TextureId {
             index,
             generation: slot.generation,
         })
+    }
+
+    fn free_slot(&mut self) -> u32 {
+        match self.free_slots.pop() {
+            Some(index) => index,
+            None => {
+                self.slots.push(Slot {
+                    generation: 0,
+                    texture: None,
+                    external: None,
+                });
+                (self.slots.len() - 1) as u32
+            }
+        }
+    }
+
+    /// A texture whose image its owner keeps (a video's, ADR 0100), for materials to name:
+    /// it reads as missing until [`Self::set_external`] gives it a bindless index. The pool
+    /// neither uploads into it nor frees it; [`Self::remove`] forgets it.
+    pub fn add_external(&mut self) -> TextureId {
+        let index = self.free_slot();
+        let slot = &mut self.slots[index as usize];
+        slot.external = Some(None);
+        TextureId {
+            index,
+            generation: slot.generation,
+        }
+    }
+
+    /// Points external texture `id` at bindless index `index` (an image in
+    /// `READ_ONLY_OPTIMAL` whenever shaders may read it; `None`: missing again). Materials
+    /// pick the change up in their next `begin_frame`.
+    pub fn set_external(&mut self, id: TextureId, index: Option<u32>) {
+        if let Some(slot) = self.slots.get_mut(id.index as usize)
+            && slot.generation == id.generation
+            && let Some(external) = &mut slot.external
+            && *external != index
+        {
+            *external = index;
+            self.generation += 1;
+        }
     }
 
     /// Makes the texture's image hold the levels from `base` down (ADR 0076), in the next
@@ -808,6 +847,10 @@ impl TexturePool {
             self.retiring_bytes += texture.bytes();
             self.retired.push((frame_number, Retired::Texture(texture)));
         }
+        // An external texture's image and index are its owner's.
+        if slot.external.take().is_some() {
+            self.generation += 1;
+        }
         slot.generation = slot.generation.wrapping_add(1);
         self.free_slots.push(id.index);
     }
@@ -826,10 +869,18 @@ impl TexturePool {
             .flatten()
     }
 
-    /// The bindless index of a texture once some of it is resident; `None` before, and
-    /// for stale ids.
+    /// The bindless index of a texture once some of it is resident (an external one's
+    /// once set); `None` before, and for stale ids.
     pub fn index(&self, id: TextureId) -> Option<u32> {
-        self.texture(id)?.bindless
+        let slot = self.slots.get(id.index as usize)?;
+        if slot.generation != id.generation {
+            return None;
+        }
+        match (&slot.texture, slot.external) {
+            (Some(texture), _) => texture.bindless,
+            (None, Some(external)) => external,
+            (None, None) => None,
+        }
     }
 
     /// A texture's image, for recording by hand (its uploaded levels are in

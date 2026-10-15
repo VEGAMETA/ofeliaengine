@@ -100,6 +100,10 @@ pub struct PlayerSettings {
     pub global_illumination: Option<Option<GiSettings>>,
     /// Streamed textures follow what the views sample (texture feedback, ADR 0076).
     pub texture_feedback: bool,
+    /// Videos decode on the GPU's video engine: the device asks for its AV1 decode queue
+    /// (ADR 0100; 2.5 ms of device creation on the RTX 4060 Ti, nothing on the Radeon).
+    /// Without it they decode on the CPU (rav1d).
+    pub video_decode: bool,
     /// The frame drawn into an image of its own and copied into the swapchain image
     /// (`Some(true)`), or straight into it (`Some(false)`); `None`: apart only when the
     /// swapchain presents across adapters (`engine_render::present`).
@@ -142,6 +146,7 @@ impl Default for PlayerSettings {
             screen_space_reflections: None,
             global_illumination: None,
             texture_feedback: true,
+            video_decode: false,
             present_apart: None,
             tick_hz: 64.0,
             pipeline_cache: None,
