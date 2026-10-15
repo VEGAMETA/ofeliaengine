@@ -10,8 +10,12 @@ Last updated: 2026-10-15.
 
 - **Working on: 8b, video playback** (ADR 0100): AV1 in WebM decoded by the GPU's video
   engine through Vulkan Video, rav1d where that is missing, Opus sound as the clock, the
-  picture as a texture. Researched 2026-10-15 (both reference GPUs decode AV1 in
-  hardware); next is 8b-1, the WebM reader, the AV1 header parser and rav1d's decoding.
+  picture as a texture.
+  - 8b-1 is done (2026-10-15, PR #227): `engine_video` reads WebM, parses the AV1 headers (every
+    field equal to rav1d's on nine clips) and decodes with rav1d.
+  - Next is 8b-2: the decode queue and the Vulkan Video session on both GPUs.
+  - Video with transparency (an alpha channel) is not part of it: the owner deferred it
+    (2026-10-15; §6, Video).
 - **Virtual shadow maps** (item 5, ADR 0093) are done but for transparent surfaces: steps
   3a–3c were done 2026-10-15. `ViewSettings::virtual_shadows` turns them on (off by
   default).
@@ -124,8 +128,8 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 ## 4. In flight
 
-- **8b, video playback** (ADR 0100). Research and the decision done 2026-10-15; 8b-1 is
-  next. Details are under the queue's item 8b.
+- **8b, video playback** (ADR 0100). Research and the decision done 2026-10-15, 8b-1 the
+  same day; 8b-2 is next. Details are under the queue's item 8b.
 
 Nothing else is in flight. Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
@@ -753,6 +757,17 @@ grown, divide and conquer); the old labels stay in parentheses.
    - **Steps:** 8b-1 the reader, the parser, rav1d; 8b-2 the Vulkan Video session,
      bit-exact against rav1d on both GPUs; 8b-3 the texture, sound and clock, the player's
      video entity, golden shots, costs, docs.
+   - **8b-1 done 2026-10-15** (PR #227; ADR 0100, "8b-1 as built"):
+     - `engine_video`: the WebM reader; the AV1 sequence and frame headers with the
+       reference state; `Parser`, which turns a temporal unit into frames with their tiles'
+       offsets and sizes (Vulkan's form); `SoftwareDecoder` over rav1d.
+     - Tested against rav1d on nine generated clips (SVT-AV1, libaom, rav1e): every
+       header field of every frame, hidden ones included; the test checks the clips
+       still use each of the features it lists.
+     - Measured on ref-1: the parser costs 0.3 µs a unit. rav1d decodes a 13 Mbit/s
+       1080p30 stream at 6.5× real time on one thread (15× with frame threads), a
+       36 Mbit/s 2160p30 10-bit one at 1.7× (5.5×).
+     - New build requirement: NASM on `PATH`.
 8c (was 6h). **Colliders made automatically**: collision shapes from meshes at import and
    cook, into the pack ("one button"): static level geometry as triangle meshes (simplified
    where it pays), props as a fitted box, sphere or capsule or a convex hull, concave ones
@@ -930,6 +945,12 @@ grown, divide and conquer); the old labels stay in parentheses.
     less.
 - **Presentation:** test 0e's choice with a monitor on the iGPU (the owner can connect one;
   later, owner 2026-10-10).
+- **Video (ADR 0100):**
+  - **transparency** (the owner, 2026-10-15: later): an alpha channel, for instance a
+    second, monochrome AV1 stream decoded beside the picture;
+  - streams no test clip has: intra-only and switch frames, short reference signaling
+    (unit-tested only), tile sizes that are not uniform, loop filter delta updates, film
+    grain loaded from a reference.
 - **Particles (ADR 0081):** lighting and shadows on them, depth-buffer collisions, trails
   and mesh particles, user simulation code, large particles drawn at a lower resolution
   (overdraw on the iGPU: 256 smoke puffs cost 1.6 ms there), a one-workgroup sort for small

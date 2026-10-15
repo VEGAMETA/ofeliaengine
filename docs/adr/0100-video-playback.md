@@ -144,3 +144,94 @@ loading screen), as its owner chooses.
   a feature to leave out.
 - Frames are bit-exact against a software decoder, so the decoding itself needs no golden
   images; the conversion and the texture get one.
+
+## 8b-1 as built (2026-10-15)
+
+`crates/engine_video`, no GPU yet:
+
+- **`webm`:** `Webm::read` over a file in memory: the EBML header, `Info` (the timestamp
+  scale, the duration), `Tracks` (codec, private data, picture size, sample rate, channels,
+  codec delay, seek pre-roll), `Cues`. `blocks()` and `blocks_from(cue)` walk the clusters
+  (unknown sizes too): each block's track, time in nanoseconds, keyframe flag and frames
+  (Xiph, fixed and EBML lacing), without allocating.
+- **`av1`:** the specification's headers, written from it:
+  - OBUs and the `av1C` record (`obu`);
+  - the sequence header (`sequence`);
+  - the frame header, every part of `uncompressed_header()`, with the values its parsing
+    derives (`frame`);
+  - the reference frames' state (`RefState`), which the frame header reads and the
+    reference frame update and loading processes (7.20, 7.21) write.
+- **`Parser::parse`** turns a temporal unit (a WebM block) into its frames, in decoding
+  order. Each frame comes with:
+  - its header;
+  - the offsets of its frame header OBU and of the header itself;
+  - its tiles' offsets and sizes, which are Vulkan's `pTileOffsets` and `pTileSizes`.
+
+  A `TemporalUnit` keeps the arrays from unit to unit. The parser takes the sequence header
+  from the track's `av1C` record or from the stream (rav1e's record has none). It refuses
+  spatial layers, and a frame whose reference it has not seen (`MissingReference`, after a
+  seek anywhere but at a key frame).
+- **`software`** (the default `software` feature): `SoftwareDecoder` over rav1d's dav1d
+  interface.
+  - `decode(unit, time, |picture| ..)` returns pictures in output order: every picture of
+    the unit when decoding one frame at a time; with frame threads, those that are ready.
+  - A `Picture` has its planes, size, depth, layout, time and rav1d's view of its headers.
+
+**Tested** (`tests/clips.rs`, CPU only, 0.25 s) on nine generated clips from SVT-AV1,
+libaom and rav1e (`tests/clips/README.md`, 260 KB):
+
+- every field of every frame header, hidden frames included, equals rav1d's;
+- every sequence header field equals rav1d's;
+- every frame's tiles are all there, in order, inside the unit;
+- one picture per frame, frames shown again included.
+
+The test also checks that the clips use each feature it lists: 10 bits, error resilience
+with frame ids, super-resolution, frame size overrides and render sizes, screen content
+tools and intra block copy, tiles, quantizer matrices, chroma deltas, segmentation, delta
+q and delta loop filter, lossless frames, CDEF, loop restoration of luma and chroma,
+compound references, skip mode, warped and global motion, film grain.
+
+No available encoder makes intra-only or switch frames, short reference signaling
+(`set_frame_refs` has a unit test, worked by hand), non-uniform tile sizes, loop filter delta
+updates, or film grain loaded from a reference.
+
+**Found while matching rav1d:**
+
+- What rav1d calls `all_lossless` is the specification's `CodedLossless`.
+- For lossless and intra block copy frames, the loop filter's delta flags are not coded.
+  They are reported as 1, as `setup_past_independence()` leaves them (rav1d does the same;
+  the filter is off).
+- CDEF strengths are kept as coded (a secondary strength of 3 stays 3): Vulkan takes them
+  so.
+- In the tile arrays, rav1d's last start is the frame's width in superblocks, rounded up.
+
+**Measured** on ref-1 (Ryzen 7 7700, 8 cores / 16 threads), release, `video_bench`:
+
+| clip (SVT-AV1 preset 8, CRF 32) | Mbit/s | rav1d, 1 thread | 16 threads, 1 frame at a time | 16 threads, frames in parallel |
+|---|---:|---:|---:|---:|
+| 1080p30, 8 bits | 13.4 | 194 pictures/s (6.5× real time) | 198 /s | 450 /s (15×) |
+| 2160p30, 10 bits | 35.9 | 51 /s (1.7×) | 56 /s | 164 /s (5.5×) |
+
+- **Our parser:** 0.3 µs a temporal unit.
+- **Without frame threads, more threads gain nothing:** these streams have one tile.
+- **Units with several frames take longest:** on one thread, up to 48 ms at 1080p and
+  134 ms at 2160p (a key frame with its hidden frames). The player decodes ahead.
+- **One core decodes both streams faster than they play** (6.5× and 1.7×). Frame threads
+  give the headroom (15× and 5.5×).
+- **Building rav1d:** 20 s in the dev profile (dependencies are optimized there) and 17 s in
+  release, beside the rest of the workspace.
+
+**Dependency changes:**
+
+- `rav1d` 1.1.0 and its crates (`THIRD_PARTY_NOTICES.md`).
+- NASM 2.14 or later on `PATH` (the README).
+- `syn`'s `extra-traits` in the workspace hack: strum_macros enables it (ADR 0077).
+- One advisory ignored in `deny.toml`: `paste`, a build-time macro of rav1d's, is archived
+  (RUSTSEC-2024-0436, no vulnerability).
+
+**Not done here:** decoding on the GPU (8b-2), the picture as a texture, sound and the
+clock (8b-3).
+
+**Video with transparency** (an alpha channel, e.g. as a second, monochrome AV1 stream) is
+not part of 8b. The owner deferred it on 2026-10-15; it stays in the status's list of
+things for later.
