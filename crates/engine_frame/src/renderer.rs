@@ -8,6 +8,7 @@ use crate::settings::{Exposure, FrameGeneration, ViewSettings};
 use crate::view::{HistoryImage, Prepared, Retired, View};
 use core::fmt;
 use engine_core::math::{Mat4, Quat, Vec3, vulkan_perspective};
+use engine_render::dof::{DepthOfField, DofCamera};
 use engine_render::environment::Environment;
 use engine_render::forward::{
     Camera, CascadeCache, Decal, DirectionalLight, DrawItem, ForwardPasses, ForwardRenderer,
@@ -387,6 +388,8 @@ pub struct FrameRenderer {
     resampling: [Option<Box<Tonemap>>; 4],
     /// FSR 1 (ADR 0075), made with the first view that uses it.
     fsr1: Option<Box<Fsr1>>,
+    /// Depth of field (ADR 0095), made with the first view that uses it.
+    dof: Option<Box<DepthOfField>>,
     #[cfg(feature = "dlss")]
     streamline: Option<engine_dlss::Streamline>,
 }
@@ -634,6 +637,7 @@ impl FrameRenderer {
             perceptual: None,
             resampling: Default::default(),
             fsr1: None,
+            dof: None,
             #[cfg(feature = "dlss")]
             streamline: None,
         })
@@ -956,6 +960,9 @@ impl FrameRenderer {
         }
         if antialiasing.upscale == Upscale::Fsr1 && self.fsr1.is_none() {
             self.fsr1 = Some(Box::new(Fsr1::new(device, bindless)?));
+        }
+        if settings.depth_of_field.is_some() && self.dof.is_none() {
+            self.dof = Some(Box::new(DepthOfField::new(device, bindless)?));
         }
         // Catmull-Rom and Lanczos-3: the tone mapper with their kernel.
         if let Some(kernel) = resample(antialiasing.upscale, render, output) {
@@ -1443,6 +1450,25 @@ impl FrameRenderer {
                     }
                 });
         }
+
+        // 4b. Depth of field (ADR 0095), on the antialiased image with the render-size
+        // depth: after the upscalers (AMD's FSR guide places it there; they reproject a
+        // sharp image along its motion). The previous color above stays sharp.
+        let resolved = match (&settings.depth_of_field, self.dof.as_deref()) {
+            (Some(dof_settings), Some(dof)) => dof.add_passes(
+                fg,
+                ctx.bindless,
+                resolved,
+                depth,
+                DofCamera {
+                    fov_y: camera.fov_y,
+                    near: camera.near,
+                    far: camera.far,
+                },
+                dof_settings,
+            ),
+            _ => resolved,
+        };
 
         // 5. Bloom and tone mapping, at the output size.
         let bloom = settings

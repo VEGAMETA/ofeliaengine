@@ -8,6 +8,7 @@ mod breadcrumbs;
 mod cached_shadows;
 mod culling;
 mod decals;
+mod dof;
 mod environment;
 mod feedback;
 mod forward;

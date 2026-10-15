@@ -43,6 +43,8 @@
 //! the image-based light every frame, `--fog` for exponential height fog (implies `--sky`),
 //! `--post` for bloom, automatic exposure and tone mapping every
 //! frame (ADR 0047), `--grading` to grade through a LUT too (ADR 0094; implies `--post`),
+//! `--dof <focus distance>` for depth of field before bloom (ADR 0095; f/1.4 on a 10 cm
+//! sensor, a strong blur; implies `--post`),
 //! `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
 //! levels made at load (ADR 0053), `--no-meshlets` to keep each level's triangles in their
@@ -82,6 +84,7 @@ use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::dof::{DepthOfField, DofCamera, DofSettings};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, CascadeCache, Decal, DirectionalLight, DrawItem, ForwardRenderer, ForwardView,
@@ -327,6 +330,7 @@ fn main() {
     let mut msaa_stats: u32 = 0;
     let mut post = false;
     let mut graded = false;
+    let mut dof_focus: Option<f32> = None;
     let mut curve = ToneCurve::Gt;
     let mut ddc = String::from("test-assets/.ddc");
     let mut pack: Option<String> = None;
@@ -426,6 +430,10 @@ fn main() {
             "--grading" => {
                 post = true;
                 graded = true;
+            }
+            "--dof" => {
+                post = true;
+                dof_focus = Some(args.next().unwrap().parse().unwrap());
             }
             "--curve" => {
                 curve = match args.next().as_deref() {
@@ -1295,6 +1303,18 @@ fn main() {
         saturation: 0.9,
         ..ColorGrading::default()
     };
+    // `--dof`: a strong blur (ADR 0095).
+    let dof = dof_focus.map(|focus| {
+        (
+            DepthOfField::new(&device, &bindless).unwrap(),
+            DofSettings {
+                focus_distance: focus,
+                f_number: 1.4,
+                sensor_height: 0.1,
+                ..DofSettings::default()
+            },
+        )
+    });
     let post_effects = post.then(|| {
         (
             Bloom::new(&device, &bindless, BloomSettings::default()).unwrap(),
@@ -1397,6 +1417,8 @@ fn main() {
         let (mut decal_tiles_time, mut decal_time) = (Vec::new(), Vec::new());
         let (mut tlas_time, mut camera_rays_time) = (Vec::new(), Vec::new());
         let mut gi_resolve_time = Vec::new();
+        // `--dof`: each depth of field pass's GPU time per frame.
+        let mut dof_us: Vec<(&'static str, Vec<f64>)> = Vec::new();
         let (mut sky_pass, mut rebuild) = (Vec::new(), Vec::new());
         let (mut tables, mut aerial, mut composite) = (Vec::new(), Vec::new(), Vec::new());
         let (mut bloom_time, mut exposure_time, mut tonemap_time) =
@@ -1647,6 +1669,19 @@ fn main() {
                     .filter(|_| std::env::var("GI_DEBUG").is_ok())
                     .unwrap_or(hdr);
                 added = started.elapsed();
+                // Depth of field on the scene, before bloom and tone mapping.
+                let dof_camera = DofCamera {
+                    fov_y: 60f32.to_radians(),
+                    near: size.length() * 0.001,
+                    far: size.length() * 2.0,
+                };
+                let hdr = match &dof {
+                    Some((dof, settings)) => {
+                        dof.add_passes(&mut fg, &bindless, hdr, depth, dof_camera, settings)
+                    }
+                    None => hdr,
+                };
+                let shown = if shown == view.color { hdr } else { shown };
                 if capture {
                     let ldr = fg.create_texture(
                         "screenshot",
@@ -1830,6 +1865,12 @@ fn main() {
                 let mut gi_resolve_frame = 0.0;
                 for time in graph.gpu_pass_times() {
                     let us = f64::from(time.gpu_us);
+                    if time.name.starts_with("dof ") {
+                        match dof_us.iter_mut().find(|(n, _)| *n == time.name) {
+                            Some((_, v)) => v.push(us),
+                            None => dof_us.push((time.name, vec![us])),
+                        }
+                    }
                     match time.name {
                         "probe mips" | "probe prefilter" => prefilter_frame += us,
                         "ssr depth" => ssr_frame[0] += us,
@@ -2021,6 +2062,19 @@ fn main() {
             median(&mut decal_time),
         );
         println!("{mode}: GPU cull µs {:.1}", median(&mut cull_time));
+        if !dof_us.is_empty() {
+            let medians: Vec<(&str, f64)> =
+                dof_us.iter_mut().map(|(n, v)| (*n, median(v))).collect();
+            let total: f64 = medians.iter().map(|(_, m)| m).sum();
+            let parts: Vec<String> = medians
+                .iter()
+                .map(|(n, m)| format!("{} {m:.1}", n.trim_start_matches("dof ")))
+                .collect();
+            println!(
+                "{mode}: GPU depth of field µs {total:.1} ({})",
+                parts.join(", ")
+            );
+        }
         if let Some(c) = &shadow_cache {
             let layers = f64::from(shadows.cascade_count() as u32 * shadows.resolution.pow(2));
             let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;

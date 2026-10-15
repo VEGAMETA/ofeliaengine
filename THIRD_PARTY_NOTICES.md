@@ -180,6 +180,8 @@ Constants and formulas taken into our own code (no files copied).
 | The GPU radix sort's structure: per digit a count (a histogram column per thread), a chunked reduce, a one-workgroup scan, a scan add and a scatter whose local sort of 128 keys takes two 2-bit splits on packed 8-bit counters; 128 threads × 4 keys per block, at most 800 workgroups, the indirect setup (rewritten in Slang with buffer addresses) | `engine_render/shaders/sort.slang`, `engine_render/src/sort.rs` | AMD FidelityFX Parallel Sort, `GPUOpen-Effects/FidelityFX-ParallelSort`, `ffx-parallelsort/FFX_ParallelSort.h`, master as of 2026-10-10 | MIT (Copyright (c) 2020 Advanced Micro Devices, Inc., below) |
 | LDR-FLIP: its constants, separable spatial and feature filters, colour transforms and error remapping, ported to Rust | `tests/golden/src/flip.rs` (test-only crate `engine_golden`) | NVIDIA `NVlabs/flip`, `src/cpp/FLIP.h` (Andersson et al., HPG 2020) | BSD-3-Clause (Copyright (c) 2020-2025, NVIDIA CORPORATION & AFFILIATES) |
 | Bend Studio's screen-space shadows: the wavefront layout towards the light's screen point, the dispatch list around it, the shared-memory depth line with perspective correction, the hard / averaged / fading sample groups, the edge test and precision offset, the default tuning values (ported to Slang and Rust, modified: Vulkan's y-down clip space, edges ignored, a thicker default surface, the light's own pixel written lit) | `engine_render/shaders/contact.slang`, `engine_render/src/contact.rs` (`bend_dispatches`) | Sony Interactive Entertainment (Bend Studio), `bend_sss_gpu.h`, `bend_sss_cpu.h` (2023), from bendstudio.com/blog/inside-bend-screen-space-shadows | Apache-2.0 (Copyright 2023 Sony Interactive Entertainment, below) |
+| FidelityFX DOF 1.1's passes, ported to Slang and Rust: the depth tiles and the largest reach of a tile, their dilation by scatter-as-gather, the bilateral downsample, the blur's per-wave tile classification, its rings outside-in with the sample stream's affine step, the far field's two buckets merged by the rings' overlap, the near field's 1 / r² weights, opacity and background fill, the composite's 3 × 3 medians of luminance, upscaling, fixed 3 × 3 blur and blending (modified: inverse depth instead of signed circles of confusion, the near field from a radius of one pixel, no ring merging, the ring count per workgroup, a separate output, 32-bit only) | `engine_render/shaders/dof.slang`, `engine_render/src/dof.rs` | AMD FidelityFX SDK v1.1.4, `sdk/include/FidelityFX/gpu/dof/ffx_dof_*.h`, `sdk/src/components/dof/ffx_dof.cpp` (studied from the SDK's repository; not vendored) | MIT (Copyright (C) 2024 Advanced Micro Devices, Inc., `third_party/FidelityFX-SDK/LICENSE.txt`) |
+| hash22 ("Hash without Sine"), through FidelityFX DOF: the depth of field kernel's fixed offset per pixel | `engine_render/shaders/dof.slang` (`dofBlur`) | David Hoskins, shadertoy.com/view/4djSRW | MIT (Copyright (c) 2014 David Hoskins, below) |
 
 ### MIT license (Baking Lab)
 
@@ -273,6 +275,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+```
+
+### MIT license (Hash without Sine)
+
+```
+Copyright (c)2014 David Hoskins.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 ### MIT license (XeGTAO)

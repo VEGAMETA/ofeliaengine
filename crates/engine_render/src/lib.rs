@@ -48,6 +48,7 @@ pub mod compute;
 pub mod contact;
 pub mod cull;
 pub mod decals;
+pub mod dof;
 pub mod environment;
 pub mod feedback;
 pub mod forward;

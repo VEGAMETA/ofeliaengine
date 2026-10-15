@@ -2,6 +2,7 @@
 
 use crate::antialiasing::Antialiasing;
 use engine_render::ao::{AoQuality, AoSettings};
+use engine_render::dof::DofSettings;
 use engine_render::grading::ColorGrading;
 use engine_render::post::{OutputEncoding, ToneCurve};
 use engine_render::postfx::ExposureSettings;
@@ -78,6 +79,11 @@ pub struct ViewSettings {
     pub encoding: OutputEncoding,
     /// Bloom (ADR 0047; its settings are the frame renderer's, `FrameRenderer::bloom`).
     pub bloom: bool,
+    /// Depth of field (ADR 0095; off by default, which costs nothing): a thin lens
+    /// focused at a distance blurs what lies before and behind it, on the antialiased
+    /// image before bloom and tone mapping. Its pipelines are made with the first view that
+    /// uses it.
+    pub depth_of_field: Option<DofSettings>,
     /// The color behind the scene where nothing is drawn (the sky covers it when the
     /// scene has an environment).
     pub clear: Option<[f32; 4]>,
@@ -125,6 +131,7 @@ impl Default for ViewSettings {
             peak: 1.0,
             encoding: OutputEncoding::LINEAR,
             bloom: true,
+            depth_of_field: None,
             clear: Some([0.02, 0.02, 0.05, 1.0]),
             occlusion_culling: false,
             cached_shadows: true,
