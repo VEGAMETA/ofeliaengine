@@ -70,6 +70,11 @@ pub struct ExtraQueues {
     pub graphics: u32,
     /// More queues of the compute family (of the graphics family without one).
     pub compute: u32,
+    /// A queue of the family that decodes AV1 video, with the video extensions (ADR 0100),
+    /// when the adapter has one: [`Device::video_decode`]. Asked for by games that play
+    /// video: it costs the RTX 4060 Ti 2.5 ms of `vkCreateDevice` (50 against 47.5 ms) and
+    /// the Radeon nothing.
+    pub video_decode: bool,
 }
 
 /// Where a library's extra queues start: family and index, for graphics and compute.
@@ -117,6 +122,11 @@ pub struct Device {
     pub async_compute: Option<Queue>,
     /// A transfer-only queue (copy engine), if the GPU has one.
     pub transfer: Option<Queue>,
+    /// A queue of the family that decodes AV1 video (ADR 0100): asked for with
+    /// [`ExtraQueues::video_decode`], when the adapter has one
+    /// ([`crate::OptionalCaps::video_decode_av1`]); the video extensions are enabled with
+    /// it. `ENGINE_VIDEO_DECODE=0` leaves it out (to test the software decoder).
+    pub video_decode: Option<Queue>,
     /// Every pipeline is created through it (ADR 0055); internally synchronized, so
     /// pipelines are created from many threads at once.
     pipeline_cache: vk::PipelineCache,
@@ -144,6 +154,7 @@ impl core::fmt::Debug for Device {
             .field("present", &self.present)
             .field("async_compute", &self.async_compute)
             .field("transfer", &self.transfer)
+            .field("video_decode", &self.video_decode)
             .finish()
     }
 }
@@ -257,6 +268,22 @@ impl Device {
                     .queue_priorities(&priorities[..1]),
             );
         }
+        // AV1 decoding when asked for (ADR 0100): one queue of its own family. A family
+        // the engine already takes queues from is left alone (its queues are spoken for).
+        let decode_family = adapter
+            .video_decode_family
+            .filter(|_| queues.video_decode)
+            .filter(|&f| {
+                f != graphics_family && Some(f) != compute_family && Some(f) != transfer_family
+            })
+            .filter(|_| std::env::var("ENGINE_VIDEO_DECODE").map_or(true, |v| v.trim() != "0"));
+        if let Some(family) = decode_family {
+            queue_infos.push(
+                vk::DeviceQueueCreateInfo::default()
+                    .queue_family_index(family)
+                    .queue_priorities(&priorities[..1]),
+            );
+        }
 
         // Exactly the features checked in `Adapter::query`, plus a few optional ones.
         let mut f11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(true);
@@ -316,6 +343,11 @@ impl Device {
         }
         if adapter.caps.memory_budget {
             extensions.push(ash::ext::memory_budget::NAME.as_ptr());
+        }
+        if decode_family.is_some() {
+            extensions.push(ash::khr::video_queue::NAME.as_ptr());
+            extensions.push(ash::khr::video_decode_queue::NAME.as_ptr());
+            extensions.push(ash::khr::video_decode_av1::NAME.as_ptr());
         }
         // Mastering metadata for HDR swapchains.
         let hdr_metadata = presenting && adapter.caps.hdr_metadata;
@@ -554,6 +586,7 @@ impl Device {
             },
             async_compute: compute_family.map(queue),
             transfer: transfer_family.map(queue),
+            video_decode: decode_family.map(queue),
             raw: Arc::new(raw),
             adapter: adapter.clone(),
             latency,

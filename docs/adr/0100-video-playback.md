@@ -105,7 +105,8 @@ loading screen), as its owner chooses.
     - events: a frame shown, the end, the loop point, an error.
 - **`engine_rhi`:** an optional decode queue (a family with `VIDEO_DECODE`) and the
   extensions `VK_KHR_video_queue`, `VK_KHR_video_decode_queue` and
-  `VK_KHR_video_decode_av1`, enabled when present.
+  `VK_KHR_video_decode_av1`, enabled when present and asked for (8b-2: a game without video
+  does not pay for them).
 - **Decoding** runs ahead of the clock on the decode queue (a few pictures), with a timeline
   semaphore the frame's conversion pass waits on. Pictures stay in their output or
   reference images until shown. Both of Vulkan Video's arrangements are supported:
@@ -235,3 +236,86 @@ clock (8b-3).
 **Video with transparency** (an alpha channel, e.g. as a second, monochrome AV1 stream) is
 not part of 8b. The owner deferred it on 2026-10-15; it stays in the status's list of
 things for later.
+
+## 8b-2 as built (2026-10-16)
+
+**`engine_rhi`:**
+
+- `OptionalCaps::video_decode_av1` and `Adapter::video_decode_family()`: the three video
+  extensions and a queue family whose `VkQueueFamilyVideoPropertiesKHR` include AV1 decode.
+- **The decode queue is created only when asked for** (`ExtraQueues::video_decode`, then
+  `Device::video_decode`), not whenever present as planned. It costs the RTX 2.5 ms of
+  `vkCreateDevice` (50 against 47.5 ms) and the Radeon nothing, so games without video do
+  not pay it. `ENGINE_VIDEO_DECODE=0` leaves it out, to test the software path.
+- `Adapter::driver_id`, for the one workaround below.
+
+**`engine_video::gpu`:**
+
+- **`GpuCaps`** reads the profile's capabilities and picture formats.
+- **`GpuDecoder`** holds:
+  - the session and its memory;
+  - session parameters per sequence header;
+  - the reference pictures: one image of nine layers, AV1's eight references and the
+    frame being decoded;
+  - output images (12 by default), shared with the graphics queue;
+  - four command buffers with their bitstream buffers;
+  - a timeline semaphore.
+- **`decode()`** takes a parsed temporal unit and returns `GpuPicture`s (image, sizes,
+  layout, the semaphore value to wait for). The caller gives each back with `release()`
+  once nothing reads it.
+- **The two arrangements:**
+  - **Coinciding (the RTX):** a frame decodes into its reference layer. A frame that may be
+    shown is copied into an output image on the decode queue (its family copies).
+  - **Distinct (the Radeon):** a frame decodes into an output image, with its reference
+    beside it.
+  - **Film grain:** grain frames decode into an output image on both. The reference stays
+    without grain, as the specification requires.
+- **AV1's eight reference slots map to the image's layers.** A hidden frame that may be
+  shown later keeps its output image until it is (`show_existing_frame` then just hands it
+  out). A shown key frame refreshes every slot.
+- **The structures:** `StdVideo*` (`std_av1.rs`) are filled in place for each frame,
+  without allocating. `LoopRestorationSize` goes as `log2(size) - 5` and CDEF's secondary
+  strengths as coded, as the Video Std definitions say.
+
+**Two workarounds, each limited to where it is needed:**
+
+- **AMD's PAL-based drivers read the tiles' starts in superblocks**
+  (`driverID` `AMD_PROPRIETARY` or `AMD_OPEN_SOURCE`). Other drivers get mode info units,
+  as the specification says.
+- **Frames larger than the sequence header's maximum** (SVT-AV1 1.8 at heights not a
+  multiple of 8) get session parameters whose maximum holds them, within the session's
+  pictures. A conformant stream never triggers it.
+
+**Tested** (`tests/gpu.rs`, on the GPU `ENGINE_ADAPTER` picks, under the validation layer):
+
+- Every shown picture of the test clips is read back and compared with rav1d's, sample by
+  sample, without film grain. A second test applies film grain on both sides.
+- The two clips that showed SVT's non-conformance gained conformant 176-line twins.
+- **The Radeon decodes all eleven clips** (312 pictures) bit-exact.
+- **The RTX decodes eight** (264 pictures) bit-exact. It refuses the lossless 160 × 90 clip and both resize
+  clips: their pictures are below its 128 × 128 minimum, and the test allows only size
+  refusals.
+- Film grain is bit-exact on both GPUs.
+- The validation layer reports no errors or warnings.
+
+**Measured** with `video_bench --gpu` on ref-1, release, the 8b-1 clips:
+
+| | RTX 4060 Ti | Radeon 780M | rav1d, 16 threads (8b-1) |
+|---|---:|---:|---:|
+| 1080p30 8-bit, 13.4 Mbit/s: pictures/s (× real time) | 1,024 (34×) | 548 (18×) | 450 (15×) |
+| 2160p30 10-bit, 35.9 Mbit/s | 276 (9.2×) | 107 (3.6×) | 164 (5.5×) |
+| CPU per unit (recording, submitting), 1080p / 2160p | 41 / 59 µs | 19 / 31 µs | all cores |
+| one unit, submitted to decoded, median / slowest: 1080p | 0.73 / 8.6 ms | 1.8 / 13 ms | |
+| the same, 2160p | 3.0 / 23 ms | 10 / 58 ms | |
+
+- The slowest units are key frames with their hidden frames.
+- The Radeon's decode queue has no timestamps, so these are wall-clock times on the CPU.
+
+**Left for 8b-3 and later:**
+
+- the picture as a texture (the conversion pass);
+- the sound and the clock;
+- `VideoPlayer`;
+- the decode queue shared by several players (one queue per device, submits serialized);
+- decode status queries (a damaged stream reported, not just decoded wrong);
+- recovery at the next key frame after an error.

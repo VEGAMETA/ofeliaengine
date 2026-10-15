@@ -163,6 +163,39 @@ header (`CodedBitstreamAV1`). Parsing is the application's job, separate from th
 - **The software path** costs worker threads: dav1d decodes 1080p AV1 at several hundred
   frames a second on 8 cores.
 
+## Measured on ref-1 (2026-10-16)
+
+What the drivers report for AV1's main profile (`vkGetPhysicalDeviceVideoCapabilitiesKHR`
+and `vkGetPhysicalDeviceVideoFormatPropertiesKHR`, 8 and 10 bits alike, film grain or not):
+
+| | RTX 4060 Ti, NVIDIA 616.92 | Radeon 780M, AMD 26.8.1 |
+|---|---|---|
+| decode queue family | 3: decode + transfer, 1 queue, 32 timestamp bits | 4: decode only, 1 queue, no timestamps |
+| decoded picture and reference | coincide only | distinct only |
+| coded size | 128 × 128 to 8192 × 8192 | 16 × 16 to 8192 × 4352 |
+| level | 7.3 | 6.1 |
+| reference slots, active references | 16, 16 | 9, 7 |
+| bitstream offset and size alignment | 256 bytes | 4,096 bytes |
+| picture access granularity | 16 × 16 | 16 × 16 |
+| reference picture images | one format for every usage (decode, reference, sampled, copies) | reference usage only |
+| output images | the same | decode output, sampled, storage, copies |
+
+Found while decoding the test clips:
+
+- **AMD's driver reads `pMiColStarts` and `pMiRowStarts` in superblocks.** The
+  specification has mode info units and advises drivers to ignore the arrays. Given mode
+  info units, every tile but the first decodes wrong. NVIDIA ignores them; Mesa's RADV
+  (`radv_video.c`, read 2026-10-16) derives the starts from `pWidthInSbsMinus1` and the
+  frame size, its comment noting that applications send either.
+- **SVT-AV1 1.8.0 writes frames larger than the sequence header's maximum** at heights that
+  are not a multiple of 8 (180 lines coded as 184 under a 180 maximum). rav1d and NVIDIA
+  decode them. AMD's decoder keeps to the maximum: with super-resolution the last rows are
+  lost, with resized frames the reference scaling is wrong.
+- **The RTX refuses pictures below 128 × 128**, which some resized frames of small videos
+  are.
+- Every other picture of the clips, film grain included, is bit-exact against rav1d on
+  both GPUs.
+
 ## Sources
 
 - AV1 Bitstream & Decoding Process Specification, AOMedia, 1.0.0 with errata 1.
@@ -177,3 +210,8 @@ header (`CodedBitstreamAV1`). Parsing is the application's job, separate from th
 - RFC 9559 (Matroska), RFC 8794 (EBML), the WebM container guidelines, the AV1 codec mapping
   for Matroska, Opus in Matroska (`A_OPUS`).
 - Unity `VideoPlayer` and Unreal Media Framework documentation.
+- The Vulkan specification's AsciiDoc sources (KhronosGroup/Vulkan-Docs `main`:
+  `chapters/videocoding.adoc`, `chapters/video/decode.adoc`, `chapters/video/av1_decode.adoc`),
+  read 2026-10-16.
+- Mesa `src/amd/vulkan/radv_video.c` (MIT), `main`, read 2026-10-16: how AMD's video firmware
+  is given AV1's tiles, sizes and references.

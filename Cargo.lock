@@ -731,6 +731,7 @@ dependencies = [
 name = "engine_video"
 version = "0.0.0"
 dependencies = [
+ "engine_rhi",
  "engine_workspace_hack",
  "rav1d",
 ]
