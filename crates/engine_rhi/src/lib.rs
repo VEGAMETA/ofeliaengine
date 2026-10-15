@@ -61,6 +61,6 @@ pub use pipeline::{
 };
 pub use pipeline_cache::{PipelineCacheLoad, PipelineCacheSave};
 pub use swapchain::{
-    AcquiredImage, HdrMetadata, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc,
-    VulkanHooks, color_range,
+    AcquiredImage, FullScreenExclusive, HdrMetadata, OutputColor, PresentMode, Surface, Swapchain,
+    SwapchainDesc, VulkanHooks, color_range,
 };

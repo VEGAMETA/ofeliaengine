@@ -41,6 +41,21 @@ pub enum RhiError {
 }
 
 impl RhiError {
+    /// The swapchain must be recreated before the next frame: it no longer matches its
+    /// surface (`ERROR_OUT_OF_DATE_KHR`), or it lost the monitor it held for itself
+    /// (`ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT`, ADR 0099; recreation tries to take it
+    /// again).
+    pub fn is_out_of_date(&self) -> bool {
+        matches!(
+            self,
+            Self::Vulkan {
+                result: vk::Result::ERROR_OUT_OF_DATE_KHR
+                    | vk::Result::ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT,
+                ..
+            }
+        )
+    }
+
     /// Maps a failed Vulkan call's result: `.map_err(RhiError::vk("vkCreateImage"))`.
     ///
     /// `VK_ERROR_DEVICE_LOST` also produces the GPU fault report (once per device loss;

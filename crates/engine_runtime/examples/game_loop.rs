@@ -103,6 +103,7 @@ mod windowed {
                 height: 900,
                 resizable: false,
                 visible: true,
+                ..WindowDesc::default()
             })
             .unwrap();
         let instance = Instance::new(&InstanceDesc::default()).unwrap();
@@ -127,6 +128,7 @@ mod windowed {
                 srgb: true,
                 color: OutputColor::Sdr,
                 low_latency: false,
+                ..SwapchainDesc::default()
             },
         )
         .unwrap();

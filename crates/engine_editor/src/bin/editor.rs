@@ -583,6 +583,7 @@ mod windowed {
                 color: wanted.color,
                 // Lets `engine_latency` use Reflex on NVIDIA.
                 low_latency: true,
+                ..SwapchainDesc::default()
             },
         )?;
         let device_ready = started.elapsed();

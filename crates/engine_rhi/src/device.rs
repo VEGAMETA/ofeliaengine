@@ -91,6 +91,8 @@ pub struct Device {
     latency: LatencyExtensions,
     /// `VK_EXT_hdr_metadata` is enabled.
     hdr_metadata: bool,
+    /// `VK_EXT_full_screen_exclusive` is enabled.
+    full_screen_exclusive: bool,
     /// `VK_EXT_image_view_min_lod` and its `minLod` feature are enabled.
     image_view_min_lod: bool,
     /// `shaderFloat16` and `shaderInt16` are enabled.
@@ -317,6 +319,13 @@ impl Device {
         let hdr_metadata = presenting && adapter.caps.hdr_metadata;
         if hdr_metadata {
             extensions.push(ash::ext::hdr_metadata::NAME.as_ptr());
+        }
+        // A swapchain taking its monitor for itself, or told never to (ADR 0099).
+        let full_screen_exclusive = presenting
+            && adapter.caps.full_screen_exclusive
+            && instance.shared.surface_capabilities2_enabled;
+        if full_screen_exclusive {
+            extensions.push(ash::ext::full_screen_exclusive::NAME.as_ptr());
         }
 
         // A fractional first level per image view: streamed textures fade new levels in
@@ -547,6 +556,7 @@ impl Device {
             adapter: adapter.clone(),
             latency,
             hdr_metadata,
+            full_screen_exclusive,
             image_view_min_lod,
             shader_float16: adapter.caps.shader_float16,
             ray_query,
@@ -618,6 +628,13 @@ impl Device {
     /// [`Swapchain::set_hdr_metadata`]: crate::Swapchain::set_hdr_metadata
     pub fn hdr_metadata_enabled(&self) -> bool {
         self.hdr_metadata
+    }
+
+    /// Whether `VK_EXT_full_screen_exclusive` is enabled: swapchains follow their
+    /// [`FullScreenExclusive`](crate::FullScreenExclusive) choice (without it, every
+    /// choice is the driver's default).
+    pub fn full_screen_exclusive_enabled(&self) -> bool {
+        self.full_screen_exclusive
     }
 
     /// The ash device, for calls this layer does not wrap yet.

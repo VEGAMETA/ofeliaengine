@@ -12,7 +12,8 @@
 //! - Sponza's seven local lights with cached shadows (ADR 0071), sky light (ADR 0046);
 //! - the frame renderer with the device class's defaults: ambient occlusion, the
 //!   antialiasing / render size (ADR 0072) and meshlet culling (ADR 0085);
-//! - a window, presented without vsync (or with `--vsync`), two frames in flight.
+//! - a borderless window over the monitor (or `--window`), presented without vsync (or
+//!   with `--vsync`), two frames in flight.
 //!
 //! The camera flies through the nave for `frames` frames of 1/60 s of game time each (the
 //! same path on every GPU), turning 180° in 0.2 s every 5 s.
@@ -36,6 +37,12 @@
 //!                           class's)
 //!     [--aa off|taau|fsr]   [--quality native|quality|balanced|performance]
 //!     [--vsync]
+//!     [--window full-screen|exclusive|windowed]   borderless over the monitor (default),
+//!                           the same with the swapchain holding the monitor for itself
+//!                           (`VK_EXT_full_screen_exclusive`), or a 1920 × 1080 window fit
+//!                           into the work area (ADR 0099)
+//!     [--fse default|allowed|disallowed]   what the driver may do with a borderless or
+//!                           windowed swapchain (default: disallowed; measurements)
 //!     [--cap <fps>]         at most this many real frames per second (a game's limiter;
 //!                           frame generation shows twice as many)
 //!     [--present apart|direct]   the frame into an image of its own copied into the
@@ -94,7 +101,7 @@ mod windowed {
     use engine_latency::{
         Latency, LatencySettings, Marker, PacedFrame, PacedPresenter, PresentImage, Presented,
     };
-    use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
+    use engine_platform::window::{WindowDesc, WindowEventKind, WindowMode, WindowSystem};
     use engine_render::budget::GpuBudget;
     use engine_render::environment::{Environment, Sky};
     use engine_render::feedback::{FeedbackSettings, TextureFeedback};
@@ -115,8 +122,8 @@ mod windowed {
     use engine_render2d::{Canvas, Quad};
     use engine_rhi::ash::vk;
     use engine_rhi::{
-        AdapterPreference, Allocator, Bindless, Device, Frames, Instance, InstanceDesc,
-        OutputColor, PresentMode, RhiError, Surface, Swapchain, SwapchainDesc,
+        AdapterPreference, Allocator, Bindless, Device, Frames, FullScreenExclusive, Instance,
+        InstanceDesc, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc,
     };
     use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime, look_rotation};
     use engine_streaming::{SceneStreamSettings, SceneStreamer, material_desc, texture_format};
@@ -723,6 +730,20 @@ mod windowed {
         // by default apart only when the swapchain presents across adapters.
         let present_apart = option("--present").map(|v| v == "apart");
         let vsync = flag("--vsync");
+        // `--window`: borderless over the monitor (default), the same holding the monitor
+        // (exclusive), or a window; `--fse`: what the driver may do otherwise.
+        let window_choice = option("--window").unwrap_or("full-screen");
+        let exclusive_wanted = window_choice == "exclusive";
+        let window_mode = if window_choice == "windowed" {
+            WindowMode::Windowed
+        } else {
+            WindowMode::FullScreen
+        };
+        let fse_choice = match option("--fse") {
+            Some("default") => FullScreenExclusive::Default,
+            Some("allowed") => FullScreenExclusive::Allowed,
+            _ => FullScreenExclusive::Disallowed,
+        };
         let cache_dir = option("--pipeline-cache").map(PathBuf::from);
         let warm_up = !flag("--no-warm-up");
         // `--fg`: FSR 3.1's, shown by a paced presenter; `--fg dlss`: DLSS's, through
@@ -831,6 +852,8 @@ mod windowed {
                 height: HEIGHT,
                 resizable: false,
                 visible: true,
+                mode: window_mode,
+                ..WindowDesc::default()
             })
             .unwrap();
         startup.push(("window (beside the device)", ms(phase)));
@@ -889,6 +912,12 @@ mod windowed {
             srgb: true,
             color: OutputColor::Sdr,
             low_latency: false,
+            full_screen_exclusive: match engine_platform::display::window_monitor(window.hwnd) {
+                Some(monitor) if exclusive_wanted => FullScreenExclusive::Exclusive {
+                    monitor: monitor.handle,
+                },
+                _ => fse_choice,
+            },
         };
         // The renderer draws into the format the swapchain will have.
         let swapchain_format = Swapchain::format_for(&device, &surface, &swapchain_desc).unwrap();
@@ -1206,6 +1235,11 @@ mod windowed {
         startup.push(("waiting for the swapchain", ms(wait)));
         let present_mode = swapchain.present_mode();
         let across_adapters = swapchain.presents_across_adapters();
+        let exclusive = swapchain.exclusive();
+        let exclusive_refused = swapchain.exclusive_refused();
+        // The frame's size: the swapchain's (the monitor's in full screen, the window's
+        // client area fit into the work area otherwise).
+        let (width, height) = (swapchain.extent().width, swapchain.extent().height);
         // With FSR's frame generation a paced presenter takes the swapchain (ADR 0091).
         let mut swapchain = Some(swapchain);
         let mut paced = None;
@@ -1226,7 +1260,7 @@ mod windowed {
             UiRenderer::new(&device, &mut allocator, &bindless, swapchain_format).unwrap()
         });
         let mut hud = Canvas::new();
-        let (w, h) = (WIDTH as f32, HEIGHT as f32);
+        let (w, h) = (width as f32, height as f32);
         hud.draw(&Quad::solid(Vec2::new(w * 0.5, h * 0.5), Vec2::new(24.0, 2.0)).color(Vec4::ONE));
         hud.draw(&Quad::solid(Vec2::new(w * 0.5, h * 0.5), Vec2::new(2.0, 24.0)).color(Vec4::ONE));
         hud.draw(
@@ -1384,10 +1418,8 @@ mod windowed {
             let acquired = match swapchain.as_mut() {
                 Some(swapchain) => match swapchain.acquire(frame.image_available, u64::MAX) {
                     Ok(a) => Some(a),
-                    Err(RhiError::Vulkan {
-                        result: vk::Result::ERROR_OUT_OF_DATE_KHR,
-                        ..
-                    }) => {
+                    // Out of date, or the monitor held for itself lost (ADR 0099).
+                    Err(e) if e.is_out_of_date() => {
                         frames.wait_idle().unwrap();
                         let e = swapchain.extent();
                         swapchain
@@ -1459,10 +1491,10 @@ mod windowed {
             s.animate = us(t);
 
             let main = cameras.resolve(&runtime.world).unwrap();
-            let clip_from_world = main.camera.clip_from_world(WIDTH as f32 / HEIGHT as f32);
+            let clip_from_world = main.camera.clip_from_world(width as f32 / height as f32);
             let t = Instant::now();
             // Mesh levels by distance in every direction: a fast turn finds them loaded.
-            let lod_view = LodView::new(&clip_from_world, eye, HEIGHT, 1.0).around();
+            let lod_view = LodView::new(&clip_from_world, eye, height, 1.0).around();
             let arrived_before = streamer.stats();
             streamer.update(
                 &mut textures,
@@ -1872,7 +1904,17 @@ mod windowed {
             lights.len()
         );
         println!(
-            "Adapter: {adapter_name}; {WIDTH}×{HEIGHT}, {antialiasing} at {quality:?}, AO {:?}; present mode {:?}, {}; {drawn} frames ({WARMUP} warm-up frames left out)\n",
+            "Adapter: {adapter_name}; {width}×{height} ({}), {antialiasing} at {quality:?}, AO {:?}; present mode {:?}, {}; {drawn} frames ({WARMUP} warm-up frames left out)\n",
+            match (window_mode, exclusive) {
+                (WindowMode::Windowed, _) => String::from("a window"),
+                (WindowMode::FullScreen, true) => {
+                    String::from("full screen, the monitor held by the swapchain")
+                }
+                (WindowMode::FullScreen, false) if exclusive_wanted => format!(
+                    "full screen, borderless: the driver refused the monitor ({exclusive_refused:?})"
+                ),
+                (WindowMode::FullScreen, false) => String::from("full screen, borderless"),
+            },
             ambient_occlusion.map(|a| a.quality),
             present_mode,
             match (

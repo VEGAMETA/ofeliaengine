@@ -27,6 +27,7 @@ fn generated_frames_go_out_half_a_frame_before_real_ones() {
         height: 256,
         resizable: false,
         visible: true,
+        ..WindowDesc::default()
     }) else {
         println!("skipping: no window");
         return;
@@ -70,6 +71,7 @@ fn generated_frames_go_out_half_a_frame_before_real_ones() {
             srgb: true,
             color: OutputColor::Sdr,
             low_latency: false,
+            ..SwapchainDesc::default()
         },
     )
     .unwrap();

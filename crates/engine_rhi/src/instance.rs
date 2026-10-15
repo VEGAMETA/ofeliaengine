@@ -128,6 +128,8 @@ pub(crate) struct InstanceShared {
     pub(crate) headless_surface_enabled: bool,
     /// `VK_EXT_swapchain_colorspace`: surfaces may offer HDR color spaces.
     pub(crate) swapchain_colorspace_enabled: bool,
+    /// `VK_KHR_get_surface_capabilities2`, which `VK_EXT_full_screen_exclusive` needs.
+    pub(crate) surface_capabilities2_enabled: bool,
     pub(crate) debug_utils_enabled: bool,
     /// Extensions a library asked for ([`Instance::with_extensions`]) that were enabled.
     pub(crate) extra_extensions: Vec<std::ffi::CString>,
@@ -301,6 +303,10 @@ impl Instance {
             surface && desc.headless_surface && has_extension(ext::headless_surface::NAME);
         // HDR output: without it, surfaces only list sRGB color spaces.
         let swapchain_colorspace = surface && has_extension(ext::swapchain_colorspace::NAME);
+        // Exclusive full screen (`VK_EXT_full_screen_exclusive`) asks the surface through
+        // these queries.
+        let surface_capabilities2 =
+            win32_surface && has_extension(ash::khr::get_surface_capabilities2::NAME);
         if surface {
             enabled_extensions.push(ash::khr::surface::NAME.as_ptr());
         }
@@ -312,6 +318,9 @@ impl Instance {
         }
         if swapchain_colorspace {
             enabled_extensions.push(ext::swapchain_colorspace::NAME.as_ptr());
+        }
+        if surface_capabilities2 {
+            enabled_extensions.push(ash::khr::get_surface_capabilities2::NAME.as_ptr());
         }
         if sync_validation {
             enabled_extensions.push(ext::validation_features::NAME.as_ptr());
@@ -409,6 +418,7 @@ impl Instance {
                 win32_surface_enabled: win32_surface,
                 headless_surface_enabled: headless_surface,
                 swapchain_colorspace_enabled: swapchain_colorspace,
+                surface_capabilities2_enabled: surface_capabilities2,
                 debug_utils_enabled: debug_utils,
                 extra_extensions,
             }),

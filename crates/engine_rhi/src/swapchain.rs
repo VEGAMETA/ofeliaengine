@@ -371,6 +371,34 @@ pub struct HdrMetadata {
     pub max_frame_average_nits: f32,
 }
 
+/// Whether a swapchain may take its monitor for itself (`VK_EXT_full_screen_exclusive`,
+/// ADR 0099). Without the extension ([`Device::full_screen_exclusive_enabled`]) every
+/// choice is [`Self::Default`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FullScreenExclusive {
+    /// Nothing stated: the driver decides.
+    #[default]
+    Default,
+    /// The driver may take the monitor for the swapchain when it sees fit (a window
+    /// covering its monitor), with the switch that brings (the screen may go black for a
+    /// moment).
+    Allowed,
+    /// The driver must not: the swapchain stays a window's, composed by Windows or
+    /// flipped to the display when nothing covers it.
+    Disallowed,
+    /// The swapchain takes monitor `monitor` (its window covers it:
+    /// `engine_platform::window::WindowMode::FullScreen`) at every creation. When the
+    /// driver refuses, the swapchain is made as with [`Self::Disallowed`] until the next
+    /// recreation; when the monitor is lost later (another window on top, Alt+Tab),
+    /// acquiring and presenting fail with `ERROR_FULL_SCREEN_EXCLUSIVE_MODE_LOST_EXT`,
+    /// which [`RhiError::is_out_of_date`] counts: recreate it. [`Swapchain::exclusive`]
+    /// tells whether it holds the monitor.
+    Exclusive {
+        /// The monitor (an `HMONITOR`).
+        monitor: isize,
+    },
+}
+
 /// Parameters for [`Swapchain::new`].
 #[derive(Debug, Clone, Copy)]
 pub struct SwapchainDesc {
@@ -390,6 +418,24 @@ pub struct SwapchainDesc {
     /// Create the swapchain for NVIDIA's low-latency mode (`VK_NV_low_latency2`, Reflex)
     /// when the device has it; `engine_latency` drives it.
     pub low_latency: bool,
+    /// Whether the swapchain may take its monitor for itself.
+    pub full_screen_exclusive: FullScreenExclusive,
+}
+
+impl Default for SwapchainDesc {
+    /// The surface's size, vsync, sRGB, SDR, no low-latency mode, the driver's default
+    /// full screen behavior.
+    fn default() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            present_mode: PresentMode::Fifo,
+            srgb: true,
+            color: OutputColor::Sdr,
+            low_latency: false,
+            full_screen_exclusive: FullScreenExclusive::Default,
+        }
+    }
 }
 
 /// Result of [`Swapchain::acquire`].
@@ -429,6 +475,12 @@ pub struct Swapchain {
     /// Presents through this function instead of the driver's (a library's hook, such as
     /// Streamline's for DLSS, ADR 0063).
     present_function: Option<vk::PFN_vkQueuePresentKHR>,
+    /// `VK_EXT_full_screen_exclusive`, when the device enabled it.
+    full_screen_exclusive: Option<ash::ext::full_screen_exclusive::Device>,
+    /// The swapchain holds its monitor ([`FullScreenExclusive::Exclusive`]).
+    exclusive: bool,
+    /// Why the driver refused the monitor at the last (re)creation.
+    exclusive_refused: Option<vk::Result>,
     device: ash::Device,
 }
 
@@ -500,6 +552,11 @@ impl Swapchain {
                 .then(|| ash::khr::present_wait::Device::new(device.instance_raw(), device.raw())),
             last_present_id: AtomicU64::new(0),
             present_function: None,
+            full_screen_exclusive: device.full_screen_exclusive_enabled().then(|| {
+                ash::ext::full_screen_exclusive::Device::new(device.instance_raw(), device.raw())
+            }),
+            exclusive: false,
+            exclusive_refused: None,
             device: device.raw().clone(),
         };
         swapchain.build(device, surface, desc.width, desc.height)?;
@@ -540,6 +597,42 @@ impl Swapchain {
         surface: &Surface,
         width: u32,
         height: u32,
+    ) -> Result<(), RhiError> {
+        let choice = match self.full_screen_exclusive {
+            Some(_) => self.desc.full_screen_exclusive,
+            None => FullScreenExclusive::Default,
+        };
+        self.exclusive_refused = None;
+        self.build_as(device, surface, width, height, choice)?;
+        if matches!(choice, FullScreenExclusive::Exclusive { .. }) && !self.exclusive {
+            // Refused (the window is not on top, say): a borderless window's swapchain
+            // until the next recreation tries again. Made from nothing, not as the refused
+            // one's successor: NVIDIA's driver keeps the way a replaced swapchain presented
+            // (measured: copied through GDI instead of flipped).
+            // SAFETY: the swapchain was just made; no image of it was acquired.
+            unsafe {
+                self.destroy_views();
+                self.loader.destroy_swapchain(self.raw, None);
+            }
+            self.raw = vk::SwapchainKHR::null();
+            self.build_as(
+                device,
+                surface,
+                width,
+                height,
+                FullScreenExclusive::Disallowed,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn build_as(
+        &mut self,
+        device: &Device,
+        surface: &Surface,
+        width: u32,
+        height: u32,
+        choice: FullScreenExclusive,
     ) -> Result<(), RhiError> {
         engine_profiler::zone!("rhi::Swapchain::build");
         let physical = device.physical();
@@ -614,6 +707,36 @@ impl Swapchain {
         if self.desc.low_latency && self.latency.nv_low_latency2 {
             info = info.push_next(&mut latency_info);
         }
+        let mut exclusive_info = vk::SurfaceFullScreenExclusiveInfoEXT::default();
+        let mut exclusive_monitor = vk::SurfaceFullScreenExclusiveWin32InfoEXT::default();
+        match choice {
+            FullScreenExclusive::Default => {}
+            FullScreenExclusive::Allowed => {
+                exclusive_info.full_screen_exclusive = vk::FullScreenExclusiveEXT::ALLOWED;
+                info = info.push_next(&mut exclusive_info);
+            }
+            FullScreenExclusive::Disallowed => {
+                exclusive_info.full_screen_exclusive = vk::FullScreenExclusiveEXT::DISALLOWED;
+                info = info.push_next(&mut exclusive_info);
+            }
+            FullScreenExclusive::Exclusive { monitor } => {
+                exclusive_info.full_screen_exclusive =
+                    vk::FullScreenExclusiveEXT::APPLICATION_CONTROLLED;
+                exclusive_monitor.hmonitor = monitor;
+                info = info
+                    .push_next(&mut exclusive_info)
+                    .push_next(&mut exclusive_monitor);
+            }
+        }
+        if self.exclusive
+            && let Some(loader) = &self.full_screen_exclusive
+        {
+            // The monitor goes back before the swapchain holding it is retired.
+            // SAFETY: `old` holds the monitor and is not retired yet. (An error means it
+            // had already lost it.)
+            let _ = unsafe { loader.release_full_screen_exclusive_mode(old) };
+            self.exclusive = false;
+        }
         // SAFETY: valid create info for a surface of this device's instance; `old` is
         // retired by this call and destroyed below after its views.
         let raw = unsafe { self.loader.create_swapchain(&info, None) }
@@ -633,6 +756,15 @@ impl Swapchain {
             unsafe { self.loader.destroy_swapchain(old, None) };
         }
         self.raw = raw;
+        if let (FullScreenExclusive::Exclusive { .. }, Some(loader)) =
+            (choice, &self.full_screen_exclusive)
+        {
+            // SAFETY: the swapchain was just made application controlled; it does not hold
+            // the monitor yet.
+            let acquired = unsafe { loader.acquire_full_screen_exclusive_mode(raw) };
+            self.exclusive = acquired.is_ok();
+            self.exclusive_refused = acquired.err();
+        }
         // SAFETY: `raw` is the swapchain just created.
         self.images = unsafe { self.loader.get_swapchain_images(raw) }
             .map_err(RhiError::vk("vkGetSwapchainImagesKHR"))?;
@@ -850,6 +982,18 @@ impl Swapchain {
     /// Present mode actually in use.
     pub fn present_mode(&self) -> PresentMode {
         self.present_mode
+    }
+
+    /// Whether the swapchain holds its monitor for itself
+    /// ([`FullScreenExclusive::Exclusive`], as of the last (re)creation).
+    pub fn exclusive(&self) -> bool {
+        self.exclusive
+    }
+
+    /// What the driver answered when it refused the monitor at the last (re)creation
+    /// ([`FullScreenExclusive::Exclusive`]); `None` when it did not refuse.
+    pub fn exclusive_refused(&self) -> Option<vk::Result> {
+        self.exclusive_refused
     }
 
     /// Whether the device presents across adapters (the window's monitor is driven by
