@@ -25,8 +25,9 @@ engine_script.workspace = true
 bytemuck = { version = "1.25", features = ["derive"] }
 
 [target.'cfg(windows)'.dependencies]
-engine_platform.workspace = true
+# The player the windowed run is a game on (ADR 0099).
+engine_app.workspace = true
+engine_latency.workspace = true
 engine_render.workspace = true
-engine_rhi.workspace = true
-# ECS to GPU scene extraction (ADR 0064).
+# The mesh, light and camera components (ADR 0064, ADR 0099).
 engine_runtime.workspace = true
