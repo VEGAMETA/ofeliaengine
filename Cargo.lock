@@ -734,6 +734,7 @@ dependencies = [
  "bytemuck",
  "engine_audio",
  "engine_audio_decode",
+ "engine_profiler",
  "engine_render",
  "engine_rhi",
  "engine_shader",

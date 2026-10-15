@@ -10,12 +10,14 @@
 //! - [`index`]: where a file's video units and audio packets are.
 //! - [`audio`]: the Opus track as an audio stream, its position the clock.
 //! - [`convert`]: the pictures as a texture (the conversion pass from Y'CbCr).
+//! - [`player`]: playing a video: decoding ahead, the clock, the controls.
 
 pub mod audio;
 pub mod av1;
 pub mod convert;
 pub mod gpu;
 pub mod index;
+pub mod player;
 #[cfg(feature = "software")]
 pub mod software;
 pub mod webm;

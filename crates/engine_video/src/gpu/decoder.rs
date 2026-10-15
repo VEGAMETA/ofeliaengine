@@ -62,7 +62,8 @@ pub struct GpuPicture {
     pub layout: vk::ImageLayout,
     /// The value of [`GpuDecoder::semaphore`] after which it is decoded.
     pub ready: u64,
-    /// The timestamp given with its temporal unit.
+    /// The timestamp given with the temporal unit that shows it (for a hidden frame shown
+    /// later, that unit's, not the one it was decoded in).
     pub timestamp: i64,
     /// Its output image, for [`GpuDecoder::release`].
     output: u32,
@@ -618,6 +619,18 @@ impl GpuDecoder {
         self.value
     }
 
+    /// The value [`Self::semaphore`] has reached: pictures whose [`GpuPicture::ready`] is
+    /// at most this are decoded.
+    ///
+    /// # Errors
+    ///
+    /// A failed query (a lost device).
+    pub fn completed(&self, device: &Device) -> Result<u64, GpuError> {
+        // SAFETY: the semaphore is this device's.
+        unsafe { device.raw().get_semaphore_counter_value(self.semaphore) }
+            .map_err(vk_error("vkGetSemaphoreCounterValue"))
+    }
+
     /// What the device's decoder does for this stream.
     pub fn caps(&self) -> &GpuCaps {
         &self.caps
@@ -809,7 +822,7 @@ impl GpuDecoder {
         for frame in &unit.frames {
             let h = &frame.header;
             if h.show_existing_frame {
-                result = self.show_existing(h, out);
+                result = self.show_existing(h, timestamp, out);
             } else {
                 let offsets = unit.tile_offsets(frame);
                 let sizes = unit.tile_sizes(frame);
@@ -857,6 +870,7 @@ impl GpuDecoder {
     fn show_existing(
         &mut self,
         h: &FrameHeader,
+        timestamp: i64,
         out: &mut Vec<GpuPicture>,
     ) -> Result<(), GpuError> {
         let slot = self.references[usize::from(h.frame_to_show_map_idx)]
@@ -865,7 +879,11 @@ impl GpuDecoder {
         let output = self.slots[slot].output.ok_or(GpuError::MissingReference)?;
         let picture = &mut self.outputs[output as usize];
         picture.users += 1;
-        out.push(picture.picture);
+        // Shown now: the unit that shows it gives its time.
+        out.push(GpuPicture {
+            timestamp,
+            ..picture.picture
+        });
         if h.frame_type == FrameType::Key {
             // The frame loading process: every reference slot holds the shown key frame.
             self.refresh(0xFF, slot);

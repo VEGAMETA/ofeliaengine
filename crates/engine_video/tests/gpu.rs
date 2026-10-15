@@ -424,6 +424,11 @@ fn compare_clip(
                 (theirs.width(), theirs.height()),
                 "{clip}: picture size"
             );
+            assert_eq!(
+                ours.timestamp,
+                theirs.timestamp(),
+                "{clip}: picture {compared}'s time"
+            );
             let planes = readback.read(device, gpu, ours);
             let wide = theirs.bit_depth() > 8;
             if let Some(difference) = differs(&planes, theirs, ours.width, ours.height, wide) {

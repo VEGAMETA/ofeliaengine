@@ -22,6 +22,8 @@ const PRE_ROLL: u64 = RATE * 80 / 1000;
 /// The sound of a video, decoded packet by packet from the file in memory.
 pub struct VideoAudio {
     data: Arc<[u8]>,
+    /// The track's `OpusHead`.
+    head: Arc<[u8]>,
     packets: Arc<[Indexed]>,
     /// Each packet's first frame, counted from the stream's first decoded frame (the
     /// codec's delay included).
@@ -64,10 +66,32 @@ impl VideoAudio {
         Ok(Self {
             skip: opus.pre_skip(),
             data,
+            head: head.into(),
             packets,
             starts: starts.into(),
             next: 0,
             pcm: vec![0.0; OpusPackets::MAX_FRAMES * channels],
+            opus,
+            pending: (0, 0),
+        })
+    }
+
+    /// Another decoder of the same track from its start, sharing what this one read (the
+    /// packets' lengths): for each time the sound starts again (a resume, a seek).
+    ///
+    /// # Errors
+    ///
+    /// libopus could not start.
+    pub fn fresh(&self) -> Result<Self, DecodeError> {
+        let opus = OpusPackets::new(&self.head)?;
+        Ok(Self {
+            skip: opus.pre_skip(),
+            data: self.data.clone(),
+            head: self.head.clone(),
+            packets: self.packets.clone(),
+            starts: self.starts.clone(),
+            next: 0,
+            pcm: vec![0.0; self.pcm.len()],
             opus,
             pending: (0, 0),
         })

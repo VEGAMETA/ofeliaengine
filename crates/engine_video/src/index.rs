@@ -110,10 +110,16 @@ impl FileIndex {
     /// The unit at or before `time_ns` that decoding may begin at (the stream's first
     /// unit when none is).
     pub fn keyframe_before(&self, time_ns: i64) -> usize {
-        let at = self.units.partition_point(|u| u.time_ns <= time_ns);
-        self.units[..at.max(1)]
-            .iter()
-            .rposition(|u| u.keyframe)
-            .unwrap_or(0)
+        keyframe_before(&self.units, time_ns)
     }
+}
+
+/// The unit of `units` at or before `time_ns` that decoding may begin at (the first when
+/// none is).
+pub fn keyframe_before(units: &[Indexed], time_ns: i64) -> usize {
+    let at = units.partition_point(|u| u.time_ns <= time_ns);
+    units[..at.max(1).min(units.len())]
+        .iter()
+        .rposition(|u| u.keyframe)
+        .unwrap_or(0)
 }
