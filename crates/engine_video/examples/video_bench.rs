@@ -7,6 +7,10 @@
 //! [--frame-delay 1,0] [--runs 3]` (default: the test clips; 0 threads: one per logical
 //! core; frame delay 0: rav1d's choice, 1: one frame at a time). Each setting decodes the
 //! whole file `--runs` times and keeps the fastest run.
+//!
+//! `--gpu` decodes on the GPU's video engine instead (`ENGINE_ADAPTER` picks the GPU): the
+//! units submitted back to back (pictures per second), the CPU's time per unit (recording
+//! and submitting), and the time from a unit's submission to its pictures (one at a time).
 
 #![allow(
     missing_docs,
@@ -17,7 +21,9 @@
 
 use std::time::Instant;
 
+use engine_rhi::{AdapterPreference, Allocator, Device, ExtraQueues, Instance, InstanceDesc};
 use engine_video::av1::{Parser, TemporalUnit};
+use engine_video::gpu::{GpuDecoder, GpuDecoderDesc};
 use engine_video::software::{Settings, SoftwareDecoder};
 use engine_video::webm::{TrackKind, Webm};
 
@@ -31,12 +37,14 @@ fn list(value: &str) -> Vec<u32> {
 fn main() {
     let mut files = Vec::new();
     let (mut threads, mut delays, mut runs) = (vec![1, 4, 0], vec![1, 0], 3);
+    let mut gpu = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--threads" => threads = list(&args.next().expect("--threads 1,4,0")),
             "--frame-delay" => delays = list(&args.next().expect("--frame-delay 1,0")),
             "--runs" => runs = args.next().expect("--runs 3").parse().expect("a number"),
+            "--gpu" => gpu = true,
             _ => files.push(arg),
         }
     }
@@ -50,6 +58,10 @@ fn main() {
         ] {
             files.push(format!("{dir}/{name}"));
         }
+    }
+    if gpu {
+        gpu_rows(&files, runs);
+        return;
     }
     println!(
         "| file | size | Mbit/s | parse µs/unit | threads | frame delay | pictures/s | × real time | slowest unit ms |"
@@ -145,4 +157,164 @@ fn main() {
             }
         }
     }
+}
+
+/// A file's video units: their data and time.
+type Units<'a> = Vec<(&'a [u8], i64)>;
+
+/// A file's video units, its track's codec private data and how long it plays.
+fn units_of(data: &[u8]) -> (Units<'_>, Vec<u8>, f64) {
+    let webm = Webm::read(data).unwrap();
+    let video = webm.track(TrackKind::Video).expect("a video track");
+    let units: Vec<(&[u8], i64)> = webm
+        .blocks()
+        .map(Result::unwrap)
+        .filter(|b| b.track == video.number)
+        .map(|b| (b.data(), b.time_ns))
+        .collect();
+    let frame_ns = if video.default_duration_ns > 0 {
+        video.default_duration_ns as f64
+    } else {
+        33_333_333.0
+    };
+    let seconds = ((units.last().unwrap().1 - units[0].1) as f64 + frame_ns) / 1e9;
+    (units, video.private.clone(), seconds)
+}
+
+fn gpu_rows(files: &[String], runs: usize) {
+    let instance = Instance::new(&InstanceDesc {
+        app_name: String::from("video_bench"),
+        validation: false,
+        debug_utils: false,
+        surface: false,
+        headless_surface: false,
+        sync_validation: false,
+    })
+    .unwrap();
+    let adapter = instance
+        .select_adapter(
+            &AdapterPreference::from_env().unwrap_or(AdapterPreference::HighPerformance),
+        )
+        .unwrap();
+    let device = Device::with_extras(
+        &instance,
+        &adapter,
+        &[],
+        ExtraQueues {
+            video_decode: true,
+            ..ExtraQueues::default()
+        },
+    )
+    .unwrap();
+    let mut allocator = Allocator::new(&device);
+    println!("{}", adapter.name());
+    println!(
+        "| file | size | pictures/s | × real time | CPU µs/unit | submit to pictures, median / slowest ms |"
+    );
+    println!("|---|---|---:|---:|---:|---:|");
+    for file in files {
+        let data = std::fs::read(file).unwrap_or_else(|error| panic!("{file}: {error}"));
+        let (units, private, seconds) = units_of(&data);
+        // Parsed once beforehand: the parser's own cost is in the CPU table.
+        let mut parser = Parser::with_codec_private(&private).unwrap();
+        let parsed: Vec<TemporalUnit> = units
+            .iter()
+            .map(|(data, _)| {
+                let mut unit = TemporalUnit::default();
+                parser.parse(data, &mut unit).unwrap();
+                unit
+            })
+            .collect();
+        let sequence = *parser.sequence().unwrap();
+        let serial = parser.sequence_serial();
+        let name = std::path::Path::new(file)
+            .file_name()
+            .unwrap()
+            .to_string_lossy();
+        let mut decoder = match GpuDecoder::new(
+            &device,
+            &mut allocator,
+            &sequence,
+            serial,
+            &GpuDecoderDesc::default(),
+        ) {
+            Ok(decoder) => decoder,
+            Err(error) => {
+                println!("| {name} | – | {error} | | | |");
+                continue;
+            }
+        };
+        let mut pictures = Vec::new();
+        let (mut best, mut count) = (f64::MAX, 0usize);
+        for _ in 0..runs {
+            decoder.reset();
+            let mut shown = 0usize;
+            let start = Instant::now();
+            for ((data, time), unit) in units.iter().zip(&parsed) {
+                pictures.clear();
+                decoder
+                    .decode(
+                        &device,
+                        &mut allocator,
+                        data,
+                        unit,
+                        &sequence,
+                        *time,
+                        &mut pictures,
+                    )
+                    .unwrap();
+                shown += pictures.len();
+                // Nothing reads them: back at once (the queue orders their reuse).
+                for picture in &pictures {
+                    decoder.release(picture);
+                }
+            }
+            decoder.wait(&device, decoder.submitted()).unwrap();
+            let total = start.elapsed().as_secs_f64();
+            if total < best {
+                (best, count) = (total, shown);
+            }
+        }
+        // One unit at a time: the CPU's recording and submitting (nothing to wait for), and
+        // the time from its submission to its pictures.
+        decoder.reset();
+        let mut latency = Vec::with_capacity(units.len());
+        let mut cpu = 0.0f64;
+        for ((data, time), unit) in units.iter().zip(&parsed) {
+            pictures.clear();
+            let t = Instant::now();
+            decoder
+                .decode(
+                    &device,
+                    &mut allocator,
+                    data,
+                    unit,
+                    &sequence,
+                    *time,
+                    &mut pictures,
+                )
+                .unwrap();
+            cpu += t.elapsed().as_secs_f64();
+            decoder.wait(&device, decoder.submitted()).unwrap();
+            latency.push(t.elapsed().as_secs_f64() * 1e3);
+            for picture in &pictures {
+                decoder.release(picture);
+            }
+        }
+        latency.sort_by(f64::total_cmp);
+        let cpu_us = cpu * 1e6 / units.len() as f64;
+        println!(
+            "| {name} | {}×{} | {:.0} | {:.1} | {cpu_us:.0} | {:.2} / {:.2} |",
+            sequence.max_width(),
+            sequence.max_height(),
+            count as f64 / best,
+            seconds / best,
+            latency[latency.len() / 2],
+            latency[latency.len() - 1],
+        );
+        // SAFETY: nothing reads its pictures.
+        unsafe { decoder.destroy(&device, &mut allocator) };
+    }
+    drop(allocator);
+    drop(device);
 }

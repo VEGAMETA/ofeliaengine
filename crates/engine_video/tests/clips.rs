@@ -24,7 +24,7 @@ struct Clip {
     film_grain: bool,
 }
 
-const CLIPS: [Clip; 9] = [
+const CLIPS: [Clip; 11] = [
     Clip {
         name: "svt_8bit_320x180.webm",
         width: 320,
@@ -109,6 +109,26 @@ const CLIPS: [Clip; 9] = [
         name: "svt_resize_320x180.webm",
         width: 320,
         height: 180,
+        video_blocks: 21,
+        audio_blocks: 0,
+        bit_depth: 8,
+        tiles: false,
+        film_grain: false,
+    },
+    Clip {
+        name: "svt_superres_320x176.webm",
+        width: 320,
+        height: 176,
+        video_blocks: 21,
+        audio_blocks: 0,
+        bit_depth: 8,
+        tiles: false,
+        film_grain: false,
+    },
+    Clip {
+        name: "svt_resize_320x176.webm",
+        width: 320,
+        height: 176,
         video_blocks: 21,
         audio_blocks: 0,
         bit_depth: 8,

@@ -101,6 +101,12 @@ impl Parser {
         self.sequence.as_ref()
     }
 
+    /// Which sequence header the parser holds: bumped by each that differs from the one
+    /// before (frames carry it as [`Frame::sequence_serial`]).
+    pub fn sequence_serial(&self) -> u32 {
+        self.sequence_serial
+    }
+
     /// The reference frames' state after the frames parsed so far.
     pub fn refs(&self) -> &RefState {
         &self.refs

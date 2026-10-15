@@ -16,6 +16,13 @@ tool only: nothing of it is in the engine.
 | `aom_lossless_160x90.webm` | libaom, lossless | coded lossless frames |
 | `svt_superres_320x180.webm` | SVT-AV1 1.8.0, super-resolution 8/12 | super-resolution, frame size overrides |
 | `svt_resize_320x180.webm` | SVT-AV1 1.8.0, resize 8/12 | frames coded smaller than they show (render size), sizes taken from references |
+| `svt_superres_320x176.webm`, `svt_resize_320x176.webm` | the same at 320 × 176 | the same within the sequence header's maximum (below) |
+
+**SVT-AV1 1.8 breaks the specification at heights that are not a multiple of 8:** it pads
+the 180-line clips to 184 lines but writes 180 as the sequence header's maximum. NVIDIA
+and rav1d decode them as they are. AMD's decoder keeps to the maximum, so the GPU decoder
+widens it (`GpuDecoder`'s session parameters). The 176-line clips check the conformant
+case.
 
 `tests/clips.rs` checks that every feature it lists appears in some clip, so a regenerated
 clip that loses one fails the test. None of these encoders makes intra-only or switch
@@ -50,6 +57,11 @@ $F -f lavfi -i "$PAN" -c:v libsvtav1 -preset 8 -crf 40 -g 30 -pix_fmt yuv420p \
    -svtav1-params "superres-mode=1:superres-denom=12" svt_superres_320x180.webm
 $F -f lavfi -i "$PAN" -c:v libsvtav1 -preset 8 -crf 40 -g 30 -pix_fmt yuv420p \
    -svtav1-params "resize-mode=1:resize-denom=12" svt_resize_320x180.webm
+PAN176="testsrc2=size=640x352:rate=30:duration=0.67,crop=320:176:x='t*90':y='t*45'"
+$F -f lavfi -i "$PAN176" -c:v libsvtav1 -preset 8 -crf 40 -g 30 -pix_fmt yuv420p \
+   -svtav1-params "superres-mode=1:superres-denom=12" svt_superres_320x176.webm
+$F -f lavfi -i "$PAN176" -c:v libsvtav1 -preset 8 -crf 40 -g 30 -pix_fmt yuv420p \
+   -svtav1-params "resize-mode=1:resize-denom=12" svt_resize_320x176.webm
 ```
 
 Another ffmpeg or encoder version makes other bytes: the tests read what the files hold

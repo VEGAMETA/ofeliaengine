@@ -139,6 +139,10 @@ pub struct OptionalCaps {
     /// (the virtual shadow pages' draws clipped to their dirty pages, ADR 0093); enabled
     /// when present.
     pub shader_clip_distance: bool,
+    /// `VK_KHR_video_queue`, `VK_KHR_video_decode_queue` and `VK_KHR_video_decode_av1`, with a
+    /// queue family that decodes AV1: video on the GPU's video engine (ADR 0100). A device
+    /// asked for it (`ExtraQueues::video_decode`) enables them with a queue of that family.
+    pub video_decode_av1: bool,
 }
 
 impl OptionalCaps {
@@ -177,6 +181,7 @@ impl OptionalCaps {
                 "fragment stores and atomics",
             ),
             (self.shader_clip_distance, "clip distances"),
+            (self.video_decode_av1, "AV1 video decode"),
         ]
         .into_iter()
         .filter_map(|(present, name)| present.then_some(name))
@@ -208,6 +213,9 @@ pub struct Adapter {
     pub luid: Option<[u8; 8]>,
     /// Driver name and version string (`driverName driverInfo`).
     pub driver: String,
+    /// Which driver it is (`VkPhysicalDeviceDriverProperties::driverID`), for the few
+    /// places that work around one driver's behaviour.
+    pub driver_id: vk::DriverId,
     /// Total size of device-local memory heaps in bytes.
     pub device_local_bytes: u64,
     /// Memory heaps and types.
@@ -218,6 +226,8 @@ pub struct Adapter {
     /// `supportedDepthResolveModes`; `SAMPLE_ZERO` always).
     pub depth_resolve_modes: vk::ResolveModeFlags,
     pub(crate) queue_families: Vec<vk::QueueFamilyProperties>,
+    /// The first queue family that decodes AV1, when the video extensions are present.
+    pub(crate) video_decode_family: Option<u32>,
     missing: Vec<&'static str>,
     /// Optional capabilities.
     pub caps: OptionalCaps,
@@ -267,6 +277,13 @@ impl Adapter {
                 .iter()
                 .any(|e| e.extension_name_as_c_str() == Ok(name))
         };
+        // AV1 decoding on the GPU's video engine (ADR 0100): the extensions and a queue
+        // family whose codec operations include it.
+        let video_decode_family = (has(ash::khr::video_queue::NAME)
+            && has(ash::khr::video_decode_queue::NAME)
+            && has(ash::khr::video_decode_av1::NAME))
+        .then(|| av1_decode_family(raw, physical, queue_families.len()))
+        .flatten();
 
         let mut missing = Vec::new();
         if props.api_version < vk::API_VERSION_1_3 {
@@ -414,6 +431,7 @@ impl Adapter {
                 && props.limits.max_viewports >= 16,
             fragment_stores_and_atomics: base.fragment_stores_and_atomics == vk::TRUE,
             shader_clip_distance: base.shader_clip_distance == vk::TRUE,
+            video_decode_av1: video_decode_family.is_some(),
         };
 
         let kind = match props.device_type {
@@ -447,11 +465,13 @@ impl Adapter {
             pipeline_cache_uuid: props.pipeline_cache_uuid,
             luid: (ids.device_luid_valid == vk::TRUE).then_some(ids.device_luid),
             driver: format!("{driver_name} {driver_info}").trim().to_owned(),
+            driver_id: driver_props.driver_id,
             device_local_bytes,
             memory,
             limits: props.limits,
             depth_resolve_modes: resolve.supported_depth_resolve_modes,
             queue_families,
+            video_decode_family,
             missing,
             caps,
         }
@@ -469,6 +489,11 @@ impl Adapter {
 
     pub(crate) fn info_name(&self) -> &str {
         &self.name
+    }
+
+    /// The queue family that decodes AV1 video (ADR 0100), when the adapter has one.
+    pub fn video_decode_family(&self) -> Option<u32> {
+        self.video_decode_family
     }
 
     /// Properties of queue family `family` (queue flags, timestamp valid bits, …).
@@ -534,4 +559,38 @@ impl Adapter {
             self.driver
         )
     }
+}
+
+/// The first queue family of `physical` that decodes AV1: its flags include
+/// `VIDEO_DECODE_KHR` and its `VkQueueFamilyVideoPropertiesKHR` the AV1 codec operation.
+/// Only called when the device lists the video extensions.
+fn av1_decode_family(
+    instance: &ash::Instance,
+    physical: vk::PhysicalDevice,
+    count: usize,
+) -> Option<u32> {
+    let mut video = vec![vk::QueueFamilyVideoPropertiesKHR::default(); count];
+    let flags: Vec<vk::QueueFlags> = {
+        let mut families: Vec<vk::QueueFamilyProperties2<'_>> = video
+            .iter_mut()
+            .map(|v| vk::QueueFamilyProperties2::default().push_next(v))
+            .collect();
+        // SAFETY: `physical` came from `instance`; one output structure per family, each
+        // chained to a structure of an extension the device lists.
+        unsafe { instance.get_physical_device_queue_family_properties2(physical, &mut families) };
+        families
+            .iter()
+            .map(|f| f.queue_family_properties.queue_flags)
+            .collect()
+    };
+    flags
+        .iter()
+        .zip(&video)
+        .position(|(flags, video)| {
+            flags.contains(vk::QueueFlags::VIDEO_DECODE_KHR)
+                && video
+                    .video_codec_operations
+                    .contains(vk::VideoCodecOperationFlagsKHR::DECODE_AV1)
+        })
+        .map(|family| family as u32)
 }

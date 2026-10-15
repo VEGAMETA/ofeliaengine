@@ -8,6 +8,7 @@
 //! - [`software`]: rav1d's decoding (the `software` feature, on by default).
 
 pub mod av1;
+pub mod gpu;
 #[cfg(feature = "software")]
 pub mod software;
 pub mod webm;

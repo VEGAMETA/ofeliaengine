@@ -41,7 +41,29 @@ fn adapters_are_listed_and_one_is_selected() {
         device.graphics, device.async_compute, device.transfer
     );
     assert!(device.adapter().missing_features().is_empty());
+    // The decode queue only when asked for (ADR 0100).
+    assert!(device.video_decode.is_none());
+    let adapter = device.adapter().clone();
     drop(device);
+    let video = engine_rhi::Device::with_extras(
+        &instance,
+        &adapter,
+        &[],
+        engine_rhi::ExtraQueues {
+            video_decode: true,
+            ..engine_rhi::ExtraQueues::default()
+        },
+    )
+    .unwrap();
+    println!("video_decode={:?}", video.video_decode);
+    let wanted = std::env::var("ENGINE_VIDEO_DECODE").map_or(true, |v| v.trim() != "0");
+    if wanted && adapter.caps.video_decode_av1 {
+        let decode = video
+            .video_decode
+            .expect("a queue of the AV1 decode family");
+        assert_eq!(Some(decode.family), adapter.video_decode_family());
+    }
+    drop(video);
     assert_no_validation_errors(&instance);
 }
 
