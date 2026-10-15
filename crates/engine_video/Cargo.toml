@@ -17,10 +17,44 @@ default = ["software"]
 software = ["dep:rav1d"]
 
 [dependencies]
+# A video's Opus track played as an audio stream, its position the clock (ADR 0100).
+engine_audio.workspace = true
+engine_audio_decode.workspace = true
 # Decoding on the GPU's video engine through Vulkan Video (ADR 0100).
 engine_rhi.workspace = true
+# The conversion pass: a compute shader in the frame graph (ADR 0100).
+engine_render.workspace = true
+# Its push constants as plain bytes (the version engine_render uses).
+bytemuck = { version = "1.25", features = ["derive"] }
+# Tracy zones (CLAUDE.md §14).
+engine_profiler.workspace = true
 # Feature unification of shared dependencies for build reuse (ADR 0077).
 engine_workspace_hack.workspace = true
 # rav1d (BSD-2-Clause), the Rust port of dav1d: the software decoder and the tests'
 # bit-exact reference (ADR 0100).
 rav1d = { version = "1.1", optional = true }
+
+[dev-dependencies]
+# Recompiles the committed SPIR-V in tests/shaders.rs.
+engine_shader.workspace = true
+
+# These compare with rav1d or fall back to it.
+[[test]]
+name = "clips"
+required-features = ["software"]
+
+[[test]]
+name = "gpu"
+required-features = ["software"]
+
+[[test]]
+name = "convert"
+required-features = ["software"]
+
+[[test]]
+name = "player"
+required-features = ["software"]
+
+[[example]]
+name = "video_bench"
+required-features = ["software"]

@@ -31,6 +31,11 @@
 //! volume and the scene its rays trace with their first entities, and mirrors them every
 //! frame; screen-space reflections are a setting.
 //!
+//! Videos (ADR 0100) are opened by the game with [`Videos::open`] (in [`Setup`] or any
+//! frame's [`FrameParts`]) and shown in materials ([`Videos::show_in`]) or UI sprites
+//! ([`Videos::texture_index`]); their sound plays through an audio output the player
+//! starts with the first video that has sound.
+//!
 //! Crash reports are the game's `main`'s to set up (`engine_crash`): its monitor process
 //! runs the same executable.
 
@@ -39,8 +44,12 @@ mod player;
 mod process;
 mod report;
 mod settings;
+mod videos;
 
 pub use game::{FrameParts, Game};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 pub use report::{FrameReport, Startup, StartupPipelines};
 pub use settings::{PlayerSettings, Window};
+pub use videos::{MaterialSlot, VideoId, Videos};
+// What opening a video takes and tells (ADR 0100).
+pub use engine_video::player::{VideoDesc, VideoEvent};

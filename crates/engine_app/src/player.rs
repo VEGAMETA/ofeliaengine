@@ -4,6 +4,7 @@ use crate::game::{FrameParts, Game};
 use crate::process::ProcessSetup;
 use crate::report::{FrameReport, Startup, StartupPipelines};
 use crate::settings::{PlayerSettings, Window};
+use crate::videos::Videos;
 use core::cell::RefCell;
 use core::fmt;
 use engine_core::jobs::ThreadPool;
@@ -41,9 +42,9 @@ use engine_render::upload::UploadRing;
 use engine_render2d::Canvas;
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    AdapterPreference, Allocation, Allocator, Bindless, Device, Frames, FullScreenExclusive,
-    Instance, InstanceDesc, MemoryLocation, OutputColor, PresentMode, Surface, Swapchain,
-    SwapchainDesc, VulkanHooks,
+    AdapterPreference, Allocation, Allocator, Bindless, Device, ExtraQueues, Frames,
+    FullScreenExclusive, Instance, InstanceDesc, MemoryLocation, OutputColor, PresentMode, Surface,
+    Swapchain, SwapchainDesc, VulkanHooks,
 };
 use engine_runtime::{
     Camera, CameraView, GiExtract, MeshRenderer, ProbeExtract, ReflectionProbe, Runtime,
@@ -260,6 +261,8 @@ pub struct Setup<'a> {
     /// The sky, its light, the atmosphere and fog (`set_atmosphere` needs the device, the
     /// allocator and the bindless descriptors above).
     pub environment: &'a mut Environment,
+    /// Videos (ADR 0100): opened here or in any frame's [`FrameParts`](crate::FrameParts).
+    pub videos: &'a mut Videos,
 }
 
 /// The game's process, window, device, presentation, scene and frame loop (ADR 0099).
@@ -295,6 +298,8 @@ pub struct Player {
     /// The volume of GI probes over the world's `GiVolume`, and the scene its rays trace.
     gi: Option<ProbeGi>,
     gi_rays: Option<RayScene>,
+    /// The game's videos (ADR 0100).
+    videos: Videos,
     graph: RenderGraph,
     ring: UploadRing,
     geometry: GeometryPool,
@@ -411,6 +416,7 @@ impl Player {
         };
         let preference = AdapterPreference::from_env().unwrap_or(settings.adapter.clone());
         let app_name = settings.title.clone();
+        let video_decode = settings.video_decode;
 
         // The Vulkan instance and device (the drivers' own start-up) beside the window.
         let gpu = std::thread::Builder::new()
@@ -419,6 +425,7 @@ impl Player {
                 start_gpu(
                     &app_name,
                     dlss_wanted,
+                    video_decode,
                     warm_up,
                     cache_dir.as_deref(),
                     &preference,
@@ -744,6 +751,7 @@ impl Player {
             probes: None,
             gi: None,
             gi_rays: None,
+            videos: Videos::new(),
             graph,
             ring,
             geometry,
@@ -925,6 +933,7 @@ impl Player {
             jobs: &self.jobs,
             scene: &self.scene_info,
             environment: &mut self.environment,
+            videos: &mut self.videos,
         }
     }
 
@@ -1344,6 +1353,7 @@ impl Player {
                 skinning: &mut self.skinning,
                 geometry: &mut self.geometry,
                 jobs: &self.jobs,
+                videos: &mut self.videos,
             },
             elapsed as f32,
         );
@@ -1355,6 +1365,17 @@ impl Player {
         let t = Instant::now();
         self.sync_probes()?;
         report.probes = us(t);
+        // Videos: their clocks, decoding ahead, the pictures due (ADR 0100).
+        self.videos.update(
+            &self.device,
+            &mut self.allocator,
+            &self.bindless,
+            &mut self.textures,
+            &mut self.materials,
+            frame.number,
+            self.frames.in_flight(),
+            elapsed,
+        );
         marker(
             &mut self.latency,
             &self.swapchain,
@@ -1490,6 +1511,16 @@ impl Player {
             let t = Instant::now();
             let mut fg = self.graph.begin(&frame);
             self.ring.begin(&frame);
+            // The videos' new pictures, before every pass that may sample them.
+            self.videos.add_passes(
+                &mut fg,
+                &self.device,
+                &self.bindless,
+                &mut self.textures,
+                &mut self.materials,
+                frame.number,
+                frame.slot(),
+            );
             let p = Instant::now();
             self.textures
                 .begin_frame(&mut fg, &mut self.allocator, &self.bindless, frame.number)
@@ -2061,6 +2092,12 @@ impl Drop for Player {
             if let Some(rays) = &mut self.gi_rays {
                 rays.destroy(&self.device, &mut self.allocator);
             }
+            self.videos.destroy(
+                &self.device,
+                &mut self.allocator,
+                &self.bindless,
+                self.frames.submitted(),
+            );
             self.graph
                 .destroy(&mut self.allocator, Some(&self.bindless));
             self.ring.destroy(&mut self.allocator);
@@ -2096,9 +2133,11 @@ struct GpuStart {
 
 /// The instance and device (with Streamline's extensions and queues for DLSS frame
 /// generation), the pipeline cache loaded.
+#[allow(clippy::too_many_arguments)]
 fn start_gpu(
     app_name: &str,
     dlss_wanted: bool,
+    video_decode: bool,
     warm_up: bool,
     cache_dir: Option<&std::path::Path>,
     preference: &AdapterPreference,
@@ -2150,10 +2189,13 @@ fn start_gpu(
             .as_ref()
             .map(Streamline::device_extensions)
             .unwrap_or_default(),
-        streamline
-            .as_ref()
-            .map(Streamline::extra_queues)
-            .unwrap_or_default(),
+        ExtraQueues {
+            video_decode,
+            ..streamline
+                .as_ref()
+                .map(Streamline::extra_queues)
+                .unwrap_or_default()
+        },
     )
     .map_err(AppError::at("the device"))?;
     let streamline = streamline.filter(|s| {

@@ -4,19 +4,14 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-15.
+Last updated: 2026-10-16.
 
-## 0. Now (2026-10-15)
+## 0. Now (2026-10-16)
 
-- **Working on: 8b, video playback** (ADR 0100): AV1 in WebM decoded by the GPU's video
-  engine through Vulkan Video, rav1d where that is missing, Opus sound as the clock, the
-  picture as a texture.
-  - 8b-1 is done (2026-10-15, PR #227): `engine_video` reads WebM, parses the AV1 headers (every
-    field equal to rav1d's on nine clips) and decodes with rav1d.
-  - 8b-2 is done (2026-10-16, PR #228): AV1 decoded on both GPUs' video engines through Vulkan
-    Video, every picture bit-exact against rav1d.
-  - Next is 8b-3: the picture as a texture, the sound and the clock, `VideoPlayer` and the
-    player's video entity.
+- **Done: 8b, video playback** (ADR 0100, 2026-10-16): AV1 in WebM decoded by the GPU's
+  video engine through Vulkan Video (rav1d where the GPU cannot), the picture converted
+  into a texture for materials and the UI, the Opus sound as the clock; games open videos
+  through the player (`docs/dev-guide/video.md`).
   - Video with transparency (an alpha channel) is not part of it: the owner deferred it
     (2026-10-15; §6, Video).
 - **Virtual shadow maps** (item 5, ADR 0093) are done but for transparent surfaces: steps
@@ -27,7 +22,7 @@ Last updated: 2026-10-15.
   - **Required later** (the owner, 2026-10-15: deferred, but it will be needed):
     transparent surfaces and subsurface transmission from the pages, so the cascades
     are not drawn beside them. The default for discrete GPUs is decided after it.
-- **Then, in order** (§5): 8c colliders made from meshes, 8d localization. After them,
+- **Next, in order** (§5): 8c colliders made from meshes, 8d localization. After them,
   item 9: the editor, Luau and tooling.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
@@ -125,16 +120,15 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 | Physics API on Jolt/Box2D: queries, characters, rollback | done | ADR 0066 |
 | Networking: encrypted UDP transport with NAT traversal; replication, prediction, lag compensation, co-op example | done | ADRs 0070, 0074 |
 | Assets: glTF, cooking, packs, IoRing streaming; GPU memory budget, texture streaming by GPU feedback, mesh LOD streaming (`engine_streaming`) | done | ADRs 0056, 0057, 0076 |
+| **Video**: AV1 in WebM on the GPUs' video engines (Vulkan Video; rav1d where they cannot), converted into a texture for materials and the UI, Opus sound as the clock; `Videos` in the player | done (packs, HDR, transparency left) | ADR 0100 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
 | Editor, Luau | skeleton only, by plan | §10, §12 |
 
 ## 4. In flight
 
-- **8b, video playback** (ADR 0100). Research and the decision done 2026-10-15, 8b-1 the
-  same day, 8b-2 on 2026-10-16; 8b-3 is next. Details are under the queue's item 8b.
-
-Nothing else is in flight. Meshlets (item 4) and custom materials (item 3c) were listed
+Nothing is in flight. 8b, video playback, was done 2026-10-16 (its record is under the
+queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
 them.
 
@@ -143,11 +137,10 @@ them.
 **What is left, in order.** The numbered items below keep their history; struck-through
 items are done.
 
-1. **8b, video playback** (in flight, §4).
-2. **8c, colliders made from meshes.**
-3. **8d, localization.**
-4. **9:** editor tools, Luau bindings and debugger, other tooling.
-5. **5's leftover, required** (the owner, 2026-10-15): transparent surfaces and subsurface
+1. **8c, colliders made from meshes.**
+2. **8d, localization.**
+3. **9:** editor tools, Luau bindings and debugger, other tooling.
+4. **5's leftover, required** (the owner, 2026-10-15): transparent surfaces and subsurface
    transmission from the virtual shadow pages; then the pages' default for discrete
    GPUs.
 
@@ -788,6 +781,21 @@ grown, divide and conquer); the old labels stay in parentheses.
      - Measured: 1080p30 at 34× real time on the RTX, 18× on the Radeon (rav1d on 16
        threads: 15×); 2160p30 10-bit at 9.2× and 3.6× (rav1d: 5.5×). 20–60 µs of CPU a
        unit.
+   - **8b-3 done 2026-10-16** (PR #229; ADR 0100, "8b-3 as built"):
+     - The sound: the Opus track as an `engine_audio` stream, exact seeks; its position in
+       the mix less the output's latency is the clock.
+     - The picture: a compute pass in the frame graph converts each new picture into the
+       video's RGBA8 texture (sampled as sRGB): the stream's matrix, range, depth and
+       siting; GPU pictures read where they were decoded. Within one per channel of a CPU
+       reference on both GPUs.
+     - `VideoPlayer`: decoding ahead, the clock, play, pause, seek, loop, speed, events;
+       rav1d takes over where the GPU refuses a frame on the way.
+     - The player: `Videos` opens videos from bytes and shows them in materials (external
+       pool textures) and UI sprites; `PlayerSettings::video_decode`; a golden shot per
+       vendor.
+     - Measured: a 1080p picture's conversion 25 µs on the RTX, 1.3 ms on the Radeon iGPU
+       (2160p 10-bit: 0.17 and 4.3 ms).
+     - Left (§6, Video): packs, HDR, transparency, spatial sound, seamless loops.
 8c (was 6h). **Colliders made automatically**: collision shapes from meshes at import and
    cook, into the pack ("one button"): static level geometry as triangle meshes (simplified
    where it pays), props as a fitted box, sphere or capsule or a convex hull, concave ones
@@ -968,6 +976,15 @@ grown, divide and conquer); the old labels stay in parentheses.
 - **Video (ADR 0100):**
   - **transparency** (the owner, 2026-10-15: later): an alpha channel, for instance a
     second, monochrome AV1 stream decoded beside the picture;
+  - WebM files cooked into packs and streamed through the pack's reads (videos open from
+    bytes today);
+  - HDR (PQ, HLG) and BT.2020's primaries: an RGBA16F texture and the curve;
+  - spatial sound for a video in the world; a seamless loop (the next round's first
+    picture decoded before the end);
+  - the conversion on the Radeon iGPU: 1.3 ms a 1080p picture (stores and fetches about
+    equal); a fragment shader writing through the render backend might halve it;
+  - `Game::ui` is never called by the player (its UI goes through `Player::ui_mut`): call
+    it or remove it;
   - streams no test clip has: intra-only and switch frames, short reference signaling
     (unit-tested only), tile sizes that are not uniform, loop filter delta updates, film
     grain loaded from a reference;

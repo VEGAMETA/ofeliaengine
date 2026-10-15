@@ -252,6 +252,7 @@ dependencies = [
  "bytemuck",
  "engine_anim",
  "engine_assets",
+ "engine_audio",
  "engine_core",
  "engine_dlss",
  "engine_ecs",
@@ -264,6 +265,7 @@ dependencies = [
  "engine_rhi",
  "engine_runtime",
  "engine_streaming",
+ "engine_video",
 ]
 
 [[package]]
@@ -731,7 +733,13 @@ dependencies = [
 name = "engine_video"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
+ "engine_audio",
+ "engine_audio_decode",
+ "engine_profiler",
+ "engine_render",
  "engine_rhi",
+ "engine_shader",
  "engine_workspace_hack",
  "rav1d",
 ]

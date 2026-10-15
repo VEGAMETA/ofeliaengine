@@ -188,6 +188,24 @@ impl Readback {
                     region(vk::ImageAspectFlags::PLANE_1, chroma_offset, cw, ch),
                 ],
             );
+            // Back in its layout: a hidden frame's picture may be shown again.
+            let back = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::COPY)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .old_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+                .new_layout(picture.layout)
+                .image(picture.image)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            raw.cmd_pipeline_barrier2(
+                self.commands,
+                &vk::DependencyInfo::default().image_memory_barriers(&[back]),
+            );
             raw.end_command_buffer(self.commands).unwrap();
             let commands = [vk::CommandBufferSubmitInfo::default().command_buffer(self.commands)];
             let waits = [vk::SemaphoreSubmitInfo::default()
@@ -405,6 +423,11 @@ fn compare_clip(
                 (ours.width, ours.height),
                 (theirs.width(), theirs.height()),
                 "{clip}: picture size"
+            );
+            assert_eq!(
+                ours.timestamp,
+                theirs.timestamp(),
+                "{clip}: picture {compared}'s time"
             );
             let planes = readback.read(device, gpu, ours);
             let wide = theirs.bit_depth() > 8;

@@ -269,6 +269,10 @@ pub struct Shot {
     /// pack it streams, the sun, lights, probes and GI volume as entities, offscreen. The
     /// fields it does not take fail the shot.
     pub player: bool,
+    /// A video (ADR 0100; player shots only): `engine_video`'s test clip paused at its
+    /// picture of 1.0 s, on a screen before the camera (a material's emission) and in the
+    /// top left corner of the UI (a sprite of its texture).
+    pub video: bool,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -346,6 +350,7 @@ impl Shot {
             depth_of_field: None,
             kind: ViewKind::Gameplay,
             player: false,
+            video: false,
         }
     }
 }
@@ -1292,6 +1297,11 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
     if shot.player {
         return crate::player::render(shot, options);
     }
+    assert!(
+        !shot.video,
+        "{}: videos are drawn on the player's path",
+        shot.name
+    );
     let loaded = load(
         &shot.source,
         shot.subsurface,

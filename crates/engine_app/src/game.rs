@@ -10,6 +10,8 @@ use engine_render::skinning::Skinning;
 use engine_runtime::Runtime;
 use std::sync::Arc;
 
+use crate::videos::Videos;
+
 /// The game, as the player's frame loop calls it ([`Player::frame`](crate::Player::frame)).
 ///
 /// One frame:
@@ -66,4 +68,6 @@ pub struct FrameParts<'a> {
     pub geometry: &'a mut GeometryPool,
     /// The job system.
     pub jobs: &'a Arc<ThreadPool>,
+    /// Videos (ADR 0100): open, control, show in materials and the UI.
+    pub videos: &'a mut Videos,
 }

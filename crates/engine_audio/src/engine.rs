@@ -195,10 +195,12 @@ impl fmt::Display for AudioError {
 
 impl std::error::Error for AudioError {}
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Default)]
 struct VoiceSlot {
     generation: u32,
     playing: bool,
+    /// A stream voice's ring: its position ([`Audio::stream_position`]).
+    stream: Option<Arc<StreamRing>>,
 }
 
 /// The game-thread half of the mixer: plays sounds and edits buses, sends and effects.
@@ -288,6 +290,7 @@ impl Audio {
                 && let Some(v) = self.voices.get_mut(slot as usize)
             {
                 v.playing = false;
+                v.stream = None;
                 v.generation = v.generation.wrapping_add(1);
                 self.free_voices.push(slot);
             }
@@ -370,7 +373,8 @@ impl Audio {
             // wait for it to say so).
             ring.finish();
         }
-        let handle = self.start(Source::Stream(ring), params)?;
+        let handle = self.start(Source::Stream(ring.clone()), params)?;
+        self.voices[handle.index as usize].stream = Some(ring);
         if !ended {
             self.streamer.get_or_insert_with(Streamer::start).add(job);
         }
@@ -406,6 +410,18 @@ impl Audio {
             },
         });
         Ok(handle)
+    }
+
+    /// How many frames of stream `voice` the mixer has taken, at the stream's own rate
+    /// (a looping stream keeps counting): where it is in the mix. The listener hears a
+    /// frame the output's latency later (`Output::info`'s `queue_frames` and
+    /// `stream_latency_frames`). `None` for a voice that is not a playing stream.
+    pub fn stream_position(&self, voice: VoiceHandle) -> Option<u64> {
+        let slot = self.voices.get(voice.index as usize)?;
+        if !(slot.playing && slot.generation == voice.generation) {
+            return None;
+        }
+        slot.stream.as_ref().map(|ring| ring.released())
     }
 
     /// Whether the voice is still playing (until the audio thread reports its end and

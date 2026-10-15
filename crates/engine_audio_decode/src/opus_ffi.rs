@@ -28,4 +28,5 @@ unsafe extern "C" {
         decode_fec: c_int,
     ) -> c_int;
     pub(crate) fn opus_decoder_ctl(st: *mut OpusDecoder, request: c_int, ...) -> c_int;
+    pub(crate) fn opus_packet_get_nb_samples(packet: *const c_uchar, len: i32, fs: i32) -> c_int;
 }

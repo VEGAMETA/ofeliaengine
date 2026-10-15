@@ -8,21 +8,33 @@
 use crate::scene::{
     RenderOptions, Rendered, Shot, Skip, Source, default_view, load, median, probe_grid,
 };
-use engine_app::{FrameParts, Game, Player, PlayerSettings, Window};
+use engine_app::{
+    FrameParts, Game, MaterialSlot, Player, PlayerSettings, VideoDesc, VideoId, Window,
+};
 use engine_assets::write_pack;
 use engine_core::jobs::ThreadPool;
-use engine_core::math::{Affine3A, Quat, Vec3};
+use engine_core::math::{Affine3A, Quat, Vec2, Vec3};
 use engine_ecs::{GlobalTransform, Transform, World};
-use engine_frame::Exposure;
+use engine_frame::{Exposure, Placement};
 use engine_render::forward::{ContactShadowSettings, LocalShadowSettings};
 use engine_render::gi::ProbeGi;
+use engine_render::material::MaterialDesc;
+use engine_render::mesh::cube;
 use engine_render::reflections::ProbeSettings;
+use engine_render2d::{Canvas, Quad};
 use engine_runtime::{
-    Camera, GiVolume, PointLight, ReflectionProbe, SpotLight, Sun, look_rotation,
+    Camera, GiVolume, MeshRenderer, PointLight, ReflectionProbe, SpotLight, Sun, look_rotation,
 };
 use engine_streaming::SceneStreamer;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::Arc;
+
+/// The video of [`Shot::video`]: `engine_video`'s 8-bit test clip (ffmpeg's `testsrc2`).
+const VIDEO_CLIP: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../crates/engine_video/tests/clips/svt_8bit_320x180.webm"
+);
 
 /// Frames after the camera's cut before the capture, beside a temporal shot's history:
 /// screen-space reflections' own filter (as the test bed waits).
@@ -83,6 +95,43 @@ fn check_supported(shot: &Shot) {
     );
 }
 
+/// The shot's video: opened paused at 1.0 s, on a 16:9 screen a third of the way from the
+/// camera to its target, facing the camera.
+fn add_video(player: &mut Player, shot: &Shot, eye: Vec3, target: Vec3) -> VideoId {
+    let setup = player.setup();
+    let data: Arc<[u8]> = std::fs::read(VIDEO_CLIP).expect("the video clip").into();
+    let video = setup.videos.open(
+        data,
+        VideoDesc {
+            sound: false,
+            autoplay: false,
+            ..VideoDesc::default()
+        },
+    );
+    setup.videos.seek(video, 1.0);
+    let material = setup.materials.add(MaterialDesc {
+        emissive: [1.0; 3],
+        ..MaterialDesc::solid([0.0; 3], 0.0, 1.0)
+    });
+    setup
+        .videos
+        .show_in(video, material, MaterialSlot::Emissive);
+    let mesh = setup.geometry.add_mesh(&cube().as_data()).expect("screen");
+    let forward = (target - eye).normalize();
+    let distance = (target - eye).length() * 0.35;
+    // A third of the view's height, in the middle of the view.
+    let height = 2.0 * distance * (shot.fov_y.to_radians() * 0.5).tan() / 3.0;
+    let center = eye + forward * distance;
+    setup.world.spawn((
+        Transform::from_translation(center)
+            .with_rotation(look_rotation(center, center + (center - eye), Vec3::Y))
+            .with_scale(Vec3::new(height * 16.0 / 9.0, height, height * 0.02)),
+        GlobalTransform::IDENTITY,
+        MeshRenderer::new(mesh, material),
+    ));
+    video
+}
+
 /// Renders `shot` through an offscreen player (see the module documentation).
 ///
 /// # Panics
@@ -133,6 +182,7 @@ fn render_pack(shot: &Shot, options: RenderOptions, pack: &Path) -> Result<Rende
         process_setup: false,
         pipeline_cache: Some(None),
         warm_up: false,
+        video_decode: shot.video,
         ..PlayerSettings::default()
     };
     let mut player = match Player::new(&settings) {
@@ -219,6 +269,10 @@ fn render_pack(shot: &Shot, options: RenderOptions, pack: &Path) -> Result<Rende
         Transform::from_translation(eye).with_rotation(look_rotation(eye, target, Vec3::Y)),
         camera,
     ));
+    let video = shot
+        .video
+        .then(|| add_video(&mut player, shot, eye, target));
+    let mut sprite = false;
     {
         let base = player.view_settings_mut();
         base.occlusion_culling = shot.occlusion_culling;
@@ -257,11 +311,29 @@ fn render_pack(shot: &Shot, options: RenderOptions, pack: &Path) -> Result<Rende
         let gi_ready = shot.gi.is_none()
             || player.gi_settings().is_none()
             || player.gi_volume().is_some_and(ProbeGi::is_converged);
+        if let Some(video) = video
+            && !sprite
+            && let Some(index) = player.setup().videos.texture_index(video)
+        {
+            // The UI: the video's picture in the top left corner, a fifth of the width.
+            let width = shot.size[0] as f32 * 0.2;
+            let size = Vec2::new(width, width * 9.0 / 16.0);
+            let mut hud = Canvas::new();
+            hud.draw(&Quad::sprite(index, size * 0.5 + Vec2::splat(12.0), size));
+            hud.prepare();
+            player
+                .ui_mut()
+                .expect("UI layer")
+                .canvases
+                .push((hud, Placement::Screen));
+            sprite = true;
+        }
         if since_cut.is_none()
             && player.scene_settled()
             && quiet >= QUIET_FRAMES
             && probes_ready
             && gi_ready
+            && (video.is_none() || sprite)
         {
             since_cut = Some(0);
             if let Some(camera) = player.world_mut().get_mut::<Camera>(camera) {

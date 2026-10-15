@@ -68,7 +68,7 @@ Decisions change only via an ADR backed by measurements.
   engine_physics2d       2D physics on Box2D v3
   engine_audio           mixer, buses, DSP, streaming, spatial audio
   engine_audio_vst3      VST3 host (scanning, isolation, PDC, state)
-  engine_video           video: WebM, AV1 headers, Vulkan Video decoding, rav1d as the fallback (ADR 0100)
+  engine_video           video: WebM, AV1 headers, Vulkan Video decoding, rav1d as the fallback, the conversion into a texture, Opus as the clock, VideoPlayer (ADR 0100)
   engine_ecs             ECS / scene model
   engine_assets          import, cook, DDC (derived data cache), streaming
   engine_streaming       a cooked scene streamed within the GPU memory budget (ADR 0076)

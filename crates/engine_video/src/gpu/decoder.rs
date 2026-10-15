@@ -40,8 +40,10 @@ impl Default for GpuDecoderDesc {
 
 /// A decoded picture, in one of the decoder's output images (NV12 or P010, single
 /// layer, shared by the decode and graphics queues). Read it once the decoder's timeline
-/// semaphore reaches [`Self::ready`], from [`Self::layout`]; give it back with
-/// [`GpuDecoder::release`] when nothing reads it any more.
+/// semaphore reaches [`Self::ready`], in [`Self::layout`] (`READ_ONLY_OPTIMAL`: a reader
+/// that changes it puts it back, since a hidden frame's picture may be shown twice); give
+/// it back with [`GpuDecoder::release`] when nothing reads it any more. Its planes'
+/// views for sampling: [`GpuDecoder::plane_views`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GpuPicture {
     /// The image.
@@ -56,14 +58,23 @@ pub struct GpuPicture {
     pub render_width: u32,
     /// The height to show it at.
     pub render_height: u32,
-    /// The image's layout when ready.
+    /// The image's layout when ready (`READ_ONLY_OPTIMAL`).
     pub layout: vk::ImageLayout,
     /// The value of [`GpuDecoder::semaphore`] after which it is decoded.
     pub ready: u64,
-    /// The timestamp given with its temporal unit.
+    /// The timestamp given with the temporal unit that shows it (for a hidden frame shown
+    /// later, that unit's, not the one it was decoded in).
     pub timestamp: i64,
     /// Its output image, for [`GpuDecoder::release`].
     output: u32,
+}
+
+impl GpuPicture {
+    /// The output image it is in, `0..GpuDecoder::outputs()`: one of a fixed set, so a
+    /// reader can keep what it made for each (bindless indices of the plane views).
+    pub fn output(&self) -> u32 {
+        self.output
+    }
 }
 
 /// A reference picture slot (a layer of the reference picture image).
@@ -84,6 +95,8 @@ struct Output {
     image: vk::Image,
     allocation: Option<Allocation>,
     view: vk::ImageView,
+    /// Views of its luma and chroma planes for sampling (null without `MUTABLE_FORMAT`).
+    planes: [vk::ImageView; 2],
     /// Holders: pictures handed out and a slot keeping a hidden frame's picture.
     users: u32,
     /// The picture it holds, as handed out.
@@ -374,7 +387,8 @@ impl GpuDecoder {
         if !self.caps.output_usage.contains(output_usage) {
             return Err(GpuError::Unsupported("output pictures of the usage needed"));
         }
-        // Views of single planes, later, for sampling (the conversion pass, 8b-3).
+        // Views of single planes for sampling (the conversion pass, `crate::convert`)
+        // need a mutable format.
         let output_flags = self.caps.output_flags
             & (vk::ImageCreateFlags::MUTABLE_FORMAT | vk::ImageCreateFlags::EXTENDED_USAGE);
         let families = [self.decode_family, self.graphics_family];
@@ -404,6 +418,7 @@ impl GpuDecoder {
                 image,
                 allocation: Some(allocation),
                 view: vk::ImageView::null(),
+                planes: [vk::ImageView::null(); 2],
                 users: 0,
                 picture: GpuPicture {
                     image,
@@ -428,6 +443,12 @@ impl GpuDecoder {
             )?;
             if let Some(output) = self.outputs.last_mut() {
                 output.view = view;
+            }
+            if output_flags.contains(vk::ImageCreateFlags::MUTABLE_FORMAT) {
+                let planes = plane_views(raw, image, format)?;
+                if let Some(output) = self.outputs.last_mut() {
+                    output.planes = planes;
+                }
             }
         }
 
@@ -598,9 +619,36 @@ impl GpuDecoder {
         self.value
     }
 
+    /// The value [`Self::semaphore`] has reached: pictures whose [`GpuPicture::ready`] is
+    /// at most this are decoded.
+    ///
+    /// # Errors
+    ///
+    /// A failed query (a lost device).
+    pub fn completed(&self, device: &Device) -> Result<u64, GpuError> {
+        // SAFETY: the semaphore is this device's.
+        unsafe { device.raw().get_semaphore_counter_value(self.semaphore) }
+            .map_err(vk_error("vkGetSemaphoreCounterValue"))
+    }
+
     /// What the device's decoder does for this stream.
     pub fn caps(&self) -> &GpuCaps {
         &self.caps
+    }
+
+    /// How many output images it has ([`GpuPicture::output`]).
+    pub fn outputs(&self) -> u32 {
+        self.outputs.len() as u32
+    }
+
+    /// Views of output image `output`'s luma and chroma planes for sampling, in
+    /// `READ_ONLY_OPTIMAL`: luma as `R8_UNORM`, chroma as `R8G8_UNORM` (Cb, Cr), or
+    /// `R16_UNORM` and `R16G16_UNORM` holding P010's words (its samples in the high ten
+    /// bits). `None` when the device cannot view the planes alone (no `MUTABLE_FORMAT`
+    /// for the output images).
+    pub fn plane_views(&self, output: u32) -> Option<[vk::ImageView; 2]> {
+        let planes = self.outputs.get(output as usize)?.planes;
+        (planes[0] != vk::ImageView::null()).then_some(planes)
     }
 
     /// Waits on the CPU until the semaphore reaches `value`.
@@ -774,7 +822,7 @@ impl GpuDecoder {
         for frame in &unit.frames {
             let h = &frame.header;
             if h.show_existing_frame {
-                result = self.show_existing(h, out);
+                result = self.show_existing(h, timestamp, out);
             } else {
                 let offsets = unit.tile_offsets(frame);
                 let sizes = unit.tile_sizes(frame);
@@ -822,6 +870,7 @@ impl GpuDecoder {
     fn show_existing(
         &mut self,
         h: &FrameHeader,
+        timestamp: i64,
         out: &mut Vec<GpuPicture>,
     ) -> Result<(), GpuError> {
         let slot = self.references[usize::from(h.frame_to_show_map_idx)]
@@ -830,7 +879,11 @@ impl GpuDecoder {
         let output = self.slots[slot].output.ok_or(GpuError::MissingReference)?;
         let picture = &mut self.outputs[output as usize];
         picture.users += 1;
-        out.push(picture.picture);
+        // Shown now: the unit that shows it gives its time.
+        out.push(GpuPicture {
+            timestamp,
+            ..picture.picture
+        });
         if h.frame_type == FrameType::Key {
             // The frame loading process: every reference slot holds the shown key frame.
             self.refresh(0xFF, slot);
@@ -1003,7 +1056,11 @@ impl GpuDecoder {
             )
         };
 
-        let mut layout = vk::ImageLayout::VIDEO_DECODE_DST_KHR;
+        let mut written = (
+            vk::ImageLayout::VIDEO_DECODE_DST_KHR,
+            vk::PipelineStageFlags2::VIDEO_DECODE_KHR,
+            vk::AccessFlags2::VIDEO_DECODE_WRITE_KHR,
+        );
         if let Some(o) = output.filter(|_| !to_output) {
             // Coinciding: the picture is copied from its reference slot.
             self.copy_out(
@@ -1013,7 +1070,32 @@ impl GpuDecoder {
                 self.outputs[o as usize].image,
                 extent,
             );
-            layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+            written = (
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                vk::PipelineStageFlags2::COPY,
+                vk::AccessFlags2::TRANSFER_WRITE,
+            );
+        }
+        // Handed out readable: the graphics queue samples the planes once the semaphore
+        // says so (the semaphore's wait makes the writes visible).
+        let layout = vk::ImageLayout::READ_ONLY_OPTIMAL;
+        if let Some(o) = output {
+            let barrier = vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(written.1)
+                .src_access_mask(written.2)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .dst_access_mask(vk::AccessFlags2::NONE)
+                .old_layout(written.0)
+                .new_layout(layout)
+                .image(self.outputs[o as usize].image)
+                .subresource_range(color_range(0, 1));
+            // SAFETY: recording outside a coding scope; the image is this decoder's.
+            unsafe {
+                raw.cmd_pipeline_barrier2(
+                    commands,
+                    &vk::DependencyInfo::default().image_memory_barriers(&[barrier]),
+                );
+            }
         }
         // The next frame's decode waits for this one's writes.
         let barrier = vk::MemoryBarrier2::default()
@@ -1226,8 +1308,10 @@ impl GpuDecoder {
                 raw.destroy_semaphore(self.semaphore, None);
             }
             for output in &mut self.outputs {
-                if output.view != vk::ImageView::null() {
-                    raw.destroy_image_view(output.view, None);
+                for view in output.planes.into_iter().chain([output.view]) {
+                    if view != vk::ImageView::null() {
+                        raw.destroy_image_view(view, None);
+                    }
                 }
                 if let Some(allocation) = output.allocation.take() {
                     allocator.destroy_image(output.image, allocation);
@@ -1294,6 +1378,49 @@ fn picture_view(
         .push_next(&mut view_usage);
     // SAFETY: valid create info for an image of this device.
     unsafe { raw.create_image_view(&info, None) }.map_err(vk_error("vkCreateImageView"))
+}
+
+/// Views of a picture image's two planes for sampling (see [`GpuDecoder::plane_views`]).
+fn plane_views(
+    raw: &engine_rhi::ash::Device,
+    image: vk::Image,
+    format: vk::Format,
+) -> Result<[vk::ImageView; 2], GpuError> {
+    let formats = if format == vk::Format::G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16 {
+        [vk::Format::R16_UNORM, vk::Format::R16G16_UNORM]
+    } else {
+        [vk::Format::R8_UNORM, vk::Format::R8G8_UNORM]
+    };
+    let aspects = [vk::ImageAspectFlags::PLANE_0, vk::ImageAspectFlags::PLANE_1];
+    let mut views = [vk::ImageView::null(); 2];
+    for i in 0..2 {
+        let mut usage = vk::ImageViewUsageCreateInfo::default().usage(vk::ImageUsageFlags::SAMPLED);
+        let info = vk::ImageViewCreateInfo::default()
+            .image(image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(formats[i])
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: aspects[i],
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            })
+            .push_next(&mut usage);
+        // SAFETY: valid create info; the image was made with a mutable format, and the
+        // view formats are those of its planes' compatibility classes.
+        match unsafe { raw.create_image_view(&info, None) } {
+            Ok(view) => views[i] = view,
+            Err(result) => {
+                for view in &views[..i] {
+                    // SAFETY: made above, used by nothing yet.
+                    unsafe { raw.destroy_image_view(*view, None) };
+                }
+                return Err(vk_error("vkCreateImageView")(result));
+            }
+        }
+    }
+    Ok(views)
 }
 
 /// `Extent2D` clamped to another.
