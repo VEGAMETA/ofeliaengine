@@ -1,6 +1,6 @@
 # 0099. The player crate (`engine_app`) and its window modes
 
-- Status: Accepted (steps 1 and 2 done)
+- Status: Accepted (steps 1 to 3 done)
 - Date: 2026-10-15
 - Related:
   - [ADR 0023](0023-latency.md): the latency providers;
@@ -172,15 +172,39 @@ previous binary):
     `Player::run` loops until the window closes.
 - **`flight` moves onto it first,** with its numbers compared before and after.
 
-### Step 3: ECS components for lights, skinned meshes and probes
+### Step 3 (done 2026-10-15): ECS components for lights and skinned meshes
 
-- **Components**, extracted by the runtime with the same change detection as meshes:
-  - point and spot lights (with their shadow settings);
-  - the sun;
-  - skinned meshes, each pose set with its scene instance's interpolated transform, bit
-    for bit (`Skinning::set_pose`);
-  - reflection probes and the GI volume.
-- The game no longer passes any of them by hand.
+As built:
+
+- **`engine_runtime::{PointLight, SpotLight, Sun}`.**
+  - Each is on an entity with a `GlobalTransform`.
+  - A spot light and the sun shine down their entity's −Z axis.
+  - `LightExtract` (in the runtime, after every tick's propagation) mirrors them into
+    the renderer's light list. Like `RenderExtract`, it visits only the chunks where a
+    light or its transform changed, and takes removals from the removal logs.
+  - **A light keeps its slot while it lives:** the renderer knows a light's cached shadow
+    by its index (ADR 0071).
+    - A removed light leaves a dark slot (no range, no shadow), and the next new light
+      takes it.
+    - A light changing kind keeps its slot.
+  - The first `Sun` found lights the world. Without one, the player draws no sunlight.
+  - Lights follow ticks, not interpolated between them.
+- **`engine_runtime::SkinnedMesh`** names an entity's skinned instance.
+  - The game's animation sets its skinning matrices
+    (`Skinning::set_palette`, split from `set_pose` with `set_transform`).
+  - The player calls `Runtime::place_skinned` after `Game::animate`: each skinned
+    instance gets its entity's scene instance and that instance's transform this frame,
+    bit for bit. `Skinning::update_bounds` follows.
+- **`Player::lights_mut` and `sun_mut` are gone.** `flight` spawns Sponza's seven lights
+  and the sun as entities, and its characters carry `SkinnedMesh`.
+- **Reflection probes and the GI volume move to step 4.** The player turns those features
+  on there, and their probes become components with them.
+
+Measured: `flight` on the RTX, alternated with the step 2 binary, latency control off:
+- CPU frame 761 / 768 → 771 / 770 µs (noise);
+- extraction 24.6–25.0 → 24.8–25.4 µs with the seven lights' sync;
+- 0 allocations in a steady-state frame on both GPUs, the shadowed light and the sun
+  extracted every tick.
 
 ### Step 4: features per view; the benches and the test bed on the crate
 
