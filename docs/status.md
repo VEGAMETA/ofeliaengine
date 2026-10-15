@@ -569,8 +569,11 @@ grown, divide and conquer); the old labels stay in parentheses.
    - The bindless set holds up to 16 extra sampler sets, of any bias and anisotropy.
    - Measured 2026-10-15: 16× → 4× −1.5–3 % of the forward pass, 2× −7 %, off −13–19 %.
 7. **The second review's core leftovers.**
-7a (was 6c). Memory (review §3.9): one transient heap for both frame slots where no
-   transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,
+7a (was 6c). Memory (review §3.9): ~~one transient heap for both frame slots where no
+   transient crosses queues (66 / 41 MiB)~~ (done 2026-10-15, ADR 0011's addendum:
+   the groups only the graphics queue touches share one heap, a barrier on the previous
+   frame at each frame's start; the Radeon's transients 40 → 20 MiB, the RTX's 130 → 129
+   as its AO runs on async compute), the global allocator decision (mimalloc,
    CLAUDE.md §5, never made), CPU memory accounting (0.9–1.1 GiB private bytes
    unexplained). The allocator measured 2026-10-11 (`bench/alloc-compare`,
    `docs/research/global-allocator.md`; ADR 0086, Proposed): mimalloc 2.3.2 3.3–4.7× the
