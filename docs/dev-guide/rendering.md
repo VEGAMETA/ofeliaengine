@@ -255,7 +255,16 @@ let mats = materials.begin_frame(&mut fg, &device, &mut allocator, &textures, fr
   both faces cast shadows. Use it for leaves and cloth; closed meshes should stay
   single-sided (half the fragments).
 - **Wrap modes** per texture reference: `TextureRef { texture, wrap: [Wrap::Repeat,
-  Wrap::ClampToEdge] }`. Filtering is always trilinear with 16× anisotropy.
+  Wrap::ClampToEdge] }`.
+- **Filtering** is trilinear with 16× anisotropy by default. Anisotropic filtering is a
+  player's setting (ADR 0098):
+  - `materials.set_texture_anisotropy(&bindless, Anisotropy::X4)?`; `Anisotropy::ALL`
+    lists off, 2×, 4×, 8× and 16× for a settings menu;
+  - it lives in the samplers, as the texture LOD bias does: shaders pay nothing for it;
+  - fewer samples cost the forward pass less where textures are seen at a slant, and blur
+    them there. Sponza against 16×: 4× 1.5–3 % less, 2× 7 %, off 13–19 %;
+  - set it when the player changes it, not every frame: the table's materials are
+    rewritten in the next frame.
 - **Edit and remove freely:**
   - `materials.set(id, desc)` applies next frame;
   - `materials.remove(id)`: draws that still use the id draw with the default material;

@@ -105,6 +105,7 @@ threading model, build configuration) is recorded here as `NNNN-short-title.md`
 | [0095](0095-depth-of-field.md) | Depth of field: AMD FidelityFX DOF 1.1's tiled gather ported (near and far fields, ring buckets, composite), after the upscalers and before bloom; inverse depth instead of signed circles of confusion (patent), the near field from a radius of one pixel, no ring merging; a thin lens from the view's field of view, a sensor height, an f-number and a focus distance; off by default | Accepted |
 | [0096](0096-motion-blur.md) | Motion blur: Guertin, McGuire and Nowrouzezahrai's reconstruction filter (tile max, neighbour max, a gather in two directions with direction-aware weights), on cinematic views only (`ViewKind::Cinematic { motion_blur }`, ADR 0067: a gameplay view cannot ask for it), after depth of field and before bloom | Accepted |
 | [0097](0097-color-vision.md) | Color vision deficiencies simulated (the developer's check) and corrected (the player's filter): Machado's matrices for protans and deutans, Brettel's half-planes for tritans, daltonization, held by the graded tone mapper's LUT after the curve; nothing while off | Accepted |
+| [0098](0098-texture-anisotropy.md) | Anisotropic filtering of material textures as a player setting (off, 2×, 4×, 8×, 16× by default), held by the material samplers like the LOD bias: nothing in the shaders | Accepted |
 
 ## Template
 
