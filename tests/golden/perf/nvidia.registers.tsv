@@ -1,0 +1,315 @@
+# Vector registers and spills of every pipeline the perf gate's scenes make, as the driver reports them
+# (perf_gate --registers, ADR 0062), NVIDIA GeForce RTX 4060 Ti (discrete, Vulkan 1.4.351, 15.7 GiB, NVIDIA 616.92)
+# pipeline	stage	statistic	value
+ao.aoDenoise	CS	Register Count	25
+ao.aoDenoiseBent	CS	Register Count	40
+ao.aoDepths	CS	Register Count	40
+ao.aoMain	CS	Register Count	54
+ao.aoMainBent	CS	Register Count	56
+atmosphere.aerialPerspective	CS	Register Count	64
+atmosphere.atmosphereCube	CS	Register Count	17
+atmosphere.multipleScatteringLut	CS	Register Count	64
+atmosphere.skyViewLut	CS	Register Count	72
+atmosphere.transmittanceLut	CS	Register Count	40
+decals.decalApply	CS	Register Count	96
+decals.decalTiles	CS	Register Count	16
+dof.dofBlur	CS	Register Count	56
+dof.dofComposite	CS	Register Count	79
+dof.dofDilate	CS	Register Count	21
+dof.dofDownsample	CS	Register Count	63
+environment.dfg	CS	Register Count	23
+environment.downsample	CS	Register Count	30
+environment.irradiance	CS	Register Count	48
+environment.prefilter	CS	Register Count	37
+environment.skyCube	CS	Register Count	16
+forward.backgroundVertex+forward.backgroundMotion R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	27
+forward.backgroundVertex+forward.backgroundMotion R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	16
+forward.backgroundVertex+forward.backgroundMotion R16G16_SFLOAT/D32_SFLOAT x4	FS	Register Count	27
+forward.backgroundVertex+forward.backgroundMotion R16G16_SFLOAT/D32_SFLOAT x4	VS	Register Count	16
+forward.backgroundVertex+forward.skyFragment R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	33
+forward.backgroundVertex+forward.skyFragment R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	16
+forward.backgroundVertex+forward.skyFragment R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	33
+forward.backgroundVertex+forward.skyFragment R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	16
+forward.cullMain	CS	Register Count	40
+forward.cullMainMeshlets	CS	Register Count	40
+forward.cullMeshletPieces	CS	Register Count	40
+forward.cullMeshlets	CS	Register Count	48
+forward.cullShadowViews	CS	Register Count	53
+forward.cullShadows	CS	Register Count	40
+forward.cullShadowsMeshlets	CS	Register Count	40
+forward.depthVertex /D32_SFLOAT	VS	Register Count	36
+forward.depthVertex /D32_SFLOAT x4	VS	Register Count	36
+forward.depthVertexMasked+forward.feedbackFragment /D16_UNORM	FS	Register Count	17
+forward.depthVertexMasked+forward.feedbackFragment /D16_UNORM	VS	Register Count	38
+forward.depthVertexMasked+forward.prepassCoverage /D32_SFLOAT x4 a2c	FS	Register Count	16
+forward.depthVertexMasked+forward.prepassCoverage /D32_SFLOAT x4 a2c	VS	Register Count	38
+forward.depthVertexMasked+forward.shadowFragmentMasked /D32_SFLOAT	FS	Register Count	16
+forward.depthVertexMasked+forward.shadowFragmentMasked /D32_SFLOAT	VS	Register Count	38
+forward.depthVertexMaskedMotion+forward.prepassCoverageMotion R16G16_SFLOAT/D32_SFLOAT x4 a2c	FS	Register Count	18
+forward.depthVertexMaskedMotion+forward.prepassCoverageMotion R16G16_SFLOAT/D32_SFLOAT x4 a2c	VS	Register Count	43
+forward.depthVertexMaskedMotion+forward.prepassMaskedMotion R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	16
+forward.depthVertexMaskedMotion+forward.prepassMaskedMotion R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	43
+forward.depthVertexMotion+forward.prepassMotion R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	16
+forward.depthVertexMotion+forward.prepassMotion R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	62
+forward.depthVertexMotion+forward.prepassMotion R16G16_SFLOAT/D32_SFLOAT x4	FS	Register Count	16
+forward.depthVertexMotion+forward.prepassMotion R16G16_SFLOAT/D32_SFLOAT x4	VS	Register Count	62
+forward.lightTiles	CS	Register Count	18
+forward.localShadowVertex /D16_UNORM	VS	Register Count	38
+forward.localShadowVertexMasked+forward.shadowFragmentMasked /D16_UNORM	FS	Register Count	16
+forward.localShadowVertexMasked+forward.shadowFragmentMasked /D16_UNORM	VS	Register Count	38
+forward.shadowVertex /D32_SFLOAT	VS	Register Count	41
+forward.shadowVertexMasked+forward.shadowFragmentMasked /D32_SFLOAT	FS	Register Count	16
+forward.shadowVertexMasked+forward.shadowFragmentMasked /D32_SFLOAT	VS	Register Count	44
+forward.shadowVertexMaskedPieces+forward.shadowFragmentMasked /D32_SFLOAT	FS	Register Count	16
+forward.shadowVertexMaskedPieces+forward.shadowFragmentMasked /D32_SFLOAT	VS	Register Count	48
+forward.shadowVertexPieces /D32_SFLOAT	VS	Register Count	44
+forward.vertexMain+forward.fragmentBlended spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentBlended spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlended spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	56
+forward.vertexMain+forward.fragmentBlended spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlended spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlended spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlended spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlended spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlended spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentBlended spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlended spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	63
+forward.vertexMain+forward.fragmentBlended spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlended spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlended spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlended spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlended spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphere spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedAtmosphere spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphere spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedAtmosphere spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphere spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentBlendedAtmosphere spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphere spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	63
+forward.vertexMain+forward.fragmentBlendedAtmosphere spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactive spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactive spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactive spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactive spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactive spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactive spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactive spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	FS	Register Count	63
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactive spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedAtmosphereShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentBlendedAtmosphereShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactive spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentBlendedReactive spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactive spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	FS	Register Count	56
+forward.vertexMain+forward.fragmentBlendedReactive spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactive spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedReactive spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactive spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedReactive spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactive spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentBlendedReactive spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactive spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	FS	Register Count	56
+forward.vertexMain+forward.fragmentBlendedReactive spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactive spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedReactive spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactive spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedReactive spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactiveShadowed spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedReactiveShadowed spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentBlendedReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentBlendedShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentBlendedShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentBlendedShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMain spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMain spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMain spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	56
+forward.vertexMain+forward.fragmentMain spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentMain spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMain spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMain spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	63
+forward.vertexMain+forward.fragmentMain spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentMain spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMain spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMain spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	63
+forward.vertexMain+forward.fragmentMain spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentMain spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMain spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMain spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	FS	Register Count	56
+forward.vertexMain+forward.fragmentMain spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT x4	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAo spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainAo spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAo spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMainAo spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAo spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	61
+forward.vertexMain+forward.fragmentMainAo spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAo spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMainAo spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainAoBent spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainAoBent spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainDecals spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	55
+forward.vertexMain+forward.fragmentMainDecals spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainDecals spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMainDecals spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainDecals spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainDecals spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainDecals spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	62
+forward.vertexMain+forward.fragmentMainDecals spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainGi spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainGi spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainGi spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMainGi spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainGi spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMainGi spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainGi spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMainGi spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainMotion spec=0,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainMotion spec=0,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMainMotion spec=0,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMainMotion spec=0,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMainMotion spec=1,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainMotion spec=1,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMainMotion spec=1,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMainMotion spec=1,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMainMotionShadowed spec=1,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMainMotionShadowed spec=1,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMainMotionShadowed spec=1,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentMainMotionShadowed spec=1,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMainShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMainShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMainShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentMainShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMasked spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMasked spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMasked spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentMasked spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMasked spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMasked spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMasked spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	62
+forward.vertexMain+forward.fragmentMasked spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMaskedMotion spec=0,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMaskedMotion spec=0,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMaskedMotion spec=0,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMaskedMotion spec=0,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMaskedMotion spec=1,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentMaskedMotion spec=1,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMaskedMotion spec=1,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	61
+forward.vertexMain+forward.fragmentMaskedMotion spec=1,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMaskedMotionShadowed spec=1,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMaskedMotionShadowed spec=1,0 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMaskedMotionShadowed spec=1,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentMaskedMotionShadowed spec=1,1 R16G16B16A16_SFLOAT,R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	73
+forward.vertexMain+forward.fragmentMaskedShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	64
+forward.vertexMain+forward.fragmentMaskedShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentMaskedShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentMaskedShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflect spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflect spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflect spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflect spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAo spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflectAo spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAo spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflectAo spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAoContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflectAoContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAoContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflectAoContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAoContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	69
+forward.vertexMain+forward.fragmentReflectAoContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAoShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	69
+forward.vertexMain+forward.fragmentReflectAoShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentReflectContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflectContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	70
+forward.vertexMain+forward.fragmentReflectContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	69
+forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+fsr1.easu	CS	Register Count	63
+fsr1.rcasNative	CS	Register Count	35
+fsr1.rcasScaled	CS	Register Count	36
+gi.giIrradiance	CS	Register Count	50
+gi.giMoments	CS	Register Count	35
+gi.giRelocate	CS	Register Count	40
+gi.giResolve	CS	Register Count	56
+gi.giSample	CS	Register Count	47
+gi.giTrace	CS	Register Count	56
+grading.gradeLut	CS	Register Count	47
+hiz.hizReduce	CS	Register Count	40
+motion_blur.mbComposite	CS	Register Count	40
+motion_blur.mbGather	CS	Register Count	54
+motion_blur.mbNeighborMax	CS	Register Count	18
+motion_blur.mbTileMax	CS	Register Count	38
+msaa.resolveVertex+msaa.resolve4 R16G16B16A16_SFLOAT	FS	Register Count	21
+msaa.resolveVertex+msaa.resolve4 R16G16B16A16_SFLOAT	VS	Register Count	16
+msaa.resolveVertex+msaa.resolveMotion4 R16G16B16A16_SFLOAT,R16G16_SFLOAT	FS	Register Count	27
+msaa.resolveVertex+msaa.resolveMotion4 R16G16B16A16_SFLOAT,R16G16_SFLOAT	VS	Register Count	16
+postaa.postVertex+postaa.fxaaFragment R8G8B8A8_SRGB	FS	Register Count	32
+postaa.postVertex+postaa.fxaaFragment R8G8B8A8_SRGB	VS	Register Count	16
+postfx.bloomDownsample	CS	Register Count	40
+postfx.bloomDownsampleShared	CS	Register Count	46
+postfx.bloomUpsample	CS	Register Count	40
+postfx.bloomUpsampleShared	CS	Register Count	45
+rays.castCameraRays	CS	Register Count	42
+rays.castRays	CS	Register Count	51
+rays.tlasInstances	CS	Register Count	30
+reflections.compositeVertex+atmosphere.compositeFragment R16G16B16A16_SFLOAT	FS	Register Count	34
+reflections.compositeVertex+atmosphere.compositeFragment R16G16B16A16_SFLOAT	VS	Register Count	16
+reflections.compositeVertex+atmosphere.compositeFragmentMs R16G16B16A16_SFLOAT x4	FS	Register Count	34
+reflections.compositeVertex+atmosphere.compositeFragmentMs R16G16B16A16_SFLOAT x4	VS	Register Count	16
+reflections.compositeVertex+reflections.compositeProbes R16G16B16A16_SFLOAT	FS	Register Count	48
+reflections.compositeVertex+reflections.compositeProbes R16G16B16A16_SFLOAT	VS	Register Count	16
+reflections.compositeVertex+reflections.compositeProbesSsr R16G16B16A16_SFLOAT	FS	Register Count	55
+reflections.compositeVertex+reflections.compositeProbesSsr R16G16B16A16_SFLOAT	VS	Register Count	16
+reflections.compositeVertex+reflections.compositeSsr R16G16B16A16_SFLOAT	FS	Register Count	39
+reflections.compositeVertex+reflections.compositeSsr R16G16B16A16_SFLOAT	VS	Register Count	16
+reflections.probeDownsample	CS	Register Count	30
+reflections.probeFace	CS	Register Count	16
+reflections.probePrefilter	CS	Register Count	37
+reflections.ssrDepth	CS	Register Count	16
+reflections.ssrSpatial	CS	Register Count	43
+reflections.ssrTemporal	CS	Register Count	40
+reflections.ssrTrace	CS	Register Count	55
+scene.sceneScatter	CS	Register Count	26
+skinned_motion.skinnedMotionVertex+skinned_motion.skinnedMotionFragment R16G16_SFLOAT/D32_SFLOAT	FS	Register Count	16
+skinned_motion.skinnedMotionVertex+skinned_motion.skinnedMotionFragment R16G16_SFLOAT/D32_SFLOAT	VS	Register Count	64
+skinned_motion.skinnedMotionVertex+skinned_motion.skinnedMotionFragment R16G16_SFLOAT/D32_SFLOAT x4	FS	Register Count	16
+skinned_motion.skinnedMotionVertex+skinned_motion.skinnedMotionFragment R16G16_SFLOAT/D32_SFLOAT x4	VS	Register Count	64
+skinning.skin4	CS	Register Count	44
+skinning.skin8	CS	Register Count	44
+smaa_high.weightsVertex+smaa_high.weightsFragment R8G8B8A8_UNORM	FS	Register Count	35
+smaa_high.weightsVertex+smaa_high.weightsFragment R8G8B8A8_UNORM	VS	Register Count	19
+smaa_temporal.blendVertex+smaa.blendFragment R8G8B8A8_SRGB	FS	Register Count	16
+smaa_temporal.blendVertex+smaa.blendFragment R8G8B8A8_SRGB	VS	Register Count	16
+smaa_temporal.blendVertex+smaa_temporal.blendFragment A2B10G10R10_UNORM_PACK32	FS	Register Count	20
+smaa_temporal.blendVertex+smaa_temporal.blendFragment A2B10G10R10_UNORM_PACK32	VS	Register Count	16
+smaa_temporal.blendVertex+smaa_temporal.resolveFragment R8G8B8A8_SRGB	FS	Register Count	16
+smaa_temporal.blendVertex+smaa_temporal.resolveFragment R8G8B8A8_SRGB	VS	Register Count	16
+smaa_ultra.edgesVertex+smaa_medium.edgesFragment R8G8_UNORM	FS	Register Count	24
+smaa_ultra.edgesVertex+smaa_medium.edgesFragment R8G8_UNORM	VS	Register Count	22
+taau.resolve	CS	Register Count	56
+taau.resolveCatmullRom	CS	Register Count	64
+taau.resolveShared	CS	Register Count	48
+taau.resolveSharedCatmullRom	CS	Register Count	56
+tonemap.vertexMain+tonemap.fragmentCatmullRom R8G8B8A8_SRGB	FS	Register Count	48
+tonemap.vertexMain+tonemap.fragmentCatmullRom R8G8B8A8_SRGB	VS	Register Count	16
+tonemap.vertexMain+tonemap.fragmentGraded R8G8B8A8_SRGB	FS	Register Count	18
+tonemap.vertexMain+tonemap.fragmentGraded R8G8B8A8_SRGB	VS	Register Count	16
+tonemap.vertexMain+tonemap.fragmentGradedCatmullRom R8G8B8A8_SRGB	FS	Register Count	48
+tonemap.vertexMain+tonemap.fragmentGradedCatmullRom R8G8B8A8_SRGB	VS	Register Count	16
+tonemap.vertexMain+tonemap.fragmentGradedLanczos3 R8G8B8A8_SRGB	FS	Register Count	40
+tonemap.vertexMain+tonemap.fragmentGradedLanczos3 R8G8B8A8_SRGB	VS	Register Count	16
+tonemap.vertexMain+tonemap.fragmentLanczos3 R8G8B8A8_SRGB	FS	Register Count	39
+tonemap.vertexMain+tonemap.fragmentLanczos3 R8G8B8A8_SRGB	VS	Register Count	16
+tonemap.vertexMain+tonemap.fragmentMain R8G8B8A8_SRGB	FS	Register Count	19
+tonemap.vertexMain+tonemap.fragmentMain R8G8B8A8_SRGB	VS	Register Count	16
+tonemap.vertexMain+tonemap.fragmentPerceptual A2B10G10R10_UNORM_PACK32	FS	Register Count	19
+tonemap.vertexMain+tonemap.fragmentPerceptual A2B10G10R10_UNORM_PACK32	VS	Register Count	16
+tonemap.vertexMain+tonemap.fragmentPerceptualGraded A2B10G10R10_UNORM_PACK32	FS	Register Count	18
+tonemap.vertexMain+tonemap.fragmentPerceptualGraded A2B10G10R10_UNORM_PACK32	VS	Register Count	16
+tonemap.vertexMain+tonemap.lanczos3Across R16G16B16A16_SFLOAT	FS	Register Count	39
+tonemap.vertexMain+tonemap.lanczos3Across R16G16B16A16_SFLOAT	VS	Register Count	16
