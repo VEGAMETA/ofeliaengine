@@ -34,6 +34,11 @@ fn a_game_runs_on_the_player() {
     assert_eq!(calls.animates, rendered);
     assert!(calls.events > 0, "the window's first events reach the game");
     assert!(player.first_present_ms().is_some());
+    // The light components reached the renderer's list.
+    let lights = player.runtime().lights();
+    assert_eq!(lights.lights().len(), 1);
+    assert!(lights.lights()[0].shadow);
+    assert!(lights.sun().is_some());
     let extent = player.extent();
     assert!(extent.width >= 100 && extent.height >= 100, "{extent:?}");
     let report = player.validation_report();

@@ -631,7 +631,9 @@ grown, divide and conquer); the old labels stay in parentheses.
      - latency control on by default: RTX 7.90 → 5.66 ms, Radeon 69.3 → 52.3 ms to the
        screen;
      - no allocation in a frame.
-   - Step 3: lights, skinned meshes and probes as components.
+   - ~~Step 3: lights and skinned meshes as components~~ (done 2026-10-15, ADR 0099):
+     `PointLight`, `SpotLight`, `Sun` and `SkinnedMesh`, extracted by the runtime (a
+     light keeps its slot while it lives); probes moved to step 4 with their features.
    - Step 4: features per view; the benches and the test bed on the crate.
 8b (was 6g). **Video playback** (owner, 2026-10-10: after the player crate; the engine plays
    no video today): a video frame as an ordinary texture (UI, a screen in the world, a

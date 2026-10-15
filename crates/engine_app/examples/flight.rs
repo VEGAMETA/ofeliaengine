@@ -105,7 +105,7 @@ mod windowed {
     use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, pod_component};
     use engine_frame::{Antialiasing, FrameGeneration, Placement, Quality};
     use engine_latency::{LowLatency, Presented};
-    use engine_render::forward::{LocalLight, LocalShadowSettings, Spot};
+    use engine_render::forward::LocalShadowSettings;
     use engine_render::graph::RenderGraph;
     use engine_render::material::MaterialDesc;
     use engine_render::mesh::{MeshData, cube};
@@ -113,7 +113,7 @@ mod windowed {
     use engine_render::texture_pool::{TextureId, TextureLevels};
     use engine_render2d::{Canvas, Quad};
     use engine_rhi::Allocator;
-    use engine_runtime::{MeshRenderer, look_rotation};
+    use engine_runtime::{MeshRenderer, PointLight, SkinnedMesh, SpotLight, Sun, look_rotation};
     use engine_streaming::{material_desc, texture_format};
     use std::alloc::{GlobalAlloc, Layout};
     use std::path::{Path, PathBuf};
@@ -144,7 +144,6 @@ mod windowed {
 
     /// A character's animation state, sampled on the job system.
     struct Character {
-        entity: Entity,
         skinned: SkinnedId,
         time: f32,
         pose: Pose,
@@ -481,34 +480,32 @@ mod windowed {
     }
 
     /// Sponza's local lights, as the golden test bed places them (with shadows).
-    fn sponza_lights() -> Vec<LocalLight> {
-        let mut lights: Vec<LocalLight> = (0..5)
-            .map(|k| LocalLight {
-                position: Vec3::new(
-                    -6.0 + 4.0 * k as f32,
-                    1.4,
-                    if k % 2 == 0 { 2.2 } else { -2.2 },
-                ),
-                range: 8.0,
-                color: Vec3::new(24.0, 15.0, 8.0),
-                spot: None,
-                shadow: true,
-            })
-            .collect();
-        for x in [-2.0, 6.0] {
-            lights.push(LocalLight {
-                position: Vec3::new(x, 7.0, 0.0),
-                range: 12.0,
-                color: Vec3::new(90.0, 100.0, 140.0),
-                spot: Some(Spot {
-                    direction: Vec3::new(0.15, -1.0, 0.1).normalize(),
-                    inner: 0.4,
-                    outer: 0.65,
-                }),
-                shadow: true,
-            });
+    /// Sponza's seven shadowed lights as entities: five warm points along the nave, two
+    /// cool spots from above. Returns how many.
+    fn spawn_sponza_lights(world: &mut World) -> usize {
+        for k in 0..5 {
+            let position = Vec3::new(
+                -6.0 + 4.0 * k as f32,
+                1.4,
+                if k % 2 == 0 { 2.2 } else { -2.2 },
+            );
+            world.spawn((
+                GlobalTransform(Affine3A::from_translation(position)),
+                PointLight::new(Vec3::new(24.0, 15.0, 8.0), 8.0).with_shadow(),
+            ));
         }
-        lights
+        for x in [-2.0, 6.0] {
+            // The spot shines down its entity's −Z axis.
+            let down = Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::new(0.15, -1.0, 0.1).normalize());
+            world.spawn((
+                GlobalTransform(Affine3A::from_rotation_translation(
+                    down,
+                    Vec3::new(x, 7.0, 0.0),
+                )),
+                SpotLight::new(Vec3::new(90.0, 100.0, 140.0), 12.0, 0.4, 0.65).with_shadow(),
+            ));
+        }
+        7
     }
 
     /// The camera at game time `t`: along the nave and back every 30 s, swaying, turning
@@ -728,19 +725,10 @@ mod windowed {
                 local_to_model(&skin.skeleton, &c.pose, &Affine3A::IDENTITY, &mut c.model);
                 skinning_matrices(&c.model, &skin.joints, inverse_bind, &mut c.palette);
             });
+            // The player places them at their scene instances (`SkinnedMesh`).
             for c in &self.characters {
-                if let Some(id) = parts.runtime.extract().instance(c.entity)
-                    && let Some(instance) = parts.scene.get(id)
-                {
-                    parts.skinning.set_scene_instance(c.skinned, Some(id));
-                    parts
-                        .skinning
-                        .set_pose(c.skinned, &c.palette, &instance.world_from_object);
-                }
+                parts.skinning.set_palette(c.skinned, &c.palette);
             }
-            parts
-                .skinning
-                .update_bounds(&mut *parts.geometry, Some(&mut *parts.scene));
         }
     }
 
@@ -985,15 +973,15 @@ mod windowed {
                         speed: 0.6 + (k % 4) as f32 * 0.15,
                         angle: k as f32,
                     };
-                    let entity = world.spawn((
+                    world.spawn((
                         Transform::from_xyz(walk.x, min.y, walk.z).with_scale(Vec3::splat(0.012)),
                         GlobalTransform::IDENTITY,
                         MeshRenderer::new(drawn, fox_material),
+                        SkinnedMesh { id: skinned },
                         walk,
                     ));
                     let n = skin.skeleton.joint_count();
                     characters.push(Character {
-                        entity,
                         skinned,
                         time: k as f32 * 0.37,
                         pose: skin.skeleton.rest().clone(),
@@ -1019,10 +1007,23 @@ mod windowed {
             Transform::from_translation(eye).with_rotation(rotation),
             camera_component,
         ));
-        if lights_on {
-            *player.lights_mut() = sponza_lights();
-        }
-        let light_count = player.lights_mut().len();
+        // The lights as entities (ADR 0099 step 3): Sponza's seven, and the sun.
+        let world = player.world_mut();
+        let light_count = if lights_on {
+            spawn_sponza_lights(world)
+        } else {
+            0
+        };
+        world.spawn((
+            GlobalTransform(Affine3A::from_rotation_translation(
+                Quat::from_rotation_arc(Vec3::NEG_Z, Vec3::new(-0.3, -1.0, -0.2).normalize()),
+                Vec3::ZERO,
+            )),
+            Sun {
+                color: Vec3::splat(3.0),
+                ambient: Vec3::splat(0.08),
+            },
+        ));
 
         // The UI layer: a HUD (a crosshair, a bar, a frame for a map), a panel on the nave's
         // wall, a panel on the camera (bottom left, as a helmet's display).

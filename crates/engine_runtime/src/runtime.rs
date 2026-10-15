@@ -1,6 +1,8 @@
 //! One frame of the game: input, ticks, presentation, interpolation.
 
 use crate::extract::{RenderExtract, SceneSink};
+use crate::lights::LightExtract;
+use crate::skinned::SkinnedQuery;
 use engine_core::jobs::ThreadPool;
 use engine_ecs::{TransformPropagation, World};
 use engine_physics::ecs::FixedStep;
@@ -67,7 +69,11 @@ pub struct Runtime<Id = InstanceId> {
     /// The simulation clock.
     pub clock: FixedStep,
     propagation: TransformPropagation,
-    extract: RenderExtract<Id>,
+    pub(crate) extract: RenderExtract<Id>,
+    /// The light components, mirrored after every tick (ADR 0099 step 3).
+    lights: LightExtract,
+    /// The skinned entities ([`Self::place_skinned`]).
+    pub(crate) skinned: SkinnedQuery,
     /// Workers for each tick's propagation ([`Self::set_jobs`]).
     jobs: Option<Arc<ThreadPool>>,
 }
@@ -95,11 +101,15 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
         let mut clock = FixedStep::new(hz);
         clock.max_steps = 4;
         let extract = RenderExtract::new(&mut world, true);
+        let lights = LightExtract::new(&mut world);
+        let skinned = SkinnedQuery::new(&mut world);
         Self {
             world,
             clock,
             propagation,
             extract,
+            lights,
+            skinned,
             jobs: None,
         }
     }
@@ -114,6 +124,12 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
     /// The extraction state (instances of entities, last sync's statistics).
     pub fn extract(&self) -> &RenderExtract<Id> {
         &self.extract
+    }
+
+    /// The light components, as the renderer takes them: the light list (slots stable)
+    /// and the sun.
+    pub fn lights(&self) -> &LightExtract {
+        &self.lights
     }
 
     /// One frame, `elapsed` seconds after the previous one, with the input sampled just
@@ -161,6 +177,7 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
             let start = Instant::now();
             self.extract
                 .sync_on(&mut self.world, scene, self.jobs.as_deref());
+            self.lights.sync(&mut self.world);
             stages.extract_us += us(start);
         }
         let start = Instant::now();

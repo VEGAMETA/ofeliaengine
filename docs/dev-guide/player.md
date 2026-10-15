@@ -67,6 +67,36 @@ fn main() {
   - FSR 3.1 on any GPU;
   - DLSS through the player's own DLLs.
 
+## Lights and animated characters
+
+Lights are components on entities. The player hands them to the renderer after every
+tick:
+
+```rust
+use engine_runtime::{PointLight, SkinnedMesh, SpotLight, Sun};
+
+// A warm lamp casting shadows, a spot shining down its entity's −Z axis, the sun.
+world.spawn((GlobalTransform(lamp_at), PointLight::new(Vec3::new(24.0, 15.0, 8.0), 8.0).with_shadow()));
+world.spawn((GlobalTransform(spot_at), SpotLight::new(Vec3::splat(90.0), 12.0, 0.4, 0.65)));
+world.spawn((GlobalTransform(sun_turned), Sun { color: Vec3::splat(3.0), ambient: Vec3::splat(0.08) }));
+```
+
+- **A light keeps its place in the renderer's list while it lives:** its cached shadow is
+  redrawn only when it or something near it moves.
+- **Without a `Sun` entity there is no sunlight.**
+
+A skinned character is a `SkinnedMesh` next to its `MeshRenderer`. Set its skinning
+matrices in `Game::animate`; the player puts it where its entity is this frame:
+
+```rust
+fn animate(&mut self, parts: &mut FrameParts<'_>, dt: f32) {
+    for c in &mut self.characters {
+        c.sample(dt); // the animation (engine_anim)
+        parts.skinning.set_palette(c.skinned, &c.palette);
+    }
+}
+```
+
 ## Each frame
 
 1. Window events go to `Game::event`.
@@ -74,7 +104,7 @@ fn main() {
 3. The frame waits for its slot and its swapchain image.
 4. The due ticks run: `Game::tick`, then transforms propagate to the GPU scene.
 5. `Game::present` runs (the camera, from the latest input).
-6. `Game::animate` runs: skinned poses, set with each mesh's transform for this frame.
+6. `Game::animate` runs (skinning matrices); the player places the skinned meshes.
 7. Streaming, then the frame's rendering and its UI (`player.ui_mut()`: 2D and 3D
    canvases).
 8. Submission and presentation.

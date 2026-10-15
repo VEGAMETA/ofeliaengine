@@ -16,6 +16,11 @@
 //!   must follow input every frame (the player's camera, the local character's
 //!   presentation) from the latest input, then movers are interpolated and the frame is
 //!   rendered.
+//! - [`PointLight`], [`SpotLight`] and [`Sun`] (ADR 0099 step 3): lights on entities,
+//!   mirrored into the renderer's light list after every tick by [`LightExtract`] (each
+//!   light keeps its slot while it lives: its cached shadow is known by it).
+//! - [`SkinnedMesh`]: an entity's skinned instance, placed at its scene instance every
+//!   frame by [`Runtime::place_skinned`].
 //! - [`Camera`] and [`CameraView`] (ADR 0072): the main camera, read right after the
 //!   presentation step every rendered frame, becomes the frame renderer's view
 //!   (`engine_frame`): projection, exposure, antialiasing, cuts.
@@ -37,9 +42,13 @@
 
 mod camera;
 mod extract;
+mod lights;
 mod runtime;
+mod skinned;
 
 pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;
 pub use extract::{ExtractStats, MeshRenderer, RenderExtract, SceneSink};
+pub use lights::{LightExtract, PointLight, SpotLight, Sun};
 pub use runtime::{FrameStages, Runtime};
+pub use skinned::SkinnedMesh;

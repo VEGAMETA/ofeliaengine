@@ -38,9 +38,9 @@ pub trait Game {
     }
 
     /// Every rendered frame, after the runtime and before rendering, `dt` seconds after
-    /// the previous frame: work on the renderer's parts that needs the frame's
-    /// interpolated transforms (skinned poses set with their scene instance's transform,
-    /// bit for bit).
+    /// the previous frame: the animation's skinning matrices
+    /// (`parts.skinning.set_palette`). The player then places every
+    /// `engine_runtime::SkinnedMesh` at its scene instance.
     fn animate(&mut self, parts: &mut FrameParts<'_>, dt: f32) {
         let _ = (parts, dt);
     }

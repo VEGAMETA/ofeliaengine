@@ -22,9 +22,9 @@
 //! control's wait, the frame slot, the swapchain image, input, the ticks, presentation,
 //! animation, streaming, rendering, presenting), calling the [`Game`]'s hooks.
 //!
-//! Until the next steps of ADR 0099, the game gives the player its lights
-//! ([`Player::lights_mut`], [`Player::sun_mut`]) and sets skinned poses in
-//! [`Game::animate`]; they become components.
+//! Lights are components on entities (`engine_runtime::{PointLight, SpotLight, Sun}`);
+//! skinned meshes too (`engine_runtime::SkinnedMesh`): the game sets their skinning
+//! matrices in [`Game::animate`] (`Skinning::set_palette`), the player places them.
 //!
 //! Crash reports are the game's `main`'s to set up (`engine_crash`): its monitor process
 //! runs the same executable.
