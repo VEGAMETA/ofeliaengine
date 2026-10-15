@@ -297,6 +297,11 @@ impl View {
         }
     }
 
+    /// How many draw items (or scene slots) the view remembers ([`Self::new`]).
+    pub fn capacity(&self) -> u32 {
+        self.capacity
+    }
+
     /// Frees everything the view holds.
     ///
     /// # Safety
