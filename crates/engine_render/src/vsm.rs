@@ -23,7 +23,7 @@
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::environment::{Image, ImageKind};
 use crate::graph::{
-    Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages, Texture,
+    Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages, Texture, TextureDesc,
 };
 use crate::upload::UploadRing;
 use core::cell::{Cell, RefCell};
@@ -38,6 +38,7 @@ const ALLOCATE: &[u8] = include_bytes!("../shaders/vsm.vsmAllocate.spv");
 const COLLECT_DIRTY: &[u8] = include_bytes!("../shaders/vsm.vsmCollectDirty.spv");
 const ARGS: &[u8] = include_bytes!("../shaders/vsm.vsmArgs.spv");
 const CLEAR: &[u8] = include_bytes!("../shaders/vsm.vsmClear.spv");
+const VISIBILITY: &[u8] = include_bytes!("../shaders/vsm.vsmVisibility.spv");
 
 /// Texels of a page, per axis.
 pub const PAGE_TEXELS: u32 = 64;
@@ -125,13 +126,14 @@ struct LevelData {
     wrapped: [u32; 4],
 }
 
-/// `VsmFrame` in `vsm_common.slang` (704 bytes).
+/// `VsmFrame` in `vsm_common.slang` (720 bytes).
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct FrameData {
     clip_to_light: [[f32; 4]; 2],
     clip_to_view: [[f32; 4]; 4],
     light_rows: [[f32; 4]; 3],
+    light_eye: [f32; 4],
     ndc_per_pixel: [f32; 2],
     depth_size: [u32; 2],
     level_offset: f32,
@@ -145,7 +147,7 @@ struct FrameData {
     level: [LevelData; MAX_LEVELS as usize],
 }
 
-/// `VsmPush` in `vsm.slang` (56 bytes).
+/// `VsmPush` in `vsm.slang` (64 bytes).
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
@@ -157,11 +159,14 @@ struct Push {
     hierarchy: u64,
     pool: u32,
     depth: u32,
+    /// `vsmVisibility`: the sun's mask (storage), and bit 0 to multiply into it.
+    mask: u32,
+    flags: u32,
 }
 
 const _: () = assert!(size_of::<LevelData>() == 32);
-const _: () = assert!(size_of::<FrameData>() == 704);
-const _: () = assert!(size_of::<Push>() == 56);
+const _: () = assert!(size_of::<FrameData>() == 720);
+const _: () = assert!(size_of::<Push>() == 64);
 
 /// What a view gives the pages each frame.
 #[derive(Debug, Clone, Copy)]
@@ -383,6 +388,7 @@ pub struct VirtualShadows {
     collect_dirty: ComputeShader<Push>,
     args: ComputeShader<Push>,
     clear: ComputeShader<Push>,
+    visibility: ComputeShader<Push>,
     pool: Image,
     table: Persistent,
     meta: Persistent,
@@ -429,6 +435,7 @@ impl VirtualShadows {
             collect_dirty,
             args,
             clear,
+            visibility,
         ] = ComputeSource::create_all(
             device,
             bindless,
@@ -440,6 +447,7 @@ impl VirtualShadows {
                 ComputeSource::new(COLLECT_DIRTY, c"vsmCollectDirty", &[])?,
                 ComputeSource::new(ARGS, c"vsmArgs", &[])?,
                 ComputeSource::new(CLEAR, c"vsmClear", &[])?,
+                ComputeSource::new(VISIBILITY, c"vsmVisibility", &[])?,
             ],
         )?;
         let rows = settings.pool_pages.div_ceil(TABLE_PAGES);
@@ -477,6 +485,7 @@ impl VirtualShadows {
             collect_dirty,
             args,
             clear,
+            visibility,
             pool,
             table,
             meta,
@@ -606,6 +615,7 @@ impl VirtualShadows {
             clip_to_light: [0, 1].map(|i| to_light.row(i).to_array()),
             clip_to_view: [0, 1, 2, 3].map(|i| to_view.row(i).to_array()),
             light_rows: [0, 1, 2].map(|i| light_from_world.row(i).to_array()),
+            light_eye: eye_light.extend(0.0).to_array(),
             ndc_per_pixel: depth_size.map(|s| 2.0 / s.max(1) as f32),
             depth_size,
             level_offset: (footprint / first_texel).log2() + settings.level_bias,
@@ -701,6 +711,8 @@ impl VirtualShadows {
                     hierarchy: ctx.address(hierarchy),
                     pool,
                     depth,
+                    mask: 0,
+                    flags: 0,
                 };
                 let args = ctx.buffer(lists);
                 rec.dispatch(&self.begin_frame, Dispatch::Threads([entries, 1, 1]), &push);
@@ -738,6 +750,68 @@ impl VirtualShadows {
             lists,
             hierarchy,
         }
+    }
+
+    /// Writes the sun's visibility from the pages per pixel of `depth` (the depth they were
+    /// marked from), after the casters are drawn into `frame`'s dirty pages: into `mask`,
+    /// multiplied into what it holds (the contact shadows'), or into a new mask
+    /// ([`crate::contact::CONTACT_FORMAT`]: a float's bits, 1 lit). See `vsmVisibility` in
+    /// `vsm.slang`. Returns the mask.
+    pub fn add_visibility<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        frame: VsmFrame,
+        depth: Texture,
+        mask: Option<Texture>,
+    ) -> Texture {
+        let desc = fg.texture_desc(depth);
+        let (mask, multiply) = match mask {
+            Some(mask) => (mask, true),
+            None => (
+                fg.create_texture(
+                    "sun visibility",
+                    TextureDesc::new_2d(crate::contact::CONTACT_FORMAT, desc.width, desc.height),
+                ),
+                false,
+            ),
+        };
+        let access = if multiply {
+            Access::StorageReadWrite(ShaderStages::COMPUTE)
+        } else {
+            Access::StorageWrite(ShaderStages::COMPUTE)
+        };
+        fg.add_compute("vsm visibility", bindless)
+            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .read(frame.table, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(frame.pool, Access::StorageRead(ShaderStages::COMPUTE))
+            .write(mask, access)
+            .record(move |rec| {
+                let ctx = rec.context();
+                let indices = (
+                    ctx.sampled_index(depth),
+                    ctx.storage_index(frame.pool),
+                    ctx.storage_index(mask),
+                );
+                let (Some(depth), Some(pool), Some(mask)) = indices else {
+                    return;
+                };
+                let push = Push {
+                    frame: frame.frame,
+                    table: ctx.address(frame.table),
+                    pool,
+                    depth,
+                    mask,
+                    flags: u32::from(multiply),
+                    ..Push::default()
+                };
+                rec.dispatch(
+                    &self.visibility,
+                    Dispatch::Threads([desc.width, desc.height, 1]),
+                    &push,
+                );
+            });
+        mask
     }
 
     /// Frees the pool and the tables.

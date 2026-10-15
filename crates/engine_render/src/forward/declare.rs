@@ -317,6 +317,11 @@ impl ForwardRenderer {
             || decals.is_some()
             || gi_view.is_some()
             || vsm_view.is_some();
+        // The shading that reads the sun's mask: with contact shadows, and with the pages,
+        // whose visibility the mask then holds (ADR 0093 step 3b).
+        let mask_state = contact
+            .map(|(_, state)| state)
+            .or_else(|| self.contact.as_ref().filter(|_| vsm_view.is_some()));
         // Views draw by meshlet (ADR 0085) only after a depth prepass: without one, the
         // meshlet draws' order (the GPU's) would undo the front-to-back order by which the
         // depth test rejects hidden pixels (Sponza without a prepass: forward +15 % on the
@@ -1391,7 +1396,7 @@ impl ForwardRenderer {
             None => &passes.shading[variant],
         });
         // With contact shadows (the prepass is on then), the shading that reads their mask.
-        let contact_shading = contact.and_then(|(_, c)| {
+        let contact_shading = mask_state.and_then(|c| {
             let k = shadowed_index(variant);
             match (ao.is_some(), shadowed.is_some()) {
                 (false, false) => Some(&c.shading[variant]),
@@ -1405,7 +1410,7 @@ impl ForwardRenderer {
             r.pipeline(
                 variant & 1 != 0,
                 ao.is_some(),
-                contact.is_some(),
+                mask_state.is_some(),
                 shadowed.is_some(),
             )
         });
@@ -1416,7 +1421,7 @@ impl ForwardRenderer {
                 variant,
                 reflect_shading.is_some(),
                 ao.is_some(),
-                contact.is_some(),
+                mask_state.is_some(),
                 shadowed.is_some(),
             )
         });
@@ -1429,7 +1434,7 @@ impl ForwardRenderer {
                 reflect_shading.is_some(),
                 decals.is_some(),
                 ao.is_some(),
-                contact.is_some(),
+                mask_state.is_some(),
                 shadowed.is_some(),
             )
         });
@@ -1460,10 +1465,10 @@ impl ForwardRenderer {
                 m.reflect_pipeline(
                     variant & 1 != 0,
                     ao.is_some(),
-                    contact.is_some(),
+                    mask_state.is_some(),
                     shadowed.is_some(),
                 )?
-            } else if contact.is_some() {
+            } else if mask_state.is_some() {
                 let c = m.contact.as_ref()?;
                 match (ao.is_some(), shadowed.is_some()) {
                     (false, false) => &c.shading[variant],
@@ -1531,6 +1536,9 @@ impl ForwardRenderer {
         // it takes in `phase` (ADR 0071); `decals`: the decal buffer (ADR 0082).
         // `types`: material types draw with their pipelines (the shading passes); otherwise
         // with the engine's, as glTF (the depth prepass and the subsurface pass).
+        // With the pages, the mask holds the sun's whole visibility: the shading looks up
+        // no cascade (ADR 0093 step 3b).
+        let sun_in_mask = if vsm.is_some() { SUN_IN_MASK } else { 0 };
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
                                types: bool,
@@ -1547,7 +1555,7 @@ impl ForwardRenderer {
                 ao: ao.and_then(|t| ctx.sampled_index(t)).unwrap_or(NO_AO),
                 phase: contact
                     .and_then(|t| ctx.sampled_index(t))
-                    .unwrap_or(base.phase),
+                    .map_or(base.phase, |mask| mask | sun_in_mask),
                 decal_albedo: decals
                     .and_then(|d| ctx.sampled_index(d.albedo))
                     .unwrap_or(0),
@@ -1678,6 +1686,15 @@ impl ForwardRenderer {
                         read_depth,
                         &contact_view,
                         &settings,
+                    ));
+                }
+                if let Some((v, frame)) = vsm.zip(targets.vsm) {
+                    targets.contact = Some(v.pages.add_visibility(
+                        fg,
+                        bindless,
+                        frame,
+                        read_depth,
+                        targets.contact,
                     ));
                 }
                 if let Some((d, prepared)) = &decals {
@@ -1900,6 +1917,15 @@ impl ForwardRenderer {
                             read_depth,
                             &contact_view,
                             &settings,
+                        ));
+                    }
+                    if let Some((v, frame)) = vsm.zip(targets.vsm) {
+                        targets.contact = Some(v.pages.add_visibility(
+                            fg,
+                            bindless,
+                            frame,
+                            read_depth,
+                            targets.contact,
                         ));
                     }
                     if let Some((d, prepared)) = &decals {

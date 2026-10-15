@@ -15,6 +15,9 @@
 // - `vsmCollectDirty`, `vsmArgs`, `vsmClear`: the dirty pages listed, set in the
 //   hierarchy the casters are culled with, and cleared to the far plane.
 //
+// After the casters are drawn into the dirty pages (`forward.slang`), `vsmVisibility`
+// writes the sun's visibility per pixel into the sun's mask.
+//
 // Page table entries (32 bits): flags over the physical page's index (16 bits). The meta
 // table holds, per physical page, the entry it backs and the last frame a pixel needed
 // it.
@@ -45,6 +48,8 @@ struct VsmPush
     uint* hierarchy;    // per level, its dirty pages (by window position) and their coarser levels
     uint pool;          // bindless: the pool (storage)
     uint depth;         // bindless: the depth buffer (sampled)
+    uint mask;          // bindless: the sun's mask (storage; `vsmVisibility`)
+    uint flags;         // `vsmVisibility`: bit 0, multiply into what the mask holds
 };
 
 [[vk::push_constant]]
@@ -295,4 +300,114 @@ void vsmClear(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
     for (uint y = 0; y < VSM_PAGE; y += 8)
         for (uint x = 0; x < VSM_PAGE; x += 8)
             pool[origin + uint2(x, y)] = FAR_DEPTH;
+}
+
+// The receiver's offset along its normal (from the depth), and its depth bias, in texels
+// of its level: the shadow pass draws the casters' faces turned away from the light, so
+// lit surfaces stand well in front of what their own pages hold.
+static const float NORMAL_OFFSET_TEXELS = 1.0;
+static const float DEPTH_BIAS_TEXELS = 0.5;
+
+// Pixel `p` of the depth buffer (depth `depth`) relative to the camera.
+float3 view_position(VsmFrame* f, int2 p, float depth)
+{
+    float4 clip = float4((float2(p) + 0.5) * f.ndc_per_pixel - 1.0, depth, 1.0);
+    float4 h = float4(dot(f.clip_to_view[0], clip), dot(f.clip_to_view[1], clip), dot(f.clip_to_view[2], clip), dot(f.clip_to_view[3], clip));
+    return h.xyz / h.w;
+}
+
+// The sun's visibility from the pages (ADR 0093 step 3b), per pixel of the depth buffer.
+// The level is the one the pixel marked (its window holds the filter's footprint); the
+// receiver moves along its normal (from the depth: on each axis the neighbour nearer in
+// depth) by a texel of the level; then a 3 × 3 tent filter of comparisons over 4 × 4
+// texels, as the cascades' 3 × 3 bilinear comparisons weigh them, each texel read through
+// the page table (the footprint spans at most 2 × 2 pages). Written into the sun's mask
+// (R32: a float's bits), or multiplied into what the contact shadows wrote there.
+[shader("compute")]
+[numthreads(8, 8, 1)]
+void vsmVisibility(uint3 id : SV_DispatchThreadID)
+{
+    VsmFrame* f = push.frame;
+    if (any(id.xy >= f.depth_size))
+        return;
+    Texture2D depths = g_textures[NonUniformResourceIndex(push.depth)];
+    RWTexture2D<uint> mask = g_pool_images[NonUniformResourceIndex(push.mask)];
+    int2 p = int2(id.xy);
+    float depth = depths.Load(int3(p, 0)).r;
+    float visible = 1.0;
+    if (depth < 1.0)
+    {
+        float3 c = view_position(f, p, depth);
+        // The surface's normal from its neighbours, the nearer one in depth on each axis.
+        int2 last = int2(f.depth_size) - 1;
+        int2 xs = int2(max(p.x - 1, 0), min(p.x + 1, last.x));
+        int2 ys = int2(max(p.y - 1, 0), min(p.y + 1, last.y));
+        float3 left = view_position(f, int2(xs.x, p.y), depths.Load(int3(xs.x, p.y, 0)).r);
+        float3 right = view_position(f, int2(xs.y, p.y), depths.Load(int3(xs.y, p.y, 0)).r);
+        float3 up = view_position(f, int2(p.x, ys.x), depths.Load(int3(p.x, ys.x, 0)).r);
+        float3 down = view_position(f, int2(p.x, ys.y), depths.Load(int3(p.x, ys.y, 0)).r);
+        float3 dx = abs(dot(right - c, right - c)) < abs(dot(c - left, c - left)) ? right - c : c - left;
+        float3 dy = abs(dot(down - c, down - c)) < abs(dot(c - up, c - up)) ? down - c : c - up;
+        float3 n = cross(dx, dy);
+        n = dot(n, n) > 0.0 ? normalize(n) : float3(0.0, 0.0, 0.0);
+        // Facing the camera (`c` points from it to the surface).
+        if (dot(n, c) > 0.0)
+            n = -n;
+        float2 light_xy = float2(dot(f.light_rows[0].xyz, c), dot(f.light_rows[1].xyz, c)) + f.light_eye.xy;
+        uint level = f.levels;
+        for (uint k = vsm_level_for(f, dot(c, c)); k < f.levels; k++)
+        {
+            float2 t = vsm_texel(f, k, light_xy);
+            if (vsm_in_window(f, k, vsm_page_of(t - VSM_MARGIN)) && vsm_in_window(f, k, vsm_page_of(t + VSM_MARGIN)))
+            {
+                level = k;
+                break;
+            }
+        }
+        if (level < f.levels)
+        {
+            float texel = 1.0 / (f.level[level].page_scale * float(VSM_PAGE));
+            float3 r = c + n * (NORMAL_OFFSET_TEXELS * texel);
+            float2 at = float2(dot(f.light_rows[0].xyz, r), dot(f.light_rows[1].xyz, r)) + f.light_eye.xy;
+            float receiver = -(dot(f.light_rows[2].xyz, r) + f.light_eye.z) * f.depth_scale + f.depth_offset;
+            receiver -= DEPTH_BIAS_TEXELS * texel * f.depth_scale;
+            // Texel centers lie at half texels: the 4 × 4 texels from `i0 - 1`.
+            float2 t = vsm_texel(f, level, at) - 0.5;
+            float2 i0 = floor(t);
+            float2 fr = t - i0;
+            int2 first = int2(i0) - 1;
+            int2 lo = first >> 6;
+            int2 hi = (first + 3) >> 6;
+            uint e00 = push.table[vsm_entry(level, lo)];
+            uint e10 = push.table[vsm_entry(level, int2(hi.x, lo.y))];
+            uint e01 = push.table[vsm_entry(level, int2(lo.x, hi.y))];
+            uint e11 = push.table[vsm_entry(level, hi)];
+            RWTexture2D<uint> pool = g_pool_images[NonUniformResourceIndex(push.pool)];
+            float4 wx = float4(1.0 - fr.x, 1.0, 1.0, fr.x);
+            float4 wy = float4(1.0 - fr.y, 1.0, 1.0, fr.y);
+            float sum = 0.0;
+            [unroll]
+            for (int y = 0; y < 4; y++)
+            {
+                [unroll]
+                for (int x = 0; x < 4; x++)
+                {
+                    int2 texel_at = first + int2(x, y);
+                    int2 page = texel_at >> 6;
+                    uint entry = page.y == lo.y ? (page.x == lo.x ? e00 : e10) : (page.x == lo.x ? e01 : e11);
+                    float lit = 1.0;
+                    if ((entry & VSM_ALLOCATED) != 0)
+                    {
+                        uint2 in_pool = vsm_pool_texel(entry & VSM_PHYSICAL, uint2(texel_at & 63));
+                        lit = receiver <= asfloat(pool[in_pool]) ? 1.0 : 0.0;
+                    }
+                    sum += wx[x] * wy[y] * lit;
+                }
+            }
+            visible = sum / 9.0;
+        }
+    }
+    if ((push.flags & 1u) != 0)
+        visible *= asfloat(mask[id.xy]);
+    mask[id.xy] = asuint(visible);
 }

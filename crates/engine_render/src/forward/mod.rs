@@ -488,6 +488,9 @@ const PHASE_SHADOW_MESHLETS: u32 = 16;
 const PHASE_VSM: u32 = 24;
 /// `VSM_LIST` in `forward.slang`: the virtual shadow pages' meshlet lists.
 const VSM_LIST: usize = 6;
+/// `SUN_IN_MASK` in `forward.slang`: in the `phase` of the shading that reads the sun's
+/// mask, the view's virtual shadow pages put the sun's whole visibility in it.
+const SUN_IN_MASK: u32 = 1 << 31;
 
 /// `PHASE_*` in `forward.slang`.
 const PHASE_ALL: u32 = 0;
@@ -2578,6 +2581,18 @@ impl ForwardRenderer {
             caps.fragment_stores_and_atomics && caps.draw_indirect_count && caps.shader_int64;
         if enabled && supported && self.vsm.is_none() {
             self.vsm = Some(Box::new(VsmDraw::new(device, bindless)?));
+        }
+        // Their views shade with the variants that read the sun's mask (the contact
+        // shadows'), described now if contact shadows never were.
+        if enabled && supported && self.contact.is_none() {
+            self.contact = Some(ContactState::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+            )?);
+            self.ensure_shadowed_extras(device, bindless)?;
+            self.ensure_msaa(device, bindless)?;
         }
         self.vsm_on = enabled && supported;
         Ok(self.vsm_on)

@@ -2121,6 +2121,21 @@ float shadow(float3 light, float3 n, float2 pixel)
     return 1.0;
 }
 
+// `push.phase` of the shading that reads the sun's mask (`contact` entry points): the
+// mask's bindless index, and this bit when the view's virtual shadow pages (ADR 0093 step
+// 3b) put the sun's whole visibility in it, so the cascades are not looked up.
+static const uint SUN_IN_MASK = 1u << 31;
+static const uint SUN_MASK_INDEX = SUN_IN_MASK - 1u;
+
+// The sun's shadow from the cascades, or none to look up when the mask holds it
+// (`contact` is a literal: the other entry points keep their code).
+float sun_shadow(bool contact, float3 light, float3 n, float2 pixel)
+{
+    if (contact && (push.phase & SUN_IN_MASK) != 0)
+        return 1.0;
+    return shadow(light, n, pixel);
+}
+
 // Light reflected towards `v` by a surface with normal `n`, for unit irradiance from `l`
 // (the BRDF times n·l).
 float3 surface_light(float3 n, float3 v, float3 l, float3 diffuse, float3 f0, float a)
@@ -2796,7 +2811,7 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     // decals (a literal), after the terms: the decals' values are live here.
     float visible = 0.0;
     if (!decals)
-        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? sun_shadow(contact, input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     // glTF's sheen layer lets through what its lobe does not reflect (KHR_materials_sheen's
     // albedo scaling, from n·v; `sheen_albedo` is the lobe's directional albedo).
     terms.sheen_scaling = model_sheen_layer(M::model())
@@ -2816,11 +2831,12 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     float3 surface_diffuse = subsurface ? float3(0.0, 0.0, 0.0) : diffuse;
     float3 ambient_albedo = subsurface ? float3(0.0, 0.0, 0.0) : base.rgb;
     if (decals)
-        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? sun_shadow(contact, input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     // The sun's contact shadows (ADR 0071; `contact` is a literal): their mask's bindless
-    // index comes in `push.phase`, which the shading passes do not otherwise read.
+    // index comes in `push.phase`, which the shading passes do not otherwise read. With the
+    // view's virtual shadow pages the mask holds the sun's whole visibility.
     if (contact && visible > 0.0)
-        visible *= asfloat(g_uint_textures[push.phase].Load(int3(int2(input.position.xy), 0)).r);
+        visible *= asfloat(g_uint_textures[push.phase & SUN_MASK_INDEX].Load(int3(int2(input.position.xy), 0)).r);
     float3 local_irradiance = 0.0;
     float3 reflect_weight = 0.0;
     // The lobe the reflections replace the sky's light of (ADR 0073).

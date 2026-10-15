@@ -5,8 +5,10 @@
 //! stands still and steps aside. After each frame, every texel of every backed page must
 //! hold the depth (along the light, across the pages' range) where the light's ray
 //! through the texel's center leaves the first box it meets: the shadow pass draws the
-//! faces turned away from the light. Once with the boxes drawn whole, once by meshlet,
-//! under synchronization validation.
+//! faces turned away from the light. And the sun's visibility the view's shading reads
+//! (its mask) must be what a ray to the sun finds from each pixel's surface, but in the
+//! filter's penumbra. Once with the boxes drawn whole, once by meshlet, under
+//! synchronization validation.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::print_stdout)]
 
@@ -76,16 +78,38 @@ const BOXES: [Box3; 3] = [
         center: Vec3::new(0.0, -0.1, -10.0),
         size: Vec3::new(40.0, 0.2, 40.0),
     },
-    // A box in the air, and one on the ground.
+    // A plate in the air, and a box on the ground.
     Box3 {
-        center: Vec3::new(0.0, 3.0, -6.0),
-        size: Vec3::new(2.0, 2.0, 2.0),
+        center: Vec3::new(0.0, 3.0, -5.0),
+        size: Vec3::new(3.0, 0.5, 3.0),
     },
     Box3 {
         center: Vec3::new(3.0, 1.0, -3.0),
         size: Vec3::new(1.0, 2.0, 1.0),
     },
 ];
+
+/// Where the ray `origin + t · direction` enters `b` and the normal of the face it enters
+/// by, if it meets it in front of the origin.
+fn enter(b: &Box3, origin: [f64; 3], direction: [f64; 3]) -> Option<(f64, [f64; 3])> {
+    let (mut near, mut far, mut axis) = (f64::MIN, f64::MAX, 0);
+    for i in 0..3 {
+        let c = f64::from(b.center.to_array()[i]);
+        let h = f64::from(b.size.to_array()[i]) * 0.5;
+        let t1 = (c - h - origin[i]) / direction[i];
+        let t2 = (c + h - origin[i]) / direction[i];
+        if t1.min(t2) > near {
+            near = t1.min(t2);
+            axis = i;
+        }
+        far = far.min(t1.max(t2));
+    }
+    (near <= far && near > 0.0).then(|| {
+        let mut normal = [0.0; 3];
+        normal[axis] = -direction[axis].signum();
+        (near, normal)
+    })
+}
 
 /// Where the ray `origin + t · direction` leaves `b`, if it meets it.
 fn exit(b: &Box3, origin: [f64; 3], direction: [f64; 3]) -> Option<f64> {
@@ -206,6 +230,8 @@ fn run(meshlets: bool) {
     };
     let (pool_out, pool_memory) = readback(pool_bytes);
     let (table_out, table_memory) = readback(table_bytes);
+    let mask_bytes = u64::from(WIDTH * HEIGHT) * 4;
+    let (mask_out, mask_memory) = readback(mask_bytes);
     let d = device.raw();
     // SAFETY: plain object creation.
     let (command_pool, cmd) = unsafe {
@@ -294,6 +320,19 @@ fn run(meshlets: bool) {
                 )
                 .unwrap();
             let pages = passes.virtual_shadows.expect("the view drew its pages");
+            let mask = passes
+                .contact_shadows
+                .expect("the view's shading read the sun's mask");
+            let mask_target = fg.import_buffer(
+                "mask read back",
+                ImportedBuffer {
+                    buffer: mask_out,
+                    size: mask_bytes,
+                    address: 0,
+                    initial: BufferState::idle(),
+                    final_state: Some(BufferState::host_read()),
+                },
+            );
             let pool_target = fg.import_buffer(
                 "pool read back",
                 ImportedBuffer {
@@ -317,11 +356,33 @@ fn run(meshlets: bool) {
             fg.add_pass("vsm read back")
                 .read(pages.pool, Access::TransferRead)
                 .read(pages.table, Access::TransferRead)
+                .read(mask, Access::TransferRead)
                 .write(pool_target, Access::TransferWrite)
                 .write(table_target, Access::TransferWrite)
+                .write(mask_target, Access::TransferWrite)
                 .execute(move |ctx| {
                     // SAFETY: recording; the graph orders the copies after the pages' passes.
                     unsafe {
+                        ctx.device.cmd_copy_image_to_buffer(
+                            ctx.cmd,
+                            ctx.image(mask),
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            ctx.buffer(mask_target),
+                            &[vk::BufferImageCopy {
+                                image_subresource: vk::ImageSubresourceLayers {
+                                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                                    mip_level: 0,
+                                    base_array_layer: 0,
+                                    layer_count: 1,
+                                },
+                                image_extent: vk::Extent3D {
+                                    width: WIDTH,
+                                    height: HEIGHT,
+                                    depth: 1,
+                                },
+                                ..Default::default()
+                            }],
+                        );
                         ctx.device.cmd_copy_image_to_buffer(
                             ctx.cmd,
                             ctx.image(pages.pool),
@@ -377,6 +438,7 @@ fn run(meshlets: bool) {
         };
         let pool = words(&pool_memory, pool_bytes);
         let table = words(&table_memory, table_bytes);
+        let mask = words(&mask_memory, mask_bytes);
 
         // Every texel of every backed page against the ray through its center.
         let (mut texels, mut covered, mut wrong, mut worst) = (0u64, 0u64, 0u64, 0.0f64);
@@ -443,6 +505,58 @@ fn run(meshlets: bool) {
             covered > texels / 10,
             "frame {frame}: the casters cover the pages"
         );
+        // The sun's visibility per pixel: the surface a ray from the camera through the
+        // pixel's center meets, then a ray from it to the sun.
+        let world_from_clip = clip_from_world.inverse();
+        let to_sun = direction.to_array().map(|c| -f64::from(c));
+        let eye_at = eye.to_array().map(f64::from);
+        let (mut compared, mut penumbra, mut differ, mut in_shadow) = (0u32, 0u32, 0u32, 0u32);
+        for y in 0..HEIGHT {
+            for x in 0..WIDTH {
+                let ndc = [
+                    (x as f32 + 0.5) / WIDTH as f32 * 2.0 - 1.0,
+                    (y as f32 + 0.5) / HEIGHT as f32 * 2.0 - 1.0,
+                ];
+                let far = world_from_clip * engine_core::math::Vec4::new(ndc[0], ndc[1], 1.0, 1.0);
+                let ray = (far.truncate() / far.w - eye)
+                    .normalize()
+                    .to_array()
+                    .map(f64::from);
+                let hit = BOXES
+                    .iter()
+                    .filter_map(|b| enter(b, eye_at, ray))
+                    .min_by(|a, b| a.0.total_cmp(&b.0));
+                let Some((t, normal)) = hit else {
+                    continue;
+                };
+                // Faces turned from the sun are dark whatever their shadow says.
+                let facing = (0..3).map(|i| normal[i] * to_sun[i]).sum::<f64>();
+                if facing < 0.1 {
+                    continue;
+                }
+                let point = [0, 1, 2].map(|i| eye_at[i] + t * ray[i] + normal[i] * 1e-3);
+                let shadowed = BOXES.iter().any(|b| enter(b, point, to_sun).is_some());
+                let visible = f64::from(f32::from_bits(mask[(y * WIDTH + x) as usize]));
+                if visible > 0.05 && visible < 0.95 {
+                    penumbra += 1;
+                    continue;
+                }
+                compared += 1;
+                in_shadow += u32::from(shadowed);
+                if (visible < 0.5) != shadowed {
+                    differ += 1;
+                }
+            }
+        }
+        println!(
+            "         {compared} pixels compared ({in_shadow} in shadow), {differ} differ, \
+             {penumbra} in the filter's penumbra"
+        );
+        assert!(in_shadow > 500, "frame {frame}: the view shows shadows");
+        assert!(
+            f64::from(differ) < f64::from(compared) * 0.01,
+            "frame {frame}: {differ} of {compared} pixels see the sun otherwise than a ray"
+        );
         // Rasterization and the ray part ways only on the casters' silhouettes.
         assert!(
             (wrong as f64) < texels as f64 * 0.002,
@@ -461,6 +575,7 @@ fn run(meshlets: bool) {
         textures.destroy(&mut allocator, &bindless);
         allocator.destroy_buffer(pool_out, pool_memory);
         allocator.destroy_buffer(table_out, table_memory);
+        allocator.destroy_buffer(mask_out, mask_memory);
         d.destroy_command_pool(command_pool, None);
     }
     drop(renderer);
