@@ -8,6 +8,7 @@ mod common;
 
 use engine_core::math::{Affine3A, Vec3};
 use engine_ecs::GlobalTransform;
+use engine_render::gi::GiSettings;
 use engine_render::reflections::SsrSettings;
 use engine_runtime::{GiVolume, ReflectionProbe};
 
@@ -70,6 +71,25 @@ fn probes_and_the_gi_volume_follow_their_entities() {
         let gi = player.gi_volume().unwrap();
         assert_eq!(gi.grid().counts, [13, 5, 13]);
         assert!(!gi.is_converged());
+    }
+
+    // The GI settings change at run time (a graphics option): the volume is made again
+    // with them; turned off, it goes; on again, it comes back.
+    if gi_on {
+        let settings = player.gi_settings().unwrap();
+        player.set_global_illumination(Some(GiSettings {
+            rays_per_frame: 0,
+            ..settings
+        }));
+        frames(&mut player, 1);
+        assert_eq!(player.gi_volume().unwrap().settings().rays_per_frame, 0);
+        player.set_global_illumination(None);
+        frames(&mut player, 1);
+        assert!(player.gi_volume().is_none() && player.ray_scene().is_none());
+        assert!(!player.renderer().forward().global_illumination());
+        player.set_global_illumination(Some(settings));
+        frames(&mut player, 1);
+        assert!(player.gi_volume().is_some());
     }
 
     // Gone with their entities: the probe leaves the set, the volume and its rays go.

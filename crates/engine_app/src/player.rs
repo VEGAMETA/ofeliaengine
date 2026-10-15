@@ -257,6 +257,9 @@ pub struct Setup<'a> {
     pub jobs: &'a Arc<ThreadPool>,
     /// What the pack's scene holds.
     pub scene: &'a SceneInfo,
+    /// The sky, its light, the atmosphere and fog (`set_atmosphere` needs the device, the
+    /// allocator and the bindless descriptors above).
+    pub environment: &'a mut Environment,
 }
 
 /// The game's process, window, device, presentation, scene and frame loop (ADR 0099).
@@ -330,6 +333,10 @@ pub struct Player {
     gi_extract: GiExtract,
     /// The volume's settings: `None` when it is off or the GPU has no ray queries.
     gi_settings: Option<GiSettings>,
+    /// The volume is made again at the next frame (its settings changed).
+    gi_remake: bool,
+    /// The volume has converged since it was made: the probes were captured again.
+    gi_converged: bool,
     /// The pack's textures hold their tails: from now on probes capture and the volume's
     /// rays trace the scene's materials (before, unloaded textures would read as white).
     scene_ready: bool,
@@ -762,6 +769,8 @@ impl Player {
             probe_extract: None,
             gi_extract,
             gi_settings,
+            gi_remake: false,
+            gi_converged: false,
             scene_ready: false,
             scene_settled: false,
             swapchain_format,
@@ -909,6 +918,7 @@ impl Player {
             world: &mut self.runtime.world,
             jobs: &self.jobs,
             scene: &self.scene_info,
+            environment: &mut self.environment,
         }
     }
 
@@ -1024,6 +1034,30 @@ impl Player {
     /// on and the GPU has ray queries).
     pub fn gi_settings(&self) -> Option<GiSettings> {
         self.gi_settings
+    }
+
+    /// Changes the GI volume's settings, or turns it off (`None`); a player's graphics
+    /// options. The volume is made again with them at the next frame and converges again.
+    /// Without ray queries nothing changes.
+    pub fn set_global_illumination(&mut self, settings: Option<GiSettings>) {
+        if self.device.ray_query().is_some() {
+            self.gi_settings = settings;
+            self.gi_remake = true;
+        }
+    }
+
+    /// The pack's textures hold their tails: probes capture and the GI volume's rays trace
+    /// the scene's materials from now on.
+    pub fn scene_ready(&self) -> bool {
+        self.scene_ready
+    }
+
+    /// The streaming has gone quiet once since the start (the view's textures and mesh
+    /// levels arrived) and the probes were then asked for new captures: with
+    /// [`Self::reflection_probes`]' pending captures done and [`Self::gi_volume`]
+    /// converged, the world looks as it will (a loading screen's end).
+    pub fn scene_settled(&self) -> bool {
+        self.scene_settled
     }
 
     /// The latency provider.
@@ -1889,13 +1923,20 @@ impl Player {
                 extract.sync(&mut self.runtime.world, probes);
             }
         }
-        let Some(settings) = self.gi_settings else {
-            return Ok(());
-        };
-        let grid = self.gi_extract.grid(&self.runtime.world);
-        if grid == self.gi.as_ref().map(ProbeGi::grid) {
+        // Probes capture the scene as the volume lights it: again once it has converged.
+        if !self.gi_converged && self.gi.as_ref().is_some_and(ProbeGi::is_converged) {
+            self.gi_converged = true;
+            if let Some(probes) = &self.probes {
+                probes.refresh_all();
+            }
+        }
+        let grid = self
+            .gi_settings
+            .and_then(|_| self.gi_extract.grid(&self.runtime.world));
+        if grid == self.gi.as_ref().map(ProbeGi::grid) && !core::mem::take(&mut self.gi_remake) {
             return Ok(());
         }
+        self.gi_converged = false;
         if self.gi.is_some() {
             self.wait_idle()?;
             if let Some(mut old) = self.gi.take() {
@@ -1903,8 +1944,8 @@ impl Player {
                 unsafe { old.destroy(&self.device, &mut self.allocator, &self.bindless) };
             }
         }
-        match grid {
-            Some(grid) => {
+        match grid.zip(self.gi_settings) {
+            Some((grid, settings)) => {
                 if self.gi_rays.is_none() {
                     // The meshes' coarsest levels: enough for diffuse light, and resident
                     // from the start in streamed packs (ADR 0087).
