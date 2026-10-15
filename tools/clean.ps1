@@ -123,7 +123,18 @@ if ($Targets.Count -eq 0) {
         }
     }
 }
-foreach ($target in $Targets | Select-Object -Unique) {
+# One entry per directory however it was spelled (C:/x, C:\x\, any case): a directory
+# cleaned twice would be counted twice in a dry run.
+$seen = @{}
+$unique = foreach ($target in $Targets) {
+    $full = [IO.Path]::GetFullPath($target).TrimEnd('\')
+    $key = $full.ToLowerInvariant()
+    if (-not $seen.ContainsKey($key)) {
+        $seen[$key] = $true
+        $full
+    }
+}
+foreach ($target in $unique) {
     $before = $script:freed
     Clean-Target $target
     Write-Output ('{0,8:N2} GB  {1}' -f (($script:freed - $before) / 1GB), $target)
