@@ -291,6 +291,14 @@ impl<'g> ComputePass<'_, 'g> {
         self
     }
 
+    /// Runs the pass after every pass declared before it and before every pass declared
+    /// after it (as [`PassBuilder::fence`]): for writes that later passes read through
+    /// bindless indices without declaring them (a video's texture).
+    pub fn fence(mut self) -> Self {
+        self.pass = self.pass.fence();
+        self
+    }
+
     /// Dispatches `shader` over `size` with the push constants `push` builds from the pass
     /// context (bindless indices, buffer addresses). `push` returning `None` (a resource
     /// without its bindless index) skips the dispatch.
