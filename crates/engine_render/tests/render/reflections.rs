@@ -20,7 +20,7 @@ use engine_core::math::{Mat4, Quat, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, ContactShadowSettings, DirectionalLight, DrawItem, ForwardRenderer, ForwardView,
-    LocalLight, LocalShadowSettings, Reflections, ShadowSettings, Spot,
+    LocalLight, LocalShadowSettings, Reflections, ShadowSettings, Spot, ViewFeatures,
 };
 use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
@@ -280,6 +280,7 @@ impl Bed {
                         environment: Some(&self.environment),
                         reflections,
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();
@@ -423,6 +424,7 @@ impl Bed {
                         environment: Some(&self.environment),
                         reflections,
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

@@ -24,6 +24,7 @@ use engine_dlss::{Dlss, DlssPreset, Streamline, StreamlineDesc};
 use engine_fsr::Fsr;
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::graph::{
     Access, BufferState, ImportedBuffer, RenderGraph, ShaderStages, Texture, TextureDesc,
@@ -194,6 +195,7 @@ impl Bench {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

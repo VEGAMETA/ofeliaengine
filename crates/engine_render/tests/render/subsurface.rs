@@ -18,7 +18,7 @@ use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, LocalLight, Occlusion,
-    ShadowSettings, Temporal,
+    ShadowSettings, Temporal, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialId, MaterialTable, Subsurface, Transmission};
@@ -286,6 +286,7 @@ impl Scene {
                             environment: frame.environment.then_some(&self.environment),
                             reflections: Default::default(),
                             gi: None,
+                            features: ViewFeatures::ALL,
                         },
                     )
                     .unwrap();

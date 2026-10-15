@@ -10,6 +10,7 @@ use engine_core::half;
 use engine_core::math::{Mat4, Quat, Vec2, Vec3, look_at, vulkan_orthographic};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
@@ -375,6 +376,7 @@ fn skinning() {
                 environment: None,
                 reflections: Default::default(),
                 gi: None,
+                features: ViewFeatures::ALL,
             };
             let passes = match scene {
                 None => renderer

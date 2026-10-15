@@ -96,7 +96,7 @@ impl ForwardRenderer {
             });
         let shadow_shaders = meshlet_shaders.filter(|_| shadow_meshlets.is_some());
 
-        let subsurface = self.subsurface_states();
+        let subsurface = self.subsurface_for(view);
         // The scene's instances, read by culling and by the vertex shaders.
         let scene_instances = match source {
             Source::Scene { current, .. } => Some(current),
@@ -160,7 +160,7 @@ impl ForwardRenderer {
         let local = self
             .local_shadows
             .as_ref()
-            .filter(|_| self.local_shadows_on && !capture);
+            .filter(|_| self.local_shadows_on && view.features.local_shadows && !capture);
         let mut local_frame = LocalFrame::default();
         if let Some(state) = local {
             let plan = state.plan.borrow();
@@ -232,10 +232,9 @@ impl ForwardRenderer {
         // Reflections (ADR 0073): with an environment (their last fallback), in perspective
         // views, never in a probe's capture. Their constants (and visible probes) go to the
         // ring before the shading.
-        let reflection_passes = self
-            .reflections
-            .as_ref()
-            .filter(|_| self.reflections_on && !capture && view.reflections.any());
+        let reflection_passes = self.reflections.as_ref().filter(|_| {
+            self.reflections_on && view.features.reflections && !capture && view.reflections.any()
+        });
         let prepared = match (reflection_passes, environment) {
             (Some(r), Some(env)) => r.passes.prepare(
                 ring,
@@ -257,7 +256,13 @@ impl ForwardRenderer {
         let decals = self
             .decals
             .as_deref()
-            .filter(|_| self.decals_on && !capture && ms.is_none() && !view.decals.is_empty())
+            .filter(|_| {
+                self.decals_on
+                    && view.features.decals
+                    && !capture
+                    && ms.is_none()
+                    && !view.decals.is_empty()
+            })
             .and_then(|d| {
                 let size = [depth_desc.width, depth_desc.height];
                 let prepared = d.passes.prepare(ring, view.decals, clip_from_world, size)?;
@@ -269,6 +274,7 @@ impl ForwardRenderer {
         // screen GI in probe captures.
         let gi_view = view.gi.filter(|g| {
             self.gi_on
+                && view.features.global_illumination
                 && ms.is_none()
                 && self.gi.is_some()
                 && match g {
@@ -280,20 +286,20 @@ impl ForwardRenderer {
         // Probe captures draw without it.
         let ao = self
             .ao_settings
-            .filter(|_| !capture)
+            .filter(|_| view.features.ambient_occlusion && !capture)
             .zip(view.camera.view_space())
             .zip(self.ao.as_ref());
         // The sun's contact shadows (ADR 0071) need it too.
         let contact = self
             .contact_settings
-            .filter(|_| !capture)
+            .filter(|_| view.features.contact_shadows && !capture)
             .zip(view.camera.view_space())
             .zip(self.contact.as_ref());
         // As do multisampled targets, subsurface materials (their pass follows the forward
         // pass with the depth tested for equality), reflections (their inputs are written
         // by the shading after it), decals and GI.
         let prepass = ms.is_some()
-            || self.depth_prepass
+            || (self.depth_prepass && view.features.depth_prepass)
             || ao.is_some()
             || subsurface_draws
             || contact.is_some()

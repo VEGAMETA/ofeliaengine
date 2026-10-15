@@ -13,7 +13,7 @@ use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::budget::{BudgetSettings, GpuBudget};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
 };
 use engine_render::graph::{Access, RenderGraph, TextureDesc};
 use engine_render::material::MaterialTable;
@@ -439,6 +439,7 @@ impl Bed {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

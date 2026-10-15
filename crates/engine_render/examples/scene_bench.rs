@@ -90,7 +90,7 @@ use engine_render::dof::{DepthOfField, DofCamera, DofSettings};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, CascadeCache, Decal, DirectionalLight, DrawItem, ForwardRenderer, ForwardView,
-    LocalLight, ShadowSettings, Spot, Temporal, ViewGi,
+    LocalLight, ShadowSettings, Spot, Temporal, ViewFeatures, ViewGi,
 };
 use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
@@ -1661,6 +1661,7 @@ fn main() {
                         ssr: screen_space.as_ref(),
                     },
                     gi: gi_view,
+                    features: ViewFeatures::ALL,
                 };
                 let passes = match (gi_view, &ray_frames) {
                     // With GI (its updates need them) or `--scene-draws`, the draws as the

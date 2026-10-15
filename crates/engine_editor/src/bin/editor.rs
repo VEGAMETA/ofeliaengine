@@ -68,7 +68,7 @@ mod windowed {
         MouseButton, WindowDesc, WindowEvent, WindowEventKind, WindowSystem,
     };
     use engine_render::forward::{
-        Camera, DirectionalLight, ForwardRenderer, ForwardView, ShadowSettings,
+        Camera, DirectionalLight, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
     };
     use engine_render::gpu_scene::{GpuScene, SceneInstance};
     use engine_render::graph::{LoadOp, RenderGraph, TextureDesc};
@@ -1067,6 +1067,7 @@ mod windowed {
                                         environment: None,
                                         reflections: Default::default(),
                                         gi: None,
+                                        features: ViewFeatures::ALL,
                                     },
                                 );
                             }

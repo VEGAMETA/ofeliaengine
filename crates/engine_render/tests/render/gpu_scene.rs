@@ -19,7 +19,7 @@ use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, CascadeCache, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion,
-    ShadowSettings, Temporal,
+    ShadowSettings, Temporal, ViewFeatures,
 };
 use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance, SceneStats};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
@@ -271,6 +271,7 @@ impl Bed {
                 environment: environment.as_ref(),
                 reflections: Default::default(),
                 gi: None,
+                features: ViewFeatures::ALL,
             };
             let (passes, scene) = match draw {
                 Draw::List(draws) => (

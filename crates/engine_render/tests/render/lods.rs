@@ -11,7 +11,7 @@
 
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
@@ -253,6 +253,7 @@ fn the_culling_pass_draws_the_level_the_distance_calls_for() {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

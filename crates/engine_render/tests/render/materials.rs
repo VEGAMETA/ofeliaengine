@@ -12,7 +12,7 @@
 
 use engine_core::math::{Mat4, Quat, Vec3, Vec4, look_at, vulkan_orthographic};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable, TextureRef};
@@ -317,6 +317,7 @@ impl Scene {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

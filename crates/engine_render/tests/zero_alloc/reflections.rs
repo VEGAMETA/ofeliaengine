@@ -16,6 +16,7 @@ use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::graph::{RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable};
@@ -217,6 +218,7 @@ fn steady_state_reflection_frames_do_not_allocate() {
                             ssr: Some(&ssr),
                         },
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

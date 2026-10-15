@@ -386,6 +386,7 @@ mod windowed {
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowMode, WindowSystem};
     use engine_render::forward::{
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+        ViewFeatures,
     };
     use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
     use engine_render::graph::{ImportedTexture, RenderGraph, TextureDesc, TextureState};
@@ -640,6 +641,7 @@ mod windowed {
                     environment: None,
                     reflections: Default::default(),
                     gi: None,
+                    features: ViewFeatures::ALL,
                 };
                 if extract.is_some() {
                     let scene_frame = scene

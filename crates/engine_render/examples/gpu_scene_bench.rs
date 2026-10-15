@@ -24,6 +24,7 @@
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
 use engine_render::graph::{Access, RenderGraph, TextureDesc};
@@ -308,6 +309,7 @@ fn main() {
                             environment: None,
                             reflections: Default::default(),
                             gi: None,
+                            features: ViewFeatures::ALL,
                         };
                         let t0 = Instant::now();
                         let passes = if scene_path {

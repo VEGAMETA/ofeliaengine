@@ -18,7 +18,7 @@ use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
-    ViewGi,
+    ViewFeatures, ViewGi,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
@@ -333,6 +333,7 @@ impl Harness {
                         environment: Some(&*environment),
                         reflections: Default::default(),
                         gi: Some(ViewGi::Screen(&*gi)),
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

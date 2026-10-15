@@ -19,7 +19,7 @@ use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::ao::{AO_BENT_FORMAT, AO_FORMAT, AoQuality, AoSettings};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion, ShadowSettings,
-    Temporal,
+    Temporal, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
@@ -276,6 +276,7 @@ fn a_wall_hides_half_of_the_floor_next_to_it() {
                             environment: None,
                             reflections: Default::default(),
                             gi: None,
+                            features: ViewFeatures::ALL,
                         },
                     )
                     .unwrap();

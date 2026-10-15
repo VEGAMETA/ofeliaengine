@@ -1,4 +1,5 @@
-//! The frame renderer (ADR 0072) under the validation layer: history dropped on a camera
+//! The frame renderer (ADR 0072) under the validation layer: a view's features change only
+//! that view (ADR 0099); history dropped on a camera
 //! cut (no ghost of the previous view), the texture LOD bias the upscaler asks for and the
 //! player's anisotropic filtering are applied, settings changes start the history anew, an unavailable upscaler falls back
 //! to TAAU, and the previous color reaches the scene hook; and every feature and mode fits
@@ -17,7 +18,7 @@ use common::{Bed, camera};
 use engine_core::math::Vec3;
 use engine_frame::{
     Antialiasing, FrameError, InvalidAntialiasing, Msaa, PostAntialiasing, PrepareContext, Quality,
-    Upscale, UpscalerKind, View, ViewKind, ViewSettings,
+    Upscale, UpscalerKind, View, ViewFeatures, ViewKind, ViewSettings,
 };
 use engine_render::ao::AoSettings;
 use engine_render::color_vision::{ColorVision, ColorVisionMode, Deficiency};
@@ -511,6 +512,67 @@ fn antialiasing_is_validated_and_modes_switch() {
 /// building and rendering must fit in it: renderers whose pipelines each held a copy of
 /// the device's function table needed stack frames of up to 372 KB and overflowed it on
 /// the Radeon (core review 2, §3.1).
+/// A view's features (ADR 0099 step 4) change only that view, and a view without one is
+/// drawn as if the renderer had it off: ambient occlusion, contact shadows and the depth
+/// prepass on in the renderer, a view wanting none of them gives the same pixels as a
+/// renderer with them off, and a view wanting them all is unchanged by it in between.
+#[test]
+fn a_views_features_change_only_that_view() {
+    let Some(mut bed) = Bed::new((96, 64), true) else {
+        return;
+    };
+    let grey = bed.solid([0.6, 0.6, 0.6], [0.0; 3]);
+    // A floor with blocks on it: corners for ambient occlusion, the sun's contact shadows.
+    let draws = vec![
+        bed.cube_at(grey, Vec3::new(10.0, 0.2, 10.0), Vec3::new(0.0, -0.1, 0.0)),
+        bed.cube_at(grey, Vec3::splat(1.0), Vec3::new(-0.8, 0.5, 0.0)),
+        bed.cube_at(grey, Vec3::new(0.5, 1.6, 0.5), Vec3::new(0.9, 0.8, -0.4)),
+    ];
+    let eye = camera(Vec3::new(0.5, 2.2, 4.0), Vec3::new(0.0, 0.4, 0.0), false);
+    let features = |features| ViewSettings {
+        antialiasing: Antialiasing::OFF,
+        bloom: false,
+        features,
+        ..ViewSettings::default()
+    };
+    let on = |bed: &mut Bed, on: bool| {
+        let renderer = bed.frame.forward_mut();
+        renderer.set_depth_prepass(on);
+        renderer
+            .set_ambient_occlusion(&bed.device, &bed.bindless, on.then(AoSettings::default))
+            .unwrap();
+        renderer
+            .set_contact_shadows(&bed.device, &bed.bindless, on.then(Default::default))
+            .unwrap();
+    };
+    let mut views: Vec<View> = (0..4).map(|_| View::new(&bed.device, 16)).collect();
+    let render = |bed: &mut Bed, view: &mut View, settings: &ViewSettings| {
+        let (_, pixels) = bed.render(view, settings, &draws, &eye, true, |_| {});
+        pixels.unwrap()
+    };
+    on(&mut bed, true);
+    let all = render(&mut bed, &mut views[0], &features(ViewFeatures::ALL));
+    let none = render(&mut bed, &mut views[1], &features(ViewFeatures::NONE));
+    let all_again = render(&mut bed, &mut views[2], &features(ViewFeatures::ALL));
+    on(&mut bed, false);
+    let renderer_off = render(&mut bed, &mut views[3], &features(ViewFeatures::ALL));
+    let changed = differing(&all, &none);
+    println!("pixels the features change: {changed} of {}", all.len() / 4);
+    assert!(changed > 100, "ambient occlusion and contact shadows show");
+    assert_eq!(
+        differing(&none, &renderer_off),
+        0,
+        "a view without them is the renderer without them"
+    );
+    assert_eq!(
+        differing(&all, &all_again),
+        0,
+        "another view's features do not leak"
+    );
+    let mut views: Vec<&mut View> = views.iter_mut().collect();
+    bed.finish(&mut views);
+}
+
 #[test]
 fn every_feature_fits_a_main_threads_stack() {
     std::thread::Builder::new()

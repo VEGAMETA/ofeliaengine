@@ -20,6 +20,7 @@ use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_fsr::{Fsr, FsrCamera, FsrInput, QualityMode};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::graph::{
     Access, BufferState, ImportedBuffer, RenderGraph, ShaderStages, Texture, TextureDesc,
@@ -188,6 +189,7 @@ impl Bench {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

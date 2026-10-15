@@ -1275,6 +1275,7 @@ impl FrameRenderer {
                 ssr: reflections.as_ref(),
             },
             gi: scene.gi,
+            features: prepared.settings.features,
         };
         let mut passes = match scene.draws {
             SceneDraws::List(draws) => self.forward.add_passes(

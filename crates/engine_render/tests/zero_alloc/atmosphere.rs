@@ -16,6 +16,7 @@ use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::graph::{RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable};
@@ -188,6 +189,7 @@ fn steady_state_atmosphere_frames_do_not_allocate() {
                         environment: Some(&environment),
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

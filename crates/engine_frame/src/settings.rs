@@ -4,6 +4,7 @@ use crate::antialiasing::Antialiasing;
 use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::color_vision::ColorVision;
 use engine_render::dof::DofSettings;
+use engine_render::forward::ViewFeatures;
 use engine_render::grading::ColorGrading;
 use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::post::{OutputEncoding, ToneCurve};
@@ -122,6 +123,13 @@ pub struct ViewSettings {
     /// paced presenter's images; DLSS's, the frame's inputs handed to Streamline
     /// ([`crate::ViewFrame::dlss_generation_input`]).
     pub frame_generation: FrameGeneration,
+    /// The scene renderer's features this view draws with (ADR 0099 step 4; all by
+    /// default): ambient occlusion, contact and local shadows, subsurface scattering,
+    /// reflections, decals, global illumination, the depth prepass. Each runs where the
+    /// forward renderer has it on and the view wants it, so views of one frame (split
+    /// screen, the editor's viewports) can differ; a view without one costs as if it were
+    /// off.
+    pub features: ViewFeatures,
 }
 
 impl Default for ViewSettings {
@@ -148,6 +156,7 @@ impl Default for ViewSettings {
             kind: ViewKind::Gameplay,
             screen_space_reflections: None,
             frame_generation: FrameGeneration::Off,
+            features: ViewFeatures::ALL,
         }
     }
 }

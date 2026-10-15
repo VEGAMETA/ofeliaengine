@@ -15,7 +15,7 @@ use engine_core::half;
 use engine_core::math::{Mat4, Quat, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::forward::{
     Camera, ContactShadowSettings, DirectionalLight, DrawItem, ForwardRenderer, ForwardView,
-    LocalLight, LocalShadowSettings, ShadowSettings, Spot,
+    LocalLight, LocalShadowSettings, ShadowSettings, Spot, ViewFeatures,
 };
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
@@ -267,6 +267,7 @@ impl Bed {
                 environment: None,
                 reflections: Default::default(),
                 gi: None,
+                features: ViewFeatures::ALL,
             };
             let passes = match scene {
                 Some(scene) => {

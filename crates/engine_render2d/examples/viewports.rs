@@ -27,6 +27,7 @@ fn main() {
     use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
     use engine_render::forward::{
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+        ViewFeatures,
     };
     use engine_render::graph::{LoadOp, RenderGraph, TextureDesc};
     use engine_render::material::{MaterialDesc, MaterialTable};
@@ -392,6 +393,7 @@ fn main() {
                                     environment: None,
                                     reflections: Default::default(),
                                     gi: None,
+                                    features: ViewFeatures::ALL,
                                 },
                             );
                             if vp.id == scene {

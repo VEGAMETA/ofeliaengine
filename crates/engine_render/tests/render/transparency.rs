@@ -12,7 +12,7 @@
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, Occlusion, REACTIVE_FORMAT,
-    ShadowSettings, Temporal,
+    ShadowSettings, Temporal, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialTable};
@@ -237,6 +237,7 @@ fn blended_layers_composite_back_to_front() {
                             environment: None,
                             reflections: Default::default(),
                             gi: None,
+                            features: ViewFeatures::ALL,
                         },
                     )
                     .unwrap();
