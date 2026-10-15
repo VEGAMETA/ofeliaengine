@@ -190,6 +190,7 @@ impl Bench {
                         occlusion: None,
                         temporal: (which != Which::None).then_some(&*temporal),
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

@@ -266,6 +266,7 @@ impl Bed {
                 occlusion,
                 temporal,
                 shadow_cache: shadow_cache.as_ref(),
+                virtual_shadows: None,
                 lights: &[],
                 decals: &[],
                 environment: environment.as_ref(),

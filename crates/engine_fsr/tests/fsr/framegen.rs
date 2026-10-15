@@ -261,6 +261,7 @@ fn frame(
                     occlusion: None,
                     temporal: Some(temporal),
                     shadow_cache: None,
+                    virtual_shadows: None,
                     lights: &[],
                     decals: &[],
                     environment: None,

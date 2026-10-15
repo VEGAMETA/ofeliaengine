@@ -93,7 +93,7 @@ impl Camera {
         VsmView {
             world_from_clip: self.clip_from_world(size).inverse(),
             eye: self.eye,
-            fov_y: FOV_Y,
+            footprint: 2.0 * (FOV_Y * 0.5).tan() / size[1] as f32,
             light_direction,
             depth_range: [-100.0, 100.0],
         }
@@ -232,7 +232,7 @@ fn marks(
     let m = view.world_from_clip.to_cols_array().map(f64::from);
     let light = VirtualShadows::light_from_world(view.light_direction);
     let rows = [0, 1].map(|i| light.row(i).to_array().map(f64::from));
-    let footprint = 2.0 * (view.fov_y * 0.5).tan() / size[1] as f32;
+    let footprint = view.footprint;
     let first_texel = settings.first_extent / (PAGE_TEXELS * TABLE_PAGES) as f32;
     let bias = f64::from((footprint / first_texel).log2()) + f64::from(settings.level_bias);
     let eye = view.eye.to_array().map(f64::from);

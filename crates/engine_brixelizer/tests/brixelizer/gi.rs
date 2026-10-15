@@ -328,6 +328,7 @@ impl Harness {
                         occlusion: None,
                         temporal: motion_vectors.then_some(&*temporal),
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: Some(&*environment),

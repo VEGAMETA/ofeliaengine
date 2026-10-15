@@ -171,9 +171,9 @@ pub struct VsmView {
     pub world_from_clip: Mat4,
     /// The camera's position.
     pub eye: Vec3,
-    /// Its vertical field of view, radians: with the depth buffer's height, a pixel's
-    /// footprint.
-    pub fov_y: f32,
+    /// A pixel's footprint a metre from the camera, metres (for a perspective projection
+    /// of vertical field of view `fov` over `height` pixels: `2 tan(fov / 2) / height`).
+    pub footprint: f32,
     /// The direction the sun's light travels.
     pub light_direction: Vec3,
     /// The scene's extent along the light, metres (the least and greatest
@@ -194,6 +194,16 @@ pub fn depth_range(extent: [f32; 2]) -> [f32; 2] {
 /// What [`depth_range`] rounds to, metres.
 pub const DEPTH_STEP: f32 = 16.0;
 
+/// A frame of the pages prepared before its passes ([`VirtualShadows::prepare`]).
+#[derive(Debug, Clone, Copy)]
+pub struct VsmPrepared {
+    /// The frame's data in the upload ring (`VsmFrame` in `vsm_common.slang`).
+    pub frame: vk::DeviceAddress,
+    depth_size: [u32; 2],
+    /// The tables still hold nothing.
+    reset: bool,
+}
+
 /// A level's window: the pages its table holds this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct VsmLevel {
@@ -206,7 +216,7 @@ pub struct VsmLevel {
 
 /// The pages in one frame's graph ([`VirtualShadows::add_passes`]): for the passes that
 /// draw into them and read them.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VsmFrame {
     /// The frame's data (light space, levels) in the upload ring (`Frame` in
     /// `vsm.slang`).
@@ -534,8 +544,9 @@ impl VirtualShadows {
     }
 
     /// Declares this frame's bookkeeping (see the module documentation) over `depth`, the
-    /// view's depth after its prepass (`depth_size` pixels; single-sampled). `None` when
-    /// `ring` is full (the pages then stay as they were).
+    /// view's depth after its prepass (`depth_size` pixels; single-sampled): [`Self::prepare`]
+    /// and [`Self::add_prepared`] at once. `None` when `ring` is full (the pages then stay as
+    /// they were).
     pub fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -545,7 +556,21 @@ impl VirtualShadows {
         depth_size: [u32; 2],
         view: &VsmView,
     ) -> Option<VsmFrame> {
-        engine_profiler::zone!("render::VirtualShadows::add_passes");
+        let prepared = self.prepare(ring, depth_size, view)?;
+        Some(self.add_prepared(fg, bindless, prepared, depth))
+    }
+
+    /// This frame's data, before its passes are declared ([`Self::add_prepared`]): the
+    /// windows moved with the camera at `view`, and the frame's data written to `ring`,
+    /// whose address the passes that draw into the pages and read them take before the
+    /// depth they are marked from exists. `None` when `ring` is full (nothing changes).
+    pub fn prepare(
+        &self,
+        ring: &mut UploadRing,
+        depth_size: [u32; 2],
+        view: &VsmView,
+    ) -> Option<VsmPrepared> {
+        engine_profiler::zone!("render::VirtualShadows::prepare");
         let settings = self.settings;
         let mut state = self.state.borrow_mut();
         let light_from_world = Self::light_from_world(view.light_direction);
@@ -570,7 +595,7 @@ impl VirtualShadows {
         }
         let number = state.frame.wrapping_add(1);
         // A pixel's footprint at a metre, over the first level's texel.
-        let footprint = 2.0 * (view.fov_y * 0.5).tan() / depth_size[1].max(1) as f32;
+        let footprint = view.footprint.max(1e-9);
         let first_texel = settings.first_extent / VIRTUAL_TEXELS as f32;
         let to_light = light_from_world * view.world_from_clip;
         let to_view = Mat4::from_translation(-view.eye) * view.world_from_clip;
@@ -600,8 +625,29 @@ impl VirtualShadows {
             state.first_pages[k] = Some(IVec2::from(level.first_page));
         }
         state.light = Some(light_key);
-        drop(state);
+        Some(VsmPrepared {
+            frame,
+            depth_size,
+            reset,
+        })
+    }
 
+    /// Declares the bookkeeping of the frame [`Self::prepare`] made over `depth`, the
+    /// view's depth after its prepass (single-sampled, the size it was prepared with).
+    pub fn add_prepared<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        prepared: VsmPrepared,
+        depth: Texture,
+    ) -> VsmFrame {
+        engine_profiler::zone!("render::VirtualShadows::add_prepared");
+        let settings = self.settings;
+        let VsmPrepared {
+            frame,
+            depth_size,
+            reset,
+        } = prepared;
         let pool = self
             .pool
             .import_storage(fg, "vsm pool", ShaderStages::COMPUTE);
@@ -683,7 +729,7 @@ impl VirtualShadows {
                 rec.barrier_for_indirect();
                 rec.dispatch_indirect(&self.clear, args, CLEAR_ARGS, &push);
             });
-        Some(VsmFrame {
+        VsmFrame {
             frame,
             pool,
             table,
@@ -691,7 +737,7 @@ impl VirtualShadows {
             requests,
             lists,
             hierarchy,
-        })
+        }
     }
 
     /// Frees the pool and the tables.

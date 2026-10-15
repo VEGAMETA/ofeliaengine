@@ -33,10 +33,6 @@ static const uint FRAME_FLAGS = VSM_NEEDED | VSM_DIRTY | VSM_FAILED;
 static const uint OWNED = 1u << 31;
 // The far plane, as the depth's bits (1.0).
 static const uint FAR_DEPTH = 0x3F800000u;
-// Cells of a level's hierarchy of dirty pages: its 64 × 64 pages, then each coarser
-// level of it to 1 × 1 (`HIERARCHY_CELLS` in vsm.rs).
-static const uint HIERARCHY_CELLS = 5461;
-static const uint HIERARCHY_MIPS = 7;
 
 struct VsmPush
 {
@@ -79,7 +75,7 @@ void vsmBeginFrame(uint3 id : SV_DispatchThreadID)
         push.lists[2] = 0;
     }
     uint entries = f.levels * VSM_ENTRIES;
-    for (uint cell = e; cell < f.levels * HIERARCHY_CELLS; cell += entries)
+    for (uint cell = e; cell < f.levels * VSM_HIERARCHY_CELLS; cell += entries)
         push.hierarchy[cell] = 0;
     if (e >= entries)
         return;
@@ -250,13 +246,6 @@ void vsmAllocate(uint3 id : SV_DispatchThreadID)
     push.meta[p] = uint2(OWNED | e, f.frame);
 }
 
-// The first cell of mip `m` of a level's hierarchy of dirty pages.
-uint hierarchy_mip(uint m)
-{
-    // 4096 + 1024 + 256 + 64 + 16 + 4 cells before mip 6.
-    return (4096u - (4096u >> (2 * m))) * 4u / 3u;
-}
-
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void vsmCollectDirty(uint3 id : SV_DispatchThreadID)
@@ -276,12 +265,12 @@ void vsmCollectDirty(uint3 id : SV_DispatchThreadID)
     uint level = e / VSM_ENTRIES;
     uint local = e % VSM_ENTRIES;
     uint2 at = (uint2(local % VSM_TABLE, local / VSM_TABLE) - uint2(f.level[level].first_page)) & (VSM_TABLE - 1);
-    uint* cells = push.hierarchy + level * HIERARCHY_CELLS;
+    uint* cells = push.hierarchy + level * VSM_HIERARCHY_CELLS;
     cells[at.y * VSM_TABLE + at.x] = 1;
-    for (uint m = 1; m < HIERARCHY_MIPS; m++)
+    for (uint m = 1; m < VSM_HIERARCHY_MIPS; m++)
     {
         uint side = VSM_TABLE >> m;
-        InterlockedOr(cells[hierarchy_mip(m) + (at.y >> m) * side + (at.x >> m)], 1u);
+        InterlockedOr(cells[vsm_hierarchy_mip(m) + (at.y >> m) * side + (at.x >> m)], 1u);
     }
 }
 

@@ -499,6 +499,7 @@ fn the_atmosphere_and_fog_match_the_cpu() {
                         occlusion: None,
                         temporal: None,
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: Some(environment),

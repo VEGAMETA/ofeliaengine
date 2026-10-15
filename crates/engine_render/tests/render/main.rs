@@ -40,3 +40,4 @@ mod tonemap;
 mod transparency;
 mod upload;
 mod vsm;
+mod vsm_draw;

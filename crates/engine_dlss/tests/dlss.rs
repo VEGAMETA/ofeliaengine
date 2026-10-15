@@ -280,6 +280,7 @@ impl Gpu {
                         occlusion: None,
                         temporal,
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

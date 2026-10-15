@@ -519,6 +519,7 @@ fn main() {
                         occlusion: None,
                         temporal: None,
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

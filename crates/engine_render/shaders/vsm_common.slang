@@ -16,6 +16,19 @@ static const uint VSM_MAX_LEVELS = 16;
 // within it are backed too (`MARK_MARGIN_TEXELS` in vsm.rs).
 static const float VSM_MARGIN = 4.0;
 
+// Cells of a level's hierarchy of dirty pages: its 64 × 64 pages by their place in the
+// window, then each coarser level of them (2 × 2 cells into one) down to 1 × 1, a `uint`
+// each, 1 where a dirty page is under it (`HIERARCHY_CELLS` in vsm.rs).
+static const uint VSM_HIERARCHY_CELLS = 5461;
+static const uint VSM_HIERARCHY_MIPS = 7;
+
+// The first cell of mip `m` of a level's hierarchy.
+uint vsm_hierarchy_mip(uint m)
+{
+    // 4096 + 1024 + 256 + 64 + 16 + 4 cells before mip 6.
+    return (4096u - (4096u >> (2 * m))) * 4u / 3u;
+}
+
 // Page table entries: these flags over the physical page's index.
 static const uint VSM_ALLOCATED = 1u << 31;
 static const uint VSM_NEEDED = 1u << 30;

@@ -1267,6 +1267,7 @@ impl FrameRenderer {
             occlusion,
             temporal,
             shadow_cache,
+            virtual_shadows: None,
             lights: scene.lights,
             decals: scene.decals,
             environment: scene.environment,

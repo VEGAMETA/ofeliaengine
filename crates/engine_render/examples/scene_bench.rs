@@ -1653,6 +1653,7 @@ fn main() {
                     occlusion: None,
                     temporal: temporal.as_ref(),
                     shadow_cache: shadow_cache.as_ref(),
+                    virtual_shadows: None,
                     lights: &lights,
                     decals: &decals,
                     environment: environment.as_ref(),

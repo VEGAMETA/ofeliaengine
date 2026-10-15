@@ -184,6 +184,7 @@ impl Bench {
                         occlusion: None,
                         temporal: (upscaler != Upscaler::None).then_some(&*temporal),
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

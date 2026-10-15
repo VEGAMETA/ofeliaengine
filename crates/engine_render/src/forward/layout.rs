@@ -160,6 +160,21 @@ impl ForwardRenderer {
         } else {
             None
         };
+        // The virtual shadow pages' lists (ADR 0093 step 3b).
+        let vsm = if setup.vsm {
+            vsm_layout(
+                ring,
+                geometry,
+                batch_count as usize,
+                instance_count,
+                keys.iter().map(|&(_, k)| {
+                    let run = &runs[k as usize];
+                    (run.order as usize, run, draws[run.first as usize].mesh)
+                }),
+            )
+        } else {
+            None
+        };
         // Draw commands, in state order: the forward pass's for each phase, then the shadow
         // pass's for each cascade, with no instances until culling counts them (each list's
         // slots follow the previous list's).
@@ -217,6 +232,7 @@ impl ForwardRenderer {
             max,
             subsurface_draws,
             meshlets,
+            vsm,
         })
     }
 
@@ -369,6 +385,19 @@ impl ForwardRenderer {
         } else {
             None
         };
+        // The virtual shadow pages' lists (ADR 0093 step 3b).
+        let vsm = if setup.vsm {
+            vsm_layout(
+                ring,
+                geometry,
+                batches.len(),
+                scene.slot_count(),
+                runs.iter()
+                    .map(|run| (run.first as usize, run, batches[run.first as usize].mesh)),
+            )
+        } else {
+            None
+        };
         let commands = {
             let per_list = command_count as usize;
             let (out, staged) =
@@ -433,6 +462,7 @@ impl ForwardRenderer {
             max,
             subsurface_draws,
             meshlets,
+            vsm,
         })
     }
 }
@@ -574,6 +604,107 @@ fn meshlet_layout<'r>(
     })
 }
 
+/// Room in the virtual shadow pages' lists (ADR 0093 step 3b) for each caster: an instance
+/// is drawn into a few of their levels at once.
+const VSM_LEVELS_PER_INSTANCE: u64 = 4;
+/// The pages' draws at most: 2^19 (10 MB of commands, 2 MB of slots).
+const MAX_VSM_DRAWS: u64 = 1 << 19;
+/// Levels of the pages (`MAX_LEVELS` in vsm.rs): an instance takes the meshlet path for
+/// each at most once.
+const VSM_LEVELS: u32 = crate::vsm::MAX_LEVELS;
+
+/// Lays out the virtual shadow pages' lists (ADR 0093 step 3b) as a phase's meshlet lists
+/// (`runs` and `len` as for [`meshlet_layout`]): their own batch table (every batch's
+/// state, and its levels' meshlets where it may take the meshlet path) and per pipeline
+/// state room for the meshlets of its instances that may take it and a whole draw of the
+/// others, [`VSM_LEVELS_PER_INSTANCE`] levels each, scaled down to [`MAX_VSM_DRAWS`].
+/// Blended runs cast no shadows. `None` when nothing casts, or the ring is full.
+fn vsm_layout<'r>(
+    ring: &mut UploadRing,
+    geometry: &GeometryFrame<'_>,
+    len: usize,
+    instances: u32,
+    runs: impl Iterator<Item = (usize, &'r Run, MeshId)> + Clone,
+) -> Option<MeshletLayout> {
+    let meshlets = |run: &Run, mesh: MeshId| {
+        let info = geometry.mesh(mesh)?;
+        let levels = run.lods as usize;
+        (run.ty == crate::material::MaterialTypeId::GLTF
+            && info.lods[..levels].iter().any(|l| l.meshlet_count > 0))
+        .then_some(info)
+    };
+    let mut wanted = [0u64; STATES];
+    for (_, run, mesh) in runs.clone() {
+        if run.state & BLENDED != 0 {
+            continue;
+        }
+        let each = meshlets(run, mesh).map_or(1, |info| {
+            info.lods[..run.lods as usize]
+                .iter()
+                .map(|l| l.meshlet_count)
+                .max()
+                .unwrap_or(1)
+        });
+        wanted[run.state] += u64::from(run.len) * u64::from(each) * VSM_LEVELS_PER_INSTANCE;
+    }
+    let total: u64 = wanted.iter().sum();
+    if total == 0 {
+        return None;
+    }
+    let mut caps = [0u32; STATES];
+    let mut offsets = [0u32; STATES];
+    let mut draws = 0u32;
+    for state in 0..STATES {
+        caps[state] = if total > MAX_VSM_DRAWS {
+            (wanted[state] * MAX_VSM_DRAWS / total) as u32
+        } else {
+            wanted[state] as u32
+        };
+        offsets[state] = draws;
+        draws += caps[state];
+    }
+    let table = {
+        let (out, staged) = ring.alloc::<BatchMeshletData>(len.max(1))?;
+        for out in out.iter_mut() {
+            out.write(BatchMeshletData::default());
+        }
+        for (index, run, mesh) in runs {
+            let mut entry = BatchMeshletData {
+                state: run.state as u32,
+                cone: u32::from(run.state & DOUBLE_SIDED == 0),
+                ..BatchMeshletData::default()
+            };
+            if let Some(info) = meshlets(run, mesh) {
+                for (k, level) in info.lods[..run.lods as usize].iter().enumerate() {
+                    // The pool's meshlets are 8 words, 32-byte aligned.
+                    entry.first[k] = level.first_meshlet / 8;
+                    entry.count[k] = level.meshlet_count;
+                }
+            }
+            if let Some(slot) = out.get_mut(index) {
+                slot.write(entry);
+            }
+        }
+        staged.address
+    };
+    // Each instance may take the meshlet path once per level: a chunk more each time
+    // than its draws fill.
+    let work = instances * VSM_LEVELS + draws.div_ceil(MESHLET_CHUNK);
+    let mut header = [0u32; (MESHLET_HEADER_BYTES / 4) as usize];
+    header[64..96].copy_from_slice(&offsets);
+    header[96..128].copy_from_slice(&caps);
+    header[128..132].copy_from_slice(&[0, 1, 1, work]);
+    let header = ring.stage(&header)?;
+    Some(MeshletLayout {
+        table,
+        header,
+        offsets,
+        caps,
+        draws,
+        work,
+    })
+}
+
 /// Where a frame's instance changes come from, for the local shadows' cache.
 #[derive(Clone, Copy)]
 pub(super) enum Changes<'a, 'g> {
@@ -618,6 +749,9 @@ pub(super) struct Layout {
     pub(super) subsurface_draws: bool,
     /// The meshlet lists, when the view draws by meshlet (ADR 0085).
     pub(super) meshlets: Option<MeshletLayout>,
+    /// The virtual shadow pages' lists, when the view has them (ADR 0093 step 3b): their
+    /// own batch table in `table`.
+    pub(super) vsm: Option<MeshletLayout>,
 }
 
 /// Whether a transform mirrors (negative determinant of its linear part).

@@ -345,6 +345,7 @@ fn run(meshlets: bool) {
                             occlusion: None,
                             temporal: None,
                             shadow_cache: Some(cache),
+                            virtual_shadows: None,
                             lights: &[],
                             decals: &[],
                             environment: None,
