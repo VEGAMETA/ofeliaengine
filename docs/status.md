@@ -626,7 +626,11 @@ grown, divide and conquer); the old labels stay in parentheses.
        larger than the screen; NVIDIA copied it through GDI and showed 1 frame in 25);
      - borderless stating "disallowed" is the default: NVIDIA flips it, 7.9 against 9.3 ms
        to the screen without vsync, the same with vsync.
-   - Step 2: the crate owns the wiring; `flight` first.
+   - ~~Step 2: the crate owns the wiring~~ (done 2026-10-15, ADR 0099):
+     - `engine_app::Player` and the `Game` hooks; `flight` runs on it;
+     - latency control on by default: RTX 7.90 → 5.66 ms, Radeon 69.3 → 52.3 ms to the
+       screen;
+     - no allocation in a frame.
    - Step 3: lights, skinned meshes and probes as components.
    - Step 4: features per view; the benches and the test bed on the crate.
 8b (was 6g). **Video playback** (owner, 2026-10-10: after the player crate; the engine plays
@@ -840,7 +844,7 @@ grown, divide and conquer); the old labels stay in parentheses.
 ## 7. First task of a new coordinator session: a fresh-eyes technical review
 
 The second review was done on 2026-10-10: `docs/research/core-audit-2.md`. Its harness
-`engine_runtime/examples/flight.rs` measures a game's frame end to end; rerun it in later
+`engine_app/examples/flight.rs` measures a game's frame end to end; rerun it in later
 reviews to compare.
 
 **Owner's instruction (2026-10-02): do this review yourself, and start no agents** (no

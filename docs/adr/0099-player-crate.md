@@ -1,6 +1,6 @@
 # 0099. The player crate (`engine_app`) and its window modes
 
-- Status: Accepted (step 1 done)
+- Status: Accepted (steps 1 and 2 done)
 - Date: 2026-10-15
 - Related:
   - [ADR 0023](0023-latency.md): the latency providers;
@@ -95,7 +95,46 @@ A crate `engine_app`, built in four steps, each its own pull request.
     other modes.
   - Its report says which mode it got, and why the monitor was refused.
 
-### Step 2: the crate owns the player's wiring
+### Step 2 (done 2026-10-15): the crate owns the player's wiring
+
+As planned, with these differences (as built):
+- **No `start` hook.** The game sets its world up between `Player::new` and the first
+  frame, through `Player::setup` (the device, the pools, the skinning, the world, what the
+  pack held).
+- **More hooks:**
+  - `event` (each window event);
+  - `animate` (after the runtime, with the frame's interpolated transforms: skinned
+    poses);
+  - the UI as canvases the player keeps (`Player::ui_mut`), drawn on every presented
+    frame.
+- **Lights are still given by the game** (`Player::lights_mut`, `sun_mut`), until step 3.
+- **Crash reports stay the game's `main`'s.** Their monitor process runs the same
+  executable, which must ask first thing whether it is the monitor.
+- **Reflex's swapchain** (`VK_NV_low_latency2`) only when latency control is on.
+- **Input is the game's,** from the window's events. The player reads them after the
+  latency wait and before the ticks.
+
+Measured (ref-1, release, `flight` on Sponza's pack, 1,800 frames, alternated with the
+previous binary):
+
+- **Latency control on by default** (PresentMon, from the frame's start to its scan-out,
+  median):
+  - RTX 4060 Ti (Reflex): 7.90 → 5.66 ms;
+  - Radeon iGPU across adapters (Anti-Lag 2): 69.3 → 52.3 ms;
+  - both at the same frame rate.
+- **What the player costs, latency control off.**
+  - **RTX, CPU frame without the slot's wait:** 732 µs before, 742 µs on the player, 760
+    µs with the process set-up.
+  - MMCSS "Games" is the set-up's cost: 10–17 µs on a quiet machine.
+  - **With 8 busy processes on 16 threads:** 926, 928 and 928 µs. MMCSS gains nothing
+    measurable there either.
+  - **24 busy processes:** single runs are too noisy to tell.
+  - **Radeon, CPU frame:** 1,363 → 1,276 µs. The frame interval was the same, bound by
+    the GPU.
+  - MMCSS stays, as CLAUDE.md §5 sets it, until a heavier load study says otherwise.
+- **No allocation in a steady-state frame** on either GPU: `the_players_steady_state_frames_do_not_allocate`.
+  - The device's warm-up thread does allocate, for seconds after start-up, as it compiles
+    shading variants. It is not the frame's work, so the test runs without it.
 
 - **What it owns**, in one `Player`:
   1. **The process** (CLAUDE.md §5): power throttling off, the frame thread on P-cores
