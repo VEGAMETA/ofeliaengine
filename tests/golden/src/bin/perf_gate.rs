@@ -47,6 +47,7 @@ use engine_golden::scene::{
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::grading::ColorGrading;
 use engine_render::reflections::SsrSettings;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -143,6 +144,21 @@ fn shots() -> Vec<Shot> {
             fog: Some(HeightFog::default()),
             ..Shot::new(
                 "sponza_atmosphere",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
+        // Color grading (ADR 0094): the tone mapper's graded entry point, its LUT built in
+        // the first frame.
+        Shot {
+            size: [1920, 1080],
+            grading: ColorGrading {
+                white_balance: [0.35, -0.05],
+                contrast: 1.2,
+                saturation: 0.9,
+                ..ColorGrading::default()
+            },
+            ..Shot::new(
+                "sponza_graded",
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },

@@ -54,6 +54,7 @@ pub mod forward;
 pub mod fsr1;
 pub mod gi;
 pub mod gpu_scene;
+pub mod grading;
 pub mod graph;
 pub mod hiz;
 pub mod lights;

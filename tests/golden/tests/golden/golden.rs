@@ -18,6 +18,7 @@ use engine_golden::scene::{
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::forward::{DirectionalLight, LocalLight, Spot};
+use engine_render::grading::ColorGrading;
 use engine_render::reflections::SsrSettings;
 use std::path::PathBuf;
 
@@ -320,6 +321,28 @@ fn sponza() {
         "sponza",
         Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
     ));
+}
+
+/// Sponza graded (ADR 0094): a warm white balance, lifted cool shadows, warm highlights,
+/// more contrast and vibrance, less saturation: the grading and the curve in one LUT.
+#[test]
+fn sponza_graded() {
+    check(&Shot {
+        grading: ColorGrading {
+            white_balance: [0.35, -0.05],
+            shadows: [0.95, 1.0, 1.15],
+            highlights: [1.1, 1.05, 0.95],
+            slope: [1.02, 1.0, 0.98],
+            contrast: 1.2,
+            vibrance: 1.3,
+            saturation: 0.9,
+            ..ColorGrading::default()
+        },
+        ..Shot::new(
+            "sponza_graded",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
 }
 
 /// Sponza's curtains as cloth (ADR 0092): material files with the curtains' own textures

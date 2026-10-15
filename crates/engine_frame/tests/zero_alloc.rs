@@ -1,7 +1,8 @@
 //! CLAUDE.md §5: zero heap allocations per frame in steady state, for a whole frame
 //! through the frame renderer (ADR 0072): the pools' frames, `prepare`, `add_view` (scene
 //! passes, TAAU or FSR, bloom, automatic exposure, tone mapping, the previous color) and
-//! the graph's execution. FSR's own allocations happen in C++ and are not counted. One
+//! the graph's execution, every path again with an animated color grading (its LUT built
+//! every frame, ADR 0094). FSR's own allocations happen in C++ and are not counted. One
 //! test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -13,6 +14,7 @@ use engine_core::math::Vec3;
 use engine_frame::{
     Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, Upscale, View, ViewSettings,
 };
+use engine_render::grading::ColorGrading;
 use engine_render::postfx::ExposureSettings;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -55,8 +57,9 @@ fn steady_state_frames_do_not_allocate() {
         bed.cube_at(grey, Vec3::new(10.0, 0.2, 10.0), Vec3::new(0.0, -0.1, 0.0)),
         bed.cube_at(glow, Vec3::splat(1.0), Vec3::new(0.0, 0.5, 0.0)),
     ];
-    // Every kind of path (ADR 0075): spatial, temporal, MSAA, filters after tone mapping.
-    for (antialiasing, quality) in [
+    // Every kind of path (ADR 0075): spatial, temporal, MSAA, filters after tone mapping;
+    // plain, then graded.
+    let paths = [
         (Antialiasing::OFF, Quality::Quality),
         (Antialiasing::TAAU, Quality::Quality),
         (Antialiasing::FSR, Quality::Quality),
@@ -77,17 +80,32 @@ fn steady_state_frames_do_not_allocate() {
         ),
         (Antialiasing::SMAA_4X, Quality::Native),
         (Antialiasing::TAAU.with_samples(Msaa::X2), Quality::Quality),
-    ] {
-        let settings = ViewSettings {
-            antialiasing,
-            quality,
-            exposure: Exposure::Auto(ExposureSettings::default()),
-            previous_color: true,
-            occlusion_culling: true,
-            ..ViewSettings::default()
-        };
+    ];
+    for (graded, (antialiasing, quality)) in [false, true]
+        .into_iter()
+        .flat_map(|graded| paths.map(|path| (graded, path)))
+    {
         let mut view = View::new(&bed.device, 16);
         let frame = |bed: &mut Bed, view: &mut View, k: u32| {
+            let grading = if graded {
+                // A warmth that changes every frame: the LUT is built in each.
+                ColorGrading {
+                    white_balance: [0.3 * (0.1 * k as f32).sin(), 0.0],
+                    contrast: 1.1,
+                    ..ColorGrading::default()
+                }
+            } else {
+                ColorGrading::default()
+            };
+            let settings = ViewSettings {
+                antialiasing,
+                quality,
+                exposure: Exposure::Auto(ExposureSettings::default()),
+                previous_color: true,
+                occlusion_culling: true,
+                grading,
+                ..ViewSettings::default()
+            };
             // A slowly moving camera: motion vectors and the history in use.
             let eye = Vec3::new(0.01 * k as f32, 2.0, 5.0);
             bed.render(
@@ -110,11 +128,9 @@ fn steady_state_frames_do_not_allocate() {
             frame(&mut bed, &mut view, k);
         }
         let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
-        println!(
-            "{}: 100 frames, {allocations} heap allocations",
-            antialiasing
-        );
-        assert_eq!(allocations, 0, "{}", antialiasing);
+        let graded = if graded { ", graded" } else { "" };
+        println!("{antialiasing}{graded}: 100 frames, {allocations} heap allocations");
+        assert_eq!(allocations, 0, "{antialiasing}{graded}");
         // SAFETY: the bed's device is idle after `render`.
         unsafe { view.destroy(&mut bed.allocator, &bed.bindless) };
     }

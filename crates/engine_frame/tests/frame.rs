@@ -21,6 +21,7 @@ use engine_frame::{
 };
 use engine_render::ao::AoSettings;
 use engine_render::forward::LocalShadowSettings;
+use engine_render::grading::ColorGrading;
 use engine_render::material::{MaterialDesc, TextureRef};
 use engine_render::reflections::SsrSettings;
 use engine_render::subsurface::SubsurfaceProfile;
@@ -288,7 +289,8 @@ fn the_previous_color_reaches_the_hook() {
 
 /// Invalid combinations (ADR 0075) are refused by `check` and `prepare` with the same
 /// error, and the view keeps working with valid ones; switching between MSAA, filters
-/// and spatial or temporal modes frame to frame renders every time.
+/// and spatial or temporal modes frame to frame renders every time, each mode once plain
+/// and once graded (ADR 0094: the grading switched on and off from frame to frame).
 #[test]
 fn antialiasing_is_validated_and_modes_switch() {
     let Some(mut bed) = Bed::new((96, 64), true) else {
@@ -370,11 +372,22 @@ fn antialiasing_is_validated_and_modes_switch() {
         ),
     ];
     let eye = Vec3::new(1.5, 1.5, 3.0);
-    for (antialiasing, quality) in modes.into_iter().chain(modes) {
+    for (i, (antialiasing, quality)) in modes.into_iter().chain(modes).enumerate() {
+        let graded = (i % modes.len() + i / modes.len()) % 2 == 1;
+        let grading = if graded {
+            ColorGrading {
+                white_balance: [0.3, 0.0],
+                contrast: 1.2,
+                ..ColorGrading::default()
+            }
+        } else {
+            ColorGrading::default()
+        };
         let settings = ViewSettings {
             antialiasing,
             quality,
             bloom: false,
+            grading,
             ..ViewSettings::default()
         };
         if bed.frame.check(&settings, bed.size).is_err() {
@@ -393,7 +406,7 @@ fn antialiasing_is_validated_and_modes_switch() {
         let lit = pixels.chunks(4).filter(|p| p[0] > 60).count();
         assert!(
             lit > 100,
-            "{antialiasing}: the cube is missing ({lit} pixels)"
+            "{antialiasing} (graded: {graded}): the cube is missing ({lit} pixels)"
         );
     }
     bed.finish(&mut [&mut view]);

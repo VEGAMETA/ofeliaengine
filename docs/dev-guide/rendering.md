@@ -1437,6 +1437,60 @@ exposure.reset();
   4060 Ti. On a Radeon iGPU they are 1.1 ms, 0.28 ms and 0.99 ms: consider fewer bloom
   levels there.
 
+### Color grading (ADR 0094)
+
+Grading sets a view's look with a colorist's standard controls. It changes the scene's
+light before the tone curve: `ViewSettings::grading` with the frame renderer.
+
+```rust
+use engine_render::grading::ColorGrading;
+
+// An evening: warmer, cooler shadows, warmer highlights, a little more contrast.
+settings.grading = ColorGrading {
+    white_balance: [0.35, -0.05], // temperature (−1 cooler … 1 warmer), tint (−1 green … 1 magenta)
+    shadows: [0.95, 1.0, 1.15],
+    highlights: [1.1, 1.05, 0.95],
+    contrast: 1.2,
+    vibrance: 1.3,
+    saturation: 0.9,
+    ..ColorGrading::default()
+};
+```
+
+- **The controls**, in the order they apply:
+  1. `white_balance` (temperature and tint) and `channel_mixer` (each output channel as
+     weights of the input's);
+  2. `shadows`, `midtones`, `highlights`: color multipliers. `tonal_ranges` sets where
+     the shadows fade out and the highlights fade in (DaVinci Resolve's defaults);
+  3. the ASC CDL as colorists know it: `slope`, `offset`, `power`, in ACEScct (a log
+     encoding, so they act on stops as Resolve's do), then `contrast` around mid-grey;
+  4. `vibrance` (more saturation for dull colors, less for vivid ones) and `saturation`.
+
+  `ColorGrading::default()` changes nothing. `ColorGrading::apply` grades a color on the
+  CPU, for tools and tests.
+- **How it works:**
+  - The grading and the tone curve become one LUT of 48³ texels (864 KiB per view).
+  - It is built on the GPU in the frames where the grading, the curve or the output's
+    peak change.
+  - The tone mapper reads it once per pixel in place of its curve. The result is within
+    one 8-bit step of the grading and the curve evaluated exactly.
+  - With your own passes, make a `GradingLut`, then each frame pass what its
+    `add_passes(&mut fg, &mut ring, &bindless, &grading, curve, peak)` returns as
+    `Composite::grading`, with the same `curve` and `peak`.
+- **Animating it** (damage, time of day, a flashback) is fine. Each frame that changes it
+  rebuilds the LUT with one dispatch, with no allocation.
+- **HDR:** the grading works on the scene's light before the curve, so one grading serves
+  SDR and HDR screens.
+- **What it costs** at 1080p (Sponza, bloom and exposure on): nothing without grading.
+  With it, the tone map pass takes:
+  - 44 µs instead of 29–31 µs on an RTX 4060 Ti;
+  - 1.22 ms instead of 1.12 ms on a Radeon iGPU;
+  - whatever is graded. With `ToneCurve::PbrNeutral`, whose curve stays in the shader:
+    44 µs and 1.34 ms.
+
+  Compare: `scene_bench -- <scene> --post` and `--grading`.
+- **Not yet:** LUTs made in other tools (`.cube`), hue rotation, curves.
+
 ## 12. Transparent surfaces
 
 Materials with `AlphaMode::Blend` are drawn by a transparent pass after the opaque

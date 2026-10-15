@@ -3,6 +3,7 @@
 use crate::antialiasing::Antialiasing;
 use crate::settings::ViewSettings;
 use engine_render::forward::{CascadeCache, Occlusion, Temporal};
+use engine_render::grading::GradingLut;
 use engine_render::graph::TextureState;
 use engine_render::postfx::AutoExposure;
 use engine_render::reflections::ScreenSpaceReflections;
@@ -159,6 +160,7 @@ pub(crate) enum Retired {
     Occlusion(Occlusion),
     ShadowCache(CascadeCache),
     Exposure(AutoExposure),
+    Grading(GradingLut),
     History(HistoryImage),
     Reflections(ScreenSpaceReflections),
     #[cfg(feature = "fsr")]
@@ -186,6 +188,9 @@ pub struct View {
     pub(crate) shadow_cache: Option<CascadeCache>,
     pub(crate) upscaler: Option<Box<dyn Upscaler>>,
     pub(crate) exposure: Option<AutoExposure>,
+    /// Its color grading and tone curve as one LUT (ADR 0094), from the first frame it
+    /// grades.
+    pub(crate) grading: Option<GradingLut>,
     pub(crate) history: Option<HistoryImage>,
     /// SMAA T2x's last frame (ADR 0075), at the output size.
     pub(crate) post_history: Option<HistoryImage>,
@@ -225,6 +230,7 @@ impl View {
             shadow_cache: None,
             upscaler: None,
             exposure: None,
+            grading: None,
             history: None,
             post_history: None,
             reflections: None,
@@ -310,6 +316,7 @@ impl View {
             self.occlusion.take().map(Retired::Occlusion),
             self.shadow_cache.take().map(Retired::ShadowCache),
             self.exposure.take().map(Retired::Exposure),
+            self.grading.take().map(Retired::Grading),
             self.history.take().map(Retired::History),
             self.post_history.take().map(Retired::History),
             self.reflections.take().map(Retired::Reflections),
@@ -348,6 +355,7 @@ unsafe fn free(
             Retired::Occlusion(mut occlusion) => occlusion.destroy(allocator),
             Retired::ShadowCache(mut cache) => cache.destroy(allocator, bindless),
             Retired::Exposure(mut exposure) => exposure.destroy(allocator),
+            Retired::Grading(mut lut) => lut.destroy(allocator, bindless, frame),
             Retired::History(image) => image.destroy(device, allocator, bindless, frame),
             Retired::Reflections(mut ssr) => ssr.destroy(allocator, bindless),
             #[cfg(feature = "fsr")]
