@@ -13,6 +13,9 @@
 // - The blur's ring count, and so the mip it samples, is the same for its whole workgroup
 //   (FidelityFX: per wave): the mip's texture is picked by a uniform index.
 // - The composite writes an image of its own: no workgroup reads pixels another writes.
+// - The blur writes no texel the composite does not read (in focus everywhere around).
+// - The composite reads its depths, then every texel of its windows, before it waits for
+//   any: on the Radeon iGPU the reads' latency showed (13 % of the pass).
 // - The near field starts at a radius of one pixel (`NEAR_START`), not at the plane in
 //   focus.
 // - No ring merging (FidelityFX reads inner rings of flat tiles from coarser mips: a
@@ -608,10 +611,40 @@ void process_far_color_only(InputState ins, inout Accumulators acc)
 
 groupshared uint g_ring_count;
 
+// Whether the composite's group `group` (16 × 16 pixels) blends the fields: its 2 × 2 tiles'
+// nearest q (the largest) or farthest (the smallest) out of focus. The composite's own rule.
+bool composite_reads(int2 group)
+{
+    int2 tiles = int2((push.size + TILE - 1) / TILE);
+    int2 groups = (tiles + 1) / 2;
+    if (any(group < 0) || any(group >= groups))
+        return false;
+    int2 last = tiles - 1;
+    int2 t = group * 2;
+    float2 a = g_textures[push.dilated].Load(int3(min(t, last), 0)).xy;
+    float2 b = g_textures[push.dilated].Load(int3(min(t + int2(0, 1), last), 0)).xy;
+    float2 c = g_textures[push.dilated].Load(int3(min(t + int2(1, 0), last), 0)).xy;
+    float2 d = g_textures[push.dilated].Load(int3(min(t + int2(1, 1), last), 0)).xy;
+    float nearest = max(max(a.x, b.x), max(c.x, d.x));
+    float farthest = min(min(a.y, b.y), min(c.y, d.y));
+    return !(coc_radius(nearest) < 0.25 && coc_radius(farthest) < 0.25);
+}
+
+// Whether the composite blends the fields in its group `group` or in one of its 8 neighbors,
+// the only groups that read this group's 8 × 8 texels (their 11 × 11 windows). Wave-uniform.
+bool composite_reads_around(uint2 group)
+{
+    uint lane = WaveGetLaneIndex();
+    bool read_here = false;
+    if (lane < 9)
+        read_here = composite_reads(int2(group) + int2(int(lane % 3) - 1, int(lane / 3) - 1));
+    return WaveActiveAnyTrue(read_here);
+}
+
 // The near and far fields at half size. FidelityFX's blur, per pixel of mip 0.
 [shader("compute")]
 [numthreads(8, 8, 1)]
-void dofBlur(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex)
+void dofBlur(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint index : SV_GroupIndex)
 {
     uint2 pixel = id.xy;
     bool inside = all(pixel < push.half_size);
@@ -717,7 +750,9 @@ void dofBlur(uint3 id : SV_DispatchThreadID, uint index : SV_GroupIndex)
     }
     else
     {
-        if (inside)
+        // In focus: the center, written only where the composite reads it (in focus
+        // everywhere around, nothing is read).
+        if (inside && composite_reads_around(group.xy))
         {
             g_images[push.far_field][pixel] = float4(center.rgb, 1.0);
             g_images[push.near_field][pixel] = float4(0.0, 0.0, 0.0, 0.0);
@@ -833,7 +868,7 @@ float3 blur3x3(uint base)
     return sum / weights;
 }
 
-float4 final_combine(uint2 coord, uint2 rel, float4 bg, float4 fg, float min_fg_w)
+float4 final_combine(uint2 rel, float depth, float4 bg, float4 fg, float min_fg_w)
 {
     uint base = rel.x + 18 * rel.y;
     float3 full = full_at(base + 19);
@@ -843,7 +878,7 @@ float4 final_combine(uint2 coord, uint2 rel, float4 bg, float4 fg, float min_fg_
     // A foreground texel of zero weight makes the interpolation invalid.
     if (min_fg_w == 0.0)
         fg.a = 0.0;
-    float c = 2.0 * coc_radius(depth_q(scene_depth_at(int2(coord)))); // in pixels of the image
+    float c = 2.0 * coc_radius(depth_q(depth)); // in pixels of the image
     float c1 = saturate(c - 0.5); // sharp to the fixed blur
     float c2 = saturate(c - 1.5); // to the half-size background
     if (bg.a == 0.0)
@@ -943,15 +978,23 @@ void combine_sharp_only(uint2 group, uint2 thread)
 
 void fetch_full_color(uint2 group, uint gix)
 {
+    // Every load issued before the first store, so their latencies overlap.
+    float3 c[6];
+    [unroll]
     for (uint iter = 0; iter < 6; iter++)
     {
         uint i = (gix + iter * 64) % (18 * 18);
         int2 coord = int2(group * 16) + int2(int(i % 18) - 1, int(i / 18) - 1);
         coord = clamp(coord, int2(0, 0), int2(push.size) - 1);
-        float3 c = g_textures[push.color].Load(int3(coord, 0)).rgb;
-        g_full_r[i] = c.r;
-        g_full_g[i] = c.g;
-        g_full_b[i] = c.b;
+        c[iter] = g_textures[push.color].Load(int3(coord, 0)).rgb;
+    }
+    [unroll]
+    for (uint iter = 0; iter < 6; iter++)
+    {
+        uint i = (gix + iter * 64) % (18 * 18);
+        g_full_r[i] = c[iter].r;
+        g_full_g[i] = c[iter].g;
+        g_full_b[i] = c[iter].b;
     }
 }
 
@@ -965,25 +1008,34 @@ uint extra_index(uint gix)
 
 void fetch_fields(uint2 group, uint gix, bool near)
 {
+    // Every load issued before the first store, so their latencies overlap. With the
+    // modulo some texels are fetched twice: cheaper than waiting twice.
+    float4 far[2];
+    float4 n[2];
+    [unroll]
     for (uint iter = 0; iter < 2; iter++)
     {
-        // With the modulo some texels are fetched twice: cheaper than waiting twice.
         uint i = (gix + iter * 64) % COMBINE_AREA;
         int2 coord = int2(group * COMBINE_TILE) + int2(int(i % ROW_PITCH) - 1, int(i / ROW_PITCH) - 1);
         coord = clamp(coord, int2(0, 0), int2(push.half_size) - 1);
-        float4 far = g_textures[push.far_field].Load(int3(coord, 0));
-        g_far_luma[i] = luma(far.rgb);
-        set_far(i, far);
+        far[iter] = g_textures[push.far_field].Load(int3(coord, 0));
+        n[iter] = near ? g_textures[push.near_field].Load(int3(coord, 0)) : float4(0.0, 0.0, 0.0, 0.0);
+    }
+    [unroll]
+    for (uint iter = 0; iter < 2; iter++)
+    {
+        uint i = (gix + iter * 64) % COMBINE_AREA;
+        g_far_luma[i] = luma(far[iter].rgb);
+        set_far(i, far[iter]);
         if (near)
         {
-            float4 n = g_textures[push.near_field].Load(int3(coord, 0));
-            g_near_luma[i] = luma(n.rgb);
-            set_near(i, n);
+            g_near_luma[i] = luma(n[iter].rgb);
+            set_near(i, n[iter]);
         }
     }
 }
 
-void combine(uint2 id, uint2 thread, uint2 group, uint gix, bool near)
+void combine(uint2 id, uint2 thread, uint2 group, uint gix, bool near, float4 depths)
 {
     fetch_fields(group, gix, near);
     GroupMemoryBarrierWithGroupSync();
@@ -1033,10 +1085,10 @@ void combine(uint2 id, uint2 thread, uint2 group, uint gix, bool near)
 
     uint2 coord = 2 * id;
     uint2 rel = 2 * thread;
-    store_output(coord, final_combine(coord, rel, far, near_c, min_fg_w));
-    store_output(coord + uint2(1, 0), final_combine(coord + uint2(1, 0), rel + uint2(1, 0), far_tr, near_tr, min_fg_w));
-    store_output(coord + uint2(1, 1), final_combine(coord + uint2(1, 1), rel + uint2(1, 1), far_br, near_br, min_fg_w));
-    store_output(coord + uint2(0, 1), final_combine(coord + uint2(0, 1), rel + uint2(0, 1), far_bl, near_bl, min_fg_w));
+    store_output(coord, final_combine(rel, depths.x, far, near_c, min_fg_w));
+    store_output(coord + uint2(1, 0), final_combine(rel + uint2(1, 0), depths.y, far_tr, near_tr, min_fg_w));
+    store_output(coord + uint2(1, 1), final_combine(rel + uint2(1, 1), depths.z, far_br, near_br, min_fg_w));
+    store_output(coord + uint2(0, 1), final_combine(rel + uint2(0, 1), depths.w, far_bl, near_bl, min_fg_w));
 }
 
 // The fields upscaled and blended over the image: every workgroup writes 16 × 16 pixels.
@@ -1054,6 +1106,11 @@ void dofComposite(uint3 id : SV_DispatchThreadID, uint3 thread : SV_GroupThreadI
         combine_sharp_only(group.xy, thread.xy);
         return;
     }
+    // The four pixels' depths first: read after the waits for shared memory, their latency
+    // showed (the Radeon iGPU's composite 22 % slower).
+    int2 coord = int2(2 * id.xy);
+    float4 depths = float4(scene_depth_at(coord), scene_depth_at(coord + int2(1, 0)),
+        scene_depth_at(coord + int2(1, 1)), scene_depth_at(coord + int2(0, 1)));
     fetch_full_color(group.xy, gix);
-    combine(id.xy, thread.xy, group.xy, gix, near_needed);
+    combine(id.xy, thread.xy, group.xy, gix, near_needed, depths);
 }
