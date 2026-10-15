@@ -16,7 +16,8 @@ Collected 2026-09-25 by `Runner info` (commit a103582, run 36193238273).
 | Storage | 2x Apacer AS2280Q4 1 TB NVMe SSD, WD10EZEX 1 TB SATA HDD |
 | GPU0 (discrete) | NVIDIA GeForce RTX 4060 Ti (Ada, `10de:2805`), driver 616.92, Vulkan 1.4.351, conformance 1.4.3.3 |
 | GPU1 (integrated) | AMD Radeon Graphics (Raphael, RDNA2, 2 CU, `1002:164e`), driver 26.8.1 (since 2026-10-10; 25.10.36 before), Vulkan 1.4.315, clock 2,000 MHz (see below) |
-| Displays | 1920x1080 @ 239 Hz on the NVIDIA GPU; 1920x1080 @ 60 Hz on the iGPU |
+| Displays | 1920x1080 @ 239 Hz on the NVIDIA GPU; 1920x1080 @ 60 Hz on the iGPU (inactive on 2026-10-15: one monitor, the RTX's, its taskbar 30 pixels tall at the top). The Radeon presents across adapters to the RTX's monitor |
+| PresentMon | 2.6.0's console executable (Intel's signature), run from a scratch directory when measuring, not installed (ADR 0099) |
 | Vulkan SDK | 1.4.350.0 (`D:\SDKs\Vulkan1.4.350.0`) |
 
 Implicit Vulkan layers installed on this machine (they inject into every Vulkan process):

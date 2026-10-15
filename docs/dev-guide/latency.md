@@ -27,6 +27,47 @@ let settings = LatencySettings {
 - **Without a cap and with a GPU-bound game,** latency reduction matters most: without
   it, the CPU runs ahead and frames wait in a queue.
 
+## Full screen and windows
+
+The window decides how the frame reaches the screen (ADR 0099):
+
+```rust
+use engine_platform::window::{WindowDesc, WindowMode};
+use engine_rhi::{FullScreenExclusive, SwapchainDesc};
+
+let window = WindowDesc {
+    mode: WindowMode::FullScreen, // borderless, covering the monitor
+    ..WindowDesc::default()
+};
+let swapchain = SwapchainDesc {
+    // Never let the driver switch the screen over to the game.
+    full_screen_exclusive: FullScreenExclusive::Disallowed,
+    ..SwapchainDesc::default()
+};
+```
+
+- **Borderless full screen is the right default.** Windows shows the game's frames
+  directly, without composing the desktop ("independent flip"), when the game covers its
+  monitor and nothing else is on top.
+  - Alt+Tab is instant.
+  - Overlays and notifications can show over the game without a mode switch.
+  - On ref-1's RTX, without vsync, it reached the screen 7.9 ms after the frame began.
+    With the driver left to choose, it was 9.3 ms: the frames were copied instead of
+    flipped. So the engine states "disallowed".
+- **A window** fits into its monitor's work area: a size too large for the screen is
+  scaled down, keeping its aspect ratio.
+  - A window larger than the screen was copied by NVIDIA's driver, and only 1 frame in
+    25 reached the screen.
+- **Exclusive full screen** (`FullScreenExclusive::Exclusive { monitor }`) asks the
+  driver for the monitor each time the swapchain is made.
+  - On Windows 11 it changed nothing measured on ref-1.
+  - NVIDIA grants it only with vsync. AMD refuses it when another GPU drives the monitor.
+  - Refused, the swapchain falls back to borderless by itself. Lost (Alt+Tab), acquiring
+    or presenting reports `is_out_of_date()`: recreate the swapchain.
+- **Players can check** which path their frames take with PresentMon (Intel, free): look
+  for "Hardware: Independent Flip" or "Hardware Composed: Independent Flip" in the
+  `PresentMode` column, not "Composed: Copy".
+
 ## What the engine does each frame
 
 1. `begin_frame`: waits the right amount of time. The driver (Reflex, Anti-Lag 2) or

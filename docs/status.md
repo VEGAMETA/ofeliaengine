@@ -614,14 +614,21 @@ grown, divide and conquer); the old labels stay in parentheses.
    1,650-line function; its passes per feature come with the next shading feature (decals
    or GI).
 8. **The player and content** (owner, 2026-10-10: after the rendering queue).
-8a (was 6f). **A player crate** (`engine_app`, review §3.7): device, swapchain, latency
-   provider, process setup (power throttling, MMCSS, CPU sets), pipeline cache and the frame
-   loop in one place; window modes: windowed (placed on the monitor, not larger than its
-   work area), borderless full screen and exclusive full screen
-   (`VK_EXT_full_screen_exclusive`), measured for latency with PresentMon (owner,
-   2026-10-10: `flight`'s 1920 × 1080 window is larger than the 1080p screen and composed by
-   DWM); ECS components for lights, skinned meshes and probes; features per view instead of
-   per renderer; `RenderDefaults` applied whole. The benches and the test bed move onto it.
+8a (was 6f). **A player crate** (`engine_app`, review §3.7; ADR 0099, in four steps):
+   device, swapchain, latency provider, process setup (power throttling, MMCSS, CPU sets),
+   pipeline cache and the frame loop in one place; ECS components for lights, skinned
+   meshes and probes; features per view instead of per renderer; `RenderDefaults` applied
+   whole. The benches and the test bed move onto it.
+   - ~~Step 1: window modes~~ (done 2026-10-15, ADR 0099):
+     - windows fit into the work area, borderless full screen, and exclusive full screen
+       (`VK_EXT_full_screen_exclusive`, made again from nothing when refused);
+     - measured with PresentMon on both GPUs (the owner, 2026-10-10: `flight`'s window was
+       larger than the screen; NVIDIA copied it through GDI and showed 1 frame in 25);
+     - borderless stating "disallowed" is the default: NVIDIA flips it, 7.9 against 9.3 ms
+       to the screen without vsync, the same with vsync.
+   - Step 2: the crate owns the wiring; `flight` first.
+   - Step 3: lights, skinned meshes and probes as components.
+   - Step 4: features per view; the benches and the test bed on the crate.
 8b (was 6g). **Video playback** (owner, 2026-10-10: after the player crate; the engine plays
    no video today): a video frame as an ordinary texture (UI, a screen in the world, a
    viewport, cutscenes). To research and decide in an ADR: AV1 (royalty-free, unlike H.264 /
