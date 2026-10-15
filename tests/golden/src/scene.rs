@@ -27,6 +27,7 @@ use engine_frame::{
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::budget::{BudgetSettings, GpuBudget};
+use engine_render::dof::DofSettings;
 use engine_render::environment::{Environment, Sky};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
 use engine_render::forward::ENGINE_SHADER_DIR;
@@ -244,6 +245,8 @@ pub struct Shot {
     pub fabric_curtains: bool,
     /// Color grading (`ViewSettings::grading`, ADR 0094; neutral by default).
     pub grading: ColorGrading,
+    /// Depth of field (`ViewSettings::depth_of_field`, ADR 0095; off by default).
+    pub depth_of_field: Option<DofSettings>,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -315,6 +318,7 @@ impl Shot {
             shading_models: false,
             fabric_curtains: false,
             grading: ColorGrading::default(),
+            depth_of_field: None,
         }
     }
 }
@@ -1711,6 +1715,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         exposure: Exposure::Fixed(shot.exposure),
         curve: shot.curve,
         grading: shot.grading,
+        depth_of_field: shot.depth_of_field,
         bloom: shot.bloom,
         clear: Some([0.02, 0.02, 0.05, 1.0]),
         screen_space_reflections: shot.ssr.filter(|_| shot.sky),

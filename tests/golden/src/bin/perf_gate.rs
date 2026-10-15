@@ -47,6 +47,7 @@ use engine_golden::scene::{
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::dof::DofSettings;
 use engine_render::grading::ColorGrading;
 use engine_render::reflections::SsrSettings;
 use std::collections::{BTreeMap, BTreeSet};
@@ -159,6 +160,21 @@ fn shots() -> Vec<Shot> {
             },
             ..Shot::new(
                 "sponza_graded",
+                Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+            )
+        },
+        // Depth of field (ADR 0095), strong: the curtains in front and the far end of the
+        // atrium blurred, its passes after antialiasing.
+        Shot {
+            size: [1920, 1080],
+            depth_of_field: Some(DofSettings {
+                focus_distance: 3.0,
+                f_number: 1.4,
+                sensor_height: 0.1,
+                ..DofSettings::default()
+            }),
+            ..Shot::new(
+                "sponza_dof",
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
         },

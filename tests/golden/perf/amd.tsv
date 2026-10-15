@@ -193,6 +193,22 @@ sponza_defaults_integrated	shadow cull	75.7
 sponza_defaults_integrated	sky	15.0
 sponza_defaults_integrated	taau	5860.1
 sponza_defaults_integrated	tonemap	849.2
+sponza_dof	(frame total)	29894.7
+sponza_dof	(gpu frame)	29920.0
+sponza_dof	bloom downsample	822.5
+sponza_dof	bloom upsample	446.0
+sponza_dof	cull	3.5
+sponza_dof	cull setup	0.9
+sponza_dof	dof blur	3036.6
+sponza_dof	dof composite	3290.3
+sponza_dof	dof dilate	147.7
+sponza_dof	dof downsample	1853.3
+sponza_dof	dof reach clear	0.3
+sponza_dof	forward	17092.5
+sponza_dof	shadow	2362.7
+sponza_dof	shadow cull	2.4
+sponza_dof	sky	40.3
+sponza_dof	tonemap	774.0
 sponza_fsr1_67	(frame total)	18445.2
 sponza_fsr1_67	(gpu frame)	18433.6
 sponza_fsr1_67	bloom downsample	898.6
