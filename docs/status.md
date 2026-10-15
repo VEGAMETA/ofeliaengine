@@ -11,7 +11,7 @@ Last updated: 2026-10-15.
 - **Working on: 8b, video playback** (ADR 0100): AV1 in WebM decoded by the GPU's video
   engine through Vulkan Video, rav1d where that is missing, Opus sound as the clock, the
   picture as a texture.
-  - 8b-1 is done (2026-10-15): `engine_video` reads WebM, parses the AV1 headers (every
+  - 8b-1 is done (2026-10-15, PR #227): `engine_video` reads WebM, parses the AV1 headers (every
     field equal to rav1d's on nine clips) and decodes with rav1d.
   - Next is 8b-2: the decode queue and the Vulkan Video session on both GPUs.
   - Video with transparency (an alpha channel) is not part of it: the owner deferred it
@@ -757,7 +757,7 @@ grown, divide and conquer); the old labels stay in parentheses.
    - **Steps:** 8b-1 the reader, the parser, rav1d; 8b-2 the Vulkan Video session,
      bit-exact against rav1d on both GPUs; 8b-3 the texture, sound and clock, the player's
      video entity, golden shots, costs, docs.
-   - **8b-1 done 2026-10-15** (ADR 0100, "8b-1 as built"):
+   - **8b-1 done 2026-10-15** (PR #227; ADR 0100, "8b-1 as built"):
      - `engine_video`: the WebM reader; the AV1 sequence and frame headers with the
        reference state; `Parser`, which turns a temporal unit into frames with their tiles'
        offsets and sizes (Vulkan's form); `SoftwareDecoder` over rav1d.
