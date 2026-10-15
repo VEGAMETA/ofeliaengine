@@ -175,6 +175,29 @@ uint owner_entry(uint meta_x)
     return meta_x & ~OWNED;
 }
 
+// Whether the page of table entry `e` lies under something that moved since the pages
+// were drawn (`VsmFrame::moved`: its old and new places across the light).
+bool moved_over(VsmFrame* f, uint e)
+{
+    if (f.moved_count == 0)
+        return false;
+    uint level = e / VSM_ENTRIES;
+    uint local = e % VSM_ENTRIES;
+    int2 first = f.level[level].first_page;
+    // The window's page at this place of the table (which wraps).
+    int2 page = first + ((int2(local % VSM_TABLE, local / VSM_TABLE) - first) & int(VSM_TABLE - 1));
+    float size = 1.0 / f.level[level].page_scale;
+    float2 lo = float2(page) * size;
+    float2 hi = lo + size;
+    for (uint i = 0; i < f.moved_count; i++)
+    {
+        float4 r = f.moved[i];
+        if (all(lo < r.zw) && all(r.xy < hi))
+            return true;
+    }
+    return false;
+}
+
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void vsmFindPages(uint3 id : SV_DispatchThreadID)
@@ -189,8 +212,9 @@ void vsmFindPages(uint3 id : SV_DispatchThreadID)
     {
         uint owner = owner_entry(m.x);
         uint t = push.table[owner];
-        // Drawn for another light: drawn again if needed, freed if not.
-        bool stale = (f.level[owner / VSM_ENTRIES].flags & 1u) != 0;
+        // Drawn for another light, or under a caster that moved: drawn again if needed,
+        // freed if not.
+        bool stale = (f.level[owner / VSM_ENTRIES].flags & 1u) != 0 || moved_over(f, owner);
         if ((t & VSM_NEEDED) != 0)
         {
             push.meta[p].y = f.frame;

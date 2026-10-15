@@ -67,7 +67,9 @@
 //! cached cascades then draw the strips the movement exposes; `--movers <count>` to move
 //! that many of the smallest draws back and forth every frame (half a metre over 60
 //! frames; the cached cascades draw their old and new places), `--redraw-cascades` for a
-//! cache that draws every cascade whole every frame (its layers against the atlas). The
+//! cache that draws every cascade whole every frame (its layers against the atlas);
+//! `--vsm` for the sun's virtual shadow pages (ADR 0093 step 3; their passes in the shadow
+//! column, the cascades still drawn for transparent surfaces). The
 //! last column is the GPU frame time end to end (the graph's first pass to its last on the
 //! graphics queue), which async compute shortens while the overlapped passes themselves
 //! may read longer.
@@ -315,6 +317,7 @@ fn main() {
     let mut cached_shadows = false;
     let (mut walk, mut turn) = (0.0f32, 0.0f32);
     let mut movers = 0usize;
+    let mut vsm = false;
     let mut redraw_cascades = false;
     let mut ray_detail: Option<BlasDetail> = None;
     let mut ray_budget: Option<String> = None;
@@ -424,6 +427,7 @@ fn main() {
             "--walk" => walk = args.next().unwrap().parse().unwrap(),
             "--turn" => turn = args.next().unwrap().parse().unwrap(),
             "--movers" => movers = args.next().unwrap().parse().unwrap(),
+            "--vsm" => vsm = true,
             "--redraw-cascades" => {
                 cached_shadows = true;
                 redraw_cascades = true;
@@ -1118,6 +1122,23 @@ fn main() {
     renderer
         .set_contact_shadows(&device, &bindless, contact)
         .unwrap();
+    // `--vsm`: the sun's virtual shadow pages, the default settings.
+    let mut pages = (vsm
+        && renderer
+            .set_virtual_shadows(&device, &bindless, true)
+            .unwrap())
+    .then(|| {
+        engine_render::vsm::VirtualShadows::new(
+            &device,
+            &mut allocator,
+            &bindless,
+            engine_render::vsm::VsmSettings::default(),
+        )
+        .unwrap()
+    });
+    if vsm && pages.is_none() {
+        println!("--vsm: the device lacks what the pages need; the cascades alone");
+    }
     renderer
         .set_decals(&device, &bindless, decal_count > 0 || pipeline_stats)
         .unwrap();
@@ -1653,7 +1674,7 @@ fn main() {
                     occlusion: None,
                     temporal: temporal.as_ref(),
                     shadow_cache: shadow_cache.as_ref(),
-                    virtual_shadows: None,
+                    virtual_shadows: pages.as_ref(),
                     lights: &lights,
                     decals: &decals,
                     environment: environment.as_ref(),
@@ -1927,7 +1948,8 @@ fn main() {
                         "local shadow cull" | "local shadows" => {
                             local_frame += f64::from(time.gpu_us);
                         }
-                        "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
+                        "shadow cull" | "shadow" | "vsm pages" | "vsm cull" | "vsm draw"
+                        | "vsm visibility" => shadow_frame += f64::from(time.gpu_us),
                         "cull setup" | "cull" | "cull early" | "cull late" => cull_frame += us,
                         "forward" => forward.push(f64::from(time.gpu_us)),
                         "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
@@ -2267,6 +2289,9 @@ fn main() {
         graph.destroy(&mut allocator, Some(&bindless));
         if let Some(c) = shadow_cache.as_mut() {
             c.destroy(&mut allocator, &bindless);
+        }
+        if let Some(p) = pages.as_mut() {
+            p.destroy(&mut allocator, &bindless);
         }
         if let Some(lut) = grading_lut.as_mut() {
             lut.destroy(&mut allocator, &bindless, 0);

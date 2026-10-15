@@ -16,9 +16,10 @@
 //!   for again the next frame); dirty pages are cleared to the far plane. The forward
 //!   renderer then draws the casters into the dirty pages, and [`VirtualShadows::add_visibility`]
 //!   writes the sun's visibility per pixel for the shading (step 3b).
-//! - **Casters that change** (moved, added, removed, another draw list or scene) redraw
-//!   every page a frame needs and free the others, as the light turning does; step 3c
-//!   redraws only the pages under what changed.
+//! - **Casters that change** (moved, added or removed) redraw the pages under their old
+//!   and new places and free those no pixel needs; another draw list or scene, other
+//!   materials or more than [`MAX_MOVED`] changes redraw every page a frame needs, as the
+//!   light turning does.
 //!
 //! The design follows Timberdoodle's virtual shadow maps (Apache-2.0; M. Sakmáry); the
 //! code is written for this engine.
@@ -135,7 +136,7 @@ struct LevelData {
     wrapped: [u32; 4],
 }
 
-/// `VsmFrame` in `vsm_common.slang` (720 bytes).
+/// `VsmFrame` in `vsm_common.slang` (736 bytes).
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct FrameData {
@@ -154,6 +155,10 @@ struct FrameData {
     depth_scale: f32,
     depth_offset: f32,
     level: [LevelData; MAX_LEVELS as usize],
+    /// What moved since the pages were drawn, across the light (metres): `[x0, y0, x1, y1]`.
+    moved: u64,
+    moved_count: u32,
+    moved_pad: u32,
 }
 
 /// `VsmPush` in `vsm.slang` (64 bytes).
@@ -174,7 +179,7 @@ struct Push {
 }
 
 const _: () = assert!(size_of::<LevelData>() == 32);
-const _: () = assert!(size_of::<FrameData>() == 720);
+const _: () = assert!(size_of::<FrameData>() == 736);
 const _: () = assert!(size_of::<Push>() == 64);
 
 /// What a view gives the pages each frame.
@@ -349,10 +354,20 @@ struct Casters {
     last: Option<CasterKey>,
     /// A draw list's previous draws.
     draws: DrawDiff,
-    /// Something casts otherwise than when the pages were last drawn: the next frame
-    /// draws every page it needs again and frees the others.
+    /// The world boxes of casters that moved, appeared or went (their old and new places)
+    /// since the pages were last drawn: the pages under them are drawn again.
+    boxes: Vec<[Vec3; 2]>,
+    /// Their rectangles across the light (scratch).
+    rects: Vec<[f32; 4]>,
+    /// Something casts otherwise than when the pages were last drawn, and what is not
+    /// known (another list or scene, other materials, more than [`MAX_MOVED`] boxes): the
+    /// next frame draws every page it needs again and frees the others.
     changed: bool,
 }
+
+/// More moved boxes than this since the pages were drawn: every page a frame needs is
+/// drawn again (as the cascades' cache does past its own limit).
+pub const MAX_MOVED: usize = 256;
 
 /// The windows of every level for a camera at `eye` (light space), and the masks of the
 /// rows and columns each window's move frees: see the module documentation.
@@ -627,13 +642,37 @@ impl VirtualShadows {
             range[0].to_bits(),
             range[1].to_bits(),
         ];
-        // The light turned, or casters changed (until step 3c redraws only the pages under
-        // what changed): every page the frame needs is drawn again, the others freed.
+        // The light turned, or casters changed in ways not known: every page the frame
+        // needs is drawn again, the others freed.
         let turned = state.light.is_some_and(|key| key != light_key);
         let redraw = turned || state.casters.changed;
         for level in levels.iter_mut().take(settings.levels as usize) {
             level.flags = u32::from(redraw);
         }
+        // Otherwise the pages under what moved, across the light (Arvo's box: the light's
+        // view is a rotation).
+        let casters = &mut state.casters;
+        casters.rects.clear();
+        if !redraw {
+            let abs = engine_core::math::Mat3::from_cols(
+                light_from_world.x_axis.truncate().abs(),
+                light_from_world.y_axis.truncate().abs(),
+                light_from_world.z_axis.truncate().abs(),
+            );
+            for b in &casters.boxes {
+                let c = light_from_world.transform_point3((b[0] + b[1]) * 0.5);
+                let e = abs * ((b[1] - b[0]) * 0.5);
+                casters
+                    .rects
+                    .push([c.x - e.x, c.y - e.y, c.x + e.x, c.y + e.y]);
+            }
+        }
+        let moved_count = casters.rects.len() as u32;
+        let moved = if casters.rects.is_empty() {
+            0
+        } else {
+            ring.push(&casters.rects)?
+        };
         let number = state.frame.wrapping_add(1);
         // A pixel's footprint at a metre, over the first level's texel.
         let footprint = view.footprint.max(1e-9);
@@ -659,10 +698,14 @@ impl VirtualShadows {
             depth_scale,
             depth_offset: -range[0] * depth_scale,
             level: levels,
+            moved,
+            moved_count,
+            moved_pad: 0,
         }])?;
         // The frame is declared: what it moved is remembered.
         let reset = core::mem::take(&mut state.reset);
         state.casters.changed = false;
+        state.casters.boxes.clear();
         state.frame = number;
         for (k, level) in levels.iter().enumerate().take(settings.levels as usize) {
             state.first_pages[k] = Some(IVec2::from(level.first_page));
@@ -801,24 +844,30 @@ impl VirtualShadows {
         let follows = casters.last == Some(now);
         casters.last = Some(now);
         casters.draws.diff(draws, mesh);
-        if !follows || !casters.draws.changes.is_empty() {
-            casters.changed = true;
+        let Casters {
+            draws,
+            boxes,
+            changed,
+            ..
+        } = casters;
+        boxes.extend_from_slice(&draws.changes);
+        if !follows || boxes.len() > MAX_MOVED {
+            *changed = true;
         }
     }
 
     /// Notes this frame's scene upload (`serial`, a hash of its batches' `meshes`), the
-    /// renderer settings that change what casts, the materials' revision, whether the
-    /// upload changed instances (`changes`) and whether instances move between ticks
-    /// (`moving`): when anything casts otherwise than last frame (or an upload was
-    /// skipped), the frame draws its pages again.
+    /// renderer settings that change what casts, the materials' revision, the upload's
+    /// `changes` and the boxes of instances `moving` between ticks: the pages under what
+    /// moved are drawn again (another scene or a skipped upload draws them all).
     pub(crate) fn note_scene(
         &self,
         serial: u64,
         meshes: u64,
         settings: u64,
         materials: u64,
-        changes: bool,
-        moving: bool,
+        changes: &[[Vec3; 2]],
+        moving: &[[Vec3; 2]],
     ) {
         let mut state = self.state.borrow_mut();
         let casters = &mut state.casters;
@@ -831,7 +880,11 @@ impl VirtualShadows {
             _ => (false, false),
         };
         casters.last = Some((Some((serial, meshes)), settings, materials));
-        if !(same || next) || (next && changes) || moving {
+        if next {
+            casters.boxes.extend_from_slice(changes);
+        }
+        casters.boxes.extend_from_slice(moving);
+        if !(same || next) || casters.boxes.len() > MAX_MOVED {
             casters.changed = true;
         }
     }

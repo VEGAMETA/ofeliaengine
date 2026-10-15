@@ -24,7 +24,7 @@ use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, cube};
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
 use engine_render::vsm::{
-    ALLOCATED, PAGE_TEXELS, PHYSICAL, TABLE_PAGES, VirtualShadows, VsmSettings, depth_range,
+    ALLOCATED, DIRTY, PAGE_TEXELS, PHYSICAL, TABLE_PAGES, VirtualShadows, VsmSettings, depth_range,
 };
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -517,11 +517,23 @@ fn run(meshlets: bool) {
                 }
             }
         }
+        let drawn = table
+            .iter()
+            .filter(|&&e| e & (ALLOCATED | DIRTY) == ALLOCATED | DIRTY)
+            .count();
         println!(
-            "frame {frame}: {backed} pages backed, {texels} texels, {covered} under a caster, \
-             {wrong} wrong (worst by {worst:.4})"
+            "frame {frame}: {backed} pages backed, {drawn} drawn, {texels} texels, {covered} \
+             under a caster, {wrong} wrong (worst by {worst:.4})"
         );
         assert!(backed > 0, "frame {frame}: no page backed");
+        // The plate moving under a still camera redraws the pages under its old and new
+        // places, not all of them.
+        if frame == 3 {
+            assert!(
+                drawn > 0 && drawn < backed / 2,
+                "frame {frame}: {drawn} of {backed} pages drawn after the plate moved"
+            );
+        }
         assert!(
             covered > texels / 10,
             "frame {frame}: the casters cover the pages"

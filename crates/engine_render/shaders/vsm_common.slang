@@ -48,7 +48,7 @@ struct VsmLevel
     uint4 wrapped;     // columns (xy: bits 0-31, 32-63) and rows (zw) whose pages changed
 };
 
-// `FrameData` in vsm.rs (720 bytes). A depth buffer's clip position `c` (as drawn, its
+// `FrameData` in vsm.rs (736 bytes). A depth buffer's clip position `c` (as drawn, its
 // jitter included) is at `clip_to_view · c` from the camera and at `clip_to_light · c`
 // across the light, both over `clip_to_view[3] · c`.
 struct VsmFrame
@@ -68,6 +68,9 @@ struct VsmFrame
     float depth_scale;          // a point's depth in the pages: −light.z × scale + offset
     float depth_offset;
     VsmLevel level[VSM_MAX_LEVELS];
+    float4* moved;              // what moved since the pages were drawn: xy min, zw max across the light (metres)
+    uint moved_count;
+    uint moved_pad;
 };
 
 // The level a surface `distance_squared` from the camera wants: its texel about its
