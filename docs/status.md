@@ -69,6 +69,7 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
 | Color grading: white balance, channel mixer, shadows / mid-tones / highlights, ASC CDL, contrast, vibrance, saturation; with the tone curve in one LUT built on the GPU when either changes | done | ADR 0094 |
 | Depth of field: FidelityFX DOF's tiled gather (near and far fields), after the upscalers; a thin lens | done | ADR 0095 |
+| Motion blur on cinematic views only (`ViewKind::Cinematic`; Guertin et al.'s reconstruction filter) | done | ADRs 0067, 0096 |
 | HDRI environments: `.hdr` and OpenEXR panoramas as the sky, their sun found and lit as the directional light, cooked into BC6H cubes (DDC, packs) | done | ADR 0083 |
 | GPU particles and GPU radix sort | done | ADRs 0080, 0081 |
 | Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
@@ -475,8 +476,9 @@ Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: it
 grown, divide and conquer); the old labels stay in parentheses.
 
 6. **Rendering leftovers.**
-6a (was 6). Remaining post effects: ~~LUT grading~~, ~~DOF~~, motion blur only on
-   cinematic views (ADR 0067). Frame generation is its own item now (3b, after GI).
+6a (was 6). Post effects: ~~LUT grading~~, ~~DOF~~, ~~motion blur only on cinematic
+   views~~ (ADR 0067): all done 2026-10-15. Frame generation is its own item now (3b,
+   after GI).
    - **Color grading done 2026-10-15** (ADR 0094): `ViewSettings::grading`.
      - The grading and the tone curve are one 48³ LUT, built on the GPU when either
        changes. Graded twins of the tone mapper's entry points read it once per pixel;
@@ -489,7 +491,12 @@ grown, divide and conquer); the old labels stay in parentheses.
      - After the upscalers.
      - At 1080p: RTX 0.12–0.26 ms; Radeon 3.8–8.2 ms (its composite and downsample
        bound by memory, its blur by arithmetic; to item 6b).
-   - Next: motion blur on cinematic views.
+   - **Motion blur on cinematic views done 2026-10-15** (ADR 0096).
+     - `ViewSettings::kind`: a gameplay view cannot ask for motion blur.
+     - Guertin, McGuire and Nowrouzezahrai's filter.
+     - At 1080p: RTX 0.43 ms, Radeon 15.7 ms (7.9 ms with 9 samples).
+     - Open (ADR 0067): object-only motion blur in gameplay views, if the team wants
+       it.
 6b. The iGPU's expensive passes (review §3.11): depth of field 3.8–8.2 ms at 1080p
    (ADR 0095: a 16-bit blur, the composite in place or in the tone mapper, a
    quarter-size gather), TAAU 4.2 ms (6.6 ms in the perf gate's `sponza_taa`),

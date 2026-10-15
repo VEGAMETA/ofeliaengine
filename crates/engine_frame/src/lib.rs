@@ -79,7 +79,9 @@ pub use renderer::{
     FrameContext, FrameError, FrameRenderer, GeneratedFrame, GeneratedTarget, PrepareContext,
     SceneDraws, SceneInput, SceneTargets, ViewCamera, ViewFrame, ViewTarget,
 };
-pub use settings::{DeviceClass, Exposure, FrameGeneration, RenderDefaults, ViewSettings};
+pub use settings::{
+    DeviceClass, Exposure, FrameGeneration, RenderDefaults, ViewKind, ViewSettings,
+};
 pub use ui::{Placement, UiCanvas, UiRenderer};
 pub use view::{Prepared, Resets, View};
 

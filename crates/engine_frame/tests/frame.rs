@@ -17,13 +17,14 @@ use common::{Bed, camera};
 use engine_core::math::Vec3;
 use engine_frame::{
     Antialiasing, FrameError, InvalidAntialiasing, Msaa, PostAntialiasing, PrepareContext, Quality,
-    Upscale, UpscalerKind, View, ViewSettings,
+    Upscale, UpscalerKind, View, ViewKind, ViewSettings,
 };
 use engine_render::ao::AoSettings;
 use engine_render::dof::DofSettings;
 use engine_render::forward::LocalShadowSettings;
 use engine_render::grading::ColorGrading;
 use engine_render::material::{MaterialDesc, TextureRef};
+use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::reflections::SsrSettings;
 use engine_render::subsurface::SubsurfaceProfile;
 use engine_render::texture_pool::{MipFade, TextureFormat, TextureLevels};
@@ -291,8 +292,8 @@ fn the_previous_color_reaches_the_hook() {
 /// Invalid combinations (ADR 0075) are refused by `check` and `prepare` with the same
 /// error, and the view keeps working with valid ones; switching between MSAA, filters
 /// and spatial or temporal modes frame to frame renders every time, each mode once plain
-/// and once graded with depth of field (ADRs 0094, 0095: both switched on and off from
-/// frame to frame).
+/// and once graded with depth of field, as a cinematic view with motion blur (ADRs 0094,
+/// 0095, 0096: all switched on and off from frame to frame).
 #[test]
 fn antialiasing_is_validated_and_modes_switch() {
     let Some(mut bed) = Bed::new((96, 64), true) else {
@@ -396,6 +397,13 @@ fn antialiasing_is_validated_and_modes_switch() {
                 f_number: 1.4,
                 ..DofSettings::default()
             }),
+            kind: if graded {
+                ViewKind::Cinematic {
+                    motion_blur: Some(MotionBlurSettings::default()),
+                }
+            } else {
+                ViewKind::Gameplay
+            },
             ..ViewSettings::default()
         };
         if bed.frame.check(&settings, bed.size).is_err() {

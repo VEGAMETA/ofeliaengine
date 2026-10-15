@@ -4,6 +4,7 @@ use crate::antialiasing::Antialiasing;
 use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::dof::DofSettings;
 use engine_render::grading::ColorGrading;
+use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::post::{OutputEncoding, ToneCurve};
 use engine_render::postfx::ExposureSettings;
 use engine_render::reflections::SsrSettings;
@@ -102,9 +103,10 @@ pub struct ViewSettings {
     /// that reproject it (reflections): [`crate::SceneTargets::previous_color`]. Costs a
     /// copy at output size per frame, only when on. Implies motion vectors.
     pub previous_color: bool,
-    /// A non-interactive view (cutscene, sequence; ADR 0067): the only kind that may have
-    /// camera motion blur once it exists. Gameplay views never get it.
-    pub cinematic: bool,
+    /// Gameplay (the default) or cinematic (ADR 0067). Only a cinematic view has motion
+    /// blur: its settings live in [`ViewKind::Cinematic`], so a gameplay view cannot ask
+    /// for it.
+    pub kind: ViewKind,
     /// Screen-space reflections (ADR 0073), traced at the render size against the
     /// scene's own lit image, over the scene's reflection probes and the sky. They need
     /// the scene's environment and `ForwardRenderer::set_reflections` (through
@@ -137,7 +139,7 @@ impl Default for ViewSettings {
             cached_shadows: true,
             motion_vectors: false,
             previous_color: false,
-            cinematic: false,
+            kind: ViewKind::Gameplay,
             screen_space_reflections: None,
             frame_generation: FrameGeneration::Off,
         }
@@ -151,6 +153,38 @@ impl ViewSettings {
             || self.motion_vectors
             || self.previous_color
             || self.frame_generation != FrameGeneration::Off
+            || self.kind.motion_blur().is_some()
+    }
+}
+
+/// What a view shows (ADR 0067, team decision 2026-10-01).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum ViewKind {
+    /// The player's view, interactive. It has no motion blur: blur from the camera's own
+    /// motion hides the scene when the player needs to read it, adds felt latency and
+    /// makes some players unwell.
+    #[default]
+    Gameplay,
+    /// A non-interactive view: a cutscene, a sequence. Switching a view to it is explicit
+    /// (the editor shows it).
+    Cinematic {
+        /// Motion blur of the camera's and the objects' motion (ADR 0096; `None`: off).
+        motion_blur: Option<MotionBlurSettings>,
+    },
+}
+
+impl ViewKind {
+    /// Whether it is cinematic.
+    pub fn is_cinematic(&self) -> bool {
+        matches!(self, Self::Cinematic { .. })
+    }
+
+    /// Its motion blur: only a cinematic view's.
+    pub fn motion_blur(&self) -> Option<&MotionBlurSettings> {
+        match self {
+            Self::Gameplay => None,
+            Self::Cinematic { motion_blur } => motion_blur.as_ref(),
+        }
     }
 }
 
@@ -254,6 +288,26 @@ mod tests {
             .wants_motion()
         );
         assert!(ViewSettings::default().wants_motion());
+        // A cinematic view with motion blur needs them; one without does not.
+        let cinematic = |motion_blur| ViewSettings {
+            kind: ViewKind::Cinematic { motion_blur },
+            ..off
+        };
+        assert!(cinematic(Some(MotionBlurSettings::default())).wants_motion());
+        assert!(!cinematic(None).wants_motion());
+    }
+
+    #[test]
+    fn only_a_cinematic_view_has_motion_blur() {
+        assert_eq!(ViewKind::default(), ViewKind::Gameplay);
+        assert!(ViewKind::Gameplay.motion_blur().is_none());
+        assert!(!ViewKind::Gameplay.is_cinematic());
+        let blur = MotionBlurSettings::default();
+        let cinematic = ViewKind::Cinematic {
+            motion_blur: Some(blur),
+        };
+        assert!(cinematic.is_cinematic());
+        assert_eq!(cinematic.motion_blur(), Some(&blur));
     }
 
     #[test]

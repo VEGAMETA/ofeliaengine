@@ -24,6 +24,7 @@ mod materials;
 mod mesh_streaming;
 mod meshlets;
 mod motion;
+mod motion_blur;
 mod occlusion;
 mod particles;
 mod post;

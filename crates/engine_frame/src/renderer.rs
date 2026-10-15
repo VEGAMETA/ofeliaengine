@@ -23,6 +23,7 @@ use engine_render::graph::{
 };
 use engine_render::material::{MaterialFrame, MaterialTable};
 use engine_render::mesh::GeometryFrame;
+use engine_render::motion_blur::{MotionBlur, MotionBlurCamera};
 use engine_render::msaa::{MsaaInput, MsaaResolve};
 use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, Resample, Tonemap};
 use engine_render::postaa::{
@@ -390,6 +391,8 @@ pub struct FrameRenderer {
     fsr1: Option<Box<Fsr1>>,
     /// Depth of field (ADR 0095), made with the first view that uses it.
     dof: Option<Box<DepthOfField>>,
+    /// Motion blur (ADR 0096), made with the first cinematic view that uses it.
+    motion_blur: Option<Box<MotionBlur>>,
     #[cfg(feature = "dlss")]
     streamline: Option<engine_dlss::Streamline>,
 }
@@ -638,6 +641,7 @@ impl FrameRenderer {
             resampling: Default::default(),
             fsr1: None,
             dof: None,
+            motion_blur: None,
             #[cfg(feature = "dlss")]
             streamline: None,
         })
@@ -963,6 +967,9 @@ impl FrameRenderer {
         }
         if settings.depth_of_field.is_some() && self.dof.is_none() {
             self.dof = Some(Box::new(DepthOfField::new(device, bindless)?));
+        }
+        if settings.kind.motion_blur().is_some() && self.motion_blur.is_none() {
+            self.motion_blur = Some(Box::new(MotionBlur::new(device, bindless)?));
         }
         // Catmull-Rom and Lanczos-3: the tone mapper with their kernel.
         if let Some(kernel) = resample(antialiasing.upscale, render, output) {
@@ -1466,6 +1473,28 @@ impl FrameRenderer {
                     far: camera.far,
                 },
                 dof_settings,
+            ),
+            _ => resolved,
+        };
+        // 4c. Motion blur (ADR 0096), on cinematic views only (ADR 0067): after depth of
+        // field (its streaks are of the image as focused), with the motion vectors and the
+        // depth at render size.
+        let resolved = match (
+            settings.kind.motion_blur(),
+            self.motion_blur.as_deref(),
+            passes.motion,
+        ) {
+            (Some(blur_settings), Some(blur), Some(motion)) => blur.add_passes(
+                fg,
+                ctx.bindless,
+                resolved,
+                motion.velocity,
+                depth,
+                MotionBlurCamera {
+                    near: camera.near,
+                    far: camera.far,
+                },
+                blur_settings,
             ),
             _ => resolved,
         };

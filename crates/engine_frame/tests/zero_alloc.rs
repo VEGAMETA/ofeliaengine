@@ -2,7 +2,8 @@
 //! through the frame renderer (ADR 0072): the pools' frames, `prepare`, `add_view` (scene
 //! passes, TAAU or FSR, bloom, automatic exposure, tone mapping, the previous color) and
 //! the graph's execution, every path again with an animated color grading (its LUT built
-//! every frame, ADR 0094), and again with depth of field (ADR 0095). FSR's own allocations happen in C++ and are not counted. One
+//! every frame, ADR 0094), again with depth of field (ADR 0095), and again as a cinematic
+//! view with motion blur (ADR 0096). FSR's own allocations happen in C++ and are not counted. One
 //! test per file, so nothing else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -12,10 +13,11 @@ mod common;
 use common::{Bed, camera};
 use engine_core::math::Vec3;
 use engine_frame::{
-    Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, Upscale, View, ViewSettings,
+    Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, Upscale, View, ViewKind, ViewSettings,
 };
 use engine_render::dof::DofSettings;
 use engine_render::grading::ColorGrading;
+use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::postfx::ExposureSettings;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -59,7 +61,7 @@ fn steady_state_frames_do_not_allocate() {
         bed.cube_at(glow, Vec3::splat(1.0), Vec3::new(0.0, 0.5, 0.0)),
     ];
     // Every kind of path (ADR 0075): spatial, temporal, MSAA, filters after tone mapping;
-    // plain, then graded, then with depth of field.
+    // plain, then graded, then with depth of field, then cinematic with motion blur.
     let paths = [
         (Antialiasing::OFF, Quality::Quality),
         (Antialiasing::TAAU, Quality::Quality),
@@ -82,11 +84,18 @@ fn steady_state_frames_do_not_allocate() {
         (Antialiasing::SMAA_4X, Quality::Native),
         (Antialiasing::TAAU.with_samples(Msaa::X2), Quality::Quality),
     ];
-    for (variant, (antialiasing, quality)) in ["", ", graded", ", depth of field"]
+    for (variant, (antialiasing, quality)) in ["", ", graded", ", depth of field", ", motion blur"]
         .into_iter()
         .flat_map(|variant| paths.map(|path| (variant, path)))
     {
         let graded = variant == ", graded";
+        let kind = if variant == ", motion blur" {
+            ViewKind::Cinematic {
+                motion_blur: Some(MotionBlurSettings::default()),
+            }
+        } else {
+            ViewKind::Gameplay
+        };
         let depth_of_field = (variant == ", depth of field").then(|| DofSettings {
             focus_distance: 3.0,
             f_number: 1.4,
@@ -113,6 +122,7 @@ fn steady_state_frames_do_not_allocate() {
                 occlusion_culling: true,
                 grading,
                 depth_of_field,
+                kind,
                 ..ViewSettings::default()
             };
             // A slowly moving camera: motion vectors and the history in use.
