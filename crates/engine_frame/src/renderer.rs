@@ -899,7 +899,8 @@ impl FrameRenderer {
         }
         // The sun's virtual shadow pages (ADR 0093 step 3): made the first frame they are
         // wanted (with the renderer's culls and pipelines for them), made again when their
-        // settings change; a device without fragment atomics keeps the cascades alone.
+        // settings change; a device without what they need (fragment atomics, clip
+        // distances) keeps the cascades alone.
         let pages = view.virtual_shadows.as_ref().map(|(made, _)| *made);
         match (settings.virtual_shadows, pages) {
             (Some(wanted), made) if made != Some(wanted) => {

@@ -110,8 +110,8 @@ pub struct ViewSettings {
     /// pages that are new or whose casters changed (any change redraws every page the
     /// frame needs, until step 3c) and the visibility pass: not yet less than the
     /// cascades (`docs/dev-guide/rendering.md`). Needs a single-sampled view, the depth
-    /// prepass (which then runs) and the device's fragment atomics; without them the view
-    /// keeps the cascades alone.
+    /// prepass (which then runs) and the device's fragment atomics and clip distances;
+    /// without them the view keeps the cascades alone.
     pub virtual_shadows: Option<engine_render::vsm::VsmSettings>,
     /// Motion vectors even without temporal antialiasing (for effects of your own).
     /// Temporal antialiasing always has them.

@@ -658,7 +658,8 @@ impl ForwardRenderer {
             )
         });
         // The pages' casters (ADR 0093 step 3b): a command list (the batches' levels, which
-        // their whole draws copy), then their meshlet lists; and their draws' slots.
+        // their whole draws copy), then their meshlet lists; and their draws' slots, two
+        // words each (the instance and level, the rectangle of pages it is clipped to).
         let vsm_lists = vsm.map(|v| {
             (
                 fg.create_buffer(
@@ -670,7 +671,7 @@ impl ForwardRenderer {
                 fg.create_buffer(
                     "vsm casters",
                     BufferDesc {
-                        size: u64::from(v.lists.draws.max(1)) * 4,
+                        size: u64::from(v.lists.draws.max(1)) * 8,
                     },
                 ),
             )

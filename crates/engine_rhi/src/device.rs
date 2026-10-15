@@ -301,7 +301,8 @@ impl Device {
             .shader_int64(adapter.caps.shader_int64)
             .sample_rate_shading(adapter.caps.sample_rate_shading)
             .multi_viewport(adapter.caps.viewport_index)
-            .fragment_stores_and_atomics(adapter.caps.fragment_stores_and_atomics);
+            .fragment_stores_and_atomics(adapter.caps.fragment_stores_and_atomics)
+            .shader_clip_distance(adapter.caps.shader_clip_distance);
         let mut features2 = vk::PhysicalDeviceFeatures2::default()
             .features(features)
             .push_next(&mut f11)

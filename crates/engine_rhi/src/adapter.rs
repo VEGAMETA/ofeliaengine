@@ -135,6 +135,10 @@ pub struct OptionalCaps {
     /// (the sun's virtual shadow pages drawn with an atomic minimum, ADR 0093); enabled
     /// when present.
     pub fragment_stores_and_atomics: bool,
+    /// `shaderClipDistance`: vertex shaders that clip what they draw to planes of their own
+    /// (the virtual shadow pages' draws clipped to their dirty pages, ADR 0093); enabled
+    /// when present.
+    pub shader_clip_distance: bool,
 }
 
 impl OptionalCaps {
@@ -172,6 +176,7 @@ impl OptionalCaps {
                 self.fragment_stores_and_atomics,
                 "fragment stores and atomics",
             ),
+            (self.shader_clip_distance, "clip distances"),
         ]
         .into_iter()
         .filter_map(|(present, name)| present.then_some(name))
@@ -408,6 +413,7 @@ impl Adapter {
                 && f12.shader_output_viewport_index == vk::TRUE
                 && props.limits.max_viewports >= 16,
             fragment_stores_and_atomics: base.fragment_stores_and_atomics == vk::TRUE,
+            shader_clip_distance: base.shader_clip_distance == vk::TRUE,
         };
 
         let kind = match props.device_type {

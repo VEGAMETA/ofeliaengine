@@ -78,17 +78,22 @@ const CLEAR_ARGS: u64 = 16;
 pub const MARK_MARGIN_TEXELS: f32 = 4.0;
 /// Cells of a level's hierarchy of dirty pages ([`VsmFrame::hierarchy`]): its 64 × 64
 /// pages by their place in the window, then each coarser level of them (2 × 2 cells into
-/// one) down to 1 × 1, one `u32` each (1: a dirty page under it).
-pub const HIERARCHY_CELLS: u32 = 5461;
+/// one) down to 1 × 1, one `u32` each (1: a dirty page under it); then, from
+/// [`HIERARCHY_ROWS`] (a cell of padding before it), the dirty pages as bits: page (x, y)
+/// is bit x % 32 of word 2y + x / 32.
+pub const HIERARCHY_CELLS: u32 = HIERARCHY_ROWS + 2 * TABLE_PAGES;
 /// Levels of a level's hierarchy (64², 32², ..., 1²).
 pub const HIERARCHY_MIPS: u32 = 7;
+/// The first word of a level's dirty pages as bits, in its [`HIERARCHY_CELLS`] (even: a
+/// row's two words are read as one).
+pub const HIERARCHY_ROWS: u32 = 5462;
 
 /// The first cell of mip `m` of a level's hierarchy.
 pub const fn hierarchy_mip(m: u32) -> u32 {
     (4096 - (4096 >> (2 * m))) * 4 / 3
 }
 
-const _: () = assert!(hierarchy_mip(HIERARCHY_MIPS - 1) + 1 == HIERARCHY_CELLS);
+const _: () = assert!(hierarchy_mip(HIERARCHY_MIPS - 1) + 2 == HIERARCHY_ROWS);
 
 /// A virtual shadow map's settings.
 #[derive(Debug, Clone, Copy, PartialEq)]

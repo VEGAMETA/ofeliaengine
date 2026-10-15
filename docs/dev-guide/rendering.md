@@ -1173,17 +1173,18 @@ if renderer.set_virtual_shadows(&device, &bindless, true)? {
   removed draws, another draw list or scene) draw every page the frame needs again. Call
   `pages.invalidate()` for changes the renderer cannot see. Redrawing only the pages
   under what moved comes next (ADR 0093, step 3c).
-- **Not yet cheaper than the cascades** (Intel's Sponza at 1080p, ADR 0093's step 3b):
+- **What they cost** (Intel's Sponza at 1080p, ADR 0093 step 3c):
 
 | µs a frame | RTX 4060 Ti | Radeon iGPU |
 |---|---:|---:|
-| still: the pages' passes (marking, bookkeeping, visibility) | 245 | 15,343 |
+| still: the pages' passes (marking, bookkeeping, visibility) | 233 | 8,818 |
 | the shading, without the cascades' lookup | −34 | −1,356 |
-| walking 5 cm a frame: drawing the pages it exposes | 885 more | 27,669 more |
-| the cached cascades walking, for comparison | 68 | 752 |
+| walking 5 cm a frame: drawing and culling the pages it exposes | 86 more | 2,729 more |
+| the cached cascades walking, for comparison | 79 | 822 |
 
-  Use them where the sharper shadows are worth it on a discrete GPU, and not on
-  integrated GPUs yet.
+  Walking, the frame costs the RTX about 0.28 ms more than with the cached cascades; the
+  Radeon 2.9 ms more with the integrated defaults (67 %). Use them where the sharper
+  shadows are worth it; integrated GPUs keep the cascades by default.
 
 ### Contact shadows (ADR 0071)
 

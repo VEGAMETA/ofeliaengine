@@ -21,9 +21,9 @@ use engine_core::math::{Mat4, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::upload::UploadRing;
 use engine_render::vsm::{
-    ALLOCATED, DIRTY, FAILED, HIERARCHY_CELLS, HIERARCHY_MIPS, LIST_HEADER, MARK_MARGIN_TEXELS,
-    NEEDED, OWNED, PAGE_TEXELS, PHYSICAL, TABLE_PAGES, VirtualShadows, VsmLevel, VsmSettings,
-    VsmView, hierarchy_mip,
+    ALLOCATED, DIRTY, FAILED, HIERARCHY_CELLS, HIERARCHY_MIPS, HIERARCHY_ROWS, LIST_HEADER,
+    MARK_MARGIN_TEXELS, NEEDED, OWNED, PAGE_TEXELS, PHYSICAL, TABLE_PAGES, VirtualShadows,
+    VsmLevel, VsmSettings, VsmView, hierarchy_mip,
 };
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -483,7 +483,7 @@ fn check(prev: &Snapshot, now: &Snapshot, input: &Input<'_>, settings: &VsmSetti
     }
 
     // The hierarchy of dirty pages: by window position, then each coarser level the OR of
-    // its 2 × 2 cells.
+    // its 2 × 2 cells, and the dirty pages as bits by row.
     let side = TABLE_PAGES as usize;
     for (k, level) in input.levels.iter().enumerate() {
         let cells =
@@ -502,6 +502,12 @@ fn check(prev: &Snapshot, now: &Snapshot, input: &Input<'_>, settings: &VsmSetti
                     cells[ry * side + rx],
                     u32::from(dirty),
                     "level {k}, page ({rx}, {ry}) in the hierarchy"
+                );
+                let word = cells[HIERARCHY_ROWS as usize + 2 * ry + rx / 32];
+                assert_eq!(
+                    word >> (rx % 32) & 1,
+                    u32::from(dirty),
+                    "level {k}, page ({rx}, {ry}) in the hierarchy's rows"
                 );
             }
         }
