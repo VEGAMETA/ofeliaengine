@@ -1284,6 +1284,7 @@ mod windowed {
                     presentation.exclusive_refused
                 ),
                 (Window::FullScreen, false) => String::from("full screen, borderless"),
+                (Window::Offscreen { .. }, false) => String::from("offscreen"),
             },
             defaults.ambient_occlusion.map(|a| a.quality),
             presentation.present_mode,
