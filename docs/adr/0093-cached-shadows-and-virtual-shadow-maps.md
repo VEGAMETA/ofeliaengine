@@ -243,3 +243,97 @@ mask (Warner Bros US 11,908,062 / 12,315,068).
     the camera 5 cm a frame with the cache on.
 - **Next (step 2).** Moved casters should draw their old and new light-space bounds only,
   not every cascade whole.
+
+## Step 2 as built (2026-10-15)
+
+- **What moved draws its places, not every cascade.**
+  - The changes come from the draw list (`DrawDiff`, shared with the local lights'
+    cache: a draw whose mesh, material, transform or mesh shape changed, or that appeared
+    or went) or from the GPU scene (an upload's changes and the instances moving between
+    ticks).
+  - Their old and new world boxes go into each cascade's light view (Arvo), become
+    window rectangles a texel larger, and are gathered into clusters after the strips: at
+    most 4 rectangles a cascade (`Cascade::drawn`).
+  - Still drawn whole: another draw list or scene, renderer settings that change what
+    casts, edited materials or meshes, and more than 512 changes waiting.
+- **Each piece used to draw every caster of its cascade.** Culling is per cascade,
+  against all its rectangles, so each piece (a rectangle's part on one side of the
+  layer's seams) drew all of them under its own scissor. Per cascade, Radeon, Sponza,
+  meshlets on:
+  - walking, the nearest cascade cost 55 % of its whole redraw;
+  - with 8 moving casters and walking, the farthest cost 163 %.
+- **A cascade's pieces are drawn at once** with the meshlet path, where vertex shaders
+  pick viewports (`OptionalCaps::viewport_index`: `multiViewport`,
+  `shaderOutputViewportIndex`, 16 viewports; both reference GPUs):
+  - `cullMeshletPieces` tags each run of meshlets with the pieces it reaches. The tag is
+    16 bits: bit `4r + q` is rectangle `r`'s part in quadrant `q` of the layer, cut at the
+    seams' light-view lines. It goes beside the run's slot, and the run's instance count
+    is the number of pieces. Runs split where the pieces change.
+  - `shadowVertexPieces` and `shadowVertexMaskedPieces` read the pieces at the draw's
+    first instance and send instance `i` to the `i`-th piece's viewport.
+  - The pass sets 16 viewports and scissors, clears every piece at once and draws the
+    cascade's meshlet lists once.
+  - Instanced draws (meshes without meshlets, material types) stay piece by piece, as
+    does everything on devices without the capability.
+  - Their own entry points, and pipelines made on a cache's first frame: none of it runs
+    in a view without a cache, and the meshlet cull and the shadow vertex shaders keep
+    their registers.
+  - Radeon, Sponza, walking, per cascade: 241 → 96, 258 → 89, 140 → 56 and 29 → 24 µs.
+- **The guard.** A plan's cost against a whole redraw is the casters its rectangles
+  reach: about 3 times their share of the window (calibrated on Intel's Sponza), drawn
+  once with the pieces at once, else once per piece. Above 0.8 the cascade is drawn
+  whole. With the pieces at once, the clusters may take every rectangle the strips leave;
+  otherwise two.
+- **The cascade grew** to 144 bytes (four rectangles, their count, the seams, the
+  pieces):
+  - the culls test the first two rectangles as in step 1 and the clusters after the
+    strips only when a cascade has more (`Cascade::rects`). Testing all four took the
+    Radeon's meshlet cull from 53 to 64 VGPRs (its pass +14 %, +75 µs on Intel's Sponza)
+    and the RTX's instance cull from 40 to 48 registers; both are back to step 1's, the
+    pass +2 % (11 µs on Intel's Sponza, Radeon);
+  - the shaders read a cascade's fields one at a time (loading a whole cascade cost the
+    Radeon's shading 6 registers), and its layer comes from the frame
+    (`cascade_layers`);
+  - the shading looks the sun's shadow up before the lobes' terms; with decals (a
+    literal), after them, where the decals' values are live. Step 1's lookup had taken
+    the Radeon's environment variant from 64 to 70 VGPRs; it is at 64 again: Intel's
+    Sponza without a cache, forward 22.7 → 21.6 ms on the Radeon, 461 → 455 µs on the
+    RTX. On the RTX the variants with motion vectors (TAA without the depth prepass)
+    trade: with the environment 56 → 64 registers (Sponza, forward 394 → 401 µs), with
+    local lights 63–64 → 56. Looking the shadow up later for them would trade back;
+  - `shadow_distance` reads the map as the array it is, wrapping as the lookups do.
+- **Tests.**
+  - `cached_cascades_match_cascades_drawn_whole` also moves a box while walking, and runs
+    twice: instanced, and by meshlet with spheres for the poles (125 cascades drawn in
+    pieces at once). At most 1 pixel differs on either GPU; the cache draws 5.8 % of the
+    texels.
+  - `cached_cascades_follow_the_scenes_uploads`: an upload that moves an instance draws
+    a part of the cascades.
+  - `shadow_cache`'s unit tests: the moved casters' places over a 300-step random walk
+    (both ways of drawing), the clusters, the guard.
+- **Measured** (ref-1, release, 1920 × 1080, `scene_bench --sky --meshlet-culling
+  --prepass --cached-shadows [--walk 0.05] [--movers n]`, 4 cascades of 1024², 200
+  frames). GPU shadow passes, median; the movers are the `n` smallest draws, each swinging
+  25 cm either way along x over 120 frames:
+
+  | Scene, GPU | drawn whole (still / walking) | walking: step 1 → 2 | 1 mover (still / walking) | 8 movers (still / walking) |
+  |---|---:|---:|---:|---:|
+  | Intel's Sponza, RTX | 827 / 728 µs | 69 → 43 µs | 17 / 50 µs | 317 / 403 µs |
+  | Intel's Sponza, Radeon | 21.8 / 19.0 ms | 1.98 → 0.76 ms | 0.21 / 0.88 ms | 5.55 / 7.03 ms |
+  | Sponza, RTX | 147 / 130 µs | 32–35 → 24 µs | 15 / 25 µs | 54 / 53 µs |
+  | Sponza, Radeon | 2.51 / 2.43 ms | 0.56 → 0.24 ms | 0.07 / 0.26 ms | 0.64 / 0.90 ms |
+
+  - With step 1, every frame with a moving caster drew every cascade whole, through the
+    layers: Radeon, Sponza, 2.70 ms against the atlas's 2.54 (a rendering per layer,
+    +6 %); the RTX the same.
+  - Views without a cache, step 1 → step 2 (A/B, alternated): Sponza RTX 162 → 162 µs,
+    with meshlets 135–147 both; Radeon 2.82 → 2.82 ms, with meshlets 2.50 → 2.50 ms.
+  - The perf gate passes on both GPUs. Its walking shots' shadow pass: RTX 80 → 39 µs,
+    Radeon 1.46 → 0.57 ms. Against step 1 (`perf_gate --scene`, 2 alternated rounds),
+    GPU frame: RTX intel_sponza_defaults_discrete 2,147 → 2,139 µs,
+    sponza_defaults_discrete 1,341 → 1,336 µs, sponza_taa 860 → 869 µs (its environment
+    variant with motion vectors, above); Radeon intel_sponza_defaults_integrated 57.42 →
+    57.46 ms, sponza_defaults_integrated 22.07 → 22.03 ms.
+- **Left.** Instanced draws still draw each piece's casters again (the same tags could
+  cull them per piece). The clusters are greedy. A rendering per layer costs the Radeon
+  6 % when everything is drawn whole (the first frame, a cut, the light turning).

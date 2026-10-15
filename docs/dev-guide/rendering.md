@@ -1052,10 +1052,11 @@ What it costs (ref-1, 1080p; `scene_bench -- --cascades N --shadow-res R`, `draw
 ### Cached cascades: draw only what changed (ADR 0093)
 
 A view can keep its cascades from frame to frame. Each frame then draws only the strips
-the camera's movement uncovered:
+the camera's movement uncovered and the old and new places of what moved:
 
 - a still camera over a still scene draws no shadows at all;
-- walking draws under 1–3 % of the texels.
+- walking draws under 1–3 % of the texels;
+- a moving object draws the light's view of where it was and where it is.
 
 `engine_frame` does this for every view (`ViewSettings::cached_shadows`, on by default).
 With the forward renderer directly, give each view a cache of its own:
@@ -1073,22 +1074,28 @@ unsafe { cache.destroy(&mut allocator, &bindless) };
 - **What it costs.** One shadow map per view: 16 MiB with 4 cascades of 1024². The
   cascades' texel size changes less often than it would without the cache: it may stay up
   to a quarter larger than the view needs, so shadows can be slightly softer.
+- **What moves.** Draws whose transform, mesh or material changed, draws that appeared
+  or went, a scene upload's changes and instances moving between ticks: each draws its
+  old and new places. Objects close together are drawn as one region. When the regions
+  would cost most of a whole cascade, that cascade is drawn whole.
 - **What draws everything again.** The first frame; the sun turning; a jump farther than
-  a cascade; and, for now, any change to the casters. That means a different draw list or
-  a scene upload that moves something, changed materials or meshes, and instances moving
-  between ticks. A scene where something always moves gains nothing yet. Drawing only the
-  moved objects' regions is the next step.
+  a cascade; another draw list or scene; edited materials or meshes; more than 512
+  changes in a frame.
+- **Drawn by meshlet** (the default), a cascade's regions are drawn at once, each piece
+  of geometry once into the regions it reaches, where the GPU lets vertex shaders pick the
+  viewport (both reference GPUs do). Otherwise each region draws every caster the
+  cascade's regions reach.
 - **Changes the renderer cannot see** (vertices rewritten in place by your own pass):
   call `cache.invalidate()`.
-- **`cache.stats()`** tells how many texels the last frame drew and how many cascades
-  were drawn whole.
+- **`cache.stats()`** tells how many texels the last frame drew, how many cascades were
+  drawn whole and how many drew their regions at once.
 
-| GPU shadow passes, 1080p, walking 5 cm a frame | drawn whole | cached |
-|---|---:|---:|
-| Intel's Sponza, RTX 4060 Ti | 728 µs | 69 µs |
-| Intel's Sponza, Radeon iGPU | 18.9 ms | 2.0 ms |
-| Sponza, RTX 4060 Ti | 129 µs | 32 µs |
-| Sponza, Radeon iGPU | 2.46 ms | 0.56 ms |
+| GPU shadow passes, 1080p, walking 5 cm a frame | drawn whole | cached | cached, 8 small objects moving |
+|---|---:|---:|---:|
+| Intel's Sponza, RTX 4060 Ti | 728 µs | 43 µs | 403 µs |
+| Intel's Sponza, Radeon iGPU | 19.0 ms | 0.76 ms | 7.0 ms |
+| Sponza, RTX 4060 Ti | 130 µs | 24 µs | 53 µs |
+| Sponza, Radeon iGPU | 2.43 ms | 0.24 ms | 0.90 ms |
 
 ### Contact shadows (ADR 0071)
 
