@@ -13,9 +13,12 @@
 //!   owns a heap for it. The group is not split by queue: its resources keep aliasing one
 //!   another (split, the RTX's frame needed 135 MiB for its two slots instead of 130).
 //! - **Objects.** The images, buffers and views are cached per slot by (description,
-//!   usage, heap, offset): while the frame's layout repeats, nothing is created. Objects
-//!   not used by a frame are destroyed when its slot comes around again, when the GPU is
-//!   done with them.
+//!   usage, heap, offset): while the frame's layout repeats, nothing is created. A slot
+//!   keeps the placements of its last few frame shapes ([`PLACEMENTS_PER_GROUP`]) and
+//!   objects no frame used for up to [`KEEP_UNUSED`] of its frames: a shape that comes
+//!   back (a frame that captures a reflection probe every 30 frames, between frames that
+//!   do not) finds its objects instead of making every transient again, twice. Objects
+//!   unused for longer are destroyed when their slot comes around, the GPU done with them.
 
 use super::compile::{Kind, QueueKind, Records};
 use super::placement::{self, Item};
@@ -27,6 +30,12 @@ use engine_rhi::{
 
 /// The least alignment of a transient buffer (see `requirements_of`).
 const TRANSIENT_BUFFER_ALIGN: u64 = 256;
+
+/// Frames of its slot an object no frame used is kept for.
+pub(crate) const KEEP_UNUSED: u64 = 128;
+
+/// Placements kept per group and slot: the frame shapes that alternate.
+pub(crate) const PLACEMENTS_PER_GROUP: usize = 4;
 
 /// Layers of a layered texture that get a view of their own each: what a pass renders
 /// into one by one ([`super::PassBuilder::depth_layers`]).
@@ -90,6 +99,8 @@ struct CachedImage {
     sampled_index: Option<u32>,
     storage_index: Option<u32>,
     used: bool,
+    /// The slot's frame that last used it.
+    last_used: u64,
 }
 
 impl CachedImage {
@@ -145,10 +156,12 @@ struct CachedBuffer {
     buffer: vk::Buffer,
     address: vk::DeviceAddress,
     used: bool,
+    /// The slot's frame that last used it.
+    last_used: u64,
 }
 
-/// The placement of one group in the previous frame of a slot, reused while the frame's
-/// shape (sizes, lifetimes, resource order) repeats.
+/// The placement of one group in a recent frame of a slot, reused when the frame's shape
+/// (sizes, lifetimes, resource order) is that frame's again.
 struct CachedPlacement {
     key: GroupKey,
     hash: u128,
@@ -156,10 +169,14 @@ struct CachedPlacement {
     offsets: Vec<u64>,
     alias_ranges: Vec<(u32, u32)>,
     alias_resources: Vec<u32>,
+    /// The slot's frame that last used it.
+    last_used: u64,
 }
 
 #[derive(Default)]
 struct Slot {
+    /// Frames realized in this slot.
+    frames: u64,
     heaps: Vec<Heap>,
     images: Vec<CachedImage>,
     buffers: Vec<CachedBuffer>,
@@ -375,6 +392,8 @@ impl PhysicalResources {
         let mut realized = Realized::default();
         self.current.clear();
         self.current.extend_from_slice(imports);
+        self.slots[slot].frames += 1;
+        let frame = self.slots[slot].frames;
 
         // Shared heaps replaced at least a round of slots ago: no frame in flight uses them
         // (each slot's previous frame is done by the time it is realized).
@@ -491,9 +510,17 @@ impl PhysicalResources {
             }
             let hash = hasher.finish();
             let slot = &mut self.slots[slot_index];
-            let cache_index = match slot.placements.iter().position(|p| p.key == key) {
+            // This shape's placement, else a new one: in a new entry while the group has
+            // fewer than `PLACEMENTS_PER_GROUP`, else in its least recently used.
+            let found = slot
+                .placements
+                .iter()
+                .position(|p| p.key == key && p.hash == hash);
+            let cache_index = match found {
                 Some(i) => i,
-                None => {
+                None if slot.placements.iter().filter(|p| p.key == key).count()
+                    < PLACEMENTS_PER_GROUP =>
+                {
                     slot.placements.push(CachedPlacement {
                         key,
                         hash: !hash,
@@ -501,11 +528,20 @@ impl PhysicalResources {
                         offsets: Vec::new(),
                         alias_ranges: Vec::new(),
                         alias_resources: Vec::new(),
+                        last_used: frame,
                     });
                     slot.placements.len() - 1
                 }
+                None => slot
+                    .placements
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, p)| p.key == key)
+                    .min_by_key(|(_, p)| p.last_used)
+                    .map_or(0, |(i, _)| i),
             };
             let cache = &mut slot.placements[cache_index];
+            cache.last_used = frame;
             if cache.hash != hash {
                 cache.heap_size = placement::place(&mut self.items, &mut self.scratch);
                 cache.offsets.clear();
@@ -618,6 +654,7 @@ impl PhysicalResources {
                             Some(i) => {
                                 slot.image_cursor = i + 1;
                                 slot.images[i].used = true;
+                                slot.images[i].last_used = frame;
                                 i
                             }
                             None => {
@@ -646,6 +683,7 @@ impl PhysicalResources {
                                     sampled_index: None,
                                     storage_index: None,
                                     used: true,
+                                    last_used: frame,
                                 });
                                 realized.created_objects += 1;
                                 slot.images.len() - 1
@@ -683,6 +721,7 @@ impl PhysicalResources {
                                 slot.buffer_cursor = i + 1;
                                 let c = &mut slot.buffers[i];
                                 c.used = true;
+                                c.last_used = frame;
                                 (c.buffer, c.address)
                             }
                             None => {
@@ -708,6 +747,7 @@ impl PhysicalResources {
                                     buffer,
                                     address,
                                     used: true,
+                                    last_used: frame,
                                 });
                                 realized.created_objects += 1;
                                 (buffer, address)
@@ -723,11 +763,12 @@ impl PhysicalResources {
             }
         }
 
-        // Objects this frame did not use: their last use was in this slot's previous
-        // frame, which the GPU has finished.
+        // Objects no frame of this slot used for `KEEP_UNUSED` frames: their last use was
+        // in an earlier frame of this slot, which the GPU has finished.
         let slot = &mut self.slots[slot_index];
+        let kept = |used: bool, last_used: u64| used || frame - last_used < KEEP_UNUSED;
         slot.images.retain_mut(|c| {
-            let keep = c.used;
+            let keep = kept(c.used, c.last_used);
             if !keep {
                 // SAFETY: not used by any pending GPU work (see above).
                 unsafe { c.destroy(device, bindless) };
@@ -736,7 +777,7 @@ impl PhysicalResources {
             keep
         });
         slot.buffers.retain_mut(|c| {
-            let keep = c.used;
+            let keep = kept(c.used, c.last_used);
             if !keep {
                 // SAFETY: as above.
                 unsafe { device.destroy_buffer(c.buffer, None) };

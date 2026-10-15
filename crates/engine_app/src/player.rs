@@ -9,7 +9,7 @@ use core::fmt;
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
 use engine_dlss::{DlssFrameGeneration, Streamline, StreamlineDesc};
-use engine_ecs::{GlobalTransform, World};
+use engine_ecs::{GlobalTransform, QueryState, World};
 use engine_frame::{
     Antialiasing, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget, Placement,
     PrepareContext, Quality, RenderDefaults, SceneDraws, SceneInput, UiCanvas, UiRenderer, View,
@@ -22,7 +22,8 @@ use engine_platform::window::{
 use engine_render::budget::GpuBudget;
 use engine_render::environment::{Environment, Sky};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
-use engine_render::forward::{DirectionalLight, ShadowSettings};
+use engine_render::forward::{DirectionalLight, ShadowSettings, ViewGi};
+use engine_render::gi::{GiSettings, ProbeGi};
 use engine_render::gpu_scene::{GpuScene, InstanceId};
 use engine_render::graph::{
     Access, FrameGraph, ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState,
@@ -30,6 +31,8 @@ use engine_render::graph::{
 use engine_render::material::{MaterialId, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId};
 use engine_render::present::PresentTarget;
+use engine_render::rays::{BlasDetail, RayScene, RaySettings};
+use engine_render::reflections::ReflectionProbes;
 use engine_render::skinning::Skinning;
 use engine_render::streaming::LodView;
 use engine_render::texture_pool::{TextureId, TexturePool};
@@ -40,7 +43,9 @@ use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Frames, FullScreenExclusive, Instance,
     InstanceDesc, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc, VulkanHooks,
 };
-use engine_runtime::{Camera, CameraView, MeshRenderer, Runtime};
+use engine_runtime::{
+    Camera, CameraView, GiExtract, MeshRenderer, ProbeExtract, ReflectionProbe, Runtime,
+};
 use engine_streaming::{SceneStreamSettings, SceneStreamer};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -205,6 +210,11 @@ pub struct Player {
     skinning: Skinning,
     feedback: Option<TextureFeedback>,
     environment: Environment,
+    /// Reflection probes, made with the first `ReflectionProbe` entity (ADR 0099 step 4).
+    probes: Option<ReflectionProbes>,
+    /// The volume of GI probes over the world's `GiVolume`, and the scene its rays trace.
+    gi: Option<ProbeGi>,
+    gi_rays: Option<RayScene>,
     graph: RenderGraph,
     ring: UploadRing,
     geometry: GeometryPool,
@@ -233,6 +243,19 @@ pub struct Player {
     // State.
     settings: PlayerSettings,
     defaults: RenderDefaults,
+    /// The `ReflectionProbe` entities, counted until the first makes the probe set; then
+    /// their mirror in it.
+    probe_entities: QueryState<&'static ReflectionProbe>,
+    probe_extract: Option<ProbeExtract>,
+    gi_extract: GiExtract,
+    /// The volume's settings: `None` when it is off or the GPU has no ray queries.
+    gi_settings: Option<GiSettings>,
+    /// The pack's textures hold their tails: from now on probes capture and the volume's
+    /// rays trace the scene's materials (before, unloaded textures would read as white).
+    scene_ready: bool,
+    /// The streaming has settled once since the start: the probes were captured again
+    /// with what it brought.
+    scene_settled: bool,
     swapchain_format: vk::Format,
     presentation: Presentation,
     cache_path: Option<PathBuf>,
@@ -456,6 +479,23 @@ impl Player {
         };
         let environment = Environment::new(&device, &mut allocator, &bindless, Sky::default())
             .map_err(AppError::at("the environment"))?;
+        // Screen-space reflections from the start (a view setting); probes and the GI
+        // volume come with their first entities.
+        if settings.screen_space_reflections.is_some() {
+            renderer
+                .forward_mut()
+                .set_reflections(&device, &bindless, true)
+                .map_err(AppError::at("reflections"))?;
+        }
+        let gi_settings = settings
+            .global_illumination
+            .unwrap_or_else(|| Some(GiSettings::for_device(&device)));
+        if gi_settings.is_some() && device.ray_query().is_none() {
+            startup.notes.push(String::from(
+                "no ray queries on this GPU: GiVolume entities light nothing",
+            ));
+        }
+        let gi_settings = gi_settings.filter(|_| device.ray_query().is_some());
         let pipelines_after = engine_rhi::creation_stats();
         startup.pipelines = StartupPipelines {
             created: pipelines_after.created - pipelines_before.created,
@@ -502,7 +542,11 @@ impl Player {
             .phases
             .push(("scene opened from its pack (tails resident)", ms(phase)));
 
-        let cameras = CameraView::new(&mut world, defaults.view_settings());
+        let mut base = defaults.view_settings();
+        base.screen_space_reflections = settings.screen_space_reflections;
+        let cameras = CameraView::new(&mut world, base);
+        let probe_entities = QueryState::new(&mut world);
+        let gi_extract = GiExtract::new(&mut world);
         let mut scene = GpuScene::new(&device, &bindless, world.len() as u32 + 16, in_flight)
             .map_err(AppError::at("the GPU scene"))?;
         scene.set_jobs(jobs.clone());
@@ -543,6 +587,9 @@ impl Player {
             skinning,
             feedback,
             environment,
+            probes: None,
+            gi: None,
+            gi_rays: None,
             graph,
             ring,
             geometry,
@@ -569,6 +616,12 @@ impl Player {
             _process: process,
             settings: settings.clone(),
             defaults,
+            probe_entities,
+            probe_extract: None,
+            gi_extract,
+            gi_settings,
+            scene_ready: false,
+            scene_settled: false,
             swapchain_format,
             presentation: Presentation {
                 present_mode: PresentMode::Fifo,
@@ -804,6 +857,33 @@ impl Player {
         self.streamer.as_ref()
     }
 
+    /// The reflection probes, once a `ReflectionProbe` entity made them.
+    pub fn reflection_probes(&self) -> Option<&ReflectionProbes> {
+        self.probes.as_ref()
+    }
+
+    /// The `ReflectionProbe` entities' mirror in [`Self::reflection_probes`]: each entity's
+    /// probe (to capture a manual one again: `ReflectionProbes::refresh`).
+    pub fn probe_extract(&self) -> Option<&ProbeExtract> {
+        self.probe_extract.as_ref()
+    }
+
+    /// The volume of GI probes over the world's `GiVolume`, while there is one.
+    pub fn gi_volume(&self) -> Option<&ProbeGi> {
+        self.gi.as_ref()
+    }
+
+    /// The scene the GI volume's rays trace, while there is a volume.
+    pub fn ray_scene(&self) -> Option<&RayScene> {
+        self.gi_rays.as_ref()
+    }
+
+    /// The GI volume's settings, when a `GiVolume` entity would get one (the setting is
+    /// on and the GPU has ray queries).
+    pub fn gi_settings(&self) -> Option<GiSettings> {
+        self.gi_settings
+    }
+
     /// The latency provider.
     pub fn latency(&self) -> Option<&Latency> {
         self.latency.as_ref()
@@ -1024,6 +1104,9 @@ impl Player {
         self.skinning
             .update_bounds(&mut self.geometry, Some(&mut self.scene));
         report.animate = us(t);
+        let t = Instant::now();
+        self.sync_probes()?;
+        report.probes = us(t);
         marker(
             &mut self.latency,
             &self.swapchain,
@@ -1063,6 +1146,29 @@ impl Player {
             report.arrived = streamer.stats().arrived.saturating_sub(before);
         }
         self.budget.update(&self.allocator);
+        // Probes and the GI volume see the scene's materials once the pack's textures
+        // hold their tails; once the streaming settles, the probes are captured again.
+        if !self.scene_ready {
+            let textures = &self.textures;
+            self.scene_ready = self
+                .scene_info
+                .textures
+                .iter()
+                .all(|&t| textures.resident_level(t).is_some());
+        }
+        if self.scene_ready
+            && !self.scene_settled
+            && self.streamer.as_ref().is_none_or(SceneStreamer::idle)
+            && self.textures.pending().0 == 0
+        {
+            self.scene_settled = true;
+            if let Some(probes) = &self.probes {
+                probes.refresh_all();
+            }
+        }
+        let scene_ready = self.scene_ready;
+        let probes_shown =
+            scene_ready && self.probe_extract.as_ref().is_some_and(|e| !e.is_empty());
         report.streaming = us(t);
 
         if self.paced.is_some() {
@@ -1186,6 +1292,23 @@ impl Player {
                     frame.number,
                 )
                 .map_err(AppError::at("the GPU scene"))?;
+            // The scene for the GI volume's rays, after the GPU scene's passes placed its
+            // instances (ADR 0087).
+            let ray_frame = match (self.gi_rays.as_mut(), &scene_frame) {
+                (Some(rays), Some(scene)) => rays
+                    .add_passes(
+                        &mut fg,
+                        &self.device,
+                        &mut self.allocator,
+                        &mut self.ring,
+                        &self.bindless,
+                        &geo,
+                        scene,
+                        frame.number,
+                    )
+                    .map_err(AppError::at("the scene for ray queries"))?,
+                _ => None,
+            };
             report.upload = us(t);
             let t = Instant::now();
             let import = |fg: &mut FrameGraph<'_>, name: &'static str, image: PresentImage| {
@@ -1262,8 +1385,11 @@ impl Player {
                 lights: self.runtime.lights().lights(),
                 decals: &[],
                 environment: Some(&self.environment),
-                reflection_probes: None,
-                gi: None,
+                reflection_probes: self.probes.as_ref().filter(|_| probes_shown),
+                gi: self.gi.as_ref().map(|volume| ViewGi::Probes {
+                    volume: volume.begin_frame(&mut fg),
+                    rays: ray_frame.filter(|_| scene_ready),
+                }),
             };
             let view_target = ViewTarget {
                 texture: target,
@@ -1508,18 +1634,103 @@ impl Player {
         (extent.width, extent.height) != self.client
     }
 
+    /// Waits until the GPU has finished every frame (Streamline's queues too).
+    fn wait_idle(&self) -> Result<(), AppError> {
+        match &self.hooks {
+            Some(hooks) => hooks.device_wait_idle(&self.device),
+            None => self.frames.wait_idle(),
+        }
+        .map_err(AppError::at("waiting for the device"))
+    }
+
+    /// Reflection probes and the GI volume after the frame's ticks (ADR 0099 step 4).
+    /// The probe set (with the renderer's reflections) is made with the first
+    /// `ReflectionProbe` entity and then follows the entities. The GI volume (with the
+    /// scene for its rays) is made with the world's `GiVolume`, made anew when its grid
+    /// changes (the GPU waits for the frames that use the old one) and goes with it.
+    fn sync_probes(&mut self) -> Result<(), AppError> {
+        if let Some(settings) = self.settings.reflection_probes {
+            if self.probes.is_none() && self.probe_entities.entity_count(&self.runtime.world) > 0 {
+                self.renderer
+                    .forward_mut()
+                    .set_reflections(&self.device, &self.bindless, true)
+                    .map_err(AppError::at("reflections"))?;
+                self.probes = Some(
+                    ReflectionProbes::new(
+                        &self.device,
+                        &mut self.allocator,
+                        &self.bindless,
+                        settings,
+                    )
+                    .map_err(AppError::at("reflection probes"))?,
+                );
+                self.probe_extract = Some(ProbeExtract::new(&mut self.runtime.world));
+            }
+            if let (Some(probes), Some(extract)) = (&mut self.probes, &mut self.probe_extract) {
+                extract.sync(&mut self.runtime.world, probes);
+            }
+        }
+        let Some(settings) = self.gi_settings else {
+            return Ok(());
+        };
+        let grid = self.gi_extract.grid(&self.runtime.world);
+        if grid == self.gi.as_ref().map(ProbeGi::grid) {
+            return Ok(());
+        }
+        if self.gi.is_some() {
+            self.wait_idle()?;
+            if let Some(mut old) = self.gi.take() {
+                // SAFETY: the device is idle.
+                unsafe { old.destroy(&self.device, &mut self.allocator, &self.bindless) };
+            }
+        }
+        match grid {
+            Some(grid) => {
+                if self.gi_rays.is_none() {
+                    // The meshes' coarsest levels: enough for diffuse light, and resident
+                    // from the start in streamed packs (ADR 0087).
+                    let rays = RaySettings {
+                        detail: BlasDetail::Coarsest,
+                        ..RaySettings::for_device(&self.device)
+                    };
+                    self.gi_rays = Some(
+                        RayScene::new(
+                            &self.device,
+                            &self.bindless,
+                            rays,
+                            self.settings.frames_in_flight.max(1),
+                        )
+                        .map_err(AppError::at("the scene for ray queries"))?,
+                    );
+                }
+                self.gi = Some(
+                    ProbeGi::new(
+                        &self.device,
+                        &mut self.allocator,
+                        &self.bindless,
+                        grid,
+                        settings,
+                    )
+                    .map_err(AppError::at("the GI volume"))?,
+                );
+            }
+            None => {
+                if let Some(mut rays) = self.gi_rays.take() {
+                    // SAFETY: the device is idle (waited for above).
+                    unsafe { rays.destroy(&self.device, &mut self.allocator) };
+                }
+            }
+        }
+        self.renderer
+            .forward_mut()
+            .set_global_illumination(&self.device, &self.bindless, self.gi.is_some())
+            .map_err(AppError::at("global illumination"))
+    }
+
     /// Makes the swapchain anew for the window's size (after a resize, out-of-date or
     /// the monitor lost), with its frame generation and latency control.
     fn recreate_presentation(&mut self) -> Result<(), AppError> {
-        match &self.hooks {
-            Some(hooks) => hooks
-                .device_wait_idle(&self.device)
-                .map_err(AppError::at("waiting for the device"))?,
-            None => self
-                .frames
-                .wait_idle()
-                .map_err(AppError::at("waiting for the device"))?,
-        }
+        self.wait_idle()?;
         self.latency = None;
         if let Some(paced) = self.paced.take() {
             self.swapchain = Some(
@@ -1567,6 +1778,15 @@ impl Drop for Player {
             }
             self.environment
                 .destroy(&mut self.allocator, &self.bindless);
+            if let Some(probes) = &mut self.probes {
+                probes.destroy(&mut self.allocator, &self.bindless);
+            }
+            if let Some(gi) = &mut self.gi {
+                gi.destroy(&self.device, &mut self.allocator, &self.bindless);
+            }
+            if let Some(rays) = &mut self.gi_rays {
+                rays.destroy(&self.device, &mut self.allocator);
+            }
             self.graph
                 .destroy(&mut self.allocator, Some(&self.bindless));
             self.ring.destroy(&mut self.allocator);

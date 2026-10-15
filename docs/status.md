@@ -635,9 +635,17 @@ grown, divide and conquer); the old labels stay in parentheses.
      `PointLight`, `SpotLight`, `Sun` and `SkinnedMesh`, extracted by the runtime (a
      light keeps its slot while it lives); probes moved to step 4 with their features.
    - Step 4: ~~features per view~~ (done 2026-10-15: `ViewFeatures` in `ViewSettings`; a
-     view without a feature is drawn as a renderer without it); reflection probes and the
-     GI volume as components with the player's reflections and GI; the benches and the
-     test bed on the crate.
+     view without a feature is drawn as a renderer without it); ~~reflection probes and
+     the GI volume as components~~ (done 2026-10-15: `ReflectionProbe` and `GiVolume`
+     entities, each made with its first entity and free before; screen-space reflections
+     a setting; probes in a moving world captured in turn, at most every 30 frames for the
+     scene's changes; the render graph keeps the objects of recent frame shapes); the
+     benches and the test bed on the crate.
+   - Follow-ups of the player: window events read again after latency control's wait
+     (today they are read before it); reflection probes one face a frame on integrated
+     GPUs (a whole capture is about 6 ms in one frame on the Radeon; to measure); HDR
+     output from the player; the taskbar's full-screen marking; variable refresh; glTF
+     `KHR_lights_punctual` into packs; rendering features on the camera component.
 8b (was 6g). **Video playback** (owner, 2026-10-10: after the player crate; the engine plays
    no video today): a video frame as an ordinary texture (UI, a screen in the world, a
    viewport, cutscenes). To research and decide in an ADR: AV1 (royalty-free, unlike H.264 /

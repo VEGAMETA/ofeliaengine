@@ -3,8 +3,10 @@
 //!
 //! A counting global allocator observes the process while the same frame is declared and
 //! recorded repeatedly after a warm-up (driver and layer allocations happen in C and are
-//! not counted: this checks the engine's own code). One test per file, so nothing else
-//! allocates concurrently.
+//! not counted: this checks the engine's own code), every seventh frame with a pass and a
+//! transient of its own (as a reflection probe captured every few frames): the frame's
+//! shape alternates, and neither shape makes objects again. One test per file, so nothing
+//! else allocates concurrently.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
@@ -67,7 +69,7 @@ fn steady_state_frames_do_not_allocate() {
 
     // A deferred-shading-like frame: G-buffer, lighting, 8 post passes, a culled debug
     // pass and a compute pass producing a buffer.
-    let frame = |graph: &mut RenderGraph, allocator: &mut Allocator, slot: usize| {
+    let frame = |graph: &mut RenderGraph, allocator: &mut Allocator, slot: usize, capture: bool| {
         // SAFETY: nothing recorded by this test is ever submitted.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -96,7 +98,22 @@ fn steady_state_frames_do_not_allocate() {
                 .color(normal, LoadOp::Clear([0.0; 4]), StoreOp::Store)
                 .depth(depth, LoadOp::Clear([1.0, 0.0, 0.0, 0.0]), StoreOp::Store)
                 .execute(|_| {});
-            fg.add_pass("lighting")
+            // The intermittent pass: its transient changes the frame's placement.
+            let face = capture.then(|| {
+                let face = fg.create_texture(
+                    "probe face",
+                    TextureDesc::new_2d(vk::Format::R16G16B16A16_SFLOAT, 128, 128),
+                );
+                fg.add_pass("probe capture")
+                    .color(face, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+                    .execute(|_| {});
+                face
+            });
+            let mut lighting = fg.add_pass("lighting");
+            if let Some(face) = face {
+                lighting = lighting.read(face, Access::Sampled(ShaderStages::FRAGMENT));
+            }
+            lighting
                 .read(albedo, Access::Sampled(ShaderStages::FRAGMENT))
                 .read(normal, Access::Sampled(ShaderStages::FRAGMENT))
                 .read(lights, Access::StorageRead(ShaderStages::FRAGMENT))
@@ -124,22 +141,27 @@ fn steady_state_frames_do_not_allocate() {
         unsafe { d.end_command_buffer(cmd).unwrap() };
     };
 
+    // Both shapes in both slots during the warm-up (frames 0, 7, 14 capture).
     for i in 0..20 {
-        frame(&mut graph, &mut allocator, i % 2);
+        frame(&mut graph, &mut allocator, i % 2, i % 7 == 0);
     }
     // Shading variants the frames have not drawn with are made on the device's
     // warm-up thread (ADR 0079), which allocates: done before counting.
     device.wait_for_pipeline_warm_up();
     let before = ALLOCATIONS.load(Ordering::Relaxed);
-    for i in 0..100 {
-        frame(&mut graph, &mut allocator, i % 2);
+    let mut created = 0;
+    for i in 20..120 {
+        frame(&mut graph, &mut allocator, i % 2, i % 7 == 0);
+        created += graph.stats().created_objects;
     }
     let allocations = ALLOCATIONS.load(Ordering::Relaxed) - before;
     let stats = graph.stats();
-    println!("100 frames: {allocations} heap allocations; last frame {stats:?}");
+    println!(
+        "100 frames: {allocations} heap allocations, {created} objects made; last frame {stats:?}"
+    );
     assert_eq!(allocations, 0);
     assert_eq!(stats.culled_passes, 1);
-    assert_eq!(stats.created_objects, 0);
+    assert_eq!(created, 0, "a shape that comes back makes no object");
 
     device.wait_idle().unwrap();
     // SAFETY: nothing is in use.

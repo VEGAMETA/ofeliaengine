@@ -53,8 +53,13 @@ impl Game for Cubes {
 /// A player in a small window with the test game's world, or `None` (with a note)
 /// without a desktop or a GPU, unless `ENGINE_REQUIRE_GPU=1`.
 pub fn player() -> Option<(Player, Cubes)> {
+    player_with(|_| {})
+}
+
+/// [`player`] with its settings changed by `adjust`.
+pub fn player_with(adjust: impl FnOnce(&mut PlayerSettings)) -> Option<(Player, Cubes)> {
     let required = std::env::var("ENGINE_REQUIRE_GPU").is_ok_and(|v| v == "1");
-    let settings = PlayerSettings {
+    let mut settings = PlayerSettings {
         title: String::from("engine_app test"),
         window: Window::Windowed {
             width: 320,
@@ -68,6 +73,7 @@ pub fn player() -> Option<(Player, Cubes)> {
         warm_up: false,
         ..PlayerSettings::default()
     };
+    adjust(&mut settings);
     let mut player = match Player::new(&settings) {
         Ok(player) => player,
         Err(e) if !required => {

@@ -1872,6 +1872,9 @@ reflections where they know better (ADR 0073):
   something, the probes and the sky take over. Rough surfaces trace scattered rays that
   are filtered over space and time.
 
+On the player (`engine_app`), probes are entities and SSR a setting: see
+[player.md](player.md#reflections-and-global-illumination). Without it:
+
 ```rust
 use engine_render::reflections::{ReflectionProbe, ReflectionProbes, ProbeSettings, SsrSettings};
 
@@ -1900,9 +1903,11 @@ ssr: Some(&ssr) }, .. }`, with a `ScreenSpaceReflections` per view at the view's
 - **When probes are captured again:** after `set`, `refresh(id)` / `refresh_all()`, when
   the sky or the sun changes, and, for scenes drawn from a `GpuScene`, when instances
   inside a probe's boxes move, appear or disappear. With draw lists, tell it yourself:
-  `probes.invalidate_region(min, max)`. `ProbeRefresh::Manual` probes change only when
-  asked. `faces_per_frame` (6 by default) spreads a capture over frames; the nearest
-  waiting probe goes first.
+  `probes.invalidate_region(min, max)`. Captures the scene's changes ask for wait
+  `scene_interval` frames (30 by default; 0: at once) since the probe's last one, so
+  something moving inside a probe does not capture it in every frame. `ProbeRefresh::Manual`
+  probes change only when asked. `faces_per_frame` (6 by default) spreads a capture over
+  frames; the waiting probe captured longest ago goes first, the nearest among equals.
 - **Cost of a capture** (Sponza, 1080p view, 128² probes): a whole probe 0.23 ms on an
   RTX 4060 Ti, 3.1 ms on a Radeon iGPU (one face per frame: 0.08 / 1.0 ms). A static scene
   captures nothing after the first frames.
@@ -2112,6 +2117,9 @@ in, so the light follows a moving sun, lights turned on and off, and doors openi
   Radeon, plus reading the volume.
 - **To skip the wait.** Call `refresh()` after a big change (a level's lights switched),
   and the volume converges again. `rays_per_frame: 0` freezes the light once converged.
+
+On the player (`engine_app`), the volume is a `GiVolume` entity and the player makes the
+rest: see [player.md](player.md#reflections-and-global-illumination). Without it:
 
 ```rust
 use engine_render::forward::ViewGi;
