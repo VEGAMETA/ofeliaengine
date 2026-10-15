@@ -1126,6 +1126,65 @@ unsafe { cache.destroy(&mut allocator, &bindless) };
 | Sponza, RTX 4060 Ti | 130 µs | 24 µs | 53 µs |
 | Sponza, Radeon iGPU | 2.43 ms | 0.24 ms | 0.90 ms |
 
+### Virtual shadow pages for the sun (ADR 0093, opt-in)
+
+The cascades' texels are 2–10 pixels wide near the camera. Virtual shadow pages give each
+pixel about a texel of the sun's shadow: 16 levels around the camera, each twice as wide
+as the last, in pages of 64² texels. Only the pages the frame's pixels sample are backed,
+from a pool kept across frames, and a page is drawn again only when it is new or what it
+holds changed.
+
+```rust
+use engine_render::vsm::VsmSettings;
+
+let settings = ViewSettings {
+    virtual_shadows: Some(VsmSettings::default()),
+    ..ViewSettings::default()
+};
+```
+
+With the forward renderer directly, turn them on once and give each view its pages:
+
+```rust
+use engine_render::vsm::{VirtualShadows, VsmSettings};
+
+if renderer.set_virtual_shadows(&device, &bindless, true)? {
+    let mut pages = VirtualShadows::new(&device, &mut allocator, &bindless, VsmSettings::default())?;
+    // every frame:
+    let view = ForwardView { virtual_shadows: Some(&pages), ..view };
+    // when the GPU is done with them:
+    unsafe { pages.destroy(&mut allocator, &bindless) };
+}
+```
+
+- **What reads them.** Opaque surfaces: a pass after the depth prepass writes the sun's
+  visibility per pixel, filtered as the cascades are, and the shading reads it (with
+  contact shadows, both multiplied). Transparent surfaces and subsurface transmission keep
+  the cascades, which are still drawn.
+- **What they need.** The depth prepass (it then runs), a single-sampled view (MSAA views
+  keep the cascades), and a device with `fragmentStoresAndAtomics`, `drawIndirectCount`
+  and `shaderInt64`. `set_virtual_shadows` returns `false` without them, and the views keep
+  the cascades.
+- **Settings.** `pool_pages` (4,096 pages of 16 KiB: 64 MiB with the tables), `levels`,
+  `first_extent` (the first level's width, 2 m), `keep_frames` (how long a page nobody
+  samples stays backed), `level_bias` (+1 halves the texel density and quarters the
+  pages).
+- **What changes redraw.** The light turning and casters changing (moved, added or
+  removed draws, another draw list or scene) draw every page the frame needs again. Call
+  `pages.invalidate()` for changes the renderer cannot see. Redrawing only the pages
+  under what moved comes next (ADR 0093, step 3c).
+- **Not yet cheaper than the cascades** (Intel's Sponza at 1080p, ADR 0093's step 3b):
+
+| µs a frame | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| still: the pages' passes (marking, bookkeeping, visibility) | 245 | 15,343 |
+| the shading, without the cascades' lookup | −34 | −1,356 |
+| walking 5 cm a frame: drawing the pages it exposes | 885 more | 27,669 more |
+| the cached cascades walking, for comparison | 68 | 752 |
+
+  Use them where the sharper shadows are worth it on a discrete GPU, and not on
+  integrated GPUs yet.
+
 ### Contact shadows (ADR 0071)
 
 The cascades cannot resolve what is smaller than their texels: a box resting on the floor,

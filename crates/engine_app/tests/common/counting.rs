@@ -87,11 +87,23 @@ unsafe impl GlobalAlloc for CountingAllocator {
 /// inside) and asserts there are none, naming the threads that allocated.
 pub fn assert_steady_state(player: &mut engine_app::Player, game: &mut crate::common::Cubes) {
     // Warm-up, 120 frames and at least 1.5 s: pipelines, the view's state, the graph's
-    // buffers and heaps, the window thread's first display checks (once a second).
+    // buffers and heaps, the window thread's first display checks (once a second). And
+    // half a second past the last slow frame, 20 s at most: with a cold driver cache the
+    // first frames compile pipelines for seconds, and what settles after them (2026-10-15:
+    // 6 allocations after 120 frames that took the whole 1.5 s) is not the steady state.
     let started = Instant::now();
+    let mut last_slow = started;
     let mut warm = 0;
-    while warm < 120 || started.elapsed() < Duration::from_millis(1500) {
+    while (warm < 120
+        || started.elapsed() < Duration::from_millis(1500)
+        || last_slow.elapsed() < Duration::from_millis(500))
+        && started.elapsed() < Duration::from_secs(20)
+    {
+        let frame = Instant::now();
         player.frame(game).unwrap();
+        if frame.elapsed() > Duration::from_millis(50) {
+            last_slow = Instant::now();
+        }
         warm += 1;
     }
     // SAFETY: a plain query.

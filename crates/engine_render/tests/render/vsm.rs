@@ -21,8 +21,9 @@ use engine_core::math::{Mat4, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::upload::UploadRing;
 use engine_render::vsm::{
-    ALLOCATED, DIRTY, FAILED, LIST_HEADER, NEEDED, OWNED, PAGE_TEXELS, PHYSICAL, TABLE_PAGES,
-    VirtualShadows, VsmLevel, VsmSettings, VsmView,
+    ALLOCATED, DIRTY, FAILED, HIERARCHY_CELLS, HIERARCHY_MIPS, LIST_HEADER, MARK_MARGIN_TEXELS,
+    NEEDED, OWNED, PAGE_TEXELS, PHYSICAL, TABLE_PAGES, VirtualShadows, VsmLevel, VsmSettings,
+    VsmView, hierarchy_mip,
 };
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -92,8 +93,9 @@ impl Camera {
         VsmView {
             world_from_clip: self.clip_from_world(size).inverse(),
             eye: self.eye,
-            fov_y: FOV_Y,
+            footprint: 2.0 * (FOV_Y * 0.5).tan() / size[1] as f32,
             light_direction,
+            depth_range: [-100.0, 100.0],
         }
     }
 
@@ -137,6 +139,8 @@ struct Snapshot {
     lists: Vec<u32>,
     /// The pool's texels, rows of 64 pages.
     pool: Vec<u32>,
+    /// Per level, its hierarchy of dirty pages.
+    hierarchy: Vec<u32>,
 }
 
 impl Snapshot {
@@ -148,6 +152,7 @@ impl Snapshot {
             requests: Vec::new(),
             lists: Vec::new(),
             pool: Vec::new(),
+            hierarchy: Vec::new(),
         }
     }
 }
@@ -181,27 +186,38 @@ struct Stats {
     backed: usize,
 }
 
-/// The entry of the page holding `light` (metres across the light) at the level `k`
-/// (fractional) asks for, or a coarser level whose window holds it; `shift` moves the
-/// position by fractions of a page.
-fn entry(levels: &[VsmLevel], k: f64, light: [f64; 2], shift: [f64; 2]) -> Option<usize> {
+/// The entries a pixel at `light` (metres across the light) marks: at the level `k`
+/// (fractional) asks for, or the first coarser one whose window holds its footprint, the
+/// pages within the margin of it. `shift` moves the position by fractions of a page.
+fn entries(levels: &[VsmLevel], k: f64, light: [f64; 2], shift: [f64; 2]) -> Vec<usize> {
     let count = levels.len();
     let first = k.floor().clamp(0.0, (count - 1) as f64) as usize;
-    (first..count).find_map(|level| {
-        let l = levels[level];
-        let page_size = f64::from(l.texel * PAGE_TEXELS as f32);
-        let page = [0, 1].map(|i| (light[i] / page_size + shift[i]).floor() as i64);
-        let local = [
-            page[0] - i64::from(l.first_page.x),
-            page[1] - i64::from(l.first_page.y),
-        ];
-        let table = i64::from(TABLE_PAGES);
-        let inside = local.iter().all(|&c| (0..table).contains(&c));
-        inside.then(|| {
-            level * ENTRIES
-                + (page[1].rem_euclid(table) * table + page[0].rem_euclid(table)) as usize
-        })
-    })
+    let page_texels = f64::from(PAGE_TEXELS);
+    let margin = f64::from(MARK_MARGIN_TEXELS);
+    let table = i64::from(TABLE_PAGES);
+    for (level, l) in levels.iter().enumerate().skip(first) {
+        let texel = f64::from(l.texel);
+        let t = [0, 1].map(|i| light[i] / texel + shift[i] * page_texels);
+        let page = |v: f64| (v / page_texels).floor() as i64;
+        let lo = [page(t[0] - margin), page(t[1] - margin)];
+        let hi = [page(t[0] + margin), page(t[1] + margin)];
+        let first_page = [i64::from(l.first_page.x), i64::from(l.first_page.y)];
+        let inside = |p: [i64; 2]| (0..2).all(|i| (0..table).contains(&(p[i] - first_page[i])));
+        if !inside(lo) || !inside(hi) {
+            continue;
+        }
+        let mut out = Vec::with_capacity(4);
+        for py in lo[1]..=hi[1] {
+            for px in lo[0]..=hi[0] {
+                out.push(
+                    level * ENTRIES
+                        + (py.rem_euclid(table) * table + px.rem_euclid(table)) as usize,
+                );
+            }
+        }
+        return out;
+    }
+    Vec::new()
 }
 
 /// The entries the pixels must mark (`.0`: every pixel clear of an edge) and may mark
@@ -216,7 +232,7 @@ fn marks(
     let m = view.world_from_clip.to_cols_array().map(f64::from);
     let light = VirtualShadows::light_from_world(view.light_direction);
     let rows = [0, 1].map(|i| light.row(i).to_array().map(f64::from));
-    let footprint = 2.0 * (view.fov_y * 0.5).tan() / size[1] as f32;
+    let footprint = view.footprint;
     let first_texel = settings.first_extent / (PAGE_TEXELS * TABLE_PAGES) as f32;
     let bias = f64::from((footprint / first_texel).log2()) + f64::from(settings.level_bias);
     let eye = view.eye.to_array().map(f64::from);
@@ -240,19 +256,19 @@ fn marks(
                 .sum::<f64>()
                 .sqrt();
             let k = distance.max(1e-4).log2() + bias;
-            let primary = entry(levels, k, at, [0.0; 2]);
+            let primary = entries(levels, k, at, [0.0; 2]);
             let mut clear = true;
             for dk in [-EDGE, 0.0, EDGE] {
                 for sx in [-EDGE, 0.0, EDGE] {
                     for sy in [-EDGE, 0.0, EDGE] {
-                        let e = entry(levels, k + dk, at, [sx, sy]);
+                        let e = entries(levels, k + dk, at, [sx, sy]);
                         clear &= e == primary;
                         allowed.extend(e);
                     }
                 }
             }
             if clear {
-                required.extend(primary);
+                required.extend(primary.iter().copied());
             }
         }
     }
@@ -466,6 +482,47 @@ fn check(prev: &Snapshot, now: &Snapshot, input: &Input<'_>, settings: &VsmSetti
         }
     }
 
+    // The hierarchy of dirty pages: by window position, then each coarser level the OR of
+    // its 2 × 2 cells.
+    let side = TABLE_PAGES as usize;
+    for (k, level) in input.levels.iter().enumerate() {
+        let cells =
+            &now.hierarchy[k * HIERARCHY_CELLS as usize..(k + 1) * HIERARCHY_CELLS as usize];
+        let table = i64::from(TABLE_PAGES);
+        for ry in 0..side {
+            for rx in 0..side {
+                let page = [
+                    i64::from(level.first_page.x) + rx as i64,
+                    i64::from(level.first_page.y) + ry as i64,
+                ];
+                let e = k * ENTRIES
+                    + (page[1].rem_euclid(table) * table + page[0].rem_euclid(table)) as usize;
+                let dirty = now.table[e] & (ALLOCATED | DIRTY) == ALLOCATED | DIRTY;
+                assert_eq!(
+                    cells[ry * side + rx],
+                    u32::from(dirty),
+                    "level {k}, page ({rx}, {ry}) in the hierarchy"
+                );
+            }
+        }
+        for m in 1..HIERARCHY_MIPS {
+            let (fine, coarse) = (side >> (m - 1), side >> m);
+            let below = hierarchy_mip(m - 1) as usize;
+            let at = hierarchy_mip(m) as usize;
+            for y in 0..coarse {
+                for x in 0..coarse {
+                    let any =
+                        (0..4).any(|i| cells[below + (2 * y + i / 2) * fine + 2 * x + i % 2] != 0);
+                    assert_eq!(
+                        cells[at + y * coarse + x],
+                        u32::from(any),
+                        "level {k}, mip {m}, cell ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
     stats.needed = needed.len();
     stats.requests = requests.len();
     stats.free = free.len();
@@ -559,6 +616,7 @@ impl Bed {
             pages * 8,
             (1 + entries) * 4,
             (u64::from(LIST_HEADER) + 3 * pages) * 4,
+            u64::from(settings.levels * HIERARCHY_CELLS) * 4,
             u64::from(pool_extent[0]) * u64::from(pool_extent[1]) * 4,
         ];
         let depth_bytes = (depth.len() * 4) as u64;
@@ -666,7 +724,13 @@ impl Bed {
                         )
                     })
                     .collect::<Vec<_>>();
-                let sources = [frame.table, frame.meta, frame.requests, frame.lists];
+                let sources = [
+                    frame.table,
+                    frame.meta,
+                    frame.requests,
+                    frame.lists,
+                    frame.hierarchy,
+                ];
                 let mut pass = fg
                     .add_pass("vsm read back")
                     .read(frame.pool, Access::TransferRead);
@@ -675,7 +739,7 @@ impl Bed {
                         .read(source, Access::TransferRead)
                         .write(out, Access::TransferWrite);
                 }
-                let pool_out = outs[4];
+                let pool_out = outs[5];
                 pass.write(pool_out, Access::TransferWrite)
                     .execute(move |ctx| {
                         // SAFETY: recording; the graph orders the copies after the pages'
@@ -744,7 +808,8 @@ impl Bed {
                 meta: meta.chunks_exact(2).map(|m| [m[0], m[1]]).collect(),
                 requests: words(&readbacks[2], bytes[2]),
                 lists: words(&readbacks[3], bytes[3]),
-                pool: words(&readbacks[4], bytes[4]),
+                hierarchy: words(&readbacks[4], bytes[4]),
+                pool: words(&readbacks[5], bytes[5]),
             }
         });
         // SAFETY: the GPU is idle; the graph only borrowed them for this frame.

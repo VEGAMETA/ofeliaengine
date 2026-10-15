@@ -326,6 +326,7 @@ fn cascaded_shadows_match_analytic_shadows() {
                         occlusion: None,
                         temporal: None,
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

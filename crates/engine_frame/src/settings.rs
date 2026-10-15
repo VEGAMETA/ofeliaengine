@@ -102,6 +102,17 @@ pub struct ViewSettings {
     /// casters that moved, nothing for a still camera over a still scene. Costs the view a
     /// shadow map of its own (16 MiB with the default 4 cascades of 1024²).
     pub cached_shadows: bool,
+    /// The sun's virtual shadow pages (ADR 0093 step 3), off by default: opaque surfaces
+    /// take the sun's shadow from pages of about a texel a pixel, kept across frames,
+    /// instead of the cascades (which transparent surfaces and subsurface transmission
+    /// keep, so they are still drawn). Costs the view the pages' pool and tables (about
+    /// 65 MiB with the defaults) and, each frame, marking its pixels' pages, drawing the
+    /// pages that are new or whose casters changed (any change redraws every page the
+    /// frame needs, until step 3c) and the visibility pass: not yet less than the
+    /// cascades (`docs/dev-guide/rendering.md`). Needs a single-sampled view, the depth
+    /// prepass (which then runs) and the device's fragment atomics; without them the view
+    /// keeps the cascades alone.
+    pub virtual_shadows: Option<engine_render::vsm::VsmSettings>,
     /// Motion vectors even without temporal antialiasing (for effects of your own).
     /// Temporal antialiasing always has them.
     pub motion_vectors: bool,
@@ -151,6 +162,7 @@ impl Default for ViewSettings {
             clear: Some([0.02, 0.02, 0.05, 1.0]),
             occlusion_culling: false,
             cached_shadows: true,
+            virtual_shadows: None,
             motion_vectors: false,
             previous_color: false,
             kind: ViewKind::Gameplay,

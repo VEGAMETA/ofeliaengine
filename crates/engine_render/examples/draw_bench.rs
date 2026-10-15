@@ -457,6 +457,7 @@ fn main() {
                                 occlusion: (culling == Culling::Occlusion).then_some(&occlusion),
                                 temporal: None,
                                 shadow_cache: None,
+                                virtual_shadows: None,
                                 lights: &[],
                                 decals: &[],
                                 environment: None,

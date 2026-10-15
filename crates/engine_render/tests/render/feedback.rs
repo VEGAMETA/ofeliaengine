@@ -265,6 +265,7 @@ fn feedback_reports_the_levels_the_sampler_uses() {
                         occlusion: None,
                         temporal: None,
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: None,

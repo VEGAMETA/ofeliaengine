@@ -131,6 +131,10 @@ pub struct OptionalCaps {
     /// shader picks the viewport of what it draws (a cached cascade's pieces drawn at once,
     /// ADR 0093); enabled when present.
     pub viewport_index: bool,
+    /// `fragmentStoresAndAtomics`: fragment shaders that write storage buffers and images
+    /// (the sun's virtual shadow pages drawn with an atomic minimum, ADR 0093); enabled
+    /// when present.
+    pub fragment_stores_and_atomics: bool,
 }
 
 impl OptionalCaps {
@@ -164,6 +168,10 @@ impl OptionalCaps {
             (self.sample_rate_shading, "sample rate shading"),
             (self.shader_int64, "64-bit shader integers"),
             (self.viewport_index, "viewport index"),
+            (
+                self.fragment_stores_and_atomics,
+                "fragment stores and atomics",
+            ),
         ]
         .into_iter()
         .filter_map(|(present, name)| present.then_some(name))
@@ -399,6 +407,7 @@ impl Adapter {
             viewport_index: base.multi_viewport == vk::TRUE
                 && f12.shader_output_viewport_index == vk::TRUE
                 && props.limits.max_viewports >= 16,
+            fragment_stores_and_atomics: base.fragment_stores_and_atomics == vk::TRUE,
         };
 
         let kind = match props.device_type {

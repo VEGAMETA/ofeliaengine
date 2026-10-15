@@ -223,6 +223,7 @@ fn render_pack(shot: &Shot, options: RenderOptions, pack: &Path) -> Result<Rende
         let base = player.view_settings_mut();
         base.occlusion_culling = shot.occlusion_culling;
         base.cached_shadows = shot.cached_shadows;
+        base.virtual_shadows = shot.virtual_shadows;
         base.exposure = Exposure::Fixed(shot.exposure);
         base.curve = shot.curve;
         base.grading = shot.grading;

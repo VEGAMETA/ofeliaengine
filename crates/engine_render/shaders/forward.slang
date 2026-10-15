@@ -92,6 +92,11 @@
 // variants read them (the opaque ones get theirs from atmosphere.slang's full-screen pass).
 #include "atmosphere_common.slang"
 
+// The sun's virtual shadow pages (ADR 0093 step 3): their frame, levels and addressing,
+// and their pool, for the `*Vsm*` entry points that draw into them.
+#include "vsm_common.slang"
+[[vk::binding(1, 0)]] [vk::image_format("r32ui")] RWTexture2D<uint> g_vsm_pool[];
+
 // `VertexAttributes` in mesh.rs.
 struct Attributes
 {
@@ -251,10 +256,21 @@ struct Frame
     float cascade_layers;    // 1: cascade c is layer c of the map (a view's cache, ADR 0093); 0: every cascade is a tile of layer 0
     BatchMeshlets* batch_meshlets; // the meshlet entry points (ADR 0085): per batch, its levels' meshlets
     Meshlet* meshlets;       // the geometry pool's index buffer as meshlets (levels' meshlets follow their indices, 32-byte aligned)
-    // Meshlet lists (0: all or early, 1: late, 2 + k: shadow cascade k): bytes from the
-    // `commands` of their culling to them, and the first slot of their draws in `visible`.
-    uint meshlet_offset[6];
-    uint meshlet_slot[6];
+    // Meshlet lists (0: all or early, 1: late, 2 + k: shadow cascade k, 6: the virtual
+    // shadow pages): bytes from the `commands` of their culling to them, and the first
+    // slot of their draws in `visible`.
+    uint meshlet_offset[7];
+    uint meshlet_slot[7];
+    // The sun's virtual shadow pages (ADR 0093 step 3; the `*Vsm*` entry points): their
+    // frame, page tables and hierarchy of dirty pages, their batches (every batch's state
+    // and its levels' meshlets), the pool's bindless index, and the error the casters'
+    // detail levels may have, in texels of the level they are drawn into.
+    VsmFrame* vsm;
+    uint* vsm_table;
+    uint* vsm_hierarchy;
+    BatchMeshlets* vsm_batches;
+    uint vsm_pool;
+    float vsm_lod_threshold;
 };
 
 struct Instance
@@ -1177,6 +1193,220 @@ void lightTiles(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     }
 }
 
+// The sun's virtual shadow pages (ADR 0093 step 3b): their culls' `push.phase`, and their
+// meshlet lists (after the cascades').
+static const uint PHASE_VSM = 24;
+static const uint VSM_LIST = 6;
+
+BatchMeshlets read_vsm_batch(uint batch)
+{
+    return loadAligned<16>(push.frame.vsm_batches + batch);
+}
+
+// Whether `level` of the pages has a dirty page in the window rectangle `lo` to `hi`
+// (window positions, inclusive; what lies outside the window is ignored): its hierarchy
+// of dirty pages at the mip where the rectangle spans at most 2 × 2 cells.
+bool vsm_dirty(uint level, int2 lo, int2 hi)
+{
+    int2 a = max(lo, int2(0, 0));
+    int2 b = min(hi, int2(int(VSM_TABLE) - 1, int(VSM_TABLE) - 1));
+    if (any(a > b))
+        return false;
+    uint span = uint(max(b.x - a.x, b.y - a.y));
+    uint m = span == 0 ? 0 : min(firstbithigh(span) + 1, VSM_HIERARCHY_MIPS - 1);
+    uint side = VSM_TABLE >> m;
+    uint* cells = push.frame.vsm_hierarchy + level * VSM_HIERARCHY_CELLS + vsm_hierarchy_mip(m);
+    uint2 c0 = uint2(a) >> m;
+    uint2 c1 = uint2(b) >> m;
+    return (cells[c0.y * side + c0.x] | cells[c0.y * side + c1.x] | cells[c1.y * side + c0.x] | cells[c1.y * side + c1.x]) != 0;
+}
+
+// A world position across the light (the pages' light space, xy).
+float2 vsm_across(VsmFrame* f, float3 world)
+{
+    return float2(dot(f.light_rows[0].xyz, world) + f.light_rows[0].w, dot(f.light_rows[1].xyz, world) + f.light_rows[1].w);
+}
+
+// The window rectangle (positions, inclusive) a light-space box `c` ± `reach` covers at
+// `level`.
+void vsm_rect(VsmFrame* f, uint level, float2 c, float2 reach, out int2 lo, out int2 hi)
+{
+    int2 first = f.level[level].first_page;
+    lo = vsm_page_of(vsm_texel(f, level, c - reach)) - first;
+    hi = vsm_page_of(vsm_texel(f, level, c + reach)) - first;
+}
+
+// Makes instance `index`'s level `lod` meshlets work items of the pages' meshlet cull for
+// `level` when its state's draws have room for all of them (as `take_meshlets`).
+bool take_vsm_meshlets(BatchMeshlets bm, uint index, uint lod, uint level)
+{
+    uint count = bm.count[lod];
+    if (count == 0)
+        return false;
+    uint64_t lists = meshlet_lists(VSM_LIST);
+    MeshletHeader* header = (MeshletHeader*)lists;
+    uint base;
+    InterlockedAdd(header.reserved[bm.state], count, base);
+    if (base + count > header.capacity[bm.state])
+        return false;
+    uint chunks = (count + MESHLET_CHUNK - 1) / MESHLET_CHUNK;
+    uint item;
+    InterlockedAdd(header.args[0], chunks, item);
+    uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
+    for (uint c = 0; c < chunks; c++)
+        work[item + c] = uint2(index, lod | (bm.state << 8) | (level << 13) | (c << 17));
+    return true;
+}
+
+// Draws instance `index`'s level `lod` whole into `level` of the pages (no meshlets, or
+// no room for them), in its state's draws when they have room.
+void vsm_draw_whole(uint state, Batch batch, uint index, uint lod, uint level)
+{
+    uint64_t lists = meshlet_lists(VSM_LIST);
+    MeshletHeader* header = (MeshletHeader*)lists;
+    uint reserved;
+    InterlockedAdd(header.reserved[state], 1u, reserved);
+    if (reserved >= header.capacity[state])
+        return;
+    uint at;
+    InterlockedAdd(header.drawn[state], 1u, at);
+    at += header.offset[state];
+    DrawCommand* draws = (DrawCommand*)(lists + MESHLET_HEADER_BYTES + 8 * uint64_t(header.work));
+    DrawCommand whole = push.commands[batch.command + lod];
+    DrawCommand draw;
+    draw.index_count = whole.index_count;
+    draw.instance_count = 1;
+    draw.first_index = whole.first_index;
+    draw.vertex_offset = whole.vertex_offset;
+    draw.first_instance = push.frame.meshlet_slot[VSM_LIST] + at;
+    draws[at] = draw;
+    push.visible[draw.first_instance] = index | (level << 24);
+}
+
+// The pages' cull (ADR 0093 step 3b): one thread per instance. An instance casts into a
+// level of the pages when its world box, across the light, reaches a dirty page of the
+// level's window; it is drawn there at the detail level the level's texels allow: its
+// meshlets become work items of `cullVsmMeshlets`, or it is drawn whole (no meshlets, or
+// no room for them). Pages that are not dirty keep what earlier frames drew.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullVsm(uint3 id : SV_DispatchThreadID)
+{
+    uint index = id.x;
+    if (index >= push.instance_count)
+        return;
+    Instance inst = read_instance(push.instances, index);
+    Batch batch = read_batch(inst.batch);
+    // Blended batches cast no shadows.
+    if ((batch.lods & BATCH_BLENDED) != 0)
+        return;
+    VsmFrame* f = push.frame.vsm;
+    float3 center = transform_point(inst, batch.center.xyz);
+    float3 e = batch.extents.xyz;
+    float3 extents = float3(dot(abs(inst.row0.xyz), e), dot(abs(inst.row1.xyz), e), dot(abs(inst.row2.xyz), e));
+    float2 c = vsm_across(f, center);
+    float2 reach = float2(dot(abs(f.light_rows[0].xyz), extents), dot(abs(f.light_rows[1].xyz), extents));
+    float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+    float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+    float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+    float scale = sqrt(max(dot(c0, c0), max(dot(c1, c1), dot(c2, c2))));
+    BatchMeshlets bm = read_vsm_batch(inst.batch);
+    for (uint level = 0; level < f.levels; level++)
+    {
+        int2 lo, hi;
+        vsm_rect(f, level, c, reach, lo, hi);
+        if (!vsm_dirty(level, lo, hi))
+            continue;
+        float texel = 1.0 / (f.level[level].page_scale * float(VSM_PAGE));
+        uint lod = lod_within(batch, scale, push.frame.vsm_lod_threshold * texel);
+        if (!take_vsm_meshlets(bm, index, lod, level))
+            vsm_draw_whole(bm.state, batch, index, lod, level);
+    }
+}
+
+// The pages' meshlet cull (ADR 0093 step 3b): one group per work item of `cullVsm`, a
+// lane per meshlet of its chunk. A meshlet is drawn into its work item's level when its
+// bounding sphere reaches a dirty page there and its normal cone does not face away from
+// the light (as the cascades cull, `cullMeshlets`); each run of consecutive drawn
+// meshlets of the chunk is one draw.
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullVsmMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
+{
+    uint64_t lists = meshlet_lists(VSM_LIST);
+    MeshletHeader* header = (MeshletHeader*)lists;
+    uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
+    DrawCommand* draws = (DrawCommand*)(lists + MESHLET_HEADER_BYTES + 8 * uint64_t(header.work));
+    uint2 item = work[group.x];
+    uint index = item.x;
+    uint lod = item.y & 0xFFu;
+    uint state = (item.y >> 8) & 0x1Fu;
+    uint level = (item.y >> 13) & 0xFu;
+    uint m = (item.y >> 17) * MESHLET_CHUNK + local;
+    Instance inst = read_instance(push.instances, index);
+    Batch batch = read_batch(inst.batch);
+    BatchMeshlets bm = read_vsm_batch(inst.batch);
+    // Lanes past the level's last meshlet take part in the chunk's runs as not drawn.
+    bool valid = m < bm.count[lod];
+    DrawCommand whole = push.commands[batch.command + lod];
+    float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+    float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+    float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+    float3 lengths = float3(dot(c0, c0), dot(c1, c1), dot(c2, c2));
+    float largest = max(lengths.x, max(lengths.y, lengths.z));
+    float smallest = min(lengths.x, min(lengths.y, lengths.z));
+    float scale = sqrt(largest);
+    bool cone = bm.cone != 0 && smallest >= largest * 0.999;
+    VsmFrame* f = push.frame.vsm;
+    float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
+    Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + min(m, bm.count[lod] - 1));
+    float3 center = transform_point(inst, meshlet.center);
+    float radius = meshlet.radius * scale;
+    bool visible = valid;
+    if (visible)
+    {
+        int2 lo, hi;
+        vsm_rect(f, level, vsm_across(f, center), float2(radius, radius), lo, hi);
+        visible = vsm_dirty(level, lo, hi);
+        // The light is a direction: the cone test from infinitely far away.
+        if (visible && cone && (meshlet.cone >> 24) != 127u)
+        {
+            float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
+            visible = dot(culled_side, axis) < snorm8(meshlet.cone, 24);
+        }
+    }
+    // A drawn meshlet after one that is not starts a run, which takes in the drawn
+    // meshlets after it.
+    meshlet_drawn[local] = visible ? 1u : 0u;
+    meshlet_end[local] = meshlet.first_index + meshlet.triangles * 3;
+    GroupMemoryBarrierWithGroupSync();
+    bool first = visible && (local == 0 || meshlet_drawn[local - 1] == 0u);
+    uint last = local;
+    if (first)
+    {
+        while (last + 1 < MESHLET_CHUNK && meshlet_drawn[last + 1] != 0u)
+            last++;
+    }
+    uint end = meshlet_end[last];
+    uint count = WaveActiveCountBits(first);
+    uint base = 0;
+    if (WaveIsFirstLane() && count > 0)
+        InterlockedAdd(header.drawn[state], count, base);
+    base = WaveReadLaneFirst(base);
+    if (first)
+    {
+        uint at = header.offset[state] + base + WavePrefixCountBits(first);
+        DrawCommand draw;
+        draw.index_count = end - meshlet.first_index;
+        draw.instance_count = 1;
+        draw.first_index = whole.first_index + meshlet.first_index;
+        draw.vertex_offset = whole.vertex_offset;
+        draw.first_instance = push.frame.meshlet_slot[VSM_LIST] + at;
+        draws[at] = draw;
+        push.visible[draw.first_instance] = index | (level << 24);
+    }
+}
+
 struct VertexOut
 {
     float4 position : SV_Position;
@@ -1324,6 +1554,59 @@ ShadowPieceOut shadowVertexMaskedPieces(uint vertex : SV_VulkanVertexID, uint in
     o.uv = read_attributes(vertex).uv;
     o.material = inst.material;
     o.viewport = piece_viewport(slot, instance - slot);
+    return o;
+}
+
+// The virtual shadow pages' draws (ADR 0093 step 3b): instance `slot` of a draw names the
+// instance and the level it is drawn into (`index | level << 24`, by `cullVsm*`).
+struct VsmOut
+{
+    float4 position : SV_Position;
+    nointerpolation uint level : LEVEL;
+};
+
+struct VsmMaskedOut
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint material : MATERIAL;
+    nointerpolation uint level : LEVEL;
+};
+
+// A world position in `level` of the pages: its virtual texels in the level's window (the
+// 4096 × 4096 pixels of the rendering), its depth along the light. Rows run against the
+// light's y, as the cascades' do (Vulkan's clip y points down): faces keep the winding
+// the shadow pass culls by (`vsm_write` turns rows back into texels).
+float4 vsm_clip(VsmFrame* f, uint level, float3 world)
+{
+    float2 t = vsm_texel(f, level, vsm_across(f, world)) - float2(f.level[level].first_page) * float(VSM_PAGE);
+    float2 ndc = t * (2.0 / float(VSM_PAGE * VSM_TABLE)) - 1.0;
+    float depth = -(dot(f.light_rows[2].xyz, world) + f.light_rows[2].w) * f.depth_scale + f.depth_offset;
+    return float4(ndc.x, -ndc.y, depth, 1.0);
+}
+
+[shader("vertex")]
+VsmOut vsmVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    uint word = push.visible[slot];
+    Instance inst = read_instance(push.instances, word & 0xFFFFFFu);
+    VsmOut o;
+    o.level = word >> 24;
+    o.position = vsm_clip(push.frame.vsm, o.level, transform_point(inst, load_position(vertex)));
+    return o;
+}
+
+// Masked materials: texture coordinates for the alpha test.
+[shader("vertex")]
+VsmMaskedOut vsmVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
+{
+    uint word = push.visible[slot];
+    Instance inst = read_instance(push.instances, word & 0xFFFFFFu);
+    VsmMaskedOut o;
+    o.level = word >> 24;
+    o.position = vsm_clip(push.frame.vsm, o.level, transform_point(inst, load_position(vertex)));
+    o.uv = read_attributes(vertex).uv;
+    o.material = inst.material;
     return o;
 }
 
@@ -1619,6 +1902,37 @@ void shadowFragmentMasked(ShadowOut input)
         discard;
 }
 
+// A fragment of a caster drawn into the pages (ADR 0093 step 3b): its depth into its
+// texel with an atomic minimum, when its page is backed and drawn this frame (pages not
+// dirty keep what earlier frames drew).
+void vsm_write(uint level, float4 position)
+{
+    VsmFrame* f = push.frame.vsm;
+    uint2 texel = uint2(uint(position.x), uint(float(VSM_PAGE * VSM_TABLE) - position.y));
+    int2 page = f.level[level].first_page + int2(texel / VSM_PAGE);
+    uint entry = push.frame.vsm_table[vsm_entry(level, page)];
+    if ((entry & (VSM_ALLOCATED | VSM_DIRTY)) != (VSM_ALLOCATED | VSM_DIRTY))
+        return;
+    uint2 at = vsm_pool_texel(entry & VSM_PHYSICAL, texel % VSM_PAGE);
+    InterlockedMin(g_vsm_pool[NonUniformResourceIndex(push.frame.vsm_pool)][at], asuint(position.z));
+}
+
+[shader("fragment")]
+void vsmFragment(VsmOut input)
+{
+    vsm_write(input.level, input.position);
+}
+
+[shader("fragment")]
+void vsmFragmentMasked(VsmMaskedOut input)
+{
+    MaterialContext ctx = coverage_context(input.uv, input.material);
+    MATERIAL.Params p = MATERIAL::load(ctx);
+    if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
+        discard;
+    vsm_write(input.level, input.position);
+}
+
 // The depth prepass of masked materials with MSAA (ADR 0075): alpha to coverage instead
 // of the alpha test. The alpha is sharpened around the cutoff to about a pixel's width
 // (Golus, "Anti-aliased Alpha Test", 2017), so the edge stays where the alpha test puts it
@@ -1805,6 +2119,21 @@ float shadow(float3 light, float3 n, float2 pixel)
         return cascade_shadow(chosen, light, n);
     }
     return 1.0;
+}
+
+// `push.phase` of the shading that reads the sun's mask (`contact` entry points): the
+// mask's bindless index, and this bit when the view's virtual shadow pages (ADR 0093 step
+// 3b) put the sun's whole visibility in it, so the cascades are not looked up.
+static const uint SUN_IN_MASK = 1u << 31;
+static const uint SUN_MASK_INDEX = SUN_IN_MASK - 1u;
+
+// The sun's shadow from the cascades, or none to look up when the mask holds it
+// (`contact` is a literal: the other entry points keep their code).
+float sun_shadow(bool contact, float3 light, float3 n, float2 pixel)
+{
+    if (contact && (push.phase & SUN_IN_MASK) != 0)
+        return 1.0;
+    return shadow(light, n, pixel);
 }
 
 // Light reflected towards `v` by a surface with normal `n`, for unit irradiance from `l`
@@ -2482,7 +2811,7 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     // decals (a literal), after the terms: the decals' values are live here.
     float visible = 0.0;
     if (!decals)
-        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? sun_shadow(contact, input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     // glTF's sheen layer lets through what its lobe does not reflect (KHR_materials_sheen's
     // albedo scaling, from n·v; `sheen_albedo` is the lobe's directional albedo).
     terms.sheen_scaling = model_sheen_layer(M::model())
@@ -2502,11 +2831,12 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     float3 surface_diffuse = subsurface ? float3(0.0, 0.0, 0.0) : diffuse;
     float3 ambient_albedo = subsurface ? float3(0.0, 0.0, 0.0) : base.rgb;
     if (decals)
-        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? sun_shadow(contact, input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     // The sun's contact shadows (ADR 0071; `contact` is a literal): their mask's bindless
-    // index comes in `push.phase`, which the shading passes do not otherwise read.
+    // index comes in `push.phase`, which the shading passes do not otherwise read. With the
+    // view's virtual shadow pages the mask holds the sun's whole visibility.
     if (contact && visible > 0.0)
-        visible *= asfloat(g_uint_textures[push.phase].Load(int3(int2(input.position.xy), 0)).r);
+        visible *= asfloat(g_uint_textures[push.phase & SUN_MASK_INDEX].Load(int3(int2(input.position.xy), 0)).r);
     float3 local_irradiance = 0.0;
     float3 reflect_weight = 0.0;
     // The lobe the reflections replace the sky's light of (ADR 0073).

@@ -23,6 +23,7 @@ use engine_render::forward::{DirectionalLight, LocalLight, Spot};
 use engine_render::grading::ColorGrading;
 use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::reflections::SsrSettings;
+use engine_render::vsm::VsmSettings;
 use std::path::PathBuf;
 
 fn require_golden() -> bool {
@@ -250,6 +251,34 @@ fn procedural_scene_with_contact_shadows() {
     });
 }
 
+/// The procedural scene with the sun's virtual shadow pages (ADR 0093 step 3): the
+/// spheres', cubes' and glass's shadows on the floor and the wall from pages of about a
+/// texel a pixel, filtered as the cascades are; the glass (transparent) keeps the
+/// cascades.
+#[test]
+fn procedural_scene_with_virtual_shadows() {
+    check(&Shot {
+        virtual_shadows: Some(VsmSettings::default()),
+        ..procedural("procedural_vsm")
+    });
+}
+
+/// The same with the sun low from the side and contact shadows: the pages' visibility
+/// multiplied into the contact shadows' mask.
+#[test]
+fn procedural_scene_with_contact_and_virtual_shadows() {
+    check(&Shot {
+        contact_shadows: true,
+        virtual_shadows: Some(VsmSettings::default()),
+        sun: DirectionalLight {
+            direction: Vec3::new(-0.8, -0.4, -0.3).normalize(),
+            color: Vec3::splat(3.0),
+            ambient: Vec3::splat(0.08),
+        },
+        ..procedural("procedural_contact_vsm")
+    });
+}
+
 /// The procedural scene with decals (ADR 0082): a scorch mark across the corner of the
 /// floor and the wall (each face takes it by its own angle), a glossy wet patch with a
 /// painted arrow drawn over its edge, a ring wrapping a sphere and fading at its sides,
@@ -330,6 +359,20 @@ fn sponza() {
         "sponza",
         Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
     ));
+}
+
+/// Sponza's atrium with the sun's virtual shadow pages (ADR 0093 step 3): the arches',
+/// columns' and plants' shadows from the near columns to the far wall, each from the
+/// pages its pixels need.
+#[test]
+fn sponza_with_virtual_shadows() {
+    check(&Shot {
+        virtual_shadows: Some(VsmSettings::default()),
+        ..Shot::new(
+            "sponza_vsm",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
 }
 
 /// Sponza graded (ADR 0094): a warm white balance, lifted cool shadows, warm highlights,
@@ -958,6 +1001,16 @@ fn procedural_scene_with_reflections() {
 #[test]
 fn sponza_by_day_with_everything() {
     check(&sponza_day("sponza_day", [640, 360]));
+}
+
+/// The same day with the sun's virtual shadow pages (ADR 0093 step 3): their visibility
+/// multiplied into the contact shadows' mask, read by the shading under TAA's jitter.
+#[test]
+fn sponza_by_day_with_virtual_shadows() {
+    check(&Shot {
+        virtual_shadows: Some(VsmSettings::default()),
+        ..sponza_day("sponza_day_vsm", [640, 360])
+    });
 }
 
 /// The same day through the player (ADR 0099 step 4), the path games run: the scene

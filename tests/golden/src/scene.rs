@@ -57,6 +57,7 @@ use engine_render::skinning::{SkinnedMeshData, Skinning};
 use engine_render::subsurface::SubsurfaceProfile;
 use engine_render::texture_pool::{TextureFormat, TextureId, TextureLevels, TexturePool};
 use engine_render::upload::UploadRing;
+use engine_render::vsm::VsmSettings;
 use engine_render2d::{Canvas, Quad};
 use engine_rhi::ash::vk;
 use engine_rhi::{
@@ -245,6 +246,9 @@ pub struct Shot {
     /// The sun's cascades kept across frames (`ViewSettings::cached_shadows`, ADR 0093; on
     /// by default as there): a still camera draws them once.
     pub cached_shadows: bool,
+    /// The sun's virtual shadow pages (`ViewSettings::virtual_shadows`, ADR 0093 step 3;
+    /// off by default, as there): opaque surfaces take the sun's shadow from them.
+    pub virtual_shadows: Option<VsmSettings>,
     /// Sponza's curtains (its materials 14 to 19) as cloth: material files
     /// (`tests/golden/materials/fabric.slang` with the curtains' own textures) applied by a
     /// material map when cooking, the scene written to a pack (version 5, the types'
@@ -323,6 +327,7 @@ impl Shot {
             meshlets: false,
             lods: false,
             cached_shadows: true,
+            virtual_shadows: None,
             gi: None,
             brixelizer_gi: false,
             brixelizer_warmup: None,
@@ -1752,6 +1757,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         render_size: shot.render_size,
         occlusion_culling: shot.occlusion_culling,
         cached_shadows: shot.cached_shadows,
+        virtual_shadows: shot.virtual_shadows,
         exposure: Exposure::Fixed(shot.exposure),
         curve: shot.curve,
         grading: shot.grading,

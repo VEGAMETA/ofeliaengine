@@ -476,3 +476,98 @@ them yet: 3b wires them into the frame.
 - **For 3c.** The ground plane fills 78 % of the default pool at 1080p; grazing views back
   the most pages. The pool's size and the level bias (+1 quarters the pages) are per
   device class. The integrated class keeps the cascades unless 3c measures otherwise.
+
+## Step 3b as built (2026-10-15)
+
+The pages are drawn and read: `ViewSettings::virtual_shadows` (off by default) gives a
+view's opaque surfaces the sun's shadow from them. Transparent surfaces and subsurface
+transmission keep the cascades, which stay drawn (cached) beside the pages.
+
+- **Marking with the filter's footprint.** A pixel takes the first level whose window
+  holds its whole footprint, its texel ± 4 texels, and marks the up to 2 × 2 pages that
+  footprint touches (one loop per wave over its distinct pages). It cost the Radeon
+  0.22 ms more on 3a's ground plane at 1080p (1.35 ms a still frame); the RTX 65 µs.
+- **A hierarchy of dirty pages per level** (64² down to 1², 5,461 cells, indexed by the
+  page's place in the window), built where the dirty pages are collected.
+- **The depth mapping.** Depth along the light over the scene's range rounded out to
+  16 m steps, and a step more: the range moves rarely, and a change of it counts as the
+  light turning.
+- **Casters into the dirty pages** (`forward.slang`):
+  - `cullVsm`, a thread per instance: its box against each level's window (the
+    light's rows) and the hierarchy, at most 4 levels an instance; its meshlets go to
+    `cullVsmMeshlets`, or it is drawn whole.
+  - `cullVsmMeshlets`: each meshlet's sphere against the dirty pages and its cone;
+    runs of meshlets become one draw.
+  - The draws go to a list of their own (`VSM_LIST`, 2^19 draws at most; each draw's
+    word is its batch and level), with its own batch table.
+  - `vsmVertex` / `vsmFragment` (and their alpha-tested twins): one rendering of 4096²
+    without attachments, the fragment's depth written with an atomic minimum into the
+    pool, only in pages that are backed and dirty. The light's y is flipped so the
+    winding matches the cascades: the faces turned away from the light are drawn.
+- **The visibility** (`vsmVisibility`, after the contact shadows): per pixel of the
+  prepass's depth, the level it marked; the normal from the depth (on each axis the
+  neighbour nearer in depth); the receiver moved along it by a texel of its level, and
+  its depth biased by half a texel; a 3 × 3 tent filter of comparisons over 4 × 4
+  texels, as the cascades weigh their 3 × 3 bilinear comparisons, each texel read through
+  the page table (at most 4 entries). Written into the sun's mask, or multiplied into what
+  the contact shadows wrote there.
+- **The shading** uses the variants that read the mask. A bit of the shading's `phase`
+  (`SUN_IN_MASK`) says the mask holds the sun's whole visibility: they look up no cascade.
+  Their registers are unchanged on both GPUs (`scene_bench --pipeline-stats` against main);
+  no pipeline of the perf gate's scenes uses more.
+- **Which views.** Single-sampled perspective views with a depth prepass (it then runs);
+  multisampled views keep the cascades. The device needs `fragmentStoresAndAtomics`,
+  `drawIndirectCount` and `shaderInt64`; without them the view keeps the cascades.
+- **Casters that change redraw every page** a frame needs, and free the others, as the
+  light turning does: a draw list's changed draws, a scene upload's changes, instances
+  moving between ticks, another list or scene, other materials or caster settings
+  (`VirtualShadows::invalidate` for what the renderer cannot see). 3c redraws only the
+  pages under what changed.
+- **Tests** (both GPUs, synchronization validation):
+  - `tests/render/vsm.rs`: 3a's model, with the margin's pages and the hierarchy.
+  - `tests/render/vsm_draw.rs`: a ground slab, a plate in the air and a box; the camera
+    stands, stands still and steps aside, then the plate moves. Every texel of every
+    backed page holds the depth where the light's ray through it leaves the first box it
+    meets (none differs); each pixel's visibility matches a ray from its surface to the
+    sun outside the filter's penumbra (none differs). Without the redraw on change, the
+    frame after the move has 12,314 wrong texels.
+  - Golden shots on both GPUs (`*_vsm`): the procedural scene near (with and without
+    contact shadows), Sponza far, Sponza by day with everything.
+- **The picture.** Shadow edges are sharper, thin shadows the cascades lose appear (a
+  cornice's on the wall below it), and the cascades' dithered band at their edges is
+  gone. Against the cascades, by day: Intel's Sponza darker on 1.6 % of the pixels and
+  lighter on 0.1 %; Crytek's darker on 0.3 % and lighter on 1.0 %. The pages hold what
+  rays find (the test above); the cascades' coarser texels and wider normal offset miss
+  both ways.
+- **Numbers** (the perf gate's scenes, 1920 × 1080; Intel's Sponza with each class's
+  defaults; medians of 3 runs):
+
+| µs a frame | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| still: marking and bookkeeping (`vsm pages`) | 72 | 1,861 |
+| still: culls and draws (nothing dirty) | 10 | 13 |
+| still: visibility | 164 | 13,469 |
+| the forward pass without the cascades' lookup | −34 | −1,356 |
+| walking 5 cm a frame: drawing (`vsm draw`) | 885 | 27,669 |
+| walking: the cached cascades' strips instead | 68 | 752 |
+| walking, integrated class (67 %): drawing / visibility | 608 / 73 | 18,712 / 6,701 |
+| GPU frame still: pages / cascades drawn whole every frame | 1,610 / 1,440 | 66,904 / 58,095 |
+| GPU frame walking: pages / cached cascades | 2,490 / 1,372 | 91,054 / 53,973 |
+
+- **What 3b leaves** (for 3c, in order of their cost):
+  1. **Drawing while walking** costs 13 times the cached cascades' strips. The level's
+     whole 4096² is rasterized for every drawn triangle and the fragments outside dirty
+     pages discarded: a meshlet that reaches one dirty page rasterizes all its
+     triangles, and in the fine levels a floor's triangle covers millions of texels.
+     Likely fix: clip each draw to the dirty pages it reaches (a rectangle per draw,
+     clip distances), so only dirty texels are rasterized.
+  2. **The visibility on the Radeon** (13.5 ms at 1080p; the RTX 164 µs): 16 taps through
+     the page table and five reconstructed positions a pixel. Candidates: hardware
+     comparisons on a float view of the pool with a texel of border per page, the
+     normal from fewer reads.
+  3. **Moved casters** redraw every needed page; 3c redraws the pages under their old
+     and new places.
+  4. **Transparent surfaces and subsurface transmission** read the cascades, so they are
+     still drawn.
+  5. **Defaults per device class.** Off everywhere until the pages cost less than the
+     cascades they replace on that class.

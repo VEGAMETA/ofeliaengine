@@ -460,6 +460,13 @@ const CULL_SHADOWS: &[u8] = include_bytes!("../../shaders/forward.cullShadows.sp
 const CULL_SHADOWS_MESHLETS: &[u8] =
     include_bytes!("../../shaders/forward.cullShadowsMeshlets.spv");
 const MESHLET_CULL: &[u8] = include_bytes!("../../shaders/forward.cullMeshlets.spv");
+// The sun's virtual shadow pages (ADR 0093 step 3b): their culls and their casters' draws.
+const CULL_VSM: &[u8] = include_bytes!("../../shaders/forward.cullVsm.spv");
+const CULL_VSM_MESHLETS: &[u8] = include_bytes!("../../shaders/forward.cullVsmMeshlets.spv");
+const VSM_VERTEX: &[u8] = include_bytes!("../../shaders/forward.vsmVertex.spv");
+const VSM_VERTEX_MASKED: &[u8] = include_bytes!("../../shaders/forward.vsmVertexMasked.spv");
+const VSM_FRAGMENT: &[u8] = include_bytes!("../../shaders/forward.vsmFragment.spv");
+const VSM_FRAGMENT_MASKED: &[u8] = include_bytes!("../../shaders/forward.vsmFragmentMasked.spv");
 const MESHLET_PIECES_CULL: &[u8] = include_bytes!("../../shaders/forward.cullMeshletPieces.spv");
 const FRAGMENT_BLENDED: &[u8] = include_bytes!("../../shaders/forward.fragmentBlended.spv");
 const FRAGMENT_BLENDED_REACTIVE: &[u8] =
@@ -477,6 +484,13 @@ const LIGHT_TILES: &[u8] = include_bytes!("../../shaders/forward.lightTiles.spv"
 /// `PHASE_SHADOW_MESHLETS` in `forward.slang`: the meshlet cull of shadow cascade k runs
 /// with this phase plus k.
 const PHASE_SHADOW_MESHLETS: u32 = 16;
+/// `PHASE_VSM` in `forward.slang`: the virtual shadow pages' culls.
+const PHASE_VSM: u32 = 24;
+/// `VSM_LIST` in `forward.slang`: the virtual shadow pages' meshlet lists.
+const VSM_LIST: usize = 6;
+/// `SUN_IN_MASK` in `forward.slang`: in the `phase` of the shading that reads the sun's
+/// mask, the view's virtual shadow pages put the sun's whole visibility in it.
+const SUN_IN_MASK: u32 = 1 << 31;
 
 /// `PHASE_*` in `forward.slang`.
 const PHASE_ALL: u32 = 0;
@@ -647,6 +661,11 @@ pub struct ForwardView<'a> {
     /// This view's sun shadows kept across frames (ADR 0093): each frame then draws only
     /// what changed. `None` draws every cascade whole every frame.
     pub shadow_cache: Option<&'a CascadeCache>,
+    /// This view's virtual shadow pages for the sun (ADR 0093 step 3): opaque surfaces take
+    /// the sun's shadow from them, at about a texel a pixel, instead of the cascades. They
+    /// need [`ForwardRenderer::set_virtual_shadows`] and the depth prepass (which then
+    /// runs); transparent surfaces and subsurface transmission keep the cascades.
+    pub virtual_shadows: Option<&'a crate::vsm::VirtualShadows>,
     /// Point and spot lights (ADR 0045). Only those reaching the view are shaded, each by
     /// the pixels it can reach.
     pub lights: &'a [LocalLight],
@@ -1048,7 +1067,7 @@ struct CascadeData {
     _pad: u32,
 }
 
-/// `Frame` in `forward.slang` (1472 bytes).
+/// `Frame` in `forward.slang` (1520 bytes).
 #[derive(Clone, Copy)]
 #[repr(C)]
 struct FrameData {
@@ -1139,12 +1158,23 @@ struct FrameData {
     cascade_layers: f32,
     /// The meshlet path (ADR 0085): the batches' meshlets, the pool's index buffer (their
     /// meshlets), and per meshlet lists (0: all or early, 1: late, 2 + k: shadow cascade
-    /// k) the bytes from the command list its culling reads to them and the first slot of
-    /// their draws.
+    /// k, 6: the virtual shadow pages) the bytes from the command list its culling reads
+    /// to them and the first slot of their draws.
     batch_meshlets: u64,
     meshlets: u64,
-    meshlet_offset: [u32; 6],
-    meshlet_slot: [u32; 6],
+    meshlet_offset: [u32; 7],
+    meshlet_slot: [u32; 7],
+    /// The sun's virtual shadow pages (ADR 0093 step 3b, their cull and draw entry
+    /// points): their frame (`VsmFrame`), page tables and hierarchy of dirty pages, their
+    /// batches (`BatchMeshletData` of every batch), the pool's bindless index, and the
+    /// error the casters' detail levels may have in texels of the level they are drawn
+    /// into.
+    vsm: u64,
+    vsm_table: u64,
+    vsm_hierarchy: u64,
+    vsm_batches: u64,
+    vsm_pool: u32,
+    vsm_lod_threshold: f32,
 }
 
 /// `BatchMeshlets` in `forward.slang` (48 bytes): a batch's levels' meshlets (ADR 0085).
@@ -1225,7 +1255,7 @@ pub(crate) struct Push {
 const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 144);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1472);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1520);
 const _: () = assert!(core::mem::size_of::<BatchMeshletData>() == 48);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
@@ -1288,6 +1318,9 @@ pub struct ForwardPasses {
     /// The meshlet lists in `commands`, when the view drew by meshlet (ADR 0085): read a
     /// phase's first 32 words back to count its meshlet draws.
     pub meshlets: Option<MeshletLists>,
+    /// The sun's virtual shadow pages this frame (ADR 0093 step 3), when the view had them:
+    /// for debugging views and tests.
+    pub virtual_shadows: Option<crate::vsm::VsmFrame>,
 }
 
 /// Where a view's meshlet lists are in [`ForwardPasses::commands`] (ADR 0085): one per
@@ -1491,6 +1524,10 @@ pub struct ForwardRenderer {
     /// `meshlets_on` says whether it is on now.
     meshlet_cull: Option<Box<MeshletCull>>,
     meshlets_on: bool,
+    /// The sun's virtual shadow pages' culls and draws (ADR 0093 step 3b), made when they
+    /// are first turned on.
+    vsm: Option<Box<VsmDraw>>,
+    vsm_on: bool,
     /// The tiles' light bitmasks.
     light_tiles: ComputeShader<Push>,
     pyramid: DepthPyramid,
@@ -1561,6 +1598,86 @@ struct MeshletCull {
     /// Its twin for a cached cascade drawn in several pieces at once (ADR 0093), where
     /// vertex shaders pick viewports.
     pieces: Option<ComputeShader<Push>>,
+}
+
+/// The sun's virtual shadow pages' culls and casters' draws (ADR 0093 step 3b).
+struct VsmDraw {
+    /// One thread per instance: the levels whose dirty pages its box reaches.
+    cull: ComputeShader<Push>,
+    /// One group per work item: the meshlets that reach a dirty page of its level.
+    meshlets: ComputeShader<Push>,
+    /// The casters, drawn without attachments (an atomic minimum into the pool): plain,
+    /// masked.
+    pipelines: [Pipeline; 2],
+}
+
+impl core::fmt::Debug for VsmDraw {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("VsmDraw").finish_non_exhaustive()
+    }
+}
+
+impl VsmDraw {
+    fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
+        let invalid = || RhiError::Vulkan {
+            call: "embedded SPIR-V",
+            result: vk::Result::ERROR_INVALID_SHADER_NV,
+        };
+        let [cull, meshlets] = ComputeSource::create_all(
+            device,
+            bindless,
+            [
+                ComputeSource::<Push>::new(CULL_VSM, c"cullVsm", &[])?,
+                ComputeSource::<Push>::new(CULL_VSM_MESHLETS, c"cullVsmMeshlets", &[])?,
+            ],
+        )?;
+        let vertex = spirv_words(VSM_VERTEX).ok_or_else(invalid)?;
+        let vertex_masked = spirv_words(VSM_VERTEX_MASKED).ok_or_else(invalid)?;
+        let fragment = spirv_words(VSM_FRAGMENT).ok_or_else(invalid)?;
+        let fragment_masked = spirv_words(VSM_FRAGMENT_MASKED).ok_or_else(invalid)?;
+        let desc = |vertex, v, fragment, f| {
+            PipelineDesc::Graphics(GraphicsPipelineDesc {
+                depth_test: false,
+                depth_write: false,
+                dynamic_culling: true,
+                ..GraphicsPipelineDesc::new(
+                    ShaderStageDesc {
+                        spirv: vertex,
+                        entry: v,
+                    },
+                    Some(ShaderStageDesc {
+                        spirv: fragment,
+                        entry: f,
+                    }),
+                )
+            })
+        };
+        let mut pipelines = Pipeline::create_many(
+            device,
+            bindless.pipeline_layout(),
+            &[
+                desc(&vertex, c"vsmVertex", &fragment, c"vsmFragment"),
+                desc(
+                    &vertex_masked,
+                    c"vsmVertexMasked",
+                    &fragment_masked,
+                    c"vsmFragmentMasked",
+                ),
+            ],
+        )?
+        .into_iter();
+        let mut next = || {
+            pipelines.next().ok_or(RhiError::Vulkan {
+                call: "virtual shadow pipelines (fewer than described)",
+                result: vk::Result::ERROR_UNKNOWN,
+            })
+        };
+        Ok(Self {
+            cull,
+            meshlets,
+            pipelines: [next()?, next()?],
+        })
+    }
 }
 
 impl core::fmt::Debug for MeshletCull {
@@ -2061,6 +2178,8 @@ impl ForwardRenderer {
             cull,
             shadow_cull,
             meshlet_cull: None,
+            vsm: None,
+            vsm_on: false,
             meshlets_on: false,
             light_tiles,
             pyramid,
@@ -2442,6 +2561,51 @@ impl ForwardRenderer {
     /// The meshlet path's shaders while it is on.
     fn meshlet_shaders(&self) -> Option<&MeshletCull> {
         self.meshlet_cull.as_deref().filter(|_| self.meshlets_on)
+    }
+
+    /// Turns the sun's virtual shadow pages (ADR 0093 step 3) on or off (the default):
+    /// views with [`ForwardView::virtual_shadows`] then mark them from their depth prepass
+    /// (which then runs), draw the casters into their dirty pages, and take the sun's
+    /// shadow on opaque surfaces from them. Their culls and pipelines are made the first
+    /// time they are turned on, so a renderer that never uses them pays nothing. Needs the
+    /// device's `fragmentStoresAndAtomics`, `drawIndirectCount` and `shaderInt64`;
+    /// returns whether they are on.
+    pub fn set_virtual_shadows(
+        &mut self,
+        device: &Device,
+        bindless: &Bindless,
+        enabled: bool,
+    ) -> Result<bool, RhiError> {
+        let caps = &device.adapter().caps;
+        let supported =
+            caps.fragment_stores_and_atomics && caps.draw_indirect_count && caps.shader_int64;
+        if enabled && supported && self.vsm.is_none() {
+            self.vsm = Some(Box::new(VsmDraw::new(device, bindless)?));
+        }
+        // Their views shade with the variants that read the sun's mask (the contact
+        // shadows'), described now if contact shadows never were.
+        if enabled && supported && self.contact.is_none() {
+            self.contact = Some(ContactState::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+            )?);
+            self.ensure_shadowed_extras(device, bindless)?;
+            self.ensure_msaa(device, bindless)?;
+        }
+        self.vsm_on = enabled && supported;
+        Ok(self.vsm_on)
+    }
+
+    /// Whether views with virtual shadow pages use them ([`Self::set_virtual_shadows`]).
+    pub fn virtual_shadows(&self) -> bool {
+        self.vsm_on
+    }
+
+    /// The virtual shadow pages' culls and draws while they are on.
+    fn vsm_draw(&self) -> Option<&VsmDraw> {
+        self.vsm.as_deref().filter(|_| self.vsm_on)
     }
 
     /// Turns decals (ADR 0082, [`crate::decals`]) on or off (the default): views with
@@ -2922,14 +3086,23 @@ impl ForwardRenderer {
         setup.shadow_draws =
             self.plan_local_shadows(view, geometry, materials, &setup, Changes::Draws(draws));
         let layout = self.layout_draws(ring, geometry, materials, draws, view, &setup);
+        let mesh_box = |mesh| {
+            let (center, extents) = local_box(geometry, mesh);
+            let revision = geometry.mesh(mesh).map_or(0, |m| m.revision);
+            (center, extents, revision)
+        };
         if let Some(cache) = view.shadow_cache {
             cache.note_draws(
                 draws,
-                |mesh| {
-                    let (center, extents) = local_box(geometry, mesh);
-                    let revision = geometry.mesh(mesh).map_or(0, |m| m.revision);
-                    (center, extents, revision)
-                },
+                mesh_box,
+                self.caster_settings(view),
+                materials.revision(),
+            );
+        }
+        if let Some(pages) = view.virtual_shadows {
+            pages.note_draws(
+                draws,
+                mesh_box,
                 self.caster_settings(view),
                 materials.revision(),
             );
@@ -3035,8 +3208,8 @@ impl ForwardRenderer {
         }
         setup.shadow_draws =
             self.plan_local_shadows(view, geometry, materials, &setup, Changes::Scene(scene));
-        if let Some(cache) = view.shadow_cache {
-            self.note_scene_casters(cache, geometry, materials, scene, view);
+        if view.shadow_cache.is_some() || view.virtual_shadows.is_some() {
+            self.note_scene_casters(geometry, materials, scene, view);
         }
         let layout = self.layout_scene(ring, geometry, scene, view, &setup);
         let passes = layout.and_then(|layout| {
@@ -3145,6 +3318,7 @@ impl ForwardRenderer {
                 occlusion: None,
                 temporal: None,
                 shadow_cache: None,
+                virtual_shadows: None,
                 lights: view.lights,
                 decals: &[],
                 environment: view.environment,
@@ -3163,6 +3337,7 @@ impl ForwardRenderer {
                 cascade_count: self.shadow_settings.cascade_count() as u32,
                 shadow_draws: 0,
                 capture: true,
+                vsm: false,
             };
             if laid_out.is_none() {
                 laid_out = Some(layout(self, ring, &capture, &setup)?);
@@ -3223,12 +3398,11 @@ impl ForwardRenderer {
         cascade_cache::mix(hash, u64::from(self.lod_threshold.to_bits()))
     }
 
-    /// Notes what a scene's view with cached cascades (ADR 0093) casts from this frame:
-    /// the scene's upload, its changes and moving instances, and its batches' meshes (and
-    /// their shapes: another mesh or shape draws them whole).
+    /// Notes what a scene's view with cached cascades or virtual shadow pages (ADR 0093)
+    /// casts from this frame: the scene's upload, its changes and moving instances, and its
+    /// batches' meshes (and their shapes: another mesh or shape draws them whole).
     fn note_scene_casters(
         &self,
-        cache: &CascadeCache,
         geometry: &GeometryFrame<'_>,
         materials: &MaterialFrame<'_>,
         scene: &SceneFrame<'_>,
@@ -3242,14 +3416,27 @@ impl ForwardRenderer {
             meshes = cascade_cache::mix(meshes, bytemuck::cast(batch.mesh));
             meshes = cascade_cache::mix(meshes, u64::from(shape));
         }
-        cache.note_scene(
-            scene.serial(),
-            meshes,
-            self.caster_settings(view),
-            materials.revision(),
-            scene.changes(),
-            scene.moving_boxes(),
-        );
+        let settings = self.caster_settings(view);
+        if let Some(cache) = view.shadow_cache {
+            cache.note_scene(
+                scene.serial(),
+                meshes,
+                settings,
+                materials.revision(),
+                scene.changes(),
+                scene.moving_boxes(),
+            );
+        }
+        if let Some(pages) = view.virtual_shadows {
+            pages.note_scene(
+                scene.serial(),
+                meshes,
+                settings,
+                materials.revision(),
+                !scene.changes().is_empty(),
+                !scene.moving_boxes().is_empty(),
+            );
+        }
     }
 
     /// What a frame's layout depends on besides the instances.
@@ -3265,6 +3452,12 @@ impl ForwardRenderer {
             cascade_count: self.shadow_settings.cascade_count() as u32,
             shadow_draws: 0,
             capture: false,
+            // Marked from a single-sampled depth prepass.
+            vsm: view.virtual_shadows.is_some()
+                && self.vsm_draw().is_some()
+                && depth_desc.samples == vk::SampleCountFlags::TYPE_1
+                && depth_desc.width > 0
+                && depth_desc.height > 0,
         }
     }
 
@@ -3336,6 +3529,9 @@ struct Setup {
     /// A reflection probe's face (ADR 0073): no ambient occlusion, contact or local
     /// shadows, reflections or sky pass; one shared shadow cascade; passes named apart.
     capture: bool,
+    /// The view's sun shadow on opaque surfaces comes from its virtual shadow pages (ADR
+    /// 0093 step 3b): their lists are laid out, their passes run after the prepass.
+    vsm: bool,
 }
 
 /// A frame with nothing to draw: the target is the clear color everywhere, so no motion
@@ -3406,6 +3602,7 @@ fn empty_frame<'g>(fg: &mut FrameGraph<'g>, view: &ForwardView<'g>) -> ForwardPa
         ao: None,
         atmosphere: None,
         contact_shadows: None,
+        virtual_shadows: None,
         decals: None,
         gi: None,
         reflections: None,

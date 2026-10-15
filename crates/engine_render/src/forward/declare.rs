@@ -8,6 +8,7 @@ use super::*;
 use crate::graph::PassContext;
 use crate::shadow::Keep;
 use crate::shadow_cache::{Held, MAX_PIECES, Piece, Plan as ShadowPlan};
+use crate::vsm::{VIRTUAL_TEXELS, VirtualShadows, VsmFrame, VsmPrepared, VsmView};
 
 impl ForwardRenderer {
     /// Declares the passes of a laid-out frame (both paths).
@@ -39,6 +40,7 @@ impl ForwardRenderer {
             cascade_count,
             shadow_draws,
             capture,
+            vsm: vsm_on,
         } = *setup;
         let occlusion = view.occlusion.filter(|_| phases == 2);
         // MSAA (ADR 0075): multisampled targets draw with their sample count's pipelines,
@@ -75,6 +77,7 @@ impl ForwardRenderer {
             max,
             subsurface_draws,
             meshlets,
+            vsm: vsm_layout,
         } = *layout;
         // The meshlet lists (ADR 0085): in the command buffer after every phase's command
         // list, one per phase; their draws' slots in the visible buffer after the phases'.
@@ -298,6 +301,13 @@ impl ForwardRenderer {
         // As do multisampled targets, subsurface materials (their pass follows the forward
         // pass with the depth tested for equality), reflections (their inputs are written
         // by the shading after it), decals and GI.
+        // The sun's virtual shadow pages (ADR 0093 step 3b) are marked from it too.
+        let vsm_view = view
+            .virtual_shadows
+            .zip(self.vsm_draw())
+            .zip(vsm_layout)
+            .zip(ViewAxis::new(unjittered))
+            .filter(|_| vsm_on);
         let prepass = ms.is_some()
             || (self.depth_prepass && view.features.depth_prepass)
             || ao.is_some()
@@ -305,7 +315,13 @@ impl ForwardRenderer {
             || contact.is_some()
             || reflecting
             || decals.is_some()
-            || gi_view.is_some();
+            || gi_view.is_some()
+            || vsm_view.is_some();
+        // The shading that reads the sun's mask: with contact shadows, and with the pages,
+        // whose visibility the mask then holds (ADR 0093 step 3b).
+        let mask_state = contact
+            .map(|(_, state)| state)
+            .or_else(|| self.contact.as_ref().filter(|_| vsm_view.is_some()));
         // Views draw by meshlet (ADR 0085) only after a depth prepass: without one, the
         // meshlet draws' order (the GPU's) would undo the front-to-back order by which the
         // depth test rejects hidden pixels (Sponza without a prepass: forward +15 % on the
@@ -364,6 +380,44 @@ impl ForwardRenderer {
             Some(c) => c.plan(&fit, pieces.is_some()),
             None => whole_plans(&fit, resolution),
         };
+        // The pages' frame (ADR 0093 step 3b), written before the frame's data, which holds
+        // its address: the camera, the light, the scene's extent along the light.
+        let vsm = vsm_view.and_then(|(((pages, draw), lists), axis)| {
+            let direction = view.light.direction.normalize_or(Vec3::NEG_Y);
+            let along = (0..8).map(|i: u32| {
+                Vec3::new(
+                    if i & 1 == 0 { min.x } else { max.x },
+                    if i & 2 == 0 { min.y } else { max.y },
+                    if i & 4 == 0 { min.z } else { max.z },
+                )
+                .dot(direction)
+            });
+            let extent = along.fold([f32::MAX, f32::MIN], |[lo, hi], d| [lo.min(d), hi.max(d)]);
+            let pixels = crate::subsurface::Footprint::new(
+                unjittered,
+                axis.forward,
+                axis.near_center,
+                depth_desc.height,
+            )
+            .pixels_per_unit;
+            let prepared = pages.prepare(
+                ring,
+                [depth_desc.width, depth_desc.height],
+                &VsmView {
+                    world_from_clip,
+                    eye: view.camera.position,
+                    footprint: 1.0 / pixels.max(1e-9),
+                    light_direction: direction,
+                    depth_range: extent,
+                },
+            )?;
+            Some(PagesFrame {
+                pages,
+                draw,
+                lists,
+                prepared,
+            })
+        });
         let frame = FrameData {
             clip_from_world: clip_from_world.to_cols_array(),
             light_from_world: fit.light_from_world.to_cols_array(),
@@ -475,9 +529,13 @@ impl ForwardRenderer {
             material_stride: materials.params().1,
             cascade_layers: if cache.is_some() { 1.0 } else { 0.0 },
             batch_meshlets: meshlets.map_or(0, |m| m.table),
-            meshlets: meshlets.map_or(0, |_| geometry.index_address()),
+            meshlets: if meshlets.is_some() || vsm.is_some() {
+                geometry.index_address()
+            } else {
+                0
+            },
             meshlet_offset: {
-                let mut offsets = [0; 6];
+                let mut offsets = [0; 7];
                 if let Some(m) = meshlet_draws {
                     // The late phase's commands start a list later.
                     offsets[0] = m.lists(0) as u32;
@@ -488,10 +546,15 @@ impl ForwardRenderer {
                         offsets[2 + k as usize] = m.lists(k) as u32;
                     }
                 }
+                // The pages' lists follow a command list in their buffer; their slots
+                // start their own.
+                if vsm.is_some() {
+                    offsets[VSM_LIST] = command_bytes as u32;
+                }
                 offsets
             },
             meshlet_slot: {
-                let mut slots = [0; 6];
+                let mut slots = [0; 7];
                 if let Some(m) = meshlet_draws {
                     let first = phases * slot_count;
                     slots[0] = first;
@@ -504,6 +567,12 @@ impl ForwardRenderer {
                 }
                 slots
             },
+            vsm: vsm.map_or(0, |v| v.prepared.frame),
+            vsm_table: vsm.map_or(0, |v| v.pages.table_address()),
+            vsm_hierarchy: vsm.map_or(0, |v| v.pages.hierarchy_address()),
+            vsm_batches: vsm.map_or(0, |v| v.lists.table),
+            vsm_pool: vsm.map_or(0, |v| v.pages.pool_index()),
+            vsm_lod_threshold: self.lod_threshold,
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -588,6 +657,24 @@ impl ForwardRenderer {
                 ),
             )
         });
+        // The pages' casters (ADR 0093 step 3b): a command list (the batches' levels, which
+        // their whole draws copy), then their meshlet lists; and their draws' slots.
+        let vsm_lists = vsm.map(|v| {
+            (
+                fg.create_buffer(
+                    "vsm commands",
+                    BufferDesc {
+                        size: command_bytes + v.lists.list_bytes(),
+                    },
+                ),
+                fg.create_buffer(
+                    "vsm casters",
+                    BufferDesc {
+                        size: u64::from(v.lists.draws.max(1)) * 4,
+                    },
+                ),
+            )
+        });
         let flags = occlusion.map(|o| {
             // Flags written by the previous frame's late phase, or to be cleared now.
             let stale = o.stale.replace(false);
@@ -617,6 +704,9 @@ impl ForwardRenderer {
         }
         if let Some((local_commands, _)) = local_lists {
             setup = setup.write(local_commands, Access::TransferWrite);
+        }
+        if let Some((vsm_commands, _)) = vsm_lists {
+            setup = setup.write(vsm_commands, Access::TransferWrite);
         }
         setup.execute(move |ctx| {
             let region = vk::BufferCopy {
@@ -683,6 +773,32 @@ impl ForwardRenderer {
                         commands.buffer,
                         ctx.buffer(local_commands),
                         &[region],
+                    );
+                }
+                if let Some(((vsm_commands, _), v)) = vsm_lists.zip(vsm) {
+                    // The first phase's command list (only the levels' index ranges are
+                    // read), then the lists' header.
+                    let list = vk::BufferCopy {
+                        src_offset: commands.offset,
+                        dst_offset: 0,
+                        size: command_bytes,
+                    };
+                    let header = vk::BufferCopy {
+                        src_offset: v.lists.header.offset,
+                        dst_offset: command_bytes,
+                        size: MESHLET_HEADER_BYTES,
+                    };
+                    ctx.device.cmd_copy_buffer(
+                        ctx.cmd,
+                        commands.buffer,
+                        ctx.buffer(vsm_commands),
+                        &[list],
+                    );
+                    ctx.device.cmd_copy_buffer(
+                        ctx.cmd,
+                        v.lists.header.buffer,
+                        ctx.buffer(vsm_commands),
+                        &[header],
                     );
                 }
             }
@@ -1196,6 +1312,7 @@ impl ForwardRenderer {
             ao: None,
             local_atlas: local_frame.atlas.filter(|_| local_frame.shadowed),
             contact: None,
+            vsm: None,
             decals: None,
             gi: None,
             reflect: None,
@@ -1279,7 +1396,7 @@ impl ForwardRenderer {
             None => &passes.shading[variant],
         });
         // With contact shadows (the prepass is on then), the shading that reads their mask.
-        let contact_shading = contact.and_then(|(_, c)| {
+        let contact_shading = mask_state.and_then(|c| {
             let k = shadowed_index(variant);
             match (ao.is_some(), shadowed.is_some()) {
                 (false, false) => Some(&c.shading[variant]),
@@ -1293,7 +1410,7 @@ impl ForwardRenderer {
             r.pipeline(
                 variant & 1 != 0,
                 ao.is_some(),
-                contact.is_some(),
+                mask_state.is_some(),
                 shadowed.is_some(),
             )
         });
@@ -1304,7 +1421,7 @@ impl ForwardRenderer {
                 variant,
                 reflect_shading.is_some(),
                 ao.is_some(),
-                contact.is_some(),
+                mask_state.is_some(),
                 shadowed.is_some(),
             )
         });
@@ -1317,7 +1434,7 @@ impl ForwardRenderer {
                 reflect_shading.is_some(),
                 decals.is_some(),
                 ao.is_some(),
-                contact.is_some(),
+                mask_state.is_some(),
                 shadowed.is_some(),
             )
         });
@@ -1348,10 +1465,10 @@ impl ForwardRenderer {
                 m.reflect_pipeline(
                     variant & 1 != 0,
                     ao.is_some(),
-                    contact.is_some(),
+                    mask_state.is_some(),
                     shadowed.is_some(),
                 )?
-            } else if contact.is_some() {
+            } else if mask_state.is_some() {
                 let c = m.contact.as_ref()?;
                 match (ao.is_some(), shadowed.is_some()) {
                     (false, false) => &c.shading[variant],
@@ -1419,6 +1536,9 @@ impl ForwardRenderer {
         // it takes in `phase` (ADR 0071); `decals`: the decal buffer (ADR 0082).
         // `types`: material types draw with their pipelines (the shading passes); otherwise
         // with the engine's, as glTF (the depth prepass and the subsurface pass).
+        // With the pages, the mask holds the sun's whole visibility: the shading looks up
+        // no cascade (ADR 0093 step 3b).
+        let sun_in_mask = if vsm.is_some() { SUN_IN_MASK } else { 0 };
         let draw_phase = move |ctx: &mut crate::graph::PassContext<'_>,
                                pipelines: [&Pipeline; 2],
                                types: bool,
@@ -1435,7 +1555,7 @@ impl ForwardRenderer {
                 ao: ao.and_then(|t| ctx.sampled_index(t)).unwrap_or(NO_AO),
                 phase: contact
                     .and_then(|t| ctx.sampled_index(t))
-                    .unwrap_or(base.phase),
+                    .map_or(base.phase, |mask| mask | sun_in_mask),
                 decal_albedo: decals
                     .and_then(|d| ctx.sampled_index(d.albedo))
                     .unwrap_or(0),
@@ -1544,6 +1664,21 @@ impl ForwardRenderer {
                             .add_passes(fg, bindless, read_depth, view_space, settings, ao_frame),
                     );
                 }
+                targets.vsm = vsm.zip(vsm_lists).map(|(v, lists)| {
+                    v.add_passes(
+                        fg,
+                        bindless,
+                        &geometry,
+                        &materials,
+                        states,
+                        lists,
+                        base,
+                        scene_instances,
+                        instance_count,
+                        command_bytes,
+                        read_depth,
+                    )
+                });
                 if let Some(((settings, _), state)) = contact {
                     targets.contact = Some(state.passes.add_passes(
                         fg,
@@ -1551,6 +1686,15 @@ impl ForwardRenderer {
                         read_depth,
                         &contact_view,
                         &settings,
+                    ));
+                }
+                if let Some((v, frame)) = vsm.zip(targets.vsm) {
+                    targets.contact = Some(v.pages.add_visibility(
+                        fg,
+                        bindless,
+                        frame,
+                        read_depth,
+                        targets.contact,
                     ));
                 }
                 if let Some((d, prepared)) = &decals {
@@ -1600,6 +1744,7 @@ impl ForwardRenderer {
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
                     contact_shadows: targets.contact,
+                    virtual_shadows: targets.vsm,
                     decals: targets.decals,
                     gi: targets.gi,
                     reflections: None,
@@ -1750,6 +1895,21 @@ impl ForwardRenderer {
                                 fg, bindless, read_depth, view_space, settings, ao_frame,
                             ));
                     }
+                    targets.vsm = vsm.zip(vsm_lists).map(|(v, lists)| {
+                        v.add_passes(
+                            fg,
+                            bindless,
+                            &geometry,
+                            &materials,
+                            states,
+                            lists,
+                            base,
+                            scene_instances,
+                            instance_count,
+                            command_bytes,
+                            read_depth,
+                        )
+                    });
                     if let Some(((settings, _), state)) = contact {
                         targets.contact = Some(state.passes.add_passes(
                             fg,
@@ -1757,6 +1917,15 @@ impl ForwardRenderer {
                             read_depth,
                             &contact_view,
                             &settings,
+                        ));
+                    }
+                    if let Some((v, frame)) = vsm.zip(targets.vsm) {
+                        targets.contact = Some(v.pages.add_visibility(
+                            fg,
+                            bindless,
+                            frame,
+                            read_depth,
+                            targets.contact,
                         ));
                     }
                     if let Some((d, prepared)) = &decals {
@@ -1846,6 +2015,7 @@ impl ForwardRenderer {
                     ao: targets.ao,
                     atmosphere: atmosphere.and_then(|a| a.textures),
                     contact_shadows: targets.contact,
+                    virtual_shadows: targets.vsm,
                     decals: targets.decals,
                     gi: targets.gi,
                     reflections: None,
@@ -2347,6 +2517,9 @@ struct Targets {
     local_atlas: Option<Texture>,
     /// The sun's contact shadows (ADR 0071), computed after the depth prepass.
     contact: Option<Texture>,
+    /// The sun's virtual shadow pages (ADR 0093 step 3b), kept and drawn after the depth
+    /// prepass.
+    vsm: Option<VsmFrame>,
     /// The decal buffer (ADR 0082), computed after the depth prepass.
     decals: Option<DecalTargets>,
     /// The diffuse irradiance per pixel of probe GI (ADR 0088), after the depth prepass.
@@ -2355,6 +2528,110 @@ struct Targets {
     reflect: Option<(Texture, Texture)>,
     /// With MSAA (ADR 0075): what the shading pass resolves its targets into.
     resolves: Option<MsResolves>,
+}
+
+/// A view's virtual shadow pages in one frame (ADR 0093 step 3b): what draws them, their
+/// lists' layout and the frame prepared before the frame's data.
+#[derive(Clone, Copy)]
+struct PagesFrame<'g> {
+    pages: &'g VirtualShadows,
+    draw: &'g VsmDraw,
+    lists: layout::MeshletLayout,
+    prepared: VsmPrepared,
+}
+
+impl<'g> PagesFrame<'g> {
+    /// The pages' passes after the depth prepass: their bookkeeping over `depth`, then the
+    /// casters culled into their dirty pages (`lists`: the commands and the casters' slots)
+    /// and drawn there, one rendering without attachments over a level's 4096 × 4096 texels
+    /// for every level.
+    #[allow(clippy::too_many_arguments)]
+    fn add_passes(
+        self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        geometry: &GeometryFrame<'g>,
+        materials: &MaterialFrame<'g>,
+        states: States,
+        (commands, casters): (Buffer, Buffer),
+        base: Push,
+        scene_instances: Option<Buffer>,
+        instance_count: u32,
+        command_bytes: u64,
+        depth: Texture,
+    ) -> VsmFrame {
+        let frame = self.pages.add_prepared(fg, bindless, self.prepared, depth);
+        let Self { draw, lists, .. } = self;
+        let push = move |ctx: &PassContext<'_>| Push {
+            visible: ctx.address(casters),
+            commands: ctx.address(commands),
+            phase: PHASE_VSM,
+            ..base
+        };
+        let rw = Access::StorageReadWrite(ShaderStages::COMPUTE);
+        fg.add_compute("vsm cull", bindless)
+            .write(commands, rw)
+            .read(commands, Access::Indirect)
+            .write(casters, Access::StorageWrite(ShaderStages::COMPUTE))
+            .read(frame.hierarchy, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(geometry.indices, Access::StorageRead(ShaderStages::COMPUTE))
+            .maybe_read(scene_instances, Access::StorageRead(ShaderStages::COMPUTE))
+            .record(move |rec| {
+                let push = push(rec.context());
+                let args = rec.context().buffer(commands);
+                rec.dispatch(&draw.cull, Dispatch::Threads([instance_count, 1, 1]), &push);
+                rec.barrier_for_indirect();
+                rec.dispatch_indirect(&draw.meshlets, args, command_bytes + MESHLET_ARGS, &push);
+            });
+        let geometry = *geometry;
+        let side = VIRTUAL_TEXELS;
+        let area = vk::Rect2D {
+            offset: vk::Offset2D::default(),
+            extent: vk::Extent2D {
+                width: side,
+                height: side,
+            },
+        };
+        materials
+            .read(geometry.read(fg.add_pass("vsm draw")))
+            .maybe_read(scene_instances, Access::StorageRead(ShaderStages::VERTEX))
+            .read(commands, Access::Indirect)
+            .read(casters, Access::StorageRead(ShaderStages::VERTEX))
+            .read(frame.table, Access::StorageRead(ShaderStages::FRAGMENT))
+            .write(frame.pool, Access::StorageReadWrite(ShaderStages::FRAGMENT))
+            .execute(move |ctx| {
+                let push = Push {
+                    visible: ctx.address(casters),
+                    ..base
+                };
+                let draws = MeshletDraws {
+                    layout: lists,
+                    base: command_bytes,
+                    bytes: lists.list_bytes(),
+                };
+                // SAFETY: the pass has no attachments and no rendering is begun; it reads the
+                // commands (indirect), the casters' slots, the pool's geometry and the
+                // material table, and writes only the pages' pool, which it declared.
+                unsafe {
+                    ctx.begin_rendering_without_attachments(area.extent);
+                    states.draw_meshlets(
+                        ctx,
+                        bindless,
+                        &geometry,
+                        [&draw.pipelines[0], &draw.pipelines[1]],
+                        &push,
+                        true,
+                        DEPTH_STATES,
+                        ctx.buffer(commands),
+                        command_bytes,
+                        &draws,
+                        area,
+                    );
+                    ctx.end_rendering();
+                }
+            });
+        frame
+    }
 }
 
 /// The single-sampled textures a multisampled view's shading resolves into (ADR 0075).

@@ -13,9 +13,12 @@
 //!   whose texel is about its footprint; when the light turned, the needed pages are
 //!   drawn again and the others freed; requests take free pages, then pages no pixel
 //!   needed for [`VsmSettings::keep_frames`] frames, and fail when there are none (asked
-//!   for again the next frame); dirty pages are cleared to the far plane.
-//! - **Step 3a** (this module so far) keeps the pages; drawing into them and shading with
-//!   them follow (steps 3b, 3c).
+//!   for again the next frame); dirty pages are cleared to the far plane. The forward
+//!   renderer then draws the casters into the dirty pages, and [`VirtualShadows::add_visibility`]
+//!   writes the sun's visibility per pixel for the shading (step 3b).
+//! - **Casters that change** (moved, added, removed, another draw list or scene) redraw
+//!   every page a frame needs and free the others, as the light turning does; step 3c
+//!   redraws only the pages under what changed.
 //!
 //! The design follows Timberdoodle's virtual shadow maps (Apache-2.0; M. Sakmáry); the
 //! code is written for this engine.
@@ -23,8 +26,9 @@
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::environment::{Image, ImageKind};
 use crate::graph::{
-    Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages, Texture,
+    Access, Buffer, BufferState, FrameGraph, ImportedBuffer, ShaderStages, Texture, TextureDesc,
 };
+use crate::local_shadows::DrawDiff;
 use crate::upload::UploadRing;
 use core::cell::{Cell, RefCell};
 use engine_core::math::{IVec2, Mat4, Vec2, Vec3, look_at};
@@ -38,6 +42,7 @@ const ALLOCATE: &[u8] = include_bytes!("../shaders/vsm.vsmAllocate.spv");
 const COLLECT_DIRTY: &[u8] = include_bytes!("../shaders/vsm.vsmCollectDirty.spv");
 const ARGS: &[u8] = include_bytes!("../shaders/vsm.vsmArgs.spv");
 const CLEAR: &[u8] = include_bytes!("../shaders/vsm.vsmClear.spv");
+const VISIBILITY: &[u8] = include_bytes!("../shaders/vsm.vsmVisibility.spv");
 
 /// Texels of a page, per axis.
 pub const PAGE_TEXELS: u32 = 64;
@@ -68,6 +73,22 @@ pub const OWNED: u32 = 1 << 31;
 pub const LIST_HEADER: u32 = 8;
 /// The clear pass's dispatch in the lists, bytes.
 const CLEAR_ARGS: u64 = 16;
+/// Texels around a pixel's sample that its filter and normal offset may read: marking
+/// backs the pages within it too (`VSM_MARGIN` in `vsm_common.slang`).
+pub const MARK_MARGIN_TEXELS: f32 = 4.0;
+/// Cells of a level's hierarchy of dirty pages ([`VsmFrame::hierarchy`]): its 64 × 64
+/// pages by their place in the window, then each coarser level of them (2 × 2 cells into
+/// one) down to 1 × 1, one `u32` each (1: a dirty page under it).
+pub const HIERARCHY_CELLS: u32 = 5461;
+/// Levels of a level's hierarchy (64², 32², ..., 1²).
+pub const HIERARCHY_MIPS: u32 = 7;
+
+/// The first cell of mip `m` of a level's hierarchy.
+pub const fn hierarchy_mip(m: u32) -> u32 {
+    (4096 - (4096 >> (2 * m))) * 4 / 3
+}
+
+const _: () = assert!(hierarchy_mip(HIERARCHY_MIPS - 1) + 1 == HIERARCHY_CELLS);
 
 /// A virtual shadow map's settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -109,12 +130,14 @@ struct LevelData {
     wrapped: [u32; 4],
 }
 
-/// `Frame` in `vsm.slang` (656 bytes).
+/// `VsmFrame` in `vsm_common.slang` (720 bytes).
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct FrameData {
     clip_to_light: [[f32; 4]; 2],
     clip_to_view: [[f32; 4]; 4],
+    light_rows: [[f32; 4]; 3],
+    light_eye: [f32; 4],
     ndc_per_pixel: [f32; 2],
     depth_size: [u32; 2],
     level_offset: f32,
@@ -123,11 +146,12 @@ struct FrameData {
     pool_pages: u32,
     keep_frames: u32,
     max_requests: u32,
-    _pad: [u32; 2],
+    depth_scale: f32,
+    depth_offset: f32,
     level: [LevelData; MAX_LEVELS as usize],
 }
 
-/// `VsmPush` in `vsm.slang` (48 bytes).
+/// `VsmPush` in `vsm.slang` (64 bytes).
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
@@ -136,13 +160,17 @@ struct Push {
     meta: u64,
     requests: u64,
     lists: u64,
+    hierarchy: u64,
     pool: u32,
     depth: u32,
+    /// `vsmVisibility`: the sun's mask (storage), and bit 0 to multiply into it.
+    mask: u32,
+    flags: u32,
 }
 
 const _: () = assert!(size_of::<LevelData>() == 32);
-const _: () = assert!(size_of::<FrameData>() == 656);
-const _: () = assert!(size_of::<Push>() == 48);
+const _: () = assert!(size_of::<FrameData>() == 720);
+const _: () = assert!(size_of::<Push>() == 64);
 
 /// What a view gives the pages each frame.
 #[derive(Debug, Clone, Copy)]
@@ -152,11 +180,37 @@ pub struct VsmView {
     pub world_from_clip: Mat4,
     /// The camera's position.
     pub eye: Vec3,
-    /// Its vertical field of view, radians: with the depth buffer's height, a pixel's
-    /// footprint.
-    pub fov_y: f32,
+    /// A pixel's footprint a metre from the camera, metres (for a perspective projection
+    /// of vertical field of view `fov` over `height` pixels: `2 tan(fov / 2) / height`).
+    pub footprint: f32,
     /// The direction the sun's light travels.
     pub light_direction: Vec3,
+    /// The scene's extent along the light, metres (the least and greatest
+    /// `dot(position, light_direction)` of its casters): the pages' depth range. It is
+    /// rounded out to whole steps, so a change within a step keeps the pages.
+    pub depth_range: [f32; 2],
+}
+
+/// The pages' depth range for a scene's extent along the light, `depth_range`: rounded
+/// out to multiples of [`DEPTH_STEP`] metres with a step to spare on each side, so a
+/// scene's casters moving a little change nothing (a change redraws every page).
+pub fn depth_range(extent: [f32; 2]) -> [f32; 2] {
+    let lo = (extent[0].min(extent[1]) / DEPTH_STEP).floor() * DEPTH_STEP - DEPTH_STEP;
+    let hi = (extent[0].max(extent[1]) / DEPTH_STEP).ceil() * DEPTH_STEP + DEPTH_STEP;
+    [lo, hi]
+}
+
+/// What [`depth_range`] rounds to, metres.
+pub const DEPTH_STEP: f32 = 16.0;
+
+/// A frame of the pages prepared before its passes ([`VirtualShadows::prepare`]).
+#[derive(Debug, Clone, Copy)]
+pub struct VsmPrepared {
+    /// The frame's data in the upload ring (`VsmFrame` in `vsm_common.slang`).
+    pub frame: vk::DeviceAddress,
+    depth_size: [u32; 2],
+    /// The tables still hold nothing.
+    reset: bool,
 }
 
 /// A level's window: the pages its table holds this frame.
@@ -171,7 +225,7 @@ pub struct VsmLevel {
 
 /// The pages in one frame's graph ([`VirtualShadows::add_passes`]): for the passes that
 /// draw into them and read them.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VsmFrame {
     /// The frame's data (light space, levels) in the upload ring (`Frame` in
     /// `vsm.slang`).
@@ -186,6 +240,9 @@ pub struct VsmFrame {
     pub requests: Buffer,
     /// The free, old and dirty lists, after their header of [`LIST_HEADER`] words.
     pub lists: Buffer,
+    /// Per level, [`HIERARCHY_CELLS`] cells: which pages of its window are dirty this
+    /// frame, and each coarser level of that (the casters' cull).
+    pub hierarchy: Buffer,
 }
 
 /// A buffer of the pages', kept across frames.
@@ -266,10 +323,30 @@ struct State {
     reset: bool,
     /// Each level's window: its first page, as drawn last frame.
     first_pages: [Option<IVec2>; MAX_LEVELS as usize],
-    /// The light's direction, as its bits.
-    light: Option<[u32; 3]>,
+    /// The light's direction and the pages' depth range, as their bits.
+    light: Option<[u32; 5]>,
     /// Frames so far.
     frame: u32,
+    /// What the pages were drawn from, and whether it changed since.
+    casters: Casters,
+}
+
+/// A frame's casters: a draw list (`None`) or a scene upload (its serial and a hash of its
+/// batches' meshes); the renderer settings that change what casts; the materials'
+/// revision.
+type CasterKey = (Option<(u64, u64)>, u64, u64);
+
+/// What a view's pages were drawn from ([`VirtualShadows::note_draws`],
+/// [`VirtualShadows::note_scene`]).
+#[derive(Debug, Default)]
+struct Casters {
+    /// The last frame's casters.
+    last: Option<CasterKey>,
+    /// A draw list's previous draws.
+    draws: DrawDiff,
+    /// Something casts otherwise than when the pages were last drawn: the next frame
+    /// draws every page it needs again and frees the others.
+    changed: bool,
 }
 
 /// The windows of every level for a camera at `eye` (light space), and the masks of the
@@ -335,11 +412,13 @@ pub struct VirtualShadows {
     collect_dirty: ComputeShader<Push>,
     args: ComputeShader<Push>,
     clear: ComputeShader<Push>,
+    visibility: ComputeShader<Push>,
     pool: Image,
     table: Persistent,
     meta: Persistent,
     requests: Persistent,
     lists: Persistent,
+    hierarchy: Persistent,
     state: RefCell<State>,
 }
 
@@ -380,6 +459,7 @@ impl VirtualShadows {
             collect_dirty,
             args,
             clear,
+            visibility,
         ] = ComputeSource::create_all(
             device,
             bindless,
@@ -391,6 +471,7 @@ impl VirtualShadows {
                 ComputeSource::new(COLLECT_DIRTY, c"vsmCollectDirty", &[])?,
                 ComputeSource::new(ARGS, c"vsmArgs", &[])?,
                 ComputeSource::new(CLEAR, c"vsmClear", &[])?,
+                ComputeSource::new(VISIBILITY, c"vsmVisibility", &[])?,
             ],
         )?;
         let rows = settings.pool_pages.div_ceil(TABLE_PAGES);
@@ -413,6 +494,11 @@ impl VirtualShadows {
             allocator,
             u64::from(LIST_HEADER + 3 * settings.pool_pages) * 4,
         )?;
+        let hierarchy = Persistent::new(
+            device,
+            allocator,
+            u64::from(settings.levels * HIERARCHY_CELLS) * 4,
+        )?;
         Ok(Self {
             device: device.raw().clone(),
             settings,
@@ -423,11 +509,13 @@ impl VirtualShadows {
             collect_dirty,
             args,
             clear,
+            visibility,
             pool,
             table,
             meta,
             requests,
             lists,
+            hierarchy,
             state: RefCell::new(State {
                 reset: true,
                 ..State::default()
@@ -454,7 +542,26 @@ impl VirtualShadows {
     pub fn memory_bytes(&self) -> u64 {
         let pages = self.settings.pool_pages.next_multiple_of(TABLE_PAGES);
         let pool = u64::from(pages) * u64::from(PAGE_TEXELS * PAGE_TEXELS) * 4;
-        pool + self.table.size + self.meta.size + self.requests.size + self.lists.size
+        pool + self.table.size
+            + self.meta.size
+            + self.requests.size
+            + self.lists.size
+            + self.hierarchy.size
+    }
+
+    /// The page tables' address, for the passes that draw into the pages and read them.
+    pub fn table_address(&self) -> vk::DeviceAddress {
+        self.table.address
+    }
+
+    /// The hierarchy of dirty pages' address ([`VsmFrame::hierarchy`]).
+    pub fn hierarchy_address(&self) -> vk::DeviceAddress {
+        self.hierarchy.address
+    }
+
+    /// The pool's index in the bindless storage images.
+    pub fn pool_index(&self) -> u32 {
+        self.pool.storage[0]
     }
 
     /// The light space of `direction`, the way the light travels: x and y across the
@@ -470,8 +577,9 @@ impl VirtualShadows {
     }
 
     /// Declares this frame's bookkeeping (see the module documentation) over `depth`, the
-    /// view's depth after its prepass (`depth_size` pixels; single-sampled). `None` when
-    /// `ring` is full (the pages then stay as they were).
+    /// view's depth after its prepass (`depth_size` pixels; single-sampled): [`Self::prepare`]
+    /// and [`Self::add_prepared`] at once. `None` when `ring` is full (the pages then stay as
+    /// they were).
     pub fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -481,7 +589,21 @@ impl VirtualShadows {
         depth_size: [u32; 2],
         view: &VsmView,
     ) -> Option<VsmFrame> {
-        engine_profiler::zone!("render::VirtualShadows::add_passes");
+        let prepared = self.prepare(ring, depth_size, view)?;
+        Some(self.add_prepared(fg, bindless, prepared, depth))
+    }
+
+    /// This frame's data, before its passes are declared ([`Self::add_prepared`]): the
+    /// windows moved with the camera at `view`, and the frame's data written to `ring`,
+    /// whose address the passes that draw into the pages and read them take before the
+    /// depth they are marked from exists. `None` when `ring` is full (nothing changes).
+    pub fn prepare(
+        &self,
+        ring: &mut UploadRing,
+        depth_size: [u32; 2],
+        view: &VsmView,
+    ) -> Option<VsmPrepared> {
+        engine_profiler::zone!("render::VirtualShadows::prepare");
         let settings = self.settings;
         let mut state = self.state.borrow_mut();
         let light_from_world = Self::light_from_world(view.light_direction);
@@ -491,24 +613,36 @@ impl VirtualShadows {
             Vec2::new(eye_light.x, eye_light.y),
             &state.first_pages,
         );
-        let light_key = view
-            .light_direction
-            .normalize_or(Vec3::NEG_Y)
-            .to_array()
-            .map(f32::to_bits);
+        let direction = view.light_direction.normalize_or(Vec3::NEG_Y);
+        let range = depth_range(view.depth_range);
+        let light_key = [
+            direction.x.to_bits(),
+            direction.y.to_bits(),
+            direction.z.to_bits(),
+            range[0].to_bits(),
+            range[1].to_bits(),
+        ];
+        // The light turned, or casters changed (until step 3c redraws only the pages under
+        // what changed): every page the frame needs is drawn again, the others freed.
         let turned = state.light.is_some_and(|key| key != light_key);
+        let redraw = turned || state.casters.changed;
         for level in levels.iter_mut().take(settings.levels as usize) {
-            level.flags = u32::from(turned);
+            level.flags = u32::from(redraw);
         }
         let number = state.frame.wrapping_add(1);
         // A pixel's footprint at a metre, over the first level's texel.
-        let footprint = 2.0 * (view.fov_y * 0.5).tan() / depth_size[1].max(1) as f32;
+        let footprint = view.footprint.max(1e-9);
         let first_texel = settings.first_extent / VIRTUAL_TEXELS as f32;
         let to_light = light_from_world * view.world_from_clip;
         let to_view = Mat4::from_translation(-view.eye) * view.world_from_clip;
+        // A point's depth in the pages: its distance along the light (−z in light space)
+        // across the range.
+        let depth_scale = 1.0 / (range[1] - range[0]).max(1e-3);
         let frame = ring.push(&[FrameData {
             clip_to_light: [0, 1].map(|i| to_light.row(i).to_array()),
             clip_to_view: [0, 1, 2, 3].map(|i| to_view.row(i).to_array()),
+            light_rows: [0, 1, 2].map(|i| light_from_world.row(i).to_array()),
+            light_eye: eye_light.extend(0.0).to_array(),
             ndc_per_pixel: depth_size.map(|s| 2.0 / s.max(1) as f32),
             depth_size,
             level_offset: (footprint / first_texel).log2() + settings.level_bias,
@@ -517,18 +651,41 @@ impl VirtualShadows {
             pool_pages: settings.pool_pages,
             keep_frames: settings.keep_frames,
             max_requests: settings.levels * ENTRIES,
-            _pad: [0; 2],
+            depth_scale,
+            depth_offset: -range[0] * depth_scale,
             level: levels,
         }])?;
         // The frame is declared: what it moved is remembered.
         let reset = core::mem::take(&mut state.reset);
+        state.casters.changed = false;
         state.frame = number;
         for (k, level) in levels.iter().enumerate().take(settings.levels as usize) {
             state.first_pages[k] = Some(IVec2::from(level.first_page));
         }
         state.light = Some(light_key);
-        drop(state);
+        Some(VsmPrepared {
+            frame,
+            depth_size,
+            reset,
+        })
+    }
 
+    /// Declares the bookkeeping of the frame [`Self::prepare`] made over `depth`, the
+    /// view's depth after its prepass (single-sampled, the size it was prepared with).
+    pub fn add_prepared<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        prepared: VsmPrepared,
+        depth: Texture,
+    ) -> VsmFrame {
+        engine_profiler::zone!("render::VirtualShadows::add_prepared");
+        let settings = self.settings;
+        let VsmPrepared {
+            frame,
+            depth_size,
+            reset,
+        } = prepared;
         let pool = self
             .pool
             .import_storage(fg, "vsm pool", ShaderStages::COMPUTE);
@@ -536,6 +693,7 @@ impl VirtualShadows {
         let meta = self.meta.import(fg, "vsm meta");
         let requests = self.requests.import(fg, "vsm requests");
         let lists = self.lists.import(fg, "vsm lists");
+        let hierarchy = self.hierarchy.import(fg, "vsm hierarchy");
         if reset {
             fg.add_pass("vsm reset")
                 .write(table, Access::TransferWrite)
@@ -564,6 +722,7 @@ impl VirtualShadows {
             .write(meta, rw)
             .write(requests, rw)
             .write(lists, rw)
+            .write(hierarchy, rw)
             .read(lists, Access::Indirect)
             .record(move |rec| {
                 let ctx = rec.context();
@@ -577,8 +736,11 @@ impl VirtualShadows {
                     meta: ctx.address(meta),
                     requests: ctx.address(requests),
                     lists: ctx.address(lists),
+                    hierarchy: ctx.address(hierarchy),
                     pool,
                     depth,
+                    mask: 0,
+                    flags: 0,
                 };
                 let args = ctx.buffer(lists);
                 rec.dispatch(&self.begin_frame, Dispatch::Threads([entries, 1, 1]), &push);
@@ -607,14 +769,135 @@ impl VirtualShadows {
                 rec.barrier_for_indirect();
                 rec.dispatch_indirect(&self.clear, args, CLEAR_ARGS, &push);
             });
-        Some(VsmFrame {
+        VsmFrame {
             frame,
             pool,
             table,
             meta,
             requests,
             lists,
-        })
+            hierarchy,
+        }
+    }
+
+    /// Notes this frame's draw list (`mesh`: a mesh's object box and shape revision), the
+    /// renderer settings that change what casts and the materials' revision: when anything
+    /// casts otherwise than last frame, the frame draws its pages again.
+    pub(crate) fn note_draws(
+        &self,
+        draws: &[crate::forward::DrawItem],
+        mesh: impl Fn(crate::mesh::MeshId) -> (Vec3, Vec3, u32),
+        settings: u64,
+        materials: u64,
+    ) {
+        let mut state = self.state.borrow_mut();
+        let casters = &mut state.casters;
+        let now = (None, settings, materials);
+        let follows = casters.last == Some(now);
+        casters.last = Some(now);
+        casters.draws.diff(draws, mesh);
+        if !follows || !casters.draws.changes.is_empty() {
+            casters.changed = true;
+        }
+    }
+
+    /// Notes this frame's scene upload (`serial`, a hash of its batches' `meshes`), the
+    /// renderer settings that change what casts, the materials' revision, whether the
+    /// upload changed instances (`changes`) and whether instances move between ticks
+    /// (`moving`): when anything casts otherwise than last frame (or an upload was
+    /// skipped), the frame draws its pages again.
+    pub(crate) fn note_scene(
+        &self,
+        serial: u64,
+        meshes: u64,
+        settings: u64,
+        materials: u64,
+        changes: bool,
+        moving: bool,
+    ) {
+        let mut state = self.state.borrow_mut();
+        let casters = &mut state.casters;
+        let (same, next) = match casters.last {
+            Some((Some((last, hash)), s, m))
+                if hash == meshes && s == settings && m == materials =>
+            {
+                (serial == last, serial == last.wrapping_add(1))
+            }
+            _ => (false, false),
+        };
+        casters.last = Some((Some((serial, meshes)), settings, materials));
+        if !(same || next) || (next && changes) || moving {
+            casters.changed = true;
+        }
+    }
+
+    /// Draws every page again when a frame next needs it (and frees the others): for
+    /// changes the renderer cannot see, such as vertices rewritten in place by a pass of
+    /// your own.
+    pub fn invalidate(&self) {
+        self.state.borrow_mut().casters.changed = true;
+    }
+
+    /// Writes the sun's visibility from the pages per pixel of `depth` (the depth they were
+    /// marked from), after the casters are drawn into `frame`'s dirty pages: into `mask`,
+    /// multiplied into what it holds (the contact shadows'), or into a new mask
+    /// ([`crate::contact::CONTACT_FORMAT`]: a float's bits, 1 lit). See `vsmVisibility` in
+    /// `vsm.slang`. Returns the mask.
+    pub fn add_visibility<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        frame: VsmFrame,
+        depth: Texture,
+        mask: Option<Texture>,
+    ) -> Texture {
+        let desc = fg.texture_desc(depth);
+        let (mask, multiply) = match mask {
+            Some(mask) => (mask, true),
+            None => (
+                fg.create_texture(
+                    "sun visibility",
+                    TextureDesc::new_2d(crate::contact::CONTACT_FORMAT, desc.width, desc.height),
+                ),
+                false,
+            ),
+        };
+        let access = if multiply {
+            Access::StorageReadWrite(ShaderStages::COMPUTE)
+        } else {
+            Access::StorageWrite(ShaderStages::COMPUTE)
+        };
+        fg.add_compute("vsm visibility", bindless)
+            .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .read(frame.table, Access::StorageRead(ShaderStages::COMPUTE))
+            .read(frame.pool, Access::StorageRead(ShaderStages::COMPUTE))
+            .write(mask, access)
+            .record(move |rec| {
+                let ctx = rec.context();
+                let indices = (
+                    ctx.sampled_index(depth),
+                    ctx.storage_index(frame.pool),
+                    ctx.storage_index(mask),
+                );
+                let (Some(depth), Some(pool), Some(mask)) = indices else {
+                    return;
+                };
+                let push = Push {
+                    frame: frame.frame,
+                    table: ctx.address(frame.table),
+                    pool,
+                    depth,
+                    mask,
+                    flags: u32::from(multiply),
+                    ..Push::default()
+                };
+                rec.dispatch(
+                    &self.visibility,
+                    Dispatch::Threads([desc.width, desc.height, 1]),
+                    &push,
+                );
+            });
+        mask
     }
 
     /// Frees the pool and the tables.
@@ -630,6 +913,7 @@ impl VirtualShadows {
             self.meta.destroy(allocator);
             self.requests.destroy(allocator);
             self.lists.destroy(allocator);
+            self.hierarchy.destroy(allocator);
         }
     }
 }

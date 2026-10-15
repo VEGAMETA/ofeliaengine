@@ -210,6 +210,7 @@ fn steady_state_reflection_frames_do_not_allocate() {
                         occlusion: None,
                         temporal: Some(&temporal),
                         shadow_cache: None,
+                        virtual_shadows: None,
                         lights: &[],
                         decals: &[],
                         environment: Some(&environment),
