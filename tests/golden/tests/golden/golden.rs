@@ -1038,6 +1038,21 @@ fn sponza_by_day_on_the_player() {
     );
 }
 
+/// A video on the player (ADR 0100): Sponza with a screen showing `engine_video`'s test
+/// clip at 1.0 s (paused; decoded by the GPU's video engine, converted into the video's
+/// texture) as its emission, and the same picture as a UI sprite in the top left corner.
+#[test]
+fn a_video_in_a_material_and_the_ui() {
+    check(&Shot {
+        player: true,
+        video: true,
+        ..Shot::new(
+            "video_player",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
 /// Sponza by night with everything on (`scene::sponza_night`): a bonfire in the
 /// courtyard (sparks, smoke, its light), lights along the hall, all with shadows; fog,
 /// probe GI, ambient occlusion, reflection probes and screen-space reflections, TAA,

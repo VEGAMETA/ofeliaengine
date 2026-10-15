@@ -319,3 +319,119 @@ things for later.
 - the decode queue shared by several players (one queue per device, submits serialized);
 - decode status queries (a damaged stream reported, not just decoded wrong);
 - recovery at the next key frame after an error.
+
+## 8b-3 as built (2026-10-16)
+
+**The sound and the clock** (`engine_video::audio`, `engine_audio`):
+
+- `engine_audio_decode::OpusPackets` decodes raw Opus packets (from WebM rather than Ogg),
+  with each packet's length for exact seeks.
+- `VideoAudio` is the Opus track as an `engine_audio` stream. Its time 0 is the first
+  block's: the codec's delay (`CodecDelay`, pre-skip) is decoded and dropped. **Seeks count
+  the packets' own lengths** from the start: muxers round block times to the millisecond
+  (an early version landed 1,030 frames off). 80 ms of pre-roll (WebM's `SeekPreRoll`).
+- `Audio::stream_position`: the frames of a stream voice the mixer has taken. The clock is
+  that position at the stream's rate, less the output's latency (`OutputInfo`'s queue and
+  stream latency) times the speed.
+
+**The picture as a texture** (`engine_video::convert`):
+
+- **`VideoTexture`**: RGBA8, R'G'B' written through a UNORM view and sampled through an
+  sRGB one (filtering in linear light), in the bindless table. Not mipmapped.
+- **`Conversion`** from the colour description (H.273 code points): BT.709, BT.601,
+  BT.2020 (its constant-luminance form taken as the usual one), FCC, SMPTE 240M, YCgCo, GBR;
+  studio and full range at any depth; chroma siting from `chroma_sample_position`
+  (4:2:0's chroma halfway down unless colocated; across, on luma sample 0). **An
+  unspecified matrix is guessed from the size** as players guess (BT.709 from 1280 wide or
+  577 high). HDR transfers and BT.2020's primaries are not converted yet (shown as SDR
+  BT.709's).
+- **The pass** (`convert.slang`) reads samples as integer codes: an 8-bit byte, P010's
+  words shifted by six, or the low bits of the software decoder's 16-bit words. Planes are
+  interpolated bilinearly with exact weights; a picture of another size than the texture
+  (AV1's render size; the 184-line SVT frames under their 180-line picture) is scaled.
+  - **`convertHalf`**, the usual case (4:2:0 at the texture's size), takes a 2 × 2 block a
+    thread: its luma in one gather, the chroma it shares (two columns, three rows) in four,
+    the block stored through group-shared memory so that each store instruction's lanes
+    write neighbouring texels. Same arithmetic, same results. A 1080p picture: 1.3 against
+    2.9 ms on the Radeon iGPU, 25 against 44 µs on the RTX.
+- **The pass is a fence of the frame graph** (`ComputePass::fence`): shaders reach the
+  texture through its bindless index without declaring it, so every pass declared after
+  it runs after it, on both queues. It records its own barriers: the texture from its
+  readers (`ALL_COMMANDS`) to the compute writes and back to `READ_ONLY_OPTIMAL`.
+- **GPU pictures are read where they were decoded.** The decoder now leaves every picture
+  it hands out in `READ_ONLY_OPTIMAL` (a barrier on the decode queue, before its semaphore
+  signal) and makes single-plane views of its output images (`R8`/`R8G8`, or
+  `R16`/`R16G16` holding P010's words; `MUTABLE_FORMAT`, which both GPUs offer).
+  `DecoderPlanes` puts them in the bindless table. **`wait_for_decode`** submits an empty
+  batch that waits for the picture's semaphore value before the frame graph's first
+  submission. The player converts only pictures it has seen decoded, so the wait costs the
+  GPU nothing.
+- **Software pictures** (`PlaneUpload`): copied each picture into the frame slot's staging
+  memory (Cb and Cr interleaved), then by the pass into two plane images sized for the
+  stream's largest frame (rounded to 64).
+
+**Playing** (`engine_video::player::VideoPlayer`):
+
+- Decodes ahead (3 pictures by default, at most 8 units an update), on the GPU when the
+  device has the decode queue and takes the stream, else rav1d on a thread of its own
+  (half the cores, at most 8, frame threading). **When the GPU refuses a frame on the way**
+  (a size outside its range), rav1d takes over from the key frame before the clock; the GPU
+  decoder is destroyed once the frames reading its pictures finish.
+- The newest picture the clock has reached is shown; late ones are skipped, early ones
+  held, one still decoding stays off a frame longer. After opening or a seek the clock
+  waits for the picture sought (shown only once a later one or the end proves it the last
+  before the target).
+- Play, pause, seek, looping, speed (the sound's pitch with it); events: a picture shown,
+  the end, the loop point.
+- **A fix found here:** a picture shown by `show_existing_frame` took the time of the unit
+  it was decoded in; it takes the showing unit's now. The GPU test checks every picture's
+  time against rav1d's.
+
+**The player** (`engine_app::Videos`):
+
+- The game opens a video from its bytes and controls it by id, from `Setup` or any frame's
+  `FrameParts`; calls take effect at the next frame.
+- `show_in` binds the video to a material's base colour or emission through an **external
+  texture** of the texture pool (`TexturePool::add_external`, `set_external`): an image its
+  owner keeps, named by materials like any pool texture, missing until its first picture.
+  Closing gives the material back. `texture_index` serves UI sprites.
+- The player updates the videos after the game's `animate` and declares their conversions
+  first in the frame graph. Their sound plays through an audio output started with the
+  first video that has sound.
+- `PlayerSettings::video_decode` asks for the decode queue (off by default, as 8b-2
+  decided).
+
+**Tested**, under the validation layer with synchronization validation, on both GPUs:
+
+- the conversion against its CPU reference, within one per channel: synthetic planes of
+  every layout (4:2:0, 4:2:2, 4:4:4 GBR, luma only), depth (8, 10, 12), range, siting and
+  scaling (one texel of 18,393 off by one on each GPU); and the GPU decoder's pictures of
+  three clips against rav1d's planes;
+- `VideoPlayer`: each of 60 pictures shown once and in order (GPU and rav1d); seeks to 1.0,
+  0.5 and 1.9 s showing exactly that picture (the texture compared with rav1d's); 0.750 s
+  mixed moving the clock 0.750 s, a pause holding it; a loop; twice the speed; every clip
+  to its end (the RTX's resized clips go from the GPU to rav1d mid-stream);
+- the player: a video on a screen and in the UI, the material given back when it closes;
+- **a golden shot per vendor** (`video_player`): Sponza with a screen showing the clip's
+  picture at 1.0 s, paused, and the same picture as a UI sprite.
+
+**Measured** with `examples/player_bench.rs` on ref-1 (release; 60 simulated frames a
+second; the GPU kept busy after the conversion so its clocks stay up), each new picture:
+
+| | RTX 4060 Ti | Radeon 780M |
+|---|---:|---:|
+| conversion, 1080p30 8-bit (GPU decoded) | 25 µs | 1.30 ms |
+| conversion, 2160p30 10-bit | 0.17 ms | 4.3 ms |
+| conversion with the upload, rav1d, 1080p / 2160p 10-bit | 0.26 / 2.0 ms | 1.7 / 10.4 ms |
+| `update` on the CPU, median / p99 / largest (GPU decoding) | 1 / 182 / 820 µs | 1 / 74 / 810 µs |
+| `add_pass` on the CPU, GPU decoding / rav1d's copy at 1080p | 9 / 177 µs | 4 / 170 µs |
+
+**Left:**
+
+- WebM files cooked into packs and streamed through the pack's reads (videos open from
+  bytes today);
+- HDR (PQ, HLG) and BT.2020's primaries: an RGBA16F texture and the curve;
+- transparency (deferred by the owner);
+- spatial sound for a video in the world (the stream plays as is);
+- a seamless loop (the first picture of the next round decoded before the end);
+- decode status queries; one decode queue shared by several players.
