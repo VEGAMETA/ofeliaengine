@@ -91,7 +91,11 @@ Read this whole file before starting, and the repository's CLAUDE.md. (Canonical
   scene_bench --pipeline-stats --sky --ao high` (`--ao` before a flag eats it as its quality):
   ps numUsedVgprs per variant 48/64/64/80 on main, and the default path's (after the prepass
   with AO, which writes the motion vectors) 48/63/72/80 with a 49-VGPR vertex stage; the
-  prepass with motion vectors 47 (vertex) / 8 (pixel).
+  prepass with motion vectors 47 (vertex) / 8 (pixel). `tools/check.ps1 -Perf` warns
+  (`**more registers**`) when any pipeline the perf scenes make uses more vector registers
+  or spills than `tests/golden/perf/<vendor>.registers.tsv` (`perf_gate --registers`,
+  ADR 0062). A deliberate change records the new values with `--update` on both GPUs and
+  says why in the PR.
 - No per-frame heap allocations (tests exist; add one for new per-frame paths); `// SAFETY:` on
   every unsafe block; LF line endings (Python on Windows: `newline='\n'`; check `git ls-files --eol`);
   rustfmt, clippy `-D warnings`.

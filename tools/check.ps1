@@ -281,8 +281,9 @@ if ($Gpu) {
 }
 if ($Perf) {
     # Release, overlays off; regressions are reported (below), not fatal (ADR 0062).
+    # Then each GPU's register check (`--registers`, ADR 0062's addendum): a warning, never fatal.
     $perfGate = 'run --release --locked -p engine_golden --bin perf_gate'
-    $steps['perf'] = @($perfGate, "radeon:$perfGate")
+    $steps['perf'] = @($perfGate, "$perfGate -- --registers", "radeon:$perfGate", "radeon:$perfGate -- --registers")
     $prebuild['perf'] = 'build --release --locked -p engine_golden --bin perf_gate'
 }
 if ($Deny) { $steps['deny'] = @('deny --locked check', 'drift:') }
@@ -449,7 +450,7 @@ foreach ($name in $steps.Keys) {
     if ($ok) {
         Write-Output "ok      $time  $name"
         if ($name -eq 'perf') {
-            Select-String -Path $log -Pattern '\*\*slower\*\*|^measured again' | Select-Object -First 15 |
+            Select-String -Path $log -Pattern '\*\*slower\*\*|^measured again|\*\*more registers\*\*|^registers: [0-9]' | Select-Object -First 20 |
                 ForEach-Object { Write-Output "        $($_.Line)" }
         }
     } else {
