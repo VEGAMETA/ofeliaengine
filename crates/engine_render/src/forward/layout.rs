@@ -39,7 +39,7 @@ impl ForwardRenderer {
         let mut counts = [0u32; STATES];
         // Subsurface materials get a pipeline state of their own while scattering is on
         // and there are profiles; otherwise they shade as ordinary ones.
-        let subsurface_on = self.subsurface_states().is_some();
+        let subsurface_on = self.subsurface_for(view).is_some();
         batches(draws, materials, slots, runs, &mut counts, subsurface_on);
         let subsurface_draws = counts[SUBSURFACE..SUBSURFACE + 8].iter().any(|&c| c > 0);
         let mut starts = [0u32; STATES];
@@ -245,7 +245,7 @@ impl ForwardRenderer {
             commands: command_scratch,
             ..
         } = &mut *scratch;
-        let subsurface_on = self.subsurface_states().is_some();
+        let subsurface_on = self.subsurface_for(view).is_some();
         let batches = scene.batches();
         // One run per live batch (`first` holds its id), counted per pipeline state.
         let mut counts = [0u32; STATES];

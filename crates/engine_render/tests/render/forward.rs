@@ -5,7 +5,7 @@
 
 use engine_core::math::{Mat4, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
@@ -210,6 +210,7 @@ fn pbr_lighting_and_shadows() {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 );
                 tonemap.add_pass(&mut fg, &bindless, scene, color, 1.0);
@@ -235,6 +236,7 @@ fn pbr_lighting_and_shadows() {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 );
             }

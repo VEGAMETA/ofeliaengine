@@ -75,6 +75,8 @@ pub use antialiasing::{
     Upscale,
 };
 
+/// The scene renderer's features a view draws with (ADR 0099 step 4).
+pub use engine_render::forward::ViewFeatures;
 pub use renderer::{
     FrameContext, FrameError, FrameRenderer, GeneratedFrame, GeneratedTarget, PrepareContext,
     SceneDraws, SceneInput, SceneTargets, ViewCamera, ViewFrame, ViewTarget,

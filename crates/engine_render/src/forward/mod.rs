@@ -668,6 +668,69 @@ pub struct ForwardView<'a> {
     /// [`ForwardRenderer::set_global_illumination`]; not in multisampled views;
     /// transparent surfaces keep the sky's light.
     pub gi: Option<ViewGi<'a>>,
+    /// The renderer's features this view draws with ([`ViewFeatures::ALL`]: every one the
+    /// renderer has on).
+    pub features: ViewFeatures,
+}
+
+/// Which of the renderer's features a view draws with (ADR 0099 step 4). A feature runs in
+/// a view when the renderer has it on (its `ForwardRenderer::set_*`) and the view wants
+/// it: the views of one frame (split screen, the editor's viewports) can differ. A view
+/// without a feature costs as if the renderer had it off: its passes are not declared
+/// and its shading variants are not drawn with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ViewFeatures {
+    /// Ambient occlusion ([`ForwardRenderer::set_ambient_occlusion`]).
+    pub ambient_occlusion: bool,
+    /// The sun's contact shadows ([`ForwardRenderer::set_contact_shadows`]).
+    pub contact_shadows: bool,
+    /// Local lights' shadows ([`ForwardRenderer::set_local_shadows`]): the shadow views
+    /// this view plans and draws, and its shading with them.
+    pub local_shadows: bool,
+    /// Subsurface scattering ([`ForwardRenderer::set_subsurface`]); without it subsurface
+    /// materials shade as the renderer shades them with subsurface scattering off.
+    pub subsurface: bool,
+    /// Probe and screen-space reflections ([`ForwardRenderer::set_reflections`]).
+    pub reflections: bool,
+    /// Decals ([`ForwardRenderer::set_decals`]).
+    pub decals: bool,
+    /// Global illumination ([`ForwardRenderer::set_global_illumination`]).
+    pub global_illumination: bool,
+    /// The depth prepass where no other feature needs it
+    /// ([`ForwardRenderer::set_depth_prepass`]).
+    pub depth_prepass: bool,
+}
+
+impl ViewFeatures {
+    /// Every feature the renderer has on.
+    pub const ALL: Self = Self {
+        ambient_occlusion: true,
+        contact_shadows: true,
+        local_shadows: true,
+        subsurface: true,
+        reflections: true,
+        decals: true,
+        global_illumination: true,
+        depth_prepass: true,
+    };
+
+    /// None: the plain forward shading (lights, the sun and its cascades, the sky).
+    pub const NONE: Self = Self {
+        ambient_occlusion: false,
+        contact_shadows: false,
+        local_shadows: false,
+        subsurface: false,
+        reflections: false,
+        decals: false,
+        global_illumination: false,
+        depth_prepass: false,
+    };
+}
+
+impl Default for ViewFeatures {
+    fn default() -> Self {
+        Self::ALL
+    }
 }
 
 /// A view's global illumination ([`ForwardView::gi`]).
@@ -2867,7 +2930,7 @@ impl ForwardRenderer {
                     let revision = geometry.mesh(mesh).map_or(0, |m| m.revision);
                     (center, extents, revision)
                 },
-                self.caster_settings(),
+                self.caster_settings(view),
                 materials.revision(),
             );
         }
@@ -2973,7 +3036,7 @@ impl ForwardRenderer {
         setup.shadow_draws =
             self.plan_local_shadows(view, geometry, materials, &setup, Changes::Scene(scene));
         if let Some(cache) = view.shadow_cache {
-            self.note_scene_casters(cache, geometry, materials, scene);
+            self.note_scene_casters(cache, geometry, materials, scene, view);
         }
         let layout = self.layout_scene(ring, geometry, scene, view, &setup);
         let passes = layout.and_then(|layout| {
@@ -3092,6 +3155,7 @@ impl ForwardRenderer {
                     ViewGi::Probes { volume, .. } => Some(ViewGi::Probes { volume, rays: None }),
                     ViewGi::Screen(_) => None,
                 }),
+                features: view.features,
             };
             let setup = Setup {
                 depth_desc: fg.texture_desc(depth),
@@ -3145,10 +3209,17 @@ impl ForwardRenderer {
             .filter(|_| self.subsurface_settings.is_some() && !self.subsurface_profiles.is_empty())
     }
 
-    /// A hash of the renderer's settings that change what the cached cascades draw (ADR
-    /// 0093): another one draws them whole.
-    fn caster_settings(&self) -> u64 {
-        let hash = cascade_cache::mix(0, u64::from(self.subsurface_states().is_some()));
+    /// The subsurface pipelines when `view` scatters (ADR 0099 step 4): without them its
+    /// subsurface materials shade as ordinary ones.
+    fn subsurface_for(&self, view: &ForwardView<'_>) -> Option<&SubsurfacePipelines> {
+        self.subsurface_states()
+            .filter(|_| view.features.subsurface)
+    }
+
+    /// A hash of the settings that change what `view`'s cached cascades draw (ADR 0093):
+    /// another one draws them whole.
+    fn caster_settings(&self, view: &ForwardView<'_>) -> u64 {
+        let hash = cascade_cache::mix(0, u64::from(self.subsurface_for(view).is_some()));
         cascade_cache::mix(hash, u64::from(self.lod_threshold.to_bits()))
     }
 
@@ -3161,6 +3232,7 @@ impl ForwardRenderer {
         geometry: &GeometryFrame<'_>,
         materials: &MaterialFrame<'_>,
         scene: &SceneFrame<'_>,
+        view: &ForwardView<'_>,
     ) {
         let batches = scene.batches();
         let mut meshes = cascade_cache::mix(0, batches.len() as u64);
@@ -3173,7 +3245,7 @@ impl ForwardRenderer {
         cache.note_scene(
             scene.serial(),
             meshes,
-            self.caster_settings(),
+            self.caster_settings(view),
             materials.revision(),
             scene.changes(),
             scene.moving_boxes(),
@@ -3210,7 +3282,7 @@ impl ForwardRenderer {
         let Some(state) = self
             .local_shadows
             .as_ref()
-            .filter(|_| self.local_shadows_on)
+            .filter(|_| self.local_shadows_on && view.features.local_shadows)
         else {
             return 0;
         };

@@ -19,6 +19,7 @@
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::graph::{Access, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
@@ -315,6 +316,7 @@ fn main() {
                             environment: None,
                             reflections: Default::default(),
                             gi: None,
+                            features: ViewFeatures::ALL,
                         },
                     )
                     .unwrap();

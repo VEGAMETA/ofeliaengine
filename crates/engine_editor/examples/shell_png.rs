@@ -14,7 +14,7 @@ use engine_editor::shell::{
     Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, build,
 };
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{MaterialDesc, MaterialTable};
@@ -474,6 +474,7 @@ fn main() {
                             environment: None,
                             reflections: Default::default(),
                             gi: None,
+                            features: ViewFeatures::ALL,
                         };
                         forward.add_passes(fg, ring, bindless, &geo, &mats, draws, &view);
                     },

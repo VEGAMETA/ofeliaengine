@@ -22,6 +22,7 @@ use engine_dlss::{DlssError, Streamline, StreamlineDesc};
 use engine_fsr::Fsr;
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::graph::{
     Access, BufferState, ImportedBuffer, RenderGraph, Texture, TextureDesc,
@@ -284,6 +285,7 @@ impl Gpu {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

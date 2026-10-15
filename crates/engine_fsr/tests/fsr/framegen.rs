@@ -266,6 +266,7 @@ fn frame(
                     environment: None,
                     reflections: Default::default(),
                     gi: None,
+                    features: ViewFeatures::ALL,
                 },
             )
             .unwrap();

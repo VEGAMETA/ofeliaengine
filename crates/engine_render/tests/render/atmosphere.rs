@@ -35,7 +35,7 @@ use engine_render::atmosphere::{
 };
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
-    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
+    Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings, ViewFeatures,
 };
 use engine_render::graph::{
     Access, BufferState, FrameGraph, ImportedBuffer, RenderGraph, Texture, TextureDesc,
@@ -504,6 +504,7 @@ fn the_atmosphere_and_fog_match_the_cpu() {
                         environment: Some(environment),
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

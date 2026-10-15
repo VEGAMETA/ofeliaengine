@@ -10,7 +10,7 @@ use engine_core::half;
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_orthographic};
 use engine_render::forward::{
     Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, MOTION_FORMAT, Occlusion,
-    ShadowSettings, Temporal,
+    ShadowSettings, Temporal, ViewFeatures,
 };
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::MaterialTable;
@@ -206,6 +206,7 @@ fn motion_vectors() {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

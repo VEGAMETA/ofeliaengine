@@ -13,6 +13,7 @@
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
     Camera, DirectionalLight, ForwardRenderer, ForwardView, Occlusion, ShadowSettings, Temporal,
+    ViewFeatures,
 };
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
 use engine_render::graph::{RenderGraph, TextureDesc};
@@ -246,6 +247,7 @@ fn steady_state_skinning_frames_do_not_allocate() {
                         environment: None,
                         reflections: Default::default(),
                         gi: None,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();

@@ -17,7 +17,7 @@
 use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
 use engine_render::forward::{
     Camera, DirectionalLight, ForwardRenderer, ForwardView, Occlusion, ShadowSettings, Temporal,
-    ViewGi,
+    ViewFeatures, ViewGi,
 };
 use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
@@ -270,6 +270,7 @@ fn steady_state_scene_frames_do_not_allocate() {
                         environment: None,
                         reflections: Default::default(),
                         gi: gi_view,
+                        features: ViewFeatures::ALL,
                     },
                 )
                 .unwrap();
