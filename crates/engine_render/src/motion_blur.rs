@@ -5,12 +5,15 @@
 //!
 //! Guertin, McGuire and Nowrouzezahrai's filter (HPG 2014), written from the paper:
 //!
-//! 1. each pixel's velocity and depth into one texel, and the largest velocity of every
-//!    tile (the tile is the largest blur);
+//! 1. the largest velocity of every tile (the tile is the largest blur), and the velocity
+//!    and depth of each 2 × 2 pixels' nearest one, at half size;
 //! 2. the largest of each tile's neighbourhood, a diagonal tile only if it blurs towards
 //!    the tile;
-//! 3. each pixel's samples along that velocity and its own, alternately, weighted by who
-//!    is in front, by how far each velocity reaches and by direction.
+//! 3. at half size (Jimenez 2014), each 2 × 2's samples along that velocity and its own,
+//!    alternately, weighted by who is in front, by how far each velocity reaches and by
+//!    direction;
+//! 4. at full size, each pixel's own color over the blur of the half-size texels around
+//!    it, those at its depth first.
 //!
 //! The team limits its use (ADR 0067): only cinematic views have it
 //! (`engine_frame::ViewKind::Cinematic`); a gameplay view cannot ask for it.
@@ -23,11 +26,14 @@ use engine_rhi::{Bindless, Device, PipelineStatistic, RhiError, SamplerKind};
 const TILE_MAX: &[u8] = include_bytes!("../shaders/motion_blur.mbTileMax.spv");
 const NEIGHBOR_MAX: &[u8] = include_bytes!("../shaders/motion_blur.mbNeighborMax.spv");
 const GATHER: &[u8] = include_bytes!("../shaders/motion_blur.mbGather.spv");
+const COMPOSITE: &[u8] = include_bytes!("../shaders/motion_blur.mbComposite.spv");
 
 /// The tiles' format: a velocity in pixels.
 const TILE_FORMAT: vk::Format = vk::Format::R16G16_SFLOAT;
-/// Each pixel's velocity (pixels), linear depth and speed, for the gather's samples.
+/// Each 2 × 2's nearest pixel's velocity (pixels), linear depth and speed, for the gather.
 const VZ_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
+/// The samples' blur at half size: color premultiplied by its share, and the share.
+const BLUR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
 /// The paper's τ (the samples' largest jitter, in sample spacings) and ψ (its baseline
 /// level): the jitter is τ ψ / N.
@@ -43,7 +49,8 @@ pub struct MotionBlurSettings {
     /// Samples per pixel (19; 35 the paper's own setting, about twice the cost).
     pub samples: u32,
     /// The longest blur each way along the motion, as a fraction of the image's height
-    /// (0.037: 40 pixels at 1080p, the paper's). It is also the tile size.
+    /// (0.037: 40 pixels at 1080p, the paper's). It is also the tile size (rounded to an
+    /// even number of pixels).
     pub max_radius: f32,
 }
 
@@ -66,7 +73,7 @@ pub struct MotionBlurCamera {
     pub far: f32,
 }
 
-/// `Push` in `motion_blur.slang` (80 bytes).
+/// `Push` in `motion_blur.slang` (88 bytes).
 #[derive(Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
@@ -87,9 +94,11 @@ struct Push {
     depth_scale: f32,
     jitter: f32,
     vz: u32,
+    blur: u32,
+    _pad: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<Push>() == 80);
+const _: () = assert!(core::mem::size_of::<Push>() == 88);
 
 /// Motion blur (see the module documentation): the pipelines, shared by every view.
 #[derive(Debug)]
@@ -97,31 +106,34 @@ pub struct MotionBlur {
     tile_max: ComputeShader<Push>,
     neighbor_max: ComputeShader<Push>,
     gather: ComputeShader<Push>,
+    composite: ComputeShader<Push>,
 }
 
 impl MotionBlur {
     /// Creates the pipelines.
     pub fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
-        let [tile_max, neighbor_max, gather] = ComputeSource::create_all(
+        let [tile_max, neighbor_max, gather, composite] = ComputeSource::create_all(
             device,
             bindless,
             [
                 ComputeSource::new(TILE_MAX, c"mbTileMax", &[])?,
                 ComputeSource::new(NEIGHBOR_MAX, c"mbNeighborMax", &[])?,
                 ComputeSource::new(GATHER, c"mbGather", &[])?,
+                ComputeSource::new(COMPOSITE, c"mbComposite", &[])?,
             ],
         )?;
         Ok(Self {
             tile_max,
             neighbor_max,
             gather,
+            composite,
         })
     }
 
     /// The driver's statistics of each pass's pipeline (registers, occupancy), by pass
     /// name; empty unless the device captures them (`ENGINE_PIPELINE_STATS=1`).
     #[doc(hidden)]
-    pub fn statistics(&self, device: &Device) -> [(&'static str, Vec<PipelineStatistic>); 3] {
+    pub fn statistics(&self, device: &Device) -> [(&'static str, Vec<PipelineStatistic>); 4] {
         [
             ("tile max", self.tile_max.pipeline().statistics(device)),
             (
@@ -129,6 +141,7 @@ impl MotionBlur {
                 self.neighbor_max.pipeline().statistics(device),
             ),
             ("gather", self.gather.pipeline().statistics(device)),
+            ("composite", self.composite.pipeline().statistics(device)),
         ]
     }
 
@@ -151,7 +164,10 @@ impl MotionBlur {
         let desc = fg.texture_desc(color);
         let render = fg.texture_desc(motion);
         let (w, h) = (desc.width, desc.height);
+        // Even, so that the half-size texels' 2 × 2s never straddle tiles.
         let tile = ((settings.max_radius.max(0.0) * h as f32).round() as u32).max(8);
+        let tile = tile + tile % 2;
+        let (hw, hh) = (w.div_ceil(2), h.div_ceil(2));
         let tile_count = [w.div_ceil(tile), h.div_ceil(tile)];
         let tiles = fg.create_texture(
             "motion blur tiles",
@@ -162,7 +178,14 @@ impl MotionBlur {
             TextureDesc::new_2d(TILE_FORMAT, tile_count[0], tile_count[1]),
         );
         let output = fg.create_texture("motion blur", TextureDesc::new_2d(desc.format, w, h));
-        let vz = fg.create_texture("motion blur velocity", TextureDesc::new_2d(VZ_FORMAT, w, h));
+        let vz = fg.create_texture(
+            "motion blur velocity",
+            TextureDesc::new_2d(VZ_FORMAT, hw, hh),
+        );
+        let blur = fg.create_texture(
+            "motion blur samples",
+            TextureDesc::new_2d(BLUR_FORMAT, hw, hh),
+        );
         let samples = settings.samples.clamp(1, 64);
         let near = camera.near.max(1e-6);
         let base = Push {
@@ -215,12 +238,30 @@ impl MotionBlur {
             .read(color, Access::Sampled(stage))
             .read(vz, Access::Sampled(stage))
             .read(neighbors, Access::Sampled(stage))
-            .write(output, Access::StorageWrite(stage))
-            .dispatch(&self.gather, Dispatch::Threads([w, h, 1]), move |ctx| {
+            .write(blur, Access::StorageWrite(stage))
+            .dispatch(&self.gather, Dispatch::Threads([hw, hh, 1]), move |ctx| {
                 Some(Push {
                     color: ctx.sampled_index(color)?,
                     vz: ctx.sampled_index(vz)?,
                     neighbors: ctx.sampled_index(neighbors)?,
+                    blur: ctx.storage_index(blur)?,
+                    ..base
+                })
+            });
+        fg.add_compute("motion blur composite", bindless)
+            .read(color, Access::Sampled(stage))
+            .read(depth, Access::Sampled(stage))
+            .read(vz, Access::Sampled(stage))
+            .read(neighbors, Access::Sampled(stage))
+            .read(blur, Access::Sampled(stage))
+            .write(output, Access::StorageWrite(stage))
+            .dispatch(&self.composite, Dispatch::Threads([w, h, 1]), move |ctx| {
+                Some(Push {
+                    color: ctx.sampled_index(color)?,
+                    depth: ctx.sampled_index(depth)?,
+                    vz: ctx.sampled_index(vz)?,
+                    neighbors: ctx.sampled_index(neighbors)?,
+                    blur: ctx.sampled_index(blur)?,
                     output: ctx.storage_index(output)?,
                     ..base
                 })
