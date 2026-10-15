@@ -174,6 +174,13 @@ compute: ADR 0065's addendum, PR #166). Next: GI phase 2 and the Brixelizer GI r
 Merged with the second review's findings (`docs/research/core-audit-2.md`). The owner's
 answers of 2026-10-10: faster checks first, then the review's P0 fixes; the player crate
 after the rendering queue; custom 3D materials after GI; the discrete AO default stays High.
+The owner's answers of 2026-10-15:
+- no object motion blur in gameplay views;
+- the virtual shadow pages after the player crate;
+- a register check in the perf gate, as a warning (6c);
+- DOF's ring merging stays off for now, as an option later;
+- anisotropic filtering as a player setting (6d).
+
 The owner's answers of 2026-10-11: decals through a decal buffer (ADR 0082); our own GI,
 held to beat AMD's Brixelizer GI in cost (ADR 0084); meshlets first (ADR 0085); mimalloc
 (ADR 0086); Radeon GPU Profiler installed on ref-1 (`D:\SDKs\AMD`); NVIDIA's shader cache
@@ -478,8 +485,9 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
      - Walking: Intel's Sponza RTX 69 → 43 µs, Radeon 1.98 → 0.76 ms. With 8 small
        objects moving: RTX 403 µs, Radeon 7.0 ms, against 728 µs and 19.0 ms drawn
        whole.
-   - **Next:** virtual pages (option 1) where the cache leaves cost or resolution wanting;
-     the instanced draws' pieces culled with the same tags.
+   - **Next:** virtual pages (option 1) where the cache leaves cost or resolution wanting
+     (the owner, 2026-10-15: after the player crate, 8a); the instanced draws' pieces culled
+     with the same tags.
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.
 
@@ -505,8 +513,8 @@ grown, divide and conquer); the old labels stay in parentheses.
      - At 1080p: RTX 0.43 ms, Radeon 15.7 ms (7.9 ms with 9 samples); since the
        gather runs at half size (2026-10-15, ADR 0096's addendum) RTX 0.23 ms, Radeon
        7.3 ms.
-     - Open (ADR 0067): object-only motion blur in gameplay views, if the team wants
-       it.
+     - Object-only motion blur in gameplay views: not wanted (the owner, 2026-10-15).
+       Motion blur stays on cinematic views only.
 6b. The iGPU's expensive passes (review §3.11): depth of field 3.8–8.2 ms at 1080p
    (ADR 0095: a 16-bit blur, the composite in place or in the tone mapper, a
    quarter-size gather), TAAU 4.2 ms (6.6 ms in the perf gate's `sponza_taa`; since
@@ -538,6 +546,14 @@ grown, divide and conquer); the old labels stay in parentheses.
      - the sun's 3 × 3 PCF as 4 gathers tried: the RTX's forward 0.3–5.7 % faster in every
        scene, but the Radeon's shading registers rose (plain 47 → 54, environment 64 → 78)
        and 12 scenes ran 4–12 % slower. Not adopted.
+6c. **The perf gate's register check** (the owner, 2026-10-15). Every pipeline's
+   registers (the drivers' statistics, which do not vary from run to run) against a
+   baseline per vendor, a warning listing the pipelines that grew. The time gate let 64 →
+   70 VGPRs through on the Radeon (ADR 0093); the PCF gathers of 2026-10-15 rose 64 → 78
+   and cost 12 scenes 4–12 %.
+6d. **Anisotropic filtering as a player setting** (the owner, 2026-10-15). Off / 2× / 4× /
+   8× / 16× for the materials, 16× by default, changed at run time. Measured 2026-10-15:
+   16× → 4× −1.5–3 % of the forward pass, 2× −7 %, off −13–19 %.
 7. **The second review's core leftovers.**
 7a (was 6c). Memory (review §3.9): one transient heap for both frame slots where no
    transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,
@@ -614,7 +630,14 @@ grown, divide and conquer); the old labels stay in parentheses.
    - per-language fonts and fallbacks, right-to-left and complex scripts through
      `engine_text`'s shaping and bidi;
    - a check for missing and unused keys ("one button": the CLI and later the editor).
-8e. **Color vision settings for the game developer** (owner, 2026-10-14: a light addition):
+8e. ~~**Color vision settings for the game developer**~~ (owner, 2026-10-14: a light
+   addition). **Done 2026-10-15 (ADR 0097):** `ViewSettings::color_vision`.
+   - Protan, deutan and tritan, corrected (daltonization) or simulated, with a severity.
+   - Held by the graded tone mapper's LUT after the curve: nothing while off, the graded
+     path's cost while on.
+   - Golden image `sponza_deuteranopia`.
+
+   The item as it was asked:
    - protanopia, deuteranopia and tritanopia for the player: their correction (daltonizing)
      with a strength;
    - their simulation for the developer, to check what such players see;

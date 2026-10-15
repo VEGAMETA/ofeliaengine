@@ -129,8 +129,8 @@ at 7 cm a frame, a 180° shutter, 19 samples, every pixel moving.
   - a moving object's core stays nearly opaque;
   - there is no blur across the edge of the screen;
   - translucent surfaces follow what is behind them (one velocity per pixel).
-- **Object-only motion blur for gameplay views is ADR 0067's open question.** If the team
-  wants it: the same passes with the camera's motion subtracted from the motion vectors.
+- **Object-only motion blur for gameplay views was ADR 0067's open question.** The owner's
+  answer (2026-10-15): not wanted. Motion blur stays on cinematic views only.
 
 ## Addendum (2026-10-15): the gather at half size
 

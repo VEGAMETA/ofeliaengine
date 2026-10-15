@@ -81,7 +81,8 @@ Changes from FidelityFX:
     disk then becomes a cone, 1.7 times as bright in the middle, with a tail 8 pixels
     past its radius.
   - Merging would save 11 µs on the RTX and 0.27 ms on the Radeon (the blur of the strong
-    Sponza scene below). We keep the disk.
+    Sponza scene below). We keep the disk; the owner (2026-10-15): merging as an option
+    later.
 - **Composite:**
   - the fixed 3 × 3 blur only where it shows: Radeon composite 3.38 → 3.22 ms;
   - shared memory as separate channels: RTX composite 128–138 → 115 µs.
