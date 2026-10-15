@@ -1,6 +1,6 @@
 //! The frame renderer (ADR 0072) under the validation layer: history dropped on a camera
-//! cut (no ghost of the previous view), the texture LOD bias the upscaler asks for is
-//! applied, settings changes start the history anew, an unavailable upscaler falls back
+//! cut (no ghost of the previous view), the texture LOD bias the upscaler asks for and the
+//! player's anisotropic filtering are applied, settings changes start the history anew, an unavailable upscaler falls back
 //! to TAAU, and the previous color reaches the scene hook; and every feature and mode fits
 //! a main thread's 1 MiB stack; a streamed level fades in on screen. `framegen`: frame
 //! generation with the UI layer (ADR 0091).
@@ -24,7 +24,7 @@ use engine_render::color_vision::{ColorVision, ColorVisionMode, Deficiency};
 use engine_render::dof::DofSettings;
 use engine_render::forward::LocalShadowSettings;
 use engine_render::grading::ColorGrading;
-use engine_render::material::{MaterialDesc, TextureRef};
+use engine_render::material::{Anisotropy, MaterialDesc, MaterialId, TextureRef};
 use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::reflections::SsrSettings;
 use engine_render::subsurface::SubsurfaceProfile;
@@ -102,41 +102,7 @@ fn the_upscalers_lod_bias_is_applied() {
     let Some(mut bed) = Bed::new((128, 128), true) else {
         return;
     };
-    // 256 × 256: level 0 red, 1 green, 2 blue, then grey.
-    let colors: [[u8; 4]; 9] = [
-        [255, 0, 0, 255],
-        [0, 255, 0, 255],
-        [0, 0, 255, 255],
-        [128, 128, 128, 255],
-        [128, 128, 128, 255],
-        [128, 128, 128, 255],
-        [128, 128, 128, 255],
-        [128, 128, 128, 255],
-        [128, 128, 128, 255],
-    ];
-    let levels = (0..9u32)
-        .map(|k| {
-            let side = (256 >> k) as usize;
-            colors[k as usize].repeat(side * side)
-        })
-        .collect();
-    let texture = bed
-        .textures
-        .add(
-            &bed.device,
-            &mut bed.allocator,
-            TextureLevels {
-                width: 256,
-                height: 256,
-                format: TextureFormat::Rgba8Unorm,
-                levels,
-            },
-        )
-        .unwrap();
-    let material = bed.materials.add(MaterialDesc {
-        base_color_texture: Some(TextureRef::new(texture)),
-        ..MaterialDesc::solid([1.0; 3], 0.0, 1.0)
-    });
+    let material = level_colored(&mut bed);
     // A 4 × 4 face across the whole view: 256 texels over 128 output pixels, 64 render
     // pixels at half the size: level 1 at the output size, level 2 at the render size.
     let draws = vec![bed.cube_at(material, Vec3::new(4.0, 4.0, 0.2), Vec3::ZERO)];
@@ -184,6 +150,107 @@ fn the_upscalers_lod_bias_is_applied() {
     assert!(
         taau_sum[1] > 4 * taau_sum[2],
         "with TAAU's bias, level 1 (green): {taau_sum:?}"
+    );
+    bed.finish(&mut []);
+}
+
+/// A material whose 256 × 256 texture shows which level is sampled: level 0 red, 1 green,
+/// 2 blue, then grey.
+fn level_colored(bed: &mut Bed) -> MaterialId {
+    let colors: [[u8; 4]; 9] = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [128, 128, 128, 255],
+        [128, 128, 128, 255],
+        [128, 128, 128, 255],
+        [128, 128, 128, 255],
+        [128, 128, 128, 255],
+        [128, 128, 128, 255],
+    ];
+    let levels = (0..9u32)
+        .map(|k| {
+            let side = (256 >> k) as usize;
+            colors[k as usize].repeat(side * side)
+        })
+        .collect();
+    let texture = bed
+        .textures
+        .add(
+            &bed.device,
+            &mut bed.allocator,
+            TextureLevels {
+                width: 256,
+                height: 256,
+                format: TextureFormat::Rgba8Unorm,
+                levels,
+            },
+        )
+        .unwrap();
+    bed.materials.add(MaterialDesc {
+        base_color_texture: Some(TextureRef::new(texture)),
+        ..MaterialDesc::solid([1.0; 3], 0.0, 1.0)
+    })
+}
+
+/// The player's anisotropic filtering reaches the material samplers. A 40 × 40 floor seen
+/// from 0.5 above it, along it, its texture's levels in solid colors: past a few metres its
+/// texels shrink much faster along the view than across it. 16× samples there from the
+/// finest levels (red, green), trilinear filtering from the coarse ones (blue, grey).
+#[test]
+fn the_players_anisotropic_filtering_is_applied() {
+    let Some(mut bed) = Bed::new((128, 128), true) else {
+        return;
+    };
+    let material = level_colored(&mut bed);
+    let draws = vec![bed.cube_at(
+        material,
+        Vec3::new(40.0, 0.1, 40.0),
+        Vec3::new(0.0, -0.05, -18.0),
+    )];
+    let view_camera = camera(Vec3::new(0.0, 0.5, 2.0), Vec3::new(0.0, 0.0, -30.0), false);
+    let mut fine_and_coarse = |anisotropy| {
+        bed.materials
+            .set_texture_anisotropy(&bed.bindless, anisotropy)
+            .unwrap();
+        // Black behind the floor: only the floor's pixels count below.
+        let settings = ViewSettings {
+            antialiasing: Antialiasing::OFF,
+            bloom: false,
+            clear: Some([0.0, 0.0, 0.0, 1.0]),
+            ..ViewSettings::default()
+        };
+        let mut view = View::new(&bed.device, 4);
+        let mut last = None;
+        // Until the texture is resident.
+        for _ in 0..8 {
+            last = Some(bed.render(&mut view, &settings, &draws, &view_camera, true, |_| {}));
+        }
+        let pixels = last.unwrap().1.unwrap();
+        // Pixels of the finest levels (red or green ahead) and of the coarse ones (blue
+        // ahead, or grey).
+        let (mut fine, mut coarse) = (0u32, 0u32);
+        for p in pixels.chunks(4) {
+            let [r, g, b] = [p[0], p[1], p[2]].map(i32::from);
+            if r.max(g) > 2 * b && r.max(g) > 16 {
+                fine += 1;
+            } else if b > 2 * r.max(g) || (b > 16 && (r - b).abs() < 8 && (g - b).abs() < 8) {
+                coarse += 1;
+            }
+        }
+        // SAFETY: the bed's device is idle after `render`.
+        unsafe { view.destroy(&mut bed.allocator, &bed.bindless) };
+        (fine, coarse)
+    };
+    let (sharp_fine, sharp_coarse) = fine_and_coarse(Anisotropy::X16);
+    let (off_fine, off_coarse) = fine_and_coarse(Anisotropy::Off);
+    println!(
+        "16×: {sharp_fine} fine, {sharp_coarse} coarse; off: {off_fine} fine, {off_coarse} coarse"
+    );
+    assert_eq!(bed.materials.texture_anisotropy(), Anisotropy::Off);
+    assert!(
+        sharp_fine > off_fine + 800 && off_coarse > 800 && off_coarse > 3 * sharp_coarse,
+        "16× samples finer levels than trilinear filtering"
     );
     bed.finish(&mut []);
 }

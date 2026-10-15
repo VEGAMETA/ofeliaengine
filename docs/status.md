@@ -177,9 +177,9 @@ after the rendering queue; custom 3D materials after GI; the discrete AO default
 The owner's answers of 2026-10-15:
 - no object motion blur in gameplay views;
 - the virtual shadow pages after the player crate;
-- a register check in the perf gate, as a warning (6c);
+- a register check in the perf gate, as a warning (6c, done the same day);
 - DOF's ring merging stays off for now, as an option later;
-- anisotropic filtering as a player setting (6d).
+- anisotropic filtering as a player setting (6d, done the same day).
 
 The owner's answers of 2026-10-11: decals through a decal buffer (ADR 0082); our own GI,
 held to beat AMD's Brixelizer GI in cost (ADR 0084); meshlets first (ADR 0085); mimalloc
@@ -555,9 +555,12 @@ grown, divide and conquer); the old labels stay in parentheses.
 
    The time gate had let 64 → 70 VGPRs through on the Radeon (ADR 0093); the PCF gathers
    of 2026-10-15 rose 64 → 78 and cost 12 scenes 4–12 %.
-6d. **Anisotropic filtering as a player setting** (the owner, 2026-10-15). Off / 2× / 4× /
-   8× / 16× for the materials, 16× by default, changed at run time. Measured 2026-10-15:
-   16× → 4× −1.5–3 % of the forward pass, 2× −7 %, off −13–19 %.
+6d. ~~**Anisotropic filtering as a player setting**~~ (the owner, 2026-10-15). **Done
+   2026-10-15 (ADR 0098):** `MaterialTable::set_texture_anisotropy` with
+   `Anisotropy::{Off, X2, X4, X8, X16}`, 16× by default.
+   - It lives in the material samplers, like the LOD bias: nothing in the shaders.
+   - The bindless set holds up to 16 extra sampler sets, of any bias and anisotropy.
+   - Measured 2026-10-15: 16× → 4× −1.5–3 % of the forward pass, 2× −7 %, off −13–19 %.
 7. **The second review's core leftovers.**
 7a (was 6c). Memory (review §3.9): one transient heap for both frame slots where no
    transient crosses queues (66 / 41 MiB), the global allocator decision (mimalloc,

@@ -312,6 +312,39 @@ const MATERIAL_READ: BufferState = BufferState {
     access: vk::AccessFlags2::SHADER_STORAGE_READ,
 };
 
+/// Anisotropic filtering of material textures ([`MaterialTable::set_texture_anisotropy`]):
+/// the most samples a lookup takes along a texture seen at a slant. A player's setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum Anisotropy {
+    /// Trilinear only: textures at a slant blur soonest.
+    Off,
+    /// 2 samples.
+    X2,
+    /// 4 samples.
+    X4,
+    /// 8 samples.
+    X8,
+    /// 16 samples (the default; the most any device does here).
+    #[default]
+    X16,
+}
+
+impl Anisotropy {
+    /// Every setting, from off to 16×: a settings menu's choices.
+    pub const ALL: [Self; 5] = [Self::Off, Self::X2, Self::X4, Self::X8, Self::X16];
+
+    /// The most samples a lookup takes (1 when off).
+    pub fn samples(self) -> u32 {
+        match self {
+            Self::Off => 1,
+            Self::X2 => 2,
+            Self::X4 => 4,
+            Self::X8 => 8,
+            Self::X16 => 16,
+        }
+    }
+}
+
 /// Every material (see the module documentation).
 #[derive(Debug)]
 pub struct MaterialTable {
@@ -326,8 +359,10 @@ pub struct MaterialTable {
     /// Edits that change how instances resolve: a material's kind changed, or a material
     /// was removed (its ids now mean the default material).
     revision: u64,
-    /// The texture LOD bias and the first index of its material samplers.
+    /// The texture LOD bias, the anisotropic filtering, and the first index of their
+    /// material samplers.
     lod_bias: f32,
+    anisotropy: Anisotropy,
     samplers: u32,
     /// Material types' parameters, [`PARAMS_BYTES`] per slot: made when the first material
     /// of a type is added, as large as the table.
@@ -350,6 +385,7 @@ impl MaterialTable {
             resolved: None,
             revision: 0,
             lod_bias: 0.0,
+            anisotropy: Anisotropy::default(),
             samplers: Bindless::material_sampler(Wrap::Repeat, Wrap::Repeat),
             params: None,
             typed: false,
@@ -372,19 +408,54 @@ impl MaterialTable {
     ///
     /// When a sampler cannot be created.
     pub fn set_texture_lod_bias(&mut self, bindless: &Bindless, bias: f32) -> Result<(), RhiError> {
-        let samplers = bindless.material_samplers(bias)?;
+        self.set_samplers(bindless, bias, self.anisotropy)
+    }
+
+    /// The bias set by [`Self::set_texture_lod_bias`].
+    pub fn texture_lod_bias(&self) -> f32 {
+        self.lod_bias
+    }
+
+    /// Sets the anisotropic filtering of the materials' textures: the player's setting
+    /// (ADR 0098), 16× by default. Like the LOD bias it lives in the samplers: shaders pay
+    /// nothing for it, and every view drawing with these materials gets it. Changing it
+    /// rewrites every material in the next [`Self::begin_frame`]: set it when the player
+    /// changes it, not every frame. Fewer samples cost the forward pass less where
+    /// textures are seen at a slant (Sponza: 4× 1.5–3 % less than 16×, 2× 7 %, off
+    /// 13–19 %), and blur them there.
+    ///
+    /// # Errors
+    ///
+    /// When a sampler cannot be created.
+    pub fn set_texture_anisotropy(
+        &mut self,
+        bindless: &Bindless,
+        anisotropy: Anisotropy,
+    ) -> Result<(), RhiError> {
+        self.set_samplers(bindless, self.lod_bias, anisotropy)
+    }
+
+    /// The anisotropic filtering set by [`Self::set_texture_anisotropy`].
+    pub fn texture_anisotropy(&self) -> Anisotropy {
+        self.anisotropy
+    }
+
+    /// Takes the material samplers with `bias` and `anisotropy`.
+    fn set_samplers(
+        &mut self,
+        bindless: &Bindless,
+        bias: f32,
+        anisotropy: Anisotropy,
+    ) -> Result<(), RhiError> {
+        let samplers = bindless.material_samplers(bias, anisotropy.samples())?;
         self.lod_bias = bias;
+        self.anisotropy = anisotropy;
         if samplers != self.samplers {
             self.samplers = samplers;
             // Resolved again (with the other samplers) in the next frame.
             self.resolved = None;
         }
         Ok(())
-    }
-
-    /// The bias set by [`Self::set_texture_lod_bias`].
-    pub fn texture_lod_bias(&self) -> f32 {
-        self.lod_bias
     }
 
     /// Adds a material; it reaches the GPU in the next [`Self::begin_frame`].

@@ -186,8 +186,10 @@ fn generated_frames_go_out_half_a_frame_before_real_ones() {
     let median = errors[errors.len() / 2];
     println!("median |gap − spacing|: {median:.3} ms");
     assert!(median < 1.0, "{gaps:?}");
-    // 20 ms frames: about 10 ms less the margins.
+    // 20 ms frames: about 10 ms less the margins (the unit tests check the rule exactly).
+    // A frame late under load lengthens the mean of the last 10 intervals, and the spacing
+    // with it: 10.015 ms was read once in the gate's parallel tests.
     for (_, spacing) in &gaps {
-        assert!((8.5..10.0).contains(spacing), "{gaps:?}");
+        assert!((8.5..10.5).contains(spacing), "{gaps:?}");
     }
 }
