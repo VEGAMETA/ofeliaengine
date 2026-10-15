@@ -14,7 +14,7 @@ Last updated: 2026-10-15.
     2026-10-15. `ViewSettings::virtual_shadows` turns them on (off by default): sharper
     shadows, but not yet cheaper than the cascades.
   - Next is 3c: cut the cost of drawing while walking (13× the cached cascades on the
-    RTX) and of the visibility on the Radeon (13.7 ms at 1080p); then moved casters, a
+    RTX) and of the visibility on the Radeon (13.5 ms at 1080p); then moved casters, a
     turning sun, defaults per device class.
 - **Then, in order** (§5): 8b video playback, 8c colliders made from meshes,
   8d localization. After them, item 9: the editor, Luau and tooling.
@@ -536,11 +536,11 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
        the shading reads (the cascades' lookup skipped; transparent surfaces keep the
        cascades). Casters that change redraw every page a frame needs. Tests against
        rays on both GPUs, golden shots, three perf gate scenes.
-       - Sharper shadows; on walls under a high sun larger than the cascades' (their
-         normal offset is 5–10 times wider).
-       - Intel's Sponza at 1080p: still RTX 246 µs (the visibility 164), Radeon 15.8 ms
-         (the visibility 13.7); walking 5 cm a frame, drawing RTX 885 µs, Radeon 27.6 ms,
-         against the cached cascades' 69 µs and 0.75 ms.
+       - Sharper shadows, and thin ones the cascades lose (a cornice's on the wall).
+       - Intel's Sponza at 1080p, still: the pages' passes RTX 245 µs (the visibility
+         164), Radeon 15.3 ms (13.5); the shading 34 µs and 1.4 ms cheaper without the
+         cascades' lookup. Walking 5 cm a frame, drawing RTX 885 µs, Radeon 27.7 ms,
+         against the cached cascades' 68 µs and 0.75 ms.
      - **Next, 3c**, in order of cost (ADR 0093's "What 3b leaves"):
        1. drawing while walking: clip each draw to the dirty pages it reaches, so the
           fragments outside them are not rasterized;

@@ -1177,9 +1177,10 @@ if renderer.set_virtual_shadows(&device, &bindless, true)? {
 
 | µs a frame | RTX 4060 Ti | Radeon iGPU |
 |---|---:|---:|
-| still (marking, bookkeeping, visibility) | 246 | 15,753 |
-| walking 5 cm a frame, drawing the pages it exposes | 885 more | 27,605 more |
-| the cached cascades walking, for comparison | 69 | 754 |
+| still: the pages' passes (marking, bookkeeping, visibility) | 245 | 15,343 |
+| the shading, without the cascades' lookup | −34 | −1,356 |
+| walking 5 cm a frame: drawing the pages it exposes | 885 more | 27,669 more |
+| the cached cascades walking, for comparison | 68 | 752 |
 
   Use them where the sharper shadows are worth it on a discrete GPU, and not on
   integrated GPUs yet.

@@ -533,23 +533,26 @@ transmission keep the cascades, which stay drawn (cached) beside the pages.
     frame after the move has 12,314 wrong texels.
   - Golden shots on both GPUs (`*_vsm`): the procedural scene near (with and without
     contact shadows), Sponza far, Sponza by day with everything.
-- **The picture.** Shadow edges are sharper. On walls under a high sun the shadows are
-  larger than the cascades': their normal offset is a texel of their own, 5–10 times
-  wider, which lifts the receiver past a ledge's shadow. The cascades' dithered band at
-  their edges is gone.
+- **The picture.** Shadow edges are sharper, thin shadows the cascades lose appear (a
+  cornice's on the wall below it), and the cascades' dithered band at their edges is
+  gone. Against the cascades, by day: Intel's Sponza darker on 1.6 % of the pixels and
+  lighter on 0.1 %; Crytek's darker on 0.3 % and lighter on 1.0 %. The pages hold what
+  rays find (the test above); the cascades' coarser texels and wider normal offset miss
+  both ways.
 - **Numbers** (the perf gate's scenes, 1920 × 1080; Intel's Sponza with each class's
   defaults; medians of 3 runs):
 
 | µs a frame | RTX 4060 Ti | Radeon iGPU |
 |---|---:|---:|
-| still: marking and bookkeeping (`vsm pages`) | 72 | 2,021 |
-| still: culls and draws (nothing dirty) | 10 | 15 |
-| still: visibility | 164 | 13,717 |
-| walking 5 cm a frame: drawing (`vsm draw`) | 885 | 27,605 |
-| walking: the cached cascades' strips instead | 69 | 754 |
-| walking, integrated class (67 %): drawing / visibility | 598 / 73 | 18,608 / 6,605 |
-| GPU frame still: pages / cascades drawn whole every frame | 1,656 / 1,436 | 70,942 / 58,166 |
-| GPU frame walking: pages / cached cascades | 2,543 / 1,371 | 99,793 / 53,971 |
+| still: marking and bookkeeping (`vsm pages`) | 72 | 1,861 |
+| still: culls and draws (nothing dirty) | 10 | 13 |
+| still: visibility | 164 | 13,469 |
+| the forward pass without the cascades' lookup | −34 | −1,356 |
+| walking 5 cm a frame: drawing (`vsm draw`) | 885 | 27,669 |
+| walking: the cached cascades' strips instead | 68 | 752 |
+| walking, integrated class (67 %): drawing / visibility | 608 / 73 | 18,712 / 6,701 |
+| GPU frame still: pages / cascades drawn whole every frame | 1,610 / 1,440 | 66,904 / 58,095 |
+| GPU frame walking: pages / cached cascades | 2,490 / 1,372 | 91,054 / 53,973 |
 
 - **What 3b leaves** (for 3c, in order of their cost):
   1. **Drawing while walking** costs 13 times the cached cascades' strips. The level's
@@ -558,7 +561,7 @@ transmission keep the cascades, which stay drawn (cached) beside the pages.
      triangles, and in the fine levels a floor's triangle covers millions of texels.
      Likely fix: clip each draw to the dirty pages it reaches (a rectangle per draw,
      clip distances), so only dirty texels are rasterized.
-  2. **The visibility on the Radeon** (13.7 ms at 1080p; the RTX 164 µs): 16 taps through
+  2. **The visibility on the Radeon** (13.5 ms at 1080p; the RTX 164 µs): 16 taps through
      the page table and five reconstructed positions a pixel. Candidates: hardware
      comparisons on a float view of the pool with a texel of border per page, the
      normal from fewer reads.
