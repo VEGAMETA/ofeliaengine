@@ -39,3 +39,4 @@ mod subsurface;
 mod tonemap;
 mod transparency;
 mod upload;
+mod vsm;
