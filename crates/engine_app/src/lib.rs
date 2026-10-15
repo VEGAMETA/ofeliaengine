@@ -1,0 +1,41 @@
+//! The player (ADR 0099): what a game's executable owns, so that a game is a few hooks.
+//!
+//! [`Player::new`] starts everything a game needs, overlapping what does not depend on
+//! each other:
+//! - **the process** (CLAUDE.md §5): power throttling off, the frame thread under MMCSS
+//!   "Games" and on performance cores where the CPU has two kinds;
+//! - **the window and its swapchain**: borderless full screen by default, the swapchain
+//!   stating that the driver must not take the monitor for itself (ADR 0099: NVIDIA then
+//!   flips it, 7.9 against 9.3 ms to the screen), a window fit into the work area, or
+//!   exclusive full screen;
+//! - **the device and latency control**: Reflex, Anti-Lag 2 or the engine's own limiter
+//!   (ADR 0023), frame generation (FSR's or DLSS's, ADR 0091);
+//! - **the pipeline cache** in `%LOCALAPPDATA%\<title>\` (ADR 0055) and the warm-up
+//!   thread (ADR 0079);
+//! - **the scene and the renderer**: the pack streamed within the GPU memory budget (ADR
+//!   0076), its instances as entities in the world; the frame renderer with the device
+//!   class's `RenderDefaults` applied whole;
+//! - **the runtime** (ADR 0064): the world, the fixed-step simulation, extraction into
+//!   the GPU scene.
+//!
+//! [`Player::frame`] runs one frame in the order that keeps input latency low (latency
+//! control's wait, the frame slot, the swapchain image, input, the ticks, presentation,
+//! animation, streaming, rendering, presenting), calling the [`Game`]'s hooks.
+//!
+//! Until the next steps of ADR 0099, the game gives the player its lights
+//! ([`Player::lights_mut`], [`Player::sun_mut`]) and sets skinned poses in
+//! [`Game::animate`]; they become components.
+//!
+//! Crash reports are the game's `main`'s to set up (`engine_crash`): its monitor process
+//! runs the same executable.
+
+mod game;
+mod player;
+mod process;
+mod report;
+mod settings;
+
+pub use game::{FrameParts, Game};
+pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
+pub use report::{FrameReport, Startup, StartupPipelines};
+pub use settings::{PlayerSettings, Window};

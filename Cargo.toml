@@ -12,6 +12,7 @@ license = "MIT"
 publish = false
 
 [workspace.dependencies]
+engine_app = { path = "crates/engine_app" }
 engine_assets = { path = "crates/engine_assets" }
 engine_audio = { path = "crates/engine_audio" }
 engine_audio_decode = { path = "crates/engine_audio_decode" }

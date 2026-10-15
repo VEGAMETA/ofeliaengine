@@ -220,6 +220,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_app"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "engine_anim",
+ "engine_assets",
+ "engine_core",
+ "engine_dlss",
+ "engine_ecs",
+ "engine_frame",
+ "engine_latency",
+ "engine_platform",
+ "engine_profiler",
+ "engine_render",
+ "engine_render2d",
+ "engine_rhi",
+ "engine_runtime",
+ "engine_streaming",
+]
+
+[[package]]
 name = "engine_assets"
 version = "0.0.0"
 dependencies = [
@@ -577,20 +598,14 @@ name = "engine_runtime"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
- "engine_anim",
- "engine_assets",
  "engine_core",
- "engine_dlss",
  "engine_ecs",
  "engine_frame",
- "engine_latency",
  "engine_physics",
  "engine_platform",
  "engine_profiler",
  "engine_render",
- "engine_render2d",
  "engine_rhi",
- "engine_streaming",
 ]
 
 [[package]]

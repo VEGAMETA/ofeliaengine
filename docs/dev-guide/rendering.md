@@ -2177,7 +2177,7 @@ if let Some(g) = frame.generated.filter(|g| g.shown) {
 paced.present(PacedFrame { done: (frames.timeline(), number), generated: shown, .. })?;
 ```
 
-`examples/flight.rs --fg` runs it. Nothing is generated across a camera cut
+`engine_app`'s `examples/flight.rs --fg` runs it. Nothing is generated across a camera cut
 (`ViewCamera::cut`) or after a change of size.
 
 **DLSS frame generation:** load Streamline with `StreamlineDesc { frame_generation: true, .. }`
@@ -2195,7 +2195,7 @@ if let Some(input) = frame.dlss_generation_input(&camera, hudless, Some(ui_layer
 }
 ```
 
-`examples/flight.rs --fg dlss` runs it. `streamline.frame_generation_error()` says why it
+`engine_app`'s `examples/flight.rs --fg dlss` runs it. `streamline.frame_generation_error()` says why it
 cannot run (`eErrorOSDisabledHWS`: Windows' hardware-accelerated GPU scheduling is off),
 `streamline.frame_generation_hint()` a sentence for the player.
 Turning it on or off for good recreates the swapchain (`Streamline::set_frame_generation_loaded`):
@@ -2441,7 +2441,7 @@ says which a game's frames draw:
 ```text
 # a playtest: fly through the level with the settings players will use (every quality
 # preset you offer), the record merged at the end
-cargo run -p engine_runtime --release --example flight -- game.pack --record-pso game.pso.ron
+cargo run -p engine_app --release --example flight -- game.pack --record-pso game.pso.ron
 
 # the cook: only the recorded entry points for the types the record names
 ofeliaengine cook level.gltf -o level.pack --pso game.pso.ron

@@ -537,9 +537,15 @@ unsafe extern "system" fn control_proc(
     if msg == WM_TIMER && wparam == DISPLAY_TIMER && !state.is_null() {
         // SAFETY: as below.
         let state = unsafe { &*state };
-        let windows: Vec<(WindowId, HWND)> = state.windows.borrow().clone();
-        for (id, window) in windows {
+        // By index, without a copy of the list (nothing allocates once a second), and no
+        // borrow held across the queries (a window may be destroyed meanwhile).
+        let mut index = 0;
+        loop {
+            let Some((id, window)) = state.windows.borrow().get(index).copied() else {
+                break;
+            };
             check_display(state, id, window);
+            index += 1;
         }
         return 0;
     }
