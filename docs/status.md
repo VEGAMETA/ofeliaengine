@@ -6,6 +6,30 @@ PR that changes the picture updates this file in the same PR.
 
 Last updated: 2026-10-15.
 
+## 0. Now (2026-10-15)
+
+- **Working on: virtual shadow maps, step 3** (queue item 5, ADR 0093): virtual pages for
+  the sun.
+  - 3a, the pages' machinery, was done 2026-10-15 (not yet used by a frame).
+  - Next is 3b: drawing into the pages, the sun's visibility from them, the shading
+    reading it.
+  - Then 3c: moved casters, a turning sun, defaults per device class.
+- **Then, in order** (§5): 8b video playback, 8c colliders made from meshes,
+  8d localization. After them, item 9: the editor, Luau and tooling.
+- **Parked:**
+  - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
+    step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
+  - Candidates beyond the queue: §6.
+- **Done since 2026-10-12:**
+  - custom materials (3c) and meshlets (4);
+  - cached shadow cascades (5, steps 1–2);
+  - post effects (6a: grading, depth of field, cinematic motion blur);
+  - the perf gate's register check (6c) and anisotropy as a player setting (6d);
+  - shared transient heaps (7a);
+  - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
+- **Questions open with the owner:** none.
+- **Agents:** none run until the owner allows them again (§7).
+
 ## 1. What matters most
 
 The owner's goal is a **technically ideal engine core**. That means well-designed
@@ -54,22 +78,29 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate: the technical core is about **74 %** done (GI done and measured against AMD's,
-2026-10-11), and the whole engine (editor, Luau and tooling included) about **50 %**.
+Estimate of 2026-10-11 (GI done and measured against AMD's): the technical core about
+**74 %** done, the whole engine (editor, Luau and tooling included) about **50 %**. Done
+since: custom materials, meshlets, cached shadows, post effects and the player crate.
 
 | Area | State | Where |
 |---|---|---|
 | Platform, core, jobs, memory, timers, input, latency | solid | §5, §7 |
 | Vulkan RHI: bindless, render graph, async compute, pipeline cache, crash/GPU-fault reports, Vulkan instances on a process-lifetime loader thread | solid | ADRs 0006, 0055, 0061, 0065 |
 | Persistent GPU scene, ECS extraction, runtime frame loop, cameras | done | ADR 0064 |
+| **The player** (`engine_app`): the device, swapchain, latency control and frame loop in one place; window modes and exclusive full screen; lights, skinned meshes, reflection probes and the GI volume as ECS components; features per view; an offscreen mode for tests | done | ADR 0099 |
 | **Frame renderer** (`engine_frame`): one object composes a frame: scene → hook → exposure → TAA/TAAU/FSR/DLSS → bloom/tonemap; defaults per device class | done | ADR 0072 |
 | Lighting: PBR forward with clustered lights, CSM, IBL, GTAO with bent normals and GTSO, SSS, transparency (sorted + OIT) | done | ADRs 0045–0047, 0054, 0058, 0059 |
+| Custom materials: material types in Slang (`IMaterial`), material files, cooking, hot reload; shading models lit, unlit, clear coat, cloth, hair, toon and glTF's sheen | done | ADR 0092 |
+| Meshlets: made by the cook, culled per meshlet (sphere, cone, depth pyramid) for views and shadow cascades, on by default | done (mesh shaders left) | ADR 0085 |
+| Decals through a decal buffer before lighting | done | ADR 0082 |
 | Local-light shadows (cached atlas), contact shadows (Bend) | done | ADR 0071 |
+| The sun's shadow cascades kept across frames: scrolled with the camera, only exposed strips and moved casters' regions drawn | done (virtual pages in flight) | ADR 0093 |
 | Reflections: parallax-corrected probes, SSR (FidelityFX SSSR-based) | done | ADR 0073 |
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
 | Color grading: white balance, channel mixer, shadows / mid-tones / highlights, ASC CDL, contrast, vibrance, saturation; with the tone curve in one LUT built on the GPU when either changes | done | ADR 0094 |
 | Depth of field: FidelityFX DOF's tiled gather (near and far fields), after the upscalers; a thin lens | done | ADR 0095 |
 | Motion blur on cinematic views only (`ViewKind::Cinematic`; Guertin et al.'s reconstruction filter) | done | ADRs 0067, 0096 |
+| Color vision settings (simulated or corrected) and anisotropic filtering as player settings | done | ADRs 0097, 0098 |
 | HDRI environments: `.hdr` and OpenEXR panoramas as the sky, their sun found and lit as the directional light, cooked into BC6H cubes (DDC, packs) | done | ADR 0083 |
 | GPU particles and GPU radix sort | done | ADRs 0080, 0081 |
 | Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
@@ -87,89 +118,36 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 
 ## 4. In flight
 
-- **4, meshlets in the forward renderer** (ADR 0085's addendum of 2026-10-14). Step 1 is
-  done: the cook makes meshlets per detail level (64 vertices, 124 triangles; none for
-  skinned meshes) and reorders each level's triangles by them. The tables sit at the end
-  of the mesh entries, so the pack version stays.
-  - On its own, the new order already makes the Radeon's FlightHelmet shadows 13 %
-    faster. Sponza and the RTX are within ±1 %. Golden images are unchanged.
-  - Step 2 is done, off by default (`ForwardRenderer::set_meshlet_culling`). The pool
-    keeps each level's meshlets after its indices. Culling tests each meshlet's sphere,
-    normal cone and (late phase) the depth pyramid, and draws one indexed draw per
-    visible meshlet through `vkCmdDrawIndexedIndirectCount`, only after a depth prepass.
-  - Step 4 is done too: the shadow cascades are culled per meshlet (each cascade's bounds,
-    the cone seen from the light).
-  - The meshlet cull runs a group per chunk of 64 meshlets, not per instance: small
-    scenes' culls were latency-bound.
-  - The shadow cascades draw each run of consecutive drawn meshlets as one draw.
-  - **On by default for both device classes** (`RenderDefaults::meshlet_culling`,
-    2026-10-14; the owner left the choice to the coordinator). With each class's
-    defaults, off → on:
-    - Intel's Sponza (3.7 M triangles): −6.4 % on the RTX, −10.4 % on the Radeon;
-    - Sponza: +1.8 % (24 µs) on the RTX, about the same on the Radeon;
-    - 10,000 detailed spheres (scene settings of `draw_bench`): −3 to −8 % on the RTX,
-      −11 to −19 % on the Radeon.
-  - Drawing pixel-bound instances whole was tried and dropped (ADR 0085's addendum).
-  - **The draws' order measured 2026-10-15** (ADR 0085's note; branch `exp/meshlet-order`).
-    - An exact order would pay only for the light's order in the cascades. At the
-      default 1024² it saves 12 % on the RTX's Intel Sponza and next to nothing
-      elsewhere.
-    - That is less than appends keeping an order would cost (two dispatches per list), so
-      they are not built. Revisit with finer cascades (2048²: −19 % RTX, −9 % Radeon) or
-      virtual pages.
-  - **The perf gate's class-default scenes cook with detail levels** since 2026-10-15, as
-    a game's pack does. Before, they drew full meshes.
-    - Intel's Sponza with the integrated defaults on the Radeon: 57.6 → 33.8 ms, its
-      shadows 21.3 → 4.1 ms.
-  - Next:
-    - step 3, RTX mesh shaders;
-    - local lights' shadows.
-- **3c, custom materials** (ADR 0092, accepted 2026-10-12): step 1 (the passes through
-  `IMaterial`, PR #179), step 2 (material types in the renderer: typed materials,
-  batches and pipelines per type, compiled on first sight with the glTF fallback drawing
-  meanwhile, PR #180) and step 3 (the shading models lit, unlit, clear coat, cloth, hair
-  and toon as a type's `model()`, PR #181; the built-in pipelines' registers unchanged)
-  done. Step 4 (the owner confirmed the material file and the scene's map, 2026-10-12):
-  4a material files and parameter layouts through Slang's reflection (PR #182) and 4b
-  cooking (the map, texture parameters, pack version 5 with typed materials and their
-  SPIR-V, PR #183) and 4c hot reload (types' modules and material files, PR #184) done;
-  step 5, the ubershader experiment, measured and declined (iGPU forward +22–53 %, 90
-  VGPRs; the fallback stays; branch `exp/ubershader`); glTF's unlit, clear coat and sheen
-  onto the models as built-in types (ADR 0092's addendum of 2026-10-13: `MODEL_SHEEN` for
-  glTF's sheen layer, the coat's normal map); PSO records (ADR 0092's addendum of
-  2026-10-14: the cook compiles only the entry points playtests drew, `*.pso.ron`;
-  ClearCoatTest's type 128 entry points in 4.0 s → 1 in 0.6 s, its pack 1.93 → 0.98 MB).
-  **3c is done** but for the warm-up making recorded pipelines first and prediction for
-  types no record names (later). (Ref-1 runs
-  with hardware-accelerated GPU scheduling on since 2026-10-12, for DLSS frame
-  generation.)
+- **5, virtual shadow maps, step 3** (ADR 0093). 3a was done 2026-10-15: the pages'
+  machinery, not yet used by a frame. 3b is next, then 3c. Details are under
+  the queue's item 5.
 
-Done on 2026-10-10, by the coordinator: item 0 (faster checks, but for sccache:
-ADR 0077 and its addenda; the gate `-Gpu -Perf` 10–25 min → about 320–400 s), 0a (the
-review's P0 fixes: PRs #124, #125; the Radeon's perf limits, PR #126), 0b (fast turns:
-PRs #127–#130; left optional: the fast-turn test in the perf gate, one wider feedback
-pass if a larger scene shows pop-in), 0c (Catmull-Rom and Lanczos-3, ADR 0075's
-addendum), 0d (motion vectors from the depth prepass, ADR 0043's addendum), TAAU's
-Catmull-Rom history with point reads (owner, 2026-10-10; ADR 0043's second amendment), 0e
-(presenting across adapters, ADR 0007's addendum), 0f (moving instances placed on the
-GPU, the tick's stages on the job system: ADR 0064's addendum), 0f2 (16-byte aligned
-accesses through buffer addresses in every shader: ADR 0013's addendum), 0g (shading
-variants made on first use and by the device's warm-up thread, start-up phases
-overlapped: ADR 0079). On 2026-10-11: 1 (GPU particles and GPU radix sort: ADRs 0080,
-0081; the reactive mask for effects, ADR 0081's amendment), 2 (decals through a decal
-buffer, ADR 0082; clustered decals measured against it on a branch), 2b (HDRI environments, ADR 0083 and its amendments:
-`.hdr` and OpenEXR, the sun as a light, cooked BC6H cubes; PRs #143–#145), 3 researched
-(GI, ADR 0084: our own, held to beat Brixelizer GI; the owner's answers, PR #160) and its
-first step, acceleration structures (ADR 0087), 4 researched (ADR 0085: meshlets in the
-forward renderer first), 7c (`forward.rs` split, PR #147), mimalloc as the global
-allocator (ADR 0086, PR #162), contact shadows made deterministic (PRs #159, #161); a
-bloom format experiment measured and rejected (6b), 3a (the ray scene's costs spread
-over frames: ADR 0087's addendum), GI phase 1 (the probe volume converged at load:
-ADR 0088), the frame graph's fences (texture uploads ran after their readers under async
-compute: ADR 0065's addendum, PR #166). Next: GI phase 2 and the Brixelizer GI reference
-(item 3).
+Nothing else is in flight. Meshlets (item 4) and custom materials (item 3c) were listed
+here until 2026-10-15; their records moved to those items in §5, with what is left of
+them.
 
 ## 5. Queue (in order)
+
+**What is left, in order.** The numbered items below keep their history; struck-through
+items are done.
+
+1. **5, virtual shadow maps, step 3:** 3b, then 3c (in flight, §4).
+2. **8b, video playback.**
+3. **8c, colliders made from meshes.**
+4. **8d, localization.**
+5. **9:** editor tools, Luau bindings and debugger, other tooling.
+
+**Parked inside finished items.** Each waits for a measurement or the owner:
+- 0: sccache for agents, the Radeon's variance;
+- 0b: the fast-turn perf test;
+- 3: GI's leftovers;
+- 3b: frame generation's leftovers;
+- 3c: pipeline warm-up order;
+- 4: step 3, mesh shaders on the RTX;
+- 6b: the iGPU's passes;
+- 7a: memory;
+- 7c: the `declare` split;
+- 8a: the player's follow-ups.
 
 Merged with the second review's findings (`docs/research/core-audit-2.md`). The owner's
 answers of 2026-10-10: faster checks first, then the review's P0 fixes; the player crate
@@ -189,7 +167,8 @@ kept for now, to fix later; colliders (8c) made from meshes; the split of item 6
 queue item (done 2026-10-10); frame generation out of the box (DLSS FG and FSR FG, the HUD
 never interpolated, immersive UI unmarked) right after GI, off by default.
 
-0. **Faster checks, first after the review** (owner, 2026-10-02, confirmed 2026-10-10). Then
+0. ~~**Faster checks, first after the review**~~ (owner, 2026-10-02, confirmed 2026-10-10;
+   done 2026-10-10 but for the leftovers at the end). Then
    `check.ps1 -Gpu -Perf` took 10–25 min, and it grew with every crate and test. Per
    step, from the runs before 2026-10-10:
 
@@ -252,7 +231,8 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
      time starts at the previous pass's end on its queue when that came later; the
      Radeon's texture feedback reads 88 µs instead of 2.4 ms, its culling passes
      0.3–1.6 µs instead of 4–76; both perf baselines re-measured.
-0b. **No visible streaming pop-in on fast camera turns** (owner, 2026-10-02: in UE, models
+0b. ~~**No visible streaming pop-in on fast camera turns**~~ (done 2026-10-10 but for the
+   leftovers below; owner, 2026-10-02: in UE, models
    and textures failed to load in time when the camera turned quickly). Our ADR 0076 has
    the same risk:
    - texture levels come only from the current view's feedback;
@@ -352,7 +332,7 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    a decal covering the screen 0.15 / 4.1 ms. Clustered decals in the shading, built on a
    branch to compare: cheaper on the RTX, worse on the iGPU (+6.4 against +4.9 ms on that
    decal). Left: MSAA views, probe captures, emissive decals, transparent surfaces.
-2b. **HDRI environments** (owner, 2026-10-10: before GI, a necessity). ~~Phase 1~~ done
+2b. ~~**HDRI environments**~~ (owner, 2026-10-10: before GI, a necessity). ~~Phase 1~~ done
    2026-10-11 (ADR 0083): our own `.hdr` decoder, RGBE kept and decoded on the GPU (an
    unclipped sun exceeds half floats); a background cube of its own made on the GPU (a
    quarter of the panorama's width, at most 1,024 by default: 0.23 ms on the RTX, 6.8 ms on
@@ -366,7 +346,8 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    `exr` crate (1.74.0: every compression but the lossy DWA; Poly Haven's 1K EXR, PIZ
    and float, decodes to exactly its `.hdr`'s pixels).
    **Left** (§6): the sun's angular size for soft shadows.
-3. GI: probe volumes, then DDGI-like. Acceptance check, besides the usual: Sponza's metallic
+3. ~~GI: probe volumes, then DDGI-like.~~ **Done 2026-10-11** (Echo GI; ADRs 0084,
+   0087–0090), but for the leftovers at the end. Acceptance check, besides the usual: Sponza's metallic
    medallions on the curtains (roughness 0.28, metallic 0.74) must read gold when seen from
    above in shade. Today they look dark brown there. The material and the shading are
    right (seen from below they are gold), but the shaded floor they reflect has no bounced
@@ -394,10 +375,7 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    sample on discrete GPUs, 4 × 4 on integrated ones) and 34 GI twins of the shading
    entry points (variants without GI keep their registers): 0.12 / 1.8 ms per frame at
    1080p; 12.8 MiB. The medallions read gold from above (golden shot
-   `sponza_gi_medallions`). **Next:** phase 2 (a ray budget per frame, rays allocated
-   where the light changes), then Brixelizer GI built as the reference, its cost and
-   memory against ours on both GPUs (ADR 0084's bar). Known limits: normals from the
-   depth facet low-poly curves. **Phase 2 done 2026-10-11** (ADR 0089): once converged,
+   `sponza_gi_medallions`). Known limits: normals from the depth facet low-poly curves. **Phase 2 done 2026-10-11** (ADR 0089): once converged,
    every frame traces windows of probes within a ray budget (131,072 rays on discrete
    GPUs, 8,192 on integrated ones), half in an 8 × 4 × 8 box around the camera and half
    in turn over the volume, blended with a hysteresis of 0.9. A sun turned off fades as
@@ -412,13 +390,14 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    sunlit wall 1.19 against 0.23 (physically about 1.14); a sun turned off halves in 15 /
    123 frames against 180 / 203. ADR 0084's bar is met; Brixelizer GI stays as the
    reference (the golden shot `sponza_brixelizer_gi`). The owner named our GI **Echo GI**
-   (2026-10-11). **Next:** a refresh after a large change of light (on the iGPU a sun
+   (2026-10-11). **Left:** a refresh after a large change of light (on the iGPU a sun
    turned off leaves a third of its bounce after 400 frames: the far probes wait for their
    turn of the budget; `ProbeGi::refresh` converges in ten frames); local lights at the
    rays' hits (night scenes); the moments' blend (a third of the cost) at a lower rate.
-3b. **Frame generation out of the box** (owner, 2026-10-11: "needed out of the box, DLSS FG
+3b. ~~**Frame generation out of the box**~~ (owner, 2026-10-11: "needed out of the box, DLSS FG
    and FSR FG; the HUD fix on by default"; right after GI, off by default). **Done
-   2026-10-12 (ADR 0091), but for running DLSS FG (§4).** FSR FG measured on both GPUs:
+   2026-10-12 (ADR 0091)**; DLSS FG runs since the owner turned on Windows' GPU scheduling
+   the same day. FSR FG measured on both GPUs:
    exact pacing, +half a real interval of latency, generated frames 3.6 times nearer the
    truth than the real frame a display holds (FLIP), the HUD and the panels sharp on
    them; the golden shot `sponza_fg`. Left for later: async compute for the
@@ -460,19 +439,74 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
    - **Measured** on both GPUs: presented and real frame rates, latency (PresentMon,
      `engine_latency`), image quality against the real frames (FLIP), the HUD with 2D and
      3D UI.
-3c. **Custom 3D materials and shaders** (review §4; after GI: owner, 2026-10-10). ADR
-   first: it decides permutations and pipeline management for the whole renderer (§9
-   material graph and hand-written Slang).
+3c. ~~**Custom 3D materials and shaders**~~ (review §4; after GI: owner, 2026-10-10). **Done
+   2026-10-12 to 2026-10-14** (ADR 0092, accepted 2026-10-12), but for two leftovers. The
+   ADR decides permutations and pipeline management for the whole renderer (§9 material
+   graph and hand-written Slang).
+   - Step 1: the passes through `IMaterial` (PR #179).
+   - Step 2: material types in the renderer: typed materials, batches and pipelines per
+     type, compiled on first sight with the glTF fallback drawing meanwhile (PR #180).
+   - Step 3: the shading models lit, unlit, clear coat, cloth, hair and toon as a type's
+     `model()` (PR #181; the built-in pipelines' registers unchanged).
+   - Step 4 (the owner confirmed the material file and the scene's map, 2026-10-12):
+     - 4a: material files and parameter layouts through Slang's reflection (PR #182);
+     - 4b: cooking (the map, texture parameters, pack version 5 with typed materials and
+       their SPIR-V, PR #183);
+     - 4c: hot reload (types' modules and material files, PR #184).
+   - Step 5, the ubershader experiment: measured and declined (iGPU forward +22–53 %, 90
+     VGPRs; the fallback stays; branch `exp/ubershader`).
+   - glTF's unlit, clear coat and sheen onto the models as built-in types (ADR 0092's
+     addendum of 2026-10-13: `MODEL_SHEEN` for glTF's sheen layer, the coat's normal map).
+   - PSO records (ADR 0092's addendum of 2026-10-14): the cook compiles only the entry
+     points playtests drew (`*.pso.ron`). ClearCoatTest's type: 128 entry points in 4.0 s
+     → 1 in 0.6 s, its pack 1.93 → 0.98 MB.
+   - **Left (later):** the warm-up making recorded pipelines first; prediction for types no
+     record names.
 3d. ~~**Directional GTAO and GTSO**~~ done 2026-10-13 (ADR 0058's addendum): bent normals
    and cone specular occlusion behind `AoSettings::bent_normals` (the owner, 2026-10-13: a
    switch, on for discrete GPUs, off for integrated), 36 twin entry points made on first
    use; off, the shading is byte-identical to before.
-4. Visibility buffer / meshlets. Write the ADR first, with no persistent per-triangle
-   visibility bits (patent, ADR 0035 note). Researched 2026-10-11 (ADR 0085): **meshlets
-   in the forward renderer first** (the owner, 2026-10-11; both GPUs; the iGPU has no mesh
-   shaders), the visibility buffer decided together with custom materials (3c). Step 1
-   (meshlets made by the cook), step 2 (culling per meshlet) and step 4 (the shadow
-   cascades too) done 2026-10-14, on by default since; step 3 in ADR 0085's addendum.
+4. Visibility buffer / meshlets. **Meshlets done 2026-10-14** (steps 1, 2 and 4; ADR 0085
+   and its addendum of 2026-10-14), on by default since; step 3 is left. Write the ADR
+   first, with no persistent per-triangle visibility bits (patent, ADR 0035 note).
+   Researched 2026-10-11 (ADR 0085): **meshlets in the forward renderer first** (the owner,
+   2026-10-11; both GPUs; the iGPU has no mesh shaders), the visibility buffer decided
+   together with custom materials (3c).
+   - **Step 1:** the cook makes meshlets per detail level (64 vertices, 124 triangles; none
+     for skinned meshes) and reorders each level's triangles by them.
+     - The tables sit at the end of the mesh entries, so the pack version stays.
+     - On its own, the new order makes the Radeon's FlightHelmet shadows 13 % faster.
+       Sponza and the RTX are within ±1 %. Golden images are unchanged.
+   - **Step 2:** culling per meshlet after a depth prepass
+     (`ForwardRenderer::set_meshlet_culling`). The pool keeps each level's meshlets after
+     its indices.
+     - Each meshlet's sphere, normal cone and (late phase) the depth pyramid are tested.
+     - One indexed draw per visible meshlet through `vkCmdDrawIndexedIndirectCount`.
+     - A group per chunk of 64 meshlets, not per instance: small scenes' culls were
+       latency-bound.
+   - **Step 4:** the shadow cascades culled per meshlet (each cascade's bounds, the cone
+     seen from the light). Each run of consecutive drawn meshlets is one draw.
+   - **On by default for both device classes** (`RenderDefaults::meshlet_culling`,
+     2026-10-14; the owner left the choice to the coordinator). With each class's
+     defaults, off → on:
+     - Intel's Sponza (3.7 M triangles): −6.4 % on the RTX, −10.4 % on the Radeon;
+     - Sponza: +1.8 % (24 µs) on the RTX, about the same on the Radeon;
+     - 10,000 detailed spheres (`draw_bench`'s scene settings): −3 to −8 % on the RTX,
+       −11 to −19 % on the Radeon.
+   - Drawing pixel-bound instances whole was tried and dropped (ADR 0085's addendum).
+   - **The draws' order measured 2026-10-15** (ADR 0085's note; branch
+     `exp/meshlet-order`).
+     - An exact order pays only for the light's order in the cascades: 12 % on the RTX's
+       Intel Sponza at the default 1024², next to nothing elsewhere.
+     - That is less than appends keeping an order would cost (two dispatches per list),
+       so they are not built.
+     - Revisit with finer cascades (2048²: −19 % RTX, −9 % Radeon) or virtual pages.
+   - **The perf gate's class-default scenes cook with detail levels** since 2026-10-15, as
+     a game's pack does (before, they drew full meshes). Intel's Sponza with the
+     integrated defaults on the Radeon: 57.6 → 33.8 ms, its shadows 21.3 → 4.1 ms.
+   - **Left:**
+     - step 3, mesh shaders on the RTX (ADR 0085's addendum; deferred);
+     - local lights' shadows culled per meshlet.
 5. Virtual shadow maps. Researched 2026-10-14 (ADR 0093, accepted): scrolling cached
    cascades first (only what changed is drawn), virtual pages after; one cache, no
    static/dynamic pair merged by a mask (the owner, 2026-10-14).
@@ -485,9 +519,23 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
      - Walking: Intel's Sponza RTX 69 → 43 µs, Radeon 1.98 → 0.76 ms. With 8 small
        objects moving: RTX 403 µs, Radeon 7.0 ms, against 728 µs and 19.0 ms drawn
        whole.
-   - **Next:** virtual pages (option 1) where the cache leaves cost or resolution wanting
-     (the owner, 2026-10-15: after the player crate, 8a); the instanced draws' pieces culled
-     with the same tags.
+   - **Step 3, virtual pages for the sun**, designed 2026-10-15 (ADR 0093's step 3; the
+     owner: after the player crate). The cache leaves resolution wanting: a shadow texel
+     is never under 2.2 pixels with the defaults, 4–10 pixels at 2–5 m.
+     - **3a done 2026-10-15:** the pages' machinery, not yet used by a frame
+       (`engine_render::vsm::VirtualShadows`): a pool of physical pages, page tables that
+       scroll with the camera, marking from the depth buffer, allocation and eviction on
+       the GPU, the light turning, clearing. Every frame of the tests is held to a CPU
+       model of the rules on both GPUs.
+       - At 1080p (a ground plane, 3,185 pages): RTX 62 µs a frame (the first 121 µs),
+         Radeon 1.03 ms (the first 1.88 ms).
+     - **Next, 3b:** drawing into the dirty pages, the visibility pass into the sun's mask,
+       the shading reading it; golden shots and perf gate scenes.
+     - **Then 3c:** moved casters, a slowly turning sun (today every turn redraws the
+       needed pages), the pool's size and the level bias per device class. A ground plane
+       at 1080p fills 78 % of the default pool, and the Radeon's marking costs 1 ms, so
+       the integrated class keeps the cascades unless measured otherwise.
+   - The instanced draws' pieces culled with the same tags (left from step 2).
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.
 
@@ -614,7 +662,8 @@ grown, divide and conquer); the old labels stay in parentheses.
    1,650-line function; its passes per feature come with the next shading feature (decals
    or GI).
 8. **The player and content** (owner, 2026-10-10: after the rendering queue).
-8a (was 6f). **A player crate** (`engine_app`, review §3.7; ADR 0099, in four steps):
+8a (was 6f). ~~**A player crate**~~ (`engine_app`, review §3.7; ADR 0099, in four steps;
+   **done 2026-10-15**, PRs #215–#220):
    device, swapchain, latency provider, process setup (power throttling, MMCSS, CPU sets),
    pipeline cache and the frame loop in one place; ECS components for lights, skinned
    meshes and probes; features per view instead of per renderer; `RenderDefaults` applied

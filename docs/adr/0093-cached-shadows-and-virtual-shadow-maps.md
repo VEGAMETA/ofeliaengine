@@ -337,3 +337,142 @@ mask (Warner Bros US 11,908,062 / 12,315,068).
 - **Left.** Instanced draws still draw each piece's casters again (the same tags could
   cull them per piece). The clusters are greedy. A rendering per layer costs the Radeon
   6 % when everything is drawn whole (the first frame, a cut, the light turning).
+
+## Step 3: virtual pages for the sun (design, 2026-10-15)
+
+The owner put the pages after the player crate (2026-10-15). The cache's cost is low now
+(a still camera draws nothing, a walk 0.8–2 % of the texels); what it leaves wanting is
+**resolution**. With the defaults a shadow texel is never smaller than 2.2 pixels, and is
+4–10 pixels at 2–5 m from the camera (the research note's table). Pages give each pixel
+about a texel and back only what pixels sample.
+
+**Options for the parts:**
+
+1. **Drawing into pages.**
+   - (a) **A rendering without attachments over a level's virtual 4096², the fragment
+     shader writing the depth with an atomic minimum into the pool** through the page
+     table, only into dirty pages (Timberdoodle, StratusGFX, UnityVSM). No limit on pages
+     a frame; no early depth test (depth only: cheap fragments).
+   - (b) A viewport per dirty page and the pool as the depth attachment: early depth
+     tests, but at most 16 viewports a draw (`multiViewport`), so the draws repeat per
+     group of pages.
+   - (c) Mesh shaders culling triangles per page: not on the Radeon today (#88).
+   - **Chosen: (a)**, with our meshlet cull (ADR 0085) choosing what each level draws.
+     It needs `fragmentStoresAndAtomics` (every desktop GPU), enabled when present.
+2. **Allocation.** (a) On the GPU, from a scan of the physical pages (Timberdoodle);
+   (b) through a readback to the CPU (StratusGFX's first version: a frame late).
+   **Chosen: (a).**
+3. **Shading.**
+   - (a) Every shading variant looks the pages up itself: a twin of every variant, and
+     registers in the forward shader (ADR 0058's rule).
+   - (b) **A screen-space pass after the pages are drawn** writes the sun's visibility,
+     filtered, into the mask the contact shadows write today (ADR 0071). The variants
+     that read that mask skip the cascades' lookup: fewer registers than now.
+     Transparent surfaces have no depth in the prepass and keep a lookup of their own.
+   - **Chosen: (b).** One cache and a visibility mask is not the static and dynamic pair
+     merged per texel that Warner Bros' patents claim.
+4. **Filtering.** The 3 × 3 tent PCF the cascades have, each tap through the page table
+   when the footprint crosses a page's edge (Timberdoodle's way). A 1-texel border per
+   page is the alternative if the lookups cost.
+
+**The design:**
+
+- **Levels.** 16 levels of 4096² virtual texels in 64² pages (a 64 × 64 page table
+  each). Level `k` covers `2 m × 2^k` around the camera. The first texel is 0.5 mm; the
+  last level is 65 km across. Each level's window snaps to whole pages and its page table
+  is addressed modulo 64 (scrolling frees the pages that wrap). The light's depth range is
+  the scene's, as the cascades' is.
+- **The pool.** 4,096 pages of 64² in one `R32_UINT` image of 4096² (64 MiB), and one
+  meta entry per page (the virtual page it backs, the last frame a pixel needed it).
+  Per device class once measured.
+- **Each frame**, after the depth prepass:
+  1. levels scroll; wrapped pages are freed;
+  2. pages are invalidated: all of them when the light turns or its depth range changes,
+     those under a moved caster's old and new light-space boxes otherwise (the GPU scene's
+     changes, as the cascades take them);
+  3. marking: each pixel's level (from its distance, the finest that gives about a texel
+     per pixel), its page flagged as needed, a first request appended;
+  4. allocation: free pages first, then those no pixel needed for a few frames;
+  5. new and dirty pages cleared to the far plane;
+  6. per level, a hierarchy of dirty bits; the meshlet cull keeps what touches dirty
+     pages; the levels with dirty pages are drawn (an indirect draw list each);
+  7. the visibility pass fills the sun's mask; the shading reads it.
+- **Fallback.** A pixel whose page could not be allocated uses the next coarser level that
+  has one (and the coarsest levels can be kept resident).
+
+**Steps:**
+
+- **3a.** The pages' machinery without drawing: pool, tables, scrolling, marking,
+  allocation, invalidation, clearing. Tested against a CPU model of the same rules: a
+  depth buffer marks the pages it should; allocation fills them; still frames allocate
+  nothing; scrolling frees what wraps; the pool's overflow fails gracefully.
+- **3b.** Drawing and shading: culling into dirty pages, the attachment-less drawing, the
+  visibility pass, the shading variants reading the mask. Golden shots near the camera
+  and in the distance, a test against a high-resolution reference map, perf gate scenes,
+  register checks on both GPUs.
+- **3c.** Moved casters and the light turning, defaults per device class, measurements
+  against the cascade cache, documentation.
+
+## Step 3a as built (2026-10-15)
+
+`engine_render::vsm::VirtualShadows` and `vsm.slang`. Nothing draws into the pages or reads
+them yet: 3b wires them into the frame.
+
+- **One graph pass of seven dispatches**, after the depth prepass:
+  1. the frame's flags cleared, the entries whose window wrapped freed;
+  2. marking;
+  3. the free pages and the old ones (no pixel needed them for `keep_frames` frames);
+     when the light turned, the needed pages dirty and the others freed;
+  4. allocation: free pages, then old ones, then failure;
+  5. the dirty pages collected;
+  6. the clear's dispatch;
+  7. the clear: one group per dirty page, indirect.
+- **Kept across frames:** the pool (`R32_UINT`, rows of 64 pages, in the general layout),
+  the page tables (a 64 × 64 table per level), and a meta entry per physical page (the
+  entry it backs, the last frame a pixel needed it).
+- **Changes from the design:**
+  - **The light turning frees the pages no pixel needs**, rather than marking every page
+    dirty: a dirty page is drawn in its frame, and a page nobody samples would be drawn
+    for nothing. In the test's turn at 540p, 852 pages are drawn instead of 1,886.
+  - **A page is dirty in one frame:** the frame that draws it. A request that finds no
+    page fails, and is asked for again the next frame.
+  - **The marking's arithmetic.** Clip → light and clip → camera-relative matrices are
+    made on the CPU. A pixel takes one reciprocal; the level comes from the squared
+    distance, and the page from pages per metre (no divisions).
+  - **The pool takes any number of pages,** up to 65,472, as many rows as the device's
+    images allow.
+- **Tests** (`tests/render/vsm.rs`, both GPUs, synchronization validation).
+  - **Each frame's change from the last is held to the rules:**
+    - the pages marked, against the same math in f64 (a pixel within 1 % of a page's or a
+      level's edge may land on either side);
+    - the requests, the free and old lists, allocation, failures and eviction;
+    - kept entries and their meta;
+    - the dirty pages, cleared to the far plane.
+  - **Scenarios:**
+    - still frames allocate and clear nothing;
+    - walking and a 1 km jump free what wraps;
+    - the light turning;
+    - a pool with room for one of two views fails for `keep_frames` frames after turning
+      around, then takes the old pages.
+- **Numbers** (`what_the_pages_cost_at_1080p`): a ground plane seen from 1.7 m at
+  1920 × 1080, default settings (16 levels, 4,096 pages, 64.6 MiB).
+
+| | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| first frame (3,185 pages backed and cleared) | 121 µs | 1,879 µs |
+| still camera | 62 µs | 1,029 µs |
+| walking at 3 m/s | 64 µs | 1,047 µs |
+| of which marking | 51 µs | 985 µs |
+
+- **The clear's first version** had each lane clear 8 × 8 texels, lanes 8 texels apart:
+  the first frame took 892 µs on the RTX and 11.67 ms on the Radeon. Clearing one 8 × 8
+  block a step brought them to 116–121 µs and 1.88 ms.
+- **The Radeon's marking is bound by arithmetic:** about 120 lane-cycles a pixel on its
+  2 CUs, about its instruction count.
+  - Not the depth reads: without them it is 4 % faster.
+  - The per-wave deduplication and its atomics are about 20 % of it.
+  - The matrices made on the CPU took 10 % off.
+  - Not tried: 2 × 2 pixels a thread, to share the deduplication.
+- **For 3c.** The ground plane fills 78 % of the default pool at 1080p; grazing views back
+  the most pages. The pool's size and the level bias (+1 quarters the pages) are per
+  device class. The integrated class keeps the cascades unless 3c measures otherwise.

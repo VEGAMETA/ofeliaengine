@@ -322,6 +322,36 @@ impl Image {
         texture
     }
 
+    /// Imports the image into `fg` as storage (its first mip's view), left in the general
+    /// layout for shaders in `stages` to read and write: an image only ever used as
+    /// storage never changes layout.
+    pub(crate) fn import_storage<'g>(
+        &self,
+        fg: &mut FrameGraph<'g>,
+        name: &'static str,
+        stages: ShaderStages,
+    ) -> Texture {
+        let final_state = TextureState {
+            layout: vk::ImageLayout::GENERAL,
+            stages: stages.pipeline_stages(),
+            access: vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        };
+        let texture = fg.import_texture(
+            name,
+            ImportedTexture {
+                image: self.image,
+                view: self.view,
+                desc: self.desc,
+                initial: self.state.get(),
+                final_state: Some(final_state),
+                sampled_index: Some(self.sampled),
+                storage_index: self.storage.first().copied(),
+            },
+        );
+        self.state.set(final_state);
+        texture
+    }
+
     /// The state the next import starts from.
     pub(crate) fn state(&self) -> TextureState {
         self.state.get()

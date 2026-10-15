@@ -84,3 +84,4 @@ pub mod texture;
 pub mod texture_pool;
 pub mod upload;
 pub mod viewport;
+pub mod vsm;
