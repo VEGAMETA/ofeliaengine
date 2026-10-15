@@ -713,5 +713,5 @@ vsm.vsmFindPages	ShaderProperties.cs	numUsedVgprs	6
 vsm.vsmFindPages	ShaderProperties.cs	scratchMemUsageInBytes	0
 vsm.vsmMark	ShaderProperties.cs	numUsedVgprs	34
 vsm.vsmMark	ShaderProperties.cs	scratchMemUsageInBytes	0
-vsm.vsmVisibility	ShaderProperties.cs	numUsedVgprs	102
+vsm.vsmVisibility	ShaderProperties.cs	numUsedVgprs	47
 vsm.vsmVisibility	ShaderProperties.cs	scratchMemUsageInBytes	0
