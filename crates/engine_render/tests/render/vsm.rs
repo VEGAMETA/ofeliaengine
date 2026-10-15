@@ -195,8 +195,7 @@ fn entries(levels: &[VsmLevel], k: f64, light: [f64; 2], shift: [f64; 2]) -> Vec
     let page_texels = f64::from(PAGE_TEXELS);
     let margin = f64::from(MARK_MARGIN_TEXELS);
     let table = i64::from(TABLE_PAGES);
-    for level in first..count {
-        let l = levels[level];
+    for (level, l) in levels.iter().enumerate().skip(first) {
         let texel = f64::from(l.texel);
         let t = [0, 1].map(|i| light[i] / texel + shift[i] * page_texels);
         let page = |v: f64| (v / page_texels).floor() as i64;
