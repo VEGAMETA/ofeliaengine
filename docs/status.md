@@ -13,7 +13,7 @@ Last updated: 2026-10-15.
   picture as a texture.
   - 8b-1 is done (2026-10-15, PR #227): `engine_video` reads WebM, parses the AV1 headers (every
     field equal to rav1d's on nine clips) and decodes with rav1d.
-  - 8b-2 is done (2026-10-16): AV1 decoded on both GPUs' video engines through Vulkan
+  - 8b-2 is done (2026-10-16, PR #228): AV1 decoded on both GPUs' video engines through Vulkan
     Video, every picture bit-exact against rav1d.
   - Next is 8b-3: the picture as a texture, the sound and the clock, `VideoPlayer` and the
     player's video entity.
@@ -771,7 +771,7 @@ grown, divide and conquer); the old labels stay in parentheses.
        1080p30 stream at 6.5× real time on one thread (15× with frame threads), a
        36 Mbit/s 2160p30 10-bit one at 1.7× (5.5×).
      - New build requirement: NASM on `PATH`.
-   - **8b-2 done 2026-10-16** (ADR 0100, "8b-2 as built"):
+   - **8b-2 done 2026-10-16** (PR #228; ADR 0100, "8b-2 as built"):
      - `engine_rhi`: the AV1 decode queue, created when asked for
        (`ExtraQueues::video_decode`: 2.5 ms of the RTX's device creation, nothing on the
        Radeon).
