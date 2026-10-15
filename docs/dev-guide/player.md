@@ -63,6 +63,7 @@ fn main() {
   - ambient occlusion, antialiasing and render size, meshlet culling;
   - `PlayerSettings` overrides any of them (`antialiasing`, `quality`,
     `ambient_occlusion`, `meshlet_culling`).
+- **Reflections and global illumination** when your world has their entities (below).
 - **Frame generation** when you ask for it (`frame_generation`):
   - FSR 3.1 on any GPU;
   - DLSS through the player's own DLLs.
@@ -97,6 +98,50 @@ fn animate(&mut self, parts: &mut FrameParts<'_>, dt: f32) {
 }
 ```
 
+## Reflections and global illumination
+
+Reflection probes and the volume of global illumination probes are components too. Each
+is made when its first entity appears, and costs nothing before:
+
+```rust
+use engine_runtime::{GiVolume, ReflectionProbe};
+
+// A probe for a room: captured from its entity, reflecting inside the box around it.
+world.spawn((GlobalTransform(room_center), ReflectionProbe::new(Vec3::new(6.0, 3.0, 9.0))));
+// Light bouncing over the whole level: probes about a meter apart.
+world.spawn((GlobalTransform(level_center), GiVolume::new(level_half_size, 1.0)));
+```
+
+- **A probe follows its entity.** Moved, turned or scaled, it is captured again.
+  - Something moving inside its box captures it again at most every 30 frames
+    (`ProbeSettings::scene_interval`), each probe in turn.
+  - With `manual: 1` it is captured only when it changes, or when you ask
+    (`player.reflection_probes()` and `player.probe_extract()` give its `refresh`).
+  - Up to 16 probes by default (`reflection_probes` in the settings): about 1 MiB each.
+- **One GI volume lights the world:** the first `GiVolume` found.
+  - It needs a GPU with ray queries (NVIDIA RTX, AMD RX 6000 and newer, their integrated
+    GPUs). Without one, the world keeps the sky's light.
+  - It converges in its first 11 frames, once the pack's textures have arrived. Then a
+    ray budget a frame keeps it following the sun, the sky and what moves.
+  - Moving or resizing it makes it anew, and the GPU waits for its frames: place it once
+    per level.
+- **Screen-space reflections** are a setting (`screen_space_reflections`), off by default.
+  Unlike probes they cost every frame, whatever the world holds.
+
+What each costs in `flight` (Sponza with 2,000 moving cubes and 64 characters, a
+1797 × 1011 window, the GPU frame's median):
+
+| | RTX 4060 Ti | Radeon iGPU (TAAU at 67 %) |
+|---|---:|---:|
+| none of them | 1.78 ms | 21.3 ms |
+| four probes along the courtyard | 1.91 ms | 24.7 ms |
+| the GI volume (8,680 probes 0.96 m apart) | 2.04 ms | 23.5 ms |
+| screen-space reflections | 2.15 ms | 26.9 ms |
+| all three | 2.50 ms | 32.6 ms |
+
+On a small integrated GPU each is a choice to make with your players: offer them as
+settings.
+
 ## Each frame
 
 1. Window events go to `Game::event`.
@@ -104,7 +149,8 @@ fn animate(&mut self, parts: &mut FrameParts<'_>, dt: f32) {
 3. The frame waits for its slot and its swapchain image.
 4. The due ticks run: `Game::tick`, then transforms propagate to the GPU scene.
 5. `Game::present` runs (the camera, from the latest input).
-6. `Game::animate` runs (skinning matrices); the player places the skinned meshes.
+6. `Game::animate` runs (skinning matrices); the player places the skinned meshes and
+   mirrors the probes and the GI volume.
 7. Streaming, then the frame's rendering and its UI (`player.ui_mut()`: 2D and 3D
    canvases).
 8. Submission and presentation.
@@ -124,6 +170,9 @@ game is running.
 | `fps_limit` | a frame cap (a few frames under the refresh rate with G-Sync/FreeSync) |
 | `frame_generation` | `Off`, `Fsr`, `Dlss` |
 | `antialiasing`, `quality` | TAAU, FSR, DLSS and the render size |
+| `screen_space_reflections` | off, or `SsrSettings` (half-resolution rays by default) |
+| `global_illumination` | the GPU class's (`None`), your `GiSettings`, or off (`Some(None)`) |
+| `reflection_probes` | the probes' room and captures, or off (`None`) |
 
 ## Crash reports
 

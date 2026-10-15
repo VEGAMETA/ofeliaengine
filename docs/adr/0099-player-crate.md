@@ -1,6 +1,7 @@
 # 0099. The player crate (`engine_app`) and its window modes
 
-- Status: Accepted (steps 1 to 3 done; step 4 in parts: the features per view done)
+- Status: Accepted (steps 1 to 3 done; step 4 in parts: the features per view,
+  reflections and GI done)
 - Date: 2026-10-15
 - Related:
   - [ADR 0023](0023-latency.md): the latency providers;
@@ -111,8 +112,10 @@ As planned, with these differences (as built):
 - **Crash reports stay the game's `main`'s.** Their monitor process runs the same
   executable, which must ask first thing whether it is the monitor.
 - **Reflex's swapchain** (`VK_NV_low_latency2`) only when latency control is on.
-- **Input is the game's,** from the window's events. The player reads them after the
-  latency wait and before the ticks.
+- **Input is the game's,** from the window's events. The player hands them over at the
+  frame's start, before latency control's wait (corrected 2026-10-15: this said after it).
+  Events that arrive during the wait reach the game in the next frame; reading them again
+  after the wait is a follow-up.
 
 Measured (ref-1, release, `flight` on Sponza's pack, 1,800 frames, alternated with the
 previous binary):
@@ -226,12 +229,72 @@ Measured: `flight` on the RTX, alternated with the step 2 binary, latency contro
   - A view wanting none of them gives the same pixels as a renderer with them off.
   - A view wanting them all is unchanged by another view without them.
 
-**Planned for this step:**
+**Done second (2026-10-15): reflections and global illumination, their probes as
+components.**
 
-- **Per view:** ambient occlusion, local and contact shadows, reflections, subsurface
-  scattering and the prepass become view settings, so split screen and editor viewports
-  can differ.
-  - Each is made on first use, at no cost where unused, not even in registers (§5).
+- **`engine_runtime::ReflectionProbe`:** a probe for the box around its entity (half
+  extents, intensity, blend distance, manual refresh). The box turns and scales with the
+  entity.
+  - `ProbeExtract` mirrors the entities into `ReflectionProbes` as `LightExtract` mirrors
+    lights: only the chunks where a probe or its transform changed, removals from the
+    world's removal log.
+  - A probe the set has no room for waits until another goes.
+  - `ProbeSink` lets its unit tests mirror into a list.
+- **`engine_runtime::GiVolume`:** the box a volume of GI probes covers, probes about
+  `spacing` apart, at most `max_probes`. `GiExtract` finds the first; turned, the volume
+  covers the world-aligned box around it.
+- **The player:**
+  - Settings: `reflection_probes` (`ProbeSettings`, on), `screen_space_reflections`
+    (off: unlike probes they cost every frame) and `global_illumination` (the device
+    class's `GiSettings`, on GPUs with ray queries).
+  - The probe set and the renderer's reflections are made with the first
+    `ReflectionProbe` entity.
+  - The GI volume, the scene its rays trace and the renderer's GI are made with the
+    world's `GiVolume`. The ray scene builds the meshes' coarsest levels (resident from
+    the start in streamed packs) within `RaySettings::for_device`'s budget.
+  - A changed grid makes the volume anew, once the GPU has finished the frames using the
+    old one; without a volume, neither it nor its ray scene exist.
+  - Probes capture and the volume's rays trace once the pack's textures hold their
+    tails: an unloaded texture would read as white. When streaming first settles, the
+    probes are captured again.
+  - Screen-space reflections go into the view's base settings.
+  - `FrameReport::probes` is the mirroring's time.
+- **Probes in a moving world:** ADR 0073's addendum. The waiting probe captured longest
+  ago goes first, the scene's changes capture a probe at most every 30 frames, and the
+  render graph keeps the placements and objects of recent frame shapes.
+
+Measured on ref-1 (`flight`, release, Sponza's pack, 2,000 movers and 64 characters, a
+1797 × 1011 window, latency control off; RTX 1,800 frames, Radeon 900):
+
+- **Without probes, volume or SSR the player costs what it did.** Main and the branch
+  alternated, CPU frame median: RTX 844–863 µs against 845–853 µs; Radeon 1,236 against
+  1,243–1,254 µs. GPU frames were the same: RTX 1,782–1,786 µs, Radeon 21.3 ms. The
+  mirroring takes 0.2–0.4 µs a frame (0.5–1.1 µs with them).
+- **What they cost**, GPU frame median (CPU frame median):
+
+  | | RTX 4060 Ti | Radeon iGPU |
+  |---|---:|---:|
+  | none | 1,782 µs (851) | 21.3 ms (1,243) |
+  | four probes along the courtyard | 1,914 µs (913) | 24.7 ms (1,257) |
+  | the GI volume, 31 × 14 × 20 probes | 2,037 µs (941) | 23.5 ms (1,234) |
+  | screen-space reflections, half resolution | 2,147 µs (948) | 26.9 ms (1,267) |
+  | all three | 2,501 µs (1,075) | 32.6 ms (1,312) |
+
+- **The volume converges in frame 14,** after the pack's tails arrived: 0.86–0.99 s
+  after `main` on the RTX, 1.6–3.3 s on the Radeon. Its ray scene: 168 bottom levels of
+  84,145 triangles (2.4 MiB on the RTX, 5.1 MiB on the Radeon); the volume 12.8 MiB.
+- **Tests,** both GPUs, under validation:
+  - `probes_and_the_gi_volume_follow_their_entities`: nothing made before the
+    entities; the probe captured, visible, moved with its entity; the volume converged
+    over 11 × 5 × 11 probes and made anew when resized; both gone with their entities.
+  - `frames_with_probes_and_gi_do_not_allocate`: 0 allocations in 812–1,186
+    steady-state frames, with screen-space reflections, the volume's rays, and the probe
+    captured again every 30 frames for the spinning cubes inside it.
+  - `probes_follow_their_entities_and_wait_for_room` and
+    `the_volume_covers_its_entitys_box`: unit tests of the mirroring.
+
+**Left for this step:**
+
 - **On the crate:** `scene_bench`, `stream_bench`, `tools/stress` and the golden test bed
   move onto `engine_app`. Their scenes and numbers stay comparable: each move is checked
   against the previous binary.

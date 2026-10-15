@@ -52,6 +52,8 @@ pub struct FrameReport {
     pub interpolate: f64,
     /// The animate hook.
     pub animate: f64,
+    /// The reflection probe entities and the GI volume mirrored into the renderer.
+    pub probes: f64,
     /// Streaming: textures and mesh levels requested, arrived, evicted.
     pub streaming: f64,
     /// Texture and mesh levels that arrived this frame.

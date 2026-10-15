@@ -25,6 +25,10 @@
 //! Lights are components on entities (`engine_runtime::{PointLight, SpotLight, Sun}`);
 //! skinned meshes too (`engine_runtime::SkinnedMesh`): the game sets their skinning
 //! matrices in [`Game::animate`] (`Skinning::set_palette`), the player places them.
+//! Reflection probes and the global illumination volume as well
+//! (`engine_runtime::{ReflectionProbe, GiVolume}`): the player makes the probe set, the
+//! volume and the scene its rays trace with their first entities, and mirrors them every
+//! frame; screen-space reflections are a setting.
 //!
 //! Crash reports are the game's `main`'s to set up (`engine_crash`): its monitor process
 //! runs the same executable.

@@ -15,6 +15,9 @@
 //! - `characters` skinned characters (glTF Fox) walking in circles, their poses sampled
 //!   on the job system every frame and skinned on the GPU (ADR 0068);
 //! - Sponza's seven local lights with cached shadows (ADR 0071), sky light (ADR 0046);
+//! - with `--probes`, `--gi` and `--ssr`: reflection probes along the courtyard and a
+//!   volume of GI probes over the scene as entities, and screen-space reflections (ADR
+//!   0099 step 4);
 //! - the frame renderer with the device class's defaults: ambient occlusion, the
 //!   antialiasing / render size (ADR 0072) and meshlet culling (ADR 0085);
 //! - a borderless window over the monitor (or `--window`), presented without vsync (or
@@ -39,6 +42,13 @@
 //!     [--characters <n>]    skinned characters (default 64; needs test-assets/Fox)
 //!     [--no-lights]         no local lights
 //!     [--no-ao]             no ambient occlusion
+//!     [--probes]            four reflection probes along the courtyard, as entities
+//!                           (ADR 0073), like the golden shot `sponza_day`
+//!     [--gi [spacing]]      global illumination from a volume of probes over the scene
+//!                           (ADR 0088), as an entity: probes `spacing` apart (default 1)
+//!     [--ssr]               screen-space reflections at half resolution (ADR 0073)
+//!     [--probe-interval <n>]   frames between captures of a probe that the scene's
+//!                           changes ask for (default 30; 0: every frame)
 //!     [--meshlet-culling on|off]  drawing by meshlet (ADR 0085; default: the device
 //!                           class's)
 //!     [--aa off|taau|fsr]   [--quality native|quality|balanced|performance]
@@ -109,11 +119,15 @@ mod windowed {
     use engine_render::graph::RenderGraph;
     use engine_render::material::MaterialDesc;
     use engine_render::mesh::{MeshData, cube};
+    use engine_render::reflections::{ProbeSettings, SsrSettings};
     use engine_render::skinning::{SkinnedId, SkinnedMeshData};
     use engine_render::texture_pool::{TextureId, TextureLevels};
     use engine_render2d::{Canvas, Quad};
     use engine_rhi::Allocator;
-    use engine_runtime::{MeshRenderer, PointLight, SkinnedMesh, SpotLight, Sun, look_rotation};
+    use engine_runtime::{
+        GiVolume, MeshRenderer, PointLight, ReflectionProbe, SkinnedMesh, SpotLight, Sun,
+        look_rotation,
+    };
     use engine_streaming::{material_desc, texture_format};
     use std::alloc::{GlobalAlloc, Layout};
     use std::path::{Path, PathBuf};
@@ -162,6 +176,8 @@ mod windowed {
         extract: f64,
         interpolate: f64,
         animate: f64,
+        /// The probe entities and the GI volume mirrored.
+        probes: f64,
         streaming: f64,
         /// The pools' `begin_frame`: textures, materials, geometry, skinning.
         pools: f64,
@@ -186,7 +202,7 @@ mod windowed {
     /// A column of the CPU table: its name and what it reads from a frame.
     type Column = (&'static str, fn(&Stages) -> f64);
 
-    const COLUMNS: [Column; 16] = [
+    const COLUMNS: [Column; 17] = [
         ("wait for frame slot", |s| s.wait),
         ("acquire", |s| s.acquire),
         ("tick systems", |s| s.simulate),
@@ -194,6 +210,7 @@ mod windowed {
         ("extraction", |s| s.extract),
         ("interpolation", |s| s.interpolate),
         ("animation (job system) + poses", |s| s.animate),
+        ("probes + GI volume (entities)", |s| s.probes),
         ("streaming update + budget", |s| s.streaming),
         ("pools: textures, materials, geometry, skinning", |s| {
             s.pools
@@ -761,6 +778,13 @@ mod windowed {
         let movers = number("--movers", 2000);
         let character_count = number("--characters", 64);
         let lights_on = !flag("--no-lights");
+        let probes_on = flag("--probes");
+        // `--gi [spacing]`: a volume of GI probes over the scene, `spacing` apart.
+        let gi_spacing = flag("--gi").then(|| {
+            option("--gi")
+                .and_then(|v| v.parse::<f32>().ok())
+                .unwrap_or(1.0)
+        });
         // `--fg`: FSR 3.1's, shown by a paced presenter; `--fg dlss`: DLSS's, through
         // Streamline (ADR 0091).
         let frame_generation = if flag("--fg") {
@@ -820,6 +844,11 @@ mod windowed {
                 _ => None,
             },
             local_shadows: lights_on.then(LocalShadowSettings::default),
+            screen_space_reflections: flag("--ssr").then(SsrSettings::default),
+            reflection_probes: Some(ProbeSettings {
+                scene_interval: number("--probe-interval", 30) as u32,
+                ..ProbeSettings::default()
+            }),
             texture_feedback: !flag("--no-feedback"),
             // Where the frame is drawn (`engine_render::present`): `--present apart|direct`,
             // by default apart only when the swapchain presents across adapters.
@@ -1024,6 +1053,25 @@ mod windowed {
                 ambient: Vec3::splat(0.08),
             },
         ));
+        // Reflection probes and the GI volume as entities (ADR 0099 step 4): four probes
+        // along the courtyard, each across its whole width (the golden shot `sponza_day`'s),
+        // and probes over the whole scene.
+        if probes_on {
+            let cell = Vec3::new(size.x / 4.0, size.y, size.z);
+            for k in 0..4 {
+                let center = min + cell * Vec3::new(k as f32 + 0.5, 0.5, 0.5);
+                world.spawn((
+                    GlobalTransform(Affine3A::from_translation(center)),
+                    ReflectionProbe::new(cell * 0.5),
+                ));
+            }
+        }
+        if let Some(spacing) = gi_spacing {
+            world.spawn((
+                GlobalTransform(Affine3A::from_translation((min + max) * 0.5)),
+                GiVolume::new(size * 0.5, spacing),
+            ));
+        }
 
         // The UI layer: a HUD (a crosshair, a bar, a frame for a map), a panel on the nave's
         // wall, a panel on the camera (bottom left, as a helmet's display).
@@ -1119,6 +1167,7 @@ mod windowed {
         let mut dlss = DlssReport::default();
         let mut first_present = None;
         let mut first_idle = None;
+        let mut gi_converged = None;
         let mut memory_logged = false;
         let mut drawn = 0usize;
         let mut previous_start: Option<Instant> = None;
@@ -1141,6 +1190,7 @@ mod windowed {
                 extract: report.extract,
                 interpolate: report.interpolate,
                 animate: report.animate,
+                probes: report.probes,
                 streaming: report.streaming,
                 pools: report.pools,
                 pool_parts: report.pool_parts,
@@ -1166,6 +1216,13 @@ mod windowed {
             }
             if first_idle.is_none() && drawn > 0 && player.streamer().is_some_and(|s| s.idle()) {
                 first_idle = Some(ms(t0));
+            }
+            if gi_converged.is_none()
+                && player
+                    .gi_volume()
+                    .is_some_and(engine_render::gi::ProbeGi::is_converged)
+            {
+                gi_converged = Some((drawn, ms(t0)));
             }
             let graph = player.graph();
             s.gpu = f64::from(graph.gpu_frame_time().unwrap_or(0.0));
@@ -1370,6 +1427,30 @@ mod windowed {
                 s.submit,
                 s.present,
                 s.pipelines
+            );
+        }
+        if let Some(probes) = player.reflection_probes() {
+            let stats = probes.stats();
+            println!(
+                "\n**Reflection probes:** {} of {} captured, {} visible in the last frame, {} faces drawn in it.",
+                stats.captured, stats.probes, stats.visible, stats.faces
+            );
+        }
+        if let Some(volume) = player.gi_volume() {
+            let grid = volume.grid();
+            let rays = player.ray_scene().map(|r| r.stats()).unwrap_or_default();
+            println!(
+                "\n**GI volume:** {:?} probes ({}) {:.2} m apart, {:.1} MiB; converged at frame {} ({:.0} ms since `main`); ray scene: {} bottom levels ({:.1} MiB, {} triangles), top level {:.1} MiB.",
+                grid.counts,
+                grid.probe_count(),
+                grid.spacing.min_element(),
+                volume.memory_bytes() as f64 / MIB,
+                gi_converged.map_or(-1, |(frame, _)| frame as i64),
+                gi_converged.map_or(f64::NAN, |(_, ms)| ms),
+                rays.blas_count,
+                rays.blas_bytes as f64 / MIB,
+                rays.triangles,
+                rays.tlas_bytes as f64 / MIB,
             );
         }
         if player.paced().is_some() {

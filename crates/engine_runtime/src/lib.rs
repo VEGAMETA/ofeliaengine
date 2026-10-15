@@ -21,6 +21,10 @@
 //!   light keeps its slot while it lives: its cached shadow is known by it).
 //! - [`SkinnedMesh`]: an entity's skinned instance, placed at its scene instance every
 //!   frame by [`Runtime::place_skinned`].
+//! - [`ReflectionProbe`] and [`GiVolume`] (ADR 0099 step 4): reflection probes for the
+//!   boxes around their entities, mirrored into the renderer's probe set by a
+//!   [`ProbeExtract`]; the box a volume of global illumination probes covers, found by a
+//!   [`GiExtract`].
 //! - [`Camera`] and [`CameraView`] (ADR 0072): the main camera, read right after the
 //!   presentation step every rendered frame, becomes the frame renderer's view
 //!   (`engine_frame`): projection, exposure, antialiasing, cuts.
@@ -43,6 +47,7 @@
 mod camera;
 mod extract;
 mod lights;
+mod probes;
 mod runtime;
 mod skinned;
 
@@ -50,5 +55,6 @@ pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;
 pub use extract::{ExtractStats, MeshRenderer, RenderExtract, SceneSink};
 pub use lights::{LightExtract, PointLight, SpotLight, Sun};
+pub use probes::{GiExtract, GiVolume, ProbeExtract, ProbeSink, ReflectionProbe};
 pub use runtime::{FrameStages, Runtime};
 pub use skinned::SkinnedMesh;

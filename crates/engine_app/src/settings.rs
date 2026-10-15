@@ -4,6 +4,8 @@ use engine_frame::{Antialiasing, FrameGeneration, Quality, RenderDefaults};
 use engine_latency::LowLatency;
 use engine_render::ao::AoSettings;
 use engine_render::forward::LocalShadowSettings;
+use engine_render::gi::GiSettings;
+use engine_render::reflections::{ProbeSettings, SsrSettings};
 use engine_rhi::AdapterPreference;
 use std::path::PathBuf;
 
@@ -67,6 +69,19 @@ pub struct PlayerSettings {
     pub meshlet_culling: Option<bool>,
     /// Shadowed local lights (ADR 0071).
     pub local_shadows: Option<LocalShadowSettings>,
+    /// Reflection probes (ADR 0073) for the world's `engine_runtime::ReflectionProbe`
+    /// entities: their set's room and captures, made with the first such entity; `None`:
+    /// the entities reflect nothing.
+    pub reflection_probes: Option<ProbeSettings>,
+    /// Screen-space reflections (ADR 0073) in the view, at the render size; `None` (the
+    /// default): off. Unlike probes they cost every frame whatever the world holds (at
+    /// 1080p with half-resolution rays: 0.26 ms on an RTX 4060 Ti, 7.5 ms on a two-CU
+    /// Radeon), so a game turns them on.
+    pub screen_space_reflections: Option<SsrSettings>,
+    /// Global illumination from a volume of probes (ADR 0088, ADR 0089) over the world's
+    /// `engine_runtime::GiVolume` entity, on GPUs with ray queries: the device class's
+    /// settings (`None`: `GiSettings::for_device`), these, or none (`Some(None)`).
+    pub global_illumination: Option<Option<GiSettings>>,
     /// Streamed textures follow what the views sample (texture feedback, ADR 0076).
     pub texture_feedback: bool,
     /// The frame drawn into an image of its own and copied into the swapchain image
@@ -105,6 +120,9 @@ impl Default for PlayerSettings {
             ambient_occlusion: None,
             meshlet_culling: None,
             local_shadows: Some(LocalShadowSettings::default()),
+            reflection_probes: Some(ProbeSettings::default()),
+            screen_space_reflections: None,
+            global_illumination: None,
             texture_feedback: true,
             present_apart: None,
             tick_hz: 64.0,
