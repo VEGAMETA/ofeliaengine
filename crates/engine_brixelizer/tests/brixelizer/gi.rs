@@ -611,8 +611,12 @@ fn a_sunlit_wall_lights_the_floor_in_front_of_it() {
     );
     h.finish();
     assert!(near.x > 0.15, "in front of the wall: {near:?}");
+    // Usually 2.9 times as much. The SDK's GI is not deterministic from run to run (in
+    // front 0.234 to 0.241 alone), and in some runs, most often while other GPU tests run,
+    // the floor away from the wall reads up to 40 % more (0.114 against 0.081: 2.07 times;
+    // 2026-10-15).
     assert!(
-        near.x > 2.5 * far.x,
+        near.x > 1.75 * far.x,
         "in front {near:?} against away {far:?}"
     );
     assert!(
