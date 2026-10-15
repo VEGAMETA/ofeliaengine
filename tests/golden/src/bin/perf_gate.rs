@@ -51,7 +51,8 @@ use engine_core::math::Vec3;
 use engine_frame::{Antialiasing, DeviceClass, Msaa, Quality, RenderDefaults, Upscale, ViewKind};
 use engine_golden::registers::{self, Registers};
 use engine_golden::scene::{
-    RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_lights, vendor_name,
+    RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_day, sponza_lights,
+    vendor_name,
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
@@ -284,6 +285,14 @@ fn shots() -> Vec<Shot> {
                 "sponza_gi",
                 Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
             )
+        },
+        // A game's frame on the player (ADR 0099 step 4): `sponza_day` (the atmosphere,
+        // fog, probe GI, ambient occlusion, contact shadows, four reflection probes, SSR,
+        // TAAU) streamed from a pack by an offscreen player, its sun, probes and GI volume
+        // as entities.
+        Shot {
+            player: true,
+            ..sponza_day("sponza_day_player", [1920, 1080])
         },
         // Textures streamed by texture feedback within an ample budget (ADR 0076): the
         // same frame as `sponza` plus the feedback pass (a quarter of the commands each

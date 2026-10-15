@@ -261,6 +261,10 @@ pub struct Shot {
     /// 0096; gameplay by default). Not on the runtime path: there the camera entity has
     /// its own.
     pub kind: ViewKind,
+    /// Rendered by the player (`engine_app`, ADR 0099; [`crate::player`]): the scene as a
+    /// pack it streams, the sun, lights, probes and GI volume as entities, offscreen. The
+    /// fields it does not take fail the shot.
+    pub player: bool,
 }
 
 /// Frames Brixelizer GI runs with every texture resident before a shot is captured or
@@ -336,6 +340,7 @@ impl Shot {
             color_vision: ColorVision::default(),
             depth_of_field: None,
             kind: ViewKind::Gameplay,
+            player: false,
         }
     }
 }
@@ -441,8 +446,8 @@ pub fn vendor_name(vendor_id: u32) -> String {
     }
 }
 
-struct Loaded {
-    cooked: Option<CookedScene>,
+pub(crate) struct Loaded {
+    pub(crate) cooked: Option<CookedScene>,
     procedural: Vec<(OwnedMeshData, MaterialDesc, Mat4)>,
 }
 
@@ -867,7 +872,7 @@ fn fabric_map(dir: &Path) -> MaterialMap {
     MaterialMap::parse(&map, &out).expect("fabric map")
 }
 
-fn load(
+pub(crate) fn load(
     source: &Source,
     subsurface: bool,
     glossy_floor: bool,
@@ -953,7 +958,7 @@ pub fn probe_grid(min: Vec3, max: Vec3, grid: [u32; 3]) -> Vec<ReflectionProbe> 
 
 /// A camera like `scene_bench`'s default: down the longest horizontal axis of a wide
 /// scene, from the front of a compact one.
-fn default_view(min: Vec3, max: Vec3) -> (Vec3, Vec3) {
+pub(crate) fn default_view(min: Vec3, max: Vec3) -> (Vec3, Vec3) {
     let size = max - min;
     let center = (min + max) * 0.5;
     if size.x.max(size.z) > 1.5 * size.y {
@@ -974,7 +979,7 @@ fn default_view(min: Vec3, max: Vec3) -> (Vec3, Vec3) {
     }
 }
 
-fn median(values: &mut [f64]) -> f64 {
+pub(crate) fn median(values: &mut [f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
@@ -1279,6 +1284,9 @@ impl GenerationImages {
 /// On Vulkan errors and, with validation, on validation errors.
 #[allow(clippy::too_many_lines)]
 pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
+    if shot.player {
+        return crate::player::render(shot, options);
+    }
     let loaded = load(
         &shot.source,
         shot.subsurface,

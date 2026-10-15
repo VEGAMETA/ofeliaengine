@@ -3,7 +3,7 @@
 use engine_frame::{Antialiasing, FrameGeneration, Quality, RenderDefaults};
 use engine_latency::LowLatency;
 use engine_render::ao::AoSettings;
-use engine_render::forward::LocalShadowSettings;
+use engine_render::forward::{ContactShadowSettings, LocalShadowSettings};
 use engine_render::gi::GiSettings;
 use engine_render::reflections::{ProbeSettings, SsrSettings};
 use engine_rhi::AdapterPreference;
@@ -82,6 +82,9 @@ pub struct PlayerSettings {
     pub meshlet_culling: Option<bool>,
     /// Shadowed local lights (ADR 0071).
     pub local_shadows: Option<LocalShadowSettings>,
+    /// The sun's contact shadows (ADR 0071; they turn the depth prepass on); `None` (the
+    /// default): off.
+    pub contact_shadows: Option<ContactShadowSettings>,
     /// Reflection probes (ADR 0073) for the world's `engine_runtime::ReflectionProbe`
     /// entities: their set's room and captures, made with the first such entity; `None`:
     /// the entities reflect nothing.
@@ -134,6 +137,7 @@ impl Default for PlayerSettings {
             ambient_occlusion: None,
             meshlet_culling: None,
             local_shadows: Some(LocalShadowSettings::default()),
+            contact_shadows: None,
             reflection_probes: Some(ProbeSettings::default()),
             screen_space_reflections: None,
             global_illumination: None,

@@ -13,7 +13,7 @@ use engine_ecs::{GlobalTransform, QueryState, World};
 use engine_frame::{
     Antialiasing, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget, Placement,
     PrepareContext, Quality, RenderDefaults, SceneDraws, SceneInput, UiCanvas, UiRenderer, View,
-    ViewCamera, ViewTarget,
+    ViewCamera, ViewSettings, ViewTarget,
 };
 use engine_latency::{Latency, LatencySettings, Marker, PacedFrame, PacedPresenter, PresentImage};
 use engine_platform::window::{
@@ -574,6 +574,12 @@ impl Player {
             .forward_mut()
             .set_meshlet_culling(&device, &bindless, defaults.meshlet_culling)
             .map_err(AppError::at("meshlet culling"))?;
+        if settings.contact_shadows.is_some() {
+            renderer
+                .forward_mut()
+                .set_contact_shadows(&device, &bindless, settings.contact_shadows)
+                .map_err(AppError::at("contact shadows"))?;
+        }
         if let Some(local_shadows) = settings.local_shadows {
             renderer
                 .forward_mut()
@@ -967,6 +973,14 @@ impl Player {
     pub fn camera(&self, fov_y: f32, near: f32, far: f32) -> Camera {
         Camera::perspective(fov_y, near, far)
             .with_antialiasing(self.defaults.antialiasing, self.defaults.quality)
+    }
+
+    /// The view settings cameras do not carry (`engine_runtime::CameraView::base_mut`):
+    /// bloom, the tone curve, grading, color vision, depth of field, occlusion culling,
+    /// cached shadows, the clear color. A camera entity gives its antialiasing, render
+    /// size, exposure and kind.
+    pub fn view_settings_mut(&mut self) -> &mut ViewSettings {
+        self.cameras.base_mut()
     }
 
     /// The renderer's features in effect (the device class's defaults, or the settings').

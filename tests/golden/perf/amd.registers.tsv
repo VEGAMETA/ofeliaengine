@@ -21,6 +21,10 @@ atmosphere.skyViewLut	ShaderProperties.cs	numUsedVgprs	74
 atmosphere.skyViewLut	ShaderProperties.cs	scratchMemUsageInBytes	0
 atmosphere.transmittanceLut	ShaderProperties.cs	numUsedVgprs	35
 atmosphere.transmittanceLut	ShaderProperties.cs	scratchMemUsageInBytes	0
+contact.contactBend	ShaderProperties.cs	numUsedVgprs	64
+contact.contactBend	ShaderProperties.cs	scratchMemUsageInBytes	0
+contact.contactClear	ShaderProperties.cs	numUsedVgprs	3
+contact.contactClear	ShaderProperties.cs	scratchMemUsageInBytes	0
 decals.decalApply	ShaderProperties.cs	numUsedVgprs	96
 decals.decalApply	ShaderProperties.cs	scratchMemUsageInBytes	0
 decals.decalTiles	ShaderProperties.cs	numUsedVgprs	10
@@ -435,6 +439,14 @@ forward.vertexMain+forward.fragmentReflectAo spec=1,1 R16G16B16A16_SFLOAT,A2B10G
 forward.vertexMain+forward.fragmentReflectAo spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectAo spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	87
 forward.vertexMain+forward.fragmentReflectAo spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentReflectAoBentContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentReflectAoBentContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentReflectAoBentContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	72
+forward.vertexMain+forward.fragmentReflectAoBentContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentReflectAoBentContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentReflectAoBentContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentReflectAoBentContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	56
+forward.vertexMain+forward.fragmentReflectAoBentContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectAoContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
 forward.vertexMain+forward.fragmentReflectAoContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectAoContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	69
@@ -443,6 +455,10 @@ forward.vertexMain+forward.fragmentReflectAoContact spec=1,1 R16G16B16A16_SFLOAT
 forward.vertexMain+forward.fragmentReflectAoContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectAoContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	87
 forward.vertexMain+forward.fragmentReflectAoContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentReflectAoContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentReflectAoContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentReflectAoContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	56
+forward.vertexMain+forward.fragmentReflectAoContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectAoContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
 forward.vertexMain+forward.fragmentReflectAoContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectAoContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	96

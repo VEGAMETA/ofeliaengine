@@ -157,6 +157,39 @@ sponza_catmull_rom_67	shadow	156.8
 sponza_catmull_rom_67	shadow cull	3.1
 sponza_catmull_rom_67	sky	3.1
 sponza_catmull_rom_67	tonemap	65.5
+sponza_day_player	(frame total)	2721.0
+sponza_day_player	(gpu frame)	2231.4
+sponza_day_player	ao	646.1
+sponza_day_player	ao denoise	60.4
+sponza_day_player	ao depths	39.9
+sponza_day_player	atmosphere	47.1
+sponza_day_player	atmosphere aerial perspective	33.2
+sponza_day_player	bloom downsample	51.2
+sponza_day_player	bloom upsample	29.7
+sponza_day_player	contact shadows	111.6
+sponza_day_player	contact shadows clear	28.7
+sponza_day_player	cull	5.1
+sponza_day_player	cull setup	1.8
+sponza_day_player	depth prepass	70.0
+sponza_day_player	forward	396.3
+sponza_day_player	gi irradiance	35.8
+sponza_day_player	gi moments	114.7
+sponza_day_player	gi resolve	97.3
+sponza_day_player	gi trace	186.4
+sponza_day_player	material upload	2.7
+sponza_day_player	motion background	3.1
+sponza_day_player	reflections	117.8
+sponza_day_player	shadow	214.0
+sponza_day_player	shadow cull	8.2
+sponza_day_player	ssr depth	28.7
+sponza_day_player	ssr spatial	53.2
+sponza_day_player	ssr temporal	53.2
+sponza_day_player	ssr trace	111.6
+sponza_day_player	taau	130.0
+sponza_day_player	texture feedback	13.3
+sponza_day_player	texture feedback clear	1.1
+sponza_day_player	texture feedback readback	2.0
+sponza_day_player	tonemap	28.7
 sponza_defaults_discrete	(frame total)	1350.2
 sponza_defaults_discrete	(gpu frame)	1294.8
 sponza_defaults_discrete	ao	455.7

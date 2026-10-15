@@ -10,7 +10,7 @@
 
 use engine_core::math::Vec3;
 use engine_frame::{Antialiasing, Msaa, PostAntialiasing, Quality, Upscale, ViewKind};
-use engine_golden::golden::{Outcome, Tolerance, compare};
+use engine_golden::golden::{Outcome, Tolerance, compare_with};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_day, sponza_lights,
     sponza_night,
@@ -30,6 +30,12 @@ fn require_golden() -> bool {
 }
 
 fn check(shot: &Shot) {
+    check_against(shot, shot.name, Tolerance::default());
+}
+
+/// Renders `shot` and compares it with `golden`'s image (another shot's, for two paths to
+/// the same picture) within `tolerance`.
+fn check_against(shot: &Shot, golden: &str, tolerance: Tolerance) {
     let options = RenderOptions {
         validation: true,
         timed_frames: 0,
@@ -64,7 +70,7 @@ fn check(shot: &Shot) {
             return;
         }
     };
-    match compare(&rendered, shot.name, Tolerance::default()) {
+    match compare_with(&rendered, shot.name, golden, tolerance) {
         Outcome::Matched(result) => println!(
             "{} on {}: mean FLIP {:.5}, 99.9th percentile {:.4}, max {:.4}",
             shot.name,
@@ -952,6 +958,31 @@ fn procedural_scene_with_reflections() {
 #[test]
 fn sponza_by_day_with_everything() {
     check(&sponza_day("sponza_day", [640, 360]));
+}
+
+/// The same day through the player (ADR 0099 step 4), the path games run: the scene
+/// written to a pack it streams by texture feedback, the sun, the reflection probes and
+/// the GI volume as entities, the camera an entity, offscreen. Held to the test bed's image
+/// of `sponza_day`: the player draws what the hand-wired bed draws.
+///
+/// The two paths' frame histories differ (the frame the camera cuts at, so TAAU's and
+/// SSR's phases; the GI volume's updates since it converged): on the RTX they differ by a
+/// mean FLIP of 0.015 (99.9th percentile 0.08), the player against itself by 0.002 (0.03).
+/// A feature lost moves it far more: without GI or the probes the mean is 0.29-0.63,
+/// without SSR or contact shadows the 99.9th percentile 0.39-0.80.
+#[test]
+fn sponza_by_day_on_the_player() {
+    check_against(
+        &Shot {
+            player: true,
+            ..sponza_day("sponza_day_player", [640, 360])
+        },
+        "sponza_day",
+        Tolerance {
+            mean: 0.03,
+            ..Tolerance::default()
+        },
+    );
 }
 
 /// Sponza by night with everything on (`scene::sponza_night`): a bonfire in the
