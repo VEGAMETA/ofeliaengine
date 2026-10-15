@@ -14,6 +14,8 @@ workspace = true
 # Reading and writing the golden images (the version engine_assets uses).
 png = "0.18"
 engine_anim.workspace = true
+# Shots rendered by the player, the path games run (ADR 0099).
+engine_app.workspace = true
 engine_assets.workspace = true
 # Brixelizer GI's shots, probe GI's reference (ADR 0090).
 engine_brixelizer.workspace = true

@@ -6,8 +6,9 @@
 //!   "Games" and on performance cores where the CPU has two kinds;
 //! - **the window and its swapchain**: borderless full screen by default, the swapchain
 //!   stating that the driver must not take the monitor for itself (ADR 0099: NVIDIA then
-//!   flips it, 7.9 against 9.3 ms to the screen), a window fit into the work area, or
-//!   exclusive full screen;
+//!   flips it, 7.9 against 9.3 ms to the screen), a window fit into the work area,
+//!   exclusive full screen, or none (offscreen: each frame drawn into an image that
+//!   [`Player::capture`] reads back, for tests and benchmarks);
 //! - **the device and latency control**: Reflex, Anti-Lag 2 or the engine's own limiter
 //!   (ADR 0023), frame generation (FSR's or DLSS's, ADR 0091);
 //! - **the pipeline cache** in `%LOCALAPPDATA%\<title>\` (ADR 0055) and the warm-up

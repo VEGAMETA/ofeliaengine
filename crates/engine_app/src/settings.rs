@@ -3,7 +3,7 @@
 use engine_frame::{Antialiasing, FrameGeneration, Quality, RenderDefaults};
 use engine_latency::LowLatency;
 use engine_render::ao::AoSettings;
-use engine_render::forward::LocalShadowSettings;
+use engine_render::forward::{ContactShadowSettings, LocalShadowSettings};
 use engine_render::gi::GiSettings;
 use engine_render::reflections::{ProbeSettings, SsrSettings};
 use engine_rhi::AdapterPreference;
@@ -26,6 +26,16 @@ pub enum Window {
     /// Borderless over the monitor, the swapchain asking for the monitor
     /// (`VK_EXT_full_screen_exclusive`); refused, it presents as [`Self::FullScreen`].
     Exclusive,
+    /// No window: each frame is drawn into an image of `width` × `height` pixels (8-bit
+    /// sRGB) that [`Player::capture`](crate::Player::capture) reads back, and nothing is
+    /// presented: tests, benchmarks, renders without a screen. No latency control and no
+    /// frame generation (they need a swapchain).
+    Offscreen {
+        /// Width in pixels.
+        width: u32,
+        /// Height in pixels.
+        height: u32,
+    },
 }
 
 /// Everything [`Player::new`](crate::Player::new) needs.
@@ -44,6 +54,9 @@ pub struct PlayerSettings {
     pub monitor: Option<isize>,
     /// The GPU: `ENGINE_ADAPTER` if set, else this.
     pub adapter: AdapterPreference,
+    /// The validation layer: `None` as the build has it (debug builds validate), `Some(true)`
+    /// with synchronization validation too (tests), `Some(false)` never.
+    pub validation: Option<bool>,
     /// Wait for the display's refresh (FIFO) instead of presenting at once.
     pub vsync: bool,
     /// Latency reduction (Reflex, Anti-Lag 2 or the engine's own; ADR 0023).
@@ -69,6 +82,9 @@ pub struct PlayerSettings {
     pub meshlet_culling: Option<bool>,
     /// Shadowed local lights (ADR 0071).
     pub local_shadows: Option<LocalShadowSettings>,
+    /// The sun's contact shadows (ADR 0071; they turn the depth prepass on); `None` (the
+    /// default): off.
+    pub contact_shadows: Option<ContactShadowSettings>,
     /// Reflection probes (ADR 0073) for the world's `engine_runtime::ReflectionProbe`
     /// entities: their set's room and captures, made with the first such entity; `None`:
     /// the entities reflect nothing.
@@ -109,6 +125,7 @@ impl Default for PlayerSettings {
             window: Window::FullScreen,
             monitor: None,
             adapter: AdapterPreference::HighPerformance,
+            validation: None,
             vsync: false,
             low_latency: LowLatency::On,
             fps_limit: None,
@@ -120,6 +137,7 @@ impl Default for PlayerSettings {
             ambient_occlusion: None,
             meshlet_culling: None,
             local_shadows: Some(LocalShadowSettings::default()),
+            contact_shadows: None,
             reflection_probes: Some(ProbeSettings::default()),
             screen_space_reflections: None,
             global_illumination: None,

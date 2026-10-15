@@ -11,6 +11,8 @@ atmosphere.atmosphereCube	CS	Register Count	17
 atmosphere.multipleScatteringLut	CS	Register Count	64
 atmosphere.skyViewLut	CS	Register Count	72
 atmosphere.transmittanceLut	CS	Register Count	40
+contact.contactBend	CS	Register Count	40
+contact.contactClear	CS	Register Count	16
 decals.decalApply	CS	Register Count	96
 decals.decalTiles	CS	Register Count	16
 dof.dofBlur	CS	Register Count	56
@@ -213,10 +215,16 @@ forward.vertexMain+forward.fragmentReflectAo spec=0,1 R16G16B16A16_SFLOAT,A2B10G
 forward.vertexMain+forward.fragmentReflectAo spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentReflectAo spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
 forward.vertexMain+forward.fragmentReflectAo spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAoBentContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflectAoBentContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAoBentContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
+forward.vertexMain+forward.fragmentReflectAoBentContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentReflectAoContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
 forward.vertexMain+forward.fragmentReflectAoContact spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentReflectAoContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	63
 forward.vertexMain+forward.fragmentReflectAoContact spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
+forward.vertexMain+forward.fragmentReflectAoContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	56
+forward.vertexMain+forward.fragmentReflectAoContactGi spec=0,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentReflectAoContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	69
 forward.vertexMain+forward.fragmentReflectAoContactShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
 forward.vertexMain+forward.fragmentReflectAoShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	69

@@ -132,6 +132,22 @@ pub fn to_linear(rgb: &[u8]) -> Vec<[f32; 3]> {
 ///
 /// If the golden image cannot be read or written, or its size differs from the render's.
 pub fn compare(rendered: &Rendered, name: &str, tolerance: Tolerance) -> Outcome {
+    compare_with(rendered, name, name, tolerance)
+}
+
+/// Compares a render named `name` (its files in [`output_dir`]) with another shot's golden
+/// image, `golden_name`'s: two paths to the same picture. `ENGINE_GOLDEN_UPDATE=1` writes
+/// nothing then (the image is the other shot's).
+///
+/// # Panics
+///
+/// As [`compare`].
+pub fn compare_with(
+    rendered: &Rendered,
+    name: &str,
+    golden_name: &str,
+    tolerance: Tolerance,
+) -> Outcome {
     let vendor = vendor_name(rendered.vendor_id);
     let (w, h) = (rendered.width, rendered.height);
     let rgb: Vec<u8> = rendered
@@ -141,8 +157,8 @@ pub fn compare(rendered: &Rendered, name: &str, tolerance: Tolerance) -> Outcome
         .collect();
     let out = output_dir(&vendor);
     write_png(&out.join(format!("{name}.png")), w, h, &rgb).expect("write the render");
-    let golden = golden_path(&vendor, name);
-    if std::env::var("ENGINE_GOLDEN_UPDATE").is_ok_and(|v| v == "1") {
+    let golden = golden_path(&vendor, golden_name);
+    if name == golden_name && std::env::var("ENGINE_GOLDEN_UPDATE").is_ok_and(|v| v == "1") {
         write_png(&golden, w, h, &rgb).expect("write the golden image");
         return Outcome::Updated(golden);
     }

@@ -418,6 +418,7 @@ name = "engine_golden"
 version = "0.0.0"
 dependencies = [
  "engine_anim",
+ "engine_app",
  "engine_assets",
  "engine_brixelizer",
  "engine_core",
@@ -657,14 +658,14 @@ name = "engine_stress"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
+ "engine_app",
  "engine_core",
  "engine_ecs",
+ "engine_latency",
  "engine_physics",
  "engine_physics_jolt",
- "engine_platform",
  "engine_profiler",
  "engine_render",
- "engine_rhi",
  "engine_runtime",
  "engine_script",
 ]

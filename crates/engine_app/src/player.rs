@@ -13,7 +13,7 @@ use engine_ecs::{GlobalTransform, QueryState, World};
 use engine_frame::{
     Antialiasing, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget, Placement,
     PrepareContext, Quality, RenderDefaults, SceneDraws, SceneInput, UiCanvas, UiRenderer, View,
-    ViewCamera, ViewTarget,
+    ViewCamera, ViewSettings, ViewTarget,
 };
 use engine_latency::{Latency, LatencySettings, Marker, PacedFrame, PacedPresenter, PresentImage};
 use engine_platform::window::{
@@ -26,7 +26,8 @@ use engine_render::forward::{DirectionalLight, ShadowSettings, ViewGi};
 use engine_render::gi::{GiSettings, ProbeGi};
 use engine_render::gpu_scene::{GpuScene, InstanceId};
 use engine_render::graph::{
-    Access, FrameGraph, ImportedTexture, LoadOp, RenderGraph, TextureDesc, TextureState,
+    Access, BufferState, FrameGraph, ImportedBuffer, ImportedTexture, LoadOp, RenderGraph, Texture,
+    TextureDesc, TextureState,
 };
 use engine_render::material::{MaterialId, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId};
@@ -40,8 +41,9 @@ use engine_render::upload::UploadRing;
 use engine_render2d::Canvas;
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    AdapterPreference, Allocator, Bindless, Device, Frames, FullScreenExclusive, Instance,
-    InstanceDesc, OutputColor, PresentMode, Surface, Swapchain, SwapchainDesc, VulkanHooks,
+    AdapterPreference, Allocation, Allocator, Bindless, Device, Frames, FullScreenExclusive,
+    Instance, InstanceDesc, MemoryLocation, OutputColor, PresentMode, Surface, Swapchain,
+    SwapchainDesc, VulkanHooks,
 };
 use engine_runtime::{
     Camera, CameraView, GiExtract, MeshRenderer, ProbeExtract, ReflectionProbe, Runtime,
@@ -126,6 +128,81 @@ impl fmt::Debug for UiLayer {
     }
 }
 
+/// The offscreen player's image readback ([`Window::Offscreen`]).
+struct Offscreen {
+    width: u32,
+    height: u32,
+    /// Host-visible: a captured frame's pixels.
+    buffer: vk::Buffer,
+    memory: Option<Allocation>,
+    /// The next frame copies its image into `buffer`.
+    requested: bool,
+    /// The frame whose image `buffer` receives.
+    captured: Option<u64>,
+}
+
+impl Offscreen {
+    /// Bytes of a frame: four a pixel.
+    fn bytes(&self) -> u64 {
+        u64::from(self.width) * u64::from(self.height) * 4
+    }
+
+    /// The frame's last pass: its image copied into the readback buffer when a capture is
+    /// asked for, else kept (read by a pass that is never culled).
+    fn add_pass(&mut self, fg: &mut FrameGraph<'_>, image: Texture, number: u64) {
+        if !self.requested {
+            fg.add_pass("offscreen frame")
+                .read(image, Access::TransferRead)
+                .side_effects()
+                .execute(|_| {});
+            return;
+        }
+        self.requested = false;
+        self.captured = Some(number);
+        let out = fg.import_buffer(
+            "offscreen capture",
+            ImportedBuffer {
+                buffer: self.buffer,
+                size: self.bytes(),
+                address: 0,
+                initial: BufferState::idle(),
+                final_state: Some(BufferState::host_read()),
+            },
+        );
+        let (width, height) = (self.width, self.height);
+        fg.add_pass("offscreen capture")
+            .read(image, Access::TransferRead)
+            .write(out, Access::TransferWrite)
+            .execute(move |ctx| {
+                let region = vk::BufferImageCopy {
+                    image_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    image_extent: vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                    ..Default::default()
+                };
+                // SAFETY: recording; the graph made the image a transfer source and the
+                // buffer a transfer destination.
+                unsafe {
+                    ctx.device.cmd_copy_image_to_buffer(
+                        ctx.cmd,
+                        ctx.image(image),
+                        vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                        ctx.buffer(out),
+                        &[region],
+                    );
+                }
+            });
+    }
+}
+
 /// How the frame reaches the screen, as of the swapchain's last (re)creation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Presentation {
@@ -180,6 +257,9 @@ pub struct Setup<'a> {
     pub jobs: &'a Arc<ThreadPool>,
     /// What the pack's scene holds.
     pub scene: &'a SceneInfo,
+    /// The sky, its light, the atmosphere and fog (`set_atmosphere` needs the device, the
+    /// allocator and the bindless descriptors above).
+    pub environment: &'a mut Environment,
 }
 
 /// The game's process, window, device, presentation, scene and frame loop (ADR 0099).
@@ -229,15 +309,18 @@ pub struct Player {
     // Presentation.
     paced: Option<PacedPresenter>,
     swapchain: Option<Swapchain>,
-    surface: Arc<Surface>,
+    /// The window's surface (none offscreen).
+    surface: Option<Arc<Surface>>,
+    /// The offscreen image's readback ([`Window::Offscreen`]).
+    offscreen: Option<Offscreen>,
     latency: Option<Latency>,
     dlss: Option<DlssFrameGeneration>,
     streamline: Option<Streamline>,
     hooks: Option<VulkanHooks>,
     device: Arc<Device>,
     jobs: Arc<ThreadPool>,
-    windows: WindowSystem,
-    window: WindowHandle,
+    windows: Option<WindowSystem>,
+    window: Option<WindowHandle>,
     instance: Instance,
     _process: Option<ProcessSetup>,
     // State.
@@ -250,6 +333,10 @@ pub struct Player {
     gi_extract: GiExtract,
     /// The volume's settings: `None` when it is off or the GPU has no ray queries.
     gi_settings: Option<GiSettings>,
+    /// The volume is made again at the next frame (its settings changed).
+    gi_remake: bool,
+    /// The volume has converged since it was made: the probes were captured again.
+    gi_converged: bool,
     /// The pack's textures hold their tails: from now on probes capture and the volume's
     /// rays trace the scene's materials (before, unloaded textures would read as white).
     scene_ready: bool,
@@ -304,7 +391,17 @@ impl Player {
             startup.notes.extend(process.notes.iter().cloned());
         }
         let in_flight = settings.frames_in_flight.max(1);
-        let dlss_wanted = settings.frame_generation == FrameGeneration::Dlss;
+        let offscreen = match settings.window {
+            Window::Offscreen { width, height } => Some((width.max(1), height.max(1))),
+            _ => None,
+        };
+        if offscreen.is_some() && settings.frame_generation != FrameGeneration::Off {
+            startup.notes.push(String::from(
+                "frame generation needs a window: offscreen frames are not generated",
+            ));
+        }
+        let dlss_wanted = settings.frame_generation == FrameGeneration::Dlss && offscreen.is_none();
+        let validation = settings.validation;
         let warm_up = settings.warm_up;
         let cache_dir = match &settings.pipeline_cache {
             Some(dir) => dir.clone(),
@@ -325,29 +422,36 @@ impl Player {
                     warm_up,
                     cache_dir.as_deref(),
                     &preference,
+                    validation,
+                    offscreen.is_none(),
                 )
             })
             .map_err(AppError::at("the device's start-up thread"))?;
         let phase = Instant::now();
-        let windows = WindowSystem::start(4096).map_err(AppError::at("the window system"))?;
-        let (mode, width, height) = match settings.window {
-            Window::Windowed { width, height } => (WindowMode::Windowed, width, height),
-            Window::FullScreen | Window::Exclusive => (WindowMode::FullScreen, 1920, 1080),
+        let (windows, window) = if offscreen.is_none() {
+            let windows = WindowSystem::start(4096).map_err(AppError::at("the window system"))?;
+            let (mode, width, height) = match settings.window {
+                Window::Windowed { width, height } => (WindowMode::Windowed, width, height),
+                _ => (WindowMode::FullScreen, 1920, 1080),
+            };
+            let window = windows
+                .create_window(&WindowDesc {
+                    title: settings.title.clone(),
+                    width,
+                    height,
+                    resizable: mode == WindowMode::Windowed,
+                    visible: true,
+                    mode,
+                    monitor: settings.monitor,
+                })
+                .map_err(AppError::at("the window"))?;
+            startup
+                .phases
+                .push(("window (beside the device)", ms(phase)));
+            (Some(windows), Some(window))
+        } else {
+            (None, None)
         };
-        let window = windows
-            .create_window(&WindowDesc {
-                title: settings.title.clone(),
-                width,
-                height,
-                resizable: mode == WindowMode::Windowed,
-                visible: true,
-                mode,
-                monitor: settings.monitor,
-            })
-            .map_err(AppError::at("the window"))?;
-        startup
-            .phases
-            .push(("window (beside the device)", ms(phase)));
         let phase = Instant::now();
         let jobs = Arc::new(
             ThreadPool::builder()
@@ -374,47 +478,63 @@ impl Player {
         // With DLSS frame generation Streamline presents: the surface and the swapchain go
         // through its hooks.
         let hooks = streamline.as_ref().map(Streamline::vulkan_hooks);
-        let surface = Arc::new(
-            match &hooks {
-                Some(hooks) => {
-                    Surface::from_win32_hooked(&instance, window.hinstance, window.hwnd, hooks)
+        let surface = match window {
+            Some(window) => Some(Arc::new(
+                match &hooks {
+                    Some(hooks) => {
+                        Surface::from_win32_hooked(&instance, window.hinstance, window.hwnd, hooks)
+                    }
+                    None => Surface::from_win32(&instance, window.hinstance, window.hwnd),
                 }
-                None => Surface::from_win32(&instance, window.hinstance, window.hwnd),
-            }
-            .map_err(AppError::at("the window's surface"))?,
-        );
-        let swapchain_desc = SwapchainDesc {
-            present_mode: if settings.vsync {
-                PresentMode::Fifo
-            } else {
-                PresentMode::Immediate
-            },
-            srgb: true,
-            color: OutputColor::Sdr,
-            // Reflex's swapchain only when latency control is on: off, it costs nothing.
-            low_latency: settings.low_latency != engine_latency::LowLatency::Off,
-            full_screen_exclusive: full_screen_choice(settings.window, window.hwnd),
-            ..SwapchainDesc::default()
+                .map_err(AppError::at("the window's surface"))?,
+            )),
+            None => None,
         };
-        // The renderer draws into the format the swapchain will have.
-        let swapchain_format = Swapchain::format_for(&device, &surface, &swapchain_desc)
-            .map_err(AppError::at("the swapchain's format"))?;
+        // The renderer draws into the format the swapchain will have (offscreen: 8-bit
+        // sRGB, as captures read it).
+        let (swapchain_format, swapchain_desc) = match (&surface, window) {
+            (Some(surface), Some(window)) => {
+                let desc = SwapchainDesc {
+                    present_mode: if settings.vsync {
+                        PresentMode::Fifo
+                    } else {
+                        PresentMode::Immediate
+                    },
+                    srgb: true,
+                    color: OutputColor::Sdr,
+                    // Reflex's swapchain only when latency control is on: off, it costs
+                    // nothing.
+                    low_latency: settings.low_latency != engine_latency::LowLatency::Off,
+                    full_screen_exclusive: full_screen_choice(settings.window, window.hwnd),
+                    ..SwapchainDesc::default()
+                };
+                let format = Swapchain::format_for(&device, surface, &desc)
+                    .map_err(AppError::at("the swapchain's format"))?;
+                (format, Some(desc))
+            }
+            _ => (vk::Format::R8G8B8A8_SRGB, None),
+        };
         let device = Arc::new(device);
-        let pending_swapchain = {
-            let (device, surface, hooks) = (Arc::clone(&device), Arc::clone(&surface), hooks);
-            std::thread::Builder::new()
-                .name(String::from("swapchain"))
-                .spawn(move || {
-                    let phase = Instant::now();
-                    let swapchain = match &hooks {
-                        Some(hooks) => {
-                            Swapchain::new_hooked(&device, &surface, &swapchain_desc, hooks)
-                        }
-                        None => Swapchain::new(&device, &surface, &swapchain_desc),
-                    };
-                    (swapchain, ms(phase))
-                })
-                .map_err(AppError::at("the swapchain's thread"))?
+        let pending_swapchain = match (&surface, swapchain_desc) {
+            (Some(surface), Some(swapchain_desc)) => {
+                let (device, surface, hooks) = (Arc::clone(&device), Arc::clone(surface), hooks);
+                Some(
+                    std::thread::Builder::new()
+                        .name(String::from("swapchain"))
+                        .spawn(move || {
+                            let phase = Instant::now();
+                            let swapchain = match &hooks {
+                                Some(hooks) => {
+                                    Swapchain::new_hooked(&device, &surface, &swapchain_desc, hooks)
+                                }
+                                None => Swapchain::new(&device, &surface, &swapchain_desc),
+                            };
+                            (swapchain, ms(phase))
+                        })
+                        .map_err(AppError::at("the swapchain's thread"))?,
+                )
+            }
+            _ => None,
         };
 
         // The renderer, with the device class's defaults applied whole.
@@ -454,6 +574,12 @@ impl Player {
             .forward_mut()
             .set_meshlet_culling(&device, &bindless, defaults.meshlet_culling)
             .map_err(AppError::at("meshlet culling"))?;
+        if settings.contact_shadows.is_some() {
+            renderer
+                .forward_mut()
+                .set_contact_shadows(&device, &bindless, settings.contact_shadows)
+                .map_err(AppError::at("contact shadows"))?;
+        }
         if let Some(local_shadows) = settings.local_shadows {
             renderer
                 .forward_mut()
@@ -558,24 +684,52 @@ impl Player {
             .map_err(AppError::at("the frame slots"))?;
         let graph = RenderGraph::new(&device, in_flight);
 
-        // The swapchain, made beside all of the above.
+        // The swapchain, made beside all of the above; offscreen, the image's readback.
         let wait = Instant::now();
-        let (swapchain, swapchain_ms) = pending_swapchain
-            .join()
-            .map_err(|_| AppError::message("the swapchain", String::from("its thread panicked")))?;
-        let swapchain = swapchain.map_err(AppError::at("the swapchain"))?;
-        startup.phases.push((
-            "surface + swapchain (beside the renderer and the scene)",
-            swapchain_ms,
-        ));
-        startup.phases.push(("waiting for the swapchain", ms(wait)));
-        if matches!(settings.window, Window::Exclusive)
-            && let Some(refused) = swapchain.exclusive_refused()
-        {
-            startup.notes.push(format!(
-                "the driver refused the monitor ({refused:?}): borderless full screen"
-            ));
-        }
+        let swapchain = match pending_swapchain {
+            Some(pending) => {
+                let (swapchain, swapchain_ms) = pending.join().map_err(|_| {
+                    AppError::message("the swapchain", String::from("its thread panicked"))
+                })?;
+                let swapchain = swapchain.map_err(AppError::at("the swapchain"))?;
+                startup.phases.push((
+                    "surface + swapchain (beside the renderer and the scene)",
+                    swapchain_ms,
+                ));
+                startup.phases.push(("waiting for the swapchain", ms(wait)));
+                if matches!(settings.window, Window::Exclusive)
+                    && let Some(refused) = swapchain.exclusive_refused()
+                {
+                    startup.notes.push(format!(
+                        "the driver refused the monitor ({refused:?}): borderless full screen"
+                    ));
+                }
+                Some(swapchain)
+            }
+            None => None,
+        };
+        let offscreen = match offscreen {
+            Some((width, height)) => {
+                let bytes = u64::from(width) * u64::from(height) * 4;
+                let (buffer, memory) = allocator
+                    .create_buffer(
+                        &vk::BufferCreateInfo::default()
+                            .size(bytes)
+                            .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                        MemoryLocation::Readback,
+                    )
+                    .map_err(AppError::at("the offscreen readback"))?;
+                Some(Offscreen {
+                    width,
+                    height,
+                    buffer,
+                    memory: Some(memory),
+                    requested: false,
+                    captured: None,
+                })
+            }
+            None => None,
+        };
 
         let mut player = Self {
             runtime,
@@ -602,8 +756,9 @@ impl Player {
             bindless,
             allocator,
             paced: None,
-            swapchain: Some(swapchain),
+            swapchain,
             surface,
+            offscreen,
             latency: None,
             dlss: None,
             streamline,
@@ -620,6 +775,8 @@ impl Player {
             probe_extract: None,
             gi_extract,
             gi_settings,
+            gi_remake: false,
+            gi_converged: false,
             scene_ready: false,
             scene_settled: false,
             swapchain_format,
@@ -767,6 +924,7 @@ impl Player {
             world: &mut self.runtime.world,
             jobs: &self.jobs,
             scene: &self.scene_info,
+            environment: &mut self.environment,
         }
     }
 
@@ -815,6 +973,14 @@ impl Player {
     pub fn camera(&self, fov_y: f32, near: f32, far: f32) -> Camera {
         Camera::perspective(fov_y, near, far)
             .with_antialiasing(self.defaults.antialiasing, self.defaults.quality)
+    }
+
+    /// The view settings cameras do not carry (`engine_runtime::CameraView::base_mut`):
+    /// bloom, the tone curve, grading, color vision, depth of field, occlusion culling,
+    /// cached shadows, the clear color. A camera entity gives its antialiasing, render
+    /// size, exposure and kind.
+    pub fn view_settings_mut(&mut self) -> &mut ViewSettings {
+        self.cameras.base_mut()
     }
 
     /// The renderer's features in effect (the device class's defaults, or the settings').
@@ -884,6 +1050,30 @@ impl Player {
         self.gi_settings
     }
 
+    /// Changes the GI volume's settings, or turns it off (`None`); a player's graphics
+    /// options. The volume is made again with them at the next frame and converges again.
+    /// Without ray queries nothing changes.
+    pub fn set_global_illumination(&mut self, settings: Option<GiSettings>) {
+        if self.device.ray_query().is_some() {
+            self.gi_settings = settings;
+            self.gi_remake = true;
+        }
+    }
+
+    /// The pack's textures hold their tails: probes capture and the GI volume's rays trace
+    /// the scene's materials from now on.
+    pub fn scene_ready(&self) -> bool {
+        self.scene_ready
+    }
+
+    /// The streaming has gone quiet once since the start (the view's textures and mesh
+    /// levels arrived) and the probes were then asked for new captures: with
+    /// [`Self::reflection_probes`]' pending captures done and [`Self::gi_volume`]
+    /// converged, the world looks as it will (a loading screen's end).
+    pub fn scene_settled(&self) -> bool {
+        self.scene_settled
+    }
+
     /// The latency provider.
     pub fn latency(&self) -> Option<&Latency> {
         self.latency.as_ref()
@@ -905,18 +1095,74 @@ impl Player {
         self.dlss.as_ref()
     }
 
-    /// The frame's size: the swapchain's.
+    /// The frame's size: the swapchain's, or the offscreen image's.
     pub fn extent(&self) -> vk::Extent2D {
-        match (&self.swapchain, &self.paced) {
-            (Some(swapchain), _) => swapchain.extent(),
-            (None, Some(paced)) => paced.extent(),
-            (None, None) => vk::Extent2D::default(),
+        match (&self.swapchain, &self.paced, &self.offscreen) {
+            (Some(swapchain), _, _) => swapchain.extent(),
+            (None, Some(paced), _) => paced.extent(),
+            (None, None, Some(offscreen)) => vk::Extent2D {
+                width: offscreen.width,
+                height: offscreen.height,
+            },
+            (None, None, None) => vk::Extent2D::default(),
         }
     }
 
-    /// The window.
-    pub fn window(&self) -> WindowHandle {
+    /// The window (none offscreen).
+    pub fn window(&self) -> Option<WindowHandle> {
         self.window
+    }
+
+    /// The sky, its light, the atmosphere and fog (`engine_render::environment`): set them
+    /// for the world (`set_sky`, `set_atmosphere`, `set_fog`, `set_panorama`).
+    pub fn environment_mut(&mut self) -> &mut Environment {
+        &mut self.environment
+    }
+
+    /// Runs one frame like [`Self::frame`] and returns its image once the GPU has finished
+    /// it: 8-bit sRGB RGBA, rows top to bottom. Offscreen players only
+    /// ([`Window::Offscreen`]); `None` when the frame rendered nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::frame`], and on a player with a window.
+    pub fn capture(&mut self, game: &mut impl Game) -> Result<Option<Vec<u8>>, AppError> {
+        let Some(offscreen) = &mut self.offscreen else {
+            return Err(AppError::message(
+                "capturing a frame",
+                String::from("only an offscreen player captures"),
+            ));
+        };
+        offscreen.requested = true;
+        offscreen.captured = None;
+        let rendered = self.frame(game)?;
+        let Some(offscreen) = &mut self.offscreen else {
+            unreachable!("checked above");
+        };
+        offscreen.requested = false;
+        let Some(number) = offscreen.captured.take().filter(|_| rendered.is_some()) else {
+            return Ok(None);
+        };
+        self.frames
+            .wait_for_frame(number)
+            .map_err(AppError::at("waiting for the captured frame"))?;
+        let Some(offscreen) = &self.offscreen else {
+            unreachable!("checked above");
+        };
+        let bytes = offscreen.bytes() as usize;
+        let mapped = offscreen
+            .memory
+            .as_ref()
+            .and_then(Allocation::mapped_ptr)
+            .ok_or_else(|| {
+                AppError::message(
+                    "capturing a frame",
+                    String::from("the readback is not mapped"),
+                )
+            })?;
+        // SAFETY: the frame that wrote the buffer has finished; the mapping covers `bytes`.
+        let pixels = unsafe { core::slice::from_raw_parts(mapped.as_ptr(), bytes) };
+        Ok(Some(pixels.to_vec()))
     }
 
     /// Whether the window asked to close: [`Self::run`] stops.
@@ -971,19 +1217,21 @@ impl Player {
                 &mut self.minimized,
                 &mut self.client,
             );
-            self.windows.drain_events(|event| {
-                match event.kind {
-                    WindowEventKind::CloseRequested => *closing = true,
-                    WindowEventKind::Resized { width, height } => {
-                        *resized = true;
-                        *minimized = width == 0 || height == 0;
-                        *client = (width, height);
+            if let Some(windows) = &mut self.windows {
+                windows.drain_events(|event| {
+                    match event.kind {
+                        WindowEventKind::CloseRequested => *closing = true,
+                        WindowEventKind::Resized { width, height } => {
+                            *resized = true;
+                            *minimized = width == 0 || height == 0;
+                            *client = (width, height);
+                        }
+                        WindowEventKind::Minimized => *minimized = true,
+                        _ => {}
                     }
-                    WindowEventKind::Minimized => *minimized = true,
-                    _ => {}
-                }
-                game.event(&event);
-            });
+                    game.event(&event);
+                });
+            }
         }
         if self.closing {
             return Ok(None);
@@ -1325,44 +1573,56 @@ impl Player {
                     },
                 )
             };
-            let (present, generated) = match (&self.swapchain, paced_images) {
-                (Some(swapchain), _) => (
-                    // DLSS frame generation: the frame is drawn apart, kept without its UI
-                    // for Streamline, and copied to the swapchain image under the UI.
-                    Some(PresentTarget::import_with(
-                        &mut fg,
-                        swapchain,
-                        acquired.map_or(0, |a| a.index),
-                        self.dlss.is_some()
-                            || self
-                                .settings
-                                .present_apart
-                                .unwrap_or_else(|| swapchain.presents_across_adapters()),
-                    )),
-                    None,
-                ),
-                (None, Some(images)) => (
-                    None,
-                    Some((
-                        import(&mut fg, "real frame", images.real),
-                        GeneratedTarget {
-                            texture: import(&mut fg, "generated frame", images.generated),
-                            format: images.generated.raw_format,
-                            source_format: images.real.raw_format,
-                        },
-                    )),
-                ),
-                (None, None) => {
-                    return Err(AppError::message(
-                        "the frame",
-                        String::from("nothing presents"),
-                    ));
-                }
-            };
-            let target = match (&present, &generated) {
-                (Some(present), _) => present.texture,
-                (None, Some((real, _))) => *real,
-                (None, None) => unreachable!("one of them presents"),
+            let (present, generated, offscreen_target) =
+                match (&self.swapchain, paced_images, &self.offscreen) {
+                    (Some(swapchain), _, _) => (
+                        // DLSS frame generation: the frame is drawn apart, kept without its UI
+                        // for Streamline, and copied to the swapchain image under the UI.
+                        Some(PresentTarget::import_with(
+                            &mut fg,
+                            swapchain,
+                            acquired.map_or(0, |a| a.index),
+                            self.dlss.is_some()
+                                || self
+                                    .settings
+                                    .present_apart
+                                    .unwrap_or_else(|| swapchain.presents_across_adapters()),
+                        )),
+                        None,
+                        None,
+                    ),
+                    (None, Some(images), _) => (
+                        None,
+                        Some((
+                            import(&mut fg, "real frame", images.real),
+                            GeneratedTarget {
+                                texture: import(&mut fg, "generated frame", images.generated),
+                                format: images.generated.raw_format,
+                                source_format: images.real.raw_format,
+                            },
+                        )),
+                        None,
+                    ),
+                    (None, None, Some(_)) => (
+                        None,
+                        None,
+                        Some(fg.create_texture(
+                            "offscreen frame",
+                            TextureDesc::new_2d(self.swapchain_format, extent.width, extent.height),
+                        )),
+                    ),
+                    (None, None, None) => {
+                        return Err(AppError::message(
+                            "the frame",
+                            String::from("nothing presents"),
+                        ));
+                    }
+                };
+            let target = match (&present, &generated, offscreen_target) {
+                (Some(present), _, _) => present.texture,
+                (None, Some((real, _)), _) => *real,
+                (None, None, Some(image)) => image,
+                (None, None, None) => unreachable!("one of them presents"),
             };
             let mut context = FrameContext {
                 device: &self.device,
@@ -1508,6 +1768,9 @@ impl Player {
                 generation.add_pass(&mut fg, input, id);
             }
             generated_shown = view_frame.generated.is_some_and(|g| g.shown);
+            if let (Some(image), Some(offscreen)) = (offscreen_target, &mut self.offscreen) {
+                offscreen.add_pass(&mut fg, image, frame.number);
+            }
             if let Some(feedback) = &mut self.feedback {
                 feedback
                     .add_pass(
@@ -1559,7 +1822,10 @@ impl Player {
                     None,
                 )
                 .map_err(AppError::at("submitting the frame"))?,
-            (None, None) => unreachable!("one of them presents"),
+            (None, None) => self
+                .frames
+                .submit(self.device.graphics, frame, false, None)
+                .map_err(AppError::at("submitting the frame"))?,
         }
         report.submit = us(t);
         let t = Instant::now();
@@ -1604,7 +1870,8 @@ impl Player {
                     }
                 }
             }
-            (None, None) => unreachable!("one of them presents"),
+            // Offscreen: nothing is presented.
+            (None, None) => {}
         }
         marker(
             &mut self.latency,
@@ -1670,13 +1937,20 @@ impl Player {
                 extract.sync(&mut self.runtime.world, probes);
             }
         }
-        let Some(settings) = self.gi_settings else {
-            return Ok(());
-        };
-        let grid = self.gi_extract.grid(&self.runtime.world);
-        if grid == self.gi.as_ref().map(ProbeGi::grid) {
+        // Probes capture the scene as the volume lights it: again once it has converged.
+        if !self.gi_converged && self.gi.as_ref().is_some_and(ProbeGi::is_converged) {
+            self.gi_converged = true;
+            if let Some(probes) = &self.probes {
+                probes.refresh_all();
+            }
+        }
+        let grid = self
+            .gi_settings
+            .and_then(|_| self.gi_extract.grid(&self.runtime.world));
+        if grid == self.gi.as_ref().map(ProbeGi::grid) && !core::mem::take(&mut self.gi_remake) {
             return Ok(());
         }
+        self.gi_converged = false;
         if self.gi.is_some() {
             self.wait_idle()?;
             if let Some(mut old) = self.gi.take() {
@@ -1684,8 +1958,8 @@ impl Player {
                 unsafe { old.destroy(&self.device, &mut self.allocator, &self.bindless) };
             }
         }
-        match grid {
-            Some(grid) => {
+        match grid.zip(self.gi_settings) {
+            Some((grid, settings)) => {
                 if self.gi_rays.is_none() {
                     // The meshes' coarsest levels: enough for diffuse light, and resident
                     // from the start in streamed packs (ADR 0087).
@@ -1739,10 +2013,10 @@ impl Player {
                     .map_err(AppError::at("stopping the paced presenter"))?,
             );
         }
-        if let Some(swapchain) = &mut self.swapchain {
+        if let (Some(swapchain), Some(surface)) = (&mut self.swapchain, &self.surface) {
             let extent = swapchain.extent();
             swapchain
-                .recreate(&self.device, &self.surface, extent.width, extent.height)
+                .recreate(&self.device, surface, extent.width, extent.height)
                 .map_err(AppError::at("the swapchain"))?;
         }
         self.start_presentation()
@@ -1793,12 +2067,19 @@ impl Drop for Player {
             self.geometry.destroy(&mut self.allocator);
             self.materials.destroy(&mut self.allocator);
             self.textures.destroy(&mut self.allocator, &self.bindless);
+            if let Some(offscreen) = &mut self.offscreen
+                && let Some(memory) = offscreen.memory.take()
+            {
+                self.allocator.destroy_buffer(offscreen.buffer, memory);
+            }
         }
         // Streamline before the device it is attached to (its shutdown releases what it
         // made on it); the rest drops in field order.
         self.latency = None;
         self.dlss = None;
-        let _ = self.windows.destroy_window(self.window.id);
+        if let (Some(windows), Some(window)) = (&self.windows, self.window) {
+            let _ = windows.destroy_window(window.id);
+        }
     }
 }
 
@@ -1821,6 +2102,8 @@ fn start_gpu(
     warm_up: bool,
     cache_dir: Option<&std::path::Path>,
     preference: &AdapterPreference,
+    validation: Option<bool>,
+    surface: bool,
 ) -> Result<GpuStart, AppError> {
     let phase = Instant::now();
     let mut notes = Vec::new();
@@ -1841,6 +2124,9 @@ fn start_gpu(
     let instance = Instance::with_extensions(
         &InstanceDesc {
             app_name: app_name.to_owned(),
+            validation: validation.unwrap_or(InstanceDesc::default().validation),
+            sync_validation: validation == Some(true),
+            surface,
             ..InstanceDesc::default()
         },
         &streamline
@@ -1908,7 +2194,9 @@ fn full_screen_choice(window: Window, hwnd: isize) -> FullScreenExclusive {
             },
             None => FullScreenExclusive::Disallowed,
         },
-        Window::FullScreen | Window::Windowed { .. } => FullScreenExclusive::Disallowed,
+        Window::FullScreen | Window::Windowed { .. } | Window::Offscreen { .. } => {
+            FullScreenExclusive::Disallowed
+        }
     }
 }
 

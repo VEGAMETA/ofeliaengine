@@ -142,6 +142,40 @@ What each costs in `flight` (Sponza with 2,000 moving cubes and 64 characters, a
 On a small integrated GPU each is a choice to make with your players: offer them as
 settings.
 
+## The world's look, and a loading screen
+
+- **The sky, the atmosphere and fog** are set up with the world: `player.setup()`'s
+  `environment` (`set_atmosphere`, `set_fog`, `set_panorama`, `set_intensity`).
+- **Bloom, the tone curve, color grading, depth of field** and the clear color live in
+  `player.view_settings_mut()`. The camera entity gives the antialiasing, the render size,
+  the exposure and whether it is cinematic.
+- **Graphics options at run time:** `player.set_global_illumination(...)` changes the GI
+  volume's settings or turns it off; the volume is made again and converges again.
+- **When to lift a loading screen:** `player.scene_settled()` says that streaming has gone
+  quiet once and the probes have been asked for new captures. Add that
+  `reflection_probes()` have no capture pending and `gi_volume()` has converged.
+
+## Without a window
+
+`Window::Offscreen { width, height }` renders without a window, a swapchain or latency
+control: tests, benchmarks, renders on a machine without a screen. `player.capture(&mut
+game)` runs a frame and returns its pixels (8-bit sRGB RGBA, rows top to bottom):
+
+```rust
+let mut player = Player::new(&PlayerSettings {
+    window: Window::Offscreen { width: 1280, height: 720 },
+    validation: Some(true), // with synchronization validation
+    ..PlayerSettings::default()
+})?;
+for _ in 0..60 {
+    player.frame(&mut game)?;
+}
+let rgba = player.capture(&mut game)?.expect("a frame");
+```
+
+The golden tests render `sponza_day` this way and hold it to the image the test bed
+draws by hand (`docs/dev-guide/testing.md`).
+
 ## Each frame
 
 1. Window events go to `Game::event`.
@@ -173,6 +207,7 @@ game is running.
 | `screen_space_reflections` | off, or `SsrSettings` (half-resolution rays by default) |
 | `global_illumination` | the GPU class's (`None`), your `GiSettings`, or off (`Some(None)`) |
 | `reflection_probes` | the probes' room and captures, or off (`None`) |
+| `contact_shadows` | the sun's contact shadows, off by default |
 
 ## Crash reports
 

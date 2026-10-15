@@ -12,5 +12,6 @@
 mod decal_set;
 pub mod flip;
 pub mod golden;
+mod player;
 pub mod registers;
 pub mod scene;
