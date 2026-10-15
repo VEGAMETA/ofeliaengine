@@ -350,6 +350,6 @@ vsm.vsmArgs	CS	Register Count	16
 vsm.vsmBeginFrame	CS	Register Count	16
 vsm.vsmClear	CS	Register Count	28
 vsm.vsmCollectDirty	CS	Register Count	16
-vsm.vsmFindPages	CS	Register Count	16
+vsm.vsmFindPages	CS	Register Count	21
 vsm.vsmMark	CS	Register Count	35
 vsm.vsmVisibility	CS	Register Count	40

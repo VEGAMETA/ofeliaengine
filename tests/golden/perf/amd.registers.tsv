@@ -709,7 +709,7 @@ vsm.vsmClear	ShaderProperties.cs	numUsedVgprs	12
 vsm.vsmClear	ShaderProperties.cs	scratchMemUsageInBytes	0
 vsm.vsmCollectDirty	ShaderProperties.cs	numUsedVgprs	15
 vsm.vsmCollectDirty	ShaderProperties.cs	scratchMemUsageInBytes	0
-vsm.vsmFindPages	ShaderProperties.cs	numUsedVgprs	6
+vsm.vsmFindPages	ShaderProperties.cs	numUsedVgprs	19
 vsm.vsmFindPages	ShaderProperties.cs	scratchMemUsageInBytes	0
 vsm.vsmMark	ShaderProperties.cs	numUsedVgprs	34
 vsm.vsmMark	ShaderProperties.cs	scratchMemUsageInBytes	0
