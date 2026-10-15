@@ -117,6 +117,14 @@ Step 2, one indexed draw per visible meshlet. The numbers are in ADR 0085's adde
 - **Order.** Meshlet draws come in the GPU's order. Without a depth prepass that undoes
   the front-to-back order: Sponza +15 % (Radeon) and +35–50 % (RTX). The path needs the
   prepass.
+  - Measured 2026-10-15 with the culls serialized, so the draws keep an exact order
+    (ADR 0085's note of that day):
+    - with the default 1024² cascades, the light's order saves the cascades 12 % on the
+      RTX's Intel Sponza and next to nothing elsewhere;
+    - at 2048² it saves 19 % (RTX) and 9 % (Radeon);
+    - the camera's order helps only the RTX's Sponza prepass (−11 %).
+  - Appends that keep an order are not built for now: they would cost more than they
+    save at the defaults.
 - **Merging runs of visible meshlets into one draw** (consecutive ranges of the level's
   indices) cuts the draws 16× on Sponza. But finding the runs through shared memory
   costs the cull more than the RTX's prepass saves.

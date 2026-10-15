@@ -311,7 +311,11 @@ fn shots() -> Vec<Shot> {
 
 const SPONZA: &str = "Sponza/Sponza.gltf";
 
-/// The glTF `scene` with `class`'s defaults (`engine_frame::RenderDefaults`).
+/// The glTF `scene` with `class`'s defaults (`engine_frame::RenderDefaults`), cooked as a
+/// game's pack is by default: with the meshes' detail levels. Without them, the view and
+/// every cascade drew Intel's Sponza (3.7 M triangles) at full detail: its shadows took
+/// 21.3 ms on the Radeon instead of 4.1, and the integrated class's frame 57.6 ms instead
+/// of 33.8.
 fn class_defaults(name: &'static str, scene: &str, class: DeviceClass) -> Shot {
     let defaults = RenderDefaults::for_class(class);
     Shot {
@@ -320,6 +324,7 @@ fn class_defaults(name: &'static str, scene: &str, class: DeviceClass) -> Shot {
         antialiasing: defaults.antialiasing,
         quality: defaults.quality,
         meshlets: defaults.meshlet_culling,
+        lods: true,
         ..Shot::new(name, Source::Gltf(PathBuf::from(scene)))
     }
 }

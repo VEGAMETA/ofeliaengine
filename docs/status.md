@@ -110,11 +110,19 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
     - 10,000 detailed spheres (scene settings of `draw_bench`): −3 to −8 % on the RTX,
       −11 to −19 % on the Radeon.
   - Drawing pixel-bound instances whole was tried and dropped (ADR 0085's addendum).
+  - **The draws' order measured 2026-10-15** (ADR 0085's note; branch `exp/meshlet-order`).
+    - An exact order would pay only for the light's order in the cascades. At the
+      default 1024² it saves 12 % on the RTX's Intel Sponza and next to nothing
+      elsewhere.
+    - That is less than appends keeping an order would cost (two dispatches per list), so
+      they are not built. Revisit with finer cascades (2048²: −19 % RTX, −9 % Radeon) or
+      virtual pages.
+  - **The perf gate's class-default scenes cook with detail levels** since 2026-10-15, as
+    a game's pack does. Before, they drew full meshes.
+    - Intel's Sponza with the integrated defaults on the Radeon: 57.6 → 33.8 ms, its
+      shadows 21.3 → 4.1 ms.
   - Next:
     - step 3, RTX mesh shaders;
-    - the shadow casters in the light's depth order (the camera's front-to-back order
-      costs the RTX's Sponza shadows 17 µs);
-    - the view's meshlet draws front to back;
     - local lights' shadows.
 - **3c, custom materials** (ADR 0092, accepted 2026-10-12): step 1 (the passes through
   `IMaterial`, PR #179), step 2 (material types in the renderer: typed materials,
@@ -608,7 +616,10 @@ grown, divide and conquer); the old labels stay in parentheses.
     cull with fewer registers on the RTX (47 → 40) ran more groups at once and shuffled
     the draws. That cost the passes drawing them their front-to-back order: Sponza,
     prepass +8 %, shadows +9–13 % (ADR 0093). Appends that keep the work items' order
-    (counts, a scan, then writes) would make it robust;
+    (counts, a scan, then writes) would make it robust.
+    - Measured 2026-10-15: the instances' own order, kept exactly, is no better than the
+      GPU's. Only the light's order gains, in the cascades (ADR 0085's note).
+    - Not built: at the default 1024² it saves less than the appends would cost;
   - **cached cascades** (ADR 0093): instanced draws (meshes without meshlets, material
     types) still go piece by piece, each drawing every caster the cascade's regions reach;
     a rendering per layer costs the Radeon 6 % when everything is drawn whole (the first
