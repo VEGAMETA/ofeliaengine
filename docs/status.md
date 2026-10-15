@@ -634,13 +634,20 @@ grown, divide and conquer); the old labels stay in parentheses.
    - ~~Step 3: lights and skinned meshes as components~~ (done 2026-10-15, ADR 0099):
      `PointLight`, `SpotLight`, `Sun` and `SkinnedMesh`, extracted by the runtime (a
      light keeps its slot while it lives); probes moved to step 4 with their features.
-   - Step 4: ~~features per view~~ (done 2026-10-15: `ViewFeatures` in `ViewSettings`; a
-     view without a feature is drawn as a renderer without it); ~~reflection probes and
-     the GI volume as components~~ (done 2026-10-15: `ReflectionProbe` and `GiVolume`
-     entities, each made with its first entity and free before; screen-space reflections
-     a setting; probes in a moving world captured in turn, at most every 30 frames for the
-     scene's changes; the render graph keeps the objects of recent frame shapes); the
-     benches and the test bed on the crate.
+   - ~~Step 4~~ (done 2026-10-15, ADR 0099):
+     - features per view (`ViewFeatures` in `ViewSettings`; a view without a feature is
+       drawn as a renderer without it);
+     - reflection probes and the GI volume as components (`ReflectionProbe`, `GiVolume`),
+       each made with its first entity and free before; screen-space reflections a
+       setting;
+     - probes in a moving world captured in turn, at most every 30 frames for the
+       scene's changes, and the render graph keeping recent frame shapes;
+     - an offscreen player (`Window::Offscreen`, `Player::capture`); the golden test
+       `sponza_by_day_on_the_player` holds the player's render of `sponza_day` to the
+       bed's image, and the perf gate times it (`sponza_day_player`);
+     - `tools/stress` a game on the player. `scene_bench`, `stream_bench` and the bed's
+       feature shots stay below the player: they measure one subsystem each, and the
+       player's own shot covers the game's path.
    - Follow-ups of the player: window events read again after latency control's wait
      (today they are read before it); reflection probes one face a frame on integrated
      GPUs (a whole capture is about 6 ms in one frame on the Radeon; to measure); HDR

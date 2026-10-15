@@ -1,7 +1,6 @@
 # 0099. The player crate (`engine_app`) and its window modes
 
-- Status: Accepted (steps 1 to 3 done; step 4 in parts: the features per view,
-  reflections and GI done)
+- Status: Accepted (done: steps 1 to 4, 2026-10-15)
 - Date: 2026-10-15
 - Related:
   - [ADR 0023](0023-latency.md): the latency providers;
@@ -293,11 +292,74 @@ Measured on ref-1 (`flight`, release, Sponza's pack, 2,000 movers and 64 charact
   - `probes_follow_their_entities_and_wait_for_room` and
     `the_volume_covers_its_entitys_box`: unit tests of the mirroring.
 
-**Left for this step:**
+**Done third (2026-10-15): the tools on the crate, as far as they measure a game.**
 
-- **On the crate:** `scene_bench`, `stream_bench`, `tools/stress` and the golden test bed
-  move onto `engine_app`. Their scenes and numbers stay comparable: each move is checked
-  against the previous binary.
+The plan moved `scene_bench`, `stream_bench`, `tools/stress` and the golden test bed onto
+the crate. Read again with the crate built, the four are of two kinds:
+
+- **Programs that run a game:** the stress scene, `flight`, the golden shots of a game's
+  frame. They belong on the player, so that what they measure is what games run.
+- **Benches of one subsystem:**
+  - `scene_bench` drives the forward renderer alone, pass by pass; its numbers anchor
+    ADRs 0039 to 0098, and its `--pipeline-stats` is the register check's tool.
+  - `stream_bench` drives streaming under controlled draws, budgets and feedback
+    settings.
+  - Most of the test bed's shots turn one renderer feature on in isolation: draw lists,
+    MSAA variants, procedural scenes, Brixelizer GI, readbacks of the GI.
+
+  On the player they would either lose that control or make the player's API a list of
+  test knobs. **They stay below the player.** The player's own golden shot and perf
+  scene keep the game's path covered; `flight` measures a game's frame end to end.
+
+As built:
+
+- **The offscreen player** (`Window::Offscreen { width, height }`): no window, surface,
+  swapchain or latency control (nor frame generation).
+  - Each frame is drawn into an 8-bit sRGB image, kept by a pass that is never culled.
+  - `Player::capture` runs a frame that copies the image into a readback buffer and
+    returns its pixels once the GPU has finished.
+  - `PlayerSettings::validation` turns synchronization validation on.
+  - For tests, benchmarks and renders without a screen.
+- **What games needed for it, too:**
+  - `Setup::environment` (the sky, atmosphere, fog and panorama);
+  - `Player::view_settings_mut` (bloom, the tone curve, grading, color vision, depth of
+    field, occlusion culling, cached shadows, the clear color);
+  - `PlayerSettings::contact_shadows`;
+  - `Player::set_global_illumination` (the volume's settings at run time, or off);
+  - the probes captured again once the volume converges;
+  - `Player::scene_ready` and `scene_settled` (a loading screen's end).
+- **The golden bed's `Shot::player`:** a shot renders through an offscreen player.
+  - The scene is cooked as the bed's and written to a pack the player streams.
+  - The sun, lights, probes and GI volume are entities.
+  - Capture waits until streaming has been quiet for 70 frames, the probes are captured
+    and the volume has converged; then the camera's cut starts the history as the bed's
+    does.
+  - Fields the path does not take fail the shot.
+  - **`sponza_by_day_on_the_player`** renders `sponza_day` this way and holds it to the
+    bed's own golden image:
+    - mean FLIP 0.015 on the RTX and 0.016 on the Radeon (99.9th percentile 0.08 and
+      0.09), within a mean of 0.03. The frame histories differ: TAAU's and SSR's phases,
+      and the GI volume's updates since it converged.
+    - The player against itself: 0.002.
+    - A lost feature moves it far more: without GI or the probes the mean is 0.29–0.63;
+      without SSR or contact shadows the 99.9th percentile is 0.39–0.80.
+  - **Perf gate scene `sponza_day_player`** (1920 × 1080), baselines on both GPUs. Its
+    five pipelines that the other scenes do not make were added to the register
+    baselines (191 → 196).
+- **`tools/stress` is a game on the player:**
+  - its simulation is the game's tick (one 240 Hz tick a frame);
+  - its cubes are entities, the frame is the device class's, uncapped with latency
+    control off.
+  - The draw-list mode and `--gpu-scene` are gone.
+  - Measured against the old `--gpu-scene` frame:
+
+    | | RTX 4060 Ti | Radeon iGPU |
+    |---|---:|---:|
+    | extraction | 134 → 75–83 µs | 251 → 99 µs |
+    | CPU, pools to presenting | 439 → 321–363 µs | 701 → 509 µs |
+    | GPU | 292 µs → 1,136 µs (499 FPS) | 8.1 → 15.0 ms |
+
+    The GPU now draws a game's frame, not just the forward pass and the tone map.
 
 ## Consequences
 
