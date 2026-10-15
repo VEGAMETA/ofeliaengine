@@ -7,7 +7,7 @@
 use super::*;
 use crate::graph::PassContext;
 use crate::shadow::Keep;
-use crate::shadow_cache::{Held, Plan as ShadowPlan};
+use crate::shadow_cache::{Held, MAX_PIECES, Piece, Plan as ShadowPlan};
 
 impl ForwardRenderer {
     /// Declares the passes of a laid-out frame (both paths).
@@ -75,7 +75,6 @@ impl ForwardRenderer {
             max,
             subsurface_draws,
             meshlets,
-            ..
         } = *layout;
         // The meshlet lists (ADR 0085): in the command buffer after every phase's command
         // list, one per phase; their draws' slots in the visible buffer after the phases'.
@@ -339,8 +338,22 @@ impl ForwardRenderer {
             ),
         };
         let resolution = settings.resolution.max(1);
+        // A cache's cascade drawn in several pieces draws them at once with the meshlet path,
+        // where vertex shaders pick viewports (ADR 0093): the piece cull and pipelines, and
+        // where the meshlet draws' pieces go in the caster lists (after the cascades'
+        // meshlet slots, from a draw's slot).
+        let pieces = match (cache, shadow_shaders, &self.shadow_pieces, shadow_meshlets) {
+            (Some(_), Some(s), Some(p), Some(m)) => s.pieces.as_ref().and_then(|cull| {
+                Some((
+                    cull,
+                    [ready(&p[0])?, ready(&p[1])?],
+                    cascade_count * m.layout.draws,
+                ))
+            }),
+            _ => None,
+        };
         let (plans, held) = match cache {
-            Some(c) => c.plan(&fit),
+            Some(c) => c.plan(&fit, pieces.is_some()),
             None => whole_plans(&fit, resolution),
         };
         let frame = FrameData {
@@ -382,6 +395,7 @@ impl ForwardRenderer {
                 &held,
                 self.lod_threshold,
                 cache.is_none().then(|| settings.atlas_grid()),
+                pieces.map(|p| p.2),
             ),
             cascade_count: fit.count as u32,
             command_count,
@@ -451,7 +465,7 @@ impl ForwardRenderer {
             },
             material_data: materials.params().0,
             material_stride: materials.params().1,
-            _material_pad: 0,
+            cascade_layers: if cache.is_some() { 1.0 } else { 0.0 },
             batch_meshlets: meshlets.map_or(0, |m| m.table),
             meshlets: meshlets.map_or(0, |_| geometry.index_address()),
             meshlet_offset: {
@@ -539,7 +553,10 @@ impl ForwardRenderer {
             BufferDesc {
                 size: u64::from(cascade_count)
                     * (visible_bytes
-                        + shadow_meshlets.map_or(0, |m| u64::from(m.layout.draws) * 4)),
+                        + shadow_meshlets.map_or(0, |m| {
+                            // Their pieces after the slots, when drawn at once.
+                            u64::from(m.layout.draws) * if pieces.is_some() { 8 } else { 4 }
+                        })),
             },
         );
         // Local lights' shadow views drawn this frame: their command and caster lists,
@@ -768,8 +785,18 @@ impl ForwardRenderer {
                                             phase: PHASE_SHADOW_MESHLETS + k,
                                             ..push
                                         };
+                                        // Drawn in several pieces at once: its runs get
+                                        // their pieces.
+                                        let cull = match pieces {
+                                            Some((cull, ..))
+                                                if plans[k as usize].piece_count() > 1 =>
+                                            {
+                                                cull
+                                            }
+                                            _ => &shaders.meshlets,
+                                        };
                                         rec.dispatch_indirect(
-                                            &shaders.meshlets,
+                                            cull,
                                             args,
                                             m.lists(k) + MESHLET_ARGS,
                                             &push,
@@ -806,6 +833,7 @@ impl ForwardRenderer {
                             visible: ctx.address(casters),
                             ..base
                         };
+                        let mut drawn_together = 0;
                         for (cascade, plan) in plans[..count].iter().enumerate() {
                             if plan.rect_count == 0 {
                                 continue;
@@ -842,49 +870,113 @@ impl ForwardRenderer {
                             } else {
                                 vk::Offset2D::default()
                             };
-                            for piece in plan.rects().iter().flat_map(|r| r.pieces()) {
-                                let area = DrawArea {
-                                    viewport: vk::Rect2D {
-                                        offset: vk::Offset2D {
-                                            x: tile.x + piece.viewport[0],
-                                            y: tile.y + piece.viewport[1],
-                                        },
-                                        extent: vk::Extent2D {
-                                            width: resolution,
-                                            height: resolution,
-                                        },
+                            let area_of = |piece: &Piece| DrawArea {
+                                viewport: vk::Rect2D {
+                                    offset: vk::Offset2D {
+                                        x: tile.x + piece.viewport[0],
+                                        y: tile.y + piece.viewport[1],
                                     },
-                                    scissor: vk::Rect2D {
-                                        offset: vk::Offset2D {
-                                            x: tile.x + piece.scissor.offset.x,
-                                            y: tile.y + piece.scissor.offset.y,
-                                        },
-                                        extent: piece.scissor.extent,
+                                    extent: vk::Extent2D {
+                                        width: resolution,
+                                        height: resolution,
                                     },
+                                },
+                                scissor: vk::Rect2D {
+                                    offset: vk::Offset2D {
+                                        x: tile.x + piece.scissor.offset.x,
+                                        y: tile.y + piece.scissor.offset.y,
+                                    },
+                                    extent: piece.scissor.extent,
+                                },
+                            };
+                            let clear = vk::ClearAttachment {
+                                aspect_mask: vk::ImageAspectFlags::DEPTH,
+                                color_attachment: 0,
+                                clear_value: vk::ClearValue {
+                                    depth_stencil: vk::ClearDepthStencilValue {
+                                        depth: 1.0,
+                                        stencil: 0,
+                                    },
+                                },
+                            };
+                            let clear_rect = |piece: &Piece| vk::ClearRect {
+                                rect: piece.scissor,
+                                base_array_layer: 0,
+                                layer_count: 1,
+                            };
+                            // A cache's cascade in several pieces with the meshlet path:
+                            // its meshlet draws at once, each run's instances into its
+                            // pieces' viewports (a piece drawn on its own draws every
+                            // caster any of the cascade's rectangles reaches); the rest
+                            // piece by piece.
+                            let together = pieces
+                                .zip(shadow_meshlets.as_ref())
+                                .filter(|_| plan.piece_count() > 1);
+                            if let Some(((_, pipelines, _), m)) = together {
+                                drawn_together += 1;
+                                let storage = held[cascade].map_or([0, 0], |h| h.storage_origin());
+                                let whole = vk::Viewport {
+                                    x: 0.0,
+                                    y: 0.0,
+                                    width: resolution as f32,
+                                    height: resolution as f32,
+                                    min_depth: 0.0,
+                                    max_depth: 1.0,
                                 };
+                                let mut viewports = [whole; MAX_PIECES];
+                                let mut scissors = [vk::Rect2D::default(); MAX_PIECES];
+                                let mut rects = [vk::ClearRect::default(); MAX_PIECES];
+                                let mut cleared = 0;
+                                for (slot, piece) in plan.piece_slots(storage) {
+                                    let area = area_of(piece);
+                                    viewports[slot] = vk::Viewport {
+                                        x: area.viewport.offset.x as f32,
+                                        y: area.viewport.offset.y as f32,
+                                        ..whole
+                                    };
+                                    scissors[slot] = area.scissor;
+                                    rects[cleared] = clear_rect(piece);
+                                    cleared += 1;
+                                }
+                                // SAFETY: recording inside the pass's rendering scope (as
+                                // below); the pieces are inside the layer.
+                                unsafe {
+                                    if load == LoadOp::Load {
+                                        ctx.device.cmd_clear_attachments(
+                                            ctx.cmd,
+                                            &[clear],
+                                            &rects[..cleared],
+                                        );
+                                    }
+                                    ctx.device.cmd_set_viewport(ctx.cmd, 0, &viewports);
+                                    ctx.device.cmd_set_scissor(ctx.cmd, 0, &scissors);
+                                    states.draw_meshlets(
+                                        ctx,
+                                        bindless,
+                                        &geometry,
+                                        pipelines,
+                                        &push,
+                                        true,
+                                        DEPTH_STATES,
+                                        ctx.buffer(shadow_commands),
+                                        m.lists(cascade as u32),
+                                        m,
+                                        DrawAreas::Set,
+                                    );
+                                }
+                            }
+                            for piece in plan.rects().iter().flat_map(|r| r.pieces()) {
+                                let area = area_of(piece);
                                 // SAFETY: recording inside the pass's rendering scope; the
                                 // pass reads the commands (indirect), the caster lists,
                                 // the pool and the material table; the piece is inside
                                 // the layer.
                                 unsafe {
-                                    if load == LoadOp::Load {
+                                    if load == LoadOp::Load && together.is_none() {
                                         ctx.device.cmd_clear_attachments(
                                             ctx.cmd,
-                                            &[vk::ClearAttachment {
-                                                aspect_mask: vk::ImageAspectFlags::DEPTH,
-                                                color_attachment: 0,
-                                                clear_value: vk::ClearValue {
-                                                    depth_stencil: vk::ClearDepthStencilValue {
-                                                        depth: 1.0,
-                                                        stencil: 0,
-                                                    },
-                                                },
-                                            }],
-                                            &[vk::ClearRect {
-                                                rect: piece.scissor,
-                                                base_array_layer: 0,
-                                                layer_count: 1,
-                                            }],
+                                            &[clear],
+                                            &[clear_rect(piece)],
                                         );
                                     }
                                     states.draw(
@@ -901,7 +993,9 @@ impl ForwardRenderer {
                                         cascade as u64 * command_bytes,
                                         area,
                                     );
-                                    if let Some(m) = &shadow_meshlets {
+                                    if let Some(m) =
+                                        shadow_meshlets.as_ref().filter(|_| together.is_none())
+                                    {
                                         states.draw_meshlets(
                                             ctx,
                                             bindless,
@@ -926,7 +1020,7 @@ impl ForwardRenderer {
                         // The layers hold what was drawn once it is recorded: a frame
                         // that is never recorded leaves the cache as it was.
                         if let Some(c) = cache {
-                            c.commit(&plans, held, count, reach);
+                            c.commit(&plans, held, count, reach, drawn_together);
                         }
                     });
                 } else if let Some(c) = cache {
@@ -2463,6 +2557,7 @@ fn cascade_data(
     held: &[Option<Held>; MAX_CASCADES],
     lod_threshold: f32,
     atlas: Option<(u32, u32)>,
+    masks: Option<u32>,
 ) -> [CascadeData; MAX_CASCADES] {
     // Reached by nothing: the shaders test boxes against it without checking it.
     const EMPTY: [f32; 4] = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
@@ -2472,37 +2567,61 @@ fn cascade_data(
             continue;
         };
         let m = cascade.clip_from_light();
-        let (uv, layer) = match atlas {
+        let uv = match atlas {
             Some((columns, rows)) => {
                 let tile = [(k as u32 % columns) as f32, (k as u32 / columns) as f32];
                 let grid = [columns as f32, rows as f32];
-                let uv = [
+                [
                     0.5 / grid[0],
                     0.5 / grid[1],
                     (0.5 + tile[0]) / grid[0],
                     (0.5 + tile[1]) / grid[1],
-                ];
-                (uv, 0.0)
+                ]
             }
             None => {
                 let n = h.resolution as f32;
                 let start = h.storage_origin();
-                let uv = [
+                [
                     0.5,
                     0.5,
                     0.5 + start[0] as f32 / n,
                     0.5 + start[1] as f32 / n,
-                ];
-                (uv, k as f32)
+                ]
             }
         };
         // Half a texel around each rectangle: whatever touches its texels is drawn.
         let pad = 0.5 * cascade.texel;
-        let mut drawn = [EMPTY; 2];
+        let mut drawn = [EMPTY; crate::shadow_cache::MAX_RECTS];
         for (d, rect) in drawn.iter_mut().zip(plans[k].rects()) {
             let [x0, y0, x1, y1] = h.light_rect(rect.window);
             *d = [x0 - pad, y0 - pad, x1 + pad, y1 + pad];
         }
+        // Drawn in several pieces at once (ADR 0093): where its layer's seams lie in light
+        // view space (none: beyond every rectangle), the pieces it draws, and where its
+        // meshlet draws' pieces go.
+        let (seam, pieces, masks) = match masks {
+            Some(masks) if plans[k].piece_count() > 1 => {
+                let n = h.resolution as i32;
+                let s = h.storage_origin();
+                let seam = [
+                    if s[0] == 0 {
+                        f32::MAX
+                    } else {
+                        (h.origin[0] + n - s[0] as i32) as f32 * h.texel
+                    },
+                    if s[1] == 0 {
+                        f32::MIN
+                    } else {
+                        -((h.origin[1] + n - s[1] as i32) as f32) * h.texel
+                    },
+                ];
+                let pieces = plans[k]
+                    .piece_slots(s)
+                    .fold(0u32, |bits, (slot, _)| bits | 1 << slot);
+                (seam, pieces, masks)
+            }
+            _ => ([0.0; 2], 0, 0),
+        };
         *data = CascadeData {
             scale: [m.x_axis.x, m.y_axis.y, m.z_axis.z, cascade.texel],
             offset: [m.w_axis.x, m.w_axis.y, m.w_axis.z, cascade.limit],
@@ -2510,7 +2629,10 @@ fn cascade_data(
             drawn,
             far: cascade.far,
             lod_error: lod_threshold * cascade.texel,
-            layer,
+            seam,
+            pieces,
+            masks,
+            rects: plans[k].rect_count as u32,
             _pad: 0,
         };
     }

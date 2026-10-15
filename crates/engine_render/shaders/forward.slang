@@ -108,10 +108,17 @@ struct Cascade
     float4 scale;            // xyz: light view → cascade NDC scale; w: world size of a texel
     float4 offset;           // xyz: offset; w: NDC edge within which the filter stays inside
     float4 atlas;            // cascade NDC → uv of its layer: xy scale, zw offset (its tile, or where its window starts)
-    float4 drawn[2];         // light view rectangles (x0, y0, x1, y1) drawn this frame; an empty one has x0 > x1
+    float4 drawn[4];         // light view rectangles (x0, y0, x1, y1) drawn this frame (strips, moved casters); an empty one has x0 > x1
     float far;               // light view far depth (−z) of its projection
     float lod_error;         // world-space error its casters' detail levels may have (0: full meshes)
-    float layer;             // its layer of the map
+    // Drawn in several pieces at once (a view's cache, ADR 0093; `cullMeshletPieces`): the
+    // light view x past which columns are past the layer's seam, the y below which rows
+    // are; the pieces drawn (bit r * 4 + q, see `reached_pieces`); and where its meshlet
+    // draws' pieces are in `visible`, from their slots.
+    float2 seam;
+    uint pieces;
+    uint masks;
+    uint rects;              // rectangles in `drawn` (they come first)
     uint _pad0;
 };
 
@@ -241,7 +248,7 @@ struct Frame
     uint cascade_sampler;    // the cascades' comparison sampler: repeat (their layers wrap around, ADR 0093)
     uint* material_data;     // material types' parameters (ADR 0092): `material_stride` bytes per slot
     uint material_stride;
-    uint _material_pad;
+    float cascade_layers;    // 1: cascade c is layer c of the map (a view's cache, ADR 0093); 0: every cascade is a tile of layer 0
     BatchMeshlets* batch_meshlets; // the meshlet entry points (ADR 0085): per batch, its levels' meshlets
     Meshlet* meshlets;       // the geometry pool's index buffer as meshlets (levels' meshlets follow their indices, 32-byte aligned)
     // Meshlet lists (0: all or early, 1: late, 2 + k: shadow cascade k): bytes from the
@@ -422,10 +429,6 @@ float4 read_float4(float4* v)
     return loadAligned<16>(v);
 }
 
-Cascade read_cascade(uint index)
-{
-    return loadAligned<16>(&push.frame.cascades[index]);
-}
 
 float3 load_position(uint vertex)
 {
@@ -778,11 +781,16 @@ void cull_shadow_instance(uint index, bool meshlets)
     uint cascades = push.frame.cascade_count;
     for (uint k = 0; k < cascades; k++)
     {
+        // A cascade drawing nothing this frame takes nothing, even without culling. Moved
+        // casters' clusters after the strips are tested only when there are any: the cull
+        // keeps step 1's registers (ADR 0093).
         float4 r0 = read_float4(&push.frame.cascades[k].drawn[0]);
         float4 r1 = read_float4(&push.frame.cascades[k].drawn[1]);
-        // A cascade drawing nothing this frame takes nothing, even without culling.
         bool drawn = r0.x <= r0.z || r1.x <= r1.z;
-        bool reached = (reaches(r0, c, le) || reaches(r1, c, le)) && -(c.z + le.z) <= push.frame.cascades[k].far;
+        bool reached = reaches(r0, c, le) || reaches(r1, c, le);
+        if (push.frame.cascades[k].rects > 2)
+            reached = reached || reaches(read_float4(&push.frame.cascades[k].drawn[2]), c, le) || reaches(read_float4(&push.frame.cascades[k].drawn[3]), c, le);
+        reached = reached && -(c.z + le.z) <= push.frame.cascades[k].far;
         bool caster = !blended && drawn && (!cull || reached);
         uint lod = lod_within(batch, scale, push.frame.cascades[k].lod_error);
         uint command = batch.command + lod;
@@ -896,7 +904,12 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
         // Reaching a rectangle the cascade draws, and not wholly beyond its far depth.
         float3 c = mul(light, float4(center, 1.0)).xyz;
         float3 e = float3(radius, radius, radius);
-        visible = (reaches(r0, c, e) || reaches(r1, c, e)) && -(c.z + radius) <= far;
+        visible = reaches(r0, c, e) || reaches(r1, c, e);
+        // Moved casters' clusters after the strips, only when there are any (the Radeon's
+        // registers for all four rectangles at the top: 53 → 64).
+        if (!visible && push.frame.cascades[cascade].rects > 2)
+            visible = reaches(read_float4(&push.frame.cascades[cascade].drawn[2]), c, e) || reaches(read_float4(&push.frame.cascades[cascade].drawn[3]), c, e);
+        visible = visible && -(c.z + radius) <= far;
         // The light is a direction: the cone test from infinitely far away.
         if (visible && cone && (meshlet.cone >> 24) != 127u)
         {
@@ -956,6 +969,126 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
         draw.first_instance = first_slot + at;
         draws[at] = draw;
         push.visible[first_slot + at] = index;
+    }
+}
+
+// The pieces of cascade `cascade` a sphere at `c` in light view space (radius `e`) reaches,
+// of those it draws (ADR 0093): bit `r * 4 + q` for the part of rectangle `r` in quadrant
+// `q` of its layer (`q & 2`: past the column seam, `q & 1`: past the row seam), each part
+// the rectangle cut at the seams' light view lines.
+uint reached_pieces(uint cascade, float3 c, float e)
+{
+    float2 seam = push.frame.cascades[cascade].seam;
+    uint reached = 0;
+    [unroll]
+    for (int r = 0; r < 4; r++)
+    {
+        float4 rect = read_float4(&push.frame.cascades[cascade].drawn[r]);
+        [unroll]
+        for (int q = 0; q < 4; q++)
+        {
+            // Columns past the seam lie at x >= seam.x, rows past it at y <= seam.y (rows
+            // grow towards −y).
+            float4 part = rect;
+            if ((q & 2) != 0)
+                part.x = max(part.x, seam.x);
+            else
+                part.z = min(part.z, seam.x);
+            if ((q & 1) != 0)
+                part.w = min(part.w, seam.y);
+            else
+                part.y = max(part.y, seam.y);
+            if (part.x <= part.z && part.y <= part.w && reaches(part, c, float3(e, e, e)))
+                reached |= 1u << uint(r * 4 + q);
+        }
+    }
+    return reached & push.frame.cascades[cascade].pieces;
+}
+
+// The meshlet cull of a shadow cascade drawn in several pieces this frame (ADR 0093): as
+// `cullMeshlets` for the cascades, with each run of drawn meshlets reaching the same
+// pieces one draw of an instance per piece; the pieces go beside the run's slot, where the
+// vertex shader finds each instance's viewport (`shadowVertexPieces`). A piece drawn on its
+// own would draw every caster any of the cascade's rectangles reaches. Its own entry point:
+// the meshlet cull keeps its registers (and so the order of its draws, see there).
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullMeshletPieces(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
+{
+    uint list = meshlet_list();
+    uint64_t lists = meshlet_lists(list);
+    MeshletHeader* header = (MeshletHeader*)lists;
+    uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
+    DrawCommand* draws = (DrawCommand*)(lists + MESHLET_HEADER_BYTES + 8 * uint64_t(header.work));
+    uint2 item = work[group.x];
+    uint index = item.x;
+    uint lod = item.y & 0xFFu;
+    uint state = (item.y >> 8) & 0xFFu;
+    uint m = (item.y >> 16) * MESHLET_CHUNK + local;
+    Instance inst = read_instance(push.instances, index);
+    Batch batch = read_batch(inst.batch);
+    BatchMeshlets bm = read_batch_meshlets(inst.batch);
+    bool valid = m < bm.count[lod];
+    DrawCommand level = push.commands[batch.command + lod];
+    float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+    float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+    float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+    float3 lengths = float3(dot(c0, c0), dot(c1, c1), dot(c2, c2));
+    float largest = max(lengths.x, max(lengths.y, lengths.z));
+    float smallest = min(lengths.x, min(lengths.y, lengths.z));
+    float scale = sqrt(largest);
+    bool cone = bm.cone != 0 && smallest >= largest * 0.999;
+    uint first_slot = push.frame.meshlet_slot[list];
+    uint cascade = list - 2;
+    float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
+    Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + min(m, bm.count[lod] - 1));
+    // Without culling every meshlet is drawn into every piece.
+    uint pieces = valid ? push.frame.cascades[cascade].pieces : 0u;
+    if (valid && push.frame.cull != 0)
+    {
+        float3 center = transform_point(inst, meshlet.center);
+        float radius = meshlet.radius * scale;
+        float3 c = mul(read_matrix(&push.frame.light_from_world), float4(center, 1.0)).xyz;
+        // Reaching pieces the cascade draws, and not wholly beyond its far depth.
+        pieces = -(c.z + radius) <= push.frame.cascades[cascade].far ? reached_pieces(cascade, c, radius) : 0u;
+        // The light is a direction: the cone test from infinitely far away.
+        if (pieces != 0 && cone && (meshlet.cone >> 24) != 127u)
+        {
+            float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
+            if (!(dot(culled_side, axis) < snorm8(meshlet.cone, 24)))
+                pieces = 0;
+        }
+    }
+    // A run: a drawn meshlet after one that is not drawn or reaches other pieces starts
+    // one, which takes in the meshlets after it that reach the same pieces.
+    meshlet_drawn[local] = pieces;
+    meshlet_end[local] = meshlet.first_index + meshlet.triangles * 3;
+    GroupMemoryBarrierWithGroupSync();
+    bool first = pieces != 0 && (local == 0 || meshlet_drawn[local - 1] != pieces);
+    uint last = local;
+    if (first)
+    {
+        while (last + 1 < MESHLET_CHUNK && meshlet_drawn[last + 1] == pieces)
+            last++;
+    }
+    uint end = meshlet_end[last];
+    uint count = WaveActiveCountBits(first);
+    uint base = 0;
+    if (WaveIsFirstLane() && count > 0)
+        InterlockedAdd(header.drawn[state], count, base);
+    base = WaveReadLaneFirst(base);
+    if (first)
+    {
+        uint at = header.offset[state] + base + WavePrefixCountBits(first);
+        DrawCommand draw;
+        draw.index_count = end - meshlet.first_index;
+        draw.instance_count = countbits(pieces);
+        draw.first_index = level.first_index + meshlet.first_index;
+        draw.vertex_offset = level.vertex_offset;
+        draw.first_instance = first_slot + at;
+        draws[at] = draw;
+        push.visible[first_slot + at] = index;
+        push.visible[first_slot + at + push.frame.cascades[cascade].masks] = pieces;
     }
 }
 
@@ -1090,12 +1223,14 @@ VertexOut vertexMain(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInsta
     return o;
 }
 
-// A world position in the clip space of cascade `push.phase`.
+// A world position in the clip space of cascade `push.phase`. A cascade's fields are read
+// one by one, never the whole: the compiler keeps what it loads (ADR 0093).
 float4 shadow_clip(float3 world)
 {
-    Cascade k = read_cascade(push.phase);
+    float4 scale = read_float4(&push.frame.cascades[push.phase].scale);
+    float4 offset = read_float4(&push.frame.cascades[push.phase].offset);
     float3 light = mul(read_matrix(&push.frame.light_from_world), float4(world, 1.0)).xyz;
-    return float4(light * k.scale.xyz + k.offset.xyz, 1.0);
+    return float4(light * scale.xyz + offset.xyz, 1.0);
 }
 
 // Drawn with a cascade's culled commands: instance `slot` is a slot of its caster list.
@@ -1140,6 +1275,55 @@ ShadowOut shadowVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_Vul
     o.position = shadow_clip(transform_point(inst, load_position(vertex)));
     o.uv = read_attributes(vertex).uv;
     o.material = inst.material;
+    return o;
+}
+
+// A cascade's pieces drawn at once (ADR 0093): instance `i` of a meshlet run's draw (whose
+// first instance is its slot) goes to the viewport of the run's `i`-th piece, its pieces
+// beside the slot (`cullMeshletPieces`).
+uint piece_viewport(uint slot, uint i)
+{
+    uint pieces = push.visible[slot + push.frame.cascades[push.phase].masks];
+    for (uint k = 0; k < i; k++)
+        pieces &= pieces - 1;
+    return firstbitlow(pieces);
+}
+
+struct PieceOut
+{
+    float4 position : SV_Position;
+    uint viewport : SV_ViewportArrayIndex;
+};
+
+// `shadowVertex` for a cascade's pieces drawn at once.
+[shader("vertex")]
+PieceOut shadowVertexPieces(uint vertex : SV_VulkanVertexID, uint instance : SV_VulkanInstanceID, uint slot : SV_StartInstanceLocation)
+{
+    Instance inst = read_instance(push.instances, push.visible[slot]);
+    PieceOut o;
+    o.position = shadow_clip(transform_point(inst, load_position(vertex)));
+    o.viewport = piece_viewport(slot, instance - slot);
+    return o;
+}
+
+struct ShadowPieceOut
+{
+    float4 position : SV_Position;
+    float2 uv : TEXCOORD0;
+    nointerpolation uint material : MATERIAL;
+    uint viewport : SV_ViewportArrayIndex;
+};
+
+// `shadowVertexMasked` for a cascade's pieces drawn at once.
+[shader("vertex")]
+ShadowPieceOut shadowVertexMaskedPieces(uint vertex : SV_VulkanVertexID, uint instance : SV_VulkanInstanceID, uint slot : SV_StartInstanceLocation)
+{
+    Instance inst = read_instance(push.instances, push.visible[slot]);
+    ShadowPieceOut o;
+    o.position = shadow_clip(transform_point(inst, load_position(vertex)));
+    o.uv = read_attributes(vertex).uv;
+    o.material = inst.material;
+    o.viewport = piece_viewport(slot, instance - slot);
     return o;
 }
 
@@ -1548,11 +1732,16 @@ float widen_roughness(float perceptual, float kernel)
 // position `light` of a receiver with light-view normal `normal` (pushed along it first).
 float cascade_shadow(uint c, float3 light, float3 normal)
 {
-    Cascade k = read_cascade(c);
-    float3 ndc = (light + normal * (push.frame.normal_bias * k.scale.w)) * k.scale.xyz + k.offset.xyz;
+    // Field by field (`shadow_clip`): a whole cascade's load cost the Radeon's shading six
+    // registers.
+    float4 scale = read_float4(&push.frame.cascades[c].scale);
+    float4 offset = read_float4(&push.frame.cascades[c].offset);
+    float4 atlas = read_float4(&push.frame.cascades[c].atlas);
+    float layer = float(c) * push.frame.cascade_layers;
+    float3 ndc = (light + normal * (push.frame.normal_bias * scale.w)) * scale.xyz + offset.xyz;
     if (ndc.z > 1.0)
         return 1.0;
-    float2 uv = ndc.xy * k.atlas.xy + k.atlas.zw;
+    float2 uv = ndc.xy * atlas.xy + atlas.zw;
     // Its layer of the map (a cache's wraps around: the window starts anywhere in it, ADR
     // 0093).
     Texture2DArray map = g_texture_arrays[NonUniformResourceIndex(push.texture)];
@@ -1565,7 +1754,7 @@ float cascade_shadow(uint c, float3 light, float3 normal)
     for (int y = -1; y <= 1; y++)
         [unroll]
         for (int x = -1; x <= 1; x++)
-            lit += map.SampleCmpLevelZero(s, float3(uv + float2(x, y) * texel, k.layer), ndc.z);
+            lit += map.SampleCmpLevelZero(s, float3(uv + float2(x, y) * texel, layer), ndc.z);
     return lit / 9.0;
 }
 
@@ -2124,15 +2313,20 @@ float shadow_distance(float3 light, float3 normal)
     {
         if (cascade_edge(c, light) >= read_float4(&push.frame.cascades[c].offset).w)
             continue;
-        Cascade k = read_cascade(c);
-        float3 ndc = (light - normal * (push.frame.normal_bias * k.scale.w)) * k.scale.xyz + k.offset.xyz;
-        float2 uv = ndc.xy * k.atlas.xy + k.atlas.zw;
-        Texture2D map = g_textures[NonUniformResourceIndex(push.texture)];
-        uint width, height;
-        map.GetDimensions(width, height);
-        int2 texel = clamp(int2(uv * float2(width, height)), int2(0, 0), int2(width, height) - 1);
-        float occluder = map.Load(int3(texel, 0)).r;
-        return max(ndc.z - occluder, 0.0) / abs(k.scale.z);
+        float4 scale = read_float4(&push.frame.cascades[c].scale);
+        float4 offset = read_float4(&push.frame.cascades[c].offset);
+        float4 atlas = read_float4(&push.frame.cascades[c].atlas);
+        float3 ndc = (light - normal * (push.frame.normal_bias * scale.w)) * scale.xyz + offset.xyz;
+        float2 uv = ndc.xy * atlas.xy + atlas.zw;
+        // Its layer of the map, wrapping around as the lookups' sampler does (ADR 0093).
+        Texture2DArray map = g_texture_arrays[NonUniformResourceIndex(push.texture)];
+        uint width, height, layers;
+        map.GetDimensions(width, height, layers);
+        int2 size = int2(width, height);
+        int2 texel = int2(floor(uv * float2(size)));
+        texel = ((texel % size) + size) % size;
+        float occluder = map.Load(int4(texel, int(float(c) * push.frame.cascade_layers), 0)).r;
+        return max(ndc.z - occluder, 0.0) / abs(scale.z);
     }
     return 0.0;
 }
@@ -2282,6 +2476,13 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     float n_dot_l = saturate(dot(n, l));
     float n_dot_h = saturate(dot(n, h));
     float v_dot_h = saturate(dot(v, h));
+    // A surface facing away from the light is in its own shadow, whatever its normal map
+    // says. The sun's cascades are looked up here, before the lobes' terms are live: on the
+    // Radeon, beside them the lookup cost the shading a step of registers (ADR 0093). With
+    // decals (a literal), after the terms: the decals' values are live here.
+    float visible = 0.0;
+    if (!decals)
+        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     // glTF's sheen layer lets through what its lobe does not reflect (KHR_materials_sheen's
     // albedo scaling, from n·v; `sheen_albedo` is the lobe's directional albedo).
     terms.sheen_scaling = model_sheen_layer(M::model())
@@ -2300,9 +2501,8 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     // the specular light only.
     float3 surface_diffuse = subsurface ? float3(0.0, 0.0, 0.0) : diffuse;
     float3 ambient_albedo = subsurface ? float3(0.0, 0.0, 0.0) : base.rgb;
-    // A surface facing away from the light is in its own shadow, whatever its normal map
-    // says.
-    float visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+    if (decals)
+        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? shadow(input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
     // The sun's contact shadows (ADR 0071; `contact` is a literal): their mask's bindless
     // index comes in `push.phase`, which the shading passes do not otherwise read.
     if (contact && visible > 0.0)

@@ -9,7 +9,7 @@
 //! - occlusion culling keys off slots: instances spawned in a shuffled order, and
 //!   removed and spawned again, are culled as well as a fixed draw list is;
 //! - cached shadow cascades (ADR 0093) follow the scene's uploads: nothing drawn while
-//!   nothing changes, everything when an instance moves.
+//!   nothing changes, an instance's old and new places when it moves.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::too_many_lines)]
 
@@ -1453,8 +1453,8 @@ fn moving_instances_apply_the_same_on_one_thread_and_on_a_pool() {
 }
 
 /// Cached shadow cascades (ADR 0093) on the scene path: frames that upload nothing draw no
-/// shadows, an upload that moves an instance draws them all again (the first step), a
-/// moving camera only strips, and what the cache holds shades as drawing it all does.
+/// shadows, an upload that moves an instance draws its old and new places, a moving camera
+/// only strips, and what the cache holds shades as drawing it all does.
 #[test]
 fn cached_cascades_follow_the_scenes_uploads() {
     let Some(mut bed) = Bed::new(128) else {
@@ -1497,10 +1497,10 @@ fn cached_cascades_follow_the_scenes_uploads() {
             Vec3::new(-1.5, 2.0, -1.0)
         )
     ));
-    assert_eq!(
-        frame(&mut bed, &mut scene, camera).1,
-        layers,
-        "an instance moved"
+    let moved = frame(&mut bed, &mut scene, camera).1;
+    assert!(
+        moved > 0 && moved < layers / 4,
+        "an instance moved: {moved} texels"
     );
     assert_eq!(frame(&mut bed, &mut scene, camera).1, 0, "nothing since");
     // A first step may outgrow the reach the cascades were split over (a new view's is just

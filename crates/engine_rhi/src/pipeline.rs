@@ -94,6 +94,9 @@ pub struct GraphicsPipelineDesc<'a> {
     /// compiles the pipeline with them, so branches on them cost nothing (and code behind
     /// a false one takes no registers).
     pub specialization: &'a [u32],
+    /// Viewports and scissors, set while recording: more than one only with
+    /// [`crate::OptionalCaps::viewport_index`], the vertex shader picking one.
+    pub viewports: u32,
 }
 
 impl<'a> GraphicsPipelineDesc<'a> {
@@ -116,6 +119,7 @@ impl<'a> GraphicsPipelineDesc<'a> {
             samples: vk::SampleCountFlags::TYPE_1,
             alpha_to_coverage: false,
             specialization: &[],
+            viewports: 1,
         }
     }
 }
@@ -566,8 +570,8 @@ impl Pipeline {
         let input_assembly =
             vk::PipelineInputAssemblyStateCreateInfo::default().topology(desc.topology);
         let viewport = vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1);
+            .viewport_count(desc.viewports.max(1))
+            .scissor_count(desc.viewports.max(1));
         let mut raster = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(desc.cull_mode)

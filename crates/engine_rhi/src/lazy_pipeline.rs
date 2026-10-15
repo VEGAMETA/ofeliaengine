@@ -146,6 +146,7 @@ impl Recipe {
                     samples: desc.samples,
                     alpha_to_coverage: desc.alpha_to_coverage,
                     specialization: &[],
+                    viewports: desc.viewports,
                 },
                 vertex: modules.stage(&desc.vertex),
                 fragment: desc.fragment.as_ref().map(|f| modules.stage(f)),

@@ -60,9 +60,13 @@
 //! the sun's cascades kept across frames (ADR 0093: a still camera draws no shadows) and
 //! `--walk <units per frame>` to walk the camera back and forth along its view (level, 120
 //! frames each way), `--turn <degrees per frame>` to turn it back and forth too: the
-//! cached cascades then draw the strips the movement exposes. The last column is the GPU frame time end to end (the graph's
-//! first pass to its last on the graphics queue), which async compute shortens while the
-//! overlapped passes themselves may read longer.
+//! cached cascades then draw the strips the movement exposes; `--movers <count>` to move
+//! that many of the smallest draws back and forth every frame (half a metre over 60
+//! frames; the cached cascades draw their old and new places), `--redraw-cascades` for a
+//! cache that draws every cascade whole every frame (its layers against the atlas). The
+//! last column is the GPU frame time end to end (the graph's first pass to its last on the
+//! graphics queue), which async compute shortens while the overlapped passes themselves
+//! may read longer.
 
 #![allow(missing_docs, clippy::print_stdout, clippy::unwrap_used)]
 
@@ -303,6 +307,8 @@ fn main() {
     let mut decal_size: Option<f32> = None;
     let mut cached_shadows = false;
     let (mut walk, mut turn) = (0.0f32, 0.0f32);
+    let mut movers = 0usize;
+    let mut redraw_cascades = false;
     let mut ray_detail: Option<BlasDetail> = None;
     let mut ray_budget: Option<String> = None;
     let mut gi_spacing: Option<f32> = None;
@@ -406,6 +412,11 @@ fn main() {
             "--cached-shadows" => cached_shadows = true,
             "--walk" => walk = args.next().unwrap().parse().unwrap(),
             "--turn" => turn = args.next().unwrap().parse().unwrap(),
+            "--movers" => movers = args.next().unwrap().parse().unwrap(),
+            "--redraw-cascades" => {
+                cached_shadows = true;
+                redraw_cascades = true;
+            }
             // With --pipeline-stats: also the multisampled shading's (ADR 0075).
             "--msaa" => msaa_stats = args.next().unwrap().parse().unwrap(),
             "--post" => post = true,
@@ -747,6 +758,32 @@ fn main() {
         }
     }
     draws.sort_by_key(|d| format!("{:?}", d.mesh));
+    // `--movers`: the smallest draws (by their world box's diagonal), and where they rest.
+    let movers: Vec<(usize, Mat4)> = {
+        let mut sized: Vec<(f32, usize)> = draws
+            .iter()
+            .enumerate()
+            .filter_map(|(k, d)| {
+                let mesh = cooked
+                    .meshes
+                    .iter()
+                    .zip(&meshes)
+                    .find(|(_, id)| **id == d.mesh)?
+                    .0;
+                let size = d
+                    .world_from_object
+                    .transform_vector3(Vec3::from(mesh.max) - Vec3::from(mesh.min))
+                    .length();
+                (size > 0.0).then_some((size, k))
+            })
+            .collect();
+        sized.sort_by(|a, b| a.0.total_cmp(&b.0));
+        sized
+            .iter()
+            .take(movers)
+            .map(|&(_, k)| (k, draws[k].world_from_object))
+            .collect()
+    };
     let (eye, target) = view(min, max, requested_view);
     // Lights spread over the scene's box (a fixed sequence): every fourth a spot pointing
     // down, ranges a few percent of the scene's size.
@@ -1313,13 +1350,15 @@ fn main() {
 
     // The sun's cascades kept across frames (ADR 0093).
     let mut shadow_cache = cached_shadows.then(|| {
-        CascadeCache::new(
+        let cache = CascadeCache::new(
             &device,
             &mut allocator,
             &bindless,
             renderer.shadow_settings(),
         )
-        .unwrap()
+        .unwrap();
+        cache.set_redraw_always(redraw_cascades);
+        cache
     });
     let mut frame_number = 0u64;
     let mut reflection_rows: Vec<String> = Vec::new();
@@ -1398,6 +1437,12 @@ fn main() {
             let added;
             let executed;
             let camera = walking(frame_number + 1);
+            // `--movers`: back and forth along x, half a metre over 60 frames.
+            let swing = ((frame_number + 1) as f32 * core::f32::consts::TAU / 120.0).sin() * 0.25;
+            for &(k, rest) in &movers {
+                draws[k].world_from_object =
+                    Mat4::from_translation(Vec3::new(swing, 0.0, 0.0)) * rest;
+            }
             {
                 // SAFETY: nothing is in flight.
                 let mut fg = unsafe { graph.begin_slot(0, cmd) };
@@ -1953,10 +1998,12 @@ fn main() {
             let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
             println!(
                 "{mode}: cached cascades drew {:.2} % of their texels per frame on average \
-                 (median {:.2} %), {} cascades whole so far; GPU shadow µs mean {:.0}",
+                 (median {:.2} %), {} cascades whole and {} in pieces at once so far; GPU \
+                 shadow µs mean {:.0}",
                 100.0 * mean(&cache_texels) / layers,
                 100.0 * median(&mut cache_texels) / layers,
                 c.stats().whole,
+                c.stats().together,
                 mean(&shadow),
             );
         }

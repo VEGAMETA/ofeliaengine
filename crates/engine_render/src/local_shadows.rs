@@ -432,6 +432,77 @@ pub(crate) struct PreviousDraw {
     pub bounds: [Vec3; 2],
 }
 
+/// A draw list compared with the previous one, draw by draw (by index): the world boxes
+/// of what changed, old and new, for the caches that redraw only that (local lights'
+/// shadows, ADR 0071; the sun's cached cascades, ADR 0093).
+#[derive(Debug, Default)]
+pub(crate) struct DrawDiff {
+    previous: Vec<PreviousDraw>,
+    /// The last comparison's changed boxes.
+    pub(crate) changes: Vec<[Vec3; 2]>,
+}
+
+impl DrawDiff {
+    /// Compares `draws` with the previous list and keeps them as the next one's: the
+    /// changed boxes go to [`Self::changes`]. `mesh` gives a mesh's object-space box
+    /// (center, half extents) and its shape's revision (a skinned mesh posed differently
+    /// changes shape).
+    pub(crate) fn diff(
+        &mut self,
+        draws: &[crate::forward::DrawItem],
+        mesh: impl Fn(crate::mesh::MeshId) -> (Vec3, Vec3, u32),
+    ) {
+        let changes = &mut self.changes;
+        changes.clear();
+        // Two boxes per draw at most.
+        changes.reserve(2 * draws.len().max(self.previous.len()));
+        for (i, draw) in draws.iter().enumerate() {
+            let t = draw.world_from_object.transpose();
+            let rows = [
+                t.x_axis.to_array(),
+                t.y_axis.to_array(),
+                t.z_axis.to_array(),
+            ];
+            let (center, extents, revision) = mesh(draw.mesh);
+            let same = self.previous.get(i).is_some_and(|p| {
+                p.mesh == draw.mesh
+                    && p.revision == revision
+                    && p.material == draw.material
+                    && p.rows
+                        .iter()
+                        .flatten()
+                        .zip(rows.iter().flatten())
+                        .all(|(a, b)| a.to_bits() == b.to_bits())
+            });
+            if same {
+                continue;
+            }
+            let (center, extents) =
+                crate::cull::transform_box(&draw.world_from_object, center, extents);
+            let bounds = [center - extents, center + extents];
+            let entry = PreviousDraw {
+                rows,
+                mesh: draw.mesh,
+                revision,
+                material: draw.material,
+                bounds,
+            };
+            match self.previous.get_mut(i) {
+                Some(p) => {
+                    changes.push(p.bounds);
+                    *p = entry;
+                }
+                None => self.previous.push(entry),
+            }
+            changes.push(bounds);
+        }
+        for p in self.previous.iter().skip(draws.len()) {
+            changes.push(p.bounds);
+        }
+        self.previous.truncate(draws.len());
+    }
+}
+
 /// How a frame's changes relate to the last frame's ([`ShadowCache::begin`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Continuity {
@@ -463,10 +534,8 @@ pub(crate) struct ShadowCache {
     /// What the last frame's changes came from, and the material table's revision.
     source: Option<ChangeSource>,
     material_revision: Option<u64>,
-    /// The draw-list path's previous list.
-    previous: Vec<PreviousDraw>,
-    /// This frame's changed boxes (draw-list path).
-    changes: Vec<[Vec3; 2]>,
+    /// The draw-list path's previous list, and this frame's changed boxes.
+    draws: DrawDiff,
     /// Unions of runs of changed boxes ([`Self::invalidate`]).
     chunk_unions: Vec<[Vec3; 2]>,
     candidates: Vec<Candidate>,
@@ -484,8 +553,7 @@ impl ShadowCache {
             serial: 0,
             source: None,
             material_revision: None,
-            previous: Vec::new(),
-            changes: Vec::new(),
+            draws: DrawDiff::default(),
             // Up to 65,536 changes without growing.
             chunk_unions: Vec::with_capacity(1024),
             candidates: Vec::new(),
@@ -543,56 +611,10 @@ impl ShadowCache {
         mesh: impl Fn(crate::mesh::MeshId) -> (Vec3, Vec3, u32),
         all: bool,
     ) {
-        let mut changes = core::mem::take(&mut self.changes);
-        changes.clear();
-        // Two boxes per draw at most.
-        changes.reserve(2 * draws.len().max(self.previous.len()));
-        for (i, draw) in draws.iter().enumerate() {
-            let t = draw.world_from_object.transpose();
-            let rows = [
-                t.x_axis.to_array(),
-                t.y_axis.to_array(),
-                t.z_axis.to_array(),
-            ];
-            let (center, extents, revision) = mesh(draw.mesh);
-            let same = self.previous.get(i).is_some_and(|p| {
-                p.mesh == draw.mesh
-                    && p.revision == revision
-                    && p.material == draw.material
-                    && p.rows
-                        .iter()
-                        .flatten()
-                        .zip(rows.iter().flatten())
-                        .all(|(a, b)| a.to_bits() == b.to_bits())
-            });
-            if same {
-                continue;
-            }
-            let (center, extents) =
-                crate::cull::transform_box(&draw.world_from_object, center, extents);
-            let bounds = [center - extents, center + extents];
-            let entry = PreviousDraw {
-                rows,
-                mesh: draw.mesh,
-                revision,
-                material: draw.material,
-                bounds,
-            };
-            match self.previous.get_mut(i) {
-                Some(p) => {
-                    changes.push(p.bounds);
-                    *p = entry;
-                }
-                None => self.previous.push(entry),
-            }
-            changes.push(bounds);
-        }
-        for p in self.previous.iter().skip(draws.len()) {
-            changes.push(p.bounds);
-        }
-        self.previous.truncate(draws.len());
+        self.draws.diff(draws, mesh);
+        let changes = core::mem::take(&mut self.draws.changes);
         self.invalidate(&changes, all);
-        self.changes = changes;
+        self.draws.changes = changes;
     }
 
     /// Marks the shadows touched by `changes` stale (or all of them).

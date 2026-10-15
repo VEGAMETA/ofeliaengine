@@ -462,8 +462,13 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
      `CascadeCache`, on by default in `engine_frame`.
      - Shadows when walking: Intel's Sponza on the RTX 728 → 69 µs, on the Radeon
        18.9 → 2.0 ms. A still camera draws nothing.
-     - Any caster change still draws every cascade whole.
-   - **Next, step 2:** moved casters draw only their old and new regions.
+   - **Step 2 done 2026-10-15:** moved casters draw only their old and new places, and a
+     cascade's regions are drawn at once by meshlet (vertex shaders pick viewports).
+     - Walking: Intel's Sponza RTX 69 → 43 µs, Radeon 1.98 → 0.76 ms. With 8 small
+       objects moving: RTX 403 µs, Radeon 7.0 ms, against 728 µs and 19.0 ms drawn
+       whole.
+   - **Next:** virtual pages (option 1) where the cache leaves cost or resolution wanting;
+     the instanced draws' pieces culled with the same tags.
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.
 
@@ -580,6 +585,15 @@ grown, divide and conquer); the old labels stay in parentheses.
     the draws. That cost the passes drawing them their front-to-back order: Sponza,
     prepass +8 %, shadows +9–13 % (ADR 0093). Appends that keep the work items' order
     (counts, a scan, then writes) would make it robust;
+  - **cached cascades** (ADR 0093): instanced draws (meshes without meshlets, material
+    types) still go piece by piece, each drawing every caster the cascade's regions reach;
+    a rendering per layer costs the Radeon 6 % when everything is drawn whole (the first
+    frame, a cut, the light turning); the moved casters' clusters are greedy;
+  - **the perf gate let a register step through:** ADR 0093's step 1 took the Radeon's
+    environment shading from 64 to 70 VGPRs (forward +5 % on Intel's Sponza) under the
+    AMD threshold (10 %, 2 % of the frame); step 2 brought it back. A check of every
+    pipeline's registers against a per-vendor baseline (the drivers' statistics, which
+    do not vary from run to run) would catch such steps at once;
   - half-resolution aerial perspective and fog on the iGPU (about 1–2 ms there);
   - froxel volumetric fog;
   - per-pixel local-shadow mask (the shadowed forward shading costs +10–12 % on the iGPU);
