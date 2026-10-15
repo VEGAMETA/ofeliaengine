@@ -4,7 +4,7 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-14.
+Last updated: 2026-10-15.
 
 ## 1. What matters most
 
@@ -67,6 +67,7 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 | Local-light shadows (cached atlas), contact shadows (Bend) | done | ADR 0071 |
 | Reflections: parallax-corrected probes, SSR (FidelityFX SSSR-based) | done | ADR 0073 |
 | Atmosphere (Hillaire 2020) and height fog | done | ADR 0069 |
+| Color grading: white balance, channel mixer, shadows / mid-tones / highlights, ASC CDL, contrast, vibrance, saturation; with the tone curve in one LUT built on the GPU when either changes | done | ADR 0094 |
 | HDRI environments: `.hdr` and OpenEXR panoramas as the sky, their sun found and lit as the directional light, cooked into BC6H cubes (DDC, packs) | done | ADR 0083 |
 | GPU particles and GPU radix sort | done | ADRs 0080, 0081 |
 | Acceleration structures for ray queries: a bottom level per mesh (compacted), the top level written on the GPU from the GPU scene | done | ADR 0087 |
@@ -473,8 +474,15 @@ Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: it
 grown, divide and conquer); the old labels stay in parentheses.
 
 6. **Rendering leftovers.**
-6a (was 6). Remaining post effects: DOF, LUT grading, motion blur only on cinematic views
-   (ADR 0067). Frame generation is its own item now (3b, after GI).
+6a (was 6). Remaining post effects: ~~LUT grading~~, DOF, motion blur only on cinematic
+   views (ADR 0067). Frame generation is its own item now (3b, after GI).
+   - **Color grading done 2026-10-15** (ADR 0094): `ViewSettings::grading`.
+     - The grading and the tone curve are one 48³ LUT, built on the GPU when either
+       changes. Graded twins of the tone mapper's entry points read it once per pixel;
+       the plain ones are unchanged.
+     - Within 0.85 / 255 of the exact chain.
+     - Sponza's tone map pass at 1080p: RTX 29–31 → 44 µs, Radeon 1.12 → 1.22 ms.
+   - Next: DOF, then motion blur.
 6b. The iGPU's expensive passes (review §3.11): TAAU 4.2 ms (6.6 ms in the perf gate's
    `sponza_taa`), ~~bloom 1.6 ms~~, local shadows redrawn every frame when casters move (a
    per-frame redraw budget; never the patented static/dynamic split). TAAU tried
