@@ -324,3 +324,62 @@ measurements, niagara's culling).
   - the view's meshlet draws front to back;
   - local lights' shadows.
 
+### The draws' order, measured; detail levels in the perf gate (2026-10-15)
+
+- **The question.** Meshlet draws come in the GPU's order (atomic appends per wave).
+  - Would an exact order pay for appends that keep it: a count, a scan and the writes per
+    list?
+  - Which order: the camera's front to back for the view's prepass, the light's for the
+    cascades?
+- **The experiment** (branch `exp/meshlet-order`, not merged):
+  - the culls run serialized in one group, so the draws follow the instances' order
+    exactly;
+  - `scene_bench` sorts its draws by their box's center, from the camera or along the
+    sun;
+  - the shadow draws are timed alone. The serial culls themselves take 0.46–5.5 ms; only
+    the draw passes are compared.
+- **Measured** with the default four cascades of 1024², and 2048². Intel's Sponza has the
+  cook's detail levels (`--lods`). Two rounds at 1024², one at 2048².
+
+| | RTX: Sponza | RTX: Intel's Sponza | Radeon: Sponza | Radeon: Intel's Sponza |
+|---|---:|---:|---:|---:|
+| shadows 1024², GPU order → light's order | 123 → 124 µs | 147 → 130 µs (−12 %) | 2,407 → 2,420 µs | 4,298 → 4,214 µs (−2 %) |
+| shadows 2048², GPU order → light's order | 255 → 249 µs | 300 → 243 µs (−19 %) | 5,380 → 5,146 µs (−4 %) | 7,559 → 6,884 µs (−9 %) |
+| prepass, GPU order → camera's order | 73 → 65 µs (−11 %) | 72 → 71 µs | 1,012 → 1,044 µs (+3 %) | 1,538 → 1,557 µs (+1 %) |
+
+- **Also seen:**
+  - The camera's order makes the cascades slower than the instances' own order: +3 to
+    +30 %.
+  - The instances' own order, kept exactly, is no better than the GPU's. The RTX's
+    prepass takes 84 µs against 73 µs, the Radeon's 1,150 µs against 1,012 µs.
+  - Caveat: those runs follow the slow serial culls, which may change the GPU's state.
+    Comparisons between the serial runs are cleaner: there the camera's order saves the
+    prepass 9–23 % on Sponza against the instances' own order.
+- **Decision: no order-preserving appends for now.**
+  - At the default 1024² the light's order saves the cascades at most 17 µs (RTX) and
+    85 µs (Radeon), on Intel's Sponza.
+  - The cache draws cascades whole only on the first frame, after a cut and while the sun
+    turns. Otherwise it draws strips.
+  - Exact appends cost two more dispatches per list, each with a barrier: about 5 µs on
+    the RTX and 15 µs on the Radeon for the pair (ADR 0080's numbers).
+  - The camera's order gains only on the RTX's Sponza (8 µs).
+  - Revisit with finer cascades (2048²: −19 % on the RTX, −9 % on the Radeon) or with
+    the virtual pages (ADR 0093).
+- **Found on the way: the perf gate's class-default scenes drew no detail levels.**
+  - The golden bed cooked without them and uploaded only the full meshes. A game's pack
+    has them: `CookSettings::lods` is on by default.
+  - The class-default scenes (`*_defaults_*`, `intel_sponza_walk_*`) now cook and upload
+    them (`Shot::lods`).
+  - Their baselines were measured again, 3 runs each. GPU frame, then shadows:
+
+| scene | RTX 4060 Ti | Radeon iGPU |
+|---|---|---|
+| Intel's Sponza, discrete defaults | 2,144 → 1,446 µs; 1,077 → 239 µs | 82.5 → 58.8 ms; 21.3 → 4.1 ms |
+| Intel's Sponza, integrated defaults | 1,670 → 783 µs; 831 → 179 µs | 57.6 → 33.8 ms; 21.3 → 4.1 ms |
+| Intel's Sponza walked, integrated defaults | 902 → 709 µs; 62 → 65 µs | 35.9 → 30.5 ms; 1.46 → 0.75 ms |
+| Sponza, integrated defaults | 679 → 648 µs; 146 → 119 µs | 22.2 → 21.0 ms; 2.16 → 1.27 ms |
+
+  - The other scenes keep their full meshes, with unchanged images and baselines.
+- **Next:**
+  - step 3: mesh shaders on the RTX;
+  - local lights' shadows.
