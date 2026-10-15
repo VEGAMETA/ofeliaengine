@@ -1188,14 +1188,21 @@ unsafe { renderer.destroy(&device, &mut allocator, &bindless) };
   or changes its range or cone, or when something within its range is added, moved,
   removed, gets another mesh or material, or a skinned mesh is posed differently. A still
   light in a still scene costs nothing but the lookups in shading.
+- **Moving objects redraw only where they were and are.** When only casters changed, each
+  of a light's views is drawn again in up to two pieces around their old and new places
+  (the views they do not reach not at all), through the view's projection narrowed to the
+  piece: only what reaches it is drawn. A view the pieces would mostly cover, or an object
+  reaching across the view's eye plane (around the light), is drawn whole.
 - **Keep each light's index in the list stable.** The cache knows a light by its index:
   reordering only costs redraws, never wrong shadows (a light whose parameters differ is
   drawn again).
 - **Moving lights share a budget.** At most `updates_per_frame` views (12) are redrawn per
-  frame, oldest and largest first; the others keep last frame's shadow for a frame or
-  more. A light seen for the first time is drawn at once. Raise the budget for many
-  moving lights on a fast GPU; lower it on an integrated one (a view costs ~2.5 µs on an
-  RTX 4060 Ti, ~70 µs on a 2-CU Radeon in Sponza).
+  frame, a piece counting as a view, oldest and largest first; the others keep last
+  frame's shadow for a frame or more. A light seen for the first time is drawn at once.
+  Raise the budget for many moving lights on a fast GPU; lower it on an integrated one (a
+  view costs ~2.5 µs on an RTX 4060 Ti, ~70 µs on a 2-CU Radeon in Sponza). A piece costs
+  less than its view when the level is many meshes (only those reaching it are drawn);
+  in a level of a few large merged meshes, about as much (each is drawn whole).
 - **Resolution follows the light's size on screen** (`texels_per_pixel`, between
   `min_resolution` and `max_resolution`), and all lights step down together when the
   atlas (`atlas_size`², 4096² D16 by default: 32 MiB) is full. Lights out of view keep

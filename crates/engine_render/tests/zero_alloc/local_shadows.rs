@@ -298,7 +298,10 @@ fn steady_state_local_shadow_frames_do_not_allocate() {
             "100 frames ({}): {allocations} heap allocations; {stats:?}",
             if use_scene { "GPU scene" } else { "draw list" }
         );
-        assert!(stats.views_drawn > 0, "shadows are redrawn: {stats:?}");
+        assert!(
+            stats.views_drawn + stats.pieces_drawn > 0,
+            "shadows are redrawn: {stats:?}"
+        );
         assert_eq!(allocations, 0);
     }
 

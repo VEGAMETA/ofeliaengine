@@ -5,8 +5,9 @@
 //! the ground, a ray towards the light tells exactly whether it is in shadow; the frame
 //! drawn with the light's shadow, divided by the frame without, must agree (lit: about 1,
 //! shadowed: about 0). Then the cache: a static scene draws each shadow once, a moving
-//! caster redraws only the light it touches, a moving light only its own views; the same
-//! through the persistent GPU scene's change list.
+//! caster redraws only the light it touches and only where it was and is (pieces of the
+//! views, the frame then the same as a whole redraw's), a moving light its own views
+//! whole; the same through the persistent GPU scene's change list.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout, clippy::too_many_lines)]
 
@@ -629,27 +630,38 @@ fn local_shadows_match_analytic_shadows_and_cache() {
         },
     );
     let mut lights = [spot, point];
+    // Lights drawn, views drawn whole, pieces drawn.
     let views = |bed: &mut Bed, draws: &[DrawItem], lights: &[LocalLight]| {
         bed.render(&cached, camera, draws, None, lights);
-        cached.local_shadow_stats().views_drawn
+        let s = cached.local_shadow_stats();
+        (s.lights_drawn, s.views_drawn, s.pieces_drawn)
     };
-    assert_eq!(views(&mut bed, &draws, &lights), 7, "both drawn once");
+    assert_eq!(
+        views(&mut bed, &draws, &lights),
+        (2, 7, 0),
+        "both drawn once"
+    );
     let reference = bed.render(&cached, camera, &draws, None, &lights);
-    assert_eq!(cached.local_shadow_stats().views_drawn, 0, "a static scene");
-    // A caster near the spot light moves: only the spot light redraws.
+    assert_eq!(
+        cached.local_shadow_stats().lights_drawn,
+        0,
+        "a static scene"
+    );
+    // A caster near the spot light moves: only the spot light redraws, and only where the
+    // caster was and is (one piece: the places overlap).
     draws[1].world_from_object = Mat4::from_translation(Vec3::new(0.01, 0.0, 0.0))
         * blocks[0].draw(mesh, gray).world_from_object;
-    assert_eq!(views(&mut bed, &draws, &lights), 1);
-    assert_eq!(views(&mut bed, &draws, &lights), 0);
-    // And back: the frame is the reference again.
+    assert_eq!(views(&mut bed, &draws, &lights), (1, 0, 1));
+    assert_eq!(views(&mut bed, &draws, &lights), (0, 0, 0));
+    // And back: the frame is the reference again, the piece drawn as the whole view was.
     draws[1] = blocks[0].draw(mesh, gray);
-    views(&mut bed, &draws, &lights);
+    assert_eq!(views(&mut bed, &draws, &lights), (1, 0, 1));
     let again = bed.render(&cached, camera, &draws, None, &lights);
     assert_eq!(again, reference, "a redrawn shadow is the same");
-    // The point light moves: its six faces.
+    // The point light moves: its six faces whole.
     lights[1].position.y += 0.05;
-    assert_eq!(views(&mut bed, &draws, &lights), 6);
-    assert_eq!(views(&mut bed, &draws, &lights), 0);
+    assert_eq!(views(&mut bed, &draws, &lights), (1, 6, 0));
+    assert_eq!(views(&mut bed, &draws, &lights), (0, 0, 0));
 
     // The same through the persistent scene's change list.
     let mut scene = GpuScene::new(&bed.device, &bed.bindless, 64, 1).unwrap();
@@ -666,29 +678,33 @@ fn local_shadows_match_analytic_shadows_and_cache() {
     let scene_renderer = renderer(&mut bed, LocalShadowSettings::default());
     let scene_views = |bed: &mut Bed, scene: &mut GpuScene| {
         bed.render(&scene_renderer, camera, &[], Some(scene), &lights);
-        scene_renderer.local_shadow_stats().views_drawn
+        let s = scene_renderer.local_shadow_stats();
+        (s.lights_drawn, s.views_drawn, s.pieces_drawn)
     };
-    assert_eq!(scene_views(&mut bed, &mut scene), 7);
-    assert_eq!(scene_views(&mut bed, &mut scene), 0);
-    // The pole next to the point light moves.
+    assert_eq!(scene_views(&mut bed, &mut scene), (2, 7, 0));
+    assert_eq!(scene_views(&mut bed, &mut scene), (0, 0, 0));
+    // The pole next to the point light moves: pieces of the faces it shows in, none
+    // drawn whole.
     scene.set_transform(
         ids[2],
         &(Mat4::from_translation(Vec3::new(0.0, 0.0, 0.02)) * draws[2].world_from_object),
     );
-    assert_eq!(scene_views(&mut bed, &mut scene), 6);
-    assert_eq!(scene_views(&mut bed, &mut scene), 0);
+    let (lights_drawn, whole, pieces) = scene_views(&mut bed, &mut scene);
+    println!("the pole moved: {pieces} pieces, {whole} views whole");
+    assert!(lights_drawn == 1 && whole == 0 && (1..=12).contains(&pieces));
+    assert_eq!(scene_views(&mut bed, &mut scene), (0, 0, 0));
     // Something far from both lights moves: nothing.
     let far = scene.insert(SceneInstance {
         mesh,
         material: gray,
         world_from_object: Mat4::from_translation(Vec3::new(25.0, 0.5, 25.0)),
     });
-    assert_eq!(scene_views(&mut bed, &mut scene), 0);
+    assert_eq!(scene_views(&mut bed, &mut scene), (0, 0, 0));
     scene.set_transform(far, &Mat4::from_translation(Vec3::new(25.0, 0.5, 24.0)));
-    assert_eq!(scene_views(&mut bed, &mut scene), 0);
-    // A removal near the spot light.
+    assert_eq!(scene_views(&mut bed, &mut scene), (0, 0, 0));
+    // A removal near the spot light: the place it left.
     scene.remove(ids[1]);
-    assert_eq!(scene_views(&mut bed, &mut scene), 1);
+    assert_eq!(scene_views(&mut bed, &mut scene), (1, 0, 1));
 
     bed.finish(vec![shadowed, plain, cached, scene_renderer], vec![scene]);
 }

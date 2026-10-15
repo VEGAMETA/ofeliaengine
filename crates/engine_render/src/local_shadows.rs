@@ -16,11 +16,17 @@
 //!   sphere was added, moved, edited or removed: the GPU scene's change list
 //!   ([`crate::gpu_scene::SceneFrame`]), or for a draw list a comparison with the previous
 //!   frame's list by index. A static scene draws nothing.
+//! - **Pieces:** when only casters changed, a view is drawn again only where their boxes
+//!   (old and new places) project: their rectangles gathered into at most
+//!   [`PIECES`] per view, each cleared and drawn through the view's projection narrowed
+//!   to it (its viewport, and the culling of what reaches it). A light keeps at most
+//!   [`DIRTY_BOXES`] boxes while it waits (more are merged into them). A view the pieces
+//!   would cover for the most part, or a box reaching across its eye plane, draws whole.
 //! - **Budget:** lights whose shadow is out of date are drawn oldest and largest first,
-//!   at most [`LocalShadowSettings::updates_per_frame`] views per frame; the others keep
-//!   their previous views (the light's old position included) one more frame. A light
-//!   seen for the first time is always drawn: a missing shadow would leak light through
-//!   walls.
+//!   at most [`LocalShadowSettings::updates_per_frame`] views per frame (a piece counts as
+//!   a view: it can cost as much, a large mesh reaching into it drawn whole); the others
+//!   keep their previous views (the light's old position included) one more frame. A light seen for the first time
+//!   is always drawn: a missing shadow would leak light through walls.
 //! - **Eviction:** lights not in view keep their tiles until the space is needed; then
 //!   the least recently seen go first.
 //!
@@ -29,7 +35,8 @@
 
 use crate::cull::Frustum;
 use crate::lights::{LocalLight, sphere_bounds};
-use engine_core::math::{Mat4, Vec3, look_at, vulkan_perspective};
+use crate::shadow_cache::{MAX_RECTS, clusters};
+use engine_core::math::{Mat4, Vec2, Vec3, Vec4, look_at, vulkan_perspective};
 use engine_rhi::DepthBias;
 use engine_rhi::ash::vk;
 
@@ -42,6 +49,16 @@ const BORDER: f32 = 2.0;
 
 /// The widest spot cone (half angle) a projection covers; beyond it the cone is lit.
 const MAX_SPOT_HALF_ANGLE: f32 = 1.4;
+
+/// World boxes of changed casters a light's shadow keeps while it waits, to draw only
+/// their places; more are merged into them (the pair whose union grows least).
+pub(crate) const DIRTY_BOXES: usize = 8;
+
+/// Rectangles a view's changed places are gathered into: its pieces drawn again.
+pub(crate) const PIECES: usize = 2;
+
+/// A view whose pieces would cover more than this share of it is drawn whole.
+const WHOLE_SHARE: f32 = 0.5;
 
 /// Settings of local lights' shadows ([`crate::forward::ForwardRenderer::set_local_shadows`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -123,10 +140,12 @@ pub struct LocalShadowStats {
     pub lights_in_view: u32,
     /// Of those, the ones drawn with a shadow.
     pub shadowed: u32,
-    /// Lights whose views were drawn this frame.
+    /// Lights whose views were drawn this frame (whole or in pieces).
     pub lights_drawn: u32,
-    /// Views drawn (a cube face counts as one).
+    /// Views drawn whole (a cube face counts as one).
     pub views_drawn: u32,
+    /// Pieces of views drawn where casters changed, the rest of their views kept.
+    pub pieces_drawn: u32,
     /// Lights in view whose shadow is out of date but waits for the budget.
     pub deferred: u32,
     /// Lights evicted from the atlas to make room.
@@ -365,6 +384,96 @@ impl Key {
     }
 }
 
+/// The rectangles of `view`'s tile (texels of the atlas: x0, y0, x1, y1, the last
+/// exclusive) where `boxes` project, a texel wider on every side, gathered into at most
+/// [`PIECES`] (none where no box reaches the view's frustum). `None`: the view is drawn
+/// whole, a box in its frustum reaching across its eye plane or the rectangles covering
+/// more than [`WHOLE_SHARE`] of it.
+fn pieces_of(view: &ShadowViewData, boxes: &[[Vec3; 2]]) -> Option<([[i32; 4]; MAX_RECTS], usize)> {
+    let m = Mat4::from_cols_array(&view.clip_from_world);
+    let [tx, ty, size, _] = view.tile;
+    // The view's frustum (Gribb and Hartmann, as the GPU's culling).
+    let (r0, r1, r2, r3) = (m.row(0), m.row(1), m.row(2), m.row(3));
+    let planes = [r3 + r0, r3 - r0, r3 + r1, r3 - r1, r2, r3 - r2];
+    let mut rects = [[0i32; 4]; DIRTY_BOXES];
+    let mut n = 0;
+    for b in boxes {
+        let (center, extents) = ((b[0] + b[1]) * 0.5, (b[1] - b[0]) * 0.5);
+        if planes
+            .iter()
+            .any(|p| p.truncate().dot(center) + p.truncate().abs().dot(extents) + p.w < 0.0)
+        {
+            continue;
+        }
+        let (mut lo, mut hi) = (Vec2::splat(f32::MAX), Vec2::splat(f32::MIN));
+        let mut behind = 0;
+        for corner in 0..8 {
+            let p = Vec3::new(
+                if corner & 1 == 0 { b[0].x } else { b[1].x },
+                if corner & 2 == 0 { b[0].y } else { b[1].y },
+                if corner & 4 == 0 { b[0].z } else { b[1].z },
+            );
+            let c = m * p.extend(1.0);
+            if c.w <= 1e-4 {
+                behind += 1;
+                continue;
+            }
+            let ndc = Vec2::new(c.x, c.y) / c.w;
+            lo = lo.min(ndc);
+            hi = hi.max(ndc);
+        }
+        // Behind the eye plane: not in this view. Across it: no rectangle bounds it.
+        if behind == 8 {
+            continue;
+        }
+        if behind > 0 {
+            return None;
+        }
+        if hi.x < -1.0 || lo.x > 1.0 || hi.y < -1.0 || lo.y > 1.0 {
+            continue;
+        }
+        // NDC to texels of the tile (Vulkan's y down, as the viewport maps it).
+        let texel = |v: f32, origin: f32| origin + (v.clamp(-1.0, 1.0) + 1.0) * 0.5 * size;
+        let x0 = (texel(lo.x, tx).floor() as i32 - 1).max(tx as i32);
+        let y0 = (texel(lo.y, ty).floor() as i32 - 1).max(ty as i32);
+        let x1 = (texel(hi.x, tx).ceil() as i32 + 1).min((tx + size) as i32);
+        let y1 = (texel(hi.y, ty).ceil() as i32 + 1).min((ty + size) as i32);
+        if x1 > x0 && y1 > y0 && n < DIRTY_BOXES {
+            rects[n] = [x0, y0, x1, y1];
+            n += 1;
+        }
+    }
+    let (rects, count) = clusters(&rects[..n], PIECES);
+    let area: f32 = rects[..count]
+        .iter()
+        .map(|r| (r[2] - r[0]) as f32 * (r[3] - r[1]) as f32)
+        .sum();
+    (area <= WHOLE_SHARE * size * size).then_some((rects, count))
+}
+
+/// `view`'s projection narrowed to `rect` (texels of the atlas in its tile, as
+/// [`pieces_of`] gives them). Drawn with the rectangle as its viewport it puts every
+/// texel where the view does; its frustum is the rectangle's, so culling keeps what
+/// reaches it. The level of detail stays the view's.
+fn narrowed(view: &ShadowViewData, rect: [i32; 4]) -> ShadowViewData {
+    let [tx, ty, size, _] = view.tile;
+    let ndc = |t: i32, origin: f32| 2.0 * (t as f32 - origin) / size - 1.0;
+    let (x0, x1) = (ndc(rect[0], tx), ndc(rect[2], tx));
+    let (y0, y1) = (ndc(rect[1], ty), ndc(rect[3], ty));
+    let (cx, hx) = (0.5 * (x0 + x1), 0.5 * (x1 - x0));
+    let (cy, hy) = (0.5 * (y0 + y1), 0.5 * (y1 - y0));
+    let zoom = Mat4::from_cols(
+        Vec4::new(1.0 / hx, 0.0, 0.0, 0.0),
+        Vec4::new(0.0, 1.0 / hy, 0.0, 0.0),
+        Vec4::new(0.0, 0.0, 1.0, 0.0),
+        Vec4::new(-cx / hx, -cy / hy, 0.0, 1.0),
+    );
+    ShadowViewData {
+        clip_from_world: (zoom * Mat4::from_cols_array(&view.clip_from_world)).to_cols_array(),
+        ..*view
+    }
+}
+
 /// The cube faces in the order `forward.slang` picks them: +x, −x, +y, −y, +z, −z.
 const CUBE_FACES: [Vec3; 6] = [
     Vec3::X,
@@ -375,6 +484,63 @@ const CUBE_FACES: [Vec3; 6] = [
     Vec3::NEG_Z,
 ];
 
+/// What of a light's shadow is out of date.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Stale {
+    /// Nothing.
+    No,
+    /// Where casters changed within its range: their world boxes, old and new places.
+    Boxes {
+        count: u8,
+        boxes: [[Vec3; 2]; DIRTY_BOXES],
+    },
+    /// Everything: its views are drawn whole.
+    Whole,
+}
+
+impl Stale {
+    fn any(&self) -> bool {
+        *self != Self::No
+    }
+
+    /// Adds a changed box; past [`DIRTY_BOXES`] it is merged into the box whose union with
+    /// it is the smallest.
+    fn add(&mut self, b: [Vec3; 2]) {
+        match self {
+            Self::No => {
+                let mut boxes = [[Vec3::ZERO; 2]; DIRTY_BOXES];
+                boxes[0] = b;
+                *self = Self::Boxes { count: 1, boxes };
+            }
+            Self::Boxes { count, boxes } => {
+                let n = usize::from(*count);
+                if n < DIRTY_BOXES {
+                    boxes[n] = b;
+                    *count += 1;
+                } else {
+                    let union = |a: [Vec3; 2]| [a[0].min(b[0]), a[1].max(b[1])];
+                    let volume = |a: [Vec3; 2]| (a[1] - a[0]).max(Vec3::ZERO).element_product();
+                    let k = (0..n)
+                        .min_by(|&i, &j| {
+                            let grow = |k: usize| volume(union(boxes[k])) - volume(boxes[k]);
+                            grow(i).total_cmp(&grow(j))
+                        })
+                        .unwrap_or(0);
+                    boxes[k] = union(boxes[k]);
+                }
+            }
+            Self::Whole => {}
+        }
+    }
+
+    fn boxes(&self) -> &[[Vec3; 2]] {
+        match self {
+            Self::Boxes { count, boxes } => &boxes[..usize::from(*count)],
+            _ => &[],
+        }
+    }
+}
+
 /// A light's shadow in the atlas.
 #[derive(Debug, Clone, Copy)]
 struct Entry {
@@ -382,8 +548,8 @@ struct Entry {
     key: Key,
     tile: u32,
     corners: [[u32; 2]; 6],
-    /// The scene changed within its range since it was drawn.
-    stale: bool,
+    /// What changed within its range since it was drawn.
+    stale: Stale,
     /// Plan serial it was last in view, and last drawn.
     seen: u64,
     drawn: u64,
@@ -401,6 +567,18 @@ struct Candidate {
     draw: bool,
     /// The light changed (its views must be drawn again, or it keeps the old ones).
     changed: bool,
+    /// Drawn in pieces: its range in [`ShadowCache::pieces`] (first, count).
+    pieces: Option<(u32, u32)>,
+}
+
+/// Where a view of a light drawn in pieces is drawn this frame.
+#[derive(Debug, Clone, Copy)]
+struct Piece {
+    /// The light's view (its cube face).
+    face: u8,
+    /// A rectangle of its tile (texels of the atlas: x0, y0, x1, y1); `None`: the whole
+    /// view.
+    rect: Option<[i32; 4]>,
 }
 
 /// A view drawn this frame: its data and its tile.
@@ -540,6 +718,10 @@ pub(crate) struct ShadowCache {
     chunk_unions: Vec<[Vec3; 2]>,
     candidates: Vec<Candidate>,
     order: Vec<u32>,
+    /// The pieces of the lights drawn in pieces this frame ([`Candidate::pieces`]).
+    pieces: Vec<Piece>,
+    /// A light's views (scratch).
+    face_views: Vec<ShadowViewData>,
     stats: LocalShadowStats,
 }
 
@@ -558,6 +740,8 @@ impl ShadowCache {
             chunk_unions: Vec::with_capacity(1024),
             candidates: Vec::new(),
             order: Vec::new(),
+            pieces: Vec::new(),
+            face_views: Vec::with_capacity(6),
             stats: LocalShadowStats::default(),
         }
     }
@@ -638,17 +822,27 @@ impl ShadowCache {
         chunks.extend(changes.chunks(CHUNK).map(union_of));
         let union = union_of(&chunks);
         for entry in self.entries.iter_mut().flatten() {
-            if entry.stale {
+            if entry.stale == Stale::Whole {
                 continue;
             }
-            entry.stale = all
-                || (entry.key.touches(&union)
-                    && chunks.iter().enumerate().any(|(k, u)| {
-                        entry.key.touches(u)
-                            && changes[k * CHUNK..((k + 1) * CHUNK).min(changes.len())]
-                                .iter()
-                                .any(|b| entry.key.touches(b))
-                    }));
+            if all {
+                entry.stale = Stale::Whole;
+                continue;
+            }
+            if !entry.key.touches(&union) {
+                continue;
+            }
+            // The boxes it keeps, to draw only their places.
+            for (k, u) in chunks.iter().enumerate() {
+                if !entry.key.touches(u) {
+                    continue;
+                }
+                for b in &changes[k * CHUNK..((k + 1) * CHUNK).min(changes.len())] {
+                    if entry.key.touches(b) {
+                        entry.stale.add(*b);
+                    }
+                }
+            }
         }
         self.chunk_unions = chunks;
     }
@@ -670,12 +864,14 @@ impl ShadowCache {
         plan.drawn.clear();
         plan.first_view.clear();
         plan.first_view.resize(lights.len(), NO_SHADOW);
-        // Room for every light's views, so later frames do not grow them.
+        // Room for every light's views (and pieces), so later frames do not grow them.
         let most = lights.len() * 6;
         plan.views.reserve(most);
-        plan.drawn.reserve(most);
+        plan.drawn.reserve(most * PIECES);
         self.candidates.reserve(lights.len());
         self.order.reserve(lights.len());
+        self.pieces.clear();
+        self.pieces.reserve(most * PIECES);
         let mut stats = LocalShadowStats::default();
 
         // Entries of lights that are gone or no longer cast shadows.
@@ -720,6 +916,7 @@ impl ShadowCache {
                 tile: 0,
                 draw: false,
                 changed: false,
+                pieces: None,
             });
         }
         stats.lights_in_view = self.candidates.len() as u32;
@@ -733,6 +930,7 @@ impl ShadowCache {
                 .clamp(settings.min_resolution, settings.max_resolution)
         };
         let capacity = u64::from(settings.atlas_size).pow(2) * 3 / 4;
+        let atlas_size = self.atlas.size();
         let mut shift = 0;
         while shift < 16 {
             let total: u64 = self
@@ -788,7 +986,7 @@ impl ShadowCache {
             let Some(e) = &self.entries[c.index as usize] else {
                 continue;
             };
-            if c.changed || e.stale || c.tile != e.tile {
+            if c.changed || e.stale.any() || c.tile != e.tile {
                 self.order.push(k as u32);
             }
         }
@@ -804,11 +1002,31 @@ impl ShadowCache {
         }
         for k in 0..self.order.len() {
             let c = self.order[k] as usize;
-            let faces = self.faces_of(lights, self.candidates[c].index) as i64;
-            if faces <= budget {
-                budget -= faces;
+            let candidate = self.candidates[c];
+            let faces = self.faces_of(lights, candidate.index) as i64;
+            // Only casters changed: the pieces of its views they touch.
+            let pieces = self.entries[candidate.index as usize]
+                .filter(|e| !candidate.changed && candidate.tile == e.tile)
+                .and_then(|e| {
+                    let first = self.pieces.len();
+                    let added = self.add_pieces(&e, atlas_size, lod_threshold);
+                    added.then_some((first, self.pieces.len()))
+                });
+            // A piece costs as a view: a large mesh reaching into it is drawn whole (its
+            // vertices), only its texels are fewer.
+            let cost = match pieces {
+                Some((first, end)) => (end - first) as i64,
+                None => faces,
+            };
+            if cost <= budget {
+                budget -= cost;
                 self.candidates[c].draw = true;
+                self.candidates[c].pieces =
+                    pieces.map(|(first, end)| (first as u32, (end - first) as u32));
             } else {
+                if let Some((first, _)) = pieces {
+                    self.pieces.truncate(first);
+                }
                 stats.deferred += 1;
             }
         }
@@ -858,7 +1076,7 @@ impl ShadowCache {
                         key,
                         tile,
                         corners,
-                        stale: false,
+                        stale: Stale::No,
                         seen: serial,
                         drawn: serial,
                     });
@@ -890,21 +1108,48 @@ impl ShadowCache {
             stats.shadowed += 1;
             if c.draw {
                 stats.lights_drawn += 1;
-                for view in &plan.views[first..] {
-                    let tile = view.tile;
-                    plan.drawn.push(DrawnView {
-                        data: *view,
-                        rect: vk::Rect2D {
-                            offset: vk::Offset2D {
-                                x: tile[0] as i32,
-                                y: tile[1] as i32,
-                            },
-                            extent: vk::Extent2D {
-                                width: tile[2] as u32,
-                                height: tile[2] as u32,
-                            },
+                let whole = |view: &ShadowViewData| DrawnView {
+                    data: *view,
+                    rect: vk::Rect2D {
+                        offset: vk::Offset2D {
+                            x: view.tile[0] as i32,
+                            y: view.tile[1] as i32,
                         },
-                    });
+                        extent: vk::Extent2D {
+                            width: view.tile[2] as u32,
+                            height: view.tile[2] as u32,
+                        },
+                    },
+                };
+                match c.pieces {
+                    None => {
+                        plan.drawn.extend(plan.views[first..].iter().map(whole));
+                        stats.views_drawn += (plan.views.len() - first) as u32;
+                    }
+                    Some((at, count)) => {
+                        for piece in &self.pieces[at as usize..(at + count) as usize] {
+                            let view = &plan.views[first + usize::from(piece.face)];
+                            match piece.rect {
+                                None => {
+                                    plan.drawn.push(whole(view));
+                                    stats.views_drawn += 1;
+                                }
+                                Some(r) => {
+                                    plan.drawn.push(DrawnView {
+                                        data: narrowed(view, r),
+                                        rect: vk::Rect2D {
+                                            offset: vk::Offset2D { x: r[0], y: r[1] },
+                                            extent: vk::Extent2D {
+                                                width: (r[2] - r[0]) as u32,
+                                                height: (r[3] - r[1]) as u32,
+                                            },
+                                        },
+                                    });
+                                    stats.pieces_drawn += 1;
+                                }
+                            }
+                        }
+                    }
                 }
             }
             // Point light faces are looked up without their matrices.
@@ -915,9 +1160,41 @@ impl ShadowCache {
                 }
             }
         }
-        stats.views_drawn = plan.drawn.len() as u32;
         stats.texels_used = self.atlas.used();
         self.stats = stats;
+    }
+
+    /// Adds the pieces of the views of `entry`'s light its changed boxes touch to
+    /// [`Self::pieces`]; false when it is drawn whole (stale whole or more than
+    /// [`DIRTY_BOXES`] changes, nothing added).
+    fn add_pieces(&mut self, entry: &Entry, atlas: u32, lod_threshold: f32) -> bool {
+        let Stale::Boxes { .. } = entry.stale else {
+            return false;
+        };
+        self.face_views.clear();
+        entry.key.views(
+            entry.tile,
+            &entry.corners,
+            atlas,
+            &self.settings,
+            lod_threshold,
+            &mut self.face_views,
+        );
+        for (face, view) in self.face_views.iter().enumerate() {
+            match pieces_of(view, entry.stale.boxes()) {
+                None => self.pieces.push(Piece {
+                    face: face as u8,
+                    rect: None,
+                }),
+                Some((rects, count)) => {
+                    self.pieces.extend(rects[..count].iter().map(|r| Piece {
+                        face: face as u8,
+                        rect: Some(*r),
+                    }));
+                }
+            }
+        }
+        true
     }
 
     fn faces_of(&self, lights: &[LocalLight], index: u32) -> usize {
@@ -1142,6 +1419,104 @@ mod tests {
         assert_eq!(frame(&mut cache, &lights, &changes).drawn.len(), 0);
         changes[700] = [Vec3::new(4.5, 0.0, -0.5), Vec3::new(5.5, 1.0, 0.5)];
         assert_eq!(frame(&mut cache, &lights, &changes).drawn.len(), 1);
+    }
+
+    #[test]
+    fn a_moved_caster_redraws_a_piece_of_the_view_it_reaches() {
+        let mut cache = ShadowCache::new(LocalShadowSettings::default());
+        let lights = [light(0.0, true)];
+        frame(&mut cache, &lights, &[]);
+        // A small box under the spot light (it looks down from 2 m).
+        let b = [Vec3::new(0.3, 0.0, 0.2), Vec3::new(0.5, 0.2, 0.4)];
+        let plan = frame(&mut cache, &lights, &[b]);
+        let s = cache.stats();
+        assert_eq!((s.lights_drawn, s.views_drawn, s.pieces_drawn), (1, 0, 1));
+        let piece = plan.drawn[0];
+        let tile = plan.views[0].tile;
+        let r = piece.rect;
+        let (x0, y0) = (r.offset.x as f32, r.offset.y as f32);
+        let (w, h) = (r.extent.width as f32, r.extent.height as f32);
+        assert!(x0 >= tile[0] && y0 >= tile[1]);
+        assert!(x0 + w <= tile[0] + tile[2] && y0 + h <= tile[1] + tile[2]);
+        assert!(
+            w * h * 4.0 < tile[2] * tile[2],
+            "a piece, not the view: {r:?}"
+        );
+        // Its projection through its rectangle puts the box where the view puts it.
+        let full = Mat4::from_cols_array(&plan.views[0].clip_from_world);
+        let narrow = Mat4::from_cols_array(&piece.data.clip_from_world);
+        let texel = |m: Mat4, p: Vec3, origin: Vec2, size: Vec2| {
+            let c = m * p.extend(1.0);
+            origin + (Vec2::new(c.x, c.y) / c.w + 1.0) * 0.5 * size
+        };
+        for p in [b[0], b[1], (b[0] + b[1]) * 0.5] {
+            let a = texel(full, p, Vec2::new(tile[0], tile[1]), Vec2::splat(tile[2]));
+            let n = texel(narrow, p, Vec2::new(x0, y0), Vec2::new(w, h));
+            assert!((a - n).length() < 1e-2, "{a} against {n}");
+            assert!(n.x > x0 && n.x < x0 + w && n.y > y0 && n.y < y0 + h);
+        }
+        assert!(frame(&mut cache, &lights, &[]).drawn.is_empty());
+    }
+
+    #[test]
+    fn a_point_light_draws_pieces_only_of_the_faces_a_box_shows_in() {
+        let mut cache = ShadowCache::new(LocalShadowSettings::default());
+        let lights = [light(0.0, false)];
+        frame(&mut cache, &lights, &[]);
+        // Beside and below the light: in its bottom face only.
+        let beside = [Vec3::new(1.0, 0.5, -0.1), Vec3::new(1.2, 0.7, 0.1)];
+        frame(&mut cache, &lights, &[beside]);
+        let s = cache.stats();
+        assert_eq!((s.views_drawn, s.pieces_drawn), (0, 1));
+        // Around the light: across every face's eye plane, every face whole.
+        let around = [Vec3::new(-0.2, 1.8, -0.2), Vec3::new(0.2, 2.2, 0.2)];
+        frame(&mut cache, &lights, &[around]);
+        let s = cache.stats();
+        assert_eq!((s.views_drawn, s.pieces_drawn), (6, 0));
+    }
+
+    #[test]
+    fn changes_past_the_limit_are_merged() {
+        let mut stale = Stale::No;
+        let boxes: Vec<[Vec3; 2]> = (0..DIRTY_BOXES + 3)
+            .map(|k| {
+                let x = k as f32;
+                [Vec3::new(x, 0.0, 0.0), Vec3::new(x + 0.5, 0.5, 0.5)]
+            })
+            .collect();
+        for b in &boxes {
+            stale.add(*b);
+        }
+        let kept = stale.boxes();
+        assert_eq!(kept.len(), DIRTY_BOXES);
+        for b in &boxes {
+            assert!(
+                kept.iter()
+                    .any(|k| k[0].cmple(b[0]).all() && k[1].cmpge(b[1]).all()),
+                "{b:?} kept"
+            );
+        }
+    }
+
+    #[test]
+    fn pieces_count_as_views_in_the_budget() {
+        let settings = LocalShadowSettings {
+            updates_per_frame: 1,
+            ..LocalShadowSettings::default()
+        };
+        let mut cache = ShadowCache::new(settings);
+        let lights = [light(-1.5, true), light(1.5, true)];
+        frame(&mut cache, &lights, &[]);
+        let under = |x: f32| [Vec3::new(x - 0.1, 0.0, -0.1), Vec3::new(x + 0.1, 0.2, 0.1)];
+        let plan = frame(&mut cache, &lights, &[under(-1.5), under(1.5)]);
+        assert_eq!(plan.drawn.len(), 1);
+        assert_eq!(cache.stats().deferred, 1);
+        assert_eq!(
+            frame(&mut cache, &lights, &[]).drawn.len(),
+            1,
+            "the other's turn"
+        );
+        assert!(frame(&mut cache, &lights, &[]).drawn.is_empty());
     }
 
     #[test]

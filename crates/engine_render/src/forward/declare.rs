@@ -212,9 +212,11 @@ impl ForwardRenderer {
                 };
                 local_frame.atlas = Some(atlas);
                 let mut rects = state.rects.borrow_mut();
-                // Room for every view of every light (more views of one frame may add
-                // theirs), so later frames do not grow it.
-                rects.reserve(plan.views.len().max(plan.drawn.len()) * 2);
+                // Room for every view of every light in pieces (more views of one frame
+                // may add theirs), so later frames do not grow it.
+                rects.reserve(
+                    plan.views.len().max(plan.drawn.len()) * 2 * crate::local_shadows::PIECES,
+                );
                 let first = rects.len();
                 rects.extend(plan.drawn.iter().map(|d| d.rect));
                 local_frame.rects = first..rects.len();
@@ -560,10 +562,11 @@ impl ForwardRenderer {
             },
         );
         // Local lights' shadow views drawn this frame: their command and caster lists,
-        // sized for a power of two of views so the graph reuses its buffers from frame to
-        // frame (the count changes every frame).
+        // sized for a power of two of views, at least the budget's, so the graph reuses its
+        // buffers from frame to frame (the count changes every frame, pieces included).
         let local_lists = (shadow_draws > 0).then(|| {
-            let room = u64::from(shadow_draws.next_power_of_two().max(4));
+            let budget = local.map_or(0, |s| s.cache.borrow().settings().updates_per_frame);
+            let room = u64::from(shadow_draws.max(budget).next_power_of_two().max(4));
             (
                 fg.create_buffer(
                     "local shadow commands",
