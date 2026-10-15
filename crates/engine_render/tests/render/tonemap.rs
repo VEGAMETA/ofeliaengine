@@ -3,11 +3,15 @@
 //! target and come back within float rounding of a CPU reference of the curve, of scRGB
 //! scaling and of PQ encoding. Its resampling kernels (Catmull-Rom, Lanczos-3; ADR 0075)
 //! match a CPU reference, give texels back at 1:1, keep flat areas flat and never ring.
+//! Graded (ADR 0094), the grading LUT gives the CPU reference of the grading and the
+//! curve within a step of 8-bit output.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
+use engine_render::grading::{ColorGrading, GradingLut};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
 use engine_render::post::{Composite, OutputEncoding, Resample, ToneCurve, Tonemap};
+use engine_render::upload::UploadRing;
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocator, Bindless, Device, Instance, InstanceDesc, MemoryLocation,
@@ -62,6 +66,52 @@ const INPUT: [[f32; 4]; 12] = [
 
 #[test]
 fn tone_map_and_encodings_match_the_reference() {
+    check_tone_map(false);
+}
+
+#[test]
+fn graded_tone_map_matches_the_reference() {
+    check_tone_map(true);
+}
+
+/// sRGB's encoding, for comparing linear outputs as an 8-bit display would show them.
+fn srgb(c: f32) -> f32 {
+    let c = c.clamp(0.0, 1.0);
+    if c <= 0.003_130_8 {
+        c * 12.92
+    } else {
+        1.055 * c.powf(1.0 / 2.4) - 0.055
+    }
+}
+
+/// The gradings `check_tone_map` runs: none (the LUT holds the curve alone), and a strong
+/// one touching every control.
+fn gradings() -> [(&'static str, ColorGrading); 2] {
+    [
+        ("neutral grading", ColorGrading::default()),
+        (
+            "strong grading",
+            ColorGrading {
+                white_balance: [0.4, -0.2],
+                channel_mixer: [[0.9, 0.1, 0.0], [0.05, 0.9, 0.05], [0.0, 0.1, 0.9]],
+                shadows: [1.1, 1.0, 1.3],
+                midtones: [1.0, 1.05, 0.95],
+                highlights: [1.2, 1.1, 0.9],
+                slope: [1.05, 1.0, 0.98],
+                offset: [0.01, 0.0, -0.01],
+                power: [0.95, 1.0, 1.05],
+                contrast: 1.3,
+                vibrance: 1.4,
+                saturation: 0.8,
+                ..ColorGrading::default()
+            },
+        ),
+    ]
+}
+
+/// The tone mapper's composites over `INPUT` against `ToneCurve::apply` (and, `graded`,
+/// `ColorGrading::apply` through a grading LUT) on every output and curve.
+fn check_tone_map(graded: bool) {
     let Some((instance, device)) = gpu() else {
         return;
     };
@@ -71,6 +121,8 @@ fn tone_map_and_encodings_match_the_reference() {
     let bindless = Bindless::new(&device).unwrap();
     let tonemap = Tonemap::new(&device, &bindless, FORMAT).unwrap();
     let mut graph = RenderGraph::new(&device, 1);
+    let mut ring = UploadRing::new(&device, &mut allocator, 1, 1 << 20).unwrap();
+    let mut lut = graded.then(|| GradingLut::new(&device, &mut allocator, &bindless).unwrap());
     // SAFETY: plain object creation.
     let (pool, cmd) = unsafe {
         let pool = d
@@ -138,17 +190,28 @@ fn tone_map_and_encodings_match_the_reference() {
             OutputEncoding::Pq { white_nits: 250.0 },
         ),
     ];
-    let cases = outputs.iter().flat_map(|&c| {
-        [
-            ToneCurve::Gt,
-            ToneCurve::PbrNeutral,
-            ToneCurve::Agx,
-            ToneCurve::Aces,
-        ]
-        .map(|curve| (c, curve))
-    });
-    for ((name, tone_map, peak, encoding), curve) in cases {
-        let name = format!("{name}, {curve:?}");
+    let gradings = if graded {
+        gradings().to_vec()
+    } else {
+        vec![("", ColorGrading::default())]
+    };
+    let cases = outputs
+        .iter()
+        // A grading needs the curve: not on an image tone-mapped already.
+        .filter(|c| c.1 || !graded)
+        .flat_map(|&c| {
+            [
+                ToneCurve::Gt,
+                ToneCurve::PbrNeutral,
+                ToneCurve::Agx,
+                ToneCurve::Aces,
+            ]
+            .map(|curve| (c, curve))
+        })
+        .flat_map(|c| gradings.iter().map(move |&g| (c, g)));
+    let mut worst = 0.0f32;
+    for (((name, tone_map, peak, encoding), curve), (grading_name, grading)) in cases {
+        let name = format!("{name}, {curve:?} {grading_name}");
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -160,9 +223,14 @@ fn tone_map_and_encodings_match_the_reference() {
             )
             .unwrap();
         }
+        ring.begin_slot(0);
         {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
+            let lut_texture = lut.as_ref().map(|l| {
+                l.add_passes(&mut fg, &mut ring, &bindless, &grading, curve, peak)
+                    .unwrap()
+            });
             let source = fg.create_texture("scene", TextureDesc::new_2d(FORMAT, width, 1));
             let values = fg.import_buffer(
                 "scene values",
@@ -216,6 +284,7 @@ fn tone_map_and_encodings_match_the_reference() {
                     peak,
                     encoding,
                     load: LoadOp::DontCare,
+                    grading: lut_texture,
                     ..Composite::default()
                 },
             );
@@ -286,6 +355,11 @@ fn tone_map_and_encodings_match_the_reference() {
         };
         for (input, got) in INPUT.iter().zip(gpu) {
             let [r, g, b, a] = *input;
+            let [r, g, b] = if graded {
+                grading.apply([r, g, b])
+            } else {
+                [r, g, b]
+            };
             let [r, g, b] = if tone_map {
                 curve.apply([r, g, b], peak)
             } else {
@@ -293,6 +367,23 @@ fn tone_map_and_encodings_match_the_reference() {
             };
             let expected = encoding.encode([r, g, b, a]);
             for c in 0..3 {
+                if graded {
+                    // Through the LUT: within a step of 8-bit output, compared as a
+                    // display shows it (PQ is perceptual already; linear outputs as sRGB
+                    // over their brightest value).
+                    let shown = |v: f32| match encoding {
+                        OutputEncoding::Pq { .. } => v,
+                        OutputEncoding::Linear { white } => srgb(v / (peak * white)),
+                    };
+                    let error = (shown(got[c]) - shown(expected[c])).abs();
+                    worst = worst.max(error);
+                    assert!(
+                        error <= 1.0 / 255.0,
+                        "{name}: {input:?} gave {got:?}, {expected:?} expected ({:.2} / 255)",
+                        error * 255.0
+                    );
+                    continue;
+                }
                 let tolerance = 2e-4 * expected[c].abs().max(1.0);
                 assert!(
                     (got[c] - expected[c]).abs() <= tolerance,
@@ -306,9 +397,16 @@ fn tone_map_and_encodings_match_the_reference() {
         }
         println!("{name}: {} values match", INPUT.len());
     }
+    if graded {
+        println!("graded: worst {:.2} / 255", worst * 255.0);
+    }
 
     // SAFETY: the device is idle.
     unsafe {
+        if let Some(lut) = lut.as_mut() {
+            lut.destroy(&mut allocator, &bindless, 0);
+        }
+        ring.destroy(&mut allocator);
         graph.destroy(&mut allocator, Some(&bindless));
         allocator.destroy_buffer(upload, upload_mem);
         allocator.destroy_buffer(readback, readback_mem);

@@ -2,6 +2,7 @@
 
 use crate::antialiasing::Antialiasing;
 use engine_render::ao::{AoQuality, AoSettings};
+use engine_render::grading::ColorGrading;
 use engine_render::post::{OutputEncoding, ToneCurve};
 use engine_render::postfx::ExposureSettings;
 use engine_render::reflections::SsrSettings;
@@ -64,6 +65,12 @@ pub struct ViewSettings {
     pub exposure: Exposure,
     /// Tone curve.
     pub curve: ToneCurve,
+    /// Color grading before the curve (ADR 0094; neutral by default, which costs
+    /// nothing): white balance, channel mixer, shadows / mid-tones / highlights, the ASC
+    /// CDL, contrast, vibrance and saturation, in one LUT with the curve. The view makes the
+    /// LUT (864 KiB) the first frame it grades and keeps it; it is built again in the
+    /// frames where the grading, the curve or the peak change.
+    pub grading: ColorGrading,
     /// Where the tone mapper's roll-off ends, in units of reference white (1 for SDR;
     /// `OutputLevels::peak` for HDR displays, ADR 0038).
     pub peak: f32,
@@ -78,9 +85,9 @@ pub struct ViewSettings {
     /// and hidden objects are skipped.
     pub occlusion_culling: bool,
     /// The sun's shadow cascades kept across frames (ADR 0093, on by default): each frame
-    /// draws only the strips the camera's movement exposed, nothing for a still camera
-    /// over a still scene (for now everything again when the casters change). Costs the
-    /// view a shadow map of its own (16 MiB with the default 4 cascades of 1024²).
+    /// draws only the strips the camera's movement exposed and the old and new places of
+    /// casters that moved, nothing for a still camera over a still scene. Costs the view a
+    /// shadow map of its own (16 MiB with the default 4 cascades of 1024²).
     pub cached_shadows: bool,
     /// Motion vectors even without temporal antialiasing (for effects of your own).
     /// Temporal antialiasing always has them.
@@ -114,6 +121,7 @@ impl Default for ViewSettings {
             render_size: None,
             exposure: Exposure::Fixed(1.0),
             curve: ToneCurve::Gt,
+            grading: ColorGrading::default(),
             peak: 1.0,
             encoding: OutputEncoding::LINEAR,
             bloom: true,

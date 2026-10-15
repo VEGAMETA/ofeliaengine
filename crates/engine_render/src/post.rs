@@ -12,8 +12,8 @@ use crate::graph::{
 use crate::postfx::BloomOutput;
 use engine_rhi::ash::vk;
 use engine_rhi::{
-    Bindless, Device, GraphicsPipelineDesc, OutputColor, Pipeline, RhiError, SamplerKind,
-    ShaderStageDesc, spirv_words,
+    Bindless, Device, GraphicsPipelineDesc, LazyPipeline, OutputColor, Pipeline, PipelineDesc,
+    RhiError, SamplerKind, ShaderStageDesc, spirv_words,
 };
 
 const VERTEX: &[u8] = include_bytes!("../shaders/tonemap.vertexMain.spv");
@@ -26,11 +26,23 @@ const FRAGMENT_PERCEPTUAL_CATMULL_ROM: &[u8] =
 const FRAGMENT_PERCEPTUAL_LANCZOS3: &[u8] =
     include_bytes!("../shaders/tonemap.fragmentPerceptualLanczos3.spv");
 const LANCZOS3_ACROSS: &[u8] = include_bytes!("../shaders/tonemap.lanczos3Across.spv");
+// Their graded twins (ADR 0094): the grading LUT in place of the curve.
+const FRAGMENT_GRADED: &[u8] = include_bytes!("../shaders/tonemap.fragmentGraded.spv");
+const FRAGMENT_PERCEPTUAL_GRADED: &[u8] =
+    include_bytes!("../shaders/tonemap.fragmentPerceptualGraded.spv");
+const FRAGMENT_GRADED_CATMULL_ROM: &[u8] =
+    include_bytes!("../shaders/tonemap.fragmentGradedCatmullRom.spv");
+const FRAGMENT_GRADED_LANCZOS3: &[u8] =
+    include_bytes!("../shaders/tonemap.fragmentGradedLanczos3.spv");
+const FRAGMENT_PERCEPTUAL_GRADED_CATMULL_ROM: &[u8] =
+    include_bytes!("../shaders/tonemap.fragmentPerceptualGradedCatmullRom.spv");
+const FRAGMENT_PERCEPTUAL_GRADED_LANCZOS3: &[u8] =
+    include_bytes!("../shaders/tonemap.fragmentPerceptualGradedLanczos3.spv");
 
 /// The HDR format scenes render into before tonemapping.
 pub const HDR_FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 
-/// `Push` in `tonemap.slang` (40 bytes).
+/// `Push` in `tonemap.slang` (48 bytes).
 #[repr(C)]
 struct Push {
     source: u32,
@@ -42,9 +54,12 @@ struct Push {
     bloom: u32,
     bloom_intensity: f32,
     auto_exposure: u64,
+    /// The graded entry points: the grading LUT and its sampler (ADR 0094).
+    lut: u32,
+    lut_sampler: u32,
 }
 
-const _: () = assert!(core::mem::size_of::<Push>() == 40);
+const _: () = assert!(core::mem::size_of::<Push>() == 48);
 
 const FLAG_PASS_THROUGH: u32 = 1;
 const FLAG_ENCODE_PQ: u32 = 2;
@@ -364,6 +379,10 @@ pub struct Composite {
     /// A rectangle cleared to black before the source is drawn into `rect` (integer
     /// scaling's letterbox: the view's whole rectangle around the scaled image).
     pub letterbox: Option<vk::Rect2D>,
+    /// The view's color grading and tone curve as one LUT
+    /// ([`crate::grading::GradingLut::add_passes`] with this `curve` and `peak`, ADR
+    /// 0094), sampled in place of the curve. Ignored without `tonemap`.
+    pub grading: Option<Texture>,
 }
 
 impl Default for Composite {
@@ -380,6 +399,7 @@ impl Default for Composite {
             bloom: None,
             auto_exposure: None,
             letterbox: None,
+            grading: None,
         }
     }
 }
@@ -404,10 +424,36 @@ pub enum Resample {
     Lanczos3,
 }
 
+/// A tone mapper's pipeline: the full-screen triangle and `fragment` into `formats`.
+fn tonemap_desc<'a>(
+    vertex: &'a [u32],
+    (fragment, entry): (&'a [u32], &'a core::ffi::CStr),
+    formats: &'a [vk::Format],
+) -> GraphicsPipelineDesc<'a> {
+    GraphicsPipelineDesc {
+        color_formats: formats,
+        cull_mode: vk::CullModeFlags::NONE,
+        depth_test: false,
+        depth_write: false,
+        ..GraphicsPipelineDesc::new(
+            ShaderStageDesc {
+                spirv: vertex,
+                entry: c"vertexMain",
+            },
+            Some(ShaderStageDesc {
+                spirv: fragment,
+                entry,
+            }),
+        )
+    }
+}
+
 /// Tonemapping into one output format.
 #[derive(Debug)]
 pub struct Tonemap {
     pipeline: Pipeline,
+    /// Its graded twin (ADR 0094), made the first time a composite grades.
+    graded: Option<LazyPipeline>,
     /// A separable kernel's first pass (Lanczos-3's rows, into [`HDR_FORMAT`]).
     across: Option<Pipeline>,
 }
@@ -419,7 +465,13 @@ impl Tonemap {
         bindless: &Bindless,
         output_format: vk::Format,
     ) -> Result<Self, RhiError> {
-        Self::with_fragment(device, bindless, output_format, FRAGMENT, c"fragmentMain")
+        Self::with_fragment(
+            device,
+            bindless,
+            output_format,
+            (FRAGMENT, c"fragmentMain"),
+            Some((FRAGMENT_GRADED, c"fragmentGraded")),
+        )
     }
 
     /// A tone mapper for the antialiasing filters after it (ADR 0075,
@@ -431,8 +483,8 @@ impl Tonemap {
             device,
             bindless,
             crate::postaa::PERCEPTUAL_FORMAT,
-            FRAGMENT_PERCEPTUAL,
-            c"fragmentPerceptual",
+            (FRAGMENT_PERCEPTUAL, c"fragmentPerceptual"),
+            Some((FRAGMENT_PERCEPTUAL_GRADED, c"fragmentPerceptualGraded")),
         )
     }
 
@@ -445,70 +497,91 @@ impl Tonemap {
         output_format: Option<vk::Format>,
         resample: Resample,
     ) -> Result<Self, RhiError> {
-        let (fragment, entry) = match (resample, output_format.is_some()) {
-            (Resample::Sampler, true) => (FRAGMENT, c"fragmentMain"),
-            (Resample::Sampler, false) => (FRAGMENT_PERCEPTUAL, c"fragmentPerceptual"),
-            (Resample::CatmullRom, true) => (FRAGMENT_CATMULL_ROM, c"fragmentCatmullRom"),
-            (Resample::CatmullRom, false) => (
-                FRAGMENT_PERCEPTUAL_CATMULL_ROM,
-                c"fragmentPerceptualCatmullRom",
+        let (plain, graded) = match (resample, output_format.is_some()) {
+            (Resample::Sampler, true) => (
+                (FRAGMENT, c"fragmentMain"),
+                (FRAGMENT_GRADED, c"fragmentGraded"),
             ),
-            (Resample::Lanczos3, true) => (FRAGMENT_LANCZOS3, c"fragmentLanczos3"),
-            (Resample::Lanczos3, false) => {
-                (FRAGMENT_PERCEPTUAL_LANCZOS3, c"fragmentPerceptualLanczos3")
-            }
+            (Resample::Sampler, false) => (
+                (FRAGMENT_PERCEPTUAL, c"fragmentPerceptual"),
+                (FRAGMENT_PERCEPTUAL_GRADED, c"fragmentPerceptualGraded"),
+            ),
+            (Resample::CatmullRom, true) => (
+                (FRAGMENT_CATMULL_ROM, c"fragmentCatmullRom"),
+                (FRAGMENT_GRADED_CATMULL_ROM, c"fragmentGradedCatmullRom"),
+            ),
+            (Resample::CatmullRom, false) => (
+                (
+                    FRAGMENT_PERCEPTUAL_CATMULL_ROM,
+                    c"fragmentPerceptualCatmullRom",
+                ),
+                (
+                    FRAGMENT_PERCEPTUAL_GRADED_CATMULL_ROM,
+                    c"fragmentPerceptualGradedCatmullRom",
+                ),
+            ),
+            (Resample::Lanczos3, true) => (
+                (FRAGMENT_LANCZOS3, c"fragmentLanczos3"),
+                (FRAGMENT_GRADED_LANCZOS3, c"fragmentGradedLanczos3"),
+            ),
+            (Resample::Lanczos3, false) => (
+                (FRAGMENT_PERCEPTUAL_LANCZOS3, c"fragmentPerceptualLanczos3"),
+                (
+                    FRAGMENT_PERCEPTUAL_GRADED_LANCZOS3,
+                    c"fragmentPerceptualGradedLanczos3",
+                ),
+            ),
         };
         let format = output_format.unwrap_or(crate::postaa::PERCEPTUAL_FORMAT);
-        let mut tonemap = Self::with_fragment(device, bindless, format, fragment, entry)?;
+        let mut tonemap = Self::with_fragment(device, bindless, format, plain, Some(graded))?;
         if resample == Resample::Lanczos3 {
             let across = Self::with_fragment(
                 device,
                 bindless,
                 HDR_FORMAT,
-                LANCZOS3_ACROSS,
-                c"lanczos3Across",
+                (LANCZOS3_ACROSS, c"lanczos3Across"),
+                None,
             )?;
             tonemap.across = Some(across.pipeline);
         }
         Ok(tonemap)
     }
 
+    /// The pipeline of `plain` (SPIR-V and entry point) into `output_format`, and the
+    /// description of its `graded` twin (made on first use).
     fn with_fragment(
         device: &Device,
         bindless: &Bindless,
         output_format: vk::Format,
-        fragment: &[u8],
-        entry: &core::ffi::CStr,
+        plain: (&[u8], &core::ffi::CStr),
+        graded: Option<(&[u8], &core::ffi::CStr)>,
     ) -> Result<Self, RhiError> {
         let invalid = || RhiError::Vulkan {
             call: "embedded SPIR-V",
             result: vk::Result::ERROR_INVALID_SHADER_NV,
         };
         let vertex = spirv_words(VERTEX).ok_or_else(invalid)?;
-        let fragment = spirv_words(fragment).ok_or_else(invalid)?;
         let formats = [output_format];
+        let fragment = spirv_words(plain.0).ok_or_else(invalid)?;
         let pipeline = Pipeline::graphics(
             device,
             bindless.pipeline_layout(),
-            &GraphicsPipelineDesc {
-                color_formats: &formats,
-                cull_mode: vk::CullModeFlags::NONE,
-                depth_test: false,
-                depth_write: false,
-                ..GraphicsPipelineDesc::new(
-                    ShaderStageDesc {
-                        spirv: &vertex,
-                        entry: c"vertexMain",
-                    },
-                    Some(ShaderStageDesc {
-                        spirv: &fragment,
-                        entry,
-                    }),
-                )
-            },
+            &tonemap_desc(&vertex, (&fragment, plain.1), &formats),
         )?;
+        let graded = match graded {
+            Some((spirv, entry)) => {
+                let fragment = spirv_words(spirv).ok_or_else(invalid)?;
+                Some(LazyPipeline::describe(
+                    device,
+                    bindless.shared_pipeline_layout(),
+                    &PipelineDesc::Graphics(tonemap_desc(&vertex, (&fragment, entry), &formats)),
+                ))
+            }
+            None => None,
+        };
         Ok(Self {
             pipeline,
+            graded,
             across: None,
         })
     }
@@ -603,6 +676,8 @@ impl Tonemap {
                     bloom: 0,
                     bloom_intensity: 0.0,
                     auto_exposure: 0,
+                    lut: 0,
+                    lut_sampler: 0,
                 };
                 // SAFETY: `Push` is plain `repr(C)` data without padding.
                 let bytes = unsafe {
@@ -650,12 +725,22 @@ impl Tonemap {
         output: Texture,
         composite: Composite,
     ) {
-        let pipeline = &self.pipeline;
+        // Graded (ADR 0094): the twin that samples the grading LUT, when it could be made
+        // (else the curve, ungraded; `engine_rhi` logged why).
+        let graded = composite
+            .grading
+            .filter(|_| composite.tonemap)
+            .and_then(|lut| Some((lut, self.graded.as_ref()?.get_or_create().ok()?)));
+        let pipeline = graded.map_or(&self.pipeline, |(_, p)| p);
+        let lut = graded.map(|(lut, _)| lut);
         let mut pass = fg
             .add_pass(name)
             .read(source, Access::Sampled(ShaderStages::FRAGMENT));
         if let Some(bloom) = composite.bloom {
             pass = pass.read(bloom.texture, Access::Sampled(ShaderStages::FRAGMENT));
+        }
+        if let Some(lut) = lut {
+            pass = pass.read(lut, Access::Sampled(ShaderStages::FRAGMENT));
         }
         if let Some(exposure) = composite.auto_exposure {
             pass = pass.read(exposure, Access::StorageRead(ShaderStages::FRAGMENT));
@@ -696,6 +781,8 @@ impl Tonemap {
                     bloom: bloom.map_or(0, |b| b.0),
                     bloom_intensity: bloom.map_or(0.0, |b| b.1),
                     auto_exposure: auto_exposure.unwrap_or(0),
+                    lut: lut.and_then(|t| ctx.sampled_index(t)).unwrap_or(0),
+                    lut_sampler: Bindless::sampler(SamplerKind::LinearClamp),
                 };
                 // SAFETY: `Push` is plain `repr(C)` data without padding.
                 let bytes = unsafe {

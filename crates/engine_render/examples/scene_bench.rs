@@ -42,7 +42,8 @@
 //! height (default: the scene's light), `--atmosphere-every-frame` to rebuild its tables and
 //! the image-based light every frame, `--fog` for exponential height fog (implies `--sky`),
 //! `--post` for bloom, automatic exposure and tone mapping every
-//! frame (ADR 0047), `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
+//! frame (ADR 0047), `--grading` to grade through a LUT too (ADR 0094; implies `--post`),
+//! `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
 //! levels made at load (ADR 0053), `--no-meshlets` to keep each level's triangles in their
 //! order before meshlets (ADR 0085: the cook reorders them meshlet by meshlet),
@@ -88,6 +89,7 @@ use engine_render::forward::{
 };
 use engine_render::gi::{GiSettings, ProbeGi, ProbeGrid};
 use engine_render::gpu_scene::{GpuScene, SceneInstance};
+use engine_render::grading::{ColorGrading, GradingLut};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, RenderGraph, TextureDesc};
 use engine_render::material::{AlphaMode, MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId};
@@ -324,6 +326,7 @@ fn main() {
     let mut pipeline_stats = false;
     let mut msaa_stats: u32 = 0;
     let mut post = false;
+    let mut graded = false;
     let mut curve = ToneCurve::Gt;
     let mut ddc = String::from("test-assets/.ddc");
     let mut pack: Option<String> = None;
@@ -420,6 +423,10 @@ fn main() {
             // With --pipeline-stats: also the multisampled shading's (ADR 0075).
             "--msaa" => msaa_stats = args.next().unwrap().parse().unwrap(),
             "--post" => post = true,
+            "--grading" => {
+                post = true;
+                graded = true;
+            }
             "--curve" => {
                 curve = match args.next().as_deref() {
                     Some("pbr-neutral") => ToneCurve::PbrNeutral,
@@ -1275,6 +1282,19 @@ fn main() {
         }
         println!();
     }
+    // `--grading`: a grading touching every control (ADR 0094).
+    let mut grading_lut =
+        graded.then(|| GradingLut::new(&device, &mut allocator, &bindless).unwrap());
+    let grading = ColorGrading {
+        white_balance: [0.3, -0.1],
+        shadows: [1.05, 1.0, 1.15],
+        highlights: [1.1, 1.05, 0.95],
+        slope: [1.03, 1.0, 0.98],
+        contrast: 1.2,
+        vibrance: 1.3,
+        saturation: 0.9,
+        ..ColorGrading::default()
+    };
     let post_effects = post.then(|| {
         (
             Bloom::new(&device, &bindless, BloomSettings::default()).unwrap(),
@@ -1639,6 +1659,9 @@ fn main() {
                         ),
                         None => (None, None),
                     };
+                    let lut = grading_lut.as_ref().and_then(|l| {
+                        l.add_passes(&mut fg, &mut ring, &bindless, &grading, curve, 1.0)
+                    });
                     tonemap.add_composite_pass(
                         &mut fg,
                         &bindless,
@@ -1648,6 +1671,7 @@ fn main() {
                             curve,
                             bloom: bloomed,
                             auto_exposure: measured,
+                            grading: lut,
                             ..Composite::default()
                         },
                     );
@@ -1728,6 +1752,9 @@ fn main() {
                     );
                     let bloomed = bloom.add_passes(&mut fg, &bindless, hdr);
                     let measured = exposure.add_passes(&mut fg, &bindless, hdr, 1.0 / 60.0);
+                    let lut = grading_lut.as_ref().and_then(|l| {
+                        l.add_passes(&mut fg, &mut ring, &bindless, &grading, curve, 1.0)
+                    });
                     tonemap.add_composite_pass(
                         &mut fg,
                         &bindless,
@@ -1737,6 +1764,7 @@ fn main() {
                             bloom: Some(bloomed),
                             auto_exposure: Some(measured),
                             curve,
+                            grading: lut,
                             ..Composite::default()
                         },
                     );
@@ -2151,6 +2179,9 @@ fn main() {
         graph.destroy(&mut allocator, Some(&bindless));
         if let Some(c) = shadow_cache.as_mut() {
             c.destroy(&mut allocator, &bindless);
+        }
+        if let Some(lut) = grading_lut.as_mut() {
+            lut.destroy(&mut allocator, &bindless, 0);
         }
         ring.destroy(&mut allocator);
         geometry.destroy(&mut allocator);

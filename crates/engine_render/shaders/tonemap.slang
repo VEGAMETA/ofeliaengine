@@ -14,6 +14,7 @@
 // PQ) for swapchains that need it.
 
 [[vk::binding(0, 0)]] Texture2D g_textures[];
+[[vk::binding(0, 0)]] Texture3D g_volumes[];
 [[vk::binding(2, 0)]] SamplerState g_samplers[];
 
 static const uint FLAG_PASS_THROUGH = 1; // exposure only, no tone mapping (LDR sources)
@@ -35,6 +36,8 @@ struct Push
     uint bloom;     // bindless index of the bloom (half size), with FLAG_BLOOM
     float bloom_intensity; // how much of the image the bloom replaces
     float4* auto_exposure; // x: the measured exposure, with FLAG_AUTO_EXPOSURE
+    uint lut;       // the graded entry points: bindless index of the grading LUT (ADR 0094)
+    uint lut_sampler; // and its sampler (trilinear, clamped)
 };
 
 [[vk::push_constant]]
@@ -57,111 +60,7 @@ VertexOut vertexMain(uint vertex_id : SV_VertexID)
     return o;
 }
 
-// PBR Neutral with its roll-off scaled to `peak`: the toe is unchanged, compression
-// starts at 0.76 · peak and approaches peak. With peak = 1 it is the published curve.
-float3 pbr_neutral(float3 color, float peak)
-{
-    const float start_compression = 0.8 - 0.04;
-    const float desaturation = 0.15;
-    float x = min(color.r, min(color.g, color.b));
-    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
-    color -= offset;
-    float brightest = max(color.r, max(color.g, color.b));
-    float start = start_compression * peak;
-    if (brightest < start)
-        return color;
-    float d = peak - start;
-    float new_peak = peak - d * d / (brightest + d - start);
-    color *= new_peak / brightest;
-    float g = 1.0 - 1.0 / (desaturation * (brightest - new_peak) / peak + 1.0);
-    return lerp(color, float3(new_peak, new_peak, new_peak), g);
-}
-
-// Uchimura's curve (`gt` in post.rs), the published defaults, rolling off to `peak`. Only
-// the section a value falls in is evaluated (neighbouring pixels share it): the toe's power
-// and the shoulder's exponential are not both paid for.
-float gt(float x, float peak)
-{
-    const float a = 1.0;
-    const float m = 0.22;
-    const float l = 0.4;
-    const float c = 1.33;
-    const float b = 0.0;
-    float p = max(peak, m + 1e-3);
-    float l0 = (p - m) * l / a;
-    float s0 = m + l0;
-    float linear = m + a * (x - m);
-    if (x < m)
-    {
-        float t = x / m;
-        float w0 = 1.0 - t * t * (3.0 - 2.0 * t);
-        float toe = m * pow(max(t, 0.0), c) + b;
-        return toe * w0 + linear * (1.0 - w0);
-    }
-    if (x < s0)
-        return linear;
-    float s1 = m + a * l0;
-    float cp = -a / (p - s1);
-    return p - (p - s1) * exp(cp * (x - s0));
-}
-
-float3 gt3(float3 color, float peak)
-{
-    color = max(color, 0.0);
-    return float3(gt(color.r, peak), gt(color.g, peak), gt(color.b, peak));
-}
-
-// AgX (`agx` in post.rs): Blender's inset matrix for Rec.2020 folded with BT.709 → BT.2020,
-// a log encoding over [MIN_EV, MAX_EV] around mid-grey, a polynomial sigmoid (Wrensch's
-// minimal AgX, Rec.2020 coefficients as in Filament), the outset matrix, a 2.2 power back
-// to linear, and back to BT.709. The constants' provenance is in post.rs and ADR 0048.
-static const float3x3 AGX_IN = float3x3(
-    0.5448148, 0.3737865, 0.0813982,
-    0.14041676, 0.7541371, 0.1054447,
-    0.08881054, 0.17887152, 0.7323176);
-static const float3x3 AGX_OUT = float3x3(
-    1.1271006, -0.11060664, -0.016493939,
-    -0.14132976, 1.1578237, -0.016493939,
-    -0.14132976, -0.11060664, 1.2519364);
-static const float3x3 BT709_FROM_BT2020 = float3x3(
-    1.6604903, -0.5876391, -0.0728516,
-    -0.12454997, 1.1328999, -0.008347964,
-    -0.01815112, -0.10057872, 1.1187299);
-
-float3 agx(float3 color)
-{
-    const float min_ev = -12.47393;
-    const float max_ev = 4.026069;
-    float3 v = mul(AGX_IN, max(color, 0.0));
-    v = saturate((log2(max(v, 1e-10)) - min_ev) / (max_ev - min_ev));
-    float3 x2 = v * v;
-    float3 x4 = x2 * x2;
-    float3 x6 = x4 * x2;
-    v = -17.86 * x6 * v + 78.01 * x6 - 126.7 * x4 * v + 92.06 * x4 - 28.72 * x2 * v + 4.361 * x2
-        - 0.1718 * v + 0.002857;
-    v = pow(max(mul(AGX_OUT, v), 0.0), 2.2);
-    // Colors AgX leaves outside BT.709 (it works in Rec.2020) are clipped to the display.
-    return saturate(mul(BT709_FROM_BT2020, v));
-}
-
-// Stephen Hill's fit of ACES 1.0 RRT + sRGB ODT (`aces` in post.rs; MJP's Baking Lab, MIT;
-// the transforms it fits are the Academy's, see THIRD_PARTY_NOTICES.md).
-static const float3x3 ACES_IN = float3x3(
-    0.59719, 0.35458, 0.04823,
-    0.07600, 0.90834, 0.01566,
-    0.02840, 0.13383, 0.83777);
-static const float3x3 ACES_OUT = float3x3(
-    1.60475, -0.53108, -0.07367,
-    -0.10208, 1.10813, -0.00605,
-    -0.00327, -0.07276, 1.07602);
-
-float3 aces(float3 color)
-{
-    float3 v = mul(ACES_IN, max(color, 0.0));
-    float3 a = v * (v + 0.0245786) - 0.000090537;
-    float3 b = v * (0.983729 * v + 0.4329510) + 0.238081;
-    return saturate(mul(ACES_OUT, a / b));
-}
+#include "tone_curves.slang"
 
 // BT.709 → BT.2020 primaries, both linear (ITU-R BT.2087).
 static const float3x3 BT2020_FROM_BT709 = float3x3(
@@ -475,4 +374,79 @@ float4 fragmentPerceptualCatmullRom(VertexOut input) : SV_Target
 float4 fragmentPerceptualLanczos3(VertexOut input) : SV_Target
 {
     return float4(perceptual(tonemap_color(lanczos3_down(input.uv), input.uv)), 1.0);
+}
+
+// Color grading (ADR 0094): the graded entry points read the view's LUT (grading.slang),
+// which holds the grading and the curve (with PBR Neutral, the grading only: its curve
+// follows). The plain entry points above keep their code.
+
+// `tonemap_color` with the grading LUT: bloom, exposure, the LUT, the output's encoding.
+float3 tonemap_graded(float3 color, float2 uv)
+{
+    SamplerState s = g_samplers[push.sampler];
+    // Bloom replaces its share of the image: energy is kept.
+    if ((push.flags & FLAG_BLOOM) != 0)
+    {
+        float3 bloom = g_textures[NonUniformResourceIndex(push.bloom)].SampleLevel(s, uv, 0).rgb;
+        color = lerp(color, bloom, push.bloom_intensity);
+    }
+    float exposure = push.exposure;
+    if ((push.flags & FLAG_AUTO_EXPOSURE) != 0)
+        exposure *= loadAligned<16>(push.auto_exposure).x;
+    color *= exposure;
+    // The LUT's texel centers sit at its coordinates (clamped to its edge).
+    Texture3D lut = g_volumes[NonUniformResourceIndex(push.lut)];
+    uint width, height, depth;
+    lut.GetDimensions(width, height, depth);
+    float n = float(width);
+    float3 uvw = lut_coordinate(color) * ((n - 1.0) / n) + 0.5 / n;
+    color = lut.SampleLevel(g_samplers[push.lut_sampler], uvw, 0).rgb;
+    if ((push.flags & FLAG_PBR_NEUTRAL) != 0)
+        color = pbr_neutral(max(acescct_decode(color), 0.0), push.peak);
+    color *= push.white;
+    if ((push.flags & FLAG_ENCODE_PQ) != 0)
+        color = pq_encode(mul(BT2020_FROM_BT709, color));
+    return color;
+}
+
+float3 source_color(float2 uv)
+{
+    SamplerState s = g_samplers[push.sampler];
+    return g_textures[NonUniformResourceIndex(push.source)].SampleLevel(s, uv, 0).rgb;
+}
+
+[shader("fragment")]
+float4 fragmentGraded(VertexOut input) : SV_Target
+{
+    return float4(tonemap_graded(source_color(input.uv), input.uv), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentPerceptualGraded(VertexOut input) : SV_Target
+{
+    return float4(perceptual(tonemap_graded(source_color(input.uv), input.uv)), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentGradedCatmullRom(VertexOut input) : SV_Target
+{
+    return float4(tonemap_graded(catmull_rom(input.uv), input.uv), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentGradedLanczos3(VertexOut input) : SV_Target
+{
+    return float4(tonemap_graded(lanczos3_down(input.uv), input.uv), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentPerceptualGradedCatmullRom(VertexOut input) : SV_Target
+{
+    return float4(perceptual(tonemap_graded(catmull_rom(input.uv), input.uv)), 1.0);
+}
+
+[shader("fragment")]
+float4 fragmentPerceptualGradedLanczos3(VertexOut input) : SV_Target
+{
+    return float4(perceptual(tonemap_graded(lanczos3_down(input.uv), input.uv)), 1.0);
 }

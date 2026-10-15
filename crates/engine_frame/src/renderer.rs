@@ -15,6 +15,7 @@ use engine_render::forward::{
 };
 use engine_render::fsr1::{Fsr1, Fsr1Exposure};
 use engine_render::gpu_scene::SceneFrame;
+use engine_render::grading::GradingLut;
 use engine_render::graph::{
     Access, Buffer, FrameGraph, ImportedTexture, LoadOp, ShaderStages, Texture, TextureDesc,
     TextureState,
@@ -899,6 +900,12 @@ impl FrameRenderer {
             }
             _ => {}
         }
+        // Color grading (ADR 0094): the view's LUT, made the first frame it grades and kept
+        // while it lives, so that a grading animated back to neutral and away again (a
+        // damage flash) makes nothing again.
+        if !settings.grading.is_neutral() && view.grading.is_none() {
+            view.grading = Some(GradingLut::new(device, allocator, bindless)?);
+        }
         match settings.exposure {
             Exposure::Auto(exposure) => match &view.exposure {
                 Some(auto) => auto.set_settings(exposure),
@@ -1161,6 +1168,7 @@ impl FrameRenderer {
             shadow_cache,
             upscaler,
             exposure,
+            grading,
             history,
             reflections,
             post_history,
@@ -1212,6 +1220,7 @@ impl FrameRenderer {
         let shadow_cache: Option<&'g CascadeCache> = shadow_cache.as_ref();
         let upscaler: Option<&'g mut Box<dyn Upscaler>> = upscaler.as_mut();
         let exposure: Option<&'g AutoExposure> = exposure.as_ref();
+        let grading: Option<&'g GradingLut> = grading.as_ref();
         let (render, output) = (prepared.render, prepared.output);
 
         // 1. The scene at render resolution, jittered, with motion vectors when temporal;
@@ -1515,6 +1524,19 @@ impl FrameRenderer {
             Upscale::Nearest | Upscale::Integer => SamplerKind::NearestClamp,
             _ => SamplerKind::LinearClamp,
         };
+        // Through the view's LUT while it grades (a neutral grading: the plain curve).
+        let grading = grading
+            .filter(|_| !settings.grading.is_neutral())
+            .and_then(|lut| {
+                lut.add_passes(
+                    fg,
+                    ctx.ring,
+                    ctx.bindless,
+                    &settings.grading,
+                    settings.curve,
+                    settings.peak,
+                )
+            });
         let composite = Composite {
             rect,
             sampler,
@@ -1527,6 +1549,7 @@ impl FrameRenderer {
             bloom,
             auto_exposure,
             letterbox,
+            grading,
         };
         tonemap.add_composite_pass(fg, ctx.bindless, sources[0], tonemapped, composite);
         let second = perceptual.and_then(|(_, _, second)| second);
