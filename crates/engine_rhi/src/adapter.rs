@@ -70,6 +70,9 @@ pub struct OptionalCaps {
     pub pipeline_binary: bool,
     /// `VK_KHR_present_wait` + `VK_KHR_present_id`.
     pub present_wait: bool,
+    /// `VK_EXT_full_screen_exclusive`: a swapchain may take its monitor for itself
+    /// ([`FullScreenExclusive`](crate::FullScreenExclusive)).
+    pub full_screen_exclusive: bool,
     /// `VK_NV_low_latency2` (Reflex without DLLs, §7).
     pub nv_low_latency2: bool,
     /// `VK_AMD_anti_lag` (Anti-Lag 2, §7).
@@ -141,6 +144,7 @@ impl OptionalCaps {
             (self.graphics_pipeline_library, "pipeline library"),
             (self.pipeline_binary, "pipeline binary"),
             (self.present_wait, "present wait"),
+            (self.full_screen_exclusive, "exclusive full screen"),
             (self.nv_low_latency2, "Reflex"),
             (self.amd_anti_lag, "Anti-Lag 2"),
             (self.device_fault, "device fault"),
@@ -364,6 +368,7 @@ impl Adapter {
             // Newer than the headers in ash 0.38: compared by name.
             pipeline_binary: has(c"VK_KHR_pipeline_binary"),
             present_wait: has(ash::khr::present_wait::NAME) && has(ash::khr::present_id::NAME),
+            full_screen_exclusive: has(ash::ext::full_screen_exclusive::NAME),
             nv_low_latency2: has(ash::nv::low_latency2::NAME),
             amd_anti_lag: has(c"VK_AMD_anti_lag"),
             device_fault: has(ash::ext::device_fault::NAME),

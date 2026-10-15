@@ -383,7 +383,7 @@ mod windowed {
     use super::*;
     use engine_core::math::{Mat4, look_at};
     use engine_ecs::{Children, QueryState};
-    use engine_platform::window::{WindowDesc, WindowEventKind, WindowSystem};
+    use engine_platform::window::{WindowDesc, WindowEventKind, WindowMode, WindowSystem};
     use engine_render::forward::{
         Camera, DirectionalLight, DrawItem, ForwardRenderer, ForwardView, ShadowSettings,
     };
@@ -411,6 +411,10 @@ mod windowed {
                 height: 1080,
                 resizable: false,
                 visible: true,
+                // The monitor's size (1920 × 1080 on ref-1): a 1920 × 1080 window would
+                // be scaled down into the work area (ADR 0099).
+                mode: WindowMode::FullScreen,
+                ..WindowDesc::default()
             })
             .unwrap();
         let instance = Instance::new(&InstanceDesc::default()).unwrap();
@@ -431,6 +435,7 @@ mod windowed {
                 srgb: true,
                 color: OutputColor::Sdr,
                 low_latency: false,
+                ..SwapchainDesc::default()
             },
         )
         .unwrap();

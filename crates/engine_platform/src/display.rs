@@ -28,12 +28,17 @@ use windows_sys::Win32::Devices::Display::{
     DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
     QDC_ONLY_ACTIVE_PATHS, QueryDisplayConfig,
 };
-use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HWND, LUID, RECT};
-use windows_sys::Win32::Graphics::Gdi::{
-    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplaySettingsW, GetMonitorInfoW, HMONITOR,
-    MONITOR_DEFAULTTONEAREST, MONITORINFO, MONITORINFOEXW, MonitorFromWindow,
+use windows_sys::Win32::Foundation::{
+    ERROR_INSUFFICIENT_BUFFER, ERROR_SUCCESS, HWND, LPARAM, LUID, POINT, RECT,
 };
-use windows_sys::core::GUID;
+use windows_sys::Win32::Graphics::Gdi::{
+    DEVMODEW, ENUM_CURRENT_SETTINGS, EnumDisplayMonitors, EnumDisplaySettingsW, GetMonitorInfoW,
+    HDC, HMONITOR, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MONITORINFOEXW,
+    MonitorFromPoint, MonitorFromWindow,
+};
+use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows_sys::Win32::UI::WindowsAndMessaging::MONITORINFOF_PRIMARY;
+use windows_sys::core::{BOOL, GUID};
 
 /// Luminance of SDR white when Windows does not say otherwise: sRGB's reference white,
 /// and 1.0 in scRGB.
@@ -344,6 +349,123 @@ pub(crate) fn device_refresh_hz(device: &[u16; 32]) -> Option<u32> {
         }
         // 0 and 1 stand for "the hardware's default rate".
         (mode.dmDisplayFrequency > 1).then_some(mode.dmDisplayFrequency)
+    }
+}
+
+// ---------------------------------------------------------------------------------------
+// Monitors
+// ---------------------------------------------------------------------------------------
+
+/// A rectangle of the desktop in physical pixels, its right and bottom edges exclusive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Rect {
+    /// Left edge.
+    pub left: i32,
+    /// Top edge.
+    pub top: i32,
+    /// Right edge.
+    pub right: i32,
+    /// Bottom edge.
+    pub bottom: i32,
+}
+
+impl Rect {
+    /// Width in pixels.
+    pub fn width(&self) -> i32 {
+        self.right - self.left
+    }
+
+    /// Height in pixels.
+    pub fn height(&self) -> i32 {
+        self.bottom - self.top
+    }
+}
+
+impl From<RECT> for Rect {
+    fn from(r: RECT) -> Self {
+        Self {
+            left: r.left,
+            top: r.top,
+            right: r.right,
+            bottom: r.bottom,
+        }
+    }
+}
+
+/// A monitor of the desktop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Monitor {
+    /// The monitor (an `HMONITOR`, as in [`DisplayInfo::monitor`]).
+    pub handle: isize,
+    /// Windows' primary monitor: the desktop's origin is its top left corner.
+    pub primary: bool,
+    /// The monitor's area of the desktop.
+    pub rect: Rect,
+    /// Its work area: the monitor less the taskbar and docked tool bars.
+    pub work: Rect,
+    /// Its effective DPI (96 = 100 %), which scales the windows on it.
+    pub dpi: u32,
+}
+
+/// Every monitor of the desktop, the primary one first.
+pub fn monitors() -> Vec<Monitor> {
+    unsafe extern "system" fn add(monitor: HMONITOR, _: HDC, _: *mut RECT, list: LPARAM) -> BOOL {
+        // SAFETY: `list` is the vector `monitors` passes, alive during the enumeration.
+        let list = unsafe { &mut *(list as *mut Vec<isize>) };
+        list.push(monitor as isize);
+        1
+    }
+    let mut handles: Vec<isize> = Vec::new();
+    // SAFETY: the callback only pushes to `handles`, which outlives the call.
+    unsafe {
+        EnumDisplayMonitors(
+            null_mut(),
+            core::ptr::null(),
+            Some(add),
+            (&raw mut handles) as LPARAM,
+        )
+    };
+    let mut list: Vec<Monitor> = handles.into_iter().filter_map(monitor_info).collect();
+    list.sort_by_key(|m| !m.primary);
+    list
+}
+
+/// Windows' primary monitor; `None` in a session without a desktop.
+pub fn primary_monitor() -> Option<Monitor> {
+    // SAFETY: a plain query; the primary monitor holds the desktop's origin.
+    let handle = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
+    monitor_info(handle as isize)
+}
+
+/// The monitor showing most of window `hwnd` (a
+/// [`WindowHandle::hwnd`](crate::window::WindowHandle::hwnd)), or the nearest one.
+pub fn window_monitor(hwnd: isize) -> Option<Monitor> {
+    monitor_info(monitor_of(hwnd))
+}
+
+/// What Windows says about monitor `handle` (an `HMONITOR`); `None` once it is gone.
+pub fn monitor_info(handle: isize) -> Option<Monitor> {
+    if handle == 0 {
+        return None;
+    }
+    // SAFETY: plain queries; the structure carries its size, as the API requires.
+    unsafe {
+        let mut info: MONITORINFO = core::mem::zeroed();
+        info.cbSize = size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(handle as HMONITOR, &mut info) == 0 {
+            return None;
+        }
+        let (mut dpi, mut dpi_y) = (96, 96);
+        if GetDpiForMonitor(handle as HMONITOR, MDT_EFFECTIVE_DPI, &mut dpi, &mut dpi_y) < 0 {
+            dpi = 96;
+        }
+        Some(Monitor {
+            handle,
+            primary: info.dwFlags & MONITORINFOF_PRIMARY != 0,
+            rect: info.rcMonitor.into(),
+            work: info.rcWork.into(),
+            dpi,
+        })
     }
 }
 

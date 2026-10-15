@@ -71,6 +71,7 @@ fn main() {
             srgb: true,
             color: OutputColor::Sdr,
             low_latency: false,
+            ..SwapchainDesc::default()
         },
     )
     .unwrap();
