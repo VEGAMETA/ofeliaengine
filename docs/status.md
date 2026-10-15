@@ -87,6 +87,8 @@ Estimate: the technical core is about **74 %** done (GI done and measured agains
 
 ## 4. In flight
 
+- **5, virtual shadow maps, step 3** (ADR 0093): 3a done 2026-10-15 (the pages'
+  machinery); 3b next, then 3c. Details under the queue's item 5.
 - **4, meshlets in the forward renderer** (ADR 0085's addendum of 2026-10-14). Step 1 is
   done: the cook makes meshlets per detail level (64 vertices, 124 triangles; none for
   skinned meshes) and reorders each level's triangles by them. The tables sit at the end
@@ -485,9 +487,23 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
      - Walking: Intel's Sponza RTX 69 → 43 µs, Radeon 1.98 → 0.76 ms. With 8 small
        objects moving: RTX 403 µs, Radeon 7.0 ms, against 728 µs and 19.0 ms drawn
        whole.
-   - **Next:** virtual pages (option 1) where the cache leaves cost or resolution wanting
-     (the owner, 2026-10-15: after the player crate, 8a); the instanced draws' pieces culled
-     with the same tags.
+   - **Step 3, virtual pages for the sun**, designed 2026-10-15 (ADR 0093's step 3; the
+     owner: after the player crate). The cache leaves resolution wanting: a shadow texel
+     is never under 2.2 pixels with the defaults, 4–10 pixels at 2–5 m.
+     - **3a done 2026-10-15:** the pages' machinery, not yet used by a frame
+       (`engine_render::vsm::VirtualShadows`): a pool of physical pages, page tables that
+       scroll with the camera, marking from the depth buffer, allocation and eviction on
+       the GPU, the light turning, clearing. Every frame of the tests is held to a CPU
+       model of the rules on both GPUs.
+       - At 1080p (a ground plane, 3,185 pages): RTX 62 µs a frame (the first 121 µs),
+         Radeon 1.03 ms (the first 1.88 ms).
+     - **Next, 3b:** drawing into the dirty pages, the visibility pass into the sun's mask,
+       the shading reading it; golden shots and perf gate scenes.
+     - **Then 3c:** moved casters, a slowly turning sun (today every turn redraws the
+       needed pages), the pool's size and the level bias per device class. A ground plane
+       at 1080p fills 78 % of the default pool, and the Radeon's marking costs 1 ms, so
+       the integrated class keeps the cascades unless measured otherwise.
+   - The instanced draws' pieces culled with the same tags (left from step 2).
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.
 

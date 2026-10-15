@@ -412,3 +412,67 @@ about a texel and back only what pixels sample.
   register checks on both GPUs.
 - **3c.** Moved casters and the light turning, defaults per device class, measurements
   against the cascade cache, documentation.
+
+## Step 3a as built (2026-10-15)
+
+`engine_render::vsm::VirtualShadows` and `vsm.slang`. Nothing draws into the pages or reads
+them yet: 3b wires them into the frame.
+
+- **One graph pass of seven dispatches**, after the depth prepass:
+  1. the frame's flags cleared, the entries whose window wrapped freed;
+  2. marking;
+  3. the free pages and the old ones (no pixel needed them for `keep_frames` frames);
+     when the light turned, the needed pages dirty and the others freed;
+  4. allocation: free pages, then old ones, then failure;
+  5. the dirty pages collected;
+  6. the clear's dispatch;
+  7. the clear: one group per dirty page, indirect.
+- **Kept across frames:** the pool (`R32_UINT`, rows of 64 pages, in the general layout),
+  the page tables (a 64 × 64 table per level), and a meta entry per physical page (the
+  entry it backs, the last frame a pixel needed it).
+- **Changes from the design:**
+  - **The light turning frees the pages no pixel needs**, rather than marking every page
+    dirty: a dirty page is drawn in its frame, and a page nobody samples would be drawn
+    for nothing. In the test's turn at 540p, 852 pages are drawn instead of 1,886.
+  - **A page is dirty in one frame:** the frame that draws it. A request that finds no
+    page fails, and is asked for again the next frame.
+  - **The marking's arithmetic.** Clip → light and clip → camera-relative matrices are
+    made on the CPU. A pixel takes one reciprocal; the level comes from the squared
+    distance, and the page from pages per metre (no divisions).
+  - **The pool takes any number of pages,** up to 65,472, as many rows as the device's
+    images allow.
+- **Tests** (`tests/render/vsm.rs`, both GPUs, synchronization validation).
+  - **Each frame's change from the last is held to the rules:**
+    - the pages marked, against the same math in f64 (a pixel within 1 % of a page's or a
+      level's edge may land on either side);
+    - the requests, the free and old lists, allocation, failures and eviction;
+    - kept entries and their meta;
+    - the dirty pages, cleared to the far plane.
+  - **Scenarios:**
+    - still frames allocate and clear nothing;
+    - walking and a 1 km jump free what wraps;
+    - the light turning;
+    - a pool with room for one of two views fails for `keep_frames` frames after turning
+      around, then takes the old pages.
+- **Numbers** (`what_the_pages_cost_at_1080p`): a ground plane seen from 1.7 m at
+  1920 × 1080, default settings (16 levels, 4,096 pages, 64.6 MiB).
+
+| | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| first frame (3,185 pages backed and cleared) | 121 µs | 1,879 µs |
+| still camera | 62 µs | 1,029 µs |
+| walking at 3 m/s | 64 µs | 1,047 µs |
+| of which marking | 51 µs | 985 µs |
+
+- **The clear's first version** had each lane clear 8 × 8 texels, lanes 8 texels apart:
+  the first frame took 892 µs on the RTX and 11.67 ms on the Radeon. Clearing one 8 × 8
+  block a step brought them to 116–121 µs and 1.88 ms.
+- **The Radeon's marking is bound by arithmetic:** about 120 lane-cycles a pixel on its
+  2 CUs, about its instruction count.
+  - Not the depth reads: without them it is 4 % faster.
+  - The per-wave deduplication and its atomics are about 20 % of it.
+  - The matrices made on the CPU took 10 % off.
+  - Not tried: 2 × 2 pixels a thread, to share the deduplication.
+- **For 3c.** The ground plane fills 78 % of the default pool at 1080p; grazing views back
+  the most pages. The pool's size and the level bias (+1 quarters the pages) are per
+  device class. The integrated class keeps the cascades unless 3c measures otherwise.
