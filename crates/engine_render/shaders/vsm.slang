@@ -272,6 +272,7 @@ void vsmCollectDirty(uint3 id : SV_DispatchThreadID)
     uint2 at = (uint2(local % VSM_TABLE, local / VSM_TABLE) - uint2(f.level[level].first_page)) & (VSM_TABLE - 1);
     uint* cells = push.hierarchy + level * VSM_HIERARCHY_CELLS;
     cells[at.y * VSM_TABLE + at.x] = 1;
+    InterlockedOr(cells[VSM_HIERARCHY_ROWS + 2 * at.y + at.x / 32], 1u << (at.x % 32));
     for (uint m = 1; m < VSM_HIERARCHY_MIPS; m++)
     {
         uint side = VSM_TABLE >> m;

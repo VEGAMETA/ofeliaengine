@@ -853,6 +853,8 @@ float snorm8(uint bits, uint shift)
 // end (relative to its level's).
 groupshared uint meshlet_drawn[MESHLET_CHUNK];
 groupshared uint meshlet_end[MESHLET_CHUNK];
+// The pages' meshlet cull: each meshlet's rectangle of dirty pages (`vsm_dirty_rect`).
+groupshared uint meshlet_rect[MESHLET_CHUNK];
 
 // The meshlet cull (ADR 0085): one group per work item of `cull_instance`, a lane per
 // meshlet of its chunk (a group never loops: a large instance's chunks run side by side).
@@ -1221,6 +1223,67 @@ bool vsm_dirty(uint level, int2 lo, int2 hi)
     return (cells[c0.y * side + c0.x] | cells[c0.y * side + c1.x] | cells[c1.y * side + c0.x] | cells[c1.y * side + c1.x]) != 0;
 }
 
+// A rectangle of a level's window in pages, inclusive, packed 6 bits a bound: x0, y0,
+// x1, y1 (ADR 0093 step 3c: what a draw into the pages is clipped to).
+uint vsm_pack_rect(uint4 r)
+{
+    return r.x | (r.y << 6) | (r.z << 12) | (r.w << 18);
+}
+
+uint4 vsm_unpack_rect(uint packed)
+{
+    return uint4(packed & 63u, (packed >> 6) & 63u, (packed >> 12) & 63u, (packed >> 18) & 63u);
+}
+
+uint vsm_union_rect(uint a, uint b)
+{
+    uint4 p = vsm_unpack_rect(a);
+    uint4 q = vsm_unpack_rect(b);
+    return vsm_pack_rect(uint4(min(p.xy, q.xy), max(p.zw, q.zw)));
+}
+
+// Of the 32 columns from `base`, those from `a` to `b` as bits.
+uint vsm_columns(int a, int b, int base)
+{
+    int lo = max(a - base, 0);
+    int hi = min(b - base, 31);
+    if (lo > hi)
+        return 0;
+    uint width = uint(hi - lo + 1);
+    return (width == 32 ? 0xFFFFFFFFu : (1u << width) - 1u) << uint(lo);
+}
+
+// The pages of `level` a caster reaching the window rectangle `lo` to `hi` may change: the
+// box of its dirty pages, from the level's dirty pages as bits (a read a row). False when
+// none is dirty.
+bool vsm_dirty_rect(uint level, int2 lo, int2 hi, out uint rect)
+{
+    rect = 0;
+    int2 a = max(lo, int2(0, 0));
+    int2 b = min(hi, int2(int(VSM_TABLE) - 1, int(VSM_TABLE) - 1));
+    if (any(a > b))
+        return false;
+    uint2 columns = uint2(vsm_columns(a.x, b.x, 0), vsm_columns(a.x, b.x, 32));
+    uint* rows = push.frame.vsm_hierarchy + level * VSM_HIERARCHY_CELLS + VSM_HIERARCHY_ROWS;
+    uint2 first = uint2(VSM_TABLE, VSM_TABLE);
+    uint2 last = uint2(0, 0);
+    for (uint y = uint(a.y); y <= uint(b.y); y++)
+    {
+        uint2 bits = uint2(rows[2 * y], rows[2 * y + 1]) & columns;
+        if ((bits.x | bits.y) != 0)
+        {
+            uint low = bits.x != 0 ? firstbitlow(bits.x) : 32 + firstbitlow(bits.y);
+            uint high = bits.y != 0 ? 32 + firstbithigh(bits.y) : firstbithigh(bits.x);
+            first = min(first, uint2(low, y));
+            last = max(last, uint2(high, y));
+        }
+    }
+    if (first.x > last.x)
+        return false;
+    rect = vsm_pack_rect(uint4(first, last));
+    return true;
+}
+
 // A world position across the light (the pages' light space, xy).
 float2 vsm_across(VsmFrame* f, float3 world)
 {
@@ -1260,7 +1323,7 @@ bool take_vsm_meshlets(BatchMeshlets bm, uint index, uint lod, uint level)
 
 // Draws instance `index`'s level `lod` whole into `level` of the pages (no meshlets, or
 // no room for them), in its state's draws when they have room.
-void vsm_draw_whole(uint state, Batch batch, uint index, uint lod, uint level)
+void vsm_draw_whole(uint state, Batch batch, uint index, uint lod, uint level, uint rect)
 {
     uint64_t lists = meshlet_lists(VSM_LIST);
     MeshletHeader* header = (MeshletHeader*)lists;
@@ -1280,7 +1343,8 @@ void vsm_draw_whole(uint state, Batch batch, uint index, uint lod, uint level)
     draw.vertex_offset = whole.vertex_offset;
     draw.first_instance = push.frame.meshlet_slot[VSM_LIST] + at;
     draws[at] = draw;
-    push.visible[draw.first_instance] = index | (level << 24);
+    push.visible[2 * draw.first_instance] = index | (level << 24);
+    push.visible[2 * draw.first_instance + 1] = rect;
 }
 
 // The pages' cull (ADR 0093 step 3b): one thread per instance. An instance casts into a
@@ -1319,8 +1383,9 @@ void cullVsm(uint3 id : SV_DispatchThreadID)
             continue;
         float texel = 1.0 / (f.level[level].page_scale * float(VSM_PAGE));
         uint lod = lod_within(batch, scale, push.frame.vsm_lod_threshold * texel);
-        if (!take_vsm_meshlets(bm, index, lod, level))
-            vsm_draw_whole(bm.state, batch, index, lod, level);
+        uint rect;
+        if (!take_vsm_meshlets(bm, index, lod, level) && vsm_dirty_rect(level, lo, hi, rect))
+            vsm_draw_whole(bm.state, batch, index, lod, level, rect);
     }
 }
 
@@ -1363,11 +1428,12 @@ void cullVsmMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     float3 center = transform_point(inst, meshlet.center);
     float radius = meshlet.radius * scale;
     bool visible = valid;
+    uint rect = 0;
     if (visible)
     {
         int2 lo, hi;
         vsm_rect(f, level, vsm_across(f, center), float2(radius, radius), lo, hi);
-        visible = vsm_dirty(level, lo, hi);
+        visible = vsm_dirty(level, lo, hi) && vsm_dirty_rect(level, lo, hi, rect);
         // The light is a direction: the cone test from infinitely far away.
         if (visible && cone && (meshlet.cone >> 24) != 127u)
         {
@@ -1379,13 +1445,17 @@ void cullVsmMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     // meshlets after it.
     meshlet_drawn[local] = visible ? 1u : 0u;
     meshlet_end[local] = meshlet.first_index + meshlet.triangles * 3;
+    meshlet_rect[local] = rect;
     GroupMemoryBarrierWithGroupSync();
     bool first = visible && (local == 0 || meshlet_drawn[local - 1] == 0u);
     uint last = local;
     if (first)
     {
         while (last + 1 < MESHLET_CHUNK && meshlet_drawn[last + 1] != 0u)
+        {
             last++;
+            rect = vsm_union_rect(rect, meshlet_rect[last]);
+        }
     }
     uint end = meshlet_end[last];
     uint count = WaveActiveCountBits(first);
@@ -1403,7 +1473,8 @@ void cullVsmMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
         draw.vertex_offset = whole.vertex_offset;
         draw.first_instance = push.frame.meshlet_slot[VSM_LIST] + at;
         draws[at] = draw;
-        push.visible[draw.first_instance] = index | (level << 24);
+        push.visible[2 * draw.first_instance] = index | (level << 24);
+        push.visible[2 * draw.first_instance + 1] = rect;
     }
 }
 
@@ -1557,17 +1628,22 @@ ShadowPieceOut shadowVertexMaskedPieces(uint vertex : SV_VulkanVertexID, uint in
     return o;
 }
 
-// The virtual shadow pages' draws (ADR 0093 step 3b): instance `slot` of a draw names the
-// instance and the level it is drawn into (`index | level << 24`, by `cullVsm*`).
+// The virtual shadow pages' draws (ADR 0093 step 3b): instance `slot` of a draw names, in
+// slot `2 · slot` of the visible list, the instance and the level it is drawn into
+// (`index | level << 24`, by `cullVsm*`), and in the next the rectangle of the level's
+// pages it may change (`vsm_dirty_rect`), which it is clipped to: the rasterizer makes no
+// fragments outside it (step 3c).
 struct VsmOut
 {
     float4 position : SV_Position;
+    float clip[4] : SV_ClipDistance;
     nointerpolation uint level : LEVEL;
 };
 
 struct VsmMaskedOut
 {
     float4 position : SV_Position;
+    float clip[4] : SV_ClipDistance;
     float2 uv : TEXCOORD0;
     nointerpolation uint material : MATERIAL;
     nointerpolation uint level : LEVEL;
@@ -1585,14 +1661,27 @@ float4 vsm_clip(VsmFrame* f, uint level, float3 world)
     return float4(ndc.x, -ndc.y, depth, 1.0);
 }
 
+// The distances of a clip position (w 1) inside the rectangle of pages `rect` (packed),
+// positive within it.
+void vsm_clip_distances(float4 clip, uint rect, out float d[4])
+{
+    float4 r = float4(vsm_unpack_rect(rect));
+    float ndc = 2.0 / float(VSM_TABLE);
+    d[0] = clip.x - (r.x * ndc - 1.0);
+    d[1] = (r.z + 1.0) * ndc - 1.0 - clip.x;
+    d[2] = clip.y - (1.0 - (r.w + 1.0) * ndc);
+    d[3] = (1.0 - r.y * ndc) - clip.y;
+}
+
 [shader("vertex")]
 VsmOut vsmVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    uint word = push.visible[slot];
+    uint word = push.visible[2 * slot];
     Instance inst = read_instance(push.instances, word & 0xFFFFFFu);
     VsmOut o;
     o.level = word >> 24;
     o.position = vsm_clip(push.frame.vsm, o.level, transform_point(inst, load_position(vertex)));
+    vsm_clip_distances(o.position, push.visible[2 * slot + 1], o.clip);
     return o;
 }
 
@@ -1600,11 +1689,12 @@ VsmOut vsmVertex(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceI
 [shader("vertex")]
 VsmMaskedOut vsmVertexMasked(uint vertex : SV_VulkanVertexID, uint slot : SV_VulkanInstanceID)
 {
-    uint word = push.visible[slot];
+    uint word = push.visible[2 * slot];
     Instance inst = read_instance(push.instances, word & 0xFFFFFFu);
     VsmMaskedOut o;
     o.level = word >> 24;
     o.position = vsm_clip(push.frame.vsm, o.level, transform_point(inst, load_position(vertex)));
+    vsm_clip_distances(o.position, push.visible[2 * slot + 1], o.clip);
     o.uv = read_attributes(vertex).uv;
     o.material = inst.material;
     return o;
@@ -1902,27 +1992,35 @@ void shadowFragmentMasked(ShadowOut input)
         discard;
 }
 
-// A fragment of a caster drawn into the pages (ADR 0093 step 3b): its depth into its
-// texel with an atomic minimum, when its page is backed and drawn this frame (pages not
-// dirty keep what earlier frames drew).
-void vsm_write(uint level, float4 position)
+// A fragment of a caster drawn into the pages (ADR 0093 step 3b): where its depth goes in
+// the pool, when its page is backed and drawn this frame (pages not dirty keep what
+// earlier frames drew).
+bool vsm_target(uint level, float4 position, out uint2 at)
 {
     VsmFrame* f = push.frame.vsm;
     uint2 texel = uint2(uint(position.x), uint(float(VSM_PAGE * VSM_TABLE) - position.y));
     int2 page = f.level[level].first_page + int2(texel / VSM_PAGE);
     uint entry = push.frame.vsm_table[vsm_entry(level, page)];
-    if ((entry & (VSM_ALLOCATED | VSM_DIRTY)) != (VSM_ALLOCATED | VSM_DIRTY))
-        return;
-    uint2 at = vsm_pool_texel(entry & VSM_PHYSICAL, texel % VSM_PAGE);
-    InterlockedMin(g_vsm_pool[NonUniformResourceIndex(push.frame.vsm_pool)][at], asuint(position.z));
+    at = vsm_pool_texel(entry & VSM_PHYSICAL, texel % VSM_PAGE);
+    return (entry & (VSM_ALLOCATED | VSM_DIRTY)) == (VSM_ALLOCATED | VSM_DIRTY);
+}
+
+// Its depth into the pool's texel with an atomic minimum.
+void vsm_write(uint2 at, float depth)
+{
+    InterlockedMin(g_vsm_pool[NonUniformResourceIndex(push.frame.vsm_pool)][at], asuint(depth));
 }
 
 [shader("fragment")]
 void vsmFragment(VsmOut input)
 {
-    vsm_write(input.level, input.position);
+    uint2 at;
+    if (vsm_target(input.level, input.position, at))
+        vsm_write(at, input.position.z);
 }
 
+// The alpha test first: returning before it (where the page is not drawn) lost the
+// Radeon's device in Sponza (2026-10-15, AMD 26.8.1).
 [shader("fragment")]
 void vsmFragmentMasked(VsmMaskedOut input)
 {
@@ -1930,7 +2028,9 @@ void vsmFragmentMasked(VsmMaskedOut input)
     MATERIAL.Params p = MATERIAL::load(ctx);
     if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
         discard;
-    vsm_write(input.level, input.position);
+    uint2 at;
+    if (vsm_target(input.level, input.position, at))
+        vsm_write(at, input.position.z);
 }
 
 // The depth prepass of masked materials with MSAA (ADR 0075): alpha to coverage instead

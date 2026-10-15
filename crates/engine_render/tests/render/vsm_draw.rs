@@ -199,7 +199,10 @@ fn run(meshlets: bool) {
         .set_virtual_shadows(&device, &bindless, true)
         .unwrap()
     {
-        println!("skipping: no fragmentStoresAndAtomics, drawIndirectCount or shaderInt64");
+        println!(
+            "skipping: no fragmentStoresAndAtomics, drawIndirectCount, shaderInt64 or \
+             shaderClipDistance"
+        );
         return;
     }
     let settings = VsmSettings {

@@ -77,7 +77,7 @@ forward.cullShadows	ShaderProperties.cs	numUsedVgprs	43
 forward.cullShadows	ShaderProperties.cs	scratchMemUsageInBytes	0
 forward.cullShadowsMeshlets	ShaderProperties.cs	numUsedVgprs	46
 forward.cullShadowsMeshlets	ShaderProperties.cs	scratchMemUsageInBytes	0
-forward.cullVsm	ShaderProperties.cs	numUsedVgprs	50
+forward.cullVsm	ShaderProperties.cs	numUsedVgprs	53
 forward.cullVsm	ShaderProperties.cs	scratchMemUsageInBytes	0
 forward.cullVsmMeshlets	ShaderProperties.cs	numUsedVgprs	40
 forward.cullVsmMeshlets	ShaderProperties.cs	scratchMemUsageInBytes	0
@@ -523,11 +523,11 @@ forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	95
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
-forward.vsmVertex+forward.vsmFragment	ShaderProperties.gs	numUsedVgprs	47
+forward.vsmVertex+forward.vsmFragment	ShaderProperties.gs	numUsedVgprs	42
 forward.vsmVertex+forward.vsmFragment	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vsmVertex+forward.vsmFragment	ShaderProperties.ps	numUsedVgprs	9
 forward.vsmVertex+forward.vsmFragment	ShaderProperties.ps	scratchMemUsageInBytes	0
-forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.gs	numUsedVgprs	47
+forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.gs	numUsedVgprs	45
 forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.ps	numUsedVgprs	9
 forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.ps	scratchMemUsageInBytes	0
@@ -707,7 +707,7 @@ vsm.vsmBeginFrame	ShaderProperties.cs	numUsedVgprs	9
 vsm.vsmBeginFrame	ShaderProperties.cs	scratchMemUsageInBytes	0
 vsm.vsmClear	ShaderProperties.cs	numUsedVgprs	12
 vsm.vsmClear	ShaderProperties.cs	scratchMemUsageInBytes	0
-vsm.vsmCollectDirty	ShaderProperties.cs	numUsedVgprs	13
+vsm.vsmCollectDirty	ShaderProperties.cs	numUsedVgprs	15
 vsm.vsmCollectDirty	ShaderProperties.cs	scratchMemUsageInBytes	0
 vsm.vsmFindPages	ShaderProperties.cs	numUsedVgprs	6
 vsm.vsmFindPages	ShaderProperties.cs	scratchMemUsageInBytes	0

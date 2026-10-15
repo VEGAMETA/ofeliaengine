@@ -2568,8 +2568,8 @@ impl ForwardRenderer {
     /// (which then runs), draw the casters into their dirty pages, and take the sun's
     /// shadow on opaque surfaces from them. Their culls and pipelines are made the first
     /// time they are turned on, so a renderer that never uses them pays nothing. Needs the
-    /// device's `fragmentStoresAndAtomics`, `drawIndirectCount` and `shaderInt64`;
-    /// returns whether they are on.
+    /// device's `fragmentStoresAndAtomics`, `drawIndirectCount`, `shaderInt64` and
+    /// `shaderClipDistance`; returns whether they are on.
     pub fn set_virtual_shadows(
         &mut self,
         device: &Device,
@@ -2577,8 +2577,10 @@ impl ForwardRenderer {
         enabled: bool,
     ) -> Result<bool, RhiError> {
         let caps = &device.adapter().caps;
-        let supported =
-            caps.fragment_stores_and_atomics && caps.draw_indirect_count && caps.shader_int64;
+        let supported = caps.fragment_stores_and_atomics
+            && caps.draw_indirect_count
+            && caps.shader_int64
+            && caps.shader_clip_distance;
         if enabled && supported && self.vsm.is_none() {
             self.vsm = Some(Box::new(VsmDraw::new(device, bindless)?));
         }

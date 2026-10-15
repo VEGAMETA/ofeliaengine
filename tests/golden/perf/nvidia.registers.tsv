@@ -258,7 +258,7 @@ forward.vertexMain+forward.fragmentReflectContactShadowed spec=1,1 R16G16B16A16_
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	FS	Register Count	69
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	VS	Register Count	48
 forward.vsmVertex+forward.vsmFragment	FS	Register Count	16
-forward.vsmVertex+forward.vsmFragment	VS	Register Count	39
+forward.vsmVertex+forward.vsmFragment	VS	Register Count	40
 forward.vsmVertexMasked+forward.vsmFragmentMasked	FS	Register Count	16
 forward.vsmVertexMasked+forward.vsmFragmentMasked	VS	Register Count	40
 fsr1.easu	CS	Register Count	63

@@ -18,9 +18,12 @@ static const float VSM_MARGIN = 4.0;
 
 // Cells of a level's hierarchy of dirty pages: its 64 × 64 pages by their place in the
 // window, then each coarser level of them (2 × 2 cells into one) down to 1 × 1, a `uint`
-// each, 1 where a dirty page is under it (`HIERARCHY_CELLS` in vsm.rs).
-static const uint VSM_HIERARCHY_CELLS = 5461;
+// each, 1 where a dirty page is under it; then (from `VSM_HIERARCHY_ROWS`, a cell of
+// padding before it) the dirty pages as bits, a row of the window in two words: page
+// (x, y) is bit x % 32 of word 2y + x / 32 (`HIERARCHY_CELLS` in vsm.rs).
 static const uint VSM_HIERARCHY_MIPS = 7;
+static const uint VSM_HIERARCHY_ROWS = 5462;
+static const uint VSM_HIERARCHY_CELLS = VSM_HIERARCHY_ROWS + 2 * VSM_TABLE;
 
 // The first cell of mip `m` of a level's hierarchy.
 uint vsm_hierarchy_mip(uint m)
