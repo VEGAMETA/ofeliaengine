@@ -6,6 +6,11 @@
 // a LUT interpolates badly (up to 6 / 255): with it the LUT holds the graded color in
 // ACEScct, and the tone mapper applies the curve after it.
 //
+// A view's color vision transform (ADR 0097, color_vision.rs) follows the curve, on the
+// displayed color. With PBR Neutral it comes before the curve (which follows the LUT): the
+// same below the curve's roll-off (0.76 of white), where PBR Neutral leaves colors as they
+// are but for its toe's offset.
+//
 // The grading, in Filament's order (Apache-2.0; the operations are published standards),
 // in linear BT.709 unless stated: white balance and the channel mixer (one matrix, built
 // on the CPU), shadows / mid-tones / highlights (multipliers over Resolve's tonal ranges),
@@ -27,6 +32,12 @@ struct GradingParams
     float4 offset;
     float4 power;
     float4 misc;             // x: contrast, y: vibrance, z: saturation
+    // The color vision transform (`color_vision::Transform`): keep · c + take · sim(c).
+    float4 sim_a[3];         // rows: the simulation on the plane's side (dot ≥ 0)
+    float4 sim_b[3];         // rows: on its other side
+    float4 plane;            // xyz: the separation plane's normal, w: the simulation's mix
+    float4 keep[3];
+    float4 take[3];
 };
 
 struct Push
@@ -81,8 +92,31 @@ float3 grade(float3 v, GradingParams* p)
     return max(y + misc.z * (v - y), 0.0);
 }
 
+// `SEPARATION_BAND` in color_vision.rs.
+static const float SEPARATION_BAND = 0.02;
+
+float3 rows(float4* m, float3 v)
+{
+    return float3(dot(read4(&m[0]).xyz, v), dot(read4(&m[1]).xyz, v), dot(read4(&m[2]).xyz, v));
+}
+
+// `ColorVision::apply`: the displayed color as a viewer with a deficiency sees it, or
+// corrected for them (never below 0; a correction may pass the curve's peak).
+float3 color_vision(float3 c, GradingParams* p)
+{
+    float4 plane = read4(&p.plane);
+    // The two half-planes meet on the grey axis: blended over a narrow band around their
+    // separation (`ColorVision::apply`), so that the LUT interpolating across it keeps
+    // greys grey.
+    float side = smoothstep(-SEPARATION_BAND, SEPARATION_BAND, dot(plane.xyz, c) / max(c.r + c.g + c.b, 1e-6));
+    float3 projected = lerp(rows(&p.sim_b[0], c), rows(&p.sim_a[0], c), side);
+    float3 sim = c + plane.w * (projected - c);
+    return max(rows(&p.keep[0], c) + rows(&p.take[0], sim), 0.0);
+}
+
 // One texel of the LUT: the color at its coordinate (from black, `lut_linear`), graded,
-// then tone-mapped (in ACEScct with PBR Neutral).
+// then tone-mapped, then the color vision transform (with PBR Neutral: graded, the color
+// vision transform, in ACEScct).
 [shader("compute")]
 [numthreads(4, 4, 4)]
 void gradeLut(uint3 id : SV_DispatchThreadID)
@@ -92,12 +126,15 @@ void gradeLut(uint3 id : SV_DispatchThreadID)
     float3 v = lut_linear(float3(id) / float(push.size - 1));
     v = grade(max(v, 0.0), push.params);
     if ((push.curve & CURVE_PBR_NEUTRAL) != 0)
-        v = acescct_encode(v);
-    else if ((push.curve & CURVE_AGX) != 0)
+    {
+        g_volume_images[push.lut][id] = float4(acescct_encode(color_vision(v, push.params)), 1.0);
+        return;
+    }
+    if ((push.curve & CURVE_AGX) != 0)
         v = agx(v);
     else if ((push.curve & CURVE_ACES) != 0)
         v = aces(v);
     else
         v = gt3(v, push.peak);
-    g_volume_images[push.lut][id] = float4(v, 1.0);
+    g_volume_images[push.lut][id] = float4(color_vision(v, push.params), 1.0);
 }

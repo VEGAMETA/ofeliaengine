@@ -85,6 +85,7 @@ use engine_core::jobs::ThreadPool;
 use engine_core::math::{Mat4, Quat, Vec3, look_at, vulkan_perspective};
 use engine_render::ao::{AoQuality, AoSettings};
 use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::color_vision::ColorVision;
 use engine_render::dof::{DepthOfField, DofCamera, DofSettings};
 use engine_render::environment::{Environment, Sky};
 use engine_render::forward::{
@@ -1710,7 +1711,15 @@ fn main() {
                         None => (None, None),
                     };
                     let lut = grading_lut.as_ref().and_then(|l| {
-                        l.add_passes(&mut fg, &mut ring, &bindless, &grading, curve, 1.0)
+                        l.add_passes(
+                            &mut fg,
+                            &mut ring,
+                            &bindless,
+                            &grading,
+                            curve,
+                            1.0,
+                            &ColorVision::default(),
+                        )
                     });
                     tonemap.add_composite_pass(
                         &mut fg,
@@ -1803,7 +1812,15 @@ fn main() {
                     let bloomed = bloom.add_passes(&mut fg, &bindless, hdr);
                     let measured = exposure.add_passes(&mut fg, &bindless, hdr, 1.0 / 60.0);
                     let lut = grading_lut.as_ref().and_then(|l| {
-                        l.add_passes(&mut fg, &mut ring, &bindless, &grading, curve, 1.0)
+                        l.add_passes(
+                            &mut fg,
+                            &mut ring,
+                            &bindless,
+                            &grading,
+                            curve,
+                            1.0,
+                            &ColorVision::default(),
+                        )
                     });
                     tonemap.add_composite_pass(
                         &mut fg,

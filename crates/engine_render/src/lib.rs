@@ -44,6 +44,7 @@
 pub mod ao;
 pub mod atmosphere;
 pub mod budget;
+pub mod color_vision;
 pub mod compute;
 pub mod contact;
 pub mod cull;

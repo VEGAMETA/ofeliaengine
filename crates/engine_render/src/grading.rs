@@ -23,6 +23,7 @@
 //! [`ColorGrading::apply`] is the CPU description of steps 1–5 (without the curve), as
 //! [`crate::post::ToneCurve::apply`] is of the curves.
 
+use crate::color_vision::ColorVision;
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::environment::{Image, ImageKind};
 use crate::graph::{Access, FrameGraph, ShaderStages, Texture};
@@ -258,11 +259,13 @@ impl ColorGrading {
     }
 
     /// The parameters `gradeLut` reads.
-    fn params(&self) -> GradingParams {
+    fn params(&self, color_vision: &ColorVision) -> GradingParams {
         let m = self.matrix();
         let v3 = |v: [f32; 3]| [v[0], v[1], v[2], 0.0];
+        let rows = |m: [[f32; 3]; 3]| [v3(m[0]), v3(m[1]), v3(m[2])];
+        let t = color_vision.transform();
         GradingParams {
-            matrix: [v3(m[0]), v3(m[1]), v3(m[2])],
+            matrix: rows(m),
             shadows: v3(self.shadows),
             midtones: v3(self.midtones),
             highlights: v3(self.highlights),
@@ -271,6 +274,11 @@ impl ColorGrading {
             offset: v3(self.offset),
             power: v3(self.power),
             misc: [self.contrast, self.vibrance, self.saturation, 0.0],
+            sim_a: rows(t.sim_a),
+            sim_b: rows(t.sim_b),
+            plane: [t.plane[0], t.plane[1], t.plane[2], t.mix],
+            keep: rows(t.keep),
+            take: rows(t.take),
         }
     }
 
@@ -299,7 +307,7 @@ fn mix(hash: u64, word: u64) -> u64 {
     (hash.rotate_left(5) ^ word).wrapping_mul(0x517c_c1b7_2722_0a95)
 }
 
-/// `GradingParams` in `grading.slang` (176 bytes).
+/// `GradingParams` in `grading.slang` (384 bytes).
 #[derive(Clone, Copy, Default)]
 #[repr(C)]
 struct GradingParams {
@@ -312,6 +320,11 @@ struct GradingParams {
     offset: [f32; 4],
     power: [f32; 4],
     misc: [f32; 4],
+    sim_a: [[f32; 4]; 3],
+    sim_b: [[f32; 4]; 3],
+    plane: [f32; 4],
+    keep: [[f32; 4]; 3],
+    take: [[f32; 4]; 3],
 }
 
 /// `Push` in `grading.slang` (24 bytes).
@@ -325,7 +338,7 @@ struct Push {
     params: u64,
 }
 
-const _: () = assert!(core::mem::size_of::<GradingParams>() == 176);
+const _: () = assert!(core::mem::size_of::<GradingParams>() == 384);
 const _: () = assert!(core::mem::size_of::<Push>() == 24);
 
 /// `CURVE_*` in `grading.slang` (the tone mapper's flags for the same curves).
@@ -341,9 +354,10 @@ fn curve_flag(curve: ToneCurve) -> u32 {
 /// A view's grading and tone curve as one 3D LUT (ADR 0094): `LUT_SIZE`³ half floats,
 /// indexed by the ACEScct encoding of the exposed scene-linear color (from black), holding
 /// the tone-mapped color in units of reference white (the graded color in ACEScct with
-/// PBR Neutral). Built by a compute pass in the frames whose grading, curve or peak
-/// changed; read by the tone mapper's graded entry points
-/// ([`crate::post::Composite::grading`]).
+/// PBR Neutral), with the view's color vision transform after the curve (ADR 0097; with PBR
+/// Neutral before it, the same below its roll-off). Built by a compute pass in the frames
+/// whose grading, curve, peak or color vision changed; read by the tone mapper's graded
+/// entry points ([`crate::post::Composite::grading`]).
 pub struct GradingLut {
     device: engine_rhi::ash::Device,
     shader: ComputeShader<Push>,
@@ -390,10 +404,11 @@ impl GradingLut {
         })
     }
 
-    /// Declares the LUT's build when `grading`, `curve` or `peak` differ from what it
-    /// holds, and returns it for [`crate::post::Composite::grading`] (whose `curve` and
-    /// `peak` must be these). `None` when the upload ring has no room for its parameters
-    /// (the composite then tone-maps without grading).
+    /// Declares the LUT's build when `grading`, `curve`, `peak` or `color_vision` differ
+    /// from what it holds, and returns it for [`crate::post::Composite::grading`] (whose
+    /// `curve` and `peak` must be these). `None` when the upload ring has no room for its
+    /// parameters (the composite then tone-maps without grading).
+    #[allow(clippy::too_many_arguments)]
     pub fn add_passes<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -402,14 +417,18 @@ impl GradingLut {
         grading: &ColorGrading,
         curve: ToneCurve,
         peak: f32,
+        color_vision: &ColorVision,
     ) -> Option<Texture> {
         let key = mix(
-            mix(grading.key(), u64::from(curve_flag(curve))),
-            u64::from(peak.to_bits()),
+            mix(
+                mix(grading.key(), u64::from(curve_flag(curve))),
+                u64::from(peak.to_bits()),
+            ),
+            color_vision.key(),
         );
         let stale = self.built.get() != Some(key);
         let params = if stale {
-            Some(ring.push(&[grading.params()])?)
+            Some(ring.push(&[grading.params(color_vision)])?)
         } else {
             None
         };

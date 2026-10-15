@@ -27,6 +27,7 @@ use engine_frame::{
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
 use engine_render::budget::{BudgetSettings, GpuBudget};
+use engine_render::color_vision::ColorVision;
 use engine_render::dof::DofSettings;
 use engine_render::environment::{Environment, Sky};
 use engine_render::feedback::{FeedbackSettings, TextureFeedback};
@@ -251,6 +252,9 @@ pub struct Shot {
     pub fabric_curtains: bool,
     /// Color grading (`ViewSettings::grading`, ADR 0094; neutral by default).
     pub grading: ColorGrading,
+    /// A color vision deficiency simulated or corrected (`ViewSettings::color_vision`, ADR
+    /// 0097; off by default).
+    pub color_vision: ColorVision,
     /// Depth of field (`ViewSettings::depth_of_field`, ADR 0095; off by default).
     pub depth_of_field: Option<DofSettings>,
     /// Gameplay or cinematic with its motion blur (`ViewSettings::kind`, ADRs 0067 and
@@ -329,6 +333,7 @@ impl Shot {
             shading_models: false,
             fabric_curtains: false,
             grading: ColorGrading::default(),
+            color_vision: ColorVision::default(),
             depth_of_field: None,
             kind: ViewKind::Gameplay,
         }
@@ -1742,6 +1747,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         exposure: Exposure::Fixed(shot.exposure),
         curve: shot.curve,
         grading: shot.grading,
+        color_vision: shot.color_vision,
         depth_of_field: shot.depth_of_field,
         kind: shot.kind,
         bloom: shot.bloom,

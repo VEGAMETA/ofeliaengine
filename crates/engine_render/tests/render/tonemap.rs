@@ -4,10 +4,12 @@
 //! scaling and of PQ encoding. Its resampling kernels (Catmull-Rom, Lanczos-3; ADR 0075)
 //! match a CPU reference, give texels back at 1:1, keep flat areas flat and never ring.
 //! Graded (ADR 0094), the grading LUT gives the CPU reference of the grading and the
-//! curve within a step of 8-bit output.
+//! curve within a step of 8-bit output; with a color vision transform after the curve (ADR
+//! 0097; before PBR Neutral's) too.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
 
+use engine_render::color_vision::{ColorVision, ColorVisionMode, Deficiency};
 use engine_render::grading::{ColorGrading, GradingLut};
 use engine_render::graph::{Access, BufferState, ImportedBuffer, LoadOp, RenderGraph, TextureDesc};
 use engine_render::post::{Composite, OutputEncoding, Resample, ToneCurve, Tonemap};
@@ -74,6 +76,38 @@ fn graded_tone_map_matches_the_reference() {
     check_tone_map(true);
 }
 
+#[test]
+fn color_vision_tone_map_matches_the_reference() {
+    check_tone_map_with(true, &color_visions());
+}
+
+/// The color vision transforms `color_vision_tone_map_matches_the_reference` runs.
+fn color_visions() -> Vec<(&'static str, ColorVision)> {
+    let vision = |deficiency, severity, mode| ColorVision {
+        deficiency: Some(deficiency),
+        severity,
+        mode,
+    };
+    vec![
+        (
+            "protanomaly corrected",
+            vision(Deficiency::Protan, 0.6, ColorVisionMode::Correct),
+        ),
+        (
+            "deuteranopia simulated",
+            vision(Deficiency::Deutan, 1.0, ColorVisionMode::Simulate),
+        ),
+        (
+            "tritanopia simulated",
+            vision(Deficiency::Tritan, 1.0, ColorVisionMode::Simulate),
+        ),
+        (
+            "tritanomaly corrected",
+            vision(Deficiency::Tritan, 0.8, ColorVisionMode::Correct),
+        ),
+    ]
+}
+
 /// sRGB's encoding, for comparing linear outputs as an 8-bit display would show them.
 fn srgb(c: f32) -> f32 {
     let c = c.clamp(0.0, 1.0);
@@ -112,6 +146,12 @@ fn gradings() -> [(&'static str, ColorGrading); 2] {
 /// The tone mapper's composites over `INPUT` against `ToneCurve::apply` (and, `graded`,
 /// `ColorGrading::apply` through a grading LUT) on every output and curve.
 fn check_tone_map(graded: bool) {
+    check_tone_map_with(graded, &[("", ColorVision::default())]);
+}
+
+/// `check_tone_map` with each of `visions` after the curve (`ColorVision::apply`); with a
+/// color vision transform, only the neutral grading.
+fn check_tone_map_with(graded: bool, visions: &[(&'static str, ColorVision)]) {
     let Some((instance, device)) = gpu() else {
         return;
     };
@@ -190,7 +230,8 @@ fn check_tone_map(graded: bool) {
             OutputEncoding::Pq { white_nits: 250.0 },
         ),
     ];
-    let gradings = if graded {
+    let with_vision = visions.iter().any(|(_, v)| !v.is_off());
+    let gradings = if graded && !with_vision {
         gradings().to_vec()
     } else {
         vec![("", ColorGrading::default())]
@@ -208,10 +249,15 @@ fn check_tone_map(graded: bool) {
             ]
             .map(|curve| (c, curve))
         })
-        .flat_map(|c| gradings.iter().map(move |&g| (c, g)));
+        .flat_map(|c| gradings.iter().map(move |&g| (c, g)))
+        .flat_map(|c| visions.iter().map(move |&v| (c, v)));
     let mut worst = 0.0f32;
-    for (((name, tone_map, peak, encoding), curve), (grading_name, grading)) in cases {
-        let name = format!("{name}, {curve:?} {grading_name}");
+    for (
+        (((name, tone_map, peak, encoding), curve), (grading_name, grading)),
+        (vision_name, vision),
+    ) in cases
+    {
+        let name = format!("{name}, {curve:?} {grading_name} {vision_name}");
         // SAFETY: one-shot recording and submission, then wait.
         unsafe {
             d.reset_command_buffer(cmd, vk::CommandBufferResetFlags::empty())
@@ -228,8 +274,10 @@ fn check_tone_map(graded: bool) {
             // SAFETY: nothing is in flight.
             let mut fg = unsafe { graph.begin_slot(0, cmd) };
             let lut_texture = lut.as_ref().map(|l| {
-                l.add_passes(&mut fg, &mut ring, &bindless, &grading, curve, peak)
-                    .unwrap()
+                l.add_passes(
+                    &mut fg, &mut ring, &bindless, &grading, curve, peak, &vision,
+                )
+                .unwrap()
             });
             let source = fg.create_texture("scene", TextureDesc::new_2d(FORMAT, width, 1));
             let values = fg.import_buffer(
@@ -360,12 +408,23 @@ fn check_tone_map(graded: bool) {
             } else {
                 [r, g, b]
             };
-            let [r, g, b] = if tone_map {
-                curve.apply([r, g, b], peak)
+            // The color vision transform after the curve (before PBR Neutral's).
+            let [r, g, b] = if tone_map && curve == ToneCurve::PbrNeutral {
+                curve.apply(vision.apply([r, g, b]), peak)
+            } else if tone_map {
+                vision.apply(curve.apply([r, g, b], peak))
             } else {
                 [r, g, b]
             };
             let expected = encoding.encode([r, g, b, a]);
+            // Brettel's two half-planes for tritans meet along a plane through the grey
+            // axis, which the LUT interpolates across (the half-planes blended over
+            // `SEPARATION_BAND`, ADR 0097): greys within 1.55 / 255 on the Radeon.
+            let steps = if vision.deficiency == Some(Deficiency::Tritan) && !vision.is_off() {
+                2.0
+            } else {
+                1.0
+            };
             for c in 0..3 {
                 if graded {
                     // Through the LUT: within a step of 8-bit output, compared as a
@@ -376,9 +435,9 @@ fn check_tone_map(graded: bool) {
                         OutputEncoding::Linear { white } => srgb(v / (peak * white)),
                     };
                     let error = (shown(got[c]) - shown(expected[c])).abs();
-                    worst = worst.max(error);
+                    worst = worst.max(error / steps);
                     assert!(
-                        error <= 1.0 / 255.0,
+                        error <= steps / 255.0,
                         "{name}: {input:?} gave {got:?}, {expected:?} expected ({:.2} / 255)",
                         error * 255.0
                     );
@@ -390,8 +449,12 @@ fn check_tone_map(graded: bool) {
                     "{name}: {input:?} gave {got:?}, {expected:?} expected"
                 );
             }
-            // The highlight roll-off never passes the peak.
-            if tone_map && let OutputEncoding::Linear { white } = encoding {
+            // The highlight roll-off never passes the peak (a color vision correction
+            // may: it adds to what the deficiency loses).
+            if tone_map
+                && vision.is_off()
+                && let OutputEncoding::Linear { white } = encoding
+            {
                 assert!(got[..3].iter().all(|&c| c <= peak * white * 1.0001));
             }
         }

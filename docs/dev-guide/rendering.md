@@ -1573,6 +1573,44 @@ With `engine_runtime`, mark the camera entity `cinematic: 1` and give it a `shut
   - 7.3 ms on a Radeon iGPU (the samples are taken at half size, ADR 0096's addendum);
   - nothing on gameplay views, and nothing on cinematic views without it.
 
+### Color vision: correction and simulation (ADR 0097)
+
+About one man in twelve sees red and green less apart than others do. Give such players
+a correction filter. Then check your game the way they see it:
+
+```rust
+use engine_render::color_vision::{ColorVision, ColorVisionMode, Deficiency};
+
+// The player's options menu: a correction for deuteranomaly, at 70 %.
+settings.color_vision = ColorVision {
+    deficiency: Some(Deficiency::Deutan),
+    severity: 0.7,
+    mode: ColorVisionMode::Correct,
+};
+// The developer's check: the game as a protanope sees it.
+settings.color_vision = ColorVision {
+    deficiency: Some(Deficiency::Protan),
+    severity: 1.0,
+    mode: ColorVisionMode::Simulate,
+};
+```
+
+- **The kinds:**
+  - `Protan`: red, weak or missing;
+  - `Deutan`: green, the most common;
+  - `Tritan`: blue, rare.
+- **Severity** runs from 0 (none) to 1 (the cones missing).
+- **The models:** Machado et al. 2009 for protans and deutans, Brettel et al. 1997 for
+  tritans. The correction is daltonization: what the viewer cannot tell apart moves into
+  colors they can.
+- **Cost:** nothing while off. On, the view tone maps through its grading LUT, the same as
+  color grading: about 15 µs more on an RTX 4060 Ti, 0.1 ms on a Radeon iGPU at 1080p.
+- **A filter is the fallback.** Do not carry essential information by color alone:
+  - add shapes, icons or patterns to what color tells apart (teams, rarities, health);
+  - check with the simulation of each kind.
+- **With the PBR Neutral curve,** the transform comes before the curve instead of after it.
+  That is the same below 0.76 of white.
+
 ## 12. Transparent surfaces
 
 Materials with `AlphaMode::Blend` are drawn by a transparent pass after the opaque
