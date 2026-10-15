@@ -461,6 +461,12 @@ const CULL_SHADOWS_MESHLETS: &[u8] =
     include_bytes!("../../shaders/forward.cullShadowsMeshlets.spv");
 const MESHLET_CULL: &[u8] = include_bytes!("../../shaders/forward.cullMeshlets.spv");
 const MESHLET_PIECES_CULL: &[u8] = include_bytes!("../../shaders/forward.cullMeshletPieces.spv");
+// EXPERIMENT (exp/meshlet-order): the culls serialized in one group.
+const CULL_MESHLETS_SERIAL: &[u8] =
+    include_bytes!("../../shaders/forward.cullMainMeshletsSerial.spv");
+const CULL_SHADOWS_MESHLETS_SERIAL: &[u8] =
+    include_bytes!("../../shaders/forward.cullShadowsMeshletsSerial.spv");
+const MESHLET_CULL_SERIAL: &[u8] = include_bytes!("../../shaders/forward.cullMeshletsSerial.spv");
 const FRAGMENT_BLENDED: &[u8] = include_bytes!("../../shaders/forward.fragmentBlended.spv");
 const FRAGMENT_BLENDED_REACTIVE: &[u8] =
     include_bytes!("../../shaders/forward.fragmentBlendedReactive.spv");
@@ -1498,6 +1504,8 @@ struct MeshletCull {
     /// Its twin for a cached cascade drawn in several pieces at once (ADR 0093), where
     /// vertex shaders pick viewports.
     pieces: Option<ComputeShader<Push>>,
+    /// EXPERIMENT: the culls are the serial twins (one group each, in order).
+    serial: bool,
 }
 
 impl core::fmt::Debug for MeshletCull {
@@ -2337,15 +2345,30 @@ impl ForwardRenderer {
         let caps = &device.adapter().caps;
         let supported = caps.draw_indirect_count && caps.shader_int64;
         if enabled && supported && self.meshlet_cull.is_none() {
-            let [instances, shadow_instances, meshlets] = ComputeSource::create_all(
-                device,
-                bindless,
+            let serial = std::env::var_os("ENGINE_EXP_SERIAL_CULL").is_some();
+            let sources = if serial {
+                [
+                    ComputeSource::<Push>::new(
+                        CULL_MESHLETS_SERIAL,
+                        c"cullMainMeshletsSerial",
+                        &[],
+                    )?,
+                    ComputeSource::<Push>::new(
+                        CULL_SHADOWS_MESHLETS_SERIAL,
+                        c"cullShadowsMeshletsSerial",
+                        &[],
+                    )?,
+                    ComputeSource::<Push>::new(MESHLET_CULL_SERIAL, c"cullMeshletsSerial", &[])?,
+                ]
+            } else {
                 [
                     ComputeSource::<Push>::new(CULL_MESHLETS, c"cullMainMeshlets", &[])?,
                     ComputeSource::<Push>::new(CULL_SHADOWS_MESHLETS, c"cullShadowsMeshlets", &[])?,
                     ComputeSource::<Push>::new(MESHLET_CULL, c"cullMeshlets", &[])?,
-                ],
-            )?;
+                ]
+            };
+            let [instances, shadow_instances, meshlets] =
+                ComputeSource::create_all(device, bindless, sources)?;
             let pieces = if caps.viewport_index {
                 let [pieces] = ComputeSource::create_all(
                     device,
@@ -2365,6 +2388,7 @@ impl ForwardRenderer {
                 shadow_instances,
                 meshlets,
                 pieces,
+                serial,
             }));
         }
         self.meshlets_on = enabled && supported;

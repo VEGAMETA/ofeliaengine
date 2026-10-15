@@ -775,7 +775,12 @@ impl ForwardRenderer {
                                 .record(move |rec| {
                                     let push = shadow_push(rec.context());
                                     let args = rec.context().buffer(shadow_commands);
-                                    rec.dispatch(&shaders.shadow_instances, cull_threads, &push);
+                                    let threads = if shaders.serial {
+                                        Dispatch::Groups([1, 1, 1])
+                                    } else {
+                                        cull_threads
+                                    };
+                                    rec.dispatch(&shaders.shadow_instances, threads, &push);
                                     rec.barrier_for_indirect();
                                     for k in 0..cascade_count {
                                         if plans[k as usize].rect_count == 0 {
@@ -792,6 +797,14 @@ impl ForwardRenderer {
                                                 if plans[k as usize].piece_count() > 1 =>
                                             {
                                                 cull
+                                            }
+                                            _ if shaders.serial => {
+                                                rec.dispatch(
+                                                    &shaders.meshlets,
+                                                    Dispatch::Groups([1, 1, 1]),
+                                                    &push,
+                                                );
+                                                continue;
                                             }
                                             _ => &shaders.meshlets,
                                         };
@@ -2501,6 +2514,12 @@ fn record_meshlet_cull<'a, 'g>(
         .record(move |rec| {
             let push = push(rec.context());
             let args = rec.context().buffer(culled);
+            if shaders.serial {
+                rec.dispatch(&shaders.instances, Dispatch::Groups([1, 1, 1]), &push);
+                rec.barrier_for_indirect();
+                rec.dispatch(&shaders.meshlets, Dispatch::Groups([1, 1, 1]), &push);
+                return;
+            }
             rec.dispatch(&shaders.instances, threads, &push);
             rec.barrier_for_indirect();
             rec.dispatch_indirect(&shaders.meshlets, args, lists + MESHLET_ARGS, &push);

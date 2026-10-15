@@ -778,6 +778,31 @@ fn main() {
         }
     }
     draws.sort_by_key(|d| format!("{:?}", d.mesh));
+    // EXPERIMENT (exp/meshlet-order): SB_SORT_DRAWS=camera|light orders the draws by their
+    // box's center: from the camera, or along the sun's direction (nearest the light first).
+    if let Ok(order) = std::env::var("SB_SORT_DRAWS") {
+        let (eye, _) = view(min, max, requested_view);
+        let dir = Vec3::new(-0.3, -1.0, -0.2).normalize();
+        let key = |d: &DrawItem| -> f32 {
+            let mesh = cooked
+                .meshes
+                .iter()
+                .zip(&meshes)
+                .find(|(_, id)| **id == d.mesh)
+                .unwrap()
+                .0;
+            let c = d
+                .world_from_object
+                .transform_point3((Vec3::from(mesh.min) + Vec3::from(mesh.max)) * 0.5);
+            if order == "light" {
+                c.dot(dir)
+            } else {
+                c.distance(eye)
+            }
+        };
+        draws.sort_by(|a, b| key(a).total_cmp(&key(b)));
+        println!("Draws sorted by {order}");
+    }
     // `--movers`: the smallest draws (by their world box's diagonal), and where they rest.
     let movers: Vec<(usize, Mat4)> = {
         let mut sized: Vec<(f32, usize)> = draws
@@ -1908,8 +1933,12 @@ fn main() {
                         "local shadow cull" | "local shadows" => {
                             local_frame += f64::from(time.gpu_us);
                         }
-                        "shadow cull" | "shadow" => shadow_frame += f64::from(time.gpu_us),
-                        "cull setup" | "cull" | "cull early" | "cull late" => cull_frame += us,
+                        // EXPERIMENT (exp/meshlet-order): the shadow draws alone; their cull
+                        // counts with the view's.
+                        "shadow" => shadow_frame += f64::from(time.gpu_us),
+                        "shadow cull" | "cull setup" | "cull" | "cull early" | "cull late" => {
+                            cull_frame += us;
+                        }
                         "forward" => forward.push(f64::from(time.gpu_us)),
                         "depth prepass" => depth_prepass.push(f64::from(time.gpu_us)),
                         "ao depths" | "ao" | "ao denoise" => ao_frame += f64::from(time.gpu_us),

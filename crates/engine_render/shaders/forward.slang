@@ -972,6 +972,175 @@ void cullMeshlets(uint3 group : SV_GroupID, uint local : SV_GroupIndex)
     }
 }
 
+
+// EXPERIMENT (exp/meshlet-order, not for main): the culls serialized in one group, so
+// work items and draws follow the instances' order exactly, whatever the scheduling.
+groupshared uint serial_prefix[MESHLET_CHUNK];
+groupshared uint serial_base;
+
+[shader("compute")]
+[numthreads(32, 1, 1)]
+void cullMainMeshletsSerial(uint local : SV_GroupIndex)
+{
+    for (uint base = 0; base < push.instance_count; base += 32)
+    {
+        cull_instance(base + local, true);
+        AllMemoryBarrierWithGroupSync();
+    }
+}
+
+[shader("compute")]
+[numthreads(32, 1, 1)]
+void cullShadowsMeshletsSerial(uint local : SV_GroupIndex)
+{
+    for (uint base = 0; base < push.instance_count; base += 32)
+    {
+        cull_shadow_instance(base + local, true);
+        AllMemoryBarrierWithGroupSync();
+    }
+}
+
+[shader("compute")]
+[numthreads(64, 1, 1)]
+void cullMeshletsSerial(uint local : SV_GroupIndex)
+{
+    uint items = ((MeshletHeader*)meshlet_lists(meshlet_list())).args[0];
+    for (uint item_index = 0; item_index < items; item_index++)
+    {
+        uint list = meshlet_list();
+        uint64_t lists = meshlet_lists(list);
+        MeshletHeader* header = (MeshletHeader*)lists;
+        uint2* work = (uint2*)(lists + MESHLET_HEADER_BYTES);
+        DrawCommand* draws = (DrawCommand*)(lists + MESHLET_HEADER_BYTES + 8 * uint64_t(header.work));
+        uint2 item = work[item_index];
+        uint index = item.x;
+        uint lod = item.y & 0xFFu;
+        uint state = (item.y >> 8) & 0xFFu;
+        uint m = (item.y >> 16) * MESHLET_CHUNK + local;
+        Instance inst = read_instance(push.instances, index);
+        Batch batch = read_batch(inst.batch);
+        BatchMeshlets bm = read_batch_meshlets(inst.batch);
+        // Lanes past the level's last meshlet take part in the chunk's runs as not drawn.
+        bool valid = m < bm.count[lod];
+        DrawCommand level = push.commands[batch.command + lod];
+        // The instance's scale: a sphere grows by the largest; the cone keeps its angle only
+        // when all three agree.
+        float3 c0 = float3(inst.row0.x, inst.row1.x, inst.row2.x);
+        float3 c1 = float3(inst.row0.y, inst.row1.y, inst.row2.y);
+        float3 c2 = float3(inst.row0.z, inst.row1.z, inst.row2.z);
+        float3 lengths = float3(dot(c0, c0), dot(c1, c1), dot(c2, c2));
+        float largest = max(lengths.x, max(lengths.y, lengths.z));
+        float smallest = min(lengths.x, min(lengths.y, lengths.z));
+        float scale = sqrt(largest);
+        bool cone = bm.cone != 0 && smallest >= largest * 0.999;
+        float3 eye = read_float4(&push.frame.camera_position).xyz;
+        bool cull = push.frame.cull != 0;
+        uint first_slot = push.frame.meshlet_slot[list];
+        // A shadow cascade's cull: the rectangles it draws this frame in light view space, and
+        // the light's direction. The shadow pass draws single-sided geometry's faces away from
+        // the light (front faces culled), subsurface materials' faces towards it: a meshlet all
+        // of whose faces the rasterizer would cull is not drawn.
+        bool shadow = list >= 2;
+        uint cascade = shadow ? list - 2 : 0;
+        // Read here, not in the test: fewer registers made the RTX run more groups at once,
+        // which shuffled the draws they append and cost the depth tests of the passes drawing
+        // them (Sponza: prepass +8 %, shadows +9 %; ADR 0093).
+        float4 r0 = shadow ? read_float4(&push.frame.cascades[cascade].drawn[0]) : float4(0.0);
+        float4 r1 = shadow ? read_float4(&push.frame.cascades[cascade].drawn[1]) : float4(0.0);
+        float far = shadow ? push.frame.cascades[cascade].far : 0.0;
+        float4x4 light = read_matrix(&push.frame.light_from_world);
+        float3 culled_side = read_float4(&push.frame.to_light).xyz * ((state & STATE_SUBSURFACE) != 0 ? -1.0 : 1.0);
+        Meshlet meshlet = loadAligned<16>(push.frame.meshlets + bm.first[lod] + min(m, bm.count[lod] - 1));
+        float3 center = transform_point(inst, meshlet.center);
+        float radius = meshlet.radius * scale;
+        bool visible = valid;
+        if (cull && shadow)
+        {
+            // Reaching a rectangle the cascade draws, and not wholly beyond its far depth.
+            float3 c = mul(light, float4(center, 1.0)).xyz;
+            float3 e = float3(radius, radius, radius);
+            visible = reaches(r0, c, e) || reaches(r1, c, e);
+            // Moved casters' clusters after the strips, only when there are any (the Radeon's
+            // registers for all four rectangles at the top: 53 → 64).
+            if (!visible && push.frame.cascades[cascade].rects > 2)
+                visible = reaches(read_float4(&push.frame.cascades[cascade].drawn[2]), c, e) || reaches(read_float4(&push.frame.cascades[cascade].drawn[3]), c, e);
+            visible = visible && -(c.z + radius) <= far;
+            // The light is a direction: the cone test from infinitely far away.
+            if (visible && cone && (meshlet.cone >> 24) != 127u)
+            {
+                float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
+                visible = dot(culled_side, axis) < snorm8(meshlet.cone, 24);
+            }
+        }
+        else if (cull)
+        {
+            [unroll]
+            for (int i = 0; i < 6; i++)
+            {
+                float4 plane = read_float4(&push.frame.planes[i]);
+                visible = visible && dot(plane.xyz, center) + plane.w >= -radius;
+            }
+            if (visible && cone && (meshlet.cone >> 24) != 127u)
+            {
+                float3 axis = normalize(transform_normal(inst, float3(snorm8(meshlet.cone, 0), snorm8(meshlet.cone, 8), snorm8(meshlet.cone, 16))));
+                float cutoff = snorm8(meshlet.cone, 24);
+                float3 d = center - eye;
+                visible = dot(d, axis) < cutoff * length(d) + radius;
+            }
+            if (visible && push.phase == PHASE_LATE)
+                visible = !occluded(center, float3(radius, radius, radius));
+        }
+        // A shadow cascade's runs: a drawn meshlet after one that is not starts one, which
+        // takes in the drawn meshlets after it (`shadow` is the same in the whole dispatch).
+        bool first = visible;
+        uint end = meshlet.first_index + meshlet.triangles * 3;
+        if (shadow)
+        {
+            meshlet_drawn[local] = visible ? 1u : 0u;
+            meshlet_end[local] = end;
+            GroupMemoryBarrierWithGroupSync();
+            first = visible && (local == 0 || meshlet_drawn[local - 1] == 0u);
+            uint last = local;
+            if (first)
+            {
+                while (last + 1 < MESHLET_CHUNK && meshlet_drawn[last + 1] != 0u)
+                    last++;
+            }
+            end = meshlet_end[last];
+        }
+        serial_prefix[local] = first ? 1u : 0u;
+        GroupMemoryBarrierWithGroupSync();
+        if (local == 0)
+        {
+            uint total = 0;
+            for (uint i = 0; i < MESHLET_CHUNK; i++)
+            {
+                uint f = serial_prefix[i];
+                serial_prefix[i] = total;
+                total += f;
+            }
+            uint b = 0;
+            if (total > 0)
+                InterlockedAdd(header.drawn[state], total, b);
+            serial_base = b;
+        }
+        GroupMemoryBarrierWithGroupSync();
+        if (first)
+        {
+            uint at = header.offset[state] + serial_base + serial_prefix[local];
+            DrawCommand draw;
+            draw.index_count = end - meshlet.first_index;
+            draw.instance_count = 1;
+            draw.first_index = level.first_index + meshlet.first_index;
+            draw.vertex_offset = level.vertex_offset;
+            draw.first_instance = first_slot + at;
+            draws[at] = draw;
+            push.visible[first_slot + at] = index;
+        }
+        AllMemoryBarrierWithGroupSync();
+    }
+}
+
 // The pieces of cascade `cascade` a sphere at `c` in light view space (radius `e`) reaches,
 // of those it draws (ADR 0093): bit `r * 4 + q` for the part of rectangle `r` in quadrant
 // `q` of its layer (`q & 2`: past the column seam, `q & 1`: past the row seam), each part
