@@ -1,14 +1,23 @@
 //! Vulkan objects behind graph resources.
 //!
-//! Each frame slot (frame in flight) owns its transient heaps: frames in flight run
-//! concurrently, so they cannot share transient memory. Transient resources are grouped
-//! by kind and allowed memory types, placed with aliasing ([`super::placement`]) and bound
-//! at their offsets. The images, buffers and views are cached per slot by
-//! (description, usage, heap, offset): while the frame's layout repeats, nothing is
-//! created. Objects not used by a frame are destroyed when its slot comes around again,
-//! when the GPU is done with them.
+//! Transient resources are grouped by kind and allowed memory types, placed with aliasing
+//! ([`super::placement`]) and bound at their offsets.
+//!
+//! - **Heaps the frame slots share.** A group whose resources only the graphics queue
+//!   uses lives in a heap every frame slot (frame in flight) shares. Frames run on that
+//!   queue in order, and each frame's first graphics batch begins with a barrier on
+//!   everything before it ([`Realized::shared_heap_bytes`]). A shared heap replaced by a
+//!   larger one is freed once every slot is past the frames that used it.
+//! - **Heaps of each slot.** A group the async compute queue touches (ADR 0065) runs
+//!   beside the graphics queue, also beside the previous frame's graphics work: each slot
+//!   owns a heap for it. The group is not split by queue: its resources keep aliasing one
+//!   another (split, the RTX's frame needed 135 MiB for its two slots instead of 130).
+//! - **Objects.** The images, buffers and views are cached per slot by (description,
+//!   usage, heap, offset): while the frame's layout repeats, nothing is created. Objects
+//!   not used by a frame are destroyed when its slot comes around again, when the GPU is
+//!   done with them.
 
-use super::compile::{Kind, Records};
+use super::compile::{Kind, QueueKind, Records};
 use super::placement::{self, Item};
 use super::{BufferDesc, TextureDesc, aspect_of};
 use engine_rhi::ash::{self, vk};
@@ -44,7 +53,11 @@ pub(crate) struct Physical {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Realized {
     pub(crate) transient_resources: u32,
+    /// Bytes of every heap the frame's transients use: its slot's and the shared ones.
     pub(crate) heap_bytes: u64,
+    /// Of those, the shared heaps' bytes: when not zero, the frame's first graphics batch
+    /// waits for everything before it on that queue.
+    pub(crate) shared_heap_bytes: u64,
     pub(crate) placed_bytes: u64,
     pub(crate) unaliased_bytes: u64,
     pub(crate) created_objects: u32,
@@ -54,6 +67,8 @@ pub(crate) struct Realized {
 struct GroupKey {
     kind: Kind,
     type_bits: u32,
+    /// Only the graphics queue uses its resources: placed in a heap the slots share.
+    shared: bool,
 }
 
 struct Heap {
@@ -183,6 +198,15 @@ pub(crate) struct PhysicalResources {
     predecessor_scratch: placement::Scratch,
     predecessors: Vec<u32>,
     next_heap_id: u64,
+    /// Heaps of the resources only the graphics queue uses, shared by the slots.
+    shared: Vec<Heap>,
+    /// Shared heaps replaced by larger ones, and the realization that replaced them: freed
+    /// once every slot has been realized since.
+    retired: Vec<(Heap, u64)>,
+    /// Realizations so far.
+    realizations: u64,
+    /// By resource: a pass on the async compute queue uses it (scratch).
+    async_used: Vec<bool>,
 }
 
 /// Create info of a transient image; `families` for concurrent sharing between queues.
@@ -248,6 +272,10 @@ impl PhysicalResources {
             predecessor_scratch: placement::Scratch::default(),
             predecessors: Vec::new(),
             next_heap_id: 1,
+            shared: Vec::new(),
+            retired: Vec::new(),
+            realizations: 0,
+            async_used: Vec::new(),
         }
     }
 
@@ -328,7 +356,9 @@ impl PhysicalResources {
     ///
     /// # Safety
     ///
-    /// The GPU has finished every submission that used `slot`'s transient resources.
+    /// The GPU has finished every submission that used `slot`'s transient resources, and
+    /// the frame's first graphics batch waits for everything before it on that queue when
+    /// [`Realized::shared_heap_bytes`] is not zero (the shared heaps').
     #[allow(clippy::too_many_arguments)]
     pub(crate) unsafe fn realize(
         &mut self,
@@ -345,6 +375,37 @@ impl PhysicalResources {
         let mut realized = Realized::default();
         self.current.clear();
         self.current.extend_from_slice(imports);
+
+        // Shared heaps replaced at least a round of slots ago: no frame in flight uses them
+        // (each slot's previous frame is done by the time it is realized).
+        self.realizations += 1;
+        let slot_count = self.slots.len() as u64;
+        while let Some(i) = self
+            .retired
+            .iter()
+            .position(|(_, at)| self.realizations >= at + slot_count)
+        {
+            let (heap, _) = self.retired.swap_remove(i);
+            for slot in &mut self.slots {
+                // SAFETY: no pending GPU work uses them (above).
+                unsafe { destroy_heap_objects(device, bindless, slot, heap.id) };
+            }
+            allocator.free(heap.allocation);
+        }
+
+        // What the async compute queue touches: it runs beside the graphics queue, so its
+        // transients keep heaps of their slot.
+        self.async_used.clear();
+        self.async_used.resize(records.resources.len(), false);
+        for pass in records
+            .passes
+            .iter()
+            .filter(|p| p.needed && p.queue == QueueKind::AsyncCompute)
+        {
+            for a in &records.accesses[pass.accesses.start as usize..pass.accesses.end as usize] {
+                self.async_used[a.resource as usize] = true;
+            }
+        }
 
         // Requirements and groups of the used transient resources.
         self.requirements.clear();
@@ -374,9 +435,19 @@ impl PhysicalResources {
             let key = GroupKey {
                 kind,
                 type_bits: req.memory_type_bits,
+                shared: true,
             };
-            if !self.groups.contains(&key) {
-                self.groups.push(key);
+            match self
+                .groups
+                .iter_mut()
+                .find(|g| g.kind == key.kind && g.type_bits == key.type_bits)
+            {
+                // A group the async compute queue touches keeps heaps per slot.
+                Some(g) => g.shared &= !self.async_used[r],
+                None => self.groups.push(GroupKey {
+                    shared: !self.async_used[r],
+                    ..key
+                }),
             }
             realized.transient_resources += 1;
             realized.unaliased_bytes += req.size;
@@ -474,49 +545,58 @@ impl PhysicalResources {
             }
 
             // The heap: reuse, or replace when too small.
-            let slot = &mut self.slots[slot_index];
-            let existing = slot.heaps.iter().position(|h| h.key == key);
-            let heap_index = match existing {
-                Some(i) if slot.heaps[i].size >= heap_size => i,
-                _ => {
-                    if let Some(i) = existing {
-                        let old = slot.heaps.swap_remove(i);
-                        // SAFETY: the slot's previous work is done (caller).
-                        unsafe { destroy_heap_objects(device, bindless, slot, old.id) };
-                        allocator.free(old.allocation);
+            let heap = if key.shared {
+                let existing = self.shared.iter().position(|h| h.key == key);
+                let index = match existing {
+                    Some(i) if self.shared[i].size >= heap_size => i,
+                    _ => {
+                        if let Some(i) = existing {
+                            // The other slots' frames in flight may still use it.
+                            let old = self.shared.swap_remove(i);
+                            self.retired.push((old, self.realizations));
+                        }
+                        let heap = allocate_heap(
+                            allocator,
+                            key,
+                            heap_size,
+                            align,
+                            &mut self.next_heap_id,
+                        )?;
+                        self.shared.push(heap);
+                        self.shared.len() - 1
                     }
-                    // Headroom so that a slowly growing frame does not reallocate often.
-                    let size = (heap_size + heap_size / 4).next_multiple_of(1 << 20);
-                    let allocation = allocator.allocate(&AllocationRequest {
-                        requirements: vk::MemoryRequirements {
-                            size,
-                            alignment: align,
-                            memory_type_bits: key.type_bits,
-                        },
-                        location: MemoryLocation::Device,
-                        kind: match key.kind {
-                            Kind::Texture => ResourceKind::Image,
-                            Kind::Buffer => ResourceKind::Buffer,
-                        },
-                        prefers_dedicated: false,
-                        requires_dedicated: false,
-                        dedicated_to: None,
-                    })?;
-                    let id = self.next_heap_id;
-                    self.next_heap_id += 1;
-                    slot.heaps.push(Heap {
-                        key,
-                        allocation,
-                        size,
-                        id,
-                    });
-                    slot.heaps.len() - 1
-                }
+                };
+                realized.shared_heap_bytes += self.shared[index].size;
+                &self.shared[index]
+            } else {
+                let slot = &mut self.slots[slot_index];
+                let existing = slot.heaps.iter().position(|h| h.key == key);
+                let index = match existing {
+                    Some(i) if slot.heaps[i].size >= heap_size => i,
+                    _ => {
+                        if let Some(i) = existing {
+                            let old = slot.heaps.swap_remove(i);
+                            // SAFETY: the slot's previous work is done (caller).
+                            unsafe { destroy_heap_objects(device, bindless, slot, old.id) };
+                            allocator.free(old.allocation);
+                        }
+                        let heap = allocate_heap(
+                            allocator,
+                            key,
+                            heap_size,
+                            align,
+                            &mut self.next_heap_id,
+                        )?;
+                        slot.heaps.push(heap);
+                        slot.heaps.len() - 1
+                    }
+                };
+                &self.slots[slot_index].heaps[index]
             };
-            let heap = &slot.heaps[heap_index];
             let (heap_id, memory, base) =
                 (heap.id, heap.allocation.memory(), heap.allocation.offset());
             realized.heap_bytes += heap.size;
+            let slot = &mut self.slots[slot_index];
 
             for (item, &r) in self.items.iter().zip(&self.item_resources) {
                 let r = r as usize;
@@ -691,7 +771,48 @@ impl PhysicalResources {
                 allocator.free(heap.allocation);
             }
         }
+        for heap in self.shared.drain(..) {
+            allocator.free(heap.allocation);
+        }
+        for (heap, _) in self.retired.drain(..) {
+            allocator.free(heap.allocation);
+        }
     }
+}
+
+/// A transient heap for `key`'s resources of `size` bytes and more (a quarter of headroom,
+/// so that a slowly growing frame does not reallocate often).
+fn allocate_heap(
+    allocator: &mut Allocator,
+    key: GroupKey,
+    size: u64,
+    align: u64,
+    next_id: &mut u64,
+) -> Result<Heap, RhiError> {
+    let size = (size + size / 4).next_multiple_of(1 << 20);
+    let allocation = allocator.allocate(&AllocationRequest {
+        requirements: vk::MemoryRequirements {
+            size,
+            alignment: align,
+            memory_type_bits: key.type_bits,
+        },
+        location: MemoryLocation::Device,
+        kind: match key.kind {
+            Kind::Texture => ResourceKind::Image,
+            Kind::Buffer => ResourceKind::Buffer,
+        },
+        prefers_dedicated: false,
+        requires_dedicated: false,
+        dedicated_to: None,
+    })?;
+    let id = *next_id;
+    *next_id += 1;
+    Ok(Heap {
+        key,
+        allocation,
+        size,
+        id,
+    })
 }
 
 /// Names a new object after the graph resource it was created for (RenderDoc, Nsight,

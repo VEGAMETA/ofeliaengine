@@ -481,8 +481,9 @@ mod windowed {
         let engine_mapped: u64 = heap_stats.iter().map(|s| s.mapped_bytes).sum();
         let g = graph.stats();
         println!(
-            "\nTransient targets: {:.1} MiB reserved in this slot's heaps ({:.1} placed, {:.1} without aliasing), {} resources, {} passes ({} culled). Process: working set {working:.0} MiB, private {private:.0} MiB.\n",
+            "\nTransient targets: {:.1} MiB reserved in the heaps this frame used, {:.1} of them shared by the frame slots ({:.1} placed, {:.1} without aliasing), {} resources, {} passes ({} culled). Process: working set {working:.0} MiB, private {private:.0} MiB.\n",
             g.transient_heap_bytes as f64 / MIB,
+            g.transient_shared_bytes as f64 / MIB,
             g.transient_placed_bytes as f64 / MIB,
             g.transient_unaliased_bytes as f64 / MIB,
             g.transient_resources,

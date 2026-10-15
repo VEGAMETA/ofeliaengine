@@ -336,6 +336,174 @@ fn passes_culling_aliasing_and_barriers_are_hazard_free() {
     assert_eq!(report.errors, 0, "{:#?}", report.first_errors);
 }
 
+/// Two frames in flight, submitted back to back without waiting, each using transients
+/// that only the graphics queue touches: they share the slots' heaps (held once, not once
+/// per slot), and synchronization validation finds no hazard between the frames (each
+/// frame's first batch waits for the previous frame on the queue).
+#[test]
+fn frames_in_flight_share_transient_heaps_without_hazards() {
+    let Some((instance, device)) = gpu() else {
+        return;
+    };
+    let d = device.raw();
+    let mut allocator = Allocator::new(&device);
+    let mut graph = RenderGraph::new(&device, 2);
+    // SAFETY: plain object creation on a live device.
+    let (pool, cmds, fences) = unsafe {
+        let pool = d
+            .create_command_pool(
+                &vk::CommandPoolCreateInfo::default()
+                    .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+                    .queue_family_index(device.graphics.family),
+                None,
+            )
+            .unwrap();
+        let cmds = d
+            .allocate_command_buffers(
+                &vk::CommandBufferAllocateInfo::default()
+                    .command_pool(pool)
+                    .command_buffer_count(2),
+            )
+            .unwrap();
+        let fences: Vec<vk::Fence> = (0..2)
+            .map(|_| {
+                d.create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+        (pool, cmds, fences)
+    };
+    let rgba = vk::Format::R8G8B8A8_UNORM;
+    for frame in 0..8u32 {
+        let slot = (frame % 2) as usize;
+        let cmd = cmds[slot];
+        // SAFETY: the slot's previous submission is waited for; the other slot's frame
+        // may still run.
+        unsafe {
+            d.wait_for_fences(&[fences[slot]], true, u64::MAX).unwrap();
+            d.reset_fences(&[fences[slot]]).unwrap();
+            d.begin_command_buffer(
+                cmd,
+                &vk::CommandBufferBeginInfo::default()
+                    .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+            )
+            .unwrap();
+        }
+        {
+            // SAFETY: the slot's previous submission completed (its fence above).
+            let mut fg = unsafe { graph.begin_slot(slot, cmd) };
+            // Every frame writes its transients first: the previous frame (the other slot)
+            // may still be reading or writing the same memory.
+            let a = fg.create_texture("a", TextureDesc::new_2d(rgba, SIZE, SIZE));
+            let b = fg.create_texture("b", TextureDesc::new_2d(rgba, SIZE, SIZE));
+            let data = fg.create_buffer("data", BufferDesc { size: 4096 });
+            let shade = frame as f32 / 8.0;
+            fg.add_pass("clear a")
+                .color(a, LoadOp::Clear([shade, 0.0, 0.0, 1.0]), StoreOp::Store)
+                .execute(|_| {});
+            fg.add_pass("copy a to b")
+                .read(a, Access::TransferRead)
+                .write(b, Access::TransferWrite)
+                .execute(move |ctx| {
+                    // SAFETY: recording; images in the layouts the graph arranged.
+                    unsafe {
+                        ctx.device.cmd_copy_image(
+                            ctx.cmd,
+                            ctx.image(a),
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            ctx.image(b),
+                            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                            &[copy_region()],
+                        );
+                    }
+                });
+            fg.add_pass("fill data")
+                .write(data, Access::TransferWrite)
+                .execute(move |ctx| {
+                    // SAFETY: recording; the buffer is 4096 bytes.
+                    unsafe {
+                        ctx.device
+                            .cmd_fill_buffer(ctx.cmd, ctx.buffer(data), 0, 4096, frame);
+                    }
+                });
+            fg.add_pass("use b and data")
+                .read(b, Access::TransferRead)
+                .write(data, Access::TransferWrite)
+                .side_effects()
+                .execute(move |ctx| {
+                    let region = vk::BufferImageCopy {
+                        buffer_offset: 0,
+                        buffer_row_length: 0,
+                        buffer_image_height: 0,
+                        image_subresource: vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level: 0,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                        image_offset: vk::Offset3D::default(),
+                        image_extent: vk::Extent3D {
+                            width: 16,
+                            height: 16,
+                            depth: 1,
+                        },
+                    };
+                    // SAFETY: recording; 16 × 16 RGBA8 pixels fit in the buffer.
+                    unsafe {
+                        ctx.device.cmd_copy_image_to_buffer(
+                            ctx.cmd,
+                            ctx.image(b),
+                            vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                            ctx.buffer(data),
+                            &[region],
+                        );
+                    }
+                });
+            fg.execute(&mut allocator).unwrap();
+        }
+        // SAFETY: recorded above; signals the slot's fence.
+        unsafe {
+            d.end_command_buffer(cmd).unwrap();
+            let infos = [vk::CommandBufferSubmitInfo::default().command_buffer(cmd)];
+            d.queue_submit2(
+                device.graphics.raw,
+                &[vk::SubmitInfo2::default().command_buffer_infos(&infos)],
+                fences[slot],
+            )
+            .unwrap();
+        }
+        let stats = graph.stats();
+        // Only the graphics queue here: every transient heap is shared by the slots.
+        assert!(stats.transient_shared_bytes > 0, "{stats:?}");
+        assert_eq!(
+            stats.transient_shared_bytes, stats.transient_heap_bytes,
+            "{stats:?}"
+        );
+        if frame >= 2 {
+            assert_eq!(stats.created_objects, 0, "slot {slot} reuses its objects");
+        }
+    }
+    device.wait_idle().unwrap();
+    // SAFETY: the device is idle.
+    unsafe {
+        graph.destroy(&mut allocator, None);
+        for fence in fences {
+            d.destroy_fence(fence, None);
+        }
+        d.destroy_command_pool(pool, None);
+    }
+    drop(allocator);
+    let report = instance.validation_report();
+    println!(
+        "validation (with synchronization validation): enabled={} errors={} warnings={}",
+        report.enabled, report.errors, report.warnings
+    );
+    assert_eq!(report.errors, 0, "{:#?}", report.first_errors);
+}
+
 /// A pass that follows a long one with no barrier between them (they share nothing) has
 /// its opening timestamp written while the long one still runs: its time must be its own,
 /// not the long pass's tail (core review 2: a 49 µs pass read 2.4 ms). The passes' times

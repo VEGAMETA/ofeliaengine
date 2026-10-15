@@ -184,3 +184,42 @@ Effect on ref-1's Radeon: in `flight`, texture feedback 2,430 → 88 µs and lig
 ~100 → 7.5 µs; in the perf gate the culling passes read 0.3–1.6 µs instead of 4–76, the
 depth prepass 12 % less in two scenes. Both perf baselines were re-measured; the RTX's
 moved within a few µs.
+
+## Addendum (2026-10-15): transient heaps the frame slots share
+
+The second review (§3.9): each frame slot (frame in flight) held its own transient heaps.
+`flight` reserved 65 MiB a slot on the RTX at 1080p, 20 MiB on the Radeon iGPU (its
+render size smaller), so twice that in all.
+
+- **Frames run on the graphics queue in order.** Transients only that queue touches can
+  live in heaps every slot shares, if each frame's work on them starts after the
+  previous frame's ends there.
+  - Each frame's first graphics batch now begins with a global barrier (all commands,
+    memory writes) on everything before it on the queue.
+  - Measured first, alone (`flight`, 600 frames, alternated with main's): the frame
+    interval moved within the noise, RTX 1,610–1,634 → 1,626–1,629 µs, Radeon 25.68–25.70
+    → 25.70–25.87 ms. Frames hardly overlap on the queue anyway: the interval was the GPU
+    frame's time.
+- **The async compute queue runs beside the graphics queue** (ADR 0065), also beside the
+  previous frame's graphics work. A group of transients (kind and memory types) that its
+  passes touch keeps a heap per slot.
+  - The group is not split by queue: its resources keep aliasing one another.
+  - Split, the RTX (whose ambient occlusion runs on that queue) needed 33 MiB shared plus
+    51 MiB a slot, 135 MiB in all instead of 130.
+- **A shared heap replaced by a larger one** is freed once every slot has been realized
+  since, when no frame in flight uses it any more. Each slot destroys its objects in it
+  as it always did, as unused.
+- **`GraphStats::transient_shared_bytes`** tells the shared part of
+  `transient_heap_bytes`.
+
+Measured (`flight` on Sponza's pack, 1080p, the device classes' defaults, two frames in
+flight):
+
+| | before | after |
+|---|---|---|
+| Radeon iGPU (no async compute): transient heaps in all | 2 × 20 = 40 MiB | 20 MiB, all shared |
+| RTX 4060 Ti (AO on async compute) | 2 × 65 = 130 MiB | 1 MiB shared (buffers) + 2 × 64 = 129 MiB |
+
+**Test.** `frames_in_flight_share_transient_heaps_without_hazards`: two frames in flight
+submitted back to back, under synchronization validation, both GPUs. With the barrier
+there are no errors; without it, 7.

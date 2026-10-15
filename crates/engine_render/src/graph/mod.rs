@@ -237,8 +237,12 @@ pub struct GraphStats {
     pub memory_barriers: u32,
     /// Transient textures and buffers used.
     pub transient_resources: u32,
-    /// Bytes reserved in this frame slot's transient heaps (with headroom).
+    /// Bytes reserved in the transient heaps this frame used (with headroom): its slot's
+    /// and the ones the slots share.
     pub transient_heap_bytes: u64,
+    /// Of those, the heaps every frame slot shares (the transients only the graphics queue
+    /// uses). The graph holds the shared ones once and the others once per slot.
+    pub transient_shared_bytes: u64,
     /// Bytes the transient resources need with aliasing.
     pub transient_placed_bytes: u64,
     /// Bytes the transient resources would need without aliasing.
@@ -1023,6 +1027,7 @@ impl<'g> FrameGraph<'g> {
             culled_passes: records.passes.iter().filter(|p| !p.needed).count() as u32,
             transient_resources: realized.transient_resources,
             transient_heap_bytes: realized.heap_bytes,
+            transient_shared_bytes: realized.shared_heap_bytes,
             transient_placed_bytes: realized.placed_bytes,
             transient_unaliased_bytes: realized.unaliased_bytes,
             created_objects: realized.created_objects,
@@ -1090,6 +1095,27 @@ impl<'g> FrameGraph<'g> {
                         // SAFETY: just reset.
                         unsafe { t.frame_mark(d, cmd, slot, false) };
                     }
+                }
+                if queue == QueueKind::Graphics && realized.shared_heap_bytes > 0 {
+                    // The transient heaps the slots share: this frame's uses of them come
+                    // after the previous frame's, which ran before on this queue. (Frames
+                    // hardly overlap there anyway: `flight`'s frame interval was the same
+                    // with this barrier on both GPUs.)
+                    let barrier = [vk::MemoryBarrier2::default()
+                        .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                        .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+                        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                        .dst_access_mask(
+                            vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE,
+                        )];
+                    // SAFETY: recording outside a rendering scope.
+                    unsafe {
+                        d.cmd_pipeline_barrier2(
+                            cmd,
+                            &vk::DependencyInfo::default().memory_barriers(&barrier),
+                        );
+                    }
+                    recorder.stats.memory_barriers += 1;
                 }
             }
             recorder.segment(cmd, index);
