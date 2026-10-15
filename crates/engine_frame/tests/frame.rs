@@ -20,6 +20,7 @@ use engine_frame::{
     Upscale, UpscalerKind, View, ViewSettings,
 };
 use engine_render::ao::AoSettings;
+use engine_render::dof::DofSettings;
 use engine_render::forward::LocalShadowSettings;
 use engine_render::grading::ColorGrading;
 use engine_render::material::{MaterialDesc, TextureRef};
@@ -290,7 +291,8 @@ fn the_previous_color_reaches_the_hook() {
 /// Invalid combinations (ADR 0075) are refused by `check` and `prepare` with the same
 /// error, and the view keeps working with valid ones; switching between MSAA, filters
 /// and spatial or temporal modes frame to frame renders every time, each mode once plain
-/// and once graded (ADR 0094: the grading switched on and off from frame to frame).
+/// and once graded with depth of field (ADRs 0094, 0095: both switched on and off from
+/// frame to frame).
 #[test]
 fn antialiasing_is_validated_and_modes_switch() {
     let Some(mut bed) = Bed::new((96, 64), true) else {
@@ -388,6 +390,12 @@ fn antialiasing_is_validated_and_modes_switch() {
             quality,
             bloom: false,
             grading,
+            // Focused on the cube (the camera is 3.67 from its center): its face stays sharp.
+            depth_of_field: graded.then(|| DofSettings {
+                focus_distance: 3.0,
+                f_number: 1.4,
+                ..DofSettings::default()
+            }),
             ..ViewSettings::default()
         };
         if bed.frame.check(&settings, bed.size).is_err() {

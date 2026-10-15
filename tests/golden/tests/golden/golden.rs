@@ -17,6 +17,7 @@ use engine_golden::scene::{
 };
 use engine_render::ao::AoSettings;
 use engine_render::atmosphere::{Atmosphere, HeightFog};
+use engine_render::dof::DofSettings;
 use engine_render::forward::{DirectionalLight, LocalLight, Spot};
 use engine_render::grading::ColorGrading;
 use engine_render::reflections::SsrSettings;
@@ -340,6 +341,24 @@ fn sponza_graded() {
         },
         ..Shot::new(
             "sponza_graded",
+            Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
+        )
+    });
+}
+
+/// Sponza with depth of field (ADR 0095): focused on the nearest arches; the curtains in
+/// front blur over them, the far end of the atrium blurs behind.
+#[test]
+fn sponza_dof() {
+    check(&Shot {
+        depth_of_field: Some(DofSettings {
+            focus_distance: 3.0,
+            f_number: 1.4,
+            sensor_height: 0.1,
+            ..DofSettings::default()
+        }),
+        ..Shot::new(
+            "sponza_dof",
             Source::Gltf(PathBuf::from("Sponza/Sponza.gltf")),
         )
     });
