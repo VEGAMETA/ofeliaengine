@@ -8,7 +8,8 @@
 //   its own field (`near_radius`, `far_radius`); no value stands for both (the research
 //   note's patent check).
 // - The image blurred is the one the tone mapper reads, after antialiasing and upscaling;
-//   the depth is the scene's at render size, read under each pixel.
+//   the depth is the scene's at render size, read under each pixel, once: the downsample
+//   also makes the depth tiles (FidelityFX reads the depth again for them).
 // - The blur's ring count, and so the mip it samples, is the same for its whole workgroup
 //   (FidelityFX: per wave): the mip's texture is picked by a uniform index.
 // - The composite writes an image of its own: no workgroup reads pixels another writes.
@@ -105,42 +106,6 @@ float scene_depth_at(int2 pixel)
 
 // ---- Tiles ------------------------------------------------------------------------------
 
-// The nearest and farthest q of each tile, and the largest reach of any tile.
-[shader("compute")]
-[numthreads(8, 8, 1)]
-void dofTiles(uint3 id : SV_DispatchThreadID)
-{
-    uint2 tiles = (push.size + TILE - 1) / TILE;
-    bool inside = all(id.xy < tiles);
-    float lowest = 1.0;
-    float highest = 0.0;
-    if (inside)
-    {
-        Texture2D depth = g_textures[push.depth];
-        SamplerState s = g_samplers[push.point_sampler];
-        float2 rcp_size = 1.0 / float2(push.size);
-        // Each gather takes the depth texels around the corner between four pixels.
-        for (uint y = 0; y < TILE; y += 2)
-        {
-            for (uint x = 0; x < TILE; x += 2)
-            {
-                float2 uv = saturate((float2(id.xy * TILE + uint2(x, y)) + 1.0) * rcp_size);
-                float4 d = depth.GatherRed(s, uv);
-                lowest = min(lowest, min(min(d.x, d.y), min(d.z, d.w)));
-                highest = max(highest, max(max(d.x, d.y), max(d.z, d.w)));
-            }
-        }
-    }
-    float nearest = depth_q(lowest);
-    float farthest = depth_q(highest);
-    uint2 reach = radius_in_tiles(float2(coc_radius(nearest), coc_radius(farthest)));
-    uint widest = WaveActiveMax(inside ? max(reach.x, reach.y) : 0u);
-    if (WaveIsFirstLane())
-        InterlockedMax(push.max_tile_radius[0], widest);
-    if (inside)
-        g_tile_images[push.tiles][id.xy] = float2(nearest, farthest);
-}
-
 // One tile of the dilation: it spreads its nearest q when its near radius reaches the tile,
 // its farthest q when its radius there reaches.
 void dilate_step(inout float nearest, inout float farthest, int x, int y, int r, int2 tiles, int2 tile)
@@ -228,21 +193,31 @@ uint2 mip_size(uint level)
 
 groupshared float4 g_mip1[8][8];
 groupshared float4 g_mip2[4][4];
+groupshared float2 g_quarter[8][8];
 
-// Four mips of color and q (half size and below): every workgroup reduces 32 × 32 pixels.
+// Four mips of color and q (half size and below), and the tiles' nearest and farthest q
+// with the largest reach of a tile (FidelityFX's depth tiles, here from the same reads):
+// every workgroup reduces 32 × 32 pixels, each thread 4 × 4.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void dofDownsample(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
 {
     float4 level0[2][2];
+    float nearest = 0.0;
+    float farthest = 1.0;
     for (uint y = 0; y < 2; y++)
     {
         for (uint x = 0; x < 2; x++)
         {
             int2 t = int2(group.xy * 16 + thread.xy * 2 + uint2(x, y));
             int2 p = t * 2;
-            float4 v = reduce(image_pixel(p), image_pixel(p + int2(1, 0)),
-                image_pixel(p + int2(0, 1)), image_pixel(p + int2(1, 1)));
+            float4 a = image_pixel(p);
+            float4 b = image_pixel(p + int2(1, 0));
+            float4 c = image_pixel(p + int2(0, 1));
+            float4 d = image_pixel(p + int2(1, 1));
+            nearest = max(nearest, max(max(a.a, b.a), max(c.a, d.a)));
+            farthest = min(farthest, min(min(a.a, b.a), min(c.a, d.a)));
+            float4 v = reduce(a, b, c, d);
             level0[y][x] = v;
             if (all(uint2(t) < mip_size(0)))
                 g_images[push.mips[0]][t] = v;
@@ -253,7 +228,30 @@ void dofDownsample(uint3 group : SV_GroupID, uint3 thread : SV_GroupThreadID)
     if (all(t1 < mip_size(1)))
         g_images[push.mips[1]][t1] = v1;
     g_mip1[thread.y][thread.x] = v1;
+    g_quarter[thread.y][thread.x] = float2(nearest, farthest);
     GroupMemoryBarrierWithGroupSync();
+
+    // A tile is 2 × 2 threads.
+    bool tile_thread = all((thread.xy & 1) == 0);
+    uint2 tile = group.xy * 4 + thread.xy / 2;
+    bool inside = tile_thread && all(tile < (push.size + TILE - 1) / TILE);
+    uint reach_tiles = 0;
+    if (inside)
+    {
+        uint2 s = thread.xy;
+        float2 q00 = g_quarter[s.y][s.x];
+        float2 q10 = g_quarter[s.y][s.x + 1];
+        float2 q01 = g_quarter[s.y + 1][s.x];
+        float2 q11 = g_quarter[s.y + 1][s.x + 1];
+        float near_q = max(max(q00.x, q10.x), max(q01.x, q11.x));
+        float far_q = min(min(q00.y, q10.y), min(q01.y, q11.y));
+        g_tile_images[push.tiles][tile] = float2(near_q, far_q);
+        uint2 reach = radius_in_tiles(float2(coc_radius(near_q), coc_radius(far_q)));
+        reach_tiles = max(reach.x, reach.y);
+    }
+    uint widest = WaveActiveMax(reach_tiles);
+    if (WaveIsFirstLane())
+        InterlockedMax(push.max_tile_radius[0], widest);
     if (all(thread.xy < 4))
     {
         uint2 s = thread.xy * 2;
@@ -772,11 +770,51 @@ static const uint COMBINE_TILE = 8;
 static const uint ROW_PITCH = COMBINE_TILE + 3; // +2 for the 3 × 3 filter, +1 for bilinear
 static const uint COMBINE_AREA = ROW_PITCH * ROW_PITCH;
 
+// Shared memory as separate channels (as FidelityFX's 32-bit path keeps it).
 groupshared float g_near_luma[COMBINE_AREA];
 groupshared float g_far_luma[COMBINE_AREA];
-groupshared float4 g_near[COMBINE_AREA];
-groupshared float4 g_far[COMBINE_AREA];
-groupshared float3 g_full[18 * 18];
+groupshared float g_near_r[COMBINE_AREA];
+groupshared float g_near_g[COMBINE_AREA];
+groupshared float g_near_b[COMBINE_AREA];
+groupshared float g_near_a[COMBINE_AREA];
+groupshared float g_far_r[COMBINE_AREA];
+groupshared float g_far_g[COMBINE_AREA];
+groupshared float g_far_b[COMBINE_AREA];
+groupshared float g_far_a[COMBINE_AREA];
+groupshared float g_full_r[18 * 18];
+groupshared float g_full_g[18 * 18];
+groupshared float g_full_b[18 * 18];
+
+float4 near_at(uint i)
+{
+    return float4(g_near_r[i], g_near_g[i], g_near_b[i], g_near_a[i]);
+}
+
+void set_near(uint i, float4 v)
+{
+    g_near_r[i] = v.r;
+    g_near_g[i] = v.g;
+    g_near_b[i] = v.b;
+    g_near_a[i] = v.a;
+}
+
+float4 far_at(uint i)
+{
+    return float4(g_far_r[i], g_far_g[i], g_far_b[i], g_far_a[i]);
+}
+
+void set_far(uint i, float4 v)
+{
+    g_far_r[i] = v.r;
+    g_far_g[i] = v.g;
+    g_far_b[i] = v.b;
+    g_far_a[i] = v.a;
+}
+
+float3 full_at(uint i)
+{
+    return float3(g_full_r[i], g_full_g[i], g_full_b[i]);
+}
 
 float luma(float3 c)
 {
@@ -789,17 +827,16 @@ float3 blur3x3(uint base)
     const float corner = 0.5453;
     const float side = 0.9717;
     const float weights = 1.0 + 4.0 * corner + 4.0 * side;
-    float3 sum = g_full[base + 19]
-        + corner * (g_full[base] + g_full[base + 2] + g_full[base + 36] + g_full[base + 38])
-        + side * (g_full[base + 1] + g_full[base + 18] + g_full[base + 20] + g_full[base + 37]);
+    float3 sum = full_at(base + 19)
+        + corner * (full_at(base) + full_at(base + 2) + full_at(base + 36) + full_at(base + 38))
+        + side * (full_at(base + 1) + full_at(base + 18) + full_at(base + 20) + full_at(base + 37));
     return sum / weights;
 }
 
 float4 final_combine(uint2 coord, uint2 rel, float4 bg, float4 fg, float min_fg_w)
 {
     uint base = rel.x + 18 * rel.y;
-    float3 full = g_full[base + 19];
-    float3 fixed_blur = blur3x3(base);
+    float3 full = full_at(base + 19);
     // The background expanded around edges.
     if (bg.a > 0.0)
         bg.rgb /= bg.a;
@@ -811,7 +848,10 @@ float4 final_combine(uint2 coord, uint2 rel, float4 bg, float4 fg, float min_fg_
     float c2 = saturate(c - 1.5); // to the half-size background
     if (bg.a == 0.0)
         c2 = 0.0;
-    float3 combined = lerp(full, fixed_blur, c1);
+    // The fixed blur only where it shows (FidelityFX: everywhere).
+    float3 combined = full;
+    if (c1 > 0.0 && c2 < 1.0)
+        combined = lerp(full, blur3x3(base), c1);
     combined = lerp(combined, bg.rgb, c2);
     combined = lerp(combined, fg.rgb, cubic_spline(fg.a));
     return float4(combined, 1.0);
@@ -824,17 +864,17 @@ float4 filter_far(uint base)
         g_far_luma[base + ROW_PITCH], g_far_luma[base + ROW_PITCH + 1], g_far_luma[base + ROW_PITCH + 2],
         g_far_luma[base + 2 * ROW_PITCH], g_far_luma[base + 2 * ROW_PITCH + 1], g_far_luma[base + 2 * ROW_PITCH + 2]);
     uint idx = base + ROW_PITCH + 1;
-    float3 col = g_far[idx].rgb;
+    float3 col = far_at(idx).rgb;
     float factor = clamp(ratio(med, g_far_luma[idx]), 0.0, 2.0);
     // A pixel on a corner (five black neighbours) keeps its color.
     if (med == 0.0)
         factor = 1.0;
-    return float4(col * factor, g_far[idx].a);
+    return float4(col * factor, g_far_a[idx]);
 }
 
 float near_alpha(uint idx, uint x, uint y)
 {
-    return g_near[idx + x + ROW_PITCH * y].a;
+    return g_near_a[idx + x + ROW_PITCH * y];
 }
 
 float near_luma_at(uint idx, uint x, uint y)
@@ -863,7 +903,7 @@ float4 filter_near(uint base)
             best = base + 2 * ROW_PITCH + 2;
         idx = best;
     }
-    float3 col = g_near[idx].rgb;
+    float3 col = near_at(idx).rgb;
     float factor = med > 0.0 ? clamp(ratio(med, g_near_luma[idx]), 0.0, 2.0) : 1.0;
     return float4(col * factor, avg_alpha);
 }
@@ -908,7 +948,10 @@ void fetch_full_color(uint2 group, uint gix)
         uint i = (gix + iter * 64) % (18 * 18);
         int2 coord = int2(group * 16) + int2(int(i % 18) - 1, int(i / 18) - 1);
         coord = clamp(coord, int2(0, 0), int2(push.size) - 1);
-        g_full[i] = g_textures[push.color].Load(int3(coord, 0)).rgb;
+        float3 c = g_textures[push.color].Load(int3(coord, 0)).rgb;
+        g_full_r[i] = c.r;
+        g_full_g[i] = c.g;
+        g_full_b[i] = c.b;
     }
 }
 
@@ -930,12 +973,12 @@ void fetch_fields(uint2 group, uint gix, bool near)
         coord = clamp(coord, int2(0, 0), int2(push.half_size) - 1);
         float4 far = g_textures[push.far_field].Load(int3(coord, 0));
         g_far_luma[i] = luma(far.rgb);
-        g_far[i] = far;
+        set_far(i, far);
         if (near)
         {
             float4 n = g_textures[push.near_field].Load(int3(coord, 0));
             g_near_luma[i] = luma(n.rgb);
-            g_near[i] = n;
+            set_near(i, n);
         }
     }
 }
@@ -961,14 +1004,14 @@ void combine(uint2 id, uint2 thread, uint2 group, uint gix, bool near)
     GroupMemoryBarrierWithGroupSync();
 
     // The filtered texels, for interpolation.
-    g_far[base] = far;
+    set_far(base, far);
     if (near)
-        g_near[base] = near_c;
+        set_near(base, near_c);
     if (extra)
     {
-        g_far[base2] = far2;
+        set_far(base2, far2);
         if (near)
-            g_near[base2] = near2;
+            set_near(base2, near2);
     }
     GroupMemoryBarrierWithGroupSync();
 
@@ -979,14 +1022,14 @@ void combine(uint2 id, uint2 thread, uint2 group, uint gix, bool near)
     if (near)
     {
         // A foreground texel of zero weight makes the interpolation invalid.
-        min_fg_w = min(near_c.a, min(min(g_near[base + 1].a, g_near[base + ROW_PITCH].a), g_near[base + ROW_PITCH + 1].a));
-        near_tr = 0.5 * near_c + 0.5 * g_near[base + 1];
-        near_bl = 0.5 * near_c + 0.5 * g_near[base + ROW_PITCH];
-        near_br = 0.5 * near_tr + 0.25 * g_near[base + ROW_PITCH] + 0.25 * g_near[base + ROW_PITCH + 1];
+        min_fg_w = min(near_c.a, min(min(g_near_a[base + 1], g_near_a[base + ROW_PITCH]), g_near_a[base + ROW_PITCH + 1]));
+        near_tr = 0.5 * near_c + 0.5 * near_at(base + 1);
+        near_bl = 0.5 * near_c + 0.5 * near_at(base + ROW_PITCH);
+        near_br = 0.5 * near_tr + 0.25 * near_at(base + ROW_PITCH) + 0.25 * near_at(base + ROW_PITCH + 1);
     }
-    float4 far_tr = 0.5 * far + 0.5 * g_far[base + 1];
-    float4 far_bl = 0.5 * far + 0.5 * g_far[base + ROW_PITCH];
-    float4 far_br = 0.5 * far_tr + 0.25 * g_far[base + ROW_PITCH] + 0.25 * g_far[base + ROW_PITCH + 1];
+    float4 far_tr = 0.5 * far + 0.5 * far_at(base + 1);
+    float4 far_bl = 0.5 * far + 0.5 * far_at(base + ROW_PITCH);
+    float4 far_br = 0.5 * far_tr + 0.25 * far_at(base + ROW_PITCH) + 0.25 * far_at(base + ROW_PITCH + 1);
 
     uint2 coord = 2 * id;
     uint2 rel = 2 * thread;

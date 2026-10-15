@@ -6,13 +6,13 @@
 //! The passes are AMD FidelityFX DOF 1.1's, ported to `shaders/dof.slang` (MIT,
 //! THIRD_PARTY_NOTICES.md):
 //!
-//! 1. the nearest and farthest depth of every 8 × 8 tile, and the widest reach of any
-//!    tile;
+//! 1. four mips of color and depth at half size and below, bilateral, and from the same
+//!    reads the nearest and farthest depth of every 8 × 8 tile with the widest reach of
+//!    any tile (FidelityFX reads the depth again for its tiles);
 //! 2. the tiles dilated by what reaches them;
-//! 3. four mips of color and depth at half size and below, bilateral;
-//! 4. the near and far fields gathered at half size in rings (outside-in, the far field's
+//! 3. the near and far fields gathered at half size in rings (outside-in, the far field's
 //!    rings occluding each other), per tile type;
-//! 5. the fields filtered, upscaled and blended over the image.
+//! 4. the fields filtered, upscaled and blended over the image.
 //!
 //! Where FidelityFX keeps signed circles of confusion, the passes keep the inverse depth.
 //! A pixel's near and far radii are two separate non-negative values computed from it,
@@ -22,9 +22,8 @@
 use crate::compute::{ComputeShader, ComputeSource, Dispatch};
 use crate::graph::{Access, BufferDesc, FrameGraph, ShaderStages, Texture, TextureDesc};
 use engine_rhi::ash::vk;
-use engine_rhi::{Bindless, Device, RhiError, SamplerKind};
+use engine_rhi::{Bindless, Device, PipelineStatistic, RhiError, SamplerKind};
 
-const TILES: &[u8] = include_bytes!("../shaders/dof.dofTiles.spv");
 const DILATE: &[u8] = include_bytes!("../shaders/dof.dofDilate.spv");
 const DOWNSAMPLE: &[u8] = include_bytes!("../shaders/dof.dofDownsample.spv");
 const BLUR: &[u8] = include_bytes!("../shaders/dof.dofBlur.spv");
@@ -166,7 +165,6 @@ const _: () = assert!(core::mem::size_of::<Push>() == 104);
 /// Depth of field (see the module documentation): the pipelines, shared by every view.
 #[derive(Debug)]
 pub struct DepthOfField {
-    tiles: ComputeShader<Push>,
     dilate: ComputeShader<Push>,
     downsample: ComputeShader<Push>,
     blur: ComputeShader<Push>,
@@ -176,11 +174,10 @@ pub struct DepthOfField {
 impl DepthOfField {
     /// Creates the pipelines.
     pub fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
-        let [tiles, dilate, downsample, blur, composite] = ComputeSource::create_all(
+        let [dilate, downsample, blur, composite] = ComputeSource::create_all(
             device,
             bindless,
             [
-                ComputeSource::new(TILES, c"dofTiles", &[])?,
                 ComputeSource::new(DILATE, c"dofDilate", &[])?,
                 ComputeSource::new(DOWNSAMPLE, c"dofDownsample", &[])?,
                 ComputeSource::new(BLUR, c"dofBlur", &[])?,
@@ -188,12 +185,23 @@ impl DepthOfField {
             ],
         )?;
         Ok(Self {
-            tiles,
             dilate,
             downsample,
             blur,
             composite,
         })
+    }
+
+    /// The driver's statistics of each pass's pipeline (registers, occupancy), by pass
+    /// name; empty unless the device captures them (`ENGINE_PIPELINE_STATS=1`).
+    #[doc(hidden)]
+    pub fn statistics(&self, device: &Device) -> [(&'static str, Vec<PipelineStatistic>); 4] {
+        [
+            ("dilate", self.dilate.pipeline().statistics(device)),
+            ("downsample", self.downsample.pipeline().statistics(device)),
+            ("blur", self.blur.pipeline().statistics(device)),
+            ("composite", self.composite.pipeline().statistics(device)),
+        ]
     }
 
     /// Declares the depth of field of `color` (any size; HDR) with the scene's `depth`
@@ -264,22 +272,33 @@ impl DepthOfField {
             ..Push::default()
         };
         let stage = ShaderStages::COMPUTE;
-        fg.add_compute("dof tiles", bindless)
+        let mut downsample = fg
+            .add_compute("dof downsample", bindless)
+            .read(color, Access::Sampled(stage))
             .read(depth, Access::Sampled(stage))
             .read(reach, Access::StorageReadWrite(stage))
-            .write(tiles, Access::StorageWrite(stage))
-            .dispatch(
-                &self.tiles,
-                Dispatch::Threads([tile_count[0], tile_count[1], 1]),
-                move |ctx| {
-                    Some(Push {
-                        max_tile_radius: ctx.address(reach),
-                        depth: ctx.sampled_index(depth)?,
-                        tiles: ctx.storage_index(tiles)?,
-                        ..base
-                    })
-                },
-            );
+            .write(tiles, Access::StorageWrite(stage));
+        for mip in mips {
+            downsample = downsample.write(mip, Access::StorageWrite(stage));
+        }
+        downsample.dispatch(
+            &self.downsample,
+            Dispatch::Groups([w.div_ceil(32), h.div_ceil(32), 1]),
+            move |ctx| {
+                let mut storage = [0; MIPS];
+                for (index, mip) in storage.iter_mut().zip(mips) {
+                    *index = ctx.storage_index(mip)?;
+                }
+                Some(Push {
+                    max_tile_radius: ctx.address(reach),
+                    color: ctx.sampled_index(color)?,
+                    depth: ctx.sampled_index(depth)?,
+                    tiles: ctx.storage_index(tiles)?,
+                    mips: storage,
+                    ..base
+                })
+            },
+        );
         fg.add_compute("dof dilate", bindless)
             .read(tiles, Access::Sampled(stage))
             .read(reach, Access::StorageRead(stage))
@@ -296,29 +315,6 @@ impl DepthOfField {
                     })
                 },
             );
-        let mut downsample = fg
-            .add_compute("dof downsample", bindless)
-            .read(color, Access::Sampled(stage))
-            .read(depth, Access::Sampled(stage));
-        for mip in mips {
-            downsample = downsample.write(mip, Access::StorageWrite(stage));
-        }
-        downsample.dispatch(
-            &self.downsample,
-            Dispatch::Groups([w.div_ceil(32), h.div_ceil(32), 1]),
-            move |ctx| {
-                let mut storage = [0; MIPS];
-                for (index, mip) in storage.iter_mut().zip(mips) {
-                    *index = ctx.storage_index(mip)?;
-                }
-                Some(Push {
-                    color: ctx.sampled_index(color)?,
-                    depth: ctx.sampled_index(depth)?,
-                    mips: storage,
-                    ..base
-                })
-            },
-        );
         let mut blur = fg
             .add_compute("dof blur", bindless)
             .read(dilated, Access::Sampled(stage));

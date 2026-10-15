@@ -44,7 +44,8 @@
 //! `--post` for bloom, automatic exposure and tone mapping every
 //! frame (ADR 0047), `--grading` to grade through a LUT too (ADR 0094; implies `--post`),
 //! `--dof <focus distance>` for depth of field before bloom (ADR 0095; f/1.4 on a 10 cm
-//! sensor, a strong blur; implies `--post`),
+//! sensor, a strong blur; implies `--post`; `--dof-rings <n>` its quality, `--dof-f-number <n>`
+//! its aperture),
 //! `--curve gt|pbr-neutral|agx|aces` for the tone curve (ADR 0048), `--ddc <dir>`
 //! for the derived data cache, `test-assets/.ddc` by default), `--lods` for mesh detail
 //! levels made at load (ADR 0053), `--no-meshlets` to keep each level's triangles in their
@@ -331,6 +332,8 @@ fn main() {
     let mut post = false;
     let mut graded = false;
     let mut dof_focus: Option<f32> = None;
+    let mut dof_rings = DofSettings::default().rings;
+    let mut dof_f_number = 1.4;
     let mut curve = ToneCurve::Gt;
     let mut ddc = String::from("test-assets/.ddc");
     let mut pack: Option<String> = None;
@@ -435,6 +438,8 @@ fn main() {
                 post = true;
                 dof_focus = Some(args.next().unwrap().parse().unwrap());
             }
+            "--dof-rings" => dof_rings = args.next().unwrap().parse().unwrap(),
+            "--dof-f-number" => dof_f_number = args.next().unwrap().parse().unwrap(),
             "--curve" => {
                 curve = match args.next().as_deref() {
                     Some("pbr-neutral") => ToneCurve::PbrNeutral,
@@ -1309,12 +1314,22 @@ fn main() {
             DepthOfField::new(&device, &bindless).unwrap(),
             DofSettings {
                 focus_distance: focus,
-                f_number: 1.4,
+                f_number: dof_f_number,
                 sensor_height: 0.1,
+                rings: dof_rings,
                 ..DofSettings::default()
             },
         )
     });
+    if pipeline_stats && let Some((dof, _)) = &dof {
+        for (name, stats) in dof.statistics(&device) {
+            let line: Vec<String> = stats
+                .iter()
+                .map(|s| format!("{} {}: {}", s.stage, s.name, s.value))
+                .collect();
+            println!("Pipeline statistics, dof {name}: {}", line.join("; "));
+        }
+    }
     let post_effects = post.then(|| {
         (
             Bloom::new(&device, &bindless, BloomSettings::default()).unwrap(),
