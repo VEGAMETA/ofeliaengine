@@ -107,6 +107,26 @@ unsafe { view.destroy(&mut allocator, &bindless) };
   `ViewTarget::rect` for split screen (the first clears, the others `LoadOp::Load`).
   Views drawing with one `MaterialTable` share its texture LOD bias (the last prepared
   wins): give them the same antialiasing.
+- **Each view chooses its features** (`ViewSettings::features`, ADR 0099). The renderer
+  makes a feature available (`forward_mut().set_ambient_occlusion(..)`, and so on); each
+  view takes the ones it wants, all of them by default.
+  - The features: ambient occlusion, contact and local shadows, subsurface scattering,
+    reflections, decals, global illumination, the depth prepass.
+  - Split screen and the editor's viewports can differ: a minimap or a rear-view mirror
+    without ambient occlusion and local shadows, say.
+  - A view without a feature is drawn exactly as a renderer with it off would draw it,
+    and costs the same.
+
+  ```rust
+  let mirror = ViewSettings {
+      features: ViewFeatures {
+          ambient_occlusion: false,
+          local_shadows: false,
+          ..ViewFeatures::ALL
+      },
+      ..ViewSettings::default()
+  };
+  ```
 - **With the game runtime:** put an `engine_runtime::Camera` on an entity and let a
   `CameraView` resolve it every frame (it gives the `ViewCamera` and the settings); move
   the player's camera in `Runtime::frame`'s presentation step. See

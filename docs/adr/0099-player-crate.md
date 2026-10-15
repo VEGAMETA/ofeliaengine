@@ -1,6 +1,6 @@
 # 0099. The player crate (`engine_app`) and its window modes
 
-- Status: Accepted (steps 1 to 3 done)
+- Status: Accepted (steps 1 to 3 done; step 4 in parts: the features per view done)
 - Date: 2026-10-15
 - Related:
   - [ADR 0023](0023-latency.md): the latency providers;
@@ -207,6 +207,26 @@ Measured: `flight` on the RTX, alternated with the step 2 binary, latency contro
   extracted every tick.
 
 ### Step 4: features per view; the benches and the test bed on the crate
+
+**Done first (2026-10-15): the features per view.**
+- `ViewFeatures` (`engine_render::forward`, re-exported by `engine_frame`):
+  - ambient occlusion, contact and local shadows, subsurface scattering, reflections,
+    decals, global illumination, the depth prepass;
+  - in `ForwardView::features` and `ViewSettings::features`, `ALL` by default.
+- **A feature runs in a view when the renderer has it on and the view wants it.** The
+  forward renderer already decided per view (a probe's capture draws without most of
+  them); each decision now also asks the view:
+  - the passes declared;
+  - the shading variants;
+  - the local shadow views planned;
+  - subsurface materials' own pipeline states;
+  - the cached cascades' caster settings.
+- **Test:** `a_views_features_change_only_that_view`, both GPUs, under validation.
+  - Ambient occlusion, contact shadows and the prepass change 369–371 of 6,144 pixels.
+  - A view wanting none of them gives the same pixels as a renderer with them off.
+  - A view wanting them all is unchanged by another view without them.
+
+**Planned for this step:**
 
 - **Per view:** ambient occlusion, local and contact shadows, reflections, subsurface
   scattering and the prepass become view settings, so split screen and editor viewports
