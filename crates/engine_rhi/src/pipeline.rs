@@ -11,7 +11,7 @@ use ash::vk;
 use core::ffi::CStr;
 use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use engine_core::jobs::ThreadPool;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 
 /// A SPIR-V entry point.
 #[derive(Debug, Clone, Copy)]
@@ -150,6 +150,132 @@ pub struct PipelineStatistic {
     pub value: f64,
 }
 
+/// A pipeline's driver statistics, recorded when it was created on a device that
+/// captures them (`ENGINE_PIPELINE_STATS=1`): checks over every pipeline a run made read
+/// them with [`take_pipeline_records`] (the perf gate's register check, ADR 0062).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PipelineRecord {
+    /// Each stage's entry point and the hash of its SPIR-V ([`spirv_hash`]), vertex (or
+    /// mesh) stage first.
+    pub stages: Vec<(String, u128)>,
+    /// Its specialization constants.
+    pub specialization: Vec<u32>,
+    /// What a graphics pipeline draws to, which the compiled code can depend on: the color
+    /// formats, then `/` and the depth format, ` x` and the samples per pixel, ` a2c` for
+    /// alpha to coverage (as `R16G16B16A16_SFLOAT/D32_SFLOAT x4`). Empty for compute.
+    pub attachments: String,
+    /// The statistics, as [`Pipeline::statistics`] returns them.
+    pub statistics: Vec<PipelineStatistic>,
+}
+
+/// The records of pipelines created while their device captured statistics, until
+/// [`take_pipeline_records`] takes them.
+static RECORDS: Mutex<Vec<PipelineRecord>> = Mutex::new(Vec::new());
+
+/// Takes the records of the pipelines created, in this process and on any device, since
+/// the last call: none unless a device captures statistics
+/// ([`Device::pipeline_statistics_enabled`]).
+pub fn take_pipeline_records() -> Vec<PipelineRecord> {
+    core::mem::take(&mut *RECORDS.lock().unwrap_or_else(PoisonError::into_inner))
+}
+
+/// Hash of a SPIR-V module: of its bytes, as its `.spv` file holds them.
+pub fn spirv_hash(words: &[u32]) -> u128 {
+    let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+    engine_core::hash::hash128(&bytes)
+}
+
+/// Records the statistics of `raw`, just created from `stages` (see [`PipelineRecord`]).
+fn record(
+    reader: &ash::khr::pipeline_executable_properties::Device,
+    raw: vk::Pipeline,
+    stages: &[ShaderStageDesc<'_>],
+    specialization: &[u32],
+    attachments: String,
+) {
+    let record = PipelineRecord {
+        stages: stages
+            .iter()
+            .map(|s| (s.entry.to_string_lossy().into_owned(), spirv_hash(s.spirv)))
+            .collect(),
+        specialization: specialization.to_vec(),
+        attachments,
+        statistics: read_statistics(reader, raw),
+    };
+    RECORDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(record);
+}
+
+/// [`PipelineRecord::attachments`] of `desc`.
+fn record_attachments(desc: &GraphicsPipelineDesc<'_>) -> String {
+    let colors: Vec<String> = desc
+        .color_formats
+        .iter()
+        .map(|f| format!("{f:?}"))
+        .collect();
+    let mut text = colors.join(",");
+    if desc.depth_format != vk::Format::UNDEFINED {
+        text.push_str(&format!("/{:?}", desc.depth_format));
+    }
+    if desc.samples != vk::SampleCountFlags::TYPE_1 {
+        text.push_str(&format!(" x{}", desc.samples.as_raw()));
+    }
+    if desc.alpha_to_coverage {
+        text.push_str(" a2c");
+    }
+    text
+}
+
+/// The driver's statistics of each stage of `raw`, which was created with
+/// `CAPTURE_STATISTICS` on the device `reader` reads.
+fn read_statistics(
+    reader: &ash::khr::pipeline_executable_properties::Device,
+    raw: vk::Pipeline,
+) -> Vec<PipelineStatistic> {
+    let mut out = Vec::new();
+    let info = vk::PipelineInfoKHR::default().pipeline(raw);
+    // SAFETY: the pipeline was created with CAPTURE_STATISTICS by this device, and the
+    // extension is enabled.
+    let Ok(executables) = (unsafe { reader.get_pipeline_executable_properties(&info) }) else {
+        return out;
+    };
+    for (index, executable) in executables.iter().enumerate() {
+        let stage = executable
+            .name_as_c_str()
+            .map_or_else(|_| format!("{index}"), |n| n.to_string_lossy().into_owned());
+        let info = vk::PipelineExecutableInfoKHR::default()
+            .pipeline(raw)
+            .executable_index(index as u32);
+        // SAFETY: as above; the index comes from the driver.
+        let Ok(statistics) = (unsafe { reader.get_pipeline_executable_statistics(&info) }) else {
+            continue;
+        };
+        for statistic in statistics {
+            // SAFETY: the union member matches the format the driver reports.
+            let value = unsafe {
+                match statistic.format {
+                    vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
+                        f64::from(statistic.value.b32)
+                    }
+                    vk::PipelineExecutableStatisticFormatKHR::INT64 => statistic.value.i64 as f64,
+                    vk::PipelineExecutableStatisticFormatKHR::UINT64 => statistic.value.u64 as f64,
+                    _ => statistic.value.f64,
+                }
+            };
+            out.push(PipelineStatistic {
+                stage: stage.clone(),
+                name: statistic
+                    .name_as_c_str()
+                    .map_or_else(|_| String::new(), |n| n.to_string_lossy().into_owned()),
+                value,
+            });
+        }
+    }
+    out
+}
+
 /// Pipeline creation in this process, over all devices ([`creation_stats`]).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PipelineCreationStats {
@@ -264,7 +390,8 @@ impl SharedPipelineLayout {
 pub struct PipelineContext {
     pub(crate) device: Arc<ash::Device>,
     pub(crate) cache: vk::PipelineCache,
-    pub(crate) statistics: bool,
+    /// Reads the driver's statistics, when pipelines capture them.
+    pub(crate) statistics: Option<ash::khr::pipeline_executable_properties::Device>,
     pub(crate) jobs: Option<Arc<ThreadPool>>,
 }
 
@@ -272,7 +399,7 @@ impl core::fmt::Debug for PipelineContext {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("PipelineContext")
             .field("cache", &self.cache)
-            .field("statistics", &self.statistics)
+            .field("statistics", &self.statistics.is_some())
             .field("jobs", &self.jobs.is_some())
             .finish()
     }
@@ -291,7 +418,7 @@ impl PipelineContext {
 
     /// Creation flags: statistics when the device captures them, and `cached_only`'s.
     fn flags(&self, cached_only: bool) -> vk::PipelineCreateFlags {
-        let statistics = if self.statistics {
+        let statistics = if self.statistics.is_some() {
             vk::PipelineCreateFlags::CAPTURE_STATISTICS_KHR
         } else {
             vk::PipelineCreateFlags::empty()
@@ -685,6 +812,17 @@ impl Pipeline {
             }
         };
         count_creation(start, true, cached_only);
+        if let Some(reader) = &context.statistics {
+            let stages: Vec<ShaderStageDesc<'_>> =
+                core::iter::once(desc.vertex).chain(desc.fragment).collect();
+            record(
+                reader,
+                raw,
+                &stages,
+                desc.specialization,
+                record_attachments(desc),
+            );
+        }
         Ok(Some(Self {
             device: Arc::clone(&context.device),
             raw,
@@ -696,58 +834,9 @@ impl Pipeline {
     /// names and meanings are the driver's), or nothing unless the device captures them
     /// ([`Device::pipeline_statistics_enabled`]).
     pub fn statistics(&self, device: &Device) -> Vec<PipelineStatistic> {
-        let mut out = Vec::new();
-        if !device.pipeline_statistics_enabled() {
-            return out;
-        }
-        let loader = ash::khr::pipeline_executable_properties::Device::new(
-            device.instance_raw(),
-            device.raw(),
-        );
-        let info = vk::PipelineInfoKHR::default().pipeline(self.raw);
-        // SAFETY: the pipeline was created with CAPTURE_STATISTICS by this device, and the
-        // extension is enabled.
-        let Ok(executables) = (unsafe { loader.get_pipeline_executable_properties(&info) }) else {
-            return out;
-        };
-        for (index, executable) in executables.iter().enumerate() {
-            let stage = executable
-                .name_as_c_str()
-                .map_or_else(|_| format!("{index}"), |n| n.to_string_lossy().into_owned());
-            let info = vk::PipelineExecutableInfoKHR::default()
-                .pipeline(self.raw)
-                .executable_index(index as u32);
-            // SAFETY: as above; the index comes from the driver.
-            let Ok(statistics) = (unsafe { loader.get_pipeline_executable_statistics(&info) })
-            else {
-                continue;
-            };
-            for statistic in statistics {
-                // SAFETY: the union member matches the format the driver reports.
-                let value = unsafe {
-                    match statistic.format {
-                        vk::PipelineExecutableStatisticFormatKHR::BOOL32 => {
-                            f64::from(statistic.value.b32)
-                        }
-                        vk::PipelineExecutableStatisticFormatKHR::INT64 => {
-                            statistic.value.i64 as f64
-                        }
-                        vk::PipelineExecutableStatisticFormatKHR::UINT64 => {
-                            statistic.value.u64 as f64
-                        }
-                        _ => statistic.value.f64,
-                    }
-                };
-                out.push(PipelineStatistic {
-                    stage: stage.clone(),
-                    name: statistic
-                        .name_as_c_str()
-                        .map_or_else(|_| String::new(), |n| n.to_string_lossy().into_owned()),
-                    value,
-                });
-            }
-        }
-        out
+        device
+            .pipeline_statistics_reader()
+            .map_or_else(Vec::new, |reader| read_statistics(reader, self.raw))
     }
 
     /// Creates a compute pipeline with `layout`, through the device's pipeline cache.
@@ -796,6 +885,7 @@ impl Pipeline {
             list: [vk::ShaderModule::null(); 2],
         };
         let module = modules.create(0, stage.spirv)?;
+        let constants = specialization;
         let (entries, data) = specialization_parts(specialization);
         let specialization = vk::SpecializationInfo::default()
             .map_entries(&entries)
@@ -828,6 +918,9 @@ impl Pipeline {
             }
         };
         count_creation(start, true, cached_only);
+        if let Some(reader) = &context.statistics {
+            record(reader, raw, &[stage], constants, String::new());
+        }
         Ok(Some(Self {
             device: Arc::clone(&context.device),
             raw,
