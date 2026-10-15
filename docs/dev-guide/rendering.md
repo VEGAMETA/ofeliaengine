@@ -1569,8 +1569,8 @@ With `engine_runtime`, mark the camera entity `cinematic: 1` and give it a `shut
 - **Cuts:** mark them (`ViewCamera::cut`, `Camera::cut`). The camera's jump then leaves
   no streak: its motion starts anew.
 - **What it costs** at 1080p, every pixel moving:
-  - 0.43 ms on an RTX 4060 Ti;
-  - 15.7 ms on a Radeon iGPU (7.9 ms with `samples: 9`);
+  - 0.23 ms on an RTX 4060 Ti;
+  - 7.3 ms on a Radeon iGPU (the samples are taken at half size, ADR 0096's addendum);
   - nothing on gameplay views, and nothing on cinematic views without it.
 
 ## 12. Transparent surfaces

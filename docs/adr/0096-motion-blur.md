@@ -123,10 +123,53 @@ at 7 cm a frame, a 180° shutter, 19 samples, every pixel moving.
   - 0.43 ms on the RTX;
   - 15.7 ms on the Radeon iGPU. Integrated GPUs should use fewer samples (9: 7.9 ms) or
     a lower output size for cutscenes.
-  - Later: a half-size gather (Jimenez 2014) and 16-bit arithmetic, for the iGPU.
+  - Later: a half-size gather (Jimenez 2014) and 16-bit arithmetic, for the iGPU. The
+    half-size gather is done (addendum below): 0.23 ms and 7.3 ms.
 - **What the filter leaves:**
   - a moving object's core stays nearly opaque;
   - there is no blur across the edge of the screen;
   - translucent surfaces follow what is behind them (one velocity per pixel).
 - **Object-only motion blur for gameplay views is ADR 0067's open question.** If the team
   wants it: the same passes with the camera's motion subtracted from the motion vectors.
+
+## Addendum (2026-10-15): the gather at half size
+
+The gather was the Radeon's cost: 14.7 of 15.7 ms. After Jimenez 2014 it now runs on a
+texel per 2 × 2 pixels, and a composite at full size keeps what does not blur sharp.
+
+- **Tiles.** The pass writes the velocity and depth of each 2 × 2's nearest pixel into one
+  half-size texel, so a thinner foreground still stands in front.
+  - r is rounded up to an even number of pixels (40 at 1080p, as before), so the 2 × 2s
+    never straddle tiles.
+- **Gather.** Each half-size texel samples as before from its 2 × 2's center (the color at
+  full size, bilinear; the velocities and depths at half size). It keeps the samples apart
+  from the center:
+  - their color, premultiplied by their share of the result;
+  - that share, Σw / (w_center + Σw).
+- **Composite.** Each pixel of the image takes its own color, sharp, for the center's share
+  and adds the blur of the four half-size texels around it.
+  - The texels are bilinear, each weighted by 1 / (0.01 + |Δz| / z) against the pixel's
+    own depth: a still edge in front keeps its own color.
+  - Where nothing in a tile's neighbourhood moves, the pixel is copied unchanged.
+- **Tests** (both GPUs, synchronization validation clean):
+  - a still image still comes through bit for bit;
+  - a square moving 24 pixels a frame streaks 12 pixels each way: 1.92 and 1.56 six
+    pixels out, nothing 16 pixels out or above it, energy 1.21 times the square's;
+  - a still object in front of a moving background stays within 0.002;
+  - camera motion blurs along it only (0.005 across a row);
+  - the golden image `sponza_motion_blur` was recorded again per vendor. It looks the
+    same: mean FLIP 0.026 against the full-size gather, the grain of the samples' noise now
+    per 2 × 2.
+- **Measured** in the perf gate's `sponza_motion_blur` (1080p, 19 samples):
+
+| | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| tiles | 72 → 35 µs | 0.98 → 1.20 ms |
+| gather | 356 → 106 µs | 14.7 → 3.73 ms |
+| composite | — → 85 µs | — → 2.35 ms |
+| all four passes | 432 → 229 µs | 15.7 → 7.3 ms |
+| GPU frame | 1,151 → 935 µs | 40.8 → 32.5 ms |
+
+  - The Radeon's composite is bound by memory: it reads the image and the depth and
+    writes the result, about 41 MB at 1080p. One gather for the four depths changed
+    nothing.
