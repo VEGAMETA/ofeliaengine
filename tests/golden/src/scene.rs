@@ -44,7 +44,9 @@ use engine_render::graph::{
 use engine_render::material::{
     AlphaMode, MaterialDesc, MaterialParams, MaterialTable, Subsurface, TextureRef,
 };
-use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshData, MeshId, OwnedMeshData, cube};
+use engine_render::mesh::{
+    GeometryCapacity, GeometryPool, LodIndices, MeshData, MeshId, OwnedMeshData, cube,
+};
 use engine_render::panorama::{Panorama, PanoramaDesc, PanoramaSun};
 use engine_render::particles::{ParticleEmitter, ParticleSystem, ParticleTarget};
 use engine_render::post::{HDR_FORMAT, ToneCurve};
@@ -235,6 +237,10 @@ pub struct Shot {
     /// Culling and drawing by meshlet (ADR 0085): the meshes with meshlets, in the view
     /// when it has the depth prepass and in the sun's shadow cascades.
     pub meshlets: bool,
+    /// The meshes' detail levels made by the cook (ADR 0053), as a game's pack has them
+    /// (`CookSettings::lods` is on by default): the view and the cascades then draw the
+    /// levels their errors allow. Off, every mesh is drawn whole.
+    pub lods: bool,
     /// The sun's cascades kept across frames (`ViewSettings::cached_shadows`, ADR 0093; on
     /// by default as there): a still camera draws them once.
     pub cached_shadows: bool,
@@ -307,6 +313,7 @@ impl Shot {
             panorama: None,
             decals: false,
             meshlets: false,
+            lods: false,
             cached_shadows: true,
             gi: None,
             brixelizer_gi: false,
@@ -860,6 +867,7 @@ fn load(
     subsurface: bool,
     glossy_floor: bool,
     fabric: bool,
+    lods: bool,
 ) -> Result<Loaded, Skip> {
     match source {
         Source::Procedural => Ok(Loaded {
@@ -898,7 +906,7 @@ fn load(
             let cache = DerivedDataCache::new(test_assets().join(".ddc"))
                 .map_err(|_| Skip::NoScene(path.clone()))?;
             let settings = CookSettings {
-                lods: false,
+                lods,
                 compression_level: 0,
                 block_compression: true,
                 ..CookSettings::default()
@@ -1271,6 +1279,7 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         shot.subsurface,
         shot.glossy_floor,
         shot.fabric_curtains,
+        shot.lods,
     )?;
     // The HDR panorama, read and its sun found before the GPU starts.
     let panorama = match shot.panorama.filter(|_| shot.sky) {
@@ -1549,19 +1558,32 @@ pub fn render(shot: &Shot, options: RenderOptions) -> Result<Rendered, Skip> {
         streaming = Some((streamer, budget, feedback, pack));
     }
     if let Some(mut cooked) = loaded.cooked {
+        // With the cook's detail levels when the shot has them (`Shot::lods`).
         let meshes: Vec<MeshId> = cooked
             .meshes
             .iter()
             .map(|m| {
-                geometry
-                    .add_mesh(&MeshData {
-                        positions: &m.positions,
-                        normals: &m.normals,
-                        tangents: &m.tangents,
-                        uvs: &m.uvs,
-                        indices: &m.indices,
-                        meshlets: engine_streaming::gpu_meshlets(&m.meshlets),
+                let levels: Vec<LodIndices<'_>> = m
+                    .lods
+                    .iter()
+                    .map(|l| LodIndices {
+                        indices: &l.indices,
+                        error: l.error,
+                        meshlets: engine_streaming::gpu_meshlets(&l.meshlets),
                     })
+                    .collect();
+                geometry
+                    .add_mesh_with_lods(
+                        &MeshData {
+                            positions: &m.positions,
+                            normals: &m.normals,
+                            tangents: &m.tangents,
+                            uvs: &m.uvs,
+                            indices: &m.indices,
+                            meshlets: engine_streaming::gpu_meshlets(&m.meshlets),
+                        },
+                        &levels,
+                    )
                     .expect("mesh")
             })
             .collect();
