@@ -1169,10 +1169,14 @@ if renderer.set_virtual_shadows(&device, &bindless, true)? {
   `first_extent` (the first level's width, 2 m), `keep_frames` (how long a page nobody
   samples stays backed), `level_bias` (+1 halves the texel density and quarters the
   pages).
-- **What changes redraw.** The light turning and casters changing (moved, added or
-  removed draws, another draw list or scene) draw every page the frame needs again. Call
-  `pages.invalidate()` for changes the renderer cannot see. Redrawing only the pages
-  under what moved comes next (ADR 0093, step 3c).
+- **What changes redraw.** Casters that move, appear or go redraw the pages under their
+  old and new places. The light turning, another draw list or scene, edited materials or
+  more than 256 changes since the last frame redraw every page the frame needs (turn a
+  time-of-day sun in steps). Call `pages.invalidate()` for changes the renderer cannot
+  see.
+  - Intel's Sponza with 8 small objects moving: the sun's shadow passes cost the RTX
+    603 µs and the Radeon 17.2 ms, of which the cascades (still drawn for transparent
+    surfaces) are 317 µs and 5.6 ms.
 - **What they cost** (Intel's Sponza at 1080p, ADR 0093 step 3c):
 
 | µs a frame | RTX 4060 Ti | Radeon iGPU |

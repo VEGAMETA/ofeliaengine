@@ -645,3 +645,44 @@ the dirty pages it may change.
 Walking, the pages now cost the RTX 278 µs more than the cached cascades (their
 visibility 149, bookkeeping 73, draw 69 and cull 17, less 32 the shading saves), and the
 Radeon 2.9 ms more with the integrated class's settings.
+
+## Step 3c, second part (2026-10-15): moved casters redraw only their pages
+
+Until now any caster that changed redrew every page a frame needed. The pages now keep, as
+the cascades' cache does, the world boxes of what moved, appeared or went since they were
+drawn, at their old and new places:
+
+- a draw list's changed draws;
+- a scene upload's changes;
+- instances moving between ticks.
+
+The frame uploads them as rectangles across the light. `vsmFindPages` then treats a backed
+page under one as it treats every page when the light turns: drawn again if a pixel needs
+it, freed if not. Every page a frame needs is still drawn again for another list or scene,
+other materials, or more than `MAX_MOVED` (256) boxes.
+
+- **The test:** after the plate moves, `vsm_draw.rs` draws 12 of 125 backed pages (before:
+  every needed page, about 100), and every texel still matches the rays on both GPUs.
+- **Measured** with `scene_bench --vsm` (new: the pages with `--movers` and `--walk`, their
+  passes in the shadow column). Intel's Sponza, `--sky --meshlet-culling --prepass
+  --cached-shadows`; GPU shadow passes, the cached cascades included (transparent surfaces
+  read them):
+
+| µs a frame | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| still: cascades / with the pages | 0 / 225 | 0 / 8,592 |
+| 1 mover: cascades / pages, all redrawn / pages, theirs only | 17 / 828 / 257 | 203 / 28,304 / 9,773 |
+| 8 movers: cascades / pages, all redrawn / pages, theirs only | 317 / 1,128 / 603 | 5,625 / 33,634 / 17,206 |
+
+**Left for later:**
+
+- **Transparent surfaces and subsurface transmission still read the cascades**, so a view
+  with pages draws both. With 8 movers that is 317 of the RTX's 603 µs. Reading the pages
+  in the forward shading needs variants of its own (the registers rule) and pages for
+  surfaces the prepass does not see.
+- **The sun turning redraws every page the frame needs**, as the cascades' cache does: a
+  time of day should turn it in steps.
+- **Defaults per class:** the pages stay off by default. With the integrated class's
+  settings they cost the Radeon 2.9 ms more than the cached cascades while walking.
+  Turning them on by default for discrete GPUs trades about 0.25–0.3 ms of an RTX 4060
+  Ti's frame for the sharper shadows: that is the owner's decision.

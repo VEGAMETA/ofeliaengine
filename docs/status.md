@@ -16,8 +16,11 @@ Last updated: 2026-10-15.
     RTX 885 → 69 µs) and a cheaper visibility (Radeon 13.5 → 6.9 ms at 1080p). Walking,
     the pages now cost the RTX 0.28 ms more than the cached cascades, the Radeon 2.9 ms
     more at the integrated defaults.
-  - Next in 3c: moved casters redraw only their pages, transparent surfaces from the
-    pages, a turning sun, defaults per device class.
+  - 3c's second part: moved casters redraw only their pages (Intel's Sponza, 8 movers:
+    RTX 1,128 → 603 µs, Radeon 33.6 → 17.2 ms).
+  - Open: transparent surfaces from the pages (the cascades are still drawn beside
+    them), a sun turning in steps, and the default for discrete GPUs (the owner's
+    decision: about 0.25–0.3 ms of an RTX 4060 Ti's frame for sharper shadows).
 - **Then, in order** (§5): 8b video playback, 8c colliders made from meshes,
   8d localization. After them, item 9: the editor, Luau and tooling.
 - **Parked:**
@@ -551,13 +554,17 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
          group-shared memory, its 16 taps without a branch: Radeon 13.5 → 6.9 ms at
          1080p (102 → 33 VGPRs), RTX 163 → 152 µs. Now bound by the latency of its
          reads (page table, then pool).
-     - **Next in 3c:**
-       1. moved casters redraw only the pages under their old and new places;
-       2. transparent surfaces and subsurface transmission from the pages, so the
-          cascades need not be drawn;
-       3. a slowly turning sun (every turn redraws the needed pages); the pool's size,
-          the level bias and the default per device class (the integrated class keeps
-          the cascades while the pages cost it more);
+     - **3c, second part, done 2026-10-15:** moved casters redraw only the pages under
+       their old and new places (as the cascades' cache does; past 256 boxes, every
+       needed page). Intel's Sponza: 1 mover RTX 828 → 257 µs, Radeon 28.3 → 9.8 ms;
+       8 movers RTX 1,128 → 603 µs, Radeon 33.6 → 17.2 ms (`scene_bench --vsm`).
+     - **Left:**
+       1. transparent surfaces and subsurface transmission from the pages, so the
+          cascades need not be drawn beside them (forward variants of their own, pages
+          for surfaces the prepass does not see);
+       2. a sun turning in steps (every turn redraws the needed pages);
+       3. the default per device class: off for now; on for discrete GPUs is the
+          owner's call (§0); the integrated class keeps the cascades (2.9 ms more);
        4. the visibility's latency on the Radeon (the table read before the barrier,
           gathers).
    - The instanced draws' pieces culled with the same tags (left from step 2).
