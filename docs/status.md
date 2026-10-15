@@ -11,11 +11,13 @@ Last updated: 2026-10-15.
 - **Working on: virtual shadow maps, step 3** (queue item 5, ADR 0093): virtual pages for
   the sun.
   - 3a, the pages' machinery, and 3b, drawing into them and shading with them, were done
-    2026-10-15. `ViewSettings::virtual_shadows` turns them on (off by default): sharper
-    shadows, but not yet cheaper than the cascades.
-  - Next is 3c: cut the cost of drawing while walking (13× the cached cascades on the
-    RTX) and of the visibility on the Radeon (13.5 ms at 1080p); then moved casters, a
-    turning sun, defaults per device class.
+    2026-10-15. `ViewSettings::virtual_shadows` turns them on (off by default).
+  - 3c's first part was done the same day: draws clipped to their dirty pages (walking,
+    RTX 885 → 69 µs) and a cheaper visibility (Radeon 13.5 → 6.9 ms at 1080p). Walking,
+    the pages now cost the RTX 0.28 ms more than the cached cascades, the Radeon 2.9 ms
+    more at the integrated defaults.
+  - Next in 3c: moved casters redraw only their pages, transparent surfaces from the
+    pages, a turning sun, defaults per device class.
 - **Then, in order** (§5): 8b video playback, 8c colliders made from meshes,
   8d localization. After them, item 9: the editor, Luau and tooling.
 - **Parked:**
@@ -541,18 +543,23 @@ never interpolated, immersive UI unmarked) right after GI, off by default.
          164), Radeon 15.3 ms (13.5); the shading 34 µs and 1.4 ms cheaper without the
          cascades' lookup. Walking 5 cm a frame, drawing RTX 885 µs, Radeon 27.7 ms,
          against the cached cascades' 68 µs and 0.75 ms.
-     - **Next, 3c**, in order of cost (ADR 0093's "What 3b leaves"):
-       1. drawing while walking: clip each draw to the dirty pages it reaches, so the
-          fragments outside them are not rasterized;
-       2. the visibility on the Radeon: fewer reads a pixel (hardware comparisons on a
-          float view of the pool with a texel of border per page; the normal from fewer
-          depths);
-       3. moved casters redraw only the pages under their old and new places;
-       4. transparent surfaces and subsurface transmission from the pages, so the
+     - **3c, first part, done 2026-10-15** (ADR 0093):
+       - draws clipped to the dirty pages under them (the dirty pages as bits a row,
+         exact boxes, clip distances). Walking, Intel's Sponza: RTX 885 → 69 µs,
+         Radeon 27.7 → 2.6 ms;
+       - the visibility reads each depth once (a group-shared tile), its levels from
+         group-shared memory, its 16 taps without a branch: Radeon 13.5 → 6.9 ms at
+         1080p (102 → 33 VGPRs), RTX 163 → 152 µs. Now bound by the latency of its
+         reads (page table, then pool).
+     - **Next in 3c:**
+       1. moved casters redraw only the pages under their old and new places;
+       2. transparent surfaces and subsurface transmission from the pages, so the
           cascades need not be drawn;
-       5. a slowly turning sun (every turn redraws the needed pages); the pool's size,
-          the level bias and the default per device class. Off everywhere until the
-          pages cost less than the cascades they replace.
+       3. a slowly turning sun (every turn redraws the needed pages); the pool's size,
+          the level bias and the default per device class (the integrated class keeps
+          the cascades while the pages cost it more);
+       4. the visibility's latency on the Radeon (the table read before the barrier,
+          gathers).
    - The instanced draws' pieces culled with the same tags (left from step 2).
 Items 6–8 were one item 6, with sub-items 6b–6h, until 2026-10-10 (owner: item 6 had
 grown, divide and conquer); the old labels stay in parentheses.

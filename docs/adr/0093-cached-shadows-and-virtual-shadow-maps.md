@@ -571,3 +571,77 @@ transmission keep the cascades, which stay drawn (cached) beside the pages.
      still drawn.
   5. **Defaults per device class.** Off everywhere until the pages cost less than the
      cascades they replace on that class.
+
+## Step 3c, first part (2026-10-15): drawing and the visibility made cheaper
+
+**Drawing (3c-1).** While walking, the pages' draw cost 13 times the cached cascades'
+strips. Taking parts out showed where the time went (Intel's Sponza walking, RTX):
+
+| vsm draw, µs | RTX |
+|---|---:|
+| as built in 3b | 885 |
+| fragment shaders empty | 880 |
+| every triangle clipped away in the vertex shader | 8 |
+
+Rasterization was the cost: a drawn triangle covered its level's whole 4096², and the
+fragments outside dirty pages were discarded after the fact. Now each draw is clipped to
+the dirty pages it may change.
+
+- **The level's dirty pages also as bits**, a row of the window in two words, after the
+  hierarchy's mips; `vsmCollectDirty` sets them.
+- **The culls give each draw the box of the dirty pages under it**, a read a row
+  (`vsm_dirty_rect`), and a run of meshlets the union of its meshlets'. It goes in the
+  draw's second visible slot.
+- **The vertex shaders clip to it** with four clip distances. `shaderClipDistance` is
+  now an optional cap the pages need.
+- **Coarser boxes, from the hierarchy's cells**, were measured first: 164 µs (cells a
+  quarter of the caster), 111 (an eighth), 84 (a sixteenth). Exact boxes from the rows
+  give 68 µs. One draw per meshlet instead of runs: 66 (noise).
+- **Two Radeon-only failures on the way**, both changed back:
+  - the row words read through a `uint2` pointer read wrong data (now two scalar loads);
+  - the masked fragment returning before its alpha test (to skip clean pages' texture
+    reads) lost the Radeon's device in Sponza; the alpha test stays first.
+
+**The visibility (3c-2).** On the Radeon the pass cost 13.5 ms at 1080p (the RTX 163 µs).
+
+- **What it cost**, taking parts out:
+  - the normal, from four neighbouring depths read and transformed per pixel: 6.2 ms, and
+    102 VGPRs live;
+  - the level search with the page table: about 3.7 ms;
+  - the filter's 16 taps: the rest.
+- **The changes:**
+  - a group of 8 × 8 pixels reads its tile and a pixel around it (100 depths) into
+    group-shared memory once, with their positions: 33 VGPRs;
+  - the levels' windows and scales are in group-shared memory for the level search;
+  - a footprint in one page (most pixels) reads its table entry once;
+  - the 16 pool reads go out without a branch.
+- **Tried and left out:**
+  - two pixels a thread (Radeon −1 %, RTX +7 %);
+  - bindless indices without `NonUniformResourceIndex` changed nothing (they are kept
+    without it, as the other passes index uniform push constants).
+- **What it is bound by now:** the latency of its chain of reads (depth, page table,
+  pool). Without the pool's reads it takes 3.3 ms, with one of them 5.5 ms, with 16 of
+  them 7.0 ms.
+- **Not tried yet:**
+  - the table entries read before the group's barrier (from the unoffset position, a
+    texel wider);
+  - gathers on a sampled view of the pool;
+  - the visibility at a lower resolution.
+- **The golden images move by rounding** (mean FLIP ≤ 0.0005: how the compiler fuses the
+  positions' arithmetic) and were written again. The test against rays: no pixel
+  differs.
+
+**Numbers** (the perf gate's scenes, 1920 × 1080, Intel's Sponza; 3b → now):
+
+| µs a frame | RTX 4060 Ti | Radeon iGPU |
+|---|---:|---:|
+| walking: vsm draw | 885 → 69 | 27,669 → 2,606 |
+| walking: vsm cull | 13 → 17 | 75 → 123 |
+| still: vsm visibility | 164 → 152 | 13,469 → 6,948 |
+| integrated class (67 %) walking: draw / visibility | 608 / 73 → 34 / 68 | 18,712 / 6,701 → 943 / 3,650 |
+| GPU frame walking: pages / cached cascades | 2,490 → 1,650 / 1,372 | 91,054 → 64,060 / 53,973 |
+| integrated class walking: pages / cached cascades | 1,436 → 862 / 705 | 52,983 → 32,544 / 29,641 |
+
+Walking, the pages now cost the RTX 278 µs more than the cached cascades (their
+visibility 149, bookkeeping 73, draw 69 and cull 17, less 32 the shading saves), and the
+Radeon 2.9 ms more with the integrated class's settings.
