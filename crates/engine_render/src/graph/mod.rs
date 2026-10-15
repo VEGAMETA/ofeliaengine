@@ -385,7 +385,26 @@ impl PassContext<'_> {
         unsafe { self.device.cmd_begin_rendering(self.cmd, &rendering) };
     }
 
-    /// Ends the rendering [`Self::begin_depth_layer`] began.
+    /// Begins a rendering without attachments over `extent`: its fragment shaders write
+    /// only through storage (the sun's virtual shadow pages are drawn so, ADR 0093).
+    ///
+    /// # Safety
+    ///
+    /// The pass declared no attachments and no rendering is begun; what its draws write
+    /// the pass declared as storage accesses.
+    pub unsafe fn begin_rendering_without_attachments(&self, extent: vk::Extent2D) {
+        let rendering = vk::RenderingInfo::default()
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D { x: 0, y: 0 },
+                extent,
+            })
+            .layer_count(1);
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.device.cmd_begin_rendering(self.cmd, &rendering) };
+    }
+
+    /// Ends the rendering [`Self::begin_depth_layer`] or
+    /// [`Self::begin_rendering_without_attachments`] began.
     ///
     /// # Safety
     ///

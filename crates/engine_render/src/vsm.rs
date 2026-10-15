@@ -68,6 +68,22 @@ pub const OWNED: u32 = 1 << 31;
 pub const LIST_HEADER: u32 = 8;
 /// The clear pass's dispatch in the lists, bytes.
 const CLEAR_ARGS: u64 = 16;
+/// Texels around a pixel's sample that its filter and normal offset may read: marking
+/// backs the pages within it too (`VSM_MARGIN` in `vsm_common.slang`).
+pub const MARK_MARGIN_TEXELS: f32 = 4.0;
+/// Cells of a level's hierarchy of dirty pages ([`VsmFrame::hierarchy`]): its 64 × 64
+/// pages by their place in the window, then each coarser level of them (2 × 2 cells into
+/// one) down to 1 × 1, one `u32` each (1: a dirty page under it).
+pub const HIERARCHY_CELLS: u32 = 5461;
+/// Levels of a level's hierarchy (64², 32², ..., 1²).
+pub const HIERARCHY_MIPS: u32 = 7;
+
+/// The first cell of mip `m` of a level's hierarchy.
+pub const fn hierarchy_mip(m: u32) -> u32 {
+    (4096 - (4096 >> (2 * m))) * 4 / 3
+}
+
+const _: () = assert!(hierarchy_mip(HIERARCHY_MIPS - 1) + 1 == HIERARCHY_CELLS);
 
 /// A virtual shadow map's settings.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -109,12 +125,13 @@ struct LevelData {
     wrapped: [u32; 4],
 }
 
-/// `Frame` in `vsm.slang` (656 bytes).
+/// `VsmFrame` in `vsm_common.slang` (704 bytes).
 #[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct FrameData {
     clip_to_light: [[f32; 4]; 2],
     clip_to_view: [[f32; 4]; 4],
+    light_rows: [[f32; 4]; 3],
     ndc_per_pixel: [f32; 2],
     depth_size: [u32; 2],
     level_offset: f32,
@@ -123,11 +140,12 @@ struct FrameData {
     pool_pages: u32,
     keep_frames: u32,
     max_requests: u32,
-    _pad: [u32; 2],
+    depth_scale: f32,
+    depth_offset: f32,
     level: [LevelData; MAX_LEVELS as usize],
 }
 
-/// `VsmPush` in `vsm.slang` (48 bytes).
+/// `VsmPush` in `vsm.slang` (56 bytes).
 #[derive(Debug, Clone, Copy, Default, bytemuck::Pod, bytemuck::Zeroable)]
 #[repr(C)]
 struct Push {
@@ -136,13 +154,14 @@ struct Push {
     meta: u64,
     requests: u64,
     lists: u64,
+    hierarchy: u64,
     pool: u32,
     depth: u32,
 }
 
 const _: () = assert!(size_of::<LevelData>() == 32);
-const _: () = assert!(size_of::<FrameData>() == 656);
-const _: () = assert!(size_of::<Push>() == 48);
+const _: () = assert!(size_of::<FrameData>() == 704);
+const _: () = assert!(size_of::<Push>() == 56);
 
 /// What a view gives the pages each frame.
 #[derive(Debug, Clone, Copy)]
@@ -157,7 +176,23 @@ pub struct VsmView {
     pub fov_y: f32,
     /// The direction the sun's light travels.
     pub light_direction: Vec3,
+    /// The scene's extent along the light, metres (the least and greatest
+    /// `dot(position, light_direction)` of its casters): the pages' depth range. It is
+    /// rounded out to whole steps, so a change within a step keeps the pages.
+    pub depth_range: [f32; 2],
 }
+
+/// The pages' depth range for a scene's extent along the light, `depth_range`: rounded
+/// out to multiples of [`DEPTH_STEP`] metres with a step to spare on each side, so a
+/// scene's casters moving a little change nothing (a change redraws every page).
+pub fn depth_range(extent: [f32; 2]) -> [f32; 2] {
+    let lo = (extent[0].min(extent[1]) / DEPTH_STEP).floor() * DEPTH_STEP - DEPTH_STEP;
+    let hi = (extent[0].max(extent[1]) / DEPTH_STEP).ceil() * DEPTH_STEP + DEPTH_STEP;
+    [lo, hi]
+}
+
+/// What [`depth_range`] rounds to, metres.
+pub const DEPTH_STEP: f32 = 16.0;
 
 /// A level's window: the pages its table holds this frame.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -186,6 +221,9 @@ pub struct VsmFrame {
     pub requests: Buffer,
     /// The free, old and dirty lists, after their header of [`LIST_HEADER`] words.
     pub lists: Buffer,
+    /// Per level, [`HIERARCHY_CELLS`] cells: which pages of its window are dirty this
+    /// frame, and each coarser level of that (the casters' cull).
+    pub hierarchy: Buffer,
 }
 
 /// A buffer of the pages', kept across frames.
@@ -266,8 +304,8 @@ struct State {
     reset: bool,
     /// Each level's window: its first page, as drawn last frame.
     first_pages: [Option<IVec2>; MAX_LEVELS as usize],
-    /// The light's direction, as its bits.
-    light: Option<[u32; 3]>,
+    /// The light's direction and the pages' depth range, as their bits.
+    light: Option<[u32; 5]>,
     /// Frames so far.
     frame: u32,
 }
@@ -340,6 +378,7 @@ pub struct VirtualShadows {
     meta: Persistent,
     requests: Persistent,
     lists: Persistent,
+    hierarchy: Persistent,
     state: RefCell<State>,
 }
 
@@ -413,6 +452,11 @@ impl VirtualShadows {
             allocator,
             u64::from(LIST_HEADER + 3 * settings.pool_pages) * 4,
         )?;
+        let hierarchy = Persistent::new(
+            device,
+            allocator,
+            u64::from(settings.levels * HIERARCHY_CELLS) * 4,
+        )?;
         Ok(Self {
             device: device.raw().clone(),
             settings,
@@ -428,6 +472,7 @@ impl VirtualShadows {
             meta,
             requests,
             lists,
+            hierarchy,
             state: RefCell::new(State {
                 reset: true,
                 ..State::default()
@@ -454,7 +499,26 @@ impl VirtualShadows {
     pub fn memory_bytes(&self) -> u64 {
         let pages = self.settings.pool_pages.next_multiple_of(TABLE_PAGES);
         let pool = u64::from(pages) * u64::from(PAGE_TEXELS * PAGE_TEXELS) * 4;
-        pool + self.table.size + self.meta.size + self.requests.size + self.lists.size
+        pool + self.table.size
+            + self.meta.size
+            + self.requests.size
+            + self.lists.size
+            + self.hierarchy.size
+    }
+
+    /// The page tables' address, for the passes that draw into the pages and read them.
+    pub fn table_address(&self) -> vk::DeviceAddress {
+        self.table.address
+    }
+
+    /// The hierarchy of dirty pages' address ([`VsmFrame::hierarchy`]).
+    pub fn hierarchy_address(&self) -> vk::DeviceAddress {
+        self.hierarchy.address
+    }
+
+    /// The pool's index in the bindless storage images.
+    pub fn pool_index(&self) -> u32 {
+        self.pool.storage[0]
     }
 
     /// The light space of `direction`, the way the light travels: x and y across the
@@ -491,11 +555,15 @@ impl VirtualShadows {
             Vec2::new(eye_light.x, eye_light.y),
             &state.first_pages,
         );
-        let light_key = view
-            .light_direction
-            .normalize_or(Vec3::NEG_Y)
-            .to_array()
-            .map(f32::to_bits);
+        let direction = view.light_direction.normalize_or(Vec3::NEG_Y);
+        let range = depth_range(view.depth_range);
+        let light_key = [
+            direction.x.to_bits(),
+            direction.y.to_bits(),
+            direction.z.to_bits(),
+            range[0].to_bits(),
+            range[1].to_bits(),
+        ];
         let turned = state.light.is_some_and(|key| key != light_key);
         for level in levels.iter_mut().take(settings.levels as usize) {
             level.flags = u32::from(turned);
@@ -506,9 +574,13 @@ impl VirtualShadows {
         let first_texel = settings.first_extent / VIRTUAL_TEXELS as f32;
         let to_light = light_from_world * view.world_from_clip;
         let to_view = Mat4::from_translation(-view.eye) * view.world_from_clip;
+        // A point's depth in the pages: its distance along the light (−z in light space)
+        // across the range.
+        let depth_scale = 1.0 / (range[1] - range[0]).max(1e-3);
         let frame = ring.push(&[FrameData {
             clip_to_light: [0, 1].map(|i| to_light.row(i).to_array()),
             clip_to_view: [0, 1, 2, 3].map(|i| to_view.row(i).to_array()),
+            light_rows: [0, 1, 2].map(|i| light_from_world.row(i).to_array()),
             ndc_per_pixel: depth_size.map(|s| 2.0 / s.max(1) as f32),
             depth_size,
             level_offset: (footprint / first_texel).log2() + settings.level_bias,
@@ -517,7 +589,8 @@ impl VirtualShadows {
             pool_pages: settings.pool_pages,
             keep_frames: settings.keep_frames,
             max_requests: settings.levels * ENTRIES,
-            _pad: [0; 2],
+            depth_scale,
+            depth_offset: -range[0] * depth_scale,
             level: levels,
         }])?;
         // The frame is declared: what it moved is remembered.
@@ -536,6 +609,7 @@ impl VirtualShadows {
         let meta = self.meta.import(fg, "vsm meta");
         let requests = self.requests.import(fg, "vsm requests");
         let lists = self.lists.import(fg, "vsm lists");
+        let hierarchy = self.hierarchy.import(fg, "vsm hierarchy");
         if reset {
             fg.add_pass("vsm reset")
                 .write(table, Access::TransferWrite)
@@ -564,6 +638,7 @@ impl VirtualShadows {
             .write(meta, rw)
             .write(requests, rw)
             .write(lists, rw)
+            .write(hierarchy, rw)
             .read(lists, Access::Indirect)
             .record(move |rec| {
                 let ctx = rec.context();
@@ -577,6 +652,7 @@ impl VirtualShadows {
                     meta: ctx.address(meta),
                     requests: ctx.address(requests),
                     lists: ctx.address(lists),
+                    hierarchy: ctx.address(hierarchy),
                     pool,
                     depth,
                 };
@@ -614,6 +690,7 @@ impl VirtualShadows {
             meta,
             requests,
             lists,
+            hierarchy,
         })
     }
 
@@ -630,6 +707,7 @@ impl VirtualShadows {
             self.meta.destroy(allocator);
             self.requests.destroy(allocator);
             self.lists.destroy(allocator);
+            self.hierarchy.destroy(allocator);
         }
     }
 }

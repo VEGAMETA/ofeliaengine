@@ -1,87 +1,52 @@
-// Virtual shadow maps for the sun (ADR 0093 step 3): levels of 4096 × 4096 virtual
-// texels around the camera, each covering twice the last, cut into pages of 64 × 64
-// texels; only the pages a frame's pixels need are backed, by pages of one pool kept
-// across frames.
+// Virtual shadow maps for the sun (ADR 0093 step 3): the pages' bookkeeping. Levels,
+// pages and their addresses: `vsm_common.slang`.
 //
-// Addresses: a level's page `p` (absolute, in the light's xy) is valid while it lies in
-// the level's window of 64 × 64 pages (`Level::first_page`), and its entry in the
-// level's page table is `p mod 64` per axis, so the table scrolls with the window: the
-// rows and columns whose page changed are freed when the window moves (`wrapped`).
-//
-// The bookkeeping, in the order a frame runs it (step 3a):
-// - `vsmBeginFrame`: a frame's flags cleared, wrapped entries freed;
-// - `vsmMark`: each pixel of the depth buffer flags the page its surface needs, at the
-//   level whose texel is about its footprint; the first to flag an unbacked page appends
-//   its request;
+// The bookkeeping, in the order a frame runs it:
+// - `vsmBeginFrame`: a frame's flags cleared, wrapped entries freed, the hierarchy of
+//   dirty pages emptied;
+// - `vsmMark`: each pixel of the depth buffer flags the pages its surface needs (the one
+//   of its sample and those within `VSM_MARGIN` texels, which its filter may read), at
+//   the level whose texel is about its footprint; the first to flag an unbacked page
+//   appends its request;
 // - `vsmFindPages`: the pool's free pages, and those no pixel needed for `keep_frames`;
 //   when the light turned, the needed pages are dirty and the others freed;
 // - `vsmAllocate`: requests take free pages, then old ones (their entries lose them),
 //   then fail;
-// - `vsmCollectDirty`, `vsmArgs`, `vsmClear`: the dirty pages, cleared to the far plane.
+// - `vsmCollectDirty`, `vsmArgs`, `vsmClear`: the dirty pages listed, set in the
+//   hierarchy the casters are culled with, and cleared to the far plane.
 //
-// Page table entries (32 bits): the flags below over the physical page's index (16
-// bits). The meta table holds, per physical page, the entry it backs and the last frame
-// a pixel needed it.
+// Page table entries (32 bits): flags over the physical page's index (16 bits). The meta
+// table holds, per physical page, the entry it backs and the last frame a pixel needed
+// it.
 //
 // The design follows Timberdoodle's virtual shadow maps (Apache-2.0; M. Sakmáry; see
 // docs/research/virtual-shadow-maps.md); the code is written for this engine.
 
+#include "vsm_common.slang"
+
 [[vk::binding(0, 0)]] Texture2D g_textures[];
 [[vk::binding(1, 0)]] [vk::image_format("r32ui")] RWTexture2D<uint> g_pool_images[];
 
-static const uint PAGE = 64;
-static const uint TABLE = 64;
-static const uint ENTRIES = TABLE * TABLE;
-static const uint MAX_LEVELS = 16;
-
-static const uint ALLOCATED = 1u << 31;
-static const uint NEEDED = 1u << 30;
-static const uint DIRTY = 1u << 29;
-static const uint FAILED = 1u << 28;
 // Flags of one frame: a page is dirty in the frame that must draw it.
-static const uint FRAME_FLAGS = NEEDED | DIRTY | FAILED;
-static const uint PHYSICAL = 0xFFFFu;
+static const uint FRAME_FLAGS = VSM_NEEDED | VSM_DIRTY | VSM_FAILED;
 // Meta: the entry a physical page backs is valid.
 static const uint OWNED = 1u << 31;
 // The far plane, as the depth's bits (1.0).
 static const uint FAR_DEPTH = 0x3F800000u;
-
-// `LevelData` in vsm.rs (32 bytes).
-struct Level
-{
-    int2 first_page;   // the window's first page, in absolute page coordinates
-    float page_scale;  // pages per metre across the light
-    uint flags;        // bit 0: the pages were drawn for another light
-    uint4 wrapped;     // columns (xy: bits 0-31, 32-63) and rows (zw) whose pages changed
-};
-
-// `FrameData` in vsm.rs (656 bytes). A depth buffer's clip position `c` (as drawn, its
-// jitter included) is at `clip_to_view · c` from the camera and at `clip_to_light · c`
-// across the light, both over `clip_to_view[3] · c`.
-struct Frame
-{
-    float4 clip_to_light[2];    // rows: clip → light xy (homogeneous)
-    float4 clip_to_view[4];     // rows: clip → world relative to the camera (homogeneous)
-    float2 ndc_per_pixel;       // 2 / the depth buffer's size
-    uint2 depth_size;           // the depth buffer's size
-    float level_offset;         // log2 of (a pixel's footprint per metre / the first texel), plus the bias
-    uint levels;                // levels in use
-    uint frame;                 // this frame's number
-    uint pool_pages;            // physical pages in the pool
-    uint keep_frames;           // frames a page no pixel needs stays allocated
-    uint max_requests;          // room in the request list
-    uint _pad[2];
-    Level level[MAX_LEVELS];
-};
+// Cells of a level's hierarchy of dirty pages: its 64 × 64 pages, then each coarser
+// level of it to 1 × 1 (`HIERARCHY_CELLS` in vsm.rs).
+static const uint HIERARCHY_CELLS = 5461;
+static const uint HIERARCHY_MIPS = 7;
 
 struct VsmPush
 {
-    Frame* frame;
+    VsmFrame* frame;
     uint* table;        // levels × 64 × 64 entries
     uint2* meta;        // per physical page: x the entry it backs (OWNED | index), y the last frame needed
     uint* requests;     // [0] count, then entry indices
     uint* lists;        // [0] free, [1] old, [2] dirty counts; [4..6] the clear pass's dispatch;
                         // then the free, old and dirty pages (pool_pages each)
+    uint* hierarchy;    // per level, its dirty pages (by window position) and their coarser levels
     uint pool;          // bindless: the pool (storage)
     uint depth;         // bindless: the depth buffer (sampled)
 };
@@ -91,9 +56,9 @@ ConstantBuffer<VsmPush> push;
 
 // The free list's, old list's and dirty list's first page in `lists`.
 static const uint LISTS = 8;
-uint free_at(Frame* f) { return LISTS; }
-uint old_at(Frame* f) { return LISTS + f.pool_pages; }
-uint dirty_at(Frame* f) { return LISTS + 2 * f.pool_pages; }
+uint free_at(VsmFrame* f) { return LISTS; }
+uint old_at(VsmFrame* f) { return LISTS + f.pool_pages; }
+uint dirty_at(VsmFrame* f) { return LISTS + 2 * f.pool_pages; }
 
 bool wrapped_bit(uint2 mask, uint i)
 {
@@ -104,7 +69,7 @@ bool wrapped_bit(uint2 mask, uint i)
 [numthreads(64, 1, 1)]
 void vsmBeginFrame(uint3 id : SV_DispatchThreadID)
 {
-    Frame* f = push.frame;
+    VsmFrame* f = push.frame;
     uint e = id.x;
     if (e == 0)
     {
@@ -113,49 +78,63 @@ void vsmBeginFrame(uint3 id : SV_DispatchThreadID)
         push.lists[1] = 0;
         push.lists[2] = 0;
     }
-    if (e >= f.levels * ENTRIES)
+    uint entries = f.levels * VSM_ENTRIES;
+    for (uint cell = e; cell < f.levels * HIERARCHY_CELLS; cell += entries)
+        push.hierarchy[cell] = 0;
+    if (e >= entries)
         return;
-    uint level = e / ENTRIES;
-    uint local = e % ENTRIES;
-    uint x = local % TABLE;
-    uint y = local / TABLE;
-    Level l = f.level[level];
+    uint level = e / VSM_ENTRIES;
+    uint local = e % VSM_ENTRIES;
+    uint x = local % VSM_TABLE;
+    uint y = local / VSM_TABLE;
+    VsmLevel l = f.level[level];
     uint t = push.table[e] & ~FRAME_FLAGS;
     if (wrapped_bit(l.wrapped.xy, x) || wrapped_bit(l.wrapped.zw, y))
     {
-        if ((t & ALLOCATED) != 0)
-            push.meta[t & PHYSICAL] = uint2(0, 0);
+        if ((t & VSM_ALLOCATED) != 0)
+            push.meta[t & VSM_PHYSICAL] = uint2(0, 0);
         t = 0;
     }
     push.table[e] = t;
 }
 
-// The level a surface `distance_squared` from the camera wants: its texel about its
-// pixel's footprint (rounded to the finer level), clamped to the levels in use.
-uint level_for(Frame* f, float distance_squared)
+// Flags the pages in `entries` (~0: none; each lane's are distinct), one flag per page
+// among the wave's pixels: each turn takes the least page any lane still holds, every
+// lane holding it crosses it off, and the first of them flags it, so the wave turns once
+// per distinct page. The first flag of an unbacked page, across waves, appends its
+// request. Called by the whole wave.
+void flag(VsmFrame* f, uint4 entries)
 {
-    float k = 0.5 * log2(max(distance_squared, 1e-8)) + f.level_offset;
-    return uint(clamp(floor(k), 0.0, float(f.levels - 1)));
-}
-
-// The entry of the page holding `light_xy` at `level`, or ~0 when it lies outside the
-// level's window.
-uint entry_at(Frame* f, uint level, float2 light_xy)
-{
-    Level l = f.level[level];
-    int2 page = int2(floor(light_xy * l.page_scale));
-    if (any(uint2(page - l.first_page) >= TABLE))
-        return ~0u;
-    uint2 wrapped = uint2(page) & (TABLE - 1);
-    return level * ENTRIES + wrapped.y * TABLE + wrapped.x;
+    uint next = min(min(entries.x, entries.y), min(entries.z, entries.w));
+    while (WaveActiveAnyTrue(next != ~0u))
+    {
+        uint page = WaveActiveMin(next);
+        bool holds = any(entries == page);
+        // Flagged already this frame (by an earlier wave): nothing to do.
+        if (holds && WavePrefixCountBits(holds) == 0 && (push.table[page] & VSM_NEEDED) == 0)
+        {
+            uint previous;
+            InterlockedOr(push.table[page], VSM_NEEDED, previous);
+            if ((previous & (VSM_ALLOCATED | VSM_NEEDED)) == 0)
+            {
+                uint slot;
+                InterlockedAdd(push.requests[0], 1u, slot);
+                if (slot < f.max_requests)
+                    push.requests[1 + slot] = page;
+            }
+        }
+        entries = select(entries == page, ~0u, entries);
+        next = min(min(entries.x, entries.y), min(entries.z, entries.w));
+    }
 }
 
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void vsmMark(uint3 id : SV_DispatchThreadID)
 {
-    Frame* f = push.frame;
-    uint entry = ~0u;
+    VsmFrame* f = push.frame;
+    // The pages the pixel needs: up to 2 × 2 around its sample (~0: none).
+    uint4 entries = uint4(~0u, ~0u, ~0u, ~0u);
     if (all(id.xy < f.depth_size))
     {
         float depth = g_textures[NonUniformResourceIndex(push.depth)].Load(int3(id.xy, 0)).r;
@@ -165,38 +144,28 @@ void vsmMark(uint3 id : SV_DispatchThreadID)
             float w = 1.0 / dot(f.clip_to_view[3], clip);
             float3 view = float3(dot(f.clip_to_view[0], clip), dot(f.clip_to_view[1], clip), dot(f.clip_to_view[2], clip)) * w;
             float2 light_xy = float2(dot(f.clip_to_light[0], clip), dot(f.clip_to_light[1], clip)) * w;
-            // A level's window may not reach the surface (it sits up to a page off the
-            // camera, and a narrow field of view picks fine levels for far surfaces):
-            // the first coarser level whose window does.
-            for (uint level = level_for(f, dot(view, view)); entry == ~0u && level < f.levels; level++)
-                entry = entry_at(f, level, light_xy);
-        }
-    }
-    // One flag per page among a wave's pixels: the lanes still looping take the first
-    // one's entry; those holding it leave, the lowest of them flags it. The first flag of
-    // an unbacked page, across waves, appends its request.
-    bool active = entry != ~0u;
-    while (active)
-    {
-        uint first = WaveReadLaneFirst(entry);
-        if (entry == first)
-        {
-            active = false;
-            // Flagged already this frame (by an earlier wave): nothing to do.
-            if (WavePrefixCountBits(true) == 0 && (push.table[first] & NEEDED) == 0)
+            // A level's window may not hold the sample's whole footprint (it sits up to a
+            // page off the camera, and a narrow field of view picks fine levels for far
+            // surfaces): the first coarser level whose window does.
+            for (uint level = vsm_level_for(f, dot(view, view)); level < f.levels; level++)
             {
-                uint previous;
-                InterlockedOr(push.table[first], NEEDED, previous);
-                if ((previous & (ALLOCATED | NEEDED)) == 0)
-                {
-                    uint slot;
-                    InterlockedAdd(push.requests[0], 1u, slot);
-                    if (slot < f.max_requests)
-                        push.requests[1 + slot] = first;
-                }
+                float2 t = vsm_texel(f, level, light_xy);
+                int2 lo = vsm_page_of(t - VSM_MARGIN);
+                int2 hi = vsm_page_of(t + VSM_MARGIN);
+                if (!vsm_in_window(f, level, lo) || !vsm_in_window(f, level, hi))
+                    continue;
+                entries.x = vsm_entry(level, lo);
+                if (hi.x != lo.x)
+                    entries.y = vsm_entry(level, int2(hi.x, lo.y));
+                if (hi.y != lo.y)
+                    entries.z = vsm_entry(level, int2(lo.x, hi.y));
+                if (hi.x != lo.x && hi.y != lo.y)
+                    entries.w = vsm_entry(level, hi);
+                break;
             }
         }
     }
+    flag(f, entries);
 }
 
 // The entry `meta`'s page backs.
@@ -209,7 +178,7 @@ uint owner_entry(uint meta_x)
 [numthreads(64, 1, 1)]
 void vsmFindPages(uint3 id : SV_DispatchThreadID)
 {
-    Frame* f = push.frame;
+    VsmFrame* f = push.frame;
     uint p = id.x;
     if (p >= f.pool_pages)
         return;
@@ -220,12 +189,12 @@ void vsmFindPages(uint3 id : SV_DispatchThreadID)
         uint owner = owner_entry(m.x);
         uint t = push.table[owner];
         // Drawn for another light: drawn again if needed, freed if not.
-        bool stale = (f.level[owner / ENTRIES].flags & 1u) != 0;
-        if ((t & NEEDED) != 0)
+        bool stale = (f.level[owner / VSM_ENTRIES].flags & 1u) != 0;
+        if ((t & VSM_NEEDED) != 0)
         {
             push.meta[p].y = f.frame;
             if (stale)
-                push.table[owner] = t | DIRTY;
+                push.table[owner] = t | VSM_DIRTY;
         }
         else if (stale)
         {
@@ -252,7 +221,7 @@ void vsmFindPages(uint3 id : SV_DispatchThreadID)
 [numthreads(64, 1, 1)]
 void vsmAllocate(uint3 id : SV_DispatchThreadID)
 {
-    Frame* f = push.frame;
+    VsmFrame* f = push.frame;
     uint i = id.x;
     uint count = min(push.requests[0], f.max_requests);
     if (i >= count)
@@ -274,27 +243,45 @@ void vsmAllocate(uint3 id : SV_DispatchThreadID)
     else
     {
         // Asked for again next frame.
-        push.table[e] = NEEDED | FAILED;
+        push.table[e] = VSM_NEEDED | VSM_FAILED;
         return;
     }
-    push.table[e] = ALLOCATED | DIRTY | NEEDED | p;
+    push.table[e] = VSM_ALLOCATED | VSM_DIRTY | VSM_NEEDED | p;
     push.meta[p] = uint2(OWNED | e, f.frame);
+}
+
+// The first cell of mip `m` of a level's hierarchy of dirty pages.
+uint hierarchy_mip(uint m)
+{
+    // 4096 + 1024 + 256 + 64 + 16 + 4 cells before mip 6.
+    return (4096u - (4096u >> (2 * m))) * 4u / 3u;
 }
 
 [shader("compute")]
 [numthreads(64, 1, 1)]
 void vsmCollectDirty(uint3 id : SV_DispatchThreadID)
 {
-    Frame* f = push.frame;
+    VsmFrame* f = push.frame;
     uint e = id.x;
-    if (e >= f.levels * ENTRIES)
+    if (e >= f.levels * VSM_ENTRIES)
         return;
     uint t = push.table[e];
-    if ((t & (ALLOCATED | DIRTY)) == (ALLOCATED | DIRTY))
+    if ((t & (VSM_ALLOCATED | VSM_DIRTY)) != (VSM_ALLOCATED | VSM_DIRTY))
+        return;
+    uint slot;
+    InterlockedAdd(push.lists[2], 1u, slot);
+    push.lists[dirty_at(f) + slot] = t & VSM_PHYSICAL;
+    // The page's place in its window (not in the table, which wraps), and the cells
+    // holding it at each coarser level of the hierarchy.
+    uint level = e / VSM_ENTRIES;
+    uint local = e % VSM_ENTRIES;
+    uint2 at = (uint2(local % VSM_TABLE, local / VSM_TABLE) - uint2(f.level[level].first_page)) & (VSM_TABLE - 1);
+    uint* cells = push.hierarchy + level * HIERARCHY_CELLS;
+    cells[at.y * VSM_TABLE + at.x] = 1;
+    for (uint m = 1; m < HIERARCHY_MIPS; m++)
     {
-        uint slot;
-        InterlockedAdd(push.lists[2], 1u, slot);
-        push.lists[dirty_at(f) + slot] = t & PHYSICAL;
+        uint side = VSM_TABLE >> m;
+        InterlockedOr(cells[hierarchy_mip(m) + (at.y >> m) * side + (at.x >> m)], 1u);
     }
 }
 
@@ -312,11 +299,11 @@ void vsmArgs(uint3 id : SV_DispatchThreadID)
 [numthreads(8, 8, 1)]
 void vsmClear(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
 {
-    Frame* f = push.frame;
+    VsmFrame* f = push.frame;
     uint p = push.lists[dirty_at(f) + group.x];
-    uint2 origin = uint2(p % TABLE, p / TABLE) * PAGE + local.xy;
+    uint2 origin = vsm_pool_texel(p, local.xy);
     RWTexture2D<uint> pool = g_pool_images[NonUniformResourceIndex(push.pool)];
-    for (uint y = 0; y < PAGE; y += 8)
-        for (uint x = 0; x < PAGE; x += 8)
+    for (uint y = 0; y < VSM_PAGE; y += 8)
+        for (uint x = 0; x < VSM_PAGE; x += 8)
             pool[origin + uint2(x, y)] = FAR_DEPTH;
 }
