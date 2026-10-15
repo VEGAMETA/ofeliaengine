@@ -8,6 +8,11 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # `paste`, a proc macro of rav1d's (ADR 0100), is archived: unmaintained, with no
+    # vulnerability, and it runs only while building. Remove once rav1d no longer uses it.
+    { id = "RUSTSEC-2024-0436", reason = "build-time macro of rav1d, archived, no vulnerability" },
+]
 
 [licenses]
 version = 2

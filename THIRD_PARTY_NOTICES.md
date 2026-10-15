@@ -39,6 +39,7 @@ the dependency.
 | log 0.4.34 | MIT OR Apache-2.0 | the logging facade `engine_log` implements (ADR 0061) |
 | crash-handler 0.8.1 + crash-context 0.8 (© Embark Studios; + parking_lot 0.12, lock_api, parking_lot_core, scopeguard, smallvec, libc, cfg-if) | MIT OR Apache-2.0 (crash-context MIT) | hooks the process's crash paths in `engine_crash` (ADR 0061) |
 | minidumper 0.11.0 + minidump-writer 0.13.0 + minidump-common 0.26 (© Embark Studios; + polling 3, concurrent-queue, crossbeam-utils, pin-project-lite, scroll 0.12 + scroll_derive, goblin 0.9, plain, error-graph, failspot, debugid, uuid, range-map, num-traits, bitflags, serde, serde_json, itoa, memchr, zmij, thiserror 2, windows-sys 0.61) | MIT OR Apache-2.0 (minidump-writer, minidump-common, scroll, goblin, error-graph, failspot, crash-context, zmij MIT; debugid Apache-2.0; memchr Unlicense OR MIT) | the crash monitor process and its minidumps in `engine_crash` (ADR 0061) |
+| rav1d 1.1.0 (© 2018-2019 VideoLAN and dav1d authors; © 2023-2024 VideoLAN, dav1d authors and Internet Security Research Group; its x86 assembly built by nasm) (+ atomig 0.4, assert_matches 1.5, raw-cpuid 11, strum 0.26, to_method 1.1, zerocopy 0.7.35; bitflags, cfg-if, libc, parking_lot already in the tree) | BSD-2-Clause (`COPYING` in the crate) (atomig, assert_matches MIT OR Apache-2.0; raw-cpuid, strum MIT; to_method CC0-1.0; zerocopy BSD-2-Clause OR Apache-2.0 OR MIT) | AV1 decoding on the CPU in `engine_video` (the `software` feature): the fallback without the GPU's decoder and the reference of the tests (ADR 0100) |
 
 Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profiling`):
 
@@ -92,6 +93,7 @@ condition of this section (ADR 0036). License texts are next to each font.
 | Crate | License | Used for |
 |---|---|---|
 | cc 1.5 (+ find-msvc-tools, jobserver, libc, shlex) | MIT OR Apache-2.0 | compiles the vendored Jolt, JoltC, Box2D and FidelityFX SDK sources, and Luau (through luau0-src) |
+| nasm-rs 0.3.2 | MIT OR Apache-2.0 | runs nasm on rav1d's x86 assembly (ADR 0100) |
 
 ## Rust crates (compile-time only: procedural macros)
 
@@ -100,6 +102,7 @@ condition of this section (ADR 0036). License texts are next to each font.
 | bytemuck_derive 1.12 (+ proc-macro2, quote, syn 3, unicode-ident) | Zlib OR Apache-2.0 OR MIT (the others MIT OR Apache-2.0; unicode-ident also Unicode-3.0) | `#[derive(Pod, Zeroable)]` with compile-time padding checks (ADR 0017) |
 | num-derive 0.4, smart-default 0.7, serde_derive, thiserror-impl 2 (+ syn 2) | MIT OR Apache-2.0 (smart-default MIT) | derives inside minidump-writer (ADR 0061) |
 | zerocopy-derive 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT | derives inside zerocopy (through half, ADR 0083) |
+| atomig-macro 0.4, strum_macros 0.26.4 (+ heck 0.5, syn 2), zerocopy-derive 0.7.35, paste 1.0.15 | MIT OR Apache-2.0 (strum_macros MIT; zerocopy-derive BSD-2-Clause OR Apache-2.0 OR MIT) | derives and macros inside rav1d (ADR 0100); `paste` is archived (RUSTSEC-2024-0436, unmaintained, ignored in `deny.toml`) |
 
 ## Rust crates (dev-dependencies only, not shipped)
 

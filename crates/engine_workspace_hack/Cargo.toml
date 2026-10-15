@@ -72,6 +72,7 @@ windows-sys = { version = "0.61", features = [
 # Dependencies built for the host (proc macros) are resolved apart from the target's: they
 # are unified here, as build dependencies (hence the empty build script). `syn` gets `full`
 # from zerocopy-derive (through `half`, ADR 0083) in every build that has engine_assets, and
-# not in the others, which rebuilt every proc macro and their users in turn.
+# not in the others, which rebuilt every proc macro and their users in turn; `extra-traits`
+# from strum_macros (through rav1d, ADR 0100) in every build that has engine_video.
 [build-dependencies]
-syn = { version = "2", features = ["full"] }
+syn = { version = "2", features = ["extra-traits", "full"] }

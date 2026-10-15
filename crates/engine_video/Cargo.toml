@@ -1,0 +1,24 @@
+[package]
+name = "engine_video"
+description = "Video playback (ADR 0100): WebM, the AV1 headers, decoding by the GPU's video engine or rav1d."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = ["software"]
+# AV1 decoded on worker threads by rav1d where the GPU cannot (ADR 0100). Its x86
+# assembly is built with nasm, which the build then needs.
+software = ["dep:rav1d"]
+
+[dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
+# rav1d (BSD-2-Clause), the Rust port of dav1d: the software decoder and the tests'
+# bit-exact reference (ADR 0100).
+rav1d = { version = "1.1", optional = true }

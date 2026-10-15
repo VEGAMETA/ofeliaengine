@@ -10,8 +10,10 @@ are in [`docs/adr`](docs/adr).
 
 ## Building
 
-Requirements: Windows 11 x64 and [rustup](https://rustup.rs). The pinned toolchain,
-components and linker (`rust-lld`) are installed automatically from `rust-toolchain.toml`.
+Requirements: Windows 11 x64, [rustup](https://rustup.rs) and [NASM](https://nasm.us) 2.14 or
+later on `PATH` (it assembles rav1d's x86 code, the software AV1 decoder of `engine_video`,
+ADR 0100). The pinned toolchain, components and linker (`rust-lld`) are installed
+automatically from `rust-toolchain.toml`.
 
 ```sh
 cargo build                       # dev profile
