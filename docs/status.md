@@ -8,21 +8,20 @@ Last updated: 2026-10-15.
 
 ## 0. Now (2026-10-15)
 
-- **Working on: virtual shadow maps, step 3** (queue item 5, ADR 0093): virtual pages for
-  the sun.
-  - 3a, the pages' machinery, and 3b, drawing into them and shading with them, were done
-    2026-10-15. `ViewSettings::virtual_shadows` turns them on (off by default).
-  - 3c's first part was done the same day: draws clipped to their dirty pages (walking,
-    RTX 885 → 69 µs) and a cheaper visibility (Radeon 13.5 → 6.9 ms at 1080p). Walking,
-    the pages now cost the RTX 0.28 ms more than the cached cascades, the Radeon 2.9 ms
-    more at the integrated defaults.
-  - 3c's second part: moved casters redraw only their pages (Intel's Sponza, 8 movers:
-    RTX 1,128 → 603 µs, Radeon 33.6 → 17.2 ms).
-  - Open: transparent surfaces from the pages (the cascades are still drawn beside
-    them), a sun turning in steps, and the default for discrete GPUs (the owner's
-    decision: about 0.25–0.3 ms of an RTX 4060 Ti's frame for sharper shadows).
-- **Then, in order** (§5): 8b video playback, 8c colliders made from meshes,
-  8d localization. After them, item 9: the editor, Luau and tooling.
+- **Working on: 8b, video playback** (ADR 0100): AV1 in WebM decoded by the GPU's video
+  engine through Vulkan Video, rav1d where that is missing, Opus sound as the clock, the
+  picture as a texture. Researched 2026-10-15 (both reference GPUs decode AV1 in
+  hardware); next is 8b-1, the WebM reader, the AV1 header parser and rav1d's decoding.
+- **Virtual shadow maps** (item 5, ADR 0093) are done but for transparent surfaces: steps
+  3a–3c were done 2026-10-15. `ViewSettings::virtual_shadows` turns them on (off by
+  default).
+  - Walking, they cost the RTX 0.28 ms more than the cached cascades, the Radeon 2.9 ms
+    more at the integrated defaults; moved casters redraw only their pages.
+  - **Required later** (the owner, 2026-10-15: deferred, but it will be needed):
+    transparent surfaces and subsurface transmission from the pages, so the cascades
+    are not drawn beside them. The default for discrete GPUs is decided after it.
+- **Then, in order** (§5): 8c colliders made from meshes, 8d localization. After them,
+  item 9: the editor, Luau and tooling.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
@@ -125,8 +124,8 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 ## 4. In flight
 
-- **5, virtual shadow maps, step 3** (ADR 0093). 3a and 3b were done 2026-10-15: the
-  pages are drawn and read, opt-in. 3c is next. Details are under the queue's item 5.
+- **8b, video playback** (ADR 0100). Research and the decision done 2026-10-15; 8b-1 is
+  next. Details are under the queue's item 8b.
 
 Nothing else is in flight. Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
@@ -137,11 +136,13 @@ them.
 **What is left, in order.** The numbered items below keep their history; struck-through
 items are done.
 
-1. **5, virtual shadow maps, step 3:** 3c (in flight, §4).
-2. **8b, video playback.**
-3. **8c, colliders made from meshes.**
-4. **8d, localization.**
-5. **9:** editor tools, Luau bindings and debugger, other tooling.
+1. **8b, video playback** (in flight, §4).
+2. **8c, colliders made from meshes.**
+3. **8d, localization.**
+4. **9:** editor tools, Luau bindings and debugger, other tooling.
+5. **5's leftover, required** (the owner, 2026-10-15): transparent surfaces and subsurface
+   transmission from the virtual shadow pages; then the pages' default for discrete
+   GPUs.
 
 **Parked inside finished items.** Each waits for a measurement or the owner:
 - 0: sccache for agents, the Radeon's variance;
@@ -741,6 +742,17 @@ grown, divide and conquer); the old labels stay in parentheses.
    reference GPUs' drivers) with dav1d (BSD-2-Clause) on worker threads where it is missing;
    WebM / Matroska demuxed by our own code; Opus sound through the existing decoder,
    synchronized to the audio clock; cost per frame measured on both GPUs.
+   - **Researched and decided 2026-10-15** (ADR 0100, `docs/research/video-playback.md`).
+     - Both reference GPUs decode AV1 (8 and 10 bits, film grain) on a queue of their own:
+       the RTX up to level 7.3 and 8192², reference and output coinciding; the Radeon up
+       to level 6.1 and 8192 × 4352, reference and output distinct.
+     - A new crate `engine_video`: our own WebM reader and AV1 header parser, a Vulkan
+       Video session on an optional decode queue, rav1d (BSD-2-Clause, Rust port of dav1d)
+       where that is missing and as the tests' bit-exact reference, a compute pass from
+       YUV to an sRGB texture, the Opus sound's clock, `VideoPlayer`.
+   - **Steps:** 8b-1 the reader, the parser, rav1d; 8b-2 the Vulkan Video session,
+     bit-exact against rav1d on both GPUs; 8b-3 the texture, sound and clock, the player's
+     video entity, golden shots, costs, docs.
 8c (was 6h). **Colliders made automatically**: collision shapes from meshes at import and
    cook, into the pack ("one button"): static level geometry as triangle meshes (simplified
    where it pays), props as a fitted box, sphere or capsule or a convex hull, concave ones
