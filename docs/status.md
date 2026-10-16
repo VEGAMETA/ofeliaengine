@@ -60,7 +60,7 @@ Last updated: 2026-10-16.
   by the owner on 2026-10-16.
   - Done: its P0 (#236: the local lights' shadows' bookkeeping bounded, a CPU stage check
     in the perf gate) and item 1 (VSM's leftover, #237).
-  - Item 2's first half done (`fix/device-memory-blocks`: the budget counts the allocator's
+  - Item 2's first half done (#238: the budget counts the allocator's
     free room); next its second, Reflex's pacing.
   - The owner wants results soon, without leaving the plan: gate what a change needs and
     skip runs that add nothing.
@@ -197,7 +197,7 @@ water and impostors stay in §6):
    surfaces and subsurface materials from the virtual shadow pages, no cascades beside
    them. The pages' default for discrete GPUs is the owner's question.
 2. **Device memory** (audit 3 §3.3): ~~the budget counts the allocator's free room, the
-   larger empty block goes~~ (done 2026-10-16, `fix/device-memory-blocks`: the flight's
+   larger empty block goes~~ (done 2026-10-16, #238: the flight's
    rest of the process 688 → 360 MiB on the RTX). **Reflex's pacing** (§3.4) is next.
 3. **8c's rules file and `RayHit`'s surface:** `<scene>.colliders.ron`, documented in the
    dev guide; every mesh collides as level geometry by default (the owner, 2026-10-16).
