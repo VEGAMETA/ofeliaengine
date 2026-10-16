@@ -54,6 +54,11 @@ const MAX_SPOT_HALF_ANGLE: f32 = 1.4;
 /// their places; more are merged into them (the pair whose union grows least).
 pub(crate) const DIRTY_BOXES: usize = 8;
 
+/// Boxes past [`DIRTY_BOXES`] a light's shadow merges before it is drawn whole instead:
+/// that many changes in its range cover its views anyway, and each merge searches the
+/// boxes (2,064 casters moving in 7 lights' ranges took 0.3 ms a frame, core audit 3).
+const MERGES: u16 = 2 * DIRTY_BOXES as u16;
+
 /// Rectangles a view's changed places are gathered into: its pieces drawn again.
 pub(crate) const PIECES: usize = 2;
 
@@ -492,6 +497,8 @@ enum Stale {
     /// Where casters changed within its range: their world boxes, old and new places.
     Boxes {
         count: u8,
+        /// Boxes merged into them past [`DIRTY_BOXES`] (past [`MERGES`]: whole).
+        merged: u16,
         boxes: [[Vec3; 2]; DIRTY_BOXES],
     },
     /// Everything: its views are drawn whole.
@@ -504,20 +511,30 @@ impl Stale {
     }
 
     /// Adds a changed box; past [`DIRTY_BOXES`] it is merged into the box whose union with
-    /// it is the smallest.
+    /// it is the smallest, and past [`MERGES`] of those the shadow is stale whole.
     fn add(&mut self, b: [Vec3; 2]) {
         match self {
             Self::No => {
                 let mut boxes = [[Vec3::ZERO; 2]; DIRTY_BOXES];
                 boxes[0] = b;
-                *self = Self::Boxes { count: 1, boxes };
+                *self = Self::Boxes {
+                    count: 1,
+                    merged: 0,
+                    boxes,
+                };
             }
-            Self::Boxes { count, boxes } => {
+            Self::Boxes { merged, .. } if *merged >= MERGES => *self = Self::Whole,
+            Self::Boxes {
+                count,
+                merged,
+                boxes,
+            } => {
                 let n = usize::from(*count);
                 if n < DIRTY_BOXES {
                     boxes[n] = b;
                     *count += 1;
                 } else {
+                    *merged += 1;
                     let union = |a: [Vec3; 2]| [a[0].min(b[0]), a[1].max(b[1])];
                     let volume = |a: [Vec3; 2]| (a[1] - a[0]).max(Vec3::ZERO).element_product();
                     let k = (0..n)
@@ -535,7 +552,7 @@ impl Stale {
 
     fn boxes(&self) -> &[[Vec3; 2]] {
         match self {
-            Self::Boxes { count, boxes } => &boxes[..usize::from(*count)],
+            Self::Boxes { count, boxes, .. } => &boxes[..usize::from(*count)],
             _ => &[],
         }
     }
@@ -832,14 +849,17 @@ impl ShadowCache {
             if !entry.key.touches(&union) {
                 continue;
             }
-            // The boxes it keeps, to draw only their places.
-            for (k, u) in chunks.iter().enumerate() {
+            // The boxes it keeps, to draw only their places, until it is stale whole.
+            'chunks: for (k, u) in chunks.iter().enumerate() {
                 if !entry.key.touches(u) {
                     continue;
                 }
                 for b in &changes[k * CHUNK..((k + 1) * CHUNK).min(changes.len())] {
                     if entry.key.touches(b) {
                         entry.stale.add(*b);
+                        if entry.stale == Stale::Whole {
+                            break 'chunks;
+                        }
                     }
                 }
             }
@@ -1496,6 +1516,31 @@ mod tests {
                 "{b:?} kept"
             );
         }
+    }
+
+    #[test]
+    fn too_many_changes_in_a_light_s_range_redraw_it_whole() {
+        let mut stale = Stale::No;
+        let small = |k: usize| {
+            let x = (k % 16) as f32 * 0.2;
+            [Vec3::new(x, 0.0, 0.0), Vec3::new(x + 0.1, 0.1, 0.1)]
+        };
+        for k in 0..DIRTY_BOXES + usize::from(MERGES) {
+            stale.add(small(k));
+        }
+        assert!(matches!(stale, Stale::Boxes { .. }));
+        stale.add(small(0));
+        assert_eq!(stale, Stale::Whole);
+        // A crowd moving under a spot light: its view drawn whole, at the cost of a few
+        // boxes rather than every one.
+        let mut cache = ShadowCache::new(LocalShadowSettings::default());
+        let lights = [light(0.0, true)];
+        frame(&mut cache, &lights, &[]);
+        let crowd: Vec<[Vec3; 2]> = (0..2000).map(small).collect();
+        let plan = frame(&mut cache, &lights, &crowd);
+        let s = cache.stats();
+        assert_eq!((s.views_drawn, s.pieces_drawn), (1, 0));
+        assert_eq!(plan.drawn.len(), 1);
     }
 
     #[test]

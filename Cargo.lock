@@ -475,6 +475,7 @@ dependencies = [
 name = "engine_golden"
 version = "0.0.0"
 dependencies = [
+ "bytemuck",
  "engine_anim",
  "engine_app",
  "engine_assets",
