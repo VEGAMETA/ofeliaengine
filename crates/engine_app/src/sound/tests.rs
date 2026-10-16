@@ -511,7 +511,10 @@ fn a_reverb_zone_takes_over_where_the_listener_is() {
 #[ignore = "a measurement"]
 fn measure_sound() {
     for (n, acoustics) in [(100, false), (1_000, false), (1_000, true)] {
-        let mut bed = Bed::new(&format!("measure-{n}-{acoustics}"), AudioSettings::default());
+        let mut bed = Bed::new(
+            &format!("measure-{n}-{acoustics}"),
+            AudioSettings::default(),
+        );
         write_wav(&bed.folder.join("tone.wav"), RATE as u64);
         if acoustics {
             let mut physics = JoltBackend::new(&PhysicsSettings::default()).unwrap();
