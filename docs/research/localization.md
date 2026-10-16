@@ -159,6 +159,20 @@ paragraph, runs split by level, lines reordered visually. `engine_text` today sh
 right-to-left script's run right to left, but resolves no levels: numbers inside Arabic
 text, neutral punctuation and mixed paragraphs come out in the wrong order.
 
+Measured 2026-10-16 (ref-1, release, `BidiInfo::new` and `visual_runs` on one paragraph):
+
+| text | allocations | time |
+|---|---:|---:|
+| `Score: 1,234,567` (Latin) | 7 | 450 ns |
+| an Arabic label with a number and Latin (25 characters) | 17 | 1,333 ns |
+| Hebrew with Latin and a number (18 characters) | 14 | 944 ns |
+| an Arabic sentence with two kinds of digits (48 characters) | 23 | 2,246 ns |
+
+Its levels and orders are per byte; its isolating run sequences are vectors of vectors; its
+bracket pairs are sorted with a stable sort, which allocates past 20. So `engine_text` adapts
+its algorithm to buffers it keeps (ADR 0102, 8d-4 as built): no allocation, 659 ns for the
+48-character sentence, nothing at all for text with nothing right to left in it.
+
 ## What we take
 
 - **Fluent's syntax as the source format:** expressive enough for plurals, genders and

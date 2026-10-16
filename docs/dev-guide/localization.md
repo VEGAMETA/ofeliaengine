@@ -147,6 +147,37 @@ let settings = PlayerSettings {
   and language → Language and region). Switch at run time:
   `player.localizer_mut().unwrap().set_locale(&["de"])`, or through the world's resource.
 
+## Right-to-left languages and fonts
+
+Arabic, Hebrew and the other right-to-left scripts are laid out by the Unicode
+bidirectional algorithm (UAX #9): a paragraph's direction is its first letter's, numbers and
+Latin words inside it read left to right, brackets face the right way, and its lines align
+right. `TextStyle::direction` forces a direction, for a label in a right-to-left UI that
+starts with a Latin word.
+
+Each language needs a font that has its script. Give each its font stack, and take the
+current locale's:
+
+```rust
+use engine_text::{FontStacks, TextLayout, TextStyle};
+
+let latin = fonts.load(include_bytes!("fonts/MyGameSans.ttf"), 0)?;
+let arabic = fonts.load(include_bytes!("fonts/MyGameSansArabic.ttf"), 0)?;
+let japanese = fonts.load(include_bytes!("fonts/MyGameSansJP.ttf"), 0)?;
+let mut stacks = FontStacks::new(vec![latin]);
+// The language's font first; Latin words and digits from the next.
+stacks.set("ar", vec![arabic, latin]);
+stacks.set("ja", vec![japanese, latin]);
+
+let stack = stacks.for_locale(localizer.locale());
+layout.layout(&mut fonts, stack, &text, &TextStyle::default());
+```
+
+A locale takes its longest tag that has a stack (`zh-Hant-TW` → `zh-Hant` → `zh`), else the
+default one. The engine bundles Noto Sans for Latin, Greek and Cyrillic, and Noto Sans Arabic
+and Hebrew (OFL-1.1, `engine_text::fonts`); CJK and other scripts' fonts are large, and your
+choice.
+
 ## Building and checking
 
 ```
@@ -191,9 +222,14 @@ None allocates. 10,000 messages compile in 8.3 ms, cook to 1.1 MB and load in 0.
 The plural rules and number formats of every CLDR language add about 0.2 MB to your game,
 the Fluent parser 120 KB.
 
+Laying text out (Noto fonts, 14 px), allocating nothing: a Latin label 0.84 µs, an Arabic or
+Hebrew label with a number 3.4 µs, a paragraph 16 ns a byte in Latin and 117 in Arabic
+(shaping Arabic's joined letters is most of it).
+
 ## Not yet
 
-- Right-to-left layout of mixed text and fonts per language (next, in `engine_text`).
+- A UI mirrored for right-to-left languages (panels and icons swapped): the UI's, with the
+  editor (item 9).
 - Dates (`DATETIME`).
 - Luau's `loc(...)`, with the scripting API (item 9).
 - The editor's tools for text.

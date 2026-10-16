@@ -37,16 +37,19 @@ Last updated: 2026-10-16.
     way (mirrored and sheared included) dropped onto Sponza come to rest, and a ball falls
     into a U's notch; a rendered demo (`props_drop`); meshes made of several pieces now
     remeshed (a table of boards was cut as a solid running through itself).
-- **In flight: 8d, localization** (ADR 0102, Proposed).
-  - **Done (first PR, #233, `feat/localization`):**
+- **Done: 8d, localization** (ADR 0102, Proposed: the source format is the owner's
+  question).
+  - **First PR (#233, `feat/localization`):**
     - the research note and the ADR (8d-1);
     - `engine_loc`: Fluent's syntax compiled, formatted without allocating, plurals and
       numbers by ICU4X (8d-2);
     - strings packs, `ofeliaengine loc build` and `loc check`, and the player's text from a
       pack or a live `loc/` folder in the player's or Windows' languages (8d-3).
-  - **Next:** 8d-4, bidirectional layout and fonts per language in `engine_text`, on a
-    branch of its own; then 8d-5, the measurements and the report.
-  - After 8d, item 9: the editor, Luau and tooling.
+  - **Second PR (`feat/bidi-text`, 8d-4):** right-to-left and mixed text in `engine_text`.
+    UAX #9 is adapted from unicode-bidi to buffers kept between calls (it allocated on every
+    call), and all 91,707 of Unicode 16's conformance cases pass. Also font stacks per
+    language and a golden image.
+- **Next:** item 9: the editor, Luau and tooling.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
@@ -159,7 +162,8 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 8d, localization (ADR 0102): its first PR (#233, `feat/localization`: 8d-1 to 8d-3, the
 research note and the ADR, `engine_loc`, strings packs, the CLI and the player's text)
-merged; 8d-4 is next.
+merged; the second (`feat/bidi-text`: 8d-4, bidirectional layout and font stacks) merged.
+8d is done but for the owner's question on the source format.
 8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
 8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
 decomposition and its place in the cook) merged; the third (#232, `feat/props-on-sponza`:
@@ -175,7 +179,7 @@ them.
 items are done.
 
 1. **8c's rules file and `RayHit`'s surface**, after the owner's question 1.
-2. **8d, localization** (in flight: 8d-4 and 8d-5 left).
+2. ~~**8d, localization**~~ (done 2026-10-16 but for the owner's question on the format).
 3. **9:** editor tools, Luau bindings and debugger, other tooling.
 4. **5's leftover, required** (the owner, 2026-10-15): transparent surfaces and subsurface
    transmission from the virtual shadow pages; then the pages' default for discrete
@@ -887,7 +891,7 @@ grown, divide and conquer); the old labels stay in parentheses.
      `engine_text`'s shaping and bidi;
    - a check for missing and unused keys ("one button": the CLI and later the editor).
 
-   **In progress (ADR 0102, Proposed; 8d-1 to 8d-3 in PR #233):**
+   **Done 2026-10-16 (ADR 0102, Proposed; PR #233 and `feat/bidi-text`):**
    - **8d-1:** the research note `docs/research/localization.md` and the ADR.
    - **8d-2:** `engine_loc`. Fluent's syntax compiled into tables, formatted into the
      caller's string without allocating (14-148 ns a message), plurals, numbers and
@@ -897,8 +901,13 @@ grown, divide and conquer); the old labels stay in parentheses.
      nothing defines, keys nothing uses). The player's text: a pack, or a `loc/` folder
      compiled again on its own thread when a file changes (an edit showed 3 frames later);
      the player's languages or Windows'. The dev guide `docs/dev-guide/localization.md`.
-   - **Left:** 8d-4, bidirectional layout and fonts per language in `engine_text`; 8d-5,
-     the gate and the PR.
+   - **8d-4:** UAX #9 in `engine_text`. It is adapted from unicode-bidi (7 to 23 allocations
+     a call there, none here; 659 ns for a 48-character Arabic line). All 91,707
+     conformance cases pass. Lines are reordered and aligned by their paragraph's
+     direction, and brackets mirror. `FontStacks` per language. Noto Sans Arabic and Hebrew
+     are bundled for tests. A golden image of text in both directions.
+   - **Left:** the owner's question on the format; a UI mirrored for right-to-left
+     languages (item 9); dates.
 8e. ~~**Color vision settings for the game developer**~~ (owner, 2026-10-14: a light
    addition). **Done 2026-10-15 (ADR 0097):** `ViewSettings::color_vision`.
    - Protan, deutan and tritan, corrected (daltonization) or simulated, with a severity.
