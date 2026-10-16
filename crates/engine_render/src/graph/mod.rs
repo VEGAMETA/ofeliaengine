@@ -733,6 +733,7 @@ impl RenderGraph {
         FrameGraph {
             slot: slot % self.physical.slots(),
             cmd,
+            present_id: None,
             graph: self,
         }
     }
@@ -816,6 +817,8 @@ pub struct FrameGraph<'g> {
     graph: &'g mut RenderGraph,
     slot: usize,
     cmd: vk::CommandBuffer,
+    /// The present id the graph's own submissions carry ([`Self::tag_submissions`]).
+    present_id: Option<u64>,
 }
 
 impl core::fmt::Debug for FrameGraph<'_> {
@@ -831,6 +834,15 @@ impl core::fmt::Debug for FrameGraph<'_> {
 static FRAME_SERIAL: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 impl<'g> FrameGraph<'g> {
+    /// Tags the submissions the graph makes itself (with async compute, every segment but
+    /// the last graphics one) with `present_id` for `VK_NV_low_latency2`
+    /// (`VkLatencySubmissionPresentIdNV`), as the frame's own submission is: Reflex then
+    /// sees all of the frame's GPU work. Pass `engine_latency::Latency::submit_present_id`
+    /// (`None` unless that extension is on).
+    pub fn tag_submissions(&mut self, present_id: Option<u64>) {
+        self.present_id = present_id;
+    }
+
     /// A number no other frame of any graph has (never 0): owners of persistent resources
     /// that several views of one frame use import them once per frame by it (an imported
     /// resource leaves the graph in its final state only at the end of the frame).
@@ -969,6 +981,7 @@ impl<'g> FrameGraph<'g> {
         allocator: &mut Allocator,
         bindless: Option<&Bindless>,
     ) -> Result<(), RhiError> {
+        let present_id = self.present_id;
         let graph = &mut *self.graph;
         let used_async = {
             engine_profiler::zone!("render::graph::compile");
@@ -1186,7 +1199,12 @@ impl<'g> FrameGraph<'g> {
                     // after it on the queue).
                     multi.segment_values.push(0);
                     if !waits.is_empty() {
-                        let submit = vk::SubmitInfo2::default().wait_semaphore_infos(waits);
+                        let mut latency = vk::LatencySubmissionPresentIdNV::default()
+                            .present_id(present_id.unwrap_or(0));
+                        let mut submit = vk::SubmitInfo2::default().wait_semaphore_infos(waits);
+                        if present_id.is_some() {
+                            submit = submit.push_next(&mut latency);
+                        }
                         // SAFETY: the semaphore and its value were signaled by an earlier
                         // submission; the queue is not used concurrently (caller).
                         unsafe { d.queue_submit2(queue.raw, &[submit], vk::Fence::null()) }
@@ -1204,10 +1222,16 @@ impl<'g> FrameGraph<'g> {
                     .stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
                 let cmds = [vk::CommandBufferSubmitInfo::default()
                     .command_buffer(multi.segment_cmds[index])];
-                let submit = vk::SubmitInfo2::default()
+                // The frame's present id, as the frame's own submission carries it (Reflex).
+                let mut latency =
+                    vk::LatencySubmissionPresentIdNV::default().present_id(present_id.unwrap_or(0));
+                let mut submit = vk::SubmitInfo2::default()
                     .wait_semaphore_infos(waits)
                     .command_buffer_infos(&cmds)
                     .signal_semaphore_infos(&signals);
+                if present_id.is_some() {
+                    submit = submit.push_next(&mut latency);
+                }
                 // SAFETY: the command buffer is recorded and ended; the waited value was
                 // signaled by an earlier submission; the queue is not used concurrently
                 // (caller).

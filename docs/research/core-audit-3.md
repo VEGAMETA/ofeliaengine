@@ -239,7 +239,7 @@ would make the next one visible.
 | 0 | ~~**P0: bound the local shadows' invalidation** (§3.1)~~ done 2026-10-16 (ADR 0071's addendum): 409 → 46 µs at 2,000 movers, 3,265 → 60 at 20,000 | 0.3 ms of every frame with movers; CPU-bound at 20,000 | S |
 | 0a | ~~**A CPU stage gate** (§3.2)~~ done 2026-10-16 (`perf_gate --cpu`, ADR 0062's addendum) | the next §3.1 is caught | S–M |
 | 1 | ~~VSM's leftover, required (owner, 2026-10-15): transparent surfaces and subsurface transmission from the pages, then the pages' default for discrete GPUs~~ done 2026-10-16 (ADR 0093 step 3d); the default is the owner's question | queued | M–L |
-| 2 | Device memory: empty blocks freed (§3.3); Reflex's pacing (§3.4) | 328 MiB; a 45 % wider tail | S each |
+| 2 | ~~Device memory: empty blocks freed (§3.3); Reflex's pacing (§3.4)~~ done 2026-10-16 (ADR 0076's and ADR 0023's addenda): the budget counts the blocks' free room; Reflex's tail is the driver's (its sleep is never under 1.5 ms, in 0.5 ms steps), its late wakes cut at three intervals | 328 MiB; a 45 % wider tail | S each |
 | 3 | 8c's rules file and `RayHit`'s surface | the owner's question 1 | S–M |
 | 4 | **Core gaps for a game** (§4): navigation; save games; audio, input and networking in the player; a quick start | what a game needs before tools | L in all |
 | 5 | Item 9: the editor's tools, Luau bindings and debugger, other tooling | after the core | L |

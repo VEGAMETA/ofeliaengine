@@ -1072,6 +1072,13 @@ impl Player {
         &self.device
     }
 
+    /// The timeline semaphore that reaches a frame's number ([`FrameReport::number`]) when
+    /// its GPU work is done: another thread can wait for frames with it (the flight's
+    /// input-to-GPU-done measurement, ADR 0023).
+    pub fn frame_timeline(&self) -> vk::Semaphore {
+        self.frames.timeline()
+    }
+
     /// GPU memory.
     pub fn allocator(&self) -> &Allocator {
         &self.allocator
@@ -1892,6 +1899,8 @@ impl Player {
             }
             report.compose += us(t);
             let t = Instant::now();
+            // Reflex sees the work the graph submits itself (async compute) as this frame's.
+            fg.tag_submissions(self.latency.as_ref().and_then(Latency::submit_present_id));
             fg.execute_with_bindless(&mut self.allocator, Some(&self.bindless))
                 .map_err(AppError::at("the frame graph"))?;
             report.execute = us(t);
