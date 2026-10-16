@@ -10,7 +10,8 @@ use syn::{Data, DeriveInput, Expr, Fields, LitStr, parse_macro_input};
 ///
 /// Attributes on fields, all optional: `#[reflect(min = 0.0, max = 1.0, step = 0.1,
 /// tooltip = "...", hidden, skip, net_quantum = 0.01, net_skip, hint = "color",
-/// rename = "...")]`. On the type: `#[reflect(name = "...")]`.
+/// rename = "...")]`. On the type: `#[reflect(name = "...", skip, version = 2)]` (`skip`:
+/// its values are not saved; `version`: the version saves record, ADR 0104).
 #[proc_macro_derive(Reflect, attributes(reflect))]
 pub fn derive_reflect(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -32,6 +33,7 @@ struct Attrs {
     net_skip: bool,
     hint: Option<LitStr>,
     rename: Option<LitStr>,
+    version: Option<syn::LitInt>,
 }
 
 fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
@@ -54,6 +56,7 @@ fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
                 "tooltip" => out.tooltip = Some(meta.value()?.parse()?),
                 "hint" => out.hint = Some(meta.value()?.parse()?),
                 "rename" | "name" => out.rename = Some(meta.value()?.parse()?),
+                "version" => out.version = Some(meta.value()?.parse()?),
                 "hidden" => out.hidden = true,
                 "skip" => out.skip = true,
                 "net_skip" => out.net_skip = true,
@@ -88,6 +91,13 @@ fn attrs_tokens(a: &Attrs) -> syn::Result<Tokens> {
         }
     };
     let (hidden, skip, net_skip) = (a.hidden, a.skip, a.net_skip);
+    let version = match &a.version {
+        Some(v) => {
+            let v: u32 = v.base10_parse()?;
+            quote!(#v)
+        }
+        None => quote!(0),
+    };
     Ok(quote! {
         ::engine_reflect::Attrs {
             min: #min,
@@ -99,6 +109,7 @@ fn attrs_tokens(a: &Attrs) -> syn::Result<Tokens> {
             net_quantum: #quantum,
             net_skip: #net_skip,
             hint: #hint,
+            version: #version,
         }
     })
 }

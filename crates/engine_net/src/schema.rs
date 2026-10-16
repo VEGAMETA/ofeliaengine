@@ -457,7 +457,12 @@ fn collect(
             }
         }
         TypeKind::Enum { repr, .. } => out.push(primitive(repr, off)),
-        TypeKind::Opaque => {}
+        // Strings, lists, optional values and maps have no fixed layout: not replicated.
+        TypeKind::String
+        | TypeKind::List(_)
+        | TypeKind::Option(_)
+        | TypeKind::Map(_)
+        | TypeKind::Opaque => {}
     }
 }
 

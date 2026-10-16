@@ -415,6 +415,7 @@ dependencies = [
  "engine_core",
  "engine_profiler",
  "engine_reflect",
+ "linkme",
 ]
 
 [[package]]
@@ -693,6 +694,19 @@ dependencies = [
  "engine_profiler",
  "engine_render",
  "engine_rhi",
+]
+
+[[package]]
+name = "engine_save"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_ecs",
+ "engine_profiler",
+ "engine_reflect",
+ "engine_scene",
+ "engine_workspace_hack",
+ "zstd",
 ]
 
 [[package]]
@@ -1291,6 +1305,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
 dependencies = [
  "cc",
+]
+
+[[package]]
+name = "linkme"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3045e122bd98aef8ec3ad58ce84f0791f64e70163d1a02710af4aa11a4d54cc5"
+dependencies = [
+ "linkme-impl",
+]
+
+[[package]]
+name = "linkme-impl"
+version = "0.3.37"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77060ebe535362c3da75682cd17b0431017b6e7c5661e714fc69a7ad017d1301"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]

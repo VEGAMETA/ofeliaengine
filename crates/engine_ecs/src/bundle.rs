@@ -26,6 +26,14 @@ pub unsafe trait Bundle: Send + Sync + 'static {
     unsafe fn write(self, dst: &[*mut u8; MAX_BUNDLE]);
 }
 
+// SAFETY: no components, nothing to write.
+unsafe impl Bundle for () {
+    const COUNT: usize = 0;
+    fn register(_: &mut Components, _: &mut [ComponentId; MAX_BUNDLE]) {}
+    #[inline]
+    unsafe fn write(self, _: &[*mut u8; MAX_BUNDLE]) {}
+}
+
 macro_rules! bundle {
     ($count:expr; $($t:ident $v:ident $i:tt),+) => {
         // SAFETY: writes each component to the destination of its tuple position.

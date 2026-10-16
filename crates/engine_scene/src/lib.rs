@@ -463,7 +463,14 @@ unsafe fn write_value(
             unsafe { write_primitive(out, ty, ptr) };
             true
         }
-        TypeKind::Struct(_) | TypeKind::Opaque => false,
+        // Strings, lists, optional values and maps come with saves' text form (ADR 0104
+        // step 2).
+        TypeKind::Struct(_)
+        | TypeKind::String
+        | TypeKind::List(_)
+        | TypeKind::Option(_)
+        | TypeKind::Map(_)
+        | TypeKind::Opaque => false,
     }
 }
 

@@ -31,6 +31,12 @@ impl Parent {
     pub fn get(&self) -> Entity {
         self.parent
     }
+
+    /// The sibling before this entity among the parent's children, or `Entity::NULL` for
+    /// the first: what keeps the children's order through a save (ADR 0104).
+    pub fn previous_sibling(&self) -> Entity {
+        self.prev
+    }
 }
 
 /// The entity's children: the ends of the list and how many there are.

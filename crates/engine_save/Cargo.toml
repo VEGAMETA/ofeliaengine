@@ -1,0 +1,23 @@
+[package]
+name = "engine_save"
+description = "Save games (ADR 0104): the world's reflected state taken in a frame, written behind it as text or a binary of named fields, in files swapped in atomically."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
+engine_core.workspace = true
+engine_ecs.workspace = true
+engine_profiler.workspace = true
+engine_reflect.workspace = true
+# `SceneId`: the identity of the level's and authored entities (ADR 0029).
+engine_scene.workspace = true
+# The body's compression: the zstd library the packs use (BSD-3-Clause, ADR 0056).
+zstd = { version = "0.13", default-features = false }

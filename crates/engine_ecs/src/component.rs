@@ -75,8 +75,10 @@ macro_rules! pod_component {
     };
 }
 
-/// Implements [`Component`] with its reflection description (`engine_reflect::Reflect`).
-/// Add `pod` first for plain-data types: `reflect_component!(pod Health, Velocity)`.
+/// Implements [`Component`] with its reflection description (`engine_reflect::Reflect`),
+/// and lists the type among the program's reflected types ([`crate::reflected`]), so saves
+/// find it by name. Add `pod` first for plain-data types:
+/// `reflect_component!(pod Health, Velocity)`.
 #[macro_export]
 macro_rules! reflect_component {
     (pod $($t:ty),+ $(,)?) => {
@@ -84,13 +86,15 @@ macro_rules! reflect_component {
             const POD: $crate::Pod = $crate::Pod::of::<$t>();
             const TYPE_INFO: ::core::option::Option<&'static $crate::reflect::TypeInfo> =
                 ::core::option::Option::Some(<$t as $crate::reflect::Reflect>::TYPE_INFO);
-        })+
+        }
+        $crate::__reflected_component!($t);)+
     };
     ($($t:ty),+ $(,)?) => {
         $(impl $crate::Component for $t {
             const TYPE_INFO: ::core::option::Option<&'static $crate::reflect::TypeInfo> =
                 ::core::option::Option::Some(<$t as $crate::reflect::Reflect>::TYPE_INFO);
-        })+
+        }
+        $crate::__reflected_component!($t);)+
     };
 }
 

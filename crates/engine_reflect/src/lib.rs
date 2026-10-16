@@ -6,6 +6,9 @@
 //! - attributes shared by serialization, the editor's inspector, scripting and network
 //!   replication.
 //!
+//! Strings, lists (`Vec`), optional values and maps (`BTreeMap`, `HashMap`) are described
+//! with functions for their contents (ADR 0104 step 1, [`containers`]).
+//!
 //! Access is pointer arithmetic on those offsets, not dynamic dispatch. Script-defined
 //! types build the same description at run time.
 //!
@@ -69,6 +72,14 @@ pub enum TypeKind {
         /// Number of elements.
         len: usize,
     },
+    /// A `String` ([`read_str`], [`write_str`]).
+    String,
+    /// A list, `Vec<T>`.
+    List(&'static ListInfo),
+    /// An optional value, `Option<T>`.
+    Option(&'static OptionInfo),
+    /// A map, `BTreeMap<K, V>` or `HashMap<K, V, S>`.
+    Map(&'static MapInfo),
     /// Not introspectable (serialized through a hook, if at all).
     Opaque,
 }
@@ -149,7 +160,8 @@ pub struct Attrs {
     pub tooltip: Option<&'static str>,
     /// Not shown in the inspector.
     pub hidden: bool,
-    /// Not saved or loaded.
+    /// Not saved or loaded. On a type: none of its values are (caches, effects, data made
+    /// again on load).
     pub skip: bool,
     /// Network quantization step (ADR 0019); `None` sends full precision.
     pub net_quantum: Option<f64>,
@@ -157,6 +169,9 @@ pub struct Attrs {
     pub net_skip: bool,
     /// Editor presentation.
     pub hint: Hint,
+    /// On a type: the version its saves record (ADR 0104), for migrations after a change
+    /// of meaning; 0 when never set.
+    pub version: u32,
 }
 
 impl Attrs {
@@ -171,6 +186,7 @@ impl Attrs {
         net_quantum: None,
         net_skip: false,
         hint: Hint::None,
+        version: 0,
     };
 }
 
@@ -223,7 +239,8 @@ impl TypeInfo {
 
     /// Calls `f` with the path, offset, type and attributes of every primitive or enum
     /// inside this type, depth first in declaration order (serialization, network
-    /// field lists). Opaque parts are skipped.
+    /// field lists). Opaque parts and containers (strings, lists, optional values, maps:
+    /// no fixed offsets) are skipped.
     pub fn visit_leaves(&'static self, f: &mut impl FnMut(&str, usize, &'static TypeInfo, Attrs)) {
         let mut path = String::new();
         visit(self, 0, self.attrs, &mut path, f);
@@ -261,7 +278,11 @@ fn visit(
                 path.truncate(old);
             }
         }
-        TypeKind::Opaque => {}
+        TypeKind::String
+        | TypeKind::List(_)
+        | TypeKind::Option(_)
+        | TypeKind::Map(_)
+        | TypeKind::Opaque => {}
     }
 }
 
@@ -476,7 +497,10 @@ impl<T: Reflect, const N: usize> Reflect for [T; N] {
     };
 }
 
+pub mod containers;
 mod math;
+
+pub use containers::{ListInfo, MapInfo, OptionInfo, read_str, write_str};
 
 #[cfg(test)]
 mod tests {

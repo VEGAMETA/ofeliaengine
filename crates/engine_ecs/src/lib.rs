@@ -25,6 +25,7 @@ mod entity;
 mod fxhash;
 mod hierarchy;
 mod query;
+pub mod reflected;
 mod resource;
 mod schedule;
 mod snapshot;
@@ -42,7 +43,10 @@ pub use component::{
 pub use engine_reflect as reflect;
 pub use entity::Entity;
 pub use hierarchy::{ChildIter, Children, HierarchyError, Parent};
+#[doc(hidden)]
+pub use linkme;
 pub use query::{Changed, Fetch, Filter, Or, QueryIter, QueryState, ReadOnlyFetch, With, Without};
+pub use reflected::{ReflectedKind, ReflectedType, find_reflected, reflected_types};
 pub use schedule::{
     Access, FnSystem, Res, ResMut, Schedule, System, SystemContext, SystemQuery, system,
 };

@@ -17,7 +17,17 @@ impl Entity {
         index: u32::MAX,
         generation: u32::MAX,
     };
+}
 
+/// [`Entity::NULL`]: components holding entities derive `Default`, which saves need to
+/// make them from a file (ADR 0104).
+impl Default for Entity {
+    fn default() -> Self {
+        Self::NULL
+    }
+}
+
+impl Entity {
     /// Slot index (dense, reused after despawn).
     pub const fn index(self) -> u32 {
         self.index

@@ -79,3 +79,24 @@ Tests:
 - **The Luau bindings generator** reads the same tables.
 - **Not supported yet:** generic types, `Vec` and maps. Such components are opaque to
   reflection until a serialization hook exists.
+
+## Addendum (2026-10-16): containers and the program's list of types (ADR 0104 step 1)
+
+- **Containers:** `TypeKind::String`, `List`, `Option` and `Map`.
+  - They describe `String`, `Vec<T>`, `Option<T>`, `BTreeMap<K, V>` and
+    `HashMap<K, V, S>`, for `T`, `K` and `V` that are `Reflect + Default`.
+  - Their contents have no fixed offsets, so each description carries functions for its
+    concrete type: length, storage, resizing with defaults, and inserting a key filled
+    by the caller.
+  - `visit_leaves` and `path` skip them, so replication's field lists are unchanged.
+- **On a type:**
+  - `#[reflect(version = N)]` (`Attrs::version`) is the version saves record;
+  - `#[reflect(skip)]` means none of its values are saved.
+- **The program's list:**
+  - `reflect_component!` and the new `reflect_resource!` add each type to a list the
+    linker collects (`linkme`);
+  - `engine_ecs::reflected_types()` and `find_reflected(name)` give a type's description
+    and how to register it or reach the world's value;
+  - a writer of its `Default` value comes with it when the type has one. The macro finds
+    out by method resolution on references, since no trait bound can say "if".
+- **Still not supported:** generic types; enums with fields.
