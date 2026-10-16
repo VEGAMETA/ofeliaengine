@@ -52,6 +52,8 @@ pub(crate) enum Selector {
     Variable {
         /// Its name's hash.
         name: u64,
+        /// Its name (a span of the text): what a check compares between locales.
+        written: Span,
         /// How a number is formatted before it is selected by.
         format: NumberFormat,
     },
@@ -67,6 +69,9 @@ pub(crate) enum Selector {
     /// A number literal.
     Number(f64),
 }
+
+/// The CLDR plural categories, in the tables' order ([`Key::Category`]).
+pub(crate) const CATEGORIES: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
 
 /// A variant's key.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -155,7 +160,8 @@ pub(crate) struct Entry {
     pub(crate) term: bool,
     /// Its pattern (a span of the operations).
     pub(crate) pattern: Span,
-    /// Its identifier as written (a span of the text).
+    /// Its identifier as written, an attribute's after a dot (`menu.tooltip`; a span of the
+    /// text).
     pub(crate) name: Span,
 }
 
@@ -185,26 +191,48 @@ impl Strings {
         self.text.get(span.range()).unwrap_or("")
     }
 
-    /// Messages (not terms), their values and attributes counted once each.
+    /// Messages (not terms), each counted once with its attributes.
     pub fn messages(&self) -> usize {
-        self.entries
-            .iter()
-            .filter(|e| !e.term && e.attribute == 0)
-            .count()
+        self.message_names().count()
     }
 
-    /// The identifiers of the messages (not terms), each once: what a check compares.
+    /// The identifiers of the messages (not terms), each once.
     pub fn message_names(&self) -> impl Iterator<Item = &str> + '_ {
         self.entries
             .iter()
-            .filter(|e| !e.term && e.attribute == 0)
+            .enumerate()
+            .filter(|&(k, e)| !e.term && (k == 0 || self.entries[k - 1].hash != e.hash))
+            .map(|(_, e)| identifier(self.text(e.name)))
+    }
+
+    /// Every message's value and attribute (not terms') as written, `menu` and
+    /// `menu.tooltip`: what a check compares between a translation and the source.
+    pub fn entry_names(&self) -> impl Iterator<Item = &str> + '_ {
+        self.entries
+            .iter()
+            .filter(|e| !e.term)
             .map(|e| self.text(e.name))
+    }
+
+    /// The identifier of the message of `hash`.
+    pub(crate) fn message_name(&self, hash: u64) -> Option<&str> {
+        self.entries
+            .iter()
+            .find(|e| !e.term && e.hash == hash)
+            .map(|e| identifier(self.text(e.name)))
     }
 
     /// Whether the message `name` (its value or any attribute) is here.
     pub fn has_message(&self, name: &str) -> bool {
         let h = crate::id::hash(name.as_bytes());
         self.entries.iter().any(|e| !e.term && e.hash == h)
+    }
+
+    /// The variables the message `name` uses (its value, its attributes and the messages it
+    /// references, which share its arguments; not terms, which have their own), sorted, each
+    /// once: what a check compares between a translation and the source.
+    pub fn variables(&self, name: &str) -> Vec<&str> {
+        variables_across(&[self], 0, crate::id::hash(name.as_bytes()), &|_, _, _| 0)
     }
 
     /// The table as bytes (the pack's `Strings` entry).
@@ -326,12 +354,71 @@ impl Strings {
                     variants.range().end <= self.variants.len()
                         && default < variants.len
                         && match selector {
-                            Selector::Text(s) => text(s),
+                            Selector::Text(s) | Selector::Variable { written: s, .. } => text(s),
                             _ => true,
                         }
                 }
             })
     }
+}
+
+/// The variables the message `hash` uses: its patterns in `tables[first]` and those of the
+/// messages they reference (which share its arguments; terms have their own), a reference
+/// from table `t` to `(target, attribute)` followed into table `pick(t, target, attribute)`.
+/// Sorted, each once.
+pub(crate) fn variables_across<'t>(
+    tables: &[&'t Strings],
+    first: usize,
+    hash: u64,
+    pick: &dyn Fn(usize, u64, u64) -> usize,
+) -> Vec<&'t str> {
+    let mut found = Vec::new();
+    let start = tables[first]
+        .entries
+        .iter()
+        .filter(|e| !e.term && e.hash == hash);
+    let mut seen: Vec<(u64, u64)> = start.clone().map(|e| (e.hash, e.attribute)).collect();
+    let mut patterns: Vec<(usize, Span)> = start.map(|e| (first, e.pattern)).collect();
+    while let Some((t, p)) = patterns.pop() {
+        let table = tables[t];
+        for op in table.ops.get(p.range()).unwrap_or(&[]) {
+            match *op {
+                Op::Text(_) => {}
+                Op::Variable { written, .. } => found.push(table.text(written)),
+                Op::Reference {
+                    target,
+                    attribute,
+                    term: false,
+                    ..
+                } => {
+                    if !seen.contains(&(target, attribute)) {
+                        seen.push((target, attribute));
+                        let k = pick(t, target, attribute);
+                        let found = tables.get(k).and_then(|r| r.find(false, target, attribute));
+                        patterns.extend(found.map(|e| (k, e.pattern)));
+                    }
+                }
+                Op::Reference { .. } => {}
+                Op::Select {
+                    selector, variants, ..
+                } => {
+                    if let Selector::Variable { written, .. } = selector {
+                        found.push(table.text(written));
+                    }
+                    let list = table.variants.get(variants.range()).unwrap_or(&[]);
+                    patterns.extend(list.iter().map(|v| (t, v.pattern)));
+                }
+            }
+        }
+    }
+    found.sort_unstable();
+    found.dedup();
+    found
+}
+
+/// An entry's identifier without its attribute (`menu` of `menu.tooltip`).
+fn identifier(name: &str) -> &str {
+    name.split_once('.').map_or(name, |(id, _)| id)
 }
 
 /// First bytes of a table; the digits are its version.
@@ -430,9 +517,14 @@ impl Writer {
             } => {
                 self.u8(3);
                 match selector {
-                    Selector::Variable { name, format } => {
+                    Selector::Variable {
+                        name,
+                        written,
+                        format,
+                    } => {
                         self.u8(0);
                         self.u64(name);
+                        self.span(written);
                         self.format(format);
                     }
                     Selector::TermAttribute { term, attribute } => {
@@ -537,6 +629,7 @@ impl<'a> Reader<'a> {
                 let selector = match self.u8()? {
                     0 => Selector::Variable {
                         name: self.u64()?,
+                        written: self.span()?,
                         format: self.format()?,
                     },
                     1 => Selector::TermAttribute {

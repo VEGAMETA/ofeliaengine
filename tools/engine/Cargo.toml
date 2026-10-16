@@ -21,6 +21,8 @@ engine_core.workspace = true
 # Logging and crash reports (ADR 0061).
 engine_crash.workspace = true
 engine_log.workspace = true
+# Localized text (ADR 0102): `loc build` and `loc check`.
+engine_loc.workspace = true
 engine_shader.workspace = true
 # Colliders baked into Jolt's binary form for packs (ADR 0101).
 engine_physics.workspace = true

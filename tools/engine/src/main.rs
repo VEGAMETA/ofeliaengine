@@ -7,12 +7,18 @@
 //!                                                  `<SCENE>.materials.ron` and `<SCENE>.pso.ron`
 //!                                                  applied (ADR 0092), its colliders baked
 //!                                                  into Jolt's binary form (ADR 0101)
+//! ofeliaengine loc build <LOC> -o <OUT.pack>       compile a `loc/` folder into a strings
+//!                                                  pack (ADR 0102)
+//! ofeliaengine loc check <LOC> [--code <DIR>]...   check its locales against the source and
+//!                                                  the code's uses
 //! ```
 //!
 //! Run `ofeliaengine help` for the options.
 
 // A command-line tool reports on stdout/stderr.
 #![allow(clippy::print_stdout, clippy::print_stderr)]
+
+mod loc;
 
 use engine_assets::gltf_models::apply_gltf_models;
 use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_material_map};
@@ -49,6 +55,16 @@ usage:
                                                    drew compiled for the types it names;
                                                    colliders from its meshes and glTF physics,
                                                    baked for Jolt (--no-colliders: none)
+  ofeliaengine loc build <LOC> -o <OUT.pack> [--source <LOCALE>] [--pseudo] [--level <N>]
+                                                   compile a loc folder (a subfolder of .ftl
+                                                   files per locale) into a strings pack: the
+                                                   source locale (en) first, every other
+                                                   against it; --pseudo adds en-XA and ar-XB
+  ofeliaengine loc check <LOC> [--source <LOCALE>] [--code <DIR>]...
+                                                   errors and warnings of every locale, what
+                                                   each lacks against the source; with --code,
+                                                   loc!(\"id\") (Rust) and loc(\"id\") (Luau)
+                                                   uses that are not defined, messages unused
 
 A shader is a .slang file with at least one [shader(\"<stage>\")] entry point; other
 .slang files are modules, compiled through the shaders that import them.
@@ -63,11 +79,12 @@ options:
                        (default: logical CPUs, at most 8)
   --out <DIR>          build: also write <file>.<entry>.spv per entry point to DIR
 
-exit status: 0 success, 1 shader errors, 2 usage or setup error";
+exit status: 0 success, 1 shader or text errors, 2 usage or setup error";
 
 enum Command {
     Shaders(Args),
     Cook(CookArgs),
+    Loc(loc::LocArgs),
 }
 
 struct CookArgs {
@@ -91,6 +108,7 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
     match args.next().as_deref() {
         Some("shaders") => parse(args).map(Command::Shaders),
         Some("cook") => parse_cook(args).map(Command::Cook),
+        Some("loc") => loc::parse_loc(args).map(Command::Loc),
         Some("help" | "-h" | "--help") | None => Err(String::new()),
         Some(other) => Err(format!("unknown command `{other}`")),
     }
@@ -374,6 +392,7 @@ fn main() -> ExitCode {
     let result = match &command {
         Command::Shaders(args) => run(args),
         Command::Cook(args) => cook(args),
+        Command::Loc(args) => loc::run_loc(args),
     };
     match result {
         Ok(code) => code,
@@ -492,14 +511,14 @@ mod tests {
     fn args(line: &str) -> Result<Args, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Shaders(args) => Ok(args),
-            Command::Cook(_) => Err(String::from("not a shaders command")),
+            Command::Cook(_) | Command::Loc(_) => Err(String::from("not a shaders command")),
         }
     }
 
     fn cook_args(line: &str) -> Result<CookArgs, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Cook(args) => Ok(args),
-            Command::Shaders(_) => Err(String::from("not a cook command")),
+            Command::Shaders(_) | Command::Loc(_) => Err(String::from("not a cook command")),
         }
     }
 

@@ -270,6 +270,7 @@ dependencies = [
  "engine_ecs",
  "engine_frame",
  "engine_latency",
+ "engine_loc",
  "engine_physics",
  "engine_physics_jolt",
  "engine_platform",
@@ -280,6 +281,7 @@ dependencies = [
  "engine_runtime",
  "engine_streaming",
  "engine_video",
+ "log",
 ]
 
 [[package]]
@@ -292,6 +294,7 @@ dependencies = [
  "engine_collision",
  "engine_core",
  "engine_ecs",
+ "engine_loc",
  "engine_platform",
  "engine_profiler",
  "engine_shader",
@@ -348,6 +351,7 @@ dependencies = [
  "engine_assets",
  "engine_core",
  "engine_crash",
+ "engine_loc",
  "engine_log",
  "engine_physics",
  "engine_physics_jolt",
@@ -511,12 +515,12 @@ dependencies = [
 name = "engine_loc"
 version = "0.0.0"
 dependencies = [
- "engine_loc",
  "engine_workspace_hack",
  "fluent-syntax",
  "icu_decimal",
  "icu_locale",
  "icu_plurals",
+ "icu_provider",
 ]
 
 [[package]]
@@ -790,10 +794,12 @@ version = "0.0.0"
 dependencies = [
  "bytemuck",
  "lock_api",
+ "memchr",
  "parking_lot",
  "serde",
  "serde_json",
  "syn 2.0.119",
+ "syn 3.0.6",
  "windows-sys",
 ]
 

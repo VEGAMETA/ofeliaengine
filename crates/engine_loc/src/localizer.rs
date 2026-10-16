@@ -3,7 +3,7 @@
 
 use crate::args::{Args, Value};
 use crate::id::MessageId;
-use crate::table::{Key, NumberFormat, Op, Selector, Span, Strings, TermValue};
+use crate::table::{CATEGORIES, Key, NumberFormat, Op, Selector, Span, Strings, TermValue};
 use core::fmt::Write as _;
 use icu_decimal::DecimalFormatter;
 use icu_decimal::input::Decimal;
@@ -88,6 +88,9 @@ pub struct Localizer {
     /// The tables a message is looked up in, in order: the chosen locale, its parents that
     /// have tables, the source locale.
     chain: Vec<usize>,
+    /// The languages last asked for ([`Self::set_locale`]), negotiated again when the tables
+    /// change.
+    preferred: Vec<String>,
     generation: u64,
 }
 
@@ -135,6 +138,7 @@ impl Localizer {
             requested: None,
             source,
             chain: vec![source],
+            preferred: Vec::new(),
             generation: 0,
         })
     }
@@ -178,8 +182,19 @@ impl Localizer {
             .filter(|l| DataLocale::from(l) != self.locales[chain[0]])
             .and_then(|l| Rules::new(&l).map(|r| (l.id.language, r)));
         self.chain = chain;
+        self.preferred = preferred.iter().map(|&p| p.to_owned()).collect();
         self.generation += 1;
         &self.tables[self.chain[0]].locale
+    }
+
+    /// The source locale: the one whose messages are complete, the last fallback.
+    pub fn source(&self) -> &str {
+        &self.tables[self.source].locale
+    }
+
+    /// The table of `locale`, if loaded.
+    pub fn table(&self, locale: &str) -> Option<&Strings> {
+        self.tables.iter().find(|t| t.locale == locale)
     }
 
     /// The chosen locale.
@@ -197,28 +212,35 @@ impl Localizer {
         self.generation
     }
 
-    /// Replaces the table of `table`'s locale (a hot reload), or adds it.
+    /// Replaces the table of `table`'s locale (a hot reload), or adds it; the locale is
+    /// negotiated again from the languages last asked for.
     ///
     /// # Errors
     ///
-    /// As [`Self::new`] for its locale.
+    /// As [`Self::new`] for its locale; the localizer is then unchanged.
     pub fn replace(&mut self, table: Strings) -> Result<(), LocError> {
-        let source = self.tables[self.source].locale.clone();
-        let mut tables = core::mem::take(&mut self.tables);
-        let chosen: Vec<String> = self
-            .chain
-            .iter()
-            .map(|&k| tables[k].locale.clone())
-            .collect();
+        let mut tables = self.tables.clone();
         match tables.iter().position(|t| t.locale == table.locale) {
             Some(k) => tables[k] = table,
             None => tables.push(table),
         }
-        let generation = self.generation;
-        *self = Self::new(tables, &source)?;
-        let chosen: Vec<&str> = chosen.iter().map(String::as_str).collect();
-        self.set_locale(&chosen[..1.min(chosen.len())]);
-        self.generation = generation + 1;
+        self.replace_all(tables)
+    }
+
+    /// Replaces every table (a hot reload of a whole folder), the source locale kept; the
+    /// locale is negotiated again from the languages last asked for.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::new`]; the localizer is then unchanged.
+    pub fn replace_all(&mut self, tables: Vec<Strings>) -> Result<(), LocError> {
+        let mut next = Self::new(tables, self.source())?;
+        let preferred: Vec<&str> = self.preferred.iter().map(String::as_str).collect();
+        if !preferred.is_empty() {
+            next.set_locale(&preferred);
+        }
+        next.generation = self.generation + 1;
+        *self = next;
         Ok(())
     }
 
@@ -350,7 +372,7 @@ impl Localizer {
     }
 
     /// The variant `selector` chooses among `variants`: an exact number, then the plural
-    /// category, for numbers; the key, for text.
+    /// category, for numbers; the key, for text (a category's name too: `"one"` is `[one]`).
     fn select(
         &self,
         t: usize,
@@ -360,7 +382,14 @@ impl Localizer {
     ) -> Option<u32> {
         let table = &self.tables[t];
         let list = &table.variants[variants.range()];
-        let by_name = |h: u64| list.iter().position(|v| v.key == Key::Name(h));
+        let by_text = |s: &str| {
+            let h = crate::id::hash(s.as_bytes());
+            list.iter().position(|v| match v.key {
+                Key::Name(k) => k == h,
+                Key::Category(c) => CATEGORIES[usize::from(c)] == s,
+                Key::Number(_) => false,
+            })
+        };
         let by_number = |value: Value<'_>, format: NumberFormat| {
             let d = decimal(value, format);
             let x = match value {
@@ -382,8 +411,8 @@ impl Localizer {
                 })
         };
         let chosen = match selector {
-            Selector::Variable { name, format } => match self.variable(scope, name)? {
-                Value::Str(s) => by_name(crate::id::hash(s.as_bytes())),
+            Selector::Variable { name, format, .. } => match self.variable(scope, name)? {
+                Value::Str(s) => by_text(s),
                 number => by_number(number, format),
             },
             Selector::TermAttribute { term, attribute } => {
@@ -394,9 +423,9 @@ impl Localizer {
                     Some([Op::Text(s)]) => rtable.text(*s),
                     _ => return None,
                 };
-                by_name(crate::id::hash(text.as_bytes()))
+                by_text(text)
             }
-            Selector::Text(s) => by_name(crate::id::hash(table.text(s).as_bytes())),
+            Selector::Text(s) => by_text(table.text(s)),
             Selector::Number(n) => by_number(Value::Float(n), NumberFormat::default()),
         };
         chosen.map(|k| k as u32)

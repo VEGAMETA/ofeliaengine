@@ -8,6 +8,7 @@
 //! - `display`: HDR state, SDR white level, luminance range and refresh rate of a monitor;
 //! - `raw_input`: raw mouse/keyboard on a time-critical thread, with timestamps;
 //! - `fs_watch`: directory change notifications for hot reload;
+//! - `locale`: the user's preferred display languages, for a game's localizer;
 //! - `io`: batched unbuffered file reads through an I/O ring, for streaming (all hosts;
 //!   synchronous reads where there is no I/O ring).
 //!
@@ -22,6 +23,8 @@ pub mod display;
 #[cfg(any(windows, test))]
 pub mod fs_watch;
 pub mod io;
+#[cfg(windows)]
+pub mod locale;
 #[cfg(windows)]
 pub mod process;
 #[cfg(windows)]

@@ -10,12 +10,6 @@ license.workspace = true
 [lints]
 workspace = true
 
-[features]
-default = []
-# The compiler from Fluent's syntax (the cook, the CLI, hot reload in development builds); a
-# shipped game reads cooked tables only.
-compile = ["dep:fluent-syntax"]
-
 [dependencies]
 # Feature unification of shared dependencies for build reuse (ADR 0077).
 engine_workspace_hack.workspace = true
@@ -24,12 +18,14 @@ engine_workspace_hack.workspace = true
 icu_decimal = "=2.3.0"
 icu_locale = "=2.3.1"
 icu_plurals = "=2.3.0"
-# Fluent's parser (Apache-2.0 OR MIT), for the compiler only.
-fluent-syntax = { version = "=0.12.0", optional = true }
-
-[dev-dependencies]
-# The tests compile Fluent sources.
-engine_loc = { path = ".", features = ["compile"] }
+# Already in the tree through the three above: `sync` keeps their data behind `Arc`, not
+# `Rc`, so a localizer is a world's resource (`Send + Sync`) that the player swaps tables in.
+icu_provider = { version = "=2.3.1", default-features = false, features = ["sync"] }
+# Fluent's parser (Apache-2.0 OR MIT), for the compiler. Not behind a feature: the CLI
+# would enable it and nothing else, and a workspace crate's features cannot be unified by
+# the workspace hack (ADR 0077) it depends on. A shipped game that never compiles carries
+# about 120 KB of it (fat LTO, stripped; 2026-10-16).
+fluent-syntax = "=0.12.0"
 
 [[bench]]
 name = "format"

@@ -1919,12 +1919,14 @@ fn open_scene_with(
     let decoded: Vec<Mutex<Option<Decoded>>> = entries.iter().map(|_| Mutex::new(None)).collect();
     let indices: Vec<u32> = (0..entries.len() as u32)
         .filter(|&i| match entries[i as usize].kind() {
-            // Panoramas are read on their own (`crate::panorama::load_panorama_pack`), and
-            // colliders when a game simulates physics (`crate::colliders::load_colliders`).
+            // Panoramas are read on their own (`crate::panorama::load_panorama_pack`),
+            // colliders when a game simulates physics (`crate::colliders::load_colliders`),
+            // text by the game's localizer (`crate::strings::load_strings`).
             EntryKind::TextureLevels
             | EntryKind::Panorama
             | EntryKind::Collider
-            | EntryKind::Bodies => false,
+            | EntryKind::Bodies
+            | EntryKind::Strings => false,
             EntryKind::MeshLevel => !stream_meshes,
             _ => true,
         })
@@ -1969,6 +1971,7 @@ fn open_scene_with(
             EntryKind::Collider | EntryKind::Bodies => {
                 return Err(invalid("colliders loaded as a scene's entry"));
             }
+            EntryKind::Strings => return Err(invalid("text loaded as a scene's entry")),
         };
         if let Ok(mut slot) = decoded[index as usize].lock() {
             *slot = Some(value);
@@ -2000,7 +2003,10 @@ fn open_scene_with(
             Some(Decoded::MaterialType(ty)) => layout.scene.material_types.push(ty),
             None if matches!(
                 entries[i].kind(),
-                EntryKind::TextureLevels | EntryKind::Collider | EntryKind::Bodies
+                EntryKind::TextureLevels
+                    | EntryKind::Collider
+                    | EntryKind::Bodies
+                    | EntryKind::Strings
             ) => {}
             None => return Err(invalid(format!("entry {i} not loaded"))),
         }

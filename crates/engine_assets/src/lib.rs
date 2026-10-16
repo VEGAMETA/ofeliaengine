@@ -25,6 +25,7 @@ pub mod meshlet;
 pub mod pack;
 pub mod panorama;
 pub mod pso_record;
+pub mod strings;
 mod texture_compress;
 mod texture_import;
 

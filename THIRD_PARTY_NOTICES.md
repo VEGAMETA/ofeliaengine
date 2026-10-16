@@ -27,7 +27,7 @@ the dependency.
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | icu_plurals 2.3.0, icu_decimal 2.3.0, icu_locale 2.3.1 (+ fixed_decimal 0.7.2, icu_collections, icu_locale_core, icu_locale_fallback, icu_provider, their `_data` crates with CLDR 48.2, litemap, potential_utf, tinystr, writeable, yoke, zerofrom, zerotrie, zerovec, stable_deref_trait, utf8_iter) | Unicode-3.0 (stable_deref_trait and utf8_iter: MIT OR Apache-2.0) | ICU4X: CLDR plural rules, decimal formatting and locale fallback in `engine_loc` (ADR 0102) |
-| fluent-syntax 0.12.0 (+ memchr 2, thiserror 2) | Apache-2.0 OR MIT | Fluent's parser in `engine_loc`'s compiler (the cook and development builds, ADR 0102) |
+| fluent-syntax 0.12.0 (+ memchr 2, thiserror 2) | Apache-2.0 OR MIT | Fluent's parser in `engine_loc`'s compiler (`ofeliaengine loc`, the player's live `loc/` folders; ADR 0102) |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
 | meshopt 0.6.2 (+ bitflags 2, float-cmp 0.10, num-traits 0.2, thiserror 2 + thiserror-impl) | MIT OR Apache-2.0 (float-cmp MIT) | mesh simplification for detail levels in `engine_assets` (ADR 0053) |
 | ron 0.12.2 (+ typeid 1.0.3; bitflags, once_cell, serde, unicode-ident already in the tree) | MIT OR Apache-2.0 | material files (`*.material.ron`) in `engine_assets` (ADR 0092) |

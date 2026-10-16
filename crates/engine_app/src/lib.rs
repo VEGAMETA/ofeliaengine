@@ -36,6 +36,11 @@
 //! ([`Videos::texture_index`]); their sound plays through an audio output the player
 //! starts with the first video that has sound.
 //!
+//! Text (ADR 0102): the game's localizer is a resource of the world
+//! (`world.resource::<Localizer>()`), made from [`PlayerSettings::text`] in the locale of
+//! the player's languages; a `loc/` folder ([`TextSource::Folder`]) is kept live, an edit
+//! showing in the running game.
+//!
 //! Physics (ADR 0101) is the game's: a [`ScenePhysics`] it owns gets the pack's bodies with
 //! [`Player::load_physics`] (level geometry static, props moving the scene's instances) and
 //! is stepped from [`Game::tick`]. A game without physics loads none of the pack's colliders.
@@ -49,6 +54,7 @@ mod player;
 mod process;
 mod report;
 mod settings;
+mod text;
 mod videos;
 
 pub use game::{FrameParts, Game};
@@ -56,6 +62,9 @@ pub use physics::{SceneBodies, ScenePhysics};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 pub use report::{FrameReport, Startup, StartupPipelines};
 pub use settings::{PlayerSettings, Window};
+pub use text::TextSource;
 pub use videos::{MaterialSlot, VideoId, Videos};
 // What opening a video takes and tells (ADR 0100).
 pub use engine_video::player::{VideoDesc, VideoEvent};
+// What a game formats its text with.
+pub use engine_loc::{Args, Diagnostic, Localizer, MessageId, Value, loc};

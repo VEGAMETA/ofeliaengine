@@ -1,4 +1,4 @@
-//! The compiler (feature `compile`; ADR 0102): a locale's Fluent files into a [`Strings`]
+//! The compiler (ADR 0102): a locale's Fluent files into a [`Strings`]
 //! table, with what is wrong in them.
 //!
 //! The subset of Fluent compiled: messages and their attributes, terms (with literal
@@ -7,10 +7,16 @@
 //! literals; keys by CLDR plural category, exact number or name), and `NUMBER` with
 //! `minimumFractionDigits`, `maximumFractionDigits`, `useGrouping` and `type: "ordinal"`.
 //! `DATETIME` and other functions are reported (a variable is written as it is).
+//!
+//! A translation compiles against the source locale's table ([`compile_translation`]):
+//! references the source resolves are not reported, messages the source lacks are, and so
+//! are variables the source's message does not pass (the message is left out: the source's
+//! shows instead of a `{$name}` the game never fills in).
 
 use crate::id::hash;
 use crate::table::{
-    Entry, Key, NumberFormat, Op, Selector, Span, Strings, TermArgument, TermValue, Variant,
+    CATEGORIES, Entry, Key, NumberFormat, Op, Selector, Span, Strings, TermArgument, TermValue,
+    Variant, variables_across,
 };
 use fluent_syntax::ast;
 use fluent_syntax::parser;
@@ -21,9 +27,9 @@ use std::collections::HashMap;
 pub struct Diagnostic {
     /// The file's name as given.
     pub file: String,
-    /// Line, from 1.
+    /// Line, from 1; 0 for something about the file or locale as a whole.
     pub line: u32,
-    /// Column (characters), from 1.
+    /// Column (characters), from 1 (0 with no line).
     pub column: u32,
     /// What is wrong.
     pub message: String,
@@ -33,14 +39,14 @@ pub struct Diagnostic {
 
 impl core::fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let kind = if self.error { "error" } else { "warning" };
+        if self.line == 0 {
+            return write!(f, "{}: {kind}: {}", self.file, self.message);
+        }
         write!(
             f,
-            "{}:{}:{}: {}: {}",
-            self.file,
-            self.line,
-            self.column,
-            if self.error { "error" } else { "warning" },
-            self.message
+            "{}:{}:{}: {kind}: {}",
+            self.file, self.line, self.column, self.message
         )
     }
 }
@@ -115,24 +121,32 @@ impl Pseudo {
     }
 }
 
-/// The CLDR plural categories, in the tables' order.
-pub(crate) const CATEGORIES: [&str; 6] = ["zero", "one", "two", "few", "many", "other"];
-
 /// Compiles a locale's files (`(name, contents)`) into a table, with what was found wrong;
 /// entries in error are left out.
 pub fn compile(locale: &str, files: &[(&str, &str)]) -> (Strings, Vec<Diagnostic>) {
-    compile_as(locale, files, None)
+    compile_as(locale, files, None, None)
+}
+
+/// Compiles a translation's files against `source`, the source locale's table (see the
+/// module documentation).
+pub fn compile_translation(
+    locale: &str,
+    files: &[(&str, &str)],
+    source: &Strings,
+) -> (Strings, Vec<Diagnostic>) {
+    compile_as(locale, files, None, Some(source))
 }
 
 /// The pseudo-locale `pseudo` of the source locale's files.
 pub fn compile_pseudo(pseudo: Pseudo, files: &[(&str, &str)]) -> (Strings, Vec<Diagnostic>) {
-    compile_as(pseudo.locale(), files, Some(pseudo))
+    compile_as(pseudo.locale(), files, Some(pseudo), None)
 }
 
 fn compile_as(
     locale: &str,
     files: &[(&str, &str)],
     pseudo: Option<Pseudo>,
+    source: Option<&Strings>,
 ) -> (Strings, Vec<Diagnostic>) {
     let mut c = Compiler {
         strings: Strings {
@@ -141,15 +155,17 @@ fn compile_as(
         },
         diagnostics: Vec::new(),
         pseudo,
+        source,
         file: "",
         lines: Vec::new(),
-        source: "",
+        text: "",
         defined: HashMap::new(),
         references: Vec::new(),
     };
     for &(name, contents) in files {
+        let contents = contents.strip_prefix('\u{feff}').unwrap_or(contents);
         c.file = name;
-        c.source = contents;
+        c.text = contents;
         c.lines = core::iter::once(0)
             .chain(contents.match_indices('\n').map(|(i, _)| i + 1))
             .collect();
@@ -167,6 +183,9 @@ fn compile_as(
         }
     }
     c.finish();
+    // In the order of the files and positions.
+    c.diagnostics
+        .sort_by(|a, b| (&a.file, a.line, a.column).cmp(&(&b.file, b.line, b.column)));
     (c.strings, c.diagnostics)
 }
 
@@ -174,8 +193,11 @@ struct Compiler<'s> {
     strings: Strings,
     diagnostics: Vec<Diagnostic>,
     pseudo: Option<Pseudo>,
+    /// The source locale's table, for a translation.
+    source: Option<&'s Strings>,
     file: &'s str,
-    source: &'s str,
+    /// The current file's text.
+    text: &'s str,
     /// Where each line of the current file starts.
     lines: Vec<usize>,
     /// Entries defined: (term, hash, attribute) → where.
@@ -203,18 +225,18 @@ impl<'s> Compiler<'s> {
         let line = self.lines.partition_point(|&s| s <= at).max(1);
         let start = self.lines[line - 1];
         let column = self
-            .source
-            .get(start..at.min(self.source.len()))
+            .text
+            .get(start..at.min(self.text.len()))
             .map_or(0, |s| s.chars().count());
         (line as u32, column as u32 + 1)
     }
 
     /// The byte offset of `slice` (a part of the current source) in it.
     fn offset(&self, slice: &str) -> usize {
-        let base = self.source.as_ptr() as usize;
+        let base = self.text.as_ptr() as usize;
         let at = slice.as_ptr() as usize;
         at.checked_sub(base)
-            .filter(|&o| o <= self.source.len())
+            .filter(|&o| o <= self.text.len())
             .unwrap_or(0)
     }
 
@@ -299,7 +321,10 @@ impl<'s> Compiler<'s> {
                 len: span.len + 2,
             };
         }
-        let name = self.text(id);
+        let name = match attribute {
+            Some(n) => self.text(&format!("{id}.{n}")),
+            None => self.text(id),
+        };
         self.strings.entries.push(Entry {
             hash: h,
             attribute: a,
@@ -403,11 +428,16 @@ impl<'s> Compiler<'s> {
         Some(match s {
             ast::InlineExpression::VariableReference { id } => Selector::Variable {
                 name: hash(id.name.as_bytes()),
+                written: self.text(id.name),
                 format: NumberFormat::default(),
             },
             ast::InlineExpression::FunctionReference { id, arguments } if id.name == "NUMBER" => {
-                let (name, format) = self.number(arguments, id.name)?;
-                Selector::Variable { name, format }
+                let (variable, format) = self.number(arguments, id.name)?;
+                Selector::Variable {
+                    name: hash(variable.as_bytes()),
+                    written: self.text(variable),
+                    format,
+                }
             }
             ast::InlineExpression::TermReference {
                 id,
@@ -432,12 +462,12 @@ impl<'s> Compiler<'s> {
         })
     }
 
-    /// `NUMBER($var, options)`: the variable and its format.
+    /// `NUMBER($var, options)`: the variable's name and its format.
     fn number(
         &mut self,
         arguments: &ast::CallArguments<&'s str>,
         name: &'s str,
-    ) -> Option<(u64, NumberFormat)> {
+    ) -> Option<(&'s str, NumberFormat)> {
         let Some(ast::InlineExpression::VariableReference { id }) = arguments.positional.first()
         else {
             self.report(
@@ -471,7 +501,7 @@ impl<'s> Compiler<'s> {
                 }
             }
         }
-        Some((hash(id.name.as_bytes()), format))
+        Some((id.name, format))
     }
 
     fn inline(&mut self, e: &ast::InlineExpression<&'s str>, from: (bool, u64), ops: &mut Vec<Op>) {
@@ -491,15 +521,10 @@ impl<'s> Compiler<'s> {
             }
             ast::InlineExpression::FunctionReference { id, arguments } => match id.name {
                 "NUMBER" => {
-                    if let Some((name, format)) = self.number(arguments, id.name) {
-                        let written = match arguments.positional.first() {
-                            Some(ast::InlineExpression::VariableReference { id }) => {
-                                self.text(id.name)
-                            }
-                            _ => Span::default(),
-                        };
+                    if let Some((variable, format)) = self.number(arguments, id.name) {
+                        let written = self.text(variable);
                         ops.push(Op::Variable {
-                            name,
+                            name: hash(variable.as_bytes()),
                             written,
                             format,
                         });
@@ -644,11 +669,16 @@ impl<'s> Compiler<'s> {
         self.strings
             .entries
             .sort_by_key(|e| (e.term, e.hash, e.attribute));
-        let known = |t: bool, h: u64| self.defined.keys().any(|&(dt, dh, _)| dt == t && dh == h);
+        let source = self.source;
+        let known = |t: bool, h: u64| {
+            self.defined.keys().any(|&(dt, dh, _)| dt == t && dh == h)
+                || source.is_some_and(|s| s.entries.iter().any(|e| e.term == t && e.hash == h))
+        };
         let mut missing = Vec::new();
         for r in &self.references {
             let (term, h, a) = r.to;
-            if !self.defined.contains_key(&(term, h, a)) {
+            let in_source = source.is_some_and(|s| s.find(term, h, a).is_some());
+            if !self.defined.contains_key(&(term, h, a)) && !in_source {
                 let what = if known(term, h) {
                     "has no such attribute"
                 } else {
@@ -728,6 +758,133 @@ impl<'s> Compiler<'s> {
                 .entries
                 .retain(|e| !cyclic.contains(&(e.term, e.hash)));
         }
+        if let Some(source) = self.source {
+            self.against(source);
+        }
+    }
+
+    /// A translation against the source's table: its messages the source lacks (warnings),
+    /// variables the source's message does not pass (errors; the message is left out).
+    fn against(&mut self, source: &Strings) {
+        let mut messages: Vec<u64> = self
+            .strings
+            .entries
+            .iter()
+            .filter(|e| !e.term)
+            .map(|e| e.hash)
+            .collect();
+        messages.dedup();
+        for &h in &messages {
+            let Some(name) = self.strings.message_name(h) else {
+                continue;
+            };
+            if !source.has_message(name) {
+                let (file, line, column) = self.defined_at(h);
+                let message = format!(
+                    "`{name}` is not in the source locale `{}`: the game cannot know it",
+                    source.locale
+                );
+                self.diagnostics.push(Diagnostic {
+                    file,
+                    line,
+                    column,
+                    message,
+                    error: false,
+                });
+            }
+        }
+        // Variables: the messages that use some their source message does not pass are left
+        // out. A message reaches others' variables through its references, which resolve as
+        // the runtime does: in the translation, else (it lacks them, or they are left out) in
+        // the source. So first every message wrong through any reference, then back those
+        // right once the others are left out: a message right with the source's version of a
+        // reference stays right with a translation's that passes (its variables are a subset
+        // of the source's), so bringing one back never makes another wrong.
+        let candidates: Vec<u64> = messages
+            .iter()
+            .copied()
+            .filter(|&h| {
+                self.strings
+                    .message_name(h)
+                    .is_some_and(|n| source.has_message(n))
+            })
+            .collect();
+        let mut left_out: Vec<u64> = candidates
+            .iter()
+            .copied()
+            .filter(|&h| !self.unpassed(source, h, &[]).is_empty())
+            .collect();
+        loop {
+            let back: Vec<u64> = left_out
+                .iter()
+                .copied()
+                .filter(|&h| self.unpassed(source, h, &left_out).is_empty())
+                .collect();
+            if back.is_empty() {
+                break;
+            }
+            left_out.retain(|h| !back.contains(h));
+        }
+        for &h in &left_out {
+            let extra: Vec<String> = self
+                .unpassed(source, h, &left_out)
+                .iter()
+                .map(|v| format!("`${v}`"))
+                .collect();
+            let passed: Vec<String> = variables_across(&[source], 0, h, &|_, _, _| 0)
+                .iter()
+                .map(|v| format!("`${v}`"))
+                .collect();
+            let name = self.strings.message_name(h).unwrap_or_default().to_owned();
+            let (file, line, column) = self.defined_at(h);
+            self.diagnostics.push(Diagnostic {
+                file,
+                line,
+                column,
+                message: format!(
+                    "`{name}` uses {}, which the source's message does not pass ({}); left out, the source's shows",
+                    extra.join(", "),
+                    if passed.is_empty() {
+                        String::from("it passes none")
+                    } else {
+                        format!("it passes {}", passed.join(", "))
+                    }
+                ),
+                error: true,
+            });
+        }
+        self.strings
+            .entries
+            .retain(|e| e.term || !left_out.contains(&e.hash));
+    }
+
+    /// Where the message of `h` is defined: its value, else its first attribute.
+    fn defined_at(&self, h: u64) -> (String, u32, u32) {
+        self.defined
+            .iter()
+            .filter(|((t, dh, _), _)| !t && *dh == h)
+            .map(|((_, _, a), at)| (*a != 0, at.clone()))
+            .min()
+            .map(|(_, at)| at)
+            .unwrap_or_default()
+    }
+
+    /// The variables message `h` of the translation uses that its source message does not
+    /// pass, with the messages of `left_out` resolved in the source.
+    fn unpassed(&self, source: &Strings, h: u64, left_out: &[u64]) -> Vec<String> {
+        let table = &self.strings;
+        let pick = |from: usize, target: u64, attribute: u64| {
+            let here = from == 0
+                && !left_out.contains(&target)
+                && table.find(false, target, attribute).is_some();
+            if here { 0 } else { 1 }
+        };
+        let passed = variables_across(&[source], 0, h, &|_, _, _| 0);
+        variables_across(&[table, source], 0, h, &pick)
+            .into_iter()
+            .filter(|v| !passed.contains(v))
+            .map(str::to_owned)
+            .collect()
     }
 }
 

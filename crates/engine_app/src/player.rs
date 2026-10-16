@@ -302,6 +302,8 @@ pub struct Player {
     gi_rays: Option<RayScene>,
     /// The game's videos (ADR 0100).
     videos: Videos,
+    /// The `loc/` folder behind the world's localizer, kept live (ADR 0102).
+    text: Option<crate::text::LiveText>,
     graph: RenderGraph,
     ring: UploadRing,
     geometry: GeometryPool,
@@ -655,6 +657,28 @@ impl Player {
         .map_err(AppError::at("the geometry pool"))?;
         let mut materials = MaterialTable::new(in_flight);
         let mut world = World::new();
+        // The game's text: its localizer a resource of the world.
+        let text = match &settings.text {
+            Some(source) => {
+                let phase = Instant::now();
+                let languages = settings
+                    .languages
+                    .clone()
+                    .unwrap_or_else(engine_platform::locale::preferred_languages);
+                let (localizer, live) = crate::text::load_text(source, &languages, &jobs)
+                    .map_err(|e| AppError::message("the game's text", e))?;
+                startup.notes.push(format!(
+                    "text in `{}` ({} locales; the player's languages: {})",
+                    localizer.locale(),
+                    localizer.locales().count(),
+                    languages.join(", ")
+                ));
+                world.insert_resource(localizer);
+                startup.phases.push(("the game's text", ms(phase)));
+                live
+            }
+            None => None,
+        };
         let mut scene_info = SceneInfo::default();
         let streamer = match &settings.pack {
             Some(pack) => {
@@ -754,6 +778,7 @@ impl Player {
             gi: None,
             gi_rays: None,
             videos: Videos::new(),
+            text,
             graph,
             ring,
             geometry,
@@ -962,6 +987,24 @@ impl Player {
     /// The game's world.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.runtime.world
+    }
+
+    /// The game's text (the world's resource), if [`PlayerSettings::text`] gave one.
+    pub fn localizer(&self) -> Option<&engine_loc::Localizer> {
+        self.runtime.world.resource::<engine_loc::Localizer>()
+    }
+
+    /// The game's text, to choose its locale (`set_locale` with the player's choice).
+    pub fn localizer_mut(&mut self) -> Option<&mut engine_loc::Localizer> {
+        self.runtime.world.resource_mut::<engine_loc::Localizer>()
+    }
+
+    /// What the last compile of a live `loc/` folder found (errors keep a locale's previous
+    /// text); empty for a pack.
+    pub fn text_diagnostics(&self) -> &[engine_loc::Diagnostic] {
+        self.text
+            .as_ref()
+            .map_or(&[], crate::text::LiveText::diagnostics)
     }
 
     /// The runtime: the world, the simulation clock, extraction.
@@ -1270,6 +1313,12 @@ impl Player {
         if core::mem::take(&mut self.resized) && self.needs_new_swapchain() {
             self.recreate_presentation()?;
             return Ok(None);
+        }
+        // A live `loc/` folder: its new tables between two frames.
+        if let Some(live) = &mut self.text
+            && let Some(localizer) = self.runtime.world.resource_mut::<engine_loc::Localizer>()
+        {
+            live.update(localizer);
         }
 
         // Latency control waits here, before the frame slot and input.
