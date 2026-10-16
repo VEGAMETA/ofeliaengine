@@ -3467,18 +3467,25 @@ impl ForwardRenderer {
             && self.frustum_culling
             && depth_desc.width > 0
             && depth_desc.height > 0;
+        // Marked from a single-sampled depth prepass.
+        let vsm = view.virtual_shadows.is_some()
+            && self.vsm_draw().is_some()
+            && depth_desc.samples == vk::SampleCountFlags::TYPE_1
+            && depth_desc.width > 0
+            && depth_desc.height > 0
+            && crate::lights::ViewAxis::new(view.camera.clip_from_world).is_some();
         Setup {
             depth_desc,
             phases: if occlusion { 2 } else { 1 },
-            cascade_count: self.shadow_settings.cascade_count() as u32,
+            // The pages hold the sun's whole shadow (ADR 0093 step 3d): no cascade.
+            cascade_count: if vsm {
+                0
+            } else {
+                self.shadow_settings.cascade_count() as u32
+            },
             shadow_draws: 0,
             capture: false,
-            // Marked from a single-sampled depth prepass.
-            vsm: view.virtual_shadows.is_some()
-                && self.vsm_draw().is_some()
-                && depth_desc.samples == vk::SampleCountFlags::TYPE_1
-                && depth_desc.width > 0
-                && depth_desc.height > 0,
+            vsm,
         }
     }
 
@@ -3550,8 +3557,9 @@ struct Setup {
     /// A reflection probe's face (ADR 0073): no ambient occlusion, contact or local
     /// shadows, reflections or sky pass; one shared shadow cascade; passes named apart.
     capture: bool,
-    /// The view's sun shadow on opaque surfaces comes from its virtual shadow pages (ADR
-    /// 0093 step 3b): their lists are laid out, their passes run after the prepass.
+    /// The view's sun shadow comes from its virtual shadow pages (ADR 0093 steps 3b and
+    /// 3d): their lists are laid out, their passes run after the prepass, and no cascade
+    /// is drawn (`cascade_count` 0).
     vsm: bool,
 }
 

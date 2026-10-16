@@ -348,9 +348,14 @@ impl ForwardRenderer {
         // The sun's cascades (ADR 0093): a view's cache holds them still across frames
         // (their texel size while it covers the view, the scene's depth range) and draws
         // only what changed; without one (and in a probe's capture) each is drawn whole.
-        let cache = view.shadow_cache.filter(|c| !capture && c.fits(settings));
+        // A view whose pages hold the sun's shadow has none (ADR 0093 step 3d): its cache
+        // keeps what it holds until a frame draws cascades again.
+        let cache = view
+            .shadow_cache
+            .filter(|c| !capture && cascade_count > 0 && c.fits(settings));
         let fit = match capture_shadow {
             Some(c) => c.fit,
+            None if cascade_count == 0 => shadow::no_cascades(view.light.direction),
             None => shadow::fit_cascades_keeping(
                 unjittered,
                 view.camera.position,
@@ -619,25 +624,29 @@ impl ForwardRenderer {
                     * (visible_bytes + meshlet_draws.map_or(0, |m| u64::from(m.layout.draws) * 4)),
             },
         );
-        let shadow_commands = fg.create_buffer(
-            "shadow commands",
-            BufferDesc {
-                size: shadow_meshlets.map_or(u64::from(cascade_count) * command_bytes, |m| {
-                    m.lists(cascade_count)
-                }),
-            },
-        );
-        let casters = fg.create_buffer(
-            "shadow casters",
-            BufferDesc {
-                size: u64::from(cascade_count)
-                    * (visible_bytes
-                        + shadow_meshlets.map_or(0, |m| {
-                            // Their pieces after the slots, when drawn at once.
-                            u64::from(m.layout.draws) * if pieces.is_some() { 8 } else { 4 }
-                        })),
-            },
-        );
+        // The cascades' command lists and casters, when the view has cascades.
+        let shadow_lists = (cascade_count > 0).then(|| {
+            let commands = fg.create_buffer(
+                "shadow commands",
+                BufferDesc {
+                    size: shadow_meshlets.map_or(u64::from(cascade_count) * command_bytes, |m| {
+                        m.lists(cascade_count)
+                    }),
+                },
+            );
+            let casters = fg.create_buffer(
+                "shadow casters",
+                BufferDesc {
+                    size: u64::from(cascade_count)
+                        * (visible_bytes
+                            + shadow_meshlets.map_or(0, |m| {
+                                // Their pieces after the slots, when drawn at once.
+                                u64::from(m.layout.draws) * if pieces.is_some() { 8 } else { 4 }
+                            })),
+                },
+            );
+            (commands, casters)
+        });
         // Local lights' shadow views drawn this frame: their command and caster lists,
         // sized for a power of two of views, at least the budget's, so the graph reuses its
         // buffers from frame to frame (the count changes every frame, pieces included).
@@ -700,8 +709,10 @@ impl ForwardRenderer {
         });
         let mut setup = fg
             .add_pass(names.cull_setup)
-            .write(culled, Access::TransferWrite)
-            .write(shadow_commands, Access::TransferWrite);
+            .write(culled, Access::TransferWrite);
+        if let Some((shadow_commands, _)) = shadow_lists {
+            setup = setup.write(shadow_commands, Access::TransferWrite);
+        }
         if let Some((flags, true)) = flags {
             setup = setup.write(flags, Access::TransferWrite);
         }
@@ -740,13 +751,15 @@ impl ForwardRenderer {
                         &regions[..phases as usize],
                     );
                 }
-                ctx.device.cmd_copy_buffer(
-                    ctx.cmd,
-                    commands.buffer,
-                    ctx.buffer(shadow_commands),
-                    &[shadow_region],
-                );
-                if let Some(m) = shadow_meshlets {
+                if let Some((shadow_commands, _)) = shadow_lists {
+                    ctx.device.cmd_copy_buffer(
+                        ctx.cmd,
+                        commands.buffer,
+                        ctx.buffer(shadow_commands),
+                        &[shadow_region],
+                    );
+                }
+                if let Some((m, (shadow_commands, _))) = shadow_meshlets.zip(shadow_lists) {
                     let header = |list: u32| vk::BufferCopy {
                         src_offset: m.layout.header.offset,
                         dst_offset: m.lists(list),
@@ -859,9 +872,11 @@ impl ForwardRenderer {
         let shared_shadow = capture_shadow.and_then(|c| c.map.get());
         let geometry = *geometry;
         let materials = *materials;
-        let shadow_map = match shared_shadow {
-            Some(map) => map,
-            None => {
+        let shadow_map = match (shared_shadow, shadow_lists) {
+            (Some(map), _) => Some(map),
+            // No cascade: the pages hold the sun's shadow.
+            (None, None) => None,
+            (None, Some((shadow_commands, casters))) => {
                 let (count, reach) = (fit.count, fit.reach);
                 let layers = cache.map_or(1, |_| settings.cascade_count());
                 // Without a cache, the cascades are tiles of one layer, drawn in one rendering
@@ -1157,7 +1172,7 @@ impl ForwardRenderer {
                 if let Some(c) = capture_shadow {
                     c.map.set(Some(shadow_map));
                 }
-                shadow_map
+                Some(shadow_map)
             }
         };
         // Local lights' shadow views (ADR 0071): culled per view, then each drawn into its
@@ -1553,7 +1568,7 @@ impl ForwardRenderer {
                                gi: Option<Texture>| {
             let push = Push {
                 visible: ctx.address(visible),
-                texture: ctx.sampled_index(shadow_map).unwrap_or(0),
+                texture: shadow_map.and_then(|t| ctx.sampled_index(t)).unwrap_or(0),
                 light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
                 ao: ao.and_then(|t| ctx.sampled_index(t)).unwrap_or(NO_AO),
                 phase: contact
@@ -2437,7 +2452,7 @@ impl ForwardRenderer {
             pass.depth_read_only(depth).execute(move |ctx| {
                 let push = Push {
                     visible: ctx.address(visible),
-                    texture: ctx.sampled_index(shadow_map).unwrap_or(0),
+                    texture: shadow_map.and_then(|t| ctx.sampled_index(t)).unwrap_or(0),
                     light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
                     ..base
                 };
@@ -2760,7 +2775,7 @@ fn shading_pass<'a, 'g>(
     name: &'static str,
     geometry: &GeometryFrame<'_>,
     materials: &MaterialFrame<'_>,
-    shadow_map: Texture,
+    shadow_map: Option<Texture>,
     culled: Buffer,
     visible: Buffer,
     targets: Targets,
@@ -2917,14 +2932,14 @@ fn forward_pass<'a, 'g>(
     name: &'static str,
     geometry: &GeometryFrame<'_>,
     materials: &MaterialFrame<'_>,
-    shadow_map: Texture,
+    shadow_map: Option<Texture>,
     culled: Buffer,
     visible: Buffer,
     instances: Option<Buffer>,
 ) -> PassBuilder<'a, 'g> {
     materials
         .read(geometry.read(fg.add_pass(name)))
-        .read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
+        .maybe_read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
         .read(culled, Access::Indirect)
         .read(visible, Access::StorageRead(ShaderStages::VERTEX))
         .maybe_read(instances, Access::StorageRead(ShaderStages::VERTEX))
