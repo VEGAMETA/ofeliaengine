@@ -2,7 +2,8 @@
 
 - Status: Accepted (the owner, 2026-10-16: both encodings, text written by development
   builds and binary by release ones, switchable; integrity by default, signing or
-  encryption as a game's setting)
+  encryption as a game's setting). Steps 1 to 4 built, but for sound, thumbnails, GPU
+  buffers and signing (see Steps).
 - Date: 2026-10-16
 - Related:
   - [ADR 0017](0017-ecs.md): the ECS and its snapshots;
@@ -162,6 +163,30 @@ otherwise read a large world in 1.9 s instead of 0.3 s.
   load is a camera cut to the renderer, so the temporal history starts over and nothing
   smears.
 
+### Timers, tweens, sound and video (the owner, 2026-10-16)
+
+- **Nothing that runs on time starts over after a load.**
+  - The engine's clocks are saved: the simulation tick, its time, and the fixed step's
+    remainder.
+  - A game's timers kept as numbers in components or resources are saved like any value.
+- **`Timer`** (engine_runtime) is a countdown on the game's clock: duration, remaining,
+  repeating, paused. The player ticks it before `Game::tick`. A game uses it instead of
+  `Instant`, which no save can hold.
+- **`Tween`** (engine_runtime) moves a component's field on the same entity, named by its
+  path (`Transform.translation`, `PointLight.color`):
+  - from a value to another over a duration, with an easing;
+  - once, looping, or back and forth.
+
+  The player ticks it on the game's clock; it is saved as a component, so it resumes at
+  the same point.
+- **Sound and music resume from the same place:**
+  - each source saves its position, volume, pause and looping;
+  - a source marked to start over after a load starts from the beginning, the developer's
+    choice;
+  - a video saves its position the same way.
+
+  Built with sound in the player (queue item 4), whose sources are saved from the start.
+
 ### Protection against players' edits (the owner's choice)
 
 - **By default, integrity only:** the checksum, the atomic swap, the backup. A player who
@@ -242,14 +267,56 @@ player.autosave_now();               // a checkpoint
 
      Applying looks every field up by name; a plan compiled per type would cut that if a
      game's loads need it.
-3. **The player:**
-   - quicksave, quickload, slots and autosave;
-   - the hooks;
-   - the providers (physics, the clock, random generators, animation);
-   - the cook's stable keys for the level's objects (pack version 9);
-   - thumbnails;
-   - the test: save, load, then the same state hash and the same next frames.
-4. **The CLI's `save` commands,** `docs/dev-guide/saves.md`, this ADR as built.
+3. **The player** (done, `feat/saves-player`):
+   - **`PlayerSettings::saves`:** the folder (`Saved Games\<studio>\<title>`, through
+     `SHGetKnownFolderPath`), the game's version, the encoding, autosaves (on time played,
+     in turn into `autosave 1..n`, held off by `Game::can_autosave`).
+   - **The world's `Saves` resource** takes the game's requests from its hooks and
+     systems: `quicksave`, `quickload`, `save(slot)`, `load(slot)`, `autosave_now`,
+     `slots`, and the outcomes.
+   - **The player** takes the frame's requests after its ticks. A save is captured, its
+     clock state added, `Game::before_save` run, then written by a thread of its own
+     (joined at drop, so a save asked for before quitting is kept).
+   - **A load:**
+     1. the level's instances destroyed in play are spawned again from the pack's
+        records;
+     2. the save's anonymous entities are removed;
+     3. `Game::before_load` runs;
+     4. the save is applied, matched entities read in place;
+     5. the clock is restored;
+     6. every camera cuts;
+     7. `Game::after_load` runs.
+   - **The cook keys every instance** by its glTF node's path and primitive (pack
+     version 9): the same across cooks while the hierarchy holds; a renamed node changes
+     its own keys only.
+   - **Physics:**
+     - a moving body's entity takes an id from its first instance;
+     - `ScenePhysics::save` and `restore` (one line each in the hooks) keep gravity and
+       the velocities, and put the bodies back where their entities were saved.
+   - **Engine components saved:** the camera, lights, probes, the GI volume, renderers.
+     A renderer is saved with its mesh and material ids, the same while a game adds them
+     in the same order; a stale id draws nothing.
+   - **`#[reflect(opaque)]`** marks a field whose type is a runtime handle: described by
+     its layout, never saved.
+   - **`SceneId::named`** names a game's long-lived entities. They are matched on load
+     and keep what saves do not hold.
+   - **`Timer` and `Tween`** (engine_runtime) are moved by the player before every tick.
+   - **A game's own saves:**
+     - `SaveImage::new()` for data alone;
+     - `CaptureOptions::only` for some entities;
+     - `ApplyOptions::add_only()` to add them to another world.
+   - **Tested on the player** (offscreen, `tests/saves.rs`): a quicksave and a quickload
+     bring back a named entity's state, its timer and tween where they were, a resource,
+     the spawned objects; the clock goes on. The quicksave is a 835-byte file, encoded in
+     0.11 ms and written in 2.5 ms behind the frame.
+   - **Not yet:**
+     - sound and video positions (with sound in the player);
+     - thumbnails;
+     - GPU buffers saved on request;
+     - signing or encryption;
+     - a destroyed prop's body made again (its entity comes back without a body).
+4. **The CLI and the guide** (done): `ofeliaengine save dump` and `save info`;
+   `docs/dev-guide/saves.md`.
 
 ## Consequences
 

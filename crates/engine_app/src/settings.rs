@@ -131,6 +131,9 @@ pub struct PlayerSettings {
     /// (`input.tick()`) and before `Game::present` (`input.frame()`). `None`: no input
     /// system (the game sees the window's events only).
     pub input: Option<engine_input::InputMap>,
+    /// Saves (ADR 0104): the folder, the game's version, the encoding, autosaves. The
+    /// world's [`crate::Saves`] resource takes the game's requests.
+    pub saves: crate::SaveSettings,
 }
 
 impl Default for PlayerSettings {
@@ -167,6 +170,7 @@ impl Default for PlayerSettings {
             text: None,
             languages: None,
             input: None,
+            saves: crate::SaveSettings::default(),
         }
     }
 }

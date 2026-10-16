@@ -10,7 +10,8 @@ use syn::{Data, DeriveInput, Expr, Fields, LitStr, parse_macro_input};
 ///
 /// Attributes on fields, all optional: `#[reflect(min = 0.0, max = 1.0, step = 0.1,
 /// tooltip = "...", hidden, skip, net_quantum = 0.01, net_skip, hint = "color",
-/// rename = "...")]`. On the type: `#[reflect(name = "...", skip, version = 2)]` (`skip`:
+/// rename = "...", opaque)]`. `opaque`: a field whose type is not reflected (a runtime
+/// handle), described by its layout alone and never saved (implies `skip`). On the type: `#[reflect(name = "...", skip, version = 2)]` (`skip`:
 /// its values are not saved; `version`: the version saves record, ADR 0104).
 #[proc_macro_derive(Reflect, attributes(reflect))]
 pub fn derive_reflect(input: TokenStream) -> TokenStream {
@@ -34,6 +35,7 @@ struct Attrs {
     hint: Option<LitStr>,
     rename: Option<LitStr>,
     version: Option<syn::LitInt>,
+    opaque: bool,
 }
 
 fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
@@ -59,6 +61,10 @@ fn parse_attrs(attrs: &[syn::Attribute]) -> syn::Result<Attrs> {
                 "version" => out.version = Some(meta.value()?.parse()?),
                 "hidden" => out.hidden = true,
                 "skip" => out.skip = true,
+                "opaque" => {
+                    out.opaque = true;
+                    out.skip = true;
+                }
                 "net_skip" => out.net_skip = true,
                 _ => return Err(meta.error("unknown reflect attribute")),
             }
@@ -153,11 +159,26 @@ fn expand(input: &DeriveInput) -> syn::Result<Tokens> {
                 let field_name = a.rename.as_ref().map_or(default_name, LitStr::value);
                 let ty = &field.ty;
                 let attrs = attrs_tokens(&a)?;
+                // An opaque field (a runtime handle) is described by its layout alone: its
+                // type needs no `Reflect`, and it is not saved.
+                let ty_info = if a.opaque {
+                    quote! {
+                        &::engine_reflect::TypeInfo {
+                            name: "opaque",
+                            size: ::core::mem::size_of::<#ty>(),
+                            align: ::core::mem::align_of::<#ty>(),
+                            kind: ::engine_reflect::TypeKind::Opaque,
+                            attrs: ::engine_reflect::Attrs::NONE,
+                        }
+                    }
+                } else {
+                    quote!(<#ty as ::engine_reflect::Reflect>::TYPE_INFO)
+                };
                 fields.push(quote! {
                     ::engine_reflect::Field {
                         name: #field_name,
                         offset: ::core::mem::offset_of!(#ident, #member),
-                        ty: <#ty as ::engine_reflect::Reflect>::TYPE_INFO,
+                        ty: #ty_info,
                         attrs: #attrs,
                     }
                 });

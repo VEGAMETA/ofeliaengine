@@ -13,6 +13,45 @@ use engine_reflect::TypeInfo;
 use engine_scene::SceneId;
 use std::collections::HashMap;
 
+/// How [`apply_with`] puts a save into a world.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ApplyOptions {
+    /// Match the save's entities with ids to the world's (the level loaded again); off,
+    /// every entity is created anew, without its id (a game's own saves added to a world).
+    pub match_level: bool,
+    /// Remove the level's entities the save records as destroyed.
+    pub destroy: bool,
+    /// Replace the resources.
+    pub resources: bool,
+    /// Set the simulation tick.
+    pub clock: bool,
+}
+
+impl Default for ApplyOptions {
+    /// A game loaded: everything.
+    fn default() -> Self {
+        Self {
+            match_level: true,
+            destroy: true,
+            resources: true,
+            clock: true,
+        }
+    }
+}
+
+impl ApplyOptions {
+    /// Only adds the save's entities to the world, touching nothing else: a character, a
+    /// building or a scene a game saved for its own reasons.
+    pub const fn add_only() -> Self {
+        Self {
+            match_level: false,
+            destroy: false,
+            resources: false,
+            clock: false,
+        }
+    }
+}
+
 /// What applying a save did.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LoadReport {
@@ -122,13 +161,29 @@ fn resolve(world: &mut World, name: &str, notes: &mut Vec<String>) -> Resolved {
 /// If the save's data is damaged, or a text save has a value it cannot read. The world
 /// then holds what was applied before, every value in it valid.
 pub fn apply(world: &mut World, save: &LoadedSave) -> Result<LoadReport, SaveError> {
+    apply_with(world, save, &ApplyOptions::default())
+}
+
+/// [`apply`], with what it does chosen ([`ApplyOptions::add_only`] for a game's own
+/// saves).
+///
+/// # Errors
+///
+/// As [`apply`].
+pub fn apply_with(
+    world: &mut World,
+    save: &LoadedSave,
+    options: &ApplyOptions,
+) -> Result<LoadReport, SaveError> {
     engine_profiler::zone!("save::apply");
     let mut report = LoadReport::default();
     let mut stable: HashMap<SceneId, Entity, IdBuild> =
         HashMap::with_capacity_and_hasher(save.entities.len(), IdBuild::default());
-    let mut q = QueryState::<(Entity, &SceneId)>::new(world);
-    for (e, &id) in q.iter_readonly(world) {
-        stable.insert(id, e);
+    if options.match_level {
+        let mut q = QueryState::<(Entity, &SceneId)>::new(world);
+        for (e, &id) in q.iter_readonly(world) {
+            stable.insert(id, e);
+        }
     }
     // Every entity first, so references between them resolve.
     let mut entity_of: Vec<Entity> = Vec::with_capacity(save.entities.len());
@@ -136,6 +191,7 @@ pub fn apply(world: &mut World, save: &LoadedSave) -> Result<LoadReport, SaveErr
     for loaded in &save.entities {
         let (e, was_there) = match loaded.key {
             LoadedKey::Excluded => (Entity::NULL, false),
+            LoadedKey::Stable(_) if !options.match_level => (world.spawn(()), false),
             LoadedKey::Stable(id) => match stable.get(&id) {
                 Some(&e) => (e, true),
                 None => (world.spawn((id,)), false),
@@ -185,6 +241,16 @@ pub fn apply(world: &mut World, save: &LoadedSave) -> Result<LoadReport, SaveErr
                 continue;
             };
             kept.push(*id);
+            report.components += 1;
+            // A matched entity's own value: read in place, so fields the save skips keep
+            // the level's (a renderer's mesh, a body's handle).
+            if matched[i]
+                && let Some(ptr) = world.get_raw_mut(e, *id)
+            {
+                // SAFETY: the entity's live value of the component `info` describes.
+                unsafe { save.decode(value, info, ptr.as_ptr(), &entity, &label, &mut notes)? };
+                continue;
+            }
             // SAFETY: the scratch is room for one `info` value; the default makes it
             // valid, decoding keeps it valid, and `insert_raw` moves it into the world (the
             // entity is alive: just matched or made), leaving the scratch free again.
@@ -194,7 +260,6 @@ pub fn apply(world: &mut World, save: &LoadedSave) -> Result<LoadReport, SaveErr
                 world.insert_raw(e, *id, scratch.ptr);
                 decoded?;
             }
-            report.components += 1;
         }
         if matched[i] {
             // The level's version of this entity may hold saved components the save says
@@ -221,14 +286,14 @@ pub fn apply(world: &mut World, save: &LoadedSave) -> Result<LoadReport, SaveErr
         }
     }
     restore_hierarchy(world, save, &entity_of);
-    for id in &save.destroyed {
+    for id in save.destroyed.iter().filter(|_| options.destroy) {
         if let Some(&e) = stable.get(id)
             && world.despawn(e)
         {
             report.destroyed += 1;
         }
     }
-    for value in &save.resources {
+    for value in save.resources.iter().filter(|_| options.resources) {
         let Some(slot) = resolved.get_mut(value.ty as usize) else {
             continue;
         };
@@ -253,7 +318,9 @@ pub fn apply(world: &mut World, save: &LoadedSave) -> Result<LoadReport, SaveErr
         unsafe { save.decode(value, info, ptr, &entity, &label, &mut notes)? };
         report.resources += 1;
     }
-    world.set_sim_tick(save.sim_tick);
+    if options.clock {
+        world.set_sim_tick(save.sim_tick);
+    }
     report.notes = notes;
     Ok(report)
 }

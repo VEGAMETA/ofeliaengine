@@ -39,9 +39,9 @@ mod text;
 mod value;
 mod wire;
 
-pub use apply::{LoadReport, apply};
+pub use apply::{ApplyOptions, LoadReport, apply, apply_with};
 pub use body::LoadedSave;
-pub use capture::{CaptureOptions, SaveImage, Transient, capture};
+pub use capture::{CaptureOptions, SaveImage, Transient, anonymous_entities, capture};
 pub use engine_scene::SceneId;
 pub use file::{
     Encoding, SaveHeader, SlotInfo, WriteStats, decode, encode, list_slots, read_header, read_save,

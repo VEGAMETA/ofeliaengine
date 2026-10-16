@@ -51,8 +51,9 @@ pub const MAGIC: [u8; 4] = *b"OFPK";
 /// compiled entry points) and the scene's materials of those types. Version 6 (ADR 0101) adds
 /// colliders and the scene's bodies (`crate::colliders`). Version 7 (ADR 0102) adds a
 /// locale's localized text (`crate::strings`). Version 8 (ADR 0103) adds the scene's
-/// navigation mesh (`crate::navigation`).
-pub const VERSION: u32 = 8;
+/// navigation mesh (`crate::navigation`). Version 9 (ADR 0104) adds the instances'
+/// stable keys, which saves know the level's objects by.
+pub const VERSION: u32 = 9;
 /// Oldest version this engine reads.
 pub const MIN_VERSION: u32 = 1;
 /// Largest entry a pack accepts (raw bytes): 4 GiB.
@@ -128,6 +129,9 @@ pub enum EntryKind {
     /// The scene's navigation mesh: Detour's tile blobs (version 8, ADR 0103;
     /// `crate::navigation`).
     NavMesh,
+    /// Each instance's stable key, from its glTF node's path (version 9, ADR 0104): what
+    /// saves know the level's objects by, across cooks.
+    InstanceKeys,
 }
 
 impl EntryKind {
@@ -145,6 +149,7 @@ impl EntryKind {
             Self::Bodies => 10,
             Self::Strings => 11,
             Self::NavMesh => 12,
+            Self::InstanceKeys => 13,
         }
     }
 
@@ -159,6 +164,7 @@ impl EntryKind {
             Self::Collider | Self::Bodies => 6,
             Self::Strings => 7,
             Self::NavMesh => 8,
+            Self::InstanceKeys => 9,
         }
     }
 
@@ -176,6 +182,7 @@ impl EntryKind {
             10 => Some(Self::Bodies),
             11 => Some(Self::Strings),
             12 => Some(Self::NavMesh),
+            13 => Some(Self::InstanceKeys),
             _ => None,
         }
     }
@@ -1691,7 +1698,8 @@ mod tests {
         b[0] = b'X';
         assert!(message(reopen(&b)).contains("not a pack"));
         let mut b = good.clone();
-        b[4] = 9;
+        // A version newer than this engine's.
+        b[4] = (VERSION + 1) as u8;
         assert!(message(reopen(&b)).contains("version"));
         assert!(message(reopen(&good[..good.len() - BLOCK as usize])).contains("truncated"));
         let header: Header = bytemuck::pod_read_unaligned(&good[..64]);

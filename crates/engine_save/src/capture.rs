@@ -47,12 +47,27 @@ impl Hasher for IdHasher {
 pub(crate) type IdBuild = BuildHasherDefault<IdHasher>;
 
 /// What [`capture`] takes besides the world.
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 pub struct CaptureOptions<'a> {
     /// The ids of the entities the level made when it loaded: those gone from the world
     /// are recorded as destroyed, so loading the level again removes them. `None`: no
     /// level.
     pub level: Option<&'a HashSet<SceneId>>,
+    /// Only the entities this accepts (a game's own saves: one character, a building, a
+    /// photo of the scene); `None`: all. References to the others are saved as none.
+    pub only: Option<&'a dyn Fn(Entity) -> bool>,
+    /// Leaves the resources out.
+    pub no_resources: bool,
+}
+
+impl core::fmt::Debug for CaptureOptions<'_> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CaptureOptions")
+            .field("level", &self.level.map(HashSet::len))
+            .field("only", &self.only.is_some())
+            .field("no_resources", &self.no_resources)
+            .finish()
+    }
 }
 
 /// How an entity is known in a save.
@@ -137,6 +152,12 @@ pub struct SaveImage {
 }
 
 impl SaveImage {
+    /// An empty save, for a game's own data: [`Self::set_state`] what it likes, then
+    /// write it as any other ([`crate::write_save`], [`crate::encode`]).
+    pub fn new() -> Self {
+        Self::default()
+    }
+
     /// Entities saved.
     pub fn entities(&self) -> usize {
         self.entities.len()
@@ -184,8 +205,13 @@ impl SaveImage {
     }
 
     /// Adds (or replaces) a named state of the game or an engine subsystem: physics, the
-    /// clock, a quest log kept outside the world.
+    /// clock, a quest log kept outside the world. The name is one word (it heads a block
+    /// of the text form): `physics`, `quest_log`.
     pub fn set_state<T: Reflect>(&mut self, name: &str, value: &T) {
+        debug_assert!(
+            !name.is_empty() && !name.contains(char::is_whitespace) && !name.contains(['[', ']']),
+            "a state's name is one word: `{name}`"
+        );
         let ty = self.type_index(T::TYPE_INFO);
         let saved = self.encode_now(ty, core::ptr::from_ref(value).cast());
         match self.states.iter_mut().find(|(n, _)| n == name) {
@@ -277,6 +303,9 @@ pub fn capture(world: &World, options: &CaptureOptions<'_>) -> SaveImage {
                 .and_then(|c| arch.pod_column(chunk, c))
                 .map(engine_ecs::bytemuck::cast_slice);
             for (row, &e) in arch.chunk_entities(chunk).iter().enumerate() {
+                if options.only.is_some_and(|only| !only(e)) {
+                    continue;
+                }
                 let key = match ids {
                     Some(ids) => {
                         if level.is_some() {
@@ -313,7 +342,10 @@ pub fn capture(world: &World, options: &CaptureOptions<'_>) -> SaveImage {
                     .iter()
                     .map(|&(c, _, pod, _)| if pod { arch.pod_column(chunk, c) } else { None }),
             );
-            for row in 0..arch.chunk_len(chunk) {
+            for (row, &e) in arch.chunk_entities(chunk).iter().enumerate() {
+                if options.only.is_some() && image.index.get(e) == u32::MAX {
+                    continue;
+                }
                 let first = image.components.len() as u32;
                 for (k, &(c, ty, pod, size)) in plan.columns.iter().enumerate() {
                     if pod {
@@ -353,7 +385,7 @@ pub fn capture(world: &World, options: &CaptureOptions<'_>) -> SaveImage {
             }
         }
     }
-    for t in reflected_types() {
+    for t in reflected_types().iter().filter(|_| !options.no_resources) {
         let ReflectedKind::Resource { get, .. } = t.kind else {
             continue;
         };
@@ -376,4 +408,37 @@ pub fn capture(world: &World, options: &CaptureOptions<'_>) -> SaveImage {
         image.destroyed.sort_unstable();
     }
     image
+}
+
+/// The entities a save holds without an id: those [`capture`] saves as created again on
+/// load (no `SceneId`, a saved component, not [`Transient`]). Loading a save into a world
+/// removes them first, so they are not doubled.
+pub fn anonymous_entities(world: &World) -> Vec<Entity> {
+    let components = world.components();
+    let (parent_id, children_id) = (
+        world.component_id::<Parent>(),
+        world.component_id::<Children>(),
+    );
+    let scene_id = world.component_id::<SceneId>();
+    let transient = world.component_id::<Transient>();
+    let mut out = Vec::new();
+    for arch in world.archetypes() {
+        if arch.is_empty()
+            || transient.is_some_and(|t| arch.column_index(t).is_some())
+            || scene_id.is_some_and(|s| arch.column_index(s).is_some())
+        {
+            continue;
+        }
+        let saved = arch.components().iter().any(|&cid| {
+            Some(cid) != parent_id
+                && Some(cid) != children_id
+                && components.type_info(cid).is_some_and(|i| !i.attrs.skip)
+        });
+        if saved {
+            for chunk in 0..arch.chunk_count() {
+                out.extend_from_slice(arch.chunk_entities(chunk));
+            }
+        }
+    }
+    out
 }

@@ -5,8 +5,9 @@
 
 use engine_core::math::Vec3;
 use engine_ecs::{
-    Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, pod_component,
+    Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, reflect_component,
 };
+use engine_reflect::Reflect;
 use engine_render::gi::ProbeGrid;
 use engine_render::reflections::{self, ProbeId, ProbeRefresh, ReflectionProbes};
 
@@ -15,7 +16,7 @@ use engine_render::reflections::{self, ProbeId, ProbeRefresh, ReflectionProbes};
 /// `blend` beyond its faces (neighbouring rooms' probes blend across their shared walls),
 /// and corrects parallax against the box's faces. The box turns and scales with the
 /// entity. A [`ProbeExtract`] mirrors these entities into the renderer's probe set.
-#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct ReflectionProbe {
     /// Half the box's size along the entity's axes: usually the room's walls.
@@ -30,7 +31,7 @@ pub struct ReflectionProbe {
     pub manual: u32,
 }
 
-pod_component!(ReflectionProbe);
+reflect_component!(pod ReflectionProbe);
 
 impl ReflectionProbe {
     /// A probe for the box of `half_extents` around its entity, at full intensity.
@@ -226,7 +227,7 @@ impl<Id: Copy + Eq> ProbeExtract<Id> {
 /// its entity (the world-aligned box around it when the entity turns), each tracing the
 /// scene. One volume lights the world: the first one found ([`GiExtract`]). Moving or
 /// resizing it makes a new volume, which converges again: place it once per level.
-#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct GiVolume {
     /// Half the box's size along the entity's axes.
@@ -238,7 +239,7 @@ pub struct GiVolume {
     pub max_probes: u32,
 }
 
-pod_component!(GiVolume);
+reflect_component!(pod GiVolume);
 
 impl GiVolume {
     /// A volume over the box of `half_extents` around its entity, probes about `spacing`

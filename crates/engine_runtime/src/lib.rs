@@ -50,6 +50,7 @@ mod lights;
 mod probes;
 mod runtime;
 mod skinned;
+mod timing;
 
 pub use camera::{Camera, CameraView, MainCamera, look_rotation};
 pub use engine_physics::ecs::FixedStep;
@@ -58,3 +59,4 @@ pub use lights::{LightExtract, PointLight, SpotLight, Sun};
 pub use probes::{GiExtract, GiVolume, ProbeExtract, ProbeSink, ReflectionProbe};
 pub use runtime::{FrameStages, Runtime};
 pub use skinned::SkinnedMesh;
+pub use timing::{Ease, Repeat, Timer, Timing, Tween};

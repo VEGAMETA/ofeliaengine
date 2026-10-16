@@ -3,12 +3,13 @@
 
 use engine_core::math::Quat;
 use engine_ecs::{
-    Entity, GlobalTransform, Parent, QueryState, Transform, World, bytemuck, pod_component,
+    Entity, GlobalTransform, Parent, QueryState, Transform, World, bytemuck, reflect_component,
 };
 use engine_frame::{
     Antialiasing, Exposure, Msaa, PostAntialiasing, Quality, SmaaQuality, Upscale, UpscalerKind,
     ViewCamera, ViewKind, ViewSettings,
 };
+use engine_reflect::Reflect;
 use engine_render::motion_blur::MotionBlurSettings;
 use engine_render::postfx::ExposureSettings;
 
@@ -19,7 +20,7 @@ use engine_render::postfx::ExposureSettings;
 /// The player's camera is moved every rendered frame (ADR 0019's addendum): write its
 /// `Transform` in `Runtime::frame`'s `present` step, from the latest input. The renderer
 /// reads it right after, without waiting for a tick's transform propagation.
-#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct Camera {
     /// Vertical field of view, radians.
@@ -55,7 +56,7 @@ pub struct Camera {
     pub shutter: f32,
 }
 
-pod_component!(Camera);
+reflect_component!(pod Camera);
 
 impl Camera {
     /// An active perspective camera: `fov_y` radians, planes at `near` and `far`, fixed

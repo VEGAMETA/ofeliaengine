@@ -4,14 +4,18 @@ use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4};
 use engine_core::sync::CachePadded;
 use engine_ecs::{
-    Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, pod_component,
+    Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, reflect_component,
 };
+use engine_reflect::Reflect;
 use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
 use engine_render::material::MaterialId;
 use engine_render::mesh::MeshId;
 
 /// Draws the entity's mesh with a material at its [`GlobalTransform`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+/// Saved whole (ADR 0104): the mesh and material as the ids the level and the game gave
+/// them, the same while the game adds its meshes and materials in the same order (a
+/// quickload, the same build; a stale id draws nothing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct MeshRenderer {
     /// The mesh in the geometry pool.
@@ -22,7 +26,14 @@ pub struct MeshRenderer {
     pub visible: u32,
 }
 
-pod_component!(MeshRenderer);
+reflect_component!(pod MeshRenderer);
+
+/// Nothing drawn: what a save's values are read into.
+impl Default for MeshRenderer {
+    fn default() -> Self {
+        bytemuck::Zeroable::zeroed()
+    }
+}
 
 impl MeshRenderer {
     /// A visible renderer.

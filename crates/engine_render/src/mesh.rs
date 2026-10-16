@@ -425,7 +425,19 @@ pub struct LodIndices<'a> {
 }
 
 /// A mesh in a [`GeometryPool`]. Ids of removed meshes are stale: lookups give `None`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+/// Saves hold it as it is (ADR 0104): the same while a game adds its meshes in the same
+/// order.
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    engine_reflect::Reflect,
+)]
 #[repr(C)]
 pub struct MeshId {
     index: u32,

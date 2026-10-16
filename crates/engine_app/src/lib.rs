@@ -53,14 +53,24 @@ mod physics;
 mod player;
 mod process;
 mod report;
+mod saves;
 mod settings;
 mod text;
 mod videos;
 
+/// Saves (ADR 0104): everything a game's own saves need (`capture`, `write_save`,
+/// `read_save`, `apply_with`).
+pub use engine_save as save;
+/// Saves' types a game's hooks take (ADR 0104).
+pub use engine_save::{
+    ApplyOptions, CaptureOptions, Encoding, LoadReport, LoadedSave, SaveHeader, SaveImage, SceneId,
+    SlotInfo, Transient,
+};
 pub use game::{FrameParts, Game};
 pub use physics::{SceneBodies, ScenePhysics};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 pub use report::{FrameReport, Startup, StartupPipelines};
+pub use saves::{Autosave, QUICK_SLOT, SaveSettings, Saves};
 pub use settings::{PlayerSettings, Window};
 pub use text::TextSource;
 pub use videos::{MaterialSlot, VideoId, Videos};

@@ -32,6 +32,38 @@ pub trait Game {
     /// player then propagates transforms and mirrors them into the GPU scene.
     fn tick(&mut self, world: &mut World, dt: f32);
 
+    /// A save was taken (ADR 0104), before it is written: add the state of what the game
+    /// owns outside the world (`physics.save(world, image)`), or correct what was taken
+    /// (`image.exclude(entity)`, `image.set_state(...)`).
+    fn before_save(&mut self, world: &World, image: &mut engine_save::SaveImage) {
+        let _ = (world, image);
+    }
+
+    /// A save is about to be applied: the level's objects destroyed in play are back,
+    /// the entities the save makes again removed.
+    fn before_load(&mut self, world: &mut World, save: &engine_save::LoadedSave) {
+        let _ = (world, save);
+    }
+
+    /// A save was applied: restore what the game owns (`physics.restore(world, save)`),
+    /// give entities made again what saves do not hold (a body, a mesh), migrate old
+    /// saves (`save.version_of(...)`, `report.notes`).
+    fn after_load(
+        &mut self,
+        world: &mut World,
+        save: &engine_save::LoadedSave,
+        report: &engine_save::LoadReport,
+    ) {
+        let _ = (world, save, report);
+    }
+
+    /// Whether an autosave may happen now (`PlayerSettings::saves.autosave`): not during
+    /// a cutscene or a fight, say.
+    fn can_autosave(&self, world: &World) -> bool {
+        let _ = world;
+        true
+    }
+
     /// Every rendered frame, after the ticks: what follows input every frame, outside the
     /// simulation (the player's camera). `alpha` is how far the frame lies between the
     /// last two ticks.

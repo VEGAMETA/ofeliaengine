@@ -14,6 +14,8 @@ workspace = true
 # Push constants as plain bytes without unsafe (ADR 0052); the version engine_ecs uses.
 bytemuck = { version = "1.25", features = ["derive"] }
 engine_core.workspace = true
+# Mesh and material ids described for saves (ADR 0104).
+engine_reflect.workspace = true
 engine_profiler.workspace = true
 engine_rhi.workspace = true
 # Material types compiled on first use, on a thread of their own (ADR 0092); loads the

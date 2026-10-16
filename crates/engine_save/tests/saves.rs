@@ -151,7 +151,13 @@ fn level_ids() -> HashSet<SceneId> {
 
 fn take(world: &World) -> engine_save::SaveImage {
     let ids = level_ids();
-    let mut image = capture(world, &CaptureOptions { level: Some(&ids) });
+    let mut image = capture(
+        world,
+        &CaptureOptions {
+            level: Some(&ids),
+            ..CaptureOptions::default()
+        },
+    );
     image.set_state(
         "physics",
         &PhysicsState {
@@ -410,4 +416,131 @@ fn damaged_files_are_refused_without_a_panic() {
         let cut = (next() % bytes.len() as u64) as usize;
         assert!(decode(&bytes[..cut]).is_err());
     }
+}
+
+#[derive(Reflect, Default, Debug, PartialEq)]
+struct Photo {
+    title: String,
+    exposure: f32,
+    tags: Vec<String>,
+}
+
+#[test]
+fn a_game_saves_what_it_likes_and_adds_it_back_alone() {
+    // A save of the game's own data only.
+    let mut image = engine_save::SaveImage::new();
+    image.set_state(
+        "photo_mode",
+        &Photo {
+            title: "Sunset over the castle".to_owned(),
+            exposure: 1.5,
+            tags: vec!["castle".to_owned(), "golden hour".to_owned()],
+        },
+    );
+    let save = decode(&encode(&image, Encoding::Binary, &SaveHeader::default()).unwrap()).unwrap();
+    assert_eq!(save.entities(), 0);
+    let photo: Photo = save.state("photo_mode").unwrap().unwrap();
+    assert_eq!(photo.tags[1], "golden hour");
+
+    // One character, out of a whole world, added to another world twice.
+    let mut world = World::new();
+    level(&mut world);
+    let hero = play(&mut world);
+    let only = |e: Entity| e == hero;
+    let image = capture(
+        &world,
+        &CaptureOptions {
+            only: Some(&only),
+            no_resources: true,
+            ..CaptureOptions::default()
+        },
+    );
+    assert_eq!(image.entities(), 1);
+    let save = decode(&encode(&image, Encoding::Text, &SaveHeader::default()).unwrap()).unwrap();
+    let mut other = World::new();
+    level(&mut other);
+    for _ in 0..2 {
+        let report =
+            engine_save::apply_with(&mut other, &save, &engine_save::ApplyOptions::add_only())
+                .unwrap();
+        assert_eq!(
+            (
+                report.spawned,
+                report.matched,
+                report.destroyed,
+                report.resources
+            ),
+            (1, 0, 0, 0)
+        );
+    }
+    let mut q = QueryState::<&Inventory>::new(&mut other);
+    let copies: Vec<Inventory> = q.iter_readonly(&other).cloned().collect();
+    assert_eq!(copies.len(), 2);
+    assert_eq!(copies[0].owner, "Офелия");
+    // The door it followed was not in the save: none.
+    assert_eq!(copies[0].follow, Entity::NULL);
+    assert!(
+        other.resource::<Score>().is_none(),
+        "the other world keeps its resources"
+    );
+    // The level is whole: nothing destroyed.
+    let mut ids = QueryState::<&SceneId>::new(&mut other);
+    assert_eq!(ids.iter_readonly(&other).count(), 3);
+}
+
+/// A runtime handle: not reflected.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+struct GpuHandle(u32);
+
+/// A renderer-like component: its handle is the level's, its visibility the game's.
+#[derive(Reflect, Default, Clone, Copy, Debug, PartialEq)]
+struct Shown {
+    #[reflect(opaque)]
+    handle: GpuHandle,
+    visible: bool,
+}
+reflect_component!(Shown);
+
+#[test]
+fn matched_entities_keep_what_saves_do_not_hold() {
+    let lamp = SceneId::named("the lamp");
+    assert_eq!(lamp, SceneId::named("the lamp"));
+    assert_ne!(lamp, SceneId::named("the other lamp"));
+    let mut world = World::new();
+    world.spawn((
+        lamp,
+        Shown {
+            handle: GpuHandle(42),
+            visible: true,
+        },
+    ));
+    let e = find(&mut world, lamp);
+    world.get_mut::<Shown>(e).unwrap().visible = false;
+    let save = decode(
+        &encode(
+            &capture(&world, &CaptureOptions::default()),
+            Encoding::Text,
+            &SaveHeader::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // The level loaded again gives the lamp another handle: it stays.
+    let mut again = World::new();
+    again.spawn((
+        lamp,
+        Shown {
+            handle: GpuHandle(77),
+            visible: true,
+        },
+    ));
+    apply(&mut again, &save).unwrap();
+    let e = find(&mut again, lamp);
+    assert_eq!(
+        again.get::<Shown>(e),
+        Some(&Shown {
+            handle: GpuHandle(77),
+            visible: false
+        })
+    );
 }

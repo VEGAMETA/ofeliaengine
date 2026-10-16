@@ -614,6 +614,8 @@ pub trait PhysicsBackend {
 
     /// Sets world gravity.
     fn set_gravity(&mut self, gravity: Vec3);
+    /// World gravity, as last set (saves keep it, ADR 0104).
+    fn gravity(&self) -> Vec3;
     /// Replaces the gravity fields seen by bodies in [`GravityMode::Fields`].
     fn set_gravity_fields(&mut self, fields: &[GravityField]);
 

@@ -3,12 +3,13 @@
 
 use engine_core::math::{Vec3, Vec3A};
 use engine_ecs::{
-    Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, pod_component,
+    Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, reflect_component,
 };
+use engine_reflect::Reflect;
 use engine_render::forward::{DirectionalLight, LocalLight, Spot};
 
 /// A point light at its entity's position.
-#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct PointLight {
     /// Color × intensity: its intensity per steradian (candela-like).
@@ -19,7 +20,7 @@ pub struct PointLight {
     pub shadow: u32,
 }
 
-pod_component!(PointLight);
+reflect_component!(pod PointLight);
 
 impl PointLight {
     /// A light of `color` (× intensity) reaching `range`, without shadows.
@@ -39,7 +40,7 @@ impl PointLight {
 }
 
 /// A spot light at its entity's position, shining down its entity's −Z axis.
-#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct SpotLight {
     /// Color × intensity: its intensity per steradian (candela-like).
@@ -54,7 +55,7 @@ pub struct SpotLight {
     pub shadow: u32,
 }
 
-pod_component!(SpotLight);
+reflect_component!(pod SpotLight);
 
 impl SpotLight {
     /// A cone of `color` (× intensity) reaching `range`, at full intensity within
@@ -78,7 +79,7 @@ impl SpotLight {
 
 /// The sun: light from far away down its entity's −Z axis, with a constant ambient term.
 /// One sun lights the world: the first one found.
-#[derive(Debug, Clone, Copy, PartialEq, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct Sun {
     /// Color × intensity.
@@ -87,7 +88,7 @@ pub struct Sun {
     pub ambient: Vec3,
 }
 
-pod_component!(Sun);
+reflect_component!(pod Sun);
 
 type Points = QueryState<
     (Entity, &'static GlobalTransform, &'static PointLight),

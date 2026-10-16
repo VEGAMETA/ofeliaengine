@@ -16,14 +16,17 @@ Last updated: 2026-10-16.
     - `engine_save`: the capture in the frame (0.51 ms per 10,000 entities), the binary
       and text encodings, reading by field name, `apply` to a reloaded level, files
       swapped in atomically with a `.bak`.
-  - **Next, step 3, the player:**
-    - quicksave, quickload, slots and autosave;
-    - the hooks;
-    - the level's stable ids (pack version 9);
-    - engine components reflected;
-    - the physics provider;
-    - loading rebuilds the level;
-    - GPU buffers saved on request.
+  - **Done, steps 3 and 4** (#245):
+    - in the player: quicksave, quickload, slots in `Saved Games` and autosave, written
+      behind the frame, through the world's `Saves` resource;
+    - hooks, the level's stable ids (pack version 9), engine components saved;
+    - physics in two lines; timers and tweens; a game's own saves;
+    - `ofeliaengine save dump` and `save info`, `docs/dev-guide/saves.md`.
+  - **Left, with sound in the player next:**
+    - sound and video positions;
+    - thumbnails;
+    - GPU buffers saved on request;
+    - signing.
 - **Done: navigation** (queue item 4, ADR 0103, 2026-10-16, #243): Recast and
   Detour in `engine_nav`; the cook bakes the level by default (Sponza in 0.03 s, 24 KB),
   pack version 8; `Player::load_navigation` puts a `NavMesh` into the world; paths in
@@ -254,8 +257,9 @@ water and impostors stay in §6):
    - ~~Navigation~~ (done 2026-10-16, #243, ADR 0103): Recast and Detour in
      `engine_nav`, baked by the cook by default (pack version 8), the world's `NavMesh`
      resource through `Player::load_navigation`. Later: crowds, obstacles, off-mesh links.
-   - Save games (ADR 0104): steps 1-2 done (#244, `engine_save`); step 3 (the player)
-     next, then audio in the player.
+   - ~~Save games~~ (ADR 0104): steps 1-2 done (#244, `engine_save`), 3-4 (the player,
+     the CLI, the guide) #245. Next: audio in the player, its sources
+     saved from the start.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
     Code can be connected as simply as possible and make games by itself, without

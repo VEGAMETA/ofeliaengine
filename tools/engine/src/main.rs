@@ -13,6 +13,8 @@
 //!                                                  pack (ADR 0102)
 //! ofeliaengine loc check <LOC> [--code <DIR>]...   check its locales against the source and
 //!                                                  the code's uses
+//! ofeliaengine save dump <FILE>                    a save as text, either encoding (ADR 0104)
+//! ofeliaengine save info <FILE>                    a save's header
 //! ```
 //!
 //! Run `ofeliaengine help` for the options.
@@ -71,6 +73,10 @@ usage:
                                                    each lacks against the source; with --code,
                                                    loc!(\"id\") (Rust) and loc(\"id\") (Luau)
                                                    uses that are not defined, messages unused
+  ofeliaengine save dump <FILE>                    a save as text, either encoding: what a
+                                                   development build writes, loaded back as it
+                                                   is (ADR 0104)
+  ofeliaengine save info <FILE>                    a save's header: slot, versions, level, time
 
 A shader is a .slang file with at least one [shader(\"<stage>\")] entry point; other
 .slang files are modules, compiled through the shaders that import them.
@@ -91,6 +97,7 @@ enum Command {
     Shaders(Args),
     Cook(CookArgs),
     Loc(loc::LocArgs),
+    Save { info: bool, file: PathBuf },
 }
 
 struct CookArgs {
@@ -115,6 +122,18 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some("shaders") => parse(args).map(Command::Shaders),
         Some("cook") => parse_cook(args).map(Command::Cook),
         Some("loc") => loc::parse_loc(args).map(Command::Loc),
+        Some("save") => {
+            let info = match args.next().as_deref() {
+                Some("dump") => false,
+                Some("info") => true,
+                other => return Err(format!("save {}: dump or info", other.unwrap_or(""))),
+            };
+            let file = args
+                .next()
+                .map(PathBuf::from)
+                .ok_or_else(|| String::from("save: a save file"))?;
+            Ok(Command::Save { info, file })
+        }
         Some("help" | "-h" | "--help") | None => Err(String::new()),
         Some(other) => Err(format!("unknown command `{other}`")),
     }
@@ -412,6 +431,7 @@ fn main() -> ExitCode {
         Command::Shaders(args) => run(args),
         Command::Cook(args) => cook(args),
         Command::Loc(args) => loc::run_loc(args),
+        Command::Save { info, file } => save(*info, file),
     };
     match result {
         Ok(code) => code,
@@ -420,6 +440,27 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// `save dump` prints a save as text (the binary turned into the text form a development
+/// build writes; any build loads it back); `save info` prints its header.
+fn save(info: bool, file: &std::path::Path) -> Result<ExitCode, String> {
+    let bytes = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
+    if info {
+        let h = engine_save::read_header(&bytes).map_err(|e| format!("{}: {e}", file.display()))?;
+        println!("slot:         {}", h.slot);
+        println!("game version: {}", h.game_version);
+        println!("engine:       {}", h.engine_version);
+        println!("level:        {}", h.level);
+        println!("created:      {} ms since 1970", h.created_unix_ms);
+        println!("played:       {:.1} min", h.play_ms as f64 / 60_000.0);
+        println!("thumbnail:    {} bytes", h.thumbnail.len());
+        println!("file:         {} bytes", bytes.len());
+    } else {
+        let text = engine_save::dump(&bytes).map_err(|e| format!("{}: {e}", file.display()))?;
+        print!("{text}");
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn run(args: &Args) -> Result<ExitCode, String> {
@@ -530,15 +571,34 @@ mod tests {
     fn args(line: &str) -> Result<Args, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Shaders(args) => Ok(args),
-            Command::Cook(_) | Command::Loc(_) => Err(String::from("not a shaders command")),
+            Command::Cook(_) | Command::Loc(_) | Command::Save { .. } => {
+                Err(String::from("not a shaders command"))
+            }
         }
     }
 
     fn cook_args(line: &str) -> Result<CookArgs, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Cook(args) => Ok(args),
-            Command::Shaders(_) | Command::Loc(_) => Err(String::from("not a cook command")),
+            Command::Shaders(_) | Command::Loc(_) | Command::Save { .. } => {
+                Err(String::from("not a cook command"))
+            }
         }
+    }
+
+    #[test]
+    fn parses_save_commands() {
+        let parse = |line: &str| parse_command(line.split_whitespace().map(str::to_owned));
+        assert!(matches!(
+            parse("save dump a.save"),
+            Ok(Command::Save { info: false, .. })
+        ));
+        assert!(matches!(
+            parse("save info a.save"),
+            Ok(Command::Save { info: true, .. })
+        ));
+        assert!(parse("save dump").is_err());
+        assert!(parse("save print a.save").is_err());
     }
 
     #[test]

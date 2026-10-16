@@ -186,6 +186,9 @@ pub struct CookedScene {
     pub bodies: Vec<crate::colliders::CookedBody>,
     /// The navigation mesh of the level geometry (ADR 0103; `crate::navigation`).
     pub navigation: Option<engine_nav::NavMeshData>,
+    /// Each instance's stable key, in [`Self::instances`]' order (pack version 9, ADR 0104;
+    /// empty from older packs): the path of its glTF node, then its primitive.
+    pub instance_keys: Vec<u128>,
 }
 
 /// A material of a type (ADR 0092): its glTF record in [`CookedScene::materials`] is its
@@ -367,6 +370,19 @@ pub struct CookStats {
     pub navigation_seconds: f64,
     /// Meshes split into convex parts, and how many of them came from the cache.
     pub colliders: crate::colliders::ColliderStats,
+}
+
+/// The key a path starts from.
+const PATH_ROOT: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+
+/// The key of a step below `parent` (FNV-1a over 128 bits): instances' stable keys.
+fn path_key(parent: u128, step: &[u8]) -> u128 {
+    let mut h = parent;
+    for &b in parent.to_le_bytes().iter().chain(step) {
+        h ^= u128::from(b);
+        h = h.wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013b);
+    }
+    h
 }
 
 /// Cooks `scene` (imported from a glTF file in `base_dir`): its textures read, filtered
@@ -594,10 +610,41 @@ pub fn cook_scene(
             Some(first)
         })
         .collect();
-    let mut stack: Vec<(usize, Mat4)> = scene.roots.iter().map(|&r| (r, Mat4::IDENTITY)).collect();
+    // Each node's step in its path: its name where its siblings do not share it, else its
+    // place among them (ADR 0104: stable across cooks while the hierarchy holds).
+    let mut segment = vec![String::new(); scene.nodes.len()];
+    let mut name_siblings = |siblings: &[usize]| {
+        let mut count: std::collections::HashMap<&str, u32> = std::collections::HashMap::new();
+        for &c in siblings {
+            *count.entry(scene.nodes[c].name.as_str()).or_default() += 1;
+        }
+        for (i, &c) in siblings.iter().enumerate() {
+            let name = scene.nodes[c].name.as_str();
+            segment[c] = if !name.is_empty() && count[name] == 1 {
+                name.to_owned()
+            } else {
+                format!("#{i}")
+            };
+        }
+    };
+    name_siblings(&scene.roots);
+    for node in &scene.nodes {
+        name_siblings(&node.children);
+    }
+    let mut stack: Vec<(usize, Mat4, u128)> = scene
+        .roots
+        .iter()
+        .map(|&r| {
+            (
+                r,
+                Mat4::IDENTITY,
+                path_key(PATH_ROOT, segment[r].as_bytes()),
+            )
+        })
+        .collect();
     // Each node's instances (first, count), for the bodies that move them.
     let mut node_instances = vec![(0u32, 0u32); scene.nodes.len()];
-    while let Some((index, parent)) = stack.pop() {
+    while let Some((index, parent, key)) = stack.pop() {
         let node = &scene.nodes[index];
         let world = parent
             * Mat4::from_scale_rotation_translation(
@@ -616,6 +663,9 @@ pub fn cook_scene(
             let skin = node.skin.filter(|&k| k < cooked.skins.len());
             for (p, primitive) in scene.meshes[mesh].primitives.iter().enumerate() {
                 let skinned = skin.filter(|_| !primitive.joints.is_empty());
+                cooked
+                    .instance_keys
+                    .push(path_key(key, format!("/{p}").as_bytes()));
                 cooked.instances.push(CookedInstance {
                     mesh: first_primitive[mesh] + p as u32,
                     material: primitive.material.map(|m| m as u32),
@@ -629,7 +679,13 @@ pub fn cook_scene(
             }
         }
         node_instances[index] = (first, cooked.instances.len() as u32 - first);
-        stack.extend(node.children.iter().map(|&c| (c, world)));
+        stack.extend(node.children.iter().map(|&c| {
+            (
+                c,
+                world,
+                path_key(key, format!("/{}", segment[c]).as_bytes()),
+            )
+        }));
     }
     if settings.colliders {
         let start = std::time::Instant::now();
@@ -1528,6 +1584,21 @@ pub fn write_pack(
             DEFAULT_CHUNK_SHIFT,
         ))?;
     }
+    // The instances' stable keys (version 9, ADR 0104).
+    if !scene.instance_keys.is_empty() {
+        let data: Vec<u8> = scene
+            .instance_keys
+            .iter()
+            .flat_map(|k| k.to_le_bytes())
+            .collect();
+        writer.add(&PreparedEntry::new(
+            EntryKind::InstanceKeys,
+            [scene.instance_keys.len() as u32, 0, 0, 0, 0, 0, 0],
+            &data,
+            level,
+            DEFAULT_CHUNK_SHIFT,
+        ))?;
+    }
     // The navigation mesh (version 8, ADR 0103).
     if let Some(nav) = &scene.navigation {
         let (meta, data) = crate::navigation::nav_entry(nav);
@@ -1909,6 +1980,7 @@ enum Decoded {
         (Vec<TypedMaterialRecord>, Vec<ParamTextureRecord>, Vec<u8>),
     ),
     MaterialType(MaterialTypeData),
+    InstanceKeys(Vec<u128>),
 }
 
 fn add_stats(total: &mut LoadStats, more: LoadStats) {
@@ -2012,6 +2084,16 @@ fn open_scene_with(
             EntryKind::NavMesh => {
                 return Err(invalid("a navigation mesh loaded as a scene's entry"));
             }
+            EntryKind::InstanceKeys => {
+                let count = e.meta[0] as usize;
+                let keys: Vec<u128> = data
+                    .get(..count * 16)
+                    .ok_or_else(|| invalid("instance keys truncated"))?
+                    .chunks_exact(16)
+                    .map(|c| u128::from_le_bytes(c.try_into().unwrap_or_default()))
+                    .collect();
+                Decoded::InstanceKeys(keys)
+            }
         };
         if let Ok(mut slot) = decoded[index as usize].lock() {
             *slot = Some(value);
@@ -2041,6 +2123,7 @@ fn open_scene_with(
                 }
             }
             Some(Decoded::MaterialType(ty)) => layout.scene.material_types.push(ty),
+            Some(Decoded::InstanceKeys(keys)) => layout.scene.instance_keys = keys,
             None if matches!(
                 entries[i].kind(),
                 EntryKind::TextureLevels
@@ -2410,6 +2493,7 @@ mod tests {
             colliders: Vec::new(),
             bodies: Vec::new(),
             navigation: None,
+            instance_keys: Vec::new(),
         }
     }
 
@@ -2696,6 +2780,85 @@ mod tests {
         let (_, layout, _) = open_scene(&path, &jobs, 4).unwrap();
         assert!(layout.scene.colliders.is_empty() && layout.scene.bodies.is_empty());
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn instances_keep_their_keys_across_cooks_while_their_paths_hold() {
+        use crate::gltf_import::{MeshData, NodeData, Primitive};
+        let quad = || Primitive {
+            positions: vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]],
+            normals: vec![[0.0, 1.0, 0.0]; 3],
+            uvs: Vec::new(),
+            tangents: Vec::new(),
+            indices: vec![0, 1, 2],
+            material: None,
+            min: [0.0; 3],
+            max: [1.0, 0.0, 1.0],
+            joints: Vec::new(),
+            weights: Vec::new(),
+        };
+        let node = |name: &str, children: Vec<usize>| NodeData {
+            name: name.to_owned(),
+            translation: [0.0; 3],
+            rotation: Quat::IDENTITY.to_array(),
+            scale: [1.0; 3],
+            mesh: Some(0),
+            children,
+            skin: None,
+            physics: None,
+        };
+        // A hall with a door and two unnamed lamps; a crate at the root.
+        let scene = |door: &str, swap: bool| {
+            let mut nodes = vec![
+                node("Hall", vec![1, 2, 3]),
+                node(door, Vec::new()),
+                node("", Vec::new()),
+                node("", Vec::new()),
+                node("Crate", Vec::new()),
+            ];
+            if swap {
+                nodes.swap(0, 4);
+                nodes[4].children = vec![1, 2, 3];
+            }
+            ImportedScene {
+                meshes: vec![MeshData {
+                    name: "m".into(),
+                    primitives: vec![quad(), quad()],
+                }],
+                roots: if swap { vec![4, 0] } else { vec![0, 4] },
+                nodes,
+                ..ImportedScene::default()
+            }
+        };
+        let jobs = ThreadPool::builder().workers(1).build().unwrap();
+        let settings = CookSettings {
+            colliders: false,
+            navigation: None,
+            lods: false,
+            meshlets: false,
+            ..CookSettings::default()
+        };
+        let keys = |s: &ImportedScene| -> std::collections::HashSet<u128> {
+            let (cooked, _) = cook_scene(s, None, None, &jobs, &settings).unwrap();
+            assert_eq!(cooked.instance_keys.len(), cooked.instances.len());
+            cooked.instance_keys.into_iter().collect()
+        };
+        let base = keys(&scene("Door", false));
+        assert_eq!(
+            base.len(),
+            10,
+            "five nodes, two primitives each, every key distinct"
+        );
+        assert_eq!(
+            base,
+            keys(&scene("Door", false)),
+            "the same scene, the same keys"
+        );
+        // The nodes' order in the file changes nothing while the paths hold.
+        assert_eq!(base, keys(&scene("Door", true)));
+        // A renamed node changes its own keys only.
+        let renamed = keys(&scene("Gate", false));
+        assert_eq!(base.intersection(&renamed).count(), 8);
     }
 
     #[test]

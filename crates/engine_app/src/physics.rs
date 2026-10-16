@@ -26,6 +26,10 @@
 //!   the prop's mesh.
 //! - The game reaches the world through [`ScenePhysics::physics`] (queries, characters,
 //!   bodies of its own).
+//! - **Saves** (ADR 0104): a moving body's entity takes its first instance's id, so loading
+//!   matches it; [`ScenePhysics::save`] keeps gravity and the bodies' velocities,
+//!   [`ScenePhysics::restore`] puts the bodies where their entities were saved, at their
+//!   saved velocities (`Game::before_save` and `Game::after_load`, one line each).
 
 use crate::AppError;
 use engine_assets::colliders::{CookedBody, CookedCollider, Motion};
@@ -38,6 +42,8 @@ use engine_physics::{
     ShapeId,
 };
 use engine_physics_jolt::JoltBackend;
+use engine_reflect::Reflect;
+use engine_scene::SceneId;
 use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
@@ -75,6 +81,8 @@ pub struct ScenePhysics {
     bodies: Vec<BodyId>,
     /// The world's settings: the layers the scene's bodies name.
     settings: PhysicsSettings,
+    /// The moving bodies with ids, for saves (made with the pack's bodies).
+    saved: Option<engine_ecs::QueryState<(&'static RigidBody, &'static SceneId)>>,
 }
 
 /// Placement tolerance for round shapes rebuilt for a scale (scene units).
@@ -90,6 +98,7 @@ impl ScenePhysics {
             placed: HashMap::new(),
             bodies: Vec::new(),
             settings: settings.clone(),
+            saved: None,
         })
     }
 
@@ -260,6 +269,15 @@ impl ScenePhysics {
                 Transform::from_translation(placed.position).with_rotation(placed.rotation),
                 GlobalTransform(pose),
             ));
+            // Known to saves by its first instance's id (pack version 9).
+            if let Some(id) = body
+                .instances
+                .first()
+                .and_then(|&i| instances.get(i as usize))
+                .and_then(|&e| world.get::<SceneId>(e).copied())
+            {
+                world.insert(entity, body_id(id));
+            }
             if body.motion == Motion::Kinematic {
                 world.insert(
                     entity,
@@ -289,6 +307,9 @@ impl ScenePhysics {
         }
         // A level's bodies all at once: the broad phase's tree built for them.
         self.physics.optimize_broad_phase();
+        if self.saved.is_none() {
+            self.saved = Some(engine_ecs::QueryState::new(world));
+        }
         Ok(report)
     }
 
@@ -312,6 +333,104 @@ impl ScenePhysics {
             sync.interpolate(world, alpha);
         }
     }
+
+    /// Adds the physics' own state to a save (ADR 0104): gravity, and the velocities of
+    /// the moving bodies whose entities have ids. Call it from `Game::before_save`.
+    pub fn save(&mut self, world: &World, image: &mut engine_save::SaveImage) {
+        let mut state = PhysicsState {
+            gravity: self.physics.gravity(),
+            bodies: Vec::new(),
+        };
+        let physics = &self.physics;
+        let Some(bodies) = self.saved.as_mut() else {
+            image.set_state(STATE, &state);
+            return;
+        };
+        bodies.for_each_readonly(world, |(body, id): (&RigidBody, &SceneId)| {
+            if let Some((linear, angular)) = physics.velocity(body.body()) {
+                let v = id.as_u128();
+                state.bodies.push(BodyState {
+                    id_high: (v >> 64) as u64,
+                    id_low: v as u64,
+                    linear,
+                    angular,
+                });
+            }
+        });
+        image.set_state(STATE, &state);
+    }
+
+    /// Takes the physics back from a save (ADR 0104): gravity; every moving body to where
+    /// its entity's `Transform` was saved, at its saved velocities, its interpolation
+    /// starting there. Call it from `Game::after_load`.
+    ///
+    /// # Errors
+    ///
+    /// If the save's physics state is damaged.
+    pub fn restore(
+        &mut self,
+        world: &mut World,
+        save: &engine_save::LoadedSave,
+    ) -> Result<(), engine_save::SaveError> {
+        let Some(state) = save.state::<PhysicsState>(STATE)? else {
+            return Ok(());
+        };
+        self.physics.set_gravity(state.gravity);
+        let velocities: HashMap<u128, (Vec3, Vec3)> = state
+            .bodies
+            .iter()
+            .map(|b| {
+                (
+                    (u128::from(b.id_high) << 64) | u128::from(b.id_low),
+                    (b.linear, b.angular),
+                )
+            })
+            .collect();
+        let physics = &mut self.physics;
+        let mut bodies = engine_ecs::QueryState::<(
+            &RigidBody,
+            &Transform,
+            &mut PhysicsPose,
+            Option<&SceneId>,
+        )>::new(world);
+        bodies.for_each(world, |(body, transform, pose, id)| {
+            let (position, rotation) = (transform.translation, transform.rotation);
+            physics.set_transform(body.body(), position, rotation);
+            *pose = PhysicsPose::at(position, rotation);
+            let (linear, angular) = id
+                .and_then(|id| velocities.get(&id.as_u128()).copied())
+                .unwrap_or((Vec3::ZERO, Vec3::ZERO));
+            physics.set_velocity(body.body(), linear, angular);
+        });
+        Ok(())
+    }
+}
+
+/// The name of the physics' state in a save.
+const STATE: &str = "physics";
+
+/// The physics in a save: what the world does not hold.
+#[derive(Debug, Default, Clone, PartialEq, Reflect)]
+#[reflect(name = "PhysicsState")]
+struct PhysicsState {
+    gravity: Vec3,
+    bodies: Vec<BodyState>,
+}
+
+/// A moving body's velocities, by its entity's id.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Reflect)]
+#[reflect(name = "BodyState")]
+struct BodyState {
+    id_high: u64,
+    id_low: u64,
+    linear: Vec3,
+    angular: Vec3,
+}
+
+/// A moving body's entity id: its first instance's, mixed so the two differ.
+fn body_id(instance: SceneId) -> SceneId {
+    let v = instance.as_u128();
+    SceneId::from_u128(v.rotate_left(64) ^ 0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C834)
 }
 
 /// What shapes made for a placement are shared by: the transform's scale when it is

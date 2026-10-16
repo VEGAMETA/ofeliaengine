@@ -35,6 +35,11 @@ engine_physics_jolt.workspace = true
 # The game's text (ADR 0102): strings packs, or a `loc/` folder compiled and kept live.
 engine_loc.workspace = true
 engine_input.workspace = true
+# Saves (ADR 0104): taken after the frame's ticks, written behind it, loaded at a tick
+# boundary; the level's objects known by their `SceneId`.
+engine_save.workspace = true
+engine_scene.workspace = true
+engine_reflect.workspace = true
 # The pack's navigation mesh as the world's resource (ADR 0103).
 engine_nav.workspace = true
 # Text errors of a live folder go to the log (engine_log's backend).
