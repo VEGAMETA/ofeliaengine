@@ -112,12 +112,14 @@
   - Simplification is optional, within an error, with borders locked (meshoptimizer), for
     dense meshes.
   - Skinned meshes get no collider.
-- **A prop**, a mesh marked dynamic, gets the first that fits:
-  1. a box, sphere or capsule whose volume is within 10 % of the hull's;
-  2. its hull, when that is within 10 % of the mesh's volume;
-  3. convex parts.
+- **A prop**, a mesh marked dynamic, is decomposed first (8c-3 as built: neither its hull nor
+  a primitive can tell a concave mesh, since a U's hull is a box):
+  1. convex enough to be one part: a box, sphere, capsule or cylinder whose volume is within
+     10 % of the hull's, else its hull;
+  2. otherwise its convex parts.
 
-  Every hull is at most 64 points.
+  Every hull is at most 64 points. A dynamic glTF physics body's triangle mesh collider
+  becomes its convex parts too: a simulated body cannot be a triangle mesh.
 - **Authored colliders win over generated ones:**
   - `KHR_physics_rigid_bodies` (motion, colliders, triggers, materials, filters) with
     `KHR_implicit_shapes`;
@@ -211,8 +213,8 @@
   form from the same source data.
 - **Scale is never an error.** Rebuilt shapes cost memory per distinct scale, and an animated
   non-uniform scale on a round shape rebuilds through the cache.
-- **The decomposition is a sizable port.** Its fallback (vendoring V-HACD) stays open until
-  8c-3 meets its goal.
+- **The decomposition is a sizable port** (about 3,000 lines with its tests). It met its goal but for the mug's
+  hull count (8c-3 as built), so V-HACD is not vendored.
 - **The editor gets colliders as plain data**, ready to edit.
 - **Packs trust their contents:** Jolt's restore does not validate its bytes the way a fuzzed
   parser would. A pack is part of the game, as its SPIR-V is.
@@ -321,7 +323,89 @@
   question 2.
 - **`RayHit`'s surface:** the triangles keep it in the engine's form, but Jolt's materials
   are not set from it yet.
-- **The decomposition** (8c-3): props whose hull is not within 10 % get the hull for now.
 - **The cook's collider making runs on one thread** (1.6 s for Intel Sponza's 115 meshes);
-  it could run per mesh.
+  it could run per mesh. The decompositions run in parallel (8c-3).
 - **Simplifying level meshes** (`StaticShape::Simplified`) waits for the rules file.
+
+## 8c-3 as built (2026-10-16)
+
+### What was built
+
+- **`engine_collision::decompose`**, CoACD's algorithm in Rust (MIT, credited in
+  `THIRD_PARTY_NOTICES.md`), with none of its dependencies:
+  - `remesh`: a closed manifold by marching tetrahedra over a distance band (CoACD's 100 cells,
+    the surface 0.55 of a cell out), the grid's origin off the mesh's own grid so that
+    axis-aligned faces never put grid points on the surface; the band per slab of the grid in
+    parallel;
+  - `decimate`: the search mesh simplified to about 4,000 triangles by quadric edge collapses
+    that keep it closed (the link condition, no flips), within half a cell; a collapse costs
+    its mean squared distance plus a little for its length, so flat faces coarsen evenly;
+  - `clip`: a closed part cut by a plane, both caps by ear clipping with holes bridged;
+  - `cost`: the concavity (the volume term; the boundary Hausdorff distance from R2 samples
+    and a triangle BVH);
+  - `search`: the tree search (150 iterations, depth 3, 20 planes per axis) and the
+    refinement of the first cut. What runs in parallel changes nothing in the result: the
+    parts of a round, the root's moves (every iteration expands the next one until all are
+    tried), the rollout's three candidate cuts, the refinement's two probes;
+  - the merge: pair costs in parallel, kept, and only the merged part's recomputed (as
+    CoACD's cost matrix). A merged part keeps its pieces, so the faces where they touch stay
+    out of its Hausdorff term (two halves of a box merge back with no concavity);
+  - hulls of at most 64 points, the farthest first.
+- **The cook:**
+  - `DynamicShape::Auto` decomposes, then a mesh of one part gets a primitive or its hull as
+    before; `DynamicShape::Parts` asks for parts outright; `ColliderRules::parts` holds the
+    settings (CoACD's threshold 0.05, no part limit by default);
+  - a dynamic `KHR_physics_rigid_bodies` body's mesh collider (`convexHull` false) becomes its
+    parts (or its hull, convex enough); static ones keep their triangles;
+  - every mesh to decompose is collected first and done in parallel on the cook's pool;
+  - parts go into the DDC under a key of the mesh's welded triangles, the settings and
+    `decompose::REVISION`: a second cook loads them (`cook` prints how many);
+  - a scene cooked with the default rules (level geometry) decomposes nothing and costs
+    nothing more.
+
+### Measured (ref-1, release, 16 threads)
+
+The research note's set, judged exactly (`docs/research/mesh-colliders.md`, "Ours"):
+
+| model | ours: hulls, time, sticks out | CoACD 1.0.14: hulls, time, sticks out |
+|---|---|---|
+| mug with a handle | 24, 0.5 s, 1.61 % | 21, 20.1 s, 1.19 % |
+| torus | 12, 0.5 s, 1.29 % | 11, 14.0 s, 1.59 % |
+| Duck | 11, 0.5 s, 1.40 % | 10, 133.8 s, 1.36 % |
+| BoomBox | 25, 2.1 s, 0.97 % | 26, 195.1 s, 0.73 % |
+| SheenChair | 25, 1.3 s, 1.12 % | 29, 95.3 s, 0.82 % |
+| ToyCar | 118, 3.0 s, 1.69 % | 110, 142.6 s, 1.19 % |
+| DragonAttenuation | 42, 1.9 s, 1.16 % | 51, 103.2 s, 1.18 % |
+
+- **The goal** (CoACD's hull counts within 10 %, at most 3 s per model) is met but for the
+  mug's count: 24 against 21 (+14 %). All 14 models take 0.02-3.0 s.
+- **The same hulls on every run, bit for bit,** with or without the pool.
+- **What it took to get there:**
+  - the stairs' decimation, 6.6 s to 0.3 s: on flat faces every collapse cost nothing and
+    vertices took in fans of neighbours; shorter edges first where errors tie, at most 32
+    neighbours;
+  - ToyCar's merge, 42 s to 0.3 s: costs kept instead of recomputed for every pair after
+    every merge;
+  - the first rounds of cuts left most threads idle; the parallel search and remesh took
+    ToyCar from 4.9 s to 3.0 s and BoomBox from 4.2 s to 2.1 s.
+
+### Tested
+
+- `engine_collision`: the box stays whole, an L splits in two, a U in three (in parallel), with
+  the volumes kept; clipping, caps with holes, the BVH against brute force, R2 samples by
+  area, the remesh closed (a box and an open box), the decimation closed, within its bound,
+  without fans; two halves of a box have no concavity together, apart they have.
+- `engine_assets`: a U prop gets three hulls of the U's volume and a crate still its box;
+  `Parts` gives the crate its hull, `Hull` the U its full hull; the second cook takes the
+  parts from the cache, other settings do not, and a torn entry is not trusted; a dynamic
+  glTF physics body's mesh collider becomes three hulls while a static one keeps its
+  triangles.
+
+### Not done yet
+
+- **A part limit by default.** The threshold alone decides; a busy mesh (ToyCar with its
+  cloth) takes 118 hulls. `max_hulls` exists; a default for props comes with the rules file.
+- **Hulls bounded by an error** instead of a count: smooth parts leave out up to 6 % at 64
+  points (the avocado and the bottle stick out 0.8-1.1 % more than CoACD's unlimited hulls).
+- **The mug's extra hulls** (24 against 21).
+- **Editing parts** in the editor (the data is ready: points per hull, stable ids).

@@ -315,10 +315,67 @@ with each other there).
   and the lantern's thin frame (1.4 against 2.1 %, CoACD 8 hulls).
 - **Many separate parts need many hulls:** the ToyCar takes 110 from CoACD, the dragon 51.
 - **CoACD's own hull decimation** (64 vertices) is an inner approximation: 4-11 % left out.
-  Our hulls are limited by an error bound, not only by a count (8c-3).
+  Ours limits hulls to 64 points too, the farthest first (below).
 - **Time:**
   - V-HACD: 0.6-2.7 s on all threads;
   - CoACD: 1.4-288 s, mostly on one thread.
+
+### Ours: CoACD's algorithm in Rust (8c-3, measured 2026-10-16)
+
+`engine_collision::decompose`, after CoACD's `main` 131010c (MIT; the paper and its source
+read side by side), without its dependencies:
+
+| step | CoACD | ours |
+|---|---|---|
+| a closed manifold | OpenVDB level set | marching tetrahedra over a distance band (six tetrahedra a cell around its diagonal: no ambiguous case), the grid's origin off the mesh's own grid by fractions of a cell; distances per slab of the grid in parallel |
+| the search mesh | the remeshed mesh as it is | simplified to about 4,000 triangles by quadric edge collapses that keep it closed (the link condition, no flipped triangles), within half a cell |
+| caps of a cut | constrained Delaunay (CDT) | ear clipping with holes bridged (Eberly) |
+| samples | Sobol (LGPL) and random | Roberts's R2 sequence (deterministic) |
+| distances | k-d tree over samples | a BVH over the triangles (Ericson's closest point) |
+| the tree search | 150 iterations, depth 3, 20 planes per axis | the same; the root's moves tried in parallel (each iteration expands the next one until all are tried, so the result is the same), the rollout's three candidate cuts in parallel, each cut clipped once |
+| the merge | cost matrix, the merged row recomputed | the same, pair costs in parallel; a merged part keeps its pieces, so the faces where they touch stay out of its Hausdorff term |
+| hulls | optional decimation | at most 64 points, the farthest first |
+
+Same machine, same judge as above, threshold 0.05 (`sticks out` varies by about ±0.06 %
+between runs of the judge, from its random samples; our hulls are the same bits every run):
+
+| model | ours: hulls | points | time | overfill | underfill | sticks out | CoACD: hulls | time | sticks out |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| U | 3 | 26 | 0.02 s | 0.1% | 0.0% | 0.05% | 3 | 1.4 s | 0.05% |
+| table | 5 | 49 | 0.04 s | 0.1% | 0.0% | 0.00% | 5 | 2.7 s | 0.00% |
+| stairs * | 5 | 255 | 0.7 s | 2.1% | 0.7% | 0.54% | 5 | 52.1 s | 0.58% |
+| mug with a handle | 24 | 649 | 0.5 s | 20.6% | 0.0% | 1.61% | 21 | 20.1 s | 1.19% |
+| torus | 12 | 768 | 0.5 s | 4.0% | 1.6% | 1.29% | 11 | 14.0 s | 1.59% |
+| Duck | 11 | 689 | 0.5 s | 0.6% | 3.4% | 1.40% | 10 | 133.8 s | 1.36% |
+| Avocado * | 3 | 192 | 0.5 s | 0.4% | 3.3% | 1.46% | 3 | 48.3 s | 0.68% |
+| WaterBottle * | 4 | 256 | 0.5 s | 2.2% | 1.7% | 1.84% | 4 | 37.8 s | 0.72% |
+| BoomBox * | 25 | 943 | 2.1 s | 0.6% | 5.5% | 0.97% | 26 | 195.1 s | 0.73% |
+| GlamVelvetSofa * | 23 | 985 | 0.7 s | 5.1% | 1.2% | 0.79% | 24 | 50.9 s | 0.83% |
+| Lantern * | 8 | 402 | 0.5 s | 32.4% | 0.8% | 2.49% | 8 | 22.8 s | 2.10% |
+| SheenChair * | 25 | 1189 | 1.3 s | 6.5% | 1.3% | 1.12% | 29 | 95.3 s | 0.82% |
+| ToyCar * | 118 | 3491 | 3.0 s | 102.8% | 6.3% | 1.69% | 110 | 142.6 s | 1.19% |
+| DragonAttenuation * | 42 | 1436 | 1.9 s | 54.8% | 5.1% | 1.16% | 51 | 103.2 s | 1.18% |
+
+- **The same parts, 30-270 times sooner:** 0.02-3 s on all threads where CoACD's wheel
+  (mostly on one thread) takes 1.4-195 s.
+- **Hull counts within 10 % of CoACD's** but the mug (24 against 21), fewer on the chair (25
+  against 29) and the dragon (42 against 51).
+- **Sticks out about as much:** within 0.1 % of CoACD or less on 7 of 14 models (the U,
+  the table, the stairs, the torus, the duck, the sofa, the dragon); 0.2-0.5 % more on the
+  mug, the boom box, the lantern, the chair and the car; 0.8-1.1 % more on the smooth
+  avocado and bottle, where CoACD's hulls keep thousands of points and ours 64.
+- **Leaves out 0-6.3 %,** between CoACD unlimited (0-2.9 %) and CoACD at 64 points (up to
+  13.5 %).
+- **What took the time, and what fixed it:**
+  - decimating the stairs' 244,000 remeshed triangles took 6.6 s: on its flat faces every
+    collapse cost nothing, so single vertices took in ever more neighbours (fans), and every
+    later collapse there scanned them all. Shorter edges first where the errors tie, and at
+    most 32 neighbours: 0.3 s;
+  - the merge recomputed every pair after each merge (ToyCar: 42 s). Pair costs kept and
+    only the merged part's recomputed: 0.3 s;
+  - the first rounds of cuts, one to sixteen parts, left most threads idle (0.5 s each).
+    The parallel tree search and remesh above: ToyCar 4.9 s to 3.0 s, BoomBox 4.2 to 2.1 s,
+    with the same hulls.
 
 ## Level geometry: triangle meshes in Jolt
 
@@ -368,11 +425,12 @@ past it. Jolt reads a shape's empty material list last, sees "end", and fails.
 - **Capsule:** the axis along the box's longest side. The radius is the vertices' largest
   distance from the axis; the segment just covers the vertices' projections once capped.
 - **Which one:**
-  - a primitive is taken when its volume is within 10 % of the hull's (it then covers the
-    hull, so it never cuts into the mesh);
-  - otherwise the hull, if the mesh is nearly convex: the hull's volume within 10 % of the
-    mesh's;
-  - otherwise the mesh is decomposed.
+  - the decomposition decides first whether the mesh is convex enough to be one part (its
+    concavity within the threshold). Neither the hull nor a primitive can tell: a U's hull
+    is a box, and comparing volumes needs a closed mesh, which most render meshes are not;
+  - one part: a primitive when its volume is within 10 % of the hull's (it then covers the
+    hull, so it never cuts into the mesh), otherwise the hull;
+  - several: the convex parts.
 
   O3DE fits by least squares instead, which can cut into the mesh. A collider that covers its
   mesh is the safer default.
@@ -437,15 +495,15 @@ and moves them.
   collides). Simplification is optional, error-bounded, with borders locked (meshoptimizer),
   for dense meshes. Materials can be excluded by name (foliage cards, decals): no automatic
   guess, since a masked material may be a grating one walks on.
-- **For props:** a fitted primitive, else the hull, else a decomposition. This is Godot's
-  "automatic", with fitting first.
+- **For props:** a decomposition, then for a mesh convex enough to be one part a fitted
+  primitive, else its hull. This is Godot's "automatic", with fitting added.
 - **A convex decomposition of our own, in Rust**, following CoACD's algorithm (the owner,
   2026-10-16: "конечно лучше на rust"). It fits better than V-HACD with 2-10 times fewer
-  hulls in the table above. It must be much faster than CoACD's build:
-  - decimate the remeshed input before searching;
-  - fewer tree search iterations;
-  - parallel search on the job system;
-  - hulls decimated to a vertex budget;
+  hulls in the table above, and is 30-270 times faster than CoACD's build (8c-3 above):
+  - the remeshed input simplified before searching;
+  - CoACD's search as it is (150 iterations), run in parallel on the job system where that
+    changes nothing in the result;
+  - hulls of at most 64 points;
   - results cached in the DDC.
 
   None of CoACD's dependencies come along:
@@ -469,8 +527,9 @@ and moves them.
 - **V-HACD as the decomposition:**
   - it fills its hull budget (32 hulls where CoACD finds 3-5);
   - with a small budget it fills cavities (a mug with 8 hulls: 91 % overfill);
-  - it is the fallback if our port misses its goals. As one BSD-3 header with no dependencies
-    it could be vendored as it is.
+  - it was the fallback had our port missed its goals (CoACD's hull counts within 10 %, at
+    most 3 s per model). The port meets them but for the mug's hull count (24 against 21,
+    and it sticks out 0.4 % more), so it is not vendored.
 - **CoACD's C++:** its dependencies (MPL, BSL, LGPL) and its time.
 - **Least-squares fitting** (O3DE), which can cut into the mesh.
 - **Building level meshes at load**, which is 0.2-3.9 s per level.

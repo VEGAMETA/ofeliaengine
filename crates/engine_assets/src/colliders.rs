@@ -14,7 +14,14 @@
 //!    geometry, its glTF mesh's triangles exactly as drawn (all primitives in one shape, each
 //!    triangle's surface its primitive's material); a dynamic prop gets a fitted box,
 //!    sphere, capsule or cylinder within 10 % of its hull's volume, else its hull (at most
-//!    64 points). Skinned meshes get nothing.
+//!    64 points), when it is convex enough; a concave one gets convex parts. Skinned
+//!    meshes get nothing.
+//!
+//! **Convex parts** (`engine_collision::decompose`, CoACD's algorithm): a simulated body
+//! cannot be a triangle mesh, so a dynamic prop's concave mesh, and a dynamic glTF physics
+//! body's triangle mesh collider, become convex parts. They are computed before the
+//! colliders are built, for every such mesh in parallel, and kept in the derived data cache
+//! under a key of the mesh and the settings: a second cook loads them.
 //!
 //! **Sharing and placement.** A collider is in its body's object space and shared by every
 //! body using the same mesh; the body keeps its node's full transform and the runtime
@@ -22,16 +29,20 @@
 //! (a non-uniform scale above a rotation) is baked into a collider of its own here, so the
 //! runtime never has to rebuild a mesh.
 
+use crate::ddc::DerivedDataCache;
 use crate::gltf_import::ImportedScene;
 use crate::gltf_physics::{AuthoredKind, Geometry, ImplicitShape, collision_name};
 use crate::pack::{EntryData, EntryKind, Pack, PackError, invalid};
+use engine_collision::decompose::{self, DecomposeSettings};
 use engine_collision::fit;
 use engine_collision::hull::{Hull, HullSettings};
 use engine_collision::mesh::weld_vertices;
 use engine_collision::{Collider, ColliderShape, Origin, Shape};
+use engine_core::hash::{StableHasher, hash128};
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat3, Mat4, Quat, Vec3};
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// What moves a body.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -70,7 +81,9 @@ pub enum StaticShape {
 /// A dynamic mesh's collider.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum DynamicShape {
-    /// A box, sphere, capsule or cylinder within 10 % of its hull's volume, else the hull.
+    /// A concave mesh: its convex parts ([`ColliderRules::parts`]). One convex enough to
+    /// be one part: a box, sphere, capsule or cylinder within 10 % of its hull's volume,
+    /// else its hull.
     #[default]
     Auto,
     /// A fitted box.
@@ -81,6 +94,8 @@ pub enum DynamicShape {
     Capsule,
     /// Its convex hull.
     Hull,
+    /// Its convex parts ([`ColliderRules::parts`]), even where a primitive would do.
+    Parts,
 }
 
 /// How a scene's meshes collide, where the file does not say (ADR 0101).
@@ -95,6 +110,18 @@ pub struct ColliderRules {
     /// glTF materials (by name) whose triangles collide with nothing: foliage cards,
     /// decals. Nothing is guessed: a masked material may be a grating one walks on.
     pub no_collision: Vec<String>,
+    /// How concave meshes of simulated bodies are split into convex parts: CoACD's
+    /// concavity threshold (0.05 of the mesh's size), as many parts as it needs.
+    pub parts: DecomposeSettings,
+}
+
+/// What [`cook_colliders`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ColliderStats {
+    /// Meshes split into convex parts.
+    pub decomposed: usize,
+    /// Of those, the ones whose parts came from the derived data cache.
+    pub cached: usize,
 }
 
 /// A collider in a physics backend's binary form (`engine_physics::colliders::bake`).
@@ -294,6 +321,122 @@ fn mesh_points(scene: &ImportedScene, mesh: usize, into: Mat4) -> Vec<Vec3> {
         .collect()
 }
 
+/// Whether a dynamic mesh is decomposed by `kind`: under [`DynamicShape::Auto`] too, since
+/// only the decomposition tells a concave mesh from one convex enough for a primitive (a
+/// U's hull is a box).
+fn needs_parts(kind: DynamicShape) -> bool {
+    matches!(kind, DynamicShape::Auto | DynamicShape::Parts)
+}
+
+/// Derived data cache entries of convex parts.
+const PARTS_KIND: &str = "parts";
+/// First bytes of a parts entry; the digits are the entry's version.
+const PARTS_MAGIC: &[u8; 8] = b"ENGPRT01";
+
+/// The cache key of a mesh's convex parts under `settings`.
+fn parts_key(vertices: &[Vec3], triangles: &[[u32; 3]], settings: &DecomposeSettings) -> u128 {
+    let mut h = StableHasher::new();
+    h.write_str("engine collider parts 1");
+    h.write_u64(u64::from(decompose::REVISION));
+    // Every setting, in a fixed order.
+    h.write_u64(settings.threshold.to_bits());
+    for v in [
+        settings.iterations,
+        settings.depth,
+        settings.candidates,
+        settings.resolution,
+        settings.search_triangles,
+        settings.samples,
+        usize::from(settings.merge),
+        settings.hull_points,
+        settings.max_hulls.map_or(usize::MAX, |m| m),
+    ] {
+        h.write_u64(v as u64);
+    }
+    let mut bytes = Vec::with_capacity(vertices.len() * 12 + triangles.len() * 12);
+    for v in vertices {
+        for c in v.to_array() {
+            bytes.extend_from_slice(&c.to_le_bytes());
+        }
+    }
+    for t in triangles {
+        for i in t {
+            bytes.extend_from_slice(&i.to_le_bytes());
+        }
+    }
+    h.write(&hash128(&bytes).to_le_bytes());
+    h.finish()
+}
+
+fn parts_to_bytes(parts: &[Vec<Vec3>]) -> Vec<u8> {
+    let points: usize = parts.iter().map(Vec::len).sum();
+    let mut out = Vec::with_capacity(12 + 4 * parts.len() + 12 * points);
+    out.extend_from_slice(PARTS_MAGIC);
+    out.extend_from_slice(&(parts.len() as u32).to_le_bytes());
+    for part in parts {
+        out.extend_from_slice(&(part.len() as u32).to_le_bytes());
+        for p in part {
+            for c in p.to_array() {
+                out.extend_from_slice(&c.to_le_bytes());
+            }
+        }
+    }
+    out
+}
+
+fn parts_from_bytes(bytes: &[u8]) -> Option<Vec<Vec<Vec3>>> {
+    let mut rest = bytes.strip_prefix(PARTS_MAGIC)?;
+    let mut word = || -> Option<u32> {
+        let (w, tail) = rest.split_first_chunk::<4>()?;
+        rest = tail;
+        Some(u32::from_le_bytes(*w))
+    };
+    let count = word()? as usize;
+    let mut parts = Vec::with_capacity(count.min(4096));
+    for _ in 0..count {
+        let n = word()? as usize;
+        let mut part = Vec::with_capacity(n.min(4096));
+        for _ in 0..n {
+            let [x, y, z] = [word()?, word()?, word()?].map(f32::from_bits);
+            part.push(Vec3::new(x, y, z));
+        }
+        parts.push(part);
+    }
+    word().is_none().then_some(parts)
+}
+
+/// A glTF mesh's convex parts (in mesh space), from the cache when it has them; whether
+/// they came from it.
+fn parts_of(
+    scene: &ImportedScene,
+    mesh: usize,
+    rules: &ColliderRules,
+    cache: Option<&DerivedDataCache>,
+    jobs: Option<&ThreadPool>,
+) -> (Vec<Vec<Vec3>>, bool) {
+    let Some(Shape::Mesh {
+        vertices,
+        triangles,
+        ..
+    }) = mesh_triangles(scene, mesh, rules, Mat4::IDENTITY)
+    else {
+        return (Vec::new(), false);
+    };
+    let key = parts_key(&vertices, &triangles, &rules.parts);
+    if let Some(parts) = cache
+        .and_then(|c| c.get(key, PARTS_KIND))
+        .and_then(|bytes| parts_from_bytes(&bytes))
+    {
+        return (parts, true);
+    }
+    let (parts, _) = decompose::decompose(&vertices, &triangles, &rules.parts, jobs);
+    if let Some(cache) = cache {
+        // A cache that cannot be written only costs the next cook the work again.
+        let _ = cache.put(key, PARTS_KIND, &parts_to_bytes(&parts));
+    }
+    (parts, false)
+}
+
 /// The hull of `points`, at most [`HULL_POINTS`] of them; a thin box for flat sets.
 fn hull_shape(points: &[Vec3]) -> Option<Shape> {
     let settings = HullSettings {
@@ -333,7 +476,8 @@ fn convex_shape(points: &[Vec3], kind: DynamicShape) -> Option<Shape> {
         DynamicShape::Box => Some(fit::Primitive::Box(fit::oriented_box(&hull))),
         DynamicShape::Sphere => Some(fit::Primitive::Sphere(fit::bounding_sphere(&hull.points))),
         DynamicShape::Capsule => Some(fit::Primitive::Capsule(fit::capsule(&hull))),
-        DynamicShape::Hull => None,
+        // Parts that could not be made (a degenerate mesh): its hull.
+        DynamicShape::Hull | DynamicShape::Parts => None,
     };
     primitive
         .map(Shape::from)
@@ -473,9 +617,59 @@ struct Builder<'a> {
     bodies: Vec<CookedBody>,
     /// Shared colliders: (mesh, dynamic) → index.
     shared: HashMap<(usize, bool), Option<u32>>,
+    cache: Option<&'a DerivedDataCache>,
+    jobs: Option<&'a ThreadPool>,
+    /// Convex parts of glTF meshes (in mesh space), by mesh.
+    parts: HashMap<usize, Vec<Vec<Vec3>>>,
+    stats: ColliderStats,
 }
 
 impl Builder<'_> {
+    /// Splits `meshes` into convex parts, all at once in parallel (each from the cache when
+    /// it has them).
+    fn decompose_meshes(&mut self, mut meshes: Vec<usize>) {
+        meshes.sort_unstable();
+        meshes.dedup();
+        meshes.retain(|m| !self.parts.contains_key(m));
+        if meshes.is_empty() {
+            return;
+        }
+        engine_profiler::zone!("assets::decompose_meshes");
+        let results: Vec<OnceLock<(Vec<Vec<Vec3>>, bool)>> =
+            meshes.iter().map(|_| OnceLock::new()).collect();
+        let work = |k: usize| {
+            let _ = results[k].set(parts_of(
+                self.scene, meshes[k], self.rules, self.cache, self.jobs,
+            ));
+        };
+        match self.jobs {
+            Some(pool) if meshes.len() > 1 => pool.parallel_for(meshes.len(), 1, |_, range| {
+                range.for_each(&work);
+            }),
+            _ => (0..meshes.len()).for_each(work),
+        }
+        for (mesh, result) in meshes.into_iter().zip(results) {
+            if let Some((parts, hit)) = result.into_inner() {
+                self.stats.decomposed += 1;
+                self.stats.cached += usize::from(hit);
+                self.parts.insert(mesh, parts);
+            }
+        }
+    }
+
+    /// A mesh's convex parts as hulls, mapped by `into`; none if it was not decomposed or is
+    /// convex enough to be one part (its own hull, or a primitive, is then more exact).
+    fn part_shapes(&self, mesh: usize, into: Mat4) -> Option<Vec<Shape>> {
+        let parts = self.parts.get(&mesh).filter(|p| p.len() > 1)?;
+        let shapes: Vec<Shape> = parts
+            .iter()
+            .filter_map(|p| {
+                let mapped: Vec<Vec3> = p.iter().map(|&q| into.transform_point3(q)).collect();
+                hull_shape(&mapped)
+            })
+            .collect();
+        (!shapes.is_empty()).then_some(shapes)
+    }
     fn add(&mut self, shapes: Vec<Shape>, origin: Origin) -> Option<u32> {
         if shapes.is_empty() {
             return None;
@@ -524,13 +718,16 @@ impl Builder<'_> {
     }
 }
 
-/// The scene's colliders and bodies (see the module's documentation). `node_instances`:
-/// each node's render instances (first, count), as the cook laid them out.
+/// The scene's colliders and bodies (see the module's documentation), and what it took.
+/// `node_instances`: each node's render instances (first, count), as the cook laid them
+/// out. Convex parts come from `cache` when it has them, and are computed on `jobs`.
 pub fn cook_colliders(
     scene: &ImportedScene,
     node_instances: &[(u32, u32)],
     rules: &ColliderRules,
-) -> (Vec<CookedCollider>, Vec<CookedBody>) {
+    cache: Option<&DerivedDataCache>,
+    jobs: Option<&ThreadPool>,
+) -> (Vec<CookedCollider>, Vec<CookedBody>, ColliderStats) {
     engine_profiler::zone!("assets::cook_colliders");
     let (world, parent) = world_transforms(scene);
     let mut b = Builder {
@@ -540,6 +737,10 @@ pub fn cook_colliders(
         colliders: Vec::new(),
         bodies: Vec::new(),
         shared: HashMap::new(),
+        cache,
+        jobs,
+        parts: HashMap::new(),
+        stats: ColliderStats::default(),
     };
     let instances_of = |i: usize| -> Vec<u32> {
         node_instances
@@ -550,7 +751,7 @@ pub fn cook_colliders(
     let uses_khr = scene.nodes.iter().any(|n| n.physics.is_some());
     if uses_khr {
         khr_bodies(&mut b, &parent, &instances_of);
-        return (b.colliders, b.bodies);
+        return (b.colliders, b.bodies, b.stats);
     }
 
     // Authored collision meshes, by the node (or mesh) they name.
@@ -592,6 +793,19 @@ pub fn cook_colliders(
                 (_, None) => hull_shape(&points),
             }
         };
+    // Props' meshes decomposed up front.
+    if rules.bodies == DefaultBodies::Dynamic && needs_parts(rules.dynamic_shape) {
+        let wanted = scene
+            .nodes
+            .iter()
+            .enumerate()
+            .filter(|(i, n)| {
+                !is_collision_node(&n.name) && n.skin.is_none() && !authored.contains_key(i)
+            })
+            .filter_map(|(_, n)| n.mesh)
+            .collect();
+        b.decompose_meshes(wanted);
+    }
     for i in 0..scene.nodes.len() {
         let node = &scene.nodes[i];
         if is_collision_node(&node.name) {
@@ -636,17 +850,25 @@ pub fn cook_colliders(
         let collider = match b.shared.get(&(mesh, dynamic)) {
             Some(&c) => c,
             None => {
-                let shape = if dynamic {
-                    convex_shape(
-                        &mesh_points(scene, mesh, Mat4::IDENTITY),
-                        rules.dynamic_shape,
-                    )
+                let shapes: Vec<Shape> = if dynamic {
+                    b.part_shapes(mesh, Mat4::IDENTITY).unwrap_or_else(|| {
+                        // Convex enough for one part: as a prop always was.
+                        let kind = match rules.dynamic_shape {
+                            DynamicShape::Parts => DynamicShape::Hull,
+                            kind => kind,
+                        };
+                        convex_shape(&mesh_points(scene, mesh, Mat4::IDENTITY), kind)
+                            .into_iter()
+                            .collect()
+                    })
                 } else if rules.static_shape == StaticShape::Mesh {
                     mesh_triangles(scene, mesh, rules, Mat4::IDENTITY)
+                        .into_iter()
+                        .collect()
                 } else {
-                    None
+                    Vec::new()
                 };
-                let c = b.add(shape.into_iter().collect(), Origin::Generated);
+                let c = b.add(shapes, Origin::Generated);
                 b.shared.insert((mesh, dynamic), c);
                 c
             }
@@ -677,7 +899,7 @@ pub fn cook_colliders(
             b.body(collider, world, CookedBody::default());
         }
     }
-    (b.colliders, b.bodies)
+    (b.colliders, b.bodies, b.stats)
 }
 
 /// Bodies from `KHR_physics_rigid_bodies`.
@@ -700,8 +922,43 @@ fn khr_bodies(
             i = parent[i]?;
         }
     };
-    // The shapes of a geometry, in `into` (the body's object space).
-    let geometry = |b: &Builder<'_>, g: &Geometry, into: Mat4| -> Vec<Shape> {
+    let dynamic = |root: usize| {
+        scene.nodes[root]
+            .physics
+            .as_ref()
+            .and_then(|p| p.motion)
+            .is_some_and(|m| !m.kinematic)
+    };
+    // A simulated body cannot be a triangle mesh: the meshes of dynamic bodies' mesh
+    // colliders are split into convex parts, up front.
+    let mut wanted = Vec::new();
+    for (i, node) in scene.nodes.iter().enumerate() {
+        let Some(c) = node.physics.as_ref().and_then(|p| p.collider.as_ref()) else {
+            continue;
+        };
+        let Some(Geometry::Node {
+            node: g,
+            convex_hull: false,
+        }) = c.geometry
+        else {
+            continue;
+        };
+        if !owner(i).is_some_and(dynamic) {
+            continue;
+        }
+        let mut stack = vec![g];
+        while let Some(n) = stack.pop() {
+            let Some(nd) = scene.nodes.get(n) else {
+                continue;
+            };
+            wanted.extend(nd.mesh);
+            stack.extend(&nd.children);
+        }
+    }
+    b.decompose_meshes(wanted);
+    // The shapes of a geometry, in `into` (the body's object space); a dynamic body's
+    // meshes as their convex parts.
+    let geometry = |b: &Builder<'_>, g: &Geometry, into: Mat4, dynamic: bool| -> Vec<Shape> {
         match *g {
             Geometry::Shape(s) => scene
                 .physics
@@ -722,6 +979,12 @@ fn khr_bodies(
                     if let Some(mesh) = nd.mesh {
                         if convex_hull {
                             points.extend(mesh_points(scene, mesh, into * m));
+                        } else if dynamic {
+                            // Its convex parts, or its hull when it is convex enough.
+                            match b.part_shapes(mesh, into * m) {
+                                Some(parts) => out.extend(parts),
+                                None => out.extend(hull_shape(&mesh_points(scene, mesh, into * m))),
+                            }
                         } else if let Some(s) = mesh_triangles(scene, mesh, b.rules, into * m) {
                             out.push(s);
                         }
@@ -755,7 +1018,7 @@ fn khr_bodies(
             match owner(i).filter(|_| !sensor) {
                 Some(root) => {
                     let into = b.world[root].inverse() * b.world[i];
-                    let shapes = geometry(b, g, into);
+                    let shapes = geometry(b, g, into, dynamic(root));
                     let entry = grouped.entry(root).or_default();
                     entry.0.extend(shapes);
                     entry.1 = entry.1.or(c.material);
@@ -813,7 +1076,7 @@ fn khr_bodies(
         );
     }
     for (i, g, mat, sensor) in statics {
-        let shapes = geometry(b, &g, Mat4::IDENTITY);
+        let shapes = geometry(b, &g, Mat4::IDENTITY, false);
         let Some(collider) = b.add(shapes, Origin::Authored) else {
             continue;
         };
@@ -1424,8 +1687,13 @@ mod tests {
             roots: vec![0, 1],
             ..ImportedScene::default()
         };
-        let (colliders, bodies) =
-            cook_colliders(&scene, &instances(&scene), &ColliderRules::default());
+        let (colliders, bodies, _) = cook_colliders(
+            &scene,
+            &instances(&scene),
+            &ColliderRules::default(),
+            None,
+            None,
+        );
         assert_eq!(colliders.len(), 1);
         assert_eq!(bodies.len(), 2);
         assert!(
@@ -1454,11 +1722,264 @@ mod tests {
             no_collision: vec!["Leaves".to_owned()],
             ..ColliderRules::default()
         };
-        let (colliders, _) = cook_colliders(&scene, &instances(&scene), &rules);
+        let (colliders, _, _) = cook_colliders(&scene, &instances(&scene), &rules, None, None);
         let Shape::Mesh { triangles, .. } = &colliders[0].collider.shapes[0].shape else {
             panic!("not a mesh");
         };
         assert_eq!(triangles.len(), 12);
+    }
+
+    /// A U-shaped prism, `height` tall: 3 × 2 across with a 1 × 1 notch, one closed mesh.
+    fn u_prism(height: f32) -> Primitive {
+        let outline = [
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (3.0, 2.0),
+            (2.0, 2.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        let caps = [
+            [0, 1, 4],
+            [0, 4, 5],
+            [1, 2, 3],
+            [1, 3, 4],
+            [0, 5, 6],
+            [0, 6, 7],
+        ];
+        let n = outline.len() as u32;
+        let mut positions: Vec<[f32; 3]> = outline.iter().map(|&(x, z)| [x, 0.0, z]).collect();
+        positions.extend(outline.iter().map(|&(x, z)| [x, height, z]));
+        let mut indices = Vec::new();
+        for [a, b, c] in caps {
+            // The bottom faces -y, the top +y.
+            indices.extend([a, b, c]);
+            indices.extend([a + n, c + n, b + n]);
+        }
+        for k in 0..n {
+            let k1 = (k + 1) % n;
+            indices.extend([k, k + n, k1, k1, k + n, k1 + n]);
+        }
+        let count = positions.len();
+        Primitive {
+            positions,
+            normals: vec![[0.0, 1.0, 0.0]; count],
+            uvs: Vec::new(),
+            tangents: Vec::new(),
+            indices,
+            material: None,
+            min: [0.0; 3],
+            max: [3.0, height, 2.0],
+            joints: Vec::new(),
+            weights: Vec::new(),
+        }
+    }
+
+    fn hull_volumes(shapes: &[ColliderShape]) -> f32 {
+        shapes
+            .iter()
+            .map(|s| match &s.shape {
+                Shape::Hull { points } => Hull::new(points).unwrap().volume(),
+                other => panic!("not a hull: {other:?}"),
+            })
+            .sum()
+    }
+
+    #[test]
+    fn concave_props_get_convex_parts_and_convex_ones_a_primitive() {
+        let u = u_prism(1.0);
+        let points: Vec<Vec3> = u.positions.iter().map(|&p| Vec3::from(p)).collect();
+        let triangles: Vec<[u32; 3]> = u
+            .indices
+            .chunks_exact(3)
+            .map(|t| [t[0], t[1], t[2]])
+            .collect();
+        assert!(engine_collision::mesh::volume(&points, &triangles) > 0.0);
+        let scene = ImportedScene {
+            meshes: vec![
+                mesh("u", vec![u]),
+                mesh(
+                    "crate",
+                    vec![cuboid(Vec3::splat(-0.5), Vec3::splat(0.5), None)],
+                ),
+            ],
+            nodes: vec![
+                node("u", Some(0), Vec3::ZERO, Vec::new()),
+                node("crate", Some(1), Vec3::new(5.0, 0.0, 0.0), Vec::new()),
+            ],
+            roots: vec![0, 1],
+            ..ImportedScene::default()
+        };
+        let rules = ColliderRules {
+            bodies: DefaultBodies::Dynamic,
+            ..ColliderRules::default()
+        };
+        let jobs = ThreadPool::builder().workers(4).build().unwrap();
+        let (colliders, bodies, stats) =
+            cook_colliders(&scene, &instances(&scene), &rules, None, Some(&jobs));
+        assert_eq!(
+            stats,
+            ColliderStats {
+                decomposed: 2,
+                cached: 0
+            }
+        );
+        assert_eq!(bodies.len(), 2);
+        // The U (whose hull is a box): its two arms and its base.
+        let u = &colliders[bodies[0].collider as usize].collider.shapes;
+        assert_eq!(u.len(), 3, "{u:?}");
+        let volume = hull_volumes(u);
+        assert!((volume - 5.0).abs() < 0.05, "{volume}");
+        // The crate, one part: its box, as before.
+        let c = &colliders[bodies[1].collider as usize].collider.shapes;
+        assert!(
+            matches!(
+                c[..],
+                [ColliderShape {
+                    shape: Shape::Box { .. },
+                    ..
+                }]
+            ),
+            "{c:?}"
+        );
+        // Asked for parts, the crate is its hull (one part).
+        let rules = ColliderRules {
+            bodies: DefaultBodies::Dynamic,
+            dynamic_shape: DynamicShape::Parts,
+            ..ColliderRules::default()
+        };
+        let (colliders, bodies, _) = cook_colliders(&scene, &instances(&scene), &rules, None, None);
+        let c = &colliders[bodies[1].collider as usize].collider.shapes;
+        assert!(
+            matches!(
+                c[..],
+                [ColliderShape {
+                    shape: Shape::Hull { .. },
+                    ..
+                }]
+            ),
+            "{c:?}"
+        );
+        // As a plain hull, the U fills its notch.
+        let rules = ColliderRules {
+            bodies: DefaultBodies::Dynamic,
+            dynamic_shape: DynamicShape::Hull,
+            ..ColliderRules::default()
+        };
+        let (colliders, bodies, stats) =
+            cook_colliders(&scene, &instances(&scene), &rules, None, None);
+        assert_eq!(stats.decomposed, 0);
+        let u = &colliders[bodies[0].collider as usize].collider.shapes;
+        assert!((hull_volumes(u) - 6.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn convex_parts_come_from_the_cache_the_second_time() {
+        let dir = std::env::temp_dir().join(format!("engine_parts_cache_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cache = DerivedDataCache::new(&dir).unwrap();
+        let scene = ImportedScene {
+            meshes: vec![mesh("u", vec![u_prism(0.5)])],
+            nodes: vec![node("u", Some(0), Vec3::ZERO, Vec::new())],
+            roots: vec![0],
+            ..ImportedScene::default()
+        };
+        let rules = ColliderRules {
+            bodies: DefaultBodies::Dynamic,
+            ..ColliderRules::default()
+        };
+        let (first, _, stats) =
+            cook_colliders(&scene, &instances(&scene), &rules, Some(&cache), None);
+        assert_eq!(
+            stats,
+            ColliderStats {
+                decomposed: 1,
+                cached: 0
+            }
+        );
+        let (second, _, stats) =
+            cook_colliders(&scene, &instances(&scene), &rules, Some(&cache), None);
+        assert_eq!(
+            stats,
+            ColliderStats {
+                decomposed: 1,
+                cached: 1
+            }
+        );
+        assert_eq!(first, second);
+        // Other settings, another entry.
+        let finer = ColliderRules {
+            parts: DecomposeSettings {
+                threshold: 0.02,
+                ..DecomposeSettings::default()
+            },
+            ..rules
+        };
+        let (_, _, stats) = cook_colliders(&scene, &instances(&scene), &finer, Some(&cache), None);
+        assert_eq!(stats.cached, 0);
+        // A torn entry is computed again, not trusted.
+        let parts = parts_to_bytes(&[vec![Vec3::ZERO; 4]]);
+        assert_eq!(parts_from_bytes(&parts).map(|p| p.len()), Some(1));
+        assert_eq!(parts_from_bytes(&parts[..parts.len() - 1]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn dynamic_gltf_bodies_take_convex_parts_of_their_mesh_colliders() {
+        let collider = |node: usize| ColliderData {
+            geometry: Some(Geometry::Node {
+                node,
+                convex_hull: false,
+            }),
+            material: None,
+            nodes: Vec::new(),
+        };
+        let mut body = node("body", Some(0), Vec3::new(0.0, 5.0, 0.0), Vec::new());
+        body.physics = Some(NodePhysics {
+            motion: Some(MotionData {
+                kinematic: false,
+                mass: None,
+                linear_velocity: [0.0; 3],
+                angular_velocity: [0.0; 3],
+                gravity_factor: 1.0,
+            }),
+            collider: Some(collider(0)),
+            ..NodePhysics::default()
+        });
+        // The same mesh as a static collider stays its triangles.
+        let mut wall = node("wall", Some(0), Vec3::new(10.0, 0.0, 0.0), Vec::new());
+        wall.physics = Some(NodePhysics {
+            collider: Some(collider(1)),
+            ..NodePhysics::default()
+        });
+        let scene = ImportedScene {
+            meshes: vec![mesh("u", vec![u_prism(1.0)])],
+            nodes: vec![body, wall],
+            roots: vec![0, 1],
+            ..ImportedScene::default()
+        };
+        let (colliders, bodies, stats) = cook_colliders(
+            &scene,
+            &instances(&scene),
+            &ColliderRules::default(),
+            None,
+            None,
+        );
+        assert_eq!(stats.decomposed, 1);
+        let dynamic = bodies.iter().find(|b| b.motion == Motion::Dynamic).unwrap();
+        let shapes = &colliders[dynamic.collider as usize].collider.shapes;
+        assert_eq!(shapes.len(), 3, "{shapes:?}");
+        assert!((hull_volumes(shapes) - 5.0).abs() < 0.05);
+        let fixed = bodies.iter().find(|b| b.motion == Motion::Static).unwrap();
+        assert!(matches!(
+            colliders[fixed.collider as usize].collider.shapes[..],
+            [ColliderShape {
+                shape: Shape::Mesh { .. },
+                ..
+            }]
+        ));
     }
 
     #[test]
@@ -1476,7 +1997,7 @@ mod tests {
             bodies: DefaultBodies::Dynamic,
             ..ColliderRules::default()
         };
-        let (colliders, bodies) = cook_colliders(&scene, &instances(&scene), &rules);
+        let (colliders, bodies, _) = cook_colliders(&scene, &instances(&scene), &rules, None, None);
         assert_eq!(bodies[0].motion, Motion::Dynamic);
         assert_eq!(bodies[0].instances, vec![0]);
         let Shape::Box { half_extents, .. } = colliders[0].collider.shapes[0].shape else {
@@ -1521,8 +2042,13 @@ mod tests {
             ..ImportedScene::default()
         };
         assert!(is_collision_node("UCX_Chair_01") && !is_collision_node("Chair"));
-        let (colliders, bodies) =
-            cook_colliders(&scene, &instances(&scene), &ColliderRules::default());
+        let (colliders, bodies, _) = cook_colliders(
+            &scene,
+            &instances(&scene),
+            &ColliderRules::default(),
+            None,
+            None,
+        );
         assert_eq!(bodies.len(), 2);
         let chair = &colliders[bodies[0].collider as usize].collider;
         assert_eq!(chair.origin, Origin::Authored);
@@ -1557,8 +2083,13 @@ mod tests {
             roots: vec![0],
             ..ImportedScene::default()
         };
-        let (colliders, bodies) =
-            cook_colliders(&scene, &instances(&scene), &ColliderRules::default());
+        let (colliders, bodies, _) = cook_colliders(
+            &scene,
+            &instances(&scene),
+            &ColliderRules::default(),
+            None,
+            None,
+        );
         assert_eq!(bodies.len(), 1);
         // The shared collider and the sheared one.
         assert_eq!(colliders.len(), 2);
@@ -1641,8 +2172,13 @@ mod tests {
             },
             ..ImportedScene::default()
         };
-        let (colliders, bodies) =
-            cook_colliders(&scene, &instances(&scene), &ColliderRules::default());
+        let (colliders, bodies, _) = cook_colliders(
+            &scene,
+            &instances(&scene),
+            &ColliderRules::default(),
+            None,
+            None,
+        );
         assert_eq!(bodies.len(), 3);
         let dynamic = &bodies[0];
         assert_eq!(dynamic.motion, Motion::Dynamic);

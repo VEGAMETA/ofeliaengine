@@ -354,6 +354,8 @@ pub struct CookStats {
     pub clip_error: f32,
     /// Seconds spent on colliders (ADR 0101).
     pub collider_seconds: f64,
+    /// Meshes split into convex parts, and how many of them came from the cache.
+    pub colliders: crate::colliders::ColliderStats,
 }
 
 /// Cooks `scene` (imported from a glTF file in `base_dir`): its textures read, filtered
@@ -620,8 +622,13 @@ pub fn cook_scene(
     }
     if settings.colliders {
         let start = std::time::Instant::now();
-        (cooked.colliders, cooked.bodies) =
-            crate::colliders::cook_colliders(scene, &node_instances, &scene.collider_rules);
+        (cooked.colliders, cooked.bodies, stats.colliders) = crate::colliders::cook_colliders(
+            scene,
+            &node_instances,
+            &scene.collider_rules,
+            cache,
+            Some(jobs),
+        );
         stats.collider_seconds = start.elapsed().as_secs_f64();
     }
     Ok((cooked, stats))
