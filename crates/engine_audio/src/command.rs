@@ -46,6 +46,8 @@ pub(crate) struct VoiceStart {
     pub(crate) priority: u8,
     /// Mixer frame to start at; `None` starts at the next block.
     pub(crate) start_at: Option<u64>,
+    /// A clip's frame to start from (a stream's decoder was sought there instead).
+    pub(crate) offset: u64,
     /// Fade-in in seconds.
     pub(crate) fade_in: f32,
     /// Placed in the world.

@@ -567,6 +567,14 @@ impl Renderer {
         }
 
         self.retire_ended();
+        for &slot in &self.active {
+            let v = &self.voices[slot as usize];
+            if let (Some(Source::Clip(_)), Some(at)) =
+                (&v.source, self.shared.positions.get(slot as usize))
+            {
+                at.store(v.pos >> 32, Ordering::Relaxed);
+            }
+        }
         self.shared.frames.store(self.clock, Ordering::Relaxed);
     }
 
@@ -719,11 +727,24 @@ impl Renderer {
             self.give_back(Return::VoiceEnded { slot, source });
             return;
         };
+        // A clip starts at its offset (inside it when looping); past the end of a one-shot
+        // there is nothing to play. A stream's decoder was sought there instead.
+        let (pos, past_end) = match &source {
+            Source::Clip(c) => {
+                let frames = c.0.frames as u64;
+                match start.offset {
+                    o if o < frames => (o << 32, false),
+                    o if start.looping && frames > 0 => ((o % frames) << 32, false),
+                    _ => (0, true),
+                }
+            }
+            Source::Stream(_) => (0, false),
+        };
         *v = Voice {
             active: true,
             source: Some(source),
             bus: start.bus,
-            pos: 0,
+            pos,
             step: 0,
             pitch: start.pitch,
             gain: start.gain.max(0.0),
@@ -743,6 +764,9 @@ impl Renderer {
             lowpass: 1.0,
             filter: [0.0; 2],
         };
+        if past_end {
+            v.ended = true;
+        }
         v.update_step(rate);
         v.spatialize(&listener, rate);
         if start.fade_in > 0.0 {

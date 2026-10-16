@@ -176,6 +176,17 @@ let rgba = player.capture(&mut game)?.expect("a frame");
 The golden tests render `sponza_day` this way and hold it to the image the test bed
 draws by hand (`docs/dev-guide/testing.md`).
 
+## Sound
+
+Sound is components too ([audio.md](audio.md), section 0):
+- `AudioSource` plays a file under `sounds/`, placed at its entity or as it is;
+- `AudioListener` marks who hears (the main camera by default);
+- `ReverbZone` gives a place a reverb of its own.
+
+With `Game::acoustics` returning your physics world, walls muffle what is behind them and
+the room around the listener sets the reverb. Saves keep where every sound was. The
+world's `Mixer` sets the buses' volumes.
+
 ## Each frame
 
 1. Window events go to `Game::event`.
@@ -184,7 +195,8 @@ draws by hand (`docs/dev-guide/testing.md`).
 4. The due ticks run: `Game::tick`, then transforms propagate to the GPU scene.
 5. `Game::present` runs (the camera, from the latest input).
 6. `Game::animate` runs (skinning matrices); the player places the skinned meshes and
-   mirrors the probes and the GI volume.
+   mirrors the probes and the GI volume. Then sound follows the sources and the listener,
+   and the videos play.
 7. Streaming, then the frame's rendering and its UI (`player.ui_mut()`: 2D and 3D
    canvases).
 8. Submission and presentation.

@@ -45,7 +45,7 @@ pub use engine::{
 };
 pub use mixer::{MAX_BLOCK, Renderer};
 pub use spatial::{Emitter, Listener, Rolloff};
-pub use stream::{DecodeError, Decoder};
+pub use stream::{DecodeError, Decoder, PreparedStream};
 
 #[cfg(test)]
 mod tests;

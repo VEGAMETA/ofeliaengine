@@ -278,6 +278,130 @@ pub(crate) fn advance_stream(ring: &StreamRing, pos: &mut u64, step: u64, n: u64
 /// Frames the stream thread decodes at a time.
 const CHUNK: usize = 1024;
 
+/// A stream sought to where it starts and decoded ahead, ready for
+/// [`crate::Audio::play_prepared`]. Making one is the work [`crate::Audio::play_stream`]
+/// does before it returns: seeking (exact seeks decode from the start of the file, about
+/// 1 ms per second of offset) and decoding the first part (a few milliseconds). Made on
+/// any thread, it keeps that work off the game thread.
+pub struct PreparedStream {
+    pub(crate) ring: Arc<StreamRing>,
+    /// `None` when the whole stream fit (the stream thread is not needed).
+    pub(crate) decoder: Option<Box<dyn Decoder>>,
+    pub(crate) looping: bool,
+    /// The frame it starts from (inside the stream when looping).
+    pub(crate) offset: u64,
+    /// The decoder's length, when known.
+    pub(crate) length: Option<u64>,
+}
+
+impl PreparedStream {
+    /// Seeks `decoder` to `offset` (frames at its rate; inside the stream when `looping`)
+    /// and decodes the first half of a ring of `buffer_ms` milliseconds
+    /// ([`crate::AudioConfig::stream_buffer_ms`], [`crate::Audio::stream_buffer_ms`]).
+    /// A one-shot stream started at or past its end plays nothing and ends at once.
+    pub fn new(
+        mut decoder: Box<dyn Decoder>,
+        offset: u64,
+        looping: bool,
+        buffer_ms: u32,
+    ) -> Result<Self, DecodeError> {
+        engine_profiler::zone!("audio::PreparedStream::new");
+        let (rate, channels) = (decoder.sample_rate(), usize::from(decoder.channels()));
+        if rate == 0 || !(1..=2).contains(&channels) {
+            return Err(DecodeError::Unsupported(format!(
+                "{channels} channels at {rate} Hz"
+            )));
+        }
+        let length = decoder.frames();
+        let (offset, past_end) = match length {
+            Some(n) if looping && n > 0 => (offset % n, false),
+            Some(n) => (offset, offset >= n),
+            None => (offset, false),
+        };
+        let frames = (u64::from(buffer_ms.max(20)) * u64::from(rate)).div_ceil(1000);
+        let ring = Arc::new(StreamRing::new(frames as usize, channels, rate));
+        if past_end {
+            ring.finish();
+            return Ok(Self {
+                ring,
+                decoder: None,
+                looping,
+                offset,
+                length,
+            });
+        }
+        if offset > 0 {
+            decoder.seek(offset)?;
+        }
+        // Decode the first half now so the voice starts with data; a stream that fails
+        // right away is an error here rather than silence.
+        let mut scratch = vec![0.0f32; 1024 * channels];
+        let mut ended = false;
+        while ring.space() > ring.capacity() / 2 {
+            let n = decoder.read(&mut scratch)?;
+            if n == 0 {
+                // A looping stream with something in it starts over; otherwise this is
+                // all there is.
+                if looping && ring.space() != ring.capacity() && decoder.seek(0).is_ok() {
+                    continue;
+                }
+                ended = true;
+                break;
+            }
+            ring.push(&scratch[..n * channels]);
+        }
+        if ended {
+            // Short enough to fit: the stream thread is not needed (and the voice must not
+            // wait for it to say so).
+            ring.finish();
+        }
+        Ok(Self {
+            ring,
+            decoder: (!ended).then_some(decoder),
+            looping,
+            offset,
+            length,
+        })
+    }
+
+    /// Sample rate in Hz.
+    pub fn sample_rate(&self) -> u32 {
+        self.ring.sample_rate
+    }
+
+    /// Channels: 1 or 2.
+    pub fn channels(&self) -> u16 {
+        self.ring.channels as u16
+    }
+
+    /// Length in frames, when the decoder said.
+    pub fn frames(&self) -> Option<u64> {
+        self.length
+    }
+
+    /// The frame it starts from.
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
+
+    /// Whether it starts over at its end.
+    pub fn looping(&self) -> bool {
+        self.looping
+    }
+}
+
+impl fmt::Debug for PreparedStream {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PreparedStream")
+            .field("sample_rate", &self.ring.sample_rate)
+            .field("channels", &self.ring.channels)
+            .field("offset", &self.offset)
+            .field("length", &self.length)
+            .field("looping", &self.looping)
+            .finish_non_exhaustive()
+    }
+}
+
 /// A stream the stream thread keeps filled.
 pub(crate) struct StreamJob {
     pub(crate) ring: Arc<StreamRing>,

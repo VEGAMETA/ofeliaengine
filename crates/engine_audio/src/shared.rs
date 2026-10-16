@@ -15,10 +15,14 @@ pub(crate) struct Shared {
     /// Peak per bus and channel since the game last read it, as `f32` bits (non-negative
     /// floats order like their bits, so `fetch_max` works).
     pub(crate) peaks: Box<[AtomicU32]>,
+    /// Each clip voice's frame in its clip at the end of the last render call, by slot
+    /// ([`crate::Audio::position`]). The game thread writes a slot's start before the voice
+    /// plays; the audio thread writes it only while the voice is active.
+    pub(crate) positions: Box<[AtomicU64]>,
 }
 
 impl Shared {
-    pub(crate) fn new(max_buses: usize) -> Self {
+    pub(crate) fn new(max_buses: usize, max_voices: usize) -> Self {
         Self {
             frames: AtomicU64::new(0),
             sample_rate: AtomicU32::new(48_000),
@@ -26,6 +30,7 @@ impl Shared {
             virtual_voices: AtomicU32::new(0),
             stream_underruns: AtomicU64::new(0),
             peaks: (0..max_buses * 2).map(|_| AtomicU32::new(0)).collect(),
+            positions: (0..max_voices).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 

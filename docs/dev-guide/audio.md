@@ -1,9 +1,93 @@
 # Audio: sounds, buses, effects, timing, sounds in the world
 
-`engine_audio` plays sounds through a mixer that runs on its own thread. Your game code
-talks to it through `Audio`; every call returns immediately and never waits for the audio
-thread. The output goes straight to the Windows audio engine with a buffer of a few
-milliseconds.
+In the player, which is where most games run, sound is a component. An `AudioSource` on
+an entity plays a file, the camera hears it, walls muffle it, and saves keep where every
+sound was (section 0).
+
+Underneath, `engine_audio` plays sounds through a mixer that runs on its own thread. Your
+code talks to it through `Audio`; every call returns immediately and never waits for the
+audio thread. The output goes straight to the Windows audio engine with a buffer of a few
+milliseconds. Sections 1–8 use the mixer directly, outside the player.
+
+## 0. Sounds in your game (the player)
+
+```rust
+use engine_app::{AudioSource, Spatial};
+
+// Music: as it is, on the music bus, looped.
+world.spawn((AudioSource::new("music/theme.ogg").on_bus("music").looped(),));
+
+// A shot where it was fired: heard from its side, fainter far away, gone at its end.
+world.spawn((
+    Transform::from_translation(muzzle),
+    AudioSource::new("sfx/shot.wav")
+        .placed(Spatial::within(2.0, 80.0))
+        .despawned_at_end(),
+));
+```
+
+- **Files** live in `sounds/` next to the game (`settings.audio.folder`). WAV, Ogg Vorbis,
+  Opus and FLAC are read.
+  - A sound under 10 s is decoded once and kept in memory; a longer one streams from its
+    file (`settings.audio.stream_from`).
+  - Files load on a thread of their own, so the first play of a sound starts a frame or
+    two late. Later plays start at once.
+- **You control a sound through its component:**
+  - `playing = false` pauses it where it is; `true` goes on from there;
+  - `position = 12.5` jumps to 12.5 s;
+  - `volume` and `pitch` are followed every frame;
+  - the bus and `spatial` are read when it starts.
+- **When a sound ends**, `mode` decides:
+  - `PlayMode::Once` stops it (`playing` turns false, `position` goes back to 0);
+  - `Loop` starts it over;
+  - `Despawn` removes its entity.
+- **Who hears:** the main camera, or the entity with an `AudioListener` (a third-person
+  character's head).
+- **Saves keep every source with its position:** after a load each sound goes on from
+  where it was. `restart_on_load: true` starts it from the beginning instead (a jingle).
+- **Your options menu** goes through `world.resource_mut::<Mixer>()`:
+  - `set_volume("music", 0.5)`, `set_muted("effects", true)`, `buses()`;
+  - the buses come from `settings.audio.buses`: music, effects, voice and ui by default;
+  - `mixer.bus_id("music")` puts a video's sound on a bus (`VideoDesc::bus`);
+  - `mixer.error()` says why there is no sound, if there is none.
+- **No sound needed?** `settings.audio.enabled = false`. A game that plays nothing never
+  opens the audio device anyway: it opens, on another thread, with the first sound.
+- **Cost on ref-1:**
+  - the game thread: 2 µs a frame for 100 moving sounds, 17 µs for 1,000;
+  - the mixer: 128 of them mixed and the rest virtual, 1.5 % of a core.
+
+### Walls and rooms
+
+Give the player your physics world, and sound travels through it:
+
+```rust
+impl Game for MyGame {
+    fn acoustics(&self) -> Option<&dyn engine_physics::PhysicsBackend> {
+        Some(self.physics.backend())
+    }
+}
+```
+
+- **A sound behind a wall is quieter and muffled**, and behind two walls more so. A ray
+  goes from the listener to each placed sound, about ten times a second.
+- **The room around the listener gives the reverb, with no set-up:**
+  - 32 rays in every direction measure how large the room is, how open it is to the sky,
+    and what its walls are made of;
+  - a cave rings, a small room answers briefly, an open field stays dry;
+  - effects and voices reverberate, music and the UI do not (`BusSettings::reverb`).
+- **What surfaces are made of:** `mixer.set_absorption(material, 0.4)` for cloth, where
+  `material` is the glTF material index (what `physics.surface_of` returns). The default
+  of 0.1 suits plaster and wood; stone is about 0.02.
+- **A place of your own:** a `ReverbZone` is a box at its entity with a `Room`. Where the
+  listener is inside it, its room takes over:
+  - presets: `Room::CAVE`, `HALL`, `CORRIDOR`, `ROOM`, `OUTDOORS`;
+  - or your own decay, size, damping, pre-delay and level.
+- **What stops sound:**
+  - by default only static geometry (`acoustics.layers`), so characters do not muffle
+    what is behind them;
+  - add your doors' layer to it if you want doors to muffle.
+- **Cost:** at most 64 rays a frame (`acoustics.rays_per_frame`). 1,000 sounds in a room
+  with pillars took 51 µs a frame instead of 17 µs.
 
 ## 1. Start
 

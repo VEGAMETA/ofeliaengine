@@ -4,6 +4,7 @@ use crate::game::{FrameParts, Game};
 use crate::process::ProcessSetup;
 use crate::report::{FrameReport, Startup, StartupPipelines};
 use crate::settings::{PlayerSettings, Window};
+use crate::sound::Sound;
 use crate::videos::Videos;
 use core::cell::RefCell;
 use core::fmt;
@@ -303,6 +304,9 @@ pub struct Player {
     gi_rays: Option<RayScene>,
     /// The game's videos (ADR 0100).
     videos: Videos,
+    /// Sound (ADR 0105): the mixer, its device, the sources' voices; the videos' sound
+    /// plays through it.
+    sound: Sound,
     /// The `loc/` folder behind the world's localizer, kept live (ADR 0102).
     text: Option<crate::text::LiveText>,
     /// The devices behind the world's `engine_input::Input` (`PlayerSettings::input`).
@@ -718,6 +722,10 @@ impl Player {
             save_folder.clone(),
             std::sync::Arc::clone(&save_status),
         ));
+        // Sound (ADR 0105): the mixer and its buses now, the device with the first sound;
+        // the game sets the buses' volumes through the world's `Mixer`.
+        let sound = Sound::new(&settings.audio);
+        world.insert_resource(sound.mixer());
         // The game's input: its actions a resource of the world.
         let input = settings.input.as_ref().map(|map| {
             world.insert_resource(engine_input::Input::new(map.clone()));
@@ -831,6 +839,7 @@ impl Player {
             gi: None,
             gi_rays: None,
             videos: Videos::new(),
+            sound,
             text,
             input,
             graph,
@@ -1564,6 +1573,17 @@ impl Player {
         let t = Instant::now();
         self.sync_probes()?;
         report.probes = us(t);
+        // The main camera: the view, and the ears where no entity hears.
+        let main = self.cameras.resolve(&self.runtime.world);
+        // Sound: the sources' voices, the listener, the world's acoustics (ADR 0105).
+        let t = Instant::now();
+        self.sound.update(
+            &mut self.runtime.world,
+            main.as_ref().map(|m| &m.camera),
+            game.acoustics(),
+            elapsed,
+        );
+        report.sound = us(t);
         // Videos: their clocks, decoding ahead, the pictures due (ADR 0100).
         self.videos.update(
             &self.device,
@@ -1574,6 +1594,7 @@ impl Player {
             frame.number,
             self.frames.in_flight(),
             elapsed,
+            &mut self.sound,
         );
         marker(
             &mut self.latency,
@@ -1583,7 +1604,7 @@ impl Player {
         );
 
         // The main camera, or one at the origin.
-        let (camera, mut view_settings) = match self.cameras.resolve(&self.runtime.world) {
+        let (camera, mut view_settings) = match main {
             Some(main) => (main.camera, main.settings),
             None => (
                 ViewCamera::from_rigid(Quat::IDENTITY, Vec3::ZERO, 1.2, 0.1, 1000.0),
@@ -2306,7 +2327,9 @@ impl Drop for Player {
                 &mut self.allocator,
                 &self.bindless,
                 self.frames.submitted(),
+                self.sound.live(),
             );
+            self.sound.stop_all();
             self.graph
                 .destroy(&mut self.allocator, Some(&self.bindless));
             self.ring.destroy(&mut self.allocator);
@@ -2578,6 +2601,8 @@ impl Player {
         // A load is a camera cut: the temporal history starts over.
         let mut cameras = QueryState::<&mut engine_runtime::Camera>::new(world);
         cameras.for_each(world, |camera| camera.cut());
+        // Every sound starts again where the save had it (ADR 0105).
+        self.sound.after_load(world);
         game.after_load(world, &save, &report);
         Ok(report)
     }

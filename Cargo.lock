@@ -264,6 +264,7 @@ dependencies = [
  "engine_anim",
  "engine_assets",
  "engine_audio",
+ "engine_audio_decode",
  "engine_collision",
  "engine_core",
  "engine_dlss",

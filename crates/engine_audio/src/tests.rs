@@ -1022,3 +1022,137 @@ fn a_stream_reports_how_far_the_mix_has_taken_it() {
     let not_a_stream = audio.play(&clip).unwrap();
     assert_eq!(audio.stream_position(not_a_stream), None);
 }
+
+#[test]
+fn a_clip_starts_at_its_offset_and_reports_where_it_is() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let samples: Vec<f32> = (0..2_000).map(value).collect();
+    let voice = audio
+        .play_with(
+            &mono(&samples),
+            &PlayParams {
+                pan: -1.0,
+                offset: 500,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    // Before the audio thread has started it: where it starts.
+    assert_eq!(audio.position(voice), Some(500));
+    let l = left(&render(&mut renderer, 256));
+    for (i, &s) in l.iter().enumerate() {
+        assert_eq!(s, value(500 + i as u64), "frame {i}");
+    }
+    assert_eq!(audio.position(voice), Some(756));
+    // Twice as fast: two frames of the clip per output frame.
+    audio.set_voice_pitch(voice, 2.0);
+    render(&mut renderer, 256);
+    assert_eq!(audio.position(voice), Some(1_268));
+    render(&mut renderer, 1_024);
+    audio.update();
+    assert!(!audio.is_playing(voice));
+    assert_eq!(audio.position(voice), None);
+}
+
+#[test]
+fn a_looping_clip_starts_inside_itself() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let samples: Vec<f32> = (0..1_000).map(value).collect();
+    let voice = audio
+        .play_with(
+            &mono(&samples),
+            &PlayParams {
+                pan: -1.0,
+                looping: true,
+                offset: 2_900,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(audio.position(voice), Some(900));
+    let l = left(&render(&mut renderer, 256));
+    for (i, &s) in l.iter().enumerate() {
+        assert_eq!(s, value((900 + i as u64) % 1_000), "frame {i}");
+    }
+    assert_eq!(audio.position(voice), Some(156));
+}
+
+#[test]
+fn a_one_shot_started_past_its_end_ends_at_once() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig::default());
+    let voice = audio
+        .play_with(
+            &mono(&[0.5; 100]),
+            &PlayParams {
+                offset: 100,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    assert!(render(&mut renderer, 256).iter().all(|&x| x == 0.0));
+    audio.update();
+    assert!(!audio.is_playing(voice));
+}
+
+#[test]
+fn a_stream_starts_at_its_offset_and_reports_where_it_is() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig {
+        stream_buffer_ms: 2_000,
+        ..AudioConfig::default()
+    });
+    let voice = audio
+        .play_stream(
+            Box::new(Synthetic::new(48_000, 1, 10_000)),
+            &PlayParams {
+                pan: -1.0,
+                offset: 4_000,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(audio.position(voice), Some(4_000));
+    let l = left(&render(&mut renderer, 256));
+    for (i, &s) in l.iter().enumerate() {
+        assert_eq!(s, value(4_000 + i as u64), "frame {i}");
+    }
+    assert_eq!(audio.position(voice), Some(4_256));
+    // Past its end: the stream stops at its length.
+    render(&mut renderer, 8_192);
+    assert_eq!(audio.position(voice), Some(10_000));
+}
+
+#[test]
+fn a_stream_prepared_on_another_thread_plays_from_its_offset() {
+    let (mut audio, mut renderer) = Audio::new(&AudioConfig {
+        stream_buffer_ms: 50,
+        ..AudioConfig::default()
+    });
+    let ms = audio.stream_buffer_ms();
+    // 7500 frames into a looping 3000-frame stream: 1500 frames in.
+    let prepared = std::thread::spawn(move || {
+        crate::PreparedStream::new(Box::new(Synthetic::new(48_000, 1, 3_000)), 7_500, true, ms)
+            .unwrap()
+    })
+    .join()
+    .unwrap();
+    assert_eq!((prepared.offset(), prepared.frames()), (1_500, Some(3_000)));
+    let voice = audio
+        .play_prepared(
+            prepared,
+            &PlayParams {
+                pan: -1.0,
+                ..PlayParams::default()
+            },
+        )
+        .unwrap();
+    let mut out = Vec::new();
+    for _ in 0..6 {
+        out.extend(left(&render(&mut renderer, 1_024)));
+        wait_ms(40);
+    }
+    assert_eq!(audio.stream_underruns(), 0);
+    for (i, &s) in out.iter().enumerate() {
+        assert_eq!(s, value((1_500 + i as u64) % 3_000), "frame {i}");
+    }
+    assert_eq!(audio.position(voice), Some((1_500 + 6 * 1_024) % 3_000));
+}

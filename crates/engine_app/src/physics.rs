@@ -107,6 +107,12 @@ impl ScenePhysics {
         &mut self.physics
     }
 
+    /// The physics world for queries alone: what sound travels through
+    /// ([`crate::Game::acoustics`]).
+    pub fn backend(&self) -> &JoltBackend {
+        &self.physics
+    }
+
     /// The bodies made from the scene, in the pack's order.
     pub fn bodies(&self) -> &[BodyId] {
         &self.bodies
