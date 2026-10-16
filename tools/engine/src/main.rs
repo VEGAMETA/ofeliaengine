@@ -5,7 +5,8 @@
 //! ofeliaengine shaders watch [OPTIONS] <ROOT>...   rebuild on every change (Windows)
 //! ofeliaengine cook <SCENE.gltf> -o <OUT.pack>     cook a scene into a pack (ADR 0056), its
 //!                                                  `<SCENE>.materials.ron` and `<SCENE>.pso.ron`
-//!                                                  applied (ADR 0092)
+//!                                                  applied (ADR 0092), its colliders baked
+//!                                                  into Jolt's binary form (ADR 0101)
 //! ```
 //!
 //! Run `ofeliaengine help` for the options.
@@ -18,6 +19,8 @@ use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_materi
 use engine_assets::pso_record::PsoRecord;
 use engine_assets::{CookSettings, DerivedDataCache, cook_scene, import_gltf, write_pack};
 use engine_core::jobs::ThreadPool;
+use engine_physics::PhysicsSettings;
+use engine_physics_jolt::JoltBackend;
 use engine_shader::{
     CompileOptions, CompilerPool, HotReloadConfig, ShaderCache, ShaderEvent, ShaderHotReload,
     SlangLibrary, compile_all, find_shader_sources,
@@ -32,7 +35,7 @@ usage:
   ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
   ofeliaengine shaders watch [OPTIONS] <ROOT>...   compile, then rebuild on every change (Windows)
   ofeliaengine cook <SCENE.gltf> -o <OUT.pack> [--ddc <DIR>] [--no-lods] [--no-meshlets]
-                    [--level <N>]                  cook a scene into a pack: textures compressed
+                    [--no-colliders] [--level <N>] cook a scene into a pack: textures compressed
                                                    with mips (through the derived data cache,
                                                    default <scene dir>/../.ddc), meshes with
                                                    detail levels and meshlets, entries zstd
@@ -43,7 +46,9 @@ usage:
                                                    (--engine-shaders <DIR>: forward.slang);
                                                    <SCENE>.pso.ron (or --pso <RECORD>): a PSO
                                                    record, only the entry points playtests
-                                                   drew compiled for the types it names
+                                                   drew compiled for the types it names;
+                                                   colliders from its meshes and glTF physics,
+                                                   baked for Jolt (--no-colliders: none)
 
 A shader is a .slang file with at least one [shader(\"<stage>\")] entry point; other
 .slang files are modules, compiled through the shaders that import them.
@@ -105,6 +110,7 @@ fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String
             "--pso" => pso = Some(PathBuf::from(value("--pso")?)),
             "--no-lods" => settings.lods = false,
             "--no-meshlets" => settings.meshlets = false,
+            "--no-colliders" => settings.colliders = false,
             "--level" => {
                 let level = value("--level")?;
                 settings.compression_level = level
@@ -202,8 +208,45 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
         .thread_name("engine-cook")
         .build()
         .map_err(|e| format!("cannot start worker threads: {e:?}"))?;
-    let (cooked, stats) = cook_scene(&scene, dir, Some(&cache), &jobs, &args.settings)
+    let (mut cooked, stats) = cook_scene(&scene, dir, Some(&cache), &jobs, &args.settings)
         .map_err(|e| format!("{}: {e}", args.scene.display()))?;
+    // Colliders in Jolt's binary form: restoring them at load is a copy (ADR 0101).
+    let bake_start = Instant::now();
+    {
+        // In parallel, a physics world per collider (shapes do not need one; Jolt's shape
+        // building does not share state between worlds).
+        let baked: Vec<
+            std::sync::OnceLock<Result<Option<engine_physics::colliders::BakedCollider>, String>>,
+        > = cooked
+            .colliders
+            .iter()
+            .map(|_| std::sync::OnceLock::new())
+            .collect();
+        let colliders = &cooked.colliders;
+        jobs.parallel_for(colliders.len(), 1, |_, range| {
+            for k in range {
+                let result = JoltBackend::new(&PhysicsSettings::default())
+                    .map_err(|e| e.to_string())
+                    .and_then(|mut physics| {
+                        engine_physics::colliders::bake(&mut physics, &colliders[k].collider)
+                            .map_err(|e| e.to_string())
+                    });
+                let _ = baked[k].set(result);
+            }
+        });
+        for (c, b) in cooked.colliders.iter_mut().zip(baked) {
+            let b = b
+                .into_inner()
+                .unwrap_or_else(|| Err("not baked".to_owned()))
+                .map_err(|e| format!("{}: a collider: {e}", args.scene.display()))?;
+            c.baked = b.map(|b| engine_assets::colliders::BakedCollider {
+                format: b.format,
+                bytes: b.bytes,
+                castable: b.castable,
+            });
+        }
+    }
+    let baked_in = bake_start.elapsed();
     let cooked_at = start.elapsed();
     let written = write_pack(&args.out, &cooked, &jobs, args.settings.compression_level)
         .map_err(|e| format!("{}: {e}", args.out.display()))?;
@@ -218,6 +261,16 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
         cooked.instances.len(),
         cooked_at.as_secs_f64(),
     );
+    if !cooked.colliders.is_empty() {
+        println!(
+            "{}: {} colliders, {} bodies; made in {:.2} s, baked in {:.2} s",
+            args.scene.display(),
+            cooked.colliders.len(),
+            cooked.bodies.len(),
+            stats.collider_seconds,
+            baked_in.as_secs_f64(),
+        );
+    }
     println!(
         "{}: {} entries, {:.1} MB ({:.1} MB raw, {:.0}%), written in {:.1} s",
         args.out.display(),

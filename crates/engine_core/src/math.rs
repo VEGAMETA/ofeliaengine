@@ -15,6 +15,9 @@ pub use glam::{
     Affine2, Affine3A, EulerRot, IVec2, IVec3, IVec4, Mat2, Mat3, Mat3A, Mat4, Quat, UVec2, UVec3,
     UVec4, Vec2, Vec3, Vec3A, Vec4,
 };
+/// Double precision, for geometry processing at cook time (convex hulls and fitting,
+/// ADR 0101), where f32's rounding decides which points lie on a plane.
+pub use glam::{DMat3, DQuat, DVec2, DVec3};
 
 /// Right-handed view matrix: the camera at `eye` looking at `target`, `up` roughly up.
 pub fn look_at(eye: Vec3, target: Vec3, up: Vec3) -> Mat4 {

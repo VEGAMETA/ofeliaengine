@@ -1,0 +1,23 @@
+[package]
+name = "engine_collision"
+description = "Colliders in the engine's own form (ADR 0101): convex hulls, fitted primitives, what shapes become under a scale."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Math (glam's vectors and quaternions, f64 for geometry processing; ADR 0012).
+engine_core.workspace = true
+# Tracy zones (CLAUDE.md §14).
+engine_profiler.workspace = true
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
+
+[[bench]]
+name = "hull"
+harness = false

@@ -22,8 +22,15 @@ Last updated: 2026-10-16.
   - **Required later** (the owner, 2026-10-15: deferred, but it will be needed):
     transparent surfaces and subsurface transmission from the pages, so the cascades
     are not drawn beside them. The default for discrete GPUs is decided after it.
-- **Next, in order** (§5): 8c colliders made from meshes, 8d localization. After them,
-  item 9: the editor, Luau and tooling.
+- **In progress: 8c, colliders made from meshes** (ADR 0101, Proposed).
+  - **Done (first PR):**
+    - `engine_collision` (hulls, fitting, scale rules);
+    - compound, scaled and baked shapes in the physics API;
+    - colliders in the cook from glTF physics, `UCX_` names and the defaults;
+    - pack version 6, baked for Jolt;
+    - `ScenePhysics` in the player.
+  - **Next (8c-3):** the Rust decomposition after CoACD's algorithm.
+- **Then:** 8d localization. After it, item 9: the editor, Luau and tooling.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
@@ -35,7 +42,11 @@ Last updated: 2026-10-16.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner:** none.
+- **Questions open with the owner** (2026-10-16, ADR 0101):
+  1. the rules file's shape (`<scene>.colliders.ron`);
+  2. what collides by default (every mesh as level geometry, recommended);
+  3. the decomposition until ours is ready (ours only, recommended; or V-HACD for a
+     while).
 - **Agents:** none run until the owner allows them again (§7).
 
 ## 1. What matters most
@@ -127,8 +138,9 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 ## 4. In flight
 
-Nothing is in flight. 8b, video playback, was done 2026-10-16 (its record is under the
-queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
+8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
+8c-1, 8c-2a, 8c-4a) merged; next 8c-3, the decomposition. 8b, video playback, was done 2026-10-16 (its
+record is under the queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
 them.
 
@@ -802,6 +814,29 @@ grown, divide and conquer); the old labels stay in parentheses.
    split into convex parts (CoACD, MIT, or V-HACD, BSD-3: compare), and colliders authored
    in the source taken as they are (`UCX_` names, a glTF physics extension). Today shapes
    are only made in code.
+   - **Research and ADR 0101** (2026-10-16):
+     - V-HACD 4.1 against CoACD 1.0.14, judged exactly with manifold booleans: CoACD fits
+       better with 2-10 times fewer hulls (sticking out 0.05-1.6 % of the size against
+       1-9 %), and is 20-90 times slower;
+     - Jolt's mesh shape costs about 1 µs a triangle to build, and restoring its binary
+       form is 470-880 times faster (Intel Sponza 3.9 s → 5.5 ms).
+   - **Owner's requirements** (2026-10-16):
+     - a decomposition of our own in Rust;
+     - any scale after the colliders are made, with no errors;
+     - colliders as editable data for the editor later.
+   - **Done (first PR, #230):**
+     - 8c-1: `engine_collision`: QuickHull, fitting, scale rules;
+     - 8c-2a: glTF physics, the cook's colliders, pack version 6, baking in `ofeliaengine
+       cook`;
+     - 8c-4a: `ScenePhysics` and `Player::load_physics`.
+     - Sponza's colliders cost the cook 0.33 s and its pack 2.4 MB; Intel Sponza's, 1.8 s
+       and 37 MB.
+   - **Left:**
+     - 8c-3: the decomposition (props whose hull does not fit get the hull until then);
+     - the rules file (the owner's question 1);
+     - `RayHit`'s surface;
+     - the cook's colliders on all threads;
+     - a demo of props dropped on Sponza.
 8d. **Localization and internationalization for the game developer** (owner, 2026-10-14:
    simple to use). Today the engine has none. To research first (Fluent and its Rust crates,
    ICU4X, gettext's PO format, Godot's `TranslationServer`, Unreal's string tables and text

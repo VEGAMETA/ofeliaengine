@@ -300,7 +300,7 @@ things for later.
 
 **Measured** with `video_bench --gpu` on ref-1, release, the 8b-1 clips:
 
-| | RTX 4060 Ti | Radeon 780M | rav1d, 16 threads (8b-1) |
+| | RTX 4060 Ti | Radeon iGPU | rav1d, 16 threads (8b-1) |
 |---|---:|---:|---:|
 | 1080p30 8-bit, 13.4 Mbit/s: pictures/s (× real time) | 1,024 (34×) | 548 (18×) | 450 (15×) |
 | 2160p30 10-bit, 35.9 Mbit/s | 276 (9.2×) | 107 (3.6×) | 164 (5.5×) |
@@ -418,7 +418,7 @@ things for later.
 **Measured** with `examples/player_bench.rs` on ref-1 (release; 60 simulated frames a
 second; the GPU kept busy after the conversion so its clocks stay up), each new picture:
 
-| | RTX 4060 Ti | Radeon 780M |
+| | RTX 4060 Ti | Radeon iGPU |
 |---|---:|---:|
 | conversion, 1080p30 8-bit (GPU decoded) | 25 µs | 1.30 ms |
 | conversion, 2160p30 10-bit | 0.17 ms | 4.3 ms |

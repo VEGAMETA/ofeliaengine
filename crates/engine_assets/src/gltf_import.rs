@@ -294,6 +294,8 @@ pub struct NodeData {
     pub children: Vec<usize>,
     /// Index into [`ImportedScene::skins`] (a skinned mesh).
     pub skin: Option<usize>,
+    /// Its `KHR_physics_rigid_bodies` (ADR 0101).
+    pub physics: Option<crate::gltf_physics::NodePhysics>,
 }
 
 /// A skin: the joints that deform meshes and their inverse bind matrices.
@@ -359,6 +361,10 @@ pub struct ImportedScene {
     pub material_types: Vec<MaterialTypeData>,
     /// The materials of those types: their parameters.
     pub typed_materials: Vec<TypedMaterialData>,
+    /// The file's physics shapes and materials (ADR 0101).
+    pub physics: crate::gltf_physics::PhysicsData,
+    /// How its meshes collide where the file does not say (ADR 0101): the cook's rules.
+    pub collider_rules: crate::colliders::ColliderRules,
 }
 
 /// A material type (ADR 0092): its source and its fragment entry points compiled.
@@ -764,8 +770,10 @@ pub fn import_gltf(bytes: &[u8], base_dir: Option<&Path>) -> Result<ImportedScen
             mesh: node.mesh().map(|m| m.index()),
             children: node.children().map(|c| c.index()).collect(),
             skin: node.skin().map(|s| s.index()),
+            physics: crate::gltf_physics::node_physics(&node),
         });
     }
+    scene.physics = crate::gltf_physics::scene_physics(&document);
     let node_count = scene.nodes.len();
     for skin in document.skins() {
         let joints: Vec<usize> = skin.joints().map(|j| j.index()).collect();

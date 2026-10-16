@@ -535,6 +535,22 @@ unsafe extern "C" {
         settings: *const JPH_ShapeSettings,
     ) -> *mut JPH_Shape;
     pub(crate) fn JPH_ShapeSettings_Destroy(settings: *mut JPH_ShapeSettings);
+    pub(crate) fn JPH_StaticCompoundShapeSettings_Create() -> *mut JPH_ShapeSettings;
+    pub(crate) fn JPH_CompoundShapeSettings_AddShape2(
+        settings: *mut JPH_ShapeSettings,
+        position: *const JPH_Vec3,
+        rotation: *const JPH_Quat,
+        shape: *const JPH_Shape,
+        user_data: u32,
+    );
+    pub(crate) fn JPH_StaticCompoundShape_Create(
+        settings: *const JPH_ShapeSettings,
+    ) -> *mut JPH_Shape;
+    pub(crate) fn JPH_ScaledShape_Create(
+        shape: *const JPH_Shape,
+        scale: *const JPH_Vec3,
+    ) -> *mut JPH_Shape;
+    pub(crate) fn JPH_Shape_IsValidScale(shape: *const JPH_Shape, scale: *const JPH_Vec3) -> bool;
     pub(crate) fn JPH_Shape_Destroy(shape: *mut JPH_Shape);
 
     pub(crate) fn JPH_BodyCreationSettings_Create3(
@@ -1130,6 +1146,13 @@ unsafe extern "C" {
         bytes: *const u8,
         size: usize,
     ) -> bool;
+    pub(crate) fn engine_jolt_shape_save(
+        shape: *const JPH_Shape,
+        out: *mut u8,
+        capacity: usize,
+    ) -> usize;
+    pub(crate) fn engine_jolt_shape_restore(bytes: *const u8, size: usize) -> *mut JPH_Shape;
+    pub(crate) fn engine_jolt_shape_format() -> u64;
 }
 
 /// Layout checks of the structs added for ADR 0066 (`csrc/ext.cpp`).

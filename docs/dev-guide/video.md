@@ -115,7 +115,7 @@ for event in videos.events(video) {
 
 Measured on ref-1 (2026-10-16), a 1080p30 and a 2160p30 10-bit stream, each new picture:
 
-| | RTX 4060 Ti | Radeon 780M (iGPU) |
+| | RTX 4060 Ti | Radeon iGPU |
 |---|---:|---:|
 | Decoding on the GPU's video engine | its own engine, beside the frame | its own engine |
 | Conversion into the texture, 1080p | 25 µs | 1.3 ms |

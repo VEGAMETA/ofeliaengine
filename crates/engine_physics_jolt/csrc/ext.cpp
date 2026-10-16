@@ -16,6 +16,7 @@
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
 #include <Jolt/Physics/StateRecorder.h>
+#include <Jolt/Physics/Collision/Shape/Shape.h>
 
 #include <atomic>
 #include <cstddef>
@@ -342,7 +343,9 @@ public:
 		mPosition += count;
 	}
 
-	bool IsEOF() const override { return mPosition >= mCapacity; }
+	// As std::istream's: set by a read past the end, not by reaching it (Jolt reads a final
+	// empty array's length and then checks this).
+	bool IsEOF() const override { return mFailed; }
 	bool IsFailed() const override { return mFailed; }
 
 	size_t Position() const { return mPosition; }
@@ -381,6 +384,46 @@ extern "C" bool engine_jolt_restore_state(EngineJoltWorld* world, EngineJoltChar
 	for (uint32_t i = 0; i < count; ++i)
 		characters[i]->character->RestoreState(recorder);
 	return !recorder.IsFailed() && recorder.Position() == size;
+}
+
+// ---------------------------------------------------------------------------------------
+// Shapes in Jolt's binary form, cooked into packs (ADR 0101).
+
+// A key of the form: it is not stable across Jolt versions, and double precision changes
+// its vectors. The low byte is this file's revision of how shapes are saved.
+extern "C" uint64_t engine_jolt_shape_format(void)
+{
+	uint64_t key = (uint64_t(JPH_VERSION_MAJOR) << 48) | (uint64_t(JPH_VERSION_MINOR) << 32) | (uint64_t(JPH_VERSION_PATCH) << 16);
+#ifdef JPH_DOUBLE_PRECISION
+	key |= uint64_t(1) << 8;
+#endif
+	return key | 1;
+}
+
+// A shape with its children in Jolt's binary form. Returns the size; the bytes are in
+// `out` only if it is at most `capacity`.
+extern "C" size_t engine_jolt_shape_save(const JPH_Shape* shape, uint8_t* out, size_t capacity)
+{
+	BufferRecorder recorder(out, nullptr, capacity);
+	Shape::ShapeToIDMap shapes;
+	Shape::MaterialToIDMap materials;
+	reinterpret_cast<const Shape*>(shape)->SaveWithChildren(recorder, shapes, materials);
+	return recorder.Position();
+}
+
+// The shape `engine_jolt_shape_save` wrote, with one reference for the caller; null if the
+// bytes are not one.
+extern "C" JPH_Shape* engine_jolt_shape_restore(const uint8_t* bytes, size_t size)
+{
+	BufferRecorder recorder(nullptr, bytes, size);
+	Shape::IDToShapeMap shapes;
+	Shape::IDToMaterialMap materials;
+	Shape::ShapeResult result = Shape::sRestoreWithChildren(recorder, shapes, materials);
+	if (result.HasError() || recorder.IsFailed() || recorder.Position() != size)
+		return nullptr;
+	Shape* shape = const_cast<Shape*>(result.Get().GetPtr());
+	shape->AddRef();
+	return reinterpret_cast<JPH_Shape*>(shape);
 }
 
 // ---------------------------------------------------------------------------------------

@@ -12,10 +12,12 @@
 //! (`pso_record`) let a cook compile only the entry points a game draws.
 
 pub mod animation;
+pub mod colliders;
 pub mod cook;
 mod ddc;
 mod gltf_import;
 pub mod gltf_models;
+pub mod gltf_physics;
 pub mod hdr;
 mod lod;
 pub mod material_file;

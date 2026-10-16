@@ -180,6 +180,10 @@ pub struct CookedScene {
     pub material_types: Vec<MaterialTypeData>,
     /// Materials of those types.
     pub typed_materials: Vec<CookedTypedMaterial>,
+    /// Colliders, shared by the bodies (ADR 0101; `crate::colliders`).
+    pub colliders: Vec<crate::colliders::CookedCollider>,
+    /// Bodies: static level geometry, props, triggers.
+    pub bodies: Vec<crate::colliders::CookedBody>,
 }
 
 /// A material of a type (ADR 0092): its glTF record in [`CookedScene::materials`] is its
@@ -223,6 +227,9 @@ pub struct CookSettings {
     /// Largest error of a compressed clip, in scene units, measured on virtual vertices at
     /// each joint's farthest skinned vertex (ADR 0068; 0.1 mm for meters).
     pub animation_error: f32,
+    /// Make colliders and bodies (ADR 0101) by the scene's [`ImportedScene::collider_rules`]
+    /// and its glTF physics.
+    pub colliders: bool,
 }
 
 impl Default for CookSettings {
@@ -233,6 +240,7 @@ impl Default for CookSettings {
             compression_level: 19,
             block_compression: true,
             animation_error: 1e-4,
+            colliders: true,
         }
     }
 }
@@ -344,6 +352,8 @@ pub struct CookStats {
     pub clip_bytes: usize,
     /// Largest error of any clip.
     pub clip_error: f32,
+    /// Seconds spent on colliders (ADR 0101).
+    pub collider_seconds: f64,
 }
 
 /// Cooks `scene` (imported from a glTF file in `base_dir`): its textures read, filtered
@@ -572,6 +582,8 @@ pub fn cook_scene(
         })
         .collect();
     let mut stack: Vec<(usize, Mat4)> = scene.roots.iter().map(|&r| (r, Mat4::IDENTITY)).collect();
+    // Each node's instances (first, count), for the bodies that move them.
+    let mut node_instances = vec![(0u32, 0u32); scene.nodes.len()];
     while let Some((index, parent)) = stack.pop() {
         let node = &scene.nodes[index];
         let world = parent
@@ -580,7 +592,12 @@ pub fn cook_scene(
                 Quat::from_array(node.rotation),
                 Vec3::from(node.translation),
             );
-        if let Some(mesh) = node.mesh {
+        let first = cooked.instances.len() as u32;
+        // Authored collision meshes (`UCX_` and kin) are not drawn.
+        if let Some(mesh) = node
+            .mesh
+            .filter(|_| !crate::colliders::is_collision_node(&node.name))
+        {
             // A skinned mesh is placed by its skeleton (glTF ignores its node's
             // transform), when it has influences.
             let skin = node.skin.filter(|&k| k < cooked.skins.len());
@@ -598,7 +615,14 @@ pub fn cook_scene(
                 });
             }
         }
+        node_instances[index] = (first, cooked.instances.len() as u32 - first);
         stack.extend(node.children.iter().map(|&c| (c, world)));
+    }
+    if settings.colliders {
+        let start = std::time::Instant::now();
+        (cooked.colliders, cooked.bodies) =
+            crate::colliders::cook_colliders(scene, &node_instances, &scene.collider_rules);
+        stats.collider_seconds = start.elapsed().as_secs_f64();
     }
     Ok((cooked, stats))
 }
@@ -1451,6 +1475,28 @@ pub fn write_pack(
             reserved: 0,
         }));
     }
+    // Colliders and bodies (version 6, ADR 0101): an entry per collider, in order, then one
+    // for the bodies.
+    for c in &scene.colliders {
+        let (meta, data) = crate::colliders::collider_entry(c);
+        writer.add(&PreparedEntry::new(
+            EntryKind::Collider,
+            meta,
+            &data,
+            level,
+            DEFAULT_CHUNK_SHIFT,
+        ))?;
+    }
+    if !scene.bodies.is_empty() {
+        let (meta, data) = crate::colliders::bodies_entry(&scene.bodies);
+        writer.add(&PreparedEntry::new(
+            EntryKind::Bodies,
+            meta,
+            &data,
+            level,
+            DEFAULT_CHUNK_SHIFT,
+        ))?;
+    }
     let mut data = Vec::new();
     section(&mut data, bytemuck::cast_slice(&records));
     section(&mut data, bytemuck::cast_slice(&materials));
@@ -1866,8 +1912,12 @@ fn open_scene_with(
     let decoded: Vec<Mutex<Option<Decoded>>> = entries.iter().map(|_| Mutex::new(None)).collect();
     let indices: Vec<u32> = (0..entries.len() as u32)
         .filter(|&i| match entries[i as usize].kind() {
-            // Panoramas are read on their own (`crate::panorama::load_panorama_pack`).
-            EntryKind::TextureLevels | EntryKind::Panorama => false,
+            // Panoramas are read on their own (`crate::panorama::load_panorama_pack`), and
+            // colliders when a game simulates physics (`crate::colliders::load_colliders`).
+            EntryKind::TextureLevels
+            | EntryKind::Panorama
+            | EntryKind::Collider
+            | EntryKind::Bodies => false,
             EntryKind::MeshLevel => !stream_meshes,
             _ => true,
         })
@@ -1909,6 +1959,9 @@ fn open_scene_with(
             }
             EntryKind::TextureLevels => return Err(invalid("texture levels loaded early")),
             EntryKind::Panorama => return Err(invalid("a panorama loaded as a scene's entry")),
+            EntryKind::Collider | EntryKind::Bodies => {
+                return Err(invalid("colliders loaded as a scene's entry"));
+            }
         };
         if let Ok(mut slot) = decoded[index as usize].lock() {
             *slot = Some(value);
@@ -1938,7 +1991,10 @@ fn open_scene_with(
                 }
             }
             Some(Decoded::MaterialType(ty)) => layout.scene.material_types.push(ty),
-            None if entries[i].kind() == EntryKind::TextureLevels => {}
+            None if matches!(
+                entries[i].kind(),
+                EntryKind::TextureLevels | EntryKind::Collider | EntryKind::Bodies
+            ) => {}
             None => return Err(invalid(format!("entry {i} not loaded"))),
         }
     }
@@ -2157,6 +2213,7 @@ pub fn load_pack(
         mut scene,
         ..
     } = layout;
+    (scene.colliders, scene.bodies) = crate::colliders::load_colliders(&pack, jobs, depth)?;
     for record in &textures {
         let format = texture_shape(record.format, record.width, record.height, record.levels)?;
         let mut out = Vec::with_capacity(record.levels as usize);
@@ -2295,6 +2352,8 @@ mod tests {
             skins: Vec::new(),
             material_types: Vec::new(),
             typed_materials: Vec::new(),
+            colliders: Vec::new(),
+            bodies: Vec::new(),
         }
     }
 
@@ -2474,6 +2533,112 @@ mod tests {
             u32::from_le_bytes([header[4], header[5], header[6], header[7]]),
             1
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn colliders_and_bodies_survive_a_pack() {
+        use crate::colliders::{BakedCollider, CookedBody, CookedCollider, Motion};
+        use engine_collision::{Collider, ColliderShape, Origin, Shape};
+        let jobs = ThreadPool::builder().workers(2).build().unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "engine_assets_colliders_{}.pack",
+            std::process::id()
+        ));
+        let mut scene = sample();
+        let shape = |id, shape| ColliderShape {
+            id,
+            shape,
+            surface: 3,
+        };
+        scene.colliders = vec![
+            // Not baked: the mesh's triangles go into the pack.
+            CookedCollider {
+                collider: Collider {
+                    shapes: vec![shape(
+                        0,
+                        Shape::Mesh {
+                            vertices: vec![Vec3::ZERO, Vec3::X, Vec3::Y],
+                            triangles: vec![[0, 1, 2]],
+                            surfaces: vec![7],
+                        },
+                    )],
+                    origin: Origin::Generated,
+                },
+                baked: None,
+            },
+            // Baked: a prop's parts, and the backend's bytes.
+            CookedCollider {
+                collider: Collider {
+                    shapes: vec![
+                        shape(
+                            4,
+                            Shape::Box {
+                                center: Vec3::new(1.0, 2.0, 3.0),
+                                rotation: Quat::from_rotation_y(0.5),
+                                half_extents: Vec3::new(0.1, 0.2, 0.3),
+                            },
+                        ),
+                        shape(
+                            9,
+                            Shape::Capsule {
+                                center: Vec3::ZERO,
+                                rotation: Quat::IDENTITY,
+                                half_height: 0.5,
+                                radius: 0.25,
+                            },
+                        ),
+                        shape(
+                            11,
+                            Shape::Hull {
+                                points: vec![Vec3::ZERO, Vec3::X, Vec3::Y, Vec3::Z],
+                            },
+                        ),
+                    ],
+                    origin: Origin::Authored,
+                },
+                baked: Some(BakedCollider {
+                    format: 0x0005_0006_0000_0001,
+                    bytes: (0..=255).collect(),
+                    castable: true,
+                }),
+            },
+        ];
+        scene.bodies = vec![
+            CookedBody {
+                collider: 0,
+                ..CookedBody::default()
+            },
+            CookedBody {
+                collider: 1,
+                instances: vec![1, 0],
+                motion: Motion::Dynamic,
+                friction: 0.25,
+                mass: Some(12.0),
+                linear_velocity: [1.0, 2.0, 3.0],
+                gravity_factor: 0.5,
+                world_from_object: Mat4::from_scale(Vec3::new(2.0, 1.0, 1.0)).to_cols_array(),
+                ..CookedBody::default()
+            },
+            CookedBody {
+                collider: 1,
+                motion: Motion::Kinematic,
+                sensor: true,
+                ..CookedBody::default()
+            },
+        ];
+        write_pack(&path, &scene, &jobs, 3).unwrap();
+        let header = std::fs::read(&path).unwrap();
+        assert_eq!(
+            u32::from_le_bytes([header[4], header[5], header[6], header[7]]),
+            6
+        );
+        let (loaded, _) = load_pack(&path, &jobs, 4).unwrap();
+        // A baked collider's meshes stay in the baked form; this one has none.
+        assert_eq!(loaded, scene);
+        // A scene that is only drawn does not load them.
+        let (_, layout, _) = open_scene(&path, &jobs, 4).unwrap();
+        assert!(layout.scene.colliders.is_empty() && layout.scene.bodies.is_empty());
         let _ = std::fs::remove_file(path);
     }
 

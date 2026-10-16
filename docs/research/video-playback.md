@@ -168,7 +168,7 @@ header (`CodedBitstreamAV1`). Parsing is the application's job, separate from th
 What the drivers report for AV1's main profile (`vkGetPhysicalDeviceVideoCapabilitiesKHR`
 and `vkGetPhysicalDeviceVideoFormatPropertiesKHR`, 8 and 10 bits alike, film grain or not):
 
-| | RTX 4060 Ti, NVIDIA 616.92 | Radeon 780M, AMD 26.8.1 |
+| | RTX 4060 Ti, NVIDIA 616.92 | Radeon iGPU, AMD 26.8.1 |
 |---|---|---|
 | decode queue family | 3: decode + transfer, 1 queue, 32 timestamp bits | 4: decode only, 1 queue, no timestamps |
 | decoded picture and reference | coincide only | distinct only |
