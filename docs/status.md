@@ -33,7 +33,7 @@ Last updated: 2026-10-16.
   - **Done (second PR, #231, 8c-3):** the Rust decomposition after CoACD's algorithm, in the cook
     for props and dynamic glTF bodies, cached in the DDC: CoACD's hull counts (but the
     mug's: 24 against 21) in 0.02-3.0 s per model where CoACD takes 1.4-195 s.
-  - **Done (third PR, 8c-4):** the owner's requirement tested: concave props scaled every
+  - **Done (third PR, #232, 8c-4):** the owner's requirement tested: concave props scaled every
     way (mirrored and sheared included) dropped onto Sponza come to rest, and a ball falls
     into a U's notch; a rendered demo (`props_drop`); meshes made of several pieces now
     remeshed (a table of boards was cut as a solid running through itself).
@@ -147,8 +147,8 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
 8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
-decomposition and its place in the cook) merged; the third (`feat/props-on-sponza`:
-8c-4, props on Sponza at every scale) in review. What is left of 8c waits for the owner's
+decomposition and its place in the cook) merged; the third (#232, `feat/props-on-sponza`:
+8c-4, props on Sponza at every scale) merged. What is left of 8c waits for the owner's
 question 1; next 8d. 8b, video playback, was done 2026-10-16 (its
 record is under the queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
@@ -848,7 +848,7 @@ grown, divide and conquer); the old labels stay in parentheses.
      the DDC. 14 models in 0.02-3.0 s (CoACD 1.4-195 s) with CoACD's hull counts but the
      mug's (24 against 21); sticking out within 0.1 % of CoACD on 7, up to 1.1 % more on
      smooth ones (64 points a hull).
-   - **Done (third PR, 8c-4):** `concave_props_scaled_every_way_land_on_sponza` (nine
+   - **Done (third PR, #232, 8c-4):** `concave_props_scaled_every_way_land_on_sponza` (nine
      props at scale 1, 0.5, 2, along their axes, mirrored, sheared; at rest standing on bare
      floor found by rays; a ball into the U's notch reaches the floor) and the rendered demo
      `engine_app/examples/props_drop.rs` (21 props, 5 meshes decomposed in 0.53 s). A mesh
