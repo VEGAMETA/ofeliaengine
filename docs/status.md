@@ -61,7 +61,7 @@ Last updated: 2026-10-16.
   - Done: its P0 (#236: the local lights' shadows' bookkeeping bounded, a CPU stage check
     in the perf gate) and item 1 (VSM's leftover, #237).
   - Item 2 done: the budget counts the allocator's free room (#238), and Reflex's pacing
-    is measured and its late wakes cut (ADR 0023's addendum). Next: item 3, the colliders'
+    is measured and its late wakes cut (#239, ADR 0023's addendum). Next: item 3, the colliders'
     rules file.
   - **Reflex's tail is the driver's** (616.92): its sleep is never under ~1.5 ms, in
     0.5 ms steps, so above ~500 FPS frames hold at 2 ms. Reflex still halves input to GPU
@@ -207,7 +207,7 @@ water and impostors stay in §6):
 2. ~~**Device memory** (audit 3 §3.3) and **Reflex's pacing** (§3.4)~~ (done 2026-10-16).
    - The budget counts the allocator's free room, and the larger empty block goes (#238:
      the flight's rest of the process 688 → 360 MiB on the RTX).
-   - Reflex (ADR 0023's addendum): every submission of a frame carries its present id. The
+   - Reflex (#239, ADR 0023's addendum): every submission of a frame carries its present id. The
      wait for the driver's signal is cut at three frame intervals (late wakes of 15–43 ms
      become 7 ms). The flight times input to GPU done (`--input-latency`).
    - The wider tail is the driver's: its sleep is never under ~1.5 ms. Left: a pacer of
