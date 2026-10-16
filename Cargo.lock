@@ -697,6 +697,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_save"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_ecs",
+ "engine_profiler",
+ "engine_reflect",
+ "engine_scene",
+ "engine_workspace_hack",
+ "zstd",
+]
+
+[[package]]
 name = "engine_scene"
 version = "0.0.0"
 dependencies = [

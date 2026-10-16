@@ -325,6 +325,20 @@ impl Archetype {
         Some(unsafe { core::slice::from_raw_parts(self.column_ptr(chunk, column), len) })
     }
 
+    /// The first value of a column in one chunk (`chunk_len` values, the component's
+    /// size apart, row order): for code that reads values that are not plain data
+    /// through their reflection description (saves). Valid while the archetype is
+    /// borrowed; reading through it is the caller's `unsafe`.
+    ///
+    /// # Panics
+    ///
+    /// If `chunk` or `column` is out of range.
+    #[inline]
+    pub fn column_base(&self, chunk: usize, column: usize) -> *const u8 {
+        assert!(chunk < self.chunks.len() && column < self.columns.len());
+        self.column_ptr(chunk, column)
+    }
+
     #[inline]
     pub(crate) fn chunk_ptr(&self, chunk: usize) -> *mut u8 {
         self.chunks[chunk].as_ptr()

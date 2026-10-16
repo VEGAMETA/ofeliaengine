@@ -107,3 +107,12 @@ fn a_resource_is_made_read_and_written_through_its_listing() {
     assert_eq!(world.resource::<Score>().unwrap().best, "Ofelia");
     assert!(get(&world).is_some());
 }
+
+#[test]
+fn an_entity_may_start_with_no_components() {
+    let mut world = World::new();
+    let e = world.spawn(());
+    assert!(world.contains(e));
+    assert!(world.insert(e, Health::default()));
+    assert_eq!(world.get::<Health>(e), Some(&Health::default()));
+}

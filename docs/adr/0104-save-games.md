@@ -125,8 +125,10 @@ otherwise read a large world in 1.9 s instead of 0.3 s.
 - **Reading takes both always:** the header says which. Switching never strands a save.
 - **The CLI:**
   - `ofeliaengine save dump <file>` writes the text form;
-  - `save pack` writes a binary from text;
   - `save info` prints the header.
+
+  No `save pack`: every build reads both encodings, so an edited text save loads as it is
+  (`engine_save::text_file` makes a file of an edited dump).
 
 ### The file
 
@@ -173,13 +175,54 @@ player.autosave_now();               // a checkpoint
      and resource of the program, with a writer of its `Default` value when it has one
      (found without a bound, by method resolution);
    - replication and scenes skip the containers for now (scenes write them with step 2).
-2. **`engine_save`:**
-   - taking a save in the frame;
-   - both encodings;
-   - the container, its checksum and the atomic swap;
-   - slots in `Saved Games`;
-   - fuzzing;
-   - measurements: what the frame pays, the background time, sizes.
+2. **`engine_save`** (done, `feat/save-games`):
+   - **`capture`** walks archetypes chunk by chunk:
+     - plain-data columns are copied as they lie, the rest written at once;
+     - the hierarchy comes from the `Parent` column (parent and previous sibling, so the
+       children keep their order);
+     - saved entities are numbered in a dense table by slot, not hashed;
+     - `Transient` leaves an entity out, `#[reflect(skip)]` a type or field;
+     - `SaveImage::set_state` and `exclude` are for the providers and `before_save`.
+   - **The binary body:**
+     - each type's shape once (field names, kinds, enum variants by name);
+     - the entities (id or local, parent, previous sibling) with their values;
+     - the resources, the states, the destroyed level ids.
+   - **The text** is written from the shapes alone, so `dump` needs no game types: the
+     same text for a text save and a binary one.
+   - **Reading:**
+     - fields by name, numbers converted (saturating), variants by name;
+     - kinds that changed keep the default, with a note;
+     - counts checked against the bytes left before anything is allocated.
+   - **`apply`:**
+     - matches the level's entities by id, creates the rest, removes the destroyed ones;
+     - drops components the save says a level entity no longer had;
+     - restores the hierarchy in order, resources from their default.
+   - **The file:**
+     - header, zstd level 1, checksum;
+     - written to `.tmp`, flushed, the old file renamed to `.bak`, the new one renamed in;
+     - `read_save` falls back to `.tmp`, then `.bak`;
+     - `slot_path` (a hash added when a name had to change), `list_slots` (newest first).
+   - **Tests:**
+     - a played level comes back from both encodings;
+     - the text is readable and the dumps of both encodings are equal;
+     - a hand-edited text save loads, and a typo is an error with its line;
+     - exclusion;
+     - the swap and the fallback;
+     - an old type read into a changed one;
+     - 3,000 damaged bodies applied without a panic.
+   - **Measured** (`cargo run -p engine_save --release --example save_bench`; ref-1, one
+     thread):
+     - the world: 10,000 entities with an id and a `Transform`, 9,900 with a plain-data
+       unit, 100 with an inventory (a name, ten items, five flags);
+     - the frame's capture: 0.51 ms (2.1 ms before its hashing was removed);
+
+     | Encoding | Encode and compress | Write the file | Read | Apply | Body | File |
+     |---|---|---|---|---|---|---|
+     | Binary | 2.5 ms | 1.9 ms | 1.6 ms | 5.7 ms | 1,003 KiB | 159 KiB |
+     | Text | 30.8 ms | 2.1 ms | 24.8 ms | 11.6 ms | 3,247 KiB | 177 KiB |
+
+     Applying looks every field up by name; a plan compiled per type would cut that if a
+     game's loads need it.
 3. **The player:**
    - quicksave, quickload, slots and autosave;
    - the hooks;
@@ -193,6 +236,8 @@ player.autosave_now();               // a checkpoint
 
 - A game saves with one call and loses nothing it did not mark. A transient type left
   unmarked costs space, not correctness, and `save info` shows the largest sections.
+- `Entity` is `Default` (`Entity::NULL`), so components that hold entities derive
+  `Default` and load; `()` is an empty bundle (`World::spawn(())`).
 - Text saves while developing can be read, diffed and fixed by hand, and kept in tests.
 - Reflection's growth (strings, lists, maps) serves the inspector, scripting and scenes
   too.
