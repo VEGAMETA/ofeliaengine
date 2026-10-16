@@ -37,15 +37,15 @@ Last updated: 2026-10-16.
     way (mirrored and sheared included) dropped onto Sponza come to rest, and a ball falls
     into a U's notch; a rendered demo (`props_drop`); meshes made of several pieces now
     remeshed (a table of boards was cut as a solid running through itself).
-- **In flight: 8d, localization** (ADR 0102, Proposed; branch `feat/localization`).
-  - **Done:**
+- **In flight: 8d, localization** (ADR 0102, Proposed).
+  - **Done (first PR, #233, `feat/localization`):**
     - the research note and the ADR (8d-1);
     - `engine_loc`: Fluent's syntax compiled, formatted without allocating, plurals and
       numbers by ICU4X (8d-2);
     - strings packs, `ofeliaengine loc build` and `loc check`, and the player's text from a
       pack or a live `loc/` folder in the player's or Windows' languages (8d-3).
-  - **Next:** 8d-4, bidirectional layout and fonts per language in `engine_text`; then
-    8d-5, the measurements, the gate and the PR.
+  - **Next:** 8d-4, bidirectional layout and fonts per language in `engine_text`, on a
+    branch of its own; then 8d-5, the measurements and the report.
   - After 8d, item 9: the editor, Luau and tooling.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
@@ -157,8 +157,9 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 ## 4. In flight
 
-8d, localization (ADR 0102): `feat/localization` holds 8d-1 to 8d-3 (the research note and
-the ADR, `engine_loc`, strings packs, the CLI and the player's text); 8d-4 is next.
+8d, localization (ADR 0102): its first PR (#233, `feat/localization`: 8d-1 to 8d-3, the
+research note and the ADR, `engine_loc`, strings packs, the CLI and the player's text)
+merged; 8d-4 is next.
 8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
 8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
 decomposition and its place in the cook) merged; the third (#232, `feat/props-on-sponza`:
@@ -886,7 +887,7 @@ grown, divide and conquer); the old labels stay in parentheses.
      `engine_text`'s shaping and bidi;
    - a check for missing and unused keys ("one button": the CLI and later the editor).
 
-   **In progress (ADR 0102, Proposed; `feat/localization`):**
+   **In progress (ADR 0102, Proposed; 8d-1 to 8d-3 in PR #233):**
    - **8d-1:** the research note `docs/research/localization.md` and the ADR.
    - **8d-2:** `engine_loc`. Fluent's syntax compiled into tables, formatted into the
      caller's string without allocating (14-148 ns a message), plurals, numbers and
