@@ -7,7 +7,7 @@ use crate::graph::{BusNode, EffectNode, Graph, SendNode};
 use crate::mixer::{Renderer, RendererParts};
 use crate::shared::Shared;
 use crate::spatial::{Emitter, Listener};
-use crate::stream::{DecodeError, Decoder, StreamJob, StreamRing, Streamer};
+use crate::stream::{DecodeError, Decoder, PreparedStream, StreamJob, StreamRing, Streamer};
 use core::fmt;
 use engine_core::math::Vec3;
 use engine_core::spsc::{self, Consumer, Producer};
@@ -119,6 +119,11 @@ pub struct PlayParams {
     pub start_at: Option<u64>,
     /// Fade-in in seconds.
     pub fade_in: f32,
+    /// Frame of the sound to start from, at its own rate (seconds × its sample rate): a
+    /// clip starts there (inside it when looping; a one-shot past its end ends at once),
+    /// and [`Audio::play_stream`] seeks its decoder there first. Saves resume sounds with
+    /// it ([`Audio::position`]).
+    pub offset: u64,
     /// Place the sound in the world: gain, pan, pitch and a low-pass then follow the
     /// emitter as heard by the [`Listener`] ([`crate::spatial`]). `gain`, `pan` and `pitch`
     /// still apply on top. `None` plays it as is (music, UI).
@@ -136,6 +141,7 @@ impl Default for PlayParams {
             priority: 128,
             start_at: None,
             fade_in: 0.0,
+            offset: 0,
             spatial: None,
         }
     }
@@ -201,6 +207,10 @@ struct VoiceSlot {
     playing: bool,
     /// A stream voice's ring: its position ([`Audio::stream_position`]).
     stream: Option<Arc<StreamRing>>,
+    /// A stream's start, length and looping, for [`Audio::position`].
+    offset: u64,
+    length: Option<u64>,
+    looping: bool,
 }
 
 /// The game-thread half of the mixer: plays sounds and edits buses, sends and effects.
@@ -238,7 +248,7 @@ impl Audio {
         // effect; room for all of them at once plus schedules means the renderer never
         // has to hold on to one.
         let (returns_tx, returns) = spsc::channel(max_voices + max_effects + 256);
-        let shared = Arc::new(Shared::new(max_buses));
+        let shared = Arc::new(Shared::new(max_buses, max_voices));
         let graph = Graph::new();
         let schedule = Box::new(graph.compile().unwrap_or_default());
         let renderer = Renderer::new(RendererParts {
@@ -320,8 +330,10 @@ impl Audio {
 
     /// Plays a long sound (music, ambience, dialogue) while it decodes: the stream thread
     /// keeps [`AudioConfig::stream_buffer_ms`] of it decoded ahead, and only that much is
-    /// in memory. `params.looping` starts it over at the end. The first part is decoded
-    /// here, before this returns (a few milliseconds), so it starts at once.
+    /// in memory. `params.looping` starts it over at the end; `params.offset` seeks there
+    /// first. The first part is decoded here, before this returns (a few milliseconds, and
+    /// about 1 ms more per second of offset), so it starts at once: [`PreparedStream`]
+    /// does that work on another thread.
     ///
     /// Short sounds played often are cheaper as clips: `Clip::from_decoder`.
     pub fn play_stream(
@@ -336,49 +348,56 @@ impl Audio {
         if self.free_voices.is_empty() {
             return Err(AudioError::VoicesExhausted);
         }
-        let (rate, channels) = (decoder.sample_rate(), usize::from(decoder.channels()));
-        if rate == 0 || !(1..=2).contains(&channels) {
-            return Err(AudioError::Decode(DecodeError::Unsupported(format!(
-                "{channels} channels at {rate} Hz"
-            ))));
-        }
-        let frames = (u64::from(self.stream_frames_ms) * u64::from(rate)).div_ceil(1000);
-        let ring = Arc::new(StreamRing::new(frames as usize, channels, rate));
-        let mut job = StreamJob {
-            ring: ring.clone(),
+        let stream = PreparedStream::new(
             decoder,
-            looping: params.looping,
-            errors: self.stream_errors.clone(),
+            params.offset,
+            params.looping,
+            self.stream_frames_ms,
+        )
+        .map_err(AudioError::Decode)?;
+        self.play_prepared(stream, params)
+    }
+
+    /// Plays a stream prepared on any thread ([`PreparedStream::new`]): nothing is decoded
+    /// here. Its own offset and looping replace `params.offset` and `params.looping`.
+    pub fn play_prepared(
+        &mut self,
+        stream: PreparedStream,
+        params: &PlayParams,
+    ) -> Result<VoiceHandle, AudioError> {
+        let PreparedStream {
+            ring,
+            decoder,
+            looping,
+            offset,
+            length,
+        } = stream;
+        let params = PlayParams {
+            looping,
+            offset: 0,
+            ..*params
         };
-        // Decode the first half now so the voice starts with data; a stream that fails
-        // right away is an error here rather than silence.
-        let mut scratch = vec![0.0f32; 1024 * channels];
-        let mut ended = false;
-        while ring.space() > ring.capacity() / 2 {
-            let n = job.decoder.read(&mut scratch).map_err(AudioError::Decode)?;
-            if n == 0 {
-                // A looping stream with something in it starts over; otherwise this is
-                // all there is.
-                if params.looping && ring.space() != ring.capacity() && job.decoder.seek(0).is_ok()
-                {
-                    continue;
-                }
-                ended = true;
-                break;
-            }
-            ring.push(&scratch[..n * channels]);
-        }
-        if ended {
-            // Short enough to fit: the stream thread is not needed (and the voice must not
-            // wait for it to say so).
-            ring.finish();
-        }
-        let handle = self.start(Source::Stream(ring.clone()), params)?;
-        self.voices[handle.index as usize].stream = Some(ring);
-        if !ended {
+        let handle = self.start(Source::Stream(ring.clone()), &params)?;
+        let slot = &mut self.voices[handle.index as usize];
+        slot.stream = Some(ring.clone());
+        slot.offset = offset;
+        slot.length = length;
+        slot.looping = looping;
+        if let Some(decoder) = decoder {
+            let job = StreamJob {
+                ring,
+                decoder,
+                looping,
+                errors: self.stream_errors.clone(),
+            };
             self.streamer.get_or_insert_with(Streamer::start).add(job);
         }
         Ok(handle)
+    }
+
+    /// The ring length streams are given, in milliseconds ([`PreparedStream::new`]).
+    pub fn stream_buffer_ms(&self) -> u32 {
+        self.stream_frames_ms
     }
 
     fn start(&mut self, source: Source, params: &PlayParams) -> Result<VoiceHandle, AudioError> {
@@ -388,8 +407,26 @@ impl Audio {
             return Err(AudioError::Unknown("bus"));
         };
         let index = self.free_voices.pop().ok_or(AudioError::VoicesExhausted)?;
+        if let Source::Clip(clip) = &source {
+            // Where it starts, until the audio thread says where it is. The slot was free,
+            // so its last voice has ended and nothing overwrites this before the new one
+            // plays.
+            let frames = clip.frames() as u64;
+            let start = match params.offset {
+                o if o < frames => o,
+                o if params.looping && frames > 0 => o % frames,
+                _ => frames,
+            };
+            if let Some(at) = self.shared.positions.get(index as usize) {
+                at.store(start, Ordering::Relaxed);
+            }
+        }
         let slot = &mut self.voices[index as usize];
         slot.playing = true;
+        slot.stream = None;
+        slot.offset = 0;
+        slot.length = None;
+        slot.looping = params.looping;
         let handle = VoiceHandle {
             index,
             generation: slot.generation,
@@ -406,6 +443,7 @@ impl Audio {
                 priority: params.priority,
                 start_at: params.start_at,
                 fade_in: params.fade_in,
+                offset: params.offset,
                 spatial: params.spatial,
             },
         });
@@ -422,6 +460,34 @@ impl Audio {
             return None;
         }
         slot.stream.as_ref().map(|ring| ring.released())
+    }
+
+    /// Where the mixer is in the voice's sound: its frame, at the sound's own rate, as of
+    /// the last render call. Exact through pitch, Doppler and virtual stretches; inside the
+    /// sound for a looping one. The listener hears it the output's latency later.
+    /// `None` once the voice has ended.
+    ///
+    /// Saves keep it and start the sound again there ([`PlayParams::offset`]).
+    pub fn position(&self, voice: VoiceHandle) -> Option<u64> {
+        let slot = self.voices.get(voice.index as usize)?;
+        if !(slot.playing && slot.generation == voice.generation) {
+            return None;
+        }
+        Some(match &slot.stream {
+            Some(ring) => {
+                let at = slot.offset + ring.released();
+                match slot.length {
+                    Some(n) if slot.looping && n > 0 => at % n,
+                    Some(n) => at.min(n),
+                    None => at,
+                }
+            }
+            None => self
+                .shared
+                .positions
+                .get(voice.index as usize)
+                .map_or(0, |at| at.load(Ordering::Relaxed)),
+        })
     }
 
     /// Whether the voice is still playing (until the audio thread reports its end and
