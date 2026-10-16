@@ -58,9 +58,10 @@ otherwise read a large world in 1.9 s instead of 0.3 s.
 
 - **Components:**
   - every component whose type is reflected (`reflect_component!`), unless the type is
-    marked `#[reflect(no_save)]`: caches, effects, data derived again on load
+    marked `#[reflect(skip)]`: caches, effects, data derived again on load
     (`GlobalTransform` is);
-  - every field of it unless marked `#[reflect(skip)]` or `#[reflect(no_save)]`.
+  - every field of it unless marked `#[reflect(skip)]` (reflection's "not saved or
+    loaded", which scenes already honour).
 - **Resources:** every reflected resource (`reflect_resource!`), with the same marks.
 - **The engine's own state, through providers:**
   - physics: gravity, each body's pose, velocities, sleeping and gravity factor;
@@ -68,10 +69,10 @@ otherwise read a large world in 1.9 s instead of 0.3 s.
   - random generators;
   - animation players.
 - **No list to keep:** the reflection macros put each type into a list collected at link
-  time, so loading finds a type by name even before the world has seen it. The
-  mechanism is chosen in step 1: `linkme`'s distributed slices (MIT OR Apache-2.0, no
-  run-time cost, supported on windows-msvc), or `SaveRegistry::register::<T>()` once per
-  type.
+  time (`linkme`'s distributed slices, MIT OR Apache-2.0), so loading finds a type by
+  name even before the world has seen it. Checked in step 1 with rust-lld in the dev,
+  release and shipping profiles (fat LTO, `panic = "abort"`): types from a crate the
+  program names nowhere else are listed too.
 - **Reflection grows what a game's state needs:** strings, lists, optional values and maps.
 - **Identity:**
   - **the level's own objects** (the pack's bodies and the entities made for them) by a
@@ -163,8 +164,15 @@ player.autosave_now();               // a checkpoint
 
 ### Steps
 
-1. **Reflection:** strings, lists, optional values, maps; `no_save`, `version`; reflected
-   resources; the link-time list of types.
+1. **Reflection** (done, `feat/save-games`):
+   - `TypeKind::String`, `List`, `Option`, `Map` with functions for their contents
+     (`String`, `Vec<T>`, `Option<T>`, `BTreeMap`, `HashMap`);
+   - `#[reflect(version = N)]` on a type; `skip` on a type;
+   - `reflect_resource!`;
+   - `engine_ecs::reflected_types()` and `find_reflected(name)`: every reflected component
+     and resource of the program, with a writer of its `Default` value when it has one
+     (found without a bound, by method resolution);
+   - replication and scenes skip the containers for now (scenes write them with step 2).
 2. **`engine_save`:**
    - taking a save in the frame;
    - both encodings;

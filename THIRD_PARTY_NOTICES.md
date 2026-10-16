@@ -15,6 +15,7 @@ the dependency.
 | mimalloc 0.1.52 + libmimalloc-sys 0.1.49 (© Octavian Oncescu) | MIT | the global allocator's Rust bindings in `engine_core::alloc` (ADR 0086) |
 | mimalloc 2.3.2 (© Microsoft Corporation, Daan Leijen; vendored inside libmimalloc-sys, built by cc) | MIT | the global allocator (ADR 0086) |
 | bytemuck 1.25 | Zlib OR Apache-2.0 OR MIT | plain-data proofs for ECS components that are snapshotted and hashed byte-wise (ADR 0017) |
+| linkme 0.3.37 | MIT OR Apache-2.0 | the list of reflected component and resource types the linker collects in `engine_ecs` (ADR 0104): saves find a type by name |
 | harfrust 0.13.3 (+ bitflags 2, once_cell 1, smallvec 1) | MIT (the others MIT OR Apache-2.0) | text shaping in `engine_text` (ADR 0025) |
 | mlua 0.12.1 + mlua-sys 0.12 (+ bstr, either, num-traits, parking_lot, rustc-hash) | MIT (the others MIT OR Apache-2.0, bstr MIT OR Apache-2.0) | Luau VM bindings in `engine_script` (ADR 0032) |
 | Luau 0.736 (© Roblox Corporation, via luau0-src 0.21, vendored C++ sources built by cc) | MIT | the scripting language and its native code generator (ADR 0032) |
@@ -107,6 +108,7 @@ condition of this section (ADR 0036). License texts are next to each font.
 | Crate | License | Used for |
 |---|---|---|
 | bytemuck_derive 1.12 (+ proc-macro2, quote, syn 3, unicode-ident) | Zlib OR Apache-2.0 OR MIT (the others MIT OR Apache-2.0; unicode-ident also Unicode-3.0) | `#[derive(Pod, Zeroable)]` with compile-time padding checks (ADR 0017) |
+| linkme-impl 0.3.37 (+ syn 2) | MIT OR Apache-2.0 | `#[distributed_slice]` for linkme (ADR 0104) |
 | num-derive 0.4, smart-default 0.7, serde_derive, thiserror-impl 2 (+ syn 2) | MIT OR Apache-2.0 (smart-default MIT) | derives inside minidump-writer (ADR 0061) |
 | zerocopy-derive 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT | derives inside zerocopy (through half, ADR 0083) |
 | displaydoc 0.2.7, synstructure 0.14.0, yoke-derive, zerofrom-derive, zerovec-derive (+ syn 2) | MIT OR Apache-2.0 (synstructure MIT; the ICU4X derives Unicode-3.0) | derives inside ICU4X (ADR 0102) |

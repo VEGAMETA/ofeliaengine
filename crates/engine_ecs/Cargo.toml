@@ -17,6 +17,9 @@ engine_reflect.workspace = true
 # Plain-data proofs for components that are copied, hashed and rolled back byte-wise
 # (Zlib OR Apache-2.0 OR MIT; the derive checks for padding at compile time). ADR 0017.
 bytemuck = { version = "1.25", features = ["derive", "min_const_generics"] }
+# The list of reflected types the linker collects (ADR 0104; MIT OR Apache-2.0, a proc
+# macro on the syn 2 already in the build, nothing run before `main`).
+linkme = "0.3.37"
 
 [[bench]]
 name = "ecs"
