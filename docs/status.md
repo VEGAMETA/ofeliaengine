@@ -45,7 +45,7 @@ Last updated: 2026-10-16.
       numbers by ICU4X (8d-2);
     - strings packs, `ofeliaengine loc build` and `loc check`, and the player's text from a
       pack or a live `loc/` folder in the player's or Windows' languages (8d-3).
-  - **Second PR (`feat/bidi-text`, 8d-4):** right-to-left and mixed text in `engine_text`.
+  - **Second PR (#234, `feat/bidi-text`, 8d-4):** right-to-left and mixed text in `engine_text`.
     UAX #9 is adapted from unicode-bidi to buffers kept between calls (it allocated on every
     call), and all 91,707 of Unicode 16's conformance cases pass. Also font stacks per
     language and a golden image.
@@ -162,7 +162,7 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 8d, localization (ADR 0102): its first PR (#233, `feat/localization`: 8d-1 to 8d-3, the
 research note and the ADR, `engine_loc`, strings packs, the CLI and the player's text)
-merged; the second (`feat/bidi-text`: 8d-4, bidirectional layout and font stacks) merged.
+merged; the second (#234, `feat/bidi-text`: 8d-4, bidirectional layout and font stacks) merged.
 8d is done but for the owner's question on the source format.
 8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
 8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
@@ -891,7 +891,7 @@ grown, divide and conquer); the old labels stay in parentheses.
      `engine_text`'s shaping and bidi;
    - a check for missing and unused keys ("one button": the CLI and later the editor).
 
-   **Done 2026-10-16 (ADR 0102, Proposed; PR #233 and `feat/bidi-text`):**
+   **Done 2026-10-16 (ADR 0102, Proposed; PRs #233 and #234):**
    - **8d-1:** the research note `docs/research/localization.md` and the ADR.
    - **8d-2:** `engine_loc`. Fluent's syntax compiled into tables, formatted into the
      caller's string without allocating (14-148 ns a message), plurals, numbers and
