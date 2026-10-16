@@ -8,8 +8,10 @@
 //! - [`fit`]: a box, sphere, capsule or cylinder around a hull, and whether one replaces it;
 //! - [`shape`]: the collider's data (shapes with stable ids) and what a shape becomes under
 //!   any scale;
-//! - [`mesh`]: a mesh's volume, whether it is closed, its vertices welded.
+//! - [`mesh`]: a mesh's volume, whether it is closed, its vertices welded;
+//! - [`decompose`]: a concave mesh split into convex parts (CoACD's algorithm, in Rust).
 
+pub mod decompose;
 pub mod fit;
 pub mod hull;
 pub mod mesh;

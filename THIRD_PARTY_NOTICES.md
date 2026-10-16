@@ -188,6 +188,7 @@ Constants and formulas taken into our own code (no files copied).
 | Simulation matrices for protanomaly and deuteranomaly at severities 0, 0.1, …, 1 (linear RGB) | `engine_render/src/color_vision.rs` (`PROTAN`, `DEUTAN`) | G. M. Machado, M. M. Oliveira, L. A. F. Fernandes, "A Physiologically-based Model for Simulation of Color Vision Deficiency", IEEE TVCG 15(6), 2009; the table on the authors' page, inf.ufrgs.br/~oliveira/pubs_files/CVD_Simulation/CVD_Simulation.html (checked 2026-10-15) | published research data, cited (the page states no license; it asks for the paper's citation) |
 | Brettel, Viénot and Mollon's tritanopia (1997) in linear RGB: the two half-planes' projection matrices and the separation plane's normal | `engine_render/src/color_vision.rs` (`TRITAN_A`, `TRITAN_B`, `TRITAN_PLANE`) | libDaltonLens, `libDaltonLens.c` (Nicolas Burrus, github.com/DaltonLens/libDaltonLens, checked 2026-10-15) | Unlicense (public domain) |
 | Daltonization's error shift for red-green deficiencies, `[[0, 0, 0], [0.7, 1, 0], [0.7, 0, 1]]` | `engine_render/src/color_vision.rs` (`SHIFT_RED_GREEN`) | O. Fidaner, P. Lin, N. Ozguven, "Analysis of Color Blindness", Stanford, 2005 | published method, cited |
+| CoACD's convex decomposition, ported to Rust: the mesh normalized to a longest side of 2, the manifold remesh's parameters (100 cells across, the surface 0.55 of a cell out), the concavity (the larger of 0.3 × the radius of a sphere of the hull's extra volume and the boundary Hausdorff distance over 2,000 sampled points), the tree search (150 iterations, 3 cuts deep, 20 candidate planes per axis, a rollout through each axis's middle plane by the volume term, UCB with C = the cost over the depth over √2, a path's quality its worst part), the refinement of the first cut along its axis, the merge by pair costs updated after each merge. Modified: our own remesh by marching tetrahedra (no OpenVDB), caps by ear clipping (no CDT), samples by Roberts's R2 sequence (CoACD's Sobol code is LGPL and not used), the search on a mesh simplified by quadric edge collapses, the faces where merged parts touch left out of the Hausdorff term | `engine_collision/src/decompose/` | CoACD, `SarahWeiii/CoACD` (X. Wei, M. Liu, Z. Ling, H. Su, SIGGRAPH 2022), `src/process.cpp`, `mcts.cpp`, `cost.cpp`, `hausdorff.h`, `preprocess.cpp`, commit 131010c | MIT (Copyright (c) 2022 Xinyue Wei, Minghua Liu, below) |
 
 ### MIT license (Baking Lab)
 
@@ -502,6 +503,32 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
+```
+
+### MIT license (CoACD)
+
+```
+MIT License
+
+Copyright (c) 2022 Xinyue Wei, Minghua Liu
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
 ```
 
 The adapted files state the changes made (`contact.slang`'s header, `contact.rs`).
