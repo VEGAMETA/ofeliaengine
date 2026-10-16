@@ -320,7 +320,10 @@ The cook makes colliders from a scene's meshes and puts them into the pack, bake
    - a node with a `motion` is a body, with the colliders of its subtree;
    - a collider elsewhere is static;
    - a trigger is a sensor;
-   - physics materials give friction and restitution.
+   - physics materials give friction and restitution;
+   - a dynamic body's mesh collider (a mesh without `convexHull`) becomes its convex parts
+     (below), since a simulated body cannot be a triangle mesh. Static and kinematic ones
+     keep their triangles.
 
    Nothing else in such a file collides. Joints and collision filters are not read yet.
 2. **Collision meshes you model** next to a mesh, named the Unreal way, give that mesh its
@@ -342,15 +345,36 @@ The cook makes colliders from a scene's meshes and puts them into the pack, bake
    - Skinned meshes get no collider.
    - Through `ImportedScene::collider_rules` (a file beside the scene comes with the owner's
      answer on its shape):
-     - the meshes become props instead (`DefaultBodies::Dynamic`): a box, sphere, capsule
-       or cylinder when one is within 10 % of the mesh's hull, else the hull;
+     - the meshes become props instead (`DefaultBodies::Dynamic`), each split into
+       convex parts first (below). A mesh convex enough to be one part gets a box, sphere,
+       capsule or cylinder when one is within 10 % of its hull, else its hull; a concave one
+       (a chair, a mug, a U-shaped table) gets its parts. `DynamicShape::Parts` asks for
+       parts outright, `Hull` and the primitives for one shape;
      - or nothing collides (`DefaultBodies::None`);
      - materials can be excluded by name (`no_collision`: foliage cards, decals).
 
 `ofeliaengine cook scene.gltf -o scene.pack` does all of this.
 - `--no-colliders` leaves colliders out.
-- The cook prints how many colliders and bodies it made and how long it took. Sponza takes
-  0.3 s more and 2.4 MB of its 75 MB; Intel Sponza 2 s more and 37 MB of 1.3 GB.
+- The cook prints how many colliders and bodies it made, how many meshes it split into
+  convex parts (and how many of those came from the cache), and how long it took. Sponza
+  takes 0.3 s more and 2.4 MB of its 75 MB; Intel Sponza 2 s more and 37 MB of 1.3 GB.
+
+### Convex parts
+
+A simulated body has to be made of convex shapes, and a concave prop's hull would fill
+it: a ball would bounce off the air under a chair or inside a mug. The cook splits such
+meshes into convex parts with CoACD's method (Wei et al., SIGGRAPH 2022), rewritten in Rust
+for the engine:
+- **The parts follow the shape:** a U in 3 parts, a table in 5, a chair in 25, a duck in 11.
+  How concave a part may stay is `ColliderRules::parts.threshold`, 0.05 of the mesh's size
+  by default; lower makes more, tighter parts. `max_hulls` caps the count.
+- **Each part is at most 64 points.**
+- **Time:** 0.02-3 s per mesh the first time on 16 threads (the sample models in
+  `docs/research/mesh-colliders.md`), all meshes of a scene at once. The parts go into the
+  derived data cache, so the next cook of an unchanged mesh loads them.
+- **Open and messy meshes are fine:** a mesh that is not closed is first rebuilt as a closed
+  surface about half a percent of its size outside it.
+- **A scene of level geometry** (the default rules) splits nothing and costs nothing more.
 
 ### Loading them
 
@@ -378,7 +402,9 @@ let bodies = player.load_physics(&mut physics)?;  // after Player::new
 
 Scale a scene, a prop or a level however you like, after the colliders are made: uniform,
 non-uniform, mirrored. Nothing is regenerated and nothing errors.
-- **Hulls and meshes** take any scale as they are.
+- **Hulls and meshes** take any scale as they are, and so do convex parts: a scaled,
+  squashed or mirrored concave prop is still covered exactly by its scaled parts, with
+  nothing split again.
 - **Boxes** take any scale along their own axes.
 - **Shapes Jolt cannot scale are rebuilt** for the scale and shared by every body scaled
   alike:
