@@ -282,8 +282,9 @@ if ($Gpu) {
 if ($Perf) {
     # Release, overlays off; regressions are reported (below), not fatal (ADR 0062).
     # Then each GPU's register check (`--registers`, ADR 0062's addendum): a warning, never fatal.
+    # Then a game frame's CPU stages (`--cpu`, core audit 3): reported, not fatal.
     $perfGate = 'run --release --locked -p engine_golden --bin perf_gate'
-    $steps['perf'] = @($perfGate, "$perfGate -- --registers", "radeon:$perfGate", "radeon:$perfGate -- --registers")
+    $steps['perf'] = @($perfGate, "$perfGate -- --registers", "$perfGate -- --cpu", "radeon:$perfGate", "radeon:$perfGate -- --registers", "radeon:$perfGate -- --cpu")
     $prebuild['perf'] = 'build --release --locked -p engine_golden --bin perf_gate'
 }
 if ($Deny) { $steps['deny'] = @('deny --locked check', 'drift:') }

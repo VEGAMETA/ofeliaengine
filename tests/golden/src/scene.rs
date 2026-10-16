@@ -730,7 +730,7 @@ fn sponza_everything(name: &'static str, size: [u32; 2]) -> Shot {
 /// view's camera (−x, a little +z: along the courtyard, lighting the far end and one
 /// side's arcade, with no haze lit up ahead). Its color is the light outside the
 /// atmosphere, which colors and dims it.
-fn sun_at(elevation: f32) -> DirectionalLight {
+pub(crate) fn sun_at(elevation: f32) -> DirectionalLight {
     let e = elevation.to_radians();
     DirectionalLight {
         direction: -Vec3::new(-0.832 * e.cos(), e.sin(), 0.555 * e.cos()).normalize(),

@@ -34,6 +34,15 @@
 //!   `--update` their rows replace theirs in the baseline and the others stay: a new
 //!   scene's first baseline).
 //!
+//! `perf_gate --cpu [--update] [--strict] [--runs N] [--frames N] [--threshold PCT]` is the
+//! CPU check instead ([`engine_golden::cpu`], core audit 3): a game's frame on an offscreen
+//! player (Sponza, 2,000 moving cubes, 7 shadowed local lights), each CPU stage's median over
+//! `--frames` (300) frames, the smallest of `--runs` (3) runs against
+//! `tests/golden/perf/<vendor>.cpu.tsv`. A stage regresses when slower by more than
+//! `--threshold` percent (20: the CPU of a desktop in use is noisier than its GPU) and by
+//! more than 25 µs; regressions are measured again and judged by the new runs, reported, not
+//! fatal without `--strict`.
+//!
 //! `perf_gate --registers [--update] [--scene NAME]...` is the register check instead
 //! ([`engine_golden::registers`], ADR 0062's addendum of 2026-10-15): every scene rendered
 //! once with the driver's pipeline statistics on, and the vector registers and spills of
@@ -49,6 +58,7 @@
 
 use engine_core::math::Vec3;
 use engine_frame::{Antialiasing, DeviceClass, Msaa, Quality, RenderDefaults, Upscale, ViewKind};
+use engine_golden::cpu;
 use engine_golden::registers::{self, Registers};
 use engine_golden::scene::{
     RenderOptions, Shot, Skip, Source, procedural_lights, render, sponza_day, sponza_lights,
@@ -383,6 +393,139 @@ fn antialiased(name: &'static str, antialiasing: Antialiasing, quality: Quality)
     }
 }
 
+/// The CPU check (`--cpu`, the module's documentation).
+fn check_cpu(runs: usize, frames: usize, update: bool, threshold: f64, strict: bool) -> ExitCode {
+    let started = Instant::now();
+    let run = |count: usize| -> Option<(String, String, Vec<Vec<f64>>)> {
+        let mut found = None;
+        let mut all = Vec::new();
+        for k in 0..count {
+            match cpu::measure(frames) {
+                Ok((adapter, vendor, medians)) => {
+                    println!(
+                        "run {}: CPU frame {:.0} µs, compose {:.0}, execute {:.0}",
+                        k + 1,
+                        medians[cpu::STAGES.len() - 1],
+                        medians[9],
+                        medians[10]
+                    );
+                    found = Some((adapter, vendor));
+                    all.push(medians);
+                }
+                Err(Skip::NoGpu(e)) => {
+                    println!("skipped: {e}");
+                    return None;
+                }
+                Err(e) => {
+                    println!("skipped: {e:?}");
+                    return None;
+                }
+            }
+        }
+        found.map(|(a, v)| (a, v, all))
+    };
+    let Some((adapter, vendor, measured)) = run(runs) else {
+        return ExitCode::SUCCESS;
+    };
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("perf")
+        .join(format!("{vendor}.cpu.tsv"));
+    // Each stage's smallest run (other work on the machine only adds time), or its median
+    // run for a baseline.
+    let pick = |runs_of: &[Vec<f64>], median: bool| -> Vec<f64> {
+        (0..cpu::STAGES.len())
+            .map(|s| {
+                let mut v: Vec<f64> = runs_of.iter().map(|r| r[s]).collect();
+                v.sort_by(f64::total_cmp);
+                if median { v[v.len() / 2] } else { v[0] }
+            })
+            .collect()
+    };
+    println!(
+        "{adapter}; baseline {}; threshold {threshold} % and 25 µs",
+        path.display()
+    );
+    if update {
+        let rows = pick(&measured, true);
+        let mut text = format!(
+            "# CPU µs per stage of a game's frame (perf_gate --cpu: median of {runs} runs' medians over {frames} frames), {adapter}
+# stage	µs
+"
+        );
+        for (stage, us) in cpu::STAGES.iter().zip(&rows) {
+            let _ = writeln!(text, "{stage}	{us:.1}");
+        }
+        if let Err(e) = std::fs::write(&path, text) {
+            eprintln!("{}: {e}", path.display());
+            return ExitCode::FAILURE;
+        }
+        println!(
+            "baseline written ({} stages) in {:.0} s",
+            rows.len(),
+            started.elapsed().as_secs_f64()
+        );
+        return ExitCode::SUCCESS;
+    }
+    let baseline: BTreeMap<String, f64> = std::fs::read_to_string(&path)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+        .filter_map(|l| {
+            let (stage, us) = l.split_once('\t')?;
+            Some((stage.to_owned(), us.trim().parse().ok()?))
+        })
+        .collect();
+    if baseline.is_empty() {
+        println!("no baseline: perf_gate --cpu --update writes it");
+        return ExitCode::SUCCESS;
+    }
+    let slower = |times: &[f64]| -> Vec<usize> {
+        (0..cpu::STAGES.len())
+            .filter(|&s| {
+                baseline.get(cpu::STAGES[s]).is_some_and(|&b| {
+                    times[s] > b * (1.0 + threshold / 100.0) && times[s] - b > 25.0
+                })
+            })
+            .collect()
+    };
+    let mut times = pick(&measured, false);
+    let mut regressed = slower(&times);
+    if !regressed.is_empty() {
+        println!("slower: measured again");
+        let Some((_, _, again)) = run(runs) else {
+            return ExitCode::SUCCESS;
+        };
+        times = pick(&again, false);
+        regressed = slower(&times);
+    }
+    println!("| stage | baseline µs | now µs | change |");
+    println!("|---|---:|---:|---:|");
+    for (s, stage) in cpu::STAGES.iter().enumerate() {
+        let b = baseline.get(*stage).copied().unwrap_or(f64::NAN);
+        let flag = if regressed.contains(&s) {
+            " **slower**"
+        } else {
+            ""
+        };
+        let change = if b >= 0.5 {
+            format!("{:+.0} %", (times[s] / b - 1.0) * 100.0)
+        } else {
+            String::from("—")
+        };
+        println!("| {stage} | {b:.1} | {:.1} | {change}{flag} |", times[s]);
+    }
+    println!(
+        "{} of {} stages slower, in {:.0} s",
+        regressed.len(),
+        cpu::STAGES.len(),
+        started.elapsed().as_secs_f64()
+    );
+    if strict && !regressed.is_empty() {
+        return ExitCode::FAILURE;
+    }
+    ExitCode::SUCCESS
+}
+
 fn baseline_path(vendor: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("perf")
@@ -697,14 +840,20 @@ fn main() -> ExitCode {
     let mut threshold: Option<f64> = None;
     let mut only: Vec<String> = Vec::new();
     let mut check_registers_only = false;
+    let mut check_cpu_only = false;
+    let mut frames_given = false;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--update" => update = true,
             "--registers" => check_registers_only = true,
+            "--cpu" => check_cpu_only = true,
             "--strict" => strict = true,
             "--runs" => runs = args.next().and_then(|v| v.parse().ok()).unwrap_or(runs),
-            "--frames" => frames = args.next().and_then(|v| v.parse().ok()).unwrap_or(frames),
+            "--frames" => {
+                frames = args.next().and_then(|v| v.parse().ok()).unwrap_or(frames);
+                frames_given = true;
+            }
             "--scene" => only.extend(args.next()),
             "--threshold" => {
                 threshold = args.next().and_then(|v| v.parse().ok()).or(threshold);
@@ -714,6 +863,10 @@ fn main() -> ExitCode {
                 return ExitCode::from(2);
             }
         }
+    }
+    if check_cpu_only {
+        let frames = if frames_given { frames } else { 300 };
+        return check_cpu(runs, frames, update, threshold.unwrap_or(20.0), strict);
     }
     let options = RenderOptions {
         validation: false,

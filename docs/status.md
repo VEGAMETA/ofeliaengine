@@ -50,9 +50,14 @@ Last updated: 2026-10-16.
     call), and all 91,707 of Unicode 16's conformance cases pass. Also font stacks per
     language and a golden image.
 - **Next:** the third review's queue (`docs/research/core-audit-3.md`, 2026-10-16), sent to
-  the owner with three questions; its P0 first: the local lights' shadows cost 150 ns per
-  moving caster per frame (a regression of 6b; CPU-bound at 20,000 movers), with a CPU
-  stage gate so the next one is caught.
+  the owner with three questions. Its P0 is done (#236, `fix/local-shadow-invalidation`):
+  - the local lights' shadows' bookkeeping bounded, after it cost 150 ns per moving caster
+    per frame (a regression of 6b): the frame renderer's CPU at 2,000 movers 409 → 46 µs,
+    at 20,000 movers 3,265 → 60 µs;
+  - a CPU stage check in the perf gate (`perf_gate --cpu`), which reports that
+    regression.
+
+  Then queue item 1, VSM's leftover.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).

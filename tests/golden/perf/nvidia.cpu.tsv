@@ -1,0 +1,16 @@
+# CPU µs per stage of a game's frame (perf_gate --cpu: median of 3 runs'              medians over 300 frames), NVIDIA GeForce RTX 4060 Ti (discrete, Vulkan 1.4.351, 15.7 GiB, NVIDIA 616.92)
+# stage	µs
+simulate	1.2
+propagate	18.2
+extract	24.0
+interpolate	0.0
+animate	0.1
+probes	0.2
+streaming	13.9
+pools	0.7
+upload	23.7
+compose	28.2
+execute	114.3
+submit	4.9
+present	0.0
+cpu frame	230.6

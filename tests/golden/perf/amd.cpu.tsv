@@ -1,0 +1,16 @@
+# CPU µs per stage of a game's frame (perf_gate --cpu: median of 3 runs'              medians over 300 frames), AMD Radeon(TM) Graphics (integrated, Vulkan 1.4.315, 21.2 GiB, AMD proprietary driver 26.8.1 (AMD proprietary shader compiler))
+# stage	µs
+simulate	1.7
+propagate	21.2
+extract	34.8
+interpolate	0.1
+animate	0.1
+probes	0.3
+streaming	20.6
+pools	1.2
+upload	38.2
+compose	44.3
+execute	183.4
+submit	18.6
+present	0.1
+cpu frame	374.0
