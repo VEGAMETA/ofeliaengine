@@ -1,8 +1,7 @@
 # 0101. Colliders made from meshes, cooked into Jolt's binary form
 
-- Status: Proposed (2026-10-16; the owner chose a Rust decomposition on 2026-10-16; the rules
-  file's shape is the owner's question 1). Built: 8c-1 to 8c-4; left: the rules file and
-  `RayHit`'s surface (8c-2b)
+- Status: Accepted (2026-10-16: the owner chose a Rust decomposition and the rules file's
+  place). Built: 8c-1 to 8c-4 and 8c-2b (the rules file, surfaces, layers by name)
 - Date: 2026-10-16
 - Related:
   - [ADR 0018](0018-physics-interface-and-jolt.md) and [ADR 0066](0066-physics-queries-characters-rollback.md):
@@ -453,4 +452,69 @@ The research note's set, judged exactly (`docs/research/mesh-colliders.md`, "Our
   ECS child whose `Transform` (translation, rotation, scale) cannot hold a shear: drawn
   without it. The collider is right; the picture is not. It needs a local transform with a
   full linear part, an ECS change for its own ADR.
-- **The rules file and `RayHit`'s surface** (8c-2b): the owner's question 1.
+- **The rules file and `RayHit`'s surface** (8c-2b): built, below.
+
+## 8c-2b as built (2026-10-16): the rules file, surfaces, layers by name
+
+The owner chose the rules file's place (`<scene>.colliders.ron` beside the glTF, documented
+in the dev guide) and kept every mesh as level geometry by default. On 2026-10-16 the owner
+also asked whether collision layers exist; the proposal to name them in this item stood
+unopposed.
+
+### The rules file
+
+- **`ColliderRules::for_scene`** reads `<scene>.colliders.ron` (the CLI's `cook` does), and
+  `ColliderRules::parse` reads the text. Every field is optional, and an unknown field is an
+  error with its line and column.
+- **Fields:** `bodies` (`Static` | `Dynamic`), `collides`, `dynamic_shape`, `parts:
+  (threshold, max_parts)`, `no_collision`, `layer`, and `meshes: { "name" or "#index": (...)
+  }` with `bodies`, `collides`, `dynamic_shape` and `layer` per mesh.
+- **"Nothing collides" is `collides: false`, not a `None` variant.** The files are read with
+  RON's implicit `Some`, under which `None` means a missing value: `bodies: None` would
+  silently be "not set".
+- **Not built:** `static_shape: Simplified(error)`. Level meshes keep their triangles until
+  a game needs fewer.
+
+### Surfaces
+
+- **What a hit is made of is a lookup, `PhysicsBackend::surface_of(body, part)`.** It is
+  not a field of `RayHit`. Hits carry `part`, the backend's sub-shape id.
+  - Measured on the batched-ray bench (4096 rays over a pile of 1000, one thread): looking
+    up every hit's surface took 599–600 µs against 567–592 without; asked on demand, 559–572
+    µs. It costs about 7 ns a call, and nothing when not called.
+- **Jolt keeps surfaces as user data, not physics materials.**
+  - A mesh triangle has its surface + 1 as its per-triangle user data, and a shape has its
+    own (`set_shape_surface`); 0 means none.
+  - A query reads the leaf shape the sub-shape id reaches (`engine_jolt_hit_surface`: the
+    triangle's when it has one, else the leaf's).
+  - Both survive Jolt's binary form: shapes save their user data, and meshes save their
+    triangles'. Materials would have been objects to keep alive and to map back to
+    indices.
+- **A cooked scene's surfaces are glTF material indices.** A level mesh's triangles carry
+  their primitives' materials. A prop's shapes, and authored colliders, carry their mesh's
+  main material, the one with the most triangles.
+- **Tested** on Jolt: two triangles and a box, built, baked and restored, scaled, and
+  without surfaces. On Sponza through cook, bake, pack and load, every ray's surface is the
+  material of the source triangle it lands on.
+
+### Layers by name
+
+- **`PhysicsSettings::layer_names`** names the layers; the default names its two `Static` and
+  `Moving`. `PhysicsSettings::layer(name)` finds one.
+- **A cooked body names its layer** (`CookedBody::layer`). The name comes from the rules
+  (the mesh's own, else the file's), or from a glTF collider's collision filter: the
+  filter's first collision system. The filters' lists of systems to collide with are not
+  read: the game's `collides` matrix decides.
+- **The pack keeps names, not numbers.** The bodies entry gains a names table (`meta[2]`
+  names, `meta[3]` bytes, after the instance indices), and each record's former reserved
+  word is `layer`: 1 + a name's index, 0 for none.
+  - An entry written before this has no names, and its bodies take their motion's layer.
+  - Renumbering a game's layers needs no new cook.
+- **`ScenePhysics`** puts each named body on the world's layer of that name. A name the
+  settings lack is an error at load, naming the layer and the world's names.
+
+### Not done
+
+- `static_shape: Simplified`.
+- Contact events' surfaces (the sub-shape ids are in Jolt's manifolds).
+- A prop's parts with different materials: they take the mesh's main one.

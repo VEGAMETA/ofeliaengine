@@ -1,7 +1,8 @@
 //! Colliders from a real scene through the whole chain (ADR 0101), without a GPU: Sponza's
 //! glTF made into colliders and bodies, baked into Jolt's binary form, written into a pack,
-//! loaded by `ScenePhysics`, and rays dropped onto its floor; then concave props, scaled
-//! every way, dropped onto it. Skipped when the test assets are missing
+//! loaded by `ScenePhysics`, and rays dropped onto its floor (where they land and what they
+//! land on); then concave props, scaled every way, dropped onto it; and bodies taking their
+//! collision layers by name. Skipped when the test assets are missing
 //! (`tools/fetch-test-assets.ps1`).
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -60,16 +61,16 @@ fn sponza_collides_where_it_is_drawn() {
             if let Shape::Mesh {
                 vertices,
                 triangles,
-                ..
+                surfaces,
             } = &s.shape
             {
-                for t in triangles {
+                for (k, t) in triangles.iter().enumerate() {
                     let w = t.map(|i| to_world.transform_point3(vertices[i as usize]));
                     for p in w {
                         lo = lo.min(p);
                         hi = hi.max(p);
                     }
-                    world_triangles.push(w);
+                    world_triangles.push((w, surfaces.get(k).copied().unwrap_or(s.surface)));
                 }
             }
         }
@@ -117,11 +118,19 @@ fn sponza_collides_where_it_is_drawn() {
         let expected = nearest_hit(&world_triangles, ray.origin, ray.direction);
         let hit = physics.physics().raycast(&ray, QueryFilter::default());
         match (expected, hit) {
-            (Some(t), Some(hit)) => assert!(
-                (hit.fraction - t).abs() * size.length() < 2e-3 * size.length() + 1e-3,
-                "Jolt {} against the triangles' {t}",
-                hit.fraction
-            ),
+            (Some((t, surface)), Some(hit)) => {
+                assert!(
+                    (hit.fraction - t).abs() * size.length() < 2e-3 * size.length() + 1e-3,
+                    "Jolt {} against the triangles' {t}",
+                    hit.fraction
+                );
+                // What it landed on: the triangle's glTF material.
+                assert_eq!(
+                    physics.physics().surface_of(hit.body, hit.part),
+                    (surface != u16::MAX).then_some(surface),
+                    "{hit:?}"
+                );
+            }
             (None, None) => {}
             (e, h) => panic!("{e:?} against {h:?}"),
         }
@@ -129,10 +138,14 @@ fn sponza_collides_where_it_is_drawn() {
 }
 
 /// The smallest fraction of `direction` at which the ray hits one of `triangles` (both
-/// sides; Möller and Trumbore).
-fn nearest_hit(triangles: &[[Vec3; 3]], origin: Vec3, direction: Vec3) -> Option<f32> {
-    let mut best: Option<f32> = None;
-    for [a, b, c] in triangles {
+/// sides; Möller and Trumbore), and that triangle's surface.
+fn nearest_hit(
+    triangles: &[([Vec3; 3], u16)],
+    origin: Vec3,
+    direction: Vec3,
+) -> Option<(f32, u16)> {
+    let mut best: Option<(f32, u16)> = None;
+    for ([a, b, c], surface) in triangles {
         let (e1, e2) = (*b - *a, *c - *a);
         let p = direction.cross(e2);
         let det = e1.dot(p);
@@ -151,8 +164,8 @@ fn nearest_hit(triangles: &[[Vec3; 3]], origin: Vec3, direction: Vec3) -> Option
             continue;
         }
         let t = e2.dot(q) * inv;
-        if (0.0..=1.0).contains(&t) && best.is_none_or(|b| t < b) {
-            best = Some(t);
+        if (0.0..=1.0).contains(&t) && best.is_none_or(|(b, _)| t < b) {
+            best = Some((t, *surface));
         }
     }
     best
@@ -583,4 +596,74 @@ fn concave_props_scaled_every_way_land_on_sponza() {
         b.y
     );
     assert!(b.y > floor - radius, "the ball fell through the floor");
+}
+
+#[test]
+fn scene_bodies_take_their_collision_layers_by_name() {
+    // A third layer, "Props", that collides with everything.
+    let settings = PhysicsSettings {
+        layers: 3,
+        collides: vec![0b110, 0b111, 0b111],
+        layer_names: ["Static", "Moving", "Props"].map(String::from).to_vec(),
+        ..settings()
+    };
+    let collider = CookedCollider {
+        collider: Collider {
+            shapes: vec![ColliderShape {
+                id: 0,
+                shape: Shape::Box {
+                    center: Vec3::ZERO,
+                    rotation: Quat::IDENTITY,
+                    half_extents: Vec3::ONE,
+                },
+                surface: 4,
+            }],
+            ..Collider::default()
+        },
+        baked: None,
+    };
+    let body = |layer: Option<&str>| CookedBody {
+        layer: layer.map(str::to_owned),
+        ..CookedBody::default()
+    };
+    let ray = Ray {
+        origin: Vec3::new(0.0, 10.0, 0.0),
+        direction: Vec3::new(0.0, -20.0, 0.0),
+    };
+    let mut world = World::new();
+    let mut physics = ScenePhysics::new(&settings).unwrap();
+    physics
+        .add(
+            std::slice::from_ref(&collider),
+            &[body(Some("Props"))],
+            &mut world,
+            &[],
+        )
+        .unwrap();
+    let only = |layer: u8| QueryFilter::layers(1 << layer);
+    let hit = physics.physics().raycast(&ray, only(2)).unwrap();
+    assert_eq!(physics.physics().surface_of(hit.body, hit.part), Some(4));
+    assert!(physics.physics().raycast(&ray, only(0)).is_none());
+    // No name: the layer of its motion (static).
+    let mut physics = ScenePhysics::new(&settings).unwrap();
+    physics
+        .add(
+            std::slice::from_ref(&collider),
+            &[body(None)],
+            &mut world,
+            &[],
+        )
+        .unwrap();
+    assert!(physics.physics().raycast(&ray, only(0)).is_some());
+    // A name the world does not have.
+    let mut physics = ScenePhysics::new(&settings).unwrap();
+    let error = physics
+        .add(
+            std::slice::from_ref(&collider),
+            &[body(Some("Debris"))],
+            &mut world,
+            &[],
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("Debris"), "{error}");
 }

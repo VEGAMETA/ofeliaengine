@@ -38,10 +38,12 @@ pub fn castable(collider: &Collider) -> bool {
         .any(|s| matches!(s.shape, Shape::Mesh { .. }))
 }
 
-/// One shape as a backend shape and the place of its origin in the collider.
+/// One shape as a backend shape made of `surface` (`u16::MAX`: none) and the place of its
+/// origin in the collider.
 fn part(
     physics: &mut dyn PhysicsBackend,
     shape: &Shape,
+    surface: u16,
 ) -> Result<(ShapeId, Vec3, Quat), PhysicsError> {
     let (desc, position, rotation) = match shape {
         Shape::Box {
@@ -90,17 +92,22 @@ fn part(
         Shape::Mesh {
             vertices,
             triangles,
-            ..
+            surfaces,
         } => (
             ShapeDesc::TriangleMesh {
                 vertices,
                 triangles,
+                surfaces,
             },
             Vec3::ZERO,
             Quat::IDENTITY,
         ),
     };
-    Ok((physics.create_shape(&desc)?, position, rotation))
+    let id = physics.create_shape(&desc)?;
+    if surface != u16::MAX {
+        physics.set_shape_surface(id, surface);
+    }
+    Ok((id, position, rotation))
 }
 
 /// `collider` as one backend shape: its shape when it has one at its origin, otherwise a
@@ -112,7 +119,7 @@ pub fn build(
     engine_profiler::zone!("physics::colliders::build");
     let mut parts = Vec::with_capacity(collider.shapes.len());
     for s in &collider.shapes {
-        match part(physics, &s.shape) {
+        match part(physics, &s.shape, s.surface) {
             Ok(p) => parts.push(p),
             Err(e) => {
                 for (shape, ..) in parts {

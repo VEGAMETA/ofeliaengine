@@ -2,8 +2,10 @@
 //! triggers, materials) and `KHR_implicit_shapes` (spheres, boxes, capsules, cylinders,
 //! planes), read from the file's JSON. Defaults are the drafts' schemas' (2026-10-16).
 //!
-//! Collision filters and joints are not read yet: the physics API has layers, not named
-//! systems, and no joints of the drafts' kind.
+//! A collider's collision filter names its body's collision layer: the filter's first
+//! collision system (the game's `PhysicsSettings::layer_names` say which layers collide;
+//! the filters' own lists of systems to collide with or not are not read). Joints are not
+//! read: the physics API has none of the drafts' kind.
 
 use gltf::json::Value;
 
@@ -98,8 +100,17 @@ pub struct ColliderData {
     pub geometry: Option<Geometry>,
     /// Index into [`PhysicsData::materials`].
     pub material: Option<usize>,
+    /// Index into [`PhysicsData::filters`].
+    pub filter: Option<usize>,
     /// A compound trigger's nodes (each with a trigger of its own).
     pub nodes: Vec<usize>,
+}
+
+/// A collision filter of `KHR_physics_rigid_bodies`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CollisionFilterData {
+    /// The collision systems its colliders belong to: the first is their body's layer.
+    pub systems: Vec<String>,
 }
 
 /// A node's `KHR_physics_rigid_bodies`.
@@ -120,6 +131,8 @@ pub struct PhysicsData {
     pub shapes: Vec<ImplicitShape>,
     /// `KHR_physics_rigid_bodies.physicsMaterials`.
     pub materials: Vec<PhysicsMaterialData>,
+    /// `KHR_physics_rigid_bodies.collisionFilters`.
+    pub filters: Vec<CollisionFilterData>,
 }
 
 fn number(v: &Value, key: &str, default: f32) -> f32 {
@@ -205,6 +218,7 @@ fn collider(v: &Value) -> ColliderData {
     ColliderData {
         geometry: geometry(v),
         material: index(v, "physicsMaterial"),
+        filter: index(v, "collisionFilter"),
         nodes: v
             .get("nodes")
             .and_then(Value::as_array)
@@ -247,7 +261,31 @@ pub(crate) fn scene_physics(document: &gltf::Document) -> PhysicsData {
         .and_then(Value::as_array)
         .map(|a| a.iter().map(material).collect())
         .unwrap_or_default();
-    PhysicsData { shapes, materials }
+    let filters = document
+        .extension_value("KHR_physics_rigid_bodies")
+        .and_then(|v| v.get("collisionFilters"))
+        .and_then(Value::as_array)
+        .map(|a| {
+            a.iter()
+                .map(|f| CollisionFilterData {
+                    systems: f
+                        .get("collisionSystems")
+                        .and_then(Value::as_array)
+                        .map(|s| {
+                            s.iter()
+                                .filter_map(|n| n.as_str().map(str::to_owned))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    PhysicsData {
+        shapes,
+        materials,
+        filters,
+    }
 }
 
 /// A node's rigid body, collider and trigger, if it has any.

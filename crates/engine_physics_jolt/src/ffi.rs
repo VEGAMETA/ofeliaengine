@@ -534,6 +534,11 @@ unsafe extern "C" {
     pub(crate) fn JPH_MeshShapeSettings_CreateShape(
         settings: *const JPH_ShapeSettings,
     ) -> *mut JPH_Shape;
+    pub(crate) fn JPH_MeshShapeSettings_SetPerTriangleUserData(
+        settings: *mut JPH_ShapeSettings,
+        value: bool,
+    );
+    pub(crate) fn JPH_Shape_SetUserData(shape: *mut JPH_Shape, user_data: u64);
     pub(crate) fn JPH_ShapeSettings_Destroy(settings: *mut JPH_ShapeSettings);
     pub(crate) fn JPH_StaticCompoundShapeSettings_Create() -> *mut JPH_ShapeSettings;
     pub(crate) fn JPH_CompoundShapeSettings_AddShape2(
@@ -1152,6 +1157,7 @@ unsafe extern "C" {
         capacity: usize,
     ) -> usize;
     pub(crate) fn engine_jolt_shape_restore(bytes: *const u8, size: usize) -> *mut JPH_Shape;
+    pub(crate) fn engine_jolt_hit_surface(body: *const JPH_Body, sub_shape: JPH_SubShapeID) -> u64;
     pub(crate) fn engine_jolt_shape_format() -> u64;
 }
 

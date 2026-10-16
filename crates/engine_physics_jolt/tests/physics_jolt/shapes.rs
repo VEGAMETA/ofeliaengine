@@ -158,6 +158,7 @@ fn baked_shapes_restore_the_same_geometry() {
         .create_shape(&ShapeDesc::TriangleMesh {
             vertices: &vertices,
             triangles: &triangles,
+            surfaces: &[],
         })
         .unwrap();
     let hull = w
