@@ -1,8 +1,9 @@
 # Audio: sounds, buses, effects, timing, sounds in the world
 
-In the player, which is where most games run, sound is a component. An `AudioSource` on
-an entity plays a file, the camera hears it, walls muffle it, and saves keep where every
-sound was (section 0).
+In the player, which is where most games run, sound is a component (section 0):
+- an `AudioSource` plays a file as it is (music, the UI);
+- an `AudioSource3D` plays one in the world, where walls muffle it and the room answers;
+- saves keep where every sound was.
 
 Underneath, `engine_audio` plays sounds through a mixer that runs on its own thread. Your
 code talks to it through `Audio`; every call returns immediately and never waits for the
@@ -12,31 +13,40 @@ milliseconds. Sections 1–8 use the mixer directly, outside the player.
 ## 0. Sounds in your game (the player)
 
 ```rust
-use engine_app::{AudioSource, Spatial};
+use engine_app::{AudioSource, AudioSource3D};
 
-// Music: as it is, on the music bus, looped.
-world.spawn((AudioSource::new("music/theme.ogg").on_bus("music").looped(),));
+// Music: as it is, looped (on the music bus by default).
+world.spawn((AudioSource::new("music/theme.ogg").looped(),));
 
 // A shot where it was fired: heard from its side, fainter far away, gone at its end.
 world.spawn((
     Transform::from_translation(muzzle),
-    AudioSource::new("sfx/shot.wav")
-        .placed(Spatial::within(2.0, 80.0))
+    AudioSource3D::new("sfx/shot.wav")
+        .within(2.0, 80.0)
         .despawned_at_end(),
 ));
 ```
 
+- **Two kinds of source:**
+  - **`AudioSource`** is a sound heard as it is: music, the UI, a narrator. No distance,
+    no walls, no reverb, whatever bus it is on. Its fields: `sound`, `bus`, `volume`,
+    `mode`, `playing`, `position`, `restart_on_load`.
+  - **`AudioSource3D`** is a sound in the world, at its entity:
+    - its `source` is an `AudioSource` (reached directly: `shot.playing`);
+    - plus `pitch`, `min_distance` and `max_distance`, `falloff`, `doppler`;
+    - plus `occlusion` (walls muffle it), `reverb` (the room answers it) and `priority`.
 - **Files** live in `sounds/` next to the game (`settings.audio.folder`). WAV, Ogg Vorbis,
   Opus and FLAC are read.
-  - A sound under 10 s is decoded once and kept in memory; a longer one streams from its
-    file (`settings.audio.stream_from`).
+  - A sound under 10 s is decoded once and kept in memory; a longer one streams
+    (`settings.audio.stream_from`).
   - Files load on a thread of their own, so the first play of a sound starts a frame or
     two late. Later plays start at once.
 - **You control a sound through its component:**
   - `playing = false` pauses it where it is; `true` goes on from there;
   - `position = 12.5` jumps to 12.5 s;
-  - `volume` and `pitch` are followed every frame;
-  - the bus and `spatial` are read when it starts.
+  - `volume` (and a 3D sound's `pitch`) is followed every frame;
+  - a fade is a `Tween` of `AudioSource.volume`;
+  - the bus and a 3D sound's distances are read when it starts.
 - **When a sound ends**, `mode` decides:
   - `PlayMode::Once` stops it (`playing` turns false, `position` goes back to 0);
   - `Loop` starts it over;
@@ -53,8 +63,26 @@ world.spawn((
 - **No sound needed?** `settings.audio.enabled = false`. A game that plays nothing never
   opens the audio device anyway: it opens, on another thread, with the first sound.
 - **Cost on ref-1:**
-  - the game thread: 2 µs a frame for 100 moving sounds, 17 µs for 1,000;
+  - the game thread: 2 µs a frame for 100 moving 3D sounds, 17 µs for 1,000;
   - the mixer: 128 of them mixed and the rest virtual, 1.5 % of a core.
+
+### Sound files: a folder while you work, a pack when you ship
+
+- **While developing** the player reads `sounds/`. Save a sound in your editor and the
+  game plays the new version at once, from where it was.
+- **For a release:**
+  ```text
+  ofeliaengine sounds build sounds -o sounds.pack
+  ```
+  Every file goes in as it is, with no re-encoding; files that are not sounds are listed
+  and left out. A release build reads `sounds.pack` (`settings.audio.pack`).
+  - Long sounds stream straight from the pack's file, so they are never loaded whole.
+  - WAV files are compressed in the pack, since they are decoded whole anyway.
+- **By build** (`settings.audio.files = SoundFiles::ByBuild`, the default):
+  - development builds read the folder, release builds the pack;
+  - each falls back to the other when it is missing;
+  - `SoundFiles::Folder` or `SoundFiles::Pack` choose one for every build;
+  - the start-up notes say which one is used.
 
 ### Walls and rooms
 
@@ -68,13 +96,14 @@ impl Game for MyGame {
 }
 ```
 
-- **A sound behind a wall is quieter and muffled**, and behind two walls more so. A ray
-  goes from the listener to each placed sound, about ten times a second.
+- **A 3D sound behind a wall is quieter and muffled**, and behind two walls more so. A
+  ray goes from the listener to each 3D sound, about ten times a second.
 - **The room around the listener gives the reverb, with no set-up:**
   - 32 rays in every direction measure how large the room is, how open it is to the sky,
     and what its walls are made of;
   - a cave rings, a small room answers briefly, an open field stays dry;
-  - effects and voices reverberate, music and the UI do not (`BusSettings::reverb`).
+  - 3D sounds on the effects and voice buses reverberate (`BusSettings::reverb`);
+    plain `AudioSource`s never do, whatever their bus.
 - **What surfaces are made of:** `mixer.set_absorption(material, 0.4)` for cloth, where
   `material` is the glTF material index (what `physics.surface_of` returns). The default
   of 0.1 suits plaster and wood; stone is about 0.02.

@@ -24,8 +24,10 @@ Last updated: 2026-10-16.
   - **The mixer:** clips start at an offset, voices say where they are, and streams are
     sought off the game thread (`PreparedStream`).
   - **Cost on ref-1:** 17 µs a frame for 1,000 moving sounds, 51 µs with the acoustics.
-  - **Open:** where sound files come from in a release (loose files or the pack: the
-    owner's call); loose files are read meanwhile.
+  - **The owner's follow-ups (same day, #247):**
+    - sound files from a folder while developing (a changed file heard at once) and a
+      sound pack in a release (`ofeliaengine sounds build`, pack version 10);
+    - `AudioSource` plain, `AudioSource3D` for space.
 - **Done: save games** (queue item 4, ADR 0104; the owner moved them before audio,
   2026-10-16, and chose both encodings and integrity by default).
   - **Done, steps 1 and 2** (#244):
@@ -221,7 +223,7 @@ Left in the core: networking in the player, recording on the job system.
 | Assets: glTF, cooking, packs, IoRing streaming; GPU memory budget, texture streaming by GPU feedback, mesh LOD streaming (`engine_streaming`) | done | ADRs 0056, 0057, 0076 |
 | **Video**: AV1 in WebM on the GPUs' video engines (Vulkan Video; rav1d where they cannot), converted into a texture for materials and the UI, Opus sound as the clock; `Videos` in the player | done (packs, HDR, transparency left) | ADR 0100 |
 | **Save games**: everything reflected saved without listing it, binary or text, integrity and a `.bak`; quicksave, quickload, slots and autosave in the player, written behind the frame | done (thumbnails, GPU buffers, signing left) | ADR 0104 |
-| **Sound in the player**: `AudioSource`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos | done (sound files in the pack: the owner's call) | ADR 0105 |
+| **Sound in the player**: `AudioSource`, `AudioSource3D`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos; sounds from a live folder while developing, a sound pack in a release | done | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
 | Editor, Luau | skeleton only, by plan | §10, §12 |
@@ -283,7 +285,8 @@ water and impostors stay in §6):
      (the player, the CLI, the guide, #245).
    - ~~Sound in the player~~ (done 2026-10-16, #246, ADR 0105): sources and the listener as
      components, saved; occlusion and the room's reverb from the physics world; zones.
-     Left: sound files in the pack (the owner's call).
+     Then (the owner's choices, #247): `AudioSource` and `AudioSource3D`, the sounds folder
+     kept live, sound packs.
    - Next: networking in the player, then the dev guide's quick start.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude

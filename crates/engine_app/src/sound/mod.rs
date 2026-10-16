@@ -1,29 +1,35 @@
 //! Sound in the player (ADR 0105): what entities play, heard from the listener, through
 //! the world.
 //!
-//! - **[`AudioSource`]** on an entity plays a sound file (under `sounds/` by default):
-//!   music, a voice line, a footstep where it was made. Every frame the player starts,
-//!   stops, tunes and moves its voice to match the component, and writes back where the
-//!   sound is (`position`): saves hold every sound's place, and a load resumes it there.
+//! - **[`AudioSource`]** on an entity plays a sound as it is: music, the UI, a narrator.
+//! - **[`AudioSource3D`]** plays one in the world, at its entity: fainter with distance,
+//!   from its side; with the game's physics ([`crate::Game::acoustics`]), muffled by walls
+//!   and answered by the room around the listener (rays, [`AcousticSettings`]). A
+//!   [`ReverbZone`] gives a place a reverb of its own.
+//! - **Every frame** the player starts, stops, tunes and moves each source's voice to match
+//!   its component, and writes back where the sound is (`position`): saves hold every
+//!   sound's place, and a load resumes it there.
 //! - **[`AudioListener`]** marks the entity that hears; without one, the main camera does.
-//! - **Through the world**, with the game's physics ([`crate::Game::acoustics`]): walls
-//!   between a sound and the listener muffle it, and the room around the listener gives
-//!   the reverb (rays, [`AcousticSettings`]); a [`ReverbZone`] gives a place a reverb of
-//!   its own.
 //! - **The world's [`Mixer`]** sets the buses' volumes (a settings menu) and what the
 //!   level's surfaces absorb.
 //!
-//! Sounds are read and decoded on a thread of their own. Shorter than
+//! **The sounds' files** ([`SoundFiles`], the owner's choice of 2026-10-16): a folder while
+//! developing, a changed file heard at once; a sound pack (`ofeliaengine sounds build`) in
+//! a release. They are read and decoded on a thread of their own. Shorter than
 //! [`AudioSettings::stream_from`] seconds they are decoded once and kept; longer ones
-//! stream from their files. A source starts once its sound is ready (a frame or two the
-//! first time). The audio device opens on another thread too, with the first source or
-//! video sound: a game without sound opens none.
+//! stream (from the pack's file in place). A source starts once its sound is ready (a frame
+//! or two the first time).
+//!
+//! The audio device opens on another thread too, with the first source or video sound: a
+//! game without sound opens none.
 
 mod acoustics;
 mod components;
 mod loader;
 
-pub use components::{AudioListener, AudioSource, Falloff, PlayMode, ReverbZone, Room, Spatial};
+pub use components::{
+    AudioListener, AudioSource, AudioSource3D, Falloff, PlayMode, ReverbZone, Room,
+};
 
 use acoustics::{Acoustics, PROBE_RAYS_PER_FRAME};
 use engine_audio::dsp::Reverb;
@@ -37,10 +43,13 @@ use engine_core::math::{Affine3A, Quat, Vec3};
 use engine_ecs::{Entity, GlobalTransform, QueryState, World};
 use engine_frame::ViewCamera;
 use engine_physics::{PhysicsBackend, QueryFilter, RayHit};
-use loader::{Done, Loaded, Loader, Request};
+use engine_platform::fs_watch::{DirectoryWatcher, FileEventKind};
+use loader::{Done, Loaded, Loader, Request, Store};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::thread::JoinHandle;
+use std::time::{Duration, Instant};
 
 /// A voice stopped by the system fades out over this long (seconds), never clicking.
 const FADE: f32 = 0.02;
@@ -50,20 +59,38 @@ const TELEPORT: f32 = 120.0;
 const ROOM_FOLLOW: f64 = 0.4;
 /// Seconds occlusion takes to follow a wall coming between.
 const OCCLUSION_FOLLOW: f64 = 0.1;
+/// How long a changed sound file must stay unchanged before it is read again.
+const QUIET: Duration = Duration::from_millis(50);
+
+/// Where the sounds' files are read from (ADR 0105; the owner, 2026-10-16).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SoundFiles {
+    /// The folder in development builds, a changed file heard at once; the pack in release
+    /// builds. Each falls back to the other where it is missing.
+    #[default]
+    ByBuild,
+    /// The folder, kept live, in every build.
+    Folder,
+    /// The pack, in every build.
+    Pack,
+}
 
 /// What [`PlayerSettings::audio`](crate::PlayerSettings::audio) holds (ADR 0105).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AudioSettings {
     /// Sound at all. `false` opens no audio device; videos play silent.
     pub enabled: bool,
-    /// The folder [`AudioSource::sound`] paths are under, relative to the current
-    /// directory as [`PlayerSettings::pack`](crate::PlayerSettings::pack) is.
+    /// The folder sources' paths are under, relative to the current directory as
+    /// [`PlayerSettings::pack`](crate::PlayerSettings::pack) is: `sounds`.
     pub folder: PathBuf,
+    /// The sound pack (`ofeliaengine sounds build <folder> -o <pack>`): `sounds.pack`.
+    pub pack: PathBuf,
+    /// Which of the two the sounds are read from.
+    pub files: SoundFiles,
     /// The buses under the master, in order: a bus's parent is named before it.
     pub buses: Vec<BusSettings>,
-    /// Sounds this long or longer (seconds) stream from their files; shorter ones are
-    /// decoded once and kept in memory (a 10 s stereo sound takes 3.8 MB). WAV files are
-    /// always decoded whole.
+    /// Sounds this long or longer (seconds) stream; shorter ones are decoded once and kept
+    /// in memory (a 10 s stereo sound takes 3.8 MB). WAV files are always decoded whole.
     pub stream_from: f32,
     /// The mixer's capacities.
     pub mixer: AudioConfig,
@@ -76,6 +103,8 @@ impl Default for AudioSettings {
         Self {
             enabled: true,
             folder: PathBuf::from("sounds"),
+            pack: PathBuf::from("sounds.pack"),
+            files: SoundFiles::ByBuild,
             buses: vec![
                 BusSettings::new("music"),
                 BusSettings::new("effects").reverberant(),
@@ -98,8 +127,8 @@ pub struct BusSettings {
     pub volume: f32,
     /// The bus it feeds, by name (named before it); empty: the master.
     pub parent: String,
-    /// Sent to the reverb of the room around the listener: effects and voices are, music
-    /// and the UI are not.
+    /// Its [`AudioSource3D`]s reverberate with the room around the listener (effects and
+    /// voices do; music and the UI do not). Its plain [`AudioSource`]s never do.
     pub reverb: bool,
 }
 
@@ -114,7 +143,7 @@ impl BusSettings {
         }
     }
 
-    /// Sent to the room's reverb.
+    /// Its 3D sounds reverberate.
     pub fn reverberant(mut self) -> Self {
         self.reverb = true;
         self
@@ -125,7 +154,7 @@ impl BusSettings {
 /// ([`crate::Game::acoustics`]).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AcousticSettings {
-    /// Walls between a placed sound and the listener muffle it.
+    /// Walls between a 3D sound and the listener muffle it.
     pub occlusion: bool,
     /// The room around the listener gives the reverb.
     pub reverb: bool,
@@ -237,6 +266,14 @@ impl Mixer {
     }
 }
 
+/// A bus of the mixer, and the child its reverberating 3D sounds play on.
+struct Bus {
+    name: String,
+    id: BusId,
+    /// Feeds `id` and the reverb (a bus with `reverb`).
+    world: Option<BusId>,
+}
+
 /// What a sound of the cache is.
 enum State {
     Loading,
@@ -248,6 +285,8 @@ enum State {
 /// A sound, by its path.
 struct SoundEntry {
     state: State,
+    /// Being read again (its file changed): what it was plays until then.
+    reloading: bool,
     /// A play of it failed: said once.
     warned: bool,
 }
@@ -260,14 +299,8 @@ struct Sounds {
 }
 
 impl Sounds {
-    /// The sound at `path` (under `folder`), asked of the loader the first time.
-    fn find_or_load(
-        &mut self,
-        path: &str,
-        loader: &Loader,
-        folder: &std::path::Path,
-        stream_from: f32,
-    ) -> Option<u32> {
+    /// The sound at `path`, asked of the loader the first time.
+    fn find_or_load(&mut self, path: &str, loader: &Loader, stream_from: f32) -> Option<u32> {
         if path.is_empty() {
             return None;
         }
@@ -277,15 +310,46 @@ impl Sounds {
         let id = self.entries.len() as u32;
         let asked = loader.send(Request::Load {
             id,
-            path: folder.join(path),
+            path: path.to_owned(),
             stream_from,
         });
         self.entries.push(SoundEntry {
             state: if asked { State::Loading } else { State::Failed },
+            reloading: false,
             warned: false,
         });
         self.by_path.insert(path.to_owned(), id);
         Some(id)
+    }
+}
+
+/// How a 3D source sits in the world, this frame.
+#[derive(Debug, Clone, Copy)]
+struct Placement {
+    at: Option<Vec3>,
+    pitch: f32,
+    min_distance: f32,
+    max_distance: f32,
+    falloff: Falloff,
+    doppler: f32,
+    occlusion: bool,
+    reverb: bool,
+    priority: u8,
+}
+
+impl Placement {
+    fn of(source: &AudioSource3D, at: Option<Vec3>) -> Self {
+        Self {
+            at,
+            pitch: source.pitch,
+            min_distance: source.min_distance,
+            max_distance: source.max_distance,
+            falloff: source.falloff,
+            doppler: source.doppler,
+            occlusion: source.occlusion,
+            reverb: source.reverb,
+            priority: source.priority,
+        }
     }
 }
 
@@ -296,6 +360,8 @@ struct Track {
     path: String,
     sound: Option<u32>,
     voice: Option<VoiceHandle>,
+    /// The bus the voice plays on.
+    bus: BusId,
     /// A long sound being opened for it by the loader.
     preparing: Option<u64>,
     /// The sound's sample rate (positions in seconds).
@@ -306,9 +372,9 @@ struct Track {
     volume: f32,
     pitch: f32,
     velocity: Vec3,
-    /// Where its entity was this frame, when placed.
+    /// Where its entity was this frame (3D sources).
     at: Option<Vec3>,
-    /// Placed, and muffled by walls.
+    /// A 3D source muffled by walls.
     occludable: bool,
     /// Occlusion now (followed smoothly), where it heads, and what the voice has.
     occlusion: f32,
@@ -327,6 +393,7 @@ impl Track {
             path: String::new(),
             sound: None,
             voice: None,
+            bus: BusId::MASTER,
             preparing: None,
             rate: 48_000,
             written,
@@ -351,7 +418,7 @@ impl Track {
     }
 }
 
-/// The tracks, found by entity.
+/// The tracks of one kind of source, found by entity.
 #[derive(Default)]
 struct Tracks {
     list: Vec<Track>,
@@ -405,26 +472,48 @@ impl Tracks {
         self.list.clear();
         self.of.fill(u32::MAX);
     }
+
+    /// Stops the voices playing sound `id`: they start again where they are, with what
+    /// the sound is now.
+    fn restart(&mut self, id: u32, audio: &mut Audio) {
+        for track in &mut self.list {
+            if track.sound == Some(id) {
+                track.stop(audio);
+            }
+        }
+    }
 }
 
-type SourceQuery = QueryState<(
+type PlainQuery = QueryState<(Entity, &'static mut AudioSource)>;
+type WorldQuery = QueryState<(
     Entity,
-    &'static mut AudioSource,
+    &'static mut AudioSource3D,
     Option<&'static GlobalTransform>,
 )>;
 
 struct Queries {
-    sources: SourceQuery,
+    plain: PlainQuery,
+    placed: WorldQuery,
     listeners: QueryState<(&'static AudioListener, &'static GlobalTransform)>,
     zones: QueryState<(&'static ReverbZone, &'static GlobalTransform)>,
 }
 
-/// The room's reverb: a bus with the reverb effect, fed by the reverberant buses.
+/// The room's reverb: a bus with the reverb effect, fed by the reverberant buses' world
+/// children.
 struct ReverbBus {
     effect: EffectId,
     sends: Vec<SendId>,
     /// What the effect and the sends were last given.
     sent: Room,
+}
+
+/// The sounds folder, watched: a changed file is read again.
+struct LiveFolder {
+    watcher: DirectoryWatcher,
+    /// Paths changed (with `/`, from the folder), and when last.
+    changed: Vec<(String, Instant)>,
+    /// Everything changed (the watcher lost track).
+    everything: Option<Instant>,
 }
 
 /// The player's sound (see the module): the mixer, its output, the sources' voices.
@@ -440,15 +529,19 @@ pub(crate) struct Sound {
     /// Tests render the mixer themselves.
     manual: bool,
     error: Option<String>,
-    /// The buses by name, the master first.
-    buses: Vec<(String, BusId)>,
+    /// The buses, the master first.
+    buses: Vec<Bus>,
     reverb: Option<ReverbBus>,
+    /// Where the sounds come from, said once at the start.
+    note: String,
+    live_folder: Option<LiveFolder>,
     loader: Loader,
     sounds: Sounds,
     tickets: u64,
     /// Long sounds the loader opened, by ticket, until their tracks take them.
     prepared: Vec<(u64, PreparedStream)>,
-    tracks: Tracks,
+    plain: Tracks,
+    placed: Tracks,
     stamp: u32,
     queries: Option<Queries>,
     /// The listener this frame, and last frame's position (its velocity).
@@ -458,9 +551,63 @@ pub(crate) struct Sound {
     room: Room,
     /// Surface → absorption ([`Mixer::set_absorption`]).
     absorption: Vec<(u16, f32)>,
-    /// The next track an occlusion ray goes to.
+    /// The next 3D track an occlusion ray goes to.
     next_occluded: usize,
     despawn: Vec<Entity>,
+}
+
+/// Where the sounds come from: the store, whether to watch the folder, and a note.
+fn choose_store(settings: &AudioSettings) -> (Store, bool, String) {
+    let folder = || {
+        let found = settings.folder.is_dir();
+        let note = if found {
+            format!("sounds from `{}`, kept live", settings.folder.display())
+        } else {
+            format!(
+                "sounds from `{}` (not there; nor the pack `{}`)",
+                settings.folder.display(),
+                settings.pack.display()
+            )
+        };
+        (Store::Folder(settings.folder.clone()), found, note)
+    };
+    let pack = || {
+        engine_assets::sounds::SoundPack::open(&settings.pack).map(|pack| {
+            let note = format!(
+                "sounds from `{}` ({} sounds)",
+                settings.pack.display(),
+                pack.len()
+            );
+            (Store::Pack(Arc::new(pack)), false, note)
+        })
+    };
+    let pack_first = match settings.files {
+        SoundFiles::ByBuild => !cfg!(debug_assertions),
+        SoundFiles::Folder => false,
+        SoundFiles::Pack => true,
+    };
+    let fallback = settings.files == SoundFiles::ByBuild;
+    if pack_first {
+        match pack() {
+            Ok(store) => store,
+            Err(e) if fallback && settings.folder.is_dir() => {
+                let (store, watch, note) = folder();
+                (store, watch, format!("{note} (the pack: {e})"))
+            }
+            Err(e) => {
+                log::warn!(target: "engine_app::sound", "the sound pack `{}`: {e}", settings.pack.display());
+                let note = format!("no sounds: the pack `{}`: {e}", settings.pack.display());
+                (Store::Folder(settings.folder.clone()), false, note)
+            }
+        }
+    } else if !settings.folder.is_dir()
+        && fallback
+        && let Ok(store) = pack()
+    {
+        store
+    } else {
+        folder()
+    }
 }
 
 impl Sound {
@@ -478,6 +625,28 @@ impl Sound {
     }
 
     fn build(settings: &AudioSettings, manual: bool) -> Self {
+        let (store, watch, note) = if settings.enabled {
+            choose_store(settings)
+        } else {
+            (
+                Store::Folder(settings.folder.clone()),
+                false,
+                String::from("sound is off"),
+            )
+        };
+        let live_folder = watch
+            .then(|| match DirectoryWatcher::new(&settings.folder, true) {
+                Ok(watcher) => Some(LiveFolder {
+                    watcher,
+                    changed: Vec::new(),
+                    everything: None,
+                }),
+                Err(e) => {
+                    log::warn!(target: "engine_app::sound", "watching `{}`: {e}", settings.folder.display());
+                    None
+                }
+            })
+            .flatten();
         let mut sound = Self {
             settings: settings.clone(),
             audio: None,
@@ -489,11 +658,14 @@ impl Sound {
                 .then(|| String::from("sound is off (AudioSettings::enabled)")),
             buses: Vec::new(),
             reverb: None,
-            loader: Loader::start(),
+            note,
+            live_folder,
+            loader: Loader::start(store),
             sounds: Sounds::default(),
             tickets: 0,
             prepared: Vec::new(),
-            tracks: Tracks::default(),
+            plain: Tracks::default(),
+            placed: Tracks::default(),
             stamp: 0,
             queries: None,
             heard_at: None,
@@ -510,20 +682,36 @@ impl Sound {
             return sound;
         }
         let (mut audio, renderer) = Audio::new(&settings.mixer);
-        sound.buses.push((String::from("master"), BusId::MASTER));
+        sound.buses.push(Bus {
+            name: String::from("master"),
+            id: BusId::MASTER,
+            world: None,
+        });
         for bus in &settings.buses {
             let parent = sound
                 .buses
                 .iter()
-                .find(|(name, _)| !bus.parent.is_empty() && *name == bus.parent)
-                .map_or(BusId::MASTER, |&(_, id)| id);
-            match audio.add_bus(&bus.name, parent) {
-                Ok(id) => {
-                    audio.set_bus_gain(id, bus.volume, 0.0);
-                    sound.buses.push((bus.name.clone(), id));
+                .find(|b| !bus.parent.is_empty() && b.name == bus.parent)
+                .map_or(BusId::MASTER, |b| b.id);
+            let id = match audio.add_bus(&bus.name, parent) {
+                Ok(id) => id,
+                Err(e) => {
+                    log::warn!(target: "engine_app::sound", "bus {}: {e}", bus.name);
+                    continue;
                 }
-                Err(e) => log::warn!(target: "engine_app::sound", "bus {}: {e}", bus.name),
-            }
+            };
+            audio.set_bus_gain(id, bus.volume, 0.0);
+            // Its reverberating 3D sounds play on a child: the parent's volume still
+            // applies, and its plain sounds stay dry.
+            let world = bus
+                .reverb
+                .then(|| audio.add_bus(&format!("{}.world", bus.name), id).ok())
+                .flatten();
+            sound.buses.push(Bus {
+                name: bus.name.clone(),
+                id,
+                world,
+            });
         }
         sound.audio = Some(audio);
         sound.renderer = Some(renderer);
@@ -543,10 +731,10 @@ impl Sound {
             buses: self
                 .buses
                 .iter()
-                .map(|(name, id)| MixerBus {
-                    name: name.clone(),
-                    id: *id,
-                    volume: volume(name),
+                .map(|b| MixerBus {
+                    name: b.name.clone(),
+                    id: b.id,
+                    volume: volume(&b.name),
                     muted: false,
                     changed: false,
                 })
@@ -555,6 +743,11 @@ impl Sound {
             absorption_changed: false,
             error: self.error.clone(),
         }
+    }
+
+    /// Where the sounds come from (for the start-up notes).
+    pub(crate) fn note(&self) -> &str {
+        &self.note
     }
 
     /// Whether sound can play (it is on and the device did not fail).
@@ -619,9 +812,9 @@ impl Sound {
     }
 
     /// One frame (after the ticks, before the videos): the mixer's returns, the loader's
-    /// sounds, the listener, every source, the acoustics. `camera` hears without an
-    /// [`AudioListener`]; `physics` is the game's world for the acoustics; `dt` is the
-    /// frame's length in seconds.
+    /// sounds, changed files, the listener, every source, the acoustics. `camera` hears
+    /// without an [`AudioListener`]; `physics` is the game's world for the acoustics; `dt`
+    /// is the frame's length in seconds.
     pub(crate) fn update(
         &mut self,
         world: &mut World,
@@ -638,10 +831,12 @@ impl Sound {
             audio.update();
         }
         self.receive();
+        self.watch_folder();
         self.apply_mixer(world);
         if self.queries.is_none() {
             self.queries = Some(Queries {
-                sources: QueryState::new(world),
+                plain: QueryState::new(world),
+                placed: QueryState::new(world),
                 listeners: QueryState::new(world),
                 zones: QueryState::new(world),
             });
@@ -654,7 +849,8 @@ impl Sound {
             self.want_output();
         }
         if let Some(audio) = self.audio.as_mut() {
-            self.tracks.drop_unseen(self.stamp, audio);
+            self.plain.drop_unseen(self.stamp, audio);
+            self.placed.drop_unseen(self.stamp, audio);
         }
         for entity in self.despawn.drain(..) {
             world.despawn(entity);
@@ -672,24 +868,40 @@ impl Sound {
                     let Some(entry) = self.sounds.entries.get_mut(id as usize) else {
                         continue;
                     };
-                    entry.state = match result {
-                        Ok(Loaded::Clip(clip)) => State::Clip(clip),
-                        Ok(Loaded::Long { rate }) => State::Long { rate },
+                    let reload = core::mem::take(&mut entry.reloading);
+                    match result {
+                        Ok(loaded) => {
+                            entry.state = match loaded {
+                                Loaded::Clip(clip) => State::Clip(clip),
+                                Loaded::Long { rate } => State::Long { rate },
+                            };
+                            entry.warned = false;
+                            if reload && let Some(audio) = self.audio.as_mut() {
+                                self.plain.restart(id, audio);
+                                self.placed.restart(id, audio);
+                            }
+                        }
+                        // A file being saved can be read half-written: what played goes on.
+                        Err(why) if reload => {
+                            log::warn!(target: "engine_app::sound", "sound {why}; the previous one plays on");
+                        }
                         Err(why) => {
                             log::warn!(target: "engine_app::sound", "sound {why}");
-                            State::Failed
+                            entry.state = State::Failed;
                         }
-                    };
+                    }
                 }
                 Done::Prepared { ticket, result } => match result {
                     Ok(stream) => {
-                        if self.tracks.list.iter().any(|t| t.preparing == Some(ticket)) {
+                        let waited = |t: &Track| t.preparing == Some(ticket);
+                        if self.plain.list.iter().any(waited) || self.placed.list.iter().any(waited)
+                        {
                             self.prepared.push((ticket, stream));
                         }
                     }
                     Err(why) => {
                         log::warn!(target: "engine_app::sound", "sound {why}");
-                        for track in &mut self.tracks.list {
+                        for track in self.plain.list.iter_mut().chain(&mut self.placed.list) {
                             if track.preparing == Some(ticket) {
                                 track.preparing = None;
                                 if let Some(entry) = track
@@ -702,6 +914,60 @@ impl Sound {
                         }
                     }
                 },
+            }
+        }
+    }
+
+    /// Changed files of the live folder, read again once they have been quiet.
+    fn watch_folder(&mut self) {
+        let Some(live) = self.live_folder.as_mut() else {
+            return;
+        };
+        while let Some(event) = live.watcher.try_next() {
+            if event.kind == FileEventKind::Rescan {
+                live.everything = Some(Instant::now());
+                continue;
+            }
+            // The watcher reports paths under its root as it holds it.
+            let Ok(relative) = event.path.strip_prefix(live.watcher.root()) else {
+                continue;
+            };
+            let name = relative
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            match live.changed.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, at)) => *at = Instant::now(),
+                None => live.changed.push((name, Instant::now())),
+            }
+        }
+        let mut again = Vec::new();
+        live.changed.retain(|(name, at)| {
+            let quiet = at.elapsed() >= QUIET;
+            if quiet {
+                again.push(name.clone());
+            }
+            !quiet
+        });
+        if live.everything.is_some_and(|at| at.elapsed() >= QUIET) {
+            live.everything = None;
+            again = self.sounds.by_path.keys().cloned().collect();
+        }
+        for name in again {
+            let Some(&id) = self.sounds.by_path.get(&name) else {
+                continue;
+            };
+            let Some(entry) = self.sounds.entries.get_mut(id as usize) else {
+                continue;
+            };
+            let asked = self.loader.send(Request::Load {
+                id,
+                path: name,
+                stream_from: self.settings.stream_from,
+            });
+            if asked {
+                entry.reloading = true;
             }
         }
     }
@@ -781,7 +1047,8 @@ impl Sound {
             sounds,
             tickets,
             prepared,
-            tracks,
+            plain,
+            placed,
             stamp,
             queries,
             despawn,
@@ -799,21 +1066,19 @@ impl Sound {
             tickets,
             prepared,
             despawn,
-            folder: &settings.folder,
             stream_from: settings.stream_from,
             stamp: *stamp,
             dt,
             wanted: false,
         };
-        queries.sources.for_each(world, |(entity, source, global)| {
-            let track = tracks.get_or_insert(entity, source.position);
-            follow(
-                &mut ctx,
-                track,
-                entity,
-                source,
-                global.map(GlobalTransform::translation),
-            );
+        queries.plain.for_each(world, |(entity, source)| {
+            let track = plain.get_or_insert(entity, source.position);
+            follow(&mut ctx, track, entity, source, None);
+        });
+        queries.placed.for_each(world, |(entity, source, global)| {
+            let track = placed.get_or_insert(entity, source.position);
+            let placement = Placement::of(source, global.map(GlobalTransform::translation));
+            follow(&mut ctx, track, entity, &mut source.source, Some(placement));
         });
         ctx.wanted
     }
@@ -854,14 +1119,14 @@ impl Sound {
                     &absorption,
                 );
             }
-            if acoustic.occlusion && !self.tracks.list.is_empty() {
-                let n = self.tracks.list.len();
+            if acoustic.occlusion && !self.placed.list.is_empty() {
+                let n = self.placed.list.len();
                 let mut looked = 0;
                 while budget > 0 && looked < n {
                     let i = self.next_occluded % n;
                     self.next_occluded = (i + 1) % n;
                     looked += 1;
-                    let track = &mut self.tracks.list[i];
+                    let track = &mut self.placed.list[i];
                     if let (true, Some(_), Some(to)) = (track.occludable, track.voice, track.at) {
                         track.occlusion_target = self.acoustics.occlusion(physics, at, to, filter);
                         budget -= 1;
@@ -872,7 +1137,7 @@ impl Sound {
         // Occlusion follows smoothly.
         let follow = (1.0 - (-dt / OCCLUSION_FOLLOW).exp()) as f32;
         if let Some(audio) = self.audio.as_mut() {
-            for track in &mut self.tracks.list {
+            for track in &mut self.placed.list {
                 let Some(voice) = track.voice else {
                     continue;
                 };
@@ -956,12 +1221,14 @@ impl Sound {
                 return;
             };
             let sends = self
-                .settings
                 .buses
                 .iter()
-                .filter(|b| b.reverb)
-                .filter_map(|b| self.buses.iter().find(|(name, _)| *name == b.name))
-                .filter_map(|&(_, id)| audio.add_send(id, bus, room.level, SendTap::PostFader).ok())
+                .filter_map(|b| b.world)
+                .filter_map(|world| {
+                    audio
+                        .add_send(world, bus, room.level, SendTap::PostFader)
+                        .ok()
+                })
                 .collect();
             self.reverb = Some(ReverbBus {
                 effect,
@@ -1006,11 +1273,17 @@ impl Sound {
         let Some(audio) = self.audio.as_mut() else {
             return;
         };
-        self.tracks.clear(audio);
+        self.plain.clear(audio);
+        self.placed.clear(audio);
         self.prepared.clear();
         self.acoustics.reset();
         if let Some(queries) = self.queries.as_mut() {
-            queries.sources.for_each(world, |(_, source, _)| {
+            queries.plain.for_each(world, |(_, source)| {
+                if source.restart_on_load {
+                    source.position = 0.0;
+                }
+            });
+            queries.placed.for_each(world, |(_, source, _)| {
                 if source.restart_on_load {
                     source.position = 0.0;
                 }
@@ -1021,7 +1294,8 @@ impl Sound {
     /// Stops what plays (the player is closing).
     pub(crate) fn stop_all(&mut self) {
         if let Some(audio) = self.audio.as_mut() {
-            self.tracks.clear(audio);
+            self.plain.clear(audio);
+            self.placed.clear(audio);
         }
         self.output = None;
     }
@@ -1031,13 +1305,12 @@ impl Sound {
 struct Ctx<'a> {
     audio: &'a mut Audio,
     live: bool,
-    buses: &'a [(String, BusId)],
+    buses: &'a [Bus],
     loader: &'a Loader,
     sounds: &'a mut Sounds,
     tickets: &'a mut u64,
     prepared: &'a mut Vec<(u64, PreparedStream)>,
     despawn: &'a mut Vec<Entity>,
-    folder: &'a std::path::Path,
     stream_from: f32,
     stamp: u32,
     dt: f64,
@@ -1045,25 +1318,25 @@ struct Ctx<'a> {
     wanted: bool,
 }
 
-/// Keeps one source's voice in step with its component.
+/// Keeps one source's voice in step with its component; `placed` for a 3D one.
 fn follow(
     ctx: &mut Ctx<'_>,
     track: &mut Track,
     entity: Entity,
     source: &mut AudioSource,
-    at: Option<Vec3>,
+    placed: Option<Placement>,
 ) {
     track.seen = ctx.stamp;
-    let placed_at = source.spatial.and(at);
+    let at = placed.and_then(|p| p.at);
     if track.path != source.sound {
         track.stop(ctx.audio);
         track.path.clone_from(&source.sound);
-        track.sound =
-            ctx.sounds
-                .find_or_load(&source.sound, ctx.loader, ctx.folder, ctx.stream_from);
+        track.sound = ctx
+            .sounds
+            .find_or_load(&source.sound, ctx.loader, ctx.stream_from);
         track.written = source.position;
     }
-    track.occludable = source.spatial.is_some_and(|s| s.occlusion);
+    track.occludable = placed.is_some_and(|p| p.occlusion);
     if !source.playing {
         if let Some(voice) = track.voice.take() {
             if let Some(frames) = ctx.audio.position(voice) {
@@ -1073,7 +1346,7 @@ fn follow(
         }
         track.preparing = None;
         track.written = source.position;
-        track.at = placed_at;
+        track.at = at;
         return;
     }
     if source.position != track.written {
@@ -1082,7 +1355,7 @@ fn follow(
     }
     match track.voice {
         Some(voice) if ctx.audio.is_playing(voice) => {
-            tune(ctx, track, voice, source, placed_at);
+            tune(ctx, track, voice, source, placed);
             if let Some(frames) = ctx.audio.position(voice) {
                 source.position = frames as f64 / f64::from(track.rate.max(1));
             }
@@ -1102,21 +1375,25 @@ fn follow(
         None => {
             ctx.wanted = true;
             if ctx.live {
-                start(ctx, track, source, placed_at);
+                start(ctx, track, source, placed);
             }
         }
     }
     track.written = source.position;
-    track.at = placed_at;
+    track.at = at;
 }
 
 /// Starts a source's voice where its component is, once its sound is ready.
-fn start(ctx: &mut Ctx<'_>, track: &mut Track, source: &AudioSource, at: Option<Vec3>) {
+fn start(ctx: &mut Ctx<'_>, track: &mut Track, source: &AudioSource, placed: Option<Placement>) {
     let Some(id) = track.sound else {
         return;
     };
-    let bus = match ctx.buses.iter().find(|(name, _)| *name == source.bus) {
-        Some(&(_, id)) => id,
+    let bus = match ctx.buses.iter().find(|b| b.name == source.bus) {
+        // A 3D sound that reverberates plays on its bus's world child.
+        Some(b) => match (placed, b.world) {
+            (Some(p), Some(world)) if p.reverb => world,
+            _ => b.id,
+        },
         None => {
             if !core::mem::replace(&mut track.warned, true) {
                 log::warn!(target: "engine_app::sound", "{}: no bus {:?}; on the master", source.sound, source.bus);
@@ -1129,22 +1406,22 @@ fn start(ctx: &mut Ctx<'_>, track: &mut Track, source: &AudioSource, at: Option<
         bus,
         gain: source.volume,
         pan: 0.0,
-        pitch: source.pitch,
+        pitch: placed.map_or(1.0, |p| p.pitch),
         looping,
-        priority: source.priority,
+        priority: placed.map_or(128, |p| p.priority),
         start_at: None,
-        fade_in: source.fade_in,
+        fade_in: 0.0,
         offset: 0,
-        spatial: source.spatial.map(|s| Emitter {
-            position: at.unwrap_or(Vec3::ZERO),
+        spatial: placed.map(|p| Emitter {
+            position: p.at.unwrap_or(Vec3::ZERO),
             velocity: Vec3::ZERO,
-            min_distance: s.min_distance.max(0.01),
-            max_distance: s.max_distance.max(s.min_distance.max(0.01)),
-            rolloff: match s.falloff {
+            min_distance: p.min_distance.max(0.01),
+            max_distance: p.max_distance.max(p.min_distance.max(0.01)),
+            rolloff: match p.falloff {
                 Falloff::Inverse => Rolloff::Inverse,
                 Falloff::Linear => Rolloff::Linear,
             },
-            doppler: s.doppler,
+            doppler: p.doppler,
             air_absorption: 1.0,
         }),
     };
@@ -1166,7 +1443,7 @@ fn start(ctx: &mut Ctx<'_>, track: &mut Track, source: &AudioSource, at: Option<
                 let ticket = *ctx.tickets;
                 let asked = ctx.loader.send(Request::Prepare {
                     ticket,
-                    path: ctx.folder.join(&source.sound),
+                    path: source.sound.clone(),
                     offset: frames_at(source.position, rate),
                     looping,
                     buffer_ms: ctx.audio.stream_buffer_ms(),
@@ -1191,9 +1468,10 @@ fn start(ctx: &mut Ctx<'_>, track: &mut Track, source: &AudioSource, at: Option<
     match started {
         Ok((voice, rate)) => {
             track.voice = Some(voice);
+            track.bus = bus;
             track.rate = rate;
             track.volume = source.volume;
-            track.pitch = source.pitch;
+            track.pitch = params.pitch;
             track.velocity = Vec3::ZERO;
             track.occlusion_sent = 0.0;
             track.occlusion = 0.0;
@@ -1214,17 +1492,20 @@ fn tune(
     track: &mut Track,
     voice: VoiceHandle,
     source: &AudioSource,
-    at: Option<Vec3>,
+    placed: Option<Placement>,
 ) {
     if source.volume != track.volume {
         ctx.audio.set_voice_gain(voice, source.volume, 0.05);
         track.volume = source.volume;
     }
-    if source.pitch != track.pitch {
-        ctx.audio.set_voice_pitch(voice, source.pitch);
-        track.pitch = source.pitch;
+    let Some(placed) = placed else {
+        return;
+    };
+    if placed.pitch != track.pitch {
+        ctx.audio.set_voice_pitch(voice, placed.pitch);
+        track.pitch = placed.pitch;
     }
-    if let Some(at) = at {
+    if let Some(at) = placed.at {
         let velocity = velocity(track.at, at, ctx.dt);
         if track.at != Some(at) || velocity != track.velocity {
             ctx.audio.set_voice_position(voice, at, velocity);

@@ -1,16 +1,54 @@
 //! Sounds read and decoded off the game thread (ADR 0105): a thread answers the sound
-//! system's requests, so no file read, decode or seek ever holds up a frame.
+//! system's requests, so no file read, decode or seek ever holds up a frame. It reads the
+//! sounds folder or the sound pack ([`Store`]).
 
-use engine_audio::{Clip, PreparedStream};
-use std::path::{Path, PathBuf};
+use engine_assets::sounds::{SoundFormat, SoundPack};
+use engine_audio::{Clip, Decoder, PreparedStream};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::JoinHandle;
+
+/// Where the sounds' files are.
+#[derive(Debug, Clone)]
+pub(crate) enum Store {
+    /// A folder of files, by their paths under it.
+    Folder(PathBuf),
+    /// A sound pack (`ofeliaengine sounds build`).
+    Pack(Arc<SoundPack>),
+}
+
+impl Store {
+    fn decoder(&self, path: &str) -> Result<Box<dyn Decoder>, String> {
+        match self {
+            Self::Folder(folder) => {
+                let file = folder.join(path);
+                engine_audio_decode::open_file(&file)
+                    .map_err(|e| format!("{}: {e}", file.display()))
+            }
+            Self::Pack(pack) => {
+                let why = |e: &dyn core::fmt::Display| format!("{path} in the sound pack: {e}");
+                let sound = *pack
+                    .get(path)
+                    .ok_or_else(|| format!("{path}: not in the sound pack"))?;
+                match pack.region(&sound).map_err(|e| why(&e))? {
+                    // Compressed audio streams in place from the pack's file.
+                    Some(region) => engine_audio_decode::open(region).map_err(|e| why(&e)),
+                    None => {
+                        let bytes = pack.read(&sound).map_err(|e| why(&e))?;
+                        engine_audio_decode::open_bytes(bytes).map_err(|e| why(&e))
+                    }
+                }
+            }
+        }
+    }
+}
 
 /// What a sound file turned out to be.
 pub(crate) enum Loaded {
     /// Short (or a WAV file): decoded whole, played from memory.
     Clip(Clip),
-    /// Long: streamed from its file every time it plays.
+    /// Long: streamed every time it plays.
     Long {
         /// Its sample rate in Hz.
         rate: u32,
@@ -19,16 +57,16 @@ pub(crate) enum Loaded {
 
 /// A request to the loading thread.
 pub(crate) enum Request {
-    /// Reads sound `id`: decoded whole when shorter than `stream_from` seconds.
+    /// Reads sound `id` at `path`: decoded whole when shorter than `stream_from` seconds.
     Load {
         id: u32,
-        path: PathBuf,
+        path: String,
         stream_from: f32,
     },
     /// Opens a long sound for one play from `offset` (frames at its rate).
     Prepare {
         ticket: u64,
-        path: PathBuf,
+        path: String,
         offset: u64,
         looping: bool,
         buffer_ms: u32,
@@ -56,7 +94,7 @@ pub(crate) struct Loader {
 }
 
 impl Loader {
-    pub(crate) fn start() -> Self {
+    pub(crate) fn start(store: Store) -> Self {
         let (requests, inbox) = mpsc::channel::<Request>();
         let (outbox, done) = mpsc::channel();
         let thread = std::thread::Builder::new()
@@ -71,7 +109,7 @@ impl Loader {
                             stream_from,
                         } => Done::Loaded {
                             id,
-                            result: load(&path, stream_from),
+                            result: load(&store, &path, stream_from),
                         },
                         Request::Prepare {
                             ticket,
@@ -81,7 +119,7 @@ impl Loader {
                             buffer_ms,
                         } => Done::Prepared {
                             ticket,
-                            result: prepare(&path, offset, looping, buffer_ms),
+                            result: prepare(&store, &path, offset, looping, buffer_ms),
                         },
                     };
                     if outbox.send(answer).is_err() {
@@ -122,50 +160,107 @@ impl Drop for Loader {
 
 /// Reads `path`: a WAV file, or a compressed one shorter than `stream_from` seconds, into
 /// a clip; a longer compressed one is only measured (it streams when it plays).
-fn load(path: &Path, stream_from: f32) -> Result<Loaded, String> {
+fn load(store: &Store, path: &str, stream_from: f32) -> Result<Loaded, String> {
     engine_profiler::zone!("app::sound::load");
-    let why = |e: &dyn core::fmt::Display| format!("{}: {e}", path.display());
-    let mut head = [0u8; 12];
-    {
-        use std::io::Read;
-        let mut file = std::fs::File::open(path).map_err(|e| why(&e))?;
-        let mut filled = 0;
-        while filled < head.len() {
-            match file.read(&mut head[filled..]).map_err(|e| why(&e))? {
-                0 => break,
-                n => filled += n,
+    let short = |frames: Option<u64>, rate: u32| {
+        frames.is_some_and(|f| (f as f64) < f64::from(stream_from.max(0.0)) * f64::from(rate))
+    };
+    match store {
+        Store::Folder(folder) => {
+            let file = folder.join(path);
+            let why = |e: &dyn core::fmt::Display| format!("{}: {e}", file.display());
+            let mut head = [0u8; 12];
+            {
+                use std::io::Read;
+                let mut f = std::fs::File::open(&file).map_err(|e| why(&e))?;
+                let mut filled = 0;
+                while filled < head.len() {
+                    match f.read(&mut head[filled..]).map_err(|e| why(&e))? {
+                        0 => break,
+                        n => filled += n,
+                    }
+                }
+            }
+            if SoundFormat::sniff(&head) == Some(SoundFormat::Wav) {
+                let bytes = std::fs::read(&file).map_err(|e| why(&e))?;
+                return Clip::from_wav(&bytes)
+                    .map(Loaded::Clip)
+                    .map_err(|e| why(&e));
+            }
+            let mut decoder = engine_audio_decode::open_file(&file).map_err(|e| why(&e))?;
+            let rate = decoder.sample_rate();
+            match decoder.frames() {
+                Some(frames) if short(Some(frames), rate) => Clip::from_decoder(decoder.as_mut())
+                    .map(Loaded::Clip)
+                    .map_err(|e| why(&e)),
+                Some(_) => Ok(Loaded::Long { rate }),
+                // Ogg files do not say their length: decoded up to the threshold, a sound
+                // that ends first is a clip.
+                None => {
+                    let limit = (f64::from(stream_from.max(0.0)) * f64::from(rate)) as u64;
+                    match decode_up_to(decoder.as_mut(), limit).map_err(|e| why(&e))? {
+                        Some(clip) => Ok(Loaded::Clip(clip)),
+                        None => Ok(Loaded::Long { rate }),
+                    }
+                }
+            }
+        }
+        Store::Pack(pack) => {
+            let why = |e: &dyn core::fmt::Display| format!("{path} in the sound pack: {e}");
+            let sound = *pack
+                .get(path)
+                .ok_or_else(|| format!("{path}: not in the sound pack"))?;
+            if sound.format != SoundFormat::Wav && !short(sound.frames, sound.sample_rate) {
+                return Ok(Loaded::Long {
+                    rate: sound.sample_rate,
+                });
+            }
+            let bytes = pack.read(&sound).map_err(|e| why(&e))?;
+            if sound.format == SoundFormat::Wav {
+                Clip::from_wav(&bytes)
+                    .map(Loaded::Clip)
+                    .map_err(|e| why(&e))
+            } else {
+                engine_audio_decode::decode(bytes)
+                    .map(Loaded::Clip)
+                    .map_err(|e| why(&e))
             }
         }
     }
-    if head.starts_with(b"RIFF") && &head[8..12] == b"WAVE" {
-        let bytes = std::fs::read(path).map_err(|e| why(&e))?;
-        return Clip::from_wav(&bytes)
-            .map(Loaded::Clip)
-            .map_err(|e| why(&e));
+}
+
+/// The whole of `decoder` as a clip when it ends within `limit` frames; `None` when it
+/// goes on past them.
+fn decode_up_to(decoder: &mut dyn Decoder, limit: u64) -> Result<Option<Clip>, String> {
+    let channels = usize::from(decoder.channels().max(1));
+    let mut samples = Vec::new();
+    let mut scratch = vec![0.0f32; 4096 * channels];
+    let mut frames = 0u64;
+    loop {
+        let n = decoder.read(&mut scratch).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        frames += n as u64;
+        if frames >= limit {
+            return Ok(None);
+        }
+        samples.extend_from_slice(&scratch[..n * channels]);
     }
-    let mut decoder = engine_audio_decode::open_file(path).map_err(|e| why(&e))?;
-    let rate = decoder.sample_rate();
-    let short = decoder
-        .frames()
-        .is_some_and(|frames| (frames as f64) < f64::from(stream_from.max(0.0)) * f64::from(rate));
-    if short {
-        Clip::from_decoder(decoder.as_mut())
-            .map(Loaded::Clip)
-            .map_err(|e| why(&e))
-    } else {
-        Ok(Loaded::Long { rate })
-    }
+    Clip::from_interleaved(decoder.sample_rate(), decoder.channels(), &samples)
+        .map(Some)
+        .map_err(|e| e.to_string())
 }
 
 /// Opens `path` and makes it ready to play from `offset`: the seek and the first decode.
 fn prepare(
-    path: &Path,
+    store: &Store,
+    path: &str,
     offset: u64,
     looping: bool,
     buffer_ms: u32,
 ) -> Result<PreparedStream, String> {
     engine_profiler::zone!("app::sound::prepare");
-    let why = |e: &dyn core::fmt::Display| format!("{}: {e}", path.display());
-    let decoder = engine_audio_decode::open_file(path).map_err(|e| why(&e))?;
-    PreparedStream::new(decoder, offset, looping, buffer_ms).map_err(|e| why(&e))
+    let decoder = store.decoder(path)?;
+    PreparedStream::new(decoder, offset, looping, buffer_ms).map_err(|e| format!("{path}: {e}"))
 }

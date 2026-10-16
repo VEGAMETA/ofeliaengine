@@ -26,6 +26,7 @@ pub mod navigation;
 pub mod pack;
 pub mod panorama;
 pub mod pso_record;
+pub mod sounds;
 pub mod strings;
 mod texture_compress;
 mod texture_import;

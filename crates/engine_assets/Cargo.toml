@@ -52,6 +52,9 @@ serde = { version = "1", features = ["derive"] }
 engine_shader.workspace = true
 # Localized text in packs (ADR 0102): the compiled tables, without the Fluent parser.
 engine_loc.workspace = true
+# Sound packs (ADR 0105): a file's format, rate and length measured when it is packed.
+engine_audio.workspace = true
+engine_audio_decode.workspace = true
 # BC1-5, BC6H and BC7 block compression (MIT): a Rust port of Intel's ISPC Texture
 # Compressor kernels, CPU only (no wgpu). ADR 0041; BC6H for HDR panoramas (ADR 0083), which
 # brings `half` (MIT OR Apache-2.0) and `zerocopy` (BSD-2-Clause OR Apache-2.0 OR MIT).

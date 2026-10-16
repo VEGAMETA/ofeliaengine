@@ -17,6 +17,11 @@ fn value(i: u64) -> f32 {
 
 /// A mono 32-bit float WAV file of `frames` frames of [`value`].
 fn write_wav(path: &Path, frames: u64) {
+    write_wav_with(path, frames, 0.0);
+}
+
+/// A mono 32-bit float WAV file of `frames` frames of [`value`] plus `lift`.
+fn write_wav_with(path: &Path, frames: u64, lift: f32) {
     let data = (frames * 4) as u32;
     let mut bytes = Vec::with_capacity(44 + data as usize);
     bytes.extend_from_slice(b"RIFF");
@@ -32,7 +37,7 @@ fn write_wav(path: &Path, frames: u64) {
     bytes.extend_from_slice(b"data");
     bytes.extend_from_slice(&data.to_le_bytes());
     for i in 0..frames {
-        bytes.extend_from_slice(&value(i).to_le_bytes());
+        bytes.extend_from_slice(&(value(i) + lift).to_le_bytes());
     }
     std::fs::write(path, bytes).unwrap();
 }
@@ -110,7 +115,12 @@ impl Bed {
     }
 
     fn track(&self, entity: Entity) -> Option<&Track> {
-        self.sound.tracks.list.iter().find(|t| t.entity == entity)
+        self.sound
+            .plain
+            .list
+            .iter()
+            .chain(&self.sound.placed.list)
+            .find(|t| t.entity == entity)
     }
 
     fn voice(&self, entity: Entity) -> Option<VoiceHandle> {
@@ -261,7 +271,7 @@ fn a_load_resumes_every_sound_where_the_save_had_it() {
     let (_, save) = engine_save::read_save(&path).unwrap();
     engine_save::apply(&mut bed.world, &save).unwrap();
     bed.sound.after_load(&mut bed.world);
-    assert!(bed.sound.tracks.list.is_empty());
+    assert!(bed.sound.plain.list.is_empty());
     assert_eq!(bed.source(music).position, saved_at);
     assert_eq!(bed.source(jingle).position, 0.0);
     // The next frame starts them again: the music where it was, the jingle from the start.
@@ -289,7 +299,7 @@ fn a_despawned_source_stops() {
     bed.world.despawn(e);
     bed.frame(40);
     bed.frame(5);
-    assert!(bed.sound.tracks.list.is_empty());
+    assert!(bed.sound.plain.list.is_empty());
     assert_eq!(bed.audio().voice_counts(), (0, 0));
 }
 
@@ -328,7 +338,7 @@ fn a_placed_sound_is_heard_from_its_side() {
     write_wav(&bed.folder.join("tone.wav"), RATE as u64);
     let e = bed.world.spawn((
         GlobalTransform(Affine3A::from_translation(Vec3::new(3.0, 0.0, 0.0))),
-        AudioSource::new("tone.wav").placed(Spatial::within(1.0, 50.0)),
+        AudioSource3D::new("tone.wav").within(1.0, 50.0),
     ));
     bed.until(|b| b.voice(e).is_some());
     let out = bed.frame(20);
@@ -386,7 +396,7 @@ fn sound_off_opens_nothing() {
     let mut world = World::new();
     world.spawn((AudioSource::new("tone.wav"),));
     sound.update(&mut world, None, None, 0.016);
-    assert!(sound.tracks.list.is_empty());
+    assert!(sound.plain.list.is_empty());
 }
 
 /// Static boxes: walls of `half` half-extents at `at`.
@@ -412,15 +422,11 @@ fn a_wall_muffles_what_is_behind_it() {
     bed.physics = Some(physics);
     let behind = bed.world.spawn((
         GlobalTransform(Affine3A::from_translation(Vec3::new(0.0, 0.0, -10.0))),
-        AudioSource::new("tone.wav")
-            .looped()
-            .placed(Spatial::within(1.0, 50.0)),
+        AudioSource3D::new("tone.wav").looped().within(1.0, 50.0),
     ));
     let beside = bed.world.spawn((
         GlobalTransform(Affine3A::from_translation(Vec3::new(10.0, 0.0, 0.0))),
-        AudioSource::new("tone.wav")
-            .looped()
-            .placed(Spatial::within(1.0, 50.0)),
+        AudioSource3D::new("tone.wav").looped().within(1.0, 50.0),
     ));
     bed.until(|b| b.voice(behind).is_some() && b.voice(beside).is_some());
     for _ in 0..30 {
@@ -545,15 +551,9 @@ fn measure_sound() {
         let placed: Vec<(Entity, f32, f32)> = (0..n)
             .map(|_| {
                 let (radius, phase) = (2.0 + next() * 30.0, next() * core::f32::consts::TAU);
-                let e = bed.world.spawn((
-                    GlobalTransform::IDENTITY,
-                    AudioSource {
-                        position: f64::from(next()),
-                        ..AudioSource::new("tone.wav")
-                            .looped()
-                            .placed(Spatial::within(1.0, 60.0))
-                    },
-                ));
+                let mut source = AudioSource3D::new("tone.wav").looped().within(1.0, 60.0);
+                source.position = f64::from(next());
+                let e = bed.world.spawn((GlobalTransform::IDENTITY, source));
                 (e, radius, phase)
             })
             .collect();
@@ -591,5 +591,131 @@ fn measure_sound() {
              mix of 16.7 ms {m50:.0} µs (p99 {m99:.0}), voices {:?}",
             bed.audio().voice_counts()
         );
+    }
+}
+
+#[test]
+fn plain_sounds_stay_dry_and_3d_ones_reverberate() {
+    let mut bed = Bed::new("routing", AudioSettings::default());
+    write_wav(&bed.folder.join("tone.wav"), RATE as u64);
+    let plain = bed
+        .world
+        .spawn((AudioSource::new("tone.wav").on_bus("effects").looped(),));
+    let placed = bed.world.spawn((
+        GlobalTransform::IDENTITY,
+        AudioSource3D::new("tone.wav").looped(),
+    ));
+    let mut dry = AudioSource3D::new("tone.wav").looped();
+    dry.reverb = false;
+    let dry = bed.world.spawn((GlobalTransform::IDENTITY, dry));
+    bed.until(|b| [plain, placed, dry].iter().all(|&e| b.voice(e).is_some()));
+    let effects = bed
+        .sound
+        .buses
+        .iter()
+        .find(|b| b.name == "effects")
+        .unwrap();
+    let (bus, world) = (effects.id, effects.world.unwrap());
+    // The reverb is fed by the world child alone: the plain sound and the dry 3D one stay
+    // out of it, all three under the effects bus's volume.
+    assert_eq!(bed.track(plain).unwrap().bus, bus);
+    assert_eq!(bed.track(placed).unwrap().bus, world);
+    assert_eq!(bed.track(dry).unwrap().bus, bus);
+    // Music has no world child.
+    assert!(
+        bed.sound
+            .buses
+            .iter()
+            .find(|b| b.name == "music")
+            .unwrap()
+            .world
+            .is_none()
+    );
+}
+
+#[test]
+fn sounds_play_from_a_pack_where_the_folder_is_missing() {
+    let mut bed = Bed::new("pack", AudioSettings::default());
+    let folder = bed.folder.join("source");
+    std::fs::create_dir_all(folder.join("sfx")).unwrap();
+    write_wav(&folder.join("sfx/tone.wav"), RATE as u64);
+    let fixtures = Path::new(env!("CARGO_MANIFEST_DIR")).join("../engine_audio_decode/tests/data");
+    std::fs::copy(fixtures.join("stereo_44100.ogg"), folder.join("theme.ogg")).unwrap();
+    let pack = bed.folder.join("sounds.pack");
+    let report = engine_assets::sounds::write_sound_pack(&folder, &pack, 19).unwrap();
+    assert_eq!(report.sounds.len(), 2);
+    std::fs::remove_dir_all(&folder).unwrap();
+    // By build: the folder is missing, so the pack.
+    let settings = AudioSettings {
+        folder: bed.folder.join("nothing here"),
+        pack,
+        stream_from: 0.5,
+        ..AudioSettings::default()
+    };
+    let (sound, renderer) = Sound::manual(&settings);
+    bed.sound = sound;
+    bed.renderer = renderer.unwrap();
+    assert!(
+        bed.sound.note().contains("sounds.pack"),
+        "{}",
+        bed.sound.note()
+    );
+    let clip = bed.world.spawn((AudioSource::new("sfx/tone.wav"),));
+    let music = bed.world.spawn((AudioSource {
+        position: 0.05,
+        ..AudioSource::new("theme.ogg").looped()
+    },));
+    bed.until(|b| b.voice(clip).is_some() && b.voice(music).is_some());
+    let theme = bed.track(music).unwrap().sound.unwrap() as usize;
+    assert!(matches!(
+        bed.sound.sounds.entries[theme].state,
+        State::Long { rate: 44_100 }
+    ));
+    // The clip from the pack, sample for sample; the music streamed from the pack's file.
+    let out = bed.frame(10);
+    let (l, r) = (
+        energy(out.chunks_exact(2).map(|f| f[0])),
+        energy(out.chunks_exact(2).map(|f| f[1])),
+    );
+    assert!(l > 0.0 && r > 0.0);
+    for _ in 0..9 {
+        bed.frame(10);
+    }
+    assert!(
+        (bed.source(music).position - 0.14).abs() < 0.001,
+        "{}",
+        bed.source(music).position
+    );
+    assert_eq!(bed.audio().stream_underruns(), 0);
+}
+
+#[test]
+fn a_changed_file_is_heard_at_once_from_where_it_was() {
+    let mut bed = Bed::new("live", AudioSettings::default());
+    write_wav(&bed.folder.join("tone.wav"), RATE as u64);
+    // Made again: the folder exists now, and is watched.
+    let (sound, renderer) = Sound::manual(&AudioSettings {
+        folder: bed.folder.clone(),
+        files: SoundFiles::Folder,
+        ..AudioSettings::default()
+    });
+    bed.sound = sound;
+    bed.renderer = renderer.unwrap();
+    assert!(bed.sound.live_folder.is_some());
+    let e = bed.world.spawn((AudioSource::new("tone.wav").looped(),));
+    bed.until(|b| b.voice(e).is_some());
+    let first = bed.voice(e).unwrap();
+    bed.frame(100);
+    // The file is saved again with another signal.
+    write_wav_with(&bed.folder.join("tone.wav"), RATE as u64, 0.3);
+    bed.until(|b| b.voice(e).is_some_and(|v| v != first));
+    // The old voice fades out over 20 ms; then the new sound alone, from where it was.
+    bed.frame(30);
+    let out = bed.frame(10);
+    let at = (bed.source(e).position * f64::from(RATE)).round() as u64;
+    assert!(at > 4_800, "{at}");
+    for (i, &s) in left(&out).iter().enumerate() {
+        let expected = (value(at + i as u64) + 0.3) * CENTRE;
+        assert!((s - expected).abs() < 1e-6, "frame {i}: {s} vs {expected}");
     }
 }

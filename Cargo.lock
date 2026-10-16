@@ -297,6 +297,8 @@ dependencies = [
  "block_compression",
  "bytemuck",
  "engine_anim",
+ "engine_audio",
+ "engine_audio_decode",
  "engine_collision",
  "engine_core",
  "engine_ecs",

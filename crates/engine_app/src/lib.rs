@@ -35,11 +35,13 @@
 //! frame's [`FrameParts`]) and shown in materials ([`Videos::show_in`]) or UI sprites
 //! ([`Videos::texture_index`]); their sound plays through the player's mixer.
 //!
-//! Sound (ADR 0105) is components too: an [`AudioSource`] on an entity plays a sound file,
-//! placed at the entity or as it is; an [`AudioListener`] hears (the main camera without
-//! one). Saves keep where every sound was. With the game's physics ([`Game::acoustics`]),
-//! walls muffle what is behind them and the room around the listener gives the reverb;
-//! a [`ReverbZone`] gives a place its own. The world's [`Mixer`] sets the buses' volumes.
+//! Sound (ADR 0105) is components too: an [`AudioSource`] plays a sound file as it is
+//! (music, the UI), an [`AudioSource3D`] at its entity in the world; an [`AudioListener`]
+//! hears (the main camera without one). Saves keep where every sound was. With the game's
+//! physics ([`Game::acoustics`]), walls muffle 3D sounds and the room around the listener
+//! answers them; a [`ReverbZone`] gives a place its own reverb. Sounds come from a folder
+//! while developing (a changed file heard at once) and a sound pack in a release
+//! ([`SoundFiles`]). The world's [`Mixer`] sets the buses' volumes.
 //!
 //! Text (ADR 0102): the game's localizer is a resource of the world
 //! (`world.resource::<Localizer>()`), made from [`PlayerSettings::text`] in the locale of
@@ -79,8 +81,8 @@ pub use report::{FrameReport, Startup, StartupPipelines};
 pub use saves::{Autosave, QUICK_SLOT, SaveSettings, Saves};
 pub use settings::{PlayerSettings, Window};
 pub use sound::{
-    AcousticSettings, AudioListener, AudioSettings, AudioSource, BusSettings, Falloff, Mixer,
-    PlayMode, ReverbZone, Room, Spatial,
+    AcousticSettings, AudioListener, AudioSettings, AudioSource, AudioSource3D, BusSettings,
+    Falloff, Mixer, PlayMode, ReverbZone, Room, SoundFiles,
 };
 pub use text::TextSource;
 pub use videos::{MaterialSlot, VideoId, Videos};

@@ -13,6 +13,8 @@
 //!                                                  pack (ADR 0102)
 //! ofeliaengine loc check <LOC> [--code <DIR>]...   check its locales against the source and
 //!                                                  the code's uses
+//! ofeliaengine sounds build <DIR> -o <OUT.pack>    a sounds folder into a sound pack, every
+//!                                                  file as it is (ADR 0105)
 //! ofeliaengine save dump <FILE>                    a save as text, either encoding (ADR 0104)
 //! ofeliaengine save info <FILE>                    a save's header
 //! ```
@@ -23,6 +25,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod loc;
+mod sounds;
 
 use engine_assets::gltf_models::apply_gltf_models;
 use engine_assets::material_file::{MaterialMap, SlangMaterialTypes, apply_material_map};
@@ -73,6 +76,12 @@ usage:
                                                    each lacks against the source; with --code,
                                                    loc!(\"id\") (Rust) and loc(\"id\") (Luau)
                                                    uses that are not defined, messages unused
+  ofeliaengine sounds build <DIR> -o <OUT.pack> [--level <N>]
+                                                   every sound file under the folder (WAV,
+                                                   Ogg Vorbis, Opus, FLAC) into a sound pack
+                                                   by its path, as it is: what a release build
+                                                   plays (ADR 0105); WAV compressed at
+                                                   --level (default 19)
   ofeliaengine save dump <FILE>                    a save as text, either encoding: what a
                                                    development build writes, loaded back as it
                                                    is (ADR 0104)
@@ -97,6 +106,7 @@ enum Command {
     Shaders(Args),
     Cook(CookArgs),
     Loc(loc::LocArgs),
+    Sounds(sounds::SoundsArgs),
     Save { info: bool, file: PathBuf },
 }
 
@@ -122,6 +132,7 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some("shaders") => parse(args).map(Command::Shaders),
         Some("cook") => parse_cook(args).map(Command::Cook),
         Some("loc") => loc::parse_loc(args).map(Command::Loc),
+        Some("sounds") => sounds::parse_sounds(args).map(Command::Sounds),
         Some("save") => {
             let info = match args.next().as_deref() {
                 Some("dump") => false,
@@ -431,6 +442,7 @@ fn main() -> ExitCode {
         Command::Shaders(args) => run(args),
         Command::Cook(args) => cook(args),
         Command::Loc(args) => loc::run_loc(args),
+        Command::Sounds(args) => sounds::run_sounds(args),
         Command::Save { info, file } => save(*info, file),
     };
     match result {
@@ -571,7 +583,7 @@ mod tests {
     fn args(line: &str) -> Result<Args, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Shaders(args) => Ok(args),
-            Command::Cook(_) | Command::Loc(_) | Command::Save { .. } => {
+            Command::Cook(_) | Command::Loc(_) | Command::Sounds(_) | Command::Save { .. } => {
                 Err(String::from("not a shaders command"))
             }
         }
@@ -580,10 +592,26 @@ mod tests {
     fn cook_args(line: &str) -> Result<CookArgs, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Cook(args) => Ok(args),
-            Command::Shaders(_) | Command::Loc(_) | Command::Save { .. } => {
+            Command::Shaders(_) | Command::Loc(_) | Command::Sounds(_) | Command::Save { .. } => {
                 Err(String::from("not a cook command"))
             }
         }
+    }
+
+    #[test]
+    fn parses_sounds_commands() {
+        let parse = |line: &str| parse_command(line.split_whitespace().map(str::to_owned));
+        match parse("sounds build sounds -o out/sounds.pack --level 3") {
+            Ok(Command::Sounds(args)) => {
+                assert_eq!(args.dir, PathBuf::from("sounds"));
+                assert_eq!(args.out, PathBuf::from("out/sounds.pack"));
+                assert_eq!(args.level, 3);
+            }
+            _ => panic!("not a sounds command"),
+        }
+        assert!(parse("sounds build sounds").is_err());
+        assert!(parse("sounds pack sounds -o x.pack").is_err());
+        assert!(parse("sounds build sounds -o x.pack --level 30").is_err());
     }
 
     #[test]

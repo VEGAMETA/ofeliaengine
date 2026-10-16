@@ -1,5 +1,9 @@
 //! The components a game puts sound on its entities with (ADR 0105). All are reflected:
 //! saves keep them, and with them where every sound was.
+//!
+//! - [`AudioSource`]: a sound heard as it is (music, the UI, a narrator), nothing more.
+//! - [`AudioSource3D`]: a sound in the world, at its entity: fainter with distance, from
+//!   its side, muffled by walls, answered by the room.
 
 use engine_core::math::Vec3;
 use engine_ecs::reflect_component;
@@ -19,7 +23,7 @@ pub enum PlayMode {
     Despawn = 2,
 }
 
-/// How a placed sound gets quieter with distance.
+/// How a sound in the world gets quieter with distance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Reflect)]
 #[repr(u8)]
 pub enum Falloff {
@@ -32,86 +36,34 @@ pub enum Falloff {
     Linear = 1,
 }
 
-/// A sound placed at its entity: heard from where the entity is, panned to its side,
-/// fainter with distance. Read when the sound starts.
-#[derive(Debug, Clone, Copy, PartialEq, Reflect)]
-pub struct Spatial {
-    /// Full volume up to here, in metres. It is the sound's size too: closer, it pans less,
-    /// so a sound passing through the listener never jumps from one ear to the other.
-    pub min_distance: f32,
-    /// Where the falloff ends, in metres.
-    pub max_distance: f32,
-    /// The curve between them.
-    pub falloff: Falloff,
-    /// The Doppler effect's strength: 1 physical, 0 none (a fast camera often sounds
-    /// better at 0.3–0.5).
-    pub doppler: f32,
-    /// Walls between it and the listener muffle it (with the game's acoustics,
-    /// [`crate::Game::acoustics`]).
-    pub occlusion: bool,
-}
-
-impl Default for Spatial {
-    fn default() -> Self {
-        Self {
-            min_distance: 1.0,
-            max_distance: 100.0,
-            falloff: Falloff::Inverse,
-            doppler: 1.0,
-            occlusion: true,
-        }
-    }
-}
-
-impl Spatial {
-    /// Full volume within `min_distance` metres, falling off to `max_distance`.
-    pub fn within(min_distance: f32, max_distance: f32) -> Self {
-        Self {
-            min_distance,
-            max_distance,
-            ..Self::default()
-        }
-    }
-}
-
-/// A sound its entity plays (ADR 0105): music, a voice line, a footstep where it was made.
+/// A sound heard as it is (ADR 0105): music, the UI, a narrator. No distance, no walls, no
+/// reverb, whatever bus it is on.
 ///
 /// ```ignore
-/// world.spawn((AudioSource::new("music/theme.ogg").looped().on_bus("music"),));
-/// world.spawn((Transform::from_translation(at), AudioSource::new("sfx/shot.ogg")
-///     .placed(Spatial::within(2.0, 80.0)).despawned_at_end()));
+/// world.spawn((AudioSource::new("music/theme.ogg").on_bus("music").looped(),));
 /// ```
 ///
-/// The player starts its voice once the sound is loaded, keeps it in step every frame
-/// (volume, pitch, the entity's position) and writes back where it is, so saves hold it:
-/// after a load it goes on from there.
+/// The player starts it once its sound is loaded and writes back where it is, so saves hold
+/// it: after a load it goes on from there. A fade is a `Tween` of `AudioSource.volume`.
 #[derive(Debug, Clone, PartialEq, Reflect)]
 pub struct AudioSource {
     /// The sound: a file under the sounds folder ([`crate::AudioSettings::folder`]) by its
-    /// path, with `/` (`sfx/door.ogg`): WAV, Ogg Vorbis, Opus or FLAC.
+    /// path, with `/` (`music/theme.ogg`): WAV, Ogg Vorbis, Opus or FLAC.
     pub sound: String,
-    /// The bus it plays on, by name ([`crate::AudioSettings::buses`]): `effects` by
-    /// default; a name no bus has plays on the master. Read when it starts.
+    /// The bus it plays on, by name ([`crate::AudioSettings::buses`]); a name no bus has
+    /// plays on the master. Read when it starts.
     pub bus: String,
     /// Linear gain.
     pub volume: f32,
-    /// Playback rate: 2 is an octave up and twice as fast.
-    pub pitch: f32,
     /// What it does at its end.
     pub mode: PlayMode,
     /// Playing. `false` stops it where it is; `true` again goes on from there.
     pub playing: bool,
-    /// Placed at its entity's `GlobalTransform`; `None` is heard as it is (music, UI).
-    pub spatial: Option<Spatial>,
     /// Seconds into the sound. The player keeps it while the sound plays; setting it moves
     /// the sound there (a seek).
     pub position: f64,
     /// After a load, starts from the beginning instead of where the save had it.
     pub restart_on_load: bool,
-    /// Higher wins when sounds compete for the mixer's voices.
-    pub priority: u8,
-    /// Seconds to fade in when it starts.
-    pub fade_in: f32,
 }
 
 reflect_component!(AudioSource);
@@ -120,22 +72,18 @@ impl Default for AudioSource {
     fn default() -> Self {
         Self {
             sound: String::new(),
-            bus: String::from("effects"),
+            bus: String::from("music"),
             volume: 1.0,
-            pitch: 1.0,
             mode: PlayMode::Once,
             playing: true,
-            spatial: None,
             position: 0.0,
             restart_on_load: false,
-            priority: 128,
-            fade_in: 0.0,
         }
     }
 }
 
 impl AudioSource {
-    /// `sound` played once on the `effects` bus, as it is, starting at once.
+    /// `sound` played once on the `music` bus, starting at once.
     pub fn new(sound: &str) -> Self {
         Self {
             sound: sound.to_owned(),
@@ -167,15 +115,124 @@ impl AudioSource {
         self
     }
 
-    /// Placed at its entity.
-    pub fn placed(mut self, spatial: Spatial) -> Self {
-        self.spatial = Some(spatial);
+    /// Not playing until `playing` is set.
+    pub fn paused(mut self) -> Self {
+        self.playing = false;
+        self
+    }
+}
+
+/// A sound in the world, at its entity's `GlobalTransform` (ADR 0105): fainter with
+/// distance, panned to its side, its pitch moved by the Doppler effect. With the game's
+/// physics ([`crate::Game::acoustics`]), walls between it and the listener muffle it and
+/// the room around the listener answers it.
+///
+/// ```ignore
+/// world.spawn((Transform::from_translation(muzzle),
+///     AudioSource3D::new("sfx/shot.wav").within(2.0, 80.0).despawned_at_end()));
+/// ```
+///
+/// What it plays and how is an [`AudioSource`]'s (`source`, also reached through this
+/// one: `shot.playing`); the rest says how it sits in the world, read when it starts.
+#[derive(Debug, Clone, PartialEq, Reflect)]
+pub struct AudioSource3D {
+    /// What it plays and how: the sound, the bus (`effects` by default), volume, the end,
+    /// playing, the position saves keep.
+    pub source: AudioSource,
+    /// Playback rate: 2 is an octave up and twice as fast (an engine's revs).
+    pub pitch: f32,
+    /// Full volume up to here, in metres. It is the sound's size too: closer, it pans less,
+    /// so a sound passing through the listener never jumps from one ear to the other.
+    pub min_distance: f32,
+    /// Where the falloff ends, in metres.
+    pub max_distance: f32,
+    /// The curve between them.
+    pub falloff: Falloff,
+    /// The Doppler effect's strength: 1 physical, 0 none (a fast camera often sounds
+    /// better at 0.3–0.5).
+    pub doppler: f32,
+    /// Walls between it and the listener muffle it.
+    pub occlusion: bool,
+    /// The room around the listener answers it (on a bus with `reverb`).
+    pub reverb: bool,
+    /// Higher wins when sounds compete for the mixer's voices.
+    pub priority: u8,
+}
+
+reflect_component!(AudioSource3D);
+
+impl Default for AudioSource3D {
+    fn default() -> Self {
+        Self {
+            source: AudioSource::default().on_bus("effects"),
+            pitch: 1.0,
+            min_distance: 1.0,
+            max_distance: 100.0,
+            falloff: Falloff::Inverse,
+            doppler: 1.0,
+            occlusion: true,
+            reverb: true,
+            priority: 128,
+        }
+    }
+}
+
+impl core::ops::Deref for AudioSource3D {
+    type Target = AudioSource;
+
+    fn deref(&self) -> &AudioSource {
+        &self.source
+    }
+}
+
+impl core::ops::DerefMut for AudioSource3D {
+    fn deref_mut(&mut self) -> &mut AudioSource {
+        &mut self.source
+    }
+}
+
+impl AudioSource3D {
+    /// `sound` played once on the `effects` bus at its entity, starting at once.
+    pub fn new(sound: &str) -> Self {
+        let mut s = Self::default();
+        sound.clone_into(&mut s.source.sound);
+        s
+    }
+
+    /// Full volume within `min_distance` metres, falling off to `max_distance`.
+    pub fn within(mut self, min_distance: f32, max_distance: f32) -> Self {
+        self.min_distance = min_distance;
+        self.max_distance = max_distance;
+        self
+    }
+
+    /// On the bus named `bus`.
+    pub fn on_bus(mut self, bus: &str) -> Self {
+        bus.clone_into(&mut self.source.bus);
+        self
+    }
+
+    /// At linear gain `volume`.
+    pub fn at_volume(mut self, volume: f32) -> Self {
+        self.source.volume = volume;
+        self
+    }
+
+    /// Starting over until stopped.
+    pub fn looped(mut self) -> Self {
+        self.source.mode = PlayMode::Loop;
+        self
+    }
+
+    /// Despawning its entity at its end.
+    pub fn despawned_at_end(mut self) -> Self {
+        self.source.mode = PlayMode::Despawn;
         self
     }
 
     /// Not playing until `playing` is set.
     pub fn paused(mut self) -> Self {
-        self.playing = false;
+        self.source.playing = false;
         self
     }
 }
@@ -266,7 +323,7 @@ impl Default for Room {
 /// A place with a reverb of its own, over what the geometry around the listener gives
 /// (ADR 0105): a box at its entity (the `GlobalTransform` places, turns and scales it) of
 /// `half_extents`, its room taking over as the listener comes within `fade` metres of it.
-/// Where zones overlap, the highest `priority` wins.
+/// Where zones overlap, the highest `priority` wins. Only [`AudioSource3D`]s reverberate.
 #[derive(Debug, Clone, Copy, PartialEq, Reflect)]
 pub struct ReverbZone {
     /// Half the box's size along its entity's axes, in its entity's units.
