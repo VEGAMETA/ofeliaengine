@@ -2035,7 +2035,9 @@ fn open_scene_with(
             | EntryKind::Collider
             | EntryKind::Bodies
             | EntryKind::Strings
-            | EntryKind::NavMesh => false,
+            | EntryKind::NavMesh
+            | EntryKind::Sound
+            | EntryKind::SoundIndex => false,
             EntryKind::MeshLevel => !stream_meshes,
             _ => true,
         })
@@ -2083,6 +2085,9 @@ fn open_scene_with(
             EntryKind::Strings => return Err(invalid("text loaded as a scene's entry")),
             EntryKind::NavMesh => {
                 return Err(invalid("a navigation mesh loaded as a scene's entry"));
+            }
+            EntryKind::Sound | EntryKind::SoundIndex => {
+                return Err(invalid("a sound loaded as a scene's entry"));
             }
             EntryKind::InstanceKeys => {
                 let count = e.meta[0] as usize;

@@ -726,6 +726,9 @@ impl Player {
         // the game sets the buses' volumes through the world's `Mixer`.
         let sound = Sound::new(&settings.audio);
         world.insert_resource(sound.mixer());
+        if settings.audio.enabled {
+            startup.notes.push(sound.note().to_owned());
+        }
         // The game's input: its actions a resource of the world.
         let input = settings.input.as_ref().map(|map| {
             world.insert_resource(engine_input::Input::new(map.clone()));

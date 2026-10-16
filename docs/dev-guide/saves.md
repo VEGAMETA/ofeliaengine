@@ -47,8 +47,9 @@ settings.saves.autosave = Some(Autosave { every: Duration::from_secs(300), slots
   - transforms, the camera, lights, renderers, probes;
   - the clock;
   - timers and tweens;
-  - sounds: every `AudioSource` with its position, so music and sounds go on from the
-    same place after a load (`restart_on_load` starts one over instead);
+  - sounds: every `AudioSource` and `AudioSource3D` with its position, so music and
+    sounds go on from the same place after a load (`restart_on_load` starts one over
+    instead);
   - physics, through two calls (below).
 - **What you leave out:**
   - `#[reflect(skip)]` on a field or a whole type (caches, effects);

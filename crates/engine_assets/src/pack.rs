@@ -52,8 +52,9 @@ pub const MAGIC: [u8; 4] = *b"OFPK";
 /// colliders and the scene's bodies (`crate::colliders`). Version 7 (ADR 0102) adds a
 /// locale's localized text (`crate::strings`). Version 8 (ADR 0103) adds the scene's
 /// navigation mesh (`crate::navigation`). Version 9 (ADR 0104) adds the instances'
-/// stable keys, which saves know the level's objects by.
-pub const VERSION: u32 = 9;
+/// stable keys, which saves know the level's objects by. Version 10 (ADR 0105) adds sound
+/// files and their index (`crate::sounds`).
+pub const VERSION: u32 = 10;
 /// Oldest version this engine reads.
 pub const MIN_VERSION: u32 = 1;
 /// Largest entry a pack accepts (raw bytes): 4 GiB.
@@ -132,6 +133,10 @@ pub enum EntryKind {
     /// Each instance's stable key, from its glTF node's path (version 9, ADR 0104): what
     /// saves know the level's objects by, across cooks.
     InstanceKeys,
+    /// A sound file as it is (version 10, ADR 0105; `crate::sounds`).
+    Sound,
+    /// The sounds' paths and entries (version 10, ADR 0105).
+    SoundIndex,
 }
 
 impl EntryKind {
@@ -150,6 +155,8 @@ impl EntryKind {
             Self::Strings => 11,
             Self::NavMesh => 12,
             Self::InstanceKeys => 13,
+            Self::Sound => 14,
+            Self::SoundIndex => 15,
         }
     }
 
@@ -165,6 +172,7 @@ impl EntryKind {
             Self::Strings => 7,
             Self::NavMesh => 8,
             Self::InstanceKeys => 9,
+            Self::Sound | Self::SoundIndex => 10,
         }
     }
 
@@ -183,6 +191,8 @@ impl EntryKind {
             11 => Some(Self::Strings),
             12 => Some(Self::NavMesh),
             13 => Some(Self::InstanceKeys),
+            14 => Some(Self::Sound),
+            15 => Some(Self::SoundIndex),
             _ => None,
         }
     }
@@ -652,6 +662,11 @@ impl Pack {
             chunks,
             chunk_shift: header.chunk_shift,
         })
+    }
+
+    /// Its chunks hold `1 << chunk_shift` raw bytes (an entry's last fewer).
+    pub fn chunk_shift(&self) -> u32 {
+        self.chunk_shift
     }
 
     /// The table of contents.

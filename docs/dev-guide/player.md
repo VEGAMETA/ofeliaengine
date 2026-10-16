@@ -179,9 +179,13 @@ draws by hand (`docs/dev-guide/testing.md`).
 ## Sound
 
 Sound is components too ([audio.md](audio.md), section 0):
-- `AudioSource` plays a file under `sounds/`, placed at its entity or as it is;
+- `AudioSource` plays a file as it is (music, the UI);
+- `AudioSource3D` plays one at its entity in the world;
 - `AudioListener` marks who hears (the main camera by default);
 - `ReverbZone` gives a place a reverb of its own.
+
+Sounds come from `sounds/` while you develop (a changed file plays at once) and from
+`sounds.pack` (`ofeliaengine sounds build`) in a release.
 
 With `Game::acoustics` returning your physics world, walls muffle what is behind them and
 the room around the listener sets the reverb. Saves keep where every sound was. The
