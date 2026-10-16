@@ -1,6 +1,7 @@
 //! CPU cost of text: layout of editor labels and of a paragraph (the same inputs as
-//! `bench/text-compare`, where Parley and cosmic-text are measured), glyph rasterization,
-//! and atlas lookups. Prints Markdown.
+//! `bench/text-compare`, where Parley and cosmic-text are measured), right-to-left labels
+//! and paragraphs with numbers and Latin inside (bidirectional levels, ADR 0102), glyph
+//! rasterization, and atlas lookups. Prints Markdown.
 //!
 //! ```text
 //! cargo bench -p engine_text --bench text
@@ -75,9 +76,60 @@ fn paragraph() -> String {
     s
 }
 
+/// 1,000 right-to-left labels: Arabic and Hebrew words with numbers, some with Latin.
+fn rtl_labels() -> Vec<(String, bool)> {
+    let arabic = [
+        "الصحة",
+        "الذخيرة",
+        "المستوى",
+        "الإعدادات",
+        "اللاعب",
+        "الخريطة",
+        "النقاط",
+        "الوقت",
+    ];
+    let hebrew = [
+        "בריאות",
+        "תחמושת",
+        "שלב",
+        "הגדרות",
+        "שחקן",
+        "מפה",
+        "נקודות",
+        "זמן",
+    ];
+    let latin = ["HP", "XP", "FPS", "Gold"];
+    (0..1000)
+        .map(|i: usize| {
+            let he = i.is_multiple_of(3);
+            let words = if he { &hebrew } else { &arabic };
+            let mut label = words[(i * 7) % words.len()].to_owned();
+            label.push(' ');
+            label.push_str(words[(i * 13 + 3) % words.len()]);
+            label.push_str(&format!(": {}", i * 37));
+            if i.is_multiple_of(4) {
+                label.push_str(&format!(" ({})", latin[i % latin.len()]));
+            }
+            (label, he)
+        })
+        .collect()
+}
+
+/// About 10 KB of Arabic with numbers and Latin words inside.
+fn rtl_paragraph() -> String {
+    let ar = "مرحبا بك في اللعبة الجديدة، لديك 3 أرواح و 250 نقطة ذهب في المستوى 12.               اضغط على Enter للمتابعة أو Esc للخروج إلى القائمة الرئيسية. ";
+    let mut s = String::new();
+    while s.len() < 10_000 {
+        s.push_str(ar);
+    }
+    s
+}
+
 fn main() {
     let mut fonts = Fonts::new();
     let go = fonts.load(engine_text::fonts::GO_REGULAR, 0).unwrap();
+    let arabic = fonts.load(engine_text::fonts::NOTO_SANS_ARABIC, 0).unwrap();
+    let hebrew = fonts.load(engine_text::fonts::NOTO_SANS_HEBREW, 0).unwrap();
     let labels = labels();
     let text = paragraph();
     let mut layout = TextLayout::new();
@@ -112,6 +164,28 @@ fn main() {
         "| 10 KB paragraph, shape + wrap at 600 px ({} lines) | {t:.0} | {:.1} ns per byte |",
         layout.lines().len(),
         t * 1000.0 / text.len() as f64
+    );
+    let rtl = rtl_labels();
+    let t = median(31, || {
+        for (l, he) in &rtl {
+            let stack = if *he { [hebrew, go] } else { [arabic, go] };
+            layout.layout(&mut fonts, &stack, l, &style);
+            black_box(layout.glyphs().len());
+        }
+    });
+    println!(
+        "| 1,000 Arabic and Hebrew labels with numbers (Noto Sans Arabic, Hebrew), shape + lay out | {t:.0} | {:.2} µs per label |",
+        t / 1000.0
+    );
+    let rtl_text = rtl_paragraph();
+    let t = median(31, || {
+        layout.layout(&mut fonts, &[arabic, go], &rtl_text, &wrapped);
+        black_box(layout.lines().len());
+    });
+    println!(
+        "| 10 KB Arabic paragraph with numbers and Latin, shape + wrap at 600 px ({} lines) | {t:.0} | {:.1} ns per byte |",
+        layout.lines().len(),
+        t * 1000.0 / rtl_text.len() as f64
     );
 
     // Rasterize every glyph of the paragraph once (cold), at 14 px.

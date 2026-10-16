@@ -39,12 +39,17 @@ fn steady_state_text_does_not_touch_the_heap() {
     let mut fonts = Fonts::new();
     let go = fonts.load(engine_text::fonts::GO_REGULAR, 0).unwrap();
     let mono = fonts.load(engine_text::fonts::GO_MONO, 0).unwrap();
+    let arabic = fonts.load(engine_text::fonts::NOTO_SANS_ARABIC, 0).unwrap();
+    let hebrew = fonts.load(engine_text::fonts::NOTO_SANS_HEBREW, 0).unwrap();
     let mut layout = TextLayout::new();
     let mut atlas = GlyphAtlas::new(1024, 1024);
     let texts = [
         "Frame 16.6 ms · GPU 4.2 ms · 144 fps",
         "Инспектор: Позиция, Поворот, Масштаб",
         "The quick brown fox jumps over the lazy dog.\nSecond line, wrapped when narrow.",
+        // Right to left, with numbers and Latin inside (UAX #9 levels and reordering).
+        "لديك ٣ أرواح و 250 نقطة ذهب (Gold). مرحبا بك في اللعبة!",
+        "שלום world 42, עולם (ok)",
     ];
     let mut frame = |n: usize| {
         for (i, text) in texts.iter().enumerate() {
@@ -54,7 +59,12 @@ fn steady_state_text_does_not_touch_the_heap() {
                 align: [Align::Start, Align::Center, Align::End][n % 3],
                 ..TextStyle::default()
             };
-            let stack = if i == 0 { [mono, go] } else { [go, mono] };
+            let stack = match i {
+                0 => [mono, go],
+                3 => [arabic, go],
+                4 => [hebrew, go],
+                _ => [go, mono],
+            };
             layout.layout(&mut fonts, &stack, text, &style);
             for g in layout.glyphs() {
                 let (key, _) = GlyphKey::at(g.font, g.glyph, style.size, g.x);

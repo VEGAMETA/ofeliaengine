@@ -289,3 +289,160 @@ fn bundled_fonts_cover_their_scripts_and_icons() {
         "{used:?}"
     );
 }
+
+/// Fonts for right-to-left text: Arabic and Hebrew, Go for Latin and digits.
+fn rtl_setup() -> (Fonts, [FontId; 2], [FontId; 2]) {
+    let mut fonts = Fonts::new();
+    let arabic = fonts.load(fonts::NOTO_SANS_ARABIC, 0).unwrap();
+    let hebrew = fonts.load(fonts::NOTO_SANS_HEBREW, 0).unwrap();
+    let go = fonts.load(fonts::GO_REGULAR, 0).unwrap();
+    (fonts, [arabic, go], [hebrew, go])
+}
+
+/// The clusters of the first line's glyphs, left to right.
+fn clusters(l: &TextLayout) -> Vec<u32> {
+    l.glyphs()[l.lines()[0].glyphs.clone()]
+        .iter()
+        .map(|g| g.cluster)
+        .collect()
+}
+
+#[test]
+fn numbers_in_arabic_text_read_left_to_right() {
+    let (mut fonts, arabic, _) = rtl_setup();
+    let mut l = TextLayout::new();
+    let text = "عدد 123 عنصر";
+    l.layout(&mut fonts, &arabic, text, &style(None));
+    let line = &l.lines()[0];
+    assert!(line.rtl, "an Arabic paragraph runs right to left");
+    let c = clusters(&l);
+    let digits: Vec<usize> = (0..c.len())
+        .filter(|&k| text.as_bytes()[c[k] as usize].is_ascii_digit())
+        .collect();
+    let digit_clusters: Vec<u32> = digits.iter().map(|&k| c[k]).collect();
+    // The number keeps its order: 1, 2, 3 from left to right.
+    assert_eq!(digit_clusters.len(), 3, "{c:?}");
+    assert!(digit_clusters.windows(2).all(|w| w[0] < w[1]), "{c:?}");
+    // The last word is at the left, the first at the right.
+    let second_word = text.rfind(' ').unwrap() as u32;
+    assert!(c[0] > second_word, "{c:?}");
+    assert!(*c.last().unwrap() < 8, "{c:?}");
+    // The number between the words on screen too (marks may sit left of their pen, so
+    // glyphs are not ordered by x one by one).
+    let x = |k: usize| l.glyphs()[k].x;
+    let (first_digit, last_digit) = (digits[0], digits[2]);
+    assert!(x(0) < x(first_digit) && x(last_digit) < x(c.len() - 1));
+    assert!(x(first_digit) < x(digits[1]) && x(digits[1]) < x(last_digit));
+}
+
+#[test]
+fn hebrew_inside_latin_reads_right_to_left_in_place() {
+    let (mut fonts, _, hebrew) = rtl_setup();
+    let mut l = TextLayout::new();
+    let text = "Hello שלום world";
+    l.layout(&mut fonts, &hebrew, text, &style(None));
+    assert!(!l.lines()[0].rtl);
+    let c = clusters(&l);
+    let start = text.find('ש').unwrap() as u32;
+    let end = text.rfind(' ').unwrap() as u32;
+    let inner: Vec<u32> = c
+        .iter()
+        .copied()
+        .filter(|&x| x >= start && x < end)
+        .collect();
+    assert_eq!(inner.len(), 4, "{c:?}");
+    // The Hebrew word's letters run right to left, between the two Latin words.
+    assert!(inner.windows(2).all(|w| w[0] > w[1]), "{c:?}");
+    assert_eq!(&c[..5], &[0, 1, 2, 3, 4]);
+    assert_eq!(*c.last().unwrap(), text.len() as u32 - 1);
+}
+
+#[test]
+fn a_paragraph_s_direction_can_be_forced() {
+    let (mut fonts, go) = setup();
+    let mut l = TextLayout::new();
+    let rtl = TextStyle {
+        direction: TextDirection::RightToLeft,
+        ..style(None)
+    };
+    l.layout(&mut fonts, &[go], "Hello!", &rtl);
+    assert!(l.lines()[0].rtl);
+    // The exclamation mark goes to the paragraph's end: the left.
+    assert_eq!(clusters(&l), [5, 0, 1, 2, 3, 4]);
+    // Left to right, an Arabic first letter does not turn the paragraph.
+    let (mut fonts, arabic, _) = rtl_setup();
+    let ltr = TextStyle {
+        direction: TextDirection::LeftToRight,
+        ..style(None)
+    };
+    l.layout(&mut fonts, &arabic, "عدد: 3", &ltr);
+    assert!(!l.lines()[0].rtl);
+}
+
+#[test]
+fn right_to_left_lines_align_right_and_hang_their_spaces_left() {
+    let (mut fonts, arabic, _) = rtl_setup();
+    let mut l = TextLayout::new();
+    let text = "مرحبا بك في اللعبة الجديدة، لديك ثلاثة أرواح ومئتان وخمسون نقطة ذهب";
+    let max = 220.0;
+    l.layout(&mut fonts, &arabic, text, &style(Some(max)));
+    assert!(l.lines().len() >= 2, "{:?}", l.lines());
+    for line in l.lines() {
+        assert!(line.rtl);
+        // The visible content ends at the right edge; its trailing space (the line's
+        // logical end) hangs past its left.
+        let visible = l.glyphs()[line.glyphs.clone()]
+            .iter()
+            .filter(|g| text.as_bytes()[g.cluster as usize] != b' ')
+            .map(|g| g.x)
+            .fold(f32::INFINITY, f32::min);
+        assert!(
+            (visible - (max - line.width)).abs() < 1.0,
+            "{visible} against {}: {line:?}",
+            max - line.width
+        );
+        assert!(line.width <= max + 0.01);
+    }
+    // Align::End puts them on the left.
+    let end = TextStyle {
+        align: Align::End,
+        ..style(Some(max))
+    };
+    l.layout(&mut fonts, &arabic, text, &end);
+    for line in l.lines() {
+        let visible = l.glyphs()[line.glyphs.clone()]
+            .iter()
+            .filter(|g| text.as_bytes()[g.cluster as usize] != b' ')
+            .map(|g| g.x)
+            .fold(f32::INFINITY, f32::min);
+        assert!(visible.abs() < 1.0, "{visible}: {line:?}");
+    }
+}
+
+#[test]
+fn brackets_mirror_in_right_to_left_text() {
+    let (mut fonts, _, hebrew) = rtl_setup();
+    let mut l = TextLayout::new();
+    // "(א)" in a right-to-left paragraph: its opening bracket is at the right, drawn as
+    // a closing one, so that it opens towards the letter.
+    let rtl = TextStyle {
+        direction: TextDirection::RightToLeft,
+        ..style(None)
+    };
+    l.layout(&mut fonts, &hebrew, "(א)", &rtl);
+    let rtl_glyphs: Vec<(u32, u16)> = l.glyphs().iter().map(|g| (g.cluster, g.glyph)).collect();
+    l.layout(&mut fonts, &hebrew, "(a)", &style(None));
+    let ltr_glyphs: Vec<(u32, u16)> = l.glyphs().iter().map(|g| (g.cluster, g.glyph)).collect();
+    // Visual order: the closing bracket's cluster at the left, the opening's at the right.
+    assert_eq!(rtl_glyphs[0].0, 3, "{rtl_glyphs:?}");
+    assert_eq!(rtl_glyphs[2].0, 0, "{rtl_glyphs:?}");
+    // The opening bracket at the right is drawn as ")" (left to right's last glyph).
+    assert_eq!(
+        rtl_glyphs[2].1, ltr_glyphs[2].1,
+        "{rtl_glyphs:?} {ltr_glyphs:?}"
+    );
+    assert_eq!(
+        rtl_glyphs[0].1, ltr_glyphs[0].1,
+        "{rtl_glyphs:?} {ltr_glyphs:?}"
+    );
+}

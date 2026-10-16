@@ -1,6 +1,8 @@
-//! Text layout: itemization by font and script, shaping, UAX #14 line breaking, wrapping
-//! with hanging whitespace, alignment.
+//! Text layout: bidirectional levels (UAX #9), itemization by font, script and level,
+//! shaping, UAX #14 line breaking, wrapping with hanging whitespace, lines in visual order,
+//! alignment.
 
+use crate::bidi::{Bidi, visual_order};
 use crate::font::{FontId, Fonts};
 use core::ops::Range;
 use harfrust::{Direction, Script, UnicodeBuffer};
@@ -10,13 +12,26 @@ use unicode_script::UnicodeScript;
 /// Horizontal alignment of lines within the layout width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Align {
-    /// Left.
+    /// The paragraph's start: left for left-to-right text, right for right-to-left.
     #[default]
     Start,
     /// Centered.
     Center,
-    /// Right.
+    /// The paragraph's end: right for left-to-right text, left for right-to-left.
     End,
+}
+
+/// A paragraph's direction (UAX #9's paragraph level).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextDirection {
+    /// The direction of its first strong character (Arabic or Hebrew: right to left; Latin,
+    /// Cyrillic, CJK: left to right), left to right without one.
+    #[default]
+    Auto,
+    /// Left to right (a left-to-right UI's labels).
+    LeftToRight,
+    /// Right to left (a right-to-left UI's labels, whatever their first letter).
+    RightToLeft,
 }
 
 /// How to lay out a piece of text.
@@ -31,6 +46,8 @@ pub struct TextStyle {
     pub max_width: Option<f32>,
     /// Alignment of lines within `max_width` (or within the widest line without it).
     pub align: Align,
+    /// The paragraphs' direction.
+    pub direction: TextDirection,
 }
 
 impl Default for TextStyle {
@@ -40,6 +57,7 @@ impl Default for TextStyle {
             line_height: None,
             max_width: None,
             align: Align::Start,
+            direction: TextDirection::Auto,
         }
     }
 }
@@ -71,6 +89,8 @@ pub struct Line {
     pub width: f32,
     /// Baseline y.
     pub baseline: f32,
+    /// Its paragraph runs right to left ([`Align::Start`] is then the right).
+    pub rtl: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -83,7 +103,6 @@ struct Shaped {
     x_offset: f32,
     y_offset: f32,
     whitespace: bool,
-    rtl: bool,
 }
 
 struct Run {
@@ -122,21 +141,6 @@ fn script_of(c: char) -> unicode_script::Script {
     }
 }
 
-fn is_rtl(s: unicode_script::Script) -> bool {
-    use unicode_script::Script as S;
-    matches!(
-        s,
-        S::Arabic
-            | S::Hebrew
-            | S::Syriac
-            | S::Thaana
-            | S::Nko
-            | S::Adlam
-            | S::Mandaic
-            | S::Samaritan
-    )
-}
-
 /// A reusable text layout: call [`TextLayout::layout`] to lay out text, then read
 /// [`TextLayout::glyphs`] and [`TextLayout::lines`]. Buffers are kept between calls, so
 /// laying out text of similar size again does not allocate.
@@ -154,6 +158,11 @@ pub struct TextLayout {
     /// (first glyph, end glyph, visible width) per line, during wrapping.
     line_ends: Vec<(usize, usize, f32)>,
     buffer: Option<UnicodeBuffer>,
+    /// The paragraph's bidirectional levels.
+    bidi: Bidi,
+    /// A line's glyph levels and their visual order.
+    levels: Vec<u8>,
+    order: Vec<u32>,
 }
 
 impl core::fmt::Debug for TextLayout {
@@ -173,7 +182,7 @@ impl TextLayout {
         Self::default()
     }
 
-    /// Positioned glyphs, in logical order.
+    /// Positioned glyphs, line by line, each line's in visual order (left to right).
     pub fn glyphs(&self) -> &[PositionedGlyph] {
         &self.glyphs
     }
@@ -211,6 +220,11 @@ impl TextLayout {
             .line_height
             .unwrap_or((vm.ascent + vm.descent + vm.line_gap) * scale);
 
+        let base = match style.direction {
+            TextDirection::Auto => None,
+            TextDirection::LeftToRight => Some(0),
+            TextDirection::RightToLeft => Some(1),
+        };
         let mut baseline = ascent;
         let mut offset = 0;
         for paragraph in text.split('\n') {
@@ -218,6 +232,7 @@ impl TextLayout {
             self.runs.clear();
             self.shaped.clear();
             self.breaks.clear();
+            self.bidi.resolve(body, base);
             self.itemize(fonts, stack, body, offset);
             self.shape(fonts, text, style.size);
             self.find_breaks(body, offset);
@@ -227,13 +242,19 @@ impl TextLayout {
         }
 
         let layout_width = style.max_width.unwrap_or(self.width);
-        if style.align != Align::Start {
-            for line in &self.lines {
-                let shift = match style.align {
-                    Align::Start => 0.0,
-                    Align::Center => ((layout_width - line.width) * 0.5).max(0.0),
-                    Align::End => (layout_width - line.width).max(0.0),
-                };
+        for line in &self.lines {
+            // Start and end are the paragraph's: right and left for right-to-left text.
+            let align = match (style.align, line.rtl) {
+                (Align::Start, true) => Align::End,
+                (Align::End, true) => Align::Start,
+                (align, _) => align,
+            };
+            let shift = match align {
+                Align::Start => 0.0,
+                Align::Center => ((layout_width - line.width) * 0.5).max(0.0),
+                Align::End => (layout_width - line.width).max(0.0),
+            };
+            if shift != 0.0 {
                 for g in &mut self.glyphs[line.glyphs.clone()] {
                     g.x += shift;
                 }
@@ -246,12 +267,16 @@ impl TextLayout {
     }
 
     /// Splits a paragraph (at byte `offset` in the text) into runs of one font, script and
-    /// direction. Whitespace and characters of the Common and Inherited scripts join the
-    /// current run when its font has them.
+    /// bidirectional level (its parity the run's direction). Whitespace and characters of
+    /// the Common and Inherited scripts join the current run when its font has them and
+    /// their level is its; one that starts a run takes Latin at a left-to-right level, the
+    /// previous run's script at a right-to-left one.
     fn itemize(&mut self, fonts: &Fonts, stack: &[FontId], text: &str, offset: usize) {
         let mut start = 0;
-        let mut current: Option<(FontId, unicode_script::Script)> = None;
+        let mut current: Option<(FontId, unicode_script::Script, u8)> = None;
+        let mut hint = 0;
         for (i, c) in text.char_indices() {
+            let level = self.bidi.level_at(i as u32, &mut hint);
             let char_script = script_of(c);
             let neutral = c.is_whitespace()
                 || matches!(
@@ -264,40 +289,46 @@ impl TextLayout {
             // font in the stack that has the character, and if none does, the current font
             // (shaping synthesizes missing space variants) or the primary.
             let font = match current {
-                Some((f, _)) if char_script == unicode_script::Script::Inherited => f,
-                Some((f, _)) if neutral && has(f) => f,
+                Some((f, _, _)) if char_script == unicode_script::Script::Inherited => f,
+                Some((f, _, _)) if neutral && has(f) => f,
                 _ => stack
                     .iter()
                     .copied()
                     .find(|&id| has(id))
                     .unwrap_or_else(|| {
-                        current.map_or(stack[0], |(f, _)| if neutral { f } else { stack[0] })
+                        current.map_or(stack[0], |(f, _, _)| if neutral { f } else { stack[0] })
                     }),
             };
-            let script = if neutral {
-                current.map_or(unicode_script::Script::Latin, |(_, s)| s)
-            } else {
-                char_script
+            let script = match current {
+                _ if !neutral => char_script,
+                Some((_, s, l)) if l == level || level % 2 == 1 => s,
+                _ => unicode_script::Script::Latin,
             };
             match current {
-                Some((f, s)) if f == font && s == script => {}
-                Some((f, s)) => {
-                    self.push_run(offset + start..offset + i, f, s);
+                Some((f, s, l)) if f == font && s == script && l == level => {}
+                Some((f, s, l)) => {
+                    self.push_run(offset + start..offset + i, f, s, l);
                     start = i;
-                    current = Some((font, script));
+                    current = Some((font, script, level));
                 }
                 None => {
                     start = i;
-                    current = Some((font, script));
+                    current = Some((font, script, level));
                 }
             }
         }
-        if let Some((font, script)) = current {
-            self.push_run(offset + start..offset + text.len(), font, script);
+        if let Some((font, script, level)) = current {
+            self.push_run(offset + start..offset + text.len(), font, script, level);
         }
     }
 
-    fn push_run(&mut self, text: Range<usize>, font: FontId, script: unicode_script::Script) {
+    fn push_run(
+        &mut self,
+        text: Range<usize>,
+        font: FontId,
+        script: unicode_script::Script,
+        level: u8,
+    ) {
         if text.is_empty() {
             return;
         }
@@ -305,7 +336,7 @@ impl TextLayout {
             text,
             font,
             script: to_hb_script(script),
-            direction: if is_rtl(script) {
+            direction: if level % 2 == 1 {
                 Direction::RightToLeft
             } else {
                 Direction::LeftToRight
@@ -339,17 +370,13 @@ impl TextLayout {
                         x_offset: x_offset as f32 * scale,
                         y_offset: y_offset as f32 * scale,
                         whitespace: matches!(bytes.get(cluster as usize), Some(b' ' | b'\t')),
-                        rtl: false,
                     });
                 },
             );
             // Right-to-left runs come out in visual order; keep logical order for line
-            // breaking, and reverse back when placing.
+            // breaking, and reorder visually when placing.
             if run.direction == Direction::RightToLeft {
                 self.shaped[first..].reverse();
-                for s in &mut self.shaped[first..] {
-                    s.rtl = true;
-                }
             }
         }
     }
@@ -422,30 +449,44 @@ impl TextLayout {
         }
     }
 
-    /// Places the paragraph's lines (`line_ends`) at successive baselines.
+    /// Places the paragraph's lines (`line_ends`) at successive baselines, each in visual
+    /// order: its levels reset at its end (L1), its glyphs reordered by level (L2).
     fn place(&mut self, paragraph: Range<usize>, baseline: &mut f32, line_height: f32) {
+        let para = self.bidi.level();
+        let rtl = para % 2 == 1;
         for k in 0..self.line_ends.len() {
             let (start, end, width) = self.line_ends[k];
             let first = self.glyphs.len();
+            let text_start = self
+                .shaped
+                .get(start)
+                .map_or(paragraph.end, |s| s.cluster as usize);
+            let text_end = self
+                .shaped
+                .get(end)
+                .map_or(paragraph.end, |s| s.cluster as usize);
             let mut pen = 0.0;
-            let mut g = start;
-            while g < end {
-                // Right-to-left stretches go in visual order.
-                let mut stretch = g + 1;
-                if self.shaped[g].rtl {
-                    while stretch < end && self.shaped[stretch].rtl {
-                        stretch += 1;
-                    }
+            if self.bidi.mixed() {
+                let local = |b: usize| (b - paragraph.start) as u32;
+                let line_end = text_end.max(text_start).min(paragraph.end);
+                self.bidi
+                    .reset_line(local(text_start.min(paragraph.end))..local(line_end), para);
+                self.levels.clear();
+                let mut hint = 0;
+                let mut total = 0.0;
+                for s in &self.shaped[start..end] {
+                    let at = (s.cluster as usize).saturating_sub(paragraph.start) as u32;
+                    self.levels.push(self.bidi.level_at(at, &mut hint));
+                    total += s.advance;
                 }
-                for k in 0..stretch - g {
-                    // Logical order for left-to-right glyphs, reversed for a right-to-left
-                    // stretch.
-                    let idx = if self.shaped[g].rtl {
-                        stretch - 1 - k
-                    } else {
-                        g + k
-                    };
-                    let s = self.shaped[idx];
+                visual_order(&self.levels, &mut self.order);
+                // A right-to-left line's trailing whitespace is now at its left: it hangs
+                // past the start of the line.
+                if rtl {
+                    pen = -(total - width);
+                }
+                for &o in &self.order {
+                    let s = self.shaped[start + o as usize];
                     self.glyphs.push(PositionedGlyph {
                         font: s.font,
                         glyph: s.glyph,
@@ -455,21 +496,24 @@ impl TextLayout {
                     });
                     pen += s.advance;
                 }
-                g = stretch;
+            } else {
+                for s in &self.shaped[start..end] {
+                    self.glyphs.push(PositionedGlyph {
+                        font: s.font,
+                        glyph: s.glyph,
+                        x: pen + s.x_offset,
+                        y: *baseline - s.y_offset,
+                        cluster: s.cluster,
+                    });
+                    pen += s.advance;
+                }
             }
-            let text_start = self
-                .shaped
-                .get(start)
-                .map_or(paragraph.end, |s| s.cluster as usize);
-            let text_end = self
-                .shaped
-                .get(end)
-                .map_or(paragraph.end, |s| s.cluster as usize);
             self.lines.push(Line {
                 glyphs: first..self.glyphs.len(),
                 text: text_start.min(paragraph.end)..text_end.max(text_start),
                 width,
                 baseline: *baseline,
+                rtl,
             });
             self.width = self.width.max(width);
             *baseline += line_height;
