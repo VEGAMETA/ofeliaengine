@@ -216,3 +216,112 @@
 - **The editor gets colliders as plain data**, ready to edit.
 - **Packs trust their contents:** Jolt's restore does not validate its bytes the way a fuzzed
   parser would. A pack is part of the game, as its SPIR-V is.
+
+## 8c-1, 8c-2a and 8c-4a as built (2026-10-16)
+
+### What was built
+
+- **`engine_collision`:**
+  - **QuickHull in f64.** Its tolerance comes from the coordinates' magnitude (qhull's rule,
+    with f32's epsilon). The next point is the farthest of all faces' outside sets (a heap),
+    so a vertex limit stops at the points that matter most. `Hull::error` says how far the
+    left-out points lie outside; it is computed exactly over every face. A point whose visible
+    faces do not border one simple loop (rounding) is dropped.
+  - **Fitting.** Boxes: the world axes, the hull surface's principal axes, and each face's
+    normal turned to the smallest rectangle (directions from a hull of at most 64 vertices,
+    extents from every point). Spheres: Welzl. Capsules: the radius searched for the smallest
+    volume. Cylinders: around the smallest circle seen down each box axis.
+  - `Shape::transformed` (any affine map) and `Shape::hull_points`.
+  - Mesh helpers: volume, closed, welding.
+- **The physics API:**
+  - `ShapeDesc::Compound` and `ShapeDesc::Scaled`;
+  - `is_valid_scale`;
+  - baked shapes: `baked_shape_format`, `bake_shape`, `create_baked_shape`;
+  - `optimize_broad_phase`;
+  - `engine_physics::colliders`: `build`, `bake`, `placed`.
+
+  Jolt bakes through `ext.cpp`: `SaveWithChildren` and `sRestoreWithChildren`. The format
+  key is Jolt's version plus double precision, with a revision byte of our own.
+- **The cook (`engine_assets::colliders`, `gltf_physics`):**
+  - the order of the decision above: KHR physics, then authored names, then the rules;
+  - colliders per glTF mesh (all primitives in one, a surface per triangle), not per cooked
+    primitive;
+  - shared per mesh;
+  - a sheared transform gets its own collider.
+- **Pack version 6:**
+  - `Collider` entries: the engine's form; a mesh's triangles only when unbaked; the baked
+    bytes after a 16-byte boundary.
+  - One `Bodies` entry: 128-byte records and the instances they move.
+  - `open_scene` skips both; `load_colliders` reads them, and `load_pack` too.
+- **`ofeliaengine cook`** bakes in parallel, a Jolt world per collider. `--no-colliders`
+  leaves colliders out.
+- **The player:**
+  - `ScenePhysics` is owned by the game. `JoltBackend` is neither `Send` nor `Sync`, so it
+    cannot be a resource of the ECS world; a `Mutex` would put a lock on the tick. The stress
+    tool already owned its world this way.
+  - `Player::load_physics` loads the bodies; `SceneInfo::instances` lists the instances'
+    entities.
+  - Moving bodies are entities with their instances as children.
+
+### Measured (ref-1, release)
+
+| | Sponza | Intel Sponza |
+|---|---:|---:|
+| colliders / bodies | 1 / 1 | 115 / 115 |
+| making them in the cook | 0.14 s | 1.58 s |
+| baking (parallel) | 0.19 s | 0.24 s (2.24 s on one thread) |
+| pack | +2.4 MB of 73.0 MB | +37 MB of 1336 MB |
+| loading the bodies (restore, place, add) | 5.5-10 ms | — |
+
+`engine_collision`'s own benchmark (`cargo bench -p engine_collision --bench hull`):
+
+| | median |
+|---|---:|
+| hull of 1,000 points | 82 µs |
+| hull of 10,000 points | 0.62 ms |
+| hull of 100,000 points | 5.8 ms |
+| hull of 10,000 points on a sphere (all of them vertices) | 6.1 ms |
+| a box, sphere, capsule and cylinder fitted around a 64-vertex hull | 0.27-0.31 ms |
+
+### Tested
+
+- **Hulls:**
+  - closed, convex, Euler's 2;
+  - every input point inside;
+  - grids at 10 km;
+  - duplicates and degenerate inputs;
+  - the limit's exact error.
+- **Fitting:** turned boxes, spheres, capsules and cylinders recovered; a tetrahedron keeps
+  its hull; flat sets get a thin box.
+- **Scale rules:** boxes along and across their axes, ellipsoids within the tolerance,
+  capsules, cylinders, mirrors (a mesh keeps a positive volume), convex parts under a shear.
+- **Jolt:**
+  - compounds keep their children;
+  - refused scales are errors, not averages;
+  - baked shapes restore the same bytes;
+  - damaged bytes are refused.
+- **Placement:**
+  - a scale Jolt takes is not rebuilt;
+  - a squashed sphere and a sheared box hit where they should;
+  - a zero scale is off;
+  - a mirrored mesh's faces point out.
+- **The cook:** shared level meshes with surfaces; excluded materials; props fitted; `UCX_`
+  and `UBX_` in the named node's space; an orphan `USP_`; a shear; KHR bodies, materials,
+  planes and triggers.
+- **The pack:** a round trip of colliders and bodies (version 6), and `open_scene` not
+  reading them.
+- **Sponza end to end** (`engine_app/tests/colliders.rs`): cooked, baked, packed, loaded and
+  scaled by its node. Five rays hit where a brute-force test of the source triangles says,
+  within 0.2 % of the size.
+
+### Not done yet
+
+- **The rules file** `<scene>.colliders.ron`: the owner's question 1. Today the rules come
+  through `ImportedScene::collider_rules`; the defaults follow the recommendation of
+  question 2.
+- **`RayHit`'s surface:** the triangles keep it in the engine's form, but Jolt's materials
+  are not set from it yet.
+- **The decomposition** (8c-3): props whose hull is not within 10 % get the hull for now.
+- **The cook's collider making runs on one thread** (1.6 s for Intel Sponza's 115 meshes);
+  it could run per mesh.
+- **Simplifying level meshes** (`StaticShape::Simplified`) waits for the rules file.

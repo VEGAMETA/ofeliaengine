@@ -24,7 +24,9 @@ let (position, rotation) = world.transform(ball).unwrap();
 ```
 
 - **Shapes** are created once and shared by any number of bodies: sphere, box, capsule,
-  cylinder, convex hull, triangle mesh (for static level geometry).
+  cylinder, convex hull, triangle mesh (for static level geometry), compounds of them
+  (`ShapeDesc::Compound`) and scaled ones (`ShapeDesc::Scaled`; `is_valid_scale` says which
+  scales a shape takes; colliders from a pack take any, section 11).
 - **Bodies** are `Static` (never move), `Kinematic` (moved by you, push others) or
   `Dynamic` (simulated).
 - `MotionQuality::Continuous` stops fast, small bodies (bullets) from tunneling.
@@ -306,7 +308,94 @@ sync.interpolate(&mut ecs, clock.alpha());         // Transform between the last
   (`cargo bench -p engine_physics_jolt --bench queries`, which also measures characters
   and save/restore).
 
-## 11. 2D physics
+## 11. Colliders made from your meshes
+
+The cook makes colliders from a scene's meshes and puts them into the pack, baked for Jolt
+(ADR 0101). Your game loads them with one call and steps them from its tick.
+
+### What collides
+
+1. **A file with glTF physics** (`KHR_physics_rigid_bodies` with `KHR_implicit_shapes`; the
+   Khronos drafts, which Blender's glTF physics exporter writes) collides as it says:
+   - a node with a `motion` is a body, with the colliders of its subtree;
+   - a collider elsewhere is static;
+   - a trigger is a sensor;
+   - physics materials give friction and restitution.
+
+   Nothing else in such a file collides. Joints and collision filters are not read yet.
+2. **Collision meshes you model** next to a mesh, named the Unreal way, give that mesh its
+   collider and are not drawn:
+
+   | name | becomes |
+   |---|---|
+   | `UCX_Chair`, `UCX_Chair_01` | the convex hull of that mesh |
+   | `UBX_Chair_02` | a box fitted around it |
+   | `USP_Chair_03` | a sphere around it |
+   | `UCP_Chair_04` | a capsule around it |
+
+   The name after the prefix is the node's (or its mesh's) name. A collision mesh whose
+   name matches nothing is a static collider of its own.
+3. **Everything else** is level geometry: a static body with the mesh's triangles, exactly
+   as drawn.
+   - All of a mesh's parts are in one collider. Each triangle remembers its material (the
+     *surface*, for footsteps and impacts).
+   - Skinned meshes get no collider.
+   - Through `ImportedScene::collider_rules` (a file beside the scene comes with the owner's
+     answer on its shape):
+     - the meshes become props instead (`DefaultBodies::Dynamic`): a box, sphere, capsule
+       or cylinder when one is within 10 % of the mesh's hull, else the hull;
+     - or nothing collides (`DefaultBodies::None`);
+     - materials can be excluded by name (`no_collision`: foliage cards, decals).
+
+`ofeliaengine cook scene.gltf -o scene.pack` does all of this.
+- `--no-colliders` leaves colliders out.
+- The cook prints how many colliders and bodies it made and how long it took. Sponza takes
+  0.3 s more and 2.4 MB of its 75 MB; Intel Sponza 2 s more and 37 MB of 1.3 GB.
+
+### Loading them
+
+```rust
+use engine_app::{Player, ScenePhysics};
+use engine_physics::PhysicsSettings;
+
+let mut physics = ScenePhysics::new(&PhysicsSettings::default())?;
+let bodies = player.load_physics(&mut physics)?;  // after Player::new
+// Game::tick, after your logic:   physics.step(world, dt)?;
+// Game::present:                  physics.interpolate(world, alpha);
+// Queries, characters, your own bodies:  physics.physics().raycast(...)
+```
+
+- **Level geometry loads as a copy.** Shapes are restored from Jolt's binary form: Intel
+  Sponza's 3.7 million triangles in 5.5 ms, where building them would take 3.9 s.
+- **Props move their meshes.** A dynamic or kinematic body gets an entity (`RigidBody`,
+  `PhysicsPose`, `Transform`), and the scene instances it moves become its children.
+- **A game without physics** never calls `load_physics`, and the pack's colliders are not
+  even read.
+- **A pack baked by another Jolt version** (after an engine update) is refused with "cook
+  the pack again". Packs are cooked by the engine that runs them.
+
+### Any scale
+
+Scale a scene, a prop or a level however you like, after the colliders are made: uniform,
+non-uniform, mirrored. Nothing is regenerated and nothing errors.
+- **Hulls and meshes** take any scale as they are.
+- **Boxes** take any scale along their own axes.
+- **Shapes Jolt cannot scale are rebuilt** for the scale and shared by every body scaled
+  alike:
+  - a squashed sphere, capsule or cylinder becomes a hull within 1 mm of the true surface;
+  - a turned box stretched across its axes becomes the exact hull of its corners.
+- **A shear** (a non-uniform scale on a parent over a rotated child) is baked into the
+  collider by the cook.
+- **A zero scale** turns the collider off.
+
+### Editing them later
+
+Colliders are stored as the engine's own data: points of hulls, parameters of
+primitives, a stable id per shape. The editor will let you grab a hull's corners, edges
+or faces, or a primitive's handles, and fix what the cook made. An edited collider is
+kept as you left it; when its mesh changes, the editor tells you.
+
+## 12. 2D physics
 
 2D games use `engine_physics2d`, a small layer over Box2D v3:
 
