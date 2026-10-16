@@ -403,7 +403,7 @@ impl StdPicture {
 ///
 /// The specification has them in mode info units and advises drivers to ignore them
 /// (applications sent either). AMD's PAL-based drivers read them as superblocks: given
-/// mode info units, every tile but the first decodes wrong (seen on the Radeon 780M,
+/// mode info units, every tile but the first decodes wrong (seen on ref-1's Radeon iGPU,
 /// driver 26.8.1, 2026-10-16). NVIDIA ignores them; Mesa's RADV derives the starts from
 /// `pWidthInSbsMinus1` and the frame size.
 pub(crate) fn tile_starts_quirk(driver: engine_rhi::ash::vk::DriverId) -> bool {
