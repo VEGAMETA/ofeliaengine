@@ -49,8 +49,9 @@ use engine_rhi::{
 use engine_runtime::{
     Camera, CameraView, GiExtract, MeshRenderer, ProbeExtract, ReflectionProbe, Runtime,
 };
+use engine_scene::SceneId;
 use engine_streaming::{SceneStreamSettings, SceneStreamer};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -368,6 +369,34 @@ pub struct Player {
     minimized: bool,
     closing: bool,
     first_present_ms: Option<f64>,
+    /// Saves (ADR 0104).
+    saves: SaveState,
+    /// The world's timers and tweens, moved before every tick (ADR 0104).
+    timing: engine_runtime::Timing,
+}
+
+/// One of the pack's instances as the level made it: what loading a save makes again
+/// when play destroyed it.
+struct LevelInstance {
+    id: SceneId,
+    transform: Affine3A,
+    mesh: MeshId,
+    material: MaterialId,
+}
+
+/// The player's side of saves.
+struct SaveState {
+    folder: PathBuf,
+    encoding: engine_save::Encoding,
+    writer: crate::saves::Writer,
+    /// The ids the level made when it loaded: those gone are saved as destroyed.
+    level_ids: std::collections::HashSet<SceneId>,
+    level: Vec<LevelInstance>,
+    /// Seconds played since the last autosave, and the next autosave slot.
+    since_autosave: f64,
+    autosaves: u32,
+    /// Milliseconds played, kept across saves.
+    play_ms: u64,
 }
 
 impl fmt::Debug for Player {
@@ -681,12 +710,21 @@ impl Player {
             }
             None => None,
         };
+        // Saves (ADR 0104): the game asks through the world's resource.
+        let save_folder = crate::saves::save_folder(&settings.saves, &settings.title);
+        let save_status =
+            std::sync::Arc::new(std::sync::Mutex::new(crate::saves::WriterStatus::default()));
+        world.insert_resource(crate::Saves::new(
+            save_folder.clone(),
+            std::sync::Arc::clone(&save_status),
+        ));
         // The game's input: its actions a resource of the world.
         let input = settings.input.as_ref().map(|map| {
             world.insert_resource(engine_input::Input::new(map.clone()));
             PlayerInput::start(offscreen.is_none(), &mut startup.notes)
         });
         let mut scene_info = SceneInfo::default();
+        let mut level = Vec::new();
         let streamer = match &settings.pack {
             Some(pack) => {
                 let streamer = SceneStreamer::open(
@@ -699,7 +737,13 @@ impl Player {
                     SceneStreamSettings::default(),
                 )
                 .map_err(AppError::at("the scene's pack"))?;
-                scene_info = spawn_scene(&streamer, &mut renderer, &mut materials, &mut world);
+                scene_info = spawn_scene(
+                    &streamer,
+                    &mut renderer,
+                    &mut materials,
+                    &mut world,
+                    &mut level,
+                );
                 Some(streamer)
             }
             None => None,
@@ -716,6 +760,8 @@ impl Player {
         let mut scene = GpuScene::new(&device, &bindless, world.len() as u32 + 16, in_flight)
             .map_err(AppError::at("the GPU scene"))?;
         scene.set_jobs(jobs.clone());
+        // Timers and tweens on the game's clock (ADR 0104), moved before each tick.
+        let timing = engine_runtime::Timing::new(&mut world);
         let mut runtime = Runtime::<InstanceId>::new(world, settings.tick_hz);
         runtime.set_jobs(jobs.clone());
         let ring = UploadRing::new(&device, &mut allocator, in_flight, 32 << 20)
@@ -841,6 +887,20 @@ impl Player {
             minimized: false,
             closing: false,
             first_present_ms: None,
+            timing,
+            saves: SaveState {
+                folder: save_folder.clone(),
+                encoding: settings
+                    .saves
+                    .encoding
+                    .unwrap_or(engine_save::Encoding::for_build()),
+                writer: crate::saves::Writer::new(save_status),
+                level_ids: level.iter().map(|l| l.id).collect(),
+                level,
+                since_autosave: 0.0,
+                autosaves: 0,
+                play_ms: 0,
+            },
         };
         player.start_presentation()?;
         // Saved now as well as at exit: a crash does not cost the next start its cache.
@@ -1457,6 +1517,7 @@ impl Player {
         // Ticks, presentation, interpolation (ADR 0064).
         let stages = {
             let game_cell = RefCell::new(&mut *game);
+            let timing = &mut self.timing;
             self.runtime.frame(
                 elapsed,
                 &(),
@@ -1465,6 +1526,7 @@ impl Player {
                     if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                         input.sample_tick(Instant::now());
                     }
+                    timing.advance(world, dt);
                     game_cell.borrow_mut().tick(world, dt);
                 },
                 |world, (), alpha| {
@@ -1480,6 +1542,8 @@ impl Player {
         report.propagate = stages.propagate_us;
         report.extract = stages.extract_us;
         report.interpolate = stages.interpolate_us + stages.present_us;
+        // Saves asked for during the ticks: taken now, at the tick boundary.
+        self.process_saves(game, elapsed);
         let t = Instant::now();
         game.animate(
             &mut FrameParts {
@@ -2387,13 +2451,147 @@ fn full_screen_choice(window: Window, hwnd: isize) -> FullScreenExclusive {
     }
 }
 
+impl Player {
+    /// The game's saves: the world's [`crate::Saves`] resource (quicksave, slots, the
+    /// last outcomes).
+    pub fn saves_mut(&mut self) -> Option<&mut crate::Saves> {
+        self.runtime.world.resource_mut::<crate::Saves>()
+    }
+
+    /// The folder of the game's save slots.
+    pub fn save_folder(&self) -> &Path {
+        &self.saves.folder
+    }
+
+    /// Takes the frame's save and load requests (and a due autosave), at the tick
+    /// boundary after the frame's ticks.
+    fn process_saves(&mut self, game: &mut impl Game, frame_seconds: f64) {
+        self.saves.play_ms += (frame_seconds * 1000.0) as u64;
+        let mut requests = match self.runtime.world.resource_mut::<crate::Saves>() {
+            Some(saves) if !saves.requests.is_empty() => core::mem::take(&mut saves.requests),
+            _ => Vec::new(),
+        };
+        if let Some(auto) = self.settings.saves.autosave {
+            self.saves.since_autosave += frame_seconds;
+            if self.saves.since_autosave >= auto.every.as_secs_f64()
+                && !self.saves.writer.pending()
+                && game.can_autosave(&self.runtime.world)
+            {
+                requests.push(crate::saves::Request::Autosave);
+            }
+        }
+        for request in requests {
+            match request {
+                crate::saves::Request::Save(slot) => self.take_save(game, &slot),
+                crate::saves::Request::Autosave => {
+                    let slots = self.settings.saves.autosave.map_or(3, |a| a.slots.max(1));
+                    let n = self.saves.autosaves % slots + 1;
+                    self.saves.autosaves = self.saves.autosaves.wrapping_add(1);
+                    self.saves.since_autosave = 0.0;
+                    self.take_save(game, &format!("autosave {n}"));
+                }
+                crate::saves::Request::Load(slot) => {
+                    let result = self.load_save(game, &slot).map_err(|e| e.to_string());
+                    if let Err(e) = &result {
+                        log::error!("load {slot}: {e}");
+                    }
+                    if let Some(saves) = self.runtime.world.resource_mut::<crate::Saves>() {
+                        saves.last_load = Some(result);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Takes a save of the world now and hands it to the writer thread.
+    fn take_save(&mut self, game: &mut impl Game, slot: &str) {
+        engine_profiler::zone!("app::take_save");
+        let world = &self.runtime.world;
+        let options = engine_save::CaptureOptions {
+            level: Some(&self.saves.level_ids),
+            ..engine_save::CaptureOptions::default()
+        };
+        let mut image = engine_save::capture(world, &options);
+        image.set_state(
+            "clock",
+            &crate::saves::ClockState {
+                remainder: self.runtime.clock.remainder(),
+                play_ms: self.saves.play_ms,
+            },
+        );
+        game.before_save(world, &mut image);
+        let header = engine_save::SaveHeader {
+            slot: slot.to_owned(),
+            game_version: self.settings.saves.game_version.clone(),
+            level: self
+                .settings
+                .pack
+                .as_ref()
+                .and_then(|p| p.file_stem())
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            play_ms: self.saves.play_ms,
+            ..engine_save::SaveHeader::default()
+        };
+        self.saves.writer.send(crate::saves::Job {
+            image,
+            path: engine_save::slot_path(&self.saves.folder, slot),
+            slot: slot.to_owned(),
+            encoding: self.saves.encoding,
+            header,
+        });
+    }
+
+    /// Loads `slot` now: the level's objects destroyed in play made again from the pack,
+    /// the entities the save makes again removed, the save applied, the clock restored, a
+    /// camera cut.
+    fn load_save(
+        &mut self,
+        game: &mut impl Game,
+        slot: &str,
+    ) -> Result<engine_save::LoadReport, AppError> {
+        engine_profiler::zone!("app::load_save");
+        let path = engine_save::slot_path(&self.saves.folder, slot);
+        let (_, save) = engine_save::read_save(&path).map_err(AppError::at("the save"))?;
+        let world = &mut self.runtime.world;
+        let present: std::collections::HashSet<SceneId> = {
+            let mut ids = QueryState::<&SceneId>::new(world);
+            ids.iter_readonly(world).copied().collect()
+        };
+        for l in self.saves.level.iter().filter(|l| !present.contains(&l.id)) {
+            world.spawn((
+                l.id,
+                GlobalTransform(l.transform),
+                MeshRenderer::new(l.mesh, l.material),
+            ));
+        }
+        for e in engine_save::anonymous_entities(world) {
+            world.despawn(e);
+        }
+        game.before_load(world, &save);
+        let report = engine_save::apply(world, &save).map_err(AppError::at("the save"))?;
+        if let Ok(Some(clock)) = save.state::<crate::saves::ClockState>("clock") {
+            self.runtime.clock.set_remainder(clock.remainder);
+            self.saves.play_ms = clock.play_ms;
+        }
+        let world = &mut self.runtime.world;
+        // A load is a camera cut: the temporal history starts over.
+        let mut cameras = QueryState::<&mut engine_runtime::Camera>::new(world);
+        cameras.for_each(world, |camera| camera.cut());
+        game.after_load(world, &save, &report);
+        Ok(report)
+    }
+}
+
 /// Registers the pack's material types and materials and spawns its instances as
-/// entities; returns what the scene holds.
+/// entities (with their `SceneId`s from the pack's keys, kept in `level` for saves);
+/// returns what the scene holds.
 fn spawn_scene(
     streamer: &SceneStreamer,
     renderer: &mut FrameRenderer,
     materials: &mut MaterialTable,
     world: &mut World,
+    level: &mut Vec<LevelInstance>,
 ) -> SceneInfo {
     let layout = &streamer.layout().scene;
     let textures = streamer.textures().to_vec();
@@ -2404,7 +2602,7 @@ fn spawn_scene(
     let fallback = materials.default_material();
     let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
     let mut instances = Vec::with_capacity(layout.instances.len());
-    for instance in &layout.instances {
+    for (index, instance) in layout.instances.iter().enumerate() {
         let world_from_object = Mat4::from_cols_array(&instance.world_from_object);
         let mesh = &layout.meshes[instance.mesh as usize];
         for corner in 0..8 {
@@ -2420,17 +2618,26 @@ fn spawn_scene(
             min = min.min(c);
             max = max.max(c);
         }
-        instances.push(
-            world.spawn((
-                GlobalTransform(Affine3A::from_mat4(world_from_object)),
-                MeshRenderer::new(
-                    streamer.meshes()[instance.mesh as usize],
-                    instance
-                        .material
-                        .map_or(fallback, |i| material_ids[i as usize]),
-                ),
-            )),
-        );
+        let transform = Affine3A::from_mat4(world_from_object);
+        let mesh = streamer.meshes()[instance.mesh as usize];
+        let material = instance
+            .material
+            .map_or(fallback, |i| material_ids[i as usize]);
+        let renderer = MeshRenderer::new(mesh, material);
+        instances.push(match layout.instance_keys.get(index) {
+            // Known to saves by its key (pack version 9).
+            Some(&key) => {
+                let id = SceneId::from_u128(key);
+                level.push(LevelInstance {
+                    id,
+                    transform,
+                    mesh,
+                    material,
+                });
+                world.spawn((id, GlobalTransform(transform), renderer))
+            }
+            None => world.spawn((GlobalTransform(transform), renderer)),
+        });
     }
     if layout.instances.is_empty() {
         (min, max) = (Vec3::ZERO, Vec3::ZERO);

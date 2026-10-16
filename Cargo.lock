@@ -277,10 +277,13 @@ dependencies = [
  "engine_physics_jolt",
  "engine_platform",
  "engine_profiler",
+ "engine_reflect",
  "engine_render",
  "engine_render2d",
  "engine_rhi",
  "engine_runtime",
+ "engine_save",
+ "engine_scene",
  "engine_streaming",
  "engine_video",
  "log",
@@ -358,6 +361,7 @@ dependencies = [
  "engine_log",
  "engine_physics",
  "engine_physics_jolt",
+ "engine_save",
  "engine_shader",
 ]
 
@@ -648,6 +652,7 @@ dependencies = [
  "engine_log",
  "engine_platform",
  "engine_profiler",
+ "engine_reflect",
  "engine_rhi",
  "engine_shader",
  "log",
@@ -695,6 +700,7 @@ dependencies = [
  "engine_reflect",
  "engine_render",
  "engine_rhi",
+ "log",
 ]
 
 [[package]]
