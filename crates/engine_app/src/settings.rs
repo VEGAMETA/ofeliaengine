@@ -119,6 +119,13 @@ pub struct PlayerSettings {
     /// The CLAUDE.md §5 process set-up: power throttling off, the frame thread under
     /// MMCSS "Games" on performance cores, crash reports and logging.
     pub process_setup: bool,
+    /// The game's text (ADR 0102): a strings pack, or in development a `loc/` folder kept
+    /// live; its localizer is the world's `engine_loc::Localizer` resource. `None`: none.
+    pub text: Option<crate::TextSource>,
+    /// The player's languages, most preferred first (BCP 47 tags, as the game's settings
+    /// keep them): the text's locale is the first it serves. `None`: Windows' display
+    /// languages.
+    pub languages: Option<Vec<String>>,
 }
 
 impl Default for PlayerSettings {
@@ -152,6 +159,8 @@ impl Default for PlayerSettings {
             pipeline_cache: None,
             warm_up: true,
             process_setup: true,
+            text: None,
+            languages: None,
         }
     }
 }

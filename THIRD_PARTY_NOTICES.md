@@ -26,6 +26,8 @@ the dependency.
 | exr 1.74.0 (+ bit_field 0.10, lebe 0.5, zune-inflate 0.2) | BSD-3-Clause (lebe BSD-3-Clause; bit_field MIT OR Apache-2.0; zune-inflate MIT OR Apache-2.0 OR Zlib) | OpenEXR panoramas in `engine_assets` (ADR 0083) |
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
+| icu_plurals 2.3.0, icu_decimal 2.3.0, icu_locale 2.3.1 (+ fixed_decimal 0.7.2, icu_collections, icu_locale_core, icu_locale_fallback, icu_provider, their `_data` crates with CLDR 48.2, litemap, potential_utf, tinystr, writeable, yoke, zerofrom, zerotrie, zerovec, stable_deref_trait, utf8_iter) | Unicode-3.0 (stable_deref_trait and utf8_iter: MIT OR Apache-2.0) | ICU4X: CLDR plural rules, decimal formatting and locale fallback in `engine_loc` (ADR 0102) |
+| fluent-syntax 0.12.0 (+ memchr 2, thiserror 2) | Apache-2.0 OR MIT | Fluent's parser in `engine_loc`'s compiler (`ofeliaengine loc`, the player's live `loc/` folders; ADR 0102) |
 | unicode-script 0.5.8 | MIT OR Apache-2.0 | script itemization in `engine_text` |
 | meshopt 0.6.2 (+ bitflags 2, float-cmp 0.10, num-traits 0.2, thiserror 2 + thiserror-impl) | MIT OR Apache-2.0 (float-cmp MIT) | mesh simplification for detail levels in `engine_assets` (ADR 0053) |
 | ron 0.12.2 (+ typeid 1.0.3; bitflags, once_cell, serde, unicode-ident already in the tree) | MIT OR Apache-2.0 | material files (`*.material.ron`) in `engine_assets` (ADR 0092) |
@@ -102,6 +104,7 @@ condition of this section (ADR 0036). License texts are next to each font.
 | bytemuck_derive 1.12 (+ proc-macro2, quote, syn 3, unicode-ident) | Zlib OR Apache-2.0 OR MIT (the others MIT OR Apache-2.0; unicode-ident also Unicode-3.0) | `#[derive(Pod, Zeroable)]` with compile-time padding checks (ADR 0017) |
 | num-derive 0.4, smart-default 0.7, serde_derive, thiserror-impl 2 (+ syn 2) | MIT OR Apache-2.0 (smart-default MIT) | derives inside minidump-writer (ADR 0061) |
 | zerocopy-derive 0.8.62 | BSD-2-Clause OR Apache-2.0 OR MIT | derives inside zerocopy (through half, ADR 0083) |
+| displaydoc 0.2.7, synstructure 0.14.0, yoke-derive, zerofrom-derive, zerovec-derive (+ syn 2) | MIT OR Apache-2.0 (synstructure MIT; the ICU4X derives Unicode-3.0) | derives inside ICU4X (ADR 0102) |
 | atomig-macro 0.4, strum_macros 0.26.4 (+ heck 0.5, syn 2), zerocopy-derive 0.7.35, paste 1.0.15 | MIT OR Apache-2.0 (strum_macros MIT; zerocopy-derive BSD-2-Clause OR Apache-2.0 OR MIT) | derives and macros inside rav1d (ADR 0100); `paste` is archived (RUSTSEC-2024-0436, unmaintained, ignored in `deny.toml`) |
 
 ## Rust crates (dev-dependencies only, not shipped)

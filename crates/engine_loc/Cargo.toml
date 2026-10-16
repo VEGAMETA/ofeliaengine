@@ -1,0 +1,32 @@
+[package]
+name = "engine_loc"
+description = "Localization (ADR 0102): string tables compiled from Fluent's syntax, formatted into the caller's buffer without allocating, plural rules and numbers by ICU4X."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
+# CLDR plural rules, decimal formatting and locales (Unicode-3.0; ADR 0102: 0.2 MB for all
+# locales).
+icu_decimal = "=2.3.0"
+icu_locale = "=2.3.1"
+icu_plurals = "=2.3.0"
+# Already in the tree through the three above: `sync` keeps their data behind `Arc`, not
+# `Rc`, so a localizer is a world's resource (`Send + Sync`) that the player swaps tables in.
+icu_provider = { version = "=2.3.1", default-features = false, features = ["sync"] }
+# Fluent's parser (Apache-2.0 OR MIT), for the compiler. Not behind a feature: the CLI
+# would enable it and nothing else, and a workspace crate's features cannot be unified by
+# the workspace hack (ADR 0077) it depends on. A shipped game that never compiles carries
+# about 120 KB of it (fat LTO, stripped; 2026-10-16).
+fluent-syntax = "=0.12.0"
+
+[[bench]]
+name = "format"
+harness = false

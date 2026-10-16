@@ -31,6 +31,8 @@ bytemuck = { version = "1.25", features = [
 ] }
 
 lock_api = { version = "0.4", features = ["arc_lock", "atomic_usize"] }
+# `std` (its default) from fluent-syntax (ADR 0102), in every build that has engine_loc.
+memchr = "2"
 parking_lot = { version = "0.12", features = ["arc_lock"] }
 # `alloc` for ron (material files, ADR 0092).
 serde = { version = "1", features = ["alloc", "derive"] }
@@ -43,6 +45,7 @@ windows-sys = { version = "0.61", features = [
     "Wdk_Storage_FileSystem",
     "Win32_Devices_Display",
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
     "Win32_Media_KernelStreaming",
@@ -73,6 +76,9 @@ windows-sys = { version = "0.61", features = [
 # are unified here, as build dependencies (hence the empty build script). `syn` gets `full`
 # from zerocopy-derive (through `half`, ADR 0083) in every build that has engine_assets, and
 # not in the others, which rebuilt every proc macro and their users in turn; `extra-traits`
-# from strum_macros (through rav1d, ADR 0100) in every build that has engine_video.
+# from strum_macros (through rav1d, ADR 0100) in every build that has engine_video. Syn 3
+# gets `extra-traits`, `fold` and `visit` from ICU4X's derives (synstructure, yoke-derive,
+# zerofrom-derive, zerovec-derive; ADR 0102) in every build that has engine_loc.
 [build-dependencies]
 syn = { version = "2", features = ["extra-traits", "full"] }
+syn3 = { package = "syn", version = "3", features = ["extra-traits", "fold", "visit"] }

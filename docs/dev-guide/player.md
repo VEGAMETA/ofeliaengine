@@ -208,6 +208,14 @@ game is running.
 | `global_illumination` | the GPU class's (`None`), your `GiSettings`, or off (`Some(None)`) |
 | `reflection_probes` | the probes' room and captures, or off (`None`) |
 | `contact_shadows` | the sun's contact shadows, off by default |
+| `languages` | the player's languages for your text; `None`: Windows' display languages |
+
+## Your game's text
+
+`text: Some(TextSource::Folder { dir: "loc".into(), source: "en".into() })` in development,
+`TextSource::Pack("strings.pack".into())` in a shipped game: the localizer is then the
+world's `Localizer` resource, in the first of the player's languages your text has. A
+folder is kept live, an edit showing in the running game. See `localization.md`.
 
 ## Crash reports
 
