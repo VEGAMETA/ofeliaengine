@@ -38,7 +38,7 @@
   - **Hulls:** 7-356 µs to build, 0.5-3.8 µs to restore.
   - **CoACD fits better than V-HACD with 2-10 times fewer hulls:** the table, 3 hulls
     against 8-16 for a U, 5 against 8-32 for a table, sticking out 0-0.6 % of the size against
-    1-2 %. It is 20-90 times slower in its own build: 1.4-196 s per model.
+    1-2 %. It is 20-90 times slower in its own build: 1.4-288 s per model.
 
 ## Options
 
@@ -57,7 +57,7 @@
 
 1. **CoACD's C++, vendored:** OpenVDB (MPL-2.0), Boost (BSL-1.0, not on the allowed list),
    CDT (MPL-2.0), an LGPL `sobol.cpp`. Out.
-2. **V-HACD 4.1, vendored:** one BSD-3 header, no dependencies, 0.3-2.7 s per model. It
+2. **V-HACD 4.1, vendored:** one BSD-3 header, no dependencies, 0.3-3.1 s per model. It
    fills its hull budget, fits worse, and with a small budget fills cavities (a mug with 8
    hulls: 91 % overfill). Kept as the fallback.
 3. **Our own Rust implementation of CoACD's algorithm** (chosen by the owner): its quality,

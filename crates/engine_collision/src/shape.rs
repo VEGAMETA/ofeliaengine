@@ -184,6 +184,73 @@ fn circle_points(relative: f32) -> Vec<Vec3> {
 }
 
 impl Shape {
+    /// Points whose convex hull is the shape: a box's corners, a hull's points, a mesh's
+    /// vertices; round shapes' surfaces sampled so that the hull lies within `tolerance`
+    /// of them (scene units).
+    pub fn hull_points(&self, tolerance: f32) -> Vec<Vec3> {
+        match self {
+            Self::Box {
+                center,
+                rotation,
+                half_extents,
+            } => (0..8)
+                .map(|i| {
+                    let corner = Vec3::new(
+                        if i & 1 == 0 { -1.0 } else { 1.0 },
+                        if i & 2 == 0 { -1.0 } else { 1.0 },
+                        if i & 4 == 0 { -1.0 } else { 1.0 },
+                    );
+                    *center + *rotation * (corner * *half_extents)
+                })
+                .collect(),
+            Self::Sphere { center, radius } => sphere_points(tolerance / radius.max(1e-30))
+                .into_iter()
+                .map(|p| *center + p * *radius)
+                .collect(),
+            Self::Capsule {
+                center,
+                rotation,
+                half_height,
+                radius,
+            } => {
+                let relative = tolerance / (radius + half_height).max(1e-30);
+                let mut local: Vec<Vec3> = sphere_points(relative)
+                    .into_iter()
+                    .map(|p| {
+                        let y = if p.y >= 0.0 {
+                            *half_height
+                        } else {
+                            -*half_height
+                        };
+                        p * *radius + Vec3::new(0.0, y, 0.0)
+                    })
+                    .collect();
+                // The straight part's ends.
+                for p in circle_points(relative) {
+                    local.push(p * *radius + Vec3::new(0.0, *half_height, 0.0));
+                    local.push(p * *radius - Vec3::new(0.0, *half_height, 0.0));
+                }
+                local.into_iter().map(|p| *center + *rotation * p).collect()
+            }
+            Self::Cylinder {
+                center,
+                rotation,
+                half_height,
+                radius,
+            } => {
+                let mut points = Vec::new();
+                for p in circle_points(tolerance / radius.max(1e-30)) {
+                    for y in [*half_height, -*half_height] {
+                        points.push(*center + *rotation * (p * *radius + Vec3::new(0.0, y, 0.0)));
+                    }
+                }
+                points
+            }
+            Self::Hull { points } => points.clone(),
+            Self::Mesh { vertices, .. } => vertices.clone(),
+        }
+    }
+
     /// Volume (a mesh's: what its triangles enclose, meaningful when it is closed).
     pub fn volume(&self) -> f32 {
         match self {
@@ -229,16 +296,7 @@ impl Shape {
                 },
                 // A parallelepiped: the hull of its corners, exactly.
                 None => Self::Hull {
-                    points: (0..8)
-                        .map(|i| {
-                            let corner = Vec3::new(
-                                if i & 1 == 0 { -1.0 } else { 1.0 },
-                                if i & 2 == 0 { -1.0 } else { 1.0 },
-                                if i & 4 == 0 { -1.0 } else { 1.0 },
-                            );
-                            point(*center + *rotation * (corner * *half_extents))
-                        })
-                        .collect(),
+                    points: self.hull_points(0.0).into_iter().map(point).collect(),
                 },
             },
             Self::Sphere { center, radius } => match rotation_and_scale(linear) {
@@ -248,15 +306,14 @@ impl Shape {
                         radius: radius * s.x,
                     }
                 }
-                _ => {
-                    let size = radius * column_max(linear);
-                    Self::Hull {
-                        points: sphere_points(tolerance / size.max(1e-30))
-                            .into_iter()
-                            .map(|p| point(*center + p * *radius))
-                            .collect(),
-                    }
-                }
+                // The tolerance in the shape's own units.
+                _ => Self::Hull {
+                    points: self
+                        .hull_points(tolerance / column_max(linear).max(1e-30))
+                        .into_iter()
+                        .map(point)
+                        .collect(),
+                },
             },
             Self::Capsule {
                 center,
@@ -270,32 +327,14 @@ impl Shape {
                     half_height: half_height * s.y,
                     radius: radius * s.x,
                 },
-                _ => {
-                    let size = (radius + half_height) * column_max(linear);
-                    let relative = tolerance / size.max(1e-30);
-                    let mut local: Vec<Vec3> = sphere_points(relative)
+                // The tolerance in the shape's own units.
+                _ => Self::Hull {
+                    points: self
+                        .hull_points(tolerance / column_max(linear).max(1e-30))
                         .into_iter()
-                        .map(|p| {
-                            let y = if p.y >= 0.0 {
-                                *half_height
-                            } else {
-                                -*half_height
-                            };
-                            p * *radius + Vec3::new(0.0, y, 0.0)
-                        })
-                        .collect();
-                    // The straight part's ends.
-                    for p in circle_points(relative) {
-                        local.push(p * *radius + Vec3::new(0.0, *half_height, 0.0));
-                        local.push(p * *radius - Vec3::new(0.0, *half_height, 0.0));
-                    }
-                    Self::Hull {
-                        points: local
-                            .into_iter()
-                            .map(|p| point(*center + *rotation * p))
-                            .collect(),
-                    }
-                }
+                        .map(point)
+                        .collect(),
+                },
             },
             Self::Cylinder {
                 center,
@@ -309,18 +348,14 @@ impl Shape {
                     half_height: half_height * s.y,
                     radius: radius * s.x,
                 },
-                _ => {
-                    let size = radius * column_max(linear);
-                    let mut points = Vec::new();
-                    for p in circle_points(tolerance / size.max(1e-30)) {
-                        for y in [*half_height, -*half_height] {
-                            points.push(point(
-                                *center + *rotation * (p * *radius + Vec3::new(0.0, y, 0.0)),
-                            ));
-                        }
-                    }
-                    Self::Hull { points }
-                }
+                // The tolerance in the shape's own units.
+                _ => Self::Hull {
+                    points: self
+                        .hull_points(tolerance / column_max(linear).max(1e-30))
+                        .into_iter()
+                        .map(point)
+                        .collect(),
+                },
             },
             Self::Hull { points } => Self::Hull {
                 points: points.iter().map(|&p| point(p)).collect(),

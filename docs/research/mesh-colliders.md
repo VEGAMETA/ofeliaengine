@@ -268,24 +268,57 @@ Tree Search", SIGGRAPH 2022.
 | WaterBottle * | V-HACD 32 hulls, 5 % | 32 | 779 | 1.0 s | 0.6% | 8.0% | 2.03% |
 | WaterBottle * | CoACD 0.05 | 4 | 5637 | 37.8 s | 3.2% | 0.5% | 0.72% |
 | WaterBottle * | CoACD 0.05, hulls of ≤ 64 vertices | 4 | 256 | 43.7 s | 1.2% | 5.0% | 1.77% |
+| BoomBox * | V-HACD 8 hulls, 1 % | 8 | 464 | 3.1 s | 4.9% | 6.8% | 2.87% |
+| BoomBox * | V-HACD 16 hulls, 1 % | 16 | 948 | 3.1 s | 2.9% | 4.9% | 3.96% |
+| BoomBox * | V-HACD 32 hulls, 5 % | 32 | 1030 | 2.3 s | 1.0% | 7.0% | 2.40% |
+| BoomBox * | CoACD 0.05 | 26 | 18926 | 195.1 s | 1.2% | 0.3% | 0.73% |
+| BoomBox * | CoACD 0.05, hulls of ≤ 64 vertices | 26 | 1631 | 288.3 s | 0.6% | 13.5% | 0.97% |
+| GlamVelvetSofa * | V-HACD 8 hulls, 1 % | 8 | 279 | 0.8 s | 31.6% | 7.6% | 8.68% |
+| GlamVelvetSofa * | V-HACD 16 hulls, 1 % | 16 | 528 | 0.8 s | 9.4% | 8.1% | 5.92% |
+| GlamVelvetSofa * | V-HACD 32 hulls, 5 % | 32 | 771 | 0.6 s | 3.4% | 10.2% | 3.12% |
+| GlamVelvetSofa * | CoACD 0.05 | 24 | 5217 | 50.9 s | 7.4% | 0.8% | 0.83% |
+| GlamVelvetSofa * | CoACD 0.05, hulls of ≤ 64 vertices | 24 | 1202 | 51.9 s | 6.4% | 4.1% | 0.82% |
+| Lantern * | V-HACD 8 hulls, 1 % | 8 | 94 | 0.3 s | 7.0% | 8.7% | 1.90% |
+| Lantern * | V-HACD 16 hulls, 1 % | 16 | 176 | 0.3 s | 3.5% | 12.5% | 1.89% |
+| Lantern * | V-HACD 32 hulls, 5 % | 32 | 320 | 0.3 s | 1.5% | 16.3% | 1.38% |
+| Lantern * | CoACD 0.05 | 8 | 832 | 22.8 s | 25.6% | 1.2% | 2.10% |
+| Lantern * | CoACD 0.05, hulls of ≤ 64 vertices | 8 | 505 | 22.8 s | 24.0% | 1.7% | 2.14% |
+| SheenChair * | V-HACD 8 hulls, 1 % | 8 | 392 | 1.9 s | 21.3% | 6.3% | 1.66% |
+| SheenChair * | V-HACD 16 hulls, 1 % | 16 | 778 | 1.8 s | 13.4% | 7.1% | 1.67% |
+| SheenChair * | V-HACD 32 hulls, 5 % | 32 | 1169 | 1.6 s | 5.1% | 9.0% | 3.64% |
+| SheenChair * | CoACD 0.05 | 29 | 14213 | 95.3 s | 6.8% | 0.7% | 0.82% |
+| SheenChair * | CoACD 0.05, hulls of ≤ 64 vertices | 29 | 1821 | 104.1 s | 5.5% | 5.0% | 0.82% |
+| ToyCar * | V-HACD 8 hulls, 1 % | 8 | 283 | 1.5 s | 430.3% | 10.1% | 1.42% |
+| ToyCar * | V-HACD 16 hulls, 1 % | 16 | 497 | 1.3 s | 289.5% | 16.6% | 3.38% |
+| ToyCar * | V-HACD 32 hulls, 5 % | 32 | 906 | 1.2 s | 181.9% | 24.4% | 2.83% |
+| ToyCar * | CoACD 0.05 | 110 | 10091 | 142.6 s | 117.1% | 2.9% | 1.19% |
+| ToyCar * | CoACD 0.05, hulls of ≤ 64 vertices | 110 | 6711 | 144.4 s | 113.7% | 3.9% | 1.37% |
+| DragonAttenuation * | V-HACD 8 hulls, 1 % | 8 | 326 | 1.3 s | 83.8% | 24.2% | 1.73% |
+| DragonAttenuation * | V-HACD 16 hulls, 1 % | 16 | 480 | 1.3 s | 67.2% | 29.5% | 1.75% |
+| DragonAttenuation * | V-HACD 32 hulls, 5 % | 32 | 834 | 1.3 s | 45.8% | 34.9% | 1.75% |
+| DragonAttenuation * | CoACD 0.05 | 51 | 6034 | 103.2 s | 66.7% | 1.3% | 1.18% |
+| DragonAttenuation * | CoACD 0.05, hulls of ≤ 64 vertices | 51 | 3144 | 109.7 s | 60.8% | 2.9% | 0.97% |
 
-`*`: not watertight, judged against its voxel solid. Rows for the larger models (BoomBox,
-GlamVelvetSofa, Lantern, SheenChair, ToyCar, Dragon) are added when their runs finish.
+`*`: not watertight, judged against its voxel solid (the ToyCar's and the dragon's are
+thin shells and open in places, so every collider overfills them; compare the methods
+with each other there).
 
 - **At the same or a lower hull count, CoACD sticks out less:**
-  - 0.05-1.6 % of the size against 1-6 % for V-HACD;
-  - it leaves out 0-0.5 % of the volume against V-HACD's 3-8 % on organic models.
+  - 0.05-1.6 % of the size against 1-9 % for V-HACD;
+  - it leaves out 0-3 % of the volume against V-HACD's 3-35 % (the dragon: a third).
 - **V-HACD fills its budget.** With a small one it fills cavities: a mug with 8 hulls is 91 %
   overfull, a torus 16 %.
 - **CoACD finds the natural parts:**
   - the U in 3 hulls, the table and the stairs in 5;
   - the avocado in 3, the bottle in 4.
-- **The torus is where V-HACD's 32 hulls beat CoACD's 11** (1.1 against 1.6 % sticking out).
+- **Where V-HACD's 32 hulls stick out less:** the torus (1.1 against 1.6 %, CoACD 11 hulls)
+  and the lantern's thin frame (1.4 against 2.1 %, CoACD 8 hulls).
+- **Many separate parts need many hulls:** the ToyCar takes 110 from CoACD, the dragon 51.
 - **CoACD's own hull decimation** (64 vertices) is an inner approximation: 4-11 % left out.
   Our hulls are limited by an error bound, not only by a count (8c-3).
 - **Time:**
   - V-HACD: 0.6-2.7 s on all threads;
-  - CoACD: 1.4-176 s, mostly on one thread.
+  - CoACD: 1.4-288 s, mostly on one thread.
 
 ## Level geometry: triangle meshes in Jolt
 

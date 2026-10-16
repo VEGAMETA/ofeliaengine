@@ -22,3 +22,6 @@ engine_core.workspace = true
 engine_crash.workspace = true
 engine_log.workspace = true
 engine_shader.workspace = true
+# Colliders baked into Jolt's binary form for packs (ADR 0101).
+engine_physics.workspace = true
+engine_physics_jolt.workspace = true

@@ -48,8 +48,9 @@ pub const MAGIC: [u8; 4] = *b"OFPK";
 /// meshes stored for streaming: the coarsest detail level in the mesh entry, each finer
 /// level's extra vertices and indices in a mesh level entry. Version 4 (ADR 0083) adds
 /// cooked HDR panoramas (`crate::panorama`). Version 5 (ADR 0092) adds material types (their
-/// compiled entry points) and the scene's materials of those types.
-pub const VERSION: u32 = 5;
+/// compiled entry points) and the scene's materials of those types. Version 6 (ADR 0101) adds
+/// colliders and the scene's bodies (`crate::colliders`).
+pub const VERSION: u32 = 6;
 /// Oldest version this engine reads.
 pub const MIN_VERSION: u32 = 1;
 /// Largest entry a pack accepts (raw bytes): 4 GiB.
@@ -113,6 +114,12 @@ pub enum EntryKind {
     /// A material type: its names and its fragment entry points' SPIR-V (version 5,
     /// ADR 0092).
     MaterialType,
+    /// A collider: its shapes in the engine's form, and in a physics backend's binary form
+    /// once baked (version 6, ADR 0101; `crate::colliders`).
+    Collider,
+    /// The scene's bodies: their colliders, transforms, motions and the instances they
+    /// move (version 6, ADR 0101).
+    Bodies,
 }
 
 impl EntryKind {
@@ -126,6 +133,8 @@ impl EntryKind {
             Self::MeshLevel => 6,
             Self::Panorama => 7,
             Self::MaterialType => 8,
+            Self::Collider => 9,
+            Self::Bodies => 10,
         }
     }
 
@@ -137,6 +146,7 @@ impl EntryKind {
             Self::MeshLevel => 3,
             Self::Panorama => 4,
             Self::MaterialType => 5,
+            Self::Collider | Self::Bodies => 6,
         }
     }
 
@@ -150,6 +160,8 @@ impl EntryKind {
             6 => Some(Self::MeshLevel),
             7 => Some(Self::Panorama),
             8 => Some(Self::MaterialType),
+            9 => Some(Self::Collider),
+            10 => Some(Self::Bodies),
             _ => None,
         }
     }

@@ -275,6 +275,7 @@ dependencies = [
  "block_compression",
  "bytemuck",
  "engine_anim",
+ "engine_collision",
  "engine_core",
  "engine_ecs",
  "engine_platform",
@@ -334,6 +335,8 @@ dependencies = [
  "engine_core",
  "engine_crash",
  "engine_log",
+ "engine_physics",
+ "engine_physics_jolt",
  "engine_shader",
 ]
 

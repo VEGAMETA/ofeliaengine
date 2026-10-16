@@ -35,13 +35,9 @@ pub fn is_closed(triangles: &[[u32; 3]]) -> bool {
         .all(|(&(a, b), &count)| count == 1 && edges.get(&(b, a)) == Some(&1))
 }
 
-/// `vertices` welded: vertices closer than `distance` become one (the first of them), and
-/// triangles that collapse are dropped. Returns the new vertices and triangles.
-pub fn weld(
-    vertices: &[Vec3],
-    triangles: &[[u32; 3]],
-    distance: f32,
-) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+/// `vertices` welded: vertices closer than `distance` become one (the first of them).
+/// Returns the vertices kept and, per input vertex, its index among them.
+pub fn weld_vertices(vertices: &[Vec3], distance: f32) -> (Vec<Vec3>, Vec<u32>) {
     let cell = f64::from(distance.max(f32::MIN_POSITIVE));
     let key = |p: DVec3| {
         let q = (p / cell).floor();
@@ -77,6 +73,17 @@ pub fn weld(
         });
         remap.push(index);
     }
+    (out, remap)
+}
+
+/// `vertices` welded ([`weld_vertices`]) and the triangles that collapse dropped. Returns
+/// the new vertices and triangles.
+pub fn weld(
+    vertices: &[Vec3],
+    triangles: &[[u32; 3]],
+    distance: f32,
+) -> (Vec<Vec3>, Vec<[u32; 3]>) {
+    let (out, remap) = weld_vertices(vertices, distance);
     let triangles = triangles
         .iter()
         .map(|t| t.map(|i| remap[i as usize]))
