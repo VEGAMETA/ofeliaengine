@@ -7,7 +7,9 @@
 //!   The game takes a share of the device-local heaps' budget ([`BudgetSettings::share`],
 //!   with an optional cap), and what the rest of the process already uses (render targets,
 //!   the swapchain, geometry that is not streamed, the driver's own) comes off it. What
-//!   remains is the **streaming pool**.
+//!   remains is the **streaming pool**. The free space of the allocator's blocks is not
+//!   the rest's: the OS counts it, but streamed data takes it without any more memory
+//!   (`HeapBudget::unused`; the allocator's newest block is often mostly free).
 //! - **Clients.** Each streaming system ([`GpuBudget::register`]: textures, meshes) reports
 //!   every frame what it holds and what it would like to hold, in three classes
 //!   ([`Demand`]): **required** (never evicted: the smallest levels that keep everything
@@ -119,7 +121,8 @@ pub struct BudgetStats {
     pub device_local: HeapBudget,
     /// The game's share of the budget.
     pub total: u64,
-    /// The process's usage outside the streaming clients.
+    /// The process's usage outside the streaming clients and the free room of the
+    /// allocator's blocks.
     pub other: u64,
     /// What the streaming clients may hold together.
     pub pool: u64,
@@ -232,6 +235,7 @@ impl GpuBudget {
             let mut local = self.queried;
             local.usage = (local.usage + allocated).saturating_sub(self.queried.allocated);
             local.allocated = allocated;
+            local.unused = allocator.device_local_unused_bytes();
             local
         };
         self.distribute(local);
@@ -246,7 +250,12 @@ impl GpuBudget {
         let total = s.cap.map_or(share, |cap| share.min(cap));
         let clients = &mut self.clients[..self.count];
         let resident: u64 = clients.iter().map(|c| c.resident).sum();
-        let other = local.usage.saturating_sub(resident);
+        // What the rest of the process holds: the OS's usage but the streamed bytes and the
+        // free space of the allocator's blocks (which streamed data takes first).
+        let other = local
+            .usage
+            .saturating_sub(local.unused)
+            .saturating_sub(resident);
         let pool = s
             .streaming_limit
             .unwrap_or_else(|| total.saturating_sub(other));
@@ -297,6 +306,7 @@ mod tests {
             budget,
             usage,
             allocated: usage,
+            unused: 0,
         }
     }
 
@@ -343,6 +353,35 @@ mod tests {
         b.distribute(heap(4000 * MIB, 250 * MIB));
         assert_eq!(b.grant(textures), 370 * MIB + 710 * MIB);
         assert_eq!(b.grant(meshes), 110 * MIB + 710 * MIB);
+    }
+
+    #[test]
+    fn free_room_in_the_allocators_blocks_is_the_pools() {
+        let mut b = GpuBudget::with_settings(BudgetSettings {
+            share: 0.5,
+            ..BudgetSettings::default()
+        });
+        let textures = b.register("textures").unwrap();
+        b.report(
+            textures,
+            150 * MIB,
+            Demand {
+                required: 0,
+                visible: 1000 * MIB,
+                cached: 0,
+            },
+        );
+        // 1000 MiB budget, half for the game; the OS counts 350 MiB, of which the textures
+        // hold 150 and the allocator's blocks have 100 free (a new block, mostly empty).
+        b.distribute(HeapBudget {
+            unused: 100 * MIB,
+            ..heap(1000 * MIB, 350 * MIB)
+        });
+        let s = b.stats();
+        assert_eq!((s.other, s.pool), (100 * MIB, 400 * MIB));
+        // Without counting the free room, it would have been the rest's.
+        b.distribute(heap(1000 * MIB, 350 * MIB));
+        assert_eq!((b.stats().other, b.stats().pool), (200 * MIB, 300 * MIB));
     }
 
     #[test]

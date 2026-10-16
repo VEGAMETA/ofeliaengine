@@ -13,7 +13,9 @@
 //! - **Dedicated allocations** when the driver asks for them or a resource is larger
 //!   than half a block (large render targets, big streaming textures).
 //! - An empty block is released unless it is the pool's only empty block, which avoids
-//!   allocate/free thrashing at a boundary.
+//!   allocate/free thrashing at a boundary; of two empty blocks the larger goes. Blocks
+//!   grow as VMA's do (1/8 of the preferred size, doubling with the pool), so the newest is
+//!   often mostly free: [`HeapBudget::unused`] reports that room.
 //!
 //! [`Allocator`] is externally synchronized (`&mut self`): the resource layer above
 //! decides which thread owns it.
@@ -304,6 +306,23 @@ pub struct HeapStats {
     pub usage: Option<u64>,
 }
 
+/// One block of an [`Allocator`]'s pools, as [`Allocator::blocks`] reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockInfo {
+    /// Its memory type.
+    pub memory_type: u32,
+    /// Its memory type's heap.
+    pub heap: u32,
+    /// The resources its pool serves.
+    pub kind: ResourceKind,
+    /// Its size.
+    pub capacity: u64,
+    /// The bytes allocated in it.
+    pub used: u64,
+    /// Allocations in it.
+    pub allocations: u32,
+}
+
 /// One memory heap's budget, as [`Allocator::budget`] reports it.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HeapBudget {
@@ -321,6 +340,10 @@ pub struct HeapBudget {
     /// Bytes of `VkDeviceMemory` this allocator holds in the heap: blocks (used or not)
     /// and dedicated allocations.
     pub allocated: u64,
+    /// Bytes of this allocator's blocks in the heap that no allocation holds (part of
+    /// [`Self::allocated`] and [`Self::usage`]): room its allocations take without any
+    /// more of the OS's memory. Room for streaming is `budget - usage + unused`.
+    pub unused: u64,
 }
 
 /// Every heap's [`HeapBudget`] at one moment (a fixed array: querying it allocates
@@ -352,6 +375,7 @@ impl MemoryBudget {
                 budget: a.budget + h.budget,
                 usage: a.usage + h.usage,
                 allocated: a.allocated + h.allocated,
+                unused: a.unused + h.unused,
             })
     }
 }
@@ -772,15 +796,23 @@ impl Allocator {
                     return;
                 };
                 b.tlsf.free(range);
-                // Keep one empty block per pool as a buffer against thrashing.
-                if b.tlsf.is_empty()
-                    && pool.empty_blocks() > 1
-                    && let Some(b) = pool.blocks[block as usize].take()
-                {
-                    self.device_memory_count -= 1;
-                    // SAFETY: the block is empty: nothing is bound to it any more.
-                    unsafe { self.device.free_memory(b.memory, None) };
-                    engine_profiler::plot!("gpu memory blocks", self.device_memory_count);
+                // Keep one empty block per pool as a buffer against thrashing: the smaller
+                // of two (blocks double as a pool grows, so the larger may be 256 MiB).
+                if b.tlsf.is_empty() && pool.empty_blocks() > 1 {
+                    let larger = pool
+                        .blocks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, b)| b.as_ref().map(|b| (i, b)))
+                        .filter(|(_, b)| b.tlsf.is_empty())
+                        .max_by_key(|(i, b)| (b.tlsf.capacity(), usize::MAX - i))
+                        .map(|(i, _)| i);
+                    if let Some(b) = larger.and_then(|i| pool.blocks[i].take()) {
+                        self.device_memory_count -= 1;
+                        // SAFETY: the block is empty: nothing is bound to it any more.
+                        unsafe { self.device.free_memory(b.memory, None) };
+                        engine_profiler::plot!("gpu memory blocks", self.device_memory_count);
+                    }
                 }
             }
         }
@@ -919,6 +951,29 @@ impl Allocator {
         self.device_memory_count
     }
 
+    /// Every block of every pool (for reports; allocates the list).
+    pub fn blocks(&self) -> Vec<BlockInfo> {
+        let mut out = Vec::new();
+        for (index, pool) in self.pools.iter().enumerate() {
+            let kind = if index % 2 == 0 {
+                ResourceKind::Buffer
+            } else {
+                ResourceKind::Image
+            };
+            for block in pool.blocks.iter().flatten() {
+                out.push(BlockInfo {
+                    memory_type: pool.memory_type,
+                    heap: self.heap_of(pool.memory_type) as u32,
+                    kind,
+                    capacity: block.tlsf.capacity(),
+                    used: block.tlsf.used(),
+                    allocations: block.tlsf.allocation_count(),
+                });
+            }
+        }
+        out
+    }
+
     /// Usage per memory heap, with the OS budget when `VK_EXT_memory_budget` is enabled.
     pub fn heap_stats(&self) -> Vec<HeapStats> {
         let heaps = self.properties.memory_heap_count as usize;
@@ -966,18 +1021,32 @@ impl Allocator {
     /// dedicated allocations), without asking the OS: what [`Self::budget`]'s `allocated`
     /// adds up to over those heaps.
     pub fn device_local_bytes(&self) -> u64 {
+        self.device_local().0
+    }
+
+    /// Bytes of device-local blocks no allocation holds ([`HeapBudget::unused`] of the
+    /// device-local heaps). Allocates nothing.
+    pub fn device_local_unused_bytes(&self) -> u64 {
+        self.device_local().1
+    }
+
+    /// Device-local `VkDeviceMemory` this allocator holds, and what of its blocks is free.
+    fn device_local(&self) -> (u64, u64) {
         let local = |heap: usize| {
             self.properties.memory_heaps[heap]
                 .flags
                 .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
         };
-        let blocks: u64 = self
+        let (mut blocks, mut unused) = (0, 0);
+        for block in self
             .pools
             .iter()
             .filter(|p| local(self.heap_of(p.memory_type)))
             .flat_map(|p| p.blocks.iter().flatten())
-            .map(|b| b.tlsf.capacity())
-            .sum();
+        {
+            blocks += block.tlsf.capacity();
+            unused += block.tlsf.capacity() - block.tlsf.used();
+        }
         let dedicated: u64 = self
             .dedicated
             .iter()
@@ -985,7 +1054,7 @@ impl Allocator {
             .filter(|(heap, _)| local(*heap))
             .map(|(_, d)| d.0)
             .sum();
-        blocks + dedicated
+        (blocks + dedicated, unused)
     }
 
     /// Every heap's budget and usage (`VK_EXT_memory_budget` when enabled) with this
@@ -1009,6 +1078,7 @@ impl Allocator {
             if heap < count {
                 for block in pool.blocks.iter().flatten() {
                     out.heaps[heap].allocated += block.tlsf.capacity();
+                    out.heaps[heap].unused += block.tlsf.capacity() - block.tlsf.used();
                 }
             }
         }

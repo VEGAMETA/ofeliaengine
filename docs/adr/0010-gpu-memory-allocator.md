@@ -122,3 +122,11 @@ they grow: such blocks stay mapped, so every byte of them counts as the process'
 private bytes, and those pools hold little (a few KiB of readback made a 32 MiB block).
 Device-local pools, an integrated GPU's host-visible ones included, are unchanged.
 `flight` on the RTX: system-memory blocks 64 → 20 MiB (`docs/perf/history.md`).
+
+## Addendum (2026-10-16): which empty block stays
+
+A pool keeps one empty block against allocate/free thrashing. Of two empty blocks the
+larger is now released (before: the one that just became empty). Blocks double as a pool
+grows, so the larger may be 256 MiB. `Allocator::blocks` lists every block (its memory
+type, kind, size and used bytes); the budget counts their free room as the streaming
+pool's (ADR 0076's addendum of 2026-10-16).

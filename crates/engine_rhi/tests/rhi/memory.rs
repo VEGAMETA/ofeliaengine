@@ -7,7 +7,7 @@ use crate::common;
 
 use common::{assert_no_validation_errors, gpu};
 use engine_rhi::ash::vk;
-use engine_rhi::{Allocator, MemoryLocation};
+use engine_rhi::{Allocator, MemoryLocation, ResourceKind};
 
 fn buffer_info(size: u64, usage: vk::BufferUsageFlags) -> vk::BufferCreateInfo<'static> {
     vk::BufferCreateInfo::default()
@@ -367,6 +367,80 @@ fn budget_accounting_follows_the_os_usage() {
         "{} after {}",
         freed.usage,
         local.usage
+    );
+    drop(allocator);
+    assert_no_validation_errors(&instance);
+}
+
+/// A pool's blocks double as it grows, so its newest block is often mostly free: the
+/// budget reports that room (`HeapBudget::unused`, which streaming takes first, ADR 0076),
+/// and of two empty blocks the larger is released, the smaller kept against thrashing.
+#[test]
+fn free_room_in_blocks_is_reported_and_the_larger_empty_block_goes() {
+    let Some((instance, device)) = gpu(false) else {
+        return;
+    };
+    let mut allocator = Allocator::new(&device);
+    let buffers_of = |allocator: &Allocator| -> Vec<(u64, u64)> {
+        allocator
+            .blocks()
+            .iter()
+            .filter(|b| b.kind == ResourceKind::Buffer)
+            .map(|b| (b.capacity, b.used))
+            .collect()
+    };
+    // 1 MiB buffers until the pool holds two blocks (the second twice the first).
+    let mut buffers = Vec::new();
+    while buffers_of(&allocator).len() < 2 && buffers.len() < 1000 {
+        buffers.push(
+            allocator
+                .create_buffer(
+                    &buffer_info(1 << 20, vk::BufferUsageFlags::STORAGE_BUFFER),
+                    MemoryLocation::Device,
+                )
+                .unwrap(),
+        );
+    }
+    let blocks = buffers_of(&allocator);
+    println!(
+        "{} buffers of 1 MiB in blocks {:?} MiB",
+        buffers.len(),
+        blocks
+            .iter()
+            .map(|&(c, u)| (c >> 20, u >> 20))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(blocks.len(), 2, "two blocks");
+    assert!(blocks[1].0 > blocks[0].0, "the second block is larger");
+    // The room in them, as the budget reports it.
+    let free: u64 = blocks.iter().map(|&(c, u)| c - u).sum();
+    let unused = allocator.budget().device_local().unused;
+    assert_eq!(
+        unused, free,
+        "the budget's unused bytes are the blocks' free bytes"
+    );
+    assert_eq!(allocator.device_local_unused_bytes(), free);
+    assert!(
+        unused >= blocks[1].0 - (2 << 20),
+        "the newest block is mostly free"
+    );
+    // Everything freed, the newest block's first (it is then the pool's only empty block):
+    // the smaller block stays, the larger goes.
+    for (buffer, memory) in buffers.into_iter().rev() {
+        // SAFETY: never used by the GPU; each pair comes from one create call.
+        unsafe { allocator.destroy_buffer(buffer, memory) };
+    }
+    let left = buffers_of(&allocator);
+    println!(
+        "after freeing: blocks {:?} MiB",
+        left.iter()
+            .map(|&(c, u)| (c >> 20, u >> 20))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        left,
+        vec![(blocks[0].0, 0)],
+        "the smaller empty block is kept"
     );
     drop(allocator);
     assert_no_validation_errors(&instance);

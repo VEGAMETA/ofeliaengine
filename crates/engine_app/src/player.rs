@@ -1082,6 +1082,12 @@ impl Player {
         &self.graph
     }
 
+    /// The GPU memory budget's last frame (ADR 0076): its share, what the rest of the
+    /// process holds, the streaming pool.
+    pub fn budget(&self) -> engine_render::budget::BudgetStats {
+        self.budget.stats()
+    }
+
     /// The frame renderer.
     pub fn renderer(&self) -> &FrameRenderer {
         &self.renderer

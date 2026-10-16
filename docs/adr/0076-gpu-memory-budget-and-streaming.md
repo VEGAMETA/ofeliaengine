@@ -231,3 +231,46 @@ runs. Settled streaming frames allocate nothing (`tests/zero_alloc.rs`). Pack: S
   `docs/research/streaming-fast-turns.md`).
 - Default budget share on integrated GPUs (50 % of a heap the driver makes mostly of system
   memory): fine as a default, or should games pick it per platform?
+
+## Addendum (2026-10-16): the allocator's free room is the pool's (core audit 3, §3.3)
+
+In the flight, the RTX's device-local blocks grew from 320 to 576 MiB while their
+allocations grew from 230 to 248 MiB. The OS counts all of it (787 MiB). The blocks show
+where the free room is (the flight's report now lists them):
+
+| | the RTX, end of the flight | the Radeon |
+|---|---|---|
+| buffers, MiB used of each block | 20 of 32, 3 of 64 | 20 of 32, 3 of 64, 64 of 64 |
+| images, MiB used of each block | 31 of 32, 59 of 64, 126 of 128, **9 of 256** | 127 of 128, **59 of 256** |
+
+No block was empty. The image pool grows as VMA's pools do: a new block is twice the
+largest, from 1/8 of the preferred 256 MiB. A few megabytes of textures past three full
+blocks took a fourth block of 256 MiB. The budget counted its free room as the rest of the
+process's usage, so the streaming pool lost it. Streamed data could have filled that room
+without any more of the OS's memory.
+
+- **`HeapBudget::unused`:** the bytes of the allocator's blocks no allocation holds
+  (`Allocator::device_local_unused_bytes` between queries).
+- **The rest of the process** is now `usage - unused - resident`, and the pool grows by
+  the free room. As VMA's documentation puts it, allocations take the free space of
+  existing blocks before they need new memory. Fragmented free space counts too. A texture
+  that fits no hole takes a new block, which the next reading sees.
+- **Of two empty blocks the larger is released.** Before, the block that became empty went
+  and the other stayed, which could be the larger one. The larger can be 256 MiB, so a pool
+  now keeps its smaller empty block against thrashing.
+- **Measured** (the flight, end):
+  - the rest of the process: RTX 360 MiB, before 688 (the blocks' 328 MiB of free room
+    counted as the rest's);
+  - the Radeon 174 MiB, before 445.
+
+  The streaming pool grows by as much. Neither GPU is short of memory in the flight, so
+  what streams does not change. Under a tight budget (a 4 GiB card, a low setting), the
+  room would have gone unused.
+- **Tests:**
+  - two blocks of a pool (32 and 64 MiB): the budget's unused bytes are their free bytes,
+    and freeing everything keeps the smaller block (both GPUs);
+  - the budget's pool counts the free room (a unit test).
+- **Not changed:** the blocks' growth (VMA's), so the OS still sees the reserved block. A
+  slower growth (half the pool rather than all of it) would halve the reserve and double
+  the new blocks a growing pool makes, each a `vkAllocateMemory` while streaming (733 µs in
+  the flight). It waits for a game short of video memory.
