@@ -497,6 +497,8 @@ pub struct JoltBackend {
     contact_scratch: RefCell<Vec<EngineJoltCharacterContact>>,
     constraints: Vec<*mut JPH_Constraint>,
     bodies: BTreeMap<JPH_BodyID, BodyInfo>,
+    /// World gravity as last set.
+    gravity: Vec3,
     gravity_dirty: bool,
     events: Vec<ContactEvent>,
     stats: PhysicsStats,
@@ -657,6 +659,7 @@ impl JoltBackend {
                 contact_scratch: RefCell::new(Vec::new()),
                 constraints: Vec::new(),
                 bodies: BTreeMap::new(),
+                gravity: settings.gravity,
                 gravity_dirty: false,
                 events: Vec::new(),
                 stats: PhysicsStats::default(),
@@ -870,9 +873,14 @@ impl PhysicsBackend for JoltBackend {
     }
 
     fn set_gravity(&mut self, gravity: Vec3) {
+        self.gravity = gravity;
         let g = v3(gravity);
         // SAFETY: valid system.
         unsafe { JPH_PhysicsSystem_SetGravity(self.system, &g) };
+    }
+
+    fn gravity(&self) -> Vec3 {
+        self.gravity
     }
 
     fn set_gravity_fields(&mut self, fields: &[GravityField]) {

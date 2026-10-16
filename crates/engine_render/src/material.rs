@@ -228,7 +228,17 @@ pub struct MaterialParams {
 
 /// A material in a [`MaterialTable`]. Ids of removed materials are stale: they draw with
 /// the default material.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, bytemuck::Pod, bytemuck::Zeroable)]
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    Hash,
+    bytemuck::Pod,
+    bytemuck::Zeroable,
+    engine_reflect::Reflect,
+)]
 #[repr(C)]
 pub struct MaterialId {
     index: u32,

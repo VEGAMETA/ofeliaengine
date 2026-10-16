@@ -205,8 +205,13 @@ impl SaveImage {
     }
 
     /// Adds (or replaces) a named state of the game or an engine subsystem: physics, the
-    /// clock, a quest log kept outside the world.
+    /// clock, a quest log kept outside the world. The name is one word (it heads a block
+    /// of the text form): `physics`, `quest_log`.
     pub fn set_state<T: Reflect>(&mut self, name: &str, value: &T) {
+        debug_assert!(
+            !name.is_empty() && !name.contains(char::is_whitespace) && !name.contains(['[', ']']),
+            "a state's name is one word: `{name}`"
+        );
         let ty = self.type_index(T::TYPE_INFO);
         let saved = self.encode_now(ty, core::ptr::from_ref(value).cast());
         match self.states.iter_mut().find(|(n, _)| n == name) {
@@ -403,4 +408,37 @@ pub fn capture(world: &World, options: &CaptureOptions<'_>) -> SaveImage {
         image.destroyed.sort_unstable();
     }
     image
+}
+
+/// The entities a save holds without an id: those [`capture`] saves as created again on
+/// load (no `SceneId`, a saved component, not [`Transient`]). Loading a save into a world
+/// removes them first, so they are not doubled.
+pub fn anonymous_entities(world: &World) -> Vec<Entity> {
+    let components = world.components();
+    let (parent_id, children_id) = (
+        world.component_id::<Parent>(),
+        world.component_id::<Children>(),
+    );
+    let scene_id = world.component_id::<SceneId>();
+    let transient = world.component_id::<Transient>();
+    let mut out = Vec::new();
+    for arch in world.archetypes() {
+        if arch.is_empty()
+            || transient.is_some_and(|t| arch.column_index(t).is_some())
+            || scene_id.is_some_and(|s| arch.column_index(s).is_some())
+        {
+            continue;
+        }
+        let saved = arch.components().iter().any(|&cid| {
+            Some(cid) != parent_id
+                && Some(cid) != children_id
+                && components.type_info(cid).is_some_and(|i| !i.attrs.skip)
+        });
+        if saved {
+            for chunk in 0..arch.chunk_count() {
+                out.extend_from_slice(arch.chunk_entities(chunk));
+            }
+        }
+    }
+    out
 }

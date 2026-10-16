@@ -12,22 +12,28 @@ use engine_render::material::MaterialId;
 use engine_render::mesh::MeshId;
 
 /// Draws the entity's mesh with a material at its [`GlobalTransform`].
-/// Saved (ADR 0104): whether it is drawn. The mesh and material are the level's or the
-/// game's own handles, made again when the level loads, not saved.
+/// Saved whole (ADR 0104): the mesh and material as the ids the level and the game gave
+/// them, the same while the game adds its meshes and materials in the same order (a
+/// quickload, the same build; a stale id draws nothing).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct MeshRenderer {
     /// The mesh in the geometry pool.
-    #[reflect(opaque)]
     pub mesh: MeshId,
     /// The material in the material table.
-    #[reflect(opaque)]
     pub material: MaterialId,
     /// Nonzero: drawn. Zero: hidden (the entity keeps its other components).
     pub visible: u32,
 }
 
 reflect_component!(pod MeshRenderer);
+
+/// Nothing drawn: what a save's values are read into.
+impl Default for MeshRenderer {
+    fn default() -> Self {
+        bytemuck::Zeroable::zeroed()
+    }
+}
 
 impl MeshRenderer {
     /// A visible renderer.

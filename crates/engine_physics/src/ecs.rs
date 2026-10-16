@@ -205,6 +205,17 @@ impl FixedStep {
     pub fn alpha(&self) -> f32 {
         (self.accumulated / self.dt).clamp(0.0, 1.0) as f32
     }
+
+    /// Seconds accumulated toward the next step: what a save keeps of the clock beside
+    /// the tick (ADR 0104).
+    pub fn remainder(&self) -> f64 {
+        self.accumulated
+    }
+
+    /// Sets the seconds accumulated toward the next step (a save loaded), less than a step.
+    pub fn set_remainder(&mut self, seconds: f64) {
+        self.accumulated = seconds.clamp(0.0, self.dt * (1.0 - 1e-9));
+    }
 }
 
 /// Moves data between the ECS and a physics world. Create it once per ECS world; it keeps

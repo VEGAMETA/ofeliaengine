@@ -430,7 +430,7 @@ fn a_game_saves_what_it_likes_and_adds_it_back_alone() {
     // A save of the game's own data only.
     let mut image = engine_save::SaveImage::new();
     image.set_state(
-        "photo mode",
+        "photo_mode",
         &Photo {
             title: "Sunset over the castle".to_owned(),
             exposure: 1.5,
@@ -439,7 +439,7 @@ fn a_game_saves_what_it_likes_and_adds_it_back_alone() {
     );
     let save = decode(&encode(&image, Encoding::Binary, &SaveHeader::default()).unwrap()).unwrap();
     assert_eq!(save.entities(), 0);
-    let photo: Photo = save.state("photo mode").unwrap().unwrap();
+    let photo: Photo = save.state("photo_mode").unwrap().unwrap();
     assert_eq!(photo.tags[1], "golden hour");
 
     // One character, out of a whole world, added to another world twice.
