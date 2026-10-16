@@ -1170,6 +1170,7 @@ mod mesh_tests {
                 budget: 1 << 40,
                 usage: 0,
                 allocated: 0,
+                unused: 0,
             });
             for r in &self.requests {
                 self.geometry.meshes[r.mesh.slot() as usize].0 = r.level;
@@ -1411,6 +1412,7 @@ mod tests {
                 budget: 1 << 40,
                 usage: 0,
                 allocated: 0,
+                unused: 0,
             });
             for r in &self.requests {
                 self.pool.upload(r);

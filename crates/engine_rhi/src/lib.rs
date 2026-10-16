@@ -51,8 +51,8 @@ pub use frames::{Frame, Frames};
 pub use instance::{Instance, InstanceDesc, ValidationReport};
 pub use lazy_pipeline::LazyPipeline;
 pub use memory::{
-    Allocation, AllocationRequest, Allocator, AllocatorConfig, DedicatedTo, HeapBudget, HeapStats,
-    MemoryBudget, MemoryLocation, Range, RangeAllocator, ResourceKind,
+    Allocation, AllocationRequest, Allocator, AllocatorConfig, BlockInfo, DedicatedTo, HeapBudget,
+    HeapStats, MemoryBudget, MemoryLocation, Range, RangeAllocator, ResourceKind,
 };
 pub use pipeline::{
     Blend, DepthBias, GraphicsPipelineDesc, Pipeline, PipelineContext, PipelineCreationStats,

@@ -457,7 +457,12 @@ mod windowed {
         )
     }
 
-    fn memory_report(label: &str, allocator: &Allocator, graph: &RenderGraph) {
+    fn memory_report(
+        label: &str,
+        allocator: &Allocator,
+        graph: &RenderGraph,
+        streaming: engine_render::budget::BudgetStats,
+    ) {
         let (working, private) = process_memory();
         println!("**Memory, {label}:**\n");
         println!(
@@ -482,6 +487,33 @@ mod windowed {
             );
         }
         let engine_mapped: u64 = heap_stats.iter().map(|s| s.mapped_bytes).sum();
+        // The allocator's blocks: what each holds of its size.
+        let blocks = allocator.blocks();
+        let line: Vec<String> = blocks
+            .iter()
+            .map(|b| {
+                format!(
+                    "{}/{:?} {:.0} of {:.0}",
+                    b.heap,
+                    b.kind,
+                    b.used as f64 / MIB,
+                    b.capacity as f64 / MIB
+                )
+            })
+            .collect();
+        println!(
+            "\nBlocks (heap/kind MiB used of size): {}.",
+            line.join(", ")
+        );
+        println!(
+            "Streaming budget (ADR 0076): pool {:.0} MiB of the game's {:.0}; the rest of the process {:.0} MiB (the blocks' free room, {:.0}, not counted); streamed {:.0} MiB of {:.0} wanted.",
+            streaming.pool as f64 / MIB,
+            streaming.total as f64 / MIB,
+            streaming.other as f64 / MIB,
+            streaming.device_local.unused as f64 / MIB,
+            streaming.resident as f64 / MIB,
+            streaming.demand as f64 / MIB,
+        );
         let g = graph.stats();
         println!(
             "\nTransient targets: {:.1} MiB reserved in the heaps this frame used, {:.1} of them shared by the frame slots ({:.1} placed, {:.1} without aliasing), {} resources, {} passes ({} culled). Process: working set {working:.0} MiB, private {private:.0} MiB.\n",
@@ -1244,6 +1276,7 @@ mod windowed {
                     &format!("after {WARMUP} frames"),
                     player.allocator(),
                     player.graph(),
+                    player.budget(),
                 );
             }
         }
@@ -1461,7 +1494,12 @@ mod windowed {
             dlss.report(drawn);
         }
         println!();
-        memory_report("at the end", player.allocator(), player.graph());
+        memory_report(
+            "at the end",
+            player.allocator(),
+            player.graph(),
+            player.budget(),
+        );
         let stats = player.streamer().map(|s| s.stats()).unwrap_or_default();
         println!(
             "Streaming: {} texture levels arrived ({:.1} MiB read), {} mesh levels; request to arrival {:.0} ms on average, {:.0} ms at worst ({} frames); textures planned {:.1} MiB of {:.1} MiB required, grant {:.1} MiB.\n",
