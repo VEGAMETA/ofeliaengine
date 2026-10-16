@@ -52,7 +52,7 @@ pub struct ShapeId(pub u64);
 pub struct ConstraintId(pub u64);
 
 /// A collision layer, `0..PhysicsSettings::layers`. Which layers collide is set by
-/// [`PhysicsSettings::collides`].
+/// [`PhysicsSettings::collides`]; scenes name them ([`PhysicsSettings::layer_names`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Layer(pub u8);
 
@@ -201,6 +201,9 @@ pub enum ShapeDesc<'a> {
         vertices: &'a [Vec3],
         /// Triangles as vertex indices, counter-clockwise seen from outside.
         triangles: &'a [[u32; 3]],
+        /// Each triangle's surface (`u16::MAX`: the shape's own), or empty: all the
+        /// shape's own ([`PhysicsBackend::surface_of`]).
+        surfaces: &'a [u16],
     },
     /// Shapes placed together as one, fixed relative to each other: a prop's convex parts
     /// and primitives (ADR 0101). The compound keeps its children alive.
@@ -379,6 +382,10 @@ pub struct RayHit {
     pub normal: Vec3,
     /// The body's user data.
     pub user_data: u64,
+    /// The part of the body's shape hit (backend-defined): what it is made of is
+    /// [`PhysicsBackend::surface_of`]`(body, part)`, asked only when wanted (it costs a
+    /// lookup per hit).
+    pub part: u32,
 }
 
 /// Which bodies a query sees.
@@ -462,6 +469,8 @@ pub struct ShapeHit {
     pub penetration: f32,
     /// The body's user data.
     pub user_data: u64,
+    /// The part of the body's shape hit (see [`RayHit::part`]).
+    pub part: u32,
 }
 
 /// What happened between two bodies during a step.
@@ -504,6 +513,10 @@ pub struct PhysicsSettings {
     pub layers: u8,
     /// `collides[a]` bit `b`: layers `a` and `b` collide (keep it symmetric).
     pub collides: Vec<u32>,
+    /// The layers' names, by layer: what a scene's colliders rules and glTF collision
+    /// filters name ([`Self::layer`]). The default names its two layers `Static` and
+    /// `Moving`.
+    pub layer_names: Vec<String>,
     /// Worker threads for the backend at most (0: always on the calling thread). The
     /// calling thread runs jobs too, so a step uses up to `threads + 1` threads. The
     /// default is every logical core ([`PhysicsSettings::all_cores`]).
@@ -526,6 +539,7 @@ impl Default for PhysicsSettings {
             max_contact_constraints: 32_768,
             layers: 2,
             collides: vec![0b10, 0b11],
+            layer_names: vec![String::from("Static"), String::from("Moving")],
             threads: Self::all_cores(),
             single_thread_below: 300,
             gravity: Vec3::new(0.0, -9.81, 0.0),
@@ -534,6 +548,15 @@ impl Default for PhysicsSettings {
 }
 
 impl PhysicsSettings {
+    /// The layer named `name` ([`Self::layer_names`]).
+    pub fn layer(&self, name: &str) -> Option<Layer> {
+        self.layer_names
+            .iter()
+            .position(|n| n == name)
+            .filter(|&i| i < usize::from(self.layers))
+            .map(|i| Layer(i as u8))
+    }
+
     /// Worker threads that, with the calling thread, use every logical core.
     pub fn all_cores() -> u32 {
         std::thread::available_parallelism().map_or(0, |n| n.get() as u32 - 1)
@@ -598,6 +621,20 @@ pub trait PhysicsBackend {
     fn create_shape(&mut self, desc: &ShapeDesc<'_>) -> Result<ShapeId, PhysicsError>;
     /// Releases the caller's reference; bodies using it keep it alive.
     fn destroy_shape(&mut self, shape: ShapeId);
+    /// Says what `shape` is made of: [`Self::surface_of`] reports `surface` for hits on
+    /// it, unless a mesh triangle has one of its own. Set it before the shape goes into a
+    /// compound or a body. A backend without surfaces ignores it.
+    fn set_shape_surface(&mut self, shape: ShapeId, surface: u16) {
+        let _ = (shape, surface);
+    }
+
+    /// What a query's hit is made of ([`RayHit::part`], [`ShapeHit::part`]): the hit
+    /// triangle's surface, or its shape's ([`Self::set_shape_surface`]); a cooked scene's
+    /// are glTF material indices. `None`: none, or a backend without surfaces.
+    fn surface_of(&self, body: BodyId, part: u32) -> Option<u16> {
+        let _ = (body, part);
+        None
+    }
     /// Whether `shape` can be scaled by `scale` ([`ShapeDesc::Scaled`]) as it is. Where
     /// not, `engine_collision::Shape::transformed` rebuilds the shape for the scale.
     fn is_valid_scale(&self, shape: ShapeId, scale: Vec3) -> bool;

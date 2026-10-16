@@ -62,8 +62,11 @@ Last updated: 2026-10-16.
   - Done: its P0 (#236: the local lights' shadows' bookkeeping bounded, a CPU stage check
     in the perf gate) and item 1 (VSM's leftover, #237).
   - Item 2 done: the budget counts the allocator's free room (#238), and Reflex's pacing
-    is measured and its late wakes cut (#239, ADR 0023's addendum). Next: item 3, the colliders'
-    rules file.
+    is measured and its late wakes cut (#239, ADR 0023's addendum).
+  - Item 3 done: the colliders' rules file, what a hit is made of, layers by name (ADR 0101
+    8c-2b). Next: item 4, the core's gaps for a game.
+  - The owner (2026-10-16) wants a layer for Claude Code to make games with the engine
+    simply: queue item 5a.
   - **Reflex's tail is the driver's** (616.92): its sleep is never under ~1.5 ms, in
     0.5 ms steps, so above ~500 FPS frames hold at 2 ms. Reflex still halves input to GPU
     done there (1.97 against 3.63 ms) and stays on by default.
@@ -136,7 +139,7 @@ Estimate of 2026-10-16: the technical core about **85 %** done, the whole engine
 (editor, Luau and tooling included) about **57 %** (2026-10-11: 74 % and 50 %). Done
 since 2026-10-11: custom materials, meshlets, cached and virtual shadows, post effects,
 the player crate, video, colliders made from meshes, localization, the third review's
-P0 and its device memory and Reflex items. Left in the core: the colliders' rules file,
+P0 and its device memory and Reflex items, the colliders' rules file. Left in the core:
 navigation, save games, audio, input and networking in the player, recording on the job
 system.
 
@@ -211,11 +214,28 @@ water and impostors stay in §6):
    - The wider tail is the driver's: its sleep is never under ~1.5 ms. Left: a pacer of
      the engine's own above ~500 FPS, and exclusive full screen's hang in a session
      without the foreground (§6).
-3. **8c's rules file and `RayHit`'s surface:** `<scene>.colliders.ron`, documented in the
-   dev guide; every mesh collides as level geometry by default (the owner, 2026-10-16).
+3. ~~**8c's rules file and `RayHit`'s surface**~~ (done 2026-10-16, ADR 0101 8c-2b):
+   - `<scene>.colliders.ron`, documented in the dev guide's physics page; per mesh by name
+     or `#index`;
+   - every mesh level geometry by default;
+   - what a hit is made of on demand (`surface_of`: glTF material indices, about 7 ns a
+     call, nothing when not called);
+   - collision layers by name (`PhysicsSettings::layer_names`, the rules' `layer`, glTF
+     collision filters).
 4. **The core's gaps for a game** (audit 3 §4): navigation; save games; audio, input and
    networking in the player; a dev-guide quick start.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
+5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
+    Code can be connected as simply as possible and make games by itself, without
+    difficulties or crutches"). Design it with 9; the likely parts:
+    - every step headless from the CLI, with machine-readable (JSON) output: cook, build,
+      run offscreen, capture frames, compare golden images, read logs and the profiler's
+      numbers;
+    - a game project template with its own `CLAUDE.md` and a dev guide written for an
+      agent too;
+    - text formats an agent edits safely (they are already RON and Fluent);
+    - an MCP server into the editor and the player: inspect the scene, spawn entities, play
+      and pause, take a screenshot, read errors with their places.
 6. Recording on the job system (§3.5); the Radeon's forward and TAAU, a shadow redraw
    budget (§3.6).
 7. Housekeeping: the probes test's warm-up (§3.7), CLAUDE.md §2 (ADR), the forward

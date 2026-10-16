@@ -18,6 +18,12 @@
 //! - **Dynamic and kinematic bodies** get an entity each (`RigidBody`, `PhysicsPose`,
 //!   `Transform`); the scene instances they move become its children, so transform
 //!   propagation carries them. Static bodies have no entity.
+//! - **Layers:** a body the scene names a collision layer for takes the layer of that name
+//!   in the world's [`PhysicsSettings::layer_names`] (a name the settings lack is an error);
+//!   others take their motion's (static or moving).
+//! - **Surfaces:** what a query hit is made of is
+//!   `physics().surface_of(hit.body, hit.part)`: the glTF material of the triangle, or of
+//!   the prop's mesh.
 //! - The game reaches the world through [`ScenePhysics::physics`] (queries, characters,
 //!   bodies of its own).
 
@@ -67,6 +73,8 @@ pub struct ScenePhysics {
     /// whether the transform's shear went into it (the body then only translates).
     placed: HashMap<(u32, [i32; 9]), (ShapeId, bool)>,
     bodies: Vec<BodyId>,
+    /// The world's settings: the layers the scene's bodies name.
+    settings: PhysicsSettings,
 }
 
 /// Placement tolerance for round shapes rebuilt for a scale (scene units).
@@ -81,6 +89,7 @@ impl ScenePhysics {
             shapes: Vec::new(),
             placed: HashMap::new(),
             bodies: Vec::new(),
+            settings: settings.clone(),
         })
     }
 
@@ -207,6 +216,18 @@ impl ScenePhysics {
                 BodyDesc::fixed(placed.shape, placed.position)
             };
             desc.motion = motion;
+            if let Some(name) = &body.layer {
+                desc.layer = self.settings.layer(name).ok_or_else(|| {
+                    AppError::message(
+                        "the pack's bodies",
+                        format!(
+                            "a body's collision layer `{name}` is not in the world's layer names {:?} \
+                             (PhysicsSettings::layer_names)",
+                            self.settings.layer_names
+                        ),
+                    )
+                })?;
+            }
             desc.rotation = placed.rotation;
             desc.friction = body.friction;
             desc.restitution = body.restitution;

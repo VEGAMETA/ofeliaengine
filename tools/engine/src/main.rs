@@ -5,8 +5,9 @@
 //! ofeliaengine shaders watch [OPTIONS] <ROOT>...   rebuild on every change (Windows)
 //! ofeliaengine cook <SCENE.gltf> -o <OUT.pack>     cook a scene into a pack (ADR 0056), its
 //!                                                  `<SCENE>.materials.ron` and `<SCENE>.pso.ron`
-//!                                                  applied (ADR 0092), its colliders baked
-//!                                                  into Jolt's binary form (ADR 0101)
+//!                                                  applied (ADR 0092), its colliders made by
+//!                                                  `<SCENE>.colliders.ron` and baked into
+//!                                                  Jolt's binary form (ADR 0101)
 //! ofeliaengine loc build <LOC> -o <OUT.pack>       compile a `loc/` folder into a strings
 //!                                                  pack (ADR 0102)
 //! ofeliaengine loc check <LOC> [--code <DIR>]...   check its locales against the source and
@@ -53,8 +54,9 @@ usage:
                                                    <SCENE>.pso.ron (or --pso <RECORD>): a PSO
                                                    record, only the entry points playtests
                                                    drew compiled for the types it names;
-                                                   colliders from its meshes and glTF physics,
-                                                   baked for Jolt (--no-colliders: none)
+                                                   colliders from its meshes and glTF physics
+                                                   by <SCENE>.colliders.ron, baked for Jolt
+                                                   (--no-colliders: none)
   ofeliaengine loc build <LOC> -o <OUT.pack> [--source <LOCALE>] [--pseudo] [--level <N>]
                                                    compile a loc folder (a subfolder of .ftl
                                                    files per locale) into a strings pack: the
@@ -169,6 +171,9 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
         }
         None => MaterialMap::for_scene(&args.scene).map_err(|e| e.to_string())?,
     };
+    // How the meshes collide (ADR 0101): the rules next to the scene.
+    scene.collider_rules = engine_assets::colliders::ColliderRules::for_scene(&args.scene)
+        .map_err(|e| e.to_string())?;
     // glTF's unlit, clear coat and sheen: materials of the engine's built-in types.
     let layered = scene.materials.iter().any(|m| m.layers.any());
     if !map.files.is_empty() || layered {

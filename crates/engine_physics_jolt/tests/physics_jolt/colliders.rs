@@ -247,3 +247,77 @@ fn a_baked_collider_restores_what_was_built() {
     ));
     assert!(close(reach(&restored, -Vec3::Y), 1.5, 2e-3));
 }
+
+/// What each of three rays down onto the surfaces test's collider reports.
+fn surfaces_hit(w: &JoltBackend) -> [Option<u16>; 3] {
+    [
+        Vec3::new(2.0, 10.0, -2.0),
+        Vec3::new(-2.0, 10.0, 2.0),
+        Vec3::new(20.0, 10.0, 0.0),
+    ]
+    .map(|origin| {
+        let hit = w
+            .raycast(
+                &Ray {
+                    origin,
+                    direction: Vec3::new(0.0, -20.0, 0.0),
+                },
+                QueryFilter::default(),
+            )
+            .unwrap();
+        w.surface_of(hit.body, hit.part)
+    })
+}
+
+#[test]
+fn surfaces_reach_the_hits_built_baked_and_scaled() {
+    // A floor of two triangles, one with a surface of its own (3), one taking its shape's
+    // (9); and a box made of 5.
+    let mut c = collider(vec![
+        Shape::Mesh {
+            vertices: vec![
+                Vec3::new(-5.0, 0.0, -5.0),
+                Vec3::new(5.0, 0.0, -5.0),
+                Vec3::new(5.0, 0.0, 5.0),
+                Vec3::new(-5.0, 0.0, 5.0),
+            ],
+            triangles: vec![[0, 2, 1], [0, 3, 2]],
+            surfaces: vec![3, u16::MAX],
+        },
+        Shape::Box {
+            center: Vec3::new(20.0, 1.0, 0.0),
+            rotation: Quat::IDENTITY,
+            half_extents: Vec3::ONE,
+        },
+    ]);
+    c.shapes[0].surface = 9;
+    c.shapes[1].surface = 5;
+    let expected = [Some(3), Some(9), Some(5)];
+
+    let (w, _) = placed_world(&c, Affine3A::IDENTITY);
+    assert_eq!(surfaces_hit(&w), expected, "built");
+
+    let baked = bake(&mut world(), &c).unwrap().unwrap();
+    let mut restored = world();
+    let shape = restored
+        .create_baked_shape(&baked.bytes, baked.castable)
+        .unwrap();
+    restored
+        .create_body(&BodyDesc::fixed(shape, Vec3::ZERO))
+        .unwrap();
+    assert_eq!(surfaces_hit(&restored), expected, "baked");
+
+    // Stretched along Z: the rays still land on the same pieces.
+    let (w, _) = placed_world(&c, Affine3A::from_scale(Vec3::new(1.0, 1.0, 1.5)));
+    assert_eq!(surfaces_hit(&w), expected, "scaled");
+
+    // Without surfaces, none.
+    for s in &mut c.shapes {
+        s.surface = u16::MAX;
+    }
+    if let Shape::Mesh { surfaces, .. } = &mut c.shapes[0].shape {
+        surfaces.clear();
+    }
+    let (w, _) = placed_world(&c, Affine3A::IDENTITY);
+    assert_eq!(surfaces_hit(&w), [None; 3], "none");
+}

@@ -11,7 +11,9 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/BodyInterface.h>
 #include <Jolt/Physics/Character/CharacterVirtual.h>
+#include <Jolt/Physics/Body/Body.h>
 #include <Jolt/Physics/Collision/Shape/CapsuleShape.h>
+#include <Jolt/Physics/Collision/Shape/MeshShape.h>
 #include <Jolt/Physics/Collision/Shape/RotatedTranslatedShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 #include <Jolt/Physics/PhysicsSystem.h>
@@ -424,6 +426,26 @@ extern "C" JPH_Shape* engine_jolt_shape_restore(const uint8_t* bytes, size_t siz
 	Shape* shape = const_cast<Shape*>(result.Get().GetPtr());
 	shape->AddRef();
 	return reinterpret_cast<JPH_Shape*>(shape);
+}
+
+// What a query hit is made of (ADR 0101, `RayHit::surface`): the user data of the leaf
+// `sub_shape` reaches in `body`'s shape. A mesh triangle's own (per-triangle user data)
+// when it has one, else the leaf shape's; 0: none.
+extern "C" uint64_t engine_jolt_hit_surface(const JPH_Body* body, uint32_t sub_shape)
+{
+	SubShapeID id;
+	id.SetValue(sub_shape);
+	SubShapeID remainder;
+	const Shape* leaf = reinterpret_cast<const Body*>(body)->GetShape()->GetLeafShape(id, remainder);
+	if (leaf == nullptr)
+		return 0;
+	if (leaf->GetSubType() == EShapeSubType::Mesh)
+	{
+		uint32 triangle = static_cast<const MeshShape*>(leaf)->GetTriangleUserData(remainder);
+		if (triangle != 0)
+			return triangle;
+	}
+	return leaf->GetUserData();
 }
 
 // ---------------------------------------------------------------------------------------

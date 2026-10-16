@@ -114,6 +114,7 @@ fn main() {
             .create_shape(&ShapeDesc::TriangleMesh {
                 vertices: &vertices,
                 triangles: &triangles,
+                surfaces: &[],
             })
             .unwrap();
         let build = t.elapsed().as_secs_f64() * 1e3;

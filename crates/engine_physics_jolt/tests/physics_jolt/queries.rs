@@ -322,6 +322,7 @@ fn meshes_are_targets_but_not_cast() {
                 Vec3::new(-5.0, 0.0, 5.0),
             ],
             triangles: &[[0, 2, 1], [0, 3, 2]],
+            surfaces: &[],
         })
         .unwrap();
     let floor = w.create_body(&BodyDesc::fixed(mesh, Vec3::ZERO)).unwrap();

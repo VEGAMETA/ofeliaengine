@@ -362,6 +362,7 @@ fn shapes_and_teleport() {
                 Vec3::new(-5.0, 0.0, 5.0),
             ],
             triangles: &[[0, 2, 1], [0, 3, 2]],
+            surfaces: &[],
         })
         .unwrap();
     w.create_body(&BodyDesc::fixed(mesh, Vec3::ZERO)).unwrap();

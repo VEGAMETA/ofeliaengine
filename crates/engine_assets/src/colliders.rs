@@ -10,12 +10,19 @@
 //!    name, Unreal's convention): the named node's collider, made of their hulls and fitted
 //!    primitives. They are not drawn. One that names nothing is a static collider of its
 //!    own.
-//! 3. **The rules** ([`ColliderRules`]) for every other mesh node: by default static level
-//!    geometry, its glTF mesh's triangles exactly as drawn (all primitives in one shape, each
-//!    triangle's surface its primitive's material); a dynamic prop gets a fitted box,
-//!    sphere, capsule or cylinder within 10 % of its hull's volume, else its hull (at most
-//!    64 points), when it is convex enough; a concave one gets convex parts. Skinned
-//!    meshes get nothing.
+//! 3. **The rules** ([`ColliderRules`], `<scene>.colliders.ron` beside the glTF) for every
+//!    other mesh node: by default static level geometry, its glTF mesh's triangles exactly
+//!    as drawn (all primitives in one shape, each triangle's surface its primitive's
+//!    material); a dynamic prop gets a fitted box, sphere, capsule or cylinder within 10 %
+//!    of its hull's volume, else its hull (at most 64 points), when it is convex enough; a
+//!    concave one gets convex parts. Skinned meshes get nothing. A mesh's own rules
+//!    ([`ColliderRules::meshes`]) say where it differs.
+//!
+//! **Surfaces** (what a ray hit is made of, `PhysicsBackend::surface_of`) are glTF
+//! material indices: a level mesh's triangles carry their primitives' materials; a prop's
+//! shapes, and authored colliders, the main material of their mesh (the one with the most
+//! triangles). **Layers** are names ([`CookedBody::layer`]): the rules', or a glTF
+//! collider's collision filter's first system; the game's physics settings number them.
 //!
 //! **Convex parts** (`engine_collision::decompose`, CoACD's algorithm): a simulated body
 //! cannot be a triangle mesh, so a dynamic prop's concave mesh, and a dynamic glTF physics
@@ -41,7 +48,8 @@ use engine_collision::{Collider, ColliderShape, Origin, Shape};
 use engine_core::hash::{StableHasher, hash128};
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat3, Mat4, Quat, Vec3};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 /// What moves a body.
@@ -113,6 +121,228 @@ pub struct ColliderRules {
     /// How concave meshes of simulated bodies are split into convex parts: CoACD's
     /// concavity threshold (0.05 of the mesh's size), as many parts as it needs.
     pub parts: DecomposeSettings,
+    /// The collision layer of the bodies these rules make, by name (the game's
+    /// `PhysicsSettings::layer_names`); none: by their motion.
+    pub layer: Option<String>,
+    /// Per glTF mesh, by its name or `#index` (`#3`: the fourth): where its rules differ.
+    pub meshes: BTreeMap<String, MeshRules>,
+}
+
+/// One glTF mesh's rules: each field it sets replaces [`ColliderRules`]'s.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct MeshRules {
+    /// What its nodes become.
+    pub bodies: Option<DefaultBodies>,
+    /// Its collider as level geometry.
+    pub static_shape: Option<StaticShape>,
+    /// Its collider as a prop.
+    pub dynamic_shape: Option<DynamicShape>,
+    /// Its bodies' collision layer, by name.
+    pub layer: Option<String>,
+}
+
+/// One mesh's rules, resolved.
+struct Resolved<'a> {
+    bodies: DefaultBodies,
+    static_shape: StaticShape,
+    dynamic_shape: DynamicShape,
+    layer: Option<&'a str>,
+}
+
+impl ColliderRules {
+    /// The rules' path for a scene: `scene.gltf` → `scene.colliders.ron`.
+    pub fn path_for(scene: &Path) -> PathBuf {
+        scene.with_extension("colliders.ron")
+    }
+
+    /// Parses a rules file (see the dev guide's physics page): every field optional.
+    pub fn parse(text: &str) -> Result<Self, ColliderRulesError> {
+        let file: rules_file::File = ron::Options::default()
+            .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
+            .from_str(text)
+            .map_err(|e| ColliderRulesError {
+                path: None,
+                message: format!("{}:{}: {}", e.span.start.line, e.span.start.col, e.code),
+            })?;
+        Ok(file.into_rules())
+    }
+
+    /// The rules next to `scene`, or the defaults when there are none.
+    pub fn for_scene(scene: &Path) -> Result<Self, ColliderRulesError> {
+        let path = Self::path_for(scene);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(ColliderRulesError {
+                    path: Some(path),
+                    message: e.to_string(),
+                });
+            }
+        };
+        Self::parse(&text).map_err(|e| ColliderRulesError {
+            path: Some(path),
+            message: e.message,
+        })
+    }
+
+    /// Mesh `mesh`'s rules: its own where it has them, by name, then by `#index`.
+    fn resolve(&self, scene: &ImportedScene, mesh: usize) -> Resolved<'_> {
+        let own = scene
+            .meshes
+            .get(mesh)
+            .and_then(|m| self.meshes.get(&m.name).filter(|_| !m.name.is_empty()))
+            .or_else(|| self.meshes.get(&format!("#{mesh}")));
+        Resolved {
+            bodies: own.and_then(|o| o.bodies).unwrap_or(self.bodies),
+            static_shape: own
+                .and_then(|o| o.static_shape)
+                .unwrap_or(self.static_shape),
+            dynamic_shape: own
+                .and_then(|o| o.dynamic_shape)
+                .unwrap_or(self.dynamic_shape),
+            layer: own
+                .and_then(|o| o.layer.as_deref())
+                .or(self.layer.as_deref()),
+        }
+    }
+}
+
+/// A rules file that does not parse or cannot be read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColliderRulesError {
+    /// The file, when it was read from one.
+    pub path: Option<PathBuf>,
+    /// What is wrong (with its line and column).
+    pub message: String,
+}
+
+impl core::fmt::Display for ColliderRulesError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match &self.path {
+            Some(path) => write!(f, "{}: {}", path.display(), self.message),
+            None => f.write_str(&self.message),
+        }
+    }
+}
+
+impl std::error::Error for ColliderRulesError {}
+
+/// `<scene>.colliders.ron`'s form: what an artist writes. "No collision" is `collides:
+/// false` rather than a variant named `None` (which RON reads as a missing value).
+mod rules_file {
+    use super::{ColliderRules, DefaultBodies, DynamicShape, MeshRules, StaticShape};
+    use serde::Deserialize;
+    use std::collections::BTreeMap;
+
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    pub(super) enum Bodies {
+        Static,
+        Dynamic,
+    }
+
+    #[derive(Debug, Clone, Copy, Deserialize)]
+    pub(super) enum Dynamic {
+        Auto,
+        Box,
+        Sphere,
+        Capsule,
+        Hull,
+        Parts,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    pub(super) struct Parts {
+        threshold: Option<f64>,
+        max_parts: Option<usize>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    pub(super) struct Mesh {
+        bodies: Option<Bodies>,
+        collides: Option<bool>,
+        dynamic_shape: Option<Dynamic>,
+        layer: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Default, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    pub(super) struct File {
+        bodies: Option<Bodies>,
+        collides: Option<bool>,
+        dynamic_shape: Option<Dynamic>,
+        parts: Option<Parts>,
+        no_collision: Vec<String>,
+        layer: Option<String>,
+        meshes: BTreeMap<String, Mesh>,
+    }
+
+    fn bodies(b: Option<Bodies>, collides: Option<bool>) -> Option<DefaultBodies> {
+        match (b, collides) {
+            (_, Some(false)) => Some(DefaultBodies::None),
+            (Some(Bodies::Static), _) => Some(DefaultBodies::Static),
+            (Some(Bodies::Dynamic), _) => Some(DefaultBodies::Dynamic),
+            (None, _) => None,
+        }
+    }
+
+    fn dynamic(d: Dynamic) -> DynamicShape {
+        match d {
+            Dynamic::Auto => DynamicShape::Auto,
+            Dynamic::Box => DynamicShape::Box,
+            Dynamic::Sphere => DynamicShape::Sphere,
+            Dynamic::Capsule => DynamicShape::Capsule,
+            Dynamic::Hull => DynamicShape::Hull,
+            Dynamic::Parts => DynamicShape::Parts,
+        }
+    }
+
+    impl File {
+        pub(super) fn into_rules(self) -> ColliderRules {
+            let mut rules = ColliderRules {
+                no_collision: self.no_collision,
+                layer: self.layer,
+                ..ColliderRules::default()
+            };
+            if let Some(b) = bodies(self.bodies, self.collides) {
+                rules.bodies = b;
+            } else if self.collides == Some(true) {
+                rules.bodies = DefaultBodies::Static;
+            }
+            if let Some(d) = self.dynamic_shape {
+                rules.dynamic_shape = dynamic(d);
+            }
+            if let Some(p) = self.parts {
+                if let Some(t) = p.threshold {
+                    rules.parts.threshold = t;
+                }
+                rules.parts.max_hulls = p.max_parts.or(rules.parts.max_hulls);
+            }
+            rules.meshes = self
+                .meshes
+                .into_iter()
+                .map(|(name, m)| {
+                    // A mesh told to collide without saying how: as level geometry.
+                    let bodies = bodies(m.bodies, m.collides)
+                        .or_else(|| (m.collides == Some(true)).then_some(DefaultBodies::Static));
+                    (
+                        name,
+                        MeshRules {
+                            bodies,
+                            static_shape: bodies
+                                .filter(|&b| b == DefaultBodies::Static)
+                                .map(|_| StaticShape::Mesh),
+                            dynamic_shape: m.dynamic_shape.map(dynamic),
+                            layer: m.layer,
+                        },
+                    )
+                })
+                .collect();
+            rules
+        }
+    }
 }
 
 /// What [`cook_colliders`] did.
@@ -170,6 +400,9 @@ pub struct CookedBody {
     pub angular_velocity: [f32; 3],
     /// How much gravity acts on it.
     pub gravity_factor: f32,
+    /// Its collision layer by name (the game's `PhysicsSettings::layer_names`); none: by
+    /// its motion.
+    pub layer: Option<String>,
 }
 
 impl Default for CookedBody {
@@ -186,6 +419,7 @@ impl Default for CookedBody {
             linear_velocity: [0.0; 3],
             angular_velocity: [0.0; 3],
             gravity_factor: 1.0,
+            layer: None,
         }
     }
 }
@@ -306,6 +540,17 @@ fn mesh_triangles(
         triangles: kept_triangles,
         surfaces: kept_surfaces,
     })
+}
+
+/// What a mesh's convex shapes are made of: the material of its primitive with the most
+/// triangles (`u16::MAX`: none).
+fn main_material(scene: &ImportedScene, mesh: usize) -> u16 {
+    scene
+        .meshes
+        .get(mesh)
+        .and_then(|m| m.primitives.iter().max_by_key(|p| p.indices.len()))
+        .and_then(|p| p.material)
+        .map_or(u16::MAX, |m| m.min(u16::MAX as usize - 1) as u16)
 }
 
 /// Every vertex of a glTF mesh, mapped by `into`.
@@ -670,7 +915,9 @@ impl Builder<'_> {
             .collect();
         (!shapes.is_empty()).then_some(shapes)
     }
-    fn add(&mut self, shapes: Vec<Shape>, origin: Origin) -> Option<u32> {
+    /// A collider of `shapes`; the convex ones made of `surface` (meshes' triangles carry
+    /// their own).
+    fn add(&mut self, shapes: Vec<Shape>, origin: Origin, surface: u16) -> Option<u32> {
         if shapes.is_empty() {
             return None;
         }
@@ -681,8 +928,12 @@ impl Builder<'_> {
                     .enumerate()
                     .map(|(id, shape)| ColliderShape {
                         id: id as u32,
+                        surface: if matches!(shape, Shape::Mesh { .. }) {
+                            u16::MAX
+                        } else {
+                            surface
+                        },
                         shape,
-                        surface: 0,
                     })
                     .collect(),
                 origin,
@@ -794,18 +1045,20 @@ pub fn cook_colliders(
             }
         };
     // Props' meshes decomposed up front.
-    if rules.bodies == DefaultBodies::Dynamic && needs_parts(rules.dynamic_shape) {
-        let wanted = scene
-            .nodes
-            .iter()
-            .enumerate()
-            .filter(|(i, n)| {
-                !is_collision_node(&n.name) && n.skin.is_none() && !authored.contains_key(i)
-            })
-            .filter_map(|(_, n)| n.mesh)
-            .collect();
-        b.decompose_meshes(wanted);
-    }
+    let wanted = scene
+        .nodes
+        .iter()
+        .enumerate()
+        .filter(|(i, n)| {
+            !is_collision_node(&n.name) && n.skin.is_none() && !authored.contains_key(i)
+        })
+        .filter_map(|(_, n)| n.mesh)
+        .filter(|&m| {
+            let r = rules.resolve(scene, m);
+            r.bodies == DefaultBodies::Dynamic && needs_parts(r.dynamic_shape)
+        })
+        .collect();
+    b.decompose_meshes(wanted);
     for i in 0..scene.nodes.len() {
         let node = &scene.nodes[i];
         if is_collision_node(&node.name) {
@@ -818,11 +1071,13 @@ pub fn cook_colliders(
                 .iter()
                 .filter_map(|&(c, kind)| shape_of(&b, c, kind, into_object * b.world[c]))
                 .collect();
-            let motion = match rules.bodies {
+            let own = node.mesh.map(|m| rules.resolve(scene, m));
+            let motion = match own.as_ref().map_or(rules.bodies, |r| r.bodies) {
                 DefaultBodies::Dynamic => Motion::Dynamic,
                 _ => Motion::Static,
             };
-            if let Some(collider) = b.add(shapes, Origin::Authored) {
+            let surface = node.mesh.map_or(u16::MAX, |m| main_material(scene, m));
+            if let Some(collider) = b.add(shapes, Origin::Authored, surface) {
                 let world = b.world[i];
                 b.body(
                     collider,
@@ -834,6 +1089,10 @@ pub fn cook_colliders(
                         } else {
                             instances_of(i)
                         },
+                        layer: own
+                            .and_then(|r| r.layer)
+                            .or(rules.layer.as_deref())
+                            .map(str::to_owned),
                         ..CookedBody::default()
                     },
                 );
@@ -843,17 +1102,23 @@ pub fn cook_colliders(
         let Some(mesh) = node.mesh else {
             continue;
         };
-        if node.skin.is_some() || rules.bodies == DefaultBodies::None {
+        let own = rules.resolve(scene, mesh);
+        if node.skin.is_some() || own.bodies == DefaultBodies::None {
             continue;
         }
-        let dynamic = rules.bodies == DefaultBodies::Dynamic;
+        let dynamic = own.bodies == DefaultBodies::Dynamic;
         let collider = match b.shared.get(&(mesh, dynamic)) {
             Some(&c) => c,
             None => {
                 let shapes: Vec<Shape> = if dynamic {
-                    b.part_shapes(mesh, Mat4::IDENTITY).unwrap_or_else(|| {
+                    let parts = if needs_parts(own.dynamic_shape) {
+                        b.part_shapes(mesh, Mat4::IDENTITY)
+                    } else {
+                        None
+                    };
+                    parts.unwrap_or_else(|| {
                         // Convex enough for one part: as a prop always was.
-                        let kind = match rules.dynamic_shape {
+                        let kind = match own.dynamic_shape {
                             DynamicShape::Parts => DynamicShape::Hull,
                             kind => kind,
                         };
@@ -861,14 +1126,14 @@ pub fn cook_colliders(
                             .into_iter()
                             .collect()
                     })
-                } else if rules.static_shape == StaticShape::Mesh {
+                } else if own.static_shape == StaticShape::Mesh {
                     mesh_triangles(scene, mesh, rules, Mat4::IDENTITY)
                         .into_iter()
                         .collect()
                 } else {
                     Vec::new()
                 };
-                let c = b.add(shapes, Origin::Generated);
+                let c = b.add(shapes, Origin::Generated, main_material(scene, mesh));
                 b.shared.insert((mesh, dynamic), c);
                 c
             }
@@ -885,6 +1150,7 @@ pub fn cook_colliders(
                         Motion::Static
                     },
                     instances: if dynamic { instances_of(i) } else { Vec::new() },
+                    layer: own.layer.map(str::to_owned),
                     ..CookedBody::default()
                 },
             );
@@ -894,9 +1160,16 @@ pub fn cook_colliders(
     for (c, kind) in orphans {
         let world = b.world[c];
         if let Some(shape) = shape_of(&b, c, kind, Mat4::IDENTITY)
-            && let Some(collider) = b.add(vec![shape], Origin::Authored)
+            && let Some(collider) = b.add(vec![shape], Origin::Authored, u16::MAX)
         {
-            b.body(collider, world, CookedBody::default());
+            b.body(
+                collider,
+                world,
+                CookedBody {
+                    layer: rules.layer.clone(),
+                    ..CookedBody::default()
+                },
+            );
         }
     }
     (b.colliders, b.bodies, b.stats)
@@ -1001,8 +1274,24 @@ fn khr_bodies(
         }
     };
     let material = |m: Option<usize>| m.and_then(|m| scene.physics.materials.get(m));
-    // Motion bodies: the colliders of their subtrees.
-    let mut grouped: HashMap<usize, (Vec<Shape>, Option<usize>)> = HashMap::new();
+    // A collider's layer: its collision filter's first system.
+    let layer = |f: Option<usize>| {
+        f.and_then(|f| scene.physics.filters.get(f))
+            .and_then(|f| f.systems.first().cloned())
+    };
+    // What a geometry's convex shapes are made of: its node's mesh's main material.
+    let surface_of = |g: &Geometry| match *g {
+        Geometry::Node { node, .. } => scene
+            .nodes
+            .get(node)
+            .and_then(|n| n.mesh)
+            .map_or(u16::MAX, |m| main_material(scene, m)),
+        Geometry::Shape(_) => u16::MAX,
+    };
+    // Motion bodies: the colliders of their subtrees (their shapes, physics material,
+    // surface and layer: the first collider's that has one).
+    type Group = (Vec<Shape>, Option<usize>, Option<u16>, Option<String>);
+    let mut grouped: HashMap<usize, Group> = HashMap::new();
     let mut statics = Vec::new();
     for (i, node) in scene.nodes.iter().enumerate() {
         let Some(p) = &node.physics else {
@@ -1022,19 +1311,26 @@ fn khr_bodies(
                     let entry = grouped.entry(root).or_default();
                     entry.0.extend(shapes);
                     entry.1 = entry.1.or(c.material);
+                    let surface = surface_of(g);
+                    if entry.2.is_none() && surface != u16::MAX {
+                        entry.2 = Some(surface);
+                    }
+                    if entry.3.is_none() {
+                        entry.3 = layer(c.filter);
+                    }
                 }
-                None => statics.push((i, *g, c.material, sensor)),
+                None => statics.push((i, *g, c.material, sensor, c.filter)),
             }
         }
     }
     let mut roots: Vec<usize> = grouped.keys().copied().collect();
     roots.sort_unstable();
     for root in roots {
-        let (shapes, mat) = grouped.remove(&root).unwrap_or_default();
+        let (shapes, mat, surface, body_layer) = grouped.remove(&root).unwrap_or_default();
         let Some(motion) = scene.nodes[root].physics.as_ref().and_then(|p| p.motion) else {
             continue;
         };
-        let Some(collider) = b.add(shapes, Origin::Authored) else {
+        let Some(collider) = b.add(shapes, Origin::Authored, surface.unwrap_or(u16::MAX)) else {
             continue;
         };
         let world = b.world[root];
@@ -1071,13 +1367,14 @@ fn khr_bodies(
                 linear_velocity: (rotation * Vec3::from(motion.linear_velocity)).to_array(),
                 angular_velocity: (rotation * Vec3::from(motion.angular_velocity)).to_array(),
                 gravity_factor: motion.gravity_factor,
+                layer: body_layer,
                 ..CookedBody::default()
             },
         );
     }
-    for (i, g, mat, sensor) in statics {
+    for (i, g, mat, sensor, filter) in statics {
         let shapes = geometry(b, &g, Mat4::IDENTITY, false);
-        let Some(collider) = b.add(shapes, Origin::Authored) else {
+        let Some(collider) = b.add(shapes, Origin::Authored, surface_of(&g)) else {
             continue;
         };
         let m = material(mat);
@@ -1089,6 +1386,7 @@ fn khr_bodies(
                 sensor,
                 friction: m.map_or(0.5, |m| m.dynamic_friction),
                 restitution: m.map_or(0.0, |m| m.restitution),
+                layer: layer(filter),
                 ..CookedBody::default()
             },
         );
@@ -1431,20 +1729,31 @@ pub struct BodyRecord {
     pub linear_velocity: [f32; 3],
     /// Initial angular velocity (world space).
     pub angular_velocity: [f32; 3],
+    /// Its collision layer's name: 1 + an index into the entry's names; 0: by its motion.
+    pub layer: u32,
     /// Reserved, 0.
-    pub reserved: [u32; 2],
+    pub reserved: u32,
     /// Its node's object to world, column major.
     pub world_from_object: [f32; 16],
 }
 
 const _: () = assert!(size_of::<BodyRecord>() == 128);
 
-/// The bodies entry: `meta = [bodies, instance indices]`; the [`BodyRecord`]s, then the
-/// instance indices they list.
+/// The bodies entry: `meta = [bodies, instance indices, layer names, their bytes]`; the
+/// [`BodyRecord`]s, the instance indices they list, then the layers' names (each a `u32`
+/// length and its UTF-8 bytes). Entries written before layers had names have none.
 pub(crate) fn bodies_entry(bodies: &[CookedBody]) -> ([u32; 7], Vec<u8>) {
     let mut records = Vec::with_capacity(bodies.len());
     let mut instances: Vec<u32> = Vec::new();
+    let mut names: Vec<&str> = Vec::new();
     for b in bodies {
+        let layer = b.layer.as_deref().map_or(0, |name| {
+            let at = names.iter().position(|&n| n == name).unwrap_or_else(|| {
+                names.push(name);
+                names.len() - 1
+            });
+            at as u32 + 1
+        });
         records.push(BodyRecord {
             collider: b.collider,
             motion: match b.motion {
@@ -1460,14 +1769,28 @@ pub(crate) fn bodies_entry(bodies: &[CookedBody]) -> ([u32; 7], Vec<u8>) {
             gravity_factor: b.gravity_factor,
             linear_velocity: b.linear_velocity,
             angular_velocity: b.angular_velocity,
-            reserved: [0; 2],
+            layer,
+            reserved: 0,
             world_from_object: b.world_from_object,
         });
         instances.extend_from_slice(&b.instances);
     }
     let mut data = bytemuck::cast_slice::<BodyRecord, u8>(&records).to_vec();
     data.extend_from_slice(bytemuck::cast_slice(&instances));
-    let meta = [records.len() as u32, instances.len() as u32, 0, 0, 0, 0, 0];
+    let names_start = data.len();
+    for name in &names {
+        data.extend_from_slice(&(name.len() as u32).to_le_bytes());
+        data.extend_from_slice(name.as_bytes());
+    }
+    let meta = [
+        records.len() as u32,
+        instances.len() as u32,
+        names.len() as u32,
+        (data.len() - names_start) as u32,
+        0,
+        0,
+        0,
+    ];
     (meta, data)
 }
 
@@ -1486,6 +1809,25 @@ pub fn read_bodies_entry(meta: [u32; 7], data: &[u8]) -> Result<Vec<CookedBody>,
         .chunks_exact(4)
         .map(|b| u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
         .collect();
+    // The layers' names.
+    let (name_count, name_bytes) = (meta[2] as usize, meta[3] as usize);
+    let start = record_bytes + refs * 4;
+    let mut names = Vec::with_capacity(name_count);
+    let mut table = data
+        .get(start..start.saturating_add(name_bytes))
+        .ok_or_else(|| invalid("bodies entry: layer names truncated"))?;
+    for _ in 0..name_count {
+        let (len, rest) = table
+            .split_first_chunk::<4>()
+            .ok_or_else(|| invalid("bodies entry: layer names truncated"))?;
+        let len = u32::from_le_bytes(*len) as usize;
+        let name = rest
+            .get(..len)
+            .and_then(|b| core::str::from_utf8(b).ok())
+            .ok_or_else(|| invalid("bodies entry: a layer name"))?;
+        names.push(name.to_owned());
+        table = &rest[len..];
+    }
     records
         .iter()
         .map(|r| {
@@ -1509,6 +1851,15 @@ pub fn read_bodies_entry(meta: [u32; 7], data: &[u8]) -> Result<Vec<CookedBody>,
                 linear_velocity: r.linear_velocity,
                 angular_velocity: r.angular_velocity,
                 gravity_factor: r.gravity_factor,
+                layer: match r.layer {
+                    0 => None,
+                    n => Some(
+                        names
+                            .get(n as usize - 1)
+                            .cloned()
+                            .ok_or_else(|| invalid("bodies entry: a layer past its names"))?,
+                    ),
+                },
             })
         })
         .collect()
@@ -1579,6 +1930,7 @@ mod tests {
     use crate::gltf_import::{
         AlphaMode, MaterialData, MaterialLayers, MeshData, NodeData, Primitive,
     };
+    use crate::gltf_physics::CollisionFilterData;
     use crate::gltf_physics::{
         ColliderData, MotionData, NodePhysics, PhysicsData, PhysicsMaterialData,
     };
@@ -1934,6 +2286,7 @@ mod tests {
                 convex_hull: false,
             }),
             material: None,
+            filter: None,
             nodes: Vec::new(),
         };
         let mut body = node("body", Some(0), Vec3::new(0.0, 5.0, 0.0), Vec::new());
@@ -2124,6 +2477,7 @@ mod tests {
             collider: Some(ColliderData {
                 geometry: Some(Geometry::Shape(0)),
                 material: Some(0),
+                filter: None,
                 nodes: Vec::new(),
             }),
             ..NodePhysics::default()
@@ -2134,6 +2488,7 @@ mod tests {
             collider: Some(ColliderData {
                 geometry: Some(Geometry::Shape(1)),
                 material: None,
+                filter: None,
                 nodes: Vec::new(),
             }),
             ..NodePhysics::default()
@@ -2143,6 +2498,7 @@ mod tests {
             trigger: Some(ColliderData {
                 geometry: Some(Geometry::Shape(2)),
                 material: None,
+                filter: None,
                 nodes: Vec::new(),
             }),
             ..NodePhysics::default()
@@ -2169,6 +2525,7 @@ mod tests {
                     dynamic_friction: 0.8,
                     restitution: 0.3,
                 }],
+                filters: Vec::new(),
             },
             ..ImportedScene::default()
         };
@@ -2209,5 +2566,169 @@ mod tests {
         // The plane's top face at its node's origin.
         assert!((center.y + half_extents.y).abs() < 1e-5 && (half_extents.x - 5.0).abs() < 1e-5);
         assert!(bodies[2].sensor);
+    }
+
+    #[test]
+    fn the_rules_file_reads_every_field_and_each_meshs_own() {
+        let rules = ColliderRules::parse(
+            r##"// every field optional
+(
+    bodies: Dynamic,
+    dynamic_shape: Hull,
+    parts: (threshold: 0.03, max_parts: 16),
+    no_collision: ["Leaves"],
+    layer: "Props",
+    meshes: {
+        "Wall": (bodies: Static, layer: "Level"),
+        "Banner": (collides: false),
+        "#3": (dynamic_shape: Box),
+    },
+)"##,
+        )
+        .unwrap();
+        assert_eq!(rules.bodies, DefaultBodies::Dynamic);
+        assert_eq!(rules.dynamic_shape, DynamicShape::Hull);
+        assert_eq!(rules.parts.threshold, 0.03);
+        assert_eq!(rules.parts.max_hulls, Some(16));
+        assert_eq!(rules.no_collision, ["Leaves"]);
+        assert_eq!(rules.layer.as_deref(), Some("Props"));
+        assert_eq!(rules.meshes["Wall"].bodies, Some(DefaultBodies::Static));
+        assert_eq!(rules.meshes["Wall"].layer.as_deref(), Some("Level"));
+        assert_eq!(rules.meshes["Banner"].bodies, Some(DefaultBodies::None));
+        assert_eq!(rules.meshes["#3"].bodies, None);
+        assert_eq!(rules.meshes["#3"].dynamic_shape, Some(DynamicShape::Box));
+        // Nothing given: the defaults.
+        assert_eq!(
+            ColliderRules::parse("()").unwrap(),
+            ColliderRules::default()
+        );
+        // A misspelled field is an error with its place.
+        let e = ColliderRules::parse("(\n  bodys: Static,\n)").unwrap_err();
+        assert!(e.message.starts_with("2:"), "{e}");
+        assert!(e.message.contains("bodys"), "{e}");
+    }
+
+    #[test]
+    fn a_meshs_own_rules_and_layers_reach_its_bodies() {
+        let scene = ImportedScene {
+            meshes: vec![
+                mesh("Wall", vec![cuboid(Vec3::ZERO, Vec3::ONE, Some(0))]),
+                mesh(
+                    "Crate",
+                    vec![cuboid(Vec3::splat(-0.5), Vec3::splat(0.5), Some(1))],
+                ),
+                mesh("Banner", vec![cuboid(Vec3::ZERO, Vec3::ONE, Some(0))]),
+            ],
+            materials: vec![material("stone"), material("wood")],
+            nodes: vec![
+                node("wall", Some(0), Vec3::ZERO, Vec::new()),
+                node("crate", Some(1), Vec3::new(0.0, 3.0, 0.0), Vec::new()),
+                node("banner", Some(2), Vec3::new(5.0, 0.0, 0.0), Vec::new()),
+            ],
+            roots: vec![0, 1, 2],
+            ..ImportedScene::default()
+        };
+        let rules = ColliderRules::parse(
+            r##"(
+    layer: "Level",
+    meshes: {
+        "Crate": (bodies: Dynamic, dynamic_shape: Box, layer: "Props"),
+        "#2": (collides: false),
+    },
+)"##,
+        )
+        .unwrap();
+        let (colliders, bodies, _) = cook_colliders(&scene, &instances(&scene), &rules, None, None);
+        assert_eq!(bodies.len(), 2, "the banner collides with nothing");
+        let wall = &bodies[0];
+        assert_eq!(wall.motion, Motion::Static);
+        assert_eq!(wall.layer.as_deref(), Some("Level"));
+        let shapes = &colliders[wall.collider as usize].collider.shapes;
+        assert!(matches!(shapes[0].shape, Shape::Mesh { .. }));
+        // A mesh's triangles carry their own surfaces, not the shape.
+        assert_eq!(shapes[0].surface, u16::MAX);
+        let crate_ = &bodies[1];
+        assert_eq!(crate_.motion, Motion::Dynamic);
+        assert_eq!(crate_.layer.as_deref(), Some("Props"));
+        let shape = &colliders[crate_.collider as usize].collider.shapes[0];
+        assert!(
+            matches!(shape.shape, Shape::Box { .. }),
+            "{:?}",
+            shape.shape
+        );
+        // A prop is made of its mesh's material.
+        assert_eq!(shape.surface, 1);
+    }
+
+    #[test]
+    fn layer_names_go_through_the_bodies_entry() {
+        let layers = [None, Some("Props"), Some("Level"), Some("Props")];
+        let bodies: Vec<CookedBody> = layers
+            .iter()
+            .enumerate()
+            .map(|(k, l)| CookedBody {
+                collider: k as u32,
+                instances: vec![k as u32],
+                layer: l.map(str::to_owned),
+                ..CookedBody::default()
+            })
+            .collect();
+        let (meta, data) = bodies_entry(&bodies);
+        assert_eq!(meta[2], 2, "each name once");
+        let read = read_bodies_entry(meta, &data).unwrap();
+        assert_eq!(read, bodies);
+        // An entry written before layers had names: none.
+        let (mut meta, mut data) = bodies_entry(&bodies[..1]);
+        meta[2] = 0;
+        meta[3] = 0;
+        data.truncate(size_of::<BodyRecord>() + 4);
+        assert_eq!(read_bodies_entry(meta, &data).unwrap()[0].layer, None);
+        // A layer past the names is refused.
+        let (meta, data) = bodies_entry(&bodies[1..2]);
+        let mut broken = meta;
+        broken[2] = 0;
+        broken[3] = 0;
+        assert!(read_bodies_entry(broken, &data).is_err());
+    }
+
+    #[test]
+    fn a_gltf_collision_filter_names_its_bodys_layer() {
+        let mut debris = node("debris", None, Vec3::new(0.0, 2.0, 0.0), Vec::new());
+        debris.physics = Some(NodePhysics {
+            motion: Some(MotionData {
+                kinematic: false,
+                mass: Some(1.0),
+                linear_velocity: [0.0; 3],
+                angular_velocity: [0.0; 3],
+                gravity_factor: 1.0,
+            }),
+            collider: Some(ColliderData {
+                geometry: Some(Geometry::Shape(0)),
+                material: None,
+                filter: Some(0),
+                nodes: Vec::new(),
+            }),
+            ..NodePhysics::default()
+        });
+        let scene = ImportedScene {
+            nodes: vec![debris],
+            roots: vec![0],
+            physics: PhysicsData {
+                shapes: vec![ImplicitShape::Sphere { radius: 0.5 }],
+                materials: Vec::new(),
+                filters: vec![CollisionFilterData {
+                    systems: vec!["Debris".to_owned(), "Small".to_owned()],
+                }],
+            },
+            ..ImportedScene::default()
+        };
+        let (_, bodies, _) = cook_colliders(
+            &scene,
+            &instances(&scene),
+            &ColliderRules::default(),
+            None,
+            None,
+        );
+        assert_eq!(bodies[0].layer.as_deref(), Some("Debris"));
     }
 }

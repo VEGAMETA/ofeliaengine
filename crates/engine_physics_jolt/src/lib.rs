@@ -752,6 +752,25 @@ impl JoltBackend {
         unsafe { JPH_BodyInterface_GetUserData(self.body_interface, body) }
     }
 
+    /// What `body` is made of where a query hit it ([`PhysicsBackend::surface_of`]).
+    fn surface(&self, body: JPH_BodyID, sub_shape: JPH_SubShapeID) -> Option<u16> {
+        let mut data = 0;
+        let mut lock = JPH_BodyLockRead {
+            lockInterface: null(),
+            mutex: core::ptr::null_mut(),
+            body: null(),
+        };
+        // SAFETY: lock, read the leaf shape's user data, unlock.
+        unsafe {
+            JPH_BodyLockInterface_LockRead(self.lock_interface, body, &mut lock);
+            if !lock.body.is_null() {
+                data = engine_jolt_hit_surface(lock.body, sub_shape);
+            }
+            JPH_BodyLockInterface_UnlockRead(self.lock_interface, &mut lock);
+        }
+        data.checked_sub(1).and_then(|s| u16::try_from(s).ok())
+    }
+
     /// World-space surface normal of `body` at `point`.
     fn surface_normal(&self, body: JPH_BodyID, sub_shape: JPH_SubShapeID, point: Vec3) -> Vec3 {
         let mut normal = JPH_Vec3::default();
@@ -785,6 +804,7 @@ impl JoltBackend {
                 hit.penetrationDepth.max(0.0)
             },
             user_data: self.user_data(hit.bodyID2),
+            part: hit.subShapeID2,
         }
     }
 
@@ -892,16 +912,22 @@ impl PhysicsBackend for JoltBackend {
                 ShapeDesc::TriangleMesh {
                     vertices,
                     triangles,
+                    surfaces,
                 } => {
                     let vertices: Vec<JPH_Vec3> = vertices.iter().copied().map(v3).collect();
+                    // A triangle's surface + 1 as its user data (0: the shape's own).
                     let triangles: Vec<JPH_IndexedTriangle> = triangles
                         .iter()
-                        .map(|t| JPH_IndexedTriangle {
+                        .enumerate()
+                        .map(|(k, t)| JPH_IndexedTriangle {
                             i1: t[0],
                             i2: t[1],
                             i3: t[2],
                             materialIndex: 0,
-                            userData: 0,
+                            userData: surfaces
+                                .get(k)
+                                .filter(|&&s| s != u16::MAX)
+                                .map_or(0, |&s| u32::from(s) + 1),
                         })
                         .collect();
                     let settings = JPH_MeshShapeSettings_Create2(
@@ -910,6 +936,9 @@ impl PhysicsBackend for JoltBackend {
                         triangles.as_ptr(),
                         triangles.len() as u32,
                     );
+                    if !surfaces.is_empty() {
+                        JPH_MeshShapeSettings_SetPerTriangleUserData(settings, true);
+                    }
                     let shape = JPH_MeshShapeSettings_CreateShape(settings);
                     JPH_ShapeSettings_Destroy(settings);
                     shape
@@ -1013,6 +1042,20 @@ impl PhysicsBackend for JoltBackend {
             // SAFETY: releases our reference; bodies hold their own.
             unsafe { JPH_Shape_Destroy(*slot) };
             *slot = core::ptr::null_mut();
+        }
+    }
+
+    fn surface_of(&self, body: BodyId, part: u32) -> Option<u16> {
+        self.surface(body.0 as JPH_BodyID, part)
+    }
+
+    fn set_shape_surface(&mut self, shape: ShapeId, surface: u16) {
+        if let Some(&ptr) = self.shapes.get(shape.0 as usize)
+            && !ptr.is_null()
+        {
+            // SAFETY: a live shape of ours. Its user data is the surface + 1 (0: none), what
+            // a query's leaf shape reports (`engine_jolt_hit_surface`); it survives baking.
+            unsafe { JPH_Shape_SetUserData(ptr, u64::from(surface) + 1) };
         }
     }
 
@@ -1449,6 +1492,7 @@ impl PhysicsBackend for JoltBackend {
             point,
             normal: self.surface_normal(hit.bodyID, hit.subShapeID2, point),
             user_data: self.user_data(hit.bodyID),
+            part: hit.subShapeID2,
         })
     }
 
@@ -1555,6 +1599,7 @@ impl PhysicsBackend for JoltBackend {
                 point,
                 normal: self.surface_normal(body, sub_shape, point),
                 user_data: self.user_data(body),
+                part: sub_shape,
             });
         }
     }

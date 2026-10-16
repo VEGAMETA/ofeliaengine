@@ -38,6 +38,20 @@ The default has layer 0 for static geometry and layer 1 for moving objects. Quer
 `QueryFilter` with a layer mask: for example, ignore the player's own layer when casting
 from the player.
 
+**Name them** in `layer_names` (the default names its two `Static` and `Moving`). Scenes
+put their bodies on layers by name: the colliders' rules file (section 11) and glTF's
+collision filters say `"Props"`, and your settings decide what number that is and what it
+collides with. Renumbering layers needs no new cook.
+
+```rust
+let settings = PhysicsSettings {
+    layers: 3,
+    collides: vec![0b110, 0b111, 0b111], // static and static do not collide
+    layer_names: ["Static", "Moving", "Props"].map(String::from).to_vec(),
+    ..PhysicsSettings::default()
+};
+```
+
 ## 3. Gravity
 
 Gravity is part of the API, not a hack:
@@ -98,6 +112,11 @@ Overlaps:
 
 Filters (`QueryFilter`):
 - `QueryFilter::layers(mask)`: only these layers;
+- **what a hit is made of:** `physics.surface_of(hit.body, hit.part)`, for a ray's or a
+  shape cast's hit. For a scene's colliders it is the glTF material of the triangle hit, or
+  of a prop's mesh (pick footstep sounds and impact effects by the material's name); for
+  your own shapes, what `set_shape_surface` gave them. It costs about 7 ns a call, and
+  nothing when not called;
 - `.with_sensors()`: sensors too (`BodyDesc::sensor` bodies report overlaps but do not
   collide; queries skip them by default);
 - `.ignoring(body)`: skip one body, typically the one casting (or your character's proxy
@@ -325,7 +344,8 @@ The cook makes colliders from a scene's meshes and puts them into the pack, bake
      (below), since a simulated body cannot be a triangle mesh. Static and kinematic ones
      keep their triangles.
 
-   Nothing else in such a file collides. Joints and collision filters are not read yet.
+   Nothing else in such a file collides. A collider's collision filter names its body's
+   layer: the filter's first collision system (section 2). Joints are not read yet.
 2. **Collision meshes you model** next to a mesh, named the Unreal way, give that mesh its
    collider and are not drawn:
 
@@ -343,15 +363,41 @@ The cook makes colliders from a scene's meshes and puts them into the pack, bake
    - All of a mesh's parts are in one collider. Each triangle remembers its material (the
      *surface*, for footsteps and impacts).
    - Skinned meshes get no collider.
-   - Through `ImportedScene::collider_rules` (a file beside the scene comes with the owner's
-     answer on its shape):
-     - the meshes become props instead (`DefaultBodies::Dynamic`), each split into
-       convex parts first (below). A mesh convex enough to be one part gets a box, sphere,
-       capsule or cylinder when one is within 10 % of its hull, else its hull; a concave one
-       (a chair, a mug, a U-shaped table) gets its parts. `DynamicShape::Parts` asks for
-       parts outright, `Hull` and the primitives for one shape;
-     - or nothing collides (`DefaultBodies::None`);
-     - materials can be excluded by name (`no_collision`: foliage cards, decals).
+   - **The rules file** beside the scene changes that (below).
+
+### The rules file: `<scene>.colliders.ron`
+
+Put `sponza.colliders.ron` next to `sponza.gltf`. Every field is optional; a scene without
+the file is all level geometry.
+
+```ron
+// sponza.colliders.ron
+(
+    bodies: Static,            // what a mesh becomes: Static (level) or Dynamic (a prop)
+    dynamic_shape: Auto,       // a prop's collider: Auto, Box, Sphere, Capsule, Hull or Parts
+    parts: (threshold: 0.05, max_parts: 32), // how concave props are split (below)
+    no_collision: ["Leaves"],  // glTF materials whose triangles collide with nothing
+    layer: "Static",           // the bodies' collision layer, by name (section 2)
+    meshes: {                  // a glTF mesh by its name, or "#3" (the fourth): what differs
+        "Chair": (bodies: Dynamic, dynamic_shape: Parts, layer: "Props"),
+        "Barrel": (bodies: Dynamic),
+        "Banner": (collides: false),
+    },
+)
+```
+
+- **`bodies: Dynamic`** makes props: each mesh is split into convex parts first (below). A
+  mesh convex enough to be one part gets a box, sphere, capsule or cylinder when one is
+  within 10 % of its hull, else its hull; a concave one (a chair, a mug, a U-shaped table)
+  gets its parts. `dynamic_shape: Parts` asks for parts outright, `Hull` and the primitives
+  for one shape.
+- **`collides: false`** turns a mesh (or, at the top, every mesh) off.
+- **`no_collision`** excludes materials by name: foliage cards, decals. Nothing is guessed:
+  a masked material may be a grating one walks on.
+- **`layer`** puts the bodies on a named layer; without it, static bodies take layer 0 and
+  moving ones layer 1. A name your game's `PhysicsSettings::layer_names` lacks is an error
+  when the pack's physics loads.
+- A misspelled field is an error with its line and column, when you cook.
 
 `ofeliaengine cook scene.gltf -o scene.pack` does all of this.
 - `--no-colliders` leaves colliders out.
@@ -366,8 +412,8 @@ it: a ball would bounce off the air under a chair or inside a mug. The cook spli
 meshes into convex parts with CoACD's method (Wei et al., SIGGRAPH 2022), rewritten in Rust
 for the engine:
 - **The parts follow the shape:** a U in 3 parts, a table in 5, a chair in 25, a duck in 11.
-  How concave a part may stay is `ColliderRules::parts.threshold`, 0.05 of the mesh's size
-  by default; lower makes more, tighter parts. `max_hulls` caps the count.
+  How concave a part may stay is the rules file's `parts: (threshold: …)`, 0.05 of the
+  mesh's size by default; lower makes more, tighter parts. `max_parts` caps the count.
 - **Each part is at most 64 points.**
 - **Time:** 0.02-3 s per mesh the first time on 16 threads (the sample models in
   `docs/research/mesh-colliders.md`), all meshes of a scene at once. The parts go into the
@@ -398,6 +444,8 @@ let bodies = player.load_physics(&mut physics)?;  // after Player::new
   Sponza's 3.7 million triangles in 5.5 ms, where building them would take 3.9 s.
 - **Props move their meshes.** A dynamic or kinematic body gets an entity (`RigidBody`,
   `PhysicsPose`, `Transform`), and the scene instances it moves become its children.
+- **Layers and surfaces come along:** each body on its layer by name (pass the same
+  `PhysicsSettings` you named the layers in), and `surface_of` answers for every hit.
 - **A game without physics** never calls `load_physics`, and the pack's colliders are not
   even read.
 - **A pack baked by another Jolt version** (after an engine update) is refused with "cook
