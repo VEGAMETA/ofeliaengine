@@ -28,7 +28,6 @@ impl Default for Entity {
 }
 
 impl Entity {
-
     /// Slot index (dense, reused after despawn).
     pub const fn index(self) -> u32 {
         self.index

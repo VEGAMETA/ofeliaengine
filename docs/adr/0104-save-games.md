@@ -143,6 +143,25 @@ otherwise read a large world in 1.9 s instead of 0.3 s.
 - **Where:** `%USERPROFILE%\Saved Games\<studio>\<game>\` (`FOLDERID_SavedGames`), one file
   per slot. Steam Auto-Cloud syncs that root.
 
+### Time, the GPU's state and rendering caches (the owner, 2026-10-16)
+
+- **Time-dependent shaders** resume at the same phase.
+  - Their time comes from the simulation's clock, which is saved, never from the wall
+    clock. Materials have no engine time input today: what a game animates in a material
+    comes from its own state, which is saved.
+  - A shared material time, when the engine adds one, is that clock.
+- **State that compute shaders computed** (particles, fluids, deformation on the GPU) is
+  not saved by default.
+  - It is rebuilt after loading: particles spawn again, a fluid settles.
+  - The saved clock and random generators' seeds make a deterministic effect run the same.
+  - A game that needs the exact state (a simulation on the GPU that gameplay reads) marks
+    its buffer or texture as saved, in one call. It is copied back from the GPU behind the
+    frame, so the save completes one or two frames later and the frame does not wait. On
+    load, the bytes are uploaded before the first frame.
+- **Rendering caches** rebuild themselves: cached shadows, GI, TAA's history, exposure. A
+  load is a camera cut to the renderer, so the temporal history starts over and nothing
+  smears.
+
 ### Protection against players' edits (the owner's choice)
 
 - **By default, integrity only:** the checksum, the atomic swap, the backup. A player who
