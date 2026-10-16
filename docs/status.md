@@ -24,7 +24,7 @@ Last updated: 2026-10-16.
   - **The mixer:** clips start at an offset, voices say where they are, and streams are
     sought off the game thread (`PreparedStream`).
   - **Cost on ref-1:** 17 µs a frame for 1,000 moving sounds, 51 µs with the acoustics.
-  - **The owner's follow-ups (same day):**
+  - **The owner's follow-ups (same day, #247):**
     - sound files from a folder while developing (a changed file heard at once) and a
       sound pack in a release (`ofeliaengine sounds build`, pack version 10);
     - `AudioSource` plain, `AudioSource3D` for space.
@@ -285,8 +285,8 @@ water and impostors stay in §6):
      (the player, the CLI, the guide, #245).
    - ~~Sound in the player~~ (done 2026-10-16, #246, ADR 0105): sources and the listener as
      components, saved; occlusion and the room's reverb from the physics world; zones.
-     Then (the owner's choices): `AudioSource` and `AudioSource3D`, the sounds folder kept
-     live, sound packs.
+     Then (the owner's choices, #247): `AudioSource` and `AudioSource3D`, the sounds folder
+     kept live, sound packs.
    - Next: networking in the player, then the dev guide's quick start.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
