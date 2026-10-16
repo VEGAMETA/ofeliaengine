@@ -692,6 +692,7 @@ dependencies = [
  "engine_physics",
  "engine_platform",
  "engine_profiler",
+ "engine_reflect",
  "engine_render",
  "engine_rhi",
 ]

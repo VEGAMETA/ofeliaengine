@@ -4,25 +4,30 @@ use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4};
 use engine_core::sync::CachePadded;
 use engine_ecs::{
-    Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, pod_component,
+    Changed, Entity, GlobalTransform, Or, QueryState, World, bytemuck, reflect_component,
 };
+use engine_reflect::Reflect;
 use engine_render::gpu_scene::{GpuScene, InstanceId, SceneInstance};
 use engine_render::material::MaterialId;
 use engine_render::mesh::MeshId;
 
 /// Draws the entity's mesh with a material at its [`GlobalTransform`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable)]
+/// Saved (ADR 0104): whether it is drawn. The mesh and material are the level's or the
+/// game's own handles, made again when the level loads, not saved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
 #[repr(C)]
 pub struct MeshRenderer {
     /// The mesh in the geometry pool.
+    #[reflect(opaque)]
     pub mesh: MeshId,
     /// The material in the material table.
+    #[reflect(opaque)]
     pub material: MaterialId,
     /// Nonzero: drawn. Zero: hidden (the entity keeps its other components).
     pub visible: u32,
 }
 
-pod_component!(MeshRenderer);
+reflect_component!(pod MeshRenderer);
 
 impl MeshRenderer {
     /// A visible renderer.
