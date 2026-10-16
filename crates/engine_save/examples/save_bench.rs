@@ -109,6 +109,7 @@ fn main() {
     level(&mut world, &ids);
     let options = CaptureOptions {
         level: Some(&known),
+        ..CaptureOptions::default()
     };
     let capture_ms = time(|| {
         let _ = capture(&world, &options);

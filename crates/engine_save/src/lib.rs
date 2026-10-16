@@ -39,7 +39,7 @@ mod text;
 mod value;
 mod wire;
 
-pub use apply::{LoadReport, apply};
+pub use apply::{ApplyOptions, LoadReport, apply, apply_with};
 pub use body::LoadedSave;
 pub use capture::{CaptureOptions, SaveImage, Transient, capture};
 pub use engine_scene::SceneId;
