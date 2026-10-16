@@ -20,7 +20,9 @@ use engine_core::jobs::ThreadPool;
 use engine_core::math::DVec3;
 use std::collections::{HashMap, VecDeque};
 
-/// Whether `solid` is closed and wound outward: every edge once each way, a positive volume.
+/// Whether `solid` is closed, wound outward and in one piece: every edge once each way, a
+/// positive volume, its triangles all connected. Several closed pieces may overlap (a chair
+/// modelled as boards), and a solid that runs through itself cannot be cut: it is remeshed.
 pub(crate) fn closed_manifold(solid: &Solid) -> bool {
     let mut edges: HashMap<(u32, u32), u32> = HashMap::with_capacity(solid.triangles.len() * 3);
     for t in &solid.triangles {
@@ -36,6 +38,34 @@ pub(crate) fn closed_manifold(solid: &Solid) -> bool {
             .iter()
             .all(|(&(a, b), &n)| n == 1 && edges.get(&(b, a)) == Some(&1))
         && solid.volume() > 0.0
+        && one_piece(solid)
+}
+
+/// Whether every triangle of `solid` is connected to every other through shared vertices.
+fn one_piece(solid: &Solid) -> bool {
+    let mut parent: Vec<u32> = (0..solid.points.len() as u32).collect();
+    fn root(parent: &mut [u32], mut v: u32) -> u32 {
+        while parent[v as usize] != v {
+            // Path halving.
+            parent[v as usize] = parent[parent[v as usize] as usize];
+            v = parent[v as usize];
+        }
+        v
+    }
+    for t in &solid.triangles {
+        let a = root(&mut parent, t[0]);
+        for &v in &t[1..] {
+            let b = root(&mut parent, v);
+            if a != b {
+                parent[b as usize] = a;
+            }
+        }
+    }
+    let first = root(&mut parent, solid.triangles[0][0]);
+    solid
+        .triangles
+        .iter()
+        .all(|t| root(&mut parent, t[0]) == first)
 }
 
 /// The six tetrahedra of a cell around its diagonal from corner 0 to corner 7 (corner bits:
@@ -262,6 +292,30 @@ pub(crate) fn remesh(
 mod tests {
     use super::*;
     use crate::decompose::clip::tests::cuboid;
+
+    #[test]
+    fn overlapping_pieces_are_not_one_solid() {
+        // Two boxes through each other: each closed, together running through themselves.
+        let a = cuboid(DVec3::ZERO, DVec3::ONE);
+        let b = cuboid(DVec3::splat(0.5), DVec3::splat(1.5));
+        let mut both = a.clone();
+        let base = both.points.len() as u32;
+        both.points.extend_from_slice(&b.points);
+        both.triangles
+            .extend(b.triangles.iter().map(|t| t.map(|i| i + base)));
+        assert!(closed_manifold(&a));
+        assert!(!closed_manifold(&both));
+        // Remeshed: one closed surface around both, 0.55 of a cell (1.5 / 40) outside their
+        // union (1.875; about 10.5 of area).
+        let out = remesh(&both.points, &both.triangles, 40, 0.55, None);
+        assert!(closed_manifold(&out));
+        let grown = 1.875 + 10.5 * 0.55 * 1.5 / 40.0;
+        assert!(
+            (out.volume() - grown).abs() < 0.03 * grown,
+            "{} against {grown}",
+            out.volume()
+        );
+    }
 
     #[test]
     fn a_closed_box_stays_a_box_and_an_open_one_becomes_a_shell() {
