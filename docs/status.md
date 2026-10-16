@@ -15,7 +15,7 @@ Last updated: 2026-10-16.
   - Video with transparency (an alpha channel) is not part of it: the owner deferred it
     (2026-10-15; §6, Video).
 - **Done: virtual shadow maps** (item 5, ADR 0093): steps 3a–3c on 2026-10-15, 3d on
-  2026-10-16 (`feat/vsm-transparent-sss`). `ViewSettings::virtual_shadows` turns them on
+  2026-10-16 (#237, `feat/vsm-transparent-sss`). `ViewSettings::virtual_shadows` turns them on
   (off by default).
   - **Everything a view with pages shades reads them**, and it draws no cascade:
     - transparent surfaces mark their own pages and look them up;
@@ -59,7 +59,7 @@ Last updated: 2026-10-16.
 - **Next:** the third review's queue (`docs/research/core-audit-3.md`, §5 below), accepted
   by the owner on 2026-10-16.
   - Done: its P0 (#236: the local lights' shadows' bookkeeping bounded, a CPU stage check
-    in the perf gate) and item 1 (VSM's leftover, `feat/vsm-transparent-sss`).
+    in the perf gate) and item 1 (VSM's leftover, #237).
   - Then item 2: device memory's empty blocks and Reflex's pacing.
   - The owner wants results soon, without leaving the plan: gate what a change needs and
     skip runs that add nothing.
