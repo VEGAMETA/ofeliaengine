@@ -25,7 +25,13 @@ let settings = LatencySettings {
   maximum (141 on 144 Hz). That keeps the display in its variable range, and latency
   stays low.
 - **Without a cap and with a GPU-bound game,** latency reduction matters most: without
-  it, the CPU runs ahead and frames wait in a queue.
+  it, the CPU runs ahead and frames wait in a queue. In the engine's flight on ref-1's
+  RTX, input to GPU done took 3.6 ms without it and 2.0 ms with Reflex.
+- **Above about 500 FPS, Reflex costs frames** (NVIDIA's driver 616.92): its sleep is
+  never shorter than about 1.5 ms, so a frame takes at least that plus the CPU's work.
+  The flight's 1.44 ms GPU frames ran at 2.0 ms intervals, against 1.83 ms without
+  Reflex; from 2 ms GPU frames on, Reflex costs nothing. For a benchmark of the GPU's
+  throughput, turn it off.
 
 ## Full screen and windows
 
@@ -87,6 +93,10 @@ Your game code does not call these. The engine's frame loop does.
   - frame time;
   - time from input to the present call;
   - time from input to the frame being displayed;
-  - on NVIDIA, Reflex's own input-to-GPU-finish time.
+  - on NVIDIA, Reflex's own input-to-GPU-finish time. With the frame's submissions
+    tagged by present id, as the extension asks, driver 616.92 puts the next frame's GPU
+    times in a frame's report, so this reads about one frame interval high.
+- **`flight --input-latency`** (`engine_app`'s example) times input to GPU done on the
+  CPU's clock, from a thread waiting on the frames' timeline, under any latency control.
 - **For true input-to-photon numbers,** use NVIDIA's LDAT or an OSLTT-type sensor. The
   engine reports what the PC controls.

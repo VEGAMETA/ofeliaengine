@@ -60,8 +60,12 @@ Last updated: 2026-10-16.
   by the owner on 2026-10-16.
   - Done: its P0 (#236: the local lights' shadows' bookkeeping bounded, a CPU stage check
     in the perf gate) and item 1 (VSM's leftover, #237).
-  - Item 2's first half done (#238: the budget counts the allocator's
-    free room); next its second, Reflex's pacing.
+  - Item 2 done: the budget counts the allocator's free room (#238), and Reflex's pacing
+    is measured and its late wakes cut (#239, ADR 0023's addendum). Next: item 3, the colliders'
+    rules file.
+  - **Reflex's tail is the driver's** (616.92): its sleep is never under ~1.5 ms, in
+    0.5 ms steps, so above ~500 FPS frames hold at 2 ms. Reflex still halves input to GPU
+    done there (1.97 against 3.63 ms) and stays on by default.
   - The owner wants results soon, without leaving the plan: gate what a change needs and
     skip runs that add nothing.
 - **Parked:**
@@ -130,9 +134,13 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-11 (GI done and measured against AMD's): the technical core about
-**74 %** done, the whole engine (editor, Luau and tooling included) about **50 %**. Done
-since: custom materials, meshlets, cached shadows, post effects and the player crate.
+Estimate of 2026-10-16: the technical core about **85 %** done, the whole engine
+(editor, Luau and tooling included) about **57 %** (2026-10-11: 74 % and 50 %). Done
+since 2026-10-11: custom materials, meshlets, cached and virtual shadows, post effects,
+the player crate, video, colliders made from meshes, localization, the third review's
+P0 and its device memory and Reflex items. Left in the core: the colliders' rules file,
+navigation, save games, audio, input and networking in the player, recording on the job
+system.
 
 | Area | State | Where |
 |---|---|---|
@@ -196,9 +204,15 @@ water and impostors stay in §6):
 1. ~~**5's leftover, required**~~ (done 2026-10-16, ADR 0093 step 3d): transparent
    surfaces and subsurface materials from the virtual shadow pages, no cascades beside
    them. The pages' default for discrete GPUs is the owner's question.
-2. **Device memory** (audit 3 §3.3): ~~the budget counts the allocator's free room, the
-   larger empty block goes~~ (done 2026-10-16, #238: the flight's
-   rest of the process 688 → 360 MiB on the RTX). **Reflex's pacing** (§3.4) is next.
+2. ~~**Device memory** (audit 3 §3.3) and **Reflex's pacing** (§3.4)~~ (done 2026-10-16).
+   - The budget counts the allocator's free room, and the larger empty block goes (#238:
+     the flight's rest of the process 688 → 360 MiB on the RTX).
+   - Reflex (#239, ADR 0023's addendum): every submission of a frame carries its present id. The
+     wait for the driver's signal is cut at three frame intervals (late wakes of 15–43 ms
+     become 7 ms). The flight times input to GPU done (`--input-latency`).
+   - The wider tail is the driver's: its sleep is never under ~1.5 ms. Left: a pacer of
+     the engine's own above ~500 FPS, and exclusive full screen's hang in a session
+     without the foreground (§6).
 3. **8c's rules file and `RayHit`'s surface:** `<scene>.colliders.ron`, documented in the
    dev guide; every mesh collides as level geometry by default (the owner, 2026-10-16).
 4. **The core's gaps for a game** (audit 3 §4): navigation; save games; audio, input and
@@ -1101,6 +1115,15 @@ grown, divide and conquer); the old labels stay in parentheses.
     less.
 - **Presentation:** test 0e's choice with a monitor on the iGPU (the owner can connect one;
   later, owner 2026-10-10).
+  - **Exclusive full screen hung** in a session that cannot bring its window to the
+    front (2026-10-16): the flight drew nothing for 300 s. Not reproduced since, because
+    reproducing it takes the monitor (the owner's call). The player should give up on
+    the monitor after a loss or two and stay borderless until the window is focused.
+- **Latency (ADR 0023's addendum):** a pacer of the engine's own for frames shorter than
+  the driver's floor (Reflex never sleeps under ~1.5 ms: above ~500 FPS frames hold at
+  2 ms). It would sleep on the precise timer until the GPU is predicted free, from the
+  engine's own GPU times. The latency overlay should read input to GPU done from the
+  frames' timeline, since Reflex's reports are a frame late with tagged submissions.
 - **Video (ADR 0100):**
   - **transparency** (the owner, 2026-10-15: later): an alpha channel, for instance a
     second, monochrome AV1 stream decoded beside the picture;

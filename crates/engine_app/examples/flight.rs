@@ -78,6 +78,10 @@
 //!                           the nave's wall, a panel on the camera
 //!     [--record-pso <file>] the material types' entry points drawn, merged into that PSO
 //!                           record at the end (ADR 0092; `ofeliaengine cook --pso`)
+//!     [--nv-csv <file>]     every frame's stages with Reflex's own report of it, as CSV
+//!                           (ADR 0023, addendum 2026-10-16)
+//!     [--input-latency]     input to GPU done per frame, from a thread waiting on the
+//!                           frames' timeline (any latency control; ADR 0023)
 //! ```
 //!
 //! Cook the pack with `ofeliaengine cook test-assets/Sponza/Sponza.gltf -o sponza.pack`.
@@ -114,7 +118,7 @@ mod windowed {
     use engine_dlss::DlssFrameGeneration;
     use engine_ecs::{Entity, GlobalTransform, QueryState, Transform, World, pod_component};
     use engine_frame::{Antialiasing, FrameGeneration, Placement, Quality};
-    use engine_latency::{LowLatency, Presented};
+    use engine_latency::{Latency, LowLatency, NvFrameReport, Presented};
     use engine_render::forward::LocalShadowSettings;
     use engine_render::graph::RenderGraph;
     use engine_render::material::MaterialDesc;
@@ -124,6 +128,7 @@ mod windowed {
     use engine_render::texture_pool::{TextureId, TextureLevels};
     use engine_render2d::{Canvas, Quad};
     use engine_rhi::Allocator;
+    use engine_rhi::ash::vk;
     use engine_runtime::{
         GiVolume, MeshRenderer, PointLight, ReflectionProbe, SkinnedMesh, SpotLight, Sun,
         look_rotation,
@@ -132,7 +137,7 @@ mod windowed {
     use std::alloc::{GlobalAlloc, Layout};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
+    use std::time::{Duration, Instant};
 
     /// Frames left out of the statistics at the start (first uploads, first captures).
     const WARMUP: usize = 120;
@@ -168,6 +173,9 @@ mod windowed {
     /// Where one frame's CPU time went, in microseconds.
     #[derive(Debug, Clone, Copy, Default)]
     struct Stages {
+        /// Latency control's sleep before the frame (Reflex's `vkLatencySleepNV`, Anti-Lag
+        /// 2's, or the generic path's queue bound and limiter).
+        sleep: f64,
         /// `Frames::begin`: waiting for the frame slot (the GPU two frames back).
         wait: f64,
         acquire: f64,
@@ -197,12 +205,20 @@ mod windowed {
         top: (&'static str, f64),
         pipelines: u64,
         arrived: u64,
+        /// The frame's present id under Reflex (0 otherwise): its driver report.
+        present_id: u64,
+        /// The frame's number (`FrameReport::number`, its value on the frames' timeline).
+        number: u64,
+        /// When its input was sampled (after latency control's sleep, the frame slot and
+        /// the acquire).
+        input: Option<Instant>,
     }
 
     /// A column of the CPU table: its name and what it reads from a frame.
     type Column = (&'static str, fn(&Stages) -> f64);
 
-    const COLUMNS: [Column; 17] = [
+    const COLUMNS: [Column; 18] = [
+        ("latency control's sleep", |s| s.sleep),
         ("wait for frame slot", |s| s.wait),
         ("acquire", |s| s.acquire),
         ("tick systems", |s| s.simulate),
@@ -223,6 +239,49 @@ mod windowed {
         ("**CPU frame (without the wait)**", |s| s.cpu),
         ("**frame interval**", |s| s.interval),
     ];
+
+    /// Every frame's stages and Reflex's report of it (µs on the driver's clock) as CSV
+    /// (`--nv-csv <path>`), to study the pacing frame by frame. With submissions tagged
+    /// by present id (as the extension asks), NVIDIA's driver 616.92 reports the next
+    /// frame's queue and GPU times in a frame's row (ADR 0023, addendum 2026-10-16).
+    fn nv_csv(path: &Path, nv: &std::collections::BTreeMap<u64, NvFrameReport>, log: &[Stages]) {
+        use std::fmt::Write as _;
+        let mut out = String::from(
+            "frame,id,sleep,slot,cpu,interval,gpu,input,sim_start,sim_end,submit_start,submit_end,present_start,present_end,driver_start,driver_end,os_start,os_end,gpu_start,gpu_end\n",
+        );
+        for (k, s) in log.iter().enumerate() {
+            let Some(r) = nv.get(&s.present_id) else {
+                continue;
+            };
+            let _ = writeln!(
+                out,
+                "{k},{},{:.0},{:.0},{:.0},{:.0},{:.0},{},{},{},{},{},{},{},{},{},{},{},{},{}",
+                s.present_id,
+                s.sleep,
+                s.wait,
+                s.cpu,
+                s.interval,
+                s.gpu,
+                r.input_sample_us,
+                r.sim_start_us,
+                r.sim_end_us,
+                r.render_submit_start_us,
+                r.render_submit_end_us,
+                r.present_start_us,
+                r.present_end_us,
+                r.driver_start_us,
+                r.driver_end_us,
+                r.os_queue_start_us,
+                r.os_queue_end_us,
+                r.gpu_render_start_us,
+                r.gpu_render_end_us,
+            );
+        }
+        match std::fs::write(path, out) {
+            Ok(()) => println!("Reflex's reports written to {}", path.display()),
+            Err(e) => println!("Reflex's reports: {e}"),
+        }
+    }
 
     fn percentile(values: &[f64], p: f64) -> f64 {
         if values.is_empty() {
@@ -1203,6 +1262,54 @@ mod windowed {
         let mut memory_logged = false;
         let mut drawn = 0usize;
         let mut previous_start: Option<Instant> = None;
+        // `--nv-csv`: Reflex's own reports by present id, read every 16 frames (the driver
+        // keeps 64).
+        let nv_csv_path = option("--nv-csv").map(PathBuf::from);
+        let mut nv: std::collections::BTreeMap<u64, NvFrameReport> =
+            std::collections::BTreeMap::new();
+        let mut nv_read = Vec::new();
+        // `--input-latency`: a thread waits on the frames' timeline and notes when each
+        // frame's GPU work is done, on the CPU's clock (a wake-up late): input to GPU done
+        // under any latency control. Reflex's own reports are a frame late with tagged
+        // submissions and absent without Reflex (ADR 0023, addendum 2026-10-16).
+        type Done = std::sync::Arc<std::sync::Mutex<Vec<(u64, Instant)>>>;
+        let watcher = flag("--input-latency").then(|| {
+            let device = player.device().raw().clone();
+            let timeline = player.frame_timeline();
+            let done: Done = std::sync::Arc::new(std::sync::Mutex::new(Vec::with_capacity(
+                frames_to_run + 64,
+            )));
+            let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let thread = {
+                let (done, stop) = (done.clone(), stop.clone());
+                std::thread::spawn(move || {
+                    // SAFETY: the player's timeline semaphore, alive until the player is
+                    // dropped, after this thread is joined.
+                    let mut next =
+                        unsafe { device.get_semaphore_counter_value(timeline) }.unwrap_or(0) + 1;
+                    while !stop.load(Ordering::Relaxed) {
+                        let semaphores = [timeline];
+                        let values = [next];
+                        let info = vk::SemaphoreWaitInfo::default()
+                            .semaphores(&semaphores)
+                            .values(&values);
+                        // SAFETY: as above; waits are allowed from any thread.
+                        if unsafe { device.wait_semaphores(&info, 50_000_000) }.is_ok() {
+                            let now = Instant::now();
+                            // SAFETY: as above.
+                            let reached = unsafe { device.get_semaphore_counter_value(timeline) }
+                                .unwrap_or(next)
+                                .max(next);
+                            done.lock()
+                                .unwrap()
+                                .extend((next..=reached).map(|n| (n, now)));
+                            next = reached + 1;
+                        }
+                    }
+                })
+            };
+            (done, stop, thread)
+        });
         while drawn < frames_to_run && !player.closing() {
             let frame_start = Instant::now();
             let Some(report) = player.frame(&mut game).unwrap_or_else(|e| panic!("{e}")) else {
@@ -1215,7 +1322,8 @@ mod windowed {
             }
             previous_start = Some(frame_start);
             let mut s = Stages {
-                wait: report.wait + report.latency_wait,
+                sleep: report.latency_wait,
+                wait: report.wait,
                 acquire: report.acquire,
                 simulate: report.simulate,
                 propagate: report.propagate,
@@ -1234,8 +1342,27 @@ mod windowed {
                 cpu: report.cpu,
                 pipelines: report.pipelines,
                 arrived: report.arrived,
+                number: report.number,
+                input: Some(
+                    frame_start
+                        + Duration::from_secs_f64(
+                            (report.latency_wait + report.wait + report.acquire) * 1e-6,
+                        ),
+                ),
+                present_id: player
+                    .latency()
+                    .and_then(Latency::submit_present_id)
+                    .unwrap_or(0),
                 ..Stages::default()
             };
+            if nv_csv_path.is_some()
+                && s.present_id > 0
+                && s.present_id.is_multiple_of(16)
+                && let (Some(latency), Some(swapchain)) = (player.latency(), player.swapchain())
+                && latency.nv_reports(swapchain, &mut nv_read).is_ok()
+            {
+                nv.extend(nv_read.iter().map(|r| (r.present_id, *r)));
+            }
             generated_shown += usize::from(report.generated_shown);
             if let Some(paced) = player.paced() {
                 paced.drain_presented(|p| presented.push(p));
@@ -1283,6 +1410,19 @@ mod windowed {
         if let Some(paced) = player.paced() {
             paced.drain_presented(|x| presented.push(x));
         }
+        let input_latency: Option<Vec<f64>> = watcher.map(|(done, stop, thread)| {
+            stop.store(true, Ordering::Relaxed);
+            let _ = thread.join();
+            let done: std::collections::HashMap<u64, Instant> =
+                done.lock().unwrap().iter().copied().collect();
+            log.iter()
+                .skip(WARMUP)
+                .filter_map(|s| {
+                    let at = done.get(&s.number)?.checked_duration_since(s.input?)?;
+                    Some(at.as_secs_f64() * 1e6)
+                })
+                .collect()
+        });
         if let Some(path) = &record_pso {
             let mut record = engine_assets::pso_record::PsoRecord::new();
             for (desc, entries) in player.renderer().forward().material_type_entries_drawn() {
@@ -1417,15 +1557,16 @@ mod windowed {
         );
         if !hitches.is_empty() {
             println!(
-                "| frame | interval µs | CPU µs | wait | streaming | compose | execute | present | GPU µs | longest pass µs | pipelines | levels arrived |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"
+                "| frame | interval µs | CPU µs | sleep | slot | streaming | compose | execute | present | GPU µs | longest pass µs | pipelines | levels arrived |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|---:|---:|"
             );
             let mut worst = hitches.clone();
             worst.sort_by(|a, b| b.1.interval.total_cmp(&a.1.interval));
             for (k, s) in worst.iter().take(12) {
                 println!(
-                    "| {k} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {} {:.0} | {} | {} |",
+                    "| {k} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {:.0} | {} {:.0} | {} | {} |",
                     s.interval,
                     s.cpu,
+                    s.sleep,
                     s.wait,
                     s.streaming,
                     s.compose,
@@ -1438,6 +1579,27 @@ mod windowed {
                     s.arrived
                 );
             }
+        }
+        if let Some(latency) = player.latency()
+            && latency.backend() == engine_latency::Backend::NvidiaReflex
+        {
+            println!(
+                "Reflex sleeps cut at their bound (three frame intervals and a millisecond): {}\n",
+                latency.sleeps_cut()
+            );
+        }
+        if let Some(v) = &input_latency {
+            println!(
+                "**Input to GPU done** (a thread waiting on the frames' timeline: the CPU's clock, a wake-up late), µs: median {:.0}, p90 {:.0}, p99 {:.0}, worst {:.0} ({} frames)\n",
+                percentile(v, 0.5),
+                percentile(v, 0.9),
+                percentile(v, 0.99),
+                percentile(v, 1.0),
+                v.len()
+            );
+        }
+        if let Some(path) = &nv_csv_path {
+            nv_csv(path, &nv, &log);
         }
         let mut by_cpu: Vec<(usize, &Stages)> = log.iter().enumerate().skip(WARMUP).collect();
         by_cpu.sort_by(|a, b| b.1.cpu.total_cmp(&a.1.cpu));

@@ -219,6 +219,12 @@ struct Nv {
     loader: engine_rhi::ash::nv::low_latency2::Device,
     semaphore: vk::Semaphore,
     value: u64,
+    /// When the last sleep ended, and the interval between the last two: the next wait
+    /// for the driver's signal is cut at a few such intervals ([`sleep_bound_ns`]).
+    woke: Option<Instant>,
+    interval_ns: u64,
+    /// Sleeps cut at that bound.
+    cut: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -343,8 +349,25 @@ impl Sleeper {
     }
 }
 
-/// How long `begin_frame` waits for the Reflex sleep semaphore before giving up.
+/// How long `begin_frame` waits for the Reflex sleep semaphore before giving up, at most.
 const NV_SLEEP_TIMEOUT_NS: u64 = 200_000_000;
+/// The least it waits for it once the frame interval is known.
+const NV_SLEEP_MIN_BOUND_NS: u64 = 4_000_000;
+
+/// How long to wait for Reflex's signal after a frame interval of `interval_ns` (0: none
+/// measured yet): three intervals and a millisecond, within 4 and 200 ms. The driver's
+/// sleep is as long as the GPU or the frame-rate cap needs, which the last interval
+/// already shows; on ref-1 it now and then signalled 15–43 ms late where frames took
+/// 2 ms (ADR 0023, addendum 2026-10-16), and the frame slot still bounds the CPU.
+fn sleep_bound_ns(interval_ns: u64) -> u64 {
+    if interval_ns == 0 {
+        return NV_SLEEP_TIMEOUT_NS;
+    }
+    interval_ns
+        .saturating_mul(3)
+        .saturating_add(1_000_000)
+        .clamp(NV_SLEEP_MIN_BOUND_NS, NV_SLEEP_TIMEOUT_NS)
+}
 /// How long the generic path waits for an old present before giving up.
 const PRESENT_WAIT_TIMEOUT_NS: u64 = 200_000_000;
 
@@ -419,6 +442,9 @@ impl Latency {
                 loader: engine_rhi::ash::nv::low_latency2::Device::new(device.instance_raw(), raw),
                 semaphore,
                 value: 0,
+                woke: None,
+                interval_ns: 0,
+                cut: 0,
             })
         } else {
             None
@@ -619,16 +645,17 @@ impl Latency {
                 let semaphores = [nv.semaphore];
                 let values = [nv.value];
                 // SAFETY: waiting on our own timeline semaphore; a timeout only means
-                // the driver did not sleep.
+                // the driver's signal is late (the next sleep's value implies this one's).
                 match unsafe {
                     self.device.wait_semaphores(
                         &vk::SemaphoreWaitInfo::default()
                             .semaphores(&semaphores)
                             .values(&values),
-                        NV_SLEEP_TIMEOUT_NS,
+                        sleep_bound_ns(nv.interval_ns),
                     )
                 } {
-                    Ok(()) | Err(vk::Result::TIMEOUT) => {}
+                    Ok(()) => {}
+                    Err(vk::Result::TIMEOUT) => nv.cut += 1,
                     Err(e) => {
                         return Err(RhiError::Vulkan {
                             call: "vkWaitSemaphores(latency)",
@@ -636,6 +663,11 @@ impl Latency {
                         });
                     }
                 }
+                let now = Instant::now();
+                if let Some(woke) = nv.woke {
+                    nv.interval_ns = (now - woke).as_nanos() as u64;
+                }
+                nv.woke = Some(now);
                 true
             }
             _ => false,
@@ -730,6 +762,12 @@ impl Latency {
         self.present_id.then_some(self.frame)
     }
 
+    /// How many Reflex sleeps were cut at their bound: three recent frame intervals
+    /// and a millisecond (ADR 0023, addendum 2026-10-16). 0 on other backends.
+    pub fn sleeps_cut(&self) -> u64 {
+        self.nv.as_ref().map_or(0, |nv| nv.cut)
+    }
+
     /// The id to tag the current frame's queue submissions with (Reflex only).
     pub fn submit_present_id(&self) -> Option<u64> {
         (self.nv.is_some() && self.settings.mode != LowLatency::Off).then_some(self.frame)
@@ -760,7 +798,15 @@ impl Latency {
                     present_id: r.present_id,
                     input_sample_us: r.input_sample_time_us,
                     sim_start_us: r.sim_start_time_us,
+                    sim_end_us: r.sim_end_time_us,
+                    render_submit_start_us: r.render_submit_start_time_us,
+                    render_submit_end_us: r.render_submit_end_time_us,
+                    present_start_us: r.present_start_time_us,
                     present_end_us: r.present_end_time_us,
+                    driver_start_us: r.driver_start_time_us,
+                    driver_end_us: r.driver_end_time_us,
+                    os_queue_start_us: r.os_render_queue_start_time_us,
+                    os_queue_end_us: r.os_render_queue_end_time_us,
                     gpu_render_start_us: r.gpu_render_start_time_us,
                     gpu_render_end_us: r.gpu_render_end_time_us,
                 });
@@ -780,8 +826,24 @@ pub struct NvFrameReport {
     pub input_sample_us: u64,
     /// Simulation started.
     pub sim_start_us: u64,
+    /// Simulation ended.
+    pub sim_end_us: u64,
+    /// Render submission started.
+    pub render_submit_start_us: u64,
+    /// Render submission ended.
+    pub render_submit_end_us: u64,
+    /// Present call started.
+    pub present_start_us: u64,
     /// Present call returned.
     pub present_end_us: u64,
+    /// The driver started processing the frame's submissions.
+    pub driver_start_us: u64,
+    /// The driver finished processing them.
+    pub driver_end_us: u64,
+    /// The frame entered the OS's render queue.
+    pub os_queue_start_us: u64,
+    /// The frame left the OS's render queue.
+    pub os_queue_end_us: u64,
     /// GPU started rendering the frame.
     pub gpu_render_start_us: u64,
     /// GPU finished rendering the frame.
@@ -790,6 +852,11 @@ pub struct NvFrameReport {
 
 impl NvFrameReport {
     /// Input sample to GPU completion, the part of input-to-photon the PC controls.
+    ///
+    /// NVIDIA's driver 616.92 puts the GPU times of the next frame's work in a frame's
+    /// report when submissions carry their present id, as the extension asks
+    /// (`VkLatencySubmissionPresentIdNV`): this then reads about one frame interval
+    /// high (ADR 0023, addendum 2026-10-16).
     pub fn input_to_gpu_end_us(&self) -> Option<u64> {
         (self.input_sample_us > 0 && self.gpu_render_end_us > self.input_sample_us)
             .then(|| self.gpu_render_end_us - self.input_sample_us)
@@ -803,5 +870,24 @@ impl Drop for Latency {
             // rendering (the caller's frames waited); nothing else uses it.
             unsafe { self.device.destroy_semaphore(nv.semaphore, None) };
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sleep_is_cut_at_three_intervals_within_its_limits() {
+        // Nothing measured yet: the longest wait.
+        assert_eq!(sleep_bound_ns(0), NV_SLEEP_TIMEOUT_NS);
+        // 2 ms frames: 7 ms.
+        assert_eq!(sleep_bound_ns(2_000_000), 7_000_000);
+        // Very short frames: not under 4 ms.
+        assert_eq!(sleep_bound_ns(500_000), NV_SLEEP_MIN_BOUND_NS);
+        // A 60 FPS cap: 51 ms.
+        assert_eq!(sleep_bound_ns(16_666_667), 51_000_001);
+        // A long pause: not over 200 ms.
+        assert_eq!(sleep_bound_ns(5_000_000_000), NV_SLEEP_TIMEOUT_NS);
     }
 }
