@@ -571,15 +571,34 @@ mod tests {
     fn args(line: &str) -> Result<Args, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Shaders(args) => Ok(args),
-            Command::Cook(_) | Command::Loc(_) => Err(String::from("not a shaders command")),
+            Command::Cook(_) | Command::Loc(_) | Command::Save { .. } => {
+                Err(String::from("not a shaders command"))
+            }
         }
     }
 
     fn cook_args(line: &str) -> Result<CookArgs, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Cook(args) => Ok(args),
-            Command::Shaders(_) | Command::Loc(_) => Err(String::from("not a cook command")),
+            Command::Shaders(_) | Command::Loc(_) | Command::Save { .. } => {
+                Err(String::from("not a cook command"))
+            }
         }
+    }
+
+    #[test]
+    fn parses_save_commands() {
+        let parse = |line: &str| parse_command(line.split_whitespace().map(str::to_owned));
+        assert!(matches!(
+            parse("save dump a.save"),
+            Ok(Command::Save { info: false, .. })
+        ));
+        assert!(matches!(
+            parse("save info a.save"),
+            Ok(Command::Save { info: true, .. })
+        ));
+        assert!(parse("save dump").is_err());
+        assert!(parse("save print a.save").is_err());
     }
 
     #[test]
