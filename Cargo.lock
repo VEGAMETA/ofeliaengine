@@ -272,6 +272,7 @@ dependencies = [
  "engine_input",
  "engine_latency",
  "engine_loc",
+ "engine_nav",
  "engine_physics",
  "engine_physics_jolt",
  "engine_platform",
@@ -296,6 +297,7 @@ dependencies = [
  "engine_core",
  "engine_ecs",
  "engine_loc",
+ "engine_nav",
  "engine_platform",
  "engine_profiler",
  "engine_shader",
@@ -533,6 +535,16 @@ dependencies = [
  "engine_workspace_hack",
  "log",
  "loom",
+]
+
+[[package]]
+name = "engine_nav"
+version = "0.0.0"
+dependencies = [
+ "cc",
+ "engine_core",
+ "engine_profiler",
+ "engine_workspace_hack",
 ]
 
 [[package]]

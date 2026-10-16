@@ -32,6 +32,7 @@ engine_crash = { path = "crates/engine_crash" }
 engine_physics = { path = "crates/engine_physics" }
 engine_physics_jolt = { path = "crates/engine_physics_jolt" }
 engine_physics2d = { path = "crates/engine_physics2d" }
+engine_nav = { path = "crates/engine_nav" }
 engine_scene = { path = "crates/engine_scene" }
 engine_editor = { path = "crates/engine_editor" }
 engine_dlss = { path = "crates/engine_dlss" }
