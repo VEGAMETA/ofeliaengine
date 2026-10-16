@@ -263,11 +263,13 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
     );
     if !cooked.colliders.is_empty() {
         println!(
-            "{}: {} colliders, {} bodies; made in {:.2} s, baked in {:.2} s",
+            "{}: {} colliders, {} bodies; made in {:.2} s ({} meshes in convex parts, {} from the cache), baked in {:.2} s",
             args.scene.display(),
             cooked.colliders.len(),
             cooked.bodies.len(),
             stats.collider_seconds,
+            stats.colliders.decomposed,
+            stats.colliders.cached,
             baked_in.as_secs_f64(),
         );
     }

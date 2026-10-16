@@ -32,7 +32,8 @@ fn sponza_collides_where_it_is_drawn() {
     };
     let scene = import_gltf(&bytes, gltf.parent()).unwrap();
     let instances: Vec<(u32, u32)> = (0..scene.nodes.len() as u32).map(|i| (i, 1)).collect();
-    let (mut colliders, bodies) = cook_colliders(&scene, &instances, &scene.collider_rules);
+    let (mut colliders, bodies, _) =
+        cook_colliders(&scene, &instances, &scene.collider_rules, None, None);
     assert!(!colliders.is_empty() && bodies.len() == colliders.len());
     let mut baker = JoltBackend::new(&settings()).unwrap();
     for c in &mut colliders {
