@@ -263,14 +263,16 @@ struct Frame
     uint meshlet_slot[7];
     // The sun's virtual shadow pages (ADR 0093 step 3; the `*Vsm*` entry points): their
     // frame, page tables and hierarchy of dirty pages, their batches (every batch's state
-    // and its levels' meshlets), the pool's bindless index, and the error the casters'
-    // detail levels may have, in texels of the level they are drawn into.
+    // and its levels' meshlets), the pool's bindless index, the error the casters' detail
+    // levels may have, in texels of the level they are drawn into, and the frame's
+    // allocation requests (a count, then entries; `vsmMarkTransparent` appends to them).
     VsmFrame* vsm;
     uint* vsm_table;
     uint* vsm_hierarchy;
     BatchMeshlets* vsm_batches;
     uint vsm_pool;
     float vsm_lod_threshold;
+    uint* vsm_requests;
 };
 
 struct Instance
@@ -2011,26 +2013,47 @@ void vsm_write(uint2 at, float depth)
     InterlockedMin(g_vsm_pool[NonUniformResourceIndex(push.frame.vsm_pool)][at], asuint(depth));
 }
 
-[shader("fragment")]
-void vsmFragment(VsmOut input)
+// A caster's faces turned to the light (`front`: subsurface materials draw them, for thick
+// transmission, and double-sided casters both theirs) are the surfaces their own pixels
+// receive on. Pushed away from the light by their slope over the filter's reach, 2.5
+// texels (ADR 0093 step 3d), they do not shadow themselves: the receiver's offsets (a
+// texel along its normal, half a texel of depth) cover the rest. The slope counts up to
+// 80° (a face nearer edge-on is barely lit); the faces turned away, which most casters
+// draw, keep their depth.
+static const float VSM_FRONT_SLOPE_BIAS = 2.5;
+static const float VSM_FRONT_MAX_SLOPE = 5.67;
+
+float vsm_depth(uint level, float z, bool front)
 {
+    float slope = max(abs(ddx(z)), abs(ddy(z)));
+    VsmFrame* f = push.frame.vsm;
+    float texel_depth = f.depth_scale / (f.level[level].page_scale * float(VSM_PAGE));
+    return front ? z + VSM_FRONT_SLOPE_BIAS * min(slope, VSM_FRONT_MAX_SLOPE * texel_depth) : z;
+}
+
+[shader("fragment")]
+void vsmFragment(VsmOut input, bool front : SV_IsFrontFace)
+{
+    float depth = vsm_depth(input.level, input.position.z, front);
     uint2 at;
     if (vsm_target(input.level, input.position, at))
-        vsm_write(at, input.position.z);
+        vsm_write(at, depth);
 }
 
 // The alpha test first: returning before it (where the page is not drawn) lost the
-// Radeon's device in Sponza (2026-10-15, AMD 26.8.1).
+// Radeon's device in Sponza (2026-10-15, AMD 26.8.1). The depth's slope before both,
+// while every lane of the quad is alive.
 [shader("fragment")]
-void vsmFragmentMasked(VsmMaskedOut input)
+void vsmFragmentMasked(VsmMaskedOut input, bool front : SV_IsFrontFace)
 {
+    float depth = vsm_depth(input.level, input.position.z, front);
     MaterialContext ctx = coverage_context(input.uv, input.material);
     MATERIAL.Params p = MATERIAL::load(ctx);
     if (MATERIAL::alpha(ctx, p) < MATERIAL::alpha_cutoff(p))
         discard;
     uint2 at;
     if (vsm_target(input.level, input.position, at))
-        vsm_write(at, input.position.z);
+        vsm_write(at, depth);
 }
 
 // The depth prepass of masked materials with MSAA (ADR 0075): alpha to coverage instead
@@ -2227,12 +2250,88 @@ float shadow(float3 light, float3 n, float2 pixel)
 static const uint SUN_IN_MASK = 1u << 31;
 static const uint SUN_MASK_INDEX = SUN_IN_MASK - 1u;
 
-// The sun's shadow from the cascades, or none to look up when the mask holds it
-// (`contact` is a literal: the other entry points keep their code).
-float sun_shadow(bool contact, float3 light, float3 n, float2 pixel)
+// The sun's shadow from the virtual pages (ADR 0093 step 3d) for the shading the
+// visibility pass's mask does not serve: transparent surfaces (not in the prepass) and
+// subsurface transmission (`*Vsm` entry points). A surface reads the level it marked
+// (`vsm_level_holding`): the depth's pixels mark the opaque surfaces' pages,
+// `vsmMarkTransparent` the transparent ones'. `world`: the surface's world position; `n`:
+// its unit geometric normal, facing the viewer.
+
+// The surface's position relative to the camera, its level (`f.levels`: no window holds
+// it) and that level's virtual texels per metre.
+uint vsm_surface(VsmFrame* f, float3 world, out float3 c, out float scale)
 {
+    c = world - read_float4(&push.frame.camera_position).xyz;
+    uint level = vsm_level_holding(f, c, vsm_light_xy(f, c));
+    scale = level < f.levels ? f.level[level].page_scale * float(VSM_PAGE) : 1.0;
+    return level;
+}
+
+// The sun's visibility at a surface, as `vsmVisibility` finds it for the depth's pixels.
+float vsm_sun(float3 world, float3 n)
+{
+    VsmFrame* f = push.frame.vsm;
+    float3 c;
+    float scale;
+    uint level = vsm_surface(f, world, c, scale);
+    if (level >= f.levels)
+        return 1.0;
+    float texel = 1.0 / scale;
+    float3 r = c + n * (VSM_NORMAL_OFFSET_TEXELS * texel);
+    float receiver = vsm_depth_of(f, r) - VSM_DEPTH_BIAS_TEXELS * texel * f.depth_scale;
+    return vsm_filter(push.frame.vsm_table, g_vsm_pool[push.frame.vsm_pool], level, vsm_light_xy(f, r) * scale, receiver);
+}
+
+// Thin transmission's visibility (`shadow` at the back side, with the cascades): the
+// receiver pushed through `thickness` towards the light (against `n`), looked up at the
+// surface's own texel across the light, whose pages its pixel backed (a sheet's back side
+// lies at most its thickness across).
+float vsm_back_side(float3 world, float3 n, float thickness)
+{
+    VsmFrame* f = push.frame.vsm;
+    float3 c;
+    float scale;
+    uint level = vsm_surface(f, world, c, scale);
+    if (level >= f.levels)
+        return 1.0;
+    float texel = 1.0 / scale;
+    float3 r = c - n * (VSM_NORMAL_OFFSET_TEXELS * texel);
+    float receiver = vsm_depth_of(f, r - n * thickness) - VSM_DEPTH_BIAS_TEXELS * texel * f.depth_scale;
+    return vsm_filter(push.frame.vsm_table, g_vsm_pool[push.frame.vsm_pool], level, vsm_light_xy(f, r) * scale, receiver);
+}
+
+// Thick transmission's distance (`shadow_distance` with the cascades): how far the sun's
+// light travelled from the nearest surface towards it to the receiver pushed a texel into
+// its surface, in world units; 0 outside the pages or on an unbacked page.
+float vsm_through(float3 world, float3 n)
+{
+    VsmFrame* f = push.frame.vsm;
+    float3 c;
+    float scale;
+    uint level = vsm_surface(f, world, c, scale);
+    if (level >= f.levels)
+        return 0.0;
+    float3 r = c - n * (VSM_NORMAL_OFFSET_TEXELS / scale);
+    int2 t = int2(floor(vsm_light_xy(f, r) * scale));
+    uint entry = push.frame.vsm_table[vsm_entry(level, t >> 6)];
+    if ((entry & VSM_ALLOCATED) == 0)
+        return 0.0;
+    float occluder = asfloat(g_vsm_pool[push.frame.vsm_pool][vsm_pool_texel(entry & VSM_PHYSICAL, uint2(t & 63))]);
+    return max(vsm_depth_of(f, r) - occluder, 0.0) / f.depth_scale;
+}
+
+// The sun's shadow: from the cascades; none to look up when the mask holds it; from the
+// pages with `vsm` (`contact` and `vsm` are literals: the other entry points keep their
+// code). Subsurface materials' `*Vsm` entry points read the mask, where the pages always
+// put the sun.
+float sun_shadow(bool contact, bool vsm, float3 light, float3 n, float2 pixel, float3 world, float3 ng)
+{
+    if (contact && vsm)
+        return 1.0;
     if (contact && (push.phase & SUN_IN_MASK) != 0)
         return 1.0;
+    if (vsm)
+        return vsm_sun(world, ng);
     return shadow(light, n, pixel);
 }
 
@@ -2833,7 +2932,8 @@ void apply_decals(Frame frame, uint2 pixel, inout float3 albedo, inout float3 n,
 // own; without ambient occlusion `push.ao` skips the read). `decals` blends the decal
 // buffer in (ADR 0082). `bent`: the view's ambient occlusion carries its bent normal
 // (`AoSettings::bent_normals`): visibility in R, the bent normal in world space in GBA.
-float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false, bool gi = false, bool bent = false)
+// `vsm`: the sun's virtual pages (ADR 0093 step 3d) instead of the cascades.
+float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bool ao, bool subsurface, out SubsurfaceOut sss, out ReflectOut refl, bool shadows = false, bool contact = false, bool reflective = false, bool decals = false, bool gi = false, bool bent = false, bool vsm = false)
 {
     Frame frame = loadAligned<16>(push.frame);
     // The back of a double-sided surface is lit from its own side: the whole tangent
@@ -2911,7 +3011,7 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     // decals (a literal), after the terms: the decals' values are live here.
     float visible = 0.0;
     if (!decals)
-        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? sun_shadow(contact, input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? sun_shadow(contact, vsm, input.light_position, normalize(input.light_normal) * side, input.position.xy, input.world_position, ng) : 0.0;
     // glTF's sheen layer lets through what its lobe does not reflect (KHR_materials_sheen's
     // albedo scaling, from n·v; `sheen_albedo` is the lobe's directional albedo).
     terms.sheen_scaling = model_sheen_layer(M::model())
@@ -2931,7 +3031,7 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
     float3 surface_diffuse = subsurface ? float3(0.0, 0.0, 0.0) : diffuse;
     float3 ambient_albedo = subsurface ? float3(0.0, 0.0, 0.0) : base.rgb;
     if (decals)
-        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? sun_shadow(contact, input.light_position, normalize(input.light_normal) * side, input.position.xy) : 0.0;
+        visible = n_dot_l > 0.0 && dot(ng, l) > 0.0 ? sun_shadow(contact, vsm, input.light_position, normalize(input.light_normal) * side, input.position.xy, input.world_position, ng) : 0.0;
     // The sun's contact shadows (ADR 0071; `contact` is a literal): their mask's bindless
     // index comes in `push.phase`, which the shading passes do not otherwise read. With the
     // view's virtual shadow pages the mask holds the sun's whole visibility.
@@ -3016,9 +3116,9 @@ float4 shade_surface<M : IMaterial>(VertexOut input, bool front, bool masked, bo
             if (transmission == TRANSMISSION_THIN)
                 // Shadowed by other objects: the receiver pushed through its thickness to
                 // the lit side.
-                lit_back = shadow(input.light_position - light_normal * thickness, -light_normal, input.position.xy);
+                lit_back = vsm ? vsm_back_side(input.world_position, ng, thickness) : shadow(input.light_position - light_normal * thickness, -light_normal, input.position.xy);
             else
-                d = max(thickness, shadow_distance(input.light_position, light_normal));
+                d = max(thickness, vsm ? vsm_through(input.world_position, ng) : shadow_distance(input.light_position, light_normal));
             lit += kd * frame.light_color.rgb * back * lit_back * profile_transmission(profile, d);
         }
         float mask = float((bits >> 8) & 0xFFu) / 255.0;
@@ -3596,6 +3696,168 @@ SubsurfaceShaded fragmentSubsurfaceShadowed(VertexOut input, bool front : SV_IsF
     o.irradiance = sss.irradiance;
     o.albedo = sss.albedo;
     return o;
+}
+
+// Transparent surfaces' pages (ADR 0093 step 3d): drawn after the prepass with its depth
+// tested, each fragment flags the pages its shading reads (`vsm_sun`), as `vsmMark` flags
+// a depth pixel's.
+[shader("fragment")]
+[earlydepthstencil]
+void vsmMarkTransparent(VertexOut input)
+{
+    VsmFrame* f = push.frame.vsm;
+    float3 c = input.world_position - read_float4(&push.frame.camera_position).xyz;
+    float2 light_xy = vsm_light_xy(f, c);
+    uint level = vsm_level_holding(f, c, light_xy);
+    if (level >= f.levels)
+        return;
+    uint4 entries = vsm_margin_entries(level, vsm_texel(f, level, light_xy));
+    uint* table = push.frame.vsm_table;
+    uint* requests = push.frame.vsm_requests;
+    vsm_flag_entry(f, table, requests, entries.x);
+    if (entries.y != ~0u)
+        vsm_flag_entry(f, table, requests, entries.y);
+    if (entries.z != ~0u)
+        vsm_flag_entry(f, table, requests, entries.z);
+    if (entries.w != ~0u)
+        vsm_flag_entry(f, table, requests, entries.w);
+}
+
+// Transparent surfaces of a view with the sun's virtual pages (ADR 0093 step 3d): the
+// sun's shadow from the pages (`vsm_sun`), as the prepass's surfaces get it from the
+// visibility pass. Twins of the transparent entry points, so those carry none of it.
+float4 shade_vsm(VertexOut input, bool front, bool shadows)
+{
+    SubsurfaceOut unused;
+    ReflectOut unused_reflect;
+    return shade_surface<MATERIAL>(input, front, false, false, false, unused, unused_reflect, shadows, false, false, false, false, false, true);
+}
+
+float4 blended_vsm(VertexOut input, bool front, bool shadows, bool atmosphere)
+{
+    float4 c = shade_vsm(input, front, shadows);
+    if (atmosphere)
+        c.rgb = atmosphere_apply(push.frame.atmosphere, c.rgb, input.world_position, input.position.xy / float2(loadAligned<8>(&push.frame.depth_size)));
+    float alpha = saturate(c.a);
+    return float4(c.rgb * alpha, alpha);
+}
+
+BlendedReactive blended_reactive_vsm(VertexOut input, bool front, bool shadows, bool atmosphere)
+{
+    BlendedReactive o;
+    o.color = blended_vsm(input, front, shadows, atmosphere);
+    o.reactive = float4(o.color.a, 0.0, 0.0, o.color.a);
+    return o;
+}
+
+[shader("fragment")]
+float4 fragmentBlendedVsm(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return blended_vsm(input, front, false, false);
+}
+
+[shader("fragment")]
+BlendedReactive fragmentBlendedReactiveVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return blended_reactive_vsm(input, front, false, false);
+}
+
+[shader("fragment")]
+float4 fragmentBlendedAtmosphereVsm(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return blended_vsm(input, front, false, true);
+}
+
+[shader("fragment")]
+BlendedReactive fragmentBlendedAtmosphereReactiveVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return blended_reactive_vsm(input, front, false, true);
+}
+
+[shader("fragment")]
+float4 fragmentBlendedShadowedVsm(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return blended_vsm(input, front, true, false);
+}
+
+[shader("fragment")]
+BlendedReactive fragmentBlendedReactiveShadowedVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return blended_reactive_vsm(input, front, true, false);
+}
+
+[shader("fragment")]
+float4 fragmentBlendedAtmosphereShadowedVsm(VertexOut input, bool front : SV_IsFrontFace) : SV_Target
+{
+    return blended_vsm(input, front, true, true);
+}
+
+[shader("fragment")]
+BlendedReactive fragmentBlendedAtmosphereReactiveShadowedVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return blended_reactive_vsm(input, front, true, true);
+}
+
+// Subsurface materials of a view with the sun's virtual pages (ADR 0093 step 3d): their
+// front's sun from the mask the visibility pass filled (with the contact shadows in it
+// when they are on), their transmission through the pages.
+SubsurfaceShaded subsurface_vsm(VertexOut input, bool front, bool shadows, bool gi, bool bent)
+{
+    SubsurfaceOut sss;
+    SubsurfaceShaded o;
+    ReflectOut unused;
+    o.color = float4(shade_surface<GltfMaterial>(input, front, false, true, true, sss, unused, shadows, true, false, false, gi, bent, true).rgb, 1.0);
+    o.irradiance = sss.irradiance;
+    o.albedo = sss.albedo;
+    return o;
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return subsurface_vsm(input, front, false, false, false);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceShadowedVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return subsurface_vsm(input, front, true, false, false);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceGiVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return subsurface_vsm(input, front, false, true, false);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceShadowedGiVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return subsurface_vsm(input, front, true, true, false);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceBentVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return subsurface_vsm(input, front, false, false, true);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceBentShadowedVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return subsurface_vsm(input, front, true, false, true);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceBentGiVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return subsurface_vsm(input, front, false, true, true);
+}
+
+[shader("fragment")]
+SubsurfaceShaded fragmentSubsurfaceBentShadowedGiVsm(VertexOut input, bool front : SV_IsFrontFace)
+{
+    return subsurface_vsm(input, front, true, true, true);
 }
 
 // After the depth prepass of a view with the sun's contact shadows (ADR 0071): the

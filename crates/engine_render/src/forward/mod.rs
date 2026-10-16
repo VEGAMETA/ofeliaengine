@@ -153,6 +153,7 @@ mod material_types;
 mod msaa;
 mod pipelines;
 mod shadow_atlas;
+mod vsm_shading;
 
 use layout::{Changes, Layout, MESHLET_ARGS, MESHLET_HEADER_BYTES, Source, local_box};
 pub(crate) use layout::{States, TypedPipelines, mirrored, state};
@@ -166,6 +167,7 @@ use pipelines::{
     ready, shading_desc, shadowed_index,
 };
 use shadow_atlas::{AtlasImage, LocalShadowState};
+use vsm_shading::VsmShading;
 
 use cascade_cache::whole_plans;
 pub use cascade_cache::{CascadeCache, CascadeCacheStats};
@@ -1166,15 +1168,18 @@ struct FrameData {
     meshlet_slot: [u32; 7],
     /// The sun's virtual shadow pages (ADR 0093 step 3b, their cull and draw entry
     /// points): their frame (`VsmFrame`), page tables and hierarchy of dirty pages, their
-    /// batches (`BatchMeshletData` of every batch), the pool's bindless index, and the
-    /// error the casters' detail levels may have in texels of the level they are drawn
-    /// into.
+    /// batches (`BatchMeshletData` of every batch), the pool's bindless index, the error
+    /// the casters' detail levels may have in texels of the level they are drawn into,
+    /// and the frame's allocation requests (the transparent surfaces' marking, step 3d).
     vsm: u64,
     vsm_table: u64,
     vsm_hierarchy: u64,
     vsm_batches: u64,
     vsm_pool: u32,
     vsm_lod_threshold: f32,
+    vsm_requests: u64,
+    /// To a whole number of 16 bytes, as the shaders read it.
+    pad: u64,
 }
 
 /// `BatchMeshlets` in `forward.slang` (48 bytes): a batch's levels' meshlets (ADR 0085).
@@ -1255,7 +1260,7 @@ pub(crate) struct Push {
 const NO_AO: u32 = u32::MAX;
 
 const _: () = assert!(core::mem::size_of::<CascadeData>() == 144);
-const _: () = assert!(core::mem::size_of::<FrameData>() == 1520);
+const _: () = assert!(core::mem::size_of::<FrameData>() == 1536);
 const _: () = assert!(core::mem::size_of::<BatchMeshletData>() == 48);
 const _: () = assert!(core::mem::size_of::<InstanceData>() == 64);
 const _: () = assert!(core::mem::size_of::<BatchData>() == 64);
@@ -1609,6 +1614,9 @@ struct VsmDraw {
     /// The casters, drawn without attachments (an atomic minimum into the pool): plain,
     /// masked.
     pipelines: [Pipeline; 2],
+    /// The shading the visibility pass's mask does not serve, and the transparent
+    /// surfaces' marking (step 3d).
+    shading: VsmShading,
 }
 
 impl core::fmt::Debug for VsmDraw {
@@ -1618,7 +1626,12 @@ impl core::fmt::Debug for VsmDraw {
 }
 
 impl VsmDraw {
-    fn new(device: &Device, bindless: &Bindless) -> Result<Self, RhiError> {
+    fn new(
+        device: &Device,
+        bindless: &Bindless,
+        color_format: vk::Format,
+        depth_format: vk::Format,
+    ) -> Result<Self, RhiError> {
         let invalid = || RhiError::Vulkan {
             call: "embedded SPIR-V",
             result: vk::Result::ERROR_INVALID_SHADER_NV,
@@ -1676,6 +1689,7 @@ impl VsmDraw {
             cull,
             meshlets,
             pipelines: [next()?, next()?],
+            shading: VsmShading::new(device, bindless, color_format, depth_format)?,
         })
     }
 }
@@ -2582,7 +2596,12 @@ impl ForwardRenderer {
             && caps.shader_int64
             && caps.shader_clip_distance;
         if enabled && supported && self.vsm.is_none() {
-            self.vsm = Some(Box::new(VsmDraw::new(device, bindless)?));
+            self.vsm = Some(Box::new(VsmDraw::new(
+                device,
+                bindless,
+                self.color_format,
+                self.depth_format,
+            )?));
         }
         // Their views shade with the variants that read the sun's mask (the contact
         // shadows'), described now if contact shadows never were.
@@ -3448,18 +3467,25 @@ impl ForwardRenderer {
             && self.frustum_culling
             && depth_desc.width > 0
             && depth_desc.height > 0;
+        // Marked from a single-sampled depth prepass.
+        let vsm = view.virtual_shadows.is_some()
+            && self.vsm_draw().is_some()
+            && depth_desc.samples == vk::SampleCountFlags::TYPE_1
+            && depth_desc.width > 0
+            && depth_desc.height > 0
+            && crate::lights::ViewAxis::new(view.camera.clip_from_world).is_some();
         Setup {
             depth_desc,
             phases: if occlusion { 2 } else { 1 },
-            cascade_count: self.shadow_settings.cascade_count() as u32,
+            // The pages hold the sun's whole shadow (ADR 0093 step 3d): no cascade.
+            cascade_count: if vsm {
+                0
+            } else {
+                self.shadow_settings.cascade_count() as u32
+            },
             shadow_draws: 0,
             capture: false,
-            // Marked from a single-sampled depth prepass.
-            vsm: view.virtual_shadows.is_some()
-                && self.vsm_draw().is_some()
-                && depth_desc.samples == vk::SampleCountFlags::TYPE_1
-                && depth_desc.width > 0
-                && depth_desc.height > 0,
+            vsm,
         }
     }
 
@@ -3531,8 +3557,9 @@ struct Setup {
     /// A reflection probe's face (ADR 0073): no ambient occlusion, contact or local
     /// shadows, reflections or sky pass; one shared shadow cascade; passes named apart.
     capture: bool,
-    /// The view's sun shadow on opaque surfaces comes from its virtual shadow pages (ADR
-    /// 0093 step 3b): their lists are laid out, their passes run after the prepass.
+    /// The view's sun shadow comes from its virtual shadow pages (ADR 0093 steps 3b and
+    /// 3d): their lists are laid out, their passes run after the prepass, and no cascade
+    /// is drawn (`cascade_count` 0).
     vsm: bool,
 }
 

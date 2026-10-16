@@ -38,27 +38,29 @@ intel_sponza_defaults_integrated	sky	3.1
 intel_sponza_defaults_integrated	taau	116.8
 intel_sponza_defaults_integrated	tonemap	27.6
 intel_sponza_defaults_integrated	transparent	28.7
-intel_sponza_vsm_discrete	(frame total)	1504.3
-intel_sponza_vsm_discrete	(gpu frame)	1602.9
+intel_sponza_vsm_discrete	(frame total)	1516.3
+intel_sponza_vsm_discrete	(gpu frame)	1614.7
 intel_sponza_vsm_discrete	ao	435.2
-intel_sponza_vsm_discrete	ao denoise	58.4
-intel_sponza_vsm_discrete	ao depths	29.1
-intel_sponza_vsm_discrete	bloom downsample	53.2
+intel_sponza_vsm_discrete	ao denoise	57.3
+intel_sponza_vsm_discrete	ao depths	29.2
+intel_sponza_vsm_discrete	bloom downsample	52.2
 intel_sponza_vsm_discrete	bloom upsample	29.7
-intel_sponza_vsm_discrete	cull	10.0
-intel_sponza_vsm_discrete	cull setup	3.2
-intel_sponza_vsm_discrete	depth prepass	92.7
-intel_sponza_vsm_discrete	forward	329.7
+intel_sponza_vsm_discrete	cull	10.1
+intel_sponza_vsm_discrete	cull setup	1.6
+intel_sponza_vsm_discrete	depth prepass	92.2
+intel_sponza_vsm_discrete	forward	325.6
 intel_sponza_vsm_discrete	motion background	3.1
 intel_sponza_vsm_discrete	remember instances	2.5
-intel_sponza_vsm_discrete	sky	3.1
-intel_sponza_vsm_discrete	taau	139.1
+intel_sponza_vsm_discrete	sky	4.1
+intel_sponza_vsm_discrete	taau	138.5
 intel_sponza_vsm_discrete	tonemap	27.6
-intel_sponza_vsm_discrete	transparent	53.2
+intel_sponza_vsm_discrete	transparent	54.3
+intel_sponza_vsm_discrete	vsm allocate	8.8
 intel_sponza_vsm_discrete	vsm cull	9.0
-intel_sponza_vsm_discrete	vsm draw	1.3
-intel_sponza_vsm_discrete	vsm pages	71.6
-intel_sponza_vsm_discrete	vsm visibility	152.6
+intel_sponza_vsm_discrete	vsm draw	1.2
+intel_sponza_vsm_discrete	vsm mark transparent	16.4
+intel_sponza_vsm_discrete	vsm pages	66.6
+intel_sponza_vsm_discrete	vsm visibility	151.6
 intel_sponza_walk_discrete	(frame total)	1361.5
 intel_sponza_walk_discrete	(gpu frame)	1370.7
 intel_sponza_walk_discrete	ao	438.3
@@ -97,52 +99,52 @@ intel_sponza_walk_integrated	sky	3.1
 intel_sponza_walk_integrated	taau	117.9
 intel_sponza_walk_integrated	tonemap	27.6
 intel_sponza_walk_integrated	transparent	29.7
-intel_sponza_walk_vsm_discrete	(frame total)	1639.9
-intel_sponza_walk_vsm_discrete	(gpu frame)	1660.0
+intel_sponza_walk_vsm_discrete	(frame total)	1567.2
+intel_sponza_walk_vsm_discrete	(gpu frame)	1660.1
 intel_sponza_walk_vsm_discrete	ao	436.2
 intel_sponza_walk_vsm_discrete	ao denoise	58.4
-intel_sponza_walk_vsm_discrete	ao depths	33.2
+intel_sponza_walk_vsm_discrete	ao depths	28.5
 intel_sponza_walk_vsm_discrete	bloom downsample	49.2
 intel_sponza_walk_vsm_discrete	bloom upsample	29.7
-intel_sponza_walk_vsm_discrete	cull	9.9
-intel_sponza_walk_vsm_discrete	cull setup	3.2
-intel_sponza_walk_vsm_discrete	depth prepass	84.2
-intel_sponza_walk_vsm_discrete	forward	312.3
+intel_sponza_walk_vsm_discrete	cull	10.1
+intel_sponza_walk_vsm_discrete	cull setup	1.6
+intel_sponza_walk_vsm_discrete	depth prepass	84.5
+intel_sponza_walk_vsm_discrete	forward	308.2
 intel_sponza_walk_vsm_discrete	motion background	3.1
-intel_sponza_walk_vsm_discrete	remember instances	2.4
-intel_sponza_walk_vsm_discrete	shadow	69.7
-intel_sponza_walk_vsm_discrete	shadow cull	11.3
-intel_sponza_walk_vsm_discrete	sky	3.1
-intel_sponza_walk_vsm_discrete	taau	142.4
+intel_sponza_walk_vsm_discrete	remember instances	2.5
+intel_sponza_walk_vsm_discrete	sky	4.1
+intel_sponza_walk_vsm_discrete	taau	142.5
 intel_sponza_walk_vsm_discrete	tonemap	27.6
 intel_sponza_walk_vsm_discrete	transparent	55.3
-intel_sponza_walk_vsm_discrete	vsm cull	17.0
-intel_sponza_walk_vsm_discrete	vsm draw	69.5
-intel_sponza_walk_vsm_discrete	vsm pages	72.7
+intel_sponza_walk_vsm_discrete	vsm allocate	10.2
+intel_sponza_walk_vsm_discrete	vsm cull	17.5
+intel_sponza_walk_vsm_discrete	vsm draw	65.3
+intel_sponza_walk_vsm_discrete	vsm mark transparent	17.4
+intel_sponza_walk_vsm_discrete	vsm pages	66.6
 intel_sponza_walk_vsm_discrete	vsm visibility	149.5
-intel_sponza_walk_vsm_integrated	(frame total)	841.0
-intel_sponza_walk_vsm_integrated	(gpu frame)	863.5
-intel_sponza_walk_vsm_integrated	ao	73.7
+intel_sponza_walk_vsm_integrated	(frame total)	762.2
+intel_sponza_walk_vsm_integrated	(gpu frame)	861.6
+intel_sponza_walk_vsm_integrated	ao	71.7
 intel_sponza_walk_vsm_integrated	ao denoise	18.4
-intel_sponza_walk_vsm_integrated	ao depths	15.5
+intel_sponza_walk_vsm_integrated	ao depths	14.2
 intel_sponza_walk_vsm_integrated	bloom downsample	42.0
-intel_sponza_walk_vsm_integrated	bloom upsample	30.7
-intel_sponza_walk_vsm_integrated	cull	9.9
-intel_sponza_walk_vsm_integrated	cull setup	3.1
-intel_sponza_walk_vsm_integrated	depth prepass	56.0
-intel_sponza_walk_vsm_integrated	forward	172.0
+intel_sponza_walk_vsm_integrated	bloom upsample	29.7
+intel_sponza_walk_vsm_integrated	cull	10.0
+intel_sponza_walk_vsm_integrated	cull setup	1.6
+intel_sponza_walk_vsm_integrated	depth prepass	56.1
+intel_sponza_walk_vsm_integrated	forward	170.0
 intel_sponza_walk_vsm_integrated	motion background	2.0
 intel_sponza_walk_vsm_integrated	remember instances	2.4
-intel_sponza_walk_vsm_integrated	shadow	66.4
-intel_sponza_walk_vsm_integrated	shadow cull	11.3
 intel_sponza_walk_vsm_integrated	sky	3.1
-intel_sponza_walk_vsm_integrated	taau	117.4
+intel_sponza_walk_vsm_integrated	taau	116.7
 intel_sponza_walk_vsm_integrated	tonemap	27.6
 intel_sponza_walk_vsm_integrated	transparent	30.7
-intel_sponza_walk_vsm_integrated	vsm cull	16.1
-intel_sponza_walk_vsm_integrated	vsm draw	34.9
-intel_sponza_walk_vsm_integrated	vsm pages	39.8
-intel_sponza_walk_vsm_integrated	vsm visibility	68.6
+intel_sponza_walk_vsm_integrated	vsm allocate	10.1
+intel_sponza_walk_vsm_integrated	vsm cull	16.2
+intel_sponza_walk_vsm_integrated	vsm draw	29.8
+intel_sponza_walk_vsm_integrated	vsm mark transparent	10.2
+intel_sponza_walk_vsm_integrated	vsm pages	31.7
+intel_sponza_walk_vsm_integrated	vsm visibility	67.6
 procedural	(frame total)	351.3
 procedural	(gpu frame)	369.2
 procedural	bloom downsample	37.9
@@ -175,6 +177,42 @@ procedural_decals	shadow cull	3.1
 procedural_decals	sky	5.1
 procedural_decals	tonemap	25.6
 procedural_decals	transparent	11.3
+procedural_sss	(frame total)	401.7
+procedural_sss	(gpu frame)	416.5
+procedural_sss	bloom downsample	38.9
+procedural_sss	bloom upsample	28.7
+procedural_sss	cull	4.2
+procedural_sss	cull setup	0.5
+procedural_sss	depth prepass	15.2
+procedural_sss	forward	108.5
+procedural_sss	forward subsurface	107.5
+procedural_sss	light tiles	10.2
+procedural_sss	light tiles clear	1.9
+procedural_sss	sky	5.1
+procedural_sss	subsurface scatter	44.0
+procedural_sss	tonemap	24.6
+procedural_sss	transparent	12.3
+procedural_sss_vsm	(frame total)	574.0
+procedural_sss_vsm	(gpu frame)	598.1
+procedural_sss_vsm	bloom downsample	39.9
+procedural_sss_vsm	bloom upsample	28.7
+procedural_sss_vsm	cull	4.4
+procedural_sss_vsm	cull setup	0.5
+procedural_sss_vsm	depth prepass	15.2
+procedural_sss_vsm	forward	84.0
+procedural_sss_vsm	forward subsurface	79.9
+procedural_sss_vsm	light tiles	10.2
+procedural_sss_vsm	light tiles clear	1.0
+procedural_sss_vsm	sky	5.1
+procedural_sss_vsm	subsurface scatter	46.1
+procedural_sss_vsm	tonemap	25.6
+procedural_sss_vsm	transparent	13.3
+procedural_sss_vsm	vsm allocate	8.7
+procedural_sss_vsm	vsm cull	8.2
+procedural_sss_vsm	vsm draw	1.5
+procedural_sss_vsm	vsm mark transparent	5.1
+procedural_sss_vsm	vsm pages	61.4
+procedural_sss_vsm	vsm visibility	135.2
 sponza	(frame total)	652.5
 sponza	(gpu frame)	667.0
 sponza	bloom downsample	48.1

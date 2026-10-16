@@ -17,7 +17,7 @@ use std::ffi::CString;
 use std::sync::Arc;
 
 /// The entry points that read the bent normal, and their SPIR-V.
-const BENT_FRAGMENTS: [(&CStr, &[u8]); 36] = [
+const BENT_FRAGMENTS: [(&CStr, &[u8]); 40] = [
     (
         c"fragmentMainAoBent",
         include_bytes!("../../shaders/forward.fragmentMainAoBent.spv"),
@@ -162,6 +162,23 @@ const BENT_FRAGMENTS: [(&CStr, &[u8]); 36] = [
         c"fragmentSubsurfaceBentShadowedGi",
         include_bytes!("../../shaders/forward.fragmentSubsurfaceBentShadowedGi.spv"),
     ),
+    // With the sun's virtual pages (ADR 0093 step 3d).
+    (
+        c"fragmentSubsurfaceBentVsm",
+        include_bytes!("../../shaders/forward.fragmentSubsurfaceBentVsm.spv"),
+    ),
+    (
+        c"fragmentSubsurfaceBentShadowedVsm",
+        include_bytes!("../../shaders/forward.fragmentSubsurfaceBentShadowedVsm.spv"),
+    ),
+    (
+        c"fragmentSubsurfaceBentGiVsm",
+        include_bytes!("../../shaders/forward.fragmentSubsurfaceBentGiVsm.spv"),
+    ),
+    (
+        c"fragmentSubsurfaceBentShadowedGiVsm",
+        include_bytes!("../../shaders/forward.fragmentSubsurfaceBentShadowedGiVsm.spv"),
+    ),
 ];
 
 /// The bent twin's entry point of `entry`, if it reads ambient occlusion.
@@ -300,6 +317,10 @@ mod tests {
             (
                 c"fragmentSubsurfaceShadowedGi",
                 Some(c"fragmentSubsurfaceBentShadowedGi"),
+            ),
+            (
+                c"fragmentSubsurfaceShadowedGiVsm",
+                Some(c"fragmentSubsurfaceBentShadowedGiVsm"),
             ),
             (c"fragmentMain", None),
             (c"fragmentReflectGi", None),

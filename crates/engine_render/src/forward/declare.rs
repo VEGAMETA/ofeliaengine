@@ -348,9 +348,14 @@ impl ForwardRenderer {
         // The sun's cascades (ADR 0093): a view's cache holds them still across frames
         // (their texel size while it covers the view, the scene's depth range) and draws
         // only what changed; without one (and in a probe's capture) each is drawn whole.
-        let cache = view.shadow_cache.filter(|c| !capture && c.fits(settings));
+        // A view whose pages hold the sun's shadow has none (ADR 0093 step 3d): its cache
+        // keeps what it holds until a frame draws cascades again.
+        let cache = view
+            .shadow_cache
+            .filter(|c| !capture && cascade_count > 0 && c.fits(settings));
         let fit = match capture_shadow {
             Some(c) => c.fit,
+            None if cascade_count == 0 => shadow::no_cascades(view.light.direction),
             None => shadow::fit_cascades_keeping(
                 unjittered,
                 view.camera.position,
@@ -573,6 +578,8 @@ impl ForwardRenderer {
             vsm_batches: vsm.map_or(0, |v| v.lists.table),
             vsm_pool: vsm.map_or(0, |v| v.pages.pool_index()),
             vsm_lod_threshold: self.lod_threshold,
+            vsm_requests: vsm.map_or(0, |v| v.pages.requests_address()),
+            pad: 0,
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -617,25 +624,29 @@ impl ForwardRenderer {
                     * (visible_bytes + meshlet_draws.map_or(0, |m| u64::from(m.layout.draws) * 4)),
             },
         );
-        let shadow_commands = fg.create_buffer(
-            "shadow commands",
-            BufferDesc {
-                size: shadow_meshlets.map_or(u64::from(cascade_count) * command_bytes, |m| {
-                    m.lists(cascade_count)
-                }),
-            },
-        );
-        let casters = fg.create_buffer(
-            "shadow casters",
-            BufferDesc {
-                size: u64::from(cascade_count)
-                    * (visible_bytes
-                        + shadow_meshlets.map_or(0, |m| {
-                            // Their pieces after the slots, when drawn at once.
-                            u64::from(m.layout.draws) * if pieces.is_some() { 8 } else { 4 }
-                        })),
-            },
-        );
+        // The cascades' command lists and casters, when the view has cascades.
+        let shadow_lists = (cascade_count > 0).then(|| {
+            let commands = fg.create_buffer(
+                "shadow commands",
+                BufferDesc {
+                    size: shadow_meshlets.map_or(u64::from(cascade_count) * command_bytes, |m| {
+                        m.lists(cascade_count)
+                    }),
+                },
+            );
+            let casters = fg.create_buffer(
+                "shadow casters",
+                BufferDesc {
+                    size: u64::from(cascade_count)
+                        * (visible_bytes
+                            + shadow_meshlets.map_or(0, |m| {
+                                // Their pieces after the slots, when drawn at once.
+                                u64::from(m.layout.draws) * if pieces.is_some() { 8 } else { 4 }
+                            })),
+                },
+            );
+            (commands, casters)
+        });
         // Local lights' shadow views drawn this frame: their command and caster lists,
         // sized for a power of two of views, at least the budget's, so the graph reuses its
         // buffers from frame to frame (the count changes every frame, pieces included).
@@ -698,8 +709,10 @@ impl ForwardRenderer {
         });
         let mut setup = fg
             .add_pass(names.cull_setup)
-            .write(culled, Access::TransferWrite)
-            .write(shadow_commands, Access::TransferWrite);
+            .write(culled, Access::TransferWrite);
+        if let Some((shadow_commands, _)) = shadow_lists {
+            setup = setup.write(shadow_commands, Access::TransferWrite);
+        }
         if let Some((flags, true)) = flags {
             setup = setup.write(flags, Access::TransferWrite);
         }
@@ -738,13 +751,15 @@ impl ForwardRenderer {
                         &regions[..phases as usize],
                     );
                 }
-                ctx.device.cmd_copy_buffer(
-                    ctx.cmd,
-                    commands.buffer,
-                    ctx.buffer(shadow_commands),
-                    &[shadow_region],
-                );
-                if let Some(m) = shadow_meshlets {
+                if let Some((shadow_commands, _)) = shadow_lists {
+                    ctx.device.cmd_copy_buffer(
+                        ctx.cmd,
+                        commands.buffer,
+                        ctx.buffer(shadow_commands),
+                        &[shadow_region],
+                    );
+                }
+                if let Some((m, (shadow_commands, _))) = shadow_meshlets.zip(shadow_lists) {
                     let header = |list: u32| vk::BufferCopy {
                         src_offset: m.layout.header.offset,
                         dst_offset: m.lists(list),
@@ -857,9 +872,11 @@ impl ForwardRenderer {
         let shared_shadow = capture_shadow.and_then(|c| c.map.get());
         let geometry = *geometry;
         let materials = *materials;
-        let shadow_map = match shared_shadow {
-            Some(map) => map,
-            None => {
+        let shadow_map = match (shared_shadow, shadow_lists) {
+            (Some(map), _) => Some(map),
+            // No cascade: the pages hold the sun's shadow.
+            (None, None) => None,
+            (None, Some((shadow_commands, casters))) => {
                 let (count, reach) = (fit.count, fit.reach);
                 let layers = cache.map_or(1, |_| settings.cascade_count());
                 // Without a cache, the cascades are tiles of one layer, drawn in one rendering
@@ -1155,7 +1172,7 @@ impl ForwardRenderer {
                 if let Some(c) = capture_shadow {
                     c.map.set(Some(shadow_map));
                 }
-                shadow_map
+                Some(shadow_map)
             }
         };
         // Local lights' shadow views (ADR 0071): culled per view, then each drawn into its
@@ -1551,7 +1568,7 @@ impl ForwardRenderer {
                                gi: Option<Texture>| {
             let push = Push {
                 visible: ctx.address(visible),
-                texture: ctx.sampled_index(shadow_map).unwrap_or(0),
+                texture: shadow_map.and_then(|t| ctx.sampled_index(t)).unwrap_or(0),
                 light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
                 ao: ao.and_then(|t| ctx.sampled_index(t)).unwrap_or(NO_AO),
                 phase: contact
@@ -1610,6 +1627,17 @@ impl ForwardRenderer {
         } else {
             StoreOp::DontCare
         };
+        // The pages' marking of transparent surfaces (ADR 0093 step 3d): their commands, which
+        // the last phase culled, when there are any.
+        let blended_commands: u32 = (0..STATES)
+            .filter(|s| s & BLENDED != 0)
+            .map(|s| states.counts[s])
+            .sum();
+        let transparent_marks = (blended_commands > 0).then_some(TransparentMarks {
+            culled,
+            visible,
+            offset: u64::from(phases - 1) * command_bytes,
+        });
         let draw_lists = DrawLists {
             push: base,
             commands: culled,
@@ -1678,6 +1706,7 @@ impl ForwardRenderer {
                         instance_count,
                         command_bytes,
                         read_depth,
+                        transparent_marks,
                     )
                 });
                 if let Some(((settings, _), state)) = contact {
@@ -1909,6 +1938,7 @@ impl ForwardRenderer {
                             instance_count,
                             command_bytes,
                             read_depth,
+                            transparent_marks,
                         )
                     });
                     if let Some(((settings, _), state)) = contact {
@@ -2048,7 +2078,18 @@ impl ForwardRenderer {
                 .and_then(|p| p.subsurface.as_ref());
             let gi_subsurface =
                 gi_view.and_then(|_| self.gi.as_deref()?.subsurface(variant, shadowed.is_some()));
+            // With the pages (ADR 0093 step 3d): the front's sun from the mask, transmission
+            // through the pages.
+            let pages = targets
+                .vsm
+                .zip(self.vsm_draw())
+                .map(|(frame, d)| (frame, &d.shading));
             let pipeline = match (ms, shadowed.and_then(|p| p.subsurface.as_ref())) {
+                _ if pages.is_some() => {
+                    pages?
+                        .1
+                        .subsurface(variant, shadowed.is_some(), gi_subsurface.is_some())
+                }
                 _ if gi_subsurface.is_some() => gi_subsurface?,
                 (Some(_), _) => match ms_shadowed {
                     Some(p) => &p[shadowed_index(variant)],
@@ -2064,9 +2105,10 @@ impl ForwardRenderer {
             })?;
             let two_phases = flag_buffer.is_some();
             // Their diffuse light is occluded by the view's ambient occlusion too, and
-            // comes from the probe volume with GI.
+            // comes from the probe volume with GI. With the pages their sun is in the mask.
             let ao_texture = targets.ao;
             let gi_texture = targets.gi;
+            let mask_texture = targets.contact.filter(|_| pages.is_some());
             // They keep the sky's reflections (their pass writes no reflection inputs).
             let targets = Targets {
                 reflect: None,
@@ -2074,7 +2116,7 @@ impl ForwardRenderer {
                 decals: None,
                 ..targets
             };
-            shading_pass(
+            let mut pass = shading_pass(
                 fg,
                 names.forward_subsurface,
                 &geometry,
@@ -2087,48 +2129,53 @@ impl ForwardRenderer {
                 depth,
                 DepthUse::ReadOnly,
                 scene_instances,
-            )
-            .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
-            .color(albedo, LoadOp::DontCare, StoreOp::Store)
-            .execute(move |ctx| {
-                let pipelines = [pipeline, pipeline];
-                if two_phases {
-                    draw_phase(
-                        ctx,
-                        pipelines,
-                        false,
-                        PHASE_EARLY,
-                        SUBSURFACE_STATES,
-                        ao_texture,
-                        None,
-                        None,
-                        gi_texture,
-                    );
-                    draw_phase(
-                        ctx,
-                        pipelines,
-                        false,
-                        PHASE_LATE,
-                        SUBSURFACE_STATES,
-                        ao_texture,
-                        None,
-                        None,
-                        gi_texture,
-                    );
-                } else {
-                    draw_phase(
-                        ctx,
-                        pipelines,
-                        false,
-                        PHASE_ALL,
-                        SUBSURFACE_STATES,
-                        ao_texture,
-                        None,
-                        None,
-                        gi_texture,
-                    );
-                }
-            });
+            );
+            if let Some((frame, _)) = pages {
+                pass = pass
+                    .read(frame.table, Access::StorageRead(ShaderStages::FRAGMENT))
+                    .read(frame.pool, Access::StorageRead(ShaderStages::FRAGMENT));
+            }
+            pass.color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+                .color(albedo, LoadOp::DontCare, StoreOp::Store)
+                .execute(move |ctx| {
+                    let pipelines = [pipeline, pipeline];
+                    if two_phases {
+                        draw_phase(
+                            ctx,
+                            pipelines,
+                            false,
+                            PHASE_EARLY,
+                            SUBSURFACE_STATES,
+                            ao_texture,
+                            mask_texture,
+                            None,
+                            gi_texture,
+                        );
+                        draw_phase(
+                            ctx,
+                            pipelines,
+                            false,
+                            PHASE_LATE,
+                            SUBSURFACE_STATES,
+                            ao_texture,
+                            mask_texture,
+                            None,
+                            gi_texture,
+                        );
+                    } else {
+                        draw_phase(
+                            ctx,
+                            pipelines,
+                            false,
+                            PHASE_ALL,
+                            SUBSURFACE_STATES,
+                            ao_texture,
+                            mask_texture,
+                            None,
+                            gi_texture,
+                        );
+                    }
+                });
             // With MSAA: their nearest sample's light and albedo (depth and profile in
             // alpha must stay one sample's).
             if let (Some(m), Some((irradiance_1x, albedo_1x))) = (ms_subsurface, resolved) {
@@ -2314,10 +2361,6 @@ impl ForwardRenderer {
         }
         // Transparent surfaces, back to front over the opaque image: depth tested, not
         // written, lit like the rest (ADR 0054). They were culled in the last phase only.
-        let blended_commands: u32 = (0..STATES)
-            .filter(|s| s & BLENDED != 0)
-            .map(|s| states.counts[s])
-            .sum();
         let reactive = (blended_commands > 0 && velocity.is_some())
             .then(|| fg.create_texture("reactive mask", multi(REACTIVE_FORMAT)));
         // With MSAA, resolved (averaged) for the temporal resolve.
@@ -2337,7 +2380,18 @@ impl ForwardRenderer {
             });
         if blended_commands > 0 {
             let reactive_index = usize::from(reactive.is_some());
+            // With the pages (ADR 0093 step 3d), the shading that looks them up.
+            let pages = passes
+                .virtual_shadows
+                .zip(self.vsm_draw())
+                .map(|(frame, d)| (frame, &d.shading));
             let pipelines = match (ms, atmosphere, shadowed) {
+                _ if pages.is_some() => pages?.1.blended(
+                    variant,
+                    atmosphere.is_some(),
+                    shadowed.is_some(),
+                    reactive_index,
+                ),
                 (Some(m), _, _) => {
                     let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
                     match (atmosphere, ms_shadowed) {
@@ -2389,11 +2443,16 @@ impl ForwardRenderer {
             if let Some(atlas) = local_frame.atlas.filter(|_| local_frame.shadowed) {
                 pass = pass.read(atlas, Access::Sampled(ShaderStages::FRAGMENT));
             }
+            if let Some((frame, _)) = pages {
+                pass = pass
+                    .read(frame.table, Access::StorageRead(ShaderStages::FRAGMENT))
+                    .read(frame.pool, Access::StorageRead(ShaderStages::FRAGMENT));
+            }
             let offset = u64::from(phases - 1) * command_bytes;
             pass.depth_read_only(depth).execute(move |ctx| {
                 let push = Push {
                     visible: ctx.address(visible),
-                    texture: ctx.sampled_index(shadow_map).unwrap_or(0),
+                    texture: shadow_map.and_then(|t| ctx.sampled_index(t)).unwrap_or(0),
                     light_tiles: light_tiles.map_or(0, |b| ctx.address(b)),
                     ..base
                 };
@@ -2541,11 +2600,21 @@ struct PagesFrame<'g> {
     prepared: VsmPrepared,
 }
 
+/// The transparent surfaces whose pages a view's marking flags (ADR 0093 step 3d): the
+/// commands of the last phase's cull, from `offset` in `culled`, and their slots.
+#[derive(Clone, Copy)]
+struct TransparentMarks {
+    culled: Buffer,
+    visible: Buffer,
+    offset: u64,
+}
+
 impl<'g> PagesFrame<'g> {
-    /// The pages' passes after the depth prepass: their bookkeeping over `depth`, then the
-    /// casters culled into their dirty pages (`lists`: the commands and the casters' slots)
-    /// and drawn there, one rendering without attachments over a level's 4096 × 4096 texels
-    /// for every level.
+    /// The pages' passes after the depth prepass: their bookkeeping over `depth`, with the
+    /// pages of `transparent` surfaces marked between its halves; then the casters culled
+    /// into their dirty pages (`lists`: the commands and the casters' slots) and drawn
+    /// there, one rendering without attachments over a level's 4096 × 4096 texels for
+    /// every level.
     #[allow(clippy::too_many_arguments)]
     fn add_passes(
         self,
@@ -2560,8 +2629,52 @@ impl<'g> PagesFrame<'g> {
         instance_count: u32,
         command_bytes: u64,
         depth: Texture,
+        transparent: Option<TransparentMarks>,
     ) -> VsmFrame {
-        let frame = self.pages.add_prepared(fg, bindless, self.prepared, depth);
+        let marked = self.pages.add_marked(fg, bindless, self.prepared, depth);
+        // Each transparent fragment in front of the prepass's depth flags the pages its
+        // shading reads (`vsmMarkTransparent`).
+        if let Some((t, mark)) = transparent.zip(ready(&self.draw.shading.mark)) {
+            let geometry = *geometry;
+            let rw = Access::StorageReadWrite(ShaderStages::FRAGMENT);
+            prepass_pass(
+                fg,
+                "vsm mark transparent",
+                &geometry,
+                materials,
+                t.culled,
+                t.visible,
+                scene_instances,
+            )
+            .write(marked.table(), rw)
+            .write(marked.requests(), rw)
+            .depth_read_only(depth)
+            .execute(move |ctx| {
+                let push = Push {
+                    visible: ctx.address(t.visible),
+                    ..base
+                };
+                // SAFETY: recording inside the pass's rendering scope; the pass reads the
+                // pool, the material table and the commands, and writes the page tables
+                // and the requests, which it declared.
+                unsafe {
+                    states.draw(
+                        ctx,
+                        bindless,
+                        &geometry,
+                        [mark, mark],
+                        &TypedPipelines::BUILTIN,
+                        &push,
+                        false,
+                        BLENDED_STATES,
+                        ctx.buffer(t.culled),
+                        t.offset,
+                        ctx.render_area(),
+                    );
+                }
+            });
+        }
+        let frame = self.pages.add_allocated(fg, bindless, marked);
         let Self { draw, lists, .. } = self;
         let push = move |ctx: &PassContext<'_>| Push {
             visible: ctx.address(casters),
@@ -2662,7 +2775,7 @@ fn shading_pass<'a, 'g>(
     name: &'static str,
     geometry: &GeometryFrame<'_>,
     materials: &MaterialFrame<'_>,
-    shadow_map: Texture,
+    shadow_map: Option<Texture>,
     culled: Buffer,
     visible: Buffer,
     targets: Targets,
@@ -2819,14 +2932,14 @@ fn forward_pass<'a, 'g>(
     name: &'static str,
     geometry: &GeometryFrame<'_>,
     materials: &MaterialFrame<'_>,
-    shadow_map: Texture,
+    shadow_map: Option<Texture>,
     culled: Buffer,
     visible: Buffer,
     instances: Option<Buffer>,
 ) -> PassBuilder<'a, 'g> {
     materials
         .read(geometry.read(fg.add_pass(name)))
-        .read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
+        .maybe_read(shadow_map, Access::Sampled(ShaderStages::FRAGMENT))
         .read(culled, Access::Indirect)
         .read(visible, Access::StorageRead(ShaderStages::VERTEX))
         .maybe_read(instances, Access::StorageRead(ShaderStages::VERTEX))

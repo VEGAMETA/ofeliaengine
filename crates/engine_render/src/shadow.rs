@@ -181,6 +181,33 @@ pub fn fit_cascades(
     )
 }
 
+/// No cascade, the light's view only: what a view whose virtual shadow pages hold the
+/// sun's shadow draws (ADR 0093 step 3d), and where a view cannot be split.
+pub(crate) fn no_cascades(direction: Vec3) -> CascadeFit {
+    let direction = direction.normalize_or(Vec3::NEG_Y);
+    let up = if direction.y.abs() > 0.99 {
+        Vec3::Z
+    } else {
+        Vec3::Y
+    };
+    let empty = Cascade {
+        center: Vec2::ZERO,
+        radius: 0.0,
+        near: 0.0,
+        far: 1.0,
+        limit: 1.0,
+        texel: 0.0,
+        split: 0.0,
+    };
+    CascadeFit {
+        light_from_world: look_at(Vec3::ZERO, direction, up),
+        cascades: [empty; MAX_CASCADES],
+        count: 0,
+        reach: 0.0,
+        fade: false,
+    }
+}
+
 /// [`fit_cascades`], holding the cascades as `keep` says.
 pub(crate) fn fit_cascades_keeping(
     clip_from_world: Mat4,
@@ -191,29 +218,8 @@ pub(crate) fn fit_cascades_keeping(
     settings: &ShadowSettings,
     keep: &Keep,
 ) -> CascadeFit {
-    let direction = direction.normalize_or(Vec3::NEG_Y);
-    let up = if direction.y.abs() > 0.99 {
-        Vec3::Z
-    } else {
-        Vec3::Y
-    };
-    let light_from_world = look_at(Vec3::ZERO, direction, up);
-    let empty = Cascade {
-        center: Vec2::ZERO,
-        radius: 0.0,
-        near: 0.0,
-        far: 1.0,
-        limit: 1.0,
-        texel: 0.0,
-        split: 0.0,
-    };
-    let mut fit = CascadeFit {
-        light_from_world,
-        cascades: [empty; MAX_CASCADES],
-        count: 0,
-        reach: 0.0,
-        fade: false,
-    };
+    let mut fit = no_cascades(direction);
+    let light_from_world = fit.light_from_world;
 
     // The view as four corner rays from the near plane: a point at distance s along the
     // view axis is a + step · s (perspective and orthographic alike).

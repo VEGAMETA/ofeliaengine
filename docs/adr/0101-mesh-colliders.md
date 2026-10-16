@@ -319,9 +319,10 @@
 
 ### Not done yet
 
-- **The rules file** `<scene>.colliders.ron`: the owner's question 1. Today the rules come
-  through `ImportedScene::collider_rules`; the defaults follow the recommendation of
-  question 2.
+- **The rules file** `<scene>.colliders.ron`. The owner chose it (2026-10-16), documented
+  in the dev guide. Today the rules come through `ImportedScene::collider_rules`; the
+  defaults follow question 2's recommendation, which the owner kept (every mesh collides
+  as level geometry).
 - **`RayHit`'s surface:** the triangles keep it in the engine's form, but Jolt's materials
   are not set from it yet.
 - **The cook's collider making runs on one thread** (1.6 s for Intel Sponza's 115 meshes);

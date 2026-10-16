@@ -334,10 +334,25 @@ fn shots() -> Vec<Shot> {
             ..class_defaults(name, INTEL_SPONZA, class)
         });
     }
+    // The procedural scene's subsurface materials (the floor and the dielectric spheres)
+    // and glass, with the cascades and with the sun's pages (ADR 0093 step 3d): the
+    // subsurface pass, its twins that read the mask and the pages, the glass's marking
+    // and its shading from the pages.
+    for (name, pages) in [("procedural_sss", false), ("procedural_sss_vsm", true)] {
+        shots.push(Shot {
+            size: [1920, 1080],
+            eye: Some(Vec3::new(0.4, 1.9, 4.8)),
+            target: Some(Vec3::new(0.0, 1.0, -1.0)),
+            lights: procedural_lights(),
+            subsurface: true,
+            virtual_shadows: pages.then(VsmSettings::default),
+            ..Shot::new(name, Source::Procedural)
+        });
+    }
     // The sun's virtual shadow pages (ADR 0093 step 3) in Intel's Sponza: still, what
     // they cost every frame (the pages the pixels need marked, the bookkeeping, the culls
     // with nothing dirty, the visibility); walking as above, the pages the camera exposes
-    // drawn too. The cascades stay cached beside them (transparent surfaces read them).
+    // drawn too. No cascade is drawn beside them (step 3d).
     for (name, class, motion) in [
         (
             "intel_sponza_vsm_discrete",

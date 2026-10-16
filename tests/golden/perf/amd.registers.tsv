@@ -89,6 +89,10 @@ forward.depthVertex /D32_SFLOAT x4	ShaderProperties.gs	numUsedVgprs	47
 forward.depthVertex /D32_SFLOAT x4	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.depthVertex /D32_SFLOAT x4	ShaderProperties.ps	numUsedVgprs	2
 forward.depthVertex /D32_SFLOAT x4	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.depthVertex+forward.scatterFragment R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.depthVertex+forward.scatterFragment R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.depthVertex+forward.scatterFragment R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	38
+forward.depthVertex+forward.scatterFragment R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.depthVertexMasked+forward.feedbackFragment /D16_UNORM	ShaderProperties.gs	numUsedVgprs	47
 forward.depthVertexMasked+forward.feedbackFragment /D16_UNORM	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.depthVertexMasked+forward.feedbackFragment /D16_UNORM	ShaderProperties.ps	numUsedVgprs	8
@@ -211,10 +215,34 @@ forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowed spec=1,1 R1
 forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	96
 forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	90
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveVsm spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveVsm spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveVsm spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	85
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveVsm spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	95
+forward.vertexMain+forward.fragmentBlendedAtmosphereReactiveVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedAtmosphereShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
 forward.vertexMain+forward.fragmentBlendedAtmosphereShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedAtmosphereShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	96
 forward.vertexMain+forward.fragmentBlendedAtmosphereShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereShadowedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedAtmosphereShadowedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereShadowedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	90
+forward.vertexMain+forward.fragmentBlendedAtmosphereShadowedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereVsm spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedAtmosphereVsm spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereVsm spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	85
+forward.vertexMain+forward.fragmentBlendedAtmosphereVsm spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedAtmosphereVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedAtmosphereVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	95
+forward.vertexMain+forward.fragmentBlendedAtmosphereVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedReactive spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
 forward.vertexMain+forward.fragmentBlendedReactive spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedReactive spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	48
@@ -255,6 +283,30 @@ forward.vertexMain+forward.fragmentBlendedReactiveShadowed spec=1,1 R16G16B16A16
 forward.vertexMain+forward.fragmentBlendedReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	92
 forward.vertexMain+forward.fragmentBlendedReactiveShadowed spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveShadowedVsm spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedReactiveShadowedVsm spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveShadowedVsm spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	88
+forward.vertexMain+forward.fragmentBlendedReactiveShadowedVsm spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedReactiveShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	88
+forward.vertexMain+forward.fragmentBlendedReactiveShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	65
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=0,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	74
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=0,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	83
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=1,0 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	84
+forward.vertexMain+forward.fragmentBlendedReactiveVsm spec=1,1 R16G16B16A16_SFLOAT,R8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
 forward.vertexMain+forward.fragmentBlendedShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedShadowed spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	96
@@ -263,6 +315,30 @@ forward.vertexMain+forward.fragmentBlendedShadowed spec=1,1 R16G16B16A16_SFLOAT/
 forward.vertexMain+forward.fragmentBlendedShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentBlendedShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	92
 forward.vertexMain+forward.fragmentBlendedShadowed spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedShadowedVsm spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedShadowedVsm spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedShadowedVsm spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	88
+forward.vertexMain+forward.fragmentBlendedShadowedVsm spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedShadowedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedShadowedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedShadowedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	88
+forward.vertexMain+forward.fragmentBlendedShadowedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedVsm spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedVsm spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedVsm spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	65
+forward.vertexMain+forward.fragmentBlendedVsm spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedVsm spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedVsm spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedVsm spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	74
+forward.vertexMain+forward.fragmentBlendedVsm spec=0,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedVsm spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedVsm spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedVsm spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	83
+forward.vertexMain+forward.fragmentBlendedVsm spec=1,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentBlendedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentBlendedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	84
+forward.vertexMain+forward.fragmentBlendedVsm spec=1,1 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentMain spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
 forward.vertexMain+forward.fragmentMain spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentMain spec=0,0 R16G16B16A16_SFLOAT/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	47
@@ -523,13 +599,81 @@ forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	95
 forward.vertexMain+forward.fragmentReflectShadowed spec=1,1 R16G16B16A16_SFLOAT,A2B10G10R10_UNORM_PACK32,R8G8B8A8_UNORM/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurface spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentSubsurface spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurface spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	64
+forward.vertexMain+forward.fragmentSubsurface spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurface spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentSubsurface spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurface spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	80
+forward.vertexMain+forward.fragmentSubsurface spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurface spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentSubsurface spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurface spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	92
+forward.vertexMain+forward.fragmentSubsurface spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurface spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	49
+forward.vertexMain+forward.fragmentSubsurface spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurface spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	90
+forward.vertexMain+forward.fragmentSubsurface spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	75
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	73
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	90
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	90
+forward.vertexMain+forward.fragmentSubsurfaceGiVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceShadowedGiVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceShadowedGiVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceShadowedGiVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	117
+forward.vertexMain+forward.fragmentSubsurfaceShadowedGiVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceShadowedGiVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceShadowedGiVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceShadowedGiVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	117
+forward.vertexMain+forward.fragmentSubsurfaceShadowedGiVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceShadowedVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceShadowedVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceShadowedVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	115
+forward.vertexMain+forward.fragmentSubsurfaceShadowedVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	115
+forward.vertexMain+forward.fragmentSubsurfaceShadowedVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	73
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=0,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	73
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=0,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	87
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=1,0 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	47
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	90
+forward.vertexMain+forward.fragmentSubsurfaceVsm spec=1,1 R16G16B16A16_SFLOAT,R16G16B16A16_SFLOAT,R8G8B8A8_SRGB/D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
+forward.vertexMain+forward.vsmMarkTransparent spec=0,0 /D32_SFLOAT	ShaderProperties.gs	numUsedVgprs	35
+forward.vertexMain+forward.vsmMarkTransparent spec=0,0 /D32_SFLOAT	ShaderProperties.gs	scratchMemUsageInBytes	0
+forward.vertexMain+forward.vsmMarkTransparent spec=0,0 /D32_SFLOAT	ShaderProperties.ps	numUsedVgprs	20
+forward.vertexMain+forward.vsmMarkTransparent spec=0,0 /D32_SFLOAT	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vsmVertex+forward.vsmFragment	ShaderProperties.gs	numUsedVgprs	42
 forward.vsmVertex+forward.vsmFragment	ShaderProperties.gs	scratchMemUsageInBytes	0
-forward.vsmVertex+forward.vsmFragment	ShaderProperties.ps	numUsedVgprs	9
+forward.vsmVertex+forward.vsmFragment	ShaderProperties.ps	numUsedVgprs	14
 forward.vsmVertex+forward.vsmFragment	ShaderProperties.ps	scratchMemUsageInBytes	0
 forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.gs	numUsedVgprs	45
 forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.gs	scratchMemUsageInBytes	0
-forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.ps	numUsedVgprs	9
+forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.ps	numUsedVgprs	17
 forward.vsmVertexMasked+forward.vsmFragmentMasked	ShaderProperties.ps	scratchMemUsageInBytes	0
 fsr1.easu	ShaderProperties.cs	numUsedVgprs	76
 fsr1.easu	ShaderProperties.cs	scratchMemUsageInBytes	0

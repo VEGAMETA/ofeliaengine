@@ -10,6 +10,9 @@
 //! - transmission through a thin sheet and a thick slab follows the profile's slab
 //!   integral.
 //!
+//! The last three also with the sun's virtual shadow pages (ADR 0093 step 3d): the front's
+//! sun then comes from the visibility pass's mask, transmission from the pages.
+//!
 //! Albedos are 8-bit sRGB codes; the albedo target stores them to within 0.2%.
 
 #![allow(clippy::unwrap_used, clippy::print_stdout)]
@@ -29,6 +32,7 @@ use engine_render::subsurface::{
 };
 use engine_render::texture_pool::TexturePool;
 use engine_render::upload::UploadRing;
+use engine_render::vsm::{VirtualShadows, VsmSettings};
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocation, Allocator, Bindless, Device, Instance, InstanceDesc,
@@ -113,6 +117,8 @@ struct Scene {
     readback: vk::Buffer,
     readback_memory: Option<Allocation>,
     frame_number: u64,
+    /// The sun's virtual shadow pages, when the view reads them ([`Scene::pages`]).
+    pages: Option<VirtualShadows>,
 }
 
 /// What one render draws.
@@ -201,7 +207,34 @@ impl Scene {
             readback,
             readback_memory: Some(readback_memory),
             frame_number: 0,
+            pages: None,
         })
+    }
+
+    /// The sun's shadow from virtual pages instead of the cascades; `false` when the
+    /// device lacks what they need.
+    fn pages(&mut self) -> bool {
+        if !self
+            .renderer
+            .set_virtual_shadows(&self.device, &self.bindless, true)
+            .unwrap()
+        {
+            println!("skipping: the device lacks what the pages need");
+            return false;
+        }
+        self.pages = Some(
+            VirtualShadows::new(
+                &self.device,
+                &mut self.allocator,
+                &self.bindless,
+                VsmSettings {
+                    pool_pages: 1024,
+                    ..VsmSettings::default()
+                },
+            )
+            .unwrap(),
+        );
+        true
     }
 
     /// Renders `frame` twice (occlusion culling then has last frame's visibility) and
@@ -281,7 +314,7 @@ impl Scene {
                             occlusion: frame.occlusion.then_some(&self.occlusion),
                             temporal: frame.temporal.then_some(&self.temporal),
                             shadow_cache: None,
-                            virtual_shadows: None,
+                            virtual_shadows: self.pages.as_ref(),
                             lights: frame.lights,
                             decals: &[],
                             environment: frame.environment.then_some(&self.environment),
@@ -360,6 +393,9 @@ impl Scene {
     fn finish(mut self) {
         // SAFETY: the device is idle.
         unsafe {
+            if let Some(mut pages) = self.pages.take() {
+                pages.destroy(&mut self.allocator, &self.bindless);
+            }
             self.graph
                 .destroy(&mut self.allocator, Some(&self.bindless));
             self.ring.destroy(&mut self.allocator);
@@ -584,9 +620,22 @@ fn column_x(column: f32) -> f32 {
 
 #[test]
 fn a_shadow_edge_spreads_like_the_half_plane_response() {
+    a_shadow_edge_spreads_like_the_half_plane_response_with(false);
+}
+
+/// The sun's shadow from the pages: the same response.
+#[test]
+fn a_shadow_edge_spreads_like_the_half_plane_response_with_virtual_shadows() {
+    a_shadow_edge_spreads_like_the_half_plane_response_with(true);
+}
+
+fn a_shadow_edge_spreads_like_the_half_plane_response_with(pages: bool) {
     let Some(mut scene) = Scene::new() else {
         return;
     };
+    if pages && !scene.pages() {
+        return;
+    }
     let sigma = [0.08, 0.05, 0.03];
     let profile = gaussians(sigma);
     scene.profiles(&[profile]);
@@ -676,9 +725,22 @@ fn a_shadow_edge_spreads_like_the_half_plane_response() {
 
 #[test]
 fn no_light_crosses_depth_or_material_edges() {
+    no_light_crosses_depth_or_material_edges_with(false);
+}
+
+/// The sun's shadow from the pages: nothing crosses either.
+#[test]
+fn no_light_crosses_depth_or_material_edges_with_virtual_shadows() {
+    no_light_crosses_depth_or_material_edges_with(true);
+}
+
+fn no_light_crosses_depth_or_material_edges_with(pages: bool) {
     let Some(mut scene) = Scene::new() else {
         return;
     };
+    if pages && !scene.pages() {
+        return;
+    }
     scene.profiles(&[gaussians([0.08, 0.05, 0.03])]);
     scene.renderer.set_subsurface(Some(SubsurfaceSettings {
         quality: SubsurfaceQuality::Ultra,
@@ -742,9 +804,22 @@ fn no_light_crosses_depth_or_material_edges() {
 
 #[test]
 fn transmission_follows_the_slab_integral() {
+    transmission_follows_the_slab_integral_with(false);
+}
+
+/// Transmission through the pages: the same integral.
+#[test]
+fn transmission_follows_the_slab_integral_with_virtual_shadows() {
+    transmission_follows_the_slab_integral_with(true);
+}
+
+fn transmission_follows_the_slab_integral_with(pages: bool) {
     let Some(mut scene) = Scene::new() else {
         return;
     };
+    if pages && !scene.pages() {
+        return;
+    }
     let sigma = [0.4, 0.3, 0.2];
     let profile = gaussians(sigma);
     scene.profiles(&[profile]);

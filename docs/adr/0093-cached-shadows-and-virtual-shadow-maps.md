@@ -686,3 +686,198 @@ other materials, or more than `MAX_MOVED` (256) boxes.
   settings they cost the Radeon 2.9 ms more than the cached cascades while walking.
   Turning them on by default for discrete GPUs trades about 0.25–0.3 ms of an RTX 4060
   Ti's frame for the sharper shadows: that is the owner's decision.
+
+## Step 3d: everything from the pages (design, 2026-10-16)
+
+A view with pages still draws its cascades, because some of its shading reads them. With
+8 movers that costs the RTX 317 of its 603 µs of shadow passes. The owner made reading the
+pages everywhere a requirement (2026-10-15). After it, the cascades' default per device
+class can be decided again.
+
+**Who reads the cascades in a view with pages:**
+
+| Shading | Today | Why |
+|---|---|---|
+| Opaque and alpha-tested surfaces | the mask (3b) | after the prepass every state shades with the equal-depth pipelines, which read the mask |
+| Subsurface materials: their front | the cascades | their pass draws with entry points that do not read the mask |
+| Subsurface transmission | the cascades | thin: the visibility at the back side; thick: the occluder's depth |
+| Transparent surfaces | the cascades | not in the prepass, so the depth's marking and the mask miss them |
+| Probe captures | their own cascade | unchanged (a capture has no prepass) |
+| Multisampled views | the cascades | no pages (3b) |
+
+Material types draw the engine's entry points with their own fragment module, so new
+entry points serve them too. Particles, GI rays and the atmosphere read no sun shadow.
+
+**How others mark pages for transparent surfaces** (read 2026-10-16):
+
+- **Unreal 5:** the depth buffer marks the pages of opaque surfaces. Forward-rendered
+  translucency and volumetric fog read **coarse pages**: a range of clipmap levels
+  (`r.Shadow.Virtual.FirstCoarseLevel` to `LastCoarseLevel`) marked around the camera.
+  Better filtering for translucency is opt-in and costly
+  (`r.Shadow.Virtual.TranslucentQuality`).
+- **EEVEE** (documentation of GPL code: ideas only): a blended object's bounding volume is
+  ray-marched, and every tile along each pixel's ray through it is tagged.
+- **Timberdoodle** and the other open implementations draw no transparent surfaces.
+
+**Options:**
+
+1. **Marking for transparent surfaces.**
+   - (a) **Coarse pages kept around the camera** (Unreal). Covering 150 m takes level 8
+     (512 m, 125 mm texels) and its whole window is 4,096 pages, the pool. A pane 2 m away
+     would get texels of tens of centimetres beside opaque surfaces with 2 mm ones.
+   - (b) **The bounding volume ray-marched** (EEVEE): one box drawn per instance, but it
+     tags every page along the ray, inside the object too.
+   - (c) **The transparent surfaces' own fragments**, drawn once more after the prepass with
+     its depth tested: each marks the pages of its sample at its level, the same rule and
+     margin as the depth's pixels. The same pages the shading then reads, at the cost of
+     drawing the transparent geometry once more (small fragments: a few table reads, an
+     atomic for the first fragment of a page).
+   - (d) **Feedback a frame late:** the transparent shading flags what it read unbacked.
+     A pane appearing reads unshadowed for a frame, and the shading carries atomics.
+   - **Chosen: (c).** It runs between the depth's marking and the allocation, only when
+     the view has transparent draws.
+2. **Shading transparent surfaces.**
+   - (a) **A twin of each transparent entry point** (`*Vsm`) that looks the pages up
+     itself: the visibility pass's level search and 3 × 3 tent through the page table,
+     with the geometric normal instead of one made from depths.
+   - (b) The existing entry points choosing at run time by a bit of the push constants:
+     fewer pipelines, but the lookup's registers in every view's transparent shading.
+   - **Chosen: (a)** (ADR 0058's rule).
+3. **Subsurface materials.** Twins of their entry points (`fragmentSubsurface*Vsm`): the
+   front light from the mask, which the visibility pass fills for their pixels (they are in
+   the prepass), with the contact shadows multiplied in when those are on; transmission
+   through the pages:
+   - **thin:** the visibility at the surface's texel and at the depth of the back side
+     (the receiver pushed through its thickness towards the light). The texel stays the
+     surface's own: its pages are backed by the depth's marking. A sheet's back side
+     shifts across the light by at most its thickness, which is what thin means;
+   - **thick:** the occluder's depth at the receiver's texel, one read through the page
+     table. Subsurface casters draw their faces towards the light into the pages, as into
+     the cascades.
+4. **The cascades.** With the pages on, a single-sampled perspective view declares no
+   cascade: no fit, no cull, no shadow map. Probe captures and multisampled views keep
+   theirs. A view whose pages could not be laid out (nothing casts, or the ring is full)
+   is unshadowed that frame.
+
+**Registers:** the existing entry points must not change on either GPU (the stats diffed
+against main). The new ones are measured and reported.
+
+**Steps:**
+
+- **3d-1.** The lookups in `vsm_common.slang`, shared with the visibility pass; the marking
+  fragment shader; the `*Vsm` entry points.
+- **3d-2.** The renderer: the marking pass between the bookkeeping's halves; the twins'
+  pipelines; the transparent and subsurface passes reading the table and the pool.
+- **3d-3.** No cascades with the pages on.
+- **3d-4.** Tests:
+  - a transparent pane against the sky under a caster, its pages backed and its
+    shading's visibility matching rays;
+  - the subsurface tests (the half-plane response, transmission through thin and thick
+    slabs) run with the pages too.
+
+  Then golden shots, registers, measurements on both GPUs, docs.
+- **3d-5.** The pages' default per device class, measured against the cached cascades now
+  that nothing draws both.
+
+## Step 3d as built (2026-10-16)
+
+A view with the pages reads them in all its shading, and draws no cascade.
+
+- **The bookkeeping in two halves** (`VirtualShadows::add_marked`, `add_allocated`):
+  - the frame's flags, the wrapped entries and the depth's marking ("vsm pages");
+  - then free and old pages found, requests backed, dirty pages listed and cleared ("vsm
+    allocate").
+- **Transparent surfaces' pages** ("vsm mark transparent", between the halves): the
+  view's transparent commands drawn again with the prepass's depth tested (early tests),
+  `vsmMarkTransparent` flagging the pages of each fragment's sample by the depth's rule and
+  margin (`vsm_level_holding`, `vsm_margin_entries`, `vsm_flag_entry` in
+  `vsm_common.slang`). A fragment reads an entry before its atomic, so mostly only the
+  first fragment of a page writes.
+  - A vertex shader with positions only was tried and changed nothing (RTX 16.4 µs, Radeon
+    397 µs either way): the cost is in the fragments. It was dropped.
+- **Their shading:** eight `fragmentBlended*Vsm` twins look the pages up themselves
+  (`vsm_sun`), with the visibility pass's level search and its 3 × 3 tent, now one
+  function (`vsm_filter`). They use the geometric normal instead of one made from depths.
+- **Subsurface materials:** four `fragmentSubsurface*Vsm` twins and their bent-normal
+  twins:
+  - the front's sun from the mask (`contact` with `vsm`: no lookup, the mask holds it,
+    and the contact shadows with it when on);
+  - thin transmission at the surface's texel and the back side's depth (`vsm_back_side`);
+  - thick transmission from the occluder's depth through the page table (`vsm_through`).
+- **Faces turned to the light.** Subsurface materials draw them into the pages (for thick
+  transmission), and double-sided casters draw both sides. Held at their exact depth,
+  they shadowed themselves: 30 % of a lit face darker at 45°, 80–89 % at 75°, by up to 27 %
+  (double-sided casters since step 3b).
+  - Now `vsmFragment*` pushes a face turned to the light (`SV_IsFrontFace`) away from it
+    by 2.5 texels of its slope, the filter's reach, up to 80°.
+  - With the receiver's offsets (a texel along its normal, half a texel of depth), no
+    lit face is darker at any angle. Faces turned away keep their exact depth, so the
+    test against rays still finds no texel wrong.
+- **No cascades.** A view whose pages run lays out no cascade (`Setup::cascade_count` 0):
+  - its fit is the light's view only (`shadow::no_cascades`);
+  - no cascade cache plans, no shadow commands, casters, cull or shadow map
+    (`Option<Texture>` through the shading passes);
+  - probe captures and multisampled views keep theirs.
+- **Registers** (`perf_gate --registers` on both GPUs; the gate's scenes now include the
+  procedural scene with subsurface scattering, with and without the pages):
+  - Every existing pipeline is unchanged, except:
+    - `vsmFragment` 9 → 14 and `vsmFragmentMasked` 9 → 17 VGPRs on the Radeon;
+    - `vsmFragmentMasked` 16 → 17 on the RTX: the slope's derivatives;
+    - `vsmMark` 35 → 34 on the RTX.
+  - The new twins against the cascades' versions:
+
+    | VGPRs | Radeon | RTX |
+    |---|---|---|
+    | transparent, by variant (none, lights, environment, both) | 48 → 65, 65 → 83, 72 → 74, 91 → 84 | 56 → 55, 63 → 64, 64 → 56, 64 → 64 |
+    | transparent, local shadows / atmosphere | 92–96 → 88 / 78–96 → 85–95 | 64–70 → 64 / 63–70 → 56–64 |
+    | subsurface, by variant | 64 → 73, 92 → 87, 80 → 73, 90 → 90 | 63 → 64, 72 → 72, 72 → 64, 72 → 72 |
+    | the marking | 20 | 26 |
+
+- **Tests** (both GPUs, synchronization validation):
+  - **A glass pane whose caster is out of view** (`vsm_draw.rs`): no opaque pixel marks a
+    page, so only the pane's fragments do. 0 of 3,826 pixels differ from rays; without the
+    marking 1,076 of 3,990 do (the whole shadow).
+  - **Lit faces of plain, double-sided and subsurface slabs** with the sun 30–75° from
+    their normal: none darker (before the bias, up to 89 % of a face).
+  - **The subsurface tests with the pages too:**
+    - the half-plane response within 0.48–0.52 % (the cascades 0.84–0.86 %);
+    - no light across depth or material edges;
+    - thin transmission as the cascades;
+    - thick transmission 0.24 % off the slab integral (the cascades 1.1 %).
+- **Golden images:**
+  - Sponza's two shots with pages moved where double-sided leaves no longer shadow
+    themselves (mean FLIP 0.0003 and 0.0008);
+  - the procedural scene's glass was lit either way (unchanged);
+  - a new shot, the procedural scene with subsurface scattering and the pages.
+- **Numbers.** `scene_bench` on the RTX: Intel's Sponza, 1080p, `--sky --meshlet-culling
+  --prepass --cached-shadows`; the sun's shadow passes / the GPU frame, µs. Before this
+  step the pages' shadow passes were 225, 257 and 603 µs, the cached cascades drawn beside
+  them.
+
+  | | cached cascades | pages |
+  |---|---:|---:|
+  | still | 0 / 682 | 220 / 901 |
+  | 1 mover | 17 / 702 | 233 / 918 |
+  | 8 movers | 317 / 1,001 | 275 / 962 |
+
+  The perf gate's scenes (each class's defaults, the GPU frame):
+
+  | µs | cascades | pages |
+  |---|---:|---:|
+  | RTX, discrete, still | 1,429 | 1,607 |
+  | RTX, discrete, walking | 1,367 | 1,662 |
+  | Radeon, integrated, walking | 29,905 | 31,153 |
+
+  Removing the cascades from the pages' views saved their passes (RTX 81 µs walking,
+  Radeon 0.82 ms). With ambient occlusion on the async queue the RTX's frame hardly moved,
+  since the cascades ran beside it. The transparent surfaces' marking costs 16 µs on the
+  RTX and 0.2–0.4 ms on the Radeon in Intel's Sponza.
+- **Left:**
+  - **Defaults per class.** Off everywhere still. On the RTX the pages cost 0.18 ms
+    more still and 0.30 ms more walking than the cached cascades. With moving casters
+    they are cheaper (8 movers: 39 µs less). That is the owner's decision.
+  - **The transparent marking on the Radeon** (0.2–0.4 ms): it is in the fragments. A
+    lower resolution (a 4 × 4 block marking with a wider margin) would cut it. That waits
+    for a scene that needs it.
+  - **Subsurface materials without pages** still ignore contact shadows (as before).
+  - **The sun turning** still redraws every page the frame needs.

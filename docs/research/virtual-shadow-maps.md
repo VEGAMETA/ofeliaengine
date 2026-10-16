@@ -123,6 +123,28 @@ The most complete open implementation, and the closest to us (Vulkan, Slang, mes
 We have no mesh shaders on the Radeon (queue item #88 is for the RTX); our meshlet path
 (a compute cull appending indexed draws, ADR 0085) does the same job with vertex shaders.
 
+## Transparent surfaces (read 2026-10-16)
+
+The depth buffer has no transparent surfaces, so its marking backs no page for them.
+
+- **Unreal 5** ([its documentation](https://dev.epicgames.com/documentation/en-us/unreal-engine/virtual-shadow-maps-in-unreal-engine)):
+  "depth buffer analysis is used as the primary method of marking pages". Systems that
+  sample at arbitrary places, "such as Volumetric Fog and forward-rendered translucency",
+  read **coarse pages**: a range of clipmap levels (`r.Shadow.Virtual.FirstCoarseLevel`
+  to `LastCoarseLevel`) marked around the camera, which "can create performance issues".
+  Better filtering on translucent surfaces is opt-in (`r.Shadow.Virtual.TranslucentQuality`,
+  "a high performance impact").
+- **EEVEE** ([shadow module](https://developer.blender.org/docs/features/eevee/modules/shadow/),
+  documentation of GPL code: **ideas only, no code carried over**): dithered materials are
+  tagged from the depth buffer; "for Blended material, we ray-march the bounding volume of
+  the object and tag all tiles along the ray"; volumes tag where they scatter.
+- **Timberdoodle, StratusGFX, UnityVSM:** opaque surfaces only.
+
+What we take: the transparent surfaces' own fragments, drawn after the prepass with its
+depth tested, mark their pages by the depth's rule (ADR 0093 step 3d). Coarse pages would
+give a pane near the camera texels of tens of centimetres. EEVEE's ray march tags pages
+inside the volume too.
+
 ## Patents
 
 - **Warner Bros, US 11,908,062 B2 and US 12,315,068 B2** ("Efficient real-time shadow

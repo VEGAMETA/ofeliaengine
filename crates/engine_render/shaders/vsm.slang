@@ -145,25 +145,9 @@ void vsmMark(uint3 id : SV_DispatchThreadID)
             float w = 1.0 / dot(f.clip_to_view[3], clip);
             float3 view = float3(dot(f.clip_to_view[0], clip), dot(f.clip_to_view[1], clip), dot(f.clip_to_view[2], clip)) * w;
             float2 light_xy = float2(dot(f.clip_to_light[0], clip), dot(f.clip_to_light[1], clip)) * w;
-            // A level's window may not hold the sample's whole footprint (it sits up to a
-            // page off the camera, and a narrow field of view picks fine levels for far
-            // surfaces): the first coarser level whose window does.
-            for (uint level = vsm_level_for(f, dot(view, view)); level < f.levels; level++)
-            {
-                float2 t = vsm_texel(f, level, light_xy);
-                int2 lo = vsm_page_of(t - VSM_MARGIN);
-                int2 hi = vsm_page_of(t + VSM_MARGIN);
-                if (!vsm_in_window(f, level, lo) || !vsm_in_window(f, level, hi))
-                    continue;
-                entries.x = vsm_entry(level, lo);
-                if (hi.x != lo.x)
-                    entries.y = vsm_entry(level, int2(hi.x, lo.y));
-                if (hi.y != lo.y)
-                    entries.z = vsm_entry(level, int2(lo.x, hi.y));
-                if (hi.x != lo.x && hi.y != lo.y)
-                    entries.w = vsm_entry(level, hi);
-                break;
-            }
+            uint level = vsm_level_holding(f, view, light_xy);
+            if (level < f.levels)
+                entries = vsm_margin_entries(level, vsm_texel(f, level, light_xy));
         }
     }
     flag(f, entries);
@@ -327,12 +311,6 @@ void vsmClear(uint3 group : SV_GroupID, uint3 local : SV_GroupThreadID)
             pool[origin + uint2(x, y)] = FAR_DEPTH;
 }
 
-// The receiver's offset along its normal (from the depth), and its depth bias, in texels
-// of its level: the shadow pass draws the casters' faces turned away from the light, so
-// lit surfaces stand well in front of what their own pages hold.
-static const float NORMAL_OFFSET_TEXELS = 1.0;
-static const float DEPTH_BIAS_TEXELS = 0.5;
-
 // Pixel `p` of the depth buffer (depth `depth`) relative to the camera.
 float3 view_position(VsmFrame* f, int2 p, float depth)
 {
@@ -352,10 +330,9 @@ groupshared float vis_scale[VSM_MAX_LEVELS];
 // The sun's visibility from the pages (ADR 0093 step 3b), per pixel of the depth buffer.
 // The level is the one the pixel marked (its window holds the filter's footprint); the
 // receiver moves along its normal (from the depth: on each axis the neighbour nearer in
-// depth) by a texel of the level; then a 3 × 3 tent filter of comparisons over 4 × 4
-// texels, as the cascades' 3 × 3 bilinear comparisons weigh them, each texel read through
-// the page table (the footprint spans at most 2 × 2 pages). Written into the sun's mask
-// (R32: a float's bits), or multiplied into what the contact shadows wrote there.
+// depth) by a texel of the level; then `vsm_filter`'s 3 × 3 tent through the page table.
+// Written into the sun's mask (R32: a float's bits), or multiplied into what the contact
+// shadows wrote there.
 [shader("compute")]
 [numthreads(8, 8, 1)]
 void vsmVisibility(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uint local : SV_GroupIndex)
@@ -414,44 +391,9 @@ void vsmVisibility(uint3 id : SV_DispatchThreadID, uint3 group : SV_GroupID, uin
         if (level < f.levels)
         {
             float texel = 1.0 / vis_scale[level];
-            float3 r = c + n * (NORMAL_OFFSET_TEXELS * texel);
-            float2 at = float2(dot(f.light_rows[0].xyz, r), dot(f.light_rows[1].xyz, r)) + f.light_eye.xy;
-            float receiver = -(dot(f.light_rows[2].xyz, r) + f.light_eye.z) * f.depth_scale + f.depth_offset;
-            receiver -= DEPTH_BIAS_TEXELS * texel * f.depth_scale;
-            // Texel centers lie at half texels: the 4 × 4 texels from `i0 - 1`.
-            float2 t = at * vis_scale[level] - 0.5;
-            float2 i0 = floor(t);
-            float2 fr = t - i0;
-            int2 first = int2(i0) - 1;
-            int2 lo = first >> 6;
-            int2 hi = (first + 3) >> 6;
-            // Most footprints lie in one page: its entry is read once.
-            uint e00 = push.table[vsm_entry(level, lo)];
-            uint e10 = hi.x != lo.x ? push.table[vsm_entry(level, int2(hi.x, lo.y))] : e00;
-            uint e01 = hi.y != lo.y ? push.table[vsm_entry(level, int2(lo.x, hi.y))] : e00;
-            uint e11 = any(hi != lo) ? push.table[vsm_entry(level, hi)] : e00;
-            RWTexture2D<uint> pool = g_pool_images[push.pool];
-            float4 wx = float4(1.0 - fr.x, 1.0, 1.0, fr.x);
-            float4 wy = float4(1.0 - fr.y, 1.0, 1.0, fr.y);
-            float sum = 0.0;
-            [unroll]
-            for (int y = 0; y < 4; y++)
-            {
-                [unroll]
-                for (int x = 0; x < 4; x++)
-                {
-                    int2 texel_at = first + int2(x, y);
-                    int2 page = texel_at >> 6;
-                    uint entry = page.y == lo.y ? (page.x == lo.x ? e00 : e10) : (page.x == lo.x ? e01 : e11);
-                    // Read whether the page is backed or not (then from page 0, unused): the
-                    // 16 reads go out together.
-                    uint2 in_pool = vsm_pool_texel(entry & VSM_PHYSICAL, uint2(texel_at & 63));
-                    float stored = asfloat(pool[in_pool]);
-                    float lit = (entry & VSM_ALLOCATED) == 0 || receiver <= stored ? 1.0 : 0.0;
-                    sum += wx[x] * wy[y] * lit;
-                }
-            }
-            visible = sum / 9.0;
+            float3 r = c + n * (VSM_NORMAL_OFFSET_TEXELS * texel);
+            float receiver = vsm_depth_of(f, r) - VSM_DEPTH_BIAS_TEXELS * texel * f.depth_scale;
+            visible = vsm_filter(push.table, g_pool_images[push.pool], level, vsm_light_xy(f, r) * vis_scale[level], receiver);
         }
     }
     if ((push.flags & 1u) != 0)

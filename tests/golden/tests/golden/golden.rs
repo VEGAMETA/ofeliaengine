@@ -301,6 +301,19 @@ fn procedural_scene_with_subsurface_scattering() {
     });
 }
 
+/// The same with the sun's virtual shadow pages (ADR 0093 step 3d): the scattering floor
+/// and spheres take their front's sun from the visibility pass's mask (the faces they cast
+/// are the ones turned to the light, which do not shadow themselves), the glass its shadow
+/// from the pages; no cascade is drawn.
+#[test]
+fn procedural_scene_with_subsurface_scattering_and_virtual_shadows() {
+    check(&Shot {
+        subsurface: true,
+        virtual_shadows: Some(VsmSettings::default()),
+        ..procedural("procedural_sss_vsm")
+    });
+}
+
 /// The ambient occlusion shot with async compute on and off (ADR 0065): the passes run
 /// on another queue, in another order, with ownership transfers, and the bytes are the
 /// same. Without an async compute queue both renders take the single-queue path.
