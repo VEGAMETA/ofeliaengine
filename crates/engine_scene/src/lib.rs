@@ -95,6 +95,21 @@ impl SceneId {
         }
     }
 
+    /// The id a name always gives (FNV-1a, 128 bits): a game's long-lived entities (the
+    /// player's character, a quest giver) named once, so saves match them on load and
+    /// they keep what saves do not hold (their body, their renderer).
+    pub const fn named(name: &str) -> Self {
+        let bytes = name.as_bytes();
+        let mut h: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+        let mut i = 0;
+        while i < bytes.len() {
+            h ^= bytes[i] as u128;
+            h = h.wrapping_mul(0x0000_0000_0100_0000_0000_0000_0000_013b);
+            i += 1;
+        }
+        Self::from_u128(h)
+    }
+
     /// An id from its 128-bit value.
     pub const fn from_u128(v: u128) -> Self {
         Self {

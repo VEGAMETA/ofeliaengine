@@ -487,3 +487,60 @@ fn a_game_saves_what_it_likes_and_adds_it_back_alone() {
     let mut ids = QueryState::<&SceneId>::new(&mut other);
     assert_eq!(ids.iter_readonly(&other).count(), 3);
 }
+
+/// A runtime handle: not reflected.
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+struct GpuHandle(u32);
+
+/// A renderer-like component: its handle is the level's, its visibility the game's.
+#[derive(Reflect, Default, Clone, Copy, Debug, PartialEq)]
+struct Shown {
+    #[reflect(opaque)]
+    handle: GpuHandle,
+    visible: bool,
+}
+reflect_component!(Shown);
+
+#[test]
+fn matched_entities_keep_what_saves_do_not_hold() {
+    let lamp = SceneId::named("the lamp");
+    assert_eq!(lamp, SceneId::named("the lamp"));
+    assert_ne!(lamp, SceneId::named("the other lamp"));
+    let mut world = World::new();
+    world.spawn((
+        lamp,
+        Shown {
+            handle: GpuHandle(42),
+            visible: true,
+        },
+    ));
+    let e = find(&mut world, lamp);
+    world.get_mut::<Shown>(e).unwrap().visible = false;
+    let save = decode(
+        &encode(
+            &capture(&world, &CaptureOptions::default()),
+            Encoding::Text,
+            &SaveHeader::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    // The level loaded again gives the lamp another handle: it stays.
+    let mut again = World::new();
+    again.spawn((
+        lamp,
+        Shown {
+            handle: GpuHandle(77),
+            visible: true,
+        },
+    ));
+    apply(&mut again, &save).unwrap();
+    let e = find(&mut again, lamp);
+    assert_eq!(
+        again.get::<Shown>(e),
+        Some(&Shown {
+            handle: GpuHandle(77),
+            visible: false
+        })
+    );
+}

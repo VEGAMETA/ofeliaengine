@@ -241,6 +241,16 @@ pub fn apply_with(
                 continue;
             };
             kept.push(*id);
+            report.components += 1;
+            // A matched entity's own value: read in place, so fields the save skips keep
+            // the level's (a renderer's mesh, a body's handle).
+            if matched[i]
+                && let Some(ptr) = world.get_raw_mut(e, *id)
+            {
+                // SAFETY: the entity's live value of the component `info` describes.
+                unsafe { save.decode(value, info, ptr.as_ptr(), &entity, &label, &mut notes)? };
+                continue;
+            }
             // SAFETY: the scratch is room for one `info` value; the default makes it
             // valid, decoding keeps it valid, and `insert_raw` moves it into the world (the
             // entity is alive: just matched or made), leaving the scratch free again.
@@ -250,7 +260,6 @@ pub fn apply_with(
                 world.insert_raw(e, *id, scratch.ptr);
                 decoded?;
             }
-            report.components += 1;
         }
         if matched[i] {
             // The level's version of this entity may hold saved components the save says
