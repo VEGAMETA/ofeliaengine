@@ -17,6 +17,8 @@ engine_physics.workspace = true
 engine_profiler.workspace = true
 
 [dev-dependencies]
+# Colliders in the engine's own form, placed at any scale in tests (ADR 0101).
+engine_collision.workspace = true
 # The ECS sync test (ADR 0066).
 engine_ecs.workspace = true
 

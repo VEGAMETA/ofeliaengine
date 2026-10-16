@@ -2,7 +2,9 @@
 //! per file. Each module was a test file of its own.
 
 mod characters;
+mod colliders;
 mod ecs_sync;
 mod jolt;
 mod queries;
 mod rollback;
+mod shapes;

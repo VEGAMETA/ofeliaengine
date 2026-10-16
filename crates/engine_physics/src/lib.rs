@@ -28,6 +28,7 @@
 use engine_core::math::{Quat, Vec3};
 
 pub mod character;
+pub mod colliders;
 #[cfg(feature = "ecs")]
 pub mod ecs;
 pub mod scenes;
@@ -151,6 +152,17 @@ impl GravityField {
     }
 }
 
+/// A child of a compound shape: a shape placed in the compound's frame.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CompoundChild {
+    /// The shape.
+    pub shape: ShapeId,
+    /// Where its origin sits.
+    pub position: Vec3,
+    /// Its orientation.
+    pub rotation: Quat,
+}
+
 /// A collision shape to create.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ShapeDesc<'a> {
@@ -189,6 +201,21 @@ pub enum ShapeDesc<'a> {
         vertices: &'a [Vec3],
         /// Triangles as vertex indices, counter-clockwise seen from outside.
         triangles: &'a [[u32; 3]],
+    },
+    /// Shapes placed together as one, fixed relative to each other: a prop's convex parts
+    /// and primitives (ADR 0101). The compound keeps its children alive.
+    Compound {
+        /// Its children.
+        children: &'a [CompoundChild],
+    },
+    /// `shape` scaled along its own axes (a negative factor mirrors). A backend may not
+    /// take every scale on every shape: see [`PhysicsBackend::is_valid_scale`];
+    /// `engine_collision::Shape::transformed` makes a shape that takes it (ADR 0101).
+    Scaled {
+        /// The shape (kept alive by the scaled one).
+        shape: ShapeId,
+        /// The factors along its X, Y and Z.
+        scale: Vec3,
     },
 }
 
@@ -571,6 +598,35 @@ pub trait PhysicsBackend {
     fn create_shape(&mut self, desc: &ShapeDesc<'_>) -> Result<ShapeId, PhysicsError>;
     /// Releases the caller's reference; bodies using it keep it alive.
     fn destroy_shape(&mut self, shape: ShapeId);
+    /// Whether `shape` can be scaled by `scale` ([`ShapeDesc::Scaled`]) as it is. Where
+    /// not, `engine_collision::Shape::transformed` rebuilds the shape for the scale.
+    fn is_valid_scale(&self, shape: ShapeId, scale: Vec3) -> bool;
+
+    /// A key of the backend's own binary form of shapes ([`Self::bake_shape`]): it changes
+    /// whenever the form does (the backend's version or build options). `None`: the
+    /// backend has no such form.
+    fn baked_shape_format(&self) -> Option<u64> {
+        None
+    }
+    /// `shape` in the backend's binary form, for a pack (ADR 0101): restoring it is a copy,
+    /// where building a level's mesh shape takes about 1 µs per triangle.
+    fn bake_shape(&self, shape: ShapeId) -> Option<Vec<u8>> {
+        let _ = shape;
+        None
+    }
+    /// A shape from [`Self::bake_shape`]'s bytes, written by a backend with the same
+    /// [`Self::baked_shape_format`]. `castable` says whether it can be swept in shape casts
+    /// (no triangle meshes in it). The bytes are trusted: a pack is part of the game.
+    fn create_baked_shape(
+        &mut self,
+        bytes: &[u8],
+        castable: bool,
+    ) -> Result<ShapeId, PhysicsError> {
+        let _ = (bytes, castable);
+        Err(PhysicsError::InvalidShape(
+            "this backend has no baked shapes".into(),
+        ))
+    }
 
     /// Creates a body and adds it to the world (awake unless static).
     fn create_body(&mut self, desc: &BodyDesc) -> Result<BodyId, PhysicsError>;

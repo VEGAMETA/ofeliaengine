@@ -734,6 +734,12 @@ impl JoltBackend {
         unsafe { engine_jolt_allocations() }
     }
 
+    /// A shape that has not been destroyed.
+    fn live_shape(&self, shape: ShapeId) -> Option<*mut JPH_Shape> {
+        let ptr = *self.shapes.get(shape.0 as usize)?;
+        (!ptr.is_null()).then_some(ptr)
+    }
+
     /// The shape of a cast, if it can be swept.
     fn cast_shape_ptr(&self, shape: ShapeId) -> Option<*mut JPH_Shape> {
         let index = shape.0 as usize;
@@ -908,13 +914,94 @@ impl PhysicsBackend for JoltBackend {
                     JPH_ShapeSettings_Destroy(settings);
                     shape
                 }
+                ShapeDesc::Compound { children } => {
+                    let settings = JPH_StaticCompoundShapeSettings_Create();
+                    for child in children {
+                        let Some(shape) = self.live_shape(child.shape) else {
+                            JPH_ShapeSettings_Destroy(settings);
+                            return Err(PhysicsError::InvalidHandle);
+                        };
+                        JPH_CompoundShapeSettings_AddShape2(
+                            settings,
+                            &v3(child.position),
+                            &quat(child.rotation.normalize()),
+                            shape,
+                            0,
+                        );
+                    }
+                    let shape = JPH_StaticCompoundShape_Create(settings);
+                    JPH_ShapeSettings_Destroy(settings);
+                    shape
+                }
+                ShapeDesc::Scaled { shape, scale } => {
+                    let Some(inner) = self.live_shape(shape) else {
+                        return Err(PhysicsError::InvalidHandle);
+                    };
+                    if !JPH_Shape_IsValidScale(inner, &v3(scale)) {
+                        return Err(PhysicsError::InvalidShape(format!(
+                            "scale {scale} does not suit this shape (rebuild it for the scale)"
+                        )));
+                    }
+                    JPH_ScaledShape_Create(inner, &v3(scale))
+                }
             }
         };
         if shape.is_null() {
             return Err(PhysicsError::InvalidShape(format!("{desc:?}")));
         }
-        self.shape_castable
-            .push(!matches!(desc, ShapeDesc::TriangleMesh { .. }));
+        let castable = match *desc {
+            ShapeDesc::TriangleMesh { .. } => false,
+            ShapeDesc::Compound { children } => children.iter().all(|c| {
+                self.shape_castable
+                    .get(c.shape.0 as usize)
+                    .copied()
+                    .unwrap_or(false)
+            }),
+            ShapeDesc::Scaled { shape, .. } => self
+                .shape_castable
+                .get(shape.0 as usize)
+                .copied()
+                .unwrap_or(false),
+            _ => true,
+        };
+        self.shape_castable.push(castable);
+        self.shapes.push(shape);
+        Ok(ShapeId((self.shapes.len() - 1) as u64))
+    }
+
+    fn is_valid_scale(&self, shape: ShapeId, scale: Vec3) -> bool {
+        // SAFETY: a live shape (checked) and a vector on the stack.
+        self.live_shape(shape)
+            .is_some_and(|s| unsafe { JPH_Shape_IsValidScale(s, &v3(scale)) })
+    }
+
+    fn baked_shape_format(&self) -> Option<u64> {
+        // SAFETY: returns a constant.
+        Some(unsafe { engine_jolt_shape_format() })
+    }
+
+    fn bake_shape(&self, shape: ShapeId) -> Option<Vec<u8>> {
+        let ptr = self.live_shape(shape)?;
+        // SAFETY: a live shape; the first call only sizes the buffer.
+        let size = unsafe { engine_jolt_shape_save(ptr, core::ptr::null_mut(), 0) };
+        let mut bytes = vec![0u8; size];
+        // SAFETY: as above, into a buffer of the size it reported.
+        let written = unsafe { engine_jolt_shape_save(ptr, bytes.as_mut_ptr(), size) };
+        (written == size).then_some(bytes)
+    }
+
+    fn create_baked_shape(
+        &mut self,
+        bytes: &[u8],
+        castable: bool,
+    ) -> Result<ShapeId, PhysicsError> {
+        // SAFETY: reads `bytes` only (trusted, see the trait); null when they are not a
+        // whole shape.
+        let shape = unsafe { engine_jolt_shape_restore(bytes.as_ptr(), bytes.len()) };
+        if shape.is_null() {
+            return Err(PhysicsError::InvalidShape("not a baked Jolt shape".into()));
+        }
+        self.shape_castable.push(castable);
         self.shapes.push(shape);
         Ok(ShapeId((self.shapes.len() - 1) as u64))
     }

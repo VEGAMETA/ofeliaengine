@@ -338,6 +338,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engine_collision"
+version = "0.0.0"
+dependencies = [
+ "engine_core",
+ "engine_profiler",
+ "engine_workspace_hack",
+]
+
+[[package]]
 name = "engine_core"
 version = "0.0.0"
 dependencies = [
@@ -521,6 +530,7 @@ name = "engine_physics"
 version = "0.0.0"
 dependencies = [
  "bytemuck",
+ "engine_collision",
  "engine_core",
  "engine_ecs",
  "engine_profiler",
@@ -540,6 +550,7 @@ name = "engine_physics_jolt"
 version = "0.0.0"
 dependencies = [
  "cc",
+ "engine_collision",
  "engine_core",
  "engine_ecs",
  "engine_physics",

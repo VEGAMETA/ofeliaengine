@@ -11,6 +11,8 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# Colliders in the engine's own form, built into backend shapes (`colliders`, ADR 0101).
+engine_collision.workspace = true
 engine_core.workspace = true
 # The `ecs` module: components and sync with the ECS (feature `ecs`, on by default; off,
 # the physics interface stands alone).
