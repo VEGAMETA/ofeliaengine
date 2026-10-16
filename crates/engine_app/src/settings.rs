@@ -126,6 +126,11 @@ pub struct PlayerSettings {
     /// keep them): the text's locale is the first it serves. `None`: Windows' display
     /// languages.
     pub languages: Option<Vec<String>>,
+    /// The game's input actions: the player reads raw keyboard and mouse input and XInput
+    /// gamepads into the world's `engine_input::Input` resource, sampled before every tick
+    /// (`input.tick()`) and before `Game::present` (`input.frame()`). `None`: no input
+    /// system (the game sees the window's events only).
+    pub input: Option<engine_input::InputMap>,
 }
 
 impl Default for PlayerSettings {
@@ -161,6 +166,7 @@ impl Default for PlayerSettings {
             process_setup: true,
             text: None,
             languages: None,
+            input: None,
         }
     }
 }

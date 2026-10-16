@@ -304,6 +304,8 @@ pub struct Player {
     videos: Videos,
     /// The `loc/` folder behind the world's localizer, kept live (ADR 0102).
     text: Option<crate::text::LiveText>,
+    /// The devices behind the world's `engine_input::Input` (`PlayerSettings::input`).
+    input: Option<PlayerInput>,
     graph: RenderGraph,
     ring: UploadRing,
     geometry: GeometryPool,
@@ -679,6 +681,11 @@ impl Player {
             }
             None => None,
         };
+        // The game's input: its actions a resource of the world.
+        let input = settings.input.as_ref().map(|map| {
+            world.insert_resource(engine_input::Input::new(map.clone()));
+            PlayerInput::start(offscreen.is_none(), &mut startup.notes)
+        });
         let mut scene_info = SceneInfo::default();
         let streamer = match &settings.pack {
             Some(pack) => {
@@ -779,6 +786,7 @@ impl Player {
             gi_rays: None,
             videos: Videos::new(),
             text,
+            input,
             graph,
             ring,
             geometry,
@@ -1299,6 +1307,7 @@ impl Player {
                 &mut self.minimized,
                 &mut self.client,
             );
+            let mut focus_lost = false;
             if let Some(windows) = &mut self.windows {
                 windows.drain_events(|event| {
                     match event.kind {
@@ -1309,10 +1318,17 @@ impl Player {
                             *client = (width, height);
                         }
                         WindowEventKind::Minimized => *minimized = true,
+                        WindowEventKind::Focused(false) => focus_lost = true,
                         _ => {}
                     }
                     game.event(&event);
                 });
+            }
+            if focus_lost
+                && self.input.is_some()
+                && let Some(input) = self.runtime.world.resource_mut::<engine_input::Input>()
+            {
+                input.release_all();
             }
         }
         if self.closing {
@@ -1409,6 +1425,16 @@ impl Player {
             Marker::SimulationStart,
         );
 
+        // The input since the last frame, then sampled before each tick and presentation.
+        let sample = match &mut self.input {
+            Some(devices) => {
+                if let Some(input) = self.runtime.world.resource_mut::<engine_input::Input>() {
+                    devices.feed(input);
+                }
+                true
+            }
+            None => false,
+        };
         // Ticks, presentation, interpolation (ADR 0064).
         let stages = {
             let game_cell = RefCell::new(&mut *game);
@@ -1416,8 +1442,18 @@ impl Player {
                 elapsed,
                 &(),
                 &mut self.scene,
-                |world, (), dt| game_cell.borrow_mut().tick(world, dt),
-                |world, (), alpha| game_cell.borrow_mut().present(world, alpha),
+                |world, (), dt| {
+                    if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
+                        input.sample_tick(Instant::now());
+                    }
+                    game_cell.borrow_mut().tick(world, dt);
+                },
+                |world, (), alpha| {
+                    if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
+                        input.sample_frame(Instant::now());
+                    }
+                    game_cell.borrow_mut().present(world, alpha);
+                },
             )
         };
         report.ticks = stages.ticks;
@@ -2386,5 +2422,52 @@ fn spawn_scene(
         textures,
         bounds: (min, max),
         instances,
+    }
+}
+
+/// The devices behind the game's input actions (`PlayerSettings::input`): raw keyboard and
+/// mouse input on its own thread with timestamps (CLAUDE.md §7), and XInput gamepads.
+struct PlayerInput {
+    raw: Option<engine_platform::raw_input::RawInput>,
+    pads: Option<engine_input::platform::XInput>,
+}
+
+impl PlayerInput {
+    /// Starts the devices (`devices`: a window; offscreen there are none, and a test feeds
+    /// the world's `Input` itself). A device that cannot start is noted and left out.
+    fn start(devices: bool, notes: &mut Vec<String>) -> Self {
+        if !devices {
+            return Self {
+                raw: None,
+                pads: None,
+            };
+        }
+        let raw = match engine_platform::raw_input::RawInput::start(
+            engine_platform::raw_input::RawInputConfig::default(),
+        ) {
+            Ok(raw) => Some(raw),
+            Err(e) => {
+                notes.push(format!("raw keyboard and mouse input unavailable: {e}"));
+                None
+            }
+        };
+        Self {
+            raw,
+            pads: Some(engine_input::platform::XInput::new()),
+        }
+    }
+
+    /// Everything the devices reported since the last call, into `input`.
+    fn feed(&mut self, input: &mut engine_input::Input) {
+        if let Some(raw) = &mut self.raw {
+            raw.drain(|event| {
+                if let Some(event) = engine_input::platform::from_raw(&event) {
+                    input.handle(&event);
+                }
+            });
+        }
+        if let Some(pads) = &mut self.pads {
+            pads.poll(Instant::now(), |event| input.handle(&event));
+        }
     }
 }

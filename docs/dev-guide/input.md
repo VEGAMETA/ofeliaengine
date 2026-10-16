@@ -34,6 +34,35 @@ map.bind(save, Binding::chord(&[Key::ControlLeft], Key::KeyS))?; // does not als
 
 ## 2. Read actions
 
+**In the player** (`engine_app`), give it the map and read the world's `Input` resource:
+
+```rust
+let settings = PlayerSettings {
+    input: Some(map),
+    ..PlayerSettings::default()
+};
+
+// Game::tick: the tick's view, sampled by the player just before the tick.
+fn tick(&mut self, world: &mut World, dt: f32) {
+    let input = world.resource::<engine_input::Input>().unwrap();
+    if input.tick().just_pressed("jump") { /* start the jump */ }
+    let [x, y] = input.tick().vector("move");
+}
+
+// Game::present: the frame's view (the camera, the UI).
+fn present(&mut self, world: &mut World, alpha: f32) {
+    let [dx, dy] = world.resource::<engine_input::Input>().unwrap().frame().vector("look");
+}
+```
+
+- The player reads raw keyboard and mouse input on its own thread, with timestamps, and
+  polls XInput gamepads every frame.
+- When the window loses the focus, everything held is released: no key stays down
+  because its key-up went to another window.
+- Rebinding is `world.resource_mut::<Input>().unwrap().edit_map(|map| ...)` (section 4).
+
+Without the player, drive `Input` yourself:
+
 ```rust
 use engine_input::Input;
 

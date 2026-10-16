@@ -269,6 +269,7 @@ dependencies = [
  "engine_dlss",
  "engine_ecs",
  "engine_frame",
+ "engine_input",
  "engine_latency",
  "engine_loc",
  "engine_physics",
