@@ -138,8 +138,8 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 ## 4. In flight
 
-8c, colliders made from meshes (ADR 0101): its first PR (`feat/mesh-colliders`: 8c-1,
-8c-2a, 8c-4a), then 8c-3, the decomposition. 8b, video playback, was done 2026-10-16 (its
+8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
+8c-1, 8c-2a, 8c-4a) merged; next 8c-3, the decomposition. 8b, video playback, was done 2026-10-16 (its
 record is under the queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
 them.
@@ -824,7 +824,7 @@ grown, divide and conquer); the old labels stay in parentheses.
      - a decomposition of our own in Rust;
      - any scale after the colliders are made, with no errors;
      - colliders as editable data for the editor later.
-   - **Done (first PR, `feat/mesh-colliders`):**
+   - **Done (first PR, #230):**
      - 8c-1: `engine_collision`: QuickHull, fitting, scale rules;
      - 8c-2a: glTF physics, the cook's colliders, pack version 6, baking in `ofeliaengine
        cook`;
