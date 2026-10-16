@@ -77,6 +77,15 @@ set ENGINE_ADAPTER=radeon & cargo test -p engine_golden --test golden -- golden:
 - Missing golden images or scenes are skipped with a note, except in `tools/check.ps1 -Gpu`,
   which requires them.
 
+## CPU time per stage
+
+`perf_gate --cpu` runs a game's frame on an offscreen player: Sponza, 2,000 moving cubes and
+7 shadowed lights. It compares each CPU stage of the frame (`engine_app::FrameReport`:
+extraction, upload, compose, execute, …) with `tests/golden/perf/<vendor>.cpu.tsv`. A stage
+is slower past 20 % and 25 µs, and is measured again before it is reported.
+`tools\check.ps1 -Perf` runs it on both GPUs; `--update` writes the baseline after a change
+that moves CPU costs on purpose.
+
 ## GPU time per pass
 
 `perf_gate` renders the procedural scene and Sponza with each feature and antialiasing mode

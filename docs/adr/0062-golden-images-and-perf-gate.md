@@ -256,3 +256,30 @@ check, as a warning (2026-10-15).
   - a baseline lowered by hand (64 → 58 VGPRs) is reported.
 - **Not covered:** the pipelines the vendor SDKs make themselves (FidelityFX, Streamline),
   and those no perf scene makes.
+
+## Addendum (2026-10-16): the CPU check (core audit 3)
+
+The time gate measures GPU passes, so a CPU regression passes it. The local lights'
+shadows' bookkeeping (ADR 0071's addendum of 2026-10-16) made the frame renderer twelve
+times slower on the CPU and passed every gate for a day.
+
+- **`perf_gate --cpu`** runs a game's frame on an offscreen player (`engine_golden::cpu`):
+  - Sponza from its pack, its 7 shadowed local lights;
+  - 2,000 cubes spinning in hierarchies of 10 along the nave;
+  - the device class's defaults at 1920 × 1080.
+
+  After the scene settles, it takes each of `engine_app::FrameReport`'s stages' medians
+  over 300 frames (simulate, propagate, extract, interpolate, animate, probes, streaming,
+  pools, upload, compose, execute, submit, present, the frame's own CPU).
+- **Three runs,** each stage's fastest counted (other work on the machine only adds time);
+  the baseline is each stage's median run, in `tests/golden/perf/<vendor>.cpu.tsv`.
+- **A stage is slower** past 20 % and 25 µs: the CPU of a desktop in use is noisier than its
+  GPU. A slower stage is measured again and judged by the new runs; reported, not fatal
+  without `--strict`.
+- **`tools/check.ps1 -Perf`** runs it after each GPU's register check.
+- **Measured (ref-1):** 4 s on the RTX, 31 s on the Radeon. The baselines:
+  - CPU frame 231 µs on the RTX (compose 28, execute 114);
+  - 374 µs on the Radeon (compose 44, execute 183).
+
+  Run again, every stage was within 8 % and 0 slower. With ADR 0071's bound removed:
+  `compose` 28 → 313 µs, `cpu frame` +124 %, both reported.

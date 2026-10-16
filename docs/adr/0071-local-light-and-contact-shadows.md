@@ -212,3 +212,28 @@ are the scene's smallest draws, going back and forth). Means over 400 frames; `b
   - Unit tests of the pieces, the narrowed projection, the merging and the budget.
   - No allocation per frame.
 - **Static scenes** (the perf gate's) draw nothing either way.
+
+## Addendum (2026-10-16): merges bounded (core audit 3)
+
+The third core review found the pieces' bookkeeping on the CPU: 150 ns per moving caster per
+frame. Every changed box in a light's range was added to the light's set, and past 8 boxes
+each one searched the set for the box that grows least. In the flight (2,064 casters
+moving every frame, 7 lights) that was 0.3 ms of the frame renderer's 0.32. With 20,000
+movers it was 3.2 ms, and the RTX became CPU-bound at 3.96 ms.
+
+- **Past 16 merges** (twice the boxes kept) a light's shadow is out of date whole, and its
+  remaining boxes are not tested. That many changes in its range would have covered its
+  views anyway, as past 512 moves the cascade cache draws everything.
+- **Measured** (ref-1, release, the flight, windowed, warm cache):
+
+  | | frame renderer: prepare + declare | CPU frame |
+  |---|---:|---:|
+  | RTX, 2,000 movers and 64 characters | 409 → 46 µs | 788 → 478 µs |
+  | RTX, 20,000 movers and 64 characters | 3,265 → 60 µs | 3,963 → 734 µs |
+  | Radeon, 2,000 movers and 64 characters | 551 → 52 µs | 1,308 → 843 µs |
+
+  The GPU's local shadows did not change: RTX 222 → 215 µs median, Radeon 2.27 → 2.26 ms.
+- **A unit test:** past the merges a shadow is whole, and a crowd of 2,000 boxes under a
+  spot light draws its one view whole.
+- **The CPU check** of the perf gate (ADR 0062's addendum of 2026-10-16) would have
+  reported it: `compose` +1008 % with the bound removed.

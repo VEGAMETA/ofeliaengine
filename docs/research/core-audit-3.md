@@ -236,8 +236,8 @@ would make the next one visible.
 
 | # | Item | Why | Cost |
 |---|---|---|---|
-| 0 | **P0: bound the local shadows' invalidation** (§3.1) | 0.3 ms of every frame with movers; CPU-bound at 20,000 | S |
-| 0a | **A CPU stage gate** (§3.2) | the next §3.1 is caught | S–M |
+| 0 | ~~**P0: bound the local shadows' invalidation** (§3.1)~~ done 2026-10-16 (ADR 0071's addendum): 409 → 46 µs at 2,000 movers, 3,265 → 60 at 20,000 | 0.3 ms of every frame with movers; CPU-bound at 20,000 | S |
+| 0a | ~~**A CPU stage gate** (§3.2)~~ done 2026-10-16 (`perf_gate --cpu`, ADR 0062's addendum) | the next §3.1 is caught | S–M |
 | 1 | VSM's leftover, required (owner, 2026-10-15): transparent surfaces and subsurface transmission from the pages, then the pages' default for discrete GPUs | queued | M–L |
 | 2 | Device memory: empty blocks freed (§3.3); Reflex's pacing (§3.4) | 328 MiB; a 45 % wider tail | S each |
 | 3 | 8c's rules file and `RayHit`'s surface | the owner's question 1 | S–M |
