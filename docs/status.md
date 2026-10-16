@@ -214,7 +214,7 @@ water and impostors stay in §6):
    - The wider tail is the driver's: its sleep is never under ~1.5 ms. Left: a pacer of
      the engine's own above ~500 FPS, and exclusive full screen's hang in a session
      without the foreground (§6).
-3. ~~**8c's rules file and `RayHit`'s surface**~~ (done 2026-10-16, ADR 0101 8c-2b):
+3. ~~**8c's rules file and `RayHit`'s surface**~~ (done 2026-10-16, #241, ADR 0101 8c-2b):
    - `<scene>.colliders.ron`, documented in the dev guide's physics page; per mesh by name
      or `#index`;
    - every mesh level geometry by default;
