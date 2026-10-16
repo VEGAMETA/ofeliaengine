@@ -22,7 +22,8 @@ Last updated: 2026-10-16.
   - **Required later** (the owner, 2026-10-15: deferred, but it will be needed):
     transparent surfaces and subsurface transmission from the pages, so the cascades
     are not drawn beside them. The default for discrete GPUs is decided after it.
-- **In progress: 8c, colliders made from meshes** (ADR 0101, Proposed).
+- **Done: 8c, colliders made from meshes** (ADR 0101, Proposed), but for the rules file
+  and `RayHit`'s surface, which wait for the owner's question 1.
   - **Done (first PR):**
     - `engine_collision` (hulls, fitting, scale rules);
     - compound, scaled and baked shapes in the physics API;
@@ -32,8 +33,11 @@ Last updated: 2026-10-16.
   - **Done (second PR, #231, 8c-3):** the Rust decomposition after CoACD's algorithm, in the cook
     for props and dynamic glTF bodies, cached in the DDC: CoACD's hull counts (but the
     mug's: 24 against 21) in 0.02-3.0 s per model where CoACD takes 1.4-195 s.
-  - **Next:** a demo of props dropped on Sponza; the rules file (question 1).
-- **Then:** 8d localization. After it, item 9: the editor, Luau and tooling.
+  - **Done (third PR, 8c-4):** the owner's requirement tested: concave props scaled every
+    way (mirrored and sheared included) dropped onto Sponza come to rest, and a ball falls
+    into a U's notch; a rendered demo (`props_drop`); meshes made of several pieces now
+    remeshed (a table of boards was cut as a solid running through itself).
+- **Next:** 8d localization. After it, item 9: the editor, Luau and tooling.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
@@ -143,7 +147,9 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
 8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
-decomposition and its place in the cook) merged; next 8c-4's demo of props on Sponza. 8b, video playback, was done 2026-10-16 (its
+decomposition and its place in the cook) merged; the third (`feat/props-on-sponza`:
+8c-4, props on Sponza at every scale) in review. What is left of 8c waits for the owner's
+question 1; next 8d. 8b, video playback, was done 2026-10-16 (its
 record is under the queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
 them.
@@ -153,7 +159,7 @@ them.
 **What is left, in order.** The numbered items below keep their history; struck-through
 items are done.
 
-1. **8c, colliders made from meshes.**
+1. **8c's rules file and `RayHit`'s surface**, after the owner's question 1.
 2. **8d, localization.**
 3. **9:** editor tools, Luau bindings and debugger, other tooling.
 4. **5's leftover, required** (the owner, 2026-10-15): transparent surfaces and subsurface
@@ -842,12 +848,17 @@ grown, divide and conquer); the old labels stay in parentheses.
      the DDC. 14 models in 0.02-3.0 s (CoACD 1.4-195 s) with CoACD's hull counts but the
      mug's (24 against 21); sticking out within 0.1 % of CoACD on 7, up to 1.1 % more on
      smooth ones (64 points a hull).
+   - **Done (third PR, 8c-4):** `concave_props_scaled_every_way_land_on_sponza` (nine
+     props at scale 1, 0.5, 2, along their axes, mirrored, sheared; at rest standing on bare
+     floor found by rays; a ball into the U's notch reaches the floor) and the rendered demo
+     `engine_app/examples/props_drop.rs` (21 props, 5 meshes decomposed in 0.53 s). A mesh
+     of several closed pieces is now remeshed: as it was, it ran through itself.
    - **Left:**
      - the rules file (the owner's question 1), with a default part limit for props;
      - hulls bounded by an error instead of 64 points;
      - `RayHit`'s surface;
      - the cook's colliders on all threads;
-     - a demo of props dropped on Sponza.
+     - a sheared prop's drawn mesh (the ECS transform has no shear; the collider has it).
 8d. **Localization and internationalization for the game developer** (owner, 2026-10-14:
    simple to use). Today the engine has none. To research first (Fluent and its Rust crates,
    ICU4X, gettext's PO format, Godot's `TranslationServer`, Unreal's string tables and text
