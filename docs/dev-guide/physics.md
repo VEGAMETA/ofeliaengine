@@ -372,8 +372,13 @@ for the engine:
 - **Time:** 0.02-3 s per mesh the first time on 16 threads (the sample models in
   `docs/research/mesh-colliders.md`), all meshes of a scene at once. The parts go into the
   derived data cache, so the next cook of an unchanged mesh loads them.
-- **Open and messy meshes are fine:** a mesh that is not closed is first rebuilt as a closed
-  surface about half a percent of its size outside it.
+- **Open and messy meshes are fine:** a mesh that is not closed, or made of several pieces
+  (a chair of boards overlapping where they join), is first rebuilt as one closed surface
+  about half a percent of its size outside it.
+- **See it:** `cargo run -p engine_app --release --example props_drop -- sponza.pack frames`
+  drops 21 concave props, each scaled another way, into Sponza's courtyard and writes the
+  frames. One limit: a dynamic prop under a non-uniformly scaled parent with a turned child
+  collides with the shear, but is drawn without it (ADR 0101, 8c-4).
 - **A scene of level geometry** (the default rules) splits nothing and costs nothing more.
 
 ### Loading them

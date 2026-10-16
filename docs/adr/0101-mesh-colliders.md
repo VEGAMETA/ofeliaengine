@@ -1,7 +1,8 @@
 # 0101. Colliders made from meshes, cooked into Jolt's binary form
 
 - Status: Proposed (2026-10-16; the owner chose a Rust decomposition on 2026-10-16; the rules
-  file's shape is the owner's question 1)
+  file's shape is the owner's question 1). Built: 8c-1 to 8c-4; left: the rules file and
+  `RayHit`'s surface (8c-2b)
 - Date: 2026-10-16
 - Related:
   - [ADR 0018](0018-physics-interface-and-jolt.md) and [ADR 0066](0066-physics-queries-characters-rollback.md):
@@ -409,3 +410,46 @@ The research note's set, judged exactly (`docs/research/mesh-colliders.md`, "Our
   points (the avocado and the bottle stick out 0.8-1.1 % more than CoACD's unlimited hulls).
 - **The mug's extra hulls** (24 against 21).
 - **Editing parts** in the editor (the data is ready: points per hull, stable ids).
+
+## 8c-4 as built (2026-10-16)
+
+### What was built
+
+- **The owner's requirement tested** (`engine_app/tests/colliders.rs`,
+  `concave_props_scaled_every_way_land_on_sponza`): Sponza's level collider and nine concave
+  props in one `ScenePhysics`: U-shaped props at scale 1, 0.5, 2, (2, 0.5, 1), mirrored
+  (−1, 1, 1) and turned under a parent stretched along x (sheared, baked by the cook), an L
+  made taller, a crate stretched, a turned crate under a stretched parent (the exact hull of
+  its corners). The cook splits the U into three parts and the L into two; each prop lands on
+  a spot of bare floor the test finds by rays (the courtyard has planters, vases and arcades
+  under roofs), and comes to rest standing, on the floor, asleep. Then a ball dropped into the
+  U's notch falls to the floor inside it, where a filled hull would hold it a unit up.
+- **A rendered demo** (`engine_app/examples/props_drop.rs`): a cooked Sponza pack and 21
+  props of the game's own (U-shaped benches, L-shaped walls, crates, tables and chairs of
+  overlapping boards), each turned and scaled its own way (uniform, along its axes,
+  mirrored), dropped in three layers into the courtyard on the offscreen player; frames
+  written as PNGs. Their meshes are added to the player, their colliders made by
+  `cook_colliders`, their bodies placed by `ScenePhysics` and moving their entities.
+- **A fix the demo found:** a mesh in several closed pieces (a table of boards, overlapping
+  where they join) passed as a closed manifold, every edge once each way, and was cut as a
+  solid running through itself: five props still being cut after a minute on 16 threads,
+  when the run was stopped.
+  A closed mesh now also has to be in one piece to be used as it is; otherwise it is remeshed
+  into one surface around all its pieces (a test: two boxes through each other). The 14
+  models of the research note decompose to the same hulls, bit for bit.
+
+### Measured (ref-1, release, RTX 4060 Ti)
+
+- The demo's five prop meshes decomposed in 0.53 s (the U in 3 parts, the L in 2, a table in
+  5, a chair in 6, the crate a box); Sponza's level collider restored in 6.6 ms; 150 frames of
+  1280 × 720 rendered and written in 10-14 s.
+- The test: 0.43 s, Sponza's colliders made, nine props cooked and dropped, the ball.
+
+### Not done yet
+
+- **A sheared prop's drawn mesh:** under a non-uniformly scaled parent with a turned child,
+  the cook bakes the shear into the collider, but a moving body carries its instance as an
+  ECS child whose `Transform` (translation, rotation, scale) cannot hold a shear: drawn
+  without it. The collider is right; the picture is not. It needs a local transform with a
+  full linear part, an ECS change for its own ADR.
+- **The rules file and `RayHit`'s surface** (8c-2b): the owner's question 1.

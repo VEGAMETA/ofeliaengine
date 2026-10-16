@@ -327,7 +327,7 @@ read side by side), without its dependencies:
 
 | step | CoACD | ours |
 |---|---|---|
-| a closed manifold | OpenVDB level set | marching tetrahedra over a distance band (six tetrahedra a cell around its diagonal: no ambiguous case), the grid's origin off the mesh's own grid by fractions of a cell; distances per slab of the grid in parallel |
+| a closed manifold | OpenVDB level set | marching tetrahedra over a distance band (six tetrahedra a cell around its diagonal: no ambiguous case), the grid's origin off the mesh's own grid by fractions of a cell; distances per slab of the grid in parallel. A mesh in several closed pieces (boards overlapping) is remeshed too: as it is, it runs through itself |
 | the search mesh | the remeshed mesh as it is | simplified to about 4,000 triangles by quadric edge collapses that keep it closed (the link condition, no flipped triangles), within half a cell |
 | caps of a cut | constrained Delaunay (CDT) | ear clipping with holes bridged (Eberly) |
 | samples | Sobol (LGPL) and random | Roberts's R2 sequence (deterministic) |
