@@ -1118,8 +1118,8 @@ grown, divide and conquer); the old labels stay in parentheses.
     - Not reproduced in three runs the same day with the owner's monitor. Each time the
       window was focused at once. Without vsync NVIDIA refused the monitor and the flight
       ran borderless; with vsync it held the monitor (4.15 ms at 240 Hz).
-    - Since then the flight stops after 10 s without a frame and prints the player's
-      presentation, and the player logs every swapchain it makes anew
+    - Since then (#240) the flight stops after 10 s without a frame and prints the
+      player's presentation, and the player logs every swapchain it makes anew
       (`engine_app::present`).
     - If it comes back: the player should give up on the monitor after a loss or two and
       stay borderless until the window is focused.
