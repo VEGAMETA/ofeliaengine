@@ -1,0 +1,194 @@
+# 0104. Save games: everything but what is marked, taken in a frame, two encodings
+
+- Status: Accepted (the owner, 2026-10-16: both encodings, text written by development
+  builds and binary by release ones, switchable; integrity by default, signing or
+  encryption as a game's setting)
+- Date: 2026-10-16
+- Related:
+  - [ADR 0017](0017-ecs.md): the ECS and its snapshots;
+  - [ADR 0022](0022-reflection.md): reflection;
+  - [ADR 0029](0029-scene-format.md): the scene text format and `SceneId`;
+  - [ADR 0099](0099-player-crate.md): the player and the `Game` hooks;
+  - [ADR 0101](0101-mesh-colliders.md): the pack's bodies;
+  - research note `docs/research/save-games.md`;
+  - core audit 3 §4, queue item 4.
+
+## Context
+
+- **Nothing saves a game.** CLAUDE.md §13 asks for "game saves in a separate, stable
+  format"; core audit 3 §4 lists them among the core's gaps.
+- **The owner (2026-10-16):**
+  - quicksave and autosave convenient for the developer;
+  - every state saved, gravity and the rest ("far too many variables" to list);
+  - the developer able to fix an autosave's states themselves;
+  - both a text and a binary encoding, switchable, text by default.
+- **The engine's rules:**
+  - no hitch: nothing that scales with the save runs in the frame;
+  - old saves load after the game updates;
+  - a save is untrusted input.
+- **Measured** (the research note; ref-1, one thread, 10,000 entities):
+
+  | | Write | Read | Size after zstd |
+  |---|---|---|---|
+  | Text (ADR 0029) | 12.0 ms | 18.8 ms | 341 KiB |
+  | Tagged binary | 1.3 ms | 2.9 ms | 277 KiB |
+  | Snapshot of the rows (in a frame) | 0.023 ms | — | — |
+
+## Options
+
+**What is saved.**
+1. **Everything but what is marked** (bevy_save's default; the owner's request).
+2. **Only what is marked** (Unreal's `UPROPERTY(SaveGame)`, moonshine-save): every new
+   variable is a chance to forget one.
+3. **The raw snapshot on disk:** any code change breaks every save.
+
+**When the work happens.**
+1. **Encode in the frame:** 12 ms of text or 1.3 ms of binary per 10,000 entities, a hitch
+   at every autosave.
+2. **Copy in the frame, encode and write behind it** (chosen): the frame pays for a copy.
+
+**The encoding:** text, binary, or both (the research note). The owner chose both. The
+first suggestion was a flag with text as the default everywhere; the owner then agreed to
+write by the build (text while developing, binary in release), since shipped games would
+otherwise read a large world in 1.9 s instead of 0.3 s.
+
+## Decision
+
+### What is saved
+
+- **Components:**
+  - every component whose type is reflected (`reflect_component!`), unless the type is
+    marked `#[reflect(no_save)]`: caches, effects, data derived again on load
+    (`GlobalTransform` is);
+  - every field of it unless marked `#[reflect(skip)]` or `#[reflect(no_save)]`.
+- **Resources:** every reflected resource (`reflect_resource!`), with the same marks.
+- **The engine's own state, through providers:**
+  - physics: gravity, each body's pose, velocities, sleeping and gravity factor;
+  - the simulation clock: tick, time, time scale;
+  - random generators;
+  - animation players.
+- **No list to keep:** the reflection macros put each type into a list collected at link
+  time, so loading finds a type by name even before the world has seen it. The
+  mechanism is chosen in step 1: `linkme`'s distributed slices (MIT OR Apache-2.0, no
+  run-time cost, supported on windows-msvc), or `SaveRegistry::register::<T>()` once per
+  type.
+- **Reflection grows what a game's state needs:** strings, lists, optional values and maps.
+- **Identity:**
+  - **the level's own objects** (the pack's bodies and the entities made for them) by a
+    stable key from the cook: the hash of their glTF node path. A save stores only what
+    changed relative to the level: moved, changed, destroyed. A level re-cooked after an
+    edit still matches; an object removed from it drops its saved state with a warning;
+  - **objects the game spawned** get a `SceneId` (ADR 0029) and are created again;
+  - **references between entities** are written as ids and remapped, as scenes do.
+
+### Taking a save
+
+- **In the frame** (`Player::save` and the rest, at the end of a tick): plain-data
+  components are copied by rows, as the snapshot does; the others are cloned; the providers
+  copy their state. Then `Game::before_save` may correct or leave out what it likes, on
+  the copy: the developer fixing an autosave's states.
+- **Behind it**, on a background thread:
+  - encoding, zstd and the checksum;
+  - the write: a temporary file, flushed, then swapped in with `ReplaceFileW`, which keeps
+    the previous save as `<slot>.save.bak`.
+- **One save in flight at a time;** an autosave due while one is written is skipped.
+
+### Loading
+
+- **Loads at a tick boundary:**
+  1. the level is loaded again;
+  2. what changed is applied to it;
+  3. spawned objects are created;
+  4. the providers restore physics and the clock;
+  5. then `Game::after_load` runs with a report (versions, what was dropped and why), to
+     fix states and migrate.
+- **Old saves:** added fields take their defaults, removed ones are skipped, renamed ones
+  follow `#[reflect(rename = …)]`; a type's `#[reflect(version = N)]` is in the save for
+  migrations in `after_load`.
+- **Untrusted input:** lengths are checked against the file and nothing runs code. The
+  decoders are fuzzed (`cargo-fuzz`, CLAUDE.md §15).
+
+### The encodings (the owner's choice: both)
+
+- **Text:** the scene format's line grammar (ADR 0029), grown for strings (`"…"`), lists
+  (`[…]`) and maps (`{key: value}`): readable and editable.
+- **Binary:** each type's fields named once per file (type name, version, field names and
+  kinds), then rows packed in that order. Loading maps the file's fields to the current
+  type's by name, once per type. The prototype measured above tagged every field; the
+  table of names makes rows about the snapshot's size.
+- **Which one is written:**
+  - the build chooses: text in development builds (`debug_assertions`), binary in release
+    and shipping;
+  - `SaveSettings::encoding` overrides either way (text in a moddable game's release, for
+    instance).
+- **Reading takes both always:** the header says which. Switching never strands a save.
+- **The CLI:**
+  - `ofeliaengine save dump <file>` writes the text form;
+  - `save pack` writes a binary from text;
+  - `save info` prints the header.
+
+### The file
+
+- **The header:**
+  - magic and format version;
+  - the encoding and flags;
+  - the engine's and the game's versions;
+  - the slot's name, date, play time and level;
+  - a thumbnail for the load menu.
+- **Then sections,** each a kind and a length: entities, resources, providers' states, the
+  game's own. The body is zstd-compressed and covered by a checksum.
+- **Where:** `%USERPROFILE%\Saved Games\<studio>\<game>\` (`FOLDERID_SavedGames`), one file
+  per slot. Steam Auto-Cloud syncs that root.
+
+### Protection against players' edits (the owner's choice)
+
+- **By default, integrity only:** the checksum, the atomic swap, the backup. A player who
+  wants to edit a save can, with the engine's tool, as in most single-player games.
+- **Signing or encryption as a game's setting** (`SaveSettings::protection`), for games
+  where it matters. The key ships in the executable, so it stops casual edits only; the
+  CLI's `save dump` takes the game's key to read such saves for bug reports.
+
+### The API
+
+```rust
+player.quicksave()?;                 // the "quick" slot, written behind the frame
+player.quickload()?;                 // at the next tick boundary
+player.save("slot 1")?;  player.load("slot 1")?;
+let slots = player.saves()?;         // name, date, play time, level, thumbnail
+// PlayerSettings::saves: SaveSettings { autosave: Some(Autosave { every, slots: 3 }), .. }
+player.autosave_now();               // a checkpoint
+// Game::before_save(&mut SaveDraft), Game::after_load(&mut World, &LoadReport),
+// Game::can_autosave() (not during a cutscene, say)
+```
+
+### Steps
+
+1. **Reflection:** strings, lists, optional values, maps; `no_save`, `version`; reflected
+   resources; the link-time list of types.
+2. **`engine_save`:**
+   - taking a save in the frame;
+   - both encodings;
+   - the container, its checksum and the atomic swap;
+   - slots in `Saved Games`;
+   - fuzzing;
+   - measurements: what the frame pays, the background time, sizes.
+3. **The player:**
+   - quicksave, quickload, slots and autosave;
+   - the hooks;
+   - the providers (physics, the clock, random generators, animation);
+   - the cook's stable keys for the level's objects (pack version 9);
+   - thumbnails;
+   - the test: save, load, then the same state hash and the same next frames.
+4. **The CLI's `save` commands,** `docs/dev-guide/saves.md`, this ADR as built.
+
+## Consequences
+
+- A game saves with one call and loses nothing it did not mark. A transient type left
+  unmarked costs space, not correctness, and `save info` shows the largest sections.
+- Text saves while developing can be read, diffed and fixed by hand, and kept in tests.
+- Reflection's growth (strings, lists, maps) serves the inspector, scripting and scenes
+  too.
+- **Costs to watch:** cloning non-plain-data components in the frame (an inventory of
+  thousands of strings), measured in step 2 with a budget.
+- **Later:** saves across the network (a host's), cloud conflicts (Steam's), per-user
+  profiles.
