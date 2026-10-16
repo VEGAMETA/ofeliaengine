@@ -52,7 +52,9 @@ fn sponza_collides_where_it_is_drawn() {
         let to_world = Mat4::from_cols_array(&body.world_from_object);
         for s in &colliders[body.collider as usize].collider.shapes {
             if let Shape::Mesh {
-                vertices, triangles, ..
+                vertices,
+                triangles,
+                ..
             } = &s.shape
             {
                 for t in triangles {
@@ -67,7 +69,8 @@ fn sponza_collides_where_it_is_drawn() {
         }
     }
     let (centre, size) = ((lo + hi) * 0.5, hi - lo);
-    let path = std::env::temp_dir().join(format!("engine_app_colliders_{}.pack", std::process::id()));
+    let path =
+        std::env::temp_dir().join(format!("engine_app_colliders_{}.pack", std::process::id()));
     let jobs = ThreadPool::builder().workers(2).build().unwrap();
     write_pack(
         &path,
@@ -86,7 +89,10 @@ fn sponza_collides_where_it_is_drawn() {
     let report = physics.load_pack(&path, &jobs, &mut world, &[]).unwrap();
     let _ = std::fs::remove_file(&path);
     println!("{report:?}");
-    assert_eq!(report.restored, report.statics, "every collider restored from its bytes");
+    assert_eq!(
+        report.restored, report.statics,
+        "every collider restored from its bytes"
+    );
     assert_eq!(report.built, 0);
     // Rays down through the courtyard and across it: Jolt's first hit is the nearest
     // source triangle's.
@@ -161,7 +167,9 @@ fn a_mesh_baked_by_another_physics_build_asks_to_cook_again() {
         }],
         ..Collider::default()
     };
-    let baked = engine_physics::colliders::bake(&mut baker, &collider).unwrap().unwrap();
+    let baked = engine_physics::colliders::bake(&mut baker, &collider)
+        .unwrap()
+        .unwrap();
     let format = baker.baked_shape_format().unwrap();
     // The pack keeps a baked mesh in the backend's form only.
     let mut packed = collider.clone();
@@ -181,6 +189,8 @@ fn a_mesh_baked_by_another_physics_build_asks_to_cook_again() {
     let bodies = [CookedBody::default()];
     let mut world = World::new();
     let mut physics = ScenePhysics::new(&settings()).unwrap();
-    let error = physics.add(&colliders, &bodies, &mut world, &[]).unwrap_err();
+    let error = physics
+        .add(&colliders, &bodies, &mut world, &[])
+        .unwrap_err();
     assert!(error.to_string().contains("cook the pack again"), "{error}");
 }
