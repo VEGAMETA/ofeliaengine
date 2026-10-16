@@ -209,6 +209,7 @@ game is running.
 | `reflection_probes` | the probes' room and captures, or off (`None`) |
 | `contact_shadows` | the sun's contact shadows, off by default |
 | `languages` | the player's languages for your text; `None`: Windows' display languages |
+| `input` | your input actions (`engine_input::InputMap`): the world's `Input` resource, read from raw keyboard and mouse input and XInput pads, sampled before every tick and before `present` ([input.md](input.md)); `None`: only the window's events |
 
 ## Your game's text
 

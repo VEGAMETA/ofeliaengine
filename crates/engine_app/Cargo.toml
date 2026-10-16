@@ -34,6 +34,7 @@ engine_physics.workspace = true
 engine_physics_jolt.workspace = true
 # The game's text (ADR 0102): strings packs, or a `loc/` folder compiled and kept live.
 engine_loc.workspace = true
+engine_input.workspace = true
 # Text errors of a live folder go to the log (engine_log's backend).
 log = "0.4"
 

@@ -366,3 +366,21 @@ fn local_players_listen_to_their_own_pads() {
     assert!(!p1.sample_tick(c.at(16)).pressed(jump));
     assert!(p2.sample_tick(c.at(16)).pressed(jump));
 }
+
+#[test]
+fn released_all_when_the_window_loses_the_focus() {
+    let (map, jump, walk, _) = game();
+    let mut input = Input::new(map);
+    let c = Clock(Instant::now());
+    input.sample_tick(c.at(0));
+    key(&mut input, c.at(5), Key::Space, true);
+    key(&mut input, c.at(6), Key::KeyW, true);
+    axis(&mut input, c.at(7), GamepadAxis::LeftX, 1.0);
+    let s = input.sample_tick(c.at(16));
+    assert!(s.pressed(jump) && s.vector(walk) != [0.0, 0.0]);
+    // The key-ups go to another window.
+    input.release_all();
+    let s = input.sample_tick(c.at(32));
+    assert!(s.just_released(jump));
+    assert_eq!(s.vector(walk), [0.0, 0.0]);
+}

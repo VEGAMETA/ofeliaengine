@@ -527,6 +527,16 @@ impl Input {
         self.filter = filter;
     }
 
+    /// Releases every key, button and stick: what the devices can no longer report once
+    /// the window loses the focus (the player calls it then), so nothing stays held.
+    /// Presses latched since the last sample are still seen by it.
+    pub fn release_all(&mut self) {
+        for bit in 0..RAW_BITS {
+            self.down.set(bit, false);
+        }
+        self.axes = [[0.0; GAMEPAD_AXIS_COUNT]; MAX_GAMEPADS];
+    }
+
     fn press(&mut self, bit: usize, pressed: bool, time: Instant) {
         if pressed && !self.down.get(bit) {
             self.tick.press(bit, time);
