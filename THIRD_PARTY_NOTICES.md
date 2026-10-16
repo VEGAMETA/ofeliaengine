@@ -25,6 +25,7 @@ the dependency.
 | half 2.7.1 (+ zerocopy 0.8.62) | MIT OR Apache-2.0 (zerocopy BSD-2-Clause OR Apache-2.0 OR MIT) | half floats for BC6H compression (block_compression's `bc6h` feature) in `engine_assets` (ADR 0083) |
 | exr 1.74.0 (+ bit_field 0.10, lebe 0.5, zune-inflate 0.2) | BSD-3-Clause (lebe BSD-3-Clause; bit_field MIT OR Apache-2.0; zune-inflate MIT OR Apache-2.0 OR Zlib) | OpenEXR panoramas in `engine_assets` (ADR 0083) |
 | skrifa 0.46 (+ read-fonts 0.43, font-types 0.12) | MIT OR Apache-2.0 | font tables, metrics, charmap and glyph outlines in `engine_text` |
+| unicode-bidi 0.3.18 (© 2015 The Servo Project Developers) | MIT OR Apache-2.0 | UAX #9's character data (bidirectional classes and bracket pairs, Unicode 16) in `engine_text`, whose algorithm is adapted (below, Adapted code; ADR 0102) |
 | unicode-linebreak 0.1.5 | MIT OR Apache-2.0 | UAX #14 line break opportunities in `engine_text` |
 | icu_plurals 2.3.0, icu_decimal 2.3.0, icu_locale 2.3.1 (+ fixed_decimal 0.7.2, icu_collections, icu_locale_core, icu_locale_fallback, icu_provider, their `_data` crates with CLDR 48.2, litemap, potential_utf, tinystr, writeable, yoke, zerofrom, zerotrie, zerovec, stable_deref_trait, utf8_iter) | Unicode-3.0 (stable_deref_trait and utf8_iter: MIT OR Apache-2.0) | ICU4X: CLDR plural rules, decimal formatting and locale fallback in `engine_loc` (ADR 0102) |
 | fluent-syntax 0.12.0 (+ memchr 2, thiserror 2) | Apache-2.0 OR MIT | Fluent's parser in `engine_loc`'s compiler (`ofeliaengine loc`, the player's live `loc/` folders; ADR 0102) |
@@ -61,6 +62,7 @@ Only compiled into builds with an `engine_profiler/tracy*` feature (`cargo profi
 | libopus (© 2001-2023 Xiph.Org, Skype Limited, Octasic, Jean-Marc Valin, Timothy B. Terriberry, CSIRO, Gregory Maxwell, Mark Borgerding, Erik de Castro Lopo, Mozilla, Amazon) | 1.5.2 | BSD-3-Clause (`third_party/opus/COPYING`) | Opus decoding in `engine_audio_decode` (ADR 0051) |
 | AMD FidelityFX SDK (© 2024 Advanced Micro Devices, Inc.; only the FSR 3.1 upscaler, frame interpolation, optical flow, Brixelizer, Brixelizer GI, the Vulkan backend and their shared code and GLSL) | v1.1.4, commit c6efa6bf7f20 (FSR 3.1.4, frame interpolation 1.1.3, optical flow 1.1.2, Brixelizer 1.0.0, Brixelizer GI 1.0.1) | MIT (`third_party/FidelityFX-SDK/LICENSE.txt`) | Built by `engine_ffx`: FSR 3.1 upscaling and frame generation's interpolation in `engine_fsr` (ADR 0060, ADR 0091), Brixelizer GI as probe GI's reference (ADR 0090); the SPIR-V in `crates/engine_ffx/shaders` is compiled from its GLSL. Modified: three fixes in Brixelizer's GLSL for AMD's Vulkan compiler (`third_party/README.md`, "Local modifications") |
 | SMAA reference implementation (© 2013 Jorge Jimenez, Jose I. Echevarria, Belen Masia, Fernando Navarro, Diego Gutierrez; `SMAA.hlsl`, and the bytes of its `Textures/AreaTex.h` and `SearchTex.h` tables in `crates/engine_render/data/smaa_area.bin`, `smaa_search.bin`) | commit 71c806a838bd | MIT (`third_party/smaa/LICENSE.txt`) | SMAA 1x / S2x / T2x / 4x and MLAA after tone mapping in `engine_render::postaa` (ADR 0075); the SPIR-V in `crates/engine_render/shaders` (`smaa*.spv`, `mlaa.*.spv`) is compiled from it |
+| Unicode's `BidiCharacterTest.txt` (© 2024 Unicode, Inc.): its header, the examples from UAX #9 and every 50th case, unchanged, in `crates/engine_text/tests/data/BidiCharacterTest-sample.txt` | Unicode 16.0.0 | Unicode License v3 (Unicode-3.0; the terms of use at https://www.unicode.org/terms_of_use.html) | the conformance test of `engine_text`'s bidirectional algorithm (ADR 0102) |
 | Vulkan-Headers (© 2015-2023 The Khronos Group Inc.; `vulkan.h`, `vulkan_core.h`, `vk_platform.h`, `vk_video/`) | v1.4.350, commit 8864cdc896bb | Apache-2.0 OR MIT (`third_party/Vulkan-Headers/LICENSE.md`) | the C headers the FidelityFX SDK's Vulkan backend compiles against in `engine_fsr` |
 
 ## Fonts and icons
@@ -74,6 +76,8 @@ condition of this section (ADR 0036). License texts are next to each font.
 | Noto Sans | © 2022 The Noto Project Authors | 2.015 | OFL-1.1 | https://github.com/notofonts/latin-greek-cyrillic | editor UI text (`NOTO_SANS`) |
 | JetBrains Mono | © 2020 The JetBrains Mono Project Authors | 2.305 | OFL-1.1 | https://github.com/JetBrains/JetBrainsMono | code, console; arrows and symbols in the UI stack (`JETBRAINS_MONO`) |
 | Go fonts (Regular, Bold, Mono) | © 2016 Bigelow & Holmes Inc., for the Go project | golang/image commit b06f1de3f490 | BSD-3-Clause | https://go.googlesource.com/image | test font of `engine_text` (`GO_*`) |
+| Noto Sans Arabic | © 2022 The Noto Project Authors | 2.013 | OFL-1.1 | https://github.com/notofonts/arabic | right-to-left text in tests and golden images; a game's Arabic stack (`NOTO_SANS_ARABIC`) |
+| Noto Sans Hebrew | © 2022 The Noto Project Authors | 3.001 | OFL-1.1 | https://github.com/notofonts/hebrew | right-to-left text in tests and golden images; a game's Hebrew stack (`NOTO_SANS_HEBREW`) |
 | Symbols Nerd Font (the font and scripts) | © 2014 Ryan L McIntyre | Nerd Fonts 3.5.1 | MIT | https://github.com/ryanoasis/nerd-fonts | icons (`NERD_SYMBOLS`), with the sets below |
 | ↳ Codicons | © Microsoft Corporation | 0.0.45 | CC BY 4.0 | https://github.com/microsoft/vscode-codicons | icons |
 | ↳ Devicons | © the Devicon contributors | 2.17.0 | MIT | https://github.com/devicons/devicon | icons |
@@ -192,6 +196,42 @@ Constants and formulas taken into our own code (no files copied).
 | Brettel, Viénot and Mollon's tritanopia (1997) in linear RGB: the two half-planes' projection matrices and the separation plane's normal | `engine_render/src/color_vision.rs` (`TRITAN_A`, `TRITAN_B`, `TRITAN_PLANE`) | libDaltonLens, `libDaltonLens.c` (Nicolas Burrus, github.com/DaltonLens/libDaltonLens, checked 2026-10-15) | Unlicense (public domain) |
 | Daltonization's error shift for red-green deficiencies, `[[0, 0, 0], [0.7, 1, 0], [0.7, 0, 1]]` | `engine_render/src/color_vision.rs` (`SHIFT_RED_GREEN`) | O. Fidaner, P. Lin, N. Ozguven, "Analysis of Color Blindness", Stanford, 2005 | published method, cited |
 | CoACD's convex decomposition, ported to Rust: the mesh normalized to a longest side of 2, the manifold remesh's parameters (100 cells across, the surface 0.55 of a cell out), the concavity (the larger of 0.3 × the radius of a sphere of the hull's extra volume and the boundary Hausdorff distance over 2,000 sampled points), the tree search (150 iterations, 3 cuts deep, 20 candidate planes per axis, a rollout through each axis's middle plane by the volume term, UCB with C = the cost over the depth over √2, a path's quality its worst part), the refinement of the first cut along its axis, the merge by pair costs updated after each merge. Modified: our own remesh by marching tetrahedra (no OpenVDB), caps by ear clipping (no CDT), samples by Roberts's R2 sequence (CoACD's Sobol code is LGPL and not used), the search on a mesh simplified by quadric edge collapses, the faces where merged parts touch left out of the Hausdorff term | `engine_collision/src/decompose/` | CoACD, `SarahWeiii/CoACD` (X. Wei, M. Liu, Z. Ling, H. Su, SIGGRAPH 2022), `src/process.cpp`, `mcts.cpp`, `cost.cpp`, `hausdorff.h`, `preprocess.cpp`, commit 131010c | MIT (Copyright (c) 2022 Xinyue Wei, Minghua Liu, below) |
+| unicode-bidi's implementation of UAX #9, adapted: the paragraph level and FSIs (P2, P3), the explicit levels and level runs (X1 to X8, BD7), the isolating run sequences and their sos and eos (X10), weak types (W1 to W7), bracket pairs (BD16, N0), neutrals (N1, N2), implicit levels (I1, I2), L1 and L2. Modified: per character instead of per byte, a sequence's runs linked through two arrays, every buffer kept between calls, an unstable sort of the bracket pairs (no allocation), nothing done for text with nothing right to left; 91,707 of Unicode 16's conformance cases pass | `engine_text/src/bidi.rs` | unicode-bidi 0.3.18, `servo/unicode-bidi`, `src/lib.rs`, `explicit.rs`, `implicit.rs`, `prepare.rs` | MIT OR Apache-2.0, taken under MIT (below) |
+
+### MIT license (unicode-bidi)
+
+The adapted `engine_text/src/bidi.rs` says in its header what changed: levels per character,
+isolating run sequences as linked runs, buffers kept between calls, a pass skipped for text
+with nothing right to left.
+
+```
+Copyright (c) 2015 The Rust Project Developers
+Copyright 2015, The Servo Project Developers (the authors of unicode-bidi)
+
+Permission is hereby granted, free of charge, to any
+person obtaining a copy of this software and associated
+documentation files (the "Software"), to deal in the
+Software without restriction, including without
+limitation the rights to use, copy, modify, merge,
+publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software
+is furnished to do so, subject to the following
+conditions:
+
+The above copyright notice and this permission notice
+shall be included in all copies or substantial portions
+of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF
+ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED
+TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A
+PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT
+SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY
+CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION
+OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR
+IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+DEALINGS IN THE SOFTWARE.
+```
 
 ### MIT license (Baking Lab)
 

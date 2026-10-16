@@ -1,9 +1,11 @@
 //! Text: fonts, shaping, line breaking, layout, glyph rasterization and atlas (ADR 0025).
 //!
 //! - [`Fonts`] holds fonts loaded from bytes ([`Font`]).
-//! - [`TextLayout`] shapes text with HarfRust, breaks lines by UAX #14 and wraps it
-//!   (whitespace at line ends hangs), with fallback fonts and alignment. It keeps its
-//!   buffers, so laying text out again does not allocate.
+//! - [`TextLayout`] resolves bidirectional levels (UAX #9: numbers in Arabic text, Hebrew
+//!   inside Latin), shapes text with HarfRust, breaks lines by UAX #14 and wraps them
+//!   (whitespace at line ends hangs), with fallback fonts and alignment by the paragraph's
+//!   direction. It keeps its buffers, so laying text out again does not allocate.
+//! - [`FontStacks`] holds a font stack per language, for a game's locales.
 //! - [`GlyphAtlas`] renders glyphs with the built-in coverage rasterizer and packs them
 //!   into an 8-bit texture, keyed by size and quarter-pixel x offset.
 //!
@@ -28,14 +30,17 @@
 //! ```
 
 mod atlas;
+mod bidi;
 mod font;
 mod layout;
 mod raster;
+mod stacks;
 
 pub use atlas::{AtlasGlyph, GlyphAtlas, GlyphKey, Rect, SUBPIXEL_STEPS};
 pub use font::{Font, FontError, FontId, Fonts, VerticalMetrics};
-pub use layout::{Align, Line, PositionedGlyph, TextLayout, TextStyle};
+pub use layout::{Align, Line, PositionedGlyph, TextDirection, TextLayout, TextStyle};
 pub use raster::{GlyphBitmap, Rasterizer, rasterize};
+pub use stacks::FontStacks;
 
 /// Fonts bundled with the engine (`third_party/fonts`; licenses and credits in
 /// `THIRD_PARTY_NOTICES.md`, policy in ADR 0036). A font stack of a text font followed by
@@ -58,6 +63,15 @@ pub mod fonts {
     /// Go Regular (Bigelow & Holmes, BSD-3-Clause): Latin, Cyrillic, Greek. Compact; used
     /// by tests and benchmarks.
     pub static GO_REGULAR: &[u8] = include_bytes!("../../../third_party/fonts/go/Go-Regular.ttf");
+    /// Noto Sans Arabic 2.013 Regular (The Noto Project Authors, OFL-1.1): the Arabic
+    /// script, for right-to-left text (tests, golden images; a game's stack for Arabic).
+    /// Not linked into a binary that does not use it.
+    pub static NOTO_SANS_ARABIC: &[u8] =
+        include_bytes!("../../../third_party/fonts/noto-sans-arabic/NotoSansArabic-Regular.ttf");
+    /// Noto Sans Hebrew 3.001 Regular (The Noto Project Authors, OFL-1.1): the Hebrew
+    /// script. Not linked into a binary that does not use it.
+    pub static NOTO_SANS_HEBREW: &[u8] =
+        include_bytes!("../../../third_party/fonts/noto-sans-hebrew/NotoSansHebrew-Regular.ttf");
     /// Go Bold.
     pub static GO_BOLD: &[u8] = include_bytes!("../../../third_party/fonts/go/Go-Bold.ttf");
     /// Go Mono: monospaced.

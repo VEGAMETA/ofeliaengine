@@ -190,6 +190,52 @@ defined; defined but unused (a warning). A non-zero exit code on errors, for bui
 - **A string selector matches variants named like categories** (`"one"` selects `[one]`).
 - **Not done:** a pack's hot reload (folders only), dates, bidirectional layout (8d-4).
 
+### 8d-4 (2026-10-16, `engine_text`)
+
+- **UAX #9 adapted, not used as a crate** (the decision said `unicode-bidi`). Measured
+  (ref-1, release), unicode-bidi 0.3.18 allocates on every call: 7 times and 450 ns for a
+  line of Latin text, 14 to 23 times and 0.9 to 2.2 µs for Arabic or Hebrew lines. A HUD
+  laid out every frame would break the rule of no allocation per frame. Its algorithm
+  (MIT OR Apache-2.0) is adapted in `engine_text/src/bidi.rs`:
+  - levels per character (unicode-bidi's are per byte);
+  - an isolating run sequence's runs linked through two arrays;
+  - every buffer kept between calls, the bracket pairs sorted without allocating;
+  - nothing done for text with nothing right to left, which below U+0590 no character is;
+  - character classes looked up a page of 256 at a time, the page filled on first use
+    (5 µs; 64 KB at most). That halved the cost: 1,184 → 659 ns for a 48-character Arabic
+    line, 7.9 ns a byte.
+
+  The crate stays for its character data (Unicode 16). All 91,707 cases of Unicode 16's
+  `BidiCharacterTest.txt` pass (`ENGINE_BIDI_TESTS` names its folder); a sample of 1,846 is
+  checked in and run by every test.
+- **The layout:**
+  - runs split by level as well as font and script, shaped in their level's direction;
+  - each line's levels reset at its end (L1), its glyphs reordered by level (L2);
+  - HarfRust mirrors brackets in right-to-left runs (L4).
+  - `TextStyle::direction`: `Auto` (the first strong character), `LeftToRight`,
+    `RightToLeft`.
+  - `Line::rtl`. `Align::Start` and `End` are the paragraph's: right and left for
+    right-to-left text. A right-to-left line's trailing whitespace hangs past its left.
+  - `glyphs()` is in visual order per line.
+- **Costs** (ref-1, `benches/text.rs`):
+  - left-to-right text a little faster than before: labels 0.83-0.84 µs against
+    0.86-0.87, a paragraph 16.4 ns a byte against 16.9-17.1 (binaries of both commits run
+    in turn);
+  - Arabic and Hebrew labels with numbers 3.41 µs;
+  - an Arabic paragraph 117 ns a byte, most of it shaping.
+
+  No allocation over 540 frames of Arabic and Hebrew text among the others
+  (`tests/zero_alloc.rs`).
+- **Fonts per language:** `FontStacks`, a stack per language tag, a locale taking its
+  longest tag set (`zh-Hant-TW` → `zh-Hant` → `zh`). Noto Sans Arabic 2.013 and Noto Sans
+  Hebrew 3.001 (OFL-1.1) are bundled for tests (`engine_text::fonts`); a binary that does not
+  name them does not link them.
+- **The golden image** (`engine_text/tests/data/bidi.png`) is rendered on the CPU: an Arabic
+  paragraph with numbers and Latin, Hebrew in Latin, Hebrew with Latin, Latin forced right
+  to left. Layout and rasterization are deterministic, and the 2D renderer's own test checks
+  that the GPU draws the atlas's coverage, so no GPU shot per vendor is needed.
+- **Not done:** a UI mirrored for right-to-left languages (item 9, the UI's), vertical text.
+
 ## Consequences
 
 - **Translators work in FTL** (Pontoon, Weblate, Crowdin); PO and XLIFF export can come with

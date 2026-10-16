@@ -748,7 +748,9 @@ version = "0.0.0"
 dependencies = [
  "engine_workspace_hack",
  "harfrust",
+ "png",
  "skrifa",
+ "unicode-bidi",
  "unicode-linebreak",
  "unicode-script",
 ]
@@ -2148,6 +2150,12 @@ checksum = "885c31f06fce836457fe3ef09a59f83fe8db95d270b11cd78f40a4666c4d1661"
 dependencies = [
  "libc",
 ]
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-ident"
