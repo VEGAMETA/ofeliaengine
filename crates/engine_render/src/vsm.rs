@@ -255,6 +255,27 @@ pub struct VsmFrame {
     pub hierarchy: Buffer,
 }
 
+/// The pages between the bookkeeping's halves ([`VirtualShadows::add_marked`],
+/// [`VirtualShadows::add_allocated`]): passes declared then may flag more page table
+/// entries `NEEDED` (a fragment's or a thread's `vsm_flag_entry` in `vsm_common.slang`),
+/// appending a request for each unbacked one they flag first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VsmMarked {
+    frame: VsmFrame,
+}
+
+impl VsmMarked {
+    /// The page tables.
+    pub fn table(&self) -> Buffer {
+        self.frame.table
+    }
+
+    /// The frame's allocation requests: a count, then entries.
+    pub fn requests(&self) -> Buffer {
+        self.frame.requests
+    }
+}
+
 /// A buffer of the pages', kept across frames.
 #[derive(Debug)]
 struct Persistent {
@@ -579,6 +600,12 @@ impl VirtualShadows {
         self.hierarchy.address
     }
 
+    /// The allocation requests' address ([`VsmFrame::requests`]), for passes that mark
+    /// pages between [`Self::add_marked`] and [`Self::add_allocated`].
+    pub fn requests_address(&self) -> vk::DeviceAddress {
+        self.requests.address
+    }
+
     /// The pool's index in the bindless storage images.
     pub fn pool_index(&self) -> u32 {
         self.pool.storage[0]
@@ -719,7 +746,8 @@ impl VirtualShadows {
     }
 
     /// Declares the bookkeeping of the frame [`Self::prepare`] made over `depth`, the
-    /// view's depth after its prepass (single-sampled, the size it was prepared with).
+    /// view's depth after its prepass (single-sampled, the size it was prepared with):
+    /// [`Self::add_marked`] and [`Self::add_allocated`] at once.
     pub fn add_prepared<'g>(
         &'g self,
         fg: &mut FrameGraph<'g>,
@@ -727,7 +755,22 @@ impl VirtualShadows {
         prepared: VsmPrepared,
         depth: Texture,
     ) -> VsmFrame {
-        engine_profiler::zone!("render::VirtualShadows::add_prepared");
+        let marked = self.add_marked(fg, bindless, prepared, depth);
+        self.add_allocated(fg, bindless, marked)
+    }
+
+    /// The bookkeeping's first half: the frame's flags cleared and the wrapped entries
+    /// freed, then the pages `depth`'s pixels need flagged. Passes declared after it may
+    /// flag more ([`VsmMarked`]: the forward renderer's transparent surfaces, step 3d)
+    /// before [`Self::add_allocated`] backs them.
+    pub fn add_marked<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        prepared: VsmPrepared,
+        depth: Texture,
+    ) -> VsmMarked {
+        engine_profiler::zone!("render::VirtualShadows::add_marked");
         let settings = self.settings;
         let VsmPrepared {
             frame,
@@ -765,6 +808,71 @@ impl VirtualShadows {
         let entries = settings.levels * ENTRIES;
         fg.add_compute("vsm pages", bindless)
             .read(depth, Access::Sampled(ShaderStages::COMPUTE))
+            .write(table, rw)
+            .write(meta, rw)
+            .write(requests, rw)
+            .write(lists, rw)
+            .write(hierarchy, rw)
+            .record(move |rec| {
+                let ctx = rec.context();
+                let Some(depth) = ctx.sampled_index(depth) else {
+                    return;
+                };
+                let push = Push {
+                    frame,
+                    table: ctx.address(table),
+                    meta: ctx.address(meta),
+                    requests: ctx.address(requests),
+                    lists: ctx.address(lists),
+                    hierarchy: ctx.address(hierarchy),
+                    depth,
+                    ..Push::default()
+                };
+                rec.dispatch(&self.begin_frame, Dispatch::Threads([entries, 1, 1]), &push);
+                rec.barrier();
+                rec.dispatch(
+                    &self.mark,
+                    Dispatch::Threads([depth_size[0], depth_size[1], 1]),
+                    &push,
+                );
+            });
+        VsmMarked {
+            frame: VsmFrame {
+                frame,
+                pool,
+                table,
+                meta,
+                requests,
+                lists,
+                hierarchy,
+            },
+        }
+    }
+
+    /// The bookkeeping's second half, after every pass that flags pages
+    /// ([`Self::add_marked`]): free and old pages found (all needed ones made dirty when the
+    /// light turned or casters changed), requests backed, the dirty pages listed and
+    /// cleared.
+    pub fn add_allocated<'g>(
+        &'g self,
+        fg: &mut FrameGraph<'g>,
+        bindless: &'g Bindless,
+        marked: VsmMarked,
+    ) -> VsmFrame {
+        engine_profiler::zone!("render::VirtualShadows::add_allocated");
+        let settings = self.settings;
+        let VsmFrame {
+            frame,
+            pool,
+            table,
+            meta,
+            requests,
+            lists,
+            hierarchy,
+        } = marked.frame;
+        let rw = Access::StorageReadWrite(ShaderStages::COMPUTE);
+        let entries = settings.levels * ENTRIES;
+        fg.add_compute("vsm allocate", bindless)
             .write(pool, Access::StorageWrite(ShaderStages::COMPUTE))
             .write(table, rw)
             .write(meta, rw)
@@ -774,8 +882,7 @@ impl VirtualShadows {
             .read(lists, Access::Indirect)
             .record(move |rec| {
                 let ctx = rec.context();
-                let (Some(depth), Some(pool)) = (ctx.sampled_index(depth), ctx.storage_index(pool))
-                else {
+                let Some(pool) = ctx.storage_index(pool) else {
                     return;
                 };
                 let push = Push {
@@ -786,19 +893,9 @@ impl VirtualShadows {
                     lists: ctx.address(lists),
                     hierarchy: ctx.address(hierarchy),
                     pool,
-                    depth,
-                    mask: 0,
-                    flags: 0,
+                    ..Push::default()
                 };
                 let args = ctx.buffer(lists);
-                rec.dispatch(&self.begin_frame, Dispatch::Threads([entries, 1, 1]), &push);
-                rec.barrier();
-                rec.dispatch(
-                    &self.mark,
-                    Dispatch::Threads([depth_size[0], depth_size[1], 1]),
-                    &push,
-                );
-                rec.barrier();
                 rec.dispatch(
                     &self.find_pages,
                     Dispatch::Threads([settings.pool_pages, 1, 1]),
@@ -817,15 +914,7 @@ impl VirtualShadows {
                 rec.barrier_for_indirect();
                 rec.dispatch_indirect(&self.clear, args, CLEAR_ARGS, &push);
             });
-        VsmFrame {
-            frame,
-            pool,
-            table,
-            meta,
-            requests,
-            lists,
-            hierarchy,
-        }
+        marked.frame
     }
 
     /// Notes this frame's draw list (`mesh`: a mesh's object box and shape revision), the

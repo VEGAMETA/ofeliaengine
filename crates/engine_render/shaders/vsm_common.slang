@@ -112,3 +112,112 @@ uint2 vsm_pool_texel(uint physical, uint2 texel)
 {
     return uint2(physical % VSM_TABLE, physical / VSM_TABLE) * VSM_PAGE + texel;
 }
+
+// The receiver's offset along its normal, and its depth bias, in texels of its level: the
+// shadow passes draw the casters' faces turned away from the light, so lit surfaces stand
+// well in front of what their own pages hold.
+static const float VSM_NORMAL_OFFSET_TEXELS = 1.0;
+static const float VSM_DEPTH_BIAS_TEXELS = 0.5;
+
+// A position relative to the camera, across the light (metres).
+float2 vsm_light_xy(VsmFrame* f, float3 c)
+{
+    return float2(dot(f.light_rows[0].xyz, c), dot(f.light_rows[1].xyz, c)) + f.light_eye.xy;
+}
+
+// A position relative to the camera, as a depth in the pages.
+float vsm_depth_of(VsmFrame* f, float3 c)
+{
+    return -(dot(f.light_rows[2].xyz, c) + f.light_eye.z) * f.depth_scale + f.depth_offset;
+}
+
+// The level a surface at `c` (relative to the camera; `light_xy` across the light) marks
+// and reads: from the one its footprint wants, the first whose window holds its sample and
+// `VSM_MARGIN` texels around it (a window sits up to a page off the camera, and a narrow
+// field of view picks fine levels for far surfaces). `f.levels` when none does.
+uint vsm_level_holding(VsmFrame* f, float3 c, float2 light_xy)
+{
+    for (uint level = vsm_level_for(f, dot(c, c)); level < f.levels; level++)
+    {
+        float2 t = vsm_texel(f, level, light_xy);
+        if (vsm_in_window(f, level, vsm_page_of(t - VSM_MARGIN)) && vsm_in_window(f, level, vsm_page_of(t + VSM_MARGIN)))
+            return level;
+    }
+    return f.levels;
+}
+
+// The table entries of the up to 2 × 2 pages within `VSM_MARGIN` texels of absolute
+// virtual texel position `t` at `level` (~0: none), which a sample there may read.
+uint4 vsm_margin_entries(uint level, float2 t)
+{
+    int2 lo = vsm_page_of(t - VSM_MARGIN);
+    int2 hi = vsm_page_of(t + VSM_MARGIN);
+    uint4 entries = uint4(vsm_entry(level, lo), ~0u, ~0u, ~0u);
+    if (hi.x != lo.x)
+        entries.y = vsm_entry(level, int2(hi.x, lo.y));
+    if (hi.y != lo.y)
+        entries.z = vsm_entry(level, int2(lo.x, hi.y));
+    if (hi.x != lo.x && hi.y != lo.y)
+        entries.w = vsm_entry(level, hi);
+    return entries;
+}
+
+// Flags page table entry `e` as needed this frame, one at a time (a fragment's: no wave
+// operations); the first flag of an unbacked page appends its request.
+void vsm_flag_entry(VsmFrame* f, uint* table, uint* requests, uint e)
+{
+    // Flagged already this frame (by the depth's pixels or another fragment).
+    if ((table[e] & VSM_NEEDED) != 0)
+        return;
+    uint previous;
+    InterlockedOr(table[e], VSM_NEEDED, previous);
+    if ((previous & (VSM_ALLOCATED | VSM_NEEDED)) == 0)
+    {
+        uint slot;
+        InterlockedAdd(requests[0], 1u, slot);
+        if (slot < f.max_requests)
+            requests[1 + slot] = e;
+    }
+}
+
+// The sun's visibility at absolute virtual texel position `t` of `level` for a receiver
+// at depth `receiver` in the pages: a 3 × 3 tent filter of comparisons over the 4 × 4
+// texels around it, as the cascades' 3 × 3 bilinear comparisons weigh them, each texel
+// read through the page table `table` (the footprint spans at most 2 × 2 pages; texels of
+// unbacked pages are lit).
+float vsm_filter(uint* table, RWTexture2D<uint> pool, uint level, float2 t, float receiver)
+{
+    // Texel centers lie at half texels: the 4 × 4 texels from `i0 - 1`.
+    t -= 0.5;
+    float2 i0 = floor(t);
+    float2 fr = t - i0;
+    int2 first = int2(i0) - 1;
+    int2 lo = first >> 6;
+    int2 hi = (first + 3) >> 6;
+    // Most footprints lie in one page: its entry is read once.
+    uint e00 = table[vsm_entry(level, lo)];
+    uint e10 = hi.x != lo.x ? table[vsm_entry(level, int2(hi.x, lo.y))] : e00;
+    uint e01 = hi.y != lo.y ? table[vsm_entry(level, int2(lo.x, hi.y))] : e00;
+    uint e11 = any(hi != lo) ? table[vsm_entry(level, hi)] : e00;
+    float4 wx = float4(1.0 - fr.x, 1.0, 1.0, fr.x);
+    float4 wy = float4(1.0 - fr.y, 1.0, 1.0, fr.y);
+    float sum = 0.0;
+    [unroll]
+    for (int y = 0; y < 4; y++)
+    {
+        [unroll]
+        for (int x = 0; x < 4; x++)
+        {
+            int2 texel_at = first + int2(x, y);
+            int2 page = texel_at >> 6;
+            uint entry = page.y == lo.y ? (page.x == lo.x ? e00 : e10) : (page.x == lo.x ? e01 : e11);
+            // Read whether the page is backed or not (then from page 0, unused): the 16
+            // reads go out together.
+            uint2 in_pool = vsm_pool_texel(entry & VSM_PHYSICAL, uint2(texel_at & 63));
+            float stored = asfloat(pool[in_pool]);
+            float lit = (entry & VSM_ALLOCATED) == 0 || receiver <= stored ? 1.0 : 0.0;
+            sum += wx[x] * wy[y] * lit;
+        }
+    }
+    return sum / 9.0;
+}

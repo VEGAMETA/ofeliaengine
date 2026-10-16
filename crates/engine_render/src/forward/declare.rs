@@ -573,6 +573,8 @@ impl ForwardRenderer {
             vsm_batches: vsm.map_or(0, |v| v.lists.table),
             vsm_pool: vsm.map_or(0, |v| v.pages.pool_index()),
             vsm_lod_threshold: self.lod_threshold,
+            vsm_requests: vsm.map_or(0, |v| v.pages.requests_address()),
+            pad: 0,
         };
         let frame = ring.push(&[frame])?;
         let base = Push {
@@ -1610,6 +1612,17 @@ impl ForwardRenderer {
         } else {
             StoreOp::DontCare
         };
+        // The pages' marking of transparent surfaces (ADR 0093 step 3d): their commands, which
+        // the last phase culled, when there are any.
+        let blended_commands: u32 = (0..STATES)
+            .filter(|s| s & BLENDED != 0)
+            .map(|s| states.counts[s])
+            .sum();
+        let transparent_marks = (blended_commands > 0).then_some(TransparentMarks {
+            culled,
+            visible,
+            offset: u64::from(phases - 1) * command_bytes,
+        });
         let draw_lists = DrawLists {
             push: base,
             commands: culled,
@@ -1678,6 +1691,7 @@ impl ForwardRenderer {
                         instance_count,
                         command_bytes,
                         read_depth,
+                        transparent_marks,
                     )
                 });
                 if let Some(((settings, _), state)) = contact {
@@ -1909,6 +1923,7 @@ impl ForwardRenderer {
                             instance_count,
                             command_bytes,
                             read_depth,
+                            transparent_marks,
                         )
                     });
                     if let Some(((settings, _), state)) = contact {
@@ -2048,7 +2063,18 @@ impl ForwardRenderer {
                 .and_then(|p| p.subsurface.as_ref());
             let gi_subsurface =
                 gi_view.and_then(|_| self.gi.as_deref()?.subsurface(variant, shadowed.is_some()));
+            // With the pages (ADR 0093 step 3d): the front's sun from the mask, transmission
+            // through the pages.
+            let pages = targets
+                .vsm
+                .zip(self.vsm_draw())
+                .map(|(frame, d)| (frame, &d.shading));
             let pipeline = match (ms, shadowed.and_then(|p| p.subsurface.as_ref())) {
+                _ if pages.is_some() => {
+                    pages?
+                        .1
+                        .subsurface(variant, shadowed.is_some(), gi_subsurface.is_some())
+                }
                 _ if gi_subsurface.is_some() => gi_subsurface?,
                 (Some(_), _) => match ms_shadowed {
                     Some(p) => &p[shadowed_index(variant)],
@@ -2064,9 +2090,10 @@ impl ForwardRenderer {
             })?;
             let two_phases = flag_buffer.is_some();
             // Their diffuse light is occluded by the view's ambient occlusion too, and
-            // comes from the probe volume with GI.
+            // comes from the probe volume with GI. With the pages their sun is in the mask.
             let ao_texture = targets.ao;
             let gi_texture = targets.gi;
+            let mask_texture = targets.contact.filter(|_| pages.is_some());
             // They keep the sky's reflections (their pass writes no reflection inputs).
             let targets = Targets {
                 reflect: None,
@@ -2074,7 +2101,7 @@ impl ForwardRenderer {
                 decals: None,
                 ..targets
             };
-            shading_pass(
+            let mut pass = shading_pass(
                 fg,
                 names.forward_subsurface,
                 &geometry,
@@ -2087,48 +2114,53 @@ impl ForwardRenderer {
                 depth,
                 DepthUse::ReadOnly,
                 scene_instances,
-            )
-            .color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
-            .color(albedo, LoadOp::DontCare, StoreOp::Store)
-            .execute(move |ctx| {
-                let pipelines = [pipeline, pipeline];
-                if two_phases {
-                    draw_phase(
-                        ctx,
-                        pipelines,
-                        false,
-                        PHASE_EARLY,
-                        SUBSURFACE_STATES,
-                        ao_texture,
-                        None,
-                        None,
-                        gi_texture,
-                    );
-                    draw_phase(
-                        ctx,
-                        pipelines,
-                        false,
-                        PHASE_LATE,
-                        SUBSURFACE_STATES,
-                        ao_texture,
-                        None,
-                        None,
-                        gi_texture,
-                    );
-                } else {
-                    draw_phase(
-                        ctx,
-                        pipelines,
-                        false,
-                        PHASE_ALL,
-                        SUBSURFACE_STATES,
-                        ao_texture,
-                        None,
-                        None,
-                        gi_texture,
-                    );
-                }
-            });
+            );
+            if let Some((frame, _)) = pages {
+                pass = pass
+                    .read(frame.table, Access::StorageRead(ShaderStages::FRAGMENT))
+                    .read(frame.pool, Access::StorageRead(ShaderStages::FRAGMENT));
+            }
+            pass.color(irradiance, LoadOp::Clear([0.0; 4]), StoreOp::Store)
+                .color(albedo, LoadOp::DontCare, StoreOp::Store)
+                .execute(move |ctx| {
+                    let pipelines = [pipeline, pipeline];
+                    if two_phases {
+                        draw_phase(
+                            ctx,
+                            pipelines,
+                            false,
+                            PHASE_EARLY,
+                            SUBSURFACE_STATES,
+                            ao_texture,
+                            mask_texture,
+                            None,
+                            gi_texture,
+                        );
+                        draw_phase(
+                            ctx,
+                            pipelines,
+                            false,
+                            PHASE_LATE,
+                            SUBSURFACE_STATES,
+                            ao_texture,
+                            mask_texture,
+                            None,
+                            gi_texture,
+                        );
+                    } else {
+                        draw_phase(
+                            ctx,
+                            pipelines,
+                            false,
+                            PHASE_ALL,
+                            SUBSURFACE_STATES,
+                            ao_texture,
+                            mask_texture,
+                            None,
+                            gi_texture,
+                        );
+                    }
+                });
             // With MSAA: their nearest sample's light and albedo (depth and profile in
             // alpha must stay one sample's).
             if let (Some(m), Some((irradiance_1x, albedo_1x))) = (ms_subsurface, resolved) {
@@ -2314,10 +2346,6 @@ impl ForwardRenderer {
         }
         // Transparent surfaces, back to front over the opaque image: depth tested, not
         // written, lit like the rest (ADR 0054). They were culled in the last phase only.
-        let blended_commands: u32 = (0..STATES)
-            .filter(|s| s & BLENDED != 0)
-            .map(|s| states.counts[s])
-            .sum();
         let reactive = (blended_commands > 0 && velocity.is_some())
             .then(|| fg.create_texture("reactive mask", multi(REACTIVE_FORMAT)));
         // With MSAA, resolved (averaged) for the temporal resolve.
@@ -2337,7 +2365,18 @@ impl ForwardRenderer {
             });
         if blended_commands > 0 {
             let reactive_index = usize::from(reactive.is_some());
+            // With the pages (ADR 0093 step 3d), the shading that looks them up.
+            let pages = passes
+                .virtual_shadows
+                .zip(self.vsm_draw())
+                .map(|(frame, d)| (frame, &d.shading));
             let pipelines = match (ms, atmosphere, shadowed) {
+                _ if pages.is_some() => pages?.1.blended(
+                    variant,
+                    atmosphere.is_some(),
+                    shadowed.is_some(),
+                    reactive_index,
+                ),
                 (Some(m), _, _) => {
                     let ms_shadowed = m.shadowed.as_ref().filter(|_| shadowed.is_some());
                     match (atmosphere, ms_shadowed) {
@@ -2388,6 +2427,11 @@ impl ForwardRenderer {
             }
             if let Some(atlas) = local_frame.atlas.filter(|_| local_frame.shadowed) {
                 pass = pass.read(atlas, Access::Sampled(ShaderStages::FRAGMENT));
+            }
+            if let Some((frame, _)) = pages {
+                pass = pass
+                    .read(frame.table, Access::StorageRead(ShaderStages::FRAGMENT))
+                    .read(frame.pool, Access::StorageRead(ShaderStages::FRAGMENT));
             }
             let offset = u64::from(phases - 1) * command_bytes;
             pass.depth_read_only(depth).execute(move |ctx| {
@@ -2541,11 +2585,21 @@ struct PagesFrame<'g> {
     prepared: VsmPrepared,
 }
 
+/// The transparent surfaces whose pages a view's marking flags (ADR 0093 step 3d): the
+/// commands of the last phase's cull, from `offset` in `culled`, and their slots.
+#[derive(Clone, Copy)]
+struct TransparentMarks {
+    culled: Buffer,
+    visible: Buffer,
+    offset: u64,
+}
+
 impl<'g> PagesFrame<'g> {
-    /// The pages' passes after the depth prepass: their bookkeeping over `depth`, then the
-    /// casters culled into their dirty pages (`lists`: the commands and the casters' slots)
-    /// and drawn there, one rendering without attachments over a level's 4096 × 4096 texels
-    /// for every level.
+    /// The pages' passes after the depth prepass: their bookkeeping over `depth`, with the
+    /// pages of `transparent` surfaces marked between its halves; then the casters culled
+    /// into their dirty pages (`lists`: the commands and the casters' slots) and drawn
+    /// there, one rendering without attachments over a level's 4096 × 4096 texels for
+    /// every level.
     #[allow(clippy::too_many_arguments)]
     fn add_passes(
         self,
@@ -2560,8 +2614,52 @@ impl<'g> PagesFrame<'g> {
         instance_count: u32,
         command_bytes: u64,
         depth: Texture,
+        transparent: Option<TransparentMarks>,
     ) -> VsmFrame {
-        let frame = self.pages.add_prepared(fg, bindless, self.prepared, depth);
+        let marked = self.pages.add_marked(fg, bindless, self.prepared, depth);
+        // Each transparent fragment in front of the prepass's depth flags the pages its
+        // shading reads (`vsmMarkTransparent`).
+        if let Some((t, mark)) = transparent.zip(ready(&self.draw.shading.mark)) {
+            let geometry = *geometry;
+            let rw = Access::StorageReadWrite(ShaderStages::FRAGMENT);
+            prepass_pass(
+                fg,
+                "vsm mark transparent",
+                &geometry,
+                materials,
+                t.culled,
+                t.visible,
+                scene_instances,
+            )
+            .write(marked.table(), rw)
+            .write(marked.requests(), rw)
+            .depth_read_only(depth)
+            .execute(move |ctx| {
+                let push = Push {
+                    visible: ctx.address(t.visible),
+                    ..base
+                };
+                // SAFETY: recording inside the pass's rendering scope; the pass reads the
+                // pool, the material table and the commands, and writes the page tables
+                // and the requests, which it declared.
+                unsafe {
+                    states.draw(
+                        ctx,
+                        bindless,
+                        &geometry,
+                        [mark, mark],
+                        &TypedPipelines::BUILTIN,
+                        &push,
+                        false,
+                        BLENDED_STATES,
+                        ctx.buffer(t.culled),
+                        t.offset,
+                        ctx.render_area(),
+                    );
+                }
+            });
+        }
+        let frame = self.pages.add_allocated(fg, bindless, marked);
         let Self { draw, lists, .. } = self;
         let push = move |ctx: &PassContext<'_>| Push {
             visible: ctx.address(casters),
