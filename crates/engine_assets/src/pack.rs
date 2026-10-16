@@ -50,8 +50,9 @@ pub const MAGIC: [u8; 4] = *b"OFPK";
 /// cooked HDR panoramas (`crate::panorama`). Version 5 (ADR 0092) adds material types (their
 /// compiled entry points) and the scene's materials of those types. Version 6 (ADR 0101) adds
 /// colliders and the scene's bodies (`crate::colliders`). Version 7 (ADR 0102) adds a
-/// locale's localized text (`crate::strings`).
-pub const VERSION: u32 = 7;
+/// locale's localized text (`crate::strings`). Version 8 (ADR 0103) adds the scene's
+/// navigation mesh (`crate::navigation`).
+pub const VERSION: u32 = 8;
 /// Oldest version this engine reads.
 pub const MIN_VERSION: u32 = 1;
 /// Largest entry a pack accepts (raw bytes): 4 GiB.
@@ -124,6 +125,9 @@ pub enum EntryKind {
     /// A locale's localized text: `engine_loc::Strings` as bytes (version 7, ADR 0102;
     /// `crate::strings`).
     Strings,
+    /// The scene's navigation mesh: Detour's tile blobs (version 8, ADR 0103;
+    /// `crate::navigation`).
+    NavMesh,
 }
 
 impl EntryKind {
@@ -140,6 +144,7 @@ impl EntryKind {
             Self::Collider => 9,
             Self::Bodies => 10,
             Self::Strings => 11,
+            Self::NavMesh => 12,
         }
     }
 
@@ -153,6 +158,7 @@ impl EntryKind {
             Self::MaterialType => 5,
             Self::Collider | Self::Bodies => 6,
             Self::Strings => 7,
+            Self::NavMesh => 8,
         }
     }
 
@@ -169,6 +175,7 @@ impl EntryKind {
             9 => Some(Self::Collider),
             10 => Some(Self::Bodies),
             11 => Some(Self::Strings),
+            12 => Some(Self::NavMesh),
             _ => None,
         }
     }

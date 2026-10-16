@@ -7,7 +7,8 @@
 //!                                                  `<SCENE>.materials.ron` and `<SCENE>.pso.ron`
 //!                                                  applied (ADR 0092), its colliders made by
 //!                                                  `<SCENE>.colliders.ron` and baked into
-//!                                                  Jolt's binary form (ADR 0101)
+//!                                                  Jolt's binary form (ADR 0101), a
+//!                                                  navigation mesh of its level (ADR 0103)
 //! ofeliaengine loc build <LOC> -o <OUT.pack>       compile a `loc/` folder into a strings
 //!                                                  pack (ADR 0102)
 //! ofeliaengine loc check <LOC> [--code <DIR>]...   check its locales against the source and
@@ -42,7 +43,8 @@ usage:
   ofeliaengine shaders build [OPTIONS] <ROOT>...   compile every shader under the roots
   ofeliaengine shaders watch [OPTIONS] <ROOT>...   compile, then rebuild on every change (Windows)
   ofeliaengine cook <SCENE.gltf> -o <OUT.pack> [--ddc <DIR>] [--no-lods] [--no-meshlets]
-                    [--no-colliders] [--level <N>] cook a scene into a pack: textures compressed
+                    [--no-colliders] [--no-navmesh] [--level <N>]
+                                                   cook a scene into a pack: textures compressed
                                                    with mips (through the derived data cache,
                                                    default <scene dir>/../.ddc), meshes with
                                                    detail levels and meshlets, entries zstd
@@ -56,7 +58,9 @@ usage:
                                                    drew compiled for the types it names;
                                                    colliders from its meshes and glTF physics
                                                    by <SCENE>.colliders.ron, baked for Jolt
-                                                   (--no-colliders: none)
+                                                   (--no-colliders: none); a navigation mesh
+                                                   of its level geometry for a human-sized
+                                                   agent (--no-navmesh: none)
   ofeliaengine loc build <LOC> -o <OUT.pack> [--source <LOCALE>] [--pseudo] [--level <N>]
                                                    compile a loc folder (a subfolder of .ftl
                                                    files per locale) into a strings pack: the
@@ -131,6 +135,7 @@ fn parse_cook(mut args: impl Iterator<Item = String>) -> Result<CookArgs, String
             "--no-lods" => settings.lods = false,
             "--no-meshlets" => settings.meshlets = false,
             "--no-colliders" => settings.colliders = false,
+            "--no-navmesh" => settings.navigation = None,
             "--level" => {
                 let level = value("--level")?;
                 settings.compression_level = level
@@ -294,6 +299,15 @@ fn cook(args: &CookArgs) -> Result<ExitCode, String> {
             stats.colliders.decomposed,
             stats.colliders.cached,
             baked_in.as_secs_f64(),
+        );
+    }
+    if let Some(nav) = &cooked.navigation {
+        println!(
+            "{}: a navigation mesh of {} tiles, {:.1} KiB, baked in {:.2} s",
+            args.scene.display(),
+            nav.tiles.len(),
+            nav.tiles.iter().map(|t| t.bytes.len()).sum::<usize>() as f64 / 1024.0,
+            stats.navigation_seconds,
         );
     }
     println!(

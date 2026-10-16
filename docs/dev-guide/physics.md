@@ -400,7 +400,8 @@ the file is all level geometry.
 - A misspelled field is an error with its line and column, when you cook.
 
 `ofeliaengine cook scene.gltf -o scene.pack` does all of this.
-- `--no-colliders` leaves colliders out.
+- `--no-colliders` leaves colliders out (and the navigation mesh made from them:
+  `navigation.md`).
 - The cook prints how many colliders and bodies it made, how many meshes it split into
   convex parts (and how many of those came from the cache), and how long it took. Sponza
   takes 0.3 s more and 2.4 MB of its 75 MB; Intel Sponza 2 s more and 37 MB of 1.3 GB.

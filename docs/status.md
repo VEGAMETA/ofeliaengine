@@ -8,6 +8,12 @@ Last updated: 2026-10-16.
 
 ## 0. Now (2026-10-16)
 
+- **Done: navigation** (queue item 4, ADR 0103, 2026-10-16, #243): Recast and
+  Detour in `engine_nav`; the cook bakes the level by default (Sponza in 0.03 s, 24 KB),
+  pack version 8; `Player::load_navigation` puts a `NavMesh` into the world; paths in
+  microseconds (`docs/dev-guide/navigation.md`).
+  - **Then a pause** (the owner, 2026-10-16: usage limits). Next after it: audio in the
+    player, then save games (the owner's call on the format).
 - **Done: 8b, video playback** (ADR 0100, 2026-10-16): AV1 in WebM decoded by the GPU's
   video engine through Vulkan Video (rav1d where the GPU cannot), the picture converted
   into a texture for materials and the UI, the Opus sound as the clock; games open videos
@@ -135,13 +141,14 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-16: the technical core about **85 %** done, the whole engine
-(editor, Luau and tooling included) about **57 %** (2026-10-11: 74 % and 50 %). Done
+Estimate of 2026-10-16 (after navigation): the technical core about **87 %** done, the
+whole engine (editor, Luau and tooling included) about **58 %** (2026-10-11: 74 % and
+50 %). Done
 since 2026-10-11: custom materials, meshlets, cached and virtual shadows, post effects,
 the player crate, video, colliders made from meshes, localization, the third review's
-P0 and its device memory and Reflex items, the colliders' rules file. Left in the core:
-navigation, save games, audio, input and networking in the player, recording on the job
-system.
+P0 and its device memory and Reflex items, the colliders' rules file, input in the
+player, navigation. Left in the core: save games, audio and networking in the player,
+recording on the job system.
 
 | Area | State | Where |
 |---|---|---|
@@ -228,7 +235,10 @@ water and impostors stay in §6):
      `engine_input::Input` resource of the world. It reads raw keyboard and mouse input and
      XInput pads, is sampled before every tick and before `present`, and is released when
      the window loses the focus.
-   - Next: navigation, then a pause (the owner, 2026-10-16: usage limits).
+   - ~~Navigation~~ (done 2026-10-16, #243, ADR 0103): Recast and Detour in
+     `engine_nav`, baked by the cook by default (pack version 8), the world's `NavMesh`
+     resource through `Player::load_navigation`. Later: crowds, obstacles, off-mesh links.
+   - Next, after the owner's pause: audio in the player, then save games.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
     Code can be connected as simply as possible and make games by itself, without

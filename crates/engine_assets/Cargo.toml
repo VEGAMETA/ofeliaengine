@@ -17,6 +17,8 @@ meshopt = "0.6"
 engine_anim.workspace = true
 # Colliders made from meshes: hulls, fitted primitives, the collider data (ADR 0101).
 engine_collision.workspace = true
+# The cook bakes navigation meshes (ADR 0103).
+engine_nav.workspace = true
 engine_core.workspace = true
 engine_ecs.workspace = true
 # Unbuffered reads through an I/O ring for packs (ADR 0056).

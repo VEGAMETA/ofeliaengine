@@ -184,6 +184,8 @@ pub struct CookedScene {
     pub colliders: Vec<crate::colliders::CookedCollider>,
     /// Bodies: static level geometry, props, triggers.
     pub bodies: Vec<crate::colliders::CookedBody>,
+    /// The navigation mesh of the level geometry (ADR 0103; `crate::navigation`).
+    pub navigation: Option<engine_nav::NavMeshData>,
 }
 
 /// A material of a type (ADR 0092): its glTF record in [`CookedScene::materials`] is its
@@ -230,6 +232,9 @@ pub struct CookSettings {
     /// Make colliders and bodies (ADR 0101) by the scene's [`ImportedScene::collider_rules`]
     /// and its glTF physics.
     pub colliders: bool,
+    /// Bake a navigation mesh of the level geometry for this agent (ADR 0103): Sponza's in
+    /// 24 ms. Needs `colliders`. `None`: none.
+    pub navigation: Option<engine_nav::BakeSettings>,
 }
 
 impl Default for CookSettings {
@@ -241,6 +246,7 @@ impl Default for CookSettings {
             block_compression: true,
             animation_error: 1e-4,
             colliders: true,
+            navigation: Some(engine_nav::BakeSettings::default()),
         }
     }
 }
@@ -254,6 +260,8 @@ pub enum CookError {
     Image(ImageError),
     /// The pack could not be written or read.
     Pack(PackError),
+    /// The navigation mesh could not be baked (ADR 0103).
+    Navigation(engine_nav::NavError),
 }
 
 impl core::fmt::Display for CookError {
@@ -262,6 +270,7 @@ impl core::fmt::Display for CookError {
             Self::Import(e) => write!(f, "{e}"),
             Self::Image(e) => write!(f, "{e}"),
             Self::Pack(e) => write!(f, "{e}"),
+            Self::Navigation(e) => write!(f, "navigation: {e}"),
         }
     }
 }
@@ -354,6 +363,8 @@ pub struct CookStats {
     pub clip_error: f32,
     /// Seconds spent on colliders (ADR 0101).
     pub collider_seconds: f64,
+    /// Seconds spent baking the navigation mesh (ADR 0103).
+    pub navigation_seconds: f64,
     /// Meshes split into convex parts, and how many of them came from the cache.
     pub colliders: crate::colliders::ColliderStats,
 }
@@ -630,6 +641,19 @@ pub fn cook_scene(
             Some(jobs),
         );
         stats.collider_seconds = start.elapsed().as_secs_f64();
+    }
+    if let Some(agent) = &settings.navigation
+        && settings.colliders
+    {
+        let start = std::time::Instant::now();
+        let (vertices, triangles) =
+            crate::navigation::level_triangles(&cooked.colliders, &cooked.bodies);
+        if !triangles.is_empty() {
+            let nav = engine_nav::bake(&vertices, &triangles, agent, Some(jobs))
+                .map_err(CookError::Navigation)?;
+            cooked.navigation = (!nav.tiles.is_empty()).then_some(nav);
+        }
+        stats.navigation_seconds = start.elapsed().as_secs_f64();
     }
     Ok((cooked, stats))
 }
@@ -1504,6 +1528,17 @@ pub fn write_pack(
             DEFAULT_CHUNK_SHIFT,
         ))?;
     }
+    // The navigation mesh (version 8, ADR 0103).
+    if let Some(nav) = &scene.navigation {
+        let (meta, data) = crate::navigation::nav_entry(nav);
+        writer.add(&PreparedEntry::new(
+            EntryKind::NavMesh,
+            meta,
+            &data,
+            level,
+            DEFAULT_CHUNK_SHIFT,
+        ))?;
+    }
     let mut data = Vec::new();
     section(&mut data, bytemuck::cast_slice(&records));
     section(&mut data, bytemuck::cast_slice(&materials));
@@ -1921,12 +1956,14 @@ fn open_scene_with(
         .filter(|&i| match entries[i as usize].kind() {
             // Panoramas are read on their own (`crate::panorama::load_panorama_pack`),
             // colliders when a game simulates physics (`crate::colliders::load_colliders`),
-            // text by the game's localizer (`crate::strings::load_strings`).
+            // text by the game's localizer (`crate::strings::load_strings`), the
+            // navigation mesh when it navigates (`crate::navigation::load_navigation`).
             EntryKind::TextureLevels
             | EntryKind::Panorama
             | EntryKind::Collider
             | EntryKind::Bodies
-            | EntryKind::Strings => false,
+            | EntryKind::Strings
+            | EntryKind::NavMesh => false,
             EntryKind::MeshLevel => !stream_meshes,
             _ => true,
         })
@@ -1972,6 +2009,9 @@ fn open_scene_with(
                 return Err(invalid("colliders loaded as a scene's entry"));
             }
             EntryKind::Strings => return Err(invalid("text loaded as a scene's entry")),
+            EntryKind::NavMesh => {
+                return Err(invalid("a navigation mesh loaded as a scene's entry"));
+            }
         };
         if let Ok(mut slot) = decoded[index as usize].lock() {
             *slot = Some(value);
@@ -2007,6 +2047,7 @@ fn open_scene_with(
                     | EntryKind::Collider
                     | EntryKind::Bodies
                     | EntryKind::Strings
+                    | EntryKind::NavMesh
             ) => {}
             None => return Err(invalid(format!("entry {i} not loaded"))),
         }
@@ -2227,6 +2268,7 @@ pub fn load_pack(
         ..
     } = layout;
     (scene.colliders, scene.bodies) = crate::colliders::load_colliders(&pack, jobs, depth)?;
+    scene.navigation = crate::navigation::load_navigation(&pack, jobs)?;
     for record in &textures {
         let format = texture_shape(record.format, record.width, record.height, record.levels)?;
         let mut out = Vec::with_capacity(record.levels as usize);
@@ -2367,6 +2409,7 @@ mod tests {
             typed_materials: Vec::new(),
             colliders: Vec::new(),
             bodies: Vec::new(),
+            navigation: None,
         }
     }
 
