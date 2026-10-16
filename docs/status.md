@@ -29,7 +29,7 @@ Last updated: 2026-10-16.
     - colliders in the cook from glTF physics, `UCX_` names and the defaults;
     - pack version 6, baked for Jolt;
     - `ScenePhysics` in the player.
-  - **Done (second PR, 8c-3):** the Rust decomposition after CoACD's algorithm, in the cook
+  - **Done (second PR, #231, 8c-3):** the Rust decomposition after CoACD's algorithm, in the cook
     for props and dynamic glTF bodies, cached in the DDC: CoACD's hull counts (but the
     mug's: 24 against 21) in 0.02-3.0 s per model where CoACD takes 1.4-195 s.
   - **Next:** a demo of props dropped on Sponza; the rules file (question 1).
@@ -142,8 +142,8 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 ## 4. In flight
 
 8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
-8c-1, 8c-2a, 8c-4a) merged; the second, 8c-3 (`feat/convex-decomposition`: the
-decomposition and its place in the cook), in review. 8b, video playback, was done 2026-10-16 (its
+8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
+decomposition and its place in the cook) merged; next 8c-4's demo of props on Sponza. 8b, video playback, was done 2026-10-16 (its
 record is under the queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
 them.
@@ -835,7 +835,7 @@ grown, divide and conquer); the old labels stay in parentheses.
      - 8c-4a: `ScenePhysics` and `Player::load_physics`.
      - Sponza's colliders cost the cook 0.33 s and its pack 2.4 MB; Intel Sponza's, 1.8 s
        and 37 MB.
-   - **Done (second PR, 8c-3):** `engine_collision::decompose`, CoACD's algorithm in Rust
+   - **Done (second PR, #231, 8c-3):** `engine_collision::decompose`, CoACD's algorithm in Rust
      without its dependencies (our marching-tetrahedra remesh, quadric decimation, ear-clipped
      caps, R2 samples); parallel where it changes nothing; in the cook for props
      (`DynamicShape::Auto` and `Parts`) and dynamic glTF bodies' mesh colliders, cached in
