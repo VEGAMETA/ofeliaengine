@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn a_remeshed_box_simplifies_closed_and_keeps_its_volume() {
         let solid = cuboid(DVec3::ZERO, DVec3::new(1.0, 0.6, 2.0));
-        let dense = remesh(&solid.points, &solid.triangles, 40, 0.55);
+        let dense = remesh(&solid.points, &solid.triangles, 40, 0.55, None);
         assert!(closed_manifold(&dense));
         let lean = decimate(&dense, 300, 0.01);
         assert!(closed_manifold(&lean));
@@ -385,7 +385,7 @@ mod tests {
             points: solid.points.clone(),
             triangles: solid.triangles[..10].to_vec(),
         };
-        let shell = remesh(&open.points, &open.triangles, 40, 0.55);
+        let shell = remesh(&open.points, &open.triangles, 40, 0.55, None);
         let lean = decimate(&shell, 500, 0.02);
         assert!(closed_manifold(&lean), "{} triangles", lean.triangles.len());
     }
@@ -395,7 +395,7 @@ mod tests {
         // A box remeshed finely: its flat faces must not collapse into fans around single
         // vertices (no vertex keeps more than MAX_VALENCE neighbours).
         let solid = cuboid(DVec3::ZERO, DVec3::new(2.0, 1.0, 1.5));
-        let dense = remesh(&solid.points, &solid.triangles, 80, 0.55);
+        let dense = remesh(&solid.points, &solid.triangles, 80, 0.55, None);
         let lean = decimate(&dense, 400, 0.01);
         assert!(closed_manifold(&lean));
         let mut valence = vec![0usize; lean.points.len()];
@@ -417,7 +417,7 @@ mod tests {
         // A sphere-like remesh simplified with a tight bound keeps more triangles than one
         // with a loose bound, and every point stays near the original surface.
         let solid = cuboid(DVec3::ZERO, DVec3::ONE);
-        let dense = remesh(&solid.points, &solid.triangles, 40, 0.55);
+        let dense = remesh(&solid.points, &solid.triangles, 40, 0.55, None);
         let tight = decimate(&dense, 0, 0.001);
         let loose = decimate(&dense, 0, 0.05);
         assert!(

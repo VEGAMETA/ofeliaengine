@@ -32,6 +32,10 @@ use engine_core::math::{DVec3, Vec3};
 use std::collections::BinaryHeap;
 use std::sync::OnceLock;
 
+/// Changes whenever the same mesh and settings give other parts (part of the cook's cache
+/// keys).
+pub const REVISION: u32 = 1;
+
 /// How to decompose.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DecomposeSettings {
@@ -176,7 +180,13 @@ pub fn decompose(
         welded
     } else {
         stats.remeshed = true;
-        remesh::remesh(&welded.points, &welded.triangles, settings.resolution, 0.55)
+        remesh::remesh(
+            &welded.points,
+            &welded.triangles,
+            settings.resolution,
+            0.55,
+            jobs,
+        )
     };
     // Within half a remesh cell (a cell is 1 % of the longest side, 0.02 of the normalized
     // frame's 2, at the default resolution).
@@ -199,9 +209,9 @@ pub fn decompose(
             let part = &queue[k];
             let c = concavity(part, settings.samples);
             if c > settings.threshold
-                && let Some((first, path)) = search(part, &search_settings)
+                && let Some((first, path)) = search(part, &search_settings, jobs)
             {
-                let plane = refine(part, first, &path, &search_settings);
+                let plane = refine(part, first, &path, &search_settings, jobs);
                 let (pos, neg) = clip(part, &plane, TOLERANCE);
                 if !pos.triangles.is_empty() && !neg.triangles.is_empty() {
                     return Step::Cut(pos, neg);
@@ -270,7 +280,7 @@ pub fn decompose(
 }
 
 /// `f(k)` for each `k` in `0..len`, in parallel on `jobs` if given.
-fn map<T: Send + Sync>(
+pub(crate) fn map<T: Send + Sync>(
     len: usize,
     jobs: Option<&ThreadPool>,
     f: impl Fn(usize) -> T + Sync,
@@ -371,13 +381,15 @@ fn near(pieces: &[Piece<'_>], a: &Group, b: &Group, limit: f64) -> bool {
     })
 }
 
-/// Two groups joined, with the concavity of the result.
-fn joined(pieces: &[Piece<'_>], a: &Group, b: &Group, samples: usize) -> Group {
+/// Two groups joined, with the concavity of the result (or `known`, already measured).
+fn joined(pieces: &[Piece<'_>], a: &Group, b: &Group, samples: usize, known: Option<f64>) -> Group {
     let mut points = a.hull.clone();
     points.extend_from_slice(&b.hull);
     let hull = hull_solid(&points);
     let volume = a.volume + b.volume;
-    let concavity = if hull.triangles.is_empty() {
+    let concavity = if let Some(c) = known {
+        c
+    } else if hull.triangles.is_empty() {
         0.0
     } else {
         let all: Vec<(&Solid, &Bvh)> = a
@@ -453,7 +465,7 @@ fn merge(
                 return None;
             };
             (anywhere || near(&pieces, ga, gb, settings.threshold))
-                .then(|| joined(&pieces, ga, gb, settings.samples).concavity)
+                .then(|| joined(&pieces, ga, gb, settings.samples, None).concavity)
         });
         for (&(a, b), cost) in pairs.iter().zip(costs) {
             if let Some(cost) = cost {
@@ -509,9 +521,7 @@ fn merge(
         let (Some(ga), Some(gb)) = (groups[a].take(), groups[b].take()) else {
             break;
         };
-        let mut g = joined(&pieces, &ga, &gb, settings.samples);
-        g.concavity = pair.cost;
-        groups[a] = Some(g);
+        groups[a] = Some(joined(&pieces, &ga, &gb, settings.samples, Some(pair.cost)));
         stamps[a] += 1;
         count -= 1;
         let row: Vec<(usize, usize)> = (0..n)
@@ -620,5 +630,36 @@ mod tests {
         assert_eq!(hulls.len(), 3, "{stats:?}");
         let total: f32 = hulls.iter().map(|h| Hull::new(h).unwrap().volume()).sum();
         assert!((total - 5.0).abs() < 0.05, "{total}");
+    }
+
+    #[test]
+    fn the_pool_changes_nothing() {
+        // An open U (no top): remeshed, simplified, searched and merged alone and on a pool,
+        // the same hulls bit for bit.
+        let u = [
+            (0.0, 0.0),
+            (3.0, 0.0),
+            (3.0, 2.0),
+            (2.0, 2.0),
+            (2.0, 1.0),
+            (1.0, 1.0),
+            (1.0, 2.0),
+            (0.0, 2.0),
+        ];
+        let (points, mut triangles) = prism(&u, 1.0);
+        outward(&points, &mut triangles);
+        triangles.retain(|t| !t.iter().all(|&i| points[i as usize].y > 0.5));
+        let settings = DecomposeSettings {
+            resolution: 40,
+            search_triangles: 1500,
+            ..DecomposeSettings::default()
+        };
+        let jobs = ThreadPool::builder().workers(4).build().unwrap();
+        let (alone, a) = decompose(&points, &triangles, &settings, None);
+        let (pooled, b) = decompose(&points, &triangles, &settings, Some(&jobs));
+        assert!(a.remeshed);
+        assert!(alone.len() >= 3, "{a:?}");
+        assert_eq!(alone, pooled);
+        assert_eq!((a.cuts, a.merged), (b.cuts, b.merged));
     }
 }

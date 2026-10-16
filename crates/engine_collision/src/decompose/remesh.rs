@@ -15,6 +15,8 @@
 
 use super::bvh::closest_on_triangle;
 use super::clip::Solid;
+use super::map;
+use engine_core::jobs::ThreadPool;
 use engine_core::math::DVec3;
 use std::collections::{HashMap, VecDeque};
 
@@ -48,8 +50,14 @@ const TETRAHEDRA: [[usize; 4]; 6] = [
 ];
 
 /// The closed surface `offset` (in cells) out from `points` and `triangles` (see the
-/// module's documentation).
-pub(crate) fn remesh(points: &[DVec3], triangles: &[[u32; 3]], cells: usize, offset: f64) -> Solid {
+/// module's documentation). The distances are found per slab of the grid on `jobs`.
+pub(crate) fn remesh(
+    points: &[DVec3],
+    triangles: &[[u32; 3]],
+    cells: usize,
+    offset: f64,
+    jobs: Option<&ThreadPool>,
+) -> Solid {
     let (lo, hi) = points.iter().fold(
         (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN)),
         |(lo, hi), &p| (lo.min(p), hi.max(p)),
@@ -67,27 +75,45 @@ pub(crate) fn remesh(points: &[DVec3], triangles: &[[u32; 3]], cells: usize, off
     let point =
         |i: usize, j: usize, k: usize| origin + DVec3::new(i as f64, j as f64, k as f64) * h;
     let far = 4.0 * band;
-    let mut distance = vec![far; nx * ny * nz];
-    // 1. Distances in a band around every triangle.
-    for t in triangles {
-        let [a, b, c] = t.map(|i| points[i as usize]);
-        let tlo = a.min(b).min(c) - DVec3::splat(band);
-        let thi = a.max(b).max(c) + DVec3::splat(band);
-        let first = ((tlo - origin) / h).floor().max(DVec3::ZERO).as_uvec3();
-        let last = ((thi - origin) / h).ceil().as_uvec3().min(dims - 1);
-        for k in first.z as usize..=last.z as usize {
-            for j in first.y as usize..=last.y as usize {
-                for i in first.x as usize..=last.x as usize {
-                    let p = point(i, j, k);
-                    let d = closest_on_triangle(p, a, b, c).distance(p);
-                    let slot = &mut distance[index(i, j, k)];
-                    if d < *slot {
-                        *slot = d;
+    // 1. Distances in a band around every triangle, a slab of z layers at a time (each
+    //    slab's points are contiguous, and only its own task writes them).
+    let ranges: Vec<_> = triangles
+        .iter()
+        .map(|t| {
+            let [a, b, c] = t.map(|i| points[i as usize]);
+            let tlo = a.min(b).min(c) - DVec3::splat(band);
+            let thi = a.max(b).max(c) + DVec3::splat(band);
+            let first = ((tlo - origin) / h).floor().max(DVec3::ZERO).as_uvec3();
+            let last = ((thi - origin) / h).ceil().as_uvec3().min(dims - 1);
+            (first, last)
+        })
+        .collect();
+    const SLAB: usize = 8;
+    let slabs = map(nz.div_ceil(SLAB), jobs, |s| {
+        let (k0, k1) = (s * SLAB, ((s + 1) * SLAB).min(nz));
+        let mut slab = vec![far; nx * ny * (k1 - k0)];
+        for (t, &(first, last)) in triangles.iter().zip(&ranges) {
+            let (z0, z1) = ((first.z as usize).max(k0), (last.z as usize).min(k1 - 1));
+            if z0 > z1 {
+                continue;
+            }
+            let [a, b, c] = t.map(|i| points[i as usize]);
+            for k in z0..=z1 {
+                for j in first.y as usize..=last.y as usize {
+                    for i in first.x as usize..=last.x as usize {
+                        let p = point(i, j, k);
+                        let d = closest_on_triangle(p, a, b, c).distance(p);
+                        let slot = &mut slab[index(i, j, k - k0)];
+                        if d < *slot {
+                            *slot = d;
+                        }
                     }
                 }
             }
         }
-    }
+        slab
+    });
+    let distance: Vec<f64> = slabs.concat();
     // 2. The outside: from the border through points farther than the offset.
     let threshold = offset * h;
     let mut outside = vec![false; nx * ny * nz];
@@ -241,7 +267,7 @@ mod tests {
     fn a_closed_box_stays_a_box_and_an_open_one_becomes_a_shell() {
         let solid = cuboid(DVec3::ZERO, DVec3::ONE);
         assert!(closed_manifold(&solid));
-        let out = remesh(&solid.points, &solid.triangles, 32, 0.55);
+        let out = remesh(&solid.points, &solid.triangles, 32, 0.55, None);
         assert!(closed_manifold(&out), "remeshed box not closed");
         // The box 0.55 of a cell (1/32) larger on every side, its edges rounded: the volume of
         // the box grown by 0.0172, minus a little at the edges.
@@ -257,7 +283,7 @@ mod tests {
             triangles: solid.triangles[..10].to_vec(),
         };
         assert!(!closed_manifold(&open));
-        let shell = remesh(&open.points, &open.triangles, 32, 0.55);
+        let shell = remesh(&open.points, &open.triangles, 32, 0.55, None);
         assert!(closed_manifold(&shell));
         assert!(
             shell.volume() < 0.2 && shell.volume() > 0.05,

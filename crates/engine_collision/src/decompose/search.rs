@@ -17,7 +17,9 @@
 
 use super::clip::{Plane, Solid, clip};
 use super::cost::volume_term;
+use super::map;
 use crate::hull::Hull;
+use engine_core::jobs::ThreadPool;
 use engine_core::math::{DVec3, Vec3};
 use std::sync::Arc;
 
@@ -68,6 +70,16 @@ pub(crate) fn axis_planes(solid: &Solid, count: usize) -> Vec<Plane> {
         }
     }
     planes
+}
+
+/// `solid` cut by `plane`: both halves with their volume terms; none if it does not cut.
+fn halves(solid: &Solid, plane: &Plane) -> Option<[(Solid, f64); 2]> {
+    let (pos, neg) = clip(solid, plane, TOLERANCE);
+    if pos.triangles.is_empty() || neg.triangles.is_empty() {
+        return None;
+    }
+    let (p, n) = (part_term(&pos), part_term(&neg));
+    Some([(pos, p), (neg, n)])
 }
 
 /// A deterministic shuffle (xorshift).
@@ -134,10 +146,12 @@ impl State {
 
     /// This state with its worst part cut by `plane`; none if the plane does not cut it.
     fn cut(&self, plane: Plane, settings: &SearchSettings) -> Option<State> {
-        let (pos, neg) = clip(&self.pieces[self.worst].solid, &plane, TOLERANCE);
-        if pos.triangles.is_empty() || neg.triangles.is_empty() {
-            return None;
-        }
+        let halves = halves(&self.pieces[self.worst].solid, &plane)?;
+        Some(self.split(plane, halves, settings))
+    }
+
+    /// This state with its worst part replaced by `halves`, the cut by `plane`.
+    fn split(&self, plane: Plane, halves: [(Solid, f64); 2], settings: &SearchSettings) -> State {
         let mut pieces: Vec<Piece> = self
             .pieces
             .iter()
@@ -146,8 +160,7 @@ impl State {
             .map(|(_, p)| p.clone())
             .collect();
         let salt = (self.round as u64 + 1) * 0x9E37_79B9;
-        for (k, s) in [pos, neg].into_iter().enumerate() {
-            let cost = part_term(&s);
+        for (k, (s, cost)) in halves.into_iter().enumerate() {
             pieces.push(Piece::new(s, cost, settings, salt + k as u64));
         }
         let mut next = State {
@@ -158,7 +171,7 @@ impl State {
             plane: Some(plane),
         };
         next.score += next.update_worst();
-        Some(next)
+        next
     }
 }
 
@@ -170,45 +183,41 @@ struct Node {
     quality: f64,
 }
 
-/// The best of `planes` for cutting `solid`: the one whose worse side has the lowest term.
-fn best_plane(solid: &Solid, planes: &[Plane]) -> Option<(Plane, f64)> {
-    let mut best: Option<(Plane, f64)> = None;
-    for &plane in planes {
-        let (pos, neg) = clip(solid, &plane, TOLERANCE);
-        if pos.triangles.is_empty() || neg.triangles.is_empty() {
-            continue;
-        }
-        let cost = part_term(&pos).max(part_term(&neg));
-        if best.is_none_or(|(_, c)| cost < c) {
-            best = Some((plane, cost));
-        }
-    }
-    best
-}
-
-/// The rollout: cut the worst part by the best middle plane per axis to the depth. Returns
-/// the mean score over the depth and the planes it cut by.
-fn rollout(state: &State, settings: &SearchSettings) -> (f64, Vec<Plane>) {
+/// The rollout: cut the worst part by the best middle plane per axis (the one whose worse
+/// side has the lowest term; the first of equals) to the depth, the planes tried in
+/// parallel. Returns the mean score over the depth and the planes it cut by.
+fn rollout(
+    state: &State,
+    settings: &SearchSettings,
+    jobs: Option<&ThreadPool>,
+) -> (f64, Vec<Plane>) {
     let mut s = state.clone();
     let mut path = Vec::new();
     while !s.terminal(settings.depth) {
-        let worst = &s.pieces[s.worst].solid;
-        let planes = axis_planes(worst, 1);
-        let Some((plane, _)) = best_plane(worst, &planes) else {
+        let worst = Arc::clone(&s.pieces[s.worst].solid);
+        let planes = axis_planes(&worst, 1);
+        let cuts = map(planes.len(), jobs, |k| halves(&worst, &planes[k]));
+        let best = cuts
+            .into_iter()
+            .enumerate()
+            .filter_map(|(k, h)| h.map(|h| (k, h)))
+            .min_by(|(_, a), (_, b)| a[0].1.max(a[1].1).total_cmp(&b[0].1.max(b[1].1)));
+        let Some((k, halves)) = best else {
             break;
         };
-        let Some(next) = s.cut(plane, settings) else {
-            break;
-        };
-        path.push(plane);
-        s = next;
+        path.push(planes[k]);
+        s = s.split(planes[k], halves, settings);
     }
     (s.score / settings.depth as f64, path)
 }
 
 /// The best plane to cut `solid` by, and the path of cuts after it that the search liked
 /// best; none if no plane cuts it.
-pub(crate) fn search(solid: &Solid, settings: &SearchSettings) -> Option<(Plane, Vec<Plane>)> {
+pub(crate) fn search(
+    solid: &Solid,
+    settings: &SearchSettings,
+    jobs: Option<&ThreadPool>,
+) -> Option<(Plane, Vec<Plane>)> {
     engine_profiler::zone!("collision::decompose::search");
     let cost = part_term(solid);
     let root = State {
@@ -229,7 +238,46 @@ pub(crate) fn search(solid: &Solid, settings: &SearchSettings) -> Option<(Plane,
     }];
     let mut best_path: Vec<Plane> = Vec::new();
     let mut best_score = f64::MAX;
-    for _ in 0..settings.iterations {
+    // The root's moves, all at once: until every one is tried, each iteration expands the
+    // root's next move whatever the earlier ones found, so these iterations run in parallel
+    // and are applied in order, as one at a time would.
+    let root_state = nodes[0].state.clone();
+    let moves = Arc::clone(&root_state.pieces[0].moves);
+    let tried = map(moves.len(), jobs, |k| {
+        root_state.cut(moves[k], settings).map(|child| {
+            let (score, path) = rollout(&child, settings, jobs);
+            (child, score, path)
+        })
+    });
+    let mut done = 0;
+    for (k, result) in tried.into_iter().enumerate() {
+        if done == settings.iterations {
+            break;
+        }
+        nodes[0].state.pieces[0].next = k + 1;
+        let Some((child, score, rollout_path)) = result else {
+            continue;
+        };
+        done += 1;
+        let mut path: Vec<Plane> = child.plane.into_iter().collect();
+        path.extend(rollout_path);
+        nodes.push(Node {
+            state: child,
+            children: Vec::new(),
+            parent: Some(0),
+            visits: 1,
+            quality: score,
+        });
+        let c = nodes.len() - 1;
+        nodes[0].children.push(c);
+        nodes[0].visits += 1;
+        nodes[0].quality = nodes[0].quality.min(score);
+        if score < best_score {
+            best_score = score;
+            best_path = path;
+        }
+    }
+    for _ in done..settings.iterations {
         // Down the tree.
         let mut at = 0usize;
         loop {
@@ -278,7 +326,7 @@ pub(crate) fn search(solid: &Solid, settings: &SearchSettings) -> Option<(Plane,
             // Nothing cuts the part.
             return None;
         }
-        let (score, rollout_path) = rollout(&nodes[at].state, settings);
+        let (score, rollout_path) = rollout(&nodes[at].state, settings, jobs);
         // Up the tree: the path from the root's child to here, then the rollout's.
         let mut path: Vec<Plane> = Vec::new();
         let mut up = Some(at);
@@ -350,12 +398,14 @@ fn path_score(solid: &Solid, first: Plane, path: &[Plane]) -> f64 {
 }
 
 /// `first` moved along its axis to where the path's score is lowest: a ternary search
-/// within one candidate spacing of it (CoACD's `TernaryMCTS`, ten steps).
+/// within one candidate spacing of it (CoACD's `TernaryMCTS`, ten steps; each step's two
+/// probes in parallel).
 pub(crate) fn refine(
     solid: &Solid,
     first: Plane,
     path: &[Plane],
     settings: &SearchSettings,
+    jobs: Option<&ThreadPool>,
 ) -> Plane {
     let (lo, hi) = solid.bounds();
     let axis = (0..3).find(|&a| first.normal[a] > 0.5).unwrap_or(0);
@@ -379,10 +429,11 @@ pub(crate) fn refine(
         }
         let third = (right - left) / 3.0;
         let (m1, m2) = (left + third, right - third);
-        let (e1, e2) = (
-            path_score(solid, at(m1), path),
-            path_score(solid, at(m2), path),
-        );
+        let probe = |x: f64| path_score(solid, at(x), path);
+        let (e1, e2) = match jobs {
+            Some(pool) => pool.join(|| probe(m1), || probe(m2)),
+            None => (probe(m1), probe(m2)),
+        };
         if e1 < e2 {
             right = m2;
             result = m1;
