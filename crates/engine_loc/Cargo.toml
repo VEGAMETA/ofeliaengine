@@ -1,0 +1,36 @@
+[package]
+name = "engine_loc"
+description = "Localization (ADR 0102): string tables compiled from Fluent's syntax, formatted into the caller's buffer without allocating, plural rules and numbers by ICU4X."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# The compiler from Fluent's syntax (the cook, the CLI, hot reload in development builds); a
+# shipped game reads cooked tables only.
+compile = ["dep:fluent-syntax"]
+
+[dependencies]
+# Feature unification of shared dependencies for build reuse (ADR 0077).
+engine_workspace_hack.workspace = true
+# CLDR plural rules, decimal formatting and locales (Unicode-3.0; ADR 0102: 0.2 MB for all
+# locales).
+icu_decimal = "=2.3.0"
+icu_locale = "=2.3.1"
+icu_plurals = "=2.3.0"
+# Fluent's parser (Apache-2.0 OR MIT), for the compiler only.
+fluent-syntax = { version = "=0.12.0", optional = true }
+
+[dev-dependencies]
+# The tests compile Fluent sources.
+engine_loc = { path = ".", features = ["compile"] }
+
+[[bench]]
+name = "format"
+harness = false
