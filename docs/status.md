@@ -37,7 +37,16 @@ Last updated: 2026-10-16.
     way (mirrored and sheared included) dropped onto Sponza come to rest, and a ball falls
     into a U's notch; a rendered demo (`props_drop`); meshes made of several pieces now
     remeshed (a table of boards was cut as a solid running through itself).
-- **Next:** 8d localization. After it, item 9: the editor, Luau and tooling.
+- **In flight: 8d, localization** (ADR 0102, Proposed; branch `feat/localization`).
+  - **Done:**
+    - the research note and the ADR (8d-1);
+    - `engine_loc`: Fluent's syntax compiled, formatted without allocating, plurals and
+      numbers by ICU4X (8d-2);
+    - strings packs, `ofeliaengine loc build` and `loc check`, and the player's text from a
+      pack or a live `loc/` folder in the player's or Windows' languages (8d-3).
+  - **Next:** 8d-4, bidirectional layout and fonts per language in `engine_text`; then
+    8d-5, the measurements, the gate and the PR.
+  - After 8d, item 9: the editor, Luau and tooling.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
@@ -49,11 +58,14 @@ Last updated: 2026-10-16.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner** (2026-10-16, ADR 0101):
-  1. the rules file's shape (`<scene>.colliders.ron`);
-  2. what collides by default (every mesh as level geometry, recommended);
-  3. the decomposition until ours is ready (ours only, recommended; or V-HACD for a
-     while).
+- **Questions open with the owner** (2026-10-16):
+  - ADR 0101, colliders:
+    1. the rules file's shape (`<scene>.colliders.ron`);
+    2. what collides by default (every mesh as level geometry, recommended).
+
+    The third, V-HACD until ours was ready, fell away: ours is done.
+  - ADR 0102, localization: the translation files' format: Fluent `.ftl` (recommended,
+    being built), gettext `.po` or CSV.
 - **Agents:** none run until the owner allows them again (§7).
 
 ## 1. What matters most
@@ -145,11 +157,13 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 
 ## 4. In flight
 
+8d, localization (ADR 0102): `feat/localization` holds 8d-1 to 8d-3 (the research note and
+the ADR, `engine_loc`, strings packs, the CLI and the player's text); 8d-4 is next.
 8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
 8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
 decomposition and its place in the cook) merged; the third (#232, `feat/props-on-sponza`:
 8c-4, props on Sponza at every scale) merged. What is left of 8c waits for the owner's
-question 1; next 8d. 8b, video playback, was done 2026-10-16 (its
+question 1. 8b, video playback, was done 2026-10-16 (its
 record is under the queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
 them.
@@ -160,7 +174,7 @@ them.
 items are done.
 
 1. **8c's rules file and `RayHit`'s surface**, after the owner's question 1.
-2. **8d, localization.**
+2. **8d, localization** (in flight: 8d-4 and 8d-5 left).
 3. **9:** editor tools, Luau bindings and debugger, other tooling.
 4. **5's leftover, required** (the owner, 2026-10-15): transparent surfaces and subsurface
    transmission from the virtual shadow pages; then the pages' default for discrete
@@ -871,6 +885,19 @@ grown, divide and conquer); the old labels stay in parentheses.
    - per-language fonts and fallbacks, right-to-left and complex scripts through
      `engine_text`'s shaping and bidi;
    - a check for missing and unused keys ("one button": the CLI and later the editor).
+
+   **In progress (ADR 0102, Proposed; `feat/localization`):**
+   - **8d-1:** the research note `docs/research/localization.md` and the ADR.
+   - **8d-2:** `engine_loc`. Fluent's syntax compiled into tables, formatted into the
+     caller's string without allocating (14-148 ns a message), plurals, numbers and
+     locale fallback by ICU4X 2.3, pseudo-locales.
+   - **8d-3:** pack entries `Strings` (version 7); `ofeliaengine loc build` and `loc
+     check` (what each locale lacks, translations' variables, keys the code uses but
+     nothing defines, keys nothing uses). The player's text: a pack, or a `loc/` folder
+     compiled again on its own thread when a file changes (an edit showed 3 frames later);
+     the player's languages or Windows'. The dev guide `docs/dev-guide/localization.md`.
+   - **Left:** 8d-4, bidirectional layout and fonts per language in `engine_text`; 8d-5,
+     the gate and the PR.
 8e. ~~**Color vision settings for the game developer**~~ (owner, 2026-10-14: a light
    addition). **Done 2026-10-15 (ADR 0097):** `ViewSettings::color_vision`.
    - Protan, deutan and tritan, corrected (daltonization) or simulated, with a severity.

@@ -123,11 +123,79 @@ defined; defined but unused (a warning). A non-zero exit code on errors, for bui
    mixed Arabic, Hebrew and Latin text and a golden image.
 5. **8d-5:** the dev guide (`docs/dev-guide/localization.md`), measurements, the gate.
 
+## As built
+
+### 8d-2 (2026-10-16, `engine_loc`)
+
+- **The compiler** (`compile`, `compile_pseudo`): a locale's files into a table of
+  operations; duplicates and cycles are errors (the entries left out), references to
+  nothing warnings, with file, line and column.
+- **The runtime** (`Localizer`): the chain from ICU4X's `LocaleFallbacker` (`es-MX` →
+  `es-419` → `es`; `zh-TW` → `zh-Hant`, never `zh`); a table's numbers and plural categories
+  by the locale asked for when it is more specific than the table's (Egypt's Arabic digits
+  from an `ar` table); `Args` on the stack (eight at most).
+- **Measured** (ref-1, release, `benches/format.rs`, into a string that has grown): plain
+  14.4 ns, a plural with a grouped number 142.2 ns, a fraction 62.1 ns, a term in the
+  genitive 70.5 ns, an English fallback 55.0 ns; 10,000 messages compiled in 8.1 ms, 1115 KB
+  cooked, read in 0.42 ms. No allocation over 10,000 HUD frames (`tests/zero_alloc.rs`).
+
+### 8d-3 (2026-10-16)
+
+- **No `compile` feature** (the decision said one). Only the CLI would enable it, so
+  `engine_loc`'s features would differ between the workspace's build and a package's own:
+  every crate above it rebuilt in turn (ADR 0077), and the workspace hack cannot unify a
+  crate that depends on it. Measured instead: a release binary with fat LTO, stripped, is
+  224 KB with the runtime only and 346.5 KB with the compiler called, so a shipped game
+  carries about 120 KB of a parser it does not run. The player uses it for `loc/` folders.
+- **Translations compile against the source** (`compile_translation`):
+  - references the source resolves are not reported;
+  - messages the source lacks are warnings;
+  - a message using variables its source message does not pass is an error, and left out:
+    the source's shows, not `{$cnt}`. The variables are followed through references as the
+    runtime resolves them (the translation's, else the source's). Every message wrong
+    through any reference is left out first; then those right once the others are left out
+    come back. Bringing one back never makes another wrong: its variables are a subset of
+    its source message's.
+- **A table keeps names for the check:** an attribute's entry its name (`menu.tooltip`), a
+  select its variable's; 10,000 messages cook to 1147 KB (1115 before).
+- **The pack:** entry kind `Strings` (code 11), pack version 7. `meta[0]` is 1 for the
+  source locale, `meta[1]` its message count; the source locale's entry comes first.
+  `engine_assets::strings::{write_strings_pack, load_strings, load_localizer}`; a scene's
+  loading skips such entries.
+- **The CLI:** `ofeliaengine loc build <loc> -o <pack> [--source] [--pseudo] [--level]`,
+  where an error stops the build (exit code 1). `ofeliaengine loc check <loc> [--source]
+  [--code <dir>]...` reports:
+  - each locale's missing messages and attributes;
+  - the translations' variables;
+  - identifiers used in `loc!("…")` (Rust) or `loc("…")` (Luau) but not defined (errors);
+  - messages neither the code nor another message uses.
+  `engine_loc::{read_sources, compile_sources, find_uses, check}` hold it, for the editor
+  later.
+- **The player:**
+  - `PlayerSettings::text`: `TextSource::Pack`, or `TextSource::Folder`, kept live:
+    - a recursive directory watcher;
+    - the folder compiled again on a thread of its own once its files have been quiet for
+      30 ms;
+    - the tables swapped between frames;
+    - a locale with errors keeps its previous table (`Player::text_diagnostics`).
+  - `PlayerSettings::languages`: `None` takes Windows' display languages
+    (`engine_platform::locale::preferred_languages`, `GetUserPreferredUILanguages`).
+  - The localizer is the world's resource, reached from every hook. `Localizer`
+    remembers the languages asked for and negotiates them again when its tables change.
+  - In `tests/text.rs`, an edit showed in the running player 3 frames later.
+- **ICU4X's `sync`** (icu_provider's feature: its data behind `Arc`, not `Rc`) makes the
+  localizer `Send + Sync`, which a world's resource must be. It costs about 3 ns on a plural
+  with a grouped number: 145.7-148.5 ns against 142.2-143.2, binaries of both commits run in
+  turn; 143.8-145.1 ns without `sync`. Nothing measurable elsewhere.
+- **A string selector matches variants named like categories** (`"one"` selects `[one]`).
+- **Not done:** a pack's hot reload (folders only), dates, bidirectional layout (8d-4).
+
 ## Consequences
 
 - **Translators work in FTL** (Pontoon, Weblate, Crowdin); PO and XLIFF export can come with
   the tools for teams that want them.
-- **New dependencies,** all on the allowed list: `fluent-syntax` (cook and development only),
+- **New dependencies,** all on the allowed list: `fluent-syntax` (in every build, about
+  120 KB; 8d-3 as built),
   `icu_plurals`, `icu_decimal`, `icu_locale`, `icu_datetime` behind `dates` (Unicode-3.0),
   `unicode-bidi` (MIT OR Apache-2.0). About 0.2 MB of binary, 1 MB with dates.
 - **We implement a subset of Fluent** (messages, terms, attributes, variables, selects, `NUMBER`,
