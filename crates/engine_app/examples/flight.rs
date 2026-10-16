@@ -1310,11 +1310,26 @@ mod windowed {
             };
             (done, stop, thread)
         });
+        // A flight that draws nothing for this long stops and says why, instead of
+        // waiting forever (2026-10-16: an exclusive full-screen run from a session that
+        // could not bring its window to the front drew nothing for 300 s).
+        const STALLED: Duration = Duration::from_secs(10);
+        let mut last_drawn = Instant::now();
         while drawn < frames_to_run && !player.closing() {
             let frame_start = Instant::now();
             let Some(report) = player.frame(&mut game).unwrap_or_else(|e| panic!("{e}")) else {
+                if last_drawn.elapsed() > STALLED {
+                    println!(
+                        "flight: no frame drawn for {} s after {drawn} frames (the window minimized, \
+                         or the swapchain made anew every frame); presentation: {:?}",
+                        STALLED.as_secs(),
+                        player.presentation()
+                    );
+                    std::process::exit(2);
+                }
                 continue;
             };
+            last_drawn = Instant::now();
             if let Some(p) = previous_start
                 && let Some(last) = log.last_mut()
             {

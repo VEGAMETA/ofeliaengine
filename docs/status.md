@@ -26,7 +26,8 @@ Last updated: 2026-10-16.
   - **Cost against the cached cascades** (Intel's Sponza, 1080p):
     - the RTX: 0.18 ms more still, 0.30 ms more walking, 39 µs less with 8 movers;
     - the Radeon at the integrated defaults: 1.25 ms more walking.
-  - **The default for discrete GPUs** is the owner's question (below).
+  - **The default for discrete GPUs stays off** (the owner, 2026-10-16): the cached
+    cascades cost 0.18–0.30 ms less on the RTX.
 - **Done: 8c, colliders made from meshes** (ADR 0101), but for the rules file and
   `RayHit`'s surface (queue item 3).
   - The owner, 2026-10-16: the rules in `<scene>.colliders.ron` beside the glTF,
@@ -79,11 +80,8 @@ Last updated: 2026-10-16.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner** (2026-10-16): the virtual shadow pages' default for
-  discrete GPUs (ADR 0093 step 3d's numbers).
-  - On, they cost an RTX 4060 Ti 0.18–0.30 ms of a 1080p frame; with moving casters they
-    are cheaper.
-  - They give a texel a pixel near the camera, where the cascades' are 2–10 pixels.
+- **Questions open with the owner:** none (2026-10-16: the virtual shadow pages stay off
+  by default on discrete GPUs; the monitor was lent for exclusive full screen, see §6).
 - **Agents:** none run until the owner allows them again (§7).
 
 ## 1. What matters most
@@ -203,7 +201,7 @@ water and impostors stay in §6):
 
 1. ~~**5's leftover, required**~~ (done 2026-10-16, ADR 0093 step 3d): transparent
    surfaces and subsurface materials from the virtual shadow pages, no cascades beside
-   them. The pages' default for discrete GPUs is the owner's question.
+   them. They stay off by default on discrete GPUs too (the owner, 2026-10-16).
 2. ~~**Device memory** (audit 3 §3.3) and **Reflex's pacing** (§3.4)~~ (done 2026-10-16).
    - The budget counts the allocator's free room, and the larger empty block goes (#238:
      the flight's rest of the process 688 → 360 MiB on the RTX).
@@ -1115,10 +1113,16 @@ grown, divide and conquer); the old labels stay in parentheses.
     less.
 - **Presentation:** test 0e's choice with a monitor on the iGPU (the owner can connect one;
   later, owner 2026-10-10).
-  - **Exclusive full screen hung** in a session that cannot bring its window to the
-    front (2026-10-16): the flight drew nothing for 300 s. Not reproduced since, because
-    reproducing it takes the monitor (the owner's call). The player should give up on
-    the monitor after a loss or two and stay borderless until the window is focused.
+  - **Exclusive full screen hung once** in a session that could not bring its window to
+    the front (2026-10-16): the flight drew nothing for 300 s.
+    - Not reproduced in three runs the same day with the owner's monitor. Each time the
+      window was focused at once. Without vsync NVIDIA refused the monitor and the flight
+      ran borderless; with vsync it held the monitor (4.15 ms at 240 Hz).
+    - Since then (#240) the flight stops after 10 s without a frame and prints the
+      player's presentation, and the player logs every swapchain it makes anew
+      (`engine_app::present`).
+    - If it comes back: the player should give up on the monitor after a loss or two and
+      stay borderless until the window is focused.
 - **Latency (ADR 0023's addendum):** a pacer of the engine's own for frames shorter than
   the driver's floor (Reflex never sleeps under ~1.5 ms: above ~500 FPS frames hold at
   2 ms). It would sleep on the precise timer until the GPU is predicted free, from the

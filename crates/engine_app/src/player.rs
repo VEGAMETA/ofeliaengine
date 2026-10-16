@@ -1372,6 +1372,7 @@ impl Player {
                 Ok(a) => Some(a),
                 // Out of date, or the monitor held for itself lost (ADR 0099).
                 Err(e) if e.is_out_of_date() => {
+                    log::info!(target: "engine_app::present", "acquiring an image: {e}; the swapchain is made anew");
                     // The slot is given back unused.
                     self.frames
                         .submit(self.device.graphics, frame, false, None)
@@ -2130,6 +2131,14 @@ impl Player {
             swapchain
                 .recreate(&self.device, surface, extent.width, extent.height)
                 .map_err(AppError::at("the swapchain"))?;
+            log::info!(
+                target: "engine_app::present",
+                "swapchain made anew: {}×{}, holds the monitor: {}, refused: {:?}",
+                extent.width,
+                extent.height,
+                swapchain.exclusive(),
+                swapchain.exclusive_refused()
+            );
         }
         self.start_presentation()
     }

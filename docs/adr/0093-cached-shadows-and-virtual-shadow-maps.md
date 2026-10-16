@@ -685,7 +685,8 @@ other materials, or more than `MAX_MOVED` (256) boxes.
 - **Defaults per class:** the pages stay off by default. With the integrated class's
   settings they cost the Radeon 2.9 ms more than the cached cascades while walking.
   Turning them on by default for discrete GPUs trades about 0.25–0.3 ms of an RTX 4060
-  Ti's frame for the sharper shadows: that is the owner's decision.
+  Ti's frame for the sharper shadows: that is the owner's decision. **Decided
+  (2026-10-16): off on discrete GPUs too**; a game turns them on per view.
 
 ## Step 3d: everything from the pages (design, 2026-10-16)
 
