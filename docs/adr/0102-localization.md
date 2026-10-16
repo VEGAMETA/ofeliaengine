@@ -1,6 +1,6 @@
 # 0102. Localization: Fluent's syntax, cooked, formatted without allocating
 
-- Status: Proposed (2026-10-16; the source format is the owner's question)
+- Status: Accepted (2026-10-16; the owner kept Fluent `.ftl` as the source format)
 - Date: 2026-10-16
 - Related:
   - [ADR 0025](0025-text.md): `engine_text` (shaping, line breaking, fallback fonts);

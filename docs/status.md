@@ -14,16 +14,23 @@ Last updated: 2026-10-16.
   through the player (`docs/dev-guide/video.md`).
   - Video with transparency (an alpha channel) is not part of it: the owner deferred it
     (2026-10-15; §6, Video).
-- **Virtual shadow maps** (item 5, ADR 0093) are done but for transparent surfaces: steps
-  3a–3c were done 2026-10-15. `ViewSettings::virtual_shadows` turns them on (off by
-  default).
-  - Walking, they cost the RTX 0.28 ms more than the cached cascades, the Radeon 2.9 ms
-    more at the integrated defaults; moved casters redraw only their pages.
-  - **Required later** (the owner, 2026-10-15: deferred, but it will be needed):
-    transparent surfaces and subsurface transmission from the pages, so the cascades
-    are not drawn beside them. The default for discrete GPUs is decided after it.
-- **Done: 8c, colliders made from meshes** (ADR 0101, Proposed), but for the rules file
-  and `RayHit`'s surface, which wait for the owner's question 1.
+- **Done: virtual shadow maps** (item 5, ADR 0093): steps 3a–3c on 2026-10-15, 3d on
+  2026-10-16 (`feat/vsm-transparent-sss`). `ViewSettings::virtual_shadows` turns them on
+  (off by default).
+  - **Everything a view with pages shades reads them**, and it draws no cascade:
+    - transparent surfaces mark their own pages and look them up;
+    - subsurface materials take their front from the mask and their transmission from
+      the pages.
+  - Faces turned to the light (subsurface and double-sided casters) no longer shadow
+    themselves.
+  - **Cost against the cached cascades** (Intel's Sponza, 1080p):
+    - the RTX: 0.18 ms more still, 0.30 ms more walking, 39 µs less with 8 movers;
+    - the Radeon at the integrated defaults: 1.25 ms more walking.
+  - **The default for discrete GPUs** is the owner's question (below).
+- **Done: 8c, colliders made from meshes** (ADR 0101), but for the rules file and
+  `RayHit`'s surface (queue item 3).
+  - The owner, 2026-10-16: the rules in `<scene>.colliders.ron` beside the glTF,
+    documented in the dev guide; by default every mesh collides as level geometry.
   - **Done (first PR):**
     - `engine_collision` (hulls, fitting, scale rules);
     - compound, scaled and baked shapes in the physics API;
@@ -37,8 +44,8 @@ Last updated: 2026-10-16.
     way (mirrored and sheared included) dropped onto Sponza come to rest, and a ball falls
     into a U's notch; a rendered demo (`props_drop`); meshes made of several pieces now
     remeshed (a table of boards was cut as a solid running through itself).
-- **Done: 8d, localization** (ADR 0102, Proposed: the source format is the owner's
-  question).
+- **Done: 8d, localization** (ADR 0102; the owner kept Fluent `.ftl` as the source format,
+  2026-10-16).
   - **First PR (#233, `feat/localization`):**
     - the research note and the ADR (8d-1);
     - `engine_loc`: Fluent's syntax compiled, formatted without allocating, plurals and
@@ -49,15 +56,13 @@ Last updated: 2026-10-16.
     UAX #9 is adapted from unicode-bidi to buffers kept between calls (it allocated on every
     call), and all 91,707 of Unicode 16's conformance cases pass. Also font stacks per
     language and a golden image.
-- **Next:** the third review's queue (`docs/research/core-audit-3.md`, 2026-10-16), sent to
-  the owner with three questions. Its P0 is done (#236, `fix/local-shadow-invalidation`):
-  - the local lights' shadows' bookkeeping bounded, after it cost 150 ns per moving caster
-    per frame (a regression of 6b): the frame renderer's CPU at 2,000 movers 409 → 46 µs,
-    at 20,000 movers 3,265 → 60 µs;
-  - a CPU stage check in the perf gate (`perf_gate --cpu`), which reports that
-    regression.
-
-  Then queue item 1, VSM's leftover.
+- **Next:** the third review's queue (`docs/research/core-audit-3.md`, §5 below), accepted
+  by the owner on 2026-10-16.
+  - Done: its P0 (#236: the local lights' shadows' bookkeeping bounded, a CPU stage check
+    in the perf gate) and item 1 (VSM's leftover, `feat/vsm-transparent-sss`).
+  - Then item 2: device memory's empty blocks and Reflex's pacing.
+  - The owner wants results soon, without leaving the plan: gate what a change needs and
+    skip runs that add nothing.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
@@ -69,14 +74,11 @@ Last updated: 2026-10-16.
   - the perf gate's register check (6c) and anisotropy as a player setting (6d);
   - shared transient heaps (7a);
   - the player crate `engine_app` (8a, PRs #215–#220) and color vision settings (8e).
-- **Questions open with the owner** (2026-10-16):
-  - ADR 0101, colliders:
-    1. the rules file's shape (`<scene>.colliders.ron`);
-    2. what collides by default (every mesh as level geometry, recommended).
-
-    The third, V-HACD until ours was ready, fell away: ours is done.
-  - ADR 0102, localization: the translation files' format: Fluent `.ftl` (recommended,
-    being built), gettext `.po` or CSV.
+- **Questions open with the owner** (2026-10-16): the virtual shadow pages' default for
+  discrete GPUs (ADR 0093 step 3d's numbers).
+  - On, they cost an RTX 4060 Ti 0.18–0.30 ms of a 1080p frame; with moving casters they
+    are cheaper.
+  - They give a texel a pixel near the camera, where the cascades' are 2–10 pixels.
 - **Agents:** none run until the owner allows them again (§7).
 
 ## 1. What matters most
@@ -171,12 +173,12 @@ since: custom materials, meshlets, cached shadows, post effects and the player c
 8d, localization (ADR 0102): its first PR (#233, `feat/localization`: 8d-1 to 8d-3, the
 research note and the ADR, `engine_loc`, strings packs, the CLI and the player's text)
 merged; the second (#234, `feat/bidi-text`: 8d-4, bidirectional layout and font stacks) merged.
-8d is done but for the owner's question on the source format.
+8d is done (the owner kept Fluent, 2026-10-16).
 8c, colliders made from meshes (ADR 0101): its first PR (#230, `feat/mesh-colliders`:
 8c-1, 8c-2a, 8c-4a) merged; the second (#231, `feat/convex-decomposition`: 8c-3, the
 decomposition and its place in the cook) merged; the third (#232, `feat/props-on-sponza`:
-8c-4, props on Sponza at every scale) merged. What is left of 8c waits for the owner's
-question 1. 8b, video playback, was done 2026-10-16 (its
+8c-4, props on Sponza at every scale) merged. What is left of 8c (the rules file, the
+owner's choice of 2026-10-16) is queue item 3. 8b, video playback, was done 2026-10-16 (its
 record is under the queue's item 8b). Meshlets (item 4) and custom materials (item 3c) were listed
 here until 2026-10-15; their records moved to those items in §5, with what is left of
 them.
@@ -186,12 +188,25 @@ them.
 **What is left, in order.** The numbered items below keep their history; struck-through
 items are done.
 
-1. **8c's rules file and `RayHit`'s surface**, after the owner's question 1.
-2. ~~**8d, localization**~~ (done 2026-10-16 but for the owner's question on the format).
-3. **9:** editor tools, Luau bindings and debugger, other tooling.
-4. **5's leftover, required** (the owner, 2026-10-15): transparent surfaces and subsurface
-   transmission from the virtual shadow pages; then the pages' default for discrete
-   GPUs.
+The third review's queue (`docs/research/core-audit-3.md` §5), accepted by the owner on
+2026-10-16 (A to both of its questions: the core's gaps before item 9; terrain, foliage,
+water and impostors stay in §6):
+
+1. ~~**5's leftover, required**~~ (done 2026-10-16, ADR 0093 step 3d): transparent
+   surfaces and subsurface materials from the virtual shadow pages, no cascades beside
+   them. The pages' default for discrete GPUs is the owner's question.
+2. **Device memory:** empty blocks freed (audit 3 §3.3); Reflex's pacing (§3.4).
+3. **8c's rules file and `RayHit`'s surface:** `<scene>.colliders.ron`, documented in the
+   dev guide; every mesh collides as level geometry by default (the owner, 2026-10-16).
+4. **The core's gaps for a game** (audit 3 §4): navigation; save games; audio, input and
+   networking in the player; a dev-guide quick start.
+5. **9:** editor tools, Luau bindings and debugger, other tooling.
+6. Recording on the job system (§3.5); the Radeon's forward and TAAU, a shadow redraw
+   budget (§3.6).
+7. Housekeeping: the probes test's warm-up (§3.7), CLAUDE.md §2 (ADR), the forward
+   renderer split by feature (§3.9).
+
+Before it: ~~8d, localization~~ (done 2026-10-16; the owner kept Fluent).
 
 **Parked inside finished items.** Each waits for a measurement or the owner:
 - 0: sccache for agents, the Radeon's variance;
@@ -208,6 +223,14 @@ items are done.
 Merged with the second review's findings (`docs/research/core-audit-2.md`). The owner's
 answers of 2026-10-10: faster checks first, then the review's P0 fixes; the player crate
 after the rendering queue; custom 3D materials after GI; the discrete AO default stays High.
+The owner's answers of 2026-10-16:
+- colliders' rules in `<scene>.colliders.ron`, documented in the dev guide; every mesh
+  collides as level geometry by default;
+- localization's source format stays Fluent;
+- after VSM's leftover, the core's gaps before item 9, without leaving the plan (but
+  without runs that add nothing);
+- terrain, foliage, water and impostors stay in §6 until a game asks.
+
 The owner's answers of 2026-10-15:
 - no object motion blur in gameplay views;
 - the virtual shadow pages after the player crate;

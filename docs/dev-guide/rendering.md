@@ -1157,10 +1157,16 @@ if renderer.set_virtual_shadows(&device, &bindless, true)? {
 }
 ```
 
-- **What reads them.** Opaque surfaces: a pass after the depth prepass writes the sun's
-  visibility per pixel, filtered as the cascades are, and the shading reads it (with
-  contact shadows, both multiplied). Transparent surfaces and subsurface transmission keep
-  the cascades, which are still drawn.
+- **What reads them.** Everything the view shades, and the view draws no cascade:
+  - opaque and alpha-tested surfaces: a pass after the depth prepass writes the sun's
+    visibility per pixel, filtered as the cascades are, and the shading reads it (with
+    contact shadows, both multiplied);
+  - subsurface materials: their front from the same visibility, their transmission
+    through the pages;
+  - transparent surfaces: a pass draws them once more with the prepass's depth tested, and
+    each fragment marks the pages it needs; their shading then looks the pages up itself.
+
+  Probe captures and multisampled views keep their cascades.
 - **What they need.** The depth prepass (it then runs), a single-sampled view (MSAA views
   keep the cascades), and a device with `fragmentStoresAndAtomics`, `drawIndirectCount`
   and `shaderInt64`. `set_virtual_shadows` returns `false` without them, and the views keep
@@ -1174,21 +1180,23 @@ if renderer.set_virtual_shadows(&device, &bindless, true)? {
   more than 256 changes since the last frame redraw every page the frame needs (turn a
   time-of-day sun in steps). Call `pages.invalidate()` for changes the renderer cannot
   see.
-  - Intel's Sponza with 8 small objects moving: the sun's shadow passes cost the RTX
-    603 µs and the Radeon 17.2 ms, of which the cascades (still drawn for transparent
-    surfaces) are 317 µs and 5.6 ms.
-- **What they cost** (Intel's Sponza at 1080p, ADR 0093 step 3c):
+- **Faces turned to the light** (subsurface materials and double-sided casters draw them
+  into the pages) are pushed away from the light by their slope, as the cascades'
+  rasterizer bias pushes them, so they do not shadow themselves.
+- **What they cost** (Intel's Sponza at 1080p, the RTX 4060 Ti, `scene_bench --sky
+  --meshlet-culling --prepass --cached-shadows`, ADR 0093 step 3d):
 
-| µs a frame | RTX 4060 Ti | Radeon iGPU |
+| µs a frame | the cached cascades: their passes / the frame | the pages: their passes / the frame |
 |---|---:|---:|
-| still: the pages' passes (marking, bookkeeping, visibility) | 233 | 8,818 |
-| the shading, without the cascades' lookup | −34 | −1,356 |
-| walking 5 cm a frame: drawing and culling the pages it exposes | 86 more | 2,729 more |
-| the cached cascades walking, for comparison | 79 | 822 |
+| still | 0 / 682 | 220 / 901 |
+| 1 object moving | 17 / 702 | 233 / 918 |
+| 8 objects moving | 317 / 1,001 | 275 / 962 |
 
-  Walking, the frame costs the RTX about 0.28 ms more than with the cached cascades; the
-  Radeon 2.9 ms more with the integrated defaults (67 %). Use them where the sharper
-  shadows are worth it; integrated GPUs keep the cascades by default.
+  With the device class's defaults (the perf gate's scenes), the pages cost the RTX
+  0.19 ms more still and 0.30 ms more walking than the cached cascades; the Radeon 1.25 ms
+  more walking at the integrated defaults. Transparent surfaces' marking is part of it
+  (RTX 16 µs, Radeon 0.2–0.4 ms in Intel's Sponza). Use them where the sharper shadows are
+  worth it; integrated GPUs keep the cascades by default.
 
 ### Contact shadows (ADR 0071)
 
