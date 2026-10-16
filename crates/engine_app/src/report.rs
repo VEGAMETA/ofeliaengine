@@ -54,6 +54,8 @@ pub struct FrameReport {
     pub animate: f64,
     /// The reflection probe entities and the GI volume mirrored into the renderer.
     pub probes: f64,
+    /// Sound (ADR 0105): the sources' voices, the listener, the acoustics' rays.
+    pub sound: f64,
     /// Streaming: textures and mesh levels requested, arrived, evicted.
     pub streaming: f64,
     /// Texture and mesh levels that arrived this frame.

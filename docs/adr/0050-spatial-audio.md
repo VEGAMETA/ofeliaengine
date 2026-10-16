@@ -97,3 +97,10 @@ ref-1, `cargo bench -p engine_audio --bench mixer`, 256-frame blocks at 48 kHz (
   - several listeners for split screen;
   - per-voice reverb sends (source-based zones);
   - sound cones and custom rolloff curves.
+
+## Addendum (2026-10-16): the player hears through the world
+
+[ADR 0105](0105-sound-in-the-player.md) uses this in the player:
+- occlusion from rays through the game's physics world;
+- the listener's room reverb from a ray probe, under `ReverbZone` components that blend
+  their room in by this weight.

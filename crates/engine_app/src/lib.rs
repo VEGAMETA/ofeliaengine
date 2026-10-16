@@ -33,8 +33,13 @@
 //!
 //! Videos (ADR 0100) are opened by the game with [`Videos::open`] (in [`Setup`] or any
 //! frame's [`FrameParts`]) and shown in materials ([`Videos::show_in`]) or UI sprites
-//! ([`Videos::texture_index`]); their sound plays through an audio output the player
-//! starts with the first video that has sound.
+//! ([`Videos::texture_index`]); their sound plays through the player's mixer.
+//!
+//! Sound (ADR 0105) is components too: an [`AudioSource`] on an entity plays a sound file,
+//! placed at the entity or as it is; an [`AudioListener`] hears (the main camera without
+//! one). Saves keep where every sound was. With the game's physics ([`Game::acoustics`]),
+//! walls muffle what is behind them and the room around the listener gives the reverb;
+//! a [`ReverbZone`] gives a place its own. The world's [`Mixer`] sets the buses' volumes.
 //!
 //! Text (ADR 0102): the game's localizer is a resource of the world
 //! (`world.resource::<Localizer>()`), made from [`PlayerSettings::text`] in the locale of
@@ -55,6 +60,7 @@ mod process;
 mod report;
 mod saves;
 mod settings;
+mod sound;
 mod text;
 mod videos;
 
@@ -72,6 +78,10 @@ pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Set
 pub use report::{FrameReport, Startup, StartupPipelines};
 pub use saves::{Autosave, QUICK_SLOT, SaveSettings, Saves};
 pub use settings::{PlayerSettings, Window};
+pub use sound::{
+    AcousticSettings, AudioListener, AudioSettings, AudioSource, BusSettings, Falloff, Mixer,
+    PlayMode, ReverbZone, Room, Spatial,
+};
 pub use text::TextSource;
 pub use videos::{MaterialSlot, VideoId, Videos};
 // What opening a video takes and tells (ADR 0100).

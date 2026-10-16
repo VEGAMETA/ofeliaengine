@@ -6,13 +6,12 @@
 //!
 //! Everything the game calls takes effect at the next frame, so it can be called from any
 //! hook ([`crate::Setup`], [`crate::FrameParts`]). The sound plays through the player's
-//! audio output, started with the first video that has sound.
+//! mixer (ADR 0105), its device opened with the first video that has sound.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
 
-use engine_audio::output::{Output, OutputConfig};
-use engine_audio::{Audio, AudioConfig};
+use engine_audio::Audio;
 use engine_render::graph::FrameGraph;
 use engine_render::material::{MaterialDesc, MaterialId, MaterialTable, TextureRef};
 use engine_render::texture_pool::{TextureId, TexturePool};
@@ -81,23 +80,16 @@ struct Slot {
     entry: Option<Entry>,
 }
 
-/// The audio engine and its output, for the videos' sound.
-struct Sound {
-    audio: Audio,
-    output: Output,
-}
-
 /// The game's videos (see the module).
 #[derive(Default)]
 pub struct Videos {
     slots: Vec<Slot>,
     free: Vec<u32>,
     converter: Option<Converter>,
-    sound: Option<Sound>,
     /// Videos closed or failed, destroyed once the frames that read them have finished
     /// (the last of them beside).
     retired: Vec<(Box<VideoPlayer>, u64)>,
-    /// Why the audio output could not start, if it could not.
+    /// Why the player has no sound, if it has none.
     sound_error: Option<String>,
 }
 
@@ -260,7 +252,7 @@ impl Videos {
             .flat_map(|entry| entry.events.drain(..))
     }
 
-    /// Why the audio output could not start (the videos then play without sound).
+    /// Why the player has no sound (the videos then play without it).
     pub fn sound_error(&self) -> Option<&str> {
         self.sound_error.as_deref()
     }
@@ -308,29 +300,27 @@ impl Videos {
         frame: u64,
         in_flight: usize,
         dt: f64,
+        sound: &mut crate::sound::Sound,
     ) {
         if self.slots.is_empty() && self.retired.is_empty() {
             return;
         }
         engine_profiler::zone!("app::Videos::update");
+        if self.sound_error.as_deref() != sound.error() {
+            self.sound_error = sound.error().map(str::to_owned);
+        }
         let completed = frame.saturating_sub(in_flight as u64);
         let mut i = 0;
         while i < self.retired.len() {
             if self.retired[i].1 <= completed {
                 let (player, _) = self.retired.swap_remove(i);
-                let audio = self.sound.as_mut().map(|s| &mut s.audio);
                 // SAFETY: the frames that read it have finished; it is this device's.
-                unsafe { (*player).destroy(device, allocator, bindless, audio, completed) };
+                unsafe { (*player).destroy(device, allocator, bindless, sound.live(), completed) };
             } else {
                 i += 1;
             }
         }
-        let latency = self.sound.as_mut().map_or(0.0, |sound| {
-            sound.audio.update();
-            let info = sound.output.info();
-            f64::from(info.queue_frames + info.stream_latency_frames)
-                / f64::from(info.sample_rate.max(1))
-        });
+        let latency = sound.latency();
         for index in 0..self.slots.len() {
             let Some(entry) = self.slots[index].entry.as_mut() else {
                 continue;
@@ -349,12 +339,9 @@ impl Videos {
             }
             if let State::Pending(data, desc) = &entry.state {
                 let (data, desc) = (data.clone(), *desc);
-                if desc.sound && self.sound.is_none() && self.sound_error.is_none() {
-                    let (audio, renderer) = Audio::new(&AudioConfig::default());
-                    match Output::start(renderer, OutputConfig::default()) {
-                        Ok(output) => self.sound = Some(Sound { audio, output }),
-                        Err(e) => self.sound_error = Some(e.to_string()),
-                    }
+                if desc.sound {
+                    // Its sound starts once the device is open.
+                    sound.want_output();
                 }
                 if self.converter.is_none() {
                     match Converter::new(device, bindless) {
@@ -366,7 +353,7 @@ impl Videos {
                     }
                 }
                 let desc = VideoDesc {
-                    sound: desc.sound && self.sound.is_some(),
+                    sound: desc.sound && sound.available(),
                     ..desc
                 };
                 match VideoPlayer::open(device, allocator, bindless, data, &desc, in_flight) {
@@ -413,7 +400,7 @@ impl Videos {
                 frame,
                 in_flight: in_flight as u64,
                 dt,
-                audio: self.sound.as_mut().map(|s| &mut s.audio),
+                audio: sound.live(),
                 latency,
             };
             match player.update(device, allocator, bindless, tick) {
@@ -502,6 +489,7 @@ impl Videos {
         allocator: &mut Allocator,
         bindless: &Bindless,
         frame: u64,
+        mut audio: Option<&mut Audio>,
     ) {
         for slot in &mut self.slots {
             if let Some(Entry {
@@ -513,12 +501,10 @@ impl Videos {
             }
         }
         for (player, _) in self.retired.drain(..) {
-            let audio = self.sound.as_mut().map(|s| &mut s.audio);
             // SAFETY: the device is idle (the caller's contract).
-            unsafe { (*player).destroy(device, allocator, bindless, audio, frame) };
+            unsafe { (*player).destroy(device, allocator, bindless, audio.as_deref_mut(), frame) };
         }
         self.converter = None;
-        self.sound = None;
     }
 }
 

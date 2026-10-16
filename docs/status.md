@@ -8,7 +8,25 @@ Last updated: 2026-10-16.
 
 ## 0. Now (2026-10-16)
 
-- **In progress: save games** (queue item 4, ADR 0104; the owner moved them before audio,
+- **Done: sound in the player** (queue item 4, ADR 0105, `feat/player-audio`).
+  - **Sound is components:**
+    - `AudioSource` plays a file under `sounds/`, as it is or placed at its entity;
+    - `AudioListener` marks who hears (the main camera without one);
+    - `ReverbZone` gives a place a reverb of its own.
+  - **Saves keep every sound's position,** so after a load music and sounds go on from
+    there (`restart_on_load` starts one over).
+  - **Through the world** (the owner, 2026-10-16: both automatic and zones), with the
+    game's physics given by `Game::acoustics`:
+    - walls muffle what is behind them;
+    - the room around the listener sets the reverb from 32 rays.
+  - **One mixer for the player,** the videos' sound included. Its device opens on a
+    thread of its own with the first sound. The world's `Mixer` sets the buses' volumes.
+  - **The mixer:** clips start at an offset, voices say where they are, and streams are
+    sought off the game thread (`PreparedStream`).
+  - **Cost on ref-1:** 17 µs a frame for 1,000 moving sounds, 51 µs with the acoustics.
+  - **Open:** where sound files come from in a release (loose files or the pack: the
+    owner's call); loose files are read meanwhile.
+- **Done: save games** (queue item 4, ADR 0104; the owner moved them before audio,
   2026-10-16, and chose both encodings and integrity by default).
   - **Done, steps 1 and 2** (#244):
     - reflection's strings, lists, optional values and maps;
@@ -22,8 +40,8 @@ Last updated: 2026-10-16.
     - hooks, the level's stable ids (pack version 9), engine components saved;
     - physics in two lines; timers and tweens; a game's own saves;
     - `ofeliaengine save dump` and `save info`, `docs/dev-guide/saves.md`.
-  - **Left, with sound in the player next:**
-    - sound and video positions;
+  - **Left:**
+    - video positions (sound positions done with ADR 0105);
     - thumbnails;
     - GPU buffers saved on request;
     - signing.
@@ -160,14 +178,16 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-16 (after navigation): the technical core about **87 %** done, the
-whole engine (editor, Luau and tooling included) about **58 %** (2026-10-11: 74 % and
-50 %). Done
-since 2026-10-11: custom materials, meshlets, cached and virtual shadows, post effects,
-the player crate, video, colliders made from meshes, localization, the third review's
-P0 and its device memory and Reflex items, the colliders' rules file, input in the
-player, navigation. Left in the core: save games, audio and networking in the player,
-recording on the job system.
+Estimate of 2026-10-16 (after sound in the player): the technical core about **90 %**
+done, the whole engine (editor, Luau and tooling included) about **60 %** (2026-10-11:
+74 % and 50 %). Done since 2026-10-11:
+- custom materials, meshlets, cached and virtual shadows, post effects;
+- the player crate, video, colliders made from meshes, localization;
+- the third review's P0 and its device memory and Reflex items, the colliders' rules
+  file;
+- input, navigation, save games and sound in the player.
+
+Left in the core: networking in the player, recording on the job system.
 
 | Area | State | Where |
 |---|---|---|
@@ -200,6 +220,8 @@ recording on the job system.
 | Networking: encrypted UDP transport with NAT traversal; replication, prediction, lag compensation, co-op example | done | ADRs 0070, 0074 |
 | Assets: glTF, cooking, packs, IoRing streaming; GPU memory budget, texture streaming by GPU feedback, mesh LOD streaming (`engine_streaming`) | done | ADRs 0056, 0057, 0076 |
 | **Video**: AV1 in WebM on the GPUs' video engines (Vulkan Video; rav1d where they cannot), converted into a texture for materials and the UI, Opus sound as the clock; `Videos` in the player | done (packs, HDR, transparency left) | ADR 0100 |
+| **Save games**: everything reflected saved without listing it, binary or text, integrity and a `.bak`; quicksave, quickload, slots and autosave in the player, written behind the frame | done (thumbnails, GPU buffers, signing left) | ADR 0104 |
+| **Sound in the player**: `AudioSource`, `AudioListener` and `ReverbZone` components, positions saved; walls muffling and the room's reverb from rays through the physics world; one mixer for sources and videos | done (sound files in the pack: the owner's call) | ADR 0105 |
 | Audio, text, 2D, basic UI | solid / basic | §11, ADR 0015 |
 | Tests: golden images (FLIP, per vendor), per-pass perf gate, determinism, zero-allocation tests | solid | ADR 0062 |
 | Editor, Luau | skeleton only, by plan | §10, §12 |
@@ -257,9 +279,12 @@ water and impostors stay in §6):
    - ~~Navigation~~ (done 2026-10-16, #243, ADR 0103): Recast and Detour in
      `engine_nav`, baked by the cook by default (pack version 8), the world's `NavMesh`
      resource through `Player::load_navigation`. Later: crowds, obstacles, off-mesh links.
-   - ~~Save games~~ (ADR 0104): steps 1-2 done (#244, `engine_save`), 3-4 (the player,
-     the CLI, the guide) #245. Next: audio in the player, its sources
-     saved from the start.
+   - ~~Save games~~ (done 2026-10-16, ADR 0104): steps 1-2 (#244, `engine_save`), 3-4
+     (the player, the CLI, the guide, #245).
+   - ~~Sound in the player~~ (done 2026-10-16, ADR 0105): sources and the listener as
+     components, saved; occlusion and the room's reverb from the physics world; zones.
+     Left: sound files in the pack (the owner's call).
+   - Next: networking in the player, then the dev guide's quick start.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
     Code can be connected as simply as possible and make games by itself, without

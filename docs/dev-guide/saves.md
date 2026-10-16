@@ -47,6 +47,8 @@ settings.saves.autosave = Some(Autosave { every: Duration::from_secs(300), slots
   - transforms, the camera, lights, renderers, probes;
   - the clock;
   - timers and tweens;
+  - sounds: every `AudioSource` with its position, so music and sounds go on from the
+    same place after a load (`restart_on_load` starts one over instead);
   - physics, through two calls (below).
 - **What you leave out:**
   - `#[reflect(skip)]` on a field or a whole type (caches, effects);
@@ -148,8 +150,7 @@ world.spawn((Timer::repeating(0.5), Tween::new("Transform.translation", &[0.0, 0
 
 ## Not there yet
 
-- **Sound and music** will resume from the same place when sound arrives in the player:
-  each source saves its position.
+- **A video's position:** videos are not components yet.
 - **Thumbnails** for the load menu.
 - **A compute shader's results** are rebuilt after a load: particles spawn again, a fluid
   settles. Marking a GPU buffer to be saved is coming.

@@ -64,6 +64,14 @@ pub trait Game {
         true
     }
 
+    /// The physics world sound travels through (ADR 0105): walls between a placed sound
+    /// and the listener muffle it, and the room around the listener gives the reverb
+    /// (`AudioSettings::acoustics`). With a [`ScenePhysics`](crate::ScenePhysics):
+    /// `Some(self.physics.backend())`. `None` (the default): sound ignores the world.
+    fn acoustics(&self) -> Option<&dyn engine_physics::PhysicsBackend> {
+        None
+    }
+
     /// Every rendered frame, after the ticks: what follows input every frame, outside the
     /// simulation (the player's camera). `alpha` is how far the frame lies between the
     /// last two ticks.

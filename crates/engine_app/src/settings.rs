@@ -134,6 +134,9 @@ pub struct PlayerSettings {
     /// Saves (ADR 0104): the folder, the game's version, the encoding, autosaves. The
     /// world's [`crate::Saves`] resource takes the game's requests.
     pub saves: crate::SaveSettings,
+    /// Sound (ADR 0105): the sounds' folder, the buses, the acoustics. The world's
+    /// [`crate::Mixer`] resource sets the buses' volumes.
+    pub audio: crate::AudioSettings,
 }
 
 impl Default for PlayerSettings {
@@ -171,6 +174,7 @@ impl Default for PlayerSettings {
             languages: None,
             input: None,
             saves: crate::SaveSettings::default(),
+            audio: crate::AudioSettings::default(),
         }
     }
 }
