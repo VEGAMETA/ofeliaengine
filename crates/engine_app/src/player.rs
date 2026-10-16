@@ -992,6 +992,25 @@ impl Player {
         physics.load_pack(&path, &jobs, self.world_mut(), &instances)
     }
 
+    /// The pack's navigation mesh (ADR 0103) as the world's [`engine_nav::NavMesh`]
+    /// resource, for the game's paths: whether the pack has one (none without a pack, or
+    /// cooked without). A game that does not navigate never calls it, and the mesh is not
+    /// read.
+    pub fn load_navigation(&mut self) -> Result<bool, AppError> {
+        let Some(path) = &self.settings.pack else {
+            return Ok(false);
+        };
+        let pack = engine_assets::pack::Pack::open(path).map_err(AppError::at("the pack"))?;
+        let data = engine_assets::navigation::load_navigation(&pack, &self.jobs)
+            .map_err(AppError::at("the pack's navigation mesh"))?;
+        let Some(data) = data else {
+            return Ok(false);
+        };
+        let mesh = engine_nav::NavMesh::new(&data).map_err(AppError::at("the navigation mesh"))?;
+        self.runtime.world.insert_resource(mesh);
+        Ok(true)
+    }
+
     /// The game's world.
     pub fn world_mut(&mut self) -> &mut World {
         &mut self.runtime.world
