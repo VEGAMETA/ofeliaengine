@@ -224,7 +224,7 @@ water and impostors stay in §6):
      collision filters).
 4. **The core's gaps for a game** (audit 3 §4): navigation; save games; audio, input and
    networking in the player; a dev-guide quick start.
-   - ~~Input in the player~~ (done 2026-10-16): `PlayerSettings::input`, an
+   - ~~Input in the player~~ (done 2026-10-16, #242): `PlayerSettings::input`, an
      `engine_input::Input` resource of the world. It reads raw keyboard and mouse input and
      XInput pads, is sampled before every tick and before `present`, and is released when
      the window loses the focus.
