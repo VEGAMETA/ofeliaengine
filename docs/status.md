@@ -49,7 +49,10 @@ Last updated: 2026-10-16.
     UAX #9 is adapted from unicode-bidi to buffers kept between calls (it allocated on every
     call), and all 91,707 of Unicode 16's conformance cases pass. Also font stacks per
     language and a golden image.
-- **Next:** item 9: the editor, Luau and tooling.
+- **Next:** the third review's queue (`docs/research/core-audit-3.md`, 2026-10-16), sent to
+  the owner with three questions; its P0 first: the local lights' shadows cost 150 ns per
+  moving caster per frame (a regression of 6b; CPU-bound at 20,000 movers), with a CPU
+  stage gate so the next one is caught.
 - **Parked:**
   - Leftovers of finished items, listed under them in §5: mesh shaders on the RTX (4,
     step 3), the player's follow-ups (8a), the iGPU's expensive passes (6b), memory (7a).
@@ -1112,9 +1115,10 @@ grown, divide and conquer); the old labels stay in parentheses.
 
 ## 7. First task of a new coordinator session: a fresh-eyes technical review
 
-The second review was done on 2026-10-10: `docs/research/core-audit-2.md`. Its harness
-`engine_app/examples/flight.rs` measures a game's frame end to end; rerun it in later
-reviews to compare.
+The second review was done on 2026-10-10: `docs/research/core-audit-2.md`; the third on
+2026-10-16: `docs/research/core-audit-3.md`. Their harness `engine_app/examples/flight.rs`
+measures a game's frame end to end; rerun it in later reviews to compare (windowed:
+`--window windowed`, people work at ref-1).
 
 **Owner's instruction (2026-10-02): do this review yourself, and start no agents** (no
 `Agent` tool, no subagents, no background workers) until the owner explicitly says agents
