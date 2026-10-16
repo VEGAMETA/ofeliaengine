@@ -8,7 +8,7 @@ Last updated: 2026-10-16.
 
 ## 0. Now (2026-10-16)
 
-- **Done: sound in the player** (queue item 4, ADR 0105, `feat/player-audio`).
+- **Done: sound in the player** (queue item 4, ADR 0105, #246).
   - **Sound is components:**
     - `AudioSource` plays a file under `sounds/`, as it is or placed at its entity;
     - `AudioListener` marks who hears (the main camera without one);
@@ -281,7 +281,7 @@ water and impostors stay in §6):
      resource through `Player::load_navigation`. Later: crowds, obstacles, off-mesh links.
    - ~~Save games~~ (done 2026-10-16, ADR 0104): steps 1-2 (#244, `engine_save`), 3-4
      (the player, the CLI, the guide, #245).
-   - ~~Sound in the player~~ (done 2026-10-16, ADR 0105): sources and the listener as
+   - ~~Sound in the player~~ (done 2026-10-16, #246, ADR 0105): sources and the listener as
      components, saved; occlusion and the room's reverb from the physics world; zones.
      Left: sound files in the pack (the owner's call).
    - Next: networking in the player, then the dev guide's quick start.
