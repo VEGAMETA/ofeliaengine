@@ -10,7 +10,7 @@ use core::fmt;
 use engine_core::jobs::ThreadPool;
 use engine_core::math::{Affine3A, Mat4, Quat, Vec3};
 use engine_dlss::{DlssFrameGeneration, Streamline, StreamlineDesc};
-use engine_ecs::{GlobalTransform, QueryState, World};
+use engine_ecs::{Entity, GlobalTransform, QueryState, World};
 use engine_frame::{
     Antialiasing, FrameContext, FrameGeneration, FrameRenderer, GeneratedTarget, Placement,
     PrepareContext, Quality, RenderDefaults, SceneDraws, SceneInput, UiCanvas, UiRenderer, View,
@@ -84,7 +84,7 @@ impl AppError {
         }
     }
 
-    fn message(what: &'static str, text: String) -> Self {
+    pub(crate) fn message(what: &'static str, text: String) -> Self {
         Self {
             what,
             source: text.into(),
@@ -233,6 +233,8 @@ pub struct SceneInfo {
     /// The bounds of the pack's instances in the world: min and max corners (zero for an
     /// empty scene).
     pub bounds: (Vec3, Vec3),
+    /// The pack's instances' entities, in the pack's order.
+    pub instances: Vec<Entity>,
 }
 
 /// The parts of the player a game sets its world up with, between [`Player::new`] and the
@@ -940,6 +942,21 @@ impl Player {
     /// What the pack's scene holds.
     pub fn scene_info(&self) -> &SceneInfo {
         &self.scene_info
+    }
+
+    /// The pack's bodies in `physics` (ADR 0101): its level geometry static, its props
+    /// moving their instances' entities. Nothing without a pack. A game without physics
+    /// never calls it, and the pack's colliders are not read.
+    pub fn load_physics(
+        &mut self,
+        physics: &mut crate::ScenePhysics,
+    ) -> Result<crate::SceneBodies, AppError> {
+        let Some(path) = self.settings.pack.clone() else {
+            return Ok(crate::SceneBodies::default());
+        };
+        let jobs = Arc::clone(&self.jobs);
+        let instances = self.scene_info.instances.clone();
+        physics.load_pack(&path, &jobs, self.world_mut(), &instances)
     }
 
     /// The game's world.
@@ -2258,6 +2275,7 @@ fn spawn_scene(
     let material_ids = engine_streaming::add_materials(materials, layout, &types, &textures);
     let fallback = materials.default_material();
     let (mut min, mut max) = (Vec3::splat(f32::MAX), Vec3::splat(f32::MIN));
+    let mut instances = Vec::with_capacity(layout.instances.len());
     for instance in &layout.instances {
         let world_from_object = Mat4::from_cols_array(&instance.world_from_object);
         let mesh = &layout.meshes[instance.mesh as usize];
@@ -2274,15 +2292,17 @@ fn spawn_scene(
             min = min.min(c);
             max = max.max(c);
         }
-        world.spawn((
-            GlobalTransform(Affine3A::from_mat4(world_from_object)),
-            MeshRenderer::new(
-                streamer.meshes()[instance.mesh as usize],
-                instance
-                    .material
-                    .map_or(fallback, |i| material_ids[i as usize]),
-            ),
-        ));
+        instances.push(
+            world.spawn((
+                GlobalTransform(Affine3A::from_mat4(world_from_object)),
+                MeshRenderer::new(
+                    streamer.meshes()[instance.mesh as usize],
+                    instance
+                        .material
+                        .map_or(fallback, |i| material_ids[i as usize]),
+                ),
+            )),
+        );
     }
     if layout.instances.is_empty() {
         (min, max) = (Vec3::ZERO, Vec3::ZERO);
@@ -2292,5 +2312,6 @@ fn spawn_scene(
         materials: material_ids,
         textures,
         bounds: (min, max),
+        instances,
     }
 }

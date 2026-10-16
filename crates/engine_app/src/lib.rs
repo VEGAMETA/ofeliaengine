@@ -36,10 +36,15 @@
 //! ([`Videos::texture_index`]); their sound plays through an audio output the player
 //! starts with the first video that has sound.
 //!
+//! Physics (ADR 0101) is the game's: a [`ScenePhysics`] it owns gets the pack's bodies with
+//! [`Player::load_physics`] (level geometry static, props moving the scene's instances) and
+//! is stepped from [`Game::tick`]. A game without physics loads none of the pack's colliders.
+//!
 //! Crash reports are the game's `main`'s to set up (`engine_crash`): its monitor process
 //! runs the same executable.
 
 mod game;
+mod physics;
 mod player;
 mod process;
 mod report;
@@ -47,6 +52,7 @@ mod settings;
 mod videos;
 
 pub use game::{FrameParts, Game};
+pub use physics::{SceneBodies, ScenePhysics};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 pub use report::{FrameReport, Startup, StartupPipelines};
 pub use settings::{PlayerSettings, Window};

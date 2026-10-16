@@ -27,6 +27,11 @@ engine_dlss.workspace = true
 # Videos (ADR 0100): decoding, the conversion pass, the sound through an audio output.
 engine_video.workspace = true
 engine_audio.workspace = true
+# A scene's physics (ADR 0101): the pack's colliders as Jolt bodies the game steps.
+engine_assets.workspace = true
+engine_collision.workspace = true
+engine_physics.workspace = true
+engine_physics_jolt.workspace = true
 
 [dev-dependencies]
 # The flight example: skinned characters (glTF Fox) cooked through the derived data cache,

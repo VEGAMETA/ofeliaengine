@@ -665,6 +665,9 @@ pub trait PhysicsBackend {
 
     /// Advances the simulation by `dt` seconds in `substeps` collision steps.
     fn step(&mut self, dt: f32, substeps: u32) -> Result<(), PhysicsError>;
+    /// Rebuilds the broad phase's tree for the bodies there are: once after adding many
+    /// (a level), so queries and the first steps do not pay for an incremental tree.
+    fn optimize_broad_phase(&mut self) {}
     /// Contact events of the last step, sorted.
     fn contact_events(&self) -> &[ContactEvent];
     /// Counts after the last step.

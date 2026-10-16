@@ -1313,6 +1313,12 @@ impl PhysicsBackend for JoltBackend {
         }
     }
 
+    fn optimize_broad_phase(&mut self) {
+        engine_profiler::zone!("physics::jolt::optimize_broad_phase");
+        // SAFETY: valid system, no step running (&mut self).
+        unsafe { JPH_PhysicsSystem_OptimizeBroadPhase(self.system) };
+    }
+
     fn step(&mut self, dt: f32, substeps: u32) -> Result<(), PhysicsError> {
         engine_profiler::zone!("physics::jolt::step");
         if self.gravity_dirty {
