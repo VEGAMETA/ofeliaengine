@@ -9,7 +9,7 @@ Last updated: 2026-10-17.
 ## 0. Now (2026-10-17)
 
 - **In progress: the editor** (queue item 9). Designed with the owner on 2026-10-17
-  (ADR 0107, ADR 0108; research `docs/research/editor-architecture.md`, UX notes in
+  (#250: ADR 0107, ADR 0108; research `docs/research/editor-architecture.md`, UX notes in
   `docs/research/ux/`). The owner's choices:
   - the whole §12 list, not a first wave only;
   - the editor linked into the game's build behind an `editor` feature; a separate process
