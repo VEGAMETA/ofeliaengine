@@ -1,7 +1,7 @@
 //! The player: a game's process, window, device, presentation, scene and frame loop.
 
 use crate::game::{FrameParts, Game};
-use crate::overlay::{Overlay, OverlayPass};
+use crate::overlay::{Overlay, OverlayOutput, OverlayPass};
 use crate::process::ProcessSetup;
 use crate::report::{FrameReport, Startup, StartupPipelines};
 use crate::settings::{PlayerSettings, Window};
@@ -19,6 +19,7 @@ use engine_frame::{
     ViewCamera, ViewSettings, ViewTarget,
 };
 use engine_latency::{Latency, LatencySettings, Marker, PacedFrame, PacedPresenter, PresentImage};
+use engine_platform::display::{DisplayInfo, DisplayQuery};
 use engine_platform::window::{
     WindowDesc, WindowEventKind, WindowHandle, WindowMode, WindowSystem,
 };
@@ -34,6 +35,7 @@ use engine_render::graph::{
 };
 use engine_render::material::{MaterialId, MaterialTable};
 use engine_render::mesh::{GeometryCapacity, GeometryPool, MeshId};
+use engine_render::post::{Composite, HDR_FORMAT, OutputEncoding, OutputLevels, Tonemap};
 use engine_render::present::PresentTarget;
 use engine_render::rays::{BlasDetail, RayScene, RaySettings};
 use engine_render::reflections::ReflectionProbes;
@@ -45,8 +47,8 @@ use engine_render2d::Canvas;
 use engine_rhi::ash::vk;
 use engine_rhi::{
     AdapterPreference, Allocation, Allocator, Bindless, Device, ExtraQueues, Frames,
-    FullScreenExclusive, Instance, InstanceDesc, MemoryLocation, OutputColor, PresentMode, Surface,
-    Swapchain, SwapchainDesc, VulkanHooks,
+    FullScreenExclusive, HdrMetadata, Instance, InstanceDesc, MemoryLocation, OutputColor,
+    PresentMode, Surface, Swapchain, SwapchainDesc, VulkanHooks,
 };
 use engine_runtime::{
     Camera, CameraView, GiExtract, MeshRenderer, ProbeExtract, ReflectionProbe, Runtime,
@@ -56,6 +58,109 @@ use engine_streaming::{SceneStreamSettings, SceneStreamer};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
+
+/// Peak luminance assumed for an HDR display that reports none: DisplayHDR 400, the
+/// lowest HDR certification.
+const FALLBACK_PEAK_NITS: f32 = 400.0;
+
+/// The output for `display` (ADR 0038): `choice` (an HDR encoding, or SDR to stay in SDR)
+/// while Windows runs the display in HDR, at its SDR white level and peak; SDR otherwise.
+/// Frame generation narrows the choice: FSR's interpolates scRGB, DLSS's is not verified
+/// in HDR yet.
+fn wanted_levels(
+    choice: OutputColor,
+    generation: FrameGeneration,
+    display: Option<&DisplayInfo>,
+) -> OutputLevels {
+    let color = match generation {
+        FrameGeneration::Off => choice,
+        FrameGeneration::Fsr if choice.is_hdr() => OutputColor::ScRgb,
+        _ => OutputColor::Sdr,
+    };
+    match display {
+        Some(d) if d.hdr_enabled && color.is_hdr() => OutputLevels {
+            color,
+            white_nits: d.sdr_white_nits,
+            peak_nits: if d.max_nits > 0.0 {
+                d.max_nits
+            } else {
+                FALLBACK_PEAK_NITS
+            },
+        },
+        _ => OutputLevels::SDR,
+    }
+}
+
+/// What an output of `color` delivers of `wanted`: SDR when it fell back to SDR.
+fn actual_levels(color: OutputColor, wanted: OutputLevels) -> OutputLevels {
+    if color.is_hdr() {
+        OutputLevels { color, ..wanted }
+    } else {
+        OutputLevels::SDR
+    }
+}
+
+/// The output a presentable format holds.
+fn color_of(format: vk::Format) -> OutputColor {
+    match format {
+        vk::Format::R16G16B16A16_SFLOAT => OutputColor::ScRgb,
+        vk::Format::A2B10G10R10_UNORM_PACK32 | vk::Format::A2R10G10B10_UNORM_PACK32 => {
+            OutputColor::Hdr10
+        }
+        _ => OutputColor::Sdr,
+    }
+}
+
+/// The offscreen image's format for an output of `color`.
+fn offscreen_format(color: OutputColor) -> vk::Format {
+    match color {
+        OutputColor::Sdr => vk::Format::R8G8B8A8_SRGB,
+        OutputColor::ScRgb => vk::Format::R16G16B16A16_SFLOAT,
+        OutputColor::Hdr10 => vk::Format::A2B10G10R10_UNORM_PACK32,
+    }
+}
+
+/// What frames are drawn in for an output of `format`: the output itself, or for HDR10 a
+/// linear intermediate, encoded at the end (blending in PQ is not linear).
+fn output_format_for(format: vk::Format, levels: &OutputLevels) -> vk::Format {
+    if levels.color == OutputColor::Hdr10 {
+        HDR_FORMAT
+    } else {
+        format
+    }
+}
+
+/// How the passes that draw the frame (the views' tone map, the UI, overlays) write it:
+/// the output's encoding, or reference white as 1 in HDR10's intermediate.
+fn output_encoding(levels: &OutputLevels) -> OutputEncoding {
+    match levels.color {
+        OutputColor::Hdr10 => OutputEncoding::LINEAR,
+        _ => levels.swapchain_encoding(),
+    }
+}
+
+/// The value white is written as under `encoding` (`Renderer2d::set_white`).
+fn white_of(encoding: OutputEncoding) -> f32 {
+    match encoding {
+        OutputEncoding::Linear { white } => white,
+        OutputEncoding::Pq { .. } => 1.0,
+    }
+}
+
+/// The display's range as HDR metadata: the output is tone mapped for it already.
+fn hdr_metadata(levels: &OutputLevels, display: Option<&DisplayInfo>) -> HdrMetadata {
+    let full_frame = display.map_or(0.0, |d| d.max_full_frame_nits);
+    HdrMetadata {
+        max_nits: levels.peak_nits,
+        min_nits: display.map_or(0.0, |d| d.min_nits),
+        max_content_nits: levels.peak_nits,
+        max_frame_average_nits: if full_frame > 0.0 {
+            full_frame.min(levels.peak_nits)
+        } else {
+            levels.peak_nits
+        },
+    }
+}
 
 /// The depth buffer's format.
 const DEPTH_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
@@ -152,6 +257,8 @@ impl fmt::Debug for UiLayer {
 struct Offscreen {
     width: u32,
     height: u32,
+    /// Bytes a pixel of the image: 4, or 8 for scRGB.
+    pixel: u32,
     /// Host-visible: a captured frame's pixels.
     buffer: vk::Buffer,
     memory: Option<Allocation>,
@@ -162,9 +269,42 @@ struct Offscreen {
 }
 
 impl Offscreen {
-    /// Bytes of a frame: four a pixel.
+    /// Bytes of a frame.
     fn bytes(&self) -> u64 {
-        u64::from(self.width) * u64::from(self.height) * 4
+        u64::from(self.width) * u64::from(self.height) * u64::from(self.pixel)
+    }
+
+    /// Reads back images of `format` from now on: the buffer made again for another
+    /// pixel size. The device must be idle.
+    fn set_format(
+        &mut self,
+        format: vk::Format,
+        allocator: &mut Allocator,
+    ) -> Result<(), AppError> {
+        let pixel = if format == vk::Format::R16G16B16A16_SFLOAT {
+            8
+        } else {
+            4
+        };
+        if pixel == self.pixel {
+            return Ok(());
+        }
+        if let Some(memory) = self.memory.take() {
+            // SAFETY: the device is idle (the caller's word): no copy writes the buffer.
+            unsafe { allocator.destroy_buffer(self.buffer, memory) };
+        }
+        self.pixel = pixel;
+        let (buffer, memory) = allocator
+            .create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(self.bytes())
+                    .usage(vk::BufferUsageFlags::TRANSFER_DST),
+                MemoryLocation::Readback,
+            )
+            .map_err(AppError::at("the offscreen readback"))?;
+        self.buffer = buffer;
+        self.memory = Some(memory);
+        Ok(())
     }
 
     /// The frame's last pass: its image copied into the readback buffer when a capture is
@@ -344,6 +484,9 @@ pub struct Player {
     budget: GpuBudget,
     frames: Frames,
     renderer: FrameRenderer,
+    /// HDR10: encodes the frame drawn in its intermediate into the output. Declared before
+    /// the device, so its pipeline goes first.
+    encode: Option<Tonemap>,
     bindless: Bindless,
     allocator: Allocator,
     // Presentation.
@@ -383,7 +526,21 @@ pub struct Player {
     /// The streaming has settled once since the start: the probes were captured again
     /// with what it brought.
     scene_settled: bool,
-    swapchain_format: vk::Format,
+    /// The format presented (the swapchain's) or captured (the offscreen image's).
+    present_format: vk::Format,
+    /// The format frames are drawn in (the tone mapper's output, the UI's, overlays'):
+    /// the presented one, or HDR10's linear intermediate.
+    output_format: vk::Format,
+    /// How frames reach the display (ADR 0038).
+    levels: OutputLevels,
+    /// The window's display as last reported (or assumed, offscreen).
+    display: Option<DisplayInfo>,
+    /// The display changed since the output last followed it.
+    display_changed: bool,
+    /// Counts the output's changes; overlays learn of them ([`Overlay::output_changed`]).
+    output_generation: u64,
+    /// The output's change the overlay last learned of.
+    overlay_generation: u64,
     presentation: Presentation,
     cache_path: Option<PathBuf>,
     startup: Startup,
@@ -560,30 +717,50 @@ impl Player {
             )),
             None => None,
         };
+        // The window's display: HDR from the first frame while Windows runs it in HDR
+        // (ADR 0038).
+        let display = window
+            .as_ref()
+            .and_then(|w| DisplayQuery::new().window(w.hwnd));
+        let wanted = wanted_levels(settings.hdr, settings.frame_generation, display.as_ref());
         // The renderer draws into the format the swapchain will have (offscreen: 8-bit
         // sRGB, as captures read it).
-        let (swapchain_format, swapchain_desc) = match (&surface, window) {
+        let (present, swapchain_desc) = match (&surface, window) {
             (Some(surface), Some(window)) => {
-                let desc = SwapchainDesc {
+                let mut desc = SwapchainDesc {
                     present_mode: if settings.vsync {
                         PresentMode::Fifo
                     } else {
                         PresentMode::Immediate
                     },
                     srgb: true,
-                    color: OutputColor::Sdr,
+                    color: wanted.color,
                     // Reflex's swapchain only when latency control is on: off, it costs
                     // nothing.
                     low_latency: settings.low_latency != engine_latency::LowLatency::Off,
                     full_screen_exclusive: full_screen_choice(settings.window, window.hwnd),
                     ..SwapchainDesc::default()
                 };
-                let format = Swapchain::format_for(&device, surface, &desc)
+                let mut format = Swapchain::format_for(&device, surface, &desc)
                     .map_err(AppError::at("the swapchain's format"))?;
+                // Frame generation draws the output itself: HDR10 (a fallback for a
+                // surface without scRGB) would blend the UI in PQ, so SDR instead.
+                if settings.frame_generation != FrameGeneration::Off
+                    && color_of(format) == OutputColor::Hdr10
+                {
+                    desc.color = OutputColor::Sdr;
+                    format = Swapchain::format_for(&device, surface, &desc)
+                        .map_err(AppError::at("the swapchain's format"))?;
+                }
                 (format, Some(desc))
             }
             _ => (vk::Format::R8G8B8A8_SRGB, None),
         };
+        let levels = match &swapchain_desc {
+            Some(_) => actual_levels(color_of(present), wanted),
+            None => OutputLevels::SDR,
+        };
+        let output = output_format_for(present, &levels);
         let device = Arc::new(device);
         let pending_swapchain = match (&surface, swapchain_desc) {
             (Some(surface), Some(swapchain_desc)) => {
@@ -630,7 +807,7 @@ impl Player {
         let mut renderer = FrameRenderer::new(
             &device,
             &bindless,
-            swapchain_format,
+            output,
             DEPTH_FORMAT,
             ShadowSettings::default(),
             in_flight,
@@ -848,6 +1025,7 @@ impl Player {
                 Some(Offscreen {
                     width,
                     height,
+                    pixel: 4,
                     buffer,
                     memory: Some(memory),
                     requested: false,
@@ -910,7 +1088,14 @@ impl Player {
             gi_converged: false,
             scene_ready: false,
             scene_settled: false,
-            swapchain_format,
+            present_format: present,
+            output_format: output,
+            levels: OutputLevels::SDR,
+            display,
+            display_changed: false,
+            encode: None,
+            output_generation: 0,
+            overlay_generation: 0,
             presentation: Presentation {
                 present_mode: PresentMode::Fifo,
                 across_adapters: false,
@@ -946,6 +1131,9 @@ impl Player {
                 play_ms: 0,
             },
         };
+        // The levels the swapchain was made for: the views' encoding and peak, the UI's
+        // white, HDR10's encode pass and the display's metadata.
+        player.apply_levels(levels)?;
         player.start_presentation()?;
         if let Some(scene) = &settings.scene {
             player.load_scene(scene)?;
@@ -1188,13 +1376,14 @@ impl Player {
     /// When the UI renderer cannot be made.
     pub fn ui_mut(&mut self) -> Result<&mut UiLayer, AppError> {
         if self.ui.is_none() {
-            let renderer = UiRenderer::new(
+            let mut renderer = UiRenderer::new(
                 &self.device,
                 &mut self.allocator,
                 &self.bindless,
-                self.swapchain_format,
+                self.output_format,
             )
             .map_err(AppError::at("the UI renderer"))?;
+            renderer.set_white(white_of(output_encoding(&self.levels)));
             self.ui = Some(UiLayer {
                 renderer,
                 canvases: Vec::new(),
@@ -1371,8 +1560,11 @@ impl Player {
     }
 
     /// Runs one frame like [`Self::frame`] and returns its image once the GPU has finished
-    /// it: 8-bit sRGB RGBA, rows top to bottom. Offscreen players only
-    /// ([`Window::Offscreen`]); `None` when the frame rendered nothing.
+    /// it, rows top to bottom: 8-bit sRGB RGBA; for an HDR output
+    /// ([`Self::assume_display`], [`Self::levels`]) scRGB as four little-endian half
+    /// floats a pixel, or HDR10 as `A2B10G10R10` (PQ, BT.2020) in one little-endian `u32`.
+    /// Offscreen players only ([`Window::Offscreen`]); `None` when the frame rendered
+    /// nothing.
     ///
     /// # Errors
     ///
@@ -1488,7 +1680,45 @@ impl Player {
     /// The format the frame is drawn in (the swapchain's, or the offscreen image's): what
     /// an overlay's pipelines write.
     pub fn output_format(&self) -> vk::Format {
-        self.swapchain_format
+        self.output_format
+    }
+
+    /// How frames reach the display (ADR 0038): SDR, or HDR at the display's SDR white
+    /// level and peak.
+    pub fn levels(&self) -> OutputLevels {
+        self.levels
+    }
+
+    /// What overlays draw into: the format, UI white and levels ([`Overlay`]).
+    pub fn output(&self) -> OverlayOutput {
+        OverlayOutput {
+            format: self.output_format,
+            white: white_of(output_encoding(&self.levels)),
+            levels: self.levels,
+        }
+    }
+
+    /// The window's display as last reported (or as [`Self::assume_display`] set it).
+    pub fn display(&self) -> Option<DisplayInfo> {
+        self.display
+    }
+
+    /// The output while the display runs in HDR, from the next frame on (a game's HDR
+    /// setting; [`PlayerSettings::hdr`]): scRGB, HDR10, or `OutputColor::Sdr` to stay in
+    /// SDR.
+    pub fn set_hdr(&mut self, hdr: OutputColor) {
+        if self.settings.hdr != hdr {
+            self.settings.hdr = hdr;
+            self.display_changed = true;
+        }
+    }
+
+    /// Draws for `display` from the next frame on, as if the window were on it (an
+    /// offscreen player's HDR, for tests): the output follows it as it follows a window's
+    /// display. A windowed player's next display report replaces it.
+    pub fn assume_display(&mut self, display: DisplayInfo) {
+        self.display = Some(display);
+        self.display_changed = true;
     }
 
     /// [`Self::frame`], with `overlay` drawing over the finished frame before it is
@@ -1508,11 +1738,13 @@ impl Player {
         // The window's events: the game sees them all; the player keeps the size and
         // whether to close.
         {
-            let (closing, resized, minimized, client) = (
+            let (closing, resized, minimized, client, display, display_changed) = (
                 &mut self.closing,
                 &mut self.resized,
                 &mut self.minimized,
                 &mut self.client,
+                &mut self.display,
+                &mut self.display_changed,
             );
             let mut focus_lost = false;
             if let Some(windows) = &mut self.windows {
@@ -1526,6 +1758,10 @@ impl Player {
                         }
                         WindowEventKind::Minimized => *minimized = true,
                         WindowEventKind::Focused(false) => focus_lost = true,
+                        WindowEventKind::Display(info) => {
+                            *display = Some(info);
+                            *display_changed = true;
+                        }
                         _ => {}
                     }
                     game.event(&event);
@@ -1549,6 +1785,19 @@ impl Player {
         if core::mem::take(&mut self.resized) && self.needs_new_swapchain() {
             self.recreate_presentation()?;
             return Ok(None);
+        }
+        // The display changed (HDR on or off, the SDR white level, another monitor): the
+        // output follows it before this frame is drawn (ADR 0038).
+        if core::mem::take(&mut self.display_changed) {
+            self.follow_display()?;
+        }
+        if self.overlay_generation != self.output_generation
+            && let Some(overlay) = overlay.as_mut()
+        {
+            self.wait_idle()?;
+            let output = self.output();
+            overlay.output_changed(&mut self.setup(), &output)?;
+            self.overlay_generation = self.output_generation;
         }
         // A live `loc/` folder: its new tables between two frames.
         if let Some(live) = &mut self.text
@@ -2023,7 +2272,7 @@ impl Player {
                         None,
                         Some(fg.create_texture(
                             "offscreen frame",
-                            TextureDesc::new_2d(self.swapchain_format, extent.width, extent.height),
+                            TextureDesc::new_2d(self.present_format, extent.width, extent.height),
                         )),
                     ),
                     (None, None, None) => {
@@ -2033,11 +2282,20 @@ impl Player {
                         ));
                     }
                 };
-            let target = match (&present, &generated, offscreen_target) {
+            let output = match (&present, &generated, offscreen_target) {
                 (Some(present), _, _) => present.texture,
                 (None, Some((real, _)), _) => *real,
                 (None, None, Some(image)) => image,
                 (None, None, None) => unreachable!("one of them presents"),
+            };
+            // HDR10: the frame is drawn linear in an intermediate, encoded into the output
+            // after the UI and the overlay (ADR 0038).
+            let target = match &self.encode {
+                Some(_) => fg.create_texture(
+                    "hdr10 frame",
+                    TextureDesc::new_2d(HDR_FORMAT, extent.width, extent.height),
+                ),
+                None => output,
             };
             let mut context = FrameContext {
                 device: &self.device,
@@ -2104,7 +2362,7 @@ impl Player {
             let ui_target = (self.dlss.is_some() && !layer.is_empty()).then(|| {
                 let texture = fg.create_texture(
                     "ui layer",
-                    TextureDesc::new_2d(self.swapchain_format, extent.width, extent.height),
+                    TextureDesc::new_2d(self.output_format, extent.width, extent.height),
                 );
                 fg.add_pass("ui layer clear")
                     .write(texture, Access::TransferWrite)
@@ -2169,6 +2427,19 @@ impl Player {
                     extent,
                 })?;
             }
+            if let Some(encode) = &self.encode {
+                encode.add_composite_pass(
+                    &mut fg,
+                    &self.bindless,
+                    target,
+                    output,
+                    Composite {
+                        tonemap: false,
+                        encoding: self.levels.swapchain_encoding(),
+                        ..Composite::default()
+                    },
+                );
+            }
             let backbuffer = present.as_ref().map(PresentTarget::swapchain_texture);
             if let Some(present) = present {
                 present.finish(&mut fg);
@@ -2192,7 +2463,8 @@ impl Player {
                 generation.add_pass(&mut fg, input, id);
             }
             generated_shown = view_frame.generated.is_some_and(|g| g.shown);
-            if let (Some(image), Some(offscreen)) = (offscreen_target, &mut self.offscreen) {
+            if let (Some(_), Some(offscreen)) = (offscreen_target, &mut self.offscreen) {
+                let image = output;
                 offscreen.add_pass(&mut fg, image, frame.number);
             }
             if let Some(feedback) = &mut self.feedback {
@@ -2430,6 +2702,13 @@ impl Player {
     /// Makes the swapchain anew for the window's size (after a resize, out-of-date or
     /// the monitor lost), with its frame generation and latency control.
     fn recreate_presentation(&mut self) -> Result<(), AppError> {
+        self.rebuild_presentation(None)
+    }
+
+    /// [`Self::recreate_presentation`], for the output `wanted` when given (HDR turned on
+    /// or off): the swapchain's color, and the display's metadata stated before a paced
+    /// presenter takes the swapchain.
+    fn rebuild_presentation(&mut self, wanted: Option<OutputLevels>) -> Result<(), AppError> {
         self.wait_idle()?;
         self.latency = None;
         if let Some(paced) = self.paced.take() {
@@ -2441,9 +2720,40 @@ impl Player {
         }
         if let (Some(swapchain), Some(surface)) = (&mut self.swapchain, &self.surface) {
             let extent = swapchain.extent();
-            swapchain
-                .recreate(&self.device, surface, extent.width, extent.height)
-                .map_err(AppError::at("the swapchain"))?;
+            match wanted {
+                Some(levels) => {
+                    swapchain
+                        .recreate_with_color(
+                            &self.device,
+                            surface,
+                            extent.width,
+                            extent.height,
+                            levels.color,
+                        )
+                        .map_err(AppError::at("the swapchain"))?;
+                    // Frame generation draws the output itself: not HDR10 (see `new`).
+                    if self.settings.frame_generation != FrameGeneration::Off
+                        && swapchain.color() == OutputColor::Hdr10
+                    {
+                        swapchain
+                            .recreate_with_color(
+                                &self.device,
+                                surface,
+                                extent.width,
+                                extent.height,
+                                OutputColor::Sdr,
+                            )
+                            .map_err(AppError::at("the swapchain"))?;
+                    }
+                    if swapchain.color().is_hdr() {
+                        swapchain.set_hdr_metadata(&hdr_metadata(&levels, self.display.as_ref()));
+                    }
+                }
+                None => swapchain
+                    .recreate(&self.device, surface, extent.width, extent.height)
+                    .map_err(AppError::at("the swapchain"))?,
+            }
+            self.present_format = swapchain.format();
             log::info!(
                 target: "engine_app::present",
                 "swapchain made anew: {}×{}, holds the monitor: {}, refused: {:?}",
@@ -2454,6 +2764,99 @@ impl Player {
             );
         }
         self.start_presentation()
+    }
+
+    /// Makes the output follow the display (ADR 0038): the swapchain made again when HDR
+    /// turned on or off, the levels (white, peak) applied either way.
+    fn follow_display(&mut self) -> Result<(), AppError> {
+        let wanted = wanted_levels(
+            self.settings.hdr,
+            self.settings.frame_generation,
+            self.display.as_ref(),
+        );
+        let color = if self.offscreen.is_some() {
+            wanted.color
+        } else {
+            if wanted.color != color_of(self.present_format) && self.surface.is_some() {
+                self.rebuild_presentation(Some(wanted))?;
+            }
+            color_of(self.present_format)
+        };
+        self.apply_levels(actual_levels(color, wanted))
+    }
+
+    /// Applies `levels` (ADR 0038): the formats drawn in and presented (the tone mapper,
+    /// the UI and the offscreen readback made for them), the views' encoding and peak, UI
+    /// white, HDR10's encode pass, the display's metadata. Overlays learn of a change
+    /// before their next frame.
+    fn apply_levels(&mut self, levels: OutputLevels) -> Result<(), AppError> {
+        let present = match &self.offscreen {
+            Some(_) => offscreen_format(levels.color),
+            None => self.present_format,
+        };
+        let output = output_format_for(present, &levels);
+        let encoding = output_encoding(&levels);
+        let present_changed = present != self.present_format;
+        if output != self.output_format || present_changed {
+            self.wait_idle()?;
+            // SAFETY: the device is idle: nothing uses the old pipelines any more.
+            unsafe {
+                self.renderer.set_output_format(
+                    &self.device,
+                    &mut self.allocator,
+                    &self.bindless,
+                    output,
+                )
+            }
+            .map_err(AppError::at("the tone mapper"))?;
+            if let Some(mut ui) = self.ui.take() {
+                // SAFETY: the device is idle.
+                unsafe { ui.renderer.destroy(&mut self.allocator) };
+                let renderer =
+                    UiRenderer::new(&self.device, &mut self.allocator, &self.bindless, output)
+                        .map_err(AppError::at("the UI renderer"))?;
+                self.ui = Some(UiLayer {
+                    renderer,
+                    canvases: ui.canvases,
+                });
+            }
+            if let Some(offscreen) = &mut self.offscreen {
+                offscreen.set_format(present, &mut self.allocator)?;
+            }
+            self.present_format = present;
+            self.output_format = output;
+        }
+        self.encode = match (levels.color, self.encode.take()) {
+            (OutputColor::Hdr10, Some(encode)) if !present_changed => Some(encode),
+            (OutputColor::Hdr10, _) => Some(
+                Tonemap::new(&self.device, &self.bindless, present)
+                    .map_err(AppError::at("the HDR10 encode pass"))?,
+            ),
+            _ => None,
+        };
+        if let Some(ui) = &mut self.ui {
+            ui.renderer.set_white(white_of(encoding));
+        }
+        let base = self.cameras.base_mut();
+        base.peak = levels.peak();
+        base.encoding = encoding;
+        if levels.color.is_hdr()
+            && let Some(swapchain) = &mut self.swapchain
+        {
+            swapchain.set_hdr_metadata(&hdr_metadata(&levels, self.display.as_ref()));
+        }
+        if levels != self.levels {
+            log::info!(
+                target: "engine_app::present",
+                "output: {:?}, reference white {:.0} nits, peak {:.0} nits",
+                levels.color,
+                levels.white_nits,
+                levels.peak_nits
+            );
+            self.output_generation += 1;
+        }
+        self.levels = levels;
+        Ok(())
     }
 }
 

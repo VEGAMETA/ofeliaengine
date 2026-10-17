@@ -6,7 +6,7 @@ use engine_render::ao::AoSettings;
 use engine_render::forward::{ContactShadowSettings, LocalShadowSettings};
 use engine_render::gi::GiSettings;
 use engine_render::reflections::{ProbeSettings, SsrSettings};
-use engine_rhi::AdapterPreference;
+use engine_rhi::{AdapterPreference, OutputColor};
 use std::path::PathBuf;
 
 /// How the game's window shows (ADR 0099).
@@ -65,6 +65,12 @@ pub struct PlayerSettings {
     pub validation: Option<bool>,
     /// Wait for the display's refresh (FIFO) instead of presenting at once.
     pub vsync: bool,
+    /// The output while Windows runs the window's display in HDR (ADR 0038): scRGB (the
+    /// default), HDR10, or `OutputColor::Sdr` to stay in SDR. The player follows the
+    /// display: HDR turned on or off, the SDR white level, another monitor. A display in
+    /// SDR always gets SDR. With FSR frame generation the output is scRGB or SDR; with
+    /// DLSS frame generation, SDR (not verified in HDR yet).
+    pub hdr: OutputColor,
     /// Latency reduction (Reflex, Anti-Lag 2 or the engine's own; ADR 0023).
     pub low_latency: LowLatency,
     /// At most this many real frames a second (frame generation shows twice as many).
@@ -161,6 +167,7 @@ impl Default for PlayerSettings {
             adapter: AdapterPreference::HighPerformance,
             validation: None,
             vsync: false,
+            hdr: OutputColor::ScRgb,
             low_latency: LowLatency::On,
             fps_limit: None,
             frames_in_flight: 2,

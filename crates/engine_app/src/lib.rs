@@ -77,6 +77,9 @@ mod videos;
 pub use assets::{Alpha, Assets, MaterialFile, Model, builtin};
 /// Networking's replication (ADR 0074): the schema, `Replicated`, lag compensation.
 pub use engine_net as netcode;
+pub use engine_platform::display::DisplayInfo;
+pub use engine_render::post::OutputLevels;
+pub use engine_rhi::OutputColor;
 /// Saves (ADR 0104): everything a game's own saves need (`capture`, `write_save`,
 /// `read_save`, `apply_with`).
 pub use engine_save as save;
@@ -90,7 +93,7 @@ pub use net::{
     HitCapsule, HostOptions, NetConfig, NetEvent, NetInput, NetState, Network, PlayerId, Predicted,
     SubTick, To,
 };
-pub use overlay::{Overlay, OverlayPass};
+pub use overlay::{Overlay, OverlayOutput, OverlayPass};
 pub use physics::{SceneBodies, ScenePhysics};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 pub use report::{FrameReport, Startup, StartupPipelines};
