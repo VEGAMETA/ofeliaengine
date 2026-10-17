@@ -51,7 +51,7 @@ Last updated: 2026-10-17.
       grid; position 0.1, scale 0.1, rotation 45°;
     - commands with shortcuts: undo, redo, save, delete, duplicate, add;
     - the scene saved under its own id; `*` on the tab while unsaved.
-  - **HDR output in the player** (PR in flight, ADR 0038 "In the player"): scRGB by
+  - **HDR output in the player** (#255, ADR 0038 "In the player"): scRGB by
     default while Windows runs the display in HDR, HDR10 or SDR by setting; follows the
     display at run time; the editor's panels at the SDR white level. Tested offscreen
     (`assume_display`); not yet seen on an HDR display (ref-1's runs in SDR).
