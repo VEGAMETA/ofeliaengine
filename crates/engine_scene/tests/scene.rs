@@ -76,7 +76,7 @@ fn exact_text_of_a_small_scene() {
     let mut out = String::new();
     assert_eq!(save(&mut w, &registry(), &mut out).unwrap(), 2);
     let expected = "\
-[scene version=1]
+[scene version=2]
 
 [entity 00000000000000000000000000000002]
 Marker = {}

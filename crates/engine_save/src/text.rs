@@ -50,12 +50,13 @@ use crate::SaveError;
 use crate::body::{
     BODY_VERSION, LoadedEntity, LoadedKey, LoadedSave, LoadedType, LoadedValue, TextLine, ValueData,
 };
-use crate::schema::{Node, is_entity, vector_like};
+use crate::schema::{Node, vector_like};
 use crate::value::read_prim;
 use crate::wire::Reader;
 use engine_ecs::Entity;
-use engine_reflect::{Attrs, Primitive, TypeInfo, TypeKind, Value};
+use engine_reflect::{Primitive, TypeInfo, Value};
 use engine_scene::SceneId;
+use engine_scene::text::{self, ReadRefs, component_of, quote, split_assignment};
 use std::collections::HashMap;
 use std::fmt::Write as _;
 
@@ -365,107 +366,6 @@ fn prim_text(p: Primitive, v: Value) -> String {
     }
 }
 
-fn quote(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => {
-                let _ = write!(out, "\\u{{{:x}}}", c as u32);
-            }
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
-}
-
-fn unquote(text: &str) -> Result<String, String> {
-    let inner = text
-        .strip_prefix('"')
-        .and_then(|t| t.strip_suffix('"'))
-        .ok_or_else(|| format!("expected a \"string\", found `{text}`"))?;
-    let mut out = String::with_capacity(inner.len());
-    let mut chars = inner.chars();
-    while let Some(c) = chars.next() {
-        if c != '\\' {
-            out.push(c);
-            continue;
-        }
-        match chars.next() {
-            Some('"') => out.push('"'),
-            Some('\\') => out.push('\\'),
-            Some('n') => out.push('\n'),
-            Some('r') => out.push('\r'),
-            Some('t') => out.push('\t'),
-            Some('u') => {
-                let rest: String = chars.by_ref().take_while(|&c| c != '}').collect();
-                let code = rest
-                    .strip_prefix('{')
-                    .and_then(|h| u32::from_str_radix(h, 16).ok())
-                    .and_then(char::from_u32)
-                    .ok_or_else(|| format!("a bad \\u{{…}} escape in `{text}`"))?;
-                out.push(code);
-            }
-            _ => return Err(format!("a bad escape in `{text}`")),
-        }
-    }
-    Ok(out)
-}
-
-/// The first `=` outside a string: a line's path and value.
-fn split_assignment(line: &str) -> Option<(&str, &str)> {
-    let mut in_str = false;
-    let mut escaped = false;
-    for (i, c) in line.char_indices() {
-        match c {
-            _ if escaped => escaped = false,
-            '\\' if in_str => escaped = true,
-            '"' => in_str = !in_str,
-            '=' if !in_str => return Some((line[..i].trim(), line[i + 1..].trim())),
-            _ => {}
-        }
-    }
-    None
-}
-
-/// Splits `a, (b, c), "d, e"` at its top-level commas.
-fn split_items(inner: &str) -> Vec<&str> {
-    let mut items = Vec::new();
-    let (mut depth, mut in_str, mut escaped, mut start) = (0i32, false, false, 0);
-    for (i, c) in inner.char_indices() {
-        match c {
-            _ if escaped => escaped = false,
-            '\\' if in_str => escaped = true,
-            '"' => in_str = !in_str,
-            '(' | '[' | '{' if !in_str => depth += 1,
-            ')' | ']' | '}' if !in_str => depth -= 1,
-            ',' if !in_str && depth == 0 => {
-                items.push(inner[start..i].trim());
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    let last = inner[start..].trim();
-    if !last.is_empty() {
-        items.push(last);
-    }
-    items
-}
-
-/// The head of a component's path: its name, then the rest without the dot.
-fn component_of(path: &str) -> (&str, &str) {
-    let end = path.find(['.', '[']).unwrap_or(path.len());
-    let rest = &path[end..];
-    (&path[..end], rest.strip_prefix('.').unwrap_or(rest))
-}
-
 /// Reads a text body.
 pub(crate) fn read_text(text: &str) -> Result<LoadedSave, SaveError> {
     engine_profiler::zone!("save::read_text");
@@ -668,54 +568,14 @@ pub(crate) fn read_text(text: &str) -> Result<LoadedSave, SaveError> {
     Ok(save)
 }
 
-/// A step of a text path.
-enum Seg<'a> {
-    Name(&'a str),
-    Key(&'a str),
-}
+/// Entities named by a save's labels.
+struct Labels<'a>(&'a dyn Fn(&str) -> Option<Entity>);
 
-fn segments(path: &str) -> Result<Vec<Seg<'_>>, String> {
-    let mut out = Vec::new();
-    let mut rest = path;
-    while !rest.is_empty() {
-        if let Some(r) = rest.strip_prefix('.') {
-            rest = r;
-        } else if let Some(r) = rest.strip_prefix('[') {
-            // The key ends at the first `]` outside a string.
-            let (mut in_str, mut escaped) = (false, false);
-            let end = r
-                .char_indices()
-                .find(|&(_, c)| match c {
-                    _ if escaped => {
-                        escaped = false;
-                        false
-                    }
-                    '\\' if in_str => {
-                        escaped = true;
-                        false
-                    }
-                    '"' => {
-                        in_str = !in_str;
-                        false
-                    }
-                    ']' => !in_str,
-                    _ => false,
-                })
-                .map(|(i, _)| i)
-                .ok_or_else(|| format!("an unclosed `[` in `{path}`"))?;
-            out.push(Seg::Key(&r[..end]));
-            rest = &r[end + 1..];
-        } else {
-            let end = rest.find(['.', '[']).unwrap_or(rest.len());
-            out.push(Seg::Name(&rest[..end]));
-            rest = &rest[end..];
-        }
+impl ReadRefs for Labels<'_> {
+    fn entity(&mut self, label: &str) -> Result<Entity, String> {
+        (self.0)(label).ok_or_else(|| format!("no entity `{label}` in the save"))
     }
-    Ok(out)
 }
-
-/// Lists grown by a line's index stop here: a typo must not allocate gigabytes.
-const MAX_TEXT_LIST_BYTES: usize = 256 << 20;
 
 /// Reads text lines into the value at `ptr` of the current type `info`.
 ///
@@ -729,14 +589,16 @@ pub(crate) unsafe fn apply_lines(
     label: &dyn Fn(&str) -> Option<Entity>,
     notes: &mut Vec<String>,
 ) -> Result<(), SaveError> {
+    let mut refs = Labels(label);
+    let mut segs = Vec::new();
     for line in lines {
         let fail = |message: String| SaveError::Text {
             line: line.line,
             message,
         };
-        let segs = segments(&line.path).map_err(fail)?;
+        text::segments_into(&line.path, &mut segs).map_err(fail)?;
         // SAFETY: as the caller guarantees; each step stays inside the value it names.
-        let target = unsafe { resolve(&segs, info, ptr, label) }.map_err(fail)?;
+        let target = unsafe { text::resolve(&segs, info, ptr, &mut refs) }.map_err(fail)?;
         let Some((ty, attrs, at)) = target else {
             if notes.len() < 64 {
                 notes.push(format!(
@@ -747,276 +609,7 @@ pub(crate) unsafe fn apply_lines(
             continue;
         };
         // SAFETY: `at` is a valid, writable value of `ty`.
-        unsafe { set_text(ty, &attrs, at, &line.value, label) }.map_err(fail)?;
+        unsafe { text::set_text(ty, &attrs, at, &line.value, &mut refs) }.map_err(fail)?;
     }
     Ok(())
-}
-
-/// Follows a path into a value; `None` when a field is gone.
-///
-/// # Safety
-///
-/// `ptr` points to a valid, writable value of `ty`.
-unsafe fn resolve(
-    segs: &[Seg<'_>],
-    mut ty: &'static TypeInfo,
-    mut ptr: *mut u8,
-    label: &dyn Fn(&str) -> Option<Entity>,
-) -> Result<Option<(&'static TypeInfo, Attrs, *mut u8)>, String> {
-    let mut attrs = ty.attrs;
-    for seg in segs {
-        // SAFETY: for the block, every step stays inside the value its description lays
-        // out; containers are changed through their own functions.
-        unsafe {
-            // An optional value's fields are its value's.
-            while let TypeKind::Option(option) = ty.kind {
-                ptr = (option.set)(ptr, true);
-                ty = option.inner;
-            }
-            match (seg, &ty.kind) {
-                (Seg::Name(name), TypeKind::Struct(fields)) => {
-                    let Some(f) = fields.iter().find(|f| f.name == *name && !f.attrs.skip) else {
-                        return Ok(None);
-                    };
-                    ptr = ptr.add(f.offset);
-                    ty = f.ty;
-                    attrs = f.attrs;
-                }
-                (Seg::Name(index), &TypeKind::Array { element, len }) => {
-                    let i: usize = index
-                        .parse()
-                        .ok()
-                        .filter(|&i| i < len)
-                        .ok_or_else(|| format!("`{index}` is not an index below {len}"))?;
-                    ptr = ptr.add(i * element.size);
-                    ty = element;
-                    attrs = element.attrs;
-                }
-                (Seg::Name(index), TypeKind::List(list)) => {
-                    let i: usize = index
-                        .parse()
-                        .ok()
-                        .filter(|&i: &usize| {
-                            i.saturating_mul(list.element.size.max(1)) < MAX_TEXT_LIST_BYTES
-                        })
-                        .ok_or_else(|| format!("`{index}` is not a list index"))?;
-                    if i >= (list.len)(ptr) {
-                        (list.resize)(ptr, i + 1);
-                    }
-                    ptr = (list.items_mut)(ptr).add(i * list.element.size);
-                    ty = list.element;
-                    attrs = ty.attrs;
-                }
-                (Seg::Key(key), TypeKind::Map(map)) => {
-                    let mut bad = None;
-                    let slot = (map.insert)(ptr, &mut |k| match set_text(
-                        map.key,
-                        &map.key.attrs,
-                        k,
-                        key,
-                        label,
-                    ) {
-                        Ok(()) => true,
-                        Err(e) => {
-                            bad = Some(e);
-                            false
-                        }
-                    });
-                    if let Some(e) = bad {
-                        return Err(e);
-                    }
-                    ptr = slot;
-                    ty = map.value;
-                    attrs = ty.attrs;
-                }
-                (Seg::Name(name), _) => {
-                    return Err(format!("`{name}` is not a part of `{}`", ty.name));
-                }
-                (Seg::Key(key), _) => {
-                    return Err(format!("`[{key}]`: `{}` is not a map", ty.name));
-                }
-            }
-        }
-    }
-    Ok(Some((ty, attrs, ptr)))
-}
-
-/// Whether a current struct is written as a tuple.
-fn vector_fields(ty: &TypeInfo) -> Option<&'static [engine_reflect::Field]> {
-    let TypeKind::Struct(fields) = ty.kind else {
-        return None;
-    };
-    let ok = !fields.is_empty()
-        && fields.len() <= 4
-        && fields
-            .iter()
-            .zip(["x", "y", "z", "w"])
-            .all(|(f, n)| f.name == n && matches!(f.ty.kind, TypeKind::Primitive(Primitive::F32)));
-    ok.then_some(fields)
-}
-
-/// Writes a line's value text into the value at `ptr` of type `ty`.
-///
-/// # Safety
-///
-/// `ptr` points to a valid, writable value of `ty`.
-unsafe fn set_text(
-    ty: &'static TypeInfo,
-    attrs: &Attrs,
-    ptr: *mut u8,
-    text: &str,
-    label: &dyn Fn(&str) -> Option<Entity>,
-) -> Result<(), String> {
-    // SAFETY: for the block, as the caller guarantees; containers are changed through
-    // their own functions, elements written inside their storage.
-    unsafe {
-        if is_entity(ty) {
-            let e = match text {
-                "@none" => Entity::NULL,
-                t => {
-                    let l = t
-                        .strip_prefix('@')
-                        .ok_or_else(|| format!("`{t}` is not an entity (`@…`)"))?;
-                    label(l).ok_or_else(|| format!("no entity `{l}` in the save"))?
-                }
-            };
-            ptr.cast::<Entity>().write_unaligned(e);
-            return Ok(());
-        }
-        if let Some(fields) = vector_fields(ty) {
-            let items = text
-                .strip_prefix('(')
-                .and_then(|t| t.strip_suffix(')'))
-                .map(split_items)
-                .ok_or_else(|| format!("expected `(…)`, found `{text}`"))?;
-            if items.len() != fields.len() {
-                return Err(format!(
-                    "expected {} numbers, found {}",
-                    fields.len(),
-                    items.len()
-                ));
-            }
-            for (f, item) in fields.iter().zip(items) {
-                set_text(f.ty, &f.attrs, ptr.add(f.offset), item, label)?;
-            }
-            return Ok(());
-        }
-        match ty.kind {
-            TypeKind::Option(option) => match text {
-                "none" => {
-                    (option.set)(ptr, false);
-                }
-                "some" => {
-                    (option.set)(ptr, true);
-                }
-                other => {
-                    let inner = (option.set)(ptr, true);
-                    set_text(option.inner, &option.inner.attrs, inner, other, label)?;
-                }
-            },
-            TypeKind::Primitive(p) => {
-                let value = match p {
-                    Primitive::Bool => match text {
-                        "true" => Value::Bool(true),
-                        "false" => Value::Bool(false),
-                        _ => return Err(format!("expected true or false, found `{text}`")),
-                    },
-                    Primitive::F32 | Primitive::F64 => Value::Float(
-                        text.parse()
-                            .map_err(|_| format!("`{text}` is not a number"))?,
-                    ),
-                    Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64 => {
-                        Value::UInt(
-                            text.parse()
-                                .map_err(|_| format!("`{text}` is not a number"))?,
-                        )
-                    }
-                    _ => Value::Int(
-                        text.parse()
-                            .map_err(|_| format!("`{text}` is not a number"))?,
-                    ),
-                };
-                engine_reflect::write(ptr, ty, attrs, value).map_err(|e| e.to_string())?;
-            }
-            TypeKind::Enum { variants, .. } => {
-                let value = match variants.iter().find(|v| v.name == text) {
-                    Some(v) => v.value,
-                    None => text
-                        .parse()
-                        .map_err(|_| format!("`{text}` is not a variant of `{}`", ty.name))?,
-                };
-                engine_reflect::write(ptr, ty, attrs, Value::Int(value))
-                    .map_err(|e| e.to_string())?;
-            }
-            TypeKind::String => engine_reflect::write_str(ptr, &unquote(text)?),
-            TypeKind::Array { element, len } => {
-                let items = text
-                    .strip_prefix('[')
-                    .and_then(|t| t.strip_suffix(']'))
-                    .map(split_items)
-                    .ok_or_else(|| format!("expected `[…]`, found `{text}`"))?;
-                for (i, item) in items.into_iter().enumerate().take(len) {
-                    set_text(
-                        element,
-                        &element.attrs,
-                        ptr.add(i * element.size),
-                        item,
-                        label,
-                    )?;
-                }
-            }
-            TypeKind::List(list) => {
-                let items = text
-                    .strip_prefix('[')
-                    .and_then(|t| t.strip_suffix(']'))
-                    .map(split_items)
-                    .ok_or_else(|| format!("expected `[…]`, found `{text}`"))?;
-                (list.resize)(ptr, items.len());
-                let base = (list.items_mut)(ptr);
-                for (i, item) in items.into_iter().enumerate() {
-                    let el = base.add(i * list.element.size);
-                    set_text(list.element, &list.element.attrs, el, item, label)?;
-                }
-            }
-            TypeKind::Map(map) if text == "{}" => (map.clear)(ptr),
-            TypeKind::Struct(_) if text == "{}" => {}
-            _ => return Err(format!("`{text}` is not a value of `{}`", ty.name)),
-        }
-    }
-    Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn strings_round_trip_through_quotes() {
-        for s in [
-            "",
-            "Ofelia",
-            "a \"quote\" and \\",
-            "line\nnext\ttab",
-            "Офелия ☕",
-            "\u{1}",
-        ] {
-            assert_eq!(unquote(&quote(s)).as_deref(), Ok(s), "{s:?}");
-        }
-        assert!(unquote("no quotes").is_err());
-    }
-
-    #[test]
-    fn lines_split_outside_strings_and_brackets() {
-        assert_eq!(
-            split_assignment(r#"Bag.flags["a = b"] = "c = d""#),
-            Some((r#"Bag.flags["a = b"]"#, r#""c = d""#))
-        );
-        assert_eq!(
-            split_items(r#"1, (2, 3), "4, 5", [6, 7]"#),
-            ["1", "(2, 3)", "\"4, 5\"", "[6, 7]"]
-        );
-        assert_eq!(component_of("Bag.items.0.id"), ("Bag", "items.0.id"));
-        assert_eq!(component_of(r#"Bag["k"]"#), ("Bag", r#"["k"]"#));
-        assert_eq!(component_of("Marker"), ("Marker", ""));
-    }
 }
