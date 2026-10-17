@@ -8,7 +8,7 @@ Last updated: 2026-10-17.
 
 ## 0. Now (2026-10-17)
 
-- **Done: the quick start** (queue item 4, `feat/quick-start`; CLAUDE.md §16):
+- **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
     scene; an index of the guides;
   - `ofeliaengine new <dir>` starts a game: its manifest on the engine, the engine's
@@ -317,7 +317,7 @@ water and impostors stay in §6):
    - ~~Networking in the player~~ (done 2026-10-17, #248, ADR 0106): the player runs the session
      the game asks for through the world's `Network` resource; the client runs the frame's
      ticks. Later: hole punching and relays through a game's rendezvous, dedicated servers.
-   - ~~The dev guide's quick start~~ (done 2026-10-17): `quick-start.md`,
+   - ~~The dev guide's quick start~~ (done 2026-10-17, #249): `quick-start.md`,
      `ofeliaengine new`, `engine_app::prelude`, the quick start's game tested offscreen.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
