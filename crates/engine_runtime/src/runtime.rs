@@ -29,6 +29,16 @@ pub struct FrameStages {
     pub interpolate_us: f64,
 }
 
+/// What a driven frame's driver reports ([`Runtime::frame_driven`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Driven {
+    /// How far its clock is into its next tick, 0..1 (the game's, to present what it
+    /// predicts between ticks).
+    pub alpha: f32,
+    /// Its newest tick: the world's simulation tick after the frame.
+    pub tick: u64,
+}
+
 /// The game's world and frame loop (see the crate documentation): one world, one
 /// fixed-step simulation, extraction into the renderer's scene.
 ///
@@ -185,6 +195,79 @@ impl<Id: Copy + Eq + Send + Sync> Runtime<Id> {
         stages.present_us = us(start);
         let start = Instant::now();
         self.extract.interpolate(scene, alpha);
+        stages.interpolate_us = us(start);
+        stages
+    }
+
+    /// One frame whose ticks someone else runs: a network client (ADR 0106), whose
+    /// prediction decides how many ticks a frame runs and runs past ones again after a
+    /// correction.
+    ///
+    /// 1. `drive(world, step)` runs the client's frame. It calls `step(world, dt)` for
+    ///    every tick it simulates, re-simulated ones too; each step runs `tick` (the
+    ///    game's systems) and propagates transforms, so the next tick sees them.
+    /// 2. The frame's state, with the remote entities the client interpolated, is
+    ///    propagated and extracted into `scene` once.
+    /// 3. `present(world, input, alpha)` runs with the driver's fraction of its next tick
+    ///    (`Driven::alpha`).
+    /// 4. The scene shows the frame as it is: remote entities are where the client put
+    ///    them, its predicted ones at their newest tick.
+    ///
+    /// The world's simulation tick becomes the driver's (`Driven::tick`); the runtime's
+    /// own clock stands still.
+    pub fn frame_driven<S, I>(
+        &mut self,
+        input: &I,
+        scene: &mut S,
+        mut tick: impl FnMut(&mut World, &I, f32),
+        drive: impl FnOnce(&mut World, &mut dyn FnMut(&mut World, f32)) -> Driven,
+        mut present: impl FnMut(&mut World, &I, f32),
+    ) -> FrameStages
+    where
+        S: SceneSink<Id = Id>,
+    {
+        engine_profiler::zone!("runtime::frame_driven");
+        let Self {
+            world,
+            propagation,
+            extract,
+            lights,
+            jobs,
+            ..
+        } = self;
+        let mut stages = FrameStages::default();
+        let driven = {
+            let mut step = |world: &mut World, dt: f32| {
+                let start = Instant::now();
+                tick(world, input, dt);
+                stages.simulate_us += us(start);
+                stages.ticks += 1;
+                let start = Instant::now();
+                match jobs.as_ref() {
+                    Some(jobs) => propagation.run_parallel(world, jobs),
+                    None => propagation.run(world),
+                };
+                stages.propagate_us += us(start);
+            };
+            drive(world, &mut step)
+        };
+        world.set_sim_tick(driven.tick);
+        stages.alpha = driven.alpha;
+        let start = Instant::now();
+        match jobs.as_ref() {
+            Some(jobs) => propagation.run_parallel(world, jobs),
+            None => propagation.run(world),
+        };
+        stages.propagate_us += us(start);
+        let start = Instant::now();
+        extract.sync_on(world, scene, jobs.as_deref());
+        lights.sync(world);
+        stages.extract_us += us(start);
+        let start = Instant::now();
+        present(world, input, driven.alpha);
+        stages.present_us = us(start);
+        let start = Instant::now();
+        extract.interpolate(scene, 1.0);
         stages.interpolate_us = us(start);
         stages
     }

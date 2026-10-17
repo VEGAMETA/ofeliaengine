@@ -684,3 +684,46 @@ fn extraction_on_a_pool_makes_the_same_calls_as_on_one_thread() {
         assert!(visited >= 8000, "the pool's path: {visited} visited");
     }
 }
+
+#[test]
+fn a_driven_frame_runs_the_drivers_ticks_and_shows_the_newest_state() {
+    let mut w = World::new();
+    let mover = renderable(&mut w, 0.0);
+    w.insert(mover, Spin(1.0));
+    let mut runtime = Runtime::<u32>::new(w, 64.0);
+    let mut s = Recorder::default();
+    // A frame with a tick before: the mover is in the scene.
+    runtime.frame(1.5 / 64.0, &(), &mut s, |_, _, _| {}, |_, _, _| {});
+    let id = runtime.extract().instance(mover).unwrap();
+    let moves = s.moves;
+    let mut presented = None;
+    // The driver re-simulates two past ticks and predicts one: three steps, one frame.
+    let stages = runtime.frame_driven(
+        &(),
+        &mut s,
+        |w, (), dt| {
+            let mut q = engine_ecs::QueryState::<(&mut Transform, &Spin)>::new(w);
+            q.for_each(w, |(t, spin)| t.translation.x += spin.0 * dt);
+        },
+        |w, step| {
+            for _ in 0..3 {
+                step(w, 0.25);
+                // Each step sees the transforms the one before it propagated.
+                let x = w.get::<GlobalTransform>(mover).unwrap().translation().x;
+                assert!(x > 0.0);
+            }
+            engine_runtime::Driven {
+                alpha: 0.4,
+                tick: 77,
+            }
+        },
+        |_, (), alpha| presented = Some(alpha),
+    );
+    assert_eq!(stages.ticks, 3);
+    assert_eq!(stages.alpha, 0.4);
+    assert_eq!(presented, Some(0.4));
+    assert_eq!(runtime.world.sim_tick(), 77);
+    // Extracted once, at the newest state, shown as it is.
+    assert_eq!(s.moves, moves + 1);
+    assert_eq!(s.live[&id].world_from_object.w_axis.x, 0.75);
+}
