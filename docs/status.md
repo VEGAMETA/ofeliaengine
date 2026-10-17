@@ -55,10 +55,12 @@ Last updated: 2026-10-17.
     default while Windows runs the display in HDR, HDR10 or SDR by setting; follows the
     display at run time; the editor's panels at the SDR white level. Tested offscreen
     (`assume_display`); not yet seen on an HDR display (ref-1's runs in SDR).
+  - **E1-4b-1, text fields** (PR in flight, ADR 0107 as built): rename in place (F2, a
+    double click), numbers typed with expressions (`2*pi`, `+=0.5`, `*1.2`), strings, the
+    tree's and the inspector's filters; Windows' clipboard.
   - **Next:** the rest of E1 (ADR 0107 §7):
-    - E1-4b: text fields (rename, typed values, strings), the command palette,
-      multi-selection and multi-editing, the inspector's filter, reset; the roots' order
-      in scene files (sorted by id today) to settle;
+    - E1-4b-2: the command palette, multi-selection and multi-editing, reset to default,
+      copying values; the roots' order in scene files (sorted by id today) to settle;
     - E1-5: sessions, autosave, rebuild and restart; the game's `main` from a macro,
       `ofeliaengine edit`, the quick start as a scene.
 

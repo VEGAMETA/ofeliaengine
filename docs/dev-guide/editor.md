@@ -30,16 +30,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   has), from the editor's own camera, in the panel's rectangle.
 - **The scene tree** lists the scene's entities (those with a scene id) in their hierarchy:
   - each row shows its name (`Name`) and its kind (camera, sun, light, model);
-  - a click selects a row; a click on the selected row opens or closes it;
+  - a click selects a row; its arrow opens or closes it;
+  - **F2** or a double click renames it in place (Enter keeps, Escape drops);
+  - the filter box keeps the rows whose names match, with their parents;
   - **`+`** (or Ctrl+A) adds an entity where the camera looks, on the grid: an empty
     entity, a cube, sphere, plane or cylinder, a sun, a point or spot light, a camera.
 - **The inspector** edits the selected entity's components, field by field:
-  - **numbers** are dragged sideways (see snapping below); vectors show their parts with
-    colored `x y z` labels, colors `r g b a`;
+  - **numbers** are dragged sideways (see snapping below), or clicked and typed (see
+    typing values below); vectors show their parts with colored `x y z` labels, colors
+    `r g b a`;
   - **a rotation** shows as Euler angles in degrees (applied Y, X, Z: yaw, pitch, roll);
   - **checkboxes** for booleans, **a list** for enums;
-  - strings, references and containers show as text: typing them comes with the text
-    field (phase E1-4b), asset pickers with the asset browser (E4);
+  - **strings** (the name too) are typed in place;
+  - references and containers show as text: asset pickers come with the asset browser
+    (E4);
+  - the filter box keeps the fields whose names match (and every field of a component
+    whose name does);
   - **Escape** during a drag puts the value back.
 - **Everything is undoable**, one step per action (a whole drag is one step). The scene's
   tab shows `*` while there are unsaved changes; undoing back to the saved state clears it.
@@ -59,6 +65,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 | Duplicate the selection (with its children) | Ctrl+D |
 | Add an entity | Ctrl+A |
 | Snap by default, or not | Y |
+| Rename the selection | F2 |
+
+While a field is typed in, the keys are the field's: Delete, Y or Ctrl+A edit the text,
+and only Ctrl+S still saves. Text fields work as Windows' own: Shift and Ctrl with the
+arrows, Home and End, Ctrl+A, Ctrl+C, Ctrl+X and Ctrl+V with the clipboard.
 
 Keys are physical positions, so they stay put on any keyboard layout. Every command has a
 stable name (`edit.undo`, `file.save`, `scene.duplicate`…) that the command palette, the
@@ -77,6 +88,19 @@ keymap file and scripts use; `EditorGame::run_command` runs one by name.
 - The grid button in the tool bar (or Y) makes snapping the default; Shift then drags
   freely.
 - The viewport's gizmos (phase E2) follow the same rules.
+
+## Typing values
+
+Click a number without dragging it and type; Enter keeps the value, Escape drops it.
+
+| Typed | Gives |
+|---|---|
+| `2.5`, `-3e2` | the number |
+| `2*pi`, `(1 + 2) / 4`, `2^10`, `sqrt(2)` | the expression's value (`pi`, `tau`, `e`; `sqrt`, `abs`, `floor`, `ceil`, `round`, `sin`, `cos`, `tan`, `min`, `max`) |
+| `+=0.5`, `-=1`, `*=2`, `/=4`, `*1.2`, `/2` | the current value changed by it |
+| `45deg`, `30°`, `pi/2 rad` | degrees, for angles (`rad` converts) |
+
+A typed value that is not a number changes nothing; the status bar says why.
 
 ## Values from code
 
@@ -99,7 +123,7 @@ right button + WASD and focusing the selection come later.
 
 | Phase | What |
 |---|---|
-| E1-4b | text fields (rename with F2, typed values and expressions, strings), the command palette (Ctrl+Shift+P), multi-selection and multi-editing, the inspector's filter, reset to default |
+| E1-4b | the command palette (Ctrl+Shift+P), multi-selection and multi-editing, reset to default, copying values |
 | E1-5 | sessions, autosave, rebuild and restart after a code change |
 | E2 | selection in the viewport, gizmos, placement by drag and drop |
 | E3 | Play on a copy of the world |
@@ -118,4 +142,4 @@ the panels stay at Windows' SDR white level. `--hdr scrgb|hdr10|off` picks the o
 | | |
 |---|---|
 | Start and 60 frames | 0.51–0.69 s (budget for the start alone: 2 s) |
-| The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 81 µs with a selection |
+| The editor's frame on the CPU (shell, tree of 200 entities, inspector) | 74 µs, 84 µs with a selection |
