@@ -431,6 +431,7 @@ dependencies = [
 name = "engine_editor"
 version = "0.0.0"
 dependencies = [
+ "engine_app",
  "engine_core",
  "engine_crash",
  "engine_ecs",
@@ -443,6 +444,7 @@ dependencies = [
  "engine_render",
  "engine_render2d",
  "engine_rhi",
+ "engine_runtime",
  "engine_scene",
  "engine_text",
  "engine_ui",

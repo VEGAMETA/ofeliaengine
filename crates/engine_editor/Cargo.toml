@@ -11,6 +11,9 @@ license.workspace = true
 workspace = true
 
 [dependencies]
+# The player the editor runs inside of (ADR 0107): the game's world, its renderer, the
+# window.
+engine_app.workspace = true
 engine_core.workspace = true
 # Logging and crash reports of the editor application (ADR 0061).
 engine_crash.workspace = true
@@ -27,6 +30,7 @@ engine_reflect.workspace = true
 engine_render.workspace = true
 engine_render2d.workspace = true
 engine_rhi.workspace = true
+engine_runtime.workspace = true
 engine_scene.workspace = true
 engine_text.workspace = true
 engine_ui.workspace = true

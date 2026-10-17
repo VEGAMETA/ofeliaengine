@@ -1185,3 +1185,28 @@ pub fn read_value<T: Reflect>(
         assets,
     })
 }
+
+/// The lines a scene writes for the value at `ptr` (type `info`), without a component's
+/// name: `translation = (0, 0, 0)`, or ` = "Door"` for a value written whole. What the
+/// editor shows of a component before its inspector has widgets for every kind. Entity
+/// references are written `@none`; asset references with their paths from `assets`.
+///
+/// # Safety
+///
+/// `ptr` points to a valid value of `info`.
+pub unsafe fn write_lines(
+    info: &'static TypeInfo,
+    ptr: *const u8,
+    assets: Option<&AssetPaths>,
+    out: &mut String,
+) {
+    let ids = HashMap::new();
+    let mut writer = Writer {
+        out,
+        path: String::new(),
+        ids: &ids,
+        assets,
+    };
+    // SAFETY: as the caller guarantees.
+    unsafe { writer.value(info, ptr) };
+}
