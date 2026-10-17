@@ -8,6 +8,12 @@ The engine is called **ofeliaengine** (team decision, 2026-09-30). In code it is
 Principles, stack and working rules are in [`CLAUDE.md`](CLAUDE.md). Architectural decisions
 are in [`docs/adr`](docs/adr).
 
+## Making a game
+
+[`docs/dev-guide/quick-start.md`](docs/dev-guide/quick-start.md): a cube on screen in five
+minutes (`cargo run --release -p engine_cli -- new ../mygame`, then `cargo run --release`
+in it). All the guides: [`docs/dev-guide`](docs/dev-guide/README.md).
+
 ## Building
 
 Requirements: Windows 11 x64, [rustup](https://rustup.rs) and [NASM](https://nasm.us) 2.14 or

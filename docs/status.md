@@ -8,6 +8,18 @@ Last updated: 2026-10-17.
 
 ## 0. Now (2026-10-17)
 
+- **Done: the quick start** (queue item 4, `feat/quick-start`; CLAUDE.md §16):
+  - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own
+    scene; an index of the guides;
+  - `ofeliaengine new <dir>` starts a game: its manifest on the engine, the engine's
+    build settings and toolchain, the quick start's game, a sounds folder;
+  - `engine_app::prelude`: what a first game uses, from one crate;
+  - `examples/quick_start.rs` is the game, rendered offscreen by a test so the guide
+    cannot rot;
+  - measured on ref-1: the new game's first build (the whole engine) 74 s, a rebuild after
+    an edit 2.5 s.
+- **Queue item 4** (the core's gaps for a game) is done with it.
+
 - **Done: networking in the player** (queue item 4, ADR 0106, #248).
   - **The player runs the session;** the game talks to it through the world's `Network`
     resource:
@@ -305,7 +317,8 @@ water and impostors stay in §6):
    - ~~Networking in the player~~ (done 2026-10-17, #248, ADR 0106): the player runs the session
      the game asks for through the world's `Network` resource; the client runs the frame's
      ticks. Later: hole punching and relays through a game's rendezvous, dedicated servers.
-   - Next: the dev guide's quick start.
+   - ~~The dev guide's quick start~~ (done 2026-10-17): `quick-start.md`,
+     `ofeliaengine new`, `engine_app::prelude`, the quick start's game tested offscreen.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
     Code can be connected as simply as possible and make games by itself, without

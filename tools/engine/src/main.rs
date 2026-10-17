@@ -15,6 +15,7 @@
 //!                                                  the code's uses
 //! ofeliaengine sounds build <DIR> -o <OUT.pack>    a sounds folder into a sound pack, every
 //!                                                  file as it is (ADR 0105)
+//! ofeliaengine new <DIR>                           a game started from the quick start
 //! ofeliaengine save dump <FILE>                    a save as text, either encoding (ADR 0104)
 //! ofeliaengine save info <FILE>                    a save's header
 //! ```
@@ -25,6 +26,7 @@
 #![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod loc;
+mod new;
 mod sounds;
 
 use engine_assets::gltf_models::apply_gltf_models;
@@ -76,6 +78,12 @@ usage:
                                                    each lacks against the source; with --code,
                                                    loc!(\"id\") (Rust) and loc(\"id\") (Luau)
                                                    uses that are not defined, messages unused
+  ofeliaengine new <DIR> [--engine <PATH>] [--name <NAME>]
+                                                   a game started from the quick start
+                                                   (docs/dev-guide/quick-start.md): its
+                                                   manifest on this engine (or --engine),
+                                                   the engine's build settings, a cube on a
+                                                   floor in src/main.rs, a sounds folder
   ofeliaengine sounds build <DIR> -o <OUT.pack> [--level <N>]
                                                    every sound file under the folder (WAV,
                                                    Ogg Vorbis, Opus, FLAC) into a sound pack
@@ -107,6 +115,7 @@ enum Command {
     Cook(CookArgs),
     Loc(loc::LocArgs),
     Sounds(sounds::SoundsArgs),
+    New(new::NewArgs),
     Save { info: bool, file: PathBuf },
 }
 
@@ -133,6 +142,7 @@ fn parse_command(mut args: impl Iterator<Item = String>) -> Result<Command, Stri
         Some("cook") => parse_cook(args).map(Command::Cook),
         Some("loc") => loc::parse_loc(args).map(Command::Loc),
         Some("sounds") => sounds::parse_sounds(args).map(Command::Sounds),
+        Some("new") => new::parse_new(args).map(Command::New),
         Some("save") => {
             let info = match args.next().as_deref() {
                 Some("dump") => false,
@@ -443,6 +453,7 @@ fn main() -> ExitCode {
         Command::Cook(args) => cook(args),
         Command::Loc(args) => loc::run_loc(args),
         Command::Sounds(args) => sounds::run_sounds(args),
+        Command::New(args) => new::run_new(args),
         Command::Save { info, file } => save(*info, file),
     };
     match result {
@@ -583,18 +594,22 @@ mod tests {
     fn args(line: &str) -> Result<Args, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Shaders(args) => Ok(args),
-            Command::Cook(_) | Command::Loc(_) | Command::Sounds(_) | Command::Save { .. } => {
-                Err(String::from("not a shaders command"))
-            }
+            Command::Cook(_)
+            | Command::Loc(_)
+            | Command::Sounds(_)
+            | Command::New(_)
+            | Command::Save { .. } => Err(String::from("not a shaders command")),
         }
     }
 
     fn cook_args(line: &str) -> Result<CookArgs, String> {
         match parse_command(line.split_whitespace().map(str::to_owned))? {
             Command::Cook(args) => Ok(args),
-            Command::Shaders(_) | Command::Loc(_) | Command::Sounds(_) | Command::Save { .. } => {
-                Err(String::from("not a cook command"))
-            }
+            Command::Shaders(_)
+            | Command::Loc(_)
+            | Command::Sounds(_)
+            | Command::New(_)
+            | Command::Save { .. } => Err(String::from("not a cook command")),
         }
     }
 

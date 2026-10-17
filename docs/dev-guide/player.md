@@ -1,5 +1,7 @@
 # Your game on the player
 
+New here? The [quick start](quick-start.md) has a game on screen in five minutes.
+
 The player (`engine_app`) runs a game. It starts the process, the window, the GPU, latency
 control, the renderer and your scene. Then, every frame, it calls your game's hooks.
 Your game is the hooks; the player does the rest (ADR 0099).
