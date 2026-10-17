@@ -47,6 +47,12 @@ pub struct PlayerSettings {
     /// The scene's pack (`ofeliaengine cook`), streamed within the GPU memory budget
     /// (ADR 0076); `None`: an empty scene.
     pub pack: Option<PathBuf>,
+    /// A scene file (ADR 0108, what the editor saves) loaded into the world after the
+    /// pack, relative to [`Self::project`]: its entities, and the meshes and materials its
+    /// `Model`s name (`Player::load_scene`). `None`: none.
+    pub scene: Option<PathBuf>,
+    /// The game's folder: scene and asset paths start from it. `None`: the working folder.
+    pub project: Option<PathBuf>,
     /// The window.
     pub window: Window,
     /// The monitor (an `HMONITOR`, `engine_platform::display::Monitor::handle`); `None`:
@@ -148,6 +154,8 @@ impl Default for PlayerSettings {
         Self {
             title: String::from("game"),
             pack: None,
+            scene: None,
+            project: None,
             window: Window::FullScreen,
             monitor: None,
             adapter: AdapterPreference::HighPerformance,

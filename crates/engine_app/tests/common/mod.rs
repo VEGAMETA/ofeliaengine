@@ -15,6 +15,13 @@ use engine_runtime::{MeshRenderer, PointLight, Sun};
 pub struct Spin(pub f32);
 pod_component!(Spin);
 
+/// Its entity's `Model` is shown and hidden in turn, every tick: the player's model sync
+/// runs every frame (ADR 0108).
+#[derive(Debug, Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+#[repr(C)]
+pub struct Flicker(pub u32);
+pod_component!(Flicker);
+
 /// What the hooks saw.
 #[derive(Debug, Default)]
 pub struct Calls {
@@ -26,6 +33,7 @@ pub struct Calls {
 
 pub struct Cubes {
     spins: QueryState<(&'static mut Transform, &'static Spin)>,
+    flickers: QueryState<(&'static mut engine_app::Model, &'static Flicker)>,
     pub calls: Calls,
 }
 
@@ -38,6 +46,9 @@ impl Game for Cubes {
         self.calls.ticks += 1;
         self.spins.for_each(world, |(t, spin)| {
             t.rotation *= Quat::from_rotation_y(spin.0 * dt);
+        });
+        self.flickers.for_each(world, |(model, _)| {
+            model.hidden = !model.hidden;
         });
     }
 
@@ -138,6 +149,7 @@ pub fn player_with(adjust: impl FnOnce(&mut PlayerSettings)) -> Option<(Player, 
     player.set_frame_time(Some(1.0 / 60.0));
     let game = Cubes {
         spins: QueryState::new(player.world_mut()),
+        flickers: QueryState::new(player.world_mut()),
         calls: Calls::default(),
     };
     Some((player, game))

@@ -2,12 +2,13 @@
 //! `docs/dev-guide/quick-start.md`).
 //!
 //! The player and its hooks, the world and its components, math, input, meshes and
-//! materials, lights and cameras, timers, sound, saves and networking. Everything else is
-//! in the crates named in the guides.
+//! materials (by asset: `Model`, `builtin`), names and scene ids, lights and cameras,
+//! timers, sound, saves and networking. Everything else is in the crates named in the
+//! guides.
 
 pub use crate::{
-    AudioListener, AudioSource, AudioSource3D, FrameParts, Game, Mixer, Network, Player,
-    PlayerSettings, ReverbZone, Room, Saves, Setup, Window,
+    AudioListener, AudioSource, AudioSource3D, FrameParts, Game, MaterialFile, Mixer, Model,
+    Network, Player, PlayerSettings, ReverbZone, Room, Saves, Setup, Window, builtin,
 };
 pub use engine_core::math::{Affine3A, Mat4, Quat, Vec2, Vec3, Vec4};
 pub use engine_ecs::{
@@ -19,3 +20,4 @@ pub use engine_render::mesh::{MeshId, cube};
 pub use engine_runtime::{
     Camera, Ease, MeshRenderer, PointLight, Repeat, SpotLight, Sun, Timer, Tween, look_rotation,
 };
+pub use engine_scene::{AssetId, AssetRef, Name, SceneId};

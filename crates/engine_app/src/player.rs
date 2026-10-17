@@ -288,6 +288,8 @@ pub struct Setup<'a> {
 pub struct Player {
     // The simulation.
     runtime: Runtime<InstanceId>,
+    /// The meshes and materials scenes name (ADR 0108), and the models drawn with them.
+    assets: crate::Assets,
     cameras: CameraView,
     scene_info: SceneInfo,
     // GPU objects destroyed in `Drop`.
@@ -908,6 +910,7 @@ impl Player {
             closing: false,
             first_present_ms: None,
             timing,
+            assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
             saves: SaveState {
                 folder: save_folder.clone(),
                 encoding: settings
@@ -923,9 +926,47 @@ impl Player {
             },
         };
         player.start_presentation()?;
+        if let Some(scene) = &settings.scene {
+            player.load_scene(scene)?;
+        }
         // Saved now as well as at exit: a crash does not cost the next start its cache.
         player.save_pipeline_cache();
         Ok(player)
+    }
+
+    /// Loads a scene file (ADR 0108; a path relative to `PlayerSettings::project`) into the
+    /// world beside what it holds: its entities with every reflected component the program
+    /// has (`SceneRegistry::from_program`), the hierarchy, and the meshes and materials its
+    /// `Model`s name, made in the next frame. Lines the types no longer match are warnings
+    /// in the log and in the report.
+    ///
+    /// # Errors
+    ///
+    /// The file cannot be read, or it is not a scene (with the line); nothing is added then.
+    pub fn load_scene(
+        &mut self,
+        path: impl AsRef<std::path::Path>,
+    ) -> Result<engine_scene::LoadReport, AppError> {
+        let path = self.assets.root().join(path);
+        let text = std::fs::read_to_string(&path).map_err(AppError::at("the scene file"))?;
+        let registry = engine_scene::SceneRegistry::from_program();
+        let report = engine_scene::load(&mut self.runtime.world, &registry, &text)
+            .map_err(AppError::at("the scene file"))?;
+        for (line, warning) in &report.warnings {
+            log::warn!(target: "engine_app::scene", "{}:{line}: {warning}", path.display());
+        }
+        self.assets.add_paths(&report.assets);
+        Ok(report)
+    }
+
+    /// The meshes and materials scenes name (ADR 0108).
+    pub fn assets(&self) -> &crate::Assets {
+        &self.assets
+    }
+
+    /// The same, to learn asset paths or make an asset ahead of its first use.
+    pub fn assets_mut(&mut self) -> &mut crate::Assets {
+        &mut self.assets
     }
 
     /// Frame generation and latency control over the swapchain (again after it is made
@@ -1544,11 +1585,17 @@ impl Player {
             let game_cell = RefCell::new(&mut *game);
             let timing = &mut self.timing;
             let mut net = self.net.as_deref_mut();
+            let assets = &mut self.assets;
+            let geometry = &mut self.geometry;
+            let materials = &mut self.materials;
             let present = |world: &mut World, (): &(), alpha: f32| {
                 if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                     input.sample_frame(Instant::now());
                 }
                 game_cell.borrow_mut().present(world, alpha);
+                // Models (ADR 0108): their meshes and materials reach the GPU this frame,
+                // the pools beginning theirs after the simulation.
+                assets.sync(world, geometry, materials);
             };
             match net.as_mut() {
                 // Joined: the client runs the frame's ticks (its predictions, and past ones

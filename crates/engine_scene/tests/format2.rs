@@ -7,7 +7,8 @@
 use engine_ecs::{Entity, World, reflect_component};
 use engine_reflect::Reflect;
 use engine_scene::{
-    AssetId, AssetPaths, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, load, save, save_with,
+    AssetId, AssetPaths, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, load, read_value,
+    save, save_with, write_value,
 };
 use std::collections::{BTreeMap, HashMap};
 
@@ -232,4 +233,92 @@ fn bad_values_name_their_line() {
     let bad_id = "[scene version=2 id=zz]\n";
     let e = load(&mut w, &r, bad_id).unwrap_err();
     assert!(e.message.contains("scene id"), "{e}");
+}
+
+#[test]
+fn the_programs_types_need_no_registration() {
+    let r = SceneRegistry::from_program();
+    for name in ["Transform", "Name", "Inventory", "Health", "Look", "Links"] {
+        assert!(r.contains(name), "{name}");
+    }
+    assert!(
+        !r.contains("Parent") && !r.contains("Children"),
+        "the hierarchy's links are runtime data"
+    );
+    // Read and written through the program's list, no Rust type behind the registry.
+    let mut w = World::new();
+    w.spawn((
+        SceneId::from_u128(1),
+        crate_inventory(),
+        Health(3.0),
+        Name::new("Crate"),
+    ));
+    let mut text = String::new();
+    save(&mut w, &r, &mut text).unwrap();
+    let mut w2 = World::new();
+    let report = load(&mut w2, &r, &text).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let e = report.entities[0];
+    assert_eq!(w2.get::<Inventory>(e), Some(&crate_inventory()));
+    assert_eq!(w2.get::<Health>(e), Some(&Health(3.0)));
+    assert_eq!(w2.get::<Name>(e).map(Name::as_str), Some("Crate"));
+    // The same text as a registry given the types by hand.
+    let mut by_hand = String::new();
+    save(&mut w, &registry(), &mut by_hand).unwrap();
+    assert_eq!(text, by_hand);
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+struct Paint {
+    color: [f32; 4],
+    shine: f32,
+    texture: AssetRef,
+    layers: Vec<String>,
+}
+
+#[test]
+fn files_of_one_value_round_trip() {
+    let paint = Paint {
+        color: [0.8, 0.15, 0.1, 1.0],
+        shine: 0.4,
+        texture: AssetRef::file(AssetId::from_u128(3)),
+        layers: vec![String::from("base")],
+    };
+    let mut paths = AssetPaths::new();
+    paths.insert(paint.texture, "textures/rust.png");
+    let mut out = String::new();
+    write_value(
+        "paint",
+        1,
+        Some(AssetId::from_u128(8)),
+        &paint,
+        Some(&paths),
+        &mut out,
+    );
+    let expected = "\
+[paint version=1 id=00000000000000000000000000000008]
+
+color = [0.8, 0.15, 0.1, 1]
+shine = 0.4
+texture = asset(\"textures/rust.png\", 00000000000000000000000000000003)
+layers = [\"base\"]
+";
+    assert_eq!(out, expected);
+    let mut back = Paint::default();
+    let report = read_value("paint", 1, &out, &mut back).unwrap();
+    assert_eq!(back, paint);
+    assert_eq!(report.id, Some(AssetId::from_u128(8)));
+    assert_eq!(report.assets.get(paint.texture), Some("textures/rust.png"));
+    // Another kind or a newer version is refused; a gone field warns.
+    let e = read_value("material", 1, &out, &mut Paint::default()).unwrap_err();
+    assert!(e.message.contains("[material"), "{e}");
+    let e = read_value("paint", 1, "[paint version=2]\n", &mut Paint::default()).unwrap_err();
+    assert!(e.message.contains("newer"), "{e}");
+    let warned = read_value(
+        "paint",
+        1,
+        "[paint version=1]\nglow = 3\n",
+        &mut Paint::default(),
+    );
+    assert_eq!(warned.unwrap().warnings.len(), 1);
 }
