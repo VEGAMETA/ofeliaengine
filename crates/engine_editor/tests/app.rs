@@ -207,6 +207,39 @@ fn the_editor_draws_its_scene_in_the_viewport() {
     );
     assert_eq!(saved.matches("Name = \"Cube\"").count(), 2, "{saved}");
     assert!(saved.contains("asset(\"red.material\""), "{saved}");
+
+    // HDR (ADR 0038): on a display in HDR the panels are drawn in scRGB at Windows' SDR
+    // white level (200 nits here: 2.5 in scRGB units), the same colors as in SDR.
+    let (px, py) = (width - 12, height - 60);
+    let sdr = frames(&mut player, &mut game, &mut overlay);
+    let i = ((py * width + px) * 4) as usize;
+    let srgb_byte = f32::from(sdr[i]);
+    player.assume_display(engine_app::DisplayInfo {
+        monitor: 0,
+        refresh_hz: None,
+        hdr_supported: true,
+        hdr_enabled: true,
+        sdr_white_nits: 200.0,
+        max_nits: 1000.0,
+        max_full_frame_nits: 600.0,
+        min_nits: 0.05,
+    });
+    let hdr = frames(&mut player, &mut game, &mut overlay);
+    assert_eq!(player.levels().color, engine_app::OutputColor::ScRgb);
+    assert_eq!(hdr.len(), (width * height * 8) as usize);
+    let i = ((py * width + px) * 8) as usize;
+    let value = engine_core::half::to_f32(u16::from_le_bytes([hdr[i], hdr[i + 1]]));
+    let c = srgb_byte / 255.0;
+    let linear = if c <= 0.040_45 {
+        c / 12.92
+    } else {
+        ((c + 0.055) / 1.055).powf(2.4)
+    };
+    assert!(
+        (value - linear * 2.5).abs() <= 0.15 * linear * 2.5 + 0.002,
+        "the dock in scRGB: {value}, from SDR's {srgb_byte} ({} expected)",
+        linear * 2.5
+    );
     overlay.destroy(&mut player).unwrap();
     let _ = std::fs::remove_dir_all(&dir);
 }

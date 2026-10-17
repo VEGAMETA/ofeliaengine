@@ -4,12 +4,15 @@
 //!
 //! ```text
 //! cargo run -p engine_editor --release --bin editor -- [scene] [--project DIR] [--frames N]
+//!     [--hdr scrgb|hdr10|off]
 //! ```
 //!
 //! - `scene`: a scene file relative to the project's folder (`--project`, the working
 //!   folder by default).
 //! - `--frames N` renders N frames and exits (smoke tests), printing the cold start and
 //!   the time per frame.
+//! - `--hdr`: the output while Windows runs the display in HDR (ADR 0038): scRGB (the
+//!   default), HDR10, or `off` to stay in SDR.
 
 #[cfg(not(windows))]
 fn main() {
@@ -20,7 +23,7 @@ fn main() {
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     #![allow(clippy::print_stdout)]
-    use engine_app::{PlayerSettings, Window};
+    use engine_app::{OutputColor, PlayerSettings, Window};
     use std::time::Instant;
 
     // The crash monitor is this executable started by `engine_crash::install`.
@@ -40,11 +43,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut frames = None;
     let mut scene = None;
     let mut project = None;
+    let mut hdr = OutputColor::ScRgb;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--frames" => frames = args.next().and_then(|n| n.parse::<u64>().ok()),
             "--project" => project = args.next().map(std::path::PathBuf::from),
+            "--hdr" => {
+                hdr = match args.next().as_deref() {
+                    Some("scrgb") => OutputColor::ScRgb,
+                    Some("hdr10") => OutputColor::Hdr10,
+                    Some("off") => OutputColor::Sdr,
+                    other => {
+                        return Err(format!(
+                            "`--hdr {}`: expected scrgb, hdr10 or off",
+                            other.unwrap_or("")
+                        )
+                        .into());
+                    }
+                };
+            }
             other if other.starts_with('-') => {
                 return Err(format!("unknown option `{other}`").into());
             }
@@ -59,6 +77,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         scene,
         project,
+        hdr,
         ..PlayerSettings::default()
     };
     let result = engine_editor::run_frames(settings, |_| Ok(NoGame), frames);

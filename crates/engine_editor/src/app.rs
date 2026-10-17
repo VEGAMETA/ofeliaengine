@@ -42,7 +42,8 @@ use crate::shell::{
 use crate::snap::{Quantity, Snapping};
 use crate::{Chord, CommandId, Commands, History, KeyContext, Keymap};
 use engine_app::{
-    AppError, Game, Model, Overlay, OverlayPass, Player, PlayerSettings, Window, builtin,
+    AppError, Game, Model, Overlay, OverlayOutput, OverlayPass, Player, PlayerSettings, Setup,
+    Window, builtin,
 };
 use engine_core::math::{Quat, Vec3};
 use engine_ecs::{ComponentId, Entity, GlobalTransform, QueryState, Transform, World};
@@ -164,15 +165,18 @@ pub fn editor<G: Game>(
         scene_id,
         player.assets().paths().clone(),
     )?;
-    let format = player.output_format();
+    // The panels are drawn in the frame's format at its white level: SDR, or HDR at
+    // Windows' SDR white (ADR 0038); `output_changed` follows the display.
+    let output = player.output();
     let setup = player.setup();
-    let renderer = Renderer2d::new(
+    let mut renderer = Renderer2d::new(
         setup.device,
         setup.allocator,
         setup.bindless,
-        format,
+        output.format,
         QuadMode::for_device(setup.device),
     )?;
+    renderer.set_white(output.white);
     let glyphs = GlyphTexture::new(
         setup.device,
         setup.allocator,
@@ -1237,6 +1241,27 @@ impl Overlay for EditorOverlay {
                 None,
             )
             .map_err(AppError::at("the editor's panels"))
+    }
+
+    fn output_changed(
+        &mut self,
+        setup: &mut Setup<'_>,
+        output: &OverlayOutput,
+    ) -> Result<(), AppError> {
+        let mut renderer = Renderer2d::new(
+            setup.device,
+            setup.allocator,
+            setup.bindless,
+            output.format,
+            QuadMode::for_device(setup.device),
+        )
+        .map_err(AppError::at("the editor's panels"))?;
+        renderer.set_white(output.white);
+        let mut old = core::mem::replace(&mut self.renderer, renderer);
+        // SAFETY: the player calls this with the device idle: nothing uses the old
+        // renderer's pipelines and buffers.
+        unsafe { old.destroy(setup.allocator) };
+        Ok(())
     }
 }
 
