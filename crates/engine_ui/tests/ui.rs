@@ -284,3 +284,36 @@ fn ids_depend_on_the_parent() {
     });
     assert_ne!(a, b);
 }
+
+#[test]
+fn drags_report_travel_from_the_press_and_their_release() {
+    let mut ui = Ui::new(Theme::default());
+    let mut r = Response::default();
+    frame(&mut ui, &at(15.0, 15.0), |ui| r = one_button(ui));
+    let held = |x: f32, y: f32, pressed: bool| UiInput {
+        mouse_down: true,
+        mouse_pressed: pressed,
+        ..at(x, y)
+    };
+    frame(&mut ui, &held(15.0, 15.0, true), |ui| r = one_button(ui));
+    assert_eq!(ui.drag_delta(r.id), Some([0.0, 0.0]));
+    // The pointer leaves the button: still its drag, measured from the press.
+    frame(&mut ui, &held(140.0, 200.0, false), |ui| r = one_button(ui));
+    assert_eq!(ui.drag_delta(r.id), Some([125.0, 185.0]));
+    assert!(r.active && !r.released);
+    assert_eq!(
+        ui.drag_delta(r.id ^ 1),
+        None,
+        "only the pressed widget drags"
+    );
+    let up = UiInput {
+        mouse_released: true,
+        ..at(150.0, 200.0)
+    };
+    frame(&mut ui, &up, |ui| r = one_button(ui));
+    assert!(r.released && !r.clicked, "released away from it: no click");
+    assert_eq!(ui.drag_delta(r.id), None);
+    frame(&mut ui, &at(150.0, 200.0), |ui| r = one_button(ui));
+    assert!(!r.released);
+    assert!(ui.hovers(r.id) == ui.rect_of(r.id).unwrap().contains([150.0, 200.0]));
+}

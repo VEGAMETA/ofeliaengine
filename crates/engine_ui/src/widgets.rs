@@ -18,6 +18,9 @@ pub struct Response {
     pub focused: bool,
     /// Clicked: released over it after pressing it, or Enter/Space while focused.
     pub clicked: bool,
+    /// The button went up this frame after going down on it, wherever the mouse is: the
+    /// end of a drag.
+    pub released: bool,
 }
 
 impl Ui {
