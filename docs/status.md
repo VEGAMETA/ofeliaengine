@@ -4,9 +4,24 @@ Where the engine stands and how work on it is run. A new session (coordinator or
 reads this after `CLAUDE.md` and `docs/agent-rules.md`. Keep it current: whoever merges a
 PR that changes the picture updates this file in the same PR.
 
-Last updated: 2026-10-16.
+Last updated: 2026-10-17.
 
-## 0. Now (2026-10-16)
+## 0. Now (2026-10-17)
+
+- **Done: networking in the player** (queue item 4, ADR 0106, `feat/player-net`).
+  - **The player runs the session;** the game talks to it through the world's `Network`
+    resource:
+    - `host`, `invite` (text: a connect token), `join`, `leave`;
+    - the host's pawn, pawns given to joining players;
+    - events, and the schema's one-shot events.
+  - **Hosting:** the server runs around the game's ticks, and the router's port is mapped
+    in the background.
+  - **Joined:** the client runs the frame's ticks (`Runtime::frame_driven`): predictions
+    and re-simulations through `Game::tick`, remote entities interpolated.
+  - **Offline:** nothing (no loopback).
+  - **Test:** a host and a guest in one process over UDP. The guest joins by invite,
+    gets its pawn and predicts it; events go both ways; leaving is heard.
+  - **Not yet:** hole punching and relays (a game's rendezvous), dedicated servers.
 
 - **Done: sound in the player** (queue item 4, ADR 0105, #246).
   - **Sound is components:**
@@ -180,16 +195,16 @@ decisions). In short:
 
 ## 3. What is done (merged to main)
 
-Estimate of 2026-10-16 (after sound in the player): the technical core about **90 %**
-done, the whole engine (editor, Luau and tooling included) about **60 %** (2026-10-11:
-74 % and 50 %). Done since 2026-10-11:
+Estimate of 2026-10-17 (after networking in the player): the technical core about
+**92 %** done, the whole engine (editor, Luau and tooling included) about **61 %**
+(2026-10-11: 74 % and 50 %). Done since 2026-10-11:
 - custom materials, meshlets, cached and virtual shadows, post effects;
 - the player crate, video, colliders made from meshes, localization;
 - the third review's P0 and its device memory and Reflex items, the colliders' rules
   file;
-- input, navigation, save games and sound in the player.
+- input, navigation, save games, sound and networking in the player.
 
-Left in the core: networking in the player, recording on the job system.
+Left in the core: recording on the job system.
 
 | Area | State | Where |
 |---|---|---|
@@ -219,7 +234,7 @@ Left in the core: networking in the player, recording on the job system.
 | Every antialiasing and scaling mode: MSAA 2/4/8× (+ alpha to coverage), FXAA, MLAA, SMAA 1x/S2x/T2x/4x, nearest/bilinear/Catmull-Rom/Lanczos-3/integer/FSR 1, TAAU/FSR/DLSS; `check()` and the GPU's support list for game menus | done | ADR 0075 |
 | Skeletal animation, clip compression, IK, GPU skinning | done | ADR 0068 |
 | Physics API on Jolt/Box2D: queries, characters, rollback | done | ADR 0066 |
-| Networking: encrypted UDP transport with NAT traversal; replication, prediction, lag compensation, co-op example | done | ADRs 0070, 0074 |
+| Networking: encrypted UDP transport with NAT traversal; replication, prediction, lag compensation, co-op example; in the player: host, invite, join through the world's `Network`, the client running the frame's ticks | done (hole punching through a rendezvous, dedicated servers left) | ADRs 0070, 0074, 0106 |
 | Assets: glTF, cooking, packs, IoRing streaming; GPU memory budget, texture streaming by GPU feedback, mesh LOD streaming (`engine_streaming`) | done | ADRs 0056, 0057, 0076 |
 | **Video**: AV1 in WebM on the GPUs' video engines (Vulkan Video; rav1d where they cannot), converted into a texture for materials and the UI, Opus sound as the clock; `Videos` in the player | done (packs, HDR, transparency left) | ADR 0100 |
 | **Save games**: everything reflected saved without listing it, binary or text, integrity and a `.bak`; quicksave, quickload, slots and autosave in the player, written behind the frame | done (thumbnails, GPU buffers, signing left) | ADR 0104 |
@@ -287,7 +302,10 @@ water and impostors stay in §6):
      components, saved; occlusion and the room's reverb from the physics world; zones.
      Then (the owner's choices, #247): `AudioSource` and `AudioSource3D`, the sounds folder
      kept live, sound packs.
-   - Next: networking in the player, then the dev guide's quick start.
+   - ~~Networking in the player~~ (done 2026-10-17, ADR 0106): the player runs the session
+     the game asks for through the world's `Network` resource; the client runs the frame's
+     ticks. Later: hole punching and relays through a game's rendezvous, dedicated servers.
+   - Next: the dev guide's quick start.
 5. **9:** editor tools, Luau bindings and debugger, other tooling.
 5a. **A layer for Claude Code** (the owner, 2026-10-16: "a convenient layer so that Claude
     Code can be connected as simply as possible and make games by itself, without

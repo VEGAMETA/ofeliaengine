@@ -191,6 +191,13 @@ With `Game::acoustics` returning your physics world, walls muffle what is behind
 the room around the listener sets the reverb. Saves keep where every sound was. The
 world's `Mixer` sets the buses' volumes.
 
+## Co-op
+
+With `settings.network = Some(NetConfig::new::<Input>(schema))` the player runs the
+network session your game asks for through the world's `Network` resource: host, invite,
+join, leave ([networking.md](networking.md), section 8). Hosting, it runs the server around
+your ticks; joined, the client runs them (its predictions); offline, nothing changes.
+
 ## Each frame
 
 1. Window events go to `Game::event`.

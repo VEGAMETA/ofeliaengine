@@ -44,6 +44,9 @@ engine_scene.workspace = true
 engine_reflect.workspace = true
 # The pack's navigation mesh as the world's resource (ADR 0103).
 engine_nav.workspace = true
+# Networking (ADR 0106): the session the player runs, its transport and NAT traversal.
+engine_net.workspace = true
+engine_net_transport.workspace = true
 # Text errors of a live folder go to the log (engine_log's backend).
 log = "0.4"
 

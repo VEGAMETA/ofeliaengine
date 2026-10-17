@@ -64,6 +64,13 @@ pub trait Game {
         true
     }
 
+    /// Networking (ADR 0106): the input for the next tick, from what the player pressed
+    /// (`world.resource_mut::<Network>()` … `.set_input(&input)`). Called before every
+    /// tick while hosting and every frame while joined; never offline.
+    fn net_input(&mut self, world: &mut World) {
+        let _ = world;
+    }
+
     /// The physics world sound travels through (ADR 0105): walls between a placed sound
     /// and the listener muffle it, and the room around the listener gives the reverb
     /// (`AudioSettings::acoustics`). With a [`ScenePhysics`](crate::ScenePhysics):
