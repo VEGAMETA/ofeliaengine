@@ -318,6 +318,8 @@ pub struct UiInput {
     pub keys: Vec<UiKey>,
     /// Shift held.
     pub shift: bool,
+    /// Control held.
+    pub ctrl: bool,
 }
 
 /// A drawing command, in paint order.
@@ -427,6 +429,8 @@ pub struct Ui {
     hovered: u64,
     /// Widget holding the mouse button.
     active: u64,
+    /// Where the mouse was when the button went down on `active`.
+    press_at: [f32; 2],
     /// Widget with keyboard focus.
     focused: u64,
     /// Focusable widgets of the previous frame, in order (for Tab).
@@ -455,6 +459,7 @@ impl Ui {
             frame: 0,
             hovered: 0,
             active: 0,
+            press_at: [0.0; 2],
             focused: 0,
             focus_order: Vec::new(),
             floating: Vec::new(),
@@ -666,6 +671,7 @@ impl Ui {
         let pressed = hovered && self.input.mouse_pressed;
         if pressed {
             self.active = id;
+            self.press_at = self.input.mouse.unwrap_or_default();
             if focusable {
                 self.focused = id;
             }
@@ -686,7 +692,29 @@ impl Ui {
             active: active && self.input.mouse_down,
             focused,
             clicked: released_on || key_activate,
+            released: active && self.input.mouse_released,
         }
+    }
+
+    /// How far the mouse has moved since the button went down on widget `id`, while it is
+    /// held there (`None` otherwise): drags that change values (the inspector's numbers).
+    pub fn drag_delta(&self, id: u64) -> Option<[f32; 2]> {
+        let mouse = self.input.mouse?;
+        (self.active == id && self.input.mouse_down)
+            .then(|| [mouse[0] - self.press_at[0], mouse[1] - self.press_at[1]])
+    }
+
+    /// This frame's input.
+    pub fn input(&self) -> &UiInput {
+        &self.input
+    }
+
+    /// Whether the mouse is over node `id` as the last layout placed it (interactive or
+    /// not): a popup asking whether a click landed inside it.
+    pub fn hovers(&self, id: u64) -> bool {
+        self.input
+            .mouse
+            .is_some_and(|m| self.rect_of(id).is_some_and(|r| r.contains(m)))
     }
 
     /// The draw commands of the frame ended last (valid until the next

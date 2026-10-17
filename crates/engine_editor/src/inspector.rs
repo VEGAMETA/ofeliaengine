@@ -1,0 +1,711 @@
+//! The inspector's properties (ADR 0107 phase E1-4): the fields of an entity's components,
+//! found through reflection, each with how it is shown and how an edit is written back.
+//!
+//! - **Numbers** are dragged sideways ([`crate::Snapping`] has the modifier keys).
+//! - **Vectors** and small arrays of numbers show their parts side by side.
+//! - **A rotation** (a quaternion) shows as Euler angles in degrees, applied in the order
+//!   Y, X, Z (yaw, pitch, roll), so a step of 45° means what it says.
+//! - **Booleans** are checkboxes; **enums** pick a variant from a list.
+//! - **Strings, references and containers** are shown as text; editing them comes with
+//!   the text field (phase E1-4b).
+
+use crate::snap::Quantity;
+use engine_core::math::{EulerRot, Quat};
+use engine_ecs::{ComponentId, Entity, World};
+use engine_reflect::{Attrs, Hint, Primitive, TypeInfo, TypeKind, Value};
+use engine_scene::text::{is_asset_ref, is_entity, newtype_field, vector_fields};
+use engine_scene::{AssetPaths, AssetRef, Name};
+use std::fmt::Write as _;
+use std::ops::Range;
+
+/// How a property is shown and edited.
+#[derive(Debug, Clone, Copy)]
+pub enum Kind {
+    /// Text only.
+    Text,
+    /// Numbers side by side (one for a plain number), all of type `element`.
+    Numbers {
+        /// How many.
+        len: u8,
+        /// What they are, for speed and step.
+        quantity: Quantity,
+        /// Their type (`f32`, `u32`…).
+        element: &'static TypeInfo,
+        /// Bytes from one to the next.
+        stride: u16,
+        /// Stored in radians, shown in degrees.
+        degrees: bool,
+    },
+    /// A quaternion shown as three Euler angles in degrees.
+    Rotation,
+    /// A checkbox.
+    Bool,
+    /// One of an enum's variants.
+    Choice,
+}
+
+/// One property: a field of a component, at a fixed place in it.
+#[derive(Debug, Clone, Copy)]
+pub struct Property {
+    /// Its component.
+    pub component: ComponentId,
+    /// Its byte offset in the component.
+    pub offset: usize,
+    /// Its type.
+    pub ty: &'static TypeInfo,
+    /// Its attributes (range, step, hint).
+    pub attrs: Attrs,
+    /// How it is shown.
+    pub kind: Kind,
+    /// Its name in [`Inspector::text`].
+    name: (u32, u32),
+    /// Its values' texts in [`Inspector::text`].
+    values: [(u32, u32); 4],
+    count: u8,
+}
+
+/// A component's properties.
+#[derive(Debug, Clone)]
+pub struct Section {
+    /// The component's name.
+    pub title: &'static str,
+    /// The component.
+    pub component: ComponentId,
+    /// Its properties in [`Inspector::properties`].
+    pub properties: Range<usize>,
+}
+
+/// The properties of one entity, built again every frame (cheap: a few hundred bytes of
+/// text, buffers kept between frames).
+#[derive(Debug, Default)]
+pub struct Inspector {
+    text: String,
+    properties: Vec<Property>,
+    sections: Vec<Section>,
+    scratch: String,
+}
+
+impl Inspector {
+    /// No properties.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// No properties (nothing selected).
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.properties.clear();
+        self.sections.clear();
+    }
+
+    /// The entity's components and their properties, sorted by component name: those
+    /// scenes show (not `hidden`, not `skip`).
+    pub fn build(&mut self, world: &World, entity: Entity, assets: &AssetPaths) {
+        self.clear();
+        let Some(ids) = world.component_ids_of(entity) else {
+            return;
+        };
+        let mut components: Vec<(&'static TypeInfo, ComponentId)> = ids
+            .iter()
+            .filter_map(|&id| Some((world.components().type_info(id)?, id)))
+            .filter(|(info, _)| !info.attrs.hidden && !info.attrs.skip)
+            .collect();
+        components.sort_by_key(|(info, _)| info.name);
+        for (info, id) in components {
+            let Some(ptr) = world.get_raw(entity, id) else {
+                continue;
+            };
+            let first = self.properties.len();
+            let mut path = String::new();
+            // SAFETY: the entity's live value of the component `info` describes.
+            unsafe {
+                self.walk(
+                    world,
+                    assets,
+                    id,
+                    ptr.as_ptr().cast_const(),
+                    info,
+                    info.attrs,
+                    0,
+                    &mut path,
+                );
+            }
+            // A transform reads position, rotation, scale (Godot, Unity), whatever the
+            // order of its fields.
+            if info.name == "Transform" {
+                let text = &self.text;
+                let order = |p: &Property| match &text[p.name.0 as usize..p.name.1 as usize] {
+                    "translation" => 0,
+                    "rotation" => 1,
+                    "scale" => 2,
+                    _ => 3,
+                };
+                self.properties[first..].sort_by_key(order);
+            }
+            self.sections.push(Section {
+                title: info.name,
+                component: id,
+                properties: first..self.properties.len(),
+            });
+        }
+    }
+
+    /// The sections, in order.
+    pub fn sections(&self) -> &[Section] {
+        &self.sections
+    }
+
+    /// The properties of every section.
+    pub fn properties(&self) -> &[Property] {
+        &self.properties
+    }
+
+    /// A property's name (`translation`, `shadow.bias`; `value` for a component written
+    /// whole, such as `Name`).
+    pub fn name(&self, p: &Property) -> &str {
+        &self.text[p.name.0 as usize..p.name.1 as usize]
+    }
+
+    /// The labels of a property's numbers: `r g b a` for a color, `x y z w` otherwise.
+    pub fn labels(p: &Property) -> &'static [&'static str] {
+        let all: &'static [&'static str] = if p.attrs.hint == Hint::Color {
+            &["r", "g", "b", "a"]
+        } else {
+            &["x", "y", "z", "w"]
+        };
+        &all[..usize::from(p.count).min(4)]
+    }
+
+    /// A property's shown values: one, or a vector's parts.
+    pub fn values<'a>(&'a self, p: &'a Property) -> impl Iterator<Item = &'a str> + 'a {
+        p.values[..usize::from(p.count)]
+            .iter()
+            .map(|&(a, b)| &self.text[a as usize..b as usize])
+    }
+
+    /// Adds properties for the value of `ty` at `offset` in the component at `base`.
+    ///
+    /// # Safety
+    ///
+    /// `base` points to a live value of the component, and `ty` describes the value at
+    /// `base + offset`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn walk(
+        &mut self,
+        world: &World,
+        assets: &AssetPaths,
+        component: ComponentId,
+        base: *const u8,
+        ty: &'static TypeInfo,
+        attrs: Attrs,
+        offset: usize,
+        path: &mut String,
+    ) {
+        // SAFETY: for the block, every step stays inside the value its description lays
+        // out (fields at their offsets, array elements at their strides).
+        unsafe {
+            let ptr = base.add(offset);
+            if let Some(f) = newtype_field(ty) {
+                self.walk(
+                    world,
+                    assets,
+                    component,
+                    base,
+                    f.ty,
+                    f.attrs,
+                    offset + f.offset,
+                    path,
+                );
+                return;
+            }
+            let Some(kind) = kind_of(ty, attrs, path) else {
+                // A struct: its fields one by one, named by their paths.
+                if let TypeKind::Struct(fields) = ty.kind {
+                    for f in fields {
+                        if f.attrs.skip || f.attrs.hidden {
+                            continue;
+                        }
+                        let len = path.len();
+                        if len > 0 {
+                            path.push('.');
+                        }
+                        path.push_str(f.name);
+                        self.walk(
+                            world,
+                            assets,
+                            component,
+                            base,
+                            f.ty,
+                            f.attrs,
+                            offset + f.offset,
+                            path,
+                        );
+                        path.truncate(len);
+                    }
+                }
+                return;
+            };
+            let name = self.push_text(if path.is_empty() { "value" } else { path });
+            let mut values = [(0, 0); 4];
+            let count = match kind {
+                Kind::Numbers {
+                    len,
+                    element,
+                    stride,
+                    degrees,
+                    ..
+                } => {
+                    for (i, slot) in values.iter_mut().enumerate().take(usize::from(len)) {
+                        let v = engine_reflect::read(ptr.add(i * usize::from(stride)), element)
+                            .map_or(0.0, Value::as_f64);
+                        let start = self.text.len();
+                        if degrees {
+                            push_number(&mut self.text, v.to_degrees(), 2);
+                        } else if matches!(
+                            element.kind,
+                            TypeKind::Primitive(Primitive::F32 | Primitive::F64)
+                        ) {
+                            push_number(&mut self.text, v, 3);
+                        } else {
+                            let _ = write!(self.text, "{v}");
+                        }
+                        *slot = (start as u32, self.text.len() as u32);
+                    }
+                    len
+                }
+                Kind::Rotation => {
+                    let degrees = euler_degrees(read_quat(ptr));
+                    for (i, d) in degrees.into_iter().enumerate() {
+                        let start = self.text.len();
+                        push_number(&mut self.text, d, 2);
+                        values[i] = (start as u32, self.text.len() as u32);
+                    }
+                    3
+                }
+                Kind::Bool | Kind::Choice | Kind::Text => {
+                    let start = self.text.len();
+                    self.scratch.clear();
+                    show(&mut self.scratch, world, assets, ty, ptr);
+                    self.text.push_str(&self.scratch);
+                    values[0] = (start as u32, self.text.len() as u32);
+                    1
+                }
+            };
+            self.properties.push(Property {
+                component,
+                offset,
+                ty,
+                attrs,
+                kind,
+                name,
+                values,
+                count,
+            });
+        }
+    }
+
+    fn push_text(&mut self, s: &str) -> (u32, u32) {
+        let start = self.text.len() as u32;
+        self.text.push_str(s);
+        (start, self.text.len() as u32)
+    }
+}
+
+/// How a value is edited; `None` for a struct whose fields are shown one by one.
+fn kind_of(ty: &'static TypeInfo, attrs: Attrs, path: &str) -> Option<Kind> {
+    let field = path.rsplit('.').next().unwrap_or(path);
+    let quantity_of = |element: &TypeInfo| match element.kind {
+        TypeKind::Primitive(Primitive::F32 | Primitive::F64) => {
+            if attrs.hint == Hint::Degrees {
+                Quantity::Angle
+            } else if matches!(field, "translation" | "position") {
+                Quantity::Position
+            } else if field == "scale" {
+                Quantity::Scale
+            } else {
+                Quantity::Number { step: attrs.step }
+            }
+        }
+        _ => Quantity::Integer,
+    };
+    if is_entity(ty) || is_asset_ref(ty) {
+        return Some(Kind::Text);
+    }
+    if ty.name == "Quat" && vector_fields(ty).is_some_and(|f| f.len() == 4) {
+        return Some(Kind::Rotation);
+    }
+    if let Some(fields) = vector_fields(ty) {
+        let element = fields[0].ty;
+        return Some(Kind::Numbers {
+            len: fields.len() as u8,
+            quantity: quantity_of(element),
+            element,
+            stride: element.size as u16,
+            degrees: attrs.hint == Hint::Degrees,
+        });
+    }
+    match ty.kind {
+        TypeKind::Primitive(Primitive::Bool) => Some(Kind::Bool),
+        TypeKind::Primitive(_) => Some(Kind::Numbers {
+            len: 1,
+            quantity: quantity_of(ty),
+            element: ty,
+            stride: ty.size as u16,
+            degrees: attrs.hint == Hint::Degrees,
+        }),
+        TypeKind::Enum { .. } => Some(Kind::Choice),
+        TypeKind::Array { element, len }
+            if (1..=4).contains(&len)
+                && matches!(element.kind, TypeKind::Primitive(p) if p != Primitive::Bool) =>
+        {
+            Some(Kind::Numbers {
+                len: len as u8,
+                quantity: quantity_of(element),
+                element,
+                stride: element.size as u16,
+                degrees: attrs.hint == Hint::Degrees,
+            })
+        }
+        TypeKind::Struct(_) => None,
+        _ => Some(Kind::Text),
+    }
+}
+
+/// Appends a number with at most `decimals` decimals, without trailing zeros (and `0`
+/// for -0).
+fn push_number(out: &mut String, v: f64, decimals: usize) {
+    let start = out.len();
+    let _ = write!(out, "{v:.decimals$}");
+    if out[start..].contains('.') {
+        while out.ends_with('0') {
+            out.pop();
+        }
+        if out.ends_with('.') {
+            out.pop();
+        }
+    }
+    if &out[start..] == "-0" {
+        out.truncate(start);
+        out.push('0');
+    }
+}
+
+/// A value shown as text: strings unquoted, entities by name, assets by path, the rest
+/// as a scene writes it (the first line of a container's lines, `…` after it).
+///
+/// # Safety
+///
+/// `ptr` points to a live value of `ty`.
+unsafe fn show(
+    out: &mut String,
+    world: &World,
+    assets: &AssetPaths,
+    ty: &'static TypeInfo,
+    ptr: *const u8,
+) {
+    // SAFETY: for the block, as the caller guarantees.
+    unsafe {
+        if is_entity(ty) {
+            let e = ptr.cast::<Entity>().read_unaligned();
+            match world.get::<Name>(e) {
+                _ if !world.contains(e) => out.push_str("none"),
+                Some(name) => out.push_str(name.as_str()),
+                None => {
+                    let _ = write!(out, "entity {}", e.index());
+                }
+            }
+            return;
+        }
+        if is_asset_ref(ty) {
+            let asset = ptr.cast::<AssetRef>().read_unaligned();
+            match assets.get(asset) {
+                Some(path) if !asset.is_none() => out.push_str(path),
+                _ => asset.write(Some(assets), out),
+            }
+            return;
+        }
+        match ty.kind {
+            TypeKind::String => out.push_str(engine_reflect::read_str(ptr)),
+            TypeKind::Primitive(Primitive::Bool) => {
+                let on = engine_reflect::read(ptr, ty) == Some(Value::Bool(true));
+                out.push_str(if on { "true" } else { "false" });
+            }
+            TypeKind::Enum { variants, .. } => {
+                let raw = match engine_reflect::read(ptr, ty) {
+                    Some(Value::Int(i)) => i,
+                    Some(Value::UInt(u)) => u as i64,
+                    _ => 0,
+                };
+                match variants.iter().find(|v| v.value == raw) {
+                    Some(v) => out.push_str(v.name),
+                    None => {
+                        let _ = write!(out, "{raw}");
+                    }
+                }
+            }
+            _ => {
+                let mut lines = String::new();
+                engine_scene::write_lines(ty, ptr, Some(assets), &mut lines);
+                let mut it = lines.lines();
+                if let Some(first) = it.next() {
+                    out.push_str(first.split_once(" = ").map_or(first, |(_, v)| v).trim());
+                    if it.next().is_some() {
+                        out.push_str(" …");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The quaternion at `ptr` (x, y, z, w as four `f32`).
+///
+/// # Safety
+///
+/// `ptr` points to four `f32`.
+unsafe fn read_quat(ptr: *const u8) -> Quat {
+    // SAFETY: as the caller guarantees.
+    let [x, y, z, w] = unsafe { ptr.cast::<[f32; 4]>().read_unaligned() };
+    Quat::from_xyzw(x, y, z, w)
+}
+
+/// A rotation's Euler angles in degrees, as shown: (pitch about X, yaw about Y, roll about
+/// Z), applied yaw first, then pitch, then roll.
+pub fn euler_degrees(q: Quat) -> [f64; 3] {
+    let (yaw, pitch, roll) = q.normalize().to_euler(EulerRot::YXZ);
+    [pitch, yaw, roll].map(|a| f64::from(a).to_degrees())
+}
+
+/// The rotation of Euler angles in degrees, as [`euler_degrees`] shows them.
+pub fn from_euler_degrees([pitch, yaw, roll]: [f64; 3]) -> Quat {
+    let r = |d: f64| d.to_radians() as f32;
+    Quat::from_euler(EulerRot::YXZ, r(yaw), r(pitch), r(roll))
+}
+
+/// An `f32` as the `f64` of its shortest decimal form (0.67, not 0.6700000166893005), so
+/// sums of drag steps on it stay decimal (0.67 + 0.5 is 1.17 in the file, not 1.1700001).
+fn decimal(v: f32) -> f64 {
+    format!("{v}").parse().unwrap_or(f64::from(v))
+}
+
+/// An angle in degrees without the noise of its conversion (to 0.0001°).
+fn clean_degrees(v: f64) -> f64 {
+    let r = (v * 1e4).round() / 1e4;
+    if r == 0.0 { 0.0 } else { r }
+}
+
+/// Reads the numbers of a [`Kind::Numbers`] or [`Kind::Rotation`] property as shown
+/// (degrees for angles), as the start of a drag: `f32`s by their decimal form, angles
+/// without conversion noise.
+///
+/// # Safety
+///
+/// `component` points to a live value of the property's component.
+pub unsafe fn read_numbers(p: &Property, component: *const u8) -> [f64; 4] {
+    let mut out = [0.0; 4];
+    // SAFETY: for the block, the property's offset and strides stay inside the component.
+    unsafe {
+        let ptr = component.add(p.offset);
+        match p.kind {
+            Kind::Numbers {
+                len,
+                element,
+                stride,
+                degrees,
+                ..
+            } => {
+                for (i, slot) in out.iter_mut().enumerate().take(usize::from(len)) {
+                    let at = ptr.add(i * usize::from(stride));
+                    let v = match element.kind {
+                        TypeKind::Primitive(Primitive::F32) => {
+                            decimal(at.cast::<f32>().read_unaligned())
+                        }
+                        _ => engine_reflect::read(at, element).map_or(0.0, Value::as_f64),
+                    };
+                    *slot = if degrees {
+                        clean_degrees(v.to_degrees())
+                    } else {
+                        v
+                    };
+                }
+            }
+            Kind::Rotation => {
+                let [x, y, z] = euler_degrees(read_quat(ptr)).map(clean_degrees);
+                out = [x, y, z, 0.0];
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Writes the numbers of a [`Kind::Numbers`] or [`Kind::Rotation`] property, as shown
+/// (degrees for angles), clamped to its range.
+///
+/// # Safety
+///
+/// `component` points to a live, writable value of the property's component.
+pub unsafe fn write_numbers(p: &Property, component: *mut u8, values: [f64; 4]) {
+    // SAFETY: for the block, the property's offset and strides stay inside the component.
+    unsafe {
+        let ptr = component.add(p.offset);
+        match p.kind {
+            Kind::Numbers {
+                len,
+                element,
+                stride,
+                degrees,
+                ..
+            } => {
+                for (i, &v) in values.iter().enumerate().take(usize::from(len)) {
+                    let v = if degrees { v.to_radians() } else { v };
+                    let _ = engine_reflect::write(
+                        ptr.add(i * usize::from(stride)),
+                        element,
+                        &p.attrs,
+                        Value::Float(v),
+                    );
+                }
+            }
+            Kind::Rotation => {
+                let q = from_euler_degrees([values[0], values[1], values[2]]);
+                ptr.cast::<[f32; 4]>().write_unaligned([q.x, q.y, q.z, q.w]);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Flips a [`Kind::Bool`] property.
+///
+/// # Safety
+///
+/// `component` points to a live, writable value of the property's component.
+pub unsafe fn toggle(p: &Property, component: *mut u8) {
+    // SAFETY: the property's offset holds a `bool` of its type.
+    unsafe {
+        let ptr = component.add(p.offset);
+        let on = engine_reflect::read(ptr, p.ty) == Some(Value::Bool(true));
+        let _ = engine_reflect::write(ptr, p.ty, &p.attrs, Value::Bool(!on));
+    }
+}
+
+/// The variants' names of a [`Kind::Choice`] property, in order.
+pub fn variants(p: &Property) -> impl Iterator<Item = &'static str> {
+    let variants = match p.ty.kind {
+        TypeKind::Enum { variants, .. } => variants,
+        _ => &[],
+    };
+    variants.iter().map(|v| v.name)
+}
+
+/// Sets a [`Kind::Choice`] property to its `index`-th variant.
+///
+/// # Safety
+///
+/// `component` points to a live, writable value of the property's component.
+pub unsafe fn choose(p: &Property, component: *mut u8, index: usize) {
+    let TypeKind::Enum { variants, .. } = p.ty.kind else {
+        return;
+    };
+    let Some(v) = variants.get(index) else {
+        return;
+    };
+    // SAFETY: the property's offset holds an enum of its type; only its variants are written.
+    unsafe {
+        let _ = engine_reflect::write(component.add(p.offset), p.ty, &p.attrs, Value::Int(v.value));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+    use engine_core::math::Vec3;
+    use engine_ecs::Transform;
+    use engine_scene::SceneId;
+
+    #[test]
+    fn transform_shows_as_vectors_and_degrees_and_edits_back() {
+        let mut world = World::new();
+        let e = world.spawn((
+            SceneId::new(),
+            Name::new("Box"),
+            Transform::from_xyz(1.5, 0.0, -2.0)
+                .with_rotation(Quat::from_rotation_y(90f32.to_radians()))
+                .with_scale(Vec3::splat(2.0)),
+        ));
+        let mut inspector = Inspector::new();
+        inspector.build(&world, e, &AssetPaths::new());
+        let titles: Vec<&str> = inspector.sections().iter().map(|s| s.title).collect();
+        assert_eq!(titles, ["Name", "Transform"]);
+        let props = inspector.properties();
+        assert_eq!(inspector.name(&props[0]), "value");
+        assert_eq!(inspector.values(&props[0]).collect::<Vec<_>>(), ["Box"]);
+        let shown: Vec<(&str, Vec<&str>)> = props[1..]
+            .iter()
+            .map(|p| (inspector.name(p), inspector.values(p).collect()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                ("translation", vec!["1.5", "0", "-2"]),
+                ("rotation", vec!["0", "90", "0"]),
+                ("scale", vec!["2", "2", "2"]),
+            ]
+        );
+        let translation = props[1];
+        assert!(matches!(
+            translation.kind,
+            Kind::Numbers {
+                quantity: Quantity::Position,
+                len: 3,
+                ..
+            }
+        ));
+        let rotation = props[2];
+        let id = translation.component;
+        let ptr = world.get_raw_mut(e, id).unwrap().as_ptr();
+        // SAFETY: the entity's live `Transform`.
+        unsafe {
+            write_numbers(&translation, ptr, [0.4, 0.0, -2.0, 0.0]);
+            let mut angles = read_numbers(&rotation, ptr);
+            assert!((angles[1] - 90.0).abs() < 1e-4, "{angles:?}");
+            angles[1] = 45.0;
+            write_numbers(&rotation, ptr, angles);
+        }
+        let t = world.get::<Transform>(e).unwrap();
+        assert_eq!(t.translation, Vec3::new(0.4, 0.0, -2.0));
+        assert!(
+            t.rotation
+                .angle_between(Quat::from_rotation_y(45f32.to_radians()))
+                < 1e-5
+        );
+    }
+
+    #[test]
+    fn euler_angles_round_trip() {
+        for angles in [[30.0, 45.0, 10.0], [-80.0, 170.0, 0.0], [0.0, -135.0, 60.0]] {
+            let back = euler_degrees(from_euler_degrees(angles));
+            for (a, b) in angles.iter().zip(back) {
+                assert!((a - b).abs() < 1e-3, "{angles:?} → {back:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn numbers_drop_trailing_zeros() {
+        let mut s = String::new();
+        for (v, d, want) in [
+            (0.5, 3, "0.5"),
+            (2.0, 3, "2"),
+            (-0.0001, 3, "0"),
+            (12.345678, 2, "12.35"),
+        ] {
+            s.clear();
+            push_number(&mut s, v, d);
+            assert_eq!(s, want);
+        }
+    }
+}

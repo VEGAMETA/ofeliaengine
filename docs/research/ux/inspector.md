@@ -55,7 +55,10 @@ errors next to their cause, keyboard-first.
    - Typing a value sets it on every entity.
    - Scrubbing and relative expressions (`+=0.5`, `*1.2`) change each entity's own value.
 5. **Number fields:**
-   - scrub by dragging the label: Shift is fine, Ctrl snaps to `step`;
+   - scrub by dragging the value. Modifiers are the owner's (2026-10-17), not Blender's:
+     free by default, Shift takes the other mode for the moment (whole steps from the
+     start), Ctrl rounds to the grid; steps position 0.1, scale 0.1, rotation 45°, else
+     the field's `step` (built in E1-4a, ADR 0107);
    - Up and Down step;
    - expressions (`2*pi`, `+=10`, `*2`);
    - units shown and accepted (`30deg`).

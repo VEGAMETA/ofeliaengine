@@ -7,7 +7,7 @@
 use engine_editor::icons;
 use engine_editor::paint::UiText;
 use engine_editor::shell::{
-    Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, build,
+    Field, FileItem, FileKind, Palette, Section, ShellModel, TreeItem, Widget, build,
 };
 use engine_ui::{TextMeasure, Theme, Ui, UiInput};
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -94,11 +94,28 @@ fn a_steady_shell_frame_does_not_allocate() {
     let fields = [
         Field {
             name: "Position",
-            value: "0.50   0.90   2.00",
+            widget: Widget::Numbers {
+                values: &["0.5", "0.9", "2"],
+                labels: &["x", "y", "z"],
+            },
         },
         Field {
             name: "Rotation",
-            value: "0°   45°   0°",
+            widget: Widget::Numbers {
+                values: &["0", "45", "0"],
+                labels: &["x", "y", "z"],
+            },
+        },
+        Field {
+            name: "Visible",
+            widget: Widget::Check(true),
+        },
+        Field {
+            name: "Mode",
+            widget: Widget::Choice {
+                current: "Opaque",
+                open: Some(&["Opaque", "Mask", "Blend"]),
+            },
         },
     ];
     let sections = [Section {
@@ -134,6 +151,8 @@ fn a_steady_shell_frame_does_not_allocate() {
         active_bottom: None,
         playing: false,
         status: "engine 0.0.0",
+        snap: true,
+        add_menu: Some(&["Empty", "Cube"]),
     };
     let palette = Palette::default();
     let mut ui = Ui::new(Theme::default());
