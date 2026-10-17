@@ -714,6 +714,43 @@ impl FrameRenderer {
         }
     }
 
+    /// The format the tone mapper writes (the output's, or its HDR intermediate's).
+    pub fn output_format(&self) -> vk::Format {
+        self.output_format
+    }
+
+    /// Writes `format` from now on (HDR output turned on or off, ADR 0038): the tone
+    /// mapper and the filters after it are made for it, the resampling tone mappers made
+    /// again when next asked for. The scene passes do not depend on it.
+    ///
+    /// # Errors
+    ///
+    /// When the tone mapper cannot be made (the renderer then still writes the old
+    /// format).
+    ///
+    /// # Safety
+    ///
+    /// The GPU no longer uses the old pipelines and filter tables (the device is idle).
+    pub unsafe fn set_output_format(
+        &mut self,
+        device: &Device,
+        allocator: &mut Allocator,
+        bindless: &Bindless,
+        format: vk::Format,
+    ) -> Result<(), RhiError> {
+        if format == self.output_format {
+            return Ok(());
+        }
+        let tonemap = Tonemap::new(device, bindless, format)?;
+        self.tonemap = tonemap;
+        // SAFETY: guaranteed by the caller.
+        unsafe { self.post.destroy(device, allocator, bindless) };
+        *self.post = PostAa::new(format);
+        self.resampling = Default::default();
+        self.output_format = format;
+        Ok(())
+    }
+
     /// The scene passes (ambient occlusion, subsurface scattering, the depth prepass,
     /// culling options are set there).
     pub fn forward(&self) -> &ForwardRenderer {
