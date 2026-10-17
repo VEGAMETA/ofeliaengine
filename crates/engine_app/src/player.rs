@@ -307,6 +307,8 @@ pub struct Player {
     /// Sound (ADR 0105): the mixer, its device, the sources' voices; the videos' sound
     /// plays through it.
     sound: Sound,
+    /// The network session (ADR 0106), with `PlayerSettings::network`.
+    net: Option<Box<dyn crate::net::NetDrive>>,
     /// The `loc/` folder behind the world's localizer, kept live (ADR 0102).
     text: Option<crate::text::LiveText>,
     /// The devices behind the world's `engine_input::Input` (`PlayerSettings::input`).
@@ -726,6 +728,11 @@ impl Player {
         // the game sets the buses' volumes through the world's `Mixer`.
         let sound = Sound::new(&settings.audio);
         world.insert_resource(sound.mixer());
+        // Networking (ADR 0106): the session the game asks for through `Network`.
+        let net = settings.network.as_ref().map(|config| {
+            world.insert_resource(config.network());
+            config.driver(settings.tick_hz)
+        });
         if settings.audio.enabled {
             startup.notes.push(sound.note().to_owned());
         }
@@ -843,6 +850,7 @@ impl Player {
             gi_rays: None,
             videos: Videos::new(),
             sound,
+            net,
             text,
             input,
             graph,
@@ -1527,27 +1535,63 @@ impl Player {
             None => false,
         };
         // Ticks, presentation, interpolation (ADR 0064).
+        // The network session's requests (host, join, leave) at the frame's start (ADR 0106).
+        if let Some(net) = &mut self.net {
+            net.begin_frame(&mut self.runtime.world, Instant::now());
+        }
+        let joined = self.net.as_ref().is_some_and(|n| n.is_client());
         let stages = {
             let game_cell = RefCell::new(&mut *game);
             let timing = &mut self.timing;
-            self.runtime.frame(
-                elapsed,
-                &(),
-                &mut self.scene,
-                |world, (), dt| {
+            let mut net = self.net.as_deref_mut();
+            let present = |world: &mut World, (): &(), alpha: f32| {
+                if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
+                    input.sample_frame(Instant::now());
+                }
+                game_cell.borrow_mut().present(world, alpha);
+            };
+            match net.as_mut() {
+                // Joined: the client runs the frame's ticks (its predictions, and past ones
+                // again after a correction), the game's tick as its simulation.
+                Some(client) if joined => {
+                    let world = &mut self.runtime.world;
                     if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
                         input.sample_tick(Instant::now());
                     }
-                    timing.advance(world, dt);
-                    game_cell.borrow_mut().tick(world, dt);
-                },
-                |world, (), alpha| {
-                    if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
-                        input.sample_frame(Instant::now());
-                    }
-                    game_cell.borrow_mut().present(world, alpha);
-                },
-            )
+                    game_cell.borrow_mut().net_input(world);
+                    // Timers move once a frame here: re-simulated ticks must not move them.
+                    timing.advance(world, elapsed as f32);
+                    self.runtime.frame_driven(
+                        &(),
+                        &mut self.scene,
+                        |world, (), dt| game_cell.borrow_mut().tick(world, dt),
+                        |world, step| client.client_frame(world, Instant::now(), step),
+                        present,
+                    )
+                }
+                _ => self.runtime.frame(
+                    elapsed,
+                    &(),
+                    &mut self.scene,
+                    |world, (), dt| {
+                        if sample && let Some(input) = world.resource_mut::<engine_input::Input>() {
+                            input.sample_tick(Instant::now());
+                        }
+                        // Hosting: the guests' inputs in, the host's input into its pawn.
+                        if let Some(host) = net.as_mut() {
+                            game_cell.borrow_mut().net_input(world);
+                            host.host_tick_start(world, Instant::now());
+                        }
+                        timing.advance(world, dt);
+                        game_cell.borrow_mut().tick(world, dt);
+                        // Hosting: the pawns given, the events, the snapshots out.
+                        if let Some(host) = net.as_mut() {
+                            host.host_tick_end(world, Instant::now());
+                        }
+                    },
+                    present,
+                ),
+            }
         };
         report.ticks = stages.ticks;
         report.simulate = stages.simulate_us;

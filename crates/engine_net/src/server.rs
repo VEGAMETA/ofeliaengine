@@ -617,15 +617,31 @@ impl<I: InputData, T: Transport> Server<I, T> {
         reliable: bool,
         event: &E,
     ) -> bool {
-        let Some(kind) = self.schema.event_index(core::any::TypeId::of::<E>()) else {
+        self.send_event_bytes(
+            target,
+            reliable,
+            core::any::TypeId::of::<E>(),
+            bytemuck::bytes_of(event),
+        )
+    }
+
+    /// [`Self::send_event`] for an event given by its type and bytes (a session that knows
+    /// only its input type, as the player's: ADR 0106). False if the type is not
+    /// registered or the bytes are not its size.
+    pub fn send_event_bytes(
+        &mut self,
+        target: Target,
+        reliable: bool,
+        event_type: core::any::TypeId,
+        bytes: &[u8],
+    ) -> bool {
+        let Some(kind) = self.schema.event_index(event_type) else {
             return false;
         };
-        wire::event_message(
-            &mut self.message,
-            kind as u16,
-            self.tick,
-            bytemuck::bytes_of(event),
-        );
+        if self.schema.events[kind].size != bytes.len() {
+            return false;
+        }
+        wire::event_message(&mut self.message, kind as u16, self.tick, bytes);
         let channel = if reliable { CH_RELIABLE } else { CH_UNRELIABLE };
         for c in self.clients.iter().flatten() {
             let to = match target {
@@ -638,6 +654,17 @@ impl<I: InputData, T: Transport> Server<I, T> {
             }
         }
         true
+    }
+
+    /// Calls `f(client, type, tick, bytes)` for every event received in the last
+    /// [`Self::update`], whatever its type.
+    pub fn read_event_bytes(&self, mut f: impl FnMut(ClientId, core::any::TypeId, u32, &[u8])) {
+        for &(kind, sender, tick, start, len) in &self.inbox.records {
+            if let Some(event) = self.schema.events.get(usize::from(kind)) {
+                let bytes = &self.inbox.bytes[start as usize..(start + len) as usize];
+                f(ClientId(sender), event.type_id, tick, bytes);
+            }
+        }
     }
 
     /// Calls `f(client, tick, event)` for every event of type `E` received in the last

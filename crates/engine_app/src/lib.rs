@@ -48,6 +48,10 @@
 //! the player's languages; a `loc/` folder ([`TextSource::Folder`]) is kept live, an edit
 //! showing in the running game.
 //!
+//! Networking (ADR 0106): with [`PlayerSettings::network`] the player runs the session the
+//! game asks for through the world's [`Network`] resource: hosting, it runs the server around
+//! the game's ticks; joined, the client runs the ticks (its predictions); offline, nothing.
+//!
 //! Physics (ADR 0101) is the game's: a [`ScenePhysics`] it owns gets the pack's bodies with
 //! [`Player::load_physics`] (level geometry static, props moving the scene's instances) and
 //! is stepped from [`Game::tick`]. A game without physics loads none of the pack's colliders.
@@ -56,6 +60,7 @@
 //! runs the same executable.
 
 mod game;
+mod net;
 mod physics;
 mod player;
 mod process;
@@ -66,6 +71,8 @@ mod sound;
 mod text;
 mod videos;
 
+/// Networking's replication (ADR 0074): the schema, `Replicated`, lag compensation.
+pub use engine_net as netcode;
 /// Saves (ADR 0104): everything a game's own saves need (`capture`, `write_save`,
 /// `read_save`, `apply_with`).
 pub use engine_save as save;
@@ -75,6 +82,10 @@ pub use engine_save::{
     SlotInfo, Transient,
 };
 pub use game::{FrameParts, Game};
+pub use net::{
+    HitCapsule, HostOptions, NetConfig, NetEvent, NetInput, NetState, Network, PlayerId, Predicted,
+    SubTick, To,
+};
 pub use physics::{SceneBodies, ScenePhysics};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 pub use report::{FrameReport, Startup, StartupPipelines};

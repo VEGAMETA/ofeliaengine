@@ -323,3 +323,60 @@ History is one second (`ServerSettings::max_rewind`).
 - Client: own pawn 1.5 µs per frame, a rollback adds ~0.12 µs per re-simulated tick plus
   your systems; 1,000 interpolated entities ~65 µs.
 - No allocation per tick on either side.
+
+## 8. Co-op in the player: hosting and joining without writing the loops
+
+In the player ([ADR 0106](../adr/0106-networking-in-the-player.md)) you do not write the
+loops of §7.3 and §7.4: the player runs the session, and your game talks to it through the
+world's `Network` resource.
+
+```rust
+use engine_app::{HostOptions, NetConfig, NetEvent, Network, To};
+
+// Settings: your input type and the function that builds your schema (§7.1).
+settings.network = Some(NetConfig::new::<PlayerInput>(schema));
+
+impl Game for MyGame {
+    // The input for the next tick, from what the player pressed (§7.2).
+    fn net_input(&mut self, world: &mut World) {
+        let input = self.sample(world.resource::<engine_input::Input>().unwrap());
+        world.resource_mut::<Network>().unwrap().set_input(&input);
+    }
+
+    // The shared systems: on the host for everyone, on a guest for its predictions.
+    fn tick(&mut self, world: &mut World, dt: f32) {
+        simulate(world, dt); // reads NetInput<PlayerInput> and the replicated components
+
+        let net = world.resource_mut::<Network>().unwrap();
+        for event in net.events().collect::<Vec<_>>() {
+            if let NetEvent::PlayerJoined(player) = event {
+                let pawn = world.spawn((Replicated::new(), Player::default(), Transform::IDENTITY));
+                world.resource_mut::<Network>().unwrap().give(pawn, Some(player));
+            }
+        }
+    }
+}
+```
+
+- **The menu:**
+  - `net.host(HostOptions::default())` hosts at the next frame. The router is asked to
+    forward the port in the background; `NetEvent::PortMapped` says when players on the
+    internet can reach you.
+  - `net.invite()` makes an invite: text to paste into a chat, or to send through your
+    platform's invite. One per player.
+  - `net.join(&invite)` joins; `net.leave()` ends the session.
+- **Your own pawn:** spawn it while hosting and say so with `net.set_local_pawn(Some(pawn))`.
+  Its input is fed every tick, as a guest's is.
+- **What happens on a guest:**
+  - `NetEvent::Connected`, then `NetEvent::Spawned { entity, predicted }` for every
+    replicated entity: attach its mesh there. `predicted` is the guest's own pawn.
+  - Read events in `present`: a guest's ticks run inside the frame.
+  - Show your own pawn between its ticks with `net.alpha()`; the remote ones are already
+    smooth.
+- **One-shot events:** `net.send_event(&e, To::All, true)` and
+  `net.read_events::<E>(|tick, from, e| ...)`, for the event types in your schema.
+- **Offline,** the player runs your ticks as in singleplayer and sends nothing. Feed your
+  pawn's `NetInput` yourself there.
+- **Not there yet:**
+  - hole punching and relays, which need a rendezvous of yours (§4);
+  - dedicated servers.

@@ -137,6 +137,10 @@ pub struct PlayerSettings {
     /// Sound (ADR 0105): the sounds' folder, the buses, the acoustics. The world's
     /// [`crate::Mixer`] resource sets the buses' volumes.
     pub audio: crate::AudioSettings,
+    /// Networking (ADR 0106): the game's input type and schema
+    /// (`NetConfig::new::<Input>(schema)`); the world's [`crate::Network`] resource hosts,
+    /// joins and leaves. `None`: singleplayer only.
+    pub network: Option<crate::NetConfig>,
 }
 
 impl Default for PlayerSettings {
@@ -175,6 +179,7 @@ impl Default for PlayerSettings {
             input: None,
             saves: crate::SaveSettings::default(),
             audio: crate::AudioSettings::default(),
+            network: None,
         }
     }
 }

@@ -57,6 +57,6 @@ pub use engine_physics::ecs::FixedStep;
 pub use extract::{ExtractStats, MeshRenderer, RenderExtract, SceneSink};
 pub use lights::{LightExtract, PointLight, SpotLight, Sun};
 pub use probes::{GiExtract, GiVolume, ProbeExtract, ProbeSink, ReflectionProbe};
-pub use runtime::{FrameStages, Runtime};
+pub use runtime::{Driven, FrameStages, Runtime};
 pub use skinned::SkinnedMesh;
 pub use timing::{Ease, Repeat, Timer, Timing, Tween};
