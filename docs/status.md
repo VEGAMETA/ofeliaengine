@@ -36,10 +36,19 @@ Last updated: 2026-10-17.
     - `.material` files.
   - **The owner added blockout** (CSG brushes as in Godot) as phase E2b, after the
     viewport tools.
-  - **Next:** the rest of E1 (ADR 0107 §7):
-    - the editor linked into a game;
-    - the tree and the inspector on the real world;
-    - sessions, rebuild and restart.
+  - **E1-3, the editor on the player** (ADR 0107 as built):
+    - the player draws the scene into the viewport panel (`set_view_rect`), and the
+      editor paints its shell over the frame (`Overlay`);
+    - the tree and the inspector read the real world;
+    - the editor's camera;
+    - the binary opens a scene file.
+    - Lost for now: HDR output (the player presents in SDR). HDR output in the player
+      comes next.
+  - **Next:** HDR output in the player; then the rest of E1 (ADR 0107 §7):
+    - E1-4: the tree and the inspector edit the world (commands, undo, multi-editing),
+      saving the scene; the roots' order in scene files (sorted by id today) to settle;
+    - E1-5: sessions, autosave, rebuild and restart; the game's `main` from a macro,
+      `ofeliaengine edit`, the quick start as a scene.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

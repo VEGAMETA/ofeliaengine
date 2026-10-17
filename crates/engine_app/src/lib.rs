@@ -62,6 +62,7 @@
 mod assets;
 mod game;
 mod net;
+mod overlay;
 mod physics;
 mod player;
 pub mod prelude;
@@ -89,6 +90,7 @@ pub use net::{
     HitCapsule, HostOptions, NetConfig, NetEvent, NetInput, NetState, Network, PlayerId, Predicted,
     SubTick, To,
 };
+pub use overlay::{Overlay, OverlayPass};
 pub use physics::{SceneBodies, ScenePhysics};
 pub use player::{AppError, MAX_UI_CANVASES, Player, Presentation, SceneInfo, Setup, UiLayer};
 pub use report::{FrameReport, Startup, StartupPipelines};

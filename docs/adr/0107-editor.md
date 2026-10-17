@@ -252,6 +252,38 @@ gains each phase's commands.
 - Offscreen shots cover the viewport's tools.
 - The zero-allocation test covers the editor's steady state.
 
+## As built (E1-3, 2026-10-17)
+
+The editor runs on the player.
+
+- **`engine_app::Overlay`:** an overlay adds its own passes to the frame's graph over the
+  finished frame, after the game's UI and before presentation
+  (`Player::frame_overlaid`, `capture_overlaid`).
+- **`Player::set_view_rect`:** the scene is drawn into a part of the output. The frame
+  renderer's view target already took a rectangle (split screen). The player gives it
+  the rectangle, sizes the view from it and takes the camera's aspect from it.
+- **`engine_editor::run`, `run_frames` and `editor`:**
+  - `EditorGame` wraps the game: it takes the window's events and builds the shell in
+    the frame's presentation step, from the world; in edit mode nothing of the game
+    runs;
+  - `EditorOverlay` paints the shell with its own 2D renderer and glyph texture;
+  - the editor's camera is an entity without a scene id, above every camera of the
+    scene;
+  - the viewport panel's rectangle sets the next frame's view.
+- **The tree and the inspector read the world:** the scene's entities in their hierarchy,
+  and the selected entity's components written as scene lines (`engine_scene::write_lines`),
+  assets by path. Editing is E1-4.
+- **The editor keeps Windows' power throttling** (`process_setup` off), as the team
+  decided.
+- **The editor binary** opens a scene file or an empty world. Its own device and window
+  set-up went away with the demo data.
+- **Lost for now: HDR output.** The old editor presented in HDR, and the player presents
+  in SDR. HDR output in the player comes next, for games and the editor alike.
+- **Measured** on ref-1 (release, 1600×900): start and 60 frames in 0.51–0.69 s.
+- **Tested** by `engine_editor` `app`: a scene file opened offscreen. The red cube is
+  drawn inside the viewport panel and nowhere outside it, and selecting it from code
+  selects it.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and

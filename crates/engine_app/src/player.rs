@@ -1,6 +1,7 @@
 //! The player: a game's process, window, device, presentation, scene and frame loop.
 
 use crate::game::{FrameParts, Game};
+use crate::overlay::{Overlay, OverlayPass};
 use crate::process::ProcessSetup;
 use crate::report::{FrameReport, Startup, StartupPipelines};
 use crate::settings::{PlayerSettings, Window};
@@ -114,6 +115,22 @@ fn ms(start: Instant) -> f64 {
 /// Microseconds since `start`.
 fn us(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1e6
+}
+
+/// `[x, y, width, height]` kept inside `extent`, at least a pixel.
+fn clamp_rect(rect: [u32; 4], extent: vk::Extent2D) -> vk::Rect2D {
+    let x = rect[0].min(extent.width.saturating_sub(1));
+    let y = rect[1].min(extent.height.saturating_sub(1));
+    vk::Rect2D {
+        offset: vk::Offset2D {
+            x: x as i32,
+            y: y as i32,
+        },
+        extent: vk::Extent2D {
+            width: rect[2].clamp(1, (extent.width - x).max(1)),
+            height: rect[3].clamp(1, (extent.height - y).max(1)),
+        },
+    }
 }
 
 /// The UI layer: canvases the game keeps in the player, drawn on every presented frame.
@@ -290,6 +307,9 @@ pub struct Player {
     runtime: Runtime<InstanceId>,
     /// The meshes and materials scenes name (ADR 0108), and the models drawn with them.
     assets: crate::Assets,
+    /// The part of the output the scene covers ([`Player::set_view_rect`]); `None`: all of
+    /// it.
+    view_rect: Option<[u32; 4]>,
     cameras: CameraView,
     scene_info: SceneInfo,
     // GPU objects destroyed in `Drop`.
@@ -911,6 +931,7 @@ impl Player {
             first_present_ms: None,
             timing,
             assets: crate::Assets::new(settings.project.clone().unwrap_or_default()),
+            view_rect: None,
             saves: SaveState {
                 folder: save_folder.clone(),
                 encoding: settings
@@ -1357,6 +1378,19 @@ impl Player {
     ///
     /// As [`Self::frame`], and on a player with a window.
     pub fn capture(&mut self, game: &mut impl Game) -> Result<Option<Vec<u8>>, AppError> {
+        self.capture_overlaid(game, None)
+    }
+
+    /// [`Self::capture`] of a frame with `overlay` drawn over it ([`Self::frame_overlaid`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::capture`].
+    pub fn capture_overlaid(
+        &mut self,
+        game: &mut impl Game,
+        overlay: Option<&mut dyn Overlay>,
+    ) -> Result<Option<Vec<u8>>, AppError> {
         let Some(offscreen) = &mut self.offscreen else {
             return Err(AppError::message(
                 "capturing a frame",
@@ -1365,7 +1399,7 @@ impl Player {
         };
         offscreen.requested = true;
         offscreen.captured = None;
-        let rendered = self.frame(game)?;
+        let rendered = self.frame_overlaid(game, overlay)?;
         let Some(offscreen) = &mut self.offscreen else {
             unreachable!("checked above");
         };
@@ -1434,8 +1468,41 @@ impl Player {
     /// # Errors
     ///
     /// When a Vulkan call or the frame's declaration fails.
-    #[allow(clippy::too_many_lines)]
     pub fn frame(&mut self, game: &mut impl Game) -> Result<Option<FrameReport>, AppError> {
+        self.frame_overlaid(game, None)
+    }
+
+    /// The part of the output the scene is drawn into: `[x, y, width, height]` in pixels
+    /// from the top-left corner (the editor's viewport panel), or `None` for all of it
+    /// (the default). The camera's aspect follows it. The rest of the output is left to
+    /// the overlay ([`Self::frame_overlaid`]).
+    pub fn set_view_rect(&mut self, rect: Option<[u32; 4]>) {
+        self.view_rect = rect;
+    }
+
+    /// The part of the output the scene is drawn into ([`Self::set_view_rect`]).
+    pub fn view_rect(&self) -> Option<[u32; 4]> {
+        self.view_rect
+    }
+
+    /// The format the frame is drawn in (the swapchain's, or the offscreen image's): what
+    /// an overlay's pipelines write.
+    pub fn output_format(&self) -> vk::Format {
+        self.swapchain_format
+    }
+
+    /// [`Self::frame`], with `overlay` drawing over the finished frame before it is
+    /// presented (the editor's panels, ADR 0107).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::frame`], and when the overlay's passes fail.
+    #[allow(clippy::too_many_lines)]
+    pub fn frame_overlaid(
+        &mut self,
+        game: &mut impl Game,
+        mut overlay: Option<&mut dyn Overlay>,
+    ) -> Result<Option<FrameReport>, AppError> {
         engine_profiler::zone!("app::Player::frame");
         let mut report = FrameReport::default();
         // The window's events: the game sees them all; the player keeps the size and
@@ -1706,7 +1773,10 @@ impl Player {
             ),
         };
         let extent = self.extent();
-        let aspect = extent.width as f32 / extent.height.max(1) as f32;
+        // The scene's part of the output (`set_view_rect`): the whole of it by default.
+        let view_rect = self.view_rect.map(|r| clamp_rect(r, extent));
+        let view_extent = view_rect.map_or(extent, |r| r.extent);
+        let aspect = view_extent.width as f32 / view_extent.height.max(1) as f32;
         let clip_from_world = camera.clip_from_world(aspect);
 
         // Streaming: mesh levels by distance in every direction (a fast turn finds them
@@ -1714,7 +1784,7 @@ impl Player {
         let t = Instant::now();
         if let Some(streamer) = &mut self.streamer {
             let eye = camera.position;
-            let lod_view = LodView::new(&clip_from_world, eye, extent.height, 1.0).around();
+            let lod_view = LodView::new(&clip_from_world, eye, view_extent.height, 1.0).around();
             let before = streamer.stats().arrived;
             streamer.update(
                 &mut self.textures,
@@ -1786,7 +1856,7 @@ impl Player {
             .prepare(
                 view,
                 &view_settings,
-                (extent.width, extent.height),
+                (view_extent.width, view_extent.height),
                 PrepareContext {
                     device: &self.device,
                     allocator: &mut self.allocator,
@@ -1998,7 +2068,7 @@ impl Player {
             };
             let view_target = ViewTarget {
                 texture: target,
-                rect: None,
+                rect: view_rect,
                 load: LoadOp::DontCare,
             };
             let view_frame = match generated {
@@ -2089,6 +2159,15 @@ impl Player {
                         )
                         .map_err(AppError::at("the UI"))?;
                 }
+            }
+            if let Some(overlay) = overlay.as_mut() {
+                overlay.record(&mut OverlayPass {
+                    fg: &mut fg,
+                    ring: &mut self.ring,
+                    bindless: &self.bindless,
+                    target: ui_target.unwrap_or(target),
+                    extent,
+                })?;
             }
             let backbuffer = present.as_ref().map(PresentTarget::swapchain_texture);
             if let Some(present) = present {

@@ -1,15 +1,40 @@
 # The editor
 
-The editor is the team's Godot layout (`docs/research/ux/editor-layout.md`) in a window:
-scene tabs with play controls, the tool bar, the 3D viewport, the file browser under it,
-the scene tree and the inspector on the right, the bottom panels.
+The editor runs inside your game's own build (ADR 0107): the player runs the game's world,
+draws the scene into the viewport panel, and the editor's shell (the team's Godot layout)
+is drawn over the frame. Your components and systems are native in it.
 
-```sh
-cargo run -p engine_editor --release --bin editor
+```text
+cargo run -p engine_editor --release --bin editor -- scenes/main.scene --project C:/games/mygame
 ```
 
-At this stage the panels show demo data; binding them to the scene (ECS, reflection, undo,
-the command palette) comes next.
+- **`scene`**: a scene file (ADR 0108), relative to `--project` (the working folder by
+  default). Without one, an empty world.
+- **`--frames N`** renders N frames and exits (smoke tests), printing the time with the
+  start.
+
+From a game's own build:
+
+```rust
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // The game's settings; their `scene` is what the editor opens.
+    engine_editor::run(settings()?, start)
+}
+```
+
+`start` makes the game from the player when Play starts (Play comes with phase E3).
+
+## What works now
+
+- **The viewport** shows the scene through the game's renderer (every feature the player
+  has), from the editor's own camera, in the panel's rectangle.
+- **The scene tree** lists the scene's entities (those with a scene id) in their hierarchy:
+  - each row shows its name (`Name`) and its kind (camera, sun, light, model);
+  - a click selects a row; a click on the selected row opens or closes it.
+- **The inspector** shows the selected entity's components as the scene file writes them,
+  assets by path (`builtin#cube`, `materials/red.material`). Editing comes next (phase
+  E1-4).
+- **Edit mode:** the game is not made and nothing ticks.
 
 ## Viewport navigation
 
@@ -23,42 +48,24 @@ the command palette) comes next.
 The bindings follow Godot (`docs/research/ux/viewport-navigation.md`). Flying with
 right button + WASD and focusing the selection come later.
 
-## Panels
+## Coming next
 
-- Clicking a row of the scene tree selects it; clicking the selected row opens or closes
-  it.
-- Tabs, tools, ► and ■ react to clicks; while "playing", a colored edge frames the
-  viewport. ‖ and keyboard navigation of the panels come with play mode and the command
-  palette.
-- The status bar shows the frame rate, the editor's CPU time per frame (UI, painting,
-  recording the frame), the GPU time per frame, and the output (SDR, or HDR with its
-  white level and peak).
+| Phase | What |
+|---|---|
+| E1-4 | the tree and the inspector edit the world (commands, undo, multi-editing), saving the scene |
+| E1-5 | sessions, autosave, rebuild and restart after a code change |
+| E2 | selection in the viewport, gizmos, snapping, placement by drag and drop |
+| E3 | Play on a copy of the world |
+
+The whole plan is ADR 0107 §7.
 
 ## HDR
 
-While Windows runs the display in HDR, the editor presents in HDR (scRGB): the UI at
-Windows' SDR white level, like every other window, and the 3D view with highlights up to
-the display's peak. It follows HDR being turned on or off, the SDR brightness slider and
-moves to another monitor while running (`docs/dev-guide/hdr.md`, ADR 0038).
-
-## Options
-
-| Option | Effect |
-|---|---|
-| `--fps N` | Frame-rate cap; `--fps 0` for none. By default the cap is 97% of the monitor's refresh rate, re-read as the window moves between monitors. |
-| `--present fifo\|mailbox\|immediate` | Present mode (drivers may override v-sync, which is why there is a cap). |
-| `--validate` | Vulkan validation with synchronization validation (always on in debug builds). |
-| `--no-throttle` | Keeps Windows from slowing the editor while its window is not in front. By default the editor saves power in the background. |
-| `--hdr scrgb\|hdr10\|off` | Output while the display runs in HDR: scRGB (default), HDR10, or stay in SDR. |
-| `--frames N` | Renders N frames and exits, printing the cold start time, frame statistics and the average GPU time of every pass. |
-
-`ENGINE_ADAPTER=radeon` (or another name fragment) picks the GPU.
+The editor presents in SDR for now: it draws through the player, which presents in SDR.
+HDR output comes back with the player's own HDR output, which games get too.
 
 ## What it costs (ref-1, release, 1600×900)
 
 | | |
 |---|---|
-| Cold start to the first frame | 0.39 s (budget 2 s): window and Vulkan device 0.35 s, pipelines (cached) 2 ms, fonts and UI 3 ms |
-| CPU per frame | UI 22 µs, painting 25 µs, recording the frame 60 µs |
-| Frame rate | capped at 233 FPS on a 240 Hz monitor (Reflex on NVIDIA, Anti-Lag 2 plus the CPU limiter on AMD) |
-| GPU per frame (RTX 4060 Ti at the cap, low clocks) | SDR 515 µs, HDR scRGB 585 µs, HDR10 670 µs |
+| Start and 60 frames | 0.51–0.69 s (budget for the start alone: 2 s) |

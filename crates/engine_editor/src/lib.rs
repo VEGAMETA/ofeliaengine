@@ -6,6 +6,7 @@
 //! names the icon glyphs it uses. [`input`] turns window events into UI input and
 //! [`camera`] is the viewport's orbit camera.
 
+pub mod app;
 pub mod camera;
 pub mod icons;
 pub mod input;
@@ -14,5 +15,6 @@ mod palette;
 pub mod shell;
 mod undo;
 
+pub use app::{EditorGame, EditorOverlay, Start, editor, run, run_frames};
 pub use palette::{Chord, CommandId, CommandInfo, Commands, Conflict, KeyContext, Keymap, Match};
 pub use undo::{History, Transaction};
