@@ -28,8 +28,15 @@ Last updated: 2026-10-17.
     - `AssetRef` written by path and id, and the scene's id in the header;
     - format 1 still loads;
     - saving 11 % faster, loading unchanged.
+  - **E1-2, scenes in the player** (ADR 0108 as built):
+    - `PlayerSettings::scene` and `project`, `Player::load_scene`;
+    - every reflected component of the program loads without registration;
+    - `Model` names a mesh and a material by asset, and the player draws it;
+    - built-in cube, sphere, plane and cylinder, the default material;
+    - `.material` files.
+  - **The owner added blockout** (CSG brushes as in Godot) as phase E2b, after the
+    viewport tools.
   - **Next:** the rest of E1 (ADR 0107 §7):
-    - scenes loaded by the player, built-in meshes and materials, the game's `start`;
     - the editor linked into a game;
     - the tree and the inspector on the real world;
     - sessions, rebuild and restart.
@@ -350,7 +357,8 @@ water and impostors stay in §6):
    - **E1:** foundation: the editor linked into a game, the player split so the editor
      drives it, scene format 2, the tree and the inspector, commands, sessions, rebuild
      and restart;
-   - **E2:** viewport tools; **E3:** Play on a copy of the world; **E4:** assets (ids,
+   - **E2:** viewport tools; **E2b:** blockout (CSG brushes, the owner's addition);
+     **E3:** Play on a copy of the world; **E4:** assets (ids,
      cache, import, browser); **E5:** prefabs; **E6:** output, errors, history;
    - **E7:** Luau in the game (bindings, `.d.luau`, script components; the public API to
      the owner); **E8:** the code editor; **E9:** the debugger (core, DAP, panel);

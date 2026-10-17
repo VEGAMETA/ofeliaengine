@@ -15,7 +15,12 @@ use engine_render::mesh::MeshId;
 /// Saved whole (ADR 0104): the mesh and material as the ids the level and the game gave
 /// them, the same while the game adds its meshes and materials in the same order (a
 /// quickload, the same build; a stale id draws nothing).
+///
+/// Hidden from scenes and the editor's inspector: its ids live only in memory. Scenes hold
+/// the player's `Model` (the mesh and material by asset id, ADR 0108), which the player
+/// turns into this.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, bytemuck::Pod, bytemuck::Zeroable, Reflect)]
+#[reflect(hidden)]
 #[repr(C)]
 pub struct MeshRenderer {
     /// The mesh in the geometry pool.

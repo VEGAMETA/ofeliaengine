@@ -189,6 +189,18 @@ impl AssetPaths {
         self.map.get(&asset).map(String::as_str)
     }
 
+    /// Takes every path of `other`; its paths win.
+    pub fn extend(&mut self, other: &AssetPaths) {
+        for (&asset, path) in &other.map {
+            self.map.insert(asset, path.clone());
+        }
+    }
+
+    /// Every reference with its path, in no particular order.
+    pub fn iter(&self) -> impl Iterator<Item = (AssetRef, &str)> + '_ {
+        self.map.iter().map(|(&asset, path)| (asset, path.as_str()))
+    }
+
     /// How many references have a path.
     pub fn len(&self) -> usize {
         self.map.len()

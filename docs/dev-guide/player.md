@@ -43,6 +43,32 @@ fn main() {
 - **`player.setup()`** gives you the meshes, materials, textures and skinned meshes, to
   add your own before the first frame.
 
+## A scene file
+
+What the editor saves (ADR 0108) loads the same way:
+
+```rust
+let mut player = Player::new(&PlayerSettings {
+    scene: Some("scenes/main.scene".into()), // relative to `project`
+    project: Some("C:/games/mygame".into()), // `None`: the working folder
+    ..PlayerSettings::default()
+})?;
+```
+
+- **Every reflected component** of your program loads, without registration: those made
+  with `reflect_component!` in any crate the game links.
+- **`Model`** names a mesh and a material by asset, and the player draws it. It makes the
+  entity's `MeshRenderer` in the frame and keeps it in step: change the model and the
+  drawing follows; remove it and the drawing goes. In code,
+  `world.spawn((Transform::from_xyz(0.0, 1.0, 0.0), Model::new(builtin::SPHERE, builtin::MATERIAL)))`
+  is enough.
+- **Built-in meshes** are `builtin::CUBE`, `SPHERE`, `PLANE` and `CYLINDER`, each 1 across;
+  the built-in material is `builtin::MATERIAL`. Your own materials are `.material` files
+  ([scenes.md](scenes.md#materials)).
+- **`player.load_scene(path)`** adds another scene to the world (a level, a room).
+- **An asset the player cannot find** leaves its entity undrawn and says why once in the
+  log; `player.assets().problem(asset)` tells you too.
+
 ## What the player does for you
 
 - **The process.**

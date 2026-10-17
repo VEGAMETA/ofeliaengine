@@ -89,6 +89,66 @@ let handle = AssetRef::part(door, "Handle");
   one, a reference is written with the bare id and the part's hash (`#~…`); it still loads
   back to the same asset.
 
+## In the player
+
+`PlayerSettings::scene` loads a scene file when the player starts, and
+`Player::load_scene(path)` loads one later ([player.md](player.md#a-scene-file)):
+
+- **Every reflected component** of the program loads without registration
+  (`SceneRegistry::from_program()`).
+- **Types marked `hidden`** stay out of scenes: runtime data such as `MeshRenderer` (its
+  mesh and material ids live only in memory) and the hierarchy's links.
+
+### Models
+
+A `Model` is what a scene says about drawing an entity: a mesh and a material, by asset.
+
+```text
+Model.mesh = asset("builtin#cube", 6f66656c6961206275696c74696e0001)
+Model.material = asset("materials/red.material", 4f8e1d2c3b4a59687706f5e4d3c2b1a0)
+Model.hidden = false
+```
+
+| Built-in | Asset |
+|---|---|
+| a cube of 1 × 1 × 1 | `builtin::CUBE` (`builtin#cube`) |
+| a sphere of diameter 1 | `builtin::SPHERE` (`builtin#sphere`) |
+| a plane of 1 × 1 facing up | `builtin::PLANE` (`builtin#plane`) |
+| a cylinder of diameter 1 and height 1 | `builtin::CYLINDER` (`builtin#cylinder`) |
+| a grey, half-rough material | `builtin::MATERIAL` (`builtin#default`) |
+
+Meshes from files (a glTF's parts) come with the editor's asset browser.
+
+### Materials
+
+A material is a file of its own, `.material`, with its id in the header:
+
+```text
+[material version=1 id=4f8e1d2c3b4a59687706f5e4d3c2b1a0]
+
+base_color = [0.8, 0.15, 0.1, 1]
+metallic = 0
+roughness = 0.4
+emissive = [0, 0, 0]
+alpha = Opaque
+alpha_cutoff = 0.5
+double_sided = false
+```
+
+| Field | What it is |
+|---|---|
+| `base_color` | linear red, green, blue and alpha |
+| `metallic` | 0 dielectric … 1 metal |
+| `roughness` | 0 mirror … 1 matte |
+| `emissive` | emitted light, linear (above 1 for bright emitters) |
+| `alpha` | `Opaque`, `Mask` (cut below `alpha_cutoff`) or `Blend` |
+| `double_sided` | both faces drawn |
+
+- In code: `MaterialFile { base_color: [0.8, 0.15, 0.1, 1.0], ..MaterialFile::default() }`,
+  written with `to_text(id)` and read with `MaterialFile::parse`.
+- A scene finds the file by the path written beside its id, relative to the game's folder.
+  Textures come with the asset browser.
+
 ## Changing components safely
 
 - **Adding a field:** old scenes load with the field's default value.

@@ -225,6 +225,40 @@ Values, names, asset references and the header's id; prefab instances come with 
   the second component moving each entity to another archetype (ADR 0029's known next
   step).
 
+## As built (E1-2, 2026-10-17)
+
+Scenes in the player.
+
+- **`SceneRegistry::from_program()`:**
+  - every reflected component linked into the program that has a `Default`, read and
+    written through its component id (no Rust type behind the registry);
+  - types marked `hidden` or `skip` stay out;
+  - `MeshRenderer` is now `hidden`: its ids live only in memory.
+- **Files of one value:** `write_value` and `read_value`. The header is
+  `[<kind> version=<n> id=<id>]`, then the struct's lines without a component's name.
+- **Material files** (`.material`, `engine_app::MaterialFile`, version 1):
+  - fields: base color, metallic, roughness, emissive, alpha (`Opaque`, `Mask`, `Blend`)
+    with its cutoff, double-sided;
+  - textures come with the asset browser (E4).
+- **`engine_app::Model`:** a mesh and a material by asset.
+  - The player makes the entity's `MeshRenderer` in its frame, after the game's
+    presentation and before extraction. The pools begin their frame after the
+    simulation, so new meshes and materials reach the GPU the same frame.
+  - It keeps the renderer in step:
+    - a `Changed<Model>` query visits only chunks where models were written;
+    - a marker takes the renderer away when the model goes.
+  - An asset it cannot find leaves the entity undrawn and is said once in the log.
+- **The built-in library** `builtin#<part>`, under one fixed id: cube, sphere, plane,
+  cylinder (each 1 across) and the default material.
+- **The player:** `PlayerSettings::scene` and `project`, `Player::load_scene`.
+- **A model spawned with a `Transform` alone** gets the world transform propagation fills.
+- **Tested:**
+  - `engine_app` `scene_file`: a scene built in code is saved with a material file beside
+    it, loaded through `PlayerSettings::scene` and rendered offscreen; removing a model
+    removes its renderer;
+  - `zero_alloc_models`: models shown and hidden in turn every tick, so the renderers
+    follow every frame, without a heap allocation in the steady state.
+
 ## Consequences
 
 - **Scenes, prefabs and saves share one value grammar.** One reader and one writer grow

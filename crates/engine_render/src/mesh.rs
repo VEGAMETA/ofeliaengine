@@ -337,6 +337,109 @@ pub fn cube() -> OwnedMeshData {
     mesh
 }
 
+/// A plane of 1 × 1 in the XZ plane, centred on the origin and facing +Y: 4 vertices,
+/// texture coordinates from 0 to 1 (the cube's top face).
+pub fn plane() -> OwnedMeshData {
+    let mut mesh = OwnedMeshData::default();
+    // u along +X, v along −Z: u × v = +Y.
+    for (du, dv) in [(-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5)] {
+        mesh.positions
+            .push((Vec3::X * du + Vec3::NEG_Z * dv).to_array());
+        mesh.normals.push([0.0, 1.0, 0.0]);
+        mesh.tangents.push([1.0, 0.0, 0.0, 1.0]);
+        mesh.uvs.push([du + 0.5, 0.5 - dv]);
+    }
+    mesh.indices.extend([0, 1, 2, 0, 2, 3]);
+    mesh
+}
+
+/// A sphere of diameter 1 centred on the origin, in `segments` slices around Y and
+/// `rings` bands from pole to pole (at least 3 and 2). Texture u goes once around, v from
+/// the top pole (0) to the bottom one (1); a seam of doubled vertices runs along +Z.
+pub fn sphere(segments: u32, rings: u32) -> OwnedMeshData {
+    let (segments, rings) = (segments.max(3), rings.max(2));
+    let mut mesh = OwnedMeshData::default();
+    for r in 0..=rings {
+        let v = r as f32 / rings as f32;
+        let (st, ct) = (v * core::f32::consts::PI).sin_cos();
+        for s in 0..=segments {
+            let u = s as f32 / segments as f32;
+            let (sp, cp) = (u * core::f32::consts::TAU).sin_cos();
+            let n = Vec3::new(st * sp, ct, st * cp);
+            mesh.positions.push((n * 0.5).to_array());
+            mesh.normals.push(n.to_array());
+            // Along increasing u; n × t points north, towards decreasing v: w = +1.
+            mesh.tangents.push([cp, 0.0, -sp, 1.0]);
+            mesh.uvs.push([u, v]);
+        }
+    }
+    let stride = segments + 1;
+    for r in 0..rings {
+        for s in 0..segments {
+            let (a, d) = (r * stride + s, r * stride + s + 1);
+            let (b, c) = (a + stride, d + stride);
+            // Counter-clockwise from outside; the poles' collapsed triangles are left out.
+            if r + 1 < rings {
+                mesh.indices.extend([a, b, c]);
+            }
+            if r > 0 {
+                mesh.indices.extend([a, c, d]);
+            }
+        }
+    }
+    mesh
+}
+
+/// A cylinder of diameter 1 and height 1 centred on the origin, its axis along Y, in
+/// `segments` slices (at least 3): a side with smooth normals (texture u once around, v
+/// from top to bottom) and two flat caps (mapped as the cube's top and bottom faces).
+pub fn cylinder(segments: u32) -> OwnedMeshData {
+    let segments = segments.max(3);
+    let mut mesh = OwnedMeshData::default();
+    for s in 0..=segments {
+        let u = s as f32 / segments as f32;
+        let (sp, cp) = (u * core::f32::consts::TAU).sin_cos();
+        for (y, v) in [(0.5, 0.0), (-0.5, 1.0)] {
+            mesh.positions.push([0.5 * sp, y, 0.5 * cp]);
+            mesh.normals.push([sp, 0.0, cp]);
+            mesh.tangents.push([cp, 0.0, -sp, 1.0]);
+            mesh.uvs.push([u, v]);
+        }
+    }
+    for s in 0..segments {
+        let (a, b) = (2 * s, 2 * s + 1);
+        let (d, c) = (a + 2, b + 2);
+        mesh.indices.extend([a, b, c, a, c, d]);
+    }
+    // The caps: a centre and a ring each, normals straight up and down.
+    for (y, ny) in [(0.5f32, 1.0f32), (-0.5, -1.0)] {
+        let centre = mesh.positions.len() as u32;
+        // As the cube's faces: u along +X, v along −Z on top and +Z below.
+        let uv = |x: f32, z: f32| [x + 0.5, 0.5 + z * ny];
+        mesh.positions.push([0.0, y, 0.0]);
+        mesh.normals.push([0.0, ny, 0.0]);
+        mesh.tangents.push([1.0, 0.0, 0.0, 1.0]);
+        mesh.uvs.push(uv(0.0, 0.0));
+        for s in 0..segments {
+            let (sp, cp) = (s as f32 / segments as f32 * core::f32::consts::TAU).sin_cos();
+            let (x, z) = (0.5 * sp, 0.5 * cp);
+            mesh.positions.push([x, y, z]);
+            mesh.normals.push([0.0, ny, 0.0]);
+            mesh.tangents.push([1.0, 0.0, 0.0, 1.0]);
+            mesh.uvs.push(uv(x, z));
+        }
+        for s in 0..segments {
+            let (i, j) = (centre + 1 + s, centre + 1 + (s + 1) % segments);
+            if ny > 0.0 {
+                mesh.indices.extend([centre, i, j]);
+            } else {
+                mesh.indices.extend([centre, j, i]);
+            }
+        }
+    }
+    mesh
+}
+
 /// A right-handed perspective projection for Vulkan: depth 0..1 (near..far) and the Y
 /// flip of Vulkan's clip space folded in, so +Y is up on screen.
 pub fn perspective(fov_y_radians: f32, aspect: f32, near: f32, far: f32) -> Mat4 {
@@ -1972,5 +2075,48 @@ mod tests {
             let (dv1, dv2) = (uv(tri[1])[1] - uv(tri[0])[1], uv(tri[2])[1] - uv(tri[0])[1]);
             assert!(b.dot(e1) * dv1 <= 1e-6 && b.dot(e2) * dv2 <= 1e-6);
         }
+    }
+
+    #[test]
+    fn generated_shapes_face_out_and_follow_their_tangents() {
+        for (name, mesh) in [
+            ("plane", plane()),
+            ("sphere", sphere(16, 8)),
+            ("cylinder", cylinder(12)),
+        ] {
+            let count = mesh.positions.len();
+            assert!(
+                mesh.normals.len() == count
+                    && mesh.tangents.len() == count
+                    && mesh.uvs.len() == count,
+                "{name}"
+            );
+            assert_eq!(mesh.indices.len() % 3, 0, "{name}");
+            for tri in mesh.indices.chunks(3) {
+                assert!(tri.iter().all(|&i| (i as usize) < count), "{name}");
+                let p = |i: u32| Vec3::from(mesh.positions[i as usize]);
+                let face = (p(tri[1]) - p(tri[0])).cross(p(tri[2]) - p(tri[0]));
+                assert!(face.length() > 1e-8, "{name}: no collapsed triangles");
+                for &i in tri {
+                    let n = Vec3::from(mesh.normals[i as usize]);
+                    assert!((n.length() - 1.0).abs() < 1e-5, "{name}");
+                    assert!(face.dot(n) > 0.0, "{name}: counter-clockwise front faces");
+                    let [tx, ty, tz, _] = mesh.tangents[i as usize];
+                    let t = Vec3::new(tx, ty, tz);
+                    assert!(
+                        t.dot(n).abs() < 1e-5 && (t.length() - 1.0).abs() < 1e-5,
+                        "{name}"
+                    );
+                }
+            }
+        }
+        // The built-in sizes: 1 across.
+        let extent = |m: &OwnedMeshData| {
+            m.positions.iter().fold(0.0f32, |e, p| {
+                e.max(p[0].abs()).max(p[1].abs()).max(p[2].abs())
+            })
+        };
+        assert!((extent(&sphere(32, 16)) - 0.5).abs() < 1e-5);
+        assert!((extent(&cylinder(32)) - 0.5).abs() < 1e-5);
     }
 }

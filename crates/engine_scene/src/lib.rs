@@ -63,7 +63,10 @@ pub mod text;
 
 pub use assets::{AssetId, AssetPaths, AssetRef};
 
-use engine_ecs::{Component, Entity, GlobalTransform, QueryState, Transform, World, bytemuck};
+use engine_ecs::reflected::WriteDefault;
+use engine_ecs::{
+    Component, ComponentId, Entity, GlobalTransform, QueryState, Transform, World, bytemuck,
+};
 use engine_reflect::{Primitive, Reflect, TypeInfo, TypeKind, Value};
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -180,12 +183,47 @@ impl Name {
 
 type Fill<'a> = dyn FnMut(*mut u8) + 'a;
 
+/// How a registered type's values are reached.
+enum Access {
+    /// Registered with its Rust type.
+    Typed {
+        type_name: fn() -> &'static str,
+        get: fn(&World, Entity) -> Option<*const u8>,
+        insert: fn(&mut World, Entity, &mut Fill<'_>),
+    },
+    /// From the program's list of reflected types (ADR 0104 step 1), by component id.
+    Listed {
+        id: fn(&mut World) -> ComponentId,
+        default: WriteDefault,
+    },
+}
+
 struct Entry {
     info: &'static TypeInfo,
-    type_name: fn() -> &'static str,
-    get: fn(&World, Entity) -> Option<*const u8>,
-    insert: fn(&mut World, Entity, &mut Fill<'_>),
+    access: Access,
     companions: Vec<fn(&mut World, Entity)>,
+}
+
+/// Room for one value of a listed type while it is read, before it moves into the world.
+struct Scratch {
+    ptr: *mut u8,
+    layout: std::alloc::Layout,
+}
+
+impl Scratch {
+    fn new(info: &TypeInfo) -> Option<Self> {
+        let layout = std::alloc::Layout::from_size_align(info.size.max(1), info.align).ok()?;
+        // SAFETY: a non-zero size.
+        let ptr = unsafe { std::alloc::alloc(layout) };
+        (!ptr.is_null()).then_some(Self { ptr, layout })
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        // SAFETY: allocated with this layout; the value in it was moved out or never made.
+        unsafe { std::alloc::dealloc(self.ptr, self.layout) };
+    }
 }
 
 /// The component types scenes may contain, by their reflected name.
@@ -211,6 +249,33 @@ impl SceneRegistry {
         r
     }
 
+    /// The engine's types ([`Self::with_engine_types`]) and every other reflected component
+    /// linked into the program (`reflect_component!`), so a game's components need no
+    /// registration. Left out: types marked `hidden` (runtime data such as
+    /// `MeshRenderer` and the hierarchy's links) or `skip` (never saved), and types without
+    /// `Default`, which a file cannot make.
+    pub fn from_program() -> Self {
+        let mut r = Self::with_engine_types();
+        for t in engine_ecs::reflected_types() {
+            let engine_ecs::ReflectedKind::Component { id, default } = t.kind else {
+                continue;
+            };
+            if t.info.attrs.hidden || t.info.attrs.skip || r.by_name.contains_key(t.info.name) {
+                continue;
+            }
+            let Some(default) = default() else {
+                continue;
+            };
+            r.entries.push(Entry {
+                info: t.info,
+                access: Access::Listed { id, default },
+                companions: Vec::new(),
+            });
+        }
+        r.index();
+        r
+    }
+
     /// Makes `T` savable and loadable under its reflected name. Missing fields load as
     /// `T::default()`'s.
     ///
@@ -219,17 +284,7 @@ impl SceneRegistry {
     /// If another type is registered under the same name.
     pub fn register<T: Component + Reflect + Default>(&mut self) -> &mut Self {
         let info = <T as Reflect>::TYPE_INFO;
-        if let Some(&i) = self.by_name.get(info.name) {
-            assert!(
-                self.entries[i].info.size == info.size
-                    && core::any::type_name::<T>() == (self.entries[i].type_name)(),
-                "two scene types named `{}`",
-                info.name
-            );
-            return self;
-        }
-        self.entries.push(Entry {
-            info,
+        let access = Access::Typed {
             type_name: core::any::type_name::<T>,
             get: |w, e| w.get::<T>(e).map(|r| (r as *const T).cast::<u8>()),
             insert: |w, e, fill| {
@@ -237,8 +292,38 @@ impl SceneRegistry {
                 fill((&raw mut value).cast::<u8>());
                 w.insert(e, value);
             },
+        };
+        if let Some(&i) = self.by_name.get(info.name) {
+            let entry = &mut self.entries[i];
+            match entry.access {
+                Access::Typed { type_name, .. } => assert!(
+                    entry.info.size == info.size && core::any::type_name::<T>() == type_name(),
+                    "two scene types named `{}`",
+                    info.name
+                ),
+                // The program's listing of the same type: reach it through its Rust type.
+                Access::Listed { .. } => {
+                    assert!(
+                        entry.info.size == info.size,
+                        "two scene types named `{}`",
+                        info.name
+                    );
+                    entry.access = access;
+                }
+            }
+            return self;
+        }
+        self.entries.push(Entry {
+            info,
+            access,
             companions: Vec::new(),
         });
+        self.index();
+        self
+    }
+
+    /// Sorts the entries by name and indexes them.
+    fn index(&mut self) {
         self.entries.sort_by_key(|e| e.info.name);
         self.by_name = self
             .entries
@@ -246,7 +331,16 @@ impl SceneRegistry {
             .enumerate()
             .map(|(i, e)| (e.info.name, i))
             .collect();
-        self
+    }
+
+    /// Whether a type of this name is registered.
+    pub fn contains(&self, name: &str) -> bool {
+        self.by_name.contains_key(name)
+    }
+
+    /// The registered types' descriptions, by name.
+    pub fn types(&self) -> impl Iterator<Item = &'static TypeInfo> + '_ {
+        self.entries.iter().map(|e| e.info)
     }
 
     /// Entities loaded with `T` also get `C::default()` if they lack a `C` (derived
@@ -380,6 +474,15 @@ pub fn save_with(
             let _ = writeln!(out, "[scene version={VERSION}]");
         }
     }
+    // How each registered type is read, its id found once for this world.
+    let getters: Vec<Getter> = registry
+        .entries
+        .iter()
+        .map(|entry| match entry.access {
+            Access::Typed { get, .. } => Getter::Typed(get),
+            Access::Listed { id, .. } => Getter::Id(id(world)),
+        })
+        .collect();
     let mut writer = Writer {
         out,
         path: String::new(),
@@ -390,13 +493,20 @@ pub fn save_with(
     let mut stack: Vec<Entity> = roots.iter().rev().map(|&(_, e)| e).collect();
     let mut children: Vec<Entity> = Vec::new();
     while let Some(e) = stack.pop() {
-        writer.entity(world, registry, e);
+        writer.entity(world, registry, &getters, e);
         count += 1;
         children.clear();
         children.extend(world.children(e).filter(|c| ids.contains_key(c)));
         stack.extend(children.iter().rev());
     }
     Ok(count)
+}
+
+/// How [`save_with`] reads a registered type's value.
+#[derive(Clone, Copy)]
+enum Getter {
+    Typed(fn(&World, Entity) -> Option<*const u8>),
+    Id(ComponentId),
 }
 
 /// Writes the lines of a scene.
@@ -409,13 +519,17 @@ struct Writer<'a> {
 }
 
 impl Writer<'_> {
-    fn entity(&mut self, world: &World, registry: &SceneRegistry, e: Entity) {
+    fn entity(&mut self, world: &World, registry: &SceneRegistry, getters: &[Getter], e: Entity) {
         let _ = writeln!(self.out, "\n[entity {}]", self.ids[&e]);
         if let Some(p) = world.parent(e).and_then(|p| self.ids.get(&p)) {
             let _ = writeln!(self.out, "parent = {p}");
         }
-        for entry in &registry.entries {
-            let Some(ptr) = (entry.get)(world, e) else {
+        for (entry, getter) in registry.entries.iter().zip(getters) {
+            let ptr = match *getter {
+                Getter::Typed(get) => get(world, e),
+                Getter::Id(id) => world.get_raw(e, id).map(|p| p.as_ptr().cast_const()),
+            };
+            let Some(ptr) = ptr else {
                 continue;
             };
             self.path.clear();
@@ -460,7 +574,9 @@ impl Writer<'_> {
                             continue;
                         }
                         let len = self.path.len();
-                        self.path.push('.');
+                        if len > 0 {
+                            self.path.push('.');
+                        }
                         self.path.push_str(f.name);
                         self.value(f.ty, ptr.add(f.offset));
                         self.path.truncate(len);
@@ -678,16 +794,23 @@ fn err(line: usize, message: impl Into<String>) -> LoadError {
     }
 }
 
-/// The header's version and id: `[scene version=2 id=<32 hex digits>]`.
-fn header(line: usize, s: &str) -> Result<(u32, Option<AssetId>), LoadError> {
+/// A header's version and id: `[<kind> version=2 id=<32 hex digits>]`.
+fn header(
+    kind: &str,
+    newest: u32,
+    line: usize,
+    s: &str,
+) -> Result<(u32, Option<AssetId>), LoadError> {
     let expected = || {
         err(
             line,
-            format!("expected the header `[scene version={VERSION}]`"),
+            format!("expected the header `[{kind} version={newest}]`"),
         )
     };
     let inner = s
-        .strip_prefix("[scene ")
+        .strip_prefix('[')
+        .and_then(|r| r.strip_prefix(kind))
+        .and_then(|r| r.strip_prefix(' '))
         .and_then(|r| r.strip_suffix(']'))
         .ok_or_else(expected)?;
     let (mut version, mut id) = (None, None);
@@ -703,10 +826,10 @@ fn header(line: usize, s: &str) -> Result<(u32, Option<AssetId>), LoadError> {
         }
     }
     let version = version.ok_or_else(expected)?;
-    if version > VERSION {
+    if version > newest {
         return Err(err(
             line,
-            format!("scene version {version} is newer than this engine ({VERSION})"),
+            format!("{kind} version {version} is newer than this engine ({newest})"),
         ));
     }
     Ok((version, id))
@@ -722,7 +845,7 @@ fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
             continue;
         }
         if head.is_none() {
-            head = Some(header(line, s)?);
+            head = Some(header("scene", VERSION, line, s)?);
             continue;
         }
         if let Some(rest) = s.strip_prefix("[entity ") {
@@ -836,6 +959,7 @@ pub fn load(
     let mut warnings: Vec<(usize, String)> = Vec::new();
     let mut first_error: Option<LoadError> = None;
     let mut segs: Vec<Seg<'_>> = Vec::new();
+    let mut scratches: Vec<Option<Scratch>> = registry.entries.iter().map(|_| None).collect();
     for (bi, b) in blocks.iter().enumerate() {
         let e = entities[bi];
         let mut start = 0;
@@ -846,9 +970,10 @@ pub fn load(
                     .iter()
                     .take_while(|f| f.1 == component)
                     .count();
-            let entry = &registry.entries[registry.by_name[component]];
+            let index = registry.by_name[component];
+            let entry = &registry.entries[index];
             let lines = &b.fields[start..end];
-            (entry.insert)(world, e, &mut |ptr| {
+            let mut fill = |ptr: *mut u8| {
                 let mut refs = SceneRefs {
                     by_id: &by_id,
                     entities: &entities,
@@ -885,7 +1010,27 @@ pub fn load(
                         }
                     }
                 }
-            });
+            };
+            match entry.access {
+                Access::Typed { insert, .. } => insert(world, e, &mut fill),
+                Access::Listed { id, default } => {
+                    let id = id(world);
+                    if scratches[index].is_none() {
+                        scratches[index] = Scratch::new(entry.info);
+                    }
+                    if let Some(scratch) = &scratches[index] {
+                        // SAFETY: the scratch is room for one value of the type; its default
+                        // makes it valid, reading keeps it valid, and `insert_raw` moves it
+                        // into the world (the entity was just spawned), leaving the room
+                        // free again.
+                        unsafe {
+                            default(scratch.ptr);
+                            fill(scratch.ptr);
+                            world.insert_raw(e, id, scratch.ptr);
+                        }
+                    }
+                }
+            }
             for companion in &entry.companions {
                 companion(world, e);
             }
@@ -915,6 +1060,128 @@ pub fn load(
         warnings,
         id: parsed.id,
         version: parsed.version,
+        assets,
+    })
+}
+
+/// What [`read_value`] found besides the value.
+#[derive(Debug, Default)]
+pub struct ValueReport {
+    /// The format version the file was written in.
+    pub version: u32,
+    /// The file's own id, from its header.
+    pub id: Option<AssetId>,
+    /// Lines that were skipped (fields the type no longer has), with their line numbers.
+    pub warnings: Vec<(usize, String)>,
+    /// The paths the file's asset references were written with.
+    pub assets: AssetPaths,
+}
+
+/// Writes a file holding one reflected struct (a material, settings; ADR 0108): the
+/// header `[<kind> version=<version> id=<id>]`, then one line per value, as a scene
+/// writes a component's but without its name (`base_color = [0.8, 0.1, 0.1, 1]`).
+pub fn write_value<T: Reflect>(
+    kind: &str,
+    version: u32,
+    id: Option<AssetId>,
+    value: &T,
+    assets: Option<&AssetPaths>,
+    out: &mut String,
+) {
+    match id {
+        Some(id) => {
+            let _ = writeln!(out, "[{kind} version={version} id={id}]");
+        }
+        None => {
+            let _ = writeln!(out, "[{kind} version={version}]");
+        }
+    }
+    out.push('\n');
+    let ids = HashMap::new();
+    let mut writer = Writer {
+        out,
+        path: String::new(),
+        ids: &ids,
+        assets,
+    };
+    // SAFETY: `value` is a live `T`, which its description lays out.
+    unsafe { writer.value(T::TYPE_INFO, (value as *const T).cast::<u8>()) };
+}
+
+/// How a file of one value names assets; it names no entities.
+struct ValueRefs<'a> {
+    assets: &'a mut AssetPaths,
+}
+
+impl ReadRefs for ValueRefs<'_> {
+    fn entity(&mut self, label: &str) -> Result<Entity, String> {
+        Err(format!("`@{label}`: a file of one value names no entities"))
+    }
+
+    fn asset(&mut self, asset: AssetRef, path: &str) {
+        self.assets.insert(asset, path);
+    }
+}
+
+/// Reads a file [`write_value`] wrote into `value`: fields the file does not mention keep
+/// theirs; fields the type no longer has are warnings.
+///
+/// # Errors
+///
+/// A header of another kind or a newer version, or a bad line or value, with its line. On
+/// error `value` may be partly read: read into a fresh value.
+pub fn read_value<T: Reflect>(
+    kind: &str,
+    version: u32,
+    text: &str,
+    value: &mut T,
+) -> Result<ValueReport, LoadError> {
+    let mut assets = AssetPaths::new();
+    let mut warnings = Vec::new();
+    let mut head = None;
+    let mut segs: Vec<Seg<'_>> = Vec::new();
+    let ptr = (value as *mut T).cast::<u8>();
+    for (i, raw) in text.lines().enumerate() {
+        let line = i + 1;
+        let s = raw.trim();
+        if s.is_empty() || s.starts_with('#') {
+            continue;
+        }
+        if head.is_none() {
+            head = Some(header(kind, version, line, s)?);
+            continue;
+        }
+        let (path, value_text) =
+            text::split_assignment(s).ok_or_else(|| err(line, "expected `field = value`"))?;
+        text::segments_into(path, &mut segs).map_err(|m| err(line, m))?;
+        let mut refs = ValueRefs {
+            assets: &mut assets,
+        };
+        // SAFETY: `ptr` is the caller's live `T`, described by its type.
+        let target = unsafe { text::resolve(&segs, T::TYPE_INFO, ptr, &mut refs) }
+            .map_err(|m| err(line, m))?;
+        match target {
+            None => warnings.push((
+                line,
+                format!("`{}` has no field `{path}`", T::TYPE_INFO.name),
+            )),
+            Some((ty, attrs, at)) => {
+                // SAFETY: `at` is a valid, writable value of `ty`.
+                unsafe { text::set_text(ty, &attrs, at, value_text, &mut refs) }
+                    .map_err(|m| err(line, m))?;
+            }
+        }
+    }
+    let (version, id) = head.ok_or_else(|| {
+        err(
+            0,
+            format!("empty file: expected the header `[{kind} version={version}]`"),
+        )
+    })?;
+    Ok(ValueReport {
+        version,
+        id,
+        warnings,
         assets,
     })
 }

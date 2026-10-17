@@ -59,6 +59,7 @@
 //! Crash reports are the game's `main`'s to set up (`engine_crash`): its monitor process
 //! runs the same executable.
 
+mod assets;
 mod game;
 mod net;
 mod physics;
@@ -72,6 +73,7 @@ mod sound;
 mod text;
 mod videos;
 
+pub use assets::{Alpha, Assets, MaterialFile, Model, builtin};
 /// Networking's replication (ADR 0074): the schema, `Replicated`, lag compensation.
 pub use engine_net as netcode;
 /// Saves (ADR 0104): everything a game's own saves need (`capture`, `write_save`,
