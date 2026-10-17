@@ -44,7 +44,7 @@ Last updated: 2026-10-17.
     - the binary opens a scene file.
     - Lost for now: HDR output (the player presents in SDR). HDR output in the player
       comes next.
-  - **E1-4a, the editor edits the world** (PR in flight, ADR 0107 as built):
+  - **E1-4a, the editor edits the world** (#254, ADR 0107 as built):
     - undo records every component scenes save (strings and lists as scene lines);
     - the inspector drags numbers, vectors and rotations (in degrees), clicks
       checkboxes, picks enums; Escape takes a drag back;
