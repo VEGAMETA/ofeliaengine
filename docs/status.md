@@ -42,8 +42,7 @@ Last updated: 2026-10-17.
     - the tree and the inspector read the real world;
     - the editor's camera;
     - the binary opens a scene file.
-    - Lost for now: HDR output (the player presents in SDR). HDR output in the player
-      comes next.
+    - HDR output, lost here for a while, came back with the player's own (below).
   - **E1-4a, the editor edits the world** (#254, ADR 0107 as built):
     - undo records every component scenes save (strings and lists as scene lines);
     - the inspector drags numbers, vectors and rotations (in degrees), clicks
@@ -52,7 +51,11 @@ Last updated: 2026-10-17.
       grid; position 0.1, scale 0.1, rotation 45°;
     - commands with shortcuts: undo, redo, save, delete, duplicate, add;
     - the scene saved under its own id; `*` on the tab while unsaved.
-  - **Next:** HDR output in the player; then the rest of E1 (ADR 0107 §7):
+  - **HDR output in the player** (PR in flight, ADR 0038 "In the player"): scRGB by
+    default while Windows runs the display in HDR, HDR10 or SDR by setting; follows the
+    display at run time; the editor's panels at the SDR white level. Tested offscreen
+    (`assume_display`); not yet seen on an HDR display (ref-1's runs in SDR).
+  - **Next:** the rest of E1 (ADR 0107 §7):
     - E1-4b: text fields (rename, typed values, strings), the command palette,
       multi-selection and multi-editing, the inspector's filter, reset; the roots' order
       in scene files (sorted by id today) to settle;
