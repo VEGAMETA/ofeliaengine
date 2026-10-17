@@ -1,0 +1,235 @@
+//! Scene format 2 (ADR 0108): strings and containers in the saves' grammar, structs of one
+//! unnamed field written as that field, asset references by path and id, the scene's own
+//! id, and files of format 1 still loading.
+
+#![allow(clippy::unwrap_used)]
+
+use engine_ecs::{Entity, World, reflect_component};
+use engine_reflect::Reflect;
+use engine_scene::{
+    AssetId, AssetPaths, AssetRef, Name, SaveOptions, SceneId, SceneRegistry, load, save, save_with,
+};
+use std::collections::{BTreeMap, HashMap};
+
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+struct Item {
+    id: u32,
+    count: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+struct Inventory {
+    owner: String,
+    items: Vec<Item>,
+    weights: Vec<f32>,
+    tags: Vec<String>,
+    flags: BTreeMap<String, bool>,
+    counts: HashMap<u32, f32>,
+    best: Option<u32>,
+    spare: Option<Item>,
+    note: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Default, Reflect)]
+struct Health(f32);
+
+#[derive(Debug, Clone, Copy, PartialEq, Default, Reflect)]
+struct Look {
+    mesh: AssetRef,
+    material: AssetRef,
+    sound: AssetRef,
+}
+
+#[derive(Debug, Clone, PartialEq, Default, Reflect)]
+struct Links {
+    targets: Vec<Entity>,
+}
+
+reflect_component!(Inventory, Health, Look, Links);
+
+fn registry() -> SceneRegistry {
+    let mut r = SceneRegistry::with_engine_types();
+    r.register::<Inventory>()
+        .register::<Health>()
+        .register::<Look>()
+        .register::<Links>();
+    r
+}
+
+fn crate_inventory() -> Inventory {
+    Inventory {
+        owner: String::from("Ofelia \"O\""),
+        items: vec![Item { id: 3, count: 2 }],
+        weights: vec![0.5, 1.0],
+        tags: vec![String::from("red"), String::from("fast")],
+        flags: BTreeMap::from([(String::from("met the smith"), true)]),
+        counts: HashMap::from([(9, 1.5), (2, 0.25)]),
+        best: Some(7),
+        spare: None,
+        note: Some(String::from("x = y")),
+    }
+}
+
+const CRATE_FILE: AssetId = AssetId::from_u128(5);
+
+#[test]
+fn exact_text_of_containers_names_and_assets() {
+    let mut w = World::new();
+    let look = Look {
+        mesh: AssetRef::part(CRATE_FILE, "Crate"),
+        material: AssetRef::NONE,
+        sound: AssetRef::file(AssetId::from_u128(6)),
+    };
+    w.spawn((
+        SceneId::from_u128(1),
+        Health(80.0),
+        crate_inventory(),
+        look,
+        Name::new("Crate"),
+    ));
+    let mut paths = AssetPaths::new();
+    paths.insert(look.mesh, "props/crate.gltf#Crate");
+    let options = SaveOptions {
+        id: Some(AssetId::from_u128(9)),
+        assets: Some(&paths),
+    };
+    let mut out = String::new();
+    save_with(&mut w, &registry(), &options, &mut out).unwrap();
+    let expected = "\
+[scene version=2 id=00000000000000000000000000000009]
+
+[entity 00000000000000000000000000000001]
+Health = 80
+Inventory.owner = \"Ofelia \\\"O\\\"\"
+Inventory.items.0.id = 3
+Inventory.items.0.count = 2
+Inventory.weights = [0.5, 1]
+Inventory.tags = [\"red\", \"fast\"]
+Inventory.flags[\"met the smith\"] = true
+Inventory.counts[2] = 0.25
+Inventory.counts[9] = 1.5
+Inventory.best = 7
+Inventory.spare = none
+Inventory.note = \"x = y\"
+Look.mesh = asset(\"props/crate.gltf#Crate\", 00000000000000000000000000000005)
+Look.material = none
+Look.sound = asset(\"\", 00000000000000000000000000000006)
+Name = \"Crate\"
+";
+    assert_eq!(out, expected);
+
+    // Loading gives the values, the id and the paths back; saving again the same text.
+    let mut w2 = World::new();
+    let report = load(&mut w2, &registry(), &out).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(report.version, 2);
+    assert_eq!(report.id, Some(AssetId::from_u128(9)));
+    let e = report.entities[0];
+    assert_eq!(w2.get::<Inventory>(e), Some(&crate_inventory()));
+    assert_eq!(w2.get::<Health>(e), Some(&Health(80.0)));
+    assert_eq!(w2.get::<Look>(e), Some(&look));
+    assert_eq!(w2.get::<Name>(e).map(Name::as_str), Some("Crate"));
+    assert_eq!(report.assets.get(look.mesh), Some("props/crate.gltf#Crate"));
+    let mut again = String::new();
+    let options = SaveOptions {
+        id: report.id,
+        assets: Some(&report.assets),
+    };
+    save_with(&mut w2, &registry(), &options, &mut again).unwrap();
+    assert_eq!(again, out);
+}
+
+#[test]
+fn empty_and_filled_containers_round_trip() {
+    let r = registry();
+    let mut w = World::new();
+    let a = w.spawn((SceneId::from_u128(1), Inventory::default()));
+    let b = w.spawn((
+        SceneId::from_u128(2),
+        Inventory {
+            spare: Some(Item { id: 1, count: 0 }),
+            items: vec![Item { id: 4, count: 1 }, Item { id: 5, count: 6 }],
+            ..crate_inventory()
+        },
+        Links {
+            targets: vec![a, Entity::NULL],
+        },
+    ));
+    let mut text = String::new();
+    save(&mut w, &r, &mut text).unwrap();
+    assert!(text.contains("Inventory.items = []"), "{text}");
+    assert!(text.contains("Inventory.flags = {}"), "{text}");
+    assert!(text.contains("Inventory.best = none"), "{text}");
+    assert!(text.contains("Inventory.spare.id = 1"), "{text}");
+    assert!(
+        text.contains("Links.targets = [@00000000000000000000000000000001, @none]"),
+        "{text}"
+    );
+    let mut w2 = World::new();
+    let report = load(&mut w2, &r, &text).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let (a2, b2) = (report.entities[0], report.entities[1]);
+    assert_eq!(w2.get::<Inventory>(a2), w.get::<Inventory>(a));
+    assert_eq!(w2.get::<Inventory>(b2), w.get::<Inventory>(b));
+    assert_eq!(w2.get::<Links>(b2).unwrap().targets, [a2, Entity::NULL]);
+}
+
+#[test]
+fn references_without_paths_keep_their_part() {
+    let mut w = World::new();
+    let look = Look {
+        mesh: AssetRef::part(CRATE_FILE, "Lid"),
+        ..Look::default()
+    };
+    w.spawn((SceneId::from_u128(1), look));
+    let mut text = String::new();
+    save(&mut w, &registry(), &mut text).unwrap();
+    assert!(text.contains("asset(\"#~"), "{text}");
+    let mut w2 = World::new();
+    let report = load(&mut w2, &registry(), &text).unwrap();
+    assert_eq!(w2.get::<Look>(report.entities[0]), Some(&look));
+}
+
+#[test]
+fn format_1_files_still_load() {
+    // Format 1 wrote a struct of one unnamed field through `.0` and had no scene id.
+    let text = "\
+[scene version=1]
+
+[entity 0000000000000000000000000000000a]
+Health.0 = 5
+Transform.translation = (1, 2, 3)
+";
+    let mut w = World::new();
+    let report = load(&mut w, &registry(), text).unwrap();
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    assert_eq!(report.version, 1);
+    assert_eq!(report.id, None);
+    assert_eq!(w.get::<Health>(report.entities[0]), Some(&Health(5.0)));
+}
+
+#[test]
+fn bad_values_name_their_line() {
+    let r = registry();
+    let head = "[scene version=2]\n[entity 0000000000000000000000000000000a]\n";
+    let cases = [
+        ("Look.mesh = asset(\"x\", 12)\n", "asset("),
+        ("Look.mesh = crate.gltf\n", "asset("),
+        ("Inventory.items.x.id = 1\n", "list index"),
+        ("Inventory.counts[\"a\"] = 1\n", "number"),
+        ("Inventory.owner = no quotes\n", "string"),
+        ("Inventory = 3\n", "Inventory.<field>"),
+    ];
+    for (line, needle) in cases {
+        let text = format!("{head}{line}");
+        let mut w = World::new();
+        let e = load(&mut w, &r, &text).unwrap_err();
+        assert_eq!(e.line, 3, "{line:?}: {e}");
+        assert!(e.message.contains(needle), "{line:?}: {e}");
+        assert_eq!(w.len(), 0, "{line:?}: nothing kept");
+    }
+    let mut w = World::new();
+    let bad_id = "[scene version=2 id=zz]\n";
+    let e = load(&mut w, &r, bad_id).unwrap_err();
+    assert!(e.message.contains("scene id"), "{e}");
+}

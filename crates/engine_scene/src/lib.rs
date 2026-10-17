@@ -1,62 +1,95 @@
-//! Text scenes (ADR 0029): a line-oriented format for entities and their reflected
-//! components, built to diff and merge well in version control.
+//! Text scenes (ADR 0029; format 2: ADR 0108): a line-oriented format for entities and
+//! their reflected components, built to diff and merge well in version control.
 //!
 //! ```text
-//! [scene version=1]
+//! [scene version=2 id=9b41d07c2e8a4f6b8d3c1a5e7f902b64]
 //!
 //! [entity 6c1f0a3e9d2b47c88e51f0d4a7b3c912]
+//! Name = "Car"
 //! Transform.rotation = (0, 0, 0, 1)
 //! Transform.translation = (10, 0, 0)
 //! Transform.scale = (1, 1, 1)
 //!
 //! [entity 0b12e4f8c3a94d5e9f7a6b1c2d3e4f50]
 //! parent = 6c1f0a3e9d2b47c88e51f0d4a7b3c912
-//! Transform.translation = (1, -0.5, 0)
-//! Health.current = 80
+//! Health = 80
+//! Inventory.items.0.id = 3
+//! Inventory.tags = ["red", "fast"]
+//! Inventory.flags["met the smith"] = true
+//! Look.mesh = asset("props/car.gltf#Wheel", 5f2c0a3e9d2b47c88e51f0d4a7b3c912)
 //! ```
 //!
+//! - The header carries the format's version and the scene's own [`AssetId`].
 //! - One block per entity, headed by its stable [`SceneId`] (128-bit, hex).
 //! - `parent = <id>` links the hierarchy. Children are written after their parent, in
 //!   the parent's child order, so the order survives a save and load.
-//! - One line per field: `Component.path = value`.
+//! - One line per value: `Component.path = value` ([`text`] has the grammar, shared with
+//!   saves).
 //!   - Components are sorted by name; fields keep declaration order.
-//!   - Vector-like structs (all `f32` fields named from `x y z w`) are written as
-//!     tuples `(1, 2, 3)`; arrays of numbers as `[1, 2, 3]`.
-//!   - Other nested structs use dotted paths.
-//!   - Enums are written by variant name. Entity references are written as `@<id>` or
-//!     `@none`.
+//!   - Lists take indices, maps keys in brackets; lists and arrays of single values are
+//!     written on one line (`[a, b]`).
+//!   - A struct of one unnamed field is written as that field (`Health = 80`).
+//!   - Asset references are written with their path, then the file's id ([`AssetRef`]).
 //! - A component with no saved fields is written as `Component = {}`.
 //!
 //! Loading is tolerant of schema changes:
 //! - fields missing from the file keep the component's `Default`;
 //! - fields the type no longer has are reported as warnings, not errors.
 //!
-//! Unknown components are errors, reported with their line number.
+//! Unknown components are errors, reported with their line number. Files of format 1 load
+//! as they are.
 //!
 //! ```
 //! use engine_ecs::{GlobalTransform, Transform, World};
-//! use engine_scene::{SceneId, SceneRegistry, load, save};
+//! use engine_scene::{Name, SceneId, SceneRegistry, load, save};
 //!
 //! let registry = SceneRegistry::with_engine_types();
 //! let mut world = World::new();
-//! let car = world.spawn((SceneId::new(), Transform::from_xyz(10.0, 0.0, 0.0), GlobalTransform::IDENTITY));
+//! let car = world.spawn((SceneId::new(), Name::new("Car"), Transform::from_xyz(10.0, 0.0, 0.0)));
 //! let mut text = String::new();
 //! save(&mut world, &registry, &mut text).unwrap();
+//! assert!(text.contains("Name = \"Car\""));
 //!
 //! let mut copy = World::new();
 //! let report = load(&mut copy, &registry, &text).unwrap();
 //! let loaded = report.entities[0];
 //! assert_eq!(copy.get::<Transform>(loaded), world.get::<Transform>(car));
+//! assert_eq!(copy.get::<Name>(loaded).map(Name::as_str), Some("Car"));
 //! assert!(copy.get::<GlobalTransform>(loaded).is_some(), "companion added");
 //! ```
 
+mod assets;
+pub mod text;
+
+pub use assets::{AssetId, AssetPaths, AssetRef};
+
 use engine_ecs::{Component, Entity, GlobalTransform, QueryState, Transform, World, bytemuck};
-use engine_reflect::{Attrs, Primitive, Reflect, TypeInfo, TypeKind, Value};
+use engine_reflect::{Primitive, Reflect, TypeInfo, TypeKind, Value};
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use text::{ReadRefs, Seg, is_asset_ref, is_entity, is_single, newtype_field, vector_fields};
 
 /// Current format version, written in the header.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
+
+/// 128 random bits: the OS-seeded hasher, a process-wide counter and the time.
+pub(crate) fn random_u128() -> u128 {
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let time = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    // `RandomState` is seeded from the OS once per process and varies per instance.
+    let half = || {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u64(n);
+        h.write_u128(time);
+        h.finish()
+    };
+    (u128::from(half()) << 64) | u128::from(half())
+}
 
 /// Stable identity of an entity in scene files (random 128 bits).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -75,24 +108,7 @@ engine_ecs::pod_component!(SceneId);
 impl SceneId {
     /// A new random id.
     pub fn new() -> Self {
-        use std::hash::{BuildHasher, Hasher};
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static COUNTER: AtomicU64 = AtomicU64::new(0);
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_nanos());
-        // `RandomState` is seeded from the OS once per process and varies per instance.
-        let half = || {
-            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-            h.write_u64(n);
-            h.write_u128(time);
-            h.finish()
-        };
-        Self {
-            hi: half(),
-            lo: half(),
-        }
+        Self::from_u128(random_u128())
     }
 
     /// The id a name always gives (FNV-1a, 128 bits): a game's long-lived entities (the
@@ -123,7 +139,8 @@ impl SceneId {
         ((self.hi as u128) << 64) | self.lo as u128
     }
 
-    fn parse(s: &str) -> Option<Self> {
+    /// An id from its 32 hex digits.
+    pub fn parse(s: &str) -> Option<Self> {
         if s.len() != 32 {
             return None;
         }
@@ -140,6 +157,24 @@ impl Default for SceneId {
 impl core::fmt::Display for SceneId {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "{:032x}", self.as_u128())
+    }
+}
+
+/// An entity's name, as the editor's tree shows it (ADR 0108). Names need not be unique:
+/// [`SceneId`]s identify entities.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Reflect)]
+pub struct Name(pub String);
+engine_ecs::reflect_component!(Name);
+
+impl Name {
+    /// A name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self(name.into())
+    }
+
+    /// The name's text.
+    pub fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
@@ -167,11 +202,12 @@ impl SceneRegistry {
     }
 
     /// The engine's own scene types: [`Transform`] (loaded entities also get a
-    /// [`GlobalTransform`]).
+    /// [`GlobalTransform`]) and [`Name`].
     pub fn with_engine_types() -> Self {
         let mut r = Self::new();
         r.register::<Transform>();
         r.require::<Transform, GlobalTransform>();
+        r.register::<Name>();
         r
     }
 
@@ -272,6 +308,23 @@ pub struct LoadReport {
     /// Lines that were skipped (fields the types no longer have, unresolved entity
     /// references), with their line numbers.
     pub warnings: Vec<(usize, String)>,
+    /// The scene's own id, from its header (none in format 1).
+    pub id: Option<AssetId>,
+    /// The format version the file was written in.
+    pub version: u32,
+    /// The paths the file's asset references were written with: give them back to
+    /// [`save_with`] to write the references the same way.
+    pub assets: AssetPaths,
+}
+
+/// How [`save_with`] writes a scene.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SaveOptions<'a> {
+    /// The scene's own id, written in the header.
+    pub id: Option<AssetId>,
+    /// The paths asset references are written with. A reference without one is written
+    /// with its id alone (and its part's hash).
+    pub assets: Option<&'a AssetPaths>,
 }
 
 /// Gives every entity without a [`SceneId`] a new one. Returns how many were added.
@@ -292,6 +345,16 @@ pub fn save(
     registry: &SceneRegistry,
     out: &mut String,
 ) -> Result<usize, SaveError> {
+    save_with(world, registry, &SaveOptions::default(), out)
+}
+
+/// [`save`] with the scene's id and the paths of its asset references.
+pub fn save_with(
+    world: &mut World,
+    registry: &SceneRegistry,
+    options: &SaveOptions<'_>,
+    out: &mut String,
+) -> Result<usize, SaveError> {
     engine_profiler::zone!("scene::save");
     let mut q = QueryState::<(Entity, &SceneId)>::new(world);
     let mut ids: HashMap<Entity, SceneId> = HashMap::new();
@@ -309,12 +372,25 @@ pub fn save(
         }
     }
     roots.sort_unstable();
-    let _ = writeln!(out, "[scene version={VERSION}]");
+    match options.id {
+        Some(id) => {
+            let _ = writeln!(out, "[scene version={VERSION} id={id}]");
+        }
+        None => {
+            let _ = writeln!(out, "[scene version={VERSION}]");
+        }
+    }
+    let mut writer = Writer {
+        out,
+        path: String::new(),
+        ids: &ids,
+        assets: options.assets,
+    };
     let mut count = 0;
     let mut stack: Vec<Entity> = roots.iter().rev().map(|&(_, e)| e).collect();
     let mut children: Vec<Entity> = Vec::new();
     while let Some(e) = stack.pop() {
-        write_entity(world, registry, &ids, e, out);
+        writer.entity(world, registry, e);
         count += 1;
         children.clear();
         children.extend(world.children(e).filter(|c| ids.contains_key(c)));
@@ -323,169 +399,215 @@ pub fn save(
     Ok(count)
 }
 
-fn write_entity(
-    world: &World,
-    registry: &SceneRegistry,
-    ids: &HashMap<Entity, SceneId>,
-    e: Entity,
-    out: &mut String,
-) {
-    let _ = writeln!(out, "\n[entity {}]", ids[&e]);
-    if let Some(p) = world.parent(e).and_then(|p| ids.get(&p)) {
-        let _ = writeln!(out, "parent = {p}");
-    }
-    for entry in &registry.entries {
-        let Some(ptr) = (entry.get)(world, e) else {
-            continue;
-        };
-        let mut path = String::from(entry.info.name);
-        let before = out.len();
-        // SAFETY: `ptr` points to a live value of the registered type.
-        unsafe { write_fields(out, &mut path, entry.info, ptr, ids) };
-        if out.len() == before {
-            let _ = writeln!(out, "{} = {{}}", entry.info.name);
+/// Writes the lines of a scene.
+struct Writer<'a> {
+    out: &'a mut String,
+    /// The path of the value being written, `Component.field…`.
+    path: String,
+    ids: &'a HashMap<Entity, SceneId>,
+    assets: Option<&'a AssetPaths>,
+}
+
+impl Writer<'_> {
+    fn entity(&mut self, world: &World, registry: &SceneRegistry, e: Entity) {
+        let _ = writeln!(self.out, "\n[entity {}]", self.ids[&e]);
+        if let Some(p) = world.parent(e).and_then(|p| self.ids.get(&p)) {
+            let _ = writeln!(self.out, "parent = {p}");
         }
-    }
-}
-
-/// Entity references are recognized by name and layout: `&'static` constants are not
-/// guaranteed to have one address across crates, so pointer comparison is unreliable.
-fn is_entity(ty: &TypeInfo) -> bool {
-    let e = <Entity as Reflect>::TYPE_INFO;
-    ty.name == e.name && ty.size == e.size && ty.align == e.align
-}
-
-fn is_vector_like(ty: &TypeInfo) -> Option<&'static [engine_reflect::Field]> {
-    let TypeKind::Struct(fields) = ty.kind else {
-        return None;
-    };
-    let ok = !fields.is_empty()
-        && fields.len() <= 4
-        && fields
-            .iter()
-            .zip(["x", "y", "z", "w"])
-            .all(|(f, n)| f.name == n && matches!(f.ty.kind, TypeKind::Primitive(Primitive::F32)));
-    ok.then_some(fields)
-}
-
-fn primitive_of(ty: &TypeInfo) -> Option<Primitive> {
-    match ty.kind {
-        TypeKind::Primitive(p) => Some(p),
-        _ => None,
-    }
-}
-
-/// Writes one line per field of the value at `ptr` (type `ty`) under `path`.
-///
-/// # Safety
-///
-/// `ptr` points to a valid value of `ty`.
-unsafe fn write_fields(
-    out: &mut String,
-    path: &mut String,
-    ty: &'static TypeInfo,
-    ptr: *const u8,
-    ids: &HashMap<Entity, SceneId>,
-) {
-    if let TypeKind::Struct(fields) = ty.kind
-        && !is_entity(ty)
-        && is_vector_like(ty).is_none()
-    {
-        for f in fields {
-            if f.attrs.skip {
+        for entry in &registry.entries {
+            let Some(ptr) = (entry.get)(world, e) else {
                 continue;
+            };
+            self.path.clear();
+            self.path.push_str(entry.info.name);
+            let before = self.out.len();
+            // SAFETY: `ptr` points to a live value of the registered type.
+            unsafe { self.value(entry.info, ptr) };
+            if self.out.len() == before {
+                let _ = writeln!(self.out, "{} = {{}}", entry.info.name);
             }
-            let len = path.len();
-            path.push('.');
-            path.push_str(f.name);
-            // SAFETY: the field lies inside the value at its offset.
-            unsafe { write_fields(out, path, f.ty, ptr.add(f.offset), ids) };
-            path.truncate(len);
         }
-        return;
     }
-    if let TypeKind::Array { element, len } = ty.kind
-        && primitive_of(element).is_none()
-    {
+
+    /// Writes `path = text`.
+    fn line(&mut self, text: &str) {
+        let _ = writeln!(self.out, "{} = {text}", self.path);
+    }
+
+    /// Writes the lines of the value at `ptr` (type `ty`) under the current path.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` points to a valid value of `ty`.
+    unsafe fn value(&mut self, ty: &'static TypeInfo, ptr: *const u8) {
+        // SAFETY: for the block, every step stays inside the value its description lays
+        // out; containers are read through their own functions.
+        unsafe {
+            if is_single(ty) {
+                let _ = write!(self.out, "{} = ", self.path);
+                single(self.out, ty, ptr, self.ids, self.assets);
+                self.out.push('\n');
+                return;
+            }
+            match ty.kind {
+                TypeKind::Struct(fields) => {
+                    if let Some(f) = newtype_field(ty) {
+                        self.value(f.ty, ptr.add(f.offset));
+                        return;
+                    }
+                    for f in fields {
+                        if f.attrs.skip {
+                            continue;
+                        }
+                        let len = self.path.len();
+                        self.path.push('.');
+                        self.path.push_str(f.name);
+                        self.value(f.ty, ptr.add(f.offset));
+                        self.path.truncate(len);
+                    }
+                }
+                TypeKind::Array { element, len } => {
+                    if is_single(element) {
+                        self.items(element, ptr, len);
+                        return;
+                    }
+                    for i in 0..len {
+                        self.index(i, element, ptr.add(i * element.size));
+                    }
+                }
+                TypeKind::List(list) => {
+                    let len = (list.len)(ptr);
+                    let items = (list.items)(ptr);
+                    if is_single(list.element) || len == 0 {
+                        self.items(list.element, items, len);
+                        return;
+                    }
+                    for i in 0..len {
+                        self.index(i, list.element, items.add(i * list.element.size));
+                    }
+                }
+                TypeKind::Option(option) => {
+                    let inner = (option.get)(ptr);
+                    if inner.is_null() {
+                        self.line("none");
+                        return;
+                    }
+                    let before = self.out.len();
+                    self.value(option.inner, inner);
+                    if self.out.len() == before {
+                        self.line("some");
+                    }
+                }
+                TypeKind::Map(map) => {
+                    if (map.len)(ptr) == 0 {
+                        self.line("{}");
+                        return;
+                    }
+                    if !is_single(map.key) {
+                        return;
+                    }
+                    let mut entries: Vec<(String, *const u8)> = Vec::with_capacity((map.len)(ptr));
+                    (map.for_each)(ptr, &mut |k, v| {
+                        let mut key = String::new();
+                        single(&mut key, map.key, k, self.ids, self.assets);
+                        entries.push((key, v));
+                    });
+                    if !map.ordered {
+                        entries.sort_by(|a, b| a.0.cmp(&b.0));
+                    }
+                    for (key, v) in entries {
+                        let len = self.path.len();
+                        let _ = write!(self.path, "[{key}]");
+                        self.value(map.value, v);
+                        self.path.truncate(len);
+                    }
+                }
+                TypeKind::Primitive(_)
+                | TypeKind::Enum { .. }
+                | TypeKind::String
+                | TypeKind::Opaque => {}
+            }
+        }
+    }
+
+    /// Writes `path.i`'s lines.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` points to a valid value of `ty`.
+    unsafe fn index(&mut self, i: usize, ty: &'static TypeInfo, ptr: *const u8) {
+        let len = self.path.len();
+        let _ = write!(self.path, ".{i}");
+        // SAFETY: as the caller guarantees.
+        unsafe { self.value(ty, ptr) };
+        self.path.truncate(len);
+    }
+
+    /// Writes `path = [a, b, …]` for `len` single values from `first`.
+    ///
+    /// # Safety
+    ///
+    /// `first` points to `len` valid values of `ty`, one after another.
+    unsafe fn items(&mut self, ty: &'static TypeInfo, first: *const u8, len: usize) {
+        let _ = write!(self.out, "{} = [", self.path);
         for i in 0..len {
-            let old = path.len();
-            let _ = write!(path, ".{i}");
-            // SAFETY: element `i` lies inside the array.
-            unsafe { write_fields(out, path, element, ptr.add(i * element.size), ids) };
-            path.truncate(old);
+            if i > 0 {
+                self.out.push_str(", ");
+            }
+            // SAFETY: element `i` of the run.
+            unsafe { single(self.out, ty, first.add(i * ty.size), self.ids, self.assets) };
         }
-        return;
-    }
-    let mark = out.len();
-    let _ = write!(out, "{path} = ");
-    // SAFETY: as the caller guarantees.
-    if unsafe { write_value(out, ty, ptr, ids) } {
-        out.push('\n');
-    } else {
-        out.truncate(mark);
+        self.out.push_str("]\n");
     }
 }
 
-/// Writes a single value (a leaf, a tuple or a list). False for opaque values.
+/// Appends a single value's text (see [`is_single`]).
 ///
 /// # Safety
 ///
-/// `ptr` points to a valid value of `ty`.
-unsafe fn write_value(
+/// `ptr` points to a valid value of `ty`, which [`is_single`] accepts.
+unsafe fn single(
     out: &mut String,
     ty: &'static TypeInfo,
     ptr: *const u8,
     ids: &HashMap<Entity, SceneId>,
-) -> bool {
-    if is_entity(ty) {
-        // SAFETY: an `Entity` value.
-        let e = unsafe { ptr.cast::<Entity>().read_unaligned() };
-        match ids.get(&e) {
-            Some(id) => {
-                let _ = write!(out, "@{id}");
+    assets: Option<&AssetPaths>,
+) {
+    // SAFETY: for the block, as the caller guarantees.
+    unsafe {
+        if is_entity(ty) {
+            let e = ptr.cast::<Entity>().read_unaligned();
+            match ids.get(&e) {
+                Some(id) => {
+                    let _ = write!(out, "@{id}");
+                }
+                None => out.push_str("@none"),
             }
-            None => out.push_str("@none"),
+            return;
         }
-        return true;
-    }
-    if let Some(fields) = is_vector_like(ty) {
-        out.push('(');
-        for (i, f) in fields.iter().enumerate() {
-            if i > 0 {
-                out.push_str(", ");
-            }
-            // SAFETY: an `f32` field inside the value.
-            unsafe { write_primitive(out, f.ty, ptr.add(f.offset)) };
+        if is_asset_ref(ty) {
+            ptr.cast::<AssetRef>().read_unaligned().write(assets, out);
+            return;
         }
-        out.push(')');
-        return true;
-    }
-    match ty.kind {
-        TypeKind::Array { element, len } => {
-            out.push('[');
-            for i in 0..len {
+        if let Some(fields) = vector_fields(ty) {
+            out.push('(');
+            for (i, f) in fields.iter().enumerate() {
                 if i > 0 {
                     out.push_str(", ");
                 }
-                // SAFETY: a primitive element inside the array.
-                unsafe { write_primitive(out, element, ptr.add(i * element.size)) };
+                write_primitive(out, f.ty, ptr.add(f.offset));
             }
-            out.push(']');
-            true
+            out.push(')');
+            return;
         }
-        TypeKind::Primitive(_) | TypeKind::Enum { .. } => {
-            // SAFETY: as the caller guarantees.
-            unsafe { write_primitive(out, ty, ptr) };
-            true
+        if let Some(f) = newtype_field(ty) {
+            single(out, f.ty, ptr.add(f.offset), ids, assets);
+            return;
         }
-        // Strings, lists, optional values and maps come with saves' text form (ADR 0104
-        // step 2).
-        TypeKind::Struct(_)
-        | TypeKind::String
-        | TypeKind::List(_)
-        | TypeKind::Option(_)
-        | TypeKind::Map(_)
-        | TypeKind::Opaque => false,
+        match ty.kind {
+            TypeKind::String => text::quote_into(out, engine_reflect::read_str(ptr)),
+            _ => write_primitive(out, ty, ptr),
+        }
     }
 }
 
@@ -542,6 +664,13 @@ struct Block<'a> {
     fields: Vec<(usize, &'a str, &'a str, &'a str)>,
 }
 
+/// A parsed file: its header and its blocks.
+struct Parsed<'a> {
+    version: u32,
+    id: Option<AssetId>,
+    blocks: Vec<Block<'a>>,
+}
+
 fn err(line: usize, message: impl Into<String>) -> LoadError {
     LoadError {
         line,
@@ -549,28 +678,51 @@ fn err(line: usize, message: impl Into<String>) -> LoadError {
     }
 }
 
-fn parse(text: &str) -> Result<Vec<Block<'_>>, LoadError> {
+/// The header's version and id: `[scene version=2 id=<32 hex digits>]`.
+fn header(line: usize, s: &str) -> Result<(u32, Option<AssetId>), LoadError> {
+    let expected = || {
+        err(
+            line,
+            format!("expected the header `[scene version={VERSION}]`"),
+        )
+    };
+    let inner = s
+        .strip_prefix("[scene ")
+        .and_then(|r| r.strip_suffix(']'))
+        .ok_or_else(expected)?;
+    let (mut version, mut id) = (None, None);
+    for item in inner.split_whitespace() {
+        match item.split_once('=') {
+            Some(("version", v)) => version = Some(v.parse::<u32>().map_err(|_| expected())?),
+            Some(("id", v)) => {
+                id = Some(AssetId::parse(v).ok_or_else(|| {
+                    err(line, format!("`{v}` is not a scene id (32 hex digits)"))
+                })?);
+            }
+            _ => return Err(expected()),
+        }
+    }
+    let version = version.ok_or_else(expected)?;
+    if version > VERSION {
+        return Err(err(
+            line,
+            format!("scene version {version} is newer than this engine ({VERSION})"),
+        ));
+    }
+    Ok((version, id))
+}
+
+fn parse(text: &str) -> Result<Parsed<'_>, LoadError> {
     let mut blocks: Vec<Block<'_>> = Vec::new();
-    let mut header = false;
+    let mut head = None;
     for (i, raw) in text.lines().enumerate() {
         let line = i + 1;
         let s = raw.trim();
         if s.is_empty() || s.starts_with('#') {
             continue;
         }
-        if !header {
-            let version = s
-                .strip_prefix("[scene version=")
-                .and_then(|r| r.strip_suffix(']'))
-                .and_then(|v| v.parse::<u32>().ok())
-                .ok_or_else(|| err(line, "expected the header `[scene version=1]`"))?;
-            if version > VERSION {
-                return Err(err(
-                    line,
-                    format!("scene version {version} is newer than this engine ({VERSION})"),
-                ));
-            }
-            header = true;
+        if head.is_none() {
+            head = Some(header(line, s)?);
             continue;
         }
         if let Some(rest) = s.strip_prefix("[entity ") {
@@ -589,25 +741,59 @@ fn parse(text: &str) -> Result<Vec<Block<'_>>, LoadError> {
         let block = blocks
             .last_mut()
             .ok_or_else(|| err(line, "a field before the first `[entity ...]`"))?;
-        let (key, value) = s
-            .split_once('=')
-            .ok_or_else(|| err(line, "expected `key = value`"))?;
-        let (key, value) = (key.trim(), value.trim());
+        let (key, value) =
+            text::split_assignment(s).ok_or_else(|| err(line, "expected `key = value`"))?;
         if key == "parent" {
             let id = SceneId::parse(value).ok_or_else(|| err(line, "expected a scene id"))?;
             block.parent = Some((line, id));
             continue;
         }
-        let (component, path) = key.split_once('.').unwrap_or((key, ""));
+        let (component, path) = text::component_of(key);
         block.fields.push((line, component, path, value));
     }
-    if !header {
-        return Err(err(
+    let (version, id) = head.ok_or_else(|| {
+        err(
             0,
-            "empty file: expected the header `[scene version=1]`",
-        ));
+            format!("empty file: expected the header `[scene version={VERSION}]`"),
+        )
+    })?;
+    Ok(Parsed {
+        version,
+        id,
+        blocks,
+    })
+}
+
+/// How a scene's values name entities and assets.
+struct SceneRefs<'a> {
+    by_id: &'a HashMap<SceneId, usize>,
+    entities: &'a [Entity],
+    /// An entity reference not in the scene, on the current line.
+    warning: Option<String>,
+    assets: &'a mut AssetPaths,
+}
+
+impl ReadRefs for SceneRefs<'_> {
+    fn entity(&mut self, label: &str) -> Result<Entity, String> {
+        let id = SceneId::parse(label)
+            .ok_or_else(|| format!("expected `@<scene id>` or `@none`, found `@{label}`"))?;
+        match self.by_id.get(&id) {
+            Some(&i) => Ok(self.entities[i]),
+            None => {
+                self.warning = Some(format!("entity {id} is not in this scene"));
+                Ok(Entity::NULL)
+            }
+        }
     }
-    Ok(blocks)
+
+    fn asset(&mut self, asset: AssetRef, path: &str) {
+        self.assets.insert(asset, path);
+    }
+}
+
+/// Whether `Component = value` sets a whole component (one written as a single value).
+fn whole_value(info: &TypeInfo) -> bool {
+    is_single(info) || newtype_field(info).is_some()
 }
 
 /// Loads a scene into `world`: spawns its entities (with their [`SceneId`]s), their
@@ -618,7 +804,8 @@ pub fn load(
     text: &str,
 ) -> Result<LoadReport, LoadError> {
     engine_profiler::zone!("scene::load");
-    let blocks = parse(text)?;
+    let parsed = parse(text)?;
+    let blocks = &parsed.blocks;
     let mut by_id: HashMap<SceneId, usize> = HashMap::with_capacity(blocks.len());
     for (i, b) in blocks.iter().enumerate() {
         if by_id.insert(b.id, i).is_some() {
@@ -626,17 +813,17 @@ pub fn load(
         }
     }
     // Validate everything that can fail before touching the world.
-    for b in &blocks {
+    for b in blocks {
         if let Some((line, p)) = b.parent
             && !by_id.contains_key(&p)
         {
             return Err(err(line, format!("parent {p} is not in this scene")));
         }
         for &(line, component, path, value) in &b.fields {
-            if !registry.by_name.contains_key(component) {
+            let Some(&entry) = registry.by_name.get(component) else {
                 return Err(err(line, format!("unknown component `{component}`")));
-            }
-            if path.is_empty() && value != "{}" {
+            };
+            if path.is_empty() && value != "{}" && !whole_value(registry.entries[entry].info) {
                 return Err(err(
                     line,
                     format!("expected `{component}.<field> = value` or `{component} = {{}}`"),
@@ -645,15 +832,12 @@ pub fn load(
         }
     }
     let entities: Vec<Entity> = blocks.iter().map(|b| world.spawn((b.id,))).collect();
-    let mut report = LoadReport {
-        entities,
-        warnings: Vec::new(),
-    };
-    let mut resolve = |id: SceneId| by_id.get(&id).map(|&i| report.entities[i]);
+    let mut assets = AssetPaths::new();
     let mut warnings: Vec<(usize, String)> = Vec::new();
     let mut first_error: Option<LoadError> = None;
+    let mut segs: Vec<Seg<'_>> = Vec::new();
     for (bi, b) in blocks.iter().enumerate() {
-        let e = report.entities[bi];
+        let e = entities[bi];
         let mut start = 0;
         while start < b.fields.len() {
             let component = b.fields[start].1;
@@ -665,18 +849,32 @@ pub fn load(
             let entry = &registry.entries[registry.by_name[component]];
             let lines = &b.fields[start..end];
             (entry.insert)(world, e, &mut |ptr| {
+                let mut refs = SceneRefs {
+                    by_id: &by_id,
+                    entities: &entities,
+                    warning: None,
+                    assets: &mut assets,
+                };
                 for &(line, _, path, value) in lines {
-                    if path.is_empty() {
+                    if path.is_empty() && value == "{}" {
                         continue;
                     }
-                    let Some((offset, ty, attrs)) = entry.info.path(path) else {
-                        warnings.push((line, format!("`{component}` has no field `{path}`")));
-                        continue;
-                    };
-                    // SAFETY: `ptr` is a valid value of the component; the path's offset
-                    // and type come from its description.
-                    let result =
-                        unsafe { read_value(ptr.add(offset), ty, &attrs, value, &mut resolve) };
+                    let result = text::segments_into(path, &mut segs).and_then(|()| {
+                        // SAFETY: `ptr` is a valid value of the component, described by
+                        // its registered type.
+                        let target = unsafe { text::resolve(&segs, entry.info, ptr, &mut refs) }?;
+                        match target {
+                            None => Ok(Some(format!("`{component}` has no field `{path}`"))),
+                            Some((ty, attrs, at)) => {
+                                // SAFETY: `at` is a valid, writable value of `ty`.
+                                unsafe { text::set_text(ty, &attrs, at, value, &mut refs) }
+                                    .map(|()| None)
+                            }
+                        }
+                    });
+                    if let Some(w) = refs.warning.take() {
+                        warnings.push((line, w));
+                    }
                     match result {
                         Ok(Some(w)) => warnings.push((line, w)),
                         Ok(None) => {}
@@ -695,157 +893,28 @@ pub fn load(
         }
     }
     if let Some(e) = first_error {
-        for &entity in &report.entities {
+        for &entity in &entities {
             world.despawn(entity);
         }
         return Err(e);
     }
     for (bi, b) in blocks.iter().enumerate() {
         if let Some((line, p)) = b.parent {
-            let child = report.entities[bi];
-            let parent = report.entities[by_id[&p]];
+            let child = entities[bi];
+            let parent = entities[by_id[&p]];
             if let Err(e) = world.set_parent(child, Some(parent)) {
-                for &entity in &report.entities {
+                for &entity in &entities {
                     world.despawn(entity);
                 }
                 return Err(err(line, e.to_string()));
             }
         }
     }
-    report.warnings = warnings;
-    Ok(report)
-}
-
-/// Parses `text` into the value at `ptr`. `Ok(Some(warning))` for recoverable problems.
-///
-/// # Safety
-///
-/// `ptr` points to a valid, writable value of `ty`.
-unsafe fn read_value(
-    ptr: *mut u8,
-    ty: &'static TypeInfo,
-    attrs: &Attrs,
-    text: &str,
-    resolve: &mut impl FnMut(SceneId) -> Option<Entity>,
-) -> Result<Option<String>, String> {
-    if is_entity(ty) {
-        let target = match text {
-            "@none" => Entity::NULL,
-            _ => {
-                let id = text
-                    .strip_prefix('@')
-                    .and_then(SceneId::parse)
-                    .ok_or_else(|| format!("expected `@<scene id>` or `@none`, found `{text}`"))?;
-                match resolve(id) {
-                    Some(e) => e,
-                    None => {
-                        // SAFETY: an `Entity` value.
-                        unsafe { ptr.cast::<Entity>().write_unaligned(Entity::NULL) };
-                        return Ok(Some(format!("entity {id} is not in this scene")));
-                    }
-                }
-            }
-        };
-        // SAFETY: an `Entity` value.
-        unsafe { ptr.cast::<Entity>().write_unaligned(target) };
-        return Ok(None);
-    }
-    if let Some(fields) = is_vector_like(ty) {
-        let items = list(text, '(', ')')?;
-        if items.len() != fields.len() {
-            return Err(format!(
-                "expected {} numbers, found {}",
-                fields.len(),
-                items.len()
-            ));
-        }
-        for (f, item) in fields.iter().zip(items) {
-            // SAFETY: an `f32` field inside the value.
-            unsafe { read_primitive(ptr.add(f.offset), f.ty, &f.attrs, item)? };
-        }
-        return Ok(None);
-    }
-    match ty.kind {
-        TypeKind::Array { element, len } if primitive_of(element).is_some() => {
-            let items = list(text, '[', ']')?;
-            if items.len() != len {
-                return Err(format!("expected {len} values, found {}", items.len()));
-            }
-            for (i, item) in items.into_iter().enumerate() {
-                // SAFETY: element `i` inside the array.
-                unsafe {
-                    read_primitive(ptr.add(i * element.size), element, &element.attrs, item)?
-                };
-            }
-            Ok(None)
-        }
-        TypeKind::Primitive(_) | TypeKind::Enum { .. } => {
-            // SAFETY: as the caller guarantees.
-            unsafe { read_primitive(ptr, ty, attrs, text)? };
-            Ok(None)
-        }
-        _ => Err(format!(
-            "`{}` is not a single value; name one of its fields",
-            ty.name
-        )),
-    }
-}
-
-fn list(text: &str, open: char, close: char) -> Result<Vec<&str>, String> {
-    let inner = text
-        .strip_prefix(open)
-        .and_then(|t| t.strip_suffix(close))
-        .ok_or_else(|| format!("expected `{open}...{close}`, found `{text}`"))?;
-    Ok(inner
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .collect())
-}
-
-/// # Safety
-///
-/// `ptr` points to a valid, writable primitive or enum of `ty`.
-unsafe fn read_primitive(
-    ptr: *mut u8,
-    ty: &TypeInfo,
-    attrs: &Attrs,
-    text: &str,
-) -> Result<(), String> {
-    let value = match ty.kind {
-        TypeKind::Enum { variants, .. } => match variants.iter().find(|v| v.name == text) {
-            Some(v) => Value::Int(v.value),
-            None => Value::Int(
-                text.parse()
-                    .map_err(|_| format!("`{text}` is not a variant of `{}`", ty.name))?,
-            ),
-        },
-        TypeKind::Primitive(Primitive::Bool) => match text {
-            "true" => Value::Bool(true),
-            "false" => Value::Bool(false),
-            _ => return Err(format!("expected `true` or `false`, found `{text}`")),
-        },
-        // Parsed at their own width, so written values round-trip bit for bit.
-        TypeKind::Primitive(Primitive::F32) => Value::Float(f64::from(
-            text.parse::<f32>()
-                .map_err(|_| format!("expected a number, found `{text}`"))?,
-        )),
-        TypeKind::Primitive(Primitive::F64) => Value::Float(
-            text.parse::<f64>()
-                .map_err(|_| format!("expected a number, found `{text}`"))?,
-        ),
-        TypeKind::Primitive(Primitive::U8 | Primitive::U16 | Primitive::U32 | Primitive::U64) => {
-            Value::UInt(
-                text.parse()
-                    .map_err(|_| format!("expected an unsigned integer, found `{text}`"))?,
-            )
-        }
-        TypeKind::Primitive(_) => Value::Int(
-            text.parse()
-                .map_err(|_| format!("expected an integer, found `{text}`"))?,
-        ),
-        _ => return Err(format!("`{}` is not a single value", ty.name)),
-    };
-    // SAFETY: as the caller guarantees.
-    unsafe { engine_reflect::write(ptr, ty, attrs, value) }.map_err(|e| e.to_string())
+    Ok(LoadReport {
+        entities,
+        warnings,
+        id: parsed.id,
+        version: parsed.version,
+        assets,
+    })
 }

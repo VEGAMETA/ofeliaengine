@@ -19,10 +19,20 @@ Last updated: 2026-10-17.
     разработчика было удобно";
   - a built-in code editor at Godot's or Roblox Studio's level, VS Code beside it;
   - asset ids: ids inside our own files, a `.meta` beside foreign ones, references by id
-    and path, the local database only a cache.
-  - **Open:** any scene as a prefab (recommended) or a separate prefab type.
-  - **Next:** phase E1 (ADR 0107 §7): the editor linked into a game, the player split so
-    the editor drives it, scene format 2, the tree and the inspector, commands, sessions.
+    and path, the local database only a cache;
+  - any scene can be a prefab.
+  - **E1-1, scene format 2** (#251, ADR 0108 as built):
+    - the saves' grammar is shared (`engine_scene::text`), and scenes gain strings,
+      lists, maps and optional values;
+    - `Name`, and structs of one field written as that field;
+    - `AssetRef` written by path and id, and the scene's id in the header;
+    - format 1 still loads;
+    - saving 11 % faster, loading unchanged.
+  - **Next:** the rest of E1 (ADR 0107 §7):
+    - scenes loaded by the player, built-in meshes and materials, the game's `start`;
+    - the editor linked into a game;
+    - the tree and the inspector on the real world;
+    - sessions, rebuild and restart.
 
 - **Done: the quick start** (queue item 4, #249; CLAUDE.md §16):
   - `docs/dev-guide/quick-start.md`, from installing to a cube on screen, then your own

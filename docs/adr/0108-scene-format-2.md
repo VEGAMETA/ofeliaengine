@@ -1,9 +1,8 @@
 # 0108. Scene format 2: names, strings and containers, assets by id and path, prefab instances
 
-- Status: Accepted in part.
-  - **Asset identity and references:** the owner's choice, 2026-10-17 ("давай смесь").
-  - **Prefab instances:** proposed. The owner is to choose between any scene being a prefab
-    (recommended) and a separate prefab file type.
+- Status: Accepted (the owner's choices, 2026-10-17).
+  - **Asset identity and references:** the mix ("давай смесь").
+  - **Prefabs:** any scene can be instanced ("давай А по префабам").
   - Version 2 is frozen once projects use it. Later changes bump the version and ship a
     migration.
 - Date: 2026-10-17
@@ -53,10 +52,10 @@
 - references carry both the id and the path;
 - the database is only a cache (1).
 
-### Prefabs (to the owner)
+### Prefabs (put to the owner, 2026-10-17)
 
 1. **Any scene can be instanced** (Godot): a level, a room and a crate are one kind of
-   file, and nesting falls out of it. **Recommended.**
+   file, and nesting falls out of it. **Chosen** (the owner).
 2. **A separate prefab file type** (Unity).
 
 Either way, overrides follow the stable ids of the prefab's entities, not their names or
@@ -141,7 +140,7 @@ Version 2 writes and reads every value the saves' text form does (ADR 0104):
   paths, where each asset is used, import states, thumbnails, cooked data.
 - It is rebuilt from the files at any time.
 
-### Prefab instances (proposed: any scene is a prefab)
+### Prefab instances (any scene is a prefab)
 
 ```text
 [instance 7d2e0f1a9b3c4d5e8f6a7b1c2d3e4f50]
@@ -185,6 +184,47 @@ Name = "Loot"
 - **Unknown fields** are warnings and **unknown components** errors, as in version 1.
   Overrides of fields the prefab's types no longer have are warnings.
 
+## As built (E1-1, 2026-10-17)
+
+Values, names, asset references and the header's id; prefab instances come with E5.
+
+- **`engine_scene::text` holds the shared grammar:**
+  - quoting, splitting lines and items, path steps;
+  - following a path through structs, arrays, lists, maps and optional values;
+  - reading a value into a reflected type.
+
+  The saves' text form uses it in place of its own copy. Numbers are now parsed at their
+  own width in both: an `f32` no longer goes through `f64`, which could round twice.
+- **A struct of one unnamed field is written as that field:** `Name = "Door"`,
+  `Health = 80`. Format 1's `Health.0 = 80` still loads.
+- **`AssetRef`** is plain data, 24 bytes: the file's `AssetId` and the part's name as a
+  64-bit FNV-1a hash (0 is the whole file). Components holding it stay copyable, so undo
+  records them as bytes (ADR 0031).
+  - Written as `asset("path#part", <file id>)`.
+  - Without a known path it is written as `asset("#~<hash>", <file id>)`, which loads back
+    to the same reference.
+  - `AssetPaths` carries the paths: `LoadReport::assets` gives the ones a file was written
+    with, and `SaveOptions::assets` takes them back (later, the editor's database).
+- **`save_with` and `SaveOptions`** take the scene's id and the asset paths;
+  `LoadReport` gains `id`, `version` and `assets`. `save` writes version 2 without an id.
+- **`Name`** is registered by `SceneRegistry::with_engine_types`.
+
+**Measured** on ref-1, `cargo bench -p engine_scene --bench scene`: 10,000 entities with a
+`Transform` in 100 hierarchies of 100. A/B against main's build, 4 alternating runs:
+
+| | main | format 2 |
+|---|---:|---:|
+| save | 7.28 ms | 6.49 ms |
+| load | 9.72 ms | 9.65 ms |
+
+- The first version of the reader loaded in 10.3 ms. It got back to main's time with:
+  - plain `=` and `.` splits when a line has no quotes or keys;
+  - a vector's numbers parsed in place;
+  - the checks only structs need behind one kind test.
+- With a `Name` on every entity: save 7.17 ms, load 11.86 ms. Most of a name's load cost is
+  the second component moving each entity to another archetype (ADR 0029's known next
+  step).
+
 ## Consequences
 
 - **Scenes, prefabs and saves share one value grammar.** One reader and one writer grow
@@ -195,5 +235,4 @@ Name = "Loot"
   control keeps them beside their files.
 - **The cache can be deleted at any time** and costs a re-import.
 - **Merges stay line-local:** an override is one line, an instance one block.
-- **Still to settle:** the prefab option (the owner), and how components carry asset
-  references in Rust (E1, E4).
+- **Still to settle:** how components carry asset references in Rust (E1, E4).
