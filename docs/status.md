@@ -44,9 +44,18 @@ Last updated: 2026-10-17.
     - the binary opens a scene file.
     - Lost for now: HDR output (the player presents in SDR). HDR output in the player
       comes next.
+  - **E1-4a, the editor edits the world** (PR in flight, ADR 0107 as built):
+    - undo records every component scenes save (strings and lists as scene lines);
+    - the inspector drags numbers, vectors and rotations (in degrees), clicks
+      checkboxes, picks enums; Escape takes a drag back;
+    - snapping as the owner asked: Shift inverts the default (free), Ctrl rounds to the
+      grid; position 0.1, scale 0.1, rotation 45°;
+    - commands with shortcuts: undo, redo, save, delete, duplicate, add;
+    - the scene saved under its own id; `*` on the tab while unsaved.
   - **Next:** HDR output in the player; then the rest of E1 (ADR 0107 §7):
-    - E1-4: the tree and the inspector edit the world (commands, undo, multi-editing),
-      saving the scene; the roots' order in scene files (sorted by id today) to settle;
+    - E1-4b: text fields (rename, typed values, strings), the command palette,
+      multi-selection and multi-editing, the inspector's filter, reset; the roots' order
+      in scene files (sorted by id today) to settle;
     - E1-5: sessions, autosave, rebuild and restart; the game's `main` from a macro,
       `ofeliaengine edit`, the quick start as a scene.
 

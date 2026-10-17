@@ -47,7 +47,10 @@ CLAUDE.md §12: keyboard-first, immediate feedback, drag and drop where natural.
 3. **Snapping:**
    - steps for grid, rotation and scale shown as toggles with their values in the
      viewport's tool bar (Unreal);
-   - Ctrl inverts the toggle while dragging, Shift is fine;
+   - the owner's rules (2026-10-17), as the inspector already has them (ADR 0107
+     E1-4a): free by default, Shift inverts the snapping toggle for the moment (steps
+     from the start), Ctrl rounds the object's center to the grid; steps position 0.1,
+     scale 0.1, rotation 45°, all settable;
    - surface snapping by Ctrl+Shift drag, optionally aligned to the surface (Unity,
      Blender);
    - V snaps a vertex to a vertex (Unity);

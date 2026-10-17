@@ -284,6 +284,60 @@ The editor runs on the player.
   drawn inside the viewport panel and nowhere outside it, and selecting it from code
   selects it.
 
+## As built (E1-4a, 2026-10-17)
+
+The editor edits the world.
+
+- **Undo records every component scenes save** (ADR 0031 as amended): plain data as bytes,
+  the rest (`Name`, `Model`, a game's components with strings and lists) as the lines a
+  scene writes for it, read back into a default value
+  (`engine_scene::write_lines_with`, `read_lines`). Runtime state (`hidden`, `skip`,
+  types without reflection or `Default`) is left to the systems that own it.
+- **The inspector edits fields through reflection** (`engine_editor::inspector`):
+  - numbers dragged sideways; vectors and small arrays side by side;
+  - a quaternion as Euler angles in degrees (Y, X, Z), so a 45° step means 45°;
+  - checkboxes; enums from a list (a floating popup);
+  - strings, references and containers shown as text until the text field (E1-4b);
+  - a transform reads translation, rotation, scale;
+  - a drag is one undo step (a merge key per gesture), and Escape takes it back exactly
+    (`History::revert`).
+- **Snapping, the owner's rules** (`engine_editor::Snapping`): free by default; Shift
+  while dragging takes the other mode (steps from the start); Ctrl rounds the value to
+  the grid. Steps: position 0.1, scale 0.1, rotation 45°, numbers 0.1 or their own
+  `step`. The tool bar's grid button (Y) switches the default. The gizmos (E2) take the
+  same rules.
+- **Commands with shortcuts** (`Commands`, `Keymap`, physical keys): undo Ctrl+Z, redo
+  Ctrl+Y and Ctrl+Shift+Z, save Ctrl+S, delete Delete, duplicate Ctrl+D, add Ctrl+A,
+  snapping Y. `EditorGame::run_command` runs one by its stable name, as the palette and the
+  MCP layer will.
+- **Duplicate** copies a subtree with new scene ids; references into the subtree move to
+  the copies (`History::duplicate_subtree`).
+- **Add** (the scene dock's `+`): an empty entity, the built-in shapes, a sun, point and
+  spot lights, a camera, where the camera looks, on the grid.
+- **Saving** writes the scene under its own id (read from the header the player loaded,
+  `engine_scene::scene_header`), asset references by path; written beside the file and
+  moved over it. A new scene becomes `untitled.scene`. The tab shows `*` while
+  `History::head` differs from its value at the last save.
+- **`EditorGame::set`** sets a value by its scene path from scene text, one undoable
+  step: tests, scripts and the command line.
+- **`engine_ui`:** drags measured from the press (`Ui::drag_delta`), `Response::released`,
+  Control in `UiInput`, `Ui::hovers`.
+- **Measured** on ref-1 (release): the editor's frame on the CPU with a tree of 200
+  entities 74 µs, 81 µs with a selection in the inspector. Scenes save and load as fast as
+  before (6.60 and 9.65 ms for 10,000 entities).
+- **Tested:**
+  - without a GPU, the editor's real frames driven by window events: a number dragged
+    with Ctrl, then free, then with Shift; Escape; undo and redo by their keys; Ctrl+S
+    and the file; a checkbox, an enum's list and a click outside it; add, duplicate,
+    delete with undo; saving an untitled scene; values set by path;
+  - on the GPU (`app`): duplicate the cube and move the copy on the player, see it drawn,
+    undo both, redo and save;
+  - undo of components that are not plain data, of duplicated subtrees with inner
+    references, and in the randomized walk (`tests/editor/undo.rs`).
+- **Left for E1-4b:** text fields (rename, typed values and expressions, strings), the
+  command palette, multi-selection and multi-editing, the inspector's filter, reset to
+  default. The order of a scene's roots (files sort them by id) is still to settle.
+
 ## Consequences
 
 - **Games change shape:** data lives in scenes edited in the editor, logic in hooks and
