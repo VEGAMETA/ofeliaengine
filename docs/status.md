@@ -58,13 +58,14 @@ Last updated: 2026-10-17.
   - **E1-4b-1, text fields** (#256, ADR 0107 as built): rename in place (F2, a
     double click), numbers typed with expressions (`2*pi`, `+=0.5`, `*1.2`), strings, the
     tree's and the inspector's filters; Windows' clipboard.
-  - **E1-4b-2, the command palette** (#PR, ADR 0107 as built): Ctrl+Shift+P finds and
+  - **E1-4b-2, the command palette** (#257, ADR 0107 as built): Ctrl+Shift+P finds and
     runs every command (the add menu's kinds among them), `@` (Ctrl+P) finds the scene's
     objects; ↺ and Backspace reset a field to its default; Ctrl+C and Ctrl+V over a field
     copy and paste its value.
   - **Next:** the rest of E1 (ADR 0107 §7):
-    - E1-4b-3: multi-selection and multi-editing; the roots' order in scene files
-      (sorted by id today) to settle;
+    - E1-4b-3: multi-selection and multi-editing; icons by kind, the same in the add
+      menu, the tree and the palette (team decision, 2026-10-17); the roots' order in
+      scene files (sorted by id today) to settle;
     - E1-5: sessions, autosave, rebuild and restart; the game's `main` from a macro,
       `ofeliaengine edit`, the quick start as a scene.
 
