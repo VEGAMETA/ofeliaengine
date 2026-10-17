@@ -50,7 +50,7 @@ value are not built (CLAUDE.md §12: design from scenarios, remove the excess).
 
 | Godot friction | What we do instead |
 |---|---|
-| Separate 2D / 3D / Script / AssetLib workspaces (a mode switch at the top) | No workspaces: viewports are panels (2D and 3D side by side if wanted); scripts open in VS Code with luau-lsp and the debugger (DAP). No modes (Raskin). |
+| Separate 2D / 3D / Script / AssetLib workspaces (a mode switch at the top) | No workspaces: viewports are panels (2D and 3D side by side if wanted); scripts open as tabs in the built-in code editor (`code-editor.md`), or in VS Code with luau-lsp and the same debugger (DAP). No modes (Raskin). |
 | The game runs in a separate process; the remote tree is read-only-ish; changes made while playing are lost | **The game runs in its own window by default** (the team tests that way), but in the same process as the editor, so starting is fast and everything stays live: select, inspect and edit objects of the running game from the editor. Changes made in Play are highlighted, and **"Keep changes"** applies them to the scene with undo. Options: embedded in the viewport, or a separate process (crash isolation, closest to a shipped build). |
 | Undo history per scene, sometimes surprising | One global undo with a history panel (ADR 0031); every step named. |
 | Finding a property in a long inspector | The inspector has an always-visible filter. It can show only values that differ from the default or the prefab. Every field has reset-to-default and "overridden by" markers. |
@@ -59,7 +59,7 @@ value are not built (CLAUDE.md §12: design from scenarios, remove the excess).
 | Project Settings and Editor Settings as big dialogs | Every setting is found through the command palette and one search box. No modal dialogs (§12). |
 | Manual reimport, import dock | Background import on file change; errors appear on the asset with a click to the cause. |
 | Signals connected through a dialog | Scripts connect in code with typed events (generated `.d.luau`); the inspector shows existing connections read-only. |
-| Instanced/inherited scenes are hard to reason about | Prefabs (post-v1 of the scene format) show overrides inline: each field says whether it comes from the prefab or the instance. |
+| Instanced/inherited scenes are hard to reason about | Prefabs (scene format 2, ADR 0108; `prefabs.md`) show overrides inline: each field says whether it comes from the prefab or the instance. |
 
 Across all of it:
 - **One search box** (the command palette with prefixes): commands, scene objects,
@@ -74,19 +74,19 @@ Across all of it:
 | Cut | Why |
 |---|---|
 | Asset Library tab | A browser inside the editor adds weight for little use; assets come from files and version control. |
-| A full built-in code editor | VS Code with luau-lsp, types and the DAP debugger is better than anything we would build. The editor keeps a quick-edit view for small changes and jump-to-line. |
 | Visual scripting | Godot dropped it too; Luau plus good tooling covers it. |
 | Theme editor | Theme tokens in code and a few presets (dark, light, high contrast) cover accessibility (§12). |
 | Workspace/mode tabs | Replaced by panels (above). |
 | Modal progress and confirmation dialogs | Background tasks with a task panel; destructive actions are undoable instead of confirmed. |
 | Editor plugins in the first versions | Tools come from the engine team first; a plugin API follows once the core tools are stable. |
 
+A full built-in code editor was cut here at first ("VS Code is better than anything we
+would build"). The owner chose one on 2026-10-17: Luau's own analysis library gives the
+smart features, and the built-in debugger needs a code view anyway (`code-editor.md`,
+ADR 0107). VS Code keeps working beside it.
+
 ## Build order for the editor
 
-1. Docking shell with the Godot default layout, command palette, global undo (ADR
-   0030, 0031, palette PR).
-2. Scene tree and inspector (reflection-driven, multi-edit, filter, overrides).
-3. Viewport with keyboard gizmos, selection, frame, drag-and-drop from the file
-   browser.
-4. Play in a separate window (same process) with live editing and "Keep changes"; embedded and separate-process options.
-5. File browser with background import and previews; output and error panels.
+The phases are in [ADR 0107](../../adr/0107-editor.md) §7 (the owner's choices,
+2026-10-17: the whole §12 list; tools in the order materials, sound, animation, 2D, then
+the rest). The shell, the palette and undo of the first plan are done.

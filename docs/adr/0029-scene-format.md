@@ -1,6 +1,7 @@
 # 0029. Scene text format: line-oriented blocks, one field per line
 
-- Status: Accepted (format chosen by the team, 2026-09-26)
+- Status: Accepted (format chosen by the team, 2026-09-26). Version 2 (strings and
+  containers, assets by id and path, prefab instances): [ADR 0108](0108-scene-format-2.md)
 - Date: 2026-09-26
 - Research: [docs/research/reflection.md](../research/reflection.md) ("What stays open
   for the team")
