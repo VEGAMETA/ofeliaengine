@@ -31,10 +31,14 @@
 //! ```
 
 mod layout;
+mod text_field;
 mod widgets;
 
 pub use layout::{Align, Direction};
+pub use text_field::{TextField, TextFieldResponse};
 pub use widgets::Response;
+
+use text_field::{EditEnd, TextEdit};
 
 use core::hash::{BuildHasherDefault, Hasher};
 use core::ops::Range;
@@ -297,8 +301,32 @@ pub enum UiKey {
     Enter,
     /// Activate the focused widget.
     Space,
-    /// Drop focus.
+    /// Drop focus; a text field's edit is cancelled.
     Escape,
+    /// The caret left (a text field; Ctrl: a word).
+    Left,
+    /// The caret right (Ctrl: a word).
+    Right,
+    /// The caret to the start (a single-line field).
+    Up,
+    /// The caret to the end (a single-line field).
+    Down,
+    /// The caret to the start.
+    Home,
+    /// The caret to the end.
+    End,
+    /// Delete before the caret (Ctrl: a word).
+    Backspace,
+    /// Delete after the caret (Ctrl: a word).
+    Delete,
+    /// Ctrl+C.
+    Copy,
+    /// Ctrl+X.
+    Cut,
+    /// Ctrl+V: [`UiInput::paste`] holds the clipboard's text.
+    Paste,
+    /// Ctrl+A.
+    SelectAll,
 }
 
 /// Input for one frame, gathered from `engine_platform` events.
@@ -320,6 +348,11 @@ pub struct UiInput {
     pub shift: bool,
     /// Control held.
     pub ctrl: bool,
+    /// Characters typed this frame (no control characters), for the text field being
+    /// edited.
+    pub text: String,
+    /// The clipboard's text when [`UiKey::Paste`] is among the keys.
+    pub paste: String,
 }
 
 /// A drawing command, in paint order.
@@ -436,6 +469,18 @@ pub struct Ui {
     /// Focusable widgets of the previous frame, in order (for Tab).
     focus_order: Vec<u64>,
     floating: Vec<u32>,
+    /// The text field being edited ([`Ui::text_field`]).
+    edit: Option<TextEdit>,
+    /// An edit another field took over in this frame: its field reports how it ended.
+    ending: Option<TextEdit>,
+    /// A field to start editing when it is next built ([`Ui::edit_field`]).
+    edit_request: Option<u64>,
+    /// What a copy or cut took ([`Ui::take_copied`]).
+    copied: Option<String>,
+    /// The rectangle of the widget the mouse went down on (the last layout's).
+    press_rect: Rect,
+    /// For `emit`: the edited text node, its scroll, caret and selection.
+    edit_draw: Option<(u64, f32, f32, [f32; 2])>,
     /// Reused by `emit`: clip rectangles and (subtree end, clip depth) of open clips.
     clips: Vec<Rect>,
     open_clips: Vec<(u32, usize)>,
@@ -463,6 +508,12 @@ impl Ui {
             focused: 0,
             focus_order: Vec::new(),
             floating: Vec::new(),
+            edit: None,
+            ending: None,
+            edit_request: None,
+            copied: None,
+            press_rect: Rect::default(),
+            edit_draw: None,
             clips: Vec::new(),
             open_clips: Vec::new(),
             last: NONE,
@@ -479,9 +530,21 @@ impl Ui {
         self.frame += 1;
         self.input.clone_from(input);
         self.viewport = viewport;
+        // An edit that ended last frame was read by then.
+        self.ending = None;
+        if self.edit.as_ref().is_some_and(|e| e.ended.is_some()) {
+            self.edit = None;
+        }
         // This frame's mouse against the previous frame's layout: hover and clicks
         // follow the pointer without delay; only the rectangles are a frame old.
         self.hit_test();
+        if let Some(edit) = &mut self.edit {
+            edit.seen = false;
+            // A click anywhere else ends the edit (its field commits when built).
+            if self.input.mouse_pressed && self.hovered != edit.id && self.focused == edit.id {
+                self.focused = 0;
+            }
+        }
         self.nodes.clear();
         self.text.clear();
         self.stack.clear();
@@ -507,7 +570,15 @@ impl Ui {
                     };
                     self.focused = self.focus_order[next];
                 }
-                UiKey::Escape => self.focused = 0,
+                UiKey::Escape => {
+                    if let Some(edit) = &mut self.edit
+                        && edit.ended.is_none()
+                        && self.focused == edit.id
+                    {
+                        edit.ended = Some(EditEnd::Cancel);
+                    }
+                    self.focused = 0;
+                }
                 _ => {}
             }
         }
@@ -739,6 +810,7 @@ impl Ui {
             state.get(&id).map_or(0.0, |s| s.scroll)
         });
         self.update_scroll_limits();
+        self.measure_edit(measure);
         self.focus_order.clear();
         self.focus_order
             .extend(self.nodes.iter().filter(|n| n.focusable).map(|n| n.id));
@@ -755,6 +827,84 @@ impl Ui {
             commands: &self.commands,
             text: &self.text,
         }
+    }
+
+    /// After layout: the edited field's caret from a press, where the caret and the
+    /// selection are, and the scroll that keeps the caret in view. An edit whose field
+    /// was not built this frame is dropped.
+    fn measure_edit(&mut self, measure: &mut dyn TextMeasure) {
+        self.edit_draw = None;
+        let Some(edit) = &mut self.edit else {
+            return;
+        };
+        if edit.ended.is_some() {
+            return;
+        }
+        if !edit.seen {
+            self.edit = None;
+            return;
+        }
+        let Some(rect) = self
+            .nodes
+            .iter()
+            .find(|n| n.id == edit.node)
+            .map(|n| n.rect)
+        else {
+            return;
+        };
+        let pad = self
+            .nodes
+            .iter()
+            .find(|n| n.id == edit.node)
+            .map_or(0.0, |n| n.style.padding[0]);
+        edit.rect = Rect::new(
+            rect.pos[0] + pad,
+            rect.pos[1],
+            rect.size[0] - pad,
+            rect.size[1],
+        );
+        let size = edit.size;
+        let width = |text: &str, m: &mut dyn TextMeasure| {
+            if text.is_empty() {
+                0.0
+            } else {
+                m.measure(text, size, None)[0]
+            }
+        };
+        if let Some((x, extend)) = edit.pointer.take() {
+            // The character boundary nearest the press.
+            let mut best = (0usize, f32::INFINITY);
+            let mut at = 0;
+            loop {
+                let d = (width(&edit.text[..at], measure) - x).abs();
+                if d < best.1 {
+                    best = (at, d);
+                }
+                if at >= edit.text.len() {
+                    break;
+                }
+                at += edit.text[at..].chars().next().map_or(1, char::len_utf8);
+            }
+            edit.caret = best.0;
+            if !extend {
+                edit.anchor = best.0;
+            }
+        }
+        edit.caret_x = width(&edit.text[..edit.caret], measure);
+        let (a, b) = (edit.caret.min(edit.anchor), edit.caret.max(edit.anchor));
+        edit.select_x = [
+            width(&edit.text[..a], measure),
+            width(&edit.text[..b], measure),
+        ];
+        let inner = edit.rect.size[0].max(1.0);
+        if edit.caret_x - edit.scroll > inner - 2.0 {
+            edit.scroll = edit.caret_x - inner + 2.0;
+        }
+        if edit.caret_x < edit.scroll {
+            edit.scroll = edit.caret_x;
+        }
+        edit.scroll = edit.scroll.max(0.0);
+        self.edit_draw = Some((edit.node, edit.scroll, edit.caret_x, edit.select_x));
     }
 
     fn update_scroll_limits(&mut self) {
@@ -801,6 +951,9 @@ impl Ui {
         }
         if let Some((_, i)) = best {
             self.hovered = self.nodes[i].id;
+            if self.input.mouse_pressed {
+                self.press_rect = self.nodes[i].rect;
+            }
         }
         if self.input.wheel != 0.0
             && let Some((_, i)) = scroll_target
@@ -913,18 +1066,55 @@ impl Ui {
             }
             if let Some(t) = &n.text {
                 let p = style.padding;
+                let mut text_rect = Rect::new(
+                    rect.pos[0] + p[0],
+                    rect.pos[1] + p[1],
+                    (rect.size[0] - p[0] - p[2]).max(0.0),
+                    (rect.size[1] - p[1] - p[3]).max(0.0),
+                );
+                let edited = self.edit_draw.filter(|d| d.0 == n.id);
+                if let Some((_, scroll, _, [s0, s1])) = edited
+                    && s1 > s0
+                {
+                    let mut select = self.theme.focus;
+                    select[3] = 0.35;
+                    self.commands.push(DrawCmd::Rect {
+                        rect: Rect::new(
+                            text_rect.pos[0] + s0 - scroll,
+                            text_rect.pos[1],
+                            s1 - s0,
+                            text_rect.size[1],
+                        ),
+                        fill: Some(select),
+                        border: None,
+                        radius: 0.0,
+                    });
+                }
+                let left = text_rect.pos[0];
+                if let Some((_, scroll, ..)) = edited {
+                    text_rect.pos[0] -= scroll;
+                    text_rect.size[0] += scroll;
+                }
                 self.commands.push(DrawCmd::Text {
-                    rect: Rect::new(
-                        rect.pos[0] + p[0],
-                        rect.pos[1] + p[1],
-                        (rect.size[0] - p[0] - p[2]).max(0.0),
-                        (rect.size[1] - p[1] - p[3]).max(0.0),
-                    ),
+                    rect: text_rect,
                     range: t.range.clone(),
                     size: t.size,
                     color: t.color,
                     wrap: t.wrap,
                 });
+                if let Some((_, scroll, caret_x, _)) = edited {
+                    self.commands.push(DrawCmd::Rect {
+                        rect: Rect::new(
+                            left + caret_x - scroll,
+                            text_rect.pos[1],
+                            1.5,
+                            text_rect.size[1],
+                        ),
+                        fill: Some(self.theme.text),
+                        border: None,
+                        radius: 0.0,
+                    });
+                }
             }
             if style.clip && n.end > i + 1 {
                 let clip = clips.last().map_or(rect, |c| c.intersect(&rect));
