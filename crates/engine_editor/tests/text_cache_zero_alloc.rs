@@ -79,6 +79,7 @@ fn item<'a>(depth: u16, icon: &'a str, name: &'a str, kind: &'a str) -> TreeItem
         kind,
         expanded: None,
         selected: false,
+        renaming: false,
     }
 }
 
@@ -97,6 +98,7 @@ fn a_steady_shell_frame_does_not_allocate() {
             widget: Widget::Numbers {
                 values: &["0.5", "0.9", "2"],
                 labels: &["x", "y", "z"],
+                typing: None,
             },
         },
         Field {
@@ -104,6 +106,7 @@ fn a_steady_shell_frame_does_not_allocate() {
             widget: Widget::Numbers {
                 values: &["0", "45", "0"],
                 labels: &["x", "y", "z"],
+                typing: None,
             },
         },
         Field {
@@ -153,6 +156,8 @@ fn a_steady_shell_frame_does_not_allocate() {
         status: "engine 0.0.0",
         snap: true,
         add_menu: Some(&["Empty", "Cube"]),
+        tree_filter: "",
+        inspector_filter: "",
     };
     let palette = Palette::default();
     let mut ui = Ui::new(Theme::default());

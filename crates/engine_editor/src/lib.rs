@@ -8,6 +8,7 @@
 
 pub mod app;
 pub mod camera;
+pub mod expr;
 pub mod icons;
 pub mod input;
 pub mod inspector;

@@ -49,6 +49,7 @@ fn tree_item<'a>(
         kind,
         expanded,
         selected,
+        renaming: false,
     }
 }
 
@@ -231,10 +232,12 @@ fn main() {
     let numbers = |values| Widget::Numbers {
         values,
         labels: &xyz,
+        typing: None,
     };
     let one = |values| Widget::Numbers {
         values,
         labels: &[],
+        typing: None,
     };
     let transform = [
         Field {
@@ -364,6 +367,8 @@ fn main() {
         status: &status,
         snap: false,
         add_menu: None,
+        tree_filter: "",
+        inspector_filter: "",
     };
 
     // Lay the UI out: the viewport's rectangle sizes the 3D view.

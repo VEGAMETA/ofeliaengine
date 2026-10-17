@@ -18,7 +18,7 @@
 //! game plays, a thin colored edge around it shows the state instead of big buttons.
 
 use crate::icons;
-use engine_ui::{Align, Color, Direction, Size, Style, Ui};
+use engine_ui::{Align, Color, Direction, Size, Style, TextField, TextFieldResponse, Ui};
 
 /// A color from sRGB bytes, as the linear value the renderer blends in.
 pub fn srgb(r: u8, g: u8, b: u8) -> Color {
@@ -90,6 +90,8 @@ pub struct TreeItem<'a> {
     pub expanded: Option<bool>,
     /// Selected.
     pub selected: bool,
+    /// Its name is being edited in place (F2, a double click).
+    pub renaming: bool,
 }
 
 /// How a property is shown in the inspector.
@@ -97,12 +99,16 @@ pub struct TreeItem<'a> {
 pub enum Widget<'a> {
     /// Text that cannot be edited here.
     Text(&'a str),
+    /// Text edited in a field (strings, names).
+    Edit(&'a str),
     /// Numbers dragged sideways: one, or a vector's parts with their labels (`x y z`).
     Numbers {
         /// The shown values.
         values: &'a [&'a str],
         /// A label per value (none for a single number).
         labels: &'a [&'a str],
+        /// The part being typed (a click without a drag): a text field instead.
+        typing: Option<u8>,
     },
     /// A checkbox.
     Check(bool),
@@ -139,6 +145,19 @@ pub enum FieldAction {
     },
     /// The drag ended.
     Release,
+    /// Typing into number `part` ended: committed (Enter, Tab, a click elsewhere; the text
+    /// is `Ui::edited_text`) or cancelled (Escape).
+    Typed {
+        /// Which number of a vector.
+        part: u8,
+        /// Kept, not cancelled.
+        commit: bool,
+    },
+    /// Editing the field's text ended: committed or cancelled.
+    Text {
+        /// Kept, not cancelled.
+        commit: bool,
+    },
     /// The checkbox was clicked.
     Toggle,
     /// The choice was clicked: its list opens or closes.
@@ -230,6 +249,10 @@ pub struct ShellModel<'a> {
     pub snap: bool,
     /// The scene dock's add menu, while open: what it offers.
     pub add_menu: Option<&'a [&'a str]>,
+    /// What the scene tree is filtered by.
+    pub tree_filter: &'a str,
+    /// What the inspector is filtered by.
+    pub inspector_filter: &'a str,
 }
 
 /// What happened in the shell this frame.
@@ -243,6 +266,14 @@ pub struct ShellResponse {
     pub tool: Option<usize>,
     /// A scene tree row was clicked.
     pub tree_row: Option<usize>,
+    /// A scene tree row's arrow was clicked: open or close it.
+    pub tree_toggle: Option<usize>,
+    /// Renaming in the tree ended: committed (the name is `Ui::edited_text`) or cancelled.
+    pub rename: Option<bool>,
+    /// The tree's filter field was used (`Ui::edited_text` while it changes).
+    pub tree_filter: Option<TextFieldResponse>,
+    /// The inspector's filter field was used.
+    pub inspector_filter: Option<TextFieldResponse>,
     /// A folder was clicked.
     pub folder: Option<usize>,
     /// A file was clicked.
@@ -491,7 +522,7 @@ fn file_browser(ui: &mut Ui, model: &ShellModel<'_>, p: &Palette, out: &mut Shel
         dock_column(ui, "folders", Size::Fixed(220.0), p, |ui| {
             dock_title(ui, "FileSystem", p);
             ui.scroll_column("tree", |ui| {
-                out.folder = tree_rows(ui, model.folders, p);
+                out.folder = tree_rows(ui, model.folders, p).clicked;
             });
         });
         dock_column(ui, "listing", Size::Grow(1.0), p, |ui| {
@@ -567,8 +598,26 @@ fn dock_title(ui: &mut Ui, title: &str, p: &Palette) {
     );
 }
 
-/// A filter box with a hint (text entry comes with the text field widget).
-fn filter(ui: &mut Ui, hint: &str, p: &Palette) {
+/// A text field in the shell's look: `Style` for the box, the theme's text.
+fn field_look<'a>(p: &Palette, style: Style, hint: &'a str, autofocus: bool) -> TextField<'a> {
+    TextField {
+        style,
+        size: TEXT,
+        color: p.text,
+        hint,
+        hint_color: p.text_dim,
+        autofocus,
+    }
+}
+
+/// What a text field did, if anything worth reporting.
+fn used(r: TextFieldResponse) -> Option<TextFieldResponse> {
+    (r.started || r.changed || r.committed || r.cancelled).then_some(r)
+}
+
+/// A filter box with a hint: a text field the caller filters by as it changes.
+fn filter(ui: &mut Ui, text_now: &str, hint: &str, p: &Palette) -> Option<TextFieldResponse> {
+    let mut response = None;
     ui.container(
         "filter row",
         Style {
@@ -581,7 +630,7 @@ fn filter(ui: &mut Ui, hint: &str, p: &Palette) {
                 "filter",
                 Style {
                     size: [Size::Grow(1.0), Size::Fixed(24.0)],
-                    padding: [8.0, 0.0, 8.0, 0.0],
+                    padding: [8.0, 0.0, 4.0, 0.0],
                     gap: 6.0,
                     radius: 3.0,
                     background: Some(p.field),
@@ -590,16 +639,31 @@ fn filter(ui: &mut Ui, hint: &str, p: &Palette) {
                 },
                 |ui| {
                     text(ui, "icon", icons::SEARCH, ICON, p.text_dim);
-                    text(ui, "hint", hint, TEXT, p.text_dim);
+                    let style = Style {
+                        size: [Size::Grow(1.0), Size::Fixed(22.0)],
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    };
+                    response =
+                        used(ui.text_field("text", text_now, &field_look(p, style, hint, false)));
                 },
             );
         },
     );
+    response
 }
 
-/// Tree rows; returns the clicked one.
-fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> Option<usize> {
-    let mut clicked = None;
+/// What the tree's rows reported.
+#[derive(Default)]
+struct RowsResponse {
+    clicked: Option<usize>,
+    toggled: Option<usize>,
+    rename: Option<bool>,
+}
+
+/// Tree rows: a click on a row, on its arrow, and renaming in place.
+fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> RowsResponse {
+    let mut out = RowsResponse::default();
     for (i, item) in rows.iter().enumerate() {
         ui.push_id(i as u64);
         let id = ui.row(
@@ -618,7 +682,7 @@ fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> Option<usize> {
                     Some(false) => icons::COLLAPSED,
                     None => "",
                 };
-                ui.container(
+                let toggle = ui.container(
                     "arrow",
                     Style {
                         size: [Size::Fixed(ICON), Size::Fit],
@@ -630,21 +694,39 @@ fn tree_rows(ui: &mut Ui, rows: &[TreeItem<'_>], p: &Palette) -> Option<usize> {
                         }
                     },
                 );
+                if !arrow.is_empty() && ui.sense(toggle, false).clicked {
+                    out.toggled = Some(i);
+                }
                 if !item.icon.is_empty() {
                     text(ui, "icon", item.icon, ICON, p.text_dim);
                 }
-                text(ui, "name", item.name, TEXT, p.text);
+                if item.renaming {
+                    let style = Style {
+                        size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                        padding: [4.0, 0.0, 4.0, 0.0],
+                        radius: 3.0,
+                        background: Some(p.field),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    };
+                    let r = ui.text_field("rename", item.name, &field_look(p, style, "", true));
+                    if r.committed || r.cancelled {
+                        out.rename = Some(r.committed);
+                    }
+                } else {
+                    text(ui, "name", item.name, TEXT, p.text);
+                }
                 if !item.kind.is_empty() {
                     text(ui, "kind", item.kind, SMALL, p.text_dim);
                 }
             },
         );
-        if ui.sense(id, false).clicked {
-            clicked = Some(i);
+        if ui.sense(id, false).clicked && out.toggled != Some(i) {
+            out.clicked = Some(i);
         }
         ui.pop_id();
     }
-    clicked
+    out
 }
 
 /// Scene tree dock: tabs and the add button, filter, tree.
@@ -684,9 +766,12 @@ fn scene_dock(
                 out.add = true;
             }
         });
-        filter(ui, "Filter nodes", p);
+        out.tree_filter = filter(ui, model.tree_filter, "Filter nodes", p);
         ui.scroll_column("tree", |ui| {
-            out.tree_row = tree_rows(ui, model.tree, p);
+            let rows = tree_rows(ui, model.tree, p);
+            out.tree_row = rows.clicked;
+            out.tree_toggle = rows.toggled;
+            out.rename = rows.rename;
         });
     });
 }
@@ -738,11 +823,13 @@ fn menu(
     )
 }
 
-/// A field's numbers, dragged sideways; reports the drag.
+/// A field's numbers, dragged sideways; reports the drag. The part being typed is a
+/// text field instead.
 fn numbers(
     ui: &mut Ui,
     values: &[&str],
     labels: &[&str],
+    typing: Option<u8>,
     p: &Palette,
     action: &mut Option<FieldAction>,
 ) {
@@ -762,6 +849,26 @@ fn numbers(
         |ui| {
             for (i, value) in values.iter().enumerate() {
                 ui.push_id(i as u64);
+                if typing == Some(i as u8) {
+                    let style = Style {
+                        size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                        padding: [5.0, 0.0, 5.0, 0.0],
+                        radius: 3.0,
+                        background: Some(p.field_hover),
+                        border: Some((p.accent, 1.0)),
+                        align_cross: Align::Center,
+                        ..Style::default()
+                    };
+                    let r = ui.text_field("typed", value, &field_look(p, style, "", true));
+                    if r.committed || r.cancelled {
+                        *action = Some(FieldAction::Typed {
+                            part: i as u8,
+                            commit: r.committed,
+                        });
+                    }
+                    ui.pop_id();
+                    continue;
+                }
                 let id = ui.id("number");
                 let lit = ui.is_hovered(id) || ui.drag_delta(id).is_some();
                 ui.row(
@@ -900,7 +1007,7 @@ fn inspector_dock(
                     text(ui, "name", model.selection, 14.0, p.text);
                 },
             );
-            filter(ui, "Filter properties", p);
+            out.inspector_filter = filter(ui, model.inspector_filter, "Filter properties", p);
             ui.scroll_column("sections", |ui| {
                 for (s, section) in model.inspector.iter().enumerate() {
                     ui.push_id(s as u64);
@@ -960,8 +1067,32 @@ fn inspector_dock(
                                             },
                                         );
                                     }
-                                    Widget::Numbers { values, labels } => {
-                                        numbers(ui, values, labels, p, &mut action);
+                                    Widget::Numbers {
+                                        values,
+                                        labels,
+                                        typing,
+                                    } => {
+                                        numbers(ui, values, labels, typing, p, &mut action);
+                                    }
+                                    Widget::Edit(value) => {
+                                        let style = Style {
+                                            size: [Size::Grow(1.0), Size::Fixed(20.0)],
+                                            padding: [6.0, 0.0, 6.0, 0.0],
+                                            radius: 3.0,
+                                            background: Some(p.field),
+                                            align_cross: Align::Center,
+                                            ..Style::default()
+                                        };
+                                        let r = ui.text_field(
+                                            "edit",
+                                            value,
+                                            &field_look(p, style, "", false),
+                                        );
+                                        if r.committed || r.cancelled {
+                                            action = Some(FieldAction::Text {
+                                                commit: r.committed,
+                                            });
+                                        }
                                     }
                                     Widget::Check(on) => checkbox(ui, on, p, &mut action),
                                     Widget::Choice { current, open } => {

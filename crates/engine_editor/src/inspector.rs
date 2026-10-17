@@ -57,6 +57,9 @@ pub struct Property {
     pub attrs: Attrs,
     /// How it is shown.
     pub kind: Kind,
+    /// The component is written whole (`Name = "Door"`): its scene path is the component's
+    /// name alone.
+    pub whole: bool,
     /// Its name in [`Inspector::text`].
     name: (u32, u32),
     /// Its values' texts in [`Inspector::text`].
@@ -245,7 +248,8 @@ impl Inspector {
                 }
                 return;
             };
-            let name = self.push_text(if path.is_empty() { "value" } else { path });
+            let whole = path.is_empty();
+            let name = self.push_text(if whole { "value" } else { path });
             let mut values = [(0, 0); 4];
             let count = match kind {
                 Kind::Numbers {
@@ -297,6 +301,7 @@ impl Inspector {
                 ty,
                 attrs,
                 kind,
+                whole,
                 name,
                 values,
                 count,

@@ -25,6 +25,7 @@ pub enum Button {
 
 /// Win32 virtual-key codes the UI reacts to.
 mod vk {
+    pub(super) const BACK: u16 = 0x08;
     pub(super) const TAB: u16 = 0x09;
     pub(super) const RETURN: u16 = 0x0D;
     pub(super) const SHIFT: u16 = 0x10;
@@ -32,6 +33,17 @@ mod vk {
     pub(super) const MENU: u16 = 0x12;
     pub(super) const ESCAPE: u16 = 0x1B;
     pub(super) const SPACE: u16 = 0x20;
+    pub(super) const END: u16 = 0x23;
+    pub(super) const HOME: u16 = 0x24;
+    pub(super) const LEFT: u16 = 0x25;
+    pub(super) const UP: u16 = 0x26;
+    pub(super) const RIGHT: u16 = 0x27;
+    pub(super) const DOWN: u16 = 0x28;
+    pub(super) const DELETE: u16 = 0x2E;
+    pub(super) const A: u16 = 0x41;
+    pub(super) const C: u16 = 0x43;
+    pub(super) const V: u16 = 0x56;
+    pub(super) const X: u16 = 0x58;
     pub(super) const LWIN: u16 = 0x5B;
     pub(super) const RWIN: u16 = 0x5C;
     pub(super) const LSHIFT: u16 = 0xA0;
@@ -126,6 +138,25 @@ impl InputCollector {
             vk::RETURN => self.ui.keys.push(UiKey::Enter),
             vk::SPACE => self.ui.keys.push(UiKey::Space),
             vk::ESCAPE => self.ui.keys.push(UiKey::Escape),
+            vk::LEFT => self.ui.keys.push(UiKey::Left),
+            vk::RIGHT => self.ui.keys.push(UiKey::Right),
+            vk::UP => self.ui.keys.push(UiKey::Up),
+            vk::DOWN => self.ui.keys.push(UiKey::Down),
+            vk::HOME => self.ui.keys.push(UiKey::Home),
+            vk::END => self.ui.keys.push(UiKey::End),
+            vk::BACK => self.ui.keys.push(UiKey::Backspace),
+            vk::DELETE => self.ui.keys.push(UiKey::Delete),
+            vk::A if self.ctrl => self.ui.keys.push(UiKey::SelectAll),
+            vk::C if self.ctrl => self.ui.keys.push(UiKey::Copy),
+            vk::X if self.ctrl => self.ui.keys.push(UiKey::Cut),
+            vk::V if self.ctrl => {
+                // The text field being edited pastes it this frame.
+                #[cfg(windows)]
+                {
+                    self.ui.paste = engine_platform::clipboard::text().unwrap_or_default();
+                }
+                self.ui.keys.push(UiKey::Paste);
+            }
             _ => {}
         }
         if let Some(key) = Key::from_scancode(scancode, extended) {
@@ -135,6 +166,14 @@ impl InputCollector {
                 alt: self.alt,
                 key,
             });
+        }
+    }
+
+    /// A character was typed (after the keyboard layout and dead keys): for the text field
+    /// being edited. Control characters (Enter, Tab, Backspace) come as keys instead.
+    pub fn char(&mut self, c: char) {
+        if !c.is_control() {
+            self.ui.text.push(c);
         }
     }
 
@@ -214,6 +253,8 @@ impl InputCollector {
         self.drag = [0.0; 2];
         self.wheel = 0.0;
         self.ui.keys.clear();
+        self.ui.text.clear();
+        self.ui.paste.clear();
         self.chords.clear();
     }
 }
